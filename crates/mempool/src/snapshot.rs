@@ -19,17 +19,19 @@ const MAX_TX_BYTES: usize = 400_000;
 const MAX_AGE: u64 = 14 * 24 * 60 * 60;
 const MAX_SUBSET_ATTEMPTS: usize = 256;
 
-struct SavedTransaction {
-    tx: Arc<Tx>,
-    txid: Txid,
-    time: u64,
-    unbroadcast: bool,
-    sigop_cost: u32,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedTransaction {
+    pub tx: Arc<Tx>,
+    pub txid: Txid,
+    pub time: u64,
+    pub unbroadcast: bool,
+    pub sigop_cost: u32,
 }
 
-struct Snapshot {
-    transactions: Vec<SavedTransaction>,
-    deltas: Vec<(Txid, i64)>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    pub transactions: Vec<SavedTransaction>,
+    pub deltas: Vec<(Txid, i64)>,
 }
 
 #[derive(Debug)]
@@ -149,7 +151,12 @@ impl Snapshot {
         })
     }
 
-    fn encode(&self, network: Network, max_bytes: u64, deadline: Instant) -> io::Result<Vec<u8>> {
+    pub fn encode(
+        &self,
+        network: Network,
+        max_bytes: u64,
+        deadline: Instant,
+    ) -> io::Result<Vec<u8>> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&VERSION.to_le_bytes());
@@ -188,7 +195,7 @@ impl Snapshot {
         Ok(bytes)
     }
 
-    fn decode(
+    pub fn decode(
         bytes: &[u8],
         network: Network,
         max_bytes: u64,
@@ -248,7 +255,7 @@ impl Snapshot {
         })
     }
 
-    fn order(&self) -> io::Result<Vec<usize>> {
+    pub fn order(&self) -> io::Result<Vec<usize>> {
         let positions: HashMap<_, _> = self
             .transactions
             .iter()

@@ -60,7 +60,7 @@ pub enum UndoCodecError {
 }
 
 #[must_use]
-pub(crate) fn encode(batch: &UndoBatch, block_hash: Hash256) -> Vec<u8> {
+pub fn encode(batch: &UndoBatch, block_hash: Hash256) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(UNDO_FORMAT_VERSION);
     out.extend_from_slice(&block_hash.to_le_bytes());

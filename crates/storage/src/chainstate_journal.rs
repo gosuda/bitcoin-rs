@@ -5,7 +5,7 @@ mod writer;
 
 pub use emit::{CheckpointBase, JournalEmit, SharedJournalWriter, shared_journal_writer};
 pub(crate) use record::crc32c;
-pub use record::{Coin, JournalRecord, Mutation};
+pub use record::{Coin, JournalRecord, JournalRecordError, Mutation, decode_record, encode_record};
 pub use replay::{JournalReplayBase, JournalReplayError, ReplayedHead, replay_committed_range};
 pub use writer::{
     FULL_REVALIDATION_MARKER, JOURNAL_DIR_NAME, JournalPolicy, JournalWriter, JournalWriterError,

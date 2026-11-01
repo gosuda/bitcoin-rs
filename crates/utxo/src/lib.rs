@@ -10,7 +10,7 @@ mod key;
 pub(crate) use key::UtxoKey;
 mod listener;
 mod overlay;
-mod record;
+pub mod record;
 pub mod scan;
 pub mod set;
 mod shard;

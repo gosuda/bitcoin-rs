@@ -27,7 +27,9 @@ pub use trait_::{
     KvIter, KvPair, KvSnapshot, KvStore, PrefixScan, PrefixScanLimit, WriteCondition,
 };
 
-pub use undo::{DisconnectMarker, DisconnectPhase, InMemoryUndoStore, KvUndoStore, UndoStore};
+pub use undo::{
+    DisconnectMarker, DisconnectPhase, InMemoryUndoStore, KvUndoStore, UndoStore, block_undo_key,
+};
 
 pub use pruning::{MandatoryRetention, RetentionError, RetentionLease, RetentionRegistry};
 

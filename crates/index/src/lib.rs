@@ -33,7 +33,9 @@ pub use query_api::{
     SCRIPT_HISTORY_PAGE_MAX, ScriptHistoryPage, ScriptHistoryRecord, ScriptIndexQuery,
     ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause,
 };
+pub use reconcile::{CURSOR_BYTE_LEN, ConsumerCursor, CursorDecodeError};
 pub use types::{
-    HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, HashPrefixRow, ScriptHash, ScriptHashRow, ScriptLiveRow,
-    SpendingPrefixRow,
+    HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, HashPrefixRow, ScriptHash, ScriptHashRow,
+    ScriptHistoryOccurrence, ScriptLiveRow, SpendingPrefixRow, TxPosition, TxPositionValue,
+    positions_are_valid,
 };

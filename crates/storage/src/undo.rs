@@ -74,7 +74,8 @@ pub enum DisconnectPhase {
 const DISCONNECT_MARKER_KEY: &[u8] = b"node:disconnect-in-flight";
 
 impl DisconnectMarker {
-    fn encode(&self) -> [u8; 37] {
+    #[must_use]
+    pub fn encode(&self) -> [u8; 37] {
         let mut encoded = [0_u8; 37];
         encoded[..32].copy_from_slice(&self.hash.to_le_bytes());
         encoded[32..36].copy_from_slice(&self.height.to_be_bytes());
@@ -85,7 +86,7 @@ impl DisconnectMarker {
         encoded
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
         let Ok(fixed): Result<[u8; 37], _> = bytes.try_into() else {
             return Err(StorageError::Backend(format!(
                 "disconnect marker is {} bytes, expected 37",

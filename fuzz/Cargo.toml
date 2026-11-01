@@ -23,9 +23,9 @@ bitcoin-rs-utxo = { path = "../crates/utxo" }
 tempfile = "3"
 bitcoin-rs-index = { path = "../crates/index" }
 bitcoin-rs-rpc = { path = "../crates/rpc", default-features = false, features = ["test-seam"] }
+bitcoin-rs-storage = { path = "../crates/storage", default-features = false }
 sonic-rs = "0.5"
 miniscript = { version = ">=13, <14", default-features = false, features = ["std"] }
-
 [[bin]]
 name = "p2p_message"
 path = "fuzz_targets/p2p_message.rs"
@@ -81,3 +81,27 @@ path = "fuzz_targets/esplora_route.rs"
 [[bin]]
 name = "rpc_hex_params"
 path = "fuzz_targets/rpc_hex_params.rs"
+
+[[bin]]
+name = "undo_row_decode"
+path = "fuzz_targets/undo_row_decode.rs"
+
+[[bin]]
+name = "index_row_decode"
+path = "fuzz_targets/index_row_decode.rs"
+
+[[bin]]
+name = "utxo_record_decode"
+path = "fuzz_targets/utxo_record_decode.rs"
+
+[[bin]]
+name = "mempool_dat_load"
+path = "fuzz_targets/mempool_dat_load.rs"
+
+[[bin]]
+name = "tx_differential"
+path = "fuzz_targets/tx_differential.rs"
+
+[[bin]]
+name = "script_differential"
+path = "fuzz_targets/script_differential.rs"

@@ -525,15 +525,13 @@ fn capacity_limits_save_whole_families_and_all_priorities() -> TestResult {
         assert!(u64::try_from(encoded.len())? <= bytes);
         std::fs::write(dir.path().join(FILE_NAME), encoded)?;
     }
-    assert!(
-        Snapshot::capture(&source, deadline(), family_bytes - 1, usize::MAX)?
-            .transactions
-            .is_empty()
+    assert_eq!(
+        Snapshot::capture(&source, deadline(), family_bytes - 1, usize::MAX)?.transactions,
+        []
     );
-    assert!(
-        Snapshot::capture(&source, deadline(), DEFAULT_MAX_BYTES, 1)?
-            .transactions
-            .is_empty()
+    assert_eq!(
+        Snapshot::capture(&source, deadline(), DEFAULT_MAX_BYTES, 1)?.transactions,
+        []
     );
     let dir = tempfile::tempdir()?;
     save(

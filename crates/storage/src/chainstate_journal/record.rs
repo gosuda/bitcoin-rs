@@ -37,7 +37,7 @@ pub struct JournalRecord {
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub(crate) enum JournalRecordError {
+pub enum JournalRecordError {
     #[error("chainstate journal record has bad magic")]
     BadMagic,
     #[error("unsupported chainstate journal record version {found}, expected {expected}")]
@@ -52,7 +52,7 @@ pub(crate) enum JournalRecordError {
     MalformedPayload,
 }
 
-pub(crate) fn encode_record(record: &JournalRecord) -> io::Result<Vec<u8>> {
+pub fn encode_record(record: &JournalRecord) -> io::Result<Vec<u8>> {
     let expected_payload_len = record_payload_len(record);
     let capacity = expected_payload_len
         .and_then(|payload_len| FRAME_HEADER_LEN.checked_add(payload_len))
@@ -123,7 +123,7 @@ impl Write for CountingWriter {
     }
 }
 
-pub(crate) fn decode_record(bytes: &[u8]) -> Result<JournalRecord, JournalRecordError> {
+pub fn decode_record(bytes: &[u8]) -> Result<JournalRecord, JournalRecordError> {
     if bytes.len() < FRAME_HEADER_LEN {
         return Err(JournalRecordError::UnexpectedEof);
     }

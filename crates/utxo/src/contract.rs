@@ -9,7 +9,8 @@ use crate::stats::{CoinStatsListener, CoinStatsRewindError};
 use crate::undo_codec;
 
 pub use crate::undo_codec::{
-    UndoCodecError, decode as decode_undo_record, record_size_limit as undo_record_size_limit,
+    UndoCodecError, decode as decode_undo_record, encode as encode_undo_record,
+    record_size_limit as undo_record_size_limit,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]

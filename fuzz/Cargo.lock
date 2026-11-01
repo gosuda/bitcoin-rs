@@ -202,6 +202,7 @@ dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin-rs-rpc",
  "bitcoin-rs-script",
+ "bitcoin-rs-storage",
  "bitcoin-rs-utxo",
  "libfuzzer-sys",
  "miniscript",

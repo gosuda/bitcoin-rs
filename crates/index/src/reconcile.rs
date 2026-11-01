@@ -2,7 +2,7 @@ use bitcoin_rs_primitives::Hash256;
 
 use crate::{IndexCapabilities, IndexCapability};
 
-pub(crate) const CURSOR_BYTE_LEN: usize = 52;
+pub const CURSOR_BYTE_LEN: usize = 52;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConsumerCursor {
@@ -14,7 +14,7 @@ pub struct ConsumerCursor {
 
 impl ConsumerCursor {
     #[must_use]
-    pub(crate) fn to_bytes(self) -> [u8; CURSOR_BYTE_LEN] {
+    pub fn to_bytes(self) -> [u8; CURSOR_BYTE_LEN] {
         let mut bytes = [0_u8; CURSOR_BYTE_LEN];
         bytes[..8].copy_from_slice(&self.epoch.to_le_bytes());
         bytes[8..16].copy_from_slice(&self.sequence.to_le_bytes());
@@ -22,6 +22,35 @@ impl ConsumerCursor {
         bytes[20..].copy_from_slice(&self.hash.to_le_bytes());
         bytes
     }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CursorDecodeError> {
+        let Ok(fixed): Result<&[u8; CURSOR_BYTE_LEN], _> = bytes.try_into() else {
+            return Err(CursorDecodeError::InvalidLength {
+                expected: CURSOR_BYTE_LEN,
+                found: bytes.len(),
+            });
+        };
+        let mut epoch = [0_u8; 8];
+        epoch.copy_from_slice(&fixed[..8]);
+        let mut sequence = [0_u8; 8];
+        sequence.copy_from_slice(&fixed[8..16]);
+        let mut height = [0_u8; 4];
+        height.copy_from_slice(&fixed[16..20]);
+        let mut hash = [0_u8; 32];
+        hash.copy_from_slice(&fixed[20..52]);
+        Ok(Self {
+            epoch: u64::from_le_bytes(epoch),
+            sequence: u64::from_le_bytes(sequence),
+            height: u32::from_le_bytes(height),
+            hash: Hash256::from_le_bytes(&hash),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum CursorDecodeError {
+    #[error("invalid cursor length: expected {expected}, found {found}")]
+    InvalidLength { expected: usize, found: usize },
 }
 
 pub(crate) mod block_tree {

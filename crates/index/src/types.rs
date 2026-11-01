@@ -202,7 +202,7 @@ impl ScriptLiveRow {
         Self { key }
     }
 
-    pub(crate) fn from_db_row(bytes: &[u8]) -> Option<Self> {
+    pub fn from_db_row(bytes: &[u8]) -> Option<Self> {
         let key: [u8; SCRIPT_LIVE_ROW_SIZE] = bytes.try_into().ok()?;
         Some(Self { key })
     }
@@ -287,7 +287,7 @@ impl TxPosition {
 
 pub(crate) const MAX_POSITION_END_BYTES: usize = 4_000_000;
 
-pub(crate) fn positions_are_valid(positions: &[TxPosition]) -> bool {
+pub fn positions_are_valid(positions: &[TxPosition]) -> bool {
     let mut previous: Option<TxPosition> = None;
     for &position in positions {
         let Some(end) = position.end() else {
