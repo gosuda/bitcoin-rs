@@ -160,6 +160,15 @@ fn fixture_wire(name: &str) -> Vec<u8> {
     .unwrap_or_else(|error| panic!("fixture {name} must be readable: {error}"))
 }
 
+static SERIALIZE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_test() -> std::sync::MutexGuard<'static, ()> {
+    match SERIALIZE_TESTS.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 fn assert_decode_heap_stays_bounded(label: &str, wire: Vec<u8>) {
     let wire_len = wire.len();
     let baseline = LIVE.load(Ordering::SeqCst);
@@ -190,21 +199,25 @@ fn assert_decode_heap_stays_bounded(label: &str, wire: Vec<u8>) {
 
 #[test]
 fn dense_empty_witness_items_decode_within_sixteen_times_wire() {
+    let _lock = lock_test();
     assert_decode_heap_stays_bounded("empty witness items", dense_witness_wire());
 }
 
 #[test]
 fn dense_empty_outputs_decode_within_sixteen_times_wire() {
+    let _lock = lock_test();
     assert_decode_heap_stays_bounded("empty outputs", dense_output_wire());
 }
 
 #[test]
 fn dense_minimal_transactions_decode_within_sixteen_times_wire() {
+    let _lock = lock_test();
     assert_decode_heap_stays_bounded("minimal transactions", dense_transaction_wire());
 }
 
 #[test]
 fn mainnet_fixture_blocks_decode_within_sixteen_times_wire() {
+    let _lock = lock_test();
     for name in ["0.bin", "363731.bin"] {
         assert_decode_heap_stays_bounded(name, fixture_wire(name));
     }
