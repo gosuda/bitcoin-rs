@@ -113,6 +113,38 @@ fn native_package_aggregates_cpfp_atomically_and_ignores_input_order() -> TestRe
 }
 
 #[test]
+#[expect(clippy::expect_used, reason = "the refusal message is the assertion")]
+fn entirely_expired_package_projects_zero_memory_with_internal_links() {
+    let pool = Mempool::new(MempoolLimits {
+        min_relay_fee_sat_per_kvb: 0,
+        max_total_bytes: 1,
+        ..MempoolLimits::default()
+    });
+    let parent = spend(&[coin(900)], &[100_000], false);
+    let parent_entry = crate::MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7, 0);
+    let child = spend(&[OutPoint::new(parent_entry.txid, 0)], &[98_000], true);
+    let fresh = crate::policy::MEMPOOL_EXPIRY_SECS + 2;
+    let child_entry = crate::MempoolEntry::new(Arc::new(child), 100, 1_000, fresh, 7, 0);
+
+    let prepared = pool
+        .prepare_package(vec![parent_entry, child_entry], fresh)
+        .expect("commit_package removes both entries and their links at once, so the expiry projection must not charge them");
+    drop(prepared);
+
+    let living = spend(&[coin(901)], &[100_000], false);
+    let living_entry = crate::MempoolEntry::new(Arc::new(living), 100, 1_000, fresh, 7, 0);
+    assert!(
+        matches!(
+            pool.prepare_package(vec![living_entry], fresh),
+            Err(crate::standardness::AcceptanceRejectReason::Mempool(
+                crate::MempoolError::Full
+            ))
+        ),
+        "a living package is still bounded by the memory limit"
+    );
+}
+
+#[test]
 fn native_package_consensus_failures_match_single_submission() -> TestResult {
     for script_failure in [true, false] {
         let gateway = gateway();

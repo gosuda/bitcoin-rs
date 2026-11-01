@@ -202,6 +202,16 @@ struct GraphLinks {
     children: Vec<EntryId>,
 }
 
+impl GraphLinks {
+    pub(crate) fn surviving_sides(&self, excluded: &HashSet<EntryId>) -> usize {
+        self.parents
+            .iter()
+            .chain(self.children.iter())
+            .filter(|neighbor| !excluded.contains(*neighbor))
+            .count()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ComponentSummary {
     member_count: u32,
@@ -930,6 +940,14 @@ impl Mempool {
 
     fn links(&self, id: EntryId) -> Option<&GraphLinks> {
         Some(&self.entries.slot(id)?.links)
+    }
+
+    pub(crate) fn surviving_neighbor_sides(
+        &self,
+        id: EntryId,
+        excluded: &HashSet<EntryId>,
+    ) -> Option<usize> {
+        Some(self.links(id)?.surviving_sides(excluded))
     }
 
     #[must_use]

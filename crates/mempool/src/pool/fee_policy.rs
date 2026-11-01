@@ -1,6 +1,6 @@
 use super::{
     EntryId, Mempool, MempoolEntry, MempoolError, MempoolLimits, MempoolPolicySnapshot,
-    PolicyError, VisitSet,
+    PolicyError, VisitSet, entry_memory_usage, link_memory_usage,
 };
 use crate::fee_diagram::{self, FeeWeight};
 use crate::rbf::RbfError;
@@ -208,7 +208,16 @@ impl Mempool {
                 continue;
             }
             surviving.insert(old, after.nodes.len());
-            after.nodes.push(node.clone());
+            let mut projected = node.clone();
+            if let Some(id) = node.id {
+                let edges = self
+                    .surviving_neighbor_sides(id, &excluded)
+                    .ok_or(RbfError::InconsistentGraph)?;
+                let entry = self.entry(id).ok_or(RbfError::InconsistentGraph)?;
+                projected.memory = entry_memory_usage(&entry.tx)
+                    .saturating_add(link_memory_usage(edges, 1));
+            }
+            after.nodes.push(projected);
         }
         for (old, node) in before.nodes.iter().enumerate() {
             if node.id.is_some_and(|id| excluded.contains(&id)) {

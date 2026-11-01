@@ -63,6 +63,12 @@ impl Mempool {
                     expired_txids.insert(entry.txid);
                     expired_memory = expired_memory
                         .checked_add(self.admission_memory(entry))
+                        .and_then(|sum| {
+                            sum.checked_add(super::link_memory_usage(
+                                package_parent_edges(entry, &members),
+                                2,
+                            ))
+                        })
                         .ok_or(PolicyError::FeeArithmetic)?;
                     changed = true;
                 }

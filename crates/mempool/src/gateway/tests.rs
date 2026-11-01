@@ -1103,6 +1103,86 @@ fn refused_insertion_preserves_state_and_publishes_nothing() {
 }
 
 #[test]
+fn replacement_fitting_after_eviction_is_not_refused_by_dead_links() {
+    let gateway = MempoolGateway::new(
+        Arc::new(RwLock::new(Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        }))),
+        None,
+        ValidationEngine::Native,
+        None,
+    );
+
+    let parents: Vec<Tx> = (0..24u8)
+        .map(|index| tx(100 + index))
+        .collect();
+    for parent in &parents {
+        gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(parent.clone()), 100, 1_000, 1, 7, 0),
+            )
+            .expect("parent in");
+    }
+    let conflict_inputs: Vec<TxIn> = parents
+        .iter()
+        .map(|parent| TxIn {
+            previous_output: OutPoint::new(parent.txid(), 0),
+            script_sig: Script::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        })
+        .collect();
+    let mut conflict = tx(250);
+    conflict.inputs = conflict_inputs.clone();
+    let conflict_txid = conflict.txid();
+    gateway
+        .insert_entry(
+            AdmissionOrigin::Rpc,
+            MempoolEntry::new(Arc::new(conflict), 100, 1_000, 1, 7, 0),
+        )
+        .expect("conflict in");
+
+    let mut replacement = tx(251);
+    replacement.inputs = conflict_inputs;
+    let replacement_entry =
+        MempoolEntry::new(Arc::new(replacement.clone()), 100, 100_000, 1, 7, 0);
+    let stale_cap = {
+        let pool = gateway.read();
+        let conflict_id = pool
+            .entry_id_by_txid(&conflict_txid)
+            .expect("conflict is in the pool");
+        pool.dynamic_memory_usage()
+            .checked_sub(pool.entry_memory(conflict_id).expect("conflict memory"))
+            .and_then(|size| size.checked_add(pool.admission_memory(&replacement_entry)))
+            .expect("cap arithmetic fits u64")
+            - 1
+    };
+    gateway.pool.write().limits.max_total_bytes = stale_cap;
+
+    let result = gateway
+        .replace_transaction(
+            AdmissionOrigin::Rpc,
+            &crate::ReplacementCandidate::new(Arc::new(replacement), 100, 100_000, 1),
+            1,
+            7,
+        )
+        .expect("each evicted link releases both endpoints, so the replacement fits once the conflict is gone");
+    assert_eq!(
+        result.changes,
+        vec![
+            crate::mutation::change(&conflict_txid, removed(RemovalReason::Replaced)),
+            crate::mutation::change(
+                &replacement_entry.txid,
+                MutationOutcome::Accepted,
+            ),
+        ],
+        "the eviction removes the conflict, then the replacement lands"
+    );
+}
+
+#[test]
 fn rejected_replacement_preserves_pool_history_and_publication() {
     let observer = Arc::new(RecordingObserver::default());
     let gateway = MempoolGateway::new(

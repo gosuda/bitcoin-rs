@@ -8,7 +8,7 @@ use hashbrown::HashSet;
 use thiserror::Error;
 
 use crate::mutation::{AdmissionOrigin, RemovalReason};
-use crate::pool::ProjectionScope;
+use crate::pool::{ProjectionScope, link_memory_usage};
 #[cfg(any(test, feature = "test-seam"))]
 use crate::truc::SiblingEviction;
 use crate::{EntryId, Mempool, MempoolEntry, MempoolError};
@@ -438,10 +438,15 @@ impl Mempool {
                 });
             }
         }
+        let evicted_set: HashSet<_> = evicted.iter().copied().collect();
         let removed_memory = evicted.iter().try_fold(0_u64, |total, &id| {
             let released = self.entry_memory(id).ok_or(RbfError::InconsistentGraph)?;
+            let surviving_sides = self
+                .surviving_neighbor_sides(id, &evicted_set)
+                .ok_or(RbfError::InconsistentGraph)?;
             total
                 .checked_add(released)
+                .and_then(|total| total.checked_add(link_memory_usage(surviving_sides, 1)))
                 .ok_or(RbfError::ArithmeticOverflow)
         })?;
         let mut projected_memory = self
