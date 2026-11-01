@@ -1052,6 +1052,56 @@ fn gettxoutproof_probes_every_txid_before_giving_up_on_the_index() {
 }
 
 #[test]
+fn gettxoutproof_maps_a_transient_index_error_instead_of_reporting_absence() {
+    let block = distinct_block(5);
+    let Some(wanted) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let mut ctx = Context::new();
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(
+        |_: &Txid| -> Result<Option<u32>, TxQueryError> { Err(TxQueryError::Retry) },
+    )));
+    install_blocks(&mut ctx, std::slice::from_ref(&block));
+    let ctx = Arc::new(ctx);
+
+    let error =
+        proof_for(&ctx, &[wanted]).expect_err("a transient index failure is not an absence answer");
+
+    assert_eq!(
+        error.code(),
+        -32603,
+        "a transient index failure must not read as 'no block contains the txid': {error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "internal error: transaction index is still catching up; retry later"
+    );
+}
+
+#[test]
+fn gettxoutproof_index_path_reports_a_pruned_body() {
+    let block = distinct_block(6);
+    let Some(wanted) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let mut ctx = Context::new();
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(1)))));
+    ctx.chain.add_block(BlockRecord::synthetic(
+        0,
+        BlockHash::from(Hash256::from_le_bytes(&[9_u8; 32])),
+    ));
+    ctx.chain.add_block(BlockRecord::from_block(1, &block));
+    let ctx = Arc::new(ctx);
+
+    let error = proof_for(&ctx, &[wanted]).expect_err("a missing indexed body is not absence");
+
+    assert!(
+        matches!(error, RpcError::NotFound("block data pruned")),
+        "the indexed height holds no body, so the answer is pruned data: {error:?}"
+    );
+}
+
+#[test]
 fn gettxoutproof_with_blockhash_never_consults_the_index() {
     let block = distinct_block(4);
     let Some(wanted) = block.txs.first().map(Tx::txid) else {

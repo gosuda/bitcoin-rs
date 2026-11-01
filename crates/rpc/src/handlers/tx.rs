@@ -368,7 +368,7 @@ fn proof_via_index(
                     %error,
                     "txindex lookup failed; gettxoutproof cannot answer"
                 );
-                return Ok(None);
+                return Err(error.into());
             }
         };
         let Some(record) = ctx.chain.block_by_height(height) else {
@@ -407,7 +407,7 @@ fn proof_from_record(
         return Err(proof_interrupted());
     }
     let Some(bytes) = ctx.chain.block_body_bytes(record) else {
-        return Ok(None);
+        return Err(RpcError::NotFound("block data pruned"));
     };
     Ok(proof_from_body(&bytes, wanted))
 }
