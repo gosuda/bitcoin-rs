@@ -1,4 +1,5 @@
 use bitcoin::hashes::Hash as _;
+use bitcoin::key::TweakedPublicKey;
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
 use bitcoin::taproot::{LeafVersion, TaprootBuilder};
 use bitcoin::{ScriptBuf, absolute, transaction};
@@ -11,12 +12,6 @@ const OP_1: u8 = opcode::OP_PUSHNUM_1;
 const OP_NOP: u8 = 0x61;
 const OP_ELSE: u8 = 0x67;
 const OP_PUSHDATA1: u8 = 0x4c;
-
-const TAPROOT_CONTROL_BASE_SIZE: usize = 33;
-const TAPROOT_CONTROL_NODE_SIZE: usize = 32;
-const TAPROOT_CONTROL_MAX_NODE_COUNT: usize = 128;
-const TAPROOT_CONTROL_MAX_SIZE: usize =
-    TAPROOT_CONTROL_BASE_SIZE + TAPROOT_CONTROL_NODE_SIZE * TAPROOT_CONTROL_MAX_NODE_COUNT;
 
 #[derive(Debug, thiserror::Error)]
 enum TestError {
@@ -127,6 +122,34 @@ fn make_tapscript_tx(
         ),
     };
     Ok((tx, prevout))
+}
+
+fn verify_taproot_witness(
+    output_key: TweakedPublicKey,
+    full_witness: Vec<Vec<u8>>,
+) -> Result<Result<bool, ScriptError>, TestError> {
+    let oracle = bitcoin::Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([42; 32]), 0),
+            script_sig: ScriptBuf::new(),
+            sequence: bitcoin::Sequence::MAX,
+            witness: bitcoin::Witness::from_slice(&full_witness),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(9_000),
+            script_pubkey: ScriptBuf::new(),
+        }],
+    };
+    let tx: Tx = bitcoin_rs_primitives::deserialize(&bitcoin::consensus::serialize(&oracle))?;
+    let prevout = TxOut {
+        value: Amount::from_sat(10_000),
+        script_pubkey: Script::from_bytes(ScriptBuf::new_p2tr_tweaked(output_key).to_bytes()),
+    };
+    let rows = [(tx.inputs[0].previous_output, prevout)];
+    let prepared = PreparedTransaction::new(&tx, &rows)?;
+    Ok(prepared.verify_input(0, VerifyFlags::MANDATORY, None))
 }
 
 fn build_clean_sized_script(target_len: usize) -> Vec<u8> {
@@ -352,23 +375,87 @@ fn conditional_nesting_and_unbalanced_branches() {
 }
 
 #[test]
-fn taproot_control_block_size_boundaries() {
-    assert_eq!(TAPROOT_CONTROL_BASE_SIZE, 33);
-    assert_eq!(TAPROOT_CONTROL_NODE_SIZE, 32);
-    assert_eq!(TAPROOT_CONTROL_MAX_NODE_COUNT, 128);
-    assert_eq!(TAPROOT_CONTROL_MAX_SIZE, 4129);
+fn taproot_control_block_size_boundaries() -> TestResult {
+    let secp = Secp256k1::new();
+    let internal = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[17; 32])?)
+        .x_only_public_key()
+        .0;
+    let script = ScriptBuf::from_bytes(vec![OP_1]);
 
-    let is_valid_size = |len: usize| {
-        (TAPROOT_CONTROL_BASE_SIZE..=TAPROOT_CONTROL_MAX_SIZE).contains(&len)
-            && (len - TAPROOT_CONTROL_BASE_SIZE).is_multiple_of(TAPROOT_CONTROL_NODE_SIZE)
+    let depth_zero = TaprootBuilder::new()
+        .add_leaf(0, script.clone())?
+        .finalize(&secp, internal)
+        .map_err(|_| "complete taproot tree")?;
+    let depth_zero_control = depth_zero
+        .control_block(&(script.clone(), LeafVersion::TapScript))
+        .ok_or("depth-zero control block")?
+        .serialize();
+    assert_eq!(depth_zero_control.len(), 33);
+    assert_eq!(
+        verify_taproot_witness(
+            depth_zero.output_key(),
+            vec![script.to_bytes(), depth_zero_control.clone()]
+        )?,
+        Ok(true)
+    );
+
+    let depth_one = TaprootBuilder::new()
+        .add_leaf(1, ScriptBuf::from_bytes(vec![OP_NOP, OP_1]))?
+        .add_leaf(1, script.clone())?
+        .finalize(&secp, internal)
+        .map_err(|_| "complete taproot tree")?;
+    let depth_one_control = depth_one
+        .control_block(&(script.clone(), LeafVersion::TapScript))
+        .ok_or("depth-one control block")?
+        .serialize();
+    assert_eq!(depth_one_control.len(), 65);
+    assert_eq!(
+        verify_taproot_witness(
+            depth_one.output_key(),
+            vec![script.to_bytes(), depth_one_control]
+        )?,
+        Ok(true)
+    );
+
+    let extended = |extra: usize| {
+        let mut control = depth_zero_control.clone();
+        control.extend(std::iter::repeat_n(0x01, extra));
+        control
     };
-    assert!(!is_valid_size(32));
-    assert!(is_valid_size(33));
-    assert!(!is_valid_size(34));
-    assert!(is_valid_size(65));
-    assert!(is_valid_size(4129));
-    assert!(!is_valid_size(4130));
-    assert!(!is_valid_size(4161));
+    let below_base = vec![0xc0; 32];
+    let misaligned = extended(1);
+    let at_max = extended(32 * 128);
+    let over_max = extended(32 * 128 + 1);
+    let node_over_max = extended(32 * 129);
+    assert_eq!(
+        [
+            below_base.len(),
+            misaligned.len(),
+            at_max.len(),
+            over_max.len(),
+            node_over_max.len()
+        ],
+        [32, 34, 4_129, 4_130, 4_161]
+    );
+
+    let wrong_size = || {
+        Err(ScriptError::Invalid {
+            code: ScriptErrCode::TaprootWrongControlSize,
+        })
+    };
+    for control in [below_base, misaligned, over_max, node_over_max] {
+        assert_eq!(
+            verify_taproot_witness(depth_zero.output_key(), vec![script.to_bytes(), control])?,
+            wrong_size()
+        );
+    }
+    assert_eq!(
+        verify_taproot_witness(depth_zero.output_key(), vec![script.to_bytes(), at_max])?,
+        Err(ScriptError::Invalid {
+            code: ScriptErrCode::WitnessProgramMismatch,
+        })
+    );
+    Ok(())
 }
 
 #[test]
