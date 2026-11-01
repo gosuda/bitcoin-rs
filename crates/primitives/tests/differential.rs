@@ -26,10 +26,8 @@ fn repo_root() -> PathBuf {
 fn fixture_blocks() -> Vec<(String, Vec<u8>)> {
     let mut blocks = Vec::new();
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/testdata");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(_) => return blocks,
-    };
+    let entries =
+        std::fs::read_dir(&dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "bin") {
@@ -37,12 +35,16 @@ fn fixture_blocks() -> Vec<(String, Vec<u8>)> {
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if let Ok(bytes) = std::fs::read(&path) {
-                blocks.push((name, bytes));
-            }
+            let bytes =
+                std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            blocks.push((name, bytes));
         }
     }
     blocks.sort_by(|left, right| left.0.cmp(&right.0));
+    assert!(
+        !blocks.is_empty(),
+        "testdata contains no .bin block fixtures"
+    );
     blocks
 }
 
