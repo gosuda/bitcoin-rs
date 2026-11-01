@@ -652,6 +652,7 @@ impl MempoolGateway {
         origin: AdmissionOrigin,
         entry: MempoolEntry,
     ) -> Result<MutationResult, MempoolError> {
+        // Keep ownership of entry across bounded optimistic retries.
         for _ in 0..crate::admission::MAX_ADMISSION_RETRIES {
             let inputs = self
                 .pool

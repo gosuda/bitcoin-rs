@@ -28,6 +28,7 @@ impl RollingMinFee {
                 halflife /= 2.0;
             }
             let elapsed = (now - self.last_update) as f64;
+            // Keep powf: mirrors Core GetMinFee pow(2.0, x); exp2 is not shown bit-identical.
             let decay = 2f64.powf(elapsed / halflife);
             self.rate /= decay;
             self.last_update = now;
