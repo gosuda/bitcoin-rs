@@ -457,7 +457,7 @@ fn an_idle_read_unblocks_on_the_cancel_latch() -> IoResult<()> {
     let (server, _) = listener.accept()?;
     let latch = bitcoin_rs_chain::LatchWriter::new();
     let mut stream = CountingStream::from_connected(server, Arc::new(PeerCounters::default()))?
-        .with_cancel(&latch.reader())?;
+        .with_cancel(&latch.reader(), &std::net::TcpStream::try_clone)?;
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
     let reader = std::thread::spawn(move || {
         let mut buffer = [0_u8; 64];

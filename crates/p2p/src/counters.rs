@@ -4,12 +4,6 @@ use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
-
-#[cfg(test)]
-pub(crate) static CANCEL_CLONE_FAIL: AtomicBool = AtomicBool::new(false);
-
 #[derive(Debug, Default)]
 pub struct PeerCounters {
     bytes_sent: AtomicU64,
@@ -134,13 +128,13 @@ impl CountingStream<std::net::TcpStream> {
     }
 
     /// # Errors
-    /// Returns the error `TcpStream::try_clone` returned.
-    pub(crate) fn with_cancel(mut self, cancel: &bitcoin_rs_chain::LatchReader) -> IoResult<Self> {
-        #[cfg(test)]
-        if CANCEL_CLONE_FAIL.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            return Err(std::io::Error::other("test-injected cancel clone failure"));
-        }
-        let shutdown_stream = std::sync::Arc::new(self.inner.try_clone()?);
+    /// Returns the error `clone` returned.
+    pub(crate) fn with_cancel(
+        mut self,
+        cancel: &bitcoin_rs_chain::LatchReader,
+        clone: &dyn Fn(&std::net::TcpStream) -> IoResult<std::net::TcpStream>,
+    ) -> IoResult<Self> {
+        let shutdown_stream = std::sync::Arc::new(clone(&self.inner)?);
         self.cancel_guard = Some(cancel.on_cancel(move || {
             let _ = shutdown_stream.shutdown(std::net::Shutdown::Both);
         }));

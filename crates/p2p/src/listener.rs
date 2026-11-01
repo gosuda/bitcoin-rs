@@ -103,6 +103,8 @@ pub struct ConnectionShared {
     pub dial_routes: crate::DialRoutes,
     #[cfg(test)]
     pub(crate) test_keepalive_intervals: std::sync::OnceLock<(Duration, Duration)>,
+    #[cfg(test)]
+    pub(crate) fail_cancel_clone: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -171,7 +173,32 @@ impl ConnectionShared {
             dial_routes: crate::DialRoutes::default(),
             #[cfg(test)]
             test_keepalive_intervals: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            fail_cancel_clone: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    #[cfg(test)]
+    fn cancel_clone(
+        &self,
+    ) -> impl Fn(&std::net::TcpStream) -> std::io::Result<std::net::TcpStream> + '_ {
+        move |stream| {
+            if self
+                .fail_cancel_clone
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                Err(std::io::Error::other("test-injected cancel clone failure"))
+            } else {
+                stream.try_clone()
+            }
+        }
+    }
+
+    #[cfg(not(test))]
+    fn cancel_clone(
+        &self,
+    ) -> impl Fn(&std::net::TcpStream) -> std::io::Result<std::net::TcpStream> {
+        std::net::TcpStream::try_clone
     }
 
     fn offer_relay_capabilities<S>(&self, peer: &mut Peer<S>, role: crate::PeerRole) {
@@ -979,7 +1006,7 @@ fn dial(
     };
     let stream = match stream
         .stop_reading_when(lease.clone())
-        .with_cancel(&connection_cancel.reader())
+        .with_cancel(&connection_cancel.reader(), &shared.cancel_clone())
         .map_err(crate::wire::PeerError::Io)
     {
         Ok(stream) => stream,
@@ -1270,7 +1297,7 @@ fn run_handshake(
         .and_then(|stream| {
             stream
                 .stop_reading_when(lease.clone())
-                .with_cancel(&connection_cancel.reader())
+                .with_cancel(&connection_cancel.reader(), &std::net::TcpStream::try_clone)
         })
         .map_err(crate::wire::PeerError::Io)
     {

@@ -16,7 +16,7 @@ fn a_failed_cancel_guard_removes_the_registered_outbound_lease() {
         crossbeam_channel::unbounded().0,
         crossbeam_channel::unbounded().0,
     ));
-    crate::counters::CANCEL_CLONE_FAIL.store(true, Ordering::Relaxed);
+    shared.fail_cancel_clone.store(true, Ordering::Relaxed);
 
     let outcome = dial(
         address.into(),
@@ -28,7 +28,11 @@ fn a_failed_cancel_guard_removes_the_registered_outbound_lease() {
     );
 
     assert!(
-        matches!(outcome, Err(crate::PeerError::Io(_))),
+        matches!(
+            &outcome,
+            Err(crate::PeerError::Io(error))
+                if error.to_string() == "test-injected cancel clone failure"
+        ),
         "the injected cancel-guard failure must fail the dial: {outcome:?}"
     );
     assert!(
