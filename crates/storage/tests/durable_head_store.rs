@@ -345,41 +345,67 @@ fn rejects_reopen_with_corrupt_or_truncated_durable_head() -> Result<(), Storage
 fn crash_windows_failing_backend_writer_at_each_write_index_preserves_atomic_reopen()
 -> Result<(), StorageError> {
     let cf = bitcoin_rs_storage::ColumnFamily::TxConfirmed;
+    let mut wrote_keys_before_fault = false;
     for fail_index in 0..=5_u8 {
         let temp = tempfile::tempdir()?;
+        let present;
         {
             let backend = Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?);
-            let mut full_batch = backend.new_batch();
-            for i in 0..5_u8 {
-                full_batch.put(cf, &[i], &[i, i]);
+            let mut prefix_batch = backend.new_batch();
+            for i in 0..fail_index {
+                prefix_batch.put(cf, &[i], &[i, i]);
             }
+            backend.write_durable(prefix_batch)?;
             if fail_index < 5 {
-                let mut partial = backend.new_batch();
                 for i in 0..fail_index {
-                    partial.put(cf, &[i], &[i, i]);
+                    assert_eq!(
+                        backend.get(cf, &[i])?.as_deref(),
+                        Some(&[i, i][..]),
+                        "fail_index {fail_index}: witness key {i} missing before the fault"
+                    );
                 }
-                backend.arm_persist_fault(PersistFault::FailApply);
-                let _ = backend.write_durable(partial);
-            } else {
-                backend.write_durable(full_batch)?;
+                if fail_index > 0 {
+                    wrote_keys_before_fault = true;
+                }
+                let mut full_batch = backend.new_batch();
+                for i in 0..5_u8 {
+                    full_batch.put(cf, &[i], &[i, i]);
+                }
+                backend.arm_persist_fault(PersistFault::LostApply);
+                let _ = backend.write_durable(full_batch);
             }
+            present = key_states(&backend, cf)?;
         }
         let reopened = Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?);
-        let mut present = 0_usize;
-        for i in 0..5_u8 {
-            if reopened.get(cf, &[i])?.is_some() {
-                present += 1;
-            }
-        }
+        let reopened_present = key_states(&reopened, cf)?;
+        let pre_batch: Vec<u8> = (0..fail_index).collect();
+        let post_batch: Vec<u8> = (0..5).collect();
         assert!(
-            present == 0 || present == 5,
-            "fail_index {fail_index} left partially written state: {present} of 5 keys present"
+            reopened_present == pre_batch || reopened_present == post_batch,
+            "fail_index {fail_index} reopened a torn state with keys {reopened_present:?} \
+             present; expected exactly {pre_batch:?} or {post_batch:?}"
         );
-        if fail_index < 5 {
-            assert_eq!(present, 0);
-        } else {
-            assert_eq!(present, 5);
+        assert_eq!(present, pre_batch);
+        assert_eq!(reopened_present, present);
+    }
+    assert!(
+        wrote_keys_before_fault,
+        "no fail_index run observed written keys before its fault"
+    );
+    Ok(())
+}
+
+fn key_states(
+    store: &Arc<bitcoin_rs_storage::FjallStore>,
+    cf: bitcoin_rs_storage::ColumnFamily,
+) -> Result<Vec<u8>, StorageError> {
+    let mut present = Vec::new();
+    for i in 0..5_u8 {
+        let value = store.get(cf, &[i])?;
+        if let Some(bytes) = value {
+            assert_eq!(bytes.as_slice(), &[i, i][..], "key {i} holds torn bytes");
+            present.push(i);
         }
     }
-    Ok(())
+    Ok(present)
 }
