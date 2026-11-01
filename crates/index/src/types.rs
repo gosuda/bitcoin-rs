@@ -351,6 +351,11 @@ impl ScriptHistoryOccurrence {
     pub const SIZE: usize = 32 + 32 + TX_POSITION_SIZE + 1;
 
     #[must_use]
+    pub fn txid(&self) -> Txid {
+        Txid(Hash256::from_le_bytes(&self.txid))
+    }
+
+    #[must_use]
     pub fn encode_all(entries: &[Self]) -> Vec<u8> {
         let mut out = Vec::with_capacity(entries.len().saturating_mul(Self::SIZE));
         for entry in entries {

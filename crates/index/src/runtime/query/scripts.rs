@@ -13,6 +13,16 @@ fn storage_error(error: impl core::fmt::Display) -> TxQueryError {
     TxQueryError::Storage(error.to_string().into())
 }
 
+fn order_by_height_txid_vout(
+    left: &ScriptIndexRecord,
+    right: &ScriptIndexRecord,
+) -> core::cmp::Ordering {
+    left.height
+        .cmp(&right.height)
+        .then_with(|| left.txid.cmp(&right.txid))
+        .then_with(|| left.vout.cmp(&right.vout))
+}
+
 impl DerivedIndexQueryEngine {
     fn check_script_limit(&self, entries: usize) -> Result<(), TxQueryError> {
         if entries > self.scripthash_limit {
@@ -24,6 +34,18 @@ impl DerivedIndexQueryEngine {
         }
         Ok(())
     }
+
+    fn require_full_history(prefix: &ReadPrefix) -> Result<(), TxQueryError> {
+        if prefix.floor > 0 {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::HistoryUnproven {
+                    floor: prefix.floor,
+                },
+            ));
+        }
+        Ok(())
+    }
+
     fn scan_funding_rows(
         &self,
         snapshot: &dyn TxIndexSnapshot,
@@ -168,13 +190,7 @@ impl DerivedIndexQueryEngine {
         budget: &mut QueryBudget,
         scripthash: ScriptHash,
     ) -> Result<ScriptIndexSnapshot, TxQueryError> {
-        if prefix.floor > 0 {
-            return Err(TxQueryError::Unavailable(
-                TxUnavailableCause::HistoryUnproven {
-                    floor: prefix.floor,
-                },
-            ));
-        }
+        Self::require_full_history(prefix)?;
         let rows = self.scan_funding_rows(snapshot, budget, scripthash)?;
         let mut history = Vec::new();
         let mut funding_outputs = Vec::new();
@@ -189,9 +205,7 @@ impl DerivedIndexQueryEngine {
                 if occurrence.scripthash != scripthash {
                     continue;
                 }
-                let txid = Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(
-                    &occurrence.txid,
-                ));
+                let txid = occurrence.txid();
                 history.push(ScriptHistoryRecord { txid, height });
                 if occurrence.flags & ScriptHistoryOccurrence::FUNDING == 0 {
                     continue;
@@ -244,12 +258,7 @@ impl DerivedIndexQueryEngine {
             });
         }
 
-        funding.sort_by(|a, b| {
-            a.height
-                .cmp(&b.height)
-                .then_with(|| a.txid.cmp(&b.txid))
-                .then_with(|| a.vout.cmp(&b.vout))
-        });
+        funding.sort_by(order_by_height_txid_vout);
         funding.dedup();
 
         Ok(ScriptIndexSnapshot { history, funding })
@@ -262,13 +271,7 @@ impl DerivedIndexQueryEngine {
         budget: &mut QueryBudget,
         scripthash: ScriptHash,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
-        if prefix.floor > 0 {
-            return Err(TxQueryError::Unavailable(
-                TxUnavailableCause::HistoryUnproven {
-                    floor: prefix.floor,
-                },
-            ));
-        }
+        Self::require_full_history(prefix)?;
         let rows = self.scan_funding_rows(snapshot, budget, scripthash)?;
         let mut history = Vec::new();
         let mut examined = 0_usize;
@@ -282,9 +285,7 @@ impl DerivedIndexQueryEngine {
                     .into_iter()
                     .filter(|occurrence| occurrence.scripthash == scripthash)
                     .map(|occurrence| ScriptHistoryRecord {
-                        txid: Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(
-                            &occurrence.txid,
-                        )),
+                        txid: occurrence.txid(),
                         height,
                     }),
             );
@@ -365,13 +366,7 @@ impl DerivedIndexQueryEngine {
         cursor: Option<Txid>,
         limit: usize,
     ) -> Result<ScriptHistoryPage, TxQueryError> {
-        if prefix.floor > 0 {
-            return Err(TxQueryError::Unavailable(
-                TxUnavailableCause::HistoryUnproven {
-                    floor: prefix.floor,
-                },
-            ));
-        }
+        Self::require_full_history(prefix)?;
         let limit = limit.min(crate::query_api::SCRIPT_HISTORY_PAGE_MAX);
         let resolved = match cursor {
             Some(txid) => Self::history_cursor_for(snapshot, prefix, budget, scripthash, &txid)?,
@@ -424,9 +419,7 @@ impl DerivedIndexQueryEngine {
                     {
                         continue;
                     }
-                    let txid = Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(
-                        &occurrence.txid,
-                    ));
+                    let txid = occurrence.txid();
                     if records
                         .last()
                         .is_some_and(|last| last.height == height && last.txid == txid)
@@ -486,12 +479,7 @@ impl DerivedIndexQueryEngine {
                     vout: outpoint.vout,
                 });
             }
-            records.sort_by(|a, b| {
-                a.height
-                    .cmp(&b.height)
-                    .then_with(|| a.txid.cmp(&b.txid))
-                    .then_with(|| a.vout.cmp(&b.vout))
-            });
+            records.sort_by(order_by_height_txid_vout);
             records.dedup_by(|a, b| a.txid == b.txid && a.vout == b.vout);
             Ok(records)
         })
