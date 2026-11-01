@@ -171,9 +171,13 @@ def native_code(native: int | None) -> int:
     return {0: 0, 150: 12, 120: 12, 12: 13}.get(native, 14)
 
 
+def lane_kind(property_arg: str) -> str:
+    return "safety" if property_arg.startswith("--inv=") else "temporal"
+
+
 def run_once(root: Path, executable: Path, module: Module, property_arg: str, bound: int,
              timeout: int, out_dir: Path | None = None) -> tuple[int | None, int, Path]:
-    kind = "safety" if property_arg.startswith("--inv=") else "temporal"
+    kind = lane_kind(property_arg)
     base = out_dir if out_dir is not None else root / "target/apalache"
     output = base / module.owner / module.machine / kind / f"k{bound}"
     output.mkdir(parents=True, exist_ok=True)
@@ -210,8 +214,6 @@ def run_once(root: Path, executable: Path, module: Module, property_arg: str, bo
             tail = stream.read()
         if b"The outcome is: NoError" not in tail or b"EXITCODE: OK" not in tail:
             code = 14
-    if not run_dir.is_dir():
-        run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "result.json").write_text(
         json.dumps({"k": bound, "native_rc": native, "evidence_rc": code}) + "\n",
         encoding="utf-8",
@@ -327,7 +329,7 @@ def build_jobs(
     jobs: list[LaneJob] = []
     for module in inventory:
         for property_arg in PROPERTIES:
-            kind = "safety" if property_arg.startswith("--inv=") else "temporal"
+            kind = lane_kind(property_arg)
             if explicit_k is not None:
                 start_k = explicit_k
             else:
@@ -375,7 +377,7 @@ def build_summary(
     for module in sorted(inventory, key=lambda item: item.name):
         summary[module.name] = {}
         for property_arg in PROPERTIES:
-            kind = "safety" if property_arg.startswith("--inv=") else "temporal"
+            kind = lane_kind(property_arg)
             if (module.name, kind) in results:
                 summary[module.name][kind] = results[(module.name, kind)]
     return summary
