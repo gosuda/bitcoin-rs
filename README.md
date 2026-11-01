@@ -12,6 +12,8 @@
 [Contributing](CONTRIBUTING.md) ·
 [Benchmarks and limitations](docs/benchmarks/end-to-end-sync.md)
 
+The [mdBook handbook](docs/book/src/SUMMARY.md) is the chapter-by-chapter guide to running, embedding, and verifying the node; build it with `mdbook build docs/book`.
+
 ---
 
 ## What is this
