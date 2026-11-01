@@ -262,7 +262,7 @@ Queue accounting:
 - Exact-source checks block credit or fault on a same-address replacement.
 - The inbound drain drops retired-source deliveries at dequeue, pre-routing, without holding peer-table authority through validation and staging.
 - Credit and fault still require the exact source to be current.
-- Compact self-fetches (`RequestMissing` `getblocktxn`, `Fallback` `getdata`) are marked (`body_fetch_owned`).
+- Compact self-fetches (`RequestMissing` `getblocktxn`, `Fallback` `getdata`) are marked (`mark_owned_fetch`).
 - On tip admission the window records the hash pending under the delivering connection (`mark_owned_fetch`) so scheduling issues no duplicate `getdata`.
 - Marks honor window capacity, per-peer inflight share, and request frontier.
 - Unattached tips wait in bounded `SchedulerState::owned_body_fetches` and resolve at ancestry admission.

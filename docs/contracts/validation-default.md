@@ -35,7 +35,7 @@
 
 - Live block rules and context-free revalidation share the consensus-owned transaction structure and aggregate legacy sigop checks in `verify_block.rs`.
 - Every transaction, including coinbase, MUST pass these checks before the PoW-valid announce hook.
-- Coinbase-only shortcuts, script caches, window proofs, Fast, AssumeValid, and replay provenance do not exempt a block from these checks.
+- Coinbase-only shortcuts, script caches, window proofs, AssumeValid, and replay provenance do not exempt a block from these checks.
 - Proposal and commit both enforce absolute transaction finality using the same height and locktime cutoff, including coinbase.
 - Proposals retain their lack of commit and publication effects and their PoW and signet exceptions.
 - Early announcement is not a commit receipt.
