@@ -201,13 +201,12 @@ refusals are fixed strings.
 
 ### Statistics and result identity
 
-Each arm receives nearest-rank percentiles over its exactly seven samples:
-for sorted observations $x_1 \ldots x_n$, percentile $p$ is
-$x_{\lceil pn/100 \rceil}$. With seven samples, p95 and p99 equal the
-maximum. No arithmetic mean is emitted or used for a verdict. The verdict
-names the arm with the lower nearest-rank p50, or records a tie; it is
-emitted only after every gate above has passed. `result_sha256` hashes the
-Decimal-safe canonical JSON record before the field is added.
+Each arm receives nearest-rank percentiles over its exactly seven samples
+under the [comparator custody](README.md#comparator-custody) rules. With
+seven samples, p95 and p99 equal the maximum. No mean is emitted or used for
+a verdict. The verdict names the arm with the lower nearest-rank p50, or
+records a tie. It is emitted only after every gate above has passed.
+`result_sha256` covers the record without that field.
 
 ### Invocation
 
@@ -242,10 +241,11 @@ strict `muhash-rpc-campaign-config-v2` object. It binds one Core arm, whose
 `backend` is always `coinsdb`, to one bitcoin-rs arm, whose `backend` is
 exactly one of `fjall`, `rocksdb` or `redb`. It also binds the single cache
 policy, the corpus, and the pinned binaries and commands. `{binary}` is
-copied and re-hashed before every spawn. `{config}` is required, so the
-receipt's pinned config is the file the daemon received
-(`docs/contracts/hot-path-attribution.md` `MRPC-03`). The controller copies that file
-into the workspace and opens the copy through the shared regular-file
+pinned with the [shared copy rule](README.md#comparator-custody) before
+every spawn. `{config}` is required, so the receipt's pinned config is the
+file the daemon received
+(`docs/contracts/hot-path-attribution.md` `MRPC-03`). The controller copies
+that file into the workspace and reads the copy through its regular-file
 reader. It re-hashes the copy into a sealed memfd (`MFD_EXEC` for the
 binary, `MFD_NOEXEC_SEAL` for `{config}`), and passes `/proc/self/fd/<n>`
 to the child. `{rpc_bind}`, `{rpc_port}`, `{data_dir}` and `{cookie}` are
@@ -262,26 +262,8 @@ It carries the campaign, the single policy, the corpus, and the 14 triple
 references in schedule order. Each triple pins its trial input, pre-receipt,
 observation and post-receipt files. Every referenced file must already
 exist with its declared size and hash. The comparator never fetches
-anything. Output paths must not already exist. Publication establishes
-namespace trust component by component. Every ancestor is opened with
-`O_NOFOLLOW` from the previously opened directory descriptor. Any ancestor
-that an untrusted user could rename through is refused, unless it follows
-the root-owned sticky `01777` contract with an effective-user-owned,
-non-writable child. The record is written to an anonymous `O_TMPFILE` inode
-in the held trusted directory, and fsynced. The parent's namespace identity
-is then re-established immediately before publishing: a fresh trusted
-traversal must resolve to the same inode. Publication uses
-`linkat(AT_EMPTY_PATH)` against the still-open descriptor. A rename or
-rebind of the requested pathname therefore refuses, instead of returning a
-success the caller cannot see. No replaceable temporary name ever exists.
-A final inode check proves the published bytes are the record. If any
-verification or durability step fails after the link, the linked name is
-removed through the held directory descriptor. That removal happens only
-after a no-follow check that the name still identifies the linked inode,
-and it is followed by a best-effort directory sync. A substituted inode is
-never removed. A refused run or a caught post-link failure leaves no
-comparator-owned partial record. An uncatchable interruption after `linkat`
-can leave a complete record whose final durability check did not run.
+anything, and output paths must not already exist. The record is published
+under the [comparator custody](README.md#comparator-custody) rules.
 
 ### Status
 
