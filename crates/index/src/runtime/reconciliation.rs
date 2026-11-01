@@ -270,6 +270,9 @@ impl Worker {
         if self.runtime.script_live_failure.read().is_some() {
             enabled = enabled.without(IndexCapability::ScriptLive);
         }
+        if self.runtime.script_history_failure.read().is_some() {
+            enabled = enabled.without(IndexCapability::ScriptHistory);
+        }
         enabled
     }
 
@@ -393,6 +396,9 @@ impl Worker {
     > {
         let mut reported_ahead = false;
         while let Some((capabilities, watermark)) = self.rollback_selection(watermarks, target) {
+            if self.runtime.should_stop() {
+                return Ok(ControlFlow::Break(ReconcileAction::Stalled));
+            }
             if let Some(target) = target
                 && !reported_ahead
                 && watermark.height > target.height
@@ -459,6 +465,14 @@ impl Worker {
             Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
                 if capabilities.contains(IndexCapability::CompactFilters) {
                     self.runtime.fail_compact_filters(&error);
+                }
+                if capabilities.contains(IndexCapability::ScriptHistory) {
+                    self.runtime.fail_script_history(&error);
+                }
+                let rebuild = capabilities
+                    .without(IndexCapability::CompactFilters)
+                    .without(IndexCapability::ScriptHistory);
+                if !rebuild.contains(IndexCapability::ScriptLive) {
                     return Ok(ControlFlow::Continue((fence, watermarks)));
                 }
                 tracing::warn!(

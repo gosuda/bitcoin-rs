@@ -642,14 +642,19 @@ impl Worker {
             Ok(prepared) => Ok(ControlFlow::Continue(prepared)),
             Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
                 *pending = None;
+                state.batch = PreparedBatch::new(self.batch_limits);
                 if capabilities.contains(IndexCapability::CompactFilters) {
                     self.runtime.fail_compact_filters(&error);
+                }
+                if capabilities.contains(IndexCapability::ScriptHistory) {
+                    self.runtime.fail_script_history(&error);
+                }
+                if !capabilities.contains(IndexCapability::ScriptLive) {
                     return Ok(ControlFlow::Break(ChunkAction::Progressed));
                 }
                 self.writer
                     .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
                     .map_err(DerivedIndexWorkerError::Index)?;
-                state.batch = PreparedBatch::new(self.batch_limits);
                 self.runtime.fail_script_live(&error);
                 if let Some(slot) = self.seed_slot.as_ref() {
                     slot.want();

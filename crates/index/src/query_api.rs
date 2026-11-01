@@ -50,6 +50,7 @@ pub enum TxUnavailableCause {
     WorkerStopped,
     CompactFilterFailed(CompactString),
     ScriptLiveUnavailable(CompactString),
+    ScriptHistoryUnavailable(CompactString),
     MissingAuthority(&'static str),
     BlockBodyMissing { height: u32 },
     FilterDataMissing,
@@ -80,6 +81,7 @@ impl core::fmt::Display for TxUnavailableCause {
             Self::WorkerFailed(message)
             | Self::CompactFilterFailed(message)
             | Self::ScriptLiveUnavailable(message)
+            | Self::ScriptHistoryUnavailable(message)
             | Self::Other(message) => f.write_str(message),
             Self::WorkerStopped => f.write_str("txindex worker stopped"),
             Self::MissingAuthority(detail) => f.write_str(detail),

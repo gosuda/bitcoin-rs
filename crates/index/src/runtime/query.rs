@@ -804,6 +804,13 @@ impl DerivedIndexQueryEngine {
                 TxUnavailableCause::ScriptLiveUnavailable(reason),
             ));
         }
+        if required.contains(IndexCapability::ScriptHistory)
+            && let Some(reason) = self.runtime.script_history_failure.read().clone()
+        {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::ScriptHistoryUnavailable(reason),
+            ));
+        }
         Ok(())
     }
 

@@ -51,10 +51,21 @@ impl DerivedIndexCapability {
             super::ReconcileLeg::Forward,
         );
         let script_live_outage = runtime.script_live_failure.read().clone();
-        let observed = if script_live_outage.is_some() {
-            phase.with_leg(IndexCapabilities::SCRIPT_LIVE, super::ReconcileLeg::Forward)
-        } else {
+        let script_history_outage = runtime.script_history_failure.read().clone();
+        let unavailable = [
+            (IndexCapability::ScriptLive, script_live_outage.as_ref()),
+            (
+                IndexCapability::ScriptHistory,
+                script_history_outage.as_ref(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(capability, reason)| reason.map(|_| capability))
+        .collect::<IndexCapabilities>();
+        let observed = if unavailable.is_empty() {
             phase
+        } else {
+            phase.with_leg(unavailable, super::ReconcileLeg::Forward)
         };
         if let Some((from_height, to_height)) = observed.rolling_back() {
             return CapabilityState::RollingBack {
@@ -62,14 +73,21 @@ impl DerivedIndexCapability {
                 to_height,
             };
         }
-        if let Some(reason) = script_live_outage {
-            let servable = enabled.without(IndexCapability::ScriptLive);
+        if let Some(reason) = script_live_outage.or(script_history_outage) {
+            let servable = enabled
+                .iter()
+                .filter(|capability| !unavailable.contains(*capability))
+                .collect::<IndexCapabilities>();
             if servable.is_empty() {
                 return CapabilityState::Failed {
                     reason: reason.to_string(),
                 };
             }
-            let rebuilding = phase.rebuilding().without(IndexCapability::ScriptLive);
+            let rebuilding = phase
+                .rebuilding()
+                .iter()
+                .filter(|capability| !unavailable.contains(*capability))
+                .collect::<IndexCapabilities>();
             if rebuilding != IndexCapabilities::NONE {
                 return match Self::progress(engine, rebuilding) {
                     Ok(progress) => CapabilityState::Rebuilding {

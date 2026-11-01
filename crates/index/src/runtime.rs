@@ -80,6 +80,7 @@ pub struct DerivedIndexRuntime {
     failure_message: RwLock<Option<CompactString>>,
     compact_filter_failure: RwLock<Option<CompactString>>,
     script_live_failure: RwLock<Option<CompactString>>,
+    script_history_failure: RwLock<Option<CompactString>>,
     phase: arc_swap::ArcSwap<ReconcilePhase>,
 }
 
@@ -95,6 +96,7 @@ impl DerivedIndexRuntime {
             failure_message: RwLock::new(None),
             compact_filter_failure: RwLock::new(None),
             script_live_failure: RwLock::new(None),
+            script_history_failure: RwLock::new(None),
             phase: arc_swap::ArcSwap::from_pointee(ReconcilePhase::FORWARD),
         }
     }
@@ -135,6 +137,13 @@ impl DerivedIndexRuntime {
         tracing::error!(%error, "ScriptLive index unavailable; other indexes continue");
         *self.script_live_failure.write() = Some(error.to_string().into());
         self.publish_leg(IndexCapabilities::SCRIPT_LIVE, ReconcileLeg::Forward);
+        self.wake();
+    }
+
+    pub(crate) fn fail_script_history(&self, error: &DerivedIndexWorkerError) {
+        tracing::error!(%error, "ScriptHistory index unavailable; other indexes continue");
+        *self.script_history_failure.write() = Some(error.to_string().into());
+        self.publish_leg(IndexCapabilities::SCRIPT_HISTORY, ReconcileLeg::Forward);
         self.wake();
     }
 

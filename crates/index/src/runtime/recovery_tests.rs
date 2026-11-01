@@ -318,7 +318,7 @@ fn unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark() {
         let harness = Harness::with_enabled(
             &fixture,
             u32::MAX,
-            IndexCapabilities::TX_LOOKUP.with_compact_filters(true),
+            IndexCapabilities::HISTORICAL.with_compact_filters(true),
         );
         harness.set_tip(&fixture.tip(fixture.a[1]));
         if pruned {
@@ -419,7 +419,9 @@ impl Harness {
         });
         let watermarks = self.watermarks();
         assert_eq!(watermarks.tx_lookup, expected, "tx_lookup watermark");
-        if self.worker.enabled.contains(IndexCapability::ScriptHistory) {
+        if self.worker.enabled.contains(IndexCapability::ScriptHistory)
+            && self.runtime.script_history_failure.read().is_none()
+        {
             assert_eq!(
                 watermarks.script_history, expected,
                 "script_history watermark"
@@ -451,7 +453,7 @@ fn missing_undo_during_filter_rollback_does_not_reset_filters_or_stop_siblings()
     let h = Harness::with_enabled(
         &f,
         u32::MAX,
-        IndexCapabilities::TX_LOOKUP.with_compact_filters(true),
+        IndexCapabilities::HISTORICAL.with_compact_filters(true),
     );
     let a2 = f.tip(f.a[1]);
     let identities = h.worker.collect_target_chain(&a2, 0, 2).expect("chain");
@@ -484,6 +486,38 @@ fn missing_undo_during_filter_rollback_does_not_reset_filters_or_stop_siblings()
         "preserve failed capability data"
     );
     assert!(h.runtime.compact_filter_failure.read().is_some());
+    assert!(!h.runtime.should_stop());
+}
+
+// IDX-06, IDX-07
+#[test]
+fn rollback_without_undo_preserves_script_history_and_rewinds_siblings() {
+    let f = ForkFixture::new(3);
+    f.persist_undo();
+    let h = Harness::with_enabled(&f, u32::MAX, IndexCapabilities::HISTORICAL);
+    let a3 = f.tip(f.a[2]);
+    h.set_tip(&a3);
+    h.settle(&mut None);
+    h.assert_at(&a3);
+
+    for height in 1..=3 {
+        f.bodies.undo.lock().remove(&f.a_key(height));
+    }
+    let a1 = f.tip(f.a[0]);
+    h.set_tip(&a1);
+    h.settle(&mut None);
+
+    assert_eq!(
+        h.watermarks().tx_lookup,
+        Some(at(&a1)),
+        "TxLookup rolls back without the undo anchor"
+    );
+    assert_eq!(
+        h.watermarks().script_history,
+        Some(at(&a3)),
+        "ScriptHistory keeps its rows and watermark"
+    );
+    assert!(h.runtime.script_history_failure.read().is_some());
     assert!(!h.runtime.should_stop());
 }
 
@@ -842,7 +876,7 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
     for undo in [Undo::Present, Undo::Missing, Undo::Corrupt] {
         let f = ForkFixture::new(5);
         f.persist_undo();
-        let h = SeedCellHarness::new(&f, IndexCapabilities::TX_LOOKUP_SCRIPT_LIVE);
+        let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
         let (a2, a5) = (f.tip(f.a[1]), f.tip(f.a[4]));
         let (artifact, _keep) = cell_seed_artifact(a5.hash, a5.height, 32);
         h.cell.want();
@@ -877,6 +911,12 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
             let reset = h.watermarks();
             assert_eq!(reset.script_live, None, "ScriptLive is reset");
             assert_eq!(reset.tx_lookup, Some(at(&a2)), "siblings keep their rows");
+            assert_eq!(
+                reset.script_history,
+                Some(at(&a2)),
+                "ScriptHistory keeps its rows and watermark"
+            );
+            assert!(h.runtime.script_history_failure.read().is_some());
             let (artifact, _keep) = cell_seed_artifact(a5.hash, a5.height, 32);
             h.cell.want();
             assert_eq!(
@@ -887,6 +927,15 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
         h.settle(&mut pending);
         assert_eq!(h.watermarks().tx_lookup, Some(at(&a5)));
         assert_eq!(h.watermarks().script_live, Some(at(&a5)));
+        if matches!(undo, Undo::Present) {
+            h.assert_at(&a5);
+        } else {
+            assert_eq!(
+                h.watermarks().script_history,
+                Some(at(&a2)),
+                "an unavailable ScriptHistory never advances past its missing anchor"
+            );
+        }
     }
 }
 

@@ -254,7 +254,7 @@ Owners:
 - Each capability query gates on its own watermark (`IDX-03`).
 - Full history stays not-ready until its watermark and coverage floor satisfy readiness.
 - Undo anchors and admission order:
-  - Preparation of `ScriptLive` and `CompactFilters` decodes each undo anchor inside that block's preparation task.
+  - Preparation of `ScriptHistory`, `ScriptLive`, and `CompactFilters` decodes each undo anchor inside that block's preparation task.
   - This decoding occurs before the shared read lock of the writer.
   - The anchor is dropped when rows of that block are prepared.
   - In-flight preparation tasks on the process-wide rayon pool bound the active anchors, not the window block count.
@@ -290,16 +290,18 @@ Owners:
 
 - A required block body can be missing during rollback (for example an abandoned-branch block pruned before rollback completed).
 - In that case, the worker resets the affected capability watermark and starts a fresh rebuild from the active chain.
-- A missing or unreadable undo record affects `ScriptLive` and `CompactFilters`.
+- A missing or unreadable undo record affects `ScriptHistory`, `ScriptLive`, and `CompactFilters`.
 - The worker resets `ScriptLive` and requests a verified immutable snapshot artifact.
 - If no accepted artifact is available, it replays the complete retained history through the body and undo worker path.
 - If that history is unavailable, only `ScriptLive` becomes `Unavailable`, while worker and sibling indexes continue.
-- `TxLookup` and `ScriptHistory` use body-only rollback.
+- `ScriptHistory` becomes unavailable for this run when its rollback or backfill needs a missing spent-script anchor.
+- Its durable rows and watermark are preserved, and its queries refuse with a typed unavailable cause.
+- `TxLookup` uses body-only rollback and keeps serving and reconciling.
 - `CompactFilters` becomes unavailable for this run, because a current UTXO snapshot cannot recreate spent scripts for historical filters.
 - Its durable rows and watermark are preserved.
 - Its queries refuse requests and its status reports unsynced.
 - Sibling indexes and validation continue.
-- The operator restores required history and restarts the node to retry filter reconciliation.
+- The operator restores required history and restarts the node to retry the unavailable capability.
 - An undo read that fails with a storage error is not an absent record.
 - It fails the worker with its own error and resets nothing.
 - When `ScriptLive` has no watermark after restoration or reset, the worker first accepts an existing verified immutable snapshot artifact.
@@ -319,10 +321,9 @@ Owners:
     - `open_timeout_publishes_error_not_infinite_spin`
   - `crates/index/src/runtime/query_tests.rs`:
     - `unusable_worker_makes_queries_unavailable`
-    - `failed_worker_makes_queries_unavailable`
-    - `stopped_worker_makes_queries_unavailable`
   - `crates/index/src/runtime/recovery_tests.rs`:
     - `undo_read_failure_is_not_a_missing_undo`
+    - `rollback_without_undo_preserves_script_history_and_rewinds_siblings`
     - the `IDX-06`/`IDX-07` anchor and reseed tests cited above
     - `unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark`
 
