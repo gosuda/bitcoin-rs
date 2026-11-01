@@ -1,0 +1,42 @@
+# Addrman / peers.dat dictionary for libFuzzer
+# Magic bytes
+magic_peers_dat="\xf1\x40\x42\x20"
+magic_mainnet="\xf9\xbe\xb4\xd9"
+magic_testnet3="\x0b\x11\x09\x07"
+magic_testnet4="\x1c\x16\x3f\x28"
+magic_regtest="\xfa\xbf\xb5\xda"
+magic_signet="\x0a\x03\xcf\x40"
+
+# Versions (u32 little-endian)
+ver_0="\x00\x00\x00\x00"
+ver_1="\x01\x00\x00\x00"
+ver_2="\x02\x00\x00\x00"
+
+# Network prefixes and BIP155 types
+ipv4_in_ipv6="\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff"
+onioncat_prefix="\xfd\x87\xd8\x7e\xeb\x43"
+bip155_ipv4="\x01"
+bip155_ipv6="\x02"
+bip155_torv2="\x03"
+bip155_torv3="\x04"
+bip155_i2p="\x05"
+bip155_cjdns="\x06"
+
+# Default ports (u16 big-endian)
+port_mainnet="\x20\x8d"
+port_testnet="\x47\x9d"
+port_regtest="\x48\x0c"
+port_signet="\x95\xbd"
+
+# Service flags (u64 little-endian)
+srv_node_network="\x01\x00\x00\x00\x00\x00\x00\x00"
+srv_node_witness="\x08\x00\x00\x00\x00\x00\x00\x00"
+srv_node_compact_filters="\x40\x00\x00\x00\x00\x00\x00\x00"
+srv_node_p2p_v2="\x00\x08\x00\x00\x00\x00\x00\x00"
+
+# CompactSize boundaries
+varint_0="\x00"
+varint_fc="\xfc"
+varint_fd="\xfd\xfd\x00"
+varint_fe="\xfe\x00\x00\x01\x00"
+varint_ff="\xff\x00\x00\x00\x00\x01\x00\x00\x00"

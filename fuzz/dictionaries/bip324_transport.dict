@@ -1,0 +1,37 @@
+# BIP324 transport dictionary for libFuzzer
+# Network magic bytes
+magic_mainnet="\xf9\xbe\xb4\xd9"
+magic_testnet3="\x0b\x11\x09\x07"
+magic_testnet4="\x1c\x16\x3f\x28"
+magic_regtest="\xfa\xbf\xb5\xda"
+magic_signet="\x0a\x03\xcf\x40"
+
+# BIP324 packet lengths (3 bytes little-endian)
+len_0="\x00\x00\x00"
+len_1="\x01\x00\x00"
+len_12="\x0c\x00\x00"
+len_max="\xff\xff\x00"
+
+# Packet types / control bytes
+pkt_decoy="\x00"
+pkt_version="\x01"
+
+# Poly1305 MAC tag boundaries (16 bytes)
+mac_zero="\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+mac_ff="\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"
+
+# Common P2P command tokens
+"version"
+"verack"
+"ping"
+"pong"
+"addr"
+"addrv2"
+"inv"
+"getdata"
+"getheaders"
+"headers"
+"block"
+"tx"
+"sendcmpct"
+"wtxidrelay"

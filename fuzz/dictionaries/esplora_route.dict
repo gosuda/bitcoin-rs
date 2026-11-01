@@ -1,0 +1,44 @@
+# Esplora and REST route dictionary for libFuzzer
+# HTTP verbs
+"GET "
+"POST "
+"OPTIONS "
+"HEAD "
+
+# REST API routes
+"/rest/chaininfo.json"
+"/rest/block/"
+"/rest/block/notxdetails/"
+"/rest/headers/"
+"/rest/blockfilter/"
+"/rest/blockfilterheaders/"
+"/rest/tx/"
+"/rest/mempool/info.json"
+"/rest/mempool/contents.json"
+"/rest/getutxos/"
+
+# REST formats
+".json"
+".bin"
+".hex"
+
+# Esplora API routes
+"/api/blocks"
+"/api/blocks/tip/hash"
+"/api/blocks/tip/height"
+"/api/block/"
+"/api/block-height/"
+"/api/tx/"
+"/api/tx/hex"
+"/api/tx/raw"
+"/api/tx/status"
+"/api/address/"
+"/api/address-prefix/"
+"/api/scripthash/"
+"/api/fee-estimates"
+"/api/mempool"
+"/api/mempool/txids"
+"/api/mempool/recent"
+
+# Sample 32-byte hex hash
+"000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"

@@ -1,0 +1,49 @@
+# RPC hex, address, and descriptor parameters dictionary for libFuzzer
+# 32-byte hashes (hex)
+"000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+"0000000000000000000000000000000000000000000000000000000000000000"
+"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+# Bitcoin address prefixes and examples
+"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+"3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+"bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+"bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3"
+"bc1p"
+"bc1q"
+"tb1q"
+"tb1p"
+"bcrt1q"
+
+# Output descriptor functions
+"pk("
+"pkh("
+"wpkh("
+"sh("
+"wsh("
+"tr("
+"raw("
+"addr("
+"combo("
+"multi("
+"sortedmulti("
+"sortedmulti_a("
+"musig("
+")"
+"#"
+
+# Key derivation paths
+"/*"
+"/*'"
+"/0/*"
+"/0'/*'"
+"m/84'/0'/0'/0/0"
+"m/86'/0'/0'/0/0"
+"m/44'/0'/0'/0/0"
+"m/49'/0'/0'/0/0"
+
+# Common hex prefixes
+"01000000"
+"02000000"
+"00000000"
+"ffffffff"

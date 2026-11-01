@@ -1,0 +1,30 @@
+# Compact block reconstruct (BIP152) dictionary for libFuzzer
+# Commands
+"cmpctblock"
+"getblocktxn"
+"blocktxn"
+"sendcmpct"
+cmd_cmpctblock_padded="cmpctblock\x00\x00"
+cmd_getblocktxn_padded="getblocktxn\x00"
+cmd_blocktxn_padded="blocktxn\x00\x00\x00\x00"
+cmd_sendcmpct_padded="sendcmpct\x00\x00\x00"
+
+# BIP152 versions (u64 little-endian)
+bip152_v1="\x01\x00\x00\x00\x00\x00\x00\x00"
+bip152_v2="\x02\x00\x00\x00\x00\x00\x00\x00"
+
+# Nonces (u64 little-endian)
+nonce_zero="\x00\x00\x00\x00\x00\x00\x00\x00"
+nonce_one="\x01\x00\x00\x00\x00\x00\x00\x00"
+nonce_max="\xff\xff\xff\xff\xff\xff\xff\xff"
+
+# Short ID bounds (6 bytes)
+shortid_zero="\x00\x00\x00\x00\x00\x00"
+shortid_ff="\xff\xff\xff\xff\xff\xff"
+
+# CompactSize boundaries
+varint_0="\x00"
+varint_fc="\xfc"
+varint_fd="\xfd\xfd\x00"
+varint_fe="\xfe\x00\x00\x01\x00"
+varint_ff="\xff\x00\x00\x00\x00\x01\x00\x00\x00"

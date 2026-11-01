@@ -1,0 +1,43 @@
+# HTTP request dictionary for libFuzzer
+# HTTP methods
+"GET "
+"POST "
+"HEAD "
+"OPTIONS "
+"PUT "
+
+# HTTP protocols
+" HTTP/1.1\r\n"
+" HTTP/1.0\r\n"
+
+# HTTP headers
+"Host: "
+"Content-Length: "
+"Content-Type: application/json\r\n"
+"Content-Type: text/plain\r\n"
+"Authorization: Basic "
+"Transfer-Encoding: chunked\r\n"
+"Connection: close\r\n"
+"Connection: keep-alive\r\n"
+"Upgrade: "
+"Sec-WebSocket-Key: "
+
+# Delimiters and chunked framing
+"\r\n\r\n"
+"\r\n"
+"\n\n"
+"\n"
+"0\r\n\r\n"
+
+# Common endpoints
+"/"
+"/rest/"
+"/api/"
+
+# JSON payload starters
+"{\"jsonrpc\":\"2.0\""
+"\"method\":"
+"\"params\":"
+"\"id\":"
+"{}"
+"[]"
