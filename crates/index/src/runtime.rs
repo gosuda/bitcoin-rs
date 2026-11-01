@@ -126,25 +126,44 @@ impl DerivedIndexRuntime {
         self.failed.store(true, Ordering::Release);
     }
 
-    pub(crate) fn fail_compact_filters(&self, error: &DerivedIndexWorkerError) {
-        tracing::error!(%error, "compact filter index unavailable; other indexes continue");
-        *self.compact_filter_failure.write() = Some(error.to_string().into());
-        self.publish_leg(IndexCapabilities::COMPACT_FILTERS, ReconcileLeg::Forward);
+    fn fail_capability(
+        &self,
+        capability: IndexCapabilities,
+        failure: &RwLock<Option<CompactString>>,
+        error: &DerivedIndexWorkerError,
+        message: &str,
+    ) {
+        tracing::error!(%error, message);
+        *failure.write() = Some(error.to_string().into());
+        self.publish_leg(capability, ReconcileLeg::Forward);
         self.wake();
+    }
+
+    pub(crate) fn fail_compact_filters(&self, error: &DerivedIndexWorkerError) {
+        self.fail_capability(
+            IndexCapabilities::COMPACT_FILTERS,
+            &self.compact_filter_failure,
+            error,
+            "compact filter index unavailable; other indexes continue",
+        );
     }
 
     pub(crate) fn fail_script_live(&self, error: &DerivedIndexWorkerError) {
-        tracing::error!(%error, "ScriptLive index unavailable; other indexes continue");
-        *self.script_live_failure.write() = Some(error.to_string().into());
-        self.publish_leg(IndexCapabilities::SCRIPT_LIVE, ReconcileLeg::Forward);
-        self.wake();
+        self.fail_capability(
+            IndexCapabilities::SCRIPT_LIVE,
+            &self.script_live_failure,
+            error,
+            "ScriptLive index unavailable; other indexes continue",
+        );
     }
 
     pub(crate) fn fail_script_history(&self, error: &DerivedIndexWorkerError) {
-        tracing::error!(%error, "ScriptHistory index unavailable; other indexes continue");
-        *self.script_history_failure.write() = Some(error.to_string().into());
-        self.publish_leg(IndexCapabilities::SCRIPT_HISTORY, ReconcileLeg::Forward);
-        self.wake();
+        self.fail_capability(
+            IndexCapabilities::SCRIPT_HISTORY,
+            &self.script_history_failure,
+            error,
+            "ScriptHistory index unavailable; other indexes continue",
+        );
     }
 
     pub(crate) fn clear_script_live(&self) {
