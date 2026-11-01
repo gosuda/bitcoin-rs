@@ -1236,3 +1236,102 @@ fn overlay_identity_remote_never_uses_proxy_ip() {
         "SAM-attested I2P keeps its typed endpoint"
     );
 }
+
+#[test]
+fn peer_table_inbound_capacity_boundaries_and_eviction_refusal() {
+    let table = PeerTable::new();
+    let activity = active_network();
+    let max_inbound = 3;
+
+    let p1 = inbound_lease().with_no_ban(true);
+    let p2 = inbound_lease().with_no_ban(true);
+    let p3 = inbound_lease().with_no_ban(true);
+    let p4 = inbound_lease().with_no_ban(true);
+
+    assert!(
+        table
+            .try_register_inbound(addr(1), p1, &[], max_inbound, 0, &activity)
+            .is_some()
+    );
+    assert_eq!(table.live_inbound_count(), 1);
+
+    assert!(
+        table
+            .try_register_inbound(addr(2), p2, &[], max_inbound, 0, &activity)
+            .is_some()
+    );
+    assert_eq!(table.live_inbound_count(), 2);
+
+    assert!(
+        table
+            .try_register_inbound(addr(3), p3, &[], max_inbound, 0, &activity)
+            .is_some()
+    );
+    assert_eq!(table.live_inbound_count(), 3);
+
+    assert!(
+        table
+            .try_register_inbound(addr(4), p4, &[], max_inbound, 0, &activity)
+            .is_none()
+    );
+    assert_eq!(table.live_inbound_count(), 3);
+
+    let zero_lease = inbound_lease();
+    assert!(
+        table
+            .try_register_inbound(addr(5), zero_lease, &[], 0, 0, &activity)
+            .is_none()
+    );
+}
+
+#[test]
+fn ban_list_policy_limits_and_expiry() -> crate::test_support::TestResult {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::SystemTime;
+    let now = SystemTime::now();
+    let subnet: crate::IpSubnet = "192.168.1.0/24".parse().map_err(|_| "subnet parse")?;
+    let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+    let outside_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 2, 100));
+
+    let permanent_ban = crate::BannedSubnet {
+        subnet,
+        banned_until: None,
+        ban_created: now,
+        reason: String::new(),
+    };
+    assert!(crate::subnet::is_banned(
+        std::slice::from_ref(&permanent_ban),
+        ip,
+        now
+    ));
+    assert!(!crate::subnet::is_banned(
+        std::slice::from_ref(&permanent_ban),
+        outside_ip,
+        now
+    ));
+
+    let expired_ban = crate::BannedSubnet {
+        subnet,
+        banned_until: Some(now - std::time::Duration::from_secs(10)),
+        ban_created: now - std::time::Duration::from_secs(100),
+        reason: String::new(),
+    };
+    assert!(!crate::subnet::is_banned(
+        std::slice::from_ref(&expired_ban),
+        ip,
+        now
+    ));
+
+    let active_ban = crate::BannedSubnet {
+        subnet,
+        banned_until: Some(now + std::time::Duration::from_secs(100)),
+        ban_created: now,
+        reason: String::new(),
+    };
+    assert!(crate::subnet::is_banned(
+        std::slice::from_ref(&active_ban),
+        ip,
+        now
+    ));
+    Ok(())
+}

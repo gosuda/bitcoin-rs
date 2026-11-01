@@ -429,6 +429,9 @@ fn invalid_getblocktxn_indexes_disconnect() {
     assert_getblocktxn_refused(Vec::new());
     assert_getblocktxn_refused(vec![1, 1]);
     assert_getblocktxn_refused(vec![3, 2]);
+    assert_getblocktxn_refused(vec![0, 1, 1, 2]);
+    assert_getblocktxn_refused(vec![1, 3, 2]);
+    assert_getblocktxn_refused(vec![10, 10]);
 }
 
 #[test]
