@@ -120,6 +120,7 @@ Distinguish, and never conflate:
   - `RCV-07` missing-body recovery owns the canonical rebuild.
   - `IDX-03` reports `TxQueryError::Unavailable`.
 - **Durable corruption**: fail closed with the owning recovery story (`RCV-01`; assumeutxo mismatch fails closed across both roles).
+- **Unusable storage engine**: a failed undo, block-body, utxo, or durable-head write, a journal failure that retention backpressure does not own, and a failed recovery checkpoint publication settle `Fatal`. The commit loop latches `apply_halted`, schedules no retry, and the event loop requests node shutdown; a supervisor restart replays the durable state with a clean engine (`SYNC-06`). `getblockchaininfo` reports `is_apply_halted` until the process exits.
 - **Terminal validation failure**: the historical role stops; it never silently converts into successful synchronization.
 - Every outstanding work item ends in one of these outcomes or is retried under the owning mechanism (`RCV-08` reconnection, `RCV-07` reconstruction).
 - This is the recovery-closure obligation of `CONV-1`.
