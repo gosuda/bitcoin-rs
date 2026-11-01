@@ -266,21 +266,24 @@ fn scantxoutset_refuses_malformed_requests() {
     let descriptor = "addr(1111111111111111111114oLvT2)";
     let computed = crate::handlers::util::descriptor_checksum(descriptor)
         .unwrap_or_else(|| panic!("{descriptor} must have a checksum"));
-    let error = scantxoutset(&ctx, &json!(["start", [format!("{descriptor}#badbadba")]]))
-        .expect_err("a wrong checksum must be refused");
+    let Err(error) = scantxoutset(&ctx, &json!(["start", [format!("{descriptor}#badbadba")]]))
+    else {
+        panic!("a wrong checksum must be refused");
+    };
     assert_eq!(
         error.to_string(),
         format!("Provided checksum 'badbadba' does not match computed checksum '{computed}'")
     );
 
-    let error = scantxoutset(
+    let Err(error) = scantxoutset(
         &ctx,
         &json!([
             "start",
             ["addr(tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx)"]
         ]),
-    )
-    .expect_err("another network's address must be refused");
+    ) else {
+        panic!("another network's address must be refused");
+    };
     assert_eq!(error.to_string(), "Address is not valid");
 }
 

@@ -98,10 +98,10 @@ fn core_calculate_next_work_required(last_time: u32, base_bits: u32, first_time:
 fn core_get_compact(target: ChainWork) -> u32 {
     let mut size = u32::try_from(target.bit_len().div_ceil(8)).expect("size fits u32");
     let mut compact: u32 = if size <= 3 {
-        u32::try_from(u64::from(target.as_limbs()[0]) << (8 * (3 - size)))
+        u32::try_from(target.as_limbs()[0] << (8 * (3 - size)))
             .expect("mantissa fits u32 when size <= 3")
     } else {
-        u32::try_from(u64::from((target >> (8 * (size - 3))).as_limbs()[0]))
+        u32::try_from((target >> (8 * (size - 3))).as_limbs()[0])
             .expect("three-byte window fits u32")
     };
     if compact & 0x0080_0000 != 0 {
@@ -317,16 +317,16 @@ fn refused_header_leaves_tree_unchanged() -> Result<(), TestError> {
     assert_eq!(tree_shape(&tree), before);
 
     let mismatched_bits = header_with(genesis.block_hash(), base_time + 2600, 0x0100_0000, 12);
-    assert!(matches!(
+    assert!(
         accept_headers(
             &mut tree,
             &[mismatched_bits],
             network,
             now,
             HeaderValidationMode::LiveAdmission
-        ),
-        Err(_)
-    ));
+        )
+        .is_err()
+    );
     assert_eq!(tree_shape(&tree), before);
 
     let far_future = super::fixture::mine_regtest(genesis.block_hash(), 1, now + 7201, 4);
