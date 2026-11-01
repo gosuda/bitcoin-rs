@@ -605,22 +605,29 @@ fn persist_reuses_only_a_matching_existing_position() -> Result<(), crate::Stora
 fn reader_recovers_cursor_after_mismatch_error() -> Result<(), crate::StorageError> {
     let data_dir = tempdir()?;
     let store = FlatFileBlockStore::open(data_dir.path())?;
-    let pos1 = store.append(1, hash(1), b"block_one_data")?;
-    let pos2 = store.append(2, hash(2), b"block_two_data")?;
+    let pos1 = store.append(1, hash(1), b"")?;
+    let pos2 = store.append(2, hash(2), b"body_two")?;
+    assert_eq!(pos2.offset, pos1.offset + RECORD_HEADER_LEN_U64);
 
     let mut reader = store.reader();
-    assert_eq!(
-        reader.load(pos1, 1, hash(1))?.as_deref(),
-        Some(b"block_one_data".as_slice())
-    );
+    assert_eq!(reader.load(pos1, 1, hash(1))?.as_deref(), Some(&[][..]));
     assert_eq!(reader.load(pos1, 1, hash(99))?, None);
+    let Some(state) = reader.state.as_ref() else {
+        panic!("reader opened the block file");
+    };
+    assert_eq!(state.cursor, None);
     assert_eq!(
         reader.load(pos2, 2, hash(2))?.as_deref(),
-        Some(b"block_two_data".as_slice())
+        Some(b"body_two".as_slice())
     );
+    assert_eq!(reader.load(pos2, 2, hash(99))?, None);
+    let Some(state) = reader.state.as_ref() else {
+        panic!("reader opened the block file");
+    };
+    assert_eq!(state.cursor, None);
     assert_eq!(
-        reader.load(pos1, 1, hash(1))?.as_deref(),
-        Some(b"block_one_data".as_slice())
+        reader.load(pos2, 2, hash(2))?.as_deref(),
+        Some(b"body_two".as_slice())
     );
     Ok(())
 }
