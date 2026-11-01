@@ -32,7 +32,7 @@ impl MemberFacts<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct ChunkKey {
     pub(crate) modified_fee: i128,
     pub(crate) charged_weight: u64,
@@ -54,6 +54,14 @@ impl Ord for ChunkKey {
             .then_with(|| self.ordinal.cmp(&other.ordinal))
     }
 }
+
+impl PartialEq for ChunkKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for ChunkKey {}
 
 impl PartialOrd for ChunkKey {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
