@@ -283,3 +283,36 @@ fn default_history_page_skips_the_cursor_and_restarts_when_unknown()
     assert_eq!(empty.records, Vec::new());
     Ok(())
 }
+
+// IDX-02
+#[test]
+fn default_history_pages_are_bounded_by_the_page_max() -> Result<(), crate::portable::TestError> {
+    let count = SCRIPT_HISTORY_PAGE_MAX * 2;
+    let records = (0..count)
+        .map(|index| {
+            let mut bytes = [0_u8; 32];
+            bytes[..8].copy_from_slice(&u64::try_from(index)?.to_le_bytes());
+            Ok(ScriptHistoryRecord {
+                txid: Txid(Hash256::from_le_bytes(&bytes)),
+                height: u32::try_from(index)?,
+            })
+        })
+        .collect::<Result<Vec<_>, std::num::TryFromIntError>>()?;
+    let source = CompleteHistory(records);
+    let script = ScriptHash::from_byte_array([0; 32]);
+
+    assert_eq!(
+        source
+            .confirmed_history_page(script, None, usize::MAX)?
+            .records
+            .len(),
+        SCRIPT_HISTORY_PAGE_MAX,
+        "a page never exceeds the script-history page maximum"
+    );
+    assert_eq!(
+        source.history_page(script, None, usize::MAX)?.len(),
+        SCRIPT_HISTORY_PAGE_MAX,
+        "a legacy page never exceeds the script-history page maximum"
+    );
+    Ok(())
+}

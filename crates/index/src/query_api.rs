@@ -216,7 +216,11 @@ pub trait ScriptIndexQuery: Send + Sync {
         let start = last
             .and_then(|txid| history.iter().position(|r| r.txid == txid))
             .map_or(0, |i| i + 1);
-        Ok(history.into_iter().skip(start).take(limit).collect())
+        Ok(history
+            .into_iter()
+            .skip(start)
+            .take(limit.min(SCRIPT_HISTORY_PAGE_MAX))
+            .collect())
     }
     fn unspent_outputs(
         &self,
@@ -252,7 +256,7 @@ pub trait ScriptIndexQuery: Send + Sync {
             records: history
                 .into_iter()
                 .skip(start.map_or(0, |index| index + 1))
-                .take(limit)
+                .take(limit.min(SCRIPT_HISTORY_PAGE_MAX))
                 .collect(),
             cursor_found,
         })
