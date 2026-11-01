@@ -22,6 +22,8 @@ use super::{
     parse_wire_job_id,
 };
 
+const ACCEPT_WAKE_CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
+
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -934,9 +936,17 @@ fn flush(stream: &mut TcpStream, out: &mut Vec<u8>) -> Result<(), SessionEnd> {
 }
 
 fn configure_stream(stream: &TcpStream, config: &ServerConfig) -> Result<(), SessionEnd> {
+    configure_stream_with(stream, config, |socket| socket.set_nodelay(true))
+}
+
+fn configure_stream_with(
+    stream: &TcpStream,
+    config: &ServerConfig,
+    set_nodelay: impl FnOnce(&TcpStream) -> io::Result<()>,
+) -> Result<(), SessionEnd> {
+    let _ = set_nodelay(stream);
     stream
-        .set_nodelay(true)
-        .and_then(|()| stream.set_nonblocking(false))
+        .set_nonblocking(false)
         .and_then(|()| stream.set_read_timeout(Some(config.poll_interval)))
         .and_then(|()| stream.set_write_timeout(Some(config.write_timeout)))
         .map_err(|error| SessionEnd::Io(error.kind()))
@@ -1164,7 +1174,7 @@ fn accept_loop(
     });
     let _accept_guard = loopback.map(|addr| {
         shared.cancel.on_cancel(move || {
-            let _ = TcpStream::connect(addr);
+            let _ = TcpStream::connect_timeout(&addr, ACCEPT_WAKE_CONNECT_TIMEOUT);
         })
     });
     while !shared.cancel.is_triggered() {
@@ -1359,5 +1369,36 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "fixture setup must fail loudly")]
+mod tests {
+    use super::*;
+
+    fn connected_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let client = TcpStream::connect(listener.local_addr().expect("address")).expect("client");
+        let (server, _) = listener.accept().expect("accept");
+        (client, server)
+    }
+
+    #[test]
+    fn a_failed_nodelay_does_not_close_the_session() {
+        let (_client, server) = connected_pair();
+        let config = ServerConfig::new(DifficultyPolicy::new("1", "1", "1").expect("policy"));
+        let configured = configure_stream_with(&server, &config, |_| {
+            Err(io::Error::other("test-injected nodelay failure"))
+        });
+        assert!(
+            configured.is_ok(),
+            "a valid session must not close on an optional socket option: {configured:?}"
+        );
+        assert_eq!(
+            server.read_timeout().ok().flatten(),
+            Some(config.poll_interval),
+            "the required poll timeout still applies"
+        );
     }
 }
