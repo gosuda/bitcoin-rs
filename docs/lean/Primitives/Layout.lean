@@ -40,19 +40,19 @@ theorem decodeReservation_le_succ (expansion wire : Nat) :
   rw [decodeReservation_eq_min]
   exact Nat.min_le_left _ _
 
-/-- With every element factor at most fifteen, the reservation is at most sixteen wire multiples.
--/
-theorem decodeReservation_linear {expansion wire : Nat} (he : expansion ≤ 15) :
-    decodeReservation expansion wire ≤ 16 * wire := by
-  have hfactor : 1 + expansion ≤ 16 := by omega
+/-- With every element factor at most the code's `DECODE_EXPANSION` (18), the reservation is at
+most nineteen wire multiples. -/
+theorem decodeReservation_linear {expansion wire : Nat} (he : expansion ≤ 18) :
+    decodeReservation expansion wire ≤ 19 * wire := by
+  have hfactor : 1 + expansion ≤ 19 := by omega
   have h1 := decodeReservation_le_succ expansion wire
-  have h2 : wire * (1 + expansion) ≤ wire * 16 := Nat.mul_le_mul_left wire hfactor
+  have h2 : wire * (1 + expansion) ≤ wire * 19 := Nat.mul_le_mul_left wire hfactor
   omega
 
-/-- A four-million-byte maximum block stays inside the 64 MiB historical staging clamp when every
-element factor is at most fifteen. -/
-theorem decodeReservation_block_clamp {expansion : Nat} (he : expansion ≤ 15) :
-    decodeReservation expansion 4_000_000 ≤ 64 * 1024 * 1024 := by
+/-- A four-million-byte maximum block reserves at most 76 MB, inside the 512 MiB block-ingress
+budget of `crates/p2p/src/inbound/block_memory.rs`. -/
+theorem decodeReservation_block_clamp {expansion : Nat} (he : expansion ≤ 18) :
+    decodeReservation expansion 4_000_000 ≤ 512 * 1024 * 1024 := by
   have hlin := decodeReservation_linear (wire := 4_000_000) he
   omega
 

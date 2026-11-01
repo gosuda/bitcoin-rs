@@ -105,6 +105,20 @@ TypeOK ==
   /\ closing \in BOOLEAN
 
 \* @type: (Str) => Bool;
+TicketSafety(q) ==
+  /\ (phase[q] = 0 =>
+        allocated[q] = 0 /\ everIssued[q] = 0 /\ releases[q] = 0
+        /\ custody[q] = 0)
+  /\ (phase[q] \in {1, 2} =>
+        allocated[q] = 1 /\ releases[q] = 0 /\ custody[q] = 1)
+  /\ (phase[q] = 3 => allocated[q] = 1 /\ releases[q] = 1 /\ custody[q] >= 2)
+  /\ everIssued[q] <= allocated[q]
+  /\ releases[q] <= allocated[q]
+
+Safety ==
+  \A q \in Q : TicketSafety(q)
+
+\* @type: (Str) => Bool;
 EnIssue(q) == phase[q] = 1
 \* @type: (Str) => Bool;
 EnTerminalize(q) == phase[q] = 2

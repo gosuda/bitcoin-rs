@@ -104,6 +104,10 @@ TypeOK ==
   /\ done \in BOOLEAN
   /\ committed \in BOOLEAN
 
+Safety ==
+  /\ jobsUsed + eventsLeft <= EventBudget
+  /\ (done => inputClosed /\ requests = 0 /\ jobsUsed = 0)
+
 EnServe == requests > 0
 EnComplete == jobsUsed > 0
 EnFinish == ~done /\ inputClosed /\ requests = 0 /\ jobsUsed = 0

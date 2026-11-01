@@ -30,9 +30,11 @@ PRINT_LOCK = threading.Lock()
 ROOT = Path(__file__).resolve().parents[1]
 FORMAL_CONTRACT = Path("docs/contracts/formal-verification.md")
 MODEL_ROOT = Path("docs/models")
-PROPERTIES = ("--inv=TypeOK", "--temporal=ConditionalProgress")
+PROPERTIES = ("--inv=TypeOK,Safety", "--temporal=ConditionalProgress")
 START_BOUND = 128
 RESOURCE_CODE = 14
+BOUND_CODE = 16
+NON_RETRYABLE_NATIVE = frozenset({75, 255})
 
 
 class EvidenceError(Exception):
@@ -47,6 +49,7 @@ class Module:
     machine: str
     tla_sha256: str
     cfg_sha256: str
+    bound: int
 
     @property
     def name(self) -> str:
@@ -105,12 +108,12 @@ def modules(root: Path) -> tuple[Module, ...]:
             continue
         name = cells[1]
         tla, cfg, bound = cells[2], cells[3], cells[5]
-        if name in inventory or not bound.isdigit():
+        if name in inventory or not bound.isdigit() or int(bound) < 1:
             raise EvidenceError(15, f"{name}: duplicate inventory or malformed bound")
         owner, _, machine = name.partition("/")
         if not owner or not machine:
             raise EvidenceError(15, f"{name}: malformed module name")
-        module = Module(owner, machine, tla, cfg)
+        module = Module(owner, machine, tla, cfg, int(bound))
         for path, expected in ((module.source(root), tla), (module.config(root), cfg)):
             try:
                 actual = sha256(path)
@@ -225,9 +228,12 @@ def run_module(root: Path, executable: Path, module: Module, property_arg: str, 
     while True:
         native, code, run_dir = run_once(root, executable, module, property_arg, bound, timeout,
                                          out_dir)
-        if code != RESOURCE_CODE or bound == 1:
-            return {"k": bound, "native_rc": native, "evidence_rc": code, "run": str(run_dir)}
-        bound = max(1, bound // 2)
+        if code == RESOURCE_CODE and native not in NON_RETRYABLE_NATIVE and bound > module.bound:
+            bound = max(module.bound, bound // 2)
+            continue
+        if code == 0 and bound < module.bound:
+            code = BOUND_CODE
+        return {"k": bound, "native_rc": native, "evidence_rc": code, "run": str(run_dir)}
 
 
 @dataclass(frozen=True)
@@ -277,10 +283,12 @@ def memo_bound(
         return None
     if entry.get("tla_sha256") != module.tla_sha256:
         return None
+    if entry.get("cfg_sha256") != module.cfg_sha256:
+        return None
     if entry.get("tool_version") != tool_ver:
         return None
     bound = entry.get("k")
-    if isinstance(bound, int) and bound > 0:
+    if isinstance(bound, int) and module.bound <= bound:
         return bound
     return None
 
@@ -324,7 +332,7 @@ def build_jobs(
                 start_k = explicit_k
             else:
                 cached = memo_bound(memo, module, kind, tool_ver)
-                start_k = cached if cached is not None else START_BOUND
+                start_k = cached if cached is not None else max(START_BOUND, module.bound)
             jobs.append(LaneJob(module, property_arg, kind, start_k))
     return jobs
 
@@ -398,11 +406,14 @@ def update_memo(
     for job in jobs:
         record = summary[job.module.name][job.kind]
         lane_key = f"{job.module.name}:{job.kind}"
-        if record.get("evidence_rc") == 0 and record.get("k") is not None:
+        bound = record.get("k")
+        if (record.get("evidence_rc") == 0 and isinstance(bound, int)
+                and bound >= job.module.bound):
             memo[lane_key] = {
                 "tla_sha256": job.module.tla_sha256,
+                "cfg_sha256": job.module.cfg_sha256,
                 "tool_version": tool_ver,
-                "k": int(record["k"]),
+                "k": bound,
             }
         else:
             memo.pop(lane_key, None)
@@ -454,11 +465,11 @@ def main() -> int:
         summary = build_summary(inventory, results)
         write_summary_report(ROOT / args.out_dir, summary)
         update_memo(memo, jobs, summary, tool_ver, memo_path)
-        worst = max(
-            (int(record["evidence_rc"]) for lanes in summary.values()
-             for record in lanes.values()),
-            default=0,
-        )
+        codes = [
+            int(record["evidence_rc"]) for lanes in summary.values()
+            for record in lanes.values()
+        ]
+        worst = 13 if 13 in codes else max(codes, default=0)
         return 0 if worst == 0 else worst
     except EvidenceError as error:
         print(error, file=sys.stderr, flush=True)

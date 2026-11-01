@@ -120,6 +120,12 @@ TypeOK ==
   /\ done \in BOOLEAN
   /\ eventsLeft \in 0..ExternalBudget
 
+Safety ==
+  /\ (done => ~inputOpen /\ current = "None")
+  /\ (phase[S1] # 0 => phase[S0] = 4)
+  /\ (current = S0 => phase[S0] \in {1, 2, 3})
+  /\ (current = S1 => phase[S1] \in {1, 2, 3})
+
 \* @type: (Str) => Bool;
 EnClose(s) == ~done /\ phase[s] \in {1, 2}
 \* @type: (Str) => Bool;

@@ -46,6 +46,18 @@ jobs:
           tool: cargo-deny@0.20.2
       - run: cargo deny --workspace --no-default-features --features "rocksdb,fjall,redb,kernel" check
 
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          cache-on-failure: true
+      - run: ./scripts/ci-pr.sh contracts
+
   clippy:
     runs-on: ubuntu-latest
     steps:

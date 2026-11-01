@@ -14,7 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import check_models
 
-MODULES = (("PeerLeases", "Session"), ("ChainAdmission", "Commit"))
+MODULES = (("PeerLeases", "Session", 128), ("ChainAdmission", "Commit", 16))
 
 
 class ModelEvidenceTests(unittest.TestCase):
@@ -23,16 +23,17 @@ class ModelEvidenceTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         rows: list[str] = []
-        for owner, machine in MODULES:
+        for owner, machine, floor in MODULES:
             directory = self.root / "docs/models" / owner
             directory.mkdir(parents=True, exist_ok=True)
             tla = directory / f"{machine}.tla"
             tla.write_text("fixture\n", encoding="utf-8")
             cfg = directory / f"{machine}.cfg"
             cfg.write_text("CONSTANTS\nN = 1\nINIT Init\nNEXT Next\n", encoding="utf-8")
+            tla_sha = hashlib.sha256(tla.read_bytes()).hexdigest()
+            cfg_sha = hashlib.sha256(cfg.read_bytes()).hexdigest()
             rows.append(
-                f"| {owner}/{machine} | {hashlib.sha256(tla.read_bytes()).hexdigest()} "
-                f"| {hashlib.sha256(cfg.read_bytes()).hexdigest()} | N=1 | 128 | BLOCKED | - | - |"
+                f"| {owner}/{machine} | {tla_sha} | {cfg_sha} | N=1 | {floor} | BLOCKED | - | - |"
             )
         contract = self.root / check_models.FORMAL_CONTRACT
         contract.parent.mkdir(parents=True, exist_ok=True)
@@ -187,7 +188,7 @@ class ModelEvidenceTests(unittest.TestCase):
 
     def test_module_filter_runs_only_the_named_module(self) -> None:
         with patch.object(check_models, "ROOT", self.root):
-            with patch.object(sys, "argv", ["check_models.py", "--k-start", "4",
+            with patch.object(sys, "argv", ["check_models.py", "--k-start", "128",
                                             "--module", "PeerLeases/Session"]):
                 with patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}):
                     self.assertEqual(check_models.main(), 0)
@@ -227,7 +228,7 @@ class ModelEvidenceTests(unittest.TestCase):
         self.assertEqual(results[0], {"k": 128, "native_rc": 0, "evidence_rc": 0})
         identity = json.loads(self.newest_result_file().with_name("identity.json").read_text())
         self.assertIn("--length=128", identity["argv"])
-        self.assertIn("--inv=TypeOK", identity["argv"])
+        self.assertIn("--inv=TypeOK,Safety", identity["argv"])
         self.assertEqual(identity["constants"], "N = 1")
         self.assertEqual(identity["k"], 128)
 
@@ -250,12 +251,12 @@ class ModelEvidenceTests(unittest.TestCase):
                 self.assertEqual(record["evidence_rc"], 14)
                 self.assertEqual(self.newest_result()["evidence_rc"], 14)
 
-    def test_resource_exhaustion_halves_the_bound_and_records_the_largest_completed(self) -> None:
+    def test_resource_exhaustion_halves_the_bound_down_to_the_module_floor(self) -> None:
         body = (
             "import sys\n"
             "length = [arg for arg in sys.argv if arg.startswith('--length=')][0]\n"
             "bound = int(length.split('=')[1])\n"
-            "if bound > 16:\n    sys.exit(255)\n"
+            "if bound > 16:\n    sys.exit(137)\n"
             "print('The outcome is: NoError\\nEXITCODE: OK')\n"
         )
         self.write_tool(body)
@@ -265,24 +266,39 @@ class ModelEvidenceTests(unittest.TestCase):
         bounds = sorted(result["k"] for result in self.results())
         self.assertEqual(bounds, [16, 32, 64, 128])
 
-    def test_halving_stops_at_one_and_reports_the_resource_code(self) -> None:
-        self.write_tool("sys.exit(255)")
+    def test_halving_stops_at_the_module_floor_and_reports_the_resource_code(self) -> None:
+        self.write_tool("sys.exit(137)")
         record = check_models.run_module(
-            self.root, self.executable, self.module(), check_models.PROPERTIES[0], 5
+            self.root, self.executable, self.module(1), check_models.PROPERTIES[0], 5
         )
-        self.assertEqual(record["k"], 1)
+        self.assertEqual(record["k"], 128)
         self.assertEqual(record["evidence_rc"], 14)
+
+    def test_spec_evaluation_error_does_not_halve_the_bound(self) -> None:
+        self.write_tool("sys.exit(75)")
+        record = self.run_check()
+        self.assertEqual(record["k"], 128)
+        self.assertEqual(record["evidence_rc"], 14)
+        self.assertEqual(len(self.results()), 1)
+
+    def test_pass_below_the_module_floor_is_unavailable_evidence(self) -> None:
+        record = check_models.run_module(
+            self.root, self.executable, self.module(1), check_models.PROPERTIES[0], 5,
+            start=64,
+        )
+        self.assertEqual(record["k"], 64)
+        self.assertEqual(record["evidence_rc"], check_models.BOUND_CODE)
 
     def test_summary_records_bound_and_return_codes(self) -> None:
         with patch.object(check_models, "ROOT", self.root):
-            with patch.object(sys, "argv", ["check_models.py", "--k-start", "8"]):
+            with patch.object(sys, "argv", ["check_models.py", "--k-start", "128"]):
                 with patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}):
                     self.assertEqual(check_models.main(), 0)
         summary = json.loads((self.root / "target/apalache/summary.json").read_text())
         self.assertEqual(set(summary), {"ChainAdmission/Commit", "PeerLeases/Session"})
         for lanes in summary.values():
             for kind in ("safety", "temporal"):
-                self.assertEqual(lanes[kind]["k"], 8)
+                self.assertEqual(lanes[kind]["k"], 128)
                 self.assertEqual(lanes[kind]["evidence_rc"], 0)
 
     def test_timeout_kills_the_whole_tool_session(self) -> None:
@@ -346,7 +362,7 @@ class ModelEvidenceTests(unittest.TestCase):
         self.assertEqual(list(summary_raw["ChainAdmission/Commit"].keys()), ["safety", "temporal"])
         self.assertEqual(list(summary_raw["PeerLeases/Session"].keys()), ["safety", "temporal"])
 
-    def test_k_memo_used_only_when_hash_and_version_match(self) -> None:
+    def test_k_memo_used_only_when_hashes_and_version_match(self) -> None:
         memo_path = self.root / "target/apalache/k-memo.json"
         memo_path.parent.mkdir(parents=True, exist_ok=True)
         commit_module = self.module(0)
@@ -358,84 +374,52 @@ class ModelEvidenceTests(unittest.TestCase):
             started_k[f"{module.name}:{kind}"] = start
             return {"k": start, "native_rc": 0, "evidence_rc": 0, "run": "test"}
 
-        memo_path.write_text(
-            json.dumps({
-                f"{commit_module.name}:safety": {
-                    "tla_sha256": commit_module.tla_sha256,
-                    "tool_version": "0.62.4",
-                    "k": 16,
-                }
-            }) + "\n",
-            encoding="utf-8",
-        )
-        with (
-            patch.object(check_models, "ROOT", self.root),
-            patch.object(check_models, "run_module", side_effect=recording_runner),
-            patch.object(sys, "argv", ["check_models.py", "--jobs", "1"]),
-            patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}),
-        ):
-            self.assertEqual(check_models.main(), 0)
+        def write_entry(**overrides: object) -> None:
+            entry: dict[str, object] = {
+                "tla_sha256": commit_module.tla_sha256,
+                "cfg_sha256": commit_module.cfg_sha256,
+                "tool_version": "0.62.4",
+                "k": 16,
+            }
+            entry.update(overrides)
+            memo_path.write_text(
+                json.dumps({f"{commit_module.name}:safety": entry}) + "\n",
+                encoding="utf-8",
+            )
+
+        def run_main(*extra: str) -> None:
+            started_k.clear()
+            with (
+                patch.object(check_models, "ROOT", self.root),
+                patch.object(check_models, "run_module", side_effect=recording_runner),
+                patch.object(sys, "argv", ["check_models.py", "--jobs", "1", *extra]),
+                patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}),
+            ):
+                self.assertEqual(check_models.main(), 0)
+
+        write_entry()
+        run_main()
         self.assertEqual(started_k[f"{commit_module.name}:safety"], 16)
         self.assertEqual(started_k[f"{commit_module.name}:temporal"], 128)
 
-        started_k.clear()
-        memo_path.write_text(
-            json.dumps({
-                f"{commit_module.name}:safety": {
-                    "tla_sha256": "0" * 64,
-                    "tool_version": "0.62.4",
-                    "k": 16,
-                }
-            }) + "\n",
-            encoding="utf-8",
-        )
-        with (
-            patch.object(check_models, "ROOT", self.root),
-            patch.object(check_models, "run_module", side_effect=recording_runner),
-            patch.object(sys, "argv", ["check_models.py", "--jobs", "1"]),
-            patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}),
-        ):
-            self.assertEqual(check_models.main(), 0)
+        write_entry(tla_sha256="0" * 64)
+        run_main()
         self.assertEqual(started_k[f"{commit_module.name}:safety"], 128)
 
-        started_k.clear()
-        memo_path.write_text(
-            json.dumps({
-                f"{commit_module.name}:safety": {
-                    "tla_sha256": commit_module.tla_sha256,
-                    "tool_version": "0.61.0",
-                    "k": 16,
-                }
-            }) + "\n",
-            encoding="utf-8",
-        )
-        with (
-            patch.object(check_models, "ROOT", self.root),
-            patch.object(check_models, "run_module", side_effect=recording_runner),
-            patch.object(sys, "argv", ["check_models.py", "--jobs", "1"]),
-            patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}),
-        ):
-            self.assertEqual(check_models.main(), 0)
+        write_entry(cfg_sha256="0" * 64)
+        run_main()
         self.assertEqual(started_k[f"{commit_module.name}:safety"], 128)
 
-        started_k.clear()
-        memo_path.write_text(
-            json.dumps({
-                f"{commit_module.name}:safety": {
-                    "tla_sha256": commit_module.tla_sha256,
-                    "tool_version": "0.62.4",
-                    "k": 16,
-                }
-            }) + "\n",
-            encoding="utf-8",
-        )
-        with (
-            patch.object(check_models, "ROOT", self.root),
-            patch.object(check_models, "run_module", side_effect=recording_runner),
-            patch.object(sys, "argv", ["check_models.py", "--jobs", "1", "--k-start", "32"]),
-            patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}),
-        ):
-            self.assertEqual(check_models.main(), 0)
+        write_entry(tool_version="0.61.0")
+        run_main()
+        self.assertEqual(started_k[f"{commit_module.name}:safety"], 128)
+
+        write_entry(k=8)
+        run_main()
+        self.assertEqual(started_k[f"{commit_module.name}:safety"], 128)
+
+        write_entry()
+        run_main("--k-start", "32")
         self.assertEqual(started_k[f"{commit_module.name}:safety"], 32)
 
     def test_failing_lane_yields_nonzero_exit_when_others_pass(self) -> None:
@@ -453,12 +437,29 @@ class ModelEvidenceTests(unittest.TestCase):
             patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}),
         ):
             rc = check_models.main()
+        self.assertEqual(rc, 14)
         summary = json.loads((self.root / "target/apalache/summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["ChainAdmission/Commit"]["temporal"]["evidence_rc"], 14)
         self.assertEqual(summary["ChainAdmission/Commit"]["safety"]["evidence_rc"], 0)
         if memo_file.is_file():
             memo = json.loads(memo_file.read_text(encoding="utf-8"))
             self.assertNotIn("ChainAdmission/Commit:temporal", memo)
+
+    def test_counterexample_outranks_unavailable_evidence(self) -> None:
+        def diverging_runner(root, executable, module, property_arg, *args, **kwargs):
+            kind = "safety" if property_arg.startswith("--inv=") else "temporal"
+            if module.name == "ChainAdmission/Commit":
+                evidence = 13 if kind == "safety" else 14
+            else:
+                evidence = 0
+            return {"k": 128, "native_rc": 12, "evidence_rc": evidence, "run": "x"}
+        with (
+            patch.object(check_models, "ROOT", self.root),
+            patch.object(check_models, "run_module", side_effect=diverging_runner),
+            patch.object(sys, "argv", ["check_models.py", "--jobs", "2"]),
+            patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}),
+        ):
+            self.assertEqual(check_models.main(), 13)
 
 if __name__ == "__main__":
     unittest.main()

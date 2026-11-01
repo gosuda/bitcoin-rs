@@ -48,6 +48,24 @@ theorem retain_never_raises_used (s : State) (c : Credit) (retained : Nat)
   · dsimp only
     omega
 
+/-- Retaining `retained` bytes releases exactly the difference, so the charge never disappears and
+the subtraction needs no saturation. -/
+theorem retain_releases_the_difference (s : State) (c : Credit) (retained : Nat)
+    (hr : retained ≤ c.bytes) (hc : c.bytes ≤ s.used) :
+    (retain s c retained).1.used + (c.bytes - retained) = s.used := by
+  unfold retain
+  rw [ite_eq_left hr]
+  dsimp only
+  omega
+
+/-- Releasing a credit whose bytes are still counted in `used` is exact, so no underflow reaches
+the saturating `Nat` subtraction. -/
+theorem release_returns_the_charge (s : State) (c : Credit) (hc : c.bytes ≤ s.used) :
+    (release s c).used + c.bytes = s.used := by
+  unfold release
+  dsimp only
+  omega
+
 /-- Dropping the credit returns `used` to the pre-reservation total. -/
 theorem reserve_retain_release_identity (s : State) (reserved retained : Nat)
     (hres : reserved ≤ blockIngressBytes) (hfit : s.used + reserved ≤ blockIngressBytes) :

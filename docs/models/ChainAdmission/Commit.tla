@@ -175,9 +175,15 @@ Retry ==
   /\ phase = 4
   /\ attempts < MaxAttempts
   /\ phase' = 0
+  /\ bodyPos' = 0
+  /\ undoPos' = 0
+  /\ syncBody' = FALSE
+  /\ syncUndo' = FALSE
+  /\ fileSync' = FALSE
+  /\ dirSync' = FALSE
+  /\ proved' = FALSE
   /\ UNCHANGED << epoch, generation, priorRoot, proposedRoot, diskRoot,
-                  liveRoot, bodyPos, undoPos, syncBody, syncUndo, fileSync,
-                  dirSync, attempts, proved >>
+                  liveRoot, attempts >>
 
 Stutter ==
   /\ UNCHANGED vars
@@ -212,6 +218,16 @@ TypeOK ==
   /\ attempts \in 0..MaxAttempts
   /\ phase \in PhaseDom
   /\ proved \in BOOLEAN
+
+Safety ==
+  /\ (phase = 3 => diskRoot = proposedRoot)
+  /\ (phase # 3 => liveRoot = diskRoot)
+  /\ (phase = 3 => fileSync /\ dirSync /\ bodyPos > 0 /\ undoPos > 0)
+  /\ (fileSync => syncBody /\ syncUndo)
+  /\ (dirSync => fileSync)
+  /\ (syncBody <=> bodyPos > 0)
+  /\ (syncUndo <=> undoPos > 0)
+  /\ generation = 2 * epoch
 
 EnCommit == phase = 2 /\ fileSync /\ dirSync
 EnPublish == phase = 3

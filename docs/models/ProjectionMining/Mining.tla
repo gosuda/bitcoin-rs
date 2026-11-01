@@ -33,12 +33,14 @@ Init ==
   /\ done = FALSE
 
 Advance ==
+  /\ ~done
   /\ activeGen < TipGen
   /\ activeGen' = activeGen + 1
   /\ pendingShares' = 0
   /\ UNCHANGED << done >>
 
 Accept ==
+  /\ ~done
   /\ activeGen = TipGen
   /\ pendingShares < ShareCap
   /\ pendingShares' = pendingShares + 1
@@ -52,9 +54,9 @@ Drain ==
 Finish ==
   /\ ~done
   /\ activeGen = TipGen
+  /\ pendingShares = 0
   /\ done' = TRUE
-  /\ pendingShares' = 0
-  /\ UNCHANGED << activeGen >>
+  /\ UNCHANGED << activeGen, pendingShares >>
 
 Stutter ==
   /\ UNCHANGED vars
@@ -71,9 +73,13 @@ TypeOK ==
   /\ pendingShares \in 0..ShareCap
   /\ done \in BOOLEAN
 
-EnAdvance == activeGen < TipGen
+Safety ==
+  /\ (done => pendingShares = 0)
+  /\ (done => activeGen = TipGen)
+
+EnAdvance == ~done /\ activeGen < TipGen
 EnDrain == pendingShares > 0
-EnFinish == ~done /\ activeGen = TipGen
+EnFinish == ~done /\ activeGen = TipGen /\ pendingShares = 0
 
 FairAdvance == ((<>[] EnAdvance) => ([]<> <<Advance>>_vars))
 FairDrain == ((<>[] EnDrain) => ([]<> <<Drain>>_vars))

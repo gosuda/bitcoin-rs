@@ -159,6 +159,26 @@ done
   printf '%s\n' "${STATUS[@]}"
 } > "$OUT/status.txt"
 
+allowed=${EXTRACT_UNEXTRACTED_ALLOW-primitives}
+unextracted=0
+for line in "${STATUS[@]}"; do
+  crate=${line%% *}
+  outcome=${line#* }
+  if [ "$outcome" = "extracted" ]; then
+    continue
+  fi
+  case " $allowed " in
+    *" $crate "*) printf 'not extracted (allowed): %s\n' "$line" >&2 ;;
+    *)
+      printf 'extraction did not complete: %s\n' "$line" >&2
+      unextracted=1
+      ;;
+  esac
+done
+if [ "$unextracted" -ne 0 ]; then
+  exit 67
+fi
+
 if [ "$CHECK" -eq 1 ]; then
   if ! diff -r "$REFERENCE" "$OUT" >/dev/null 2>&1; then
     printf 'docs/lean/Extracted is stale; rerun scripts/extract_lean.sh\n' >&2

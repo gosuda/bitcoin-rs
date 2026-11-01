@@ -74,6 +74,10 @@ TypeOK ==
   /\ rowsCommitted \in 0..CounterBound
   /\ phase \in PhaseDom
 
+Safety ==
+  /\ rowsCommitted = watermark
+  /\ (phase = 2 => watermark < AppliedHeight)
+
 EnWake == phase = 0 /\ watermark < AppliedHeight
 EnPrepare == phase = 1 /\ watermark < AppliedHeight
 EnCommit == phase = 2 /\ watermark < AppliedHeight

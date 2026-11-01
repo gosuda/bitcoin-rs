@@ -230,10 +230,14 @@ proofs_stage() {
     fi
     "${extract_cmd[@]}"
     env -C docs/lean lake build
-    if rg -n '\bsorry\b|\badmit\b' docs/lean --glob '!Extracted/**'; then
-      echo "unfinished Lean proof found in docs/lean" >&2
-      exit 1
-    fi
+    local scan_rc=0
+    rg -n '\bsorry\b|\badmit\b|\baxiom\b|\bnative_decide\b' docs/lean \
+      --glob '!**/Extracted/**' || scan_rc=$?
+    case "$scan_rc" in
+      0) echo "unfinished Lean proof found in docs/lean" >&2; exit 1 ;;
+      1) ;;
+      *) echo "Lean proof scan failed with exit code ${scan_rc}" >&2; exit 1 ;;
+    esac
   ) > "$lean_log" 2>&1 &
   local lean_pid
   lean_pid=$!
@@ -242,19 +246,23 @@ proofs_stage() {
   job_logs[$lean_pid]="$lean_log"
   job_starts[$lean_pid]=$lean_start
 
-  if [[ -f scripts/check_models.py && "${PROOFS_MODELS:-0}" == "1" ]]; then
-    local models_log
-    models_log="$log_dir/models.log"
-    local models_start
-    models_start=$SECONDS
-    echo "==> models: check_models"
-    python3 scripts/check_models.py > "$models_log" 2>&1 &
-    local models_pid
-    models_pid=$!
-    pending_pids+=("$models_pid")
-    job_labels[$models_pid]="models: check_models"
-    job_logs[$models_pid]="$models_log"
-    job_starts[$models_pid]=$models_start
+  if [[ -f scripts/check_models.py ]]; then
+    if [[ "${PROOFS_MODELS:-1}" == "0" ]]; then
+      echo "==> models: skipped (PROOFS_MODELS=0)"
+    else
+      local models_log
+      models_log="$log_dir/models.log"
+      local models_start
+      models_start=$SECONDS
+      echo "==> models: check_models"
+      python3 scripts/check_models.py > "$models_log" 2>&1 &
+      local models_pid
+      models_pid=$!
+      pending_pids+=("$models_pid")
+      job_labels[$models_pid]="models: check_models"
+      job_logs[$models_pid]="$models_log"
+      job_starts[$models_pid]=$models_start
+    fi
   fi
 
   local -a running_kani=()

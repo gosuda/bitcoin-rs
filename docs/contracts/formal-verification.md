@@ -25,12 +25,15 @@ The moving `ghcr.io/apalache-mc/apalache:main` image is not accepted evidence. A
 `python3 scripts/check_models.py` checks one safety lane and one temporal lane for every module:
 
 ```text
-apalache-mc check --config=docs/models/<Owner>/<Machine>.cfg --inv=TypeOK --length=<K> --smt-encoding=funArrays --out-dir=target/apalache/<Owner>/<Machine>/safety/k<K> docs/models/<Owner>/<Machine>.tla
+apalache-mc check --config=docs/models/<Owner>/<Machine>.cfg --inv=TypeOK,Safety --length=<K> --smt-encoding=funArrays --out-dir=target/apalache/<Owner>/<Machine>/safety/k<K> docs/models/<Owner>/<Machine>.tla
 apalache-mc check --config=docs/models/<Owner>/<Machine>.cfg --temporal=ConditionalProgress --length=<K> --smt-encoding=funArrays --out-dir=target/apalache/<Owner>/<Machine>/temporal/k<K> docs/models/<Owner>/<Machine>.tla
 ```
 
-- Every lane starts at K = 128.
-- Resource exhaustion (evidence return code 14) halves K until the lane completes or K reaches 1.
+- Every lane starts at K = 128 or the row's K floor, whichever is larger.
+- The row's K column is the evidence floor for the module.
+- A pass below the floor is evidence return code 16, not a pass.
+- Resource exhaustion (evidence return code 14 from a timeout, an out-of-memory kill, or incomplete output) halves K down to the floor, never below it.
+- A native return code 75 (spec evaluation) or 255 (system error) never halves K.
 - The run records the last K attempted and its return codes.
 - `--check-only` verifies the tool and module identities.
 - It does not evaluate a property.
@@ -40,31 +43,36 @@ apalache-mc check --config=docs/models/<Owner>/<Machine>.cfg --temporal=Conditio
   - Parse maps `150 -> 12`.
   - Typecheck maps `120 -> 12`.
   - A counterexample maps `12 -> 13`.
-  - Spec evaluation maps `75 -> 14`.
-  - System error maps `255 -> 14`.
-  - Timeout or incomplete output maps `-> 14`.
+  - Spec evaluation maps `75 -> 14` and does not halve K.
+  - System error maps `255 -> 14` and does not halve K.
+  - Timeout or incomplete output maps `-> 14` and halves K down to the floor.
+  - A bound below the row's K floor maps `-> 16`.
   - A model identity mismatch maps `-> 15`.
   - A tool identity mismatch maps `-> 11`.
 - The solver run belongs to the operator-invoked `model-check-manual` workflow and to the `proofs` stage.
 - Normal Cargo suites do not run the external checker.
 
-`env -C docs/lean lake build` builds every Lean module.
+`env -C docs/lean lake build` builds every Lean module except `docs/lean/Extracted/`.
+Compiling the extracted tree needs the Aeneas Lean library as a lake dependency, and the contract pins only the Aeneas tool asset, so that wiring remains a recorded gap.
 `scripts/extract_lean.sh` runs Charon and Aeneas for the listed functions and writes `docs/lean/Extracted/`.
 With `--check` it writes to a temporary directory and fails when the output differs from `docs/lean/Extracted/`.
+It also fails with exit 67 on any crate whose status is not `extracted`, except the crates named in `EXTRACT_UNEXTRACTED_ALLOW` (default `primitives`), and it prints each allowed failure.
 The chainstate admission model step implements the state machine verified in `docs/lean/ChainAdmission/Safety.lean`.
 
 ## Per-module Apalache table
 
 | module | .tla sha256 | .cfg sha256 | CONSTANT values | K | last recorded outcome | native rc | evidence rc |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| ChainAdmission/Commit | 4949df3cc2a2c1d65911028dbcff1e22ed254d4cb61a21a2b14d582be442a922 | 139dfe3312a4363c2b0a8f48fb41fd60b97f3e06dda010e03dfbbcdb17bd471a | MaxAttempts=4, CounterBound=1024, FrameBound=72 | 128 | safety K=32 rc 0; temporal K=8 rc 0; recorded under a 180 s per-invocation cap | 0 | 0 |
-| ChainAdmission/Frontier | a4e9a8eabc92c9f3dea03744989110676b9a6881ca74c4860e153b5b0e42c9c8 | 1495f0d4223a7c40ba955736066a59689a4e018998f6fd36f00804102e6662ce | JobSlots=12, ReqSlots=12, EventBudget=12 | 128 | safety K=32 rc 0; temporal K=8 rc 0; recorded under a 180 s per-invocation cap | 0 | 0 |
-| PeerLeases/Lease | ed4689b7cea055558ad6b1f5be5432f44735357d7c96f39ca9ad81f072ba1cbc | 4adabd58221c2ce894e092d198d3cfd6f5df26c402c97b01053a4e80a817284c | R0="R0", R1="R1", F0="F0", F1="F1" | 128 | safety K=8 rc 0; temporal K=4 rc 0; recorded under a 180 s per-invocation cap | 0 | 0 |
-| PeerLeases/Session | 5a9bf4ab04e3e58067660d88021fa38e3665afc03c7aed4510134cd678a1e537 | 1d5e4c42b59427a1f80984449fec537e8f6bc6bae2beb0c3cf177b2f8d2d6c76 | S0="S0", S1="S1", ExternalBudget=12 | 128 | safety K=16 rc 0; temporal K=8 rc 0; recorded under a 180 s per-invocation cap | 0 | 0 |
-| ProjectionMining/Mining | 8b9490ea691280eae2752bece5e0e2c24d235ee7b36d1e97476f0cd7a8d14737 | 10194af480821b515b499250bf76b117481632637589d50460b0d704bc848dc0 | TipGen=4, ShareCap=2 | 128 | safety K=64 rc 0; temporal K=16 rc 0; recorded under a 180 s per-invocation cap | 0 | 0 |
-| ProjectionMining/Projection | 8ade19fb0b39bfc82973313942c5cc5ffd0f6f03a68bbc182316b2f32ca15157 | 43768a52de0a9e1032ab534d3ffc4c916c288b5f9b2b849fde92a2d265f0e31a | AppliedHeight=12, CounterBound=1024 | 128 | safety K=64 rc 0; temporal K=16 rc 0; recorded under a 180 s per-invocation cap | 0 | 0 |
+| ChainAdmission/Commit | f7507483e986095ecc1b4314dd60b8bdf1062ce27b7d31edba6758e029197669 | 139dfe3312a4363c2b0a8f48fb41fd60b97f3e06dda010e03dfbbcdb17bd471a | MaxAttempts=4, CounterBound=1024, FrameBound=72 | 128 | TLC 1.8.0 Safety at depth 16 with CounterBound=8 and FrameBound=3 found no error; Apalache run pending | - | - |
+| ChainAdmission/Frontier | 711d4d86314f2098eccc235e726f10dd84a5d6423e5a45388cbc8d4243157db3 | 1495f0d4223a7c40ba955736066a59689a4e018998f6fd36f00804102e6662ce | JobSlots=12, ReqSlots=12, EventBudget=12 | 128 | TLC 1.8.0 Safety at depth 16 with 3 slots found no error; Apalache run pending | - | - |
+| PeerLeases/Lease | de734ebefb70a8532c4103eb519170e171cf8d405c59b36c9d95c43dc03ce2de | 4adabd58221c2ce894e092d198d3cfd6f5df26c402c97b01053a4e80a817284c | R0="R0", R1="R1", F0="F0", F1="F1" | 128 | TLC 1.8.0 Safety at depth 16 found no error; Apalache run pending | - | - |
+| PeerLeases/Session | 84952eb83bfe66978ba54afcbbeba7dbe41620674241fb627fb8bfd1425d1c4c | 1d5e4c42b59427a1f80984449fec537e8f6bc6bae2beb0c3cf177b2f8d2d6c76 | S0="S0", S1="S1", ExternalBudget=12 | 128 | TLC 1.8.0 Safety at depth 16 with ExternalBudget=3 found no error; Apalache run pending | - | - |
+| ProjectionMining/Mining | e8e7334a401d2524793f255fdbd3b16588e4932c8520c19b5c602ec5cf81c3c2 | 10194af480821b515b499250bf76b117481632637589d50460b0d704bc848dc0 | TipGen=4, ShareCap=2 | 128 | TLC 1.8.0 Safety at depth 16 with TipGen=3 found no error; Apalache run pending | - | - |
+| ProjectionMining/Projection | 0f741a9d9c2d1951896ba0bfb85884165b978f7ccc2c1f658054283135f7c22a | 43768a52de0a9e1032ab534d3ffc4c916c288b5f9b2b849fde92a2d265f0e31a | AppliedHeight=12, CounterBound=1024 | 128 | TLC 1.8.0 Safety at depth 16 with AppliedHeight=4 found no error; Apalache run pending | - | - |
 
 A row with evidence return code 14 is unavailable evidence. It is not a counterexample and not a verified pass.
+A row with evidence return code 16 has no run at or above its K floor.
+Evidence return code 13 (a counterexample) takes priority over 14 and 16 in the process exit status.
 
 ## Per-module Kani and Lean table
 
