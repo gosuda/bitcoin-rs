@@ -574,10 +574,6 @@ fn headers_for_a_record_the_tree_does_not_know_serve_nothing() {
 
 // API-03
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "covers every registered REST URI and status"
-)]
 fn route_status_table() {
     const HASH: &str = "0000000000000000000000000000000000000000000000000000000000000001";
     let ctx = Arc::new(Context::new());
