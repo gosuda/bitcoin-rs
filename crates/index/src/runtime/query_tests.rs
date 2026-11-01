@@ -1538,6 +1538,55 @@ fn confirmed_history_filters_a_shared_prefix_by_exact_script()
     Ok(())
 }
 
+// IDX-03
+#[test]
+fn history_limit_counts_occurrences_not_heights() -> Result<(), crate::portable::TestError> {
+    use crate::types::ScriptHistoryOccurrence;
+    let (genesis, chain, scripthash) = paying_chain()?;
+    let txid = genesis.txs[0].txid();
+    let occurrences = (0..3_u32)
+        .map(|index| {
+            (
+                txid,
+                TxPosition::new(index, 10),
+                ScriptHistoryOccurrence::SPENDING,
+            )
+        })
+        .collect::<Vec<_>>();
+    let rows = vec![history_row(scripthash, 0, &occurrences)];
+    let fixture = QueryFixture::new(FixtureConfig {
+        block: genesis,
+        retain_body: false,
+        scans: vec![scan_response(
+            ColumnFamily::Funding,
+            ScriptHashRow::scan_prefix(scripthash),
+            rows,
+            true,
+        )],
+        watermark: None,
+        extra_blocks: chain,
+        utxo_adds: Vec::new(),
+    })?;
+
+    assert_eq!(
+        fixture
+            .engine
+            .clone()
+            .with_scripthash_limit(2)
+            .confirmed_history(scripthash),
+        Err(TxQueryError::Unavailable(
+            TxUnavailableCause::ScriptHashLimitExceeded { limit: 2 }
+        )),
+        "three occurrences in one height exceed a two-candidate allowance"
+    );
+    assert_eq!(
+        fixture.engine.confirmed_history(scripthash)?.len(),
+        1,
+        "the same row deduplicates to one transaction record"
+    );
+    Ok(())
+}
+
 #[derive(Clone)]
 struct HistoricalSnapshot {
     tx_watermark: Option<IndexWatermark>,

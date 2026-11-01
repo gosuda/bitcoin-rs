@@ -71,6 +71,17 @@ impl DerivedIndexQueryEngine {
             .ok_or_else(|| TxQueryError::Storage("malformed script-history occurrence row".into()))
     }
 
+    fn bounded_occurrences(
+        &self,
+        value: &[u8],
+        examined: &mut usize,
+    ) -> Result<Vec<ScriptHistoryOccurrence>, TxQueryError> {
+        let occurrences = Self::occurrences(value)?;
+        *examined = examined.saturating_add(occurrences.len());
+        self.check_script_limit(*examined)?;
+        Ok(occurrences)
+    }
+
     fn collect_funding_outputs(
         transaction: &Tx,
         height: u32,
@@ -167,13 +178,14 @@ impl DerivedIndexQueryEngine {
         let rows = self.scan_funding_rows(snapshot, budget, scripthash)?;
         let mut history = Vec::new();
         let mut funding_outputs = Vec::new();
+        let mut examined = 0_usize;
         for row in rows {
             let height = row.row.height();
             if !prefix.covers(height) {
                 continue;
             }
             let mut row_hash = None;
-            for occurrence in Self::occurrences(&row.value)? {
+            for occurrence in self.bounded_occurrences(&row.value, &mut examined)? {
                 if occurrence.scripthash != scripthash {
                     continue;
                 }
@@ -259,13 +271,14 @@ impl DerivedIndexQueryEngine {
         }
         let rows = self.scan_funding_rows(snapshot, budget, scripthash)?;
         let mut history = Vec::new();
+        let mut examined = 0_usize;
         for row in rows {
             let height = row.row.height();
             if !prefix.covers(height) {
                 continue;
             }
             history.extend(
-                Self::occurrences(&row.value)?
+                self.bounded_occurrences(&row.value, &mut examined)?
                     .into_iter()
                     .filter(|occurrence| occurrence.scripthash == scripthash)
                     .map(|occurrence| ScriptHistoryRecord {
