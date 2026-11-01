@@ -34,7 +34,7 @@ Precedence, low to high:
 4. `BITCOIN_RS_*` environment variables
 5. CLI flags
 
- A later layer overrides only fields it supplies. Network-dependent validation, including mining payout addresses, runs after merge. Runtime test controls are not public configuration.
+ A later layer overrides only fields it supplies. Network-dependent validation, including mining payout addresses, runs after merge. An empty data directory fails configuration validation because the node fails fast instead of using a silent default directory. Runtime test controls are not public configuration.
 
 Common network names are `mainnet`, `signet`, `testnet4`, and `regtest`; retained aliases are documented by the compatibility contracts.
 
