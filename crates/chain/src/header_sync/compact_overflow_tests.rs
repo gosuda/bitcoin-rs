@@ -68,3 +68,40 @@ fn regtest_min_difficulty_bits_still_pass_and_insert() {
         .expect("genesis header inserts");
     assert_eq!(chain.node(id).expect("inserted node").height, 0);
 }
+
+#[test]
+fn every_core_overflow_clause_and_its_boundary_matches_set_compact() {
+    use super::pow::compact_overflows;
+
+    let overflow = |bits| compact_overflows(CompactTarget::from_consensus(bits));
+    for (bits, clause) in [
+        (0x2300_0001_u32, "nSize > 34"),
+        (0x2200_0100, "nWord > 0xff and nSize > 33"),
+        (0x2101_0000, "nWord > 0xffff and nSize > 32"),
+    ] {
+        assert!(overflow(bits), "nBits {bits:08x} overflows: {clause}");
+        let network = Network::Regtest;
+        let header = header_with_bits(bits);
+        let hash = Hash256::default();
+        assert_eq!(
+            validate_pow(&header, hash, network),
+            Err(ChainError::TargetExceedsLimit {
+                hash,
+                target: ChainWork::MAX,
+                max_target: network.max_target(),
+            }),
+            "Bitcoin Core v31.1 SetCompact (src/arith_uint256.cpp) marks nBits {bits:08x} as \
+             overflowed under {clause}, so CheckProofOfWork answers bad-diffbits"
+        );
+    }
+    for (bits, boundary) in [
+        (0x2200_00ff_u32, "nSize 34 with nWord 0xff"),
+        (0x2100_ffff, "nSize 33 with nWord 0xffff"),
+        (0x2001_0000, "nSize 32 with nWord 0x10000"),
+    ] {
+        assert!(
+            !overflow(bits),
+            "nBits {bits:08x} stays inside the 256-bit target at {boundary}"
+        );
+    }
+}
