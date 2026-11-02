@@ -1,3 +1,5 @@
+//! The one runtime validation-engine selector.
+
 use core::fmt;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -51,6 +53,8 @@ mod tests {
     fn native_is_the_default_and_is_supported_in_every_build() {
         assert_eq!(ValidationEngine::default(), ValidationEngine::Native);
         assert!(ValidationEngine::Native.is_supported());
+        assert_eq!(ValidationEngine::Native.as_str(), "native");
+        assert_eq!(ValidationEngine::Kernel.as_str(), "kernel");
     }
 
     #[test]
