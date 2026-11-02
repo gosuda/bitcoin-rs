@@ -146,3 +146,41 @@ impl ReconcilePhase {
 pub trait ChainCursorSource: Send + Sync {
     fn cursor(&self) -> ConsumerCursor;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{CURSOR_BYTE_LEN, ConsumerCursor, CursorDecodeError};
+    use bitcoin_rs_primitives::Hash256;
+
+    // IDX-05
+    #[test]
+    fn cursor_round_trips_the_documented_field_layout() {
+        let cursor = ConsumerCursor {
+            epoch: 0x0102_0304_0506_0708,
+            sequence: 0x1112_1314_1516_1718,
+            height: 0x2122_2324,
+            hash: Hash256::from_le_bytes(&[0x31; 32]),
+        };
+        let bytes = cursor.to_bytes();
+        assert_eq!(bytes.len(), CURSOR_BYTE_LEN);
+        assert_eq!(&bytes[..8], &0x0102_0304_0506_0708_u64.to_le_bytes());
+        assert_eq!(&bytes[8..16], &0x1112_1314_1516_1718_u64.to_le_bytes());
+        assert_eq!(&bytes[16..20], &0x2122_2324_u32.to_le_bytes());
+        assert_eq!(ConsumerCursor::from_bytes(&bytes), Ok(cursor));
+    }
+
+    // IDX-05
+    #[test]
+    fn cursor_decode_rejects_any_length_other_than_52() {
+        for found in [0, CURSOR_BYTE_LEN - 1, CURSOR_BYTE_LEN + 1] {
+            assert_eq!(
+                ConsumerCursor::from_bytes(&vec![0_u8; found]),
+                Err(CursorDecodeError::InvalidLength {
+                    expected: CURSOR_BYTE_LEN,
+                    found,
+                }),
+                "a {found}-byte cursor must not decode"
+            );
+        }
+    }
+}
