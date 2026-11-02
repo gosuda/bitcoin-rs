@@ -23,7 +23,7 @@ A known name that this build does not include fails config validation:
 
 ```sh
 $ ./target/release/bitcoin-rs --storage-backend rocksdb --network regtest --data-dir $DATA
-bitcoin-rs: unsupported storage backend rocksdb
+Error: unsupported storage backend rocksdb
 ```
 
 `rocksdb` needs a build with `--features rocksdb`. Giving each engine its own data directory when you compare them avoids mixing on-disk layouts; `fjall` writes `chainstate/0.jnl` plus numbered `chainstate/keyspaces/`, while `redb` writes `chainstate/redb.db`.
@@ -75,7 +75,7 @@ Pruning is not compatible with the transaction, script, or compact-filter indexe
 $ timeout 5 ./target/release/bitcoin-rs --network regtest --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --dns-seeds-enabled=false \
   --prune-target-mb 600 --txindex=true
-bitcoin-rs: transaction, script and compact-filter indexing are not compatible with -prune
+Error: transaction, script and compact-filter indexing are not compatible with -prune
 ```
 
 The process exits with status 1. Pruning keeps a reorg safety margin of 288 blocks below the applied tip, so a recent reorg can still disconnect and reconnect. Older block bodies are removed; a query that needs them reports the history unavailable instead of returning an empty success.

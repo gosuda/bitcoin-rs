@@ -53,7 +53,7 @@ Environment booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `of
 | `p2p_stale_tip_relay` | `BITCOIN_RS_P2P_STALE_TIP_RELAY` | no | `false` |
 | `p2p_stale_tip_prefers_blocks` | `BITCOIN_RS_P2P_STALE_TIP_PREFERS_BLOCKS` | no | `false` |
 
-`p2p_noban`, `connect`, and `onlynet` take TOML arrays of strings. The environment form accepts a comma-separated list.
+`p2p_noban`, `connect`, and `onlynet` take TOML arrays of strings, and their environment form accepts a comma-separated list. `ua_comments` takes one comment per array entry or repeated `uacomment=` line and has no environment form.
 
 ### RPC, REST, and features
 

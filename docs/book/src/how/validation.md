@@ -58,7 +58,7 @@ A kernel-free binary refuses the setting at startup, before chain state opens. `
 ```text
 $ bitcoin-rs --network regtest --data-dir $DATA \
     --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --validation-engine kernel
-bitcoin-rs: validation engine `kernel` is not supported by this build: bitcoinkernel support is not compiled in (enable the `kernel` feature)
+Error: validation engine `kernel` is not supported by this build: bitcoinkernel support is not compiled in (enable the `kernel` feature)
 ```
 
 The process exits with status 1. The default `bitcoin-rs` binary is kernel-free (`VAL-03`). The shipped Docker image builds `fjall,kernel` and selects kernel in its config file, so a bare container runs kernel while a bare binary runs native.

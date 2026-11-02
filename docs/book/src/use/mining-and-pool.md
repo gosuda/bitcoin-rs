@@ -59,7 +59,7 @@ The head binary used for this book was built without the pool feature, so pool s
 
 ```
 $ ./target/release/bitcoin-rs --network regtest --data-dir $DATA --pool --pool-datadir $POOL_DATA --pool-v1-bind 127.0.0.1:3333 --pool-share-difficulty 1 --pool-window-work 1 --pool-reward-script 76a914751e76e8199196d454941c45d1b3a323f1433bd688ac --mining-payout-address mrCDrCybB6J1vRfbwM5hemdJz73FwDBC8r
-bitcoin-rs: --pool requires the pool build feature
+Error: --pool requires the pool build feature
 ```
 
 To start a pool you must supply all of these:

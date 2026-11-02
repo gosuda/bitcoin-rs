@@ -66,7 +66,7 @@ Passing only some of them is an error:
 
 ```sh
 $ ./target/release/bitcoin-rs --corpus archive.bin --network regtest --data-dir $DATA
-bitcoin-rs: --corpus, --manifest, and --state must be given together
+Error: --corpus, --manifest, and --state must be given together
 ```
 
 The import validates the archive under full validation, publishes the production checkpoint, verifies the stop identity, and writes certified state to `--state`. It refuses a nonzero assume-valid height and refuses any auxiliary index. It is a benchmark and evidence path, not a normal operator sync mode.

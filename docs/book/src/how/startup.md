@@ -92,7 +92,7 @@ The shutdown latch and chainstate shutdown request propagate to every service. `
 | Journal replay matches the durable head identity | `replayed_frontier_must_match_the_durable_head_identity` | `crates/chainstate/src/journal/replay_tests.rs` (also cited in [how/state-and-storage.md](state-and-storage.md)) |
 | Crash recovery end to end | `crates/node/tests/crash_recovery.rs` (clause `SYNC-05` evidence) |
 
-Commands run for this page: the regtest traces above come from `/tmp/bitcoin-rs-book-head --network regtest --data-dir $DATA --log-level debug` with `generatetoaddress` over RPC; the restart traces (checkpoint and journal restore lines) come from a second and third start on the same datadir.
+Commands run for this page: the regtest traces above come from `./target/release/bitcoin-rs --network regtest --data-dir $DATA --log-level debug` with `generatetoaddress` over RPC; the restart traces (checkpoint and journal restore lines) come from a second and third start on the same datadir.
 
 Contracts named: `EVT-02`, `SYNC-05` (`docs/contracts/architecture.md`, `docs/contracts/synchronization.md`).
 

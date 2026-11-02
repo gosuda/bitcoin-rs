@@ -83,7 +83,7 @@ The node refuses reads that need a deleted body with distinct messages:
 Pruning is incompatible with the transaction, script, and compact-filter indexes, because each needs the history a prune deletes. Two checks enforce it: config validation and the derived-index open path (`crates/node/src/config.rs`, `crates/node/src/state.rs:410-416`). The startup refusal is one line:
 
 ```text
-bitcoin-rs: transaction, script and compact-filter indexing are not compatible with -prune
+Error: transaction, script and compact-filter indexing are not compatible with -prune
 ```
 
 [Storage and memory](../run/storage.md) shows that refusal as an operator command.

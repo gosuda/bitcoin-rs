@@ -86,14 +86,14 @@ An empty data directory string fails validation:
 
 ```sh
 $ BITCOIN_RS_DATA_DIR= ./target/release/bitcoin-rs --network regtest
-bitcoin-rs: data-dir must not be empty
+Error: data-dir must not be empty
 ```
 
 The process exits with status 1. The rule exists so a missing value cannot silently select `.bitcoin-rs`. An unset `--data-dir` still uses `.bitcoin-rs` by default.
 
 Authentication fields also interact. Supplying `--rpc-cookie` clears `rpc-user` and `rpc-password`; supplying either of those clears `rpc-cookie`. The last layer that sets one family wins.
 
-Other checks that reject at startup include a non-loopback RPC bind without explicit credentials, the legacy password `bitcoin-rs`, pruning combined with an index, a storage backend that is not compiled in, and a validation engine this build does not support. Each prints `bitcoin-rs: <message>` and exits 1.
+Other checks that reject at startup include a non-loopback RPC bind without explicit credentials, the legacy password `bitcoin-rs`, pruning combined with an index, a storage backend that is not compiled in, and a validation engine this build does not support. Each prints `Error: <message>` on stderr, with the error's cause appended after a colon when there is one, and exits 1.
 
 ## Check what you configured
 

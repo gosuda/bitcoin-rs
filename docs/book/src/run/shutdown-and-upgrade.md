@@ -44,7 +44,7 @@ The node takes an exclusive lock on the data directory before opening storage. A
 ```sh
 $ ./target/release/bitcoin-rs --network regtest --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --dns-seeds-enabled=false
-bitcoin-rs: Cannot obtain a lock on directory $DATA. bitcoin-rs is probably already running.
+Error: Cannot obtain a lock on directory $DATA. bitcoin-rs is probably already running.
 ```
 
 The exit status is 1. The lock is a POSIX record lock on `.lock` plus an in-process registry keyed by the directory's device and inode, so two paths to the same directory collide as well. The lock lives as long as the last handle that can still write the directory.
