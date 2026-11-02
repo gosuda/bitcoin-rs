@@ -1234,6 +1234,11 @@ impl AssumeUtxoManager {
             ..prior
         };
         active.durable_head.commit(Some(&prior), &next, &records)?;
+        if matches!(status, AssumeUtxoDiskStatus::Finalized { .. }) {
+            active
+                .durable_head
+                .attest(&next, bitcoin_rs_storage::ScriptAttestation::Full)?;
+        }
         if let AssumeUtxoDiskStatus::Validating {
             checkpoint: Some(checkpoint),
             ..

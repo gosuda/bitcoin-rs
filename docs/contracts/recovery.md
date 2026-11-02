@@ -168,6 +168,7 @@ Script attestation rules:
 - When the datadir is pruned, that start stops instead.
 - The stop message names `--validation-mode assume-valid` and resync.
 - A cold rebuild that reaches the stored head writes `Full`.
+- A finalized assumeutxo historical replay attests the finalized head `Full`.
 - An `AssumeValid` start never raises a level.
 - The row does not change the head encoding, so no schema epoch moves.
 

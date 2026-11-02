@@ -997,6 +997,54 @@ fn historical_restart_replays_coins_from_genesis_instead_of_fabricating_a_tip() 
     Ok(())
 }
 
+// RCV-02
+#[test]
+fn finalized_replay_attests_full_so_a_full_start_skips_revalidation() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let activated = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing activated head"))?;
+    assert_eq!(
+        fixture.active.durable_head.load_attestation(&activated)?,
+        bitcoin_rs_storage::ScriptAttestation::AssumeValid,
+        "an activated snapshot has not executed the scripts below its base yet"
+    );
+    for block in &fixture.blocks {
+        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+    }
+    assert!(matches!(
+        manager.status()?,
+        AssumeUtxoDiskStatus::Finalized { .. }
+    ));
+    let finalized = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing finalized head"))?;
+    assert_eq!(
+        fixture.active.durable_head.load_attestation(&finalized)?,
+        bitcoin_rs_storage::ScriptAttestation::Full,
+        "the historical replay executed every script below the base"
+    );
+    crate::recovery::require_full_script_attestation(
+        dir.path(),
+        crate::ValidationMode::Full,
+        Some(&finalized),
+        fixture.active.durable_head.as_ref(),
+        false,
+    )?;
+    assert!(
+        !crate::recovery::requires_full_revalidation(dir.path()),
+        "a finalized assumeutxo datadir must not take the cold revalidation path"
+    );
+    Ok(())
+}
+
 #[test]
 fn reconstructed_commitment_or_transaction_count_mismatch_fails_closed() -> TestResult {
     for wrong_count in [false, true] {
