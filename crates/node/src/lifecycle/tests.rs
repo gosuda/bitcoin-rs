@@ -679,9 +679,7 @@ fn recovery_closure_stops_the_node_run_loop() -> Result<(), TestError> {
 
     match node.shutdown_blocking() {
         Err(crate::embed::NodeError::ClosedForRecovery) => {}
-        other => panic!(
-            "a recovery closure must not tear down as a clean shutdown: {other:?}"
-        ),
+        other => panic!("a recovery closure must not tear down as a clean shutdown: {other:?}"),
     }
     Ok(())
 }
@@ -732,9 +730,9 @@ fn fatal_settlement_teardown_skips_the_checkpoint_and_answers_an_error() -> Resu
 
         match node.shutdown_blocking() {
             Err(crate::embed::NodeError::ClosedForRecovery) => {}
-            other => panic!(
-                "a closed chainstate must not tear down as a clean shutdown: {other:?}"
-            ),
+            other => {
+                panic!("a closed chainstate must not tear down as a clean shutdown: {other:?}")
+            }
         }
         assert_eq!(
             std::fs::read(&current)?,
