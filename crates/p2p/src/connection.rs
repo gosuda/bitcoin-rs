@@ -471,8 +471,12 @@ impl OutboundBudget {
     }
 
     /// Charge a frame against the bounded control lane instead of the data
-    /// caps. The lane still honors the shared aggregate cap, so control
-    /// traffic stays retryable backpressure rather than an exemption.
+    /// caps, so a queued control frame can never displace a pending data
+    /// response. A dead writer or a full lane is connection-local
+    /// congestion and refuses `Local` — a deferral, never a keepalive
+    /// stall; the lane still honors the shared aggregate cap, whose
+    /// backpressure refuses `Shared`, so control traffic stays retryable
+    /// rather than exempt.
     pub(crate) fn try_charge_control(
         self: &Arc<Self>,
         wire_len: usize,
@@ -492,7 +496,7 @@ impl OutboundBudget {
         {
             #[cfg(test)]
             self.refusals.fetch_add(1, Ordering::Relaxed);
-            return Err(Refusal::Shared);
+            return Err(Refusal::Local);
         }
         if let Some(shared) = &self.shared
             && !shared.try_charge(wire_len, shared.max_bytes)
@@ -955,32 +959,6 @@ impl PeerLease {
             return Err(OutboundRefusal::Closed(message));
         };
         match self.budget.try_charge(wire_len) {
-            Ok(credit) => self.enqueue(message, credit),
-            Err(Refusal::Local) => {
-                self.cancel();
-                Err(OutboundRefusal::Closed(message))
-            }
-            Err(Refusal::Shared) => Err(OutboundRefusal::Saturated(message)),
-        }
-    }
-
-    /// Send a node-originated control frame on the bounded control lane so it
-    /// can never displace a pending data response. A full lane or a full
-    /// shared aggregate reads as `Saturated` backpressure, not closure.
-    #[expect(clippy::result_large_err)]
-    pub(crate) fn send_control(&self, message: crate::Message) -> Result<(), OutboundRefusal> {
-        if self.is_cancelled() {
-            return Err(OutboundRefusal::Closed(message));
-        }
-        if matches!(message, crate::Message::Feature(_)) {
-            self.cancel();
-            return Err(OutboundRefusal::Closed(message));
-        }
-        let Ok(wire_len) = crate::wire::wire_len(&message) else {
-            self.cancel();
-            return Err(OutboundRefusal::Closed(message));
-        };
-        match self.budget.try_charge_control(wire_len) {
             Ok(credit) => self.enqueue(message, credit),
             Err(Refusal::Local) => {
                 self.cancel();

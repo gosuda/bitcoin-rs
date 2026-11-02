@@ -1605,6 +1605,46 @@ mod keepalive_tests {
             KeepaliveAction::Idle
         );
     }
+
+    #[test]
+    fn a_refused_probe_stays_owed_until_sent() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        keepalive.note_refusal(crate::connection::Refusal::Shared);
+        keepalive.settle_pass(t0, &mut None);
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL),
+            KeepaliveAction::Ping,
+            "a refused probe is retryable, not silently lost"
+        );
+        keepalive.record_probe(t0 + PING_INTERVAL);
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL + PING_INTERVAL / 2),
+            KeepaliveAction::Idle
+        );
+    }
+
+    #[test]
+    fn refusal_classification_keeps_the_silence_clock_honest() {
+        let t0 = Instant::now();
+        let expired = t0 + TIMEOUT_INTERVAL + Duration::from_secs(1);
+        let mut locally_refused = Keepalive::starting(t0);
+        locally_refused.note_refusal(crate::connection::Refusal::Local);
+        locally_refused.settle_pass(expired, &mut None);
+        assert_eq!(
+            locally_refused.next_action(expired),
+            KeepaliveAction::Expired,
+            "connection-local control congestion is not a stall: a wire-silent peer whose queue is stuck full still expires"
+        );
+        let mut aggregate_refused = Keepalive::starting(t0);
+        aggregate_refused.note_refusal(crate::connection::Refusal::Shared);
+        aggregate_refused.settle_pass(t0 + Duration::from_secs(1), &mut None);
+        assert_ne!(
+            aggregate_refused.next_action(expired),
+            KeepaliveAction::Expired,
+            "aggregate backpressure is a stall, not keepalive silence"
+        );
+    }
 }
 
 struct ProductionSink<'a> {
@@ -1827,14 +1867,28 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             KeepaliveAction::Idle => {}
             KeepaliveAction::Ping => {
                 // The probe rides the bounded control lane so it stays prompt
-                // without ever displacing a pending data response; a lane- or
-                // aggregate-refused probe stays owed and retries next pass.
-                match lease.send_control(crate::Message::Ping(generate_nonce(peer_addr))) {
-                    Ok(()) => keepalive.record_probe(Instant::now()),
-                    Err(crate::OutboundRefusal::Saturated(_)) => {
-                        keepalive.note_refusal(crate::connection::Refusal::Shared);
+                // without ever displacing a pending data response. The
+                // budget owns the refusal classification: aggregate
+                // (`Shared`) backpressure is a keepalive stall, while a full
+                // lane or a dead writer is connection-local congestion that
+                // defers the probe — it stays owed — without pausing the
+                // silence clock.
+                let probe = crate::Message::Ping(generate_nonce(peer_addr));
+                let Ok(wire_len) = crate::wire::wire_len(&probe) else {
+                    lease.cancel();
+                    return Err(closed_queue());
+                };
+                match budget.try_charge_control(wire_len) {
+                    Ok(credit) => {
+                        lease
+                            .send_with(credit, probe)
+                            .map(|()| keepalive.record_probe(Instant::now()))
+                            .map_err(|_| closed_queue())?;
                     }
-                    Err(crate::OutboundRefusal::Closed(_)) => return Err(closed_queue()),
+                    Err(refusal @ crate::connection::Refusal::Shared) => {
+                        keepalive.note_refusal(refusal);
+                    }
+                    Err(crate::connection::Refusal::Local) => {}
                 }
             }
             KeepaliveAction::Expired => {
