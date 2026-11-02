@@ -282,6 +282,15 @@ impl ReplacementInputs {
             } else {
                 after_chunks
             };
+            let mut static_degree: Vec<usize> = trim_graph.parents.iter().map(Vec::len).collect();
+            let mut children: Vec<Vec<usize>> = vec![Vec::new(); trim_graph.nodes.len()];
+            for (index, parents) in trim_graph.parents.iter().enumerate() {
+                for &parent in parents {
+                    static_degree[parent] += 1;
+                    children[parent].push(index);
+                }
+            }
+            let mut alive_neighbors = static_degree.clone();
             for chunk in trim_chunks.iter().rev() {
                 if size <= self.max_memory {
                     break;
@@ -303,9 +312,21 @@ impl ReplacementInputs {
                     let id = node.id.ok_or(RbfError::InconsistentGraph)?;
                     if removed.insert(id) {
                         removal_priority.push(id);
+                        let alive = alive_neighbors[member];
+                        let dead = static_degree[member] - alive;
                         size = size
                             .checked_sub(node.memory)
+                            .and_then(|size| {
+                                size.checked_sub(link_memory_usage(alive, 1))
+                                    .and_then(|size| size.checked_add(link_memory_usage(dead, 1)))
+                            })
                             .ok_or(RbfError::ArithmeticOverflow)?;
+                        for &neighbor in trim_graph.parents[member]
+                            .iter()
+                            .chain(children[member].iter())
+                        {
+                            alive_neighbors[neighbor] = alive_neighbors[neighbor].saturating_sub(1);
+                        }
                     }
                 }
             }
@@ -438,22 +459,42 @@ impl Mempool {
                 });
             }
         }
-        let evicted_set: HashSet<_> = evicted.iter().copied().collect();
-        let removed_memory = evicted.iter().try_fold(0_u64, |total, &id| {
-            let released = self.entry_memory(id).ok_or(RbfError::InconsistentGraph)?;
-            let surviving_sides = self
-                .surviving_neighbor_sides(id, &evicted_set)
-                .ok_or(RbfError::InconsistentGraph)?;
-            total
-                .checked_add(released)
-                .and_then(|total| total.checked_add(link_memory_usage(surviving_sides, 1)))
-                .ok_or(RbfError::ArithmeticOverflow)
-        })?;
+        let mut removed_set: HashSet<_> = evicted.iter().copied().collect();
+        let mut newly_expired: Vec<EntryId> = Vec::new();
+        let mut expired: HashSet<EntryId> = HashSet::new();
+        if let LimitEnforcement::ExpireBeforeTrim(now) = enforcement {
+            expired = self.expired_entry_ids(now).into_iter().collect();
+            for &id in &expired {
+                if removed_set.insert(id) {
+                    newly_expired.push(id);
+                }
+            }
+        }
+        let removed_ids: Vec<EntryId> = evicted
+            .iter()
+            .copied()
+            .chain(newly_expired.iter().copied())
+            .collect();
+        let removed_memory = self
+            .removal_memory_release(&removed_ids, &removed_set)
+            .ok_or(RbfError::InconsistentGraph)?;
         let mut projected_memory = self
             .dynamic_memory_usage()
             .checked_sub(removed_memory)
             .and_then(|size| size.checked_add(self.admission_memory(&entry)))
             .ok_or(RbfError::ArithmeticOverflow)?;
+        let expires = matches!(enforcement, LimitEnforcement::ExpireBeforeTrim(_))
+            && entry
+                .tx
+                .inputs
+                .iter()
+                .filter_map(|input| self.entry_id_by_txid(&input.previous_output.txid))
+                .any(|id| expired.contains(&id));
+        if expires {
+            projected_memory = projected_memory
+                .checked_sub(self.admission_memory(&entry))
+                .ok_or(RbfError::ArithmeticOverflow)?;
+        }
         let scope = if enforcement != LimitEnforcement::Deferred
             && self.limits.max_total_bytes > 0
             && projected_memory > self.limits.max_total_bytes
@@ -468,34 +509,14 @@ impl Mempool {
             Some(self.projected_graphs(core::slice::from_ref(&entry), &evicted, scope)?)
         };
         let excluded: HashSet<_> = evicted.iter().copied().collect();
-        let trim_graph = if let LimitEnforcement::ExpireBeforeTrim(now) = enforcement {
-            let expired: HashSet<_> = self.expired_entry_ids(now).into_iter().collect();
+        let trim_graph = if let LimitEnforcement::ExpireBeforeTrim(_) = enforcement {
             if scope == ProjectionScope::AllEntries && !expired.is_empty() {
-                let mut excluded_trim = excluded.clone();
-                for &id in &expired {
-                    if excluded_trim.insert(id) {
-                        projected_memory = projected_memory
-                            .checked_sub(self.entry_memory(id).ok_or(RbfError::InconsistentGraph)?)
-                            .ok_or(RbfError::ArithmeticOverflow)?;
-                    }
-                }
-                let expires = entry
-                    .tx
-                    .inputs
-                    .iter()
-                    .filter_map(|input| self.entry_id_by_txid(&input.previous_output.txid))
-                    .any(|id| expired.contains(&id));
-                if expires {
-                    projected_memory = projected_memory
-                        .checked_sub(self.admission_memory(&entry))
-                        .ok_or(RbfError::ArithmeticOverflow)?;
-                }
                 let candidates = if expires {
                     &[][..]
                 } else {
                     core::slice::from_ref(&entry)
                 };
-                let mut excluded_trim: Vec<_> = excluded_trim.into_iter().collect();
+                let mut excluded_trim: Vec<_> = removed_set.iter().copied().collect();
                 excluded_trim.sort_unstable();
                 Some(
                     self.projected_graphs(candidates, &excluded_trim, ProjectionScope::AllEntries)?
@@ -605,6 +626,13 @@ impl Mempool {
 #[cfg(test)]
 mod tests {
     use super::trim_bump;
+    use super::*;
+    use crate::pool::{entry_memory_usage, link_memory_usage};
+    use crate::test_error::TestError;
+    use alloc::sync::Arc;
+    use bitcoin_rs_primitives::{
+        Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
 
     #[test]
     fn trim_bump_adds_incremental_to_the_floored_chunk_rate() {
@@ -625,5 +653,158 @@ mod tests {
         assert_eq!(super::required_fee(1_000, 250), Ok(250));
         assert_eq!(super::required_fee(0, 100), Ok(0));
         assert_eq!(super::required_fee(100, 0), Ok(0));
+    }
+
+    fn trim_coin(tag: u32) -> OutPoint {
+        let mut bytes = [0_u8; 32];
+        bytes[..4].copy_from_slice(&tag.to_le_bytes());
+        OutPoint::new(Txid(Hash256::from_le_bytes(&bytes)), 0)
+    }
+
+    fn trim_tx(inputs: &[OutPoint], outputs: &[u64], witness: bool) -> Tx {
+        Tx {
+            version: 3,
+            lock_time: LockTime::ZERO,
+            inputs: inputs
+                .iter()
+                .map(|outpoint| TxIn {
+                    previous_output: *outpoint,
+                    sequence: Sequence::MAX,
+                    script_sig: Script::from_bytes(if witness { Vec::new() } else { vec![0x51] }),
+                    witness: if witness {
+                        Witness::from_stack(vec![vec![0x51]])
+                    } else {
+                        Witness::new()
+                    },
+                })
+                .collect(),
+            outputs: outputs
+                .iter()
+                .map(|value| TxOut {
+                    value: Amount::from_sat(*value),
+                    script_pubkey: Script::from_bytes(vec![0x51]),
+                })
+                .collect(),
+        }
+    }
+
+    fn insert_relay_tx(pool: &mut Mempool, tx: Tx, fee: u64, time: u64) -> (Txid, EntryId) {
+        let txid = tx.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, fee, time, 7, 0))
+            .expect("fixture insert must pass validation");
+        let id = pool
+            .entry_id_by_txid(&txid)
+            .expect("the inserted entry is pooled");
+        (txid, id)
+    }
+
+    // POL-03
+    #[test]
+    fn expire_projection_releases_evicted_and_expired_links_once() -> Result<(), TestError> {
+        let young = crate::policy::MEMPOOL_EXPIRY_SECS + 100;
+        let now = young + 1;
+        let mut pool = Mempool::new(crate::MempoolLimits::default());
+        let s1_tx = trim_tx(&[trim_coin(1)], &[100_000], true);
+        let s2_tx = trim_tx(&[trim_coin(2)], &[100_000], true);
+        let s1 = insert_relay_tx(&mut pool, s1_tx, 1_000, young);
+        let s2 = insert_relay_tx(&mut pool, s2_tx, 1_000, young);
+        let x_tx = trim_tx(
+            &[OutPoint::new(s1.0, 0), OutPoint::new(s2.0, 0)],
+            &[90_000],
+            true,
+        );
+        insert_relay_tx(&mut pool, x_tx.clone(), 1_000, 1);
+        let c_tx = trim_tx(&[OutPoint::new(x_tx.txid(), 0)], &[80_000], false);
+        let (_c_txid, c) = insert_relay_tx(&mut pool, c_tx.clone(), 1_000, young);
+
+        let r_tx = trim_tx(&[OutPoint::new(x_tx.txid(), 0)], &[70_000, 70_000], false);
+        let candidate = MempoolEntry::new(Arc::new(r_tx), 100, 10_000, young, 7, 0);
+        let inputs = pool.capture_admission(
+            candidate,
+            alloc::vec![c],
+            0,
+            false,
+            FeeEstimation::Estimate,
+            LimitEnforcement::ExpireBeforeTrim(now),
+        )?;
+
+        let expected = pool
+            .dynamic_memory_usage()
+            .saturating_sub(entry_memory_usage(&c_tx))
+            .saturating_sub(entry_memory_usage(&x_tx))
+            .saturating_sub(link_memory_usage(3, 2));
+        assert_eq!(
+            inputs.projected_memory, expected,
+            "the removal union releases each incident edge exactly once"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn trim_stops_at_the_exact_boundary_of_true_released_memory() -> Result<(), TestError> {
+        let young = crate::policy::MEMPOOL_EXPIRY_SECS + 100;
+        let now = young + 1;
+        let a_tx = trim_tx(&[trim_coin(21)], &[100_000], true);
+        let b_tx = trim_tx(&[OutPoint::new(a_tx.txid(), 0)], &[80_000], false);
+        let p_tx = trim_tx(&[trim_coin(23)], &[100_000], true);
+        let x_tx = trim_tx(&[OutPoint::new(p_tx.txid(), 0)], &[90_000], true);
+        let y_tx = trim_tx(&[OutPoint::new(x_tx.txid(), 0)], &[80_000], true);
+        let r_tx = trim_tx(&[OutPoint::new(a_tx.txid(), 0)], &[10_000; 40], false);
+        let seeds = [
+            (a_tx.clone(), 4_000_u64),
+            (b_tx.clone(), 4_000),
+            (p_tx.clone(), 3_000),
+            (x_tx.clone(), 2_000),
+            (y_tx.clone(), 1_000),
+        ];
+        let measured = {
+            let mut pool = Mempool::new(crate::MempoolLimits::default());
+            for (tx, fee) in &seeds {
+                insert_relay_tx(&mut pool, tx.clone(), *fee, young);
+            }
+            pool.dynamic_memory_usage()
+        };
+        let projected = measured - entry_memory_usage(&b_tx) + entry_memory_usage(&r_tx);
+        let boundary_side = link_memory_usage(1, 2);
+        let max_memory = projected
+            - entry_memory_usage(&y_tx)
+            - boundary_side
+            - entry_memory_usage(&x_tx)
+            - boundary_side;
+
+        let mut pool = Mempool::new(crate::MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            max_total_bytes: max_memory,
+            ..crate::MempoolLimits::default()
+        });
+        let mut b_entry = None;
+        for (tx, fee) in &seeds {
+            let (txid, id) = insert_relay_tx(&mut pool, tx.clone(), *fee, young);
+            if txid == b_tx.txid() {
+                b_entry = Some(id);
+            }
+        }
+        let conflict = b_entry.expect("the double-spent entry is pooled");
+        let candidate = MempoolEntry::new(Arc::new(r_tx), 100, 10_000, young, 7, 0);
+        let inputs = pool.capture_admission(
+            candidate,
+            alloc::vec![conflict],
+            0,
+            false,
+            FeeEstimation::Estimate,
+            LimitEnforcement::ExpireBeforeTrim(now),
+        )?;
+        let prepared = inputs.verify()?;
+        pool.commit_pool_change(prepared)?;
+        assert!(
+            pool.contains_txid(&p_tx.txid()),
+            "the trim must stop at the exact boundary and keep the next chunk"
+        );
+        assert!(
+            pool.dynamic_memory_usage() <= max_memory,
+            "committed usage {} must respect the cap {max_memory}",
+            pool.dynamic_memory_usage()
+        );
+        Ok(())
     }
 }
