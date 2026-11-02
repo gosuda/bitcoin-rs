@@ -30,6 +30,7 @@ impl InboundTx {
         }
     }
 
+    #[must_use]
     pub(crate) fn with_memory_credit(
         mut self,
         credit: Option<block_memory::BlockMemoryCredit>,
