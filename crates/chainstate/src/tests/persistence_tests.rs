@@ -199,9 +199,9 @@ fn unrecoverable_undo_failure_retains_committed_prefix_and_closes_admission()
         payloads.push(BlockPayload::from_local(block));
     }
     let refs = payloads.iter().collect::<Vec<_>>();
-    let error = chain
-        .apply_window(&refs)
-        .expect_err("poisoned undo must fail");
+    let Err(error) = chain.apply_window(&refs) else {
+        return Err("poisoned undo must fail".into());
+    };
     assert_eq!(error.disposition, crate::WindowApplyDisposition::Fatal);
     assert!(matches!(
         error.source,

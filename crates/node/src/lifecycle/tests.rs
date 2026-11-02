@@ -392,9 +392,9 @@ fn recovery_shutdown_returns_failure_preserves_checkpoint_and_replays_committed_
     node.state
         .apply_block(&BlockPayload::from_local(block.clone()))?;
     node.state.chainstate().fail_closed_for_recovery();
-    let error = node
-        .shutdown_blocking()
-        .expect_err("recovery cannot exit successfully");
+    let Err(error) = node.shutdown_blocking() else {
+        anyhow::bail!("recovery cannot exit successfully");
+    };
     assert!(error.to_string().contains("chainstate closed for recovery"));
     assert_eq!(
         std::fs::read(current)?,
