@@ -815,7 +815,7 @@ fn gettxoutproof_finds_genesis_coinbase_through_the_index() {
 }
 
 #[test]
-fn gettxoutproof_with_blockhash_reports_pruned_block_body() {
+fn gettxoutproof_with_blockhash_answers_core_message_for_a_bodyless_block() {
     let ctx = Arc::new(Context::new());
     let genesis = fixture_genesis();
     let Some(coinbase) = genesis.txs.first() else {
@@ -837,14 +837,18 @@ fn gettxoutproof_with_blockhash_reports_pruned_block_body() {
         &json!([[txid.to_string()], block_hash.to_string()]),
     );
 
-    assert!(matches!(
-        result,
-        Err(RpcError::NotFound("block data pruned"))
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(RpcError::Misc(reason))
+                if reason == "Block not available (not fully downloaded)"
+        ),
+        "Core v31.1 answers RPC_MISC_ERROR not fully downloaded for a bodyless block"
+    );
 }
 
 #[test]
-fn gettxoutproof_with_blockhash_reports_pruned_body_for_a_header_only_block() {
+fn gettxoutproof_with_blockhash_answers_core_message_for_a_header_only_block() {
     let ctx = Arc::new(Context::new());
     let genesis = fixture_genesis();
     let Some(coinbase) = genesis.txs.first() else {
@@ -863,10 +867,14 @@ fn gettxoutproof_with_blockhash_reports_pruned_body_for_a_header_only_block() {
         &json!([[coinbase.txid().to_string()], block_hash.to_string()]),
     );
 
-    assert!(matches!(
-        result,
-        Err(RpcError::NotFound("block data pruned"))
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(RpcError::Misc(reason))
+                if reason == "Block not available (not fully downloaded)"
+        ),
+        "Core v31.1 answers RPC_MISC_ERROR not fully downloaded for a header-only block"
+    );
 }
 
 // API-02
@@ -1297,7 +1305,7 @@ fn gettxoutproof_maps_a_transient_index_error_instead_of_reporting_absence() {
 }
 
 #[test]
-fn gettxoutproof_index_path_reports_a_pruned_body() {
+fn gettxoutproof_index_path_reports_the_missing_body() {
     let block = distinct_block(6);
     let Some(wanted) = block.txs.first().map(Tx::txid) else {
         panic!("block has no transactions");
@@ -1314,8 +1322,246 @@ fn gettxoutproof_index_path_reports_a_pruned_body() {
     let error = proof_for(&ctx, &[wanted]).expect_err("a missing indexed body is not absence");
 
     assert!(
-        matches!(error, RpcError::NotFound("block data pruned")),
-        "the indexed height holds no body, so the answer is pruned data: {error:?}"
+        matches!(
+            error,
+            RpcError::Misc(reason)
+                if reason == "Block not available (not fully downloaded)"
+        ),
+        "the indexed height holds no body, so the answer is Core's not-downloaded error"
+    );
+}
+
+#[test]
+fn gettxoutproof_answers_core_pruned_message_when_the_node_has_pruned() {
+    let block = distinct_block(6);
+    let Some(wanted) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let mut ctx = Context::new();
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(1)))));
+    ctx.chain.add_block(BlockRecord::synthetic(
+        0,
+        BlockHash::from(Hash256::from_le_bytes(&[9_u8; 32])),
+    ));
+    ctx.chain.add_block(BlockRecord::from_block(1, &block));
+    ctx.chain.prune_service = Some(Arc::new(PrunedStub));
+    let ctx = Arc::new(ctx);
+
+    let error = proof_for(&ctx, &[wanted]).expect_err("a missing body on a pruned node");
+
+    assert!(
+        matches!(
+            error,
+            RpcError::Misc(reason) if reason == "Block not available (pruned data)"
+        ),
+        "Core v31.1 answers RPC_MISC_ERROR pruned data once the node has pruned"
+    );
+}
+
+struct PrunedStub;
+
+impl crate::context::PruneService for PrunedStub {
+    fn prune_to_height(
+        &self,
+        _requested_height: u32,
+    ) -> Result<crate::context::PruneResult, crate::context::PruneServiceError> {
+        Err(crate::context::PruneServiceError::Failed(
+            "pruning is stubbed".to_owned(),
+        ))
+    }
+
+    fn status(&self) -> crate::context::PruneStatus {
+        crate::context::PruneStatus {
+            pruned: true,
+            pruneheight: Some(0),
+        }
+    }
+}
+
+#[test]
+fn gettxoutproof_answers_core_message_for_an_empty_txid_list() {
+    let ctx = Arc::new(Context::new());
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    let result = handler.dispatch("gettxoutproof", &json!([[]]));
+
+    assert!(
+        matches!(
+            result,
+            Err(RpcError::InvalidParameter(reason))
+                if reason == "Parameter 'txids' cannot be empty"
+        ),
+        "Core v31.1 answers RPC_INVALID_PARAMETER for an empty txid list"
+    );
+}
+
+#[test]
+fn gettxoutproof_answers_core_message_for_a_duplicated_txid() {
+    let block = distinct_block(7);
+    let Some(txid) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let raw = txid.to_string();
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let result = handler.dispatch("gettxoutproof", &json!([[raw.clone(), raw.clone()]]));
+
+    assert!(
+        matches!(
+            result,
+            Err(RpcError::InvalidParameter(reason))
+                if reason == format!("Invalid parameter, duplicated txid: {raw}")
+        ),
+        "Core v31.1 rejects a duplicated txid naming the raw input"
+    );
+}
+
+#[test]
+fn gettxoutproof_answers_a_type_error_for_a_non_string_blockhash() {
+    let block = distinct_block(8);
+    let Some(txid) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let result = handler.dispatch("gettxoutproof", &json!([[txid.to_string()], 123]));
+
+    assert!(
+        matches!(result, Err(RpcError::InvalidType(_))),
+        "Core v31.1 answers a -3 type error for a numeric blockhash"
+    );
+}
+
+#[test]
+fn gettxoutproof_answers_block_not_found_for_an_unknown_blockhash() {
+    let block = distinct_block(9);
+    let Some(txid) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let unknown = Hash256::from_le_bytes(&[0xEE; 32]);
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let result = handler.dispatch(
+        "gettxoutproof",
+        &json!([[txid.to_string()], unknown.to_string()]),
+    );
+
+    assert!(
+        matches!(
+            result,
+            Err(RpcError::InvalidAddressOrKey(reason)) if reason == "Block not found"
+        ),
+        "Core v31.1 answers Block not found for an unknown blockhash"
+    );
+}
+
+struct CorruptBodySource {
+    height: u32,
+    hash: BlockHash,
+}
+
+impl bitcoin_rs_chain::BlockBodySource for CorruptBodySource {
+    fn block_body(
+        &self,
+        height: u32,
+        hash: BlockHash,
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+        if height == self.height && hash == self.hash {
+            Ok(Some(vec![0xFF_u8; 80]))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[test]
+fn gettxoutproof_answers_core_read_error_for_an_undecodable_body() {
+    let block = distinct_block(10);
+    let Some(wanted) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let mut ctx = Context::new();
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(1)))));
+    ctx.chain.add_block(BlockRecord::synthetic(
+        0,
+        BlockHash::from(Hash256::from_le_bytes(&[9_u8; 32])),
+    ));
+    let record = BlockRecord::from_block(1, &block);
+    ctx.chain.block_body_source = Some(Arc::new(CorruptBodySource {
+        height: record.height,
+        hash: record.hash,
+    }));
+    ctx.chain.add_block(record);
+    let ctx = Arc::new(ctx);
+
+    let error = proof_for(&ctx, &[wanted]).expect_err("an undecodable body is not absence");
+
+    assert!(
+        matches!(
+            error,
+            RpcError::CoreInternal(reason) if reason == "Can't read block from disk"
+        ),
+        "Core v31.1 answers Can't read block from disk instead of hiding storage damage"
+    );
+}
+
+#[test]
+fn gettxoutproof_utxo_path_answers_interrupted_when_cancelled() {
+    let block = distinct_block(11);
+    let Some(txid) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let mut ctx = Context::new();
+    attach_body_for_block(&mut ctx, &block, 1);
+    ctx.chain.add_block(BlockRecord::synthetic(
+        0,
+        BlockHash::from(Hash256::from_le_bytes(&[3_u8; 32])),
+    ));
+    ctx.chain.add_block(BlockRecord::from_block(1, &block));
+    let ctx = Arc::new(ctx);
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    latch.trigger();
+
+    let cancelled = super::gettxoutproof(
+        &ctx,
+        &json!([[txid.to_string()]]),
+        &latch.reader(),
+    );
+    assert!(
+        matches!(
+            cancelled,
+            Err(RpcError::Misc(reason)) if reason == "gettxoutproof interrupted"
+        ),
+        "a cancelled request must stop the utxo probe"
+    );
+}
+
+#[test]
+fn gettxoutproof_utxo_path_interrupts_for_a_mixed_txid_list() {
+    let block = distinct_block(12);
+    let Some(txid) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let unknown = Hash256::from_le_bytes(&[0x77; 32]);
+    let unknown_txid = Txid(unknown);
+    let mut ctx = Context::new();
+    attach_body_for_block(&mut ctx, &block, 1);
+    ctx.chain.add_block(BlockRecord::from_block(1, &block));
+    let ctx = Arc::new(ctx);
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    latch.trigger();
+
+    let cancelled = super::gettxoutproof(
+        &ctx,
+        &json!([[unknown_txid.to_string(), txid.to_string()]]),
+        &latch.reader(),
+    );
+    assert!(
+        matches!(
+            cancelled,
+            Err(RpcError::Misc(reason)) if reason == "gettxoutproof interrupted"
+        ),
+        "the per-txid check must fire before any lookup"
     );
 }
 
@@ -1490,64 +1736,3 @@ fn sendrawtransaction_rebuilds_admission_context_after_transient_rejection() {
         "the parent must remain pooled"
     );
 }
-
-#[test]
-fn gettxoutproof_utxo_path_answers_interrupted_when_cancelled() {
-    let block = distinct_block(11);
-    let Some(txid) = block.txs.first().map(Tx::txid) else {
-        panic!("block has no transactions");
-    };
-    let mut ctx = Context::new();
-    attach_body_for_block(&mut ctx, &block, 1);
-    ctx.chain.add_block(BlockRecord::synthetic(
-        0,
-        BlockHash::from(Hash256::from_le_bytes(&[3_u8; 32])),
-    ));
-    ctx.chain.add_block(BlockRecord::from_block(1, &block));
-    let ctx = Arc::new(ctx);
-    let latch = bitcoin_rs_chain::LatchWriter::new();
-    latch.trigger();
-
-    let cancelled = super::gettxoutproof(
-        &ctx,
-        &json!([[txid.to_string()]]),
-        &latch.reader(),
-    );
-    assert!(
-        matches!(
-            cancelled,
-            Err(RpcError::Misc(reason)) if reason == "gettxoutproof interrupted"
-        ),
-        "a cancelled request must stop the utxo probe"
-    );
-}
-
-#[test]
-fn gettxoutproof_utxo_path_interrupts_for_a_mixed_txid_list() {
-    let block = distinct_block(12);
-    let Some(txid) = block.txs.first().map(Tx::txid) else {
-        panic!("block has no transactions");
-    };
-    let unknown = Hash256::from_le_bytes(&[0x77; 32]);
-    let unknown_txid = Txid(unknown);
-    let mut ctx = Context::new();
-    attach_body_for_block(&mut ctx, &block, 1);
-    ctx.chain.add_block(BlockRecord::from_block(1, &block));
-    let ctx = Arc::new(ctx);
-    let latch = bitcoin_rs_chain::LatchWriter::new();
-    latch.trigger();
-
-    let cancelled = super::gettxoutproof(
-        &ctx,
-        &json!([[unknown_txid.to_string(), txid.to_string()]]),
-        &latch.reader(),
-    );
-    assert!(
-        matches!(
-            cancelled,
-            Err(RpcError::Misc(reason)) if reason == "gettxoutproof interrupted"
-        ),
-        "the per-txid check must fire before any lookup"
-    );
-}
-

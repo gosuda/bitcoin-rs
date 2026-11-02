@@ -297,24 +297,36 @@ pub(crate) fn gettxoutproof(
         .and_then(|value| value.as_array())
         .ok_or(RpcError::InvalidParams("txids must be an array"))?;
     if txids_value.is_empty() {
-        return Err(RpcError::InvalidParams("txids are required"));
+        return Err(RpcError::InvalidParameter(
+            "Parameter 'txids' cannot be empty".to_owned(),
+        ));
     }
 
     let mut wanted = hashbrown::HashSet::new();
-    for value in txids_value {
-        let Some(txid) = value.as_str() else {
+    for value in txids_value.iter() {
+        let Some(txid_str) = value.as_str() else {
             return Err(RpcError::InvalidType(
                 "each txid must be a string".to_owned(),
             ));
         };
-        wanted.insert(parse_txid(txid, "txid")?);
+        let txid = parse_txid(txid_str, "txid")?;
+        if !wanted.insert(txid) {
+            return Err(RpcError::InvalidParameter(format!(
+                "Invalid parameter, duplicated txid: {txid_str}"
+            )));
+        }
     }
 
-    if let Some(hash_str) = array.get(1).and_then(JsonValueTrait::as_str) {
+    if let Some(blockhash) = array.get(1).filter(|value| !value.is_null()) {
+        let Some(hash_str) = blockhash.as_str() else {
+            return Err(RpcError::InvalidType(
+                "blockhash must be a string".to_owned(),
+            ));
+        };
         let hash = Hash256::from_str(hash_str)
             .map_err(|_| block_hash_param_error(hash_str, "blockhash"))?;
         let Some(record) = ctx.chain.block_by_hash(hash) else {
-            return Err(RpcError::NotFound("block not found"));
+            return Err(RpcError::InvalidAddressOrKey("Block not found".to_owned()));
         };
         return proof_from_single_record(ctx, &record, &wanted, cancellation);
     }
@@ -416,25 +428,35 @@ fn proof_from_single_record(
         return Err(proof_interrupted());
     }
     let Some(bytes) = ctx.chain.block_body_bytes(record) else {
-        return Err(RpcError::NotFound("block data pruned"));
+        return Err(RpcError::Misc(block_unavailable_error(ctx)));
     };
-    proof_from_body(&bytes, wanted).ok_or(RpcError::InvalidAddressOrKey(
-        "Not all transactions found in specified or retrieved block".to_owned(),
-    ))
+    proof_from_body(&bytes, wanted)
 }
 
-fn proof_from_body(bytes: &[u8], wanted: &hashbrown::HashSet<Txid>) -> Option<Value> {
-    let block = native_deserialize::<NativeBlock>(bytes).ok()?;
+fn block_unavailable_error(ctx: &Context) -> String {
+    if ctx.chain.prune_status().pruned {
+        "Block not available (pruned data)".to_owned()
+    } else {
+        "Block not available (not fully downloaded)".to_owned()
+    }
+}
+
+fn proof_from_body(bytes: &[u8], wanted: &hashbrown::HashSet<Txid>) -> Result<Value, RpcError> {
+    let block = native_deserialize::<NativeBlock>(bytes)
+        .map_err(|_| RpcError::CoreInternal("Can't read block from disk".to_owned()))?;
     let block_txids = block
         .txs
         .iter()
         .map(Tx::txid)
         .collect::<hashbrown::HashSet<Txid>>();
     if !wanted.iter().all(|txid| block_txids.contains(txid)) {
-        return None;
+        return Err(RpcError::InvalidAddressOrKey(
+            "Not all transactions found in specified or retrieved block".to_owned(),
+        ));
     }
 
-    let bitcoin_block = bitcoin::consensus::encode::deserialize::<bitcoin::Block>(bytes).ok()?;
+    let bitcoin_block = bitcoin::consensus::encode::deserialize::<bitcoin::Block>(bytes)
+        .map_err(|_| RpcError::CoreInternal("Can't read block from disk".to_owned()))?;
     let bitcoin_wanted: hashbrown::HashSet<bitcoin::Txid> = wanted
         .iter()
         .map(|txid| bitcoin::Txid::from_byte_array(*txid.as_bytes()))
@@ -442,7 +464,7 @@ fn proof_from_body(bytes: &[u8], wanted: &hashbrown::HashSet<Txid>) -> Option<Va
     let merkle_block = MerkleBlock::from_block_with_predicate(&bitcoin_block, |txid| {
         bitcoin_wanted.contains(txid)
     });
-    Some(json!(
+    Ok(json!(
         bitcoin_serialize(&merkle_block).to_lower_hex_string()
     ))
 }
