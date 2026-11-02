@@ -25,6 +25,45 @@ fn addnode_accepts_well_formed_input() {
     assert!(result.is_null());
 }
 
+/// Core's optional `v2transport` argument is not advertised: the named form
+/// answers an unknown-argument error and the positional third value answers
+/// a too-many-parameters error, so no caller can believe it selected a
+/// transport (per-dial choice is not plumbed; see the registry row).
+#[test]
+fn addnode_rejects_the_v2transport_argument() {
+    let ctx = Arc::new(Context::new());
+    let error = addnode(
+        &ctx,
+        &json!({"node": "127.0.0.1:8333", "command": "onetry", "v2transport": true}),
+    )
+    .err()
+    .unwrap_or_else(|| panic!("the named v2transport argument must be refused"));
+    assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
+    assert_eq!(error.to_string(), "Unknown named parameter v2transport");
+    for params in [
+        json!(["127.0.0.1:8333", "onetry", true]),
+        json!(["127.0.0.1:8333", "add", false]),
+        json!({"node": "127.0.0.1:8333", "command": "add", "v2transport": false}),
+    ] {
+        let error = addnode(&ctx, &params)
+            .err()
+            .unwrap_or_else(|| panic!("{params}: v2transport must not be accepted"));
+        let expected = if params.is_array() {
+            (
+                "invalid params: too many parameters",
+                RpcError::INVALID_PARAMS,
+            )
+        } else {
+            (
+                "Unknown named parameter v2transport",
+                RpcError::CORE_INVALID_PARAMETER,
+            )
+        };
+        assert_eq!(error.code(), expected.1, "{params}: {error}");
+        assert_eq!(error.to_string(), expected.0, "{params}: {error}");
+    }
+}
+
 #[test]
 fn addnode_skips_queueing_while_network_is_inactive() {
     let ctx = Arc::new(Context::new());
