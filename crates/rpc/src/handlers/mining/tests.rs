@@ -1400,25 +1400,37 @@ fn generatetoaddress_binds_named_params_like_core() {
 
     let named = generatetoaddress(&ctx, &json!({"nblocks": 2, "address": REGTEST_ADDRESS}))
         .unwrap_or_else(|err| panic!("named generatetoaddress failed: {err}"));
-    let positional = generatetoaddress(&ctx, &json!([2, REGTEST_ADDRESS]))
-        .unwrap_or_else(|err| panic!("positional generatetoaddress failed: {err}"));
-    assert_eq!(named, positional);
     let request = control
         .last_generate
         .lock()
         .take()
         .unwrap_or_else(|| panic!("the named call reached the mining coordinator"));
     assert_eq!(request.count, 2);
+    let positional = generatetoaddress(&ctx, &json!([2, REGTEST_ADDRESS]))
+        .unwrap_or_else(|err| panic!("positional generatetoaddress failed: {err}"));
+    assert_eq!(named, positional);
 
     // Core's args prefix supplies leading positionals; named values may
     // arrive in any object order.
     generatetoaddress(&ctx, &json!({"args": [3, REGTEST_ADDRESS]}))
         .unwrap_or_else(|err| panic!("args-prefixed named call failed: {err}"));
+    let request = control
+        .last_generate
+        .lock()
+        .take()
+        .unwrap_or_else(|| panic!("the args-prefixed call reached the mining coordinator"));
+    assert_eq!(request.count, 3);
     generatetoaddress(
         &ctx,
         &json!({"nblocks": 1, "maxtries": 5, "address": REGTEST_ADDRESS}),
     )
     .unwrap_or_else(|err| panic!("out-of-order named call failed: {err}"));
+    let request = control
+        .last_generate
+        .lock()
+        .take()
+        .unwrap_or_else(|| panic!("the out-of-order call reached the mining coordinator"));
+    assert_eq!((request.count, request.max_tries), (1, 5));
 
     // Unknown names keep Core's -8 "Unknown named parameter", never a
     // silent ignore.
@@ -1448,8 +1460,9 @@ fn submitheader_binds_the_named_hexdata_argument() {
     assert_eq!(named, positional);
 
     // Unknown names keep Core's -8 "Unknown named parameter".
-    assert!(matches!(
-        submitheader(&ctx, &json!({"hex": header.as_str()})),
-        Err(RpcError::InvalidParameter(_))
-    ));
+    let error = submitheader(&ctx, &json!({"hex": header.as_str()}))
+        .err()
+        .unwrap_or_else(|| panic!("an unknown name must be refused"));
+    assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
+    assert_eq!(error.to_string(), "Unknown named parameter hex");
 }
