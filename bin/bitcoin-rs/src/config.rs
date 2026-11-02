@@ -218,7 +218,13 @@ fn parse_for_network(text: &str, network: Network) -> Result<[UserConfig; 2], Bi
             ));
             continue;
         };
-        let key = raw_key.trim().trim_start_matches('-');
+        let key = raw_key.trim();
+        if key.starts_with('-') {
+            errors.push(format!(
+                "parse error on line {line_number}: {line}, options in configuration file must be specified without leading -"
+            ));
+            continue;
+        }
         if key == "rpcpassword" && raw_line.contains('#') {
             errors.push(format!(
                 "line {line_number}: rpcpassword contains '#', which is ambiguous"
@@ -302,7 +308,7 @@ trait CoreValue {
 
 impl CoreValue for Option<bool> {
     fn apply(_key: &str, value: &str, slot: &mut Self) -> Result<(), String> {
-        *slot = parse_core_bool(value);
+        *slot = Some(parse_core_bool(value));
         Ok(())
     }
 }
@@ -414,18 +420,34 @@ fn apply_core_exception(layer: &mut UserConfig, key: &str, value: &str) -> bool 
     if key != "listen" {
         return false;
     }
-    if parse_core_bool(value).is_some_and(|listen| !listen) {
+    if !parse_core_bool(value) {
         layer.p2p.listen = Some(Vec::new());
     }
     true
 }
 
-fn parse_core_bool(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
+fn parse_core_bool(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return true;
     }
+    locale_independent_atoi(value) != 0
+}
+
+fn locale_independent_atoi(value: &str) -> i32 {
+    if value.starts_with('+') {
+        return 0;
+    }
+    let magnitude = value.strip_prefix('-').unwrap_or(value);
+    let Ok(parsed) = magnitude.parse::<i64>() else {
+        return 0;
+    };
+    let signed = if value.starts_with('-') {
+        -parsed
+    } else {
+        parsed
+    };
+    i32::try_from(signed).unwrap_or(0)
 }
 
 fn parse_section(line: &str) -> Option<&str> {
@@ -458,11 +480,11 @@ mod tests {
     fn network_section_overrides_globals() {
         let layers = parse_for_network(
             "
--prune=550
+prune=550
 [regtest]
--prune=900
--rpcuser=regtest-user
--rpcpassword=regtest-pass
+prune=900
+rpcuser=regtest-user
+rpcpassword=regtest-pass
 ",
             Network::Regtest,
         )
@@ -479,7 +501,7 @@ mod tests {
 dbcache=450
 prune=550
 rest=1
-txindex=true
+txindex=1
 rpcuser=someuser
 rpcpassword=somepass
 rpccookiefile=/tmp/.cookie
@@ -511,11 +533,15 @@ uacomment=foo
     }
 
     #[test]
-    fn an_unparseable_core_number_sets_nothing() {
+    fn an_unparseable_number_keeps_the_default_and_a_word_bool_is_false() {
         let layers = parse_for_network("dbcache=large\nrest=maybe\n", Network::Regtest)
             .unwrap_or_else(|error| panic!("non-routing keys stay lenient: {error}"));
         assert_eq!(layers[0].storage.dbcache_mb, None);
-        assert_eq!(layers[0].rpc.rest, None);
+        assert_eq!(
+            layers[0].rpc.rest,
+            Some(false),
+            "Core's InterpretBool answers atoi, so a non-integer word is false"
+        );
     }
 }
 
@@ -549,13 +575,13 @@ mod compat_tests {
     fn bitcoin_conf_core_keys_map_into_config() -> Result<(), TestError> {
         let config = load_conf(
             r"
-# Global Core options may carry a leading dash.
--prune=550
--rpcuser=foo
--rpcpassword=bar
--server=1
--listen=0
--dbcache=768
+# Global Core options
+prune=550
+rpcuser=foo
+rpcpassword=bar
+server=1
+listen=0
+dbcache=768
 ",
             Network::Mainnet,
         )?;
@@ -565,7 +591,7 @@ mod compat_tests {
         assert_eq!(config.p2p.listen, []);
         assert_eq!(config.storage.dbcache_mb, 768);
 
-        let indexed = load_conf("-txindex=1\n", Network::Mainnet)?;
+        let indexed = load_conf("txindex=1\n", Network::Mainnet)?;
         assert!(indexed.indexes.txindex);
 
         let conf_with_overlays = load_conf(
@@ -606,6 +632,48 @@ onlynet=onion,i2p
                 bitcoin_rs_node::options::PeerNetwork::Onion,
                 bitcoin_rs_node::options::PeerNetwork::I2p
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bitcoin_conf_refuses_a_leading_dash_like_core() {
+        let error = match load_conf("-prune=550\n", Network::Mainnet) {
+            Ok(_) => panic!("a leading dash must be refused like Core"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(
+                "parse error on line 1: -prune=550, options in configuration file must be specified without leading -"
+            ),
+            "the refusal quotes Core's parse error: {error}"
+        );
+    }
+
+    #[test]
+    fn bitcoin_conf_bool_values_follow_core_interpret_bool() -> Result<(), TestError> {
+        let empty_is_true = load_conf("dnsseed=\n", Network::Mainnet)?;
+        assert!(
+            empty_is_true.p2p.dns_seeds_enabled,
+            "Core treats an empty bool value as true"
+        );
+        let nonzero_is_true = load_conf("dnsseed=2\n", Network::Mainnet)?;
+        assert!(nonzero_is_true.p2p.dns_seeds_enabled);
+        let minus_one_is_true = load_conf("dnsseed=-1\n", Network::Mainnet)?;
+        assert!(minus_one_is_true.p2p.dns_seeds_enabled);
+        let zero_is_false = load_conf("dnsseed=0\n", Network::Mainnet)?;
+        assert!(!zero_is_false.p2p.dns_seeds_enabled);
+        let word_is_false = load_conf("dnsseed=true\n", Network::Mainnet)?;
+        assert!(
+            !word_is_false.p2p.dns_seeds_enabled,
+            "Core's InterpretBool answers atoi, so a non-integer word is false"
+        );
+        let overflow_is_false = load_conf("dnsseed=2147483648\n", Network::Mainnet)?;
+        assert!(!overflow_is_false.p2p.dns_seeds_enabled);
+        let plus_sign_is_false = load_conf("dnsseed=+1\n", Network::Mainnet)?;
+        assert!(
+            !plus_sign_is_false.p2p.dns_seeds_enabled,
+            "Core's from_chars rejects a leading plus sign"
         );
         Ok(())
     }
@@ -677,11 +745,11 @@ rpcpassword=xy;z
     {
         let config = load_conf(
             r"
--prune=550
+prune=550
 [regtest]
--prune=900
--rpcuser=regtest-user
--rpcpassword=regtest-pass
+prune=900
+rpcuser=regtest-user
+rpcpassword=regtest-pass
 ",
             Network::Regtest,
         )?;
@@ -695,14 +763,14 @@ rpcpassword=xy;z
     fn bitcoin_conf_zmq_keys_are_not_promoted_into_node_config() -> Result<(), TestError> {
         let config = load_conf(
             r"
--zmqpubhashblock=tcp://127.0.0.1:28332
--zmqpubhashblock=tcp://127.0.0.1:28333
--zmqpubhashblockhwm=5
+zmqpubhashblock=tcp://127.0.0.1:28332
+zmqpubhashblock=tcp://127.0.0.1:28333
+zmqpubhashblockhwm=5
 [regtest]
--zmqpubrawtx=tcp://127.0.0.1:28334
--zmqpubrawtxhwm=6
--zmqpubsequence=tcp://127.0.0.1:28335
--zmqpubsequencehwm=7
+zmqpubrawtx=tcp://127.0.0.1:28334
+zmqpubrawtxhwm=6
+zmqpubsequence=tcp://127.0.0.1:28335
+zmqpubsequencehwm=7
 ",
             Network::Regtest,
         )?;
