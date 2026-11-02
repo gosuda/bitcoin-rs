@@ -89,12 +89,6 @@ pub(super) fn run_worker_with_open(
         return;
     }
 
-    let heartbeat = Heartbeat::start(
-        "txindex",
-        spec.namespace.to_owned(),
-        spec.storage_backend.to_string(),
-    );
-
     let worker_result = open_and_run(
         runtime,
         &spec,
@@ -110,8 +104,6 @@ pub(super) fn run_worker_with_open(
         shutdown,
         wake_rx,
     );
-
-    heartbeat.stop_and_join();
 
     finish_worker(
         runtime,
@@ -324,6 +316,11 @@ pub(super) fn open_derived_index_with_timeout(
     if should_stop() {
         return Err(DerivedIndexWorkerError::Stopped);
     }
+    let _heartbeat = Heartbeat::start(
+        "txindex",
+        spec.namespace.to_owned(),
+        spec.storage_backend.to_string(),
+    );
     let (tx, rx) = std::sync::mpsc::channel();
     let open_store = Arc::clone(&spec.open_store);
     let dir = txindex_dir.to_path_buf();
@@ -364,13 +361,13 @@ where
     })
 }
 
-pub(super) struct Heartbeat {
+struct Heartbeat {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl Heartbeat {
-    pub(super) fn start(capability: &'static str, namespace: String, backend: String) -> Self {
+    fn start(capability: &'static str, namespace: String, backend: String) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = Arc::clone(&stop);
         let start = Instant::now();
@@ -397,8 +394,10 @@ impl Heartbeat {
             .ok();
         Self { stop, handle }
     }
+}
 
-    pub(super) fn stop_and_join(mut self) {
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
