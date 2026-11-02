@@ -715,7 +715,11 @@ pub struct PeerLease {
     close_rx: Receiver<()>,
     budget: Arc<OutboundBudget>,
     unsolicited_forwards: Arc<AtomicUsize>,
-    last_send: Arc<Mutex<Instant>>,
+    /// The instant of this connection's last actual socket write. The
+    /// writer's stream accounting stamps it when the socket accepts bytes;
+    /// queue admission never does. The message loop reads it as the
+    /// send-silence feed for keepalive expiry.
+    send_activity: Arc<Mutex<Instant>>,
     inbound: bool,
     role: crate::peer_info::PeerRole,
     manual: bool,
@@ -796,7 +800,7 @@ impl PeerLease {
             close_rx,
             budget: Arc::new(budget),
             unsolicited_forwards: Arc::new(AtomicUsize::new(0)),
-            last_send: Arc::new(Mutex::new(Instant::now())),
+            send_activity: Arc::new(Mutex::new(Instant::now())),
             inbound,
             role,
             manual,
@@ -929,7 +933,14 @@ impl PeerLease {
 
     #[must_use]
     pub(crate) fn last_send(&self) -> Instant {
-        *self.last_send.lock()
+        *self.send_activity.lock()
+    }
+
+    /// The shared send-activity clock, so the stream the writer owns can
+    /// stamp it at the point the socket accepts bytes.
+    #[must_use]
+    pub(crate) fn send_activity(&self) -> Arc<Mutex<Instant>> {
+        Arc::clone(&self.send_activity)
     }
 
     #[must_use]
@@ -1004,10 +1015,9 @@ impl PeerLease {
         credit: OutboundCredit,
     ) -> Result<(), OutboundRefusal> {
         match self.outbound.try_send(QueuedFrame { message, credit }) {
-            Ok(()) => {
-                *self.last_send.lock() = Instant::now();
-                Ok(())
-            }
+            // Admission to the queue is not send activity: only the
+            // writer's socket accounting advances the send-silence clock.
+            Ok(()) => Ok(()),
             Err(TrySendError::Full(frame) | TrySendError::Disconnected(frame)) => {
                 let message = frame.into_message();
                 self.cancel();

@@ -5,6 +5,9 @@ use bitcoin_rs_primitives::unix_time_secs;
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+use parking_lot::Mutex;
 
 /// Declares [`MessageAccount`]: one row per accounted wire command, plus the
 /// [`MessageAccount::Other`] bucket appended last.
@@ -297,6 +300,11 @@ pub struct CountingStream<S> {
     inner: S,
     counters: Arc<PeerCounters>,
     lease: Option<crate::PeerLease>,
+    /// The connection's send-activity clock, shared with the lease the
+    /// message loop reads it through. Stamped beside the byte counters
+    /// when the socket accepts bytes, so keepalive send silence tracks
+    /// actual writer progress, never queue admission.
+    send_activity: Option<Arc<Mutex<Instant>>>,
     read_buf: Vec<u8>,
     read_pos: usize,
     read_end: usize,
@@ -311,6 +319,7 @@ impl<S> CountingStream<S> {
             inner,
             counters,
             lease: None,
+            send_activity: None,
             read_buf: Vec::new(),
             read_pos: 0,
             read_end: 0,
@@ -320,6 +329,24 @@ impl<S> CountingStream<S> {
     #[must_use]
     pub const fn counters(&self) -> &Arc<PeerCounters> {
         &self.counters
+    }
+
+    pub(crate) fn recording_send_activity(mut self, activity: Arc<Mutex<Instant>>) -> Self {
+        self.send_activity = Some(activity);
+        self
+    }
+
+    /// The one point that observes the socket accepting outbound bytes:
+    /// both the byte counters and the send-activity clock advance, and a
+    /// zero-byte acceptance is no activity.
+    fn note_send(&self, written: usize) {
+        if written == 0 {
+            return;
+        }
+        self.counters.record_sent(written);
+        if let Some(activity) = &self.send_activity {
+            *activity.lock() = Instant::now();
+        }
     }
 
     #[must_use]
@@ -361,10 +388,9 @@ impl CountingStream<std::net::TcpStream> {
     /// # Errors
     /// Returns the error `TcpStream::try_clone` returned.
     pub fn try_clone(&self) -> IoResult<Self> {
-        Ok(Self::new(
-            self.inner.try_clone()?,
-            Arc::clone(&self.counters),
-        ))
+        let mut clone = Self::new(self.inner.try_clone()?, Arc::clone(&self.counters));
+        clone.send_activity = self.send_activity.clone();
+        Ok(clone)
     }
 
     pub fn set_read_timeout(&self, timeout: Option<core::time::Duration>) -> IoResult<()> {
@@ -434,13 +460,13 @@ impl<S: Read> Read for CountingStream<S> {
 impl<S: Write> Write for CountingStream<S> {
     fn write(&mut self, buffer: &[u8]) -> IoResult<usize> {
         let written = self.inner.write(buffer)?;
-        self.counters.record_sent(written);
+        self.note_send(written);
         Ok(written)
     }
 
     fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
         let written = self.inner.write_vectored(buffers)?;
-        self.counters.record_sent(written);
+        self.note_send(written);
         Ok(written)
     }
 

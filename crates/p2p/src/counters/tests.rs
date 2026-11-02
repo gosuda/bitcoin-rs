@@ -560,6 +560,63 @@ fn a_cancelled_stream_stops_a_payload_that_keeps_arriving() -> IoResult<()> {
 }
 
 #[test]
+fn send_activity_advances_only_on_actual_socket_writes() {
+    use std::time::{Duration, Instant};
+
+    let (queue, _rx) = crossbeam_channel::unbounded();
+    let lease = crate::PeerLease::new(queue);
+    let stale = Instant::now()
+        .checked_sub(Duration::from_secs(30))
+        .unwrap_or_else(|| panic!("a 30-second backdate fits the monotonic clock"));
+    *lease.send_activity().lock() = stale;
+
+    lease
+        .send(crate::Message::Ping(1))
+        .unwrap_or_else(|error| panic!("queue admission failed: {error}"));
+    assert_eq!(
+        lease.last_send(),
+        stale,
+        "queue admission must not advance the send-silence clock"
+    );
+
+    let counters = Arc::new(PeerCounters::default());
+    let mut stream = CountingStream::new(std::io::Cursor::new(Vec::new()), Arc::clone(&counters))
+        .recording_send_activity(lease.send_activity());
+    let written = stream
+        .write(&[0_u8; 4])
+        .unwrap_or_else(|error| panic!("write failed: {error}"));
+    assert_eq!(written, 4);
+    assert!(
+        lease.last_send() > stale,
+        "a socket write acceptance stamps the clock the loop observes"
+    );
+
+    // The writer-thread clone of a connected stream carries the same
+    // clock, the way `run_connected_session` hands the writer its handle.
+    use std::net::{TcpListener, TcpStream};
+    let listener =
+        TcpListener::bind("127.0.0.1:0").unwrap_or_else(|error| panic!("bind failed: {error}"));
+    let addr = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("local_addr failed: {error}"));
+    let _client =
+        TcpStream::connect(addr).unwrap_or_else(|error| panic!("connect failed: {error}"));
+    let connected = listener
+        .accept()
+        .unwrap_or_else(|error| panic!("accept failed: {error}"))
+        .0;
+    let stream = CountingStream::new(connected, Arc::new(PeerCounters::default()))
+        .recording_send_activity(lease.send_activity());
+    let clone = stream
+        .try_clone()
+        .unwrap_or_else(|error| panic!("try_clone failed: {error}"));
+    assert!(
+        clone.send_activity.is_some(),
+        "the writer-thread clone carries the same send-activity clock"
+    );
+}
+
+#[test]
 fn message_account_names_round_trip_through_from_command() {
     for account in MessageAccount::ALL {
         if matches!(account, MessageAccount::Other) {
