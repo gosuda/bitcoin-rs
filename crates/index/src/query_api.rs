@@ -212,17 +212,9 @@ pub trait ScriptIndexQuery: Send + Sync {
         last: Option<Txid>,
         limit: usize,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
-        let mut history = self.confirmed_history(script_hash)?;
-        history.sort_by(|a, b| b.height.cmp(&a.height).then_with(|| b.txid.cmp(&a.txid)));
-        history.dedup_by_key(|record| record.txid);
-        let start = last
-            .and_then(|txid| history.iter().position(|r| r.txid == txid))
-            .map_or(0, |i| i + 1);
-        Ok(history
-            .into_iter()
-            .skip(start)
-            .take(limit.min(SCRIPT_HISTORY_PAGE_MAX))
-            .collect())
+        Ok(self
+            .confirmed_history_page(script_hash, last, limit)?
+            .records)
     }
     fn unspent_outputs(
         &self,

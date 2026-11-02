@@ -286,6 +286,30 @@ fn default_history_page_skips_the_cursor_and_restarts_when_unknown()
 
 // IDX-02
 #[test]
+fn default_history_page_serves_a_duplicated_txid_once_per_height()
+-> Result<(), crate::portable::TestError> {
+    let record = |id: u8, height| ScriptHistoryRecord {
+        txid: Txid(Hash256::from_le_bytes(&[id; 32])),
+        height,
+    };
+    let source = CompleteHistory(vec![record(1, 7), record(2, 6), record(2, 3), record(3, 1)]);
+    let script = ScriptHash::from_byte_array([0; 32]);
+
+    assert_eq!(
+        source.history_page(script, None, usize::MAX)?,
+        vec![record(1, 7), record(2, 6), record(2, 3), record(3, 1)],
+        "a pre-BIP34 duplicate txid is served once per height"
+    );
+    assert_eq!(
+        source.history_page(script, Some(record(2, 6).txid), usize::MAX)?,
+        vec![record(2, 3), record(3, 1)],
+        "an exclusive duplicate cursor continues below the newest occurrence"
+    );
+    Ok(())
+}
+
+// IDX-02
+#[test]
 fn default_history_pages_are_bounded_by_the_page_max() -> Result<(), crate::portable::TestError> {
     let count = SCRIPT_HISTORY_PAGE_MAX * 2;
     let records = (0..count)
