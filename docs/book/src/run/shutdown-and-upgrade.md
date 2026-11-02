@@ -1,6 +1,6 @@
 # Shutdown and upgrades
 
-Stop the node with `SIGTERM` or `SIGINT`. A clean stop drains open RPC connections, publishes a checkpoint, saves fee-estimator history, writes a mempool snapshot, and exits with status 0. `$DATA` below stands for the data directory you pass to `--data-dir`.
+Stop the node with `SIGTERM`, `SIGINT`, or the RPC `stop` method. A clean stop drains open RPC connections, publishes a checkpoint, saves fee-estimator history, writes a mempool snapshot, and exits with status 0. `$DATA` below stands for the data directory you pass to `--data-dir`.
 
 ## What a signal does
 
@@ -26,6 +26,16 @@ The clean path ends with:
 If any teardown step reports an error, the node skips the mempool snapshot and exits nonzero. The checkpoint publication runs only for a clean shutdown; the log says `clean checkpoint publication skipped: the node did not shut down cleanly` otherwise.
 
 The signal handling source is [`crates/node/src/signal.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/signal.rs), and the teardown sequence is in [`crates/node/src/lifecycle.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/lifecycle.rs).
+
+## The stop RPC
+
+The `stop` method requests the same shutdown over RPC. It trips the node's graceful-shutdown latch, the same chainstate latch SIGTERM and SIGINT trip, and answers this node's own status string:
+
+```
+{"id":1,"jsonrpc":"2.0","result":"bitcoin-rs stopping"}
+```
+
+The latch fires before the reply is written, so delivery is best effort. The detached connection thread normally writes the reply as teardown lets it finish, and the process then exits 0 through the clean path above. A guaranteed pre-teardown write is not part of the API. The string deliberately differs from Bitcoin Core's `Bitcoin Core stopping`. `stop` takes no effect-bearing arguments: Core's hidden numeric wait argument is refused with the local parameter-shape error.
 
 ## One node per data directory
 
