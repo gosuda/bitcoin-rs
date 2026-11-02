@@ -43,9 +43,7 @@ pub enum IndexError {
         expected: Option<IndexWatermark>,
         actual: Option<IndexWatermark>,
     },
-    #[error(
-        "ScriptHistory, ScriptLive and CompactFilters preparation requires a spent-coin script source"
-    )]
+    #[error("ScriptLive and CompactFilters preparation requires a spent-coin script source")]
     MissingSpentScripts,
     #[error("no spent-coin script for outpoint {txid:02x?}:{vout} in block at height {height}")]
     MissingSpentCoin {
