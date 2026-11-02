@@ -284,21 +284,6 @@ jobs:
           for f in test_*.py; do python3 "$f" || exit 1; done
       - run: python3 tools/campaign-corpus/test_corpus.py
 
-  # The mdBook in docs/book is the shipped handbook. Keep its build and
-  # link inventory green on main; chapters drift when code moves.
-  book:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - name: Install pinned mdbook
-        run: cargo install mdbook --locked --version 0.5.4
-      - name: Build the book and check its links
-        run: scripts/ci-pr.sh book
-
   # Kernel oracle differential: with `--features kernel`, replay the committed
   # fixture corpus through libbitcoinkernel AND the Rust path and hard-fail on
   # verdict disagreement. The parity tests cover:

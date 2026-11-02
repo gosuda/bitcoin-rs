@@ -115,9 +115,9 @@ current base before `main` moves forward.
 [`.github/workflows/main.yml`](.github/workflows/main.yml) runs kernel-enabled
 tests and the main-only verification lanes. It triggers on pushes to `main` and
 on manual dispatch. The lanes are bench smoke, native-script evidence, the
-comparator corpus, the book build, the kernel oracle, and Core differential.
-Bench smoke includes the witness-activation kernel regression and the
-SegWit-v0 kernel oracle.
+comparator corpus, the kernel oracle, and Core differential. Bench smoke
+includes the witness-activation kernel regression and the SegWit-v0 kernel
+oracle.
 Pull-request-triggered checks are defined in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and the path-scoped
 [`fuzz-build.yml`](.github/workflows/fuzz-build.yml).

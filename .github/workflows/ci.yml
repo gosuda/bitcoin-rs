@@ -241,7 +241,7 @@ jobs:
           echo "Gate passed."
           case "${{ github.event_name }}" in
             pull_request)
-              echo 'Fast PR checks passed. Binary/workspace tests were skipped and run on merge-group requests and main pushes.' >> "$GITHUB_STEP_SUMMARY"
+              echo 'Fast PR checks passed. The book check, binary, and workspace tests were skipped and run on merge-group requests and main pushes.' >> "$GITHUB_STEP_SUMMARY"
               ;;
             merge_group)
               echo 'Fast and heavy integration checks passed for this merge-group commit. Production/kernel results are reported by ci-merge-gate.' >> "$GITHUB_STEP_SUMMARY"
