@@ -103,8 +103,10 @@ First measured run: **2026-10-30**, on the local `core-functional-compat` branch
   (`setmocktime`-no-op -> `getbestblockhash` -> `getblockheader` ->
   `generatetoaddress` x199 -> `getblockchaininfo == 199` -> `stop`) works.
 - shim patches ACTIVE during the run (see `shim/sitecustomize.py` header;
-  each is a disclosed adaptation around a node gap, each disable-able via
-  env var, raw failures preserved in `results/raw-evidence*/`)
+  each is a disclosed adaptation around a node gap; the RPC no-op and
+  stop-wait patches are disable-able via env var, the MiniWallet
+  `generatetoaddress` patch is unconditional, raw failures preserved in
+  `results/raw-evidence*/`)
 
 **4 of the 46 selected candidates passed** (4 pass / 5 skip / 37 fail).
 Every failure is a node-side gap; no infra or harness-host failures remained
