@@ -93,9 +93,18 @@ crates/node/benches/sync_pipeline.rs:2896
 ```
 
 The fixture corpus line prints (`prefix_blocks=133 tip_height=132`), then the
-T4 connect fixture refuses its own block. CI compiles this bench and never
-runs it, so the failure is invisible to the compile gate. The retained failure
-set (stdout, stderr, exit status, binary sha256) sits beside this page under
+T4 connect fixture refuses its own block. The fixture paid every spend output
+to a bare 2-of-3 multisig script. Each such output counts 20 legacy sigops, so
+a block of 2000 spends carried 40,022 legacy sigops, or 160,088 cost units
+after the witness scale factor. Bitcoin Core 31.1 rejects that block with
+`bad-blk-sigops` in `CheckBlock` (`src/validation.cpp`). The same failure
+reproduces at the merge base `bff29b748`, so it predates this branch. CI
+compiles this bench and never runs it, which hid the defect. The fixture now
+pays its spends to p2pkh outputs (about 8,000 cost units per block) and the
+corpus builder asserts the budget; `--mrp-verify` passes on the fixed tree.
+Rows T2, T3, and T4 stay UNMEASURED because no five-tree registration exists.
+The retained failure set (stdout, stderr, exit status, binary sha256) sits
+beside this page under
 `.outline/evidence/evidence-refresh-20261102/records/mrp-verify/sync_pipeline/`.
 
 ## Full-validation parity at the frozen C150 tip (content facts, not a timed cell)
