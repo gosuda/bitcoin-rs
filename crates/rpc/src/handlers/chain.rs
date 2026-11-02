@@ -879,17 +879,22 @@ pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 /// the equivalents of Core's validation-interface consumers (mempool update,
 /// block log, ZMQ publication, mining-generation signal) run synchronously
 /// inside the committed chain transition itself
-/// (`crates/node/src/chain_effects.rs` `on_connect`/`on_disconnect`), so none
-/// of them can still be pending once any RPC reply is written. The immediate
-/// null is therefore exact for that state. Declared deviation: the background
-/// derived-index reconcile loop (crates/index/src/runtime.rs) is woken
-/// asynchronously and is not awaited here; index-backed reads have their own
-/// catch-up fallback rather than relying on this call.
+/// (`crates/node/src/chain_effects.rs` `on_connect`/`on_disconnect`). The
+/// barrier is therefore the chain-transition mutex the transition authority
+/// holds for the whole commit including those followers: acquiring a stable
+/// read here waits out any in-flight p2p-driven transition before the null
+/// reply is written, matching Core's queue-drained boundary. Declared
+/// deviations: ZMQ delivery to subscribers is queued by the zeromq context's
+/// own I/O thread (`zmq.publish_sequence` enqueues with DONTWAIT), and the
+/// background derived-index reconcile loop (crates/index/src/runtime.rs) is
+/// woken asynchronously — neither is awaited; index-backed reads have their
+/// own catch-up fallback rather than relying on this call.
 pub(crate) fn syncwithvalidationinterfacequeue(
-    _ctx: &Arc<Context>,
+    ctx: &Arc<Context>,
     params: &Value,
 ) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
+    let _settled = ctx.chain.chain_transition.lock();
     Ok(Value::new_null())
 }
 
