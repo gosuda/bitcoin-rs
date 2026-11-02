@@ -31,8 +31,11 @@ on the PR-stack tree with a byte-identical binary and the same 8/5/33; see
 (main's node code had moved, so binary identity no longer held), a sixth
 execution re-anchored the record on the rebased tree with a new binary
 identity and the same 8/5/33 and per-test statuses; see
-[Run 5b](#run-5b-post-rebase-re-anchor) below. The runs' `report.json`/
-`report.md` under `target/core-functional/results/` are the evidence owners.
+[Run 5b](#run-5b-post-rebase-re-anchor) below. Run 5b predates the
+post-review node commits landed on PRs 2 and 3 after it; those commits are
+unmeasured and named in the run-5b note rather than silently covered. The
+runs' `report.json`/`report.md` under `target/core-functional/results/` are
+the evidence owners.
 No claim beyond the 46 selected candidates is made; nothing here extrapolates
 to Core's full 262-script suite.
 
@@ -67,10 +70,20 @@ The node binary is built from `bin/` and `crates/` only - `tools/` is outside
 the build - so regrouping the tools-side commits between branches cannot
 change binary identity; run 5 below re-measures this stack's tree to anchor
 that. The per-run campaign commits (including the per-run README deltas this
-record replaces) remain visible on the `core-functional-compat` branch and
-its backup `core-functional-compat-backup`.
+record replaces) live on the local-only `core-functional-compat` and
+`core-functional-compat-backup` archive branches, which are not pushed to
+the remote; every `sha` cited below is one of those local archive commits.
+Where such a commit carried node code, its content landed in the stack as:
 
-First measured run: **2026-10-30**, on branch `core-functional-compat`.
+| campaign hash | landed commit | where |
+|---------------|---------------|-------|
+| `7913be736` | `a719b9223` | PR 3 (`stop` RPC) |
+| `862068637` | `aca495e5a` | PR 3 (named params, `syncwithvalidationinterfacequeue`, `--version`, shim sync) |
+| `a32b3856e` | `68f61a3a7` | PR 3 (uacomment / named params / silent console) |
+| `cb9cf472c` | `f492559a7` | PR 2 (getpeerinfo per-message byte accounting) |
+| `e18b2ade2` | `cbcfd5489` | PR 2 (ping origination) |
+
+First measured run: **2026-10-30**, on the local `core-functional-compat` branch.
 
 - bitcoin-rs commit: `02dc034c936a5c184b4313c4972b04703af30eb1` (includes the
   `stop` RPC from `7913be736`)
@@ -355,9 +368,11 @@ landed in the working tree (uncommitted at run time):
   messages (the binary's startup-error stderr now uses Core's `Error: `
   console prefix, which the framework's FULL_REGEX match requires); the
   wrapper translates `-uacomment=X`/conf `uacomment=` instead of dropping it.
-- **NG-8** (console logging): new fully-silent node log level `off` (bare
-  global directive, no per-crate floors); the wrapper's `printtoconsole=0`
-  translation changed from `--log-level=warn` to `--log-level=off`.
+- **NG-8** (console logging): run 4 measured a fully-silent node log level
+  `off` (bare global directive, no per-crate floors); in the landed tree the
+  node keeps Core's bare-`off` semantics reverted and the wrapper's
+  `printtoconsole=0` translation composes
+  `--log-level=off,fjall=off,rocksdb=off` (`790010444`).
 
 - bitcoin-rs commit: `a32b3856e` (run 4 measured the byte-identical
   working tree one commit later than `1f51eb4ab` plus these fixes; the
@@ -490,6 +505,16 @@ replay fixes, mempool/rpc fixes, test-suite consolidation), so run 5's
   present in 0.2s, and no test rebuilt it
 - shim patches: the same three as runs 2-5, unchanged
 
+Coverage note: run 5b measured the rebased stack tip as of 2026-10-31. Node
+code landed on PRs 2 and 3 after that measurement is unmeasured by this
+record: PR 2's `33d9449bf`, `9bbf93dcf`, and `d5eb93b45` (MessageAccount
+table, v2 undefined-type charging, per-frame burst accounting, outbound
+control lane) and PR 3's `790010444` and `9db0b4f4e` (stop reply string,
+one-line `--version`, `run.rs` `off` revert, the
+`syncwithvalidationinterfacequeue` barrier). The gap is stated rather than
+covered: a future run re-anchoring on this tip owns the fresh binary
+identity and report.
+
 **8 of the 46 selected candidates passed** (8 pass / 5 skip / 33 fail) -
 per-test statuses identical to runs 4 and 5 for all 46 candidates, and every
 failure reproduces run 4's exact failure point (verified by comparing the
@@ -605,14 +630,18 @@ raw unshimmed reproductions under `results/raw-evidence*/`.
   have no counterpart (5 tests; run 4 moved `feature_loadblock` here from
   NG-17 - it now passes `setnetworkactive`/`connect_nodes` and fails on the
   dropped `-loadblock=bootstrap.dat` with `not(0 == 100)`).
-- ~~**NG-8 console logging**~~ **CLOSED (uacomment-phase working tree, run 4
-  verified)**: the node gained a fully-silent log level `off` (bare global
-  `EnvFilter` directive - no per-crate `fjall`/`rocksdb` floors can re-enable
-  a target; `crates/node/src/run.rs` `build_filter_directive`), and the
+- ~~**NG-8 console logging**~~ **CLOSED (run 4 verified; landed tree keeps
+  the closure via the wrapper directive)**: run 4 measured a fully-silent
+  node log level `off` (bare global `EnvFilter` directive) plus the
   wrapper's `printtoconsole=0` translation changed from `--log-level=warn`
-  to `--log-level=off`. Direct probe (`results/run4/gap-probes.md`): a node
-  at `off` writes 0 stderr bytes across a dial the node warns about, where
-  `warn` writes 489. Run 4 verified all three blocked tests PASS
+  to `--log-level=off`. In the landed tree the node-side bare `off` was
+  reverted to Core's semantics (`off` means `off,fjall=warn,rocksdb=warn`
+  again) and the closure moved entirely into the wrapper, which now
+  composes `--log-level=off,fjall=off,rocksdb=off` (`790010444`) - the same
+  fully-silent console the tests assert. Direct probe
+  (`results/run4/gap-probes.md`): a node at `off` writes 0 stderr bytes
+  across a dial the node warns about, where `warn` writes 489. Run 4
+  verified all three blocked tests PASS
   (`p2p_invalid_locator`, `p2p_block_sync`, `p2p_net_deadlock`). Run-3 text
   for the record: Core's `printtoconsole=0` console is silent while bitcoin-rs
   wrote WARN lines to stderr, breaking exact-stderr teardown assertions.
@@ -662,9 +691,11 @@ raw unshimmed reproductions under `results/raw-evidence*/`.
   wrapper and the node then starts, where Core exits 1 with
   "Error parsing command line arguments". Invoked directly the node does fail
   on unknown flags, but with clap's exit code 2 and message, not Core's 1.
-- ~~**NG-15 no `--version` flag**~~ **CLOSED by `862068637`** (run 2 verified:
-  `--version` exits 0 printing the version and copyright in Core's shape;
-  `feature_help` passes that leg).
+- ~~**NG-15 no `--version` flag**~~ **CLOSED by `862068637`** (run 2 verified
+  the flag exists and `feature_help` passes that leg; run 2 measured the
+  earlier copyright-bearing form). The landed `--version` prints exactly one
+  line, `bitcoin-rs daemon version <ver>` - no copyright block
+  (`790010444`).
 - ~~**NG-16 no originated ping/keepalive**~~ **CLOSED by commit `e18b2ade2`**
   (run 3 measured the byte-identical pre-commit tree; binary sha256
   `800aa9739c...`, see Run 3): the p2p `Keepalive` owner now owes the first
@@ -784,7 +815,7 @@ per-test `tmp/` datadirs retained for debugging.
 | `fetch-core-tests.sh` | `git archive`s `test/functional`, `contrib/linearize`, `share/rpcauth` from a verified tag in a local Core checkout, writes a `PROVENANCE` stamp, symlinks `<dest>/bin/bitcoind` -> `bin/bitcoind-wrapper`. Refuses to run if the tag does not resolve. |
 | `bin/bitcoind-wrapper` | Python adapter exec'd by the framework. Translates Core-style argv to bitcoin-rs flags, derives a supported-only `bitcoin-rs-derived.conf` from the framework's `bitcoin.conf`, and creates the RPC cookie file where the framework reads it (`<datadir>/<chain>/.cookie`), pointing the node at it via `--rpc-cookie`. The node's own data directory is `<datadir>/bitcoin-rs-data` (bitcoin-rs refuses a fresh datadir holding foreign entries, and the framework always pre-populates `<datadir>/` with `bitcoin.conf` and `stderr/`/`stdout/`; keeping the node dir at the datadir top level means the framework's cache copytree carries the premined chain in the node's own storage format). Also creates the Core-facing layout `<datadir>/<chain>/{,wallets}` (mode 0700) that Core bitcoind always creates, the framework's cache teardown `rmdir`s, and `feature_posix_fs_permissions.py` asserts. With no chain marker anywhere the wrapper defaults to mainnet (Core's default), so the cookie lands at `<datadir>/.cookie` where the framework's `get_auth_cookie(datadir, "")` reads it. `printtoconsole=0` (the framework's setting) translates to the fully-silent composed directive `--log-level=off,fjall=off,rocksdb=off` (run 4 measured the earlier bare `--log-level=off`; the closest equivalent of Core's "console stays quiet" behavior that tests assert at teardown). Unmappable flags/conf keys are dropped and appended as JSON lines to `<datadir>/wrapper-dropped-flags.log`. Silent on stdout/stderr in success paths. Reads `BITCOIN_RS_BIN` (required) and `BITCOIN_RS_EXTRA_ARGS` (optional, appended verbatim). |
 | `config.ini` | Template framework config; `run.sh` renders `@CORE_TESTS_DIR@` into the results dir. `ENABLE_BITCOIND=true`, every other component `false` so wallet/cli/zmq-dependent tests take the framework's own skip paths. |
-| `shim/sitecustomize.py` | PYTHONPATH startup hook; every patch is an explicitly recorded bitcoin-rs deviation with a disable env var (see the file header). Three patches remain active: (1) monkeypatches `test_framework.wallet.MiniWallet.generate` to mine via the implemented `generatetoaddress` RPC instead of the unimplemented `generatetodescriptor` (ADDRESS_OP_TRUE mode only; other modes keep upstream behavior and fail loudly); (2) no-ops the one framework-plumbing RPC the node still lacks, `setmocktime` (no candidate test calls it itself; NG-3); (3) strips exactly the `stop(wait=0)` teardown form (Core's hidden wait argument; the node's stop takes none - non-zero waits still fail honestly; NG-4). Two run-1 patches were deleted once the node closed their gaps and run 2 + direct probes verified the closures: the client-side params-rewrite for `"params":{}` and `generatetoaddress` named-object forms (NG-1, closed by `862068637`) and the `syncwithvalidationinterfacequeue` no-op (NG-2, same commit). No Core code is copied; the patches preserve upstream post-conditions where they apply. |
+| `shim/sitecustomize.py` | PYTHONPATH startup hook; every patch is an explicitly recorded bitcoin-rs deviation (see the file header); patches (2) and (3) carry a disable env var while patch (1) is unconditional. Three patches remain active: (1) monkeypatches `test_framework.wallet.MiniWallet.generate` to mine via the implemented `generatetoaddress` RPC instead of the unimplemented `generatetodescriptor` (ADDRESS_OP_TRUE mode only; other modes keep upstream behavior and fail loudly); (2) no-ops the one framework-plumbing RPC the node still lacks, `setmocktime` (no candidate test calls it itself; NG-3); (3) strips exactly the `stop(wait=0)` teardown form (Core's hidden wait argument; the node's stop takes none - non-zero waits still fail honestly; NG-4). Two run-1 patches were deleted once the node closed their gaps and run 2 + direct probes verified the closures: the client-side params-rewrite for `"params":{}` and `generatetoaddress` named-object forms (NG-1, closed by `862068637`) and the `syncwithvalidationinterfacequeue` no-op (NG-2, same commit). No Core code is copied; the patches preserve upstream post-conditions where they apply. |
 | `run.sh` + `bin/runner.py` | Runner: per-test `python3 <test>.py --configfile <rendered config.ini> --tmpdir <results>/tmp/<test> --cachedir <results>/cache` with the shim on `PYTHONPATH`, cwd `= <dest>/test/functional`. Before the parallel pool starts, runs the extracted tree's `create_cache.py` once, serially, against the shared cachedir (Core's own `test_runner.py` pattern) so parallel jobs never race to build the cache; the framework skips mining when the cache node dir already exists, so pre-seeded caches are reused. Each test runs as its own process group; a timeout kills the whole group so node processes a timed-out test spawned cannot linger and hold ports. Classifies 0=PASS, 77=SKIP, else=FAIL (timeout tracked separately). Fails fast (exit 2, before running anything) when `BITCOIN_RS_BIN` is unset/missing. Records per-test exit code, duration, framework-log tail, and captured stdout/stderr tails in `report.json` (a relative `--results-dir` is resolved, since tests run with a different cwd). |
 | `tests/clean-candidates.txt` | The 46 tests selected by static RPC-dependency analysis at derivation time: an upper bound on candidates, not pass claims. |
 | `tests/wrapper_smoke.py` | Wrapper regression guard: covers the translation table, cookie/datadir layout (including the mainnet default and `bitcoin-rs-data` redirect), drop logging, and error paths. |
