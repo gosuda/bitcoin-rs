@@ -17,11 +17,26 @@ fn load(
     config::resolve(cli, vars)
 }
 
+/// The `-version` output: one line carrying this node's own name and
+/// workspace version. Core's `feature_help.py` (v31.1) asserts only exit 0
+/// and the word "version" on stdout, so Core's license paragraph is not
+/// imitated (a fixed copyright year would also go stale).
+fn version_notice() -> String {
+    format!(
+        "bitcoin-rs daemon version {version}\n",
+        version = env!("CARGO_PKG_VERSION")
+    )
+}
+
 fn main() -> ExitCode {
     let cli = match <config::CliArgs as clap::Parser>::try_parse() {
         Ok(cli) => cli,
         Err(error) => error.exit(),
     };
+    if cli.version {
+        print!("{}", version_notice());
+        return ExitCode::SUCCESS;
+    }
     let import = (cli.corpus.clone(), cli.manifest.clone(), cli.state.clone());
     let result = config::resolve(cli, std::env::vars_os()).and_then(|config| match import {
         (Some(corpus), Some(manifest), Some(state)) => {
@@ -37,7 +52,10 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("bitcoin-rs: {error:#}");
+            // Core's init errors print `Error: <message>` on stderr
+            // (`InitError` -> `noui.cpp`); the functional framework matches
+            // startup failures against exactly that shape.
+            eprintln!("Error: {error:#}");
             ExitCode::FAILURE
         }
     }

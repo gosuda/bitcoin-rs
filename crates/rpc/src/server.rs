@@ -1010,7 +1010,11 @@ fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
         return CallResponse::envelope_error(version.error_response(&error, &id), version, error);
     }
     let empty_params = json!([]);
-    let params = if params.is_null() {
+    // An empty params object is "no named parameters": Core routes every
+    // object params through transformNamedArguments (src/rpc/server.cpp),
+    // which maps `{}` to an empty positional array for any method, exactly as
+    // a null params field already is (src/rpc/request.cpp).
+    let params = if params.is_null() || params.as_object().is_some_and(sonic_rs::Object::is_empty) {
         &empty_params
     } else {
         params

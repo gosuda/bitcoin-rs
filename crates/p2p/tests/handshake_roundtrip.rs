@@ -8,15 +8,16 @@ use bitcoin_rs_p2p::dispatch::dispatch_inbound;
 use bitcoin_rs_p2p::handshake::start;
 use bitcoin_rs_p2p::wire::PROTOCOL_VERSION;
 use bitcoin_rs_p2p::{Message, Peer, PeerError, PeerRole, PeerState};
+use bitcoin_rs_primitives::USER_AGENT;
 
 fn handshake_cursors(
     left: &mut Peer<Cursor<Vec<u8>>>,
     right: &mut Peer<Cursor<Vec<u8>>>,
 ) -> Result<(), PeerError> {
     let unpruned = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
-    let left_messages = start(left, 1, 0, PeerRole::FullRelay, unpruned);
+    let left_messages = start(left, 1, 0, PeerRole::FullRelay, unpruned, USER_AGENT);
     exchange(left, right, left_messages)?;
-    let right_messages = start(right, 2, 0, PeerRole::FullRelay, unpruned);
+    let right_messages = start(right, 2, 0, PeerRole::FullRelay, unpruned, USER_AGENT);
     exchange(right, left, right_messages)?;
     exchange(left, right, vec![Message::Verack])?;
     exchange(right, left, vec![Message::Verack])?;
@@ -73,6 +74,7 @@ fn cursor_handshake_advertises_the_pinned_wire_protocol_version() {
         0,
         PeerRole::FullRelay,
         ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        USER_AGENT,
     );
 
     let [Message::Version(version), ..] = messages.as_slice() else {

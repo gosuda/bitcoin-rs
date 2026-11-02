@@ -1656,3 +1656,72 @@ fn getchaintips_marks_active_from_applied_tip() {
         Some(expected.as_str())
     );
 }
+
+/// Core's syncwithvalidationinterfacequeue waits for its asynchronous
+/// validation-interface queue; this node answers after taking the
+/// chain-transition barrier, so an in-flight transition's synchronous
+/// followers have finished when the reply is written and the answer is
+/// Core's null (ZMQ delivery and the derived-index reconcile stay queued —
+/// see the handler's declared deviations).
+#[test]
+fn sync_with_validation_interface_queue_answers_null() {
+    let ctx = Arc::new(Context::new());
+    let never = || bitcoin_rs_chain::LatchReader::fixture_never();
+    for params in [json!([]), Value::new_null()] {
+        let reply = syncwithvalidationinterfacequeue(&ctx, &params, &never())
+            .unwrap_or_else(|err| panic!("params {params:?} must answer: {err}"));
+        assert!(reply.is_null(), "params {params:?}: {reply:?}");
+    }
+    let error = syncwithvalidationinterfacequeue(&ctx, &json!([1]), &never())
+        .err()
+        .unwrap_or_else(|| panic!("an argument must be refused"));
+    assert_eq!(error.code(), RpcError::INVALID_PARAMS);
+    assert_eq!(
+        error.to_string(),
+        "invalid params: method does not accept parameters"
+    );
+}
+
+/// The call is a real barrier: while the chain-transition mutex is held (an
+/// in-flight commit and its synchronous followers), the reply cannot be
+/// written; once it is free the answer is Core's null. The wait honors the
+/// cancellation latch: a triggered latch answers -1 while the transition is
+/// still held, so a stopping node never parks the connection on the barrier.
+#[test]
+fn sync_with_validation_interface_queue_waits_out_a_held_transition() {
+    let ctx = Arc::new(Context::new());
+    let held = ctx.chain.chain_transition.lock();
+    let worker_ctx = Arc::clone(&ctx);
+    let worker = std::thread::spawn(move || {
+        syncwithvalidationinterfacequeue(
+            &worker_ctx,
+            &json!([]),
+            &bitcoin_rs_chain::LatchReader::fixture_never(),
+        )
+    });
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(
+        !worker.is_finished(),
+        "the reply waits while a chain transition is held"
+    );
+    drop(held);
+    let reply = worker
+        .join()
+        .unwrap_or_else(|_| panic!("the barrier caller must not panic"));
+    assert!(
+        matches!(&reply, Ok(reply) if reply.is_null()),
+        "the call answers Core's null once the transition settles: {reply:?}"
+    );
+    let interrupted_ctx = Arc::new(Context::new());
+    let _still_held = interrupted_ctx.chain.chain_transition.lock();
+    let stopped =
+        bitcoin_rs_chain::LatchReader::new(Arc::new(core::sync::atomic::AtomicBool::new(true)));
+    let error = syncwithvalidationinterfacequeue(&interrupted_ctx, &json!([]), &stopped)
+        .err()
+        .unwrap_or_else(|| panic!("a triggered latch must interrupt the barrier wait"));
+    assert_eq!(error.code(), -1, "{error}");
+    assert_eq!(
+        error.to_string(),
+        "Sync with validation interface queue interrupted"
+    );
+}

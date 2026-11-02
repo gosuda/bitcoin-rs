@@ -302,6 +302,7 @@ fn serve_connection(
         1,
         0,
         bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+        bitcoin_rs_primitives::USER_AGENT,
         lease,
         deadline,
     )
@@ -391,6 +392,7 @@ fn dial_handshake(dialer: &TcpStream, magic: Magic, wtxid_relay: bool) -> anyhow
             0,
             PeerRole::FullRelay,
             bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+            bitcoin_rs_primitives::USER_AGENT,
         )),
     )?;
     loop {

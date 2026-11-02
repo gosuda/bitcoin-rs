@@ -109,7 +109,7 @@ curl -s http://127.0.0.1:18443/api/blocks/tip/hash
 
 ### 3. Stop the node cleanly
 
-Lifecycle control is handled by process signals (`SIGINT` or `SIGTERM`), not a `stop` JSON-RPC method (`stop` is unimplemented over RPC):
+Lifecycle control is available over the `stop` JSON-RPC method or process signals (`SIGINT` or `SIGTERM`), all tripping the same graceful-shutdown latch:
 
 ```sh
 kill -INT "$NODE_PID"
@@ -159,7 +159,7 @@ The workspace is a five-layer, one-way dependency graph: `bin/bitcoin-rs` and `c
 
 External interoperability is tracked per surface in [`docs/api/ecosystem-compat.toml`](docs/api/ecosystem-compat.toml) ([contract](docs/contracts/ecosystem-compatibility.md)); per-method RPC status in [`docs/rpc-reference.md`](docs/rpc-reference.md); evidence lanes in [`docs/validation-tooling.md`](docs/validation-tooling.md).
 
-Externally verified on regtest against unmodified Bitcoin Core 31.1: P2P v1 wire, BIP152 compact blocks, BIP324 v2 transport, and BIP157/158 filters. Proactive block announcements still await a retained qualification run. JSON-RPC, REST, ZMQ, Esplora, and mining templates are implemented with in-tree suites. BIP352 Silent Payments and the Stratum V2 adapter are experimental. Wallet RPCs and Core IPC are intentionally unsupported; `stop` is unimplemented over RPC ([rpc-reference](docs/rpc-reference.md)), so shutdown uses process signals.
+Externally verified on regtest against unmodified Bitcoin Core 31.1: P2P v1 wire, BIP152 compact blocks, BIP324 v2 transport, and BIP157/158 filters. Proactive block announcements still await a retained qualification run. JSON-RPC, REST, ZMQ, Esplora, and mining templates are implemented with in-tree suites. BIP352 Silent Payments and the Stratum V2 adapter are experimental. Wallet RPCs and Core IPC are intentionally unsupported; shutdown uses the `stop` RPC or process signals ([rpc-reference](docs/rpc-reference.md)).
 
 Maps: [docs index](docs/README.md), [contracts](docs/contracts/README.md), [BIP support](docs/bip-support.md), [concepts](CONCEPTS.md).
 

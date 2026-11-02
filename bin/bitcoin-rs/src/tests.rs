@@ -688,3 +688,30 @@ fn known_non_utf8_environment_value_is_rejected() {
             .contains("environment variable BITCOIN_RS_DATA_DIR is not valid UTF-8")
     );
 }
+
+/// Core's `-version` leg of `feature_help.py` (v31.1) asserts exit 0 and the
+/// word "version" on stdout. The flag short-circuits before any datadir
+/// work and prints one line with this node's own name and workspace
+/// version - never a Core identity or version number.
+#[test]
+fn version_flag_short_circuits_with_the_node_version_line() {
+    use clap::Parser as _;
+    let cli = super::config::CliArgs::try_parse_from(["bitcoin-rs", "--version"])
+        .unwrap_or_else(|error| panic!("--version must parse: {error}"));
+    assert!(cli.version);
+
+    let notice = super::version_notice();
+    assert_eq!(
+        notice,
+        format!("bitcoin-rs daemon version {}\n", env!("CARGO_PKG_VERSION")),
+        "the whole notice is the node's own version line"
+    );
+    assert!(
+        notice.contains("version"),
+        "feature_help.py's -version assertion"
+    );
+    assert!(
+        !notice.contains("Bitcoin Core") && !notice.contains("v31."),
+        "no Core identity or version is imitated: {notice:?}"
+    );
+}

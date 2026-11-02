@@ -873,6 +873,48 @@ pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     typed_to_sonic(&v31::PruneBlockchain(i64::from(result.pruneheight)))
 }
 
+/// Core's hidden `syncwithvalidationinterfacequeue` (src/rpc/blockchain.cpp)
+/// waits until the validation-interface queue has drained. This node has no
+/// asynchronous callback queue between chain validation and the RPC surface:
+/// the equivalents of Core's validation-interface consumers (mempool update,
+/// block log, ZMQ publication, mining-generation signal) run synchronously
+/// inside the committed chain transition itself
+/// (`crates/node/src/chain_effects.rs` `on_connect`/`on_disconnect`). The
+/// barrier is therefore the chain-transition mutex the transition authority
+/// holds for the whole commit including those followers: acquiring a stable
+/// read here waits out any in-flight p2p-driven transition before the null
+/// reply is written, matching Core's queue-drained boundary. The wait is a
+/// blocking request under bounded admission, and lock acquisition honors the
+/// cancellation latch: a triggered latch or node shutdown answers -1 instead
+/// of parking the connection. Declared deviations: ZMQ delivery to
+/// subscribers is queued by the zeromq context's own I/O thread
+/// (`zmq.publish_sequence` enqueues with DONTWAIT), and the background
+/// derived-index reconcile loop (crates/index/src/runtime.rs) is woken
+/// asynchronously — neither is awaited; index-backed reads have their own
+/// catch-up fallback rather than relying on this call.
+pub(crate) fn syncwithvalidationinterfacequeue(
+    ctx: &Arc<Context>,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
+    ensure_no_params(params)?;
+    let _settled = loop {
+        if cancellation.is_triggered() {
+            return Err(RpcError::Misc(
+                "Sync with validation interface queue interrupted".to_owned(),
+            ));
+        }
+        if let Some(settled) = ctx
+            .chain
+            .chain_transition
+            .try_lock_for(std::time::Duration::from_millis(50))
+        {
+            break settled;
+        }
+    };
+    Ok(Value::new_null())
+}
+
 pub(crate) fn invalidateblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
     let control = ctx

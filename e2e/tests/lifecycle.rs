@@ -73,6 +73,18 @@ fn restart_preserves_chain_tip() -> Result<()> {
 }
 
 #[test]
+fn stop_rpc_answers_the_node_status_and_exits_zero() -> Result<()> {
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
+
+    let reply = node.rpc("stop", &json!([]))?;
+    assert_eq!(reply, json!("bitcoin-rs stopping"));
+
+    let code = node.wait_exit_code(Duration::from_secs(30))?;
+    assert_eq!(code, 0, "stop must exit through the graceful shutdown path");
+    Ok(())
+}
+
+#[test]
 fn startup_rejects_broken_configuration() -> Result<()> {
     let squatter = std::net::TcpListener::bind("127.0.0.1:0")?;
     let held = squatter.local_addr()?;
