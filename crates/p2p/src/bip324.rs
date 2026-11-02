@@ -17,6 +17,10 @@ pub use packet::{PacketError, RecvCipher};
 pub use reader::PacketReader;
 pub use reader::is_poll_timeout;
 
+/// A BIP324 transport failure.
+///
+/// A poll-timeout [`TransportError::Io`] keeps the connection alive; every
+/// other variant is terminal and poisons the reader.
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
     #[error("BIP324 garbage terminator not found within the garbage limit")]
