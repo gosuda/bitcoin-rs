@@ -86,7 +86,11 @@ Manual bans are separate. Operator bans exclude whole subnets from an `IpSubnet`
 
 ## Message loop and budgets
 
-Each connection has one reader and one writer. The writer coalesces a ready burst into one vectored write, and every queued message is a `QueuedFrame` charged against both the connection budget and a shared 64 MiB outbound queue cap (`SHARED_OUTBOUND_QUEUE_MAX_BYTES`).
+Each connection has one reader and one writer. The writer coalesces a ready burst into one vectored write, and every queued data message is a `QueuedFrame` charged against both the connection budget and a shared 64 MiB outbound queue cap (`SHARED_OUTBOUND_QUEUE_MAX_BYTES`). Node-originated control frames, today only the keepalive `ping`, charge a separate bounded control lane of 8 messages and 64 KiB, so a queued probe never takes a data slot or byte a pending response needs; control frames still charge the shared aggregate. The writer channel stays strict FIFO: a probe admitted while data is queued joins behind it.
+
+The keepalive owes its first `ping` on a connection's first message-loop pass after the handshake, then one probe per 2 minutes of send-or-receive silence with a fresh nonce. A refused probe stays owed and drains ahead of deferred replies once room returns; already-queued data keeps its order. Lane-full or dead-writer refusals are connection-local congestion: the probe is deferred, not lost, and the congestion is not a keepalive stall.
+
+Send silence comes from the socket, not the queue. The writer's stream accounting stamps the lease's send-activity clock at the exact point the socket accepts bytes, and the message loop reads that clock each pass, so an admitted-but-unwritten frame never masks a stalled writer. With a stalled writer and live inbound traffic the connection still expires after `TIMEOUT_INTERVAL` (20 minutes) of silence following its last actual write.
 
 When the shared cap is reached, the node stops accepting more queued work. That is backpressure, not a ban: getdata service defers requests and parks unserved work, and the connection lease stays alive. A slow reader therefore slows its own service without cancelling the peer or growing memory without bound (`P2P-04`, `P2P-07`).
 
@@ -122,7 +126,7 @@ Inbound headers pass through `HeadersSyncState::process`, which decides presync,
 | `P2P-01` | Wire framing and handshake compatibility against the pinned Core version |
 | `P2P-02` | Connection lifecycle and lease ownership |
 | `P2P-03` | Best-known-height credit rises monotonically and only through the delivering connection |
-| `P2P-04` | Connected sockets set `TCP_NODELAY` and forward vectored writes |
+| `P2P-04` | Connected sockets set `TCP_NODELAY`, forward vectored writes, and count each inbound frame under its command name |
 | `P2P-05` | A headers response before its deadline marks the request queued without granting credit |
 | `P2P-06` | The header carried in every inbound body reaches header admission |
 | `P2P-07` | Block announcements lead with headers and never trigger a body request |
