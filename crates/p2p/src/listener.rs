@@ -1826,14 +1826,15 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
         match action {
             KeepaliveAction::Idle => {}
             KeepaliveAction::Ping => {
-                if budget.local_production_headroom() {
-                    match lease.send(crate::Message::Ping(generate_nonce(peer_addr))) {
-                        Ok(()) => keepalive.record_probe(Instant::now()),
-                        Err(crate::OutboundRefusal::Saturated(_)) => {
-                            keepalive.note_refusal(crate::connection::Refusal::Shared);
-                        }
-                        Err(crate::OutboundRefusal::Closed(_)) => return Err(closed_queue()),
+                // The probe rides the bounded control lane so it stays prompt
+                // without ever displacing a pending data response; a lane- or
+                // aggregate-refused probe stays owed and retries next pass.
+                match lease.send_control(crate::Message::Ping(generate_nonce(peer_addr))) {
+                    Ok(()) => keepalive.record_probe(Instant::now()),
+                    Err(crate::OutboundRefusal::Saturated(_)) => {
+                        keepalive.note_refusal(crate::connection::Refusal::Shared);
                     }
+                    Err(crate::OutboundRefusal::Closed(_)) => return Err(closed_queue()),
                 }
             }
             KeepaliveAction::Expired => {

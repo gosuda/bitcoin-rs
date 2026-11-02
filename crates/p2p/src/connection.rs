@@ -301,6 +301,7 @@ pub(crate) enum Refusal {
 pub(crate) struct OutboundCredit {
     budget: Arc<OutboundBudget>,
     bytes: usize,
+    control: bool,
 }
 
 impl OutboundCredit {
@@ -315,7 +316,7 @@ impl OutboundCredit {
 
 impl Drop for OutboundCredit {
     fn drop(&mut self) {
-        self.budget.release(self.bytes);
+        self.budget.release(self.bytes, self.control);
     }
 }
 
@@ -378,6 +379,11 @@ const _: () = assert!(OUTBOUND_QUEUE_MAX_BYTES > 15 * BLOCK_PRODUCTION_RESERVE_B
 
 pub(crate) const MAX_UNSOLICITED_BLOCK_FORWARDS: usize = 16;
 
+// Originated control traffic rides a small bounded lane outside the data
+// caps so a queued control frame can never displace a pending response.
+const CONTROL_QUEUE_MAX_MESSAGES: usize = 8;
+const CONTROL_QUEUE_MAX_BYTES: usize = 64 * 1024;
+
 #[derive(Debug)]
 pub(crate) struct BlockForwardCredit(Option<Arc<AtomicUsize>>);
 
@@ -396,6 +402,8 @@ pub(crate) struct OutboundBudget {
     block_reserve: usize,
     pending_messages: AtomicUsize,
     pending_bytes: AtomicUsize,
+    control_messages: AtomicUsize,
+    control_bytes: AtomicUsize,
     #[cfg(test)]
     refusals: AtomicUsize,
     drained: Condvar,
@@ -417,6 +425,8 @@ impl OutboundBudget {
             block_reserve,
             pending_messages: AtomicUsize::new(0),
             pending_bytes: AtomicUsize::new(0),
+            control_messages: AtomicUsize::new(0),
+            control_bytes: AtomicUsize::new(0),
             #[cfg(test)]
             refusals: AtomicUsize::new(0),
             drained: Condvar::new(),
@@ -460,6 +470,40 @@ impl OutboundBudget {
         Ok(self.commit_locked(wire_len))
     }
 
+    /// Charge a frame against the bounded control lane instead of the data
+    /// caps. The lane still honors the shared aggregate cap, so control
+    /// traffic stays retryable backpressure rather than an exemption.
+    pub(crate) fn try_charge_control(
+        self: &Arc<Self>,
+        wire_len: usize,
+    ) -> Result<OutboundCredit, Refusal> {
+        let _guard = self.drained_lock.lock();
+        if self.writer_dead.load(Ordering::Acquire) {
+            #[cfg(test)]
+            self.refusals.fetch_add(1, Ordering::Relaxed);
+            return Err(Refusal::Local);
+        }
+        if self.control_messages.load(Ordering::Acquire) >= CONTROL_QUEUE_MAX_MESSAGES
+            || self
+                .control_bytes
+                .load(Ordering::Acquire)
+                .saturating_add(wire_len)
+                > CONTROL_QUEUE_MAX_BYTES
+        {
+            #[cfg(test)]
+            self.refusals.fetch_add(1, Ordering::Relaxed);
+            return Err(Refusal::Shared);
+        }
+        if let Some(shared) = &self.shared
+            && !shared.try_charge(wire_len, shared.max_bytes)
+        {
+            #[cfg(test)]
+            self.refusals.fetch_add(1, Ordering::Relaxed);
+            return Err(Refusal::Shared);
+        }
+        Ok(self.commit_control_locked(wire_len))
+    }
+
     pub(crate) fn try_reserve_production(self: &Arc<Self>) -> Result<OutboundCredit, Refusal> {
         let _guard = self.drained_lock.lock();
         if self.writer_dead.load(Ordering::Acquire) || !self.local_production_headroom() {
@@ -490,6 +534,17 @@ impl OutboundBudget {
         OutboundCredit {
             budget: Arc::clone(self),
             bytes,
+            control: false,
+        }
+    }
+
+    fn commit_control_locked(self: &Arc<Self>, bytes: usize) -> OutboundCredit {
+        self.control_messages.fetch_add(1, Ordering::AcqRel);
+        self.control_bytes.fetch_add(bytes, Ordering::AcqRel);
+        OutboundCredit {
+            budget: Arc::clone(self),
+            bytes,
+            control: true,
         }
     }
 
@@ -502,7 +557,7 @@ impl OutboundBudget {
         credit.bytes -= excess;
         {
             let _guard = self.drained_lock.lock();
-            self.release_bytes_locked(excess);
+            self.release_bytes_locked(excess, credit.control);
             if let Some(shared) = &self.shared {
                 shared.release_counter(excess);
             }
@@ -510,16 +565,19 @@ impl OutboundBudget {
         self.wake_after_release();
     }
 
-    fn release(&self, wire_len: usize) {
+    fn release(&self, wire_len: usize, control: bool) {
         {
             let _guard = self.drained_lock.lock();
-            let messages =
-                self.pending_messages
-                    .try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
-                        pending.checked_sub(1)
-                    });
-            debug_assert!(messages.is_ok(), "released more messages than charged");
-            self.release_bytes_locked(wire_len);
+            let messages = if control {
+                &self.control_messages
+            } else {
+                &self.pending_messages
+            };
+            let released = messages.try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                pending.checked_sub(1)
+            });
+            debug_assert!(released.is_ok(), "released more messages than charged");
+            self.release_bytes_locked(wire_len, control);
             if let Some(shared) = &self.shared {
                 shared.release_counter(wire_len);
             }
@@ -527,12 +585,15 @@ impl OutboundBudget {
         self.wake_after_release();
     }
 
-    fn release_bytes_locked(&self, bytes: usize) {
-        let released =
-            self.pending_bytes
-                .try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
-                    pending.checked_sub(bytes)
-                });
+    fn release_bytes_locked(&self, bytes: usize, control: bool) {
+        let counter = if control {
+            &self.control_bytes
+        } else {
+            &self.pending_bytes
+        };
+        let released = counter.try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+            pending.checked_sub(bytes)
+        });
         debug_assert!(released.is_ok(), "released more bytes than charged");
     }
 
@@ -586,6 +647,15 @@ impl OutboundBudget {
         (
             self.pending_messages.load(Ordering::Acquire),
             self.pending_bytes.load(Ordering::Acquire),
+        )
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn control_pending(&self) -> (usize, usize) {
+        (
+            self.control_messages.load(Ordering::Acquire),
+            self.control_bytes.load(Ordering::Acquire),
         )
     }
 
@@ -885,6 +955,32 @@ impl PeerLease {
             return Err(OutboundRefusal::Closed(message));
         };
         match self.budget.try_charge(wire_len) {
+            Ok(credit) => self.enqueue(message, credit),
+            Err(Refusal::Local) => {
+                self.cancel();
+                Err(OutboundRefusal::Closed(message))
+            }
+            Err(Refusal::Shared) => Err(OutboundRefusal::Saturated(message)),
+        }
+    }
+
+    /// Send a node-originated control frame on the bounded control lane so it
+    /// can never displace a pending data response. A full lane or a full
+    /// shared aggregate reads as `Saturated` backpressure, not closure.
+    #[expect(clippy::result_large_err)]
+    pub(crate) fn send_control(&self, message: crate::Message) -> Result<(), OutboundRefusal> {
+        if self.is_cancelled() {
+            return Err(OutboundRefusal::Closed(message));
+        }
+        if matches!(message, crate::Message::Feature(_)) {
+            self.cancel();
+            return Err(OutboundRefusal::Closed(message));
+        }
+        let Ok(wire_len) = crate::wire::wire_len(&message) else {
+            self.cancel();
+            return Err(OutboundRefusal::Closed(message));
+        };
+        match self.budget.try_charge_control(wire_len) {
             Ok(credit) => self.enqueue(message, credit),
             Err(Refusal::Local) => {
                 self.cancel();
