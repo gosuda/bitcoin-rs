@@ -574,6 +574,11 @@ fn validate_undo_for_block(
     if height == 0 {
         return Ok(());
     }
+    if check.block.txs.len() != check.txids.len() {
+        return Err(UndoCodecError::BlockMismatch {
+            reason: "transaction id count differs from the block transaction count",
+        });
+    }
     let (created, mut expected_removes) = block_outputs(check)?;
     let (external_inputs, same_block_inputs) = block_inputs(check);
     expected_removes.retain(|outpoint| !same_block_inputs.contains(outpoint));
@@ -613,7 +618,6 @@ fn validate_undo_for_block(
 fn block_outputs(
     check: &BlockUndoCheck<'_>,
 ) -> Result<(HashSet<OutPoint>, HashSet<OutPoint>), UndoCodecError> {
-    debug_assert_eq!(check.block.txs.len(), check.txids.len());
     let mut created = HashSet::new();
     let mut retained = HashSet::new();
     for (tx, txid) in check.block.txs.iter().zip(check.txids) {
@@ -634,7 +638,6 @@ fn block_outputs(
 }
 
 fn block_inputs(check: &BlockUndoCheck<'_>) -> (HashSet<OutPoint>, HashSet<OutPoint>) {
-    debug_assert_eq!(check.block.txs.len(), check.txids.len());
     let mut prior_txids: HashSet<Txid> = HashSet::with_capacity(check.block.txs.len());
     let mut external = HashSet::new();
     let mut same_block = HashSet::new();

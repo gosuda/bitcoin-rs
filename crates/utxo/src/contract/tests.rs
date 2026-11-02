@@ -641,6 +641,19 @@ fn undo_validation_matches_the_block_shape() -> TestResult {
     let undo = shaped_undo(&block);
     assert_eq!(validate_undo_for_block(&check, HEIGHT, &undo), Ok(()));
 
+    let short = BlockUndoCheck {
+        block: &block,
+        txids: &txids[..2],
+        max_script_size: MAX_SCRIPT_SIZE,
+    };
+    assert!(
+        matches!(
+            validate_undo_for_block(&short, HEIGHT, &undo),
+            Err(UndoCodecError::BlockMismatch { .. })
+        ),
+        "a short transaction id slice must refuse instead of validating fewer transactions"
+    );
+
     let mut extra_remove = shaped_undo(&block);
     extra_remove.remove(OutPoint::new(block.txs[1].txid(), 0));
     assert!(matches!(
