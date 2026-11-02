@@ -1,6 +1,6 @@
 # Benchmarks
 
-No benchmark number in this book is a result. At this commit every product performance cell is unmeasured, and every Cmodern cell is blocked on a missing corpus. The benchmark pages own the evidence rules.
+No benchmark number in this book is a result. At this commit one product ledger cell has samples: the C150 offline replay cell measured on 2026-11-02 with a gated result and no acceptance verdict. Every other product performance cell is unmeasured, and every Cmodern cell is blocked on a missing corpus. The benchmark pages own the evidence rules.
 
 ## Three evidence tiers
 
@@ -41,7 +41,7 @@ A fixture ratio near 1.0 is a plumbing check, not a product result. Both arms ca
 
 `Observed once, not evidence` marks a number kept for context. It has no six-identity sample, supports no acceptance verdict, and supports no promotion.
 
-The product ledger has 36 cells, one per domain, corpus, native architecture, and backend. At this commit all 36 cells have `residual = "unmeasured"`, `custody = "none"`, and `noise_floor = "unobserved"`. Every Cmodern cell is `BLOCKED` on the missing archive and manifest. C150 custody is staged, but no Core-versus-bitcoin-rs campaign has run against it. The live IBD arm still has no stop-at-height flag.
+The product ledger has 36 cells, one per domain, corpus, native architecture, and backend. At this commit 35 cells have `residual = "unmeasured"`, `custody = "none"`, and `noise_floor = "unobserved"`, and `offline.c150.x86_64.fjall` carries seven measured wall samples from the 2026-11-02 gated campaign, published without an acceptance verdict because the arm spread exceeds the 5 percent stability band. Every Cmodern cell is `BLOCKED` on the missing archive and manifest. C150 custody is staged, and the first Core-versus-bitcoin-rs campaign ran against it on 2026-11-02. The live IBD arm still has no stop-at-height flag.
 
 The historical C150 ratio in the offline comparator page is not carried forward. A new ratio exists only after a gated result file against a frozen corpus.
 
@@ -74,9 +74,9 @@ It refuses to publish a result when the archive, manifest, binary, or certified-
 
 ## What the pages say at this commit
 
-On the end-to-end synchronization page, every cell is `planned_not_executed` or `BLOCKED`. Its Cmodern offline row is `BLOCKED` on the missing corpus. Its live IBD loopback rows have not run.
+On the end-to-end synchronization page, the C150 offline replay row measured on 2026-11-02 with a gated result and no acceptance verdict, and every other cell is `planned_not_executed` or `BLOCKED`. Its Cmodern offline row is `BLOCKED` on the missing corpus. Its live IBD loopback rows have not run.
 
-The offline full-validation page says CI proves the harness with fixture nodes only. It does not claim a live C150 or Cmodern campaign.
+The offline full-validation page says CI proves the harness with fixture nodes only and points at the one published C150 result. It does not claim a Cmodern campaign.
 
 The measured campaign page is `planned_not_executed`. Packaging the harness and passing the synthetic probe is not a baseline or an acceptance.
 

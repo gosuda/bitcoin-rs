@@ -25,7 +25,7 @@ This page maps each surface to its honest state and to the file that owns the ev
 | USDT tracepoints | implemented ABI, asserted against built probe notes; live tracing run planned | [`ecosystem-compat.toml`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/api/ecosystem-compat.toml), [tracing](https://github.com/gosuda/bitcoin-rs/blob/main/docs/tracing.md) |
 | Bitcoin Core IPC interfaces | intentionally unsupported | [`ecosystem-compat.toml`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/api/ecosystem-compat.toml) |
 | BIP330 Erlay | unsupported; recorded as deferred | [BIP adoption policy, applied decisions](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/bip-adoption.md) |
-| Performance | page-specific status only: `planned_not_executed`, `measured_rejected`, or `BLOCKED`; no accepted campaign is implied | [Benchmark evidence rules](https://github.com/gosuda/bitcoin-rs/blob/main/docs/benchmarks/README.md) |
+| Performance | page-specific status only: `planned_not_executed`, `measured` without acceptance verdict, `measured_rejected`, or `BLOCKED`; no accepted campaign is implied | [Benchmark evidence rules](https://github.com/gosuda/bitcoin-rs/blob/main/docs/benchmarks/README.md) |
 
 ## How to read the states
 
