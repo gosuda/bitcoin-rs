@@ -21,6 +21,15 @@ use parking_lot::Mutex;
 ///   frame still counts under its own name, while a received frame under it
 ///   folds into `Other`, the bucket every unknown command lands in.
 ///
+/// `alert` and `reject` are decoded but never processed inbound, so they
+/// stay `send_only`. The BIP331/BIP332 extension rows (`sendpackages`,
+/// `ancpkginfo`, `getpkgtxns`, `pkgtxns`, `staletip`) are classified `both`
+/// even though Core v31.1's known-command list omits them: this node
+/// processes their inbound frames, so their received bytes keep their own
+/// buckets — a deliberate divergence from Core's internal whitelist that
+/// preserves the observable contract (Core-known names, the `*other*`
+/// fallback, and the fixed map size all stay as they were).
+///
 /// The enum variants, the declaration-order bucket array, the command
 /// lookup, the reporting names, and the receive-side fold are all derived
 /// from the one table, so the mapping is declared exactly once.
@@ -132,13 +141,13 @@ message_accounts! {
     both WtxidRelay = "wtxidrelay",
     both SendTxrcncl = "sendtxrcncl",
     both Feature = "feature",
+    both SendPackages = "sendpackages",
+    both AncPkgInfo = "ancpkginfo",
+    both GetPkgTxns = "getpkgtxns",
+    both PkgTxns = "pkgtxns",
+    both StaleTip = "staletip",
     send_only Alert = "alert",
     send_only Reject = "reject",
-    send_only SendPackages = "sendpackages",
-    send_only AncPkgInfo = "ancpkginfo",
-    send_only GetPkgTxns = "getpkgtxns",
-    send_only PkgTxns = "pkgtxns",
-    send_only StaleTip = "staletip",
 }
 
 impl MessageAccount {
