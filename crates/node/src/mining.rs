@@ -619,6 +619,7 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             | ChainError::NonContinuousHeader { .. }
             | ChainError::ZeroTarget { .. }
             | ChainError::TargetExceedsLimit { .. }
+            | ChainError::TargetBitsOverflow { .. }
             | ChainError::InvalidPow { .. }
             | ChainError::NbitsMismatch { .. }
             | ChainError::TimestampTooEarly { .. }

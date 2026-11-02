@@ -34,14 +34,45 @@ fn compact_overflow_bits_are_rejected_like_core_derive_target() {
 
     assert_eq!(
         validate_pow(&header, hash, network),
-        Err(ChainError::TargetExceedsLimit {
-            hash,
-            target: ChainWork::MAX,
-            max_target: network.max_target(),
+        Err(ChainError::TargetBitsOverflow {
+            bits: header.bits.to_consensus(),
         }),
         "Bitcoin Core's SetCompact marks nBits 0x22000101 as overflowed (nSize 34 and nWord \
          0x0101 > 0xff) and CheckProofOfWork rejects every overflowed encoding as bad-diffbits; \
          an all-zero hash below the wrapped target must not pass validation"
+    );
+}
+
+#[test]
+fn overflow_bits_are_reported_with_the_offending_nbits() {
+    for bits in [0x2300_0001_u32, 0x2101_0000] {
+        let header = header_with_bits(bits);
+        assert_eq!(
+            validate_pow(&header, Hash256::default(), Network::Regtest),
+            Err(ChainError::TargetBitsOverflow { bits }),
+            "Bitcoin Core v31.1 SetCompact (src/arith_uint256.cpp) sets fOverflow for nBits \
+             {bits:08x} and CheckProofOfWork (src/pow.cpp) refuses every overflowed encoding \
+             before the powLimit comparison, so the refusal must carry the offending nBits \
+             instead of a placeholder target"
+        );
+    }
+}
+
+#[test]
+fn core_set_compact_overflow_boundary_is_typed_not_placeholder() {
+    use super::pow::compact_overflows;
+
+    let near_boundary = header_with_bits(0x2100_ffff);
+    assert!(
+        !compact_overflows(near_boundary.bits),
+        "nBits 0x2100ffff stays inside the 256-bit target at nSize 33 with nWord 0xffff, so \
+         Core's SetCompact does not mark it overflowed"
+    );
+    let overflowing = header_with_bits(0x2101_0000);
+    assert!(
+        compact_overflows(overflowing.bits),
+        "nBits 0x21010000 pushes nWord 0x10000 past 256 bits at nSize 33, as Core's SetCompact \
+         marks it overflowed"
     );
 }
 
@@ -85,10 +116,8 @@ fn every_core_overflow_clause_and_its_boundary_matches_set_compact() {
         let hash = Hash256::default();
         assert_eq!(
             validate_pow(&header, hash, network),
-            Err(ChainError::TargetExceedsLimit {
-                hash,
-                target: ChainWork::MAX,
-                max_target: network.max_target(),
+            Err(ChainError::TargetBitsOverflow {
+                bits: header.bits.to_consensus(),
             }),
             "Bitcoin Core v31.1 SetCompact (src/arith_uint256.cpp) marks nBits {bits:08x} as \
              overflowed under {clause}, so CheckProofOfWork answers bad-diffbits"

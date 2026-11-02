@@ -134,6 +134,12 @@ fn apply_errors_delegate_consensus_and_chain_reasons() {
         "high-hash"
     );
     assert_eq!(
+        rejected(ApplyError::Chain(ChainError::TargetBitsOverflow {
+            bits: 0x2300_0001,
+        })),
+        "bad-diffbits"
+    );
+    assert_eq!(
         rejected(ApplyError::Chain(ChainError::KnownInvalidHeader {
             hash: Hash256::default(),
         })),

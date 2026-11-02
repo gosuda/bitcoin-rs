@@ -109,6 +109,10 @@ fn header_failures_use_core_bip22_reasons() {
             "high-hash",
         ),
         (
+            ChainError::TargetBitsOverflow { bits: 0x2300_0001 },
+            "bad-diffbits",
+        ),
+        (
             ChainError::TimestampTooEarly {
                 hash,
                 timestamp: 1,

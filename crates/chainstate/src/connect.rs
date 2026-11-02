@@ -160,7 +160,8 @@ fn check_self_pow(
         "apply_block: profile"
     );
     match pow_self_result {
-        Err(bitcoin_rs_chain::ChainError::TargetExceedsLimit { .. }) => {
+        Err(bitcoin_rs_chain::ChainError::TargetExceedsLimit { .. })
+        | Err(bitcoin_rs_chain::ChainError::TargetBitsOverflow { .. }) => {
             Err(ApplyError::TargetAboveLimit)
         }
         Err(_) if intent == ApplyIntent::Commit => {

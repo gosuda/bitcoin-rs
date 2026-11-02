@@ -393,6 +393,7 @@ fn classify_chain_error(error: &bitcoin_rs_chain::ChainError) -> WindowApplyDisp
         | bitcoin_rs_chain::ChainError::NonContinuousHeader { .. }
         | bitcoin_rs_chain::ChainError::ZeroTarget { .. }
         | bitcoin_rs_chain::ChainError::TargetExceedsLimit { .. }
+        | bitcoin_rs_chain::ChainError::TargetBitsOverflow { .. }
         | bitcoin_rs_chain::ChainError::InvalidPow { .. }
         | bitcoin_rs_chain::ChainError::ChainworkOverflow { .. }
         | bitcoin_rs_chain::ChainError::HeightOverflow { .. }

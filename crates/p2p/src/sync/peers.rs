@@ -30,6 +30,7 @@ pub(super) fn is_peer_fault(error: &ChainError) -> bool {
         ChainError::NbitsMismatch { .. }
         | ChainError::InvalidPow { .. }
         | ChainError::TargetExceedsLimit { .. }
+        | ChainError::TargetBitsOverflow { .. }
         | ChainError::ZeroTarget { .. }
         | ChainError::NonContinuousHeader { .. }
         | ChainError::ChainworkOverflow { .. }
@@ -621,6 +622,7 @@ mod tests {
                 timestamp: 1,
                 median: 2,
             },
+            ChainError::TargetBitsOverflow { bits: 0x2300_0001 },
             ChainError::NbitsMismatch {
                 actual: 1,
                 expected: 2,

@@ -63,6 +63,7 @@ pub fn chain_reject_reason(error: &ChainError) -> CompactString {
         ChainError::InvalidPow { .. } => "high-hash",
         ChainError::ZeroTarget { .. }
         | ChainError::TargetExceedsLimit { .. }
+        | ChainError::TargetBitsOverflow { .. }
         | ChainError::NbitsMismatch { .. } => "bad-diffbits",
         ChainError::TimestampTooEarly { .. } => "time-too-old",
         ChainError::TimestampTooFarAhead { .. } => "time-too-new",

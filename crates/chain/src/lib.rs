@@ -102,6 +102,8 @@ pub enum ChainError {
         target: ChainWork,
         max_target: ChainWork,
     },
+    #[error("nBits {bits:08x} overflows the 256-bit proof-of-work target")]
+    TargetBitsOverflow { bits: u32 },
     #[error("header {hash} does not satisfy proof of work target {target}")]
     InvalidPow { hash: Hash256, target: ChainWork },
     #[error("nBits {actual:08x} does not match expected {expected:08x} at height {height}")]

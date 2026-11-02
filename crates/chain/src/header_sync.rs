@@ -248,10 +248,8 @@ pub fn validate_pow(
     network: Network,
 ) -> Result<(), ChainError> {
     if pow::compact_overflows(header.bits) {
-        return Err(ChainError::TargetExceedsLimit {
-            hash,
-            target: ChainWork::MAX,
-            max_target: network.max_target(),
+        return Err(ChainError::TargetBitsOverflow {
+            bits: header.bits.to_consensus(),
         });
     }
     let target = compact_to_target(header.bits);
