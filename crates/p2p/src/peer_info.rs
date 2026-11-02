@@ -52,7 +52,51 @@ pub struct PeerInfo {
     pub transport: crate::TransportProtocol,
 }
 
+struct VersionMetadata<'a> {
+    version: &'a VersionMessage,
+    conn_time: u64,
+    version_received_time: u64,
+    counters: Arc<PeerCounters>,
+}
+
 impl PeerInfo {
+    fn from_version_parts(
+        addr: PeerRemote,
+        network: NetworkLabel,
+        inbound: bool,
+        addr_bind: TransportRemote,
+        metadata: VersionMetadata<'_>,
+    ) -> Self {
+        let VersionMetadata {
+            version,
+            conn_time,
+            version_received_time,
+            counters,
+        } = metadata;
+        Self {
+            endpoint: addr.endpoint(),
+            addr,
+            network,
+            version: version.version,
+            wtxid_relay: false,
+            relay_transactions: version.relay,
+            compact_block_relay: false,
+            send_headers: false,
+            services: version.services.to_u64(),
+            user_agent: version.user_agent.clone(),
+            start_height: version.start_height,
+            best_known_height: version.start_height,
+            conn_time,
+            inbound,
+            addr_bind,
+            time_offset: version
+                .timestamp
+                .saturating_sub(i64::try_from(version_received_time).unwrap_or(i64::MAX)),
+            counters,
+            transport: crate::TransportProtocol::V1,
+        }
+    }
+
     #[must_use]
     pub fn inbound_from_version(
         addr: impl Into<PeerRemote>,
@@ -63,41 +107,21 @@ impl PeerInfo {
         counters: Arc<PeerCounters>,
     ) -> Self {
         let remote: PeerRemote = addr.into();
-        let Some(endpoint) = remote.endpoint() else {
-            return Self {
-                addr: remote,
-                endpoint: None,
-                network: NetworkLabel::Onion,
-                version: version.version,
-                wtxid_relay: false,
-                relay_transactions: version.relay,
-                compact_block_relay: false,
-                send_headers: false,
-                services: version.services.to_u64(),
-                user_agent: version.user_agent.clone(),
-                start_height: version.start_height,
-                best_known_height: version.start_height,
-                conn_time,
-                inbound: true,
-                addr_bind: TransportRemote::new(addr_bind),
-                time_offset: version
-                    .timestamp
-                    .saturating_sub(i64::try_from(version_received_time).unwrap_or(i64::MAX)),
-                counters,
-                transport: crate::TransportProtocol::V1,
-            };
-        };
-        Self {
-            inbound: true,
-            ..Self::outbound_from_version_endpoint(
-                endpoint,
-                addr_bind,
+        let network = remote
+            .endpoint()
+            .map_or(NetworkLabel::Onion, crate::PeerEndpoint::net);
+        Self::from_version_parts(
+            remote,
+            network,
+            true,
+            TransportRemote::new(addr_bind),
+            VersionMetadata {
                 version,
                 conn_time,
                 version_received_time,
                 counters,
-            )
-        }
+            },
+        )
     }
 
     #[cfg(test)]
@@ -132,28 +156,18 @@ impl PeerInfo {
         version_received_time: u64,
         counters: Arc<PeerCounters>,
     ) -> Self {
-        Self {
-            addr: endpoint.into(),
-            endpoint: Some(endpoint),
-            network: endpoint.net(),
-            version: version.version,
-            wtxid_relay: false,
-            relay_transactions: version.relay,
-            compact_block_relay: false,
-            send_headers: false,
-            services: version.services.to_u64(),
-            user_agent: version.user_agent.clone(),
-            start_height: version.start_height,
-            best_known_height: version.start_height,
-            conn_time,
-            inbound: false,
-            addr_bind: TransportRemote::new(addr_bind),
-            time_offset: version
-                .timestamp
-                .saturating_sub(i64::try_from(version_received_time).unwrap_or(i64::MAX)),
-            counters,
-            transport: crate::TransportProtocol::V1,
-        }
+        Self::from_version_parts(
+            PeerRemote::Endpoint(endpoint),
+            endpoint.net(),
+            false,
+            TransportRemote::new(addr_bind),
+            VersionMetadata {
+                version,
+                conn_time,
+                version_received_time,
+                counters,
+            },
+        )
     }
 
     #[must_use]
@@ -417,7 +431,8 @@ mod tests {
         let lease = crate::PeerLease::new_inbound(tx);
         let remote = PeerRemote::AnonymousTor(lease.connection_id());
         let bind = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
-        let info = PeerInfo::inbound_from_version(remote, bind, &fake_version(), 0, 0, counters());
+        let version = fake_version();
+        let info = PeerInfo::inbound_from_version(remote, bind, &version, 0, 0, counters());
         assert!(info.inbound, "anonymous handshake stays inbound");
         assert_eq!(info.endpoint, None, "no destination is fabricated");
         assert_eq!(info.addr, remote, "AnonymousTor identity is preserved");
@@ -426,5 +441,17 @@ mod tests {
             NetworkLabel::Onion,
             "anonymous inbound records Onion"
         );
+        assert_eq!(info.version, version.version);
+        assert_eq!(info.relay_transactions, version.relay);
+        assert_eq!(info.services, version.services.to_u64());
+        assert_eq!(info.user_agent, version.user_agent);
+        assert_eq!(info.start_height, version.start_height);
+        assert_eq!(info.best_known_height, version.start_height);
+        assert_eq!(info.conn_time, 0);
+        assert_eq!(info.time_offset, 0);
+        assert!(!info.wtxid_relay);
+        assert!(!info.compact_block_relay);
+        assert!(!info.send_headers);
+        assert_eq!(info.transport, crate::TransportProtocol::V1);
     }
 }
