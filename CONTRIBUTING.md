@@ -43,9 +43,10 @@ job set.
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs for pull requests
 against any base branch (including stacked PRs), on merge-group requests, and
 for pushes to `main`. PR green is fast feedback only: `fmt`, `deny`,
-`contracts`, `clippy`, and `test-crates` passed while `test-binary` and
-`test-workspace` are skipped. Merge-group green adds those two heavy lanes as the pre-main
-integration signal; main checks are post-merge evidence. Every lane fails
+`contracts`, `clippy`, and `test-crates` passed while `book`, `test-binary`,
+and `test-workspace` are skipped. Merge-group green adds those three heavy
+lanes as the pre-main integration signal; main checks are post-merge
+evidence. Every lane fails
 fast at its first failing profile. Every gate command lives in
 [`scripts/ci-pr.sh`](scripts/ci-pr.sh), which CI, the pre-commit hooks, and
 this guide all invoke:
@@ -59,6 +60,7 @@ this guide all invoke:
 ./scripts/ci-pr.sh test           # every test lane in sequence, smallest first
 ./scripts/ci-pr.sh deny           # full dependency graph, metadata only
 ./scripts/ci-pr.sh contracts      # contract index drift check
+./scripts/ci-pr.sh book           # book build and link check
 ./scripts/ci-pr.sh deep           # every profile, collecting all failures
 ./scripts/ci-pr.sh all            # fmt + deep + deny
 ```
@@ -93,11 +95,11 @@ bypassing the queue are disallowed for standard pull requests.
 The merge queue enforces the integration contract on the latest combined ref
 (`merge_group`) before updating `main`:
 - **PR green (`pull_request`)**: Fast feedback only. `ci-gate` requires `fmt`,
-  `deny`, `contracts`, `clippy`, and `test-crates`; `test-binary`,
+  `deny`, `contracts`, `clippy`, and `test-crates`; `book`, `test-binary`,
   `test-workspace`, and kernel/native checks are skipped to keep feedback fast
   (<3 min).
 - **Merge-group green (`merge_group`)**: Pre-main integration eligibility.
-  `ci-gate` strictly requires `test-binary` and `test-workspace`;
+  `ci-gate` strictly requires `book`, `test-binary`, and `test-workspace`;
   [`ci-merge-gate.yml`](.github/workflows/ci-merge-gate.yml) strictly requires
   `kernel-consensus` and `full-node-compile`.
 - **Main green (`push`)**: Post-merge historical evidence. Runs extended
@@ -113,9 +115,9 @@ current base before `main` moves forward.
 [`.github/workflows/main.yml`](.github/workflows/main.yml) runs kernel-enabled
 tests and the main-only verification lanes. It triggers on pushes to `main` and
 on manual dispatch. The lanes are bench smoke, native-script evidence, the
-comparator corpus, the kernel oracle, and Core differential. Bench smoke
-includes the witness-activation kernel regression and the SegWit-v0 kernel
-oracle.
+comparator corpus, the book build, the kernel oracle, and Core differential.
+Bench smoke includes the witness-activation kernel regression and the
+SegWit-v0 kernel oracle.
 Pull-request-triggered checks are defined in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and the path-scoped
 [`fuzz-build.yml`](.github/workflows/fuzz-build.yml).
