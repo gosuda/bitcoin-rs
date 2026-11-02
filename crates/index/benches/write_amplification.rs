@@ -431,6 +431,7 @@ fn main() -> std::process::ExitCode {
 }
 
 #[cfg(not(any(feature = "fjall", feature = "redb", feature = "rocksdb")))]
-fn main() {
-    println!("no storage backend feature selected; run with --features fjall|redb|rocksdb");
+fn main() -> std::process::ExitCode {
+    eprintln!("no storage backend feature selected; run with --features fjall|redb|rocksdb");
+    std::process::ExitCode::FAILURE
 }
