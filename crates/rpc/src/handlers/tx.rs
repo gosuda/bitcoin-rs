@@ -360,7 +360,11 @@ fn block_from_utxo(
         if cancellation.is_triggered() {
             return Err(proof_interrupted());
         }
-        if !ctx.chain.utxo.has_live_outputs_for_txid(&Hash256::from(*txid)) {
+        if !ctx
+            .chain
+            .utxo
+            .has_live_outputs_for_txid(&Hash256::from(*txid))
+        {
             continue;
         }
         for vout in 0..MAX_OUTPUTS_PER_BLOCK {
@@ -616,8 +620,8 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
             reject_details: fact
                 .reject_reason
                 .as_ref()
-                .filter(|reason| is_oversize_reject(reason))
-                .map(|_| CORE_TX_SIZE_REJECT.to_owned()),
+                .and_then(|reason| oversize_reject_string(reason))
+                .map(str::to_owned),
         }));
     }
     typed_to_sonic_omitting_nulls(&rows)
@@ -1038,14 +1042,18 @@ fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
 }
 
 const CORE_TX_SIZE_REJECT: &str = "tx-size";
+const CORE_TX_OVERSIZE_REJECT: &str = "bad-txns-oversize";
 
-fn is_oversize_reject(reason: &AcceptanceRejectReason) -> bool {
-    matches!(
-        reason,
+fn oversize_reject_string(reason: &AcceptanceRejectReason) -> Option<&'static str> {
+    match reason {
         AcceptanceRejectReason::NonStandard(
-            bitcoin_rs_mempool::standardness::StandardnessError::Weight
-        )
-    )
+            bitcoin_rs_mempool::standardness::StandardnessError::Weight,
+        ) => Some(CORE_TX_SIZE_REJECT),
+        AcceptanceRejectReason::NonStandard(
+            bitcoin_rs_mempool::standardness::StandardnessError::Oversize,
+        ) => Some(CORE_TX_OVERSIZE_REJECT),
+        _ => None,
+    }
 }
 
 pub(crate) fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcError {
@@ -1054,8 +1062,8 @@ pub(crate) fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcE
         AcceptanceRejectReason::MissingInputs => {
             RpcError::TxVerifyError("bad-txns-inputs-missingorspent".to_owned())
         }
-        ref oversize if is_oversize_reject(oversize) => {
-            RpcError::TxRejected(CORE_TX_SIZE_REJECT.to_owned())
+        ref oversize if let Some(reject) = oversize_reject_string(oversize) => {
+            RpcError::TxRejected(reject.to_owned())
         }
         other => RpcError::TxRejected(reject_reason_to_frozen_string(other)),
     }
@@ -1075,7 +1083,7 @@ fn reject_reason_to_frozen_string(reason: AcceptanceRejectReason) -> String {
             bitcoin_rs_mempool::PolicyError::ClusterCountLimit
             | bitcoin_rs_mempool::PolicyError::ClusterSizeLimit,
         ) => "too-large-cluster".to_owned(),
-        ref oversize if is_oversize_reject(oversize) => CORE_TX_SIZE_REJECT.to_owned(),
+        ref oversize if let Some(reject) = oversize_reject_string(oversize) => reject.to_owned(),
         other => other.to_string(),
     }
 }

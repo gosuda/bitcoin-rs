@@ -397,3 +397,69 @@ fn three_vsize_meanings_on_sigop_heavy_tx() -> Result<(), crate::test_error::Tes
     assert_eq!(entry.weight, unadjusted_weight);
     Ok(())
 }
+
+fn oversize_script_sig_tx(script_bytes: usize) -> Tx {
+    let mut tx = standard_tx(2);
+    tx.inputs[0].script_sig = Script::from_bytes(vec![0x01; script_bytes]);
+    tx
+}
+
+// POL-03
+#[test]
+fn unfunded_over_block_weight_tx_answers_bad_txns_oversize() {
+    let pool = Mempool::new(crate::MempoolLimits::default());
+    let tx = oversize_script_sig_tx(1_100_000);
+    let context = PackageTxContext {
+        fee: 1_000,
+        vsize: 100,
+        sigop_cost: 0,
+        missing_inputs: true,
+    };
+    let fact = evaluate_one(
+        &pool,
+        &policy(),
+        &tx,
+        &[],
+        context,
+        None,
+        None,
+        &Bip68Admission::default(),
+    );
+    assert_eq!(
+        fact.reject_reason,
+        Some(AcceptanceRejectReason::NonStandard(
+            StandardnessError::Oversize
+        )),
+        "Core CheckTransaction answers bad-txns-oversize before the missing-inputs scan"
+    );
+}
+
+// POL-03
+#[test]
+fn unfunded_over_standard_weight_tx_answers_tx_size_before_missing_inputs() {
+    let pool = Mempool::new(crate::MempoolLimits::default());
+    let tx = oversize_script_sig_tx(120_000);
+    let context = PackageTxContext {
+        fee: 1_000,
+        vsize: 100,
+        sigop_cost: 0,
+        missing_inputs: true,
+    };
+    let fact = evaluate_one(
+        &pool,
+        &policy(),
+        &tx,
+        &[],
+        context,
+        None,
+        None,
+        &Bip68Admission::default(),
+    );
+    assert_eq!(
+        fact.reject_reason,
+        Some(AcceptanceRejectReason::NonStandard(
+            StandardnessError::Weight
+        )),
+        "Core IsStandardTx answers tx-size before bad-txns-inputs-missingorspent"
+    );
+}

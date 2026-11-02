@@ -17,7 +17,7 @@ pub const MAX_BLOCK_SERIALIZED_SIZE: u64 = 4_000_000;
 
 const MERKLE_NODE_SERIALIZED_SIZE: usize = 64;
 
-const WITNESS_SCALE_FACTOR: u64 = 4;
+pub const WITNESS_SCALE_FACTOR: u64 = 4;
 
 #[must_use]
 pub fn is_sixty_four_byte_mutation(txs: &[Tx]) -> bool {

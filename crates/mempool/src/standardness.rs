@@ -68,6 +68,8 @@ const TX_VERSION_MAX: u32 = 3;
 pub enum StandardnessError {
     #[error("non-standard transaction version")]
     Version,
+    #[error("bad-txns-oversize")]
+    Oversize,
     #[error("transaction weight exceeds maximum standard weight")]
     Weight,
     #[error("scriptSig is not push-only")]
@@ -275,7 +277,11 @@ pub(crate) fn evaluate_one(
 
     let reject = if pool.contains_txid(&txid) {
         Some(AcceptanceRejectReason::AlreadyInMempool)
-    } else if tx.is_coinbase() || context.missing_inputs {
+    } else if exceeds_block_weight(tx) {
+        Some(AcceptanceRejectReason::NonStandard(
+            StandardnessError::Oversize,
+        ))
+    } else if tx.is_coinbase() {
         Some(AcceptanceRejectReason::MissingInputs)
     } else if let Err(err) = is_standard_tx(tx, policy) {
         Some(AcceptanceRejectReason::NonStandard(err))
@@ -285,6 +291,8 @@ pub(crate) fn evaluate_one(
         Some(AcceptanceRejectReason::NonStandard(
             StandardnessError::DustOutput,
         ))
+    } else if context.missing_inputs {
+        Some(AcceptanceRejectReason::MissingInputs)
     } else if prevouts.len() == tx.inputs.len()
         && let Err(err) = is_standard_spend(tx, prevouts)
     {
@@ -350,6 +358,13 @@ fn check_weight(tx: &Tx) -> Result<(), StandardnessError> {
     } else {
         Ok(())
     }
+}
+
+fn exceeds_block_weight(tx: &Tx) -> bool {
+    u64::try_from(tx.base_size())
+        .unwrap_or(u64::MAX)
+        .saturating_mul(bitcoin_rs_consensus::WITNESS_SCALE_FACTOR)
+        > bitcoin_rs_consensus::MAX_BLOCK_WEIGHT
 }
 
 fn check_script_sigs(tx: &Tx) -> Result<(), StandardnessError> {

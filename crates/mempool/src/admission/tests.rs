@@ -1493,7 +1493,10 @@ fn package_prevouts_preserve_sigops_without_mutating_the_pool()
         let facts = gateway.preview_transactions(&txs, None, &Coins(vec![]))?;
         assert_eq!(
             facts.results[0].reject_reason,
-            Some(AcceptanceRejectReason::MissingInputs)
+            Some(AcceptanceRejectReason::NonStandard(
+                crate::standardness::StandardnessError::NonStandardOutput
+            )),
+            "Core IsStandardTx answers before the missing-inputs scan"
         );
         assert_eq!(
             facts.results[1].allowed, None,
