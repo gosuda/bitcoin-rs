@@ -339,8 +339,8 @@ Queue accounting:
 - `BodyMutated` and `Operational` stay retryable and non-punitive.
 - `Fatal` halts admission without peer blame.
 - An unrecoverable storage-engine failure settles `Fatal`: a failed undo write, a failed block-body write, a failed utxo or durable-head commit, a journal failure that retention backpressure does not own, and a failed recovery checkpoint publication.
-- `Fatal` latches `apply_halted`: the commit loop schedules no retry, the event loop requests node shutdown, and the supervisor restart replays the durable state with a clean engine.
-- `getblockchaininfo` reports the latch as `is_apply_halted` until the process exits.
+- `Fatal` closes the chainstate for recovery through `fail_closed_for_recovery`: the commit loop schedules no retry, the event loop requests node shutdown, and the supervisor restart replays the durable state with a clean engine.
+- `getblockchaininfo` reports the closed chainstate as `is_apply_halted` until the process exits.
 - Journal backpressure from the retention limit stays `Operational`; compaction relieves it in-process.
 - `BodyMutated` names only delivered bytes (header stays valid, body re-fetched).
 - These include Merkle or witness mismatch.

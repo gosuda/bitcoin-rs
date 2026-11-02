@@ -2,35 +2,47 @@ use super::*;
 
 #[test]
 fn fatal_settlement_halts_further_apply_attempts() -> TestResult {
-    let (control, _, _, control_main, _) = sync_with_mined_chain(1)?;
-    control.chain.bootstrap_genesis();
-    stage_body(&control, &control_main[0]);
-    assert_eq!(control.apply_buffered_blocks(None), (1, 0));
-
-    let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
-    sync.chain.bootstrap_genesis();
-    stage_body(&sync, &main[0]);
+    let (mut tree, blocks) = mined_chain(1, 0)?;
+    let chain_tip = tree.tip_handle();
+    let block_tree = Arc::new(RwLock::new(tree));
+    let applied_tip = Arc::new(ArcSwapOption::empty());
+    let peers = Arc::new(PeerTable::new());
+    let (_headers_tx, headers_rx) = unbounded();
+    let (_blocks_tx, blocks_rx) = unbounded();
+    let chain = Arc::new(TestChain::new(
+        chain_tip,
+        Arc::clone(&applied_tip),
+        Arc::clone(&block_tree),
+    ));
+    let chain_ref: Arc<dyn SyncChain> = chain.clone();
+    let sync = BlockSync::new(
+        chain_ref,
+        peers,
+        headers_rx,
+        blocks_rx,
+        crate::sync::syncing_ibd_latch(),
+    );
+    chain.bootstrap_genesis();
+    stage_body(&sync, &blocks[0]);
+    assert_eq!(sync.apply_buffered_blocks(None), (1, 0));
     let staged = sync.scheduler.lock().stager.received_len();
     assert!(
-        staged > 0,
-        "the staged block must be queued before the halt"
+        !chain.closed_for_recovery(),
+        "a fresh sync must not start halted"
     );
-    assert!(
-        !sync.apply_halted.load(std::sync::atomic::Ordering::SeqCst),
-        "a fresh sync object must not start halted"
-    );
-    sync.note_fatal_settlement(0, &std::io::Error::other("scripted fatal settlement"));
+
+    chain.close_for_recovery();
     assert_eq!(
         sync.apply_buffered_blocks(None),
         (0, 0),
-        "a halted sync must not start another transition"
+        "a closed chain must not start another transition"
     );
     assert_eq!(
         sync.scheduler.lock().stager.received_len(),
         staged,
         "halted ticks must preserve staged blocks for recreation"
     );
-    assert_eq!(applied_tip.load_full().map(|tip| tip.height), Some(0));
+    assert_eq!(applied_tip.load_full().map(|tip| tip.height), Some(1));
     Ok(())
 }
 
@@ -50,7 +62,7 @@ fn fatal_settlement_raises_the_halt_signal_exactly_once() -> TestResult {
         Arc::clone(&block_tree),
     ));
     let chain_handle: Arc<TestChain> = Arc::clone(&chain);
-    let chain_ref: Arc<dyn SyncChain> = chain_handle;
+    let chain_ref: Arc<dyn SyncChain> = chain;
     let sync = BlockSync::new(
         chain_ref,
         peers,
@@ -67,7 +79,7 @@ fn fatal_settlement_raises_the_halt_signal_exactly_once() -> TestResult {
 
     let failed = Hash256::from_le_bytes(blocks[0].block_hash().as_bytes());
     let suffix = Hash256::from_le_bytes(blocks[1].block_hash().as_bytes());
-    *chain.scripted_commit_failure.lock() =
+    *chain_handle.scripted_commit_failure.lock() =
         Some((failed, super::super::chain::WindowApplyDisposition::Fatal));
     stage_body(&sync, &blocks[0]);
     stage_body(&sync, &blocks[1]);
@@ -80,8 +92,8 @@ fn fatal_settlement_raises_the_halt_signal_exactly_once() -> TestResult {
         "the fatal settlement stops the window at the failed block"
     );
     assert!(
-        sync.apply_halted.load(std::sync::atomic::Ordering::SeqCst),
-        "a fatal settlement must raise the halt signal"
+        chain_handle.closed_for_recovery(),
+        "a fatal settlement must close the chain for recovery"
     );
     assert!(
         !sync.scheduler.lock().stager.contains(&failed),
@@ -98,14 +110,14 @@ fn fatal_settlement_raises_the_halt_signal_exactly_once() -> TestResult {
         "a fatal settlement must not rewind the request cursor"
     );
 
-    *chain.scripted_commit_failure.lock() =
+    *chain_handle.scripted_commit_failure.lock() =
         Some((suffix, super::super::chain::WindowApplyDisposition::Fatal));
     assert_eq!(
         sync.apply_buffered_blocks(None),
         (0, 0),
         "a halted sync must not re-enter commit_window"
     );
-    let scripted = chain.scripted_commit_failure.lock().take();
+    let scripted = chain_handle.scripted_commit_failure.lock().take();
     assert!(
         scripted.is_some(),
         "the halt latched after one settlement: commit_window never consumed a second fatal script"

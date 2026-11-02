@@ -64,7 +64,7 @@ The bind order is:
 
 ## The event loop
 
-`EventLoop::spin` (`crates/node/src/event_loop.rs:31`) selects on three channels: shutdown close, a 1-second `SYNC_TICK` timer, and a sync wake that peer readiness or inbound messages send. Each tick calls `BlockSync::tick` (see [header-sync-and-block-download.md](header-sync-and-block-download.md)). Two guards sit after every iteration: `sync.apply_halted()` requests shutdown and increments `node.sync.apply_halt_shutdowns` (`event_loop.rs:78`), and every `SYNC_PROGRESS_INTERVAL = 1 minute` of elapsed time emits sync progress (`progress_due`, `event_loop.rs:95`; the test `telemetry_uses_elapsed_time_not_wake_count` pins that progress uses elapsed time, not wake count, `event_loop.rs:105`).
+`EventLoop::spin` (`crates/node/src/event_loop.rs:31`) selects on three channels: shutdown close, a 1-second `SYNC_TICK` timer, and a sync wake that peer readiness or inbound messages send. Each tick calls `BlockSync::tick` (see [header-sync-and-block-download.md](header-sync-and-block-download.md)). Two guards sit after every iteration: `sync.closed_for_recovery()` requests shutdown and increments `node.sync.apply_halt_shutdowns` (`event_loop.rs:78`), and every `SYNC_PROGRESS_INTERVAL = 1 minute` of elapsed time emits sync progress (`progress_due`, `event_loop.rs:95`; the test `telemetry_uses_elapsed_time_not_wake_count` pins that progress uses elapsed time, not wake count, `event_loop.rs:105`).
 
 The stats heartbeat logs `event loop heartbeat` with iteration and tick counts every 1024 iterations at debug level (`event_loop.rs:41`, `STATS_INTERVAL` at `event_loop.rs:10`).
 

@@ -57,7 +57,7 @@ impl EventLoop {
                     }
                 }
             }
-            if self.sync.apply_halted() {
+            if self.sync.closed_for_recovery() {
                 metrics::counter!("node.sync.apply_halt_shutdowns").increment(1);
                 metrics::gauge!("node.shutdown.requested").set(1.0);
                 request_shutdown();

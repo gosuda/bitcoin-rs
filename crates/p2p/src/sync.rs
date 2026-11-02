@@ -128,7 +128,6 @@ pub struct BlockSync {
     scheduler: Mutex<SchedulerState>,
     refused_rerequest_at: Mutex<Option<Instant>>,
     block_announcements: Mutex<hashbrown::HashMap<PeerSource, Hash256>>,
-    apply_halted: std::sync::atomic::AtomicBool,
     stale_tips: Arc<StaleTipRetainer>,
 }
 
@@ -302,7 +301,6 @@ impl BlockSync {
             }),
             refused_rerequest_at: Mutex::new(None),
             block_announcements: Mutex::new(hashbrown::HashMap::new()),
-            apply_halted: std::sync::atomic::AtomicBool::new(false),
             stale_tips,
         }
     }
@@ -419,8 +417,8 @@ impl BlockSync {
     }
 
     #[must_use]
-    pub fn apply_halted(&self) -> bool {
-        self.apply_halted.load(std::sync::atomic::Ordering::Acquire)
+    pub fn closed_for_recovery(&self) -> bool {
+        self.chain.closed_for_recovery()
     }
 
     pub fn tick(&self) {
@@ -590,7 +588,7 @@ impl BlockSync {
             applied_tip,
             chain_tip,
             next_required,
-            apply_halted: self.apply_halted.load(std::sync::atomic::Ordering::Acquire),
+            closed_for_recovery: self.chain.closed_for_recovery(),
         }
     }
 
@@ -673,7 +671,6 @@ impl NoProgressReason {
         }
     }
 }
-
 impl std::fmt::Display for NoProgressReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())

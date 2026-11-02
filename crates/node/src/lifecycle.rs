@@ -67,10 +67,6 @@ fn rpc_network_handles(state: &NodeState) -> NetworkHandles {
 }
 
 impl ChainControl for RpcChainControl {
-    fn is_apply_halted(&self) -> bool {
-        self.sync.apply_halted()
-    }
-
     fn load_txoutset(
         &self,
         path: &std::path::Path,
@@ -380,6 +376,8 @@ impl NodeServices {
             }
             &*state
         });
+        let closed_for_recovery =
+            state.is_some_and(|state| state.chainstate().is_closed_for_recovery());
         shutdown::mark_shutdown_stage();
         #[cfg(feature = "pool")]
         if let Some(mut pool) = self.pool.take() {
@@ -394,19 +392,23 @@ impl NodeServices {
 
         self.join_core_services(state, &mut first_error);
         self.join_bootstrap_and_signal_workers(state, &mut first_error);
-        publish_clean_checkpoint_if_eligible(state, mode, &mut first_error);
+        publish_clean_checkpoint_if_eligible(state, mode, closed_for_recovery, &mut first_error);
         if let Some(state) = state {
             let history = state.mempool_reader().read().estimator_history();
             bitcoin_rs_mempool::fee_history::save(state.data_dir(), &history);
             if state.config().persist_mempool
                 && matches!(mode, TeardownMode::CleanShutdown)
                 && first_error.is_none()
+                && !closed_for_recovery
             {
                 save_mempool_snapshot(state);
             }
         }
         if let Some(error) = first_error {
             return Err(error);
+        }
+        if closed_for_recovery {
+            return Err(RunError::ClosedForRecovery);
         }
         tracing::info!("bitcoin-rs node exited cleanly");
         Ok(())
@@ -570,9 +572,12 @@ fn publish_mempool_snapshot(
 fn publish_clean_checkpoint_if_eligible(
     state: Option<&NodeState>,
     mode: TeardownMode,
+    closed_for_recovery: bool,
     first_error: &mut Option<RunError>,
 ) {
-    if let (Some(state), TeardownMode::CleanShutdown, None) = (state, mode, first_error.as_ref()) {
+    if let (Some(state), TeardownMode::CleanShutdown, None) = (state, mode, first_error.as_ref())
+        && !closed_for_recovery
+    {
         run_before_clean_checkpoint_hook();
         match state.publish_checkpoint() {
             Ok(None) => {
@@ -586,9 +591,16 @@ fn publish_clean_checkpoint_if_eligible(
                 set_first_error(first_error, error.into());
             }
         }
-    } else {
-        tracing::info!("clean checkpoint publication skipped: the node did not shut down cleanly");
+        return;
     }
+    let reason = if first_error.is_some() {
+        "an earlier shutdown error"
+    } else if closed_for_recovery {
+        "a chainstate closed for recovery"
+    } else {
+        "a startup abort or an unclean shutdown"
+    };
+    tracing::info!("clean checkpoint publication skipped: {reason}");
 }
 
 fn set_first_error(slot: &mut Option<RunError>, error: RunError) {

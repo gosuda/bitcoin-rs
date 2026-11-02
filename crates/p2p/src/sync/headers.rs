@@ -292,7 +292,7 @@ impl BlockSync {
         else {
             return GetdataRequestOutcome::default();
         };
-        if chain.apply_halted {
+        if chain.closed_for_recovery {
             return GetdataRequestOutcome::default();
         }
         let Some(height) = self.tip_height_on_active_branch(chain_tip.tip_id, announced_tip) else {

@@ -236,7 +236,7 @@ impl BlockSync {
     }
 
     pub(super) fn reconcile_window_recovery(&self, chain: &ChainFrontier, now: Instant) {
-        if chain.apply_halted {
+        if chain.closed_for_recovery {
             return;
         }
         let frontier_hash = chain.next_required.map(|body| body.hash);
@@ -438,7 +438,7 @@ impl BlockSync {
         candidates: &mut [FanoutCandidate],
         now: Instant,
     ) -> (usize, bool, Option<SyncPeer>) {
-        let tree = (!frontier.chain.apply_halted
+        let tree = (!frontier.chain.closed_for_recovery
             && frontier.chain.chain_tip.is_some()
             && frontier.chain.next_required.is_some())
         .then(|| self.chain.block_tree());
@@ -449,7 +449,7 @@ impl BlockSync {
             body_unavailable,
             ..
         } = &mut *scheduler;
-        if !frontier.chain.apply_halted
+        if !frontier.chain.closed_for_recovery
             && let (Some(tree), Some(chain_tip), Some(required)) = (
                 tree.as_deref(),
                 frontier.chain.chain_tip.as_ref(),

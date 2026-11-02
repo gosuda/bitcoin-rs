@@ -69,7 +69,7 @@ fn usable(port: u16, best_known: i32, active_height: Option<u32>) -> UsablePeer 
     }
 }
 
-fn chain_frontier(required_height: u32, apply_halted: bool) -> ChainFrontier {
+fn chain_frontier(required_height: u32, closed_for_recovery: bool) -> ChainFrontier {
     ChainFrontier {
         applied_tip: Some(snap(1, required_height.saturating_sub(1), 0x01)),
         chain_tip: Some(snap(2, required_height + 4, 0x02)),
@@ -77,7 +77,7 @@ fn chain_frontier(required_height: u32, apply_halted: bool) -> ChainFrontier {
             height: required_height,
             hash: hash(0x03),
         }),
-        apply_halted,
+        closed_for_recovery,
     }
 }
 
@@ -201,7 +201,7 @@ fn at_tip_reports_at_tip() {
             applied_tip: Some(Arc::clone(&tip)),
             chain_tip: Some(tip),
             next_required: None,
-            apply_halted: false,
+            closed_for_recovery: false,
         },
         body_state: None,
         header_request: None,
@@ -219,7 +219,7 @@ fn diverged_tips_with_unresolvable_frontier_report_frontier_unresolvable() {
             applied_tip: Some(snap(1, 0, 0x01)),
             chain_tip: Some(snap(2, 9, 0x02)),
             next_required: None,
-            apply_halted: false,
+            closed_for_recovery: false,
         },
         None,
         vec![usable(9001, 100, None)],
@@ -238,7 +238,7 @@ fn missing_tip_snapshot_reports_chain_view_unavailable() {
             applied_tip: None,
             chain_tip: Some(snap(2, 9, 0x02)),
             next_required: None,
-            apply_halted: false,
+            closed_for_recovery: false,
         },
         None,
         vec![usable(9001, 100, None)],
@@ -331,7 +331,7 @@ fn naive_plan(frontier: &SyncFrontier) -> super::super::frontier::FrontierPlan {
         state => state,
     };
     let body_unowned =
-        matches!(body_state, Some(BodyState::Unowned)) && !frontier.chain.apply_halted;
+        matches!(body_state, Some(BodyState::Unowned)) && !frontier.chain.closed_for_recovery;
 
     plan.header_action = if frontier.header_request_live {
         HeaderAction::AwaitPending
@@ -348,7 +348,7 @@ fn naive_plan(frontier: &SyncFrontier) -> super::super::frontier::FrontierPlan {
     };
 
     let Some(required) = frontier.chain.next_required else {
-        plan.no_progress = Some(if frontier.chain.apply_halted {
+        plan.no_progress = Some(if frontier.chain.closed_for_recovery {
             NoProgressReason::ApplyHalted
         } else if frontier.chain.applied_tip.is_none() || frontier.chain.chain_tip.is_none() {
             NoProgressReason::ChainViewUnavailable
@@ -360,7 +360,7 @@ fn naive_plan(frontier: &SyncFrontier) -> super::super::frontier::FrontierPlan {
         return plan;
     };
 
-    if frontier.chain.apply_halted {
+    if frontier.chain.closed_for_recovery {
         plan.no_progress = Some(NoProgressReason::ApplyHalted);
         return plan;
     }
@@ -417,7 +417,7 @@ fn frontier_peak_schedule_universal_invariant(
         );
     }
     if let Some(BodyState::InFlight(owner)) = frontier.body_state
-        && !frontier.chain.apply_halted
+        && !frontier.chain.closed_for_recovery
         && frontier
             .usable_peers
             .iter()
@@ -432,7 +432,7 @@ fn frontier_peak_schedule_universal_invariant(
             .usable_peers
             .iter()
             .any(|peer| peer.source == owner)
-        && !frontier.chain.apply_halted
+        && !frontier.chain.closed_for_recovery
         && !frontier
             .usable_peers
             .iter()
@@ -445,7 +445,7 @@ fn frontier_peak_schedule_universal_invariant(
     }
     if frontier.usable_peers.is_empty()
         && frontier.chain.next_required.is_some()
-        && !frontier.chain.apply_halted
+        && !frontier.chain.closed_for_recovery
     {
         assert_eq!(plan.no_progress, Some(NoProgressReason::NoUsablePeers));
     }
@@ -458,7 +458,7 @@ proptest::proptest! {
     fn frontier_plan_matches_naive_reference(
         applied_ahead in proptest::bool::ANY,
         next_required in proptest::option::of(0_u32..16),
-        apply_halted in proptest::bool::ANY,
+        closed_for_recovery in proptest::bool::ANY,
         body_case in 0_u8..3,
         in_flight_live in proptest::bool::ANY,
         peers in proptest::collection::vec(
@@ -522,7 +522,7 @@ proptest::proptest! {
                     height,
                     hash: hash(0x03),
                 }),
-                apply_halted,
+                closed_for_recovery,
             },
             body_state,
             header_request,
@@ -546,7 +546,7 @@ proptest::proptest! {
     fn frontier_peak_schedule_universal_invariant_prop(
         applied_ahead in proptest::bool::ANY,
         next_required in proptest::option::of(0_u32..16),
-        apply_halted in proptest::bool::ANY,
+        closed_for_recovery in proptest::bool::ANY,
         body_case in 0_u8..3,
         in_flight_live in proptest::bool::ANY,
         peers in proptest::collection::vec(
@@ -596,7 +596,7 @@ proptest::proptest! {
                 height,
                 hash: hash(0x03),
             }),
-            apply_halted,
+            closed_for_recovery,
         };
         frontier_peak_schedule_universal_invariant(
             chain,

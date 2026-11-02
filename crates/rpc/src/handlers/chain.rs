@@ -71,20 +71,10 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
             .unwrap_or_default(),
     };
     let mut response = typed_to_sonic_omitting_nulls(&response)?;
+    let closed_for_recovery = ctx.chain.closed_for_recovery.is_triggered();
     if let Some(object) = response.as_object_mut() {
-        object.insert(
-            "is_closed_for_recovery",
-            json!(ctx.chain.closed_for_recovery.is_triggered()),
-        );
-        object.insert(
-            "is_apply_halted",
-            json!(
-                ctx.chain
-                    .chain_control
-                    .as_ref()
-                    .is_some_and(|control| control.is_apply_halted())
-            ),
-        );
+        object.insert("is_closed_for_recovery", json!(closed_for_recovery));
+        object.insert("is_apply_halted", json!(closed_for_recovery));
     }
     Ok(response)
 }

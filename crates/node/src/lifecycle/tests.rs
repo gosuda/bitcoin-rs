@@ -677,7 +677,77 @@ fn recovery_closure_stops_the_node_run_loop() -> Result<(), TestError> {
         "a recovery closure must raise the node shutdown latch"
     );
 
-    node.shutdown_blocking()?;
+    match node.shutdown_blocking() {
+        Err(crate::embed::NodeError::ClosedForRecovery) => {}
+        other => panic!(
+            "a recovery closure must not tear down as a clean shutdown: {other:?}"
+        ),
+    }
+    Ok(())
+}
+
+// SYNC-04
+#[test]
+fn fatal_settlement_teardown_skips_the_checkpoint_and_answers_an_error() -> Result<(), TestError> {
+    type CloseChain = Box<dyn Fn(&bitcoin_rs_chainstate::Chainstate)>;
+    let variants: Vec<(&str, CloseChain)> = vec![
+        (
+            "fatal-settlement",
+            Box::new(|chain: &bitcoin_rs_chainstate::Chainstate| chain.fail_closed_for_recovery()),
+        ),
+        (
+            "graceful-close",
+            Box::new(|chain: &bitcoin_rs_chainstate::Chainstate| {
+                drop(chain.close());
+            }),
+        ),
+    ];
+    for (variant, close) in variants {
+        let temp = tempfile::tempdir()?;
+        let config = isolated_config(&temp.path().join(variant));
+        let state = NodeState::open(config.clone(), None)?;
+        let (current, previous) = seed_checkpoint(&state)?;
+        drop(state);
+
+        let node = start_node(config.clone(), RuntimeInputs::default(), false)?;
+        let chain = node.state.chainstate();
+        close(&chain);
+        drop(chain);
+        let deadline = std::time::Instant::now() + WITNESS_BOUND;
+        loop {
+            let exited = node
+                .services
+                .as_ref()
+                .and_then(|services| services.event_loop.as_ref())
+                .is_some_and(|handle| handle.is_finished());
+            if exited {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the event loop kept running after the chainstate closure"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        match node.shutdown_blocking() {
+            Err(crate::embed::NodeError::ClosedForRecovery) => {}
+            other => panic!(
+                "a closed chainstate must not tear down as a clean shutdown: {other:?}"
+            ),
+        }
+        assert_eq!(
+            std::fs::read(&current)?,
+            previous,
+            "the closed chainstate must not publish a fresh checkpoint"
+        );
+        let reopened = NodeState::open(config, None)?;
+        assert_eq!(
+            reopened.resume_source(),
+            crate::state::ResumeSource::Checkpoint,
+            "restart must replay from the checkpoint published before the closure"
+        );
+    }
     Ok(())
 }
 const WITNESS_BOUND: Duration = Duration::from_secs(10);

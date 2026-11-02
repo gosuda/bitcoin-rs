@@ -28,6 +28,7 @@ pub(crate) struct TestChain {
     pub(super) historical: Mutex<std::collections::VecDeque<(u32, Hash256)>>,
     pub(super) historical_connected: Mutex<Vec<Hash256>>,
     pub(super) historical_replay_pending: Mutex<bool>,
+    closed_for_recovery: std::sync::atomic::AtomicBool,
 }
 
 impl TestChain {
@@ -48,7 +49,13 @@ impl TestChain {
             historical: Mutex::new(std::collections::VecDeque::new()),
             historical_connected: Mutex::new(Vec::new()),
             historical_replay_pending: Mutex::new(false),
+            closed_for_recovery: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn close_for_recovery(&self) {
+        self.closed_for_recovery
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -79,6 +86,11 @@ impl TestChain {
 impl SyncChain for TestChain {
     fn historical_base(&self) -> Option<Hash256> {
         self.historical.lock().back().map(|(_, hash)| *hash)
+    }
+
+    fn closed_for_recovery(&self) -> bool {
+        self.closed_for_recovery
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
@@ -227,6 +239,10 @@ impl SyncChain for TestChain {
                 _ => None,
             };
             if let Some((_, disposition)) = failure {
+                if disposition == WindowApplyDisposition::Fatal {
+                    self.closed_for_recovery
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 return Err(WindowCommitError {
                     applied,
                     disposition,

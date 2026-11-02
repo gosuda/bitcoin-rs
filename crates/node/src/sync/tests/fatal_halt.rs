@@ -132,8 +132,8 @@ fn poisoned_undo_store_halts_apply_and_trips_the_shutdown_latch() -> Result<(), 
         .map_err(|_| TestError::Missing("inbound block channel closed"))?;
     sync.tick();
     assert!(
-        sync.apply_halted(),
-        "a poisoned undo store must settle fatal and raise the halt signal"
+        handles.is_closed_for_recovery(),
+        "a poisoned undo store must settle fatal and close the chainstate for recovery"
     );
     assert_eq!(
         handles.applied_tip_snapshot().map(|tip| tip.height),
@@ -148,8 +148,8 @@ fn poisoned_undo_store_halts_apply_and_trips_the_shutdown_latch() -> Result<(), 
     }
     sync.tick();
     assert!(
-        sync.apply_halted(),
-        "the halt latch must stay raised; a halted node never retries apply"
+        handles.is_closed_for_recovery(),
+        "the recovery closure must stay raised; a closed chainstate never retries apply"
     );
     assert_eq!(
         handles.applied_tip_snapshot().map(|tip| tip.height),

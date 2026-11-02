@@ -28,7 +28,7 @@ pub(crate) struct ChainFrontier {
     pub applied_tip: Option<Arc<TipSnapshot>>,
     pub chain_tip: Option<Arc<TipSnapshot>>,
     pub next_required: Option<RequiredBody>,
-    pub apply_halted: bool,
+    pub closed_for_recovery: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -131,7 +131,7 @@ impl SyncFrontier {
             state => state,
         };
         let body_unowned =
-            matches!(body_state, Some(BodyState::Unowned)) && !self.chain.apply_halted;
+            matches!(body_state, Some(BodyState::Unowned)) && !self.chain.closed_for_recovery;
         let header_action = if self.header_request_live {
             HeaderAction::AwaitPending
         } else if !peers_exist {
@@ -148,7 +148,7 @@ impl SyncFrontier {
         };
 
         let Some(required) = self.chain.next_required else {
-            plan.no_progress = Some(if self.chain.apply_halted {
+            plan.no_progress = Some(if self.chain.closed_for_recovery {
                 NoProgressReason::ApplyHalted
             } else if self.chain.applied_tip.is_none() || self.chain.chain_tip.is_none() {
                 NoProgressReason::ChainViewUnavailable
@@ -160,7 +160,7 @@ impl SyncFrontier {
             return plan;
         };
 
-        if self.chain.apply_halted {
+        if self.chain.closed_for_recovery {
             plan.no_progress = Some(NoProgressReason::ApplyHalted);
             return plan;
         }
@@ -279,7 +279,7 @@ mod tests {
                     height: 5,
                     hash: Hash256::from_le_bytes(&[0x03; 32]),
                 }),
-                apply_halted: false,
+                closed_for_recovery: false,
             },
             body_state: Some(BodyState::Unowned),
             header_request: Some(super::super::HeaderRequest {

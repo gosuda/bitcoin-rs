@@ -63,15 +63,13 @@ impl BlockSync {
              mempool admission is closed and the node will not \
              retry until recovery or restart"
         );
-        self.apply_halted
-            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub(super) fn apply_buffered_blocks(
         &self,
         next_expected_hash: Option<Hash256>,
     ) -> (usize, usize) {
-        if self.apply_halted.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.chain.closed_for_recovery() {
             metrics::counter!("node.sync.apply_halted_ticks").increment(1);
             return (0, 0);
         }

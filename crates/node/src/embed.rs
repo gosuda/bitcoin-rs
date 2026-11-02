@@ -15,6 +15,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::lifecycle::{NodeServices, TeardownMode, start_node};
+use crate::run::RunError;
 use crate::state::NodeState;
 use bitcoin_rs_chainstate::events::ChainSnapshot;
 
@@ -24,6 +25,8 @@ pub enum NodeError {
     Startup(String),
     #[error("node shutdown failed: {0}")]
     Shutdown(String),
+    #[error("chainstate closed for recovery; a supervisor restart must replay the durable state")]
+    ClosedForRecovery,
     #[error("node capability unavailable: {0}")]
     Unavailable(String),
     #[error("node object not found: {0}")]
@@ -236,7 +239,10 @@ impl Node {
         };
         let result = services
             .teardown(Some(&mut self.state), TeardownMode::CleanShutdown)
-            .map_err(|error| NodeError::Shutdown(error.to_string()));
+            .map_err(|error| match error {
+                RunError::ClosedForRecovery => NodeError::ClosedForRecovery,
+                other => NodeError::Shutdown(other.to_string()),
+            });
         self.services = None;
         result
     }

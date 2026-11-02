@@ -69,6 +69,13 @@ pub trait SyncChain: Send + Sync {
         None
     }
 
+    /// True once the chain authority closed for recovery: apply must stop
+    /// scheduling and planning new work, because the only recovery is a
+    /// supervised restart that replays durable state.
+    fn closed_for_recovery(&self) -> bool {
+        false
+    }
+
     fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
         Ok(HistoricalAdvance::Complete)
     }

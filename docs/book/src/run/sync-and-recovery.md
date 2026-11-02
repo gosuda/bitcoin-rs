@@ -22,7 +22,7 @@ A bad header is rejected and the peer's ancestry is not admitted. A body that do
 
 A transient delivery failure retries or hands over to another peer without changing chain state. Missing or pruned history is reported unavailable, never as an empty success.
 
-Durable corruption and an unusable storage engine fail closed. The commit loop latches `apply_halted`, schedules no retry, and the event loop requests shutdown. `getblockchaininfo` reports `is_apply_halted: true` until the process exits.
+Durable corruption and an unusable storage engine fail closed. `fail_closed_for_recovery` closes the chainstate for recovery, schedules no retry, and the event loop requests shutdown; teardown publishes no checkpoint and the process exits nonzero. `getblockchaininfo` reports `is_apply_halted: true` until the process exits.
 
 [`SYNC-04`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/synchronization.md) owns the full classification.
 

@@ -2004,7 +2004,7 @@ fn service_and_range_gate_both_request_paths() -> TestResult {
             applied_tip: None,
             chain_tip: None,
             next_required: Some(RequiredBody { height, hash }),
-            apply_halted: false,
+            closed_for_recovery: false,
         },
         body_state: Some(BodyState::Unowned),
         header_request: None,

@@ -82,6 +82,8 @@ pub enum RunError {
     ShutdownForwarderPanicked,
     #[error("event loop thread panicked")]
     EventLoopPanicked,
+    #[error("chainstate closed for recovery; a supervisor restart must replay the durable state")]
+    ClosedForRecovery,
     #[error("rpc listener thread panicked")]
     RpcListenerPanicked,
     #[error("tx ingress consumer panicked")]

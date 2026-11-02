@@ -120,6 +120,10 @@ impl SyncChain for NodeSyncChain {
         }
     }
 
+    fn closed_for_recovery(&self) -> bool {
+        self.handles.is_closed_for_recovery()
+    }
+
     fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
         let Some(manager) = &self.assumeutxo else {
             return Ok(HistoricalAdvance::Complete);

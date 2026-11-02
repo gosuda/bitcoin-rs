@@ -354,57 +354,21 @@ fn getblockchaininfo_reports_the_closed_for_recovery_fact() -> Result<(), TestEr
     Ok(())
 }
 
-struct HaltedChainControl {
-    halted: bool,
-}
-
-impl ChainControl for HaltedChainControl {
-    fn is_apply_halted(&self) -> bool {
-        self.halted
-    }
-
-    fn invalidate_block(&self, _hash: Hash256) -> Result<(), ChainControlError> {
-        Err(ChainControlError::Unavailable)
-    }
-
-    fn dump_txoutset(
-        &self,
-        _path: &std::path::Path,
-        _cancellation: &bitcoin_rs_chain::LatchReader,
-    ) -> Result<
-        bitcoin_rs_rpc::context::SnapshotExport,
-        bitcoin_rs_rpc::context::SnapshotControlError,
-    > {
-        Err(bitcoin_rs_rpc::context::SnapshotControlError::Unavailable(
-            "snapshot export is not attached to this fixture".to_owned(),
-        ))
-    }
-
-    fn verify_chain(
-        &self,
-        _check_level: u8,
-        _nblocks: u32,
-        _cancellation: &bitcoin_rs_chain::LatchReader,
-    ) -> Result<bool, ChainControlError> {
-        Err(ChainControlError::Unavailable)
-    }
-}
-
 #[test]
 fn getblockchaininfo_reports_the_apply_halt_fact() -> Result<(), TestError> {
     let mut ctx = Context::new();
-    ctx.chain.chain_control = Some(Arc::new(HaltedChainControl { halted: false }));
+    let closed = bitcoin_rs_chain::LatchWriter::new();
+    ctx.chain.closed_for_recovery = closed.reader();
     let ctx = Arc::new(ctx);
     let handler = Handler::new(Arc::clone(&ctx));
     let healthy = handler.dispatch("getblockchaininfo", &json!([]))?;
     assert_eq!(healthy["is_apply_halted"], json!(false));
+    assert_eq!(healthy["is_closed_for_recovery"], json!(false));
 
-    let mut ctx = Context::new();
-    ctx.chain.chain_control = Some(Arc::new(HaltedChainControl { halted: true }));
-    let ctx = Arc::new(ctx);
-    let handler = Handler::new(Arc::clone(&ctx));
+    closed.trigger();
     let halted = handler.dispatch("getblockchaininfo", &json!([]))?;
     assert_eq!(halted["is_apply_halted"], json!(true));
+    assert_eq!(halted["is_closed_for_recovery"], json!(true));
     Ok(())
 }
 
