@@ -310,6 +310,71 @@ fn outbound_budget_refuses_at_exact_item_cap_and_byte_cap() {
 }
 
 #[test]
+fn control_lane_charges_no_data_slot_and_keeps_data_capacity() {
+    let ping_len = wire_len_of(&crate::Message::Ping(1));
+    let budget = standalone(1, 100 * ping_len, 0);
+
+    let probe = budget
+        .try_charge_control(ping_len)
+        .unwrap_or_else(|refusal| panic!("control charge refused: {refusal:?}"));
+    assert_eq!(
+        budget.pending(),
+        (0, 0),
+        "a control charge takes no data-plane slot"
+    );
+    assert_eq!(budget.control_pending(), (1, ping_len));
+    assert!(
+        budget.try_charge(ping_len).is_ok(),
+        "the data plane keeps its full capacity beside a queued probe"
+    );
+    drop(probe);
+    assert_eq!(budget.control_pending(), (0, 0));
+    assert_eq!(budget.pending(), (0, 0));
+}
+
+#[test]
+fn a_full_control_lane_refuses_local_and_returns_with_room() {
+    let ping_len = wire_len_of(&crate::Message::Ping(1));
+    let budget = standalone(100, 1 << 20, 0);
+
+    let lane: Vec<_> = (0..8)
+        .map(|nonce| {
+            budget
+                .try_charge_control(ping_len)
+                .unwrap_or_else(|refusal| {
+                    panic!("control charge of probe {nonce} refused: {refusal:?}")
+                })
+        })
+        .collect();
+    assert_eq!(
+        budget.try_charge_control(ping_len).err(),
+        Some(Refusal::Local),
+        "lane-full is connection-local congestion: a deferral, never a keepalive stall"
+    );
+    drop(lane);
+    assert_eq!(budget.control_pending(), (0, 0));
+    assert!(
+        budget.try_charge_control(ping_len).is_ok(),
+        "the probe is retryable once the lane returns"
+    );
+}
+
+#[test]
+fn control_lane_refusal_follows_aggregate_backpressure() {
+    let ping_len = wire_len_of(&crate::Message::Ping(1));
+    let shared = Arc::new(SharedOutboundBudget::with_limits(ping_len - 1, 0));
+    let (lease, _rx) = shared_lease(&shared);
+    let budget = lease.budget_handle();
+
+    assert_eq!(
+        budget.try_charge_control(ping_len).err(),
+        Some(Refusal::Shared)
+    );
+    assert_eq!(budget.control_pending(), (0, 0));
+    assert_eq!(budget.pending(), (0, 0), "a refused probe charges nothing");
+}
+
+#[test]
 fn oversized_single_message_admits_on_empty_local_queue() {
     let budget = standalone(10, 100, 0);
 
