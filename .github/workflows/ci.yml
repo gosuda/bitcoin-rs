@@ -174,14 +174,14 @@ jobs:
 
   # ── Aggregate CI result ────────────────────────────────────────
   #
-  # PR green is fast feedback only: fmt, deny, clippy, test-crates.
+  # PR green is fast feedback only: fmt, deny, contracts, clippy, test-crates.
   # Merge-group green includes test-binary/test-workspace before main.
   # Main green is post-merge evidence.
 
   ci-gate:
     if: always()
     runs-on: ubuntu-latest
-    needs: [fmt, deny, clippy, test-crates, test-binary, test-workspace]
+    needs: [fmt, deny, contracts, clippy, test-crates, test-binary, test-workspace]
     steps:
       - name: Evaluate gate
         run: |
@@ -204,7 +204,7 @@ jobs:
 
           echo "Fast lanes:"
           failed=0
-          for job in fmt deny clippy test-crates; do
+          for job in fmt deny contracts clippy test-crates; do
             check "$job" false || failed=1
           done
 

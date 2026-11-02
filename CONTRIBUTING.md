@@ -43,8 +43,8 @@ job set.
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs for pull requests
 against any base branch (including stacked PRs), on merge-group requests, and
 for pushes to `main`. PR green is fast feedback only: `fmt`, `deny`,
-`clippy`, and `test-crates` passed while `test-binary` and `test-workspace`
-are skipped. Merge-group green adds those two heavy lanes as the pre-main
+`contracts`, `clippy`, and `test-crates` passed while `test-binary` and
+`test-workspace` are skipped. Merge-group green adds those two heavy lanes as the pre-main
 integration signal; main checks are post-merge evidence. Every lane fails
 fast at its first failing profile. Every gate command lives in
 [`scripts/ci-pr.sh`](scripts/ci-pr.sh), which CI, the pre-commit hooks, and
@@ -58,6 +58,7 @@ this guide all invoke:
 ./scripts/ci-pr.sh test-workspace # workspace kernel-free pass
 ./scripts/ci-pr.sh test           # every test lane in sequence, smallest first
 ./scripts/ci-pr.sh deny           # full dependency graph, metadata only
+./scripts/ci-pr.sh contracts      # contract index drift check
 ./scripts/ci-pr.sh deep           # every profile, collecting all failures
 ./scripts/ci-pr.sh all            # fmt + deep + deny
 ```
@@ -92,8 +93,9 @@ bypassing the queue are disallowed for standard pull requests.
 The merge queue enforces the integration contract on the latest combined ref
 (`merge_group`) before updating `main`:
 - **PR green (`pull_request`)**: Fast feedback only. `ci-gate` requires `fmt`,
-  `deny`, `clippy`, and `test-crates`; `test-binary`, `test-workspace`, and
-  kernel/native checks are skipped to keep feedback fast (<3 min).
+  `deny`, `contracts`, `clippy`, and `test-crates`; `test-binary`,
+  `test-workspace`, and kernel/native checks are skipped to keep feedback fast
+  (<3 min).
 - **Merge-group green (`merge_group`)**: Pre-main integration eligibility.
   `ci-gate` strictly requires `test-binary` and `test-workspace`;
   [`ci-merge-gate.yml`](.github/workflows/ci-merge-gate.yml) strictly requires
