@@ -58,7 +58,7 @@ The chapters [RPC](../use/rpc.md) and [REST and Esplora](../use/rest-esplora.md)
 
 The handshake has the same shape as Core's and rejects more cases. [`docs/policies/p2p-compatibility.md`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/p2p-compatibility.md) owns the wire policy.
 
-bitcoin-rs advertises protocol version `70017` and a `user_agent` of `/bitcoin-rs:<version>/`. Core 31.1 advertises `70016`. The higher number is the BIP434 negotiation threshold; Core 31.1 does not support BIP434. The `version.timestamp` field is always `0`, which is a recorded deviation.
+bitcoin-rs advertises protocol version `70017` and a `user_agent` of `/bitcoin-rs:<version>/`. `--uacomment` appends Core's comment form, `/bitcoin-rs:<version>(<comment>; ...)/`, to the same string in the version handshake and in `getnetworkinfo`. Core 31.1 advertises `70016`. The higher number is the BIP434 negotiation threshold; Core 31.1 does not support BIP434. The `version.timestamp` field is always `0`, which is a recorded deviation.
 
 The stricter cases are deliberate. The node disconnects the peer and temporarily avoids its IP on a duplicate `verack` or `version`, on a `sendheaders`, `sendaddrv2`, `sendcmpct` or `wtxidrelay` before `version`, or on any other message before readiness. Core ignores some of those pre-version messages and a duplicate `verack`. The node also disconnects and avoids the IP on a version-1 checksum failure; Core rejects the message and resets its decoder. The policy documents these rules. It does not relax them for Core parity.
 

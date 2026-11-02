@@ -13,6 +13,7 @@ Boolean flags come in two forms. Some require an explicit true or false value. O
 | `--corpus` | path | unset | Replays a Core-framed corpus archive offline; requires `--manifest` and `--state`. |
 | `--manifest` | path | unset | Pins the corpus archive and stop height. |
 | `--state` | directory | unset | Holds certification state for the offline import. |
+| `--version` | none | none | Prints `bitcoin-rs daemon version <version>` and exits 0 before any config or data-directory work. |
 | `-h`, `--help` | none | none | Prints the flag list and exits. |
 
 ## Network and data
@@ -37,6 +38,7 @@ Boolean flags come in two forms. Some require an explicit true or false value. O
 
 | Flag | Value | Default | Purpose |
 | --- | --- | --- | --- |
+| `--uacomment` | text | empty | Adds a comment to the advertised subversion as `/bitcoin-rs:<version>(<comment>; ...)/`; unsafe characters or a composed subversion over 256 bytes fail startup. |
 | `--p2p-magic` | 8 hex digits | network magic | Overrides the wire magic; allowed only on mainnet with `--connect` and DNS seeds off. |
 | `--p2p-listen` | `addr[,addr]` | `0.0.0.0:<p2p port>` | Sets inbound P2P listen addresses. |
 | `--dns-seeds-enabled` | `true` or `false` | `true` | Resolves DNS seeds; `drynet4` starts false. |

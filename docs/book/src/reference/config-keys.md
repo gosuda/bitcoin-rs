@@ -32,6 +32,7 @@ Environment booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `of
 | TOML key | Environment | `bitcoin.conf` | Default |
 | --- | --- | --- | --- |
 | `p2p_magic` | `BITCOIN_RS_P2P_MAGIC` | no | network magic |
+| `ua_comments` | no | `uacomment` (repeatable) | empty |
 | `p2p_listen` | `BITCOIN_RS_P2P_LISTEN` | `listen` (only `0` is handled) | `0.0.0.0:<p2p port>` |
 | `dns_seeds_enabled` | `BITCOIN_RS_DNS_SEEDS_ENABLED` | `dnsseed` | `true`; `false` for `drynet4` |
 | `asmap` | `BITCOIN_RS_ASMAP` | no | unset |

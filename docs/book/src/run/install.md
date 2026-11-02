@@ -44,7 +44,14 @@ The binary lands at `target/quickstart/bitcoin-rs`. Keep performance work on the
 
 ## Check the binary
 
-The binary has no `--version` flag. Ask for its help, and record the source commit instead of a version string.
+`--version` prints one line and exits 0:
+
+```sh
+$ ./target/release/bitcoin-rs --version
+bitcoin-rs daemon version 0.15.0
+```
+
+The flag runs before any config or data-directory work, so it is safe on a machine with no datadir. The string is this node's own name and workspace version, not Bitcoin Core's version and not Core's license paragraph.
 
 ```sh
 $ ./target/release/bitcoin-rs --help
@@ -52,11 +59,6 @@ Run a bitcoin-rs node
 ```
 
 The usage line that follows names the program as it was invoked (argv[0]). The rest of the output is the full flag list.
-
-```sh
-$ ./target/release/bitcoin-rs --version
-error: unexpected argument '--version' found
-```
 
 Help output is the authoritative flag list for the binary in front of you. The [command-line reference](../reference/cli.md) mirrors it for this book's commit.
 
