@@ -632,30 +632,33 @@ fn shaped_undo(block: &Block) -> UndoBatch {
 fn undo_validation_matches_the_block_shape() -> TestResult {
     const MAX_SCRIPT_SIZE: usize = 10_000;
     let block = shaped_block();
+    let txids: Vec<Txid> = block.txs.iter().map(|tx| tx.txid()).collect();
+    let check = BlockUndoCheck {
+        block: &block,
+        txids: &txids,
+        max_script_size: MAX_SCRIPT_SIZE,
+    };
     let undo = shaped_undo(&block);
-    assert_eq!(
-        validate_undo_for_block(&block, HEIGHT, &undo, MAX_SCRIPT_SIZE),
-        Ok(())
-    );
+    assert_eq!(validate_undo_for_block(&check, HEIGHT, &undo), Ok(()));
 
     let mut extra_remove = shaped_undo(&block);
     extra_remove.remove(OutPoint::new(block.txs[1].txid(), 0));
     assert!(matches!(
-        validate_undo_for_block(&block, HEIGHT, &extra_remove, MAX_SCRIPT_SIZE),
+        validate_undo_for_block(&check, HEIGHT, &extra_remove),
         Err(UndoCodecError::BlockMismatch { .. })
     ));
 
     let mut foreign_restore = shaped_undo(&block);
     foreign_restore.restore(UtxoAdd::new(CREATED, coin(1), false, HEIGHT - 1));
     assert!(matches!(
-        validate_undo_for_block(&block, HEIGHT, &foreign_restore, MAX_SCRIPT_SIZE),
+        validate_undo_for_block(&check, HEIGHT, &foreign_restore),
         Err(UndoCodecError::BlockMismatch { .. })
     ));
 
     let mut future_restore = shaped_undo(&block);
     future_restore.restore(UtxoAdd::new(FUNDED, coin(90), false, HEIGHT));
     assert!(matches!(
-        validate_undo_for_block(&block, HEIGHT, &future_restore, MAX_SCRIPT_SIZE),
+        validate_undo_for_block(&check, HEIGHT, &future_restore),
         Err(UndoCodecError::BlockMismatch { .. })
     ));
 
@@ -664,7 +667,7 @@ fn undo_validation_matches_the_block_shape() -> TestResult {
     missing_restore.remove(OutPoint::new(block.txs[1].txid(), 1));
     missing_restore.remove(OutPoint::new(block.txs[2].txid(), 0));
     assert!(matches!(
-        validate_undo_for_block(&block, HEIGHT, &missing_restore, MAX_SCRIPT_SIZE),
+        validate_undo_for_block(&check, HEIGHT, &missing_restore),
         Err(UndoCodecError::BlockMismatch { .. })
     ));
 
@@ -679,7 +682,7 @@ fn undo_validation_matches_the_block_shape() -> TestResult {
     overwritten.remove(OutPoint::new(block.txs[0].txid(), 0));
     overwritten.remove(OutPoint::new(block.txs[2].txid(), 0));
     assert_eq!(
-        validate_undo_for_block(&block, HEIGHT, &overwritten, MAX_SCRIPT_SIZE),
+        validate_undo_for_block(&check, HEIGHT, &overwritten),
         Ok(()),
         "a BIP30 overwrite restores the replaced output instead of removing it"
     );

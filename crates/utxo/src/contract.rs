@@ -548,30 +548,34 @@ pub fn load_block_undo(
     undo_codec::decode(&record, hash).map_err(|source| UndoLoadError::Unreadable { hash, source })
 }
 
+pub struct BlockUndoCheck<'a> {
+    pub block: &'a Block,
+    pub txids: &'a [Txid],
+    pub max_script_size: usize,
+}
+
 pub fn load_block_undo_for_block(
     store: &dyn UndoStore,
     height: u32,
     hash: Hash256,
-    block: &Block,
-    max_script_size: usize,
+    check: &BlockUndoCheck<'_>,
 ) -> Result<UndoBatch, UndoLoadError> {
     let undo = load_block_undo(store, height, hash)?;
-    validate_undo_for_block(block, height, &undo, max_script_size)
+    validate_undo_for_block(check, height, &undo)
         .map_err(|source| UndoLoadError::Unreadable { hash, source })?;
     Ok(undo)
 }
 
 fn validate_undo_for_block(
-    block: &Block,
+    check: &BlockUndoCheck<'_>,
     height: u32,
     undo: &UndoBatch,
-    max_script_size: usize,
 ) -> Result<(), UndoCodecError> {
     if height == 0 {
         return Ok(());
     }
-    let (created, mut expected_removes) = block_outputs(block, max_script_size)?;
-    let (external_inputs, same_block_inputs) = block_inputs(block);
+    let (created, mut expected_removes) = block_outputs(check)?;
+    let (external_inputs, same_block_inputs) = block_inputs(check);
     expected_removes.retain(|outpoint| !same_block_inputs.contains(outpoint));
 
     let mut restored: HashSet<OutPoint> = HashSet::with_capacity(undo.restores().len());
@@ -607,21 +611,20 @@ fn validate_undo_for_block(
 }
 
 fn block_outputs(
-    block: &Block,
-    max_script_size: usize,
+    check: &BlockUndoCheck<'_>,
 ) -> Result<(HashSet<OutPoint>, HashSet<OutPoint>), UndoCodecError> {
+    debug_assert_eq!(check.block.txs.len(), check.txids.len());
     let mut created = HashSet::new();
     let mut retained = HashSet::new();
-    for tx in &block.txs {
-        let txid = tx.txid();
+    for (tx, txid) in check.block.txs.iter().zip(check.txids) {
         for (index, txout) in tx.outputs.iter().enumerate() {
             let vout = u32::try_from(index).map_err(|_| UndoCodecError::BlockMismatch {
                 reason: "block output index exceeds the vout range",
             })?;
-            let outpoint = OutPoint::new(txid, vout);
+            let outpoint = OutPoint::new(*txid, vout);
             created.insert(outpoint);
             let unstorable = txout.script_pubkey.first() == Some(&0x6a)
-                || txout.script_pubkey.len() > max_script_size;
+                || txout.script_pubkey.len() > check.max_script_size;
             if !unstorable {
                 retained.insert(outpoint);
             }
@@ -630,13 +633,14 @@ fn block_outputs(
     Ok((created, retained))
 }
 
-fn block_inputs(block: &Block) -> (HashSet<OutPoint>, HashSet<OutPoint>) {
-    let mut prior_txids: HashSet<Txid> = HashSet::with_capacity(block.txs.len());
+fn block_inputs(check: &BlockUndoCheck<'_>) -> (HashSet<OutPoint>, HashSet<OutPoint>) {
+    debug_assert_eq!(check.block.txs.len(), check.txids.len());
+    let mut prior_txids: HashSet<Txid> = HashSet::with_capacity(check.block.txs.len());
     let mut external = HashSet::new();
     let mut same_block = HashSet::new();
-    for tx in &block.txs {
+    for (tx, txid) in check.block.txs.iter().zip(check.txids) {
         if tx.is_coinbase() {
-            prior_txids.insert(tx.txid());
+            prior_txids.insert(*txid);
             continue;
         }
         for input in &tx.inputs {
@@ -650,7 +654,7 @@ fn block_inputs(block: &Block) -> (HashSet<OutPoint>, HashSet<OutPoint>) {
                 }
             }
         }
-        prior_txids.insert(tx.txid());
+        prior_txids.insert(*txid);
     }
     (external, same_block)
 }
