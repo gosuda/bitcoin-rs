@@ -950,6 +950,25 @@ impl Mempool {
         Some(self.links(id)?.surviving_sides(excluded))
     }
 
+    /// Memory `dynamic_memory_usage` releases when `ids` and everything in
+    /// `removed` leave the pool together: each entry's body and its own side
+    /// records, plus the surviving side of every boundary link.
+    pub(crate) fn removal_memory_release(
+        &self,
+        ids: &[EntryId],
+        removed: &HashSet<EntryId>,
+    ) -> Option<u64> {
+        let mut total = 0_u64;
+        for &id in ids {
+            let released = self.entry_memory(id)?;
+            let sides = self.surviving_neighbor_sides(id, removed)?;
+            total = total
+                .checked_add(released)?
+                .checked_add(link_memory_usage(sides, 1))?;
+        }
+        Some(total)
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()

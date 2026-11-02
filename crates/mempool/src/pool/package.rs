@@ -1,4 +1,5 @@
 use super::{Mempool, PreparedInsert, fee_policy};
+use crate::EntryId;
 use crate::rbf::LimitEnforcement;
 use crate::standardness::AcceptanceRejectReason;
 use crate::{MempoolEntry, MempoolError, MutationResult, PolicyError};
@@ -35,14 +36,14 @@ impl Mempool {
         )?;
         let cutoff = expiry_time.saturating_sub(crate::policy::MEMPOOL_EXPIRY_SECS);
         let expired_ids = self.expired_entry_ids(expiry_time);
+        let expired_set: HashSet<EntryId> = expired_ids.iter().copied().collect();
         let mut expired_txids: HashSet<Txid> = expired_ids
             .iter()
             .filter_map(|id| self.entry(*id).map(|e| e.txid))
             .collect();
-        let mut expired_memory = expired_ids
-            .iter()
-            .filter_map(|id| self.entry_memory(*id))
-            .sum::<u64>();
+        let mut expired_memory = self
+            .removal_memory_release(&expired_ids, &expired_set)
+            .ok_or(PolicyError::FeeArithmetic)?;
 
         let mut expired_pending_indices = HashSet::new();
         let mut changed = true;

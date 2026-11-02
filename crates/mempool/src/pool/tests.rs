@@ -1,9 +1,11 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use hashbrown::HashSet;
 
 use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut};
 
 use super::*;
+use crate::rbf::LimitEnforcement;
 
 fn change_txids(result: &crate::mutation::MutationResult) -> Vec<Hash256> {
     result.changes.iter().map(|change| change.txid).collect()
@@ -1807,4 +1809,88 @@ fn tx(label: u8, previous_outputs: Vec<OutPoint>) -> Tx {
             script_pubkey: vec![label].into(),
         }],
     }
+}
+
+// POL-03
+#[test]
+fn pool_expiry_projection_releases_surviving_neighbor_link_sides() -> Result<(), MempoolError> {
+    fn seed(pool: &mut Mempool, entry: MempoolEntry) -> Result<(), MempoolError> {
+        let prepared = pool.prepare_insert(entry, &HashSet::new(), LimitEnforcement::Deferred)?;
+        pool.commit_insert(prepared);
+        Ok(())
+    }
+    fn package_pool(seeds: &[MempoolEntry], max_total_bytes: u64) -> Result<Mempool, MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            max_total_bytes,
+            ..MempoolLimits::default()
+        });
+        for entry in seeds {
+            seed(&mut pool, entry.clone())?;
+        }
+        Ok(pool)
+    }
+    let young = crate::policy::MEMPOOL_EXPIRY_SECS + 100;
+    let now = young + 1;
+    let boundary = link_memory_usage(1, 2);
+
+    let s_tx = single_output_tx(&[], Sequence::MAX, 90_000, vec![0x51].into());
+    let s_txid = s_tx.txid();
+    let p_tx = single_output_tx(
+        &[OutPoint::new(s_txid, 0)],
+        Sequence::MAX,
+        80_000,
+        vec![0x52].into(),
+    );
+    let x_tx = single_output_tx(
+        &[OutPoint::new(s_txid, 0)],
+        Sequence::MAX,
+        80_000,
+        vec![0x53].into(),
+    );
+    let seeds = [
+        MempoolEntry::new(Arc::new(s_tx.clone()), 100, 1_000, young, 7, 0),
+        MempoolEntry::new(Arc::new(p_tx.clone()), 100, 1_000, 1, 7, 0),
+    ];
+    let usage = package_pool(&seeds, 0)?.dynamic_memory_usage();
+    let bounded = package_pool(&seeds, usage)?;
+    let newcomer = MempoolEntry::new(Arc::new(x_tx), 100, 1_000, now, 7, 0);
+    bounded
+        .prepare_package(vec![newcomer], now)
+        .expect("removing the expired child frees its own and the parent's side records");
+
+    let s2_tx = single_output_tx(&[], Sequence::MAX, 90_000, vec![0x51].into());
+    let s2_txid = s2_tx.txid();
+    let p1_tx = single_output_tx(
+        &[OutPoint::new(s2_txid, 0)],
+        Sequence::MAX,
+        80_000,
+        vec![0x52].into(),
+    );
+    let p2_tx = single_output_tx(
+        &[OutPoint::new(s2_txid, 1)],
+        Sequence::MAX,
+        80_000,
+        vec![0x53].into(),
+    );
+    let fat_tx = single_output_tx(
+        &[OutPoint::new(s2_txid, 2)],
+        Sequence::MAX,
+        80_000,
+        Script::from_bytes(vec![0x54; 40]),
+    );
+    let seeds2 = [
+        MempoolEntry::new(Arc::new(s2_tx.clone()), 100, 1_000, young, 7, 0),
+        MempoolEntry::new(Arc::new(p1_tx.clone()), 100, 1_000, 1, 7, 0),
+        MempoolEntry::new(Arc::new(p2_tx.clone()), 100, 1_000, 1, 7, 0),
+    ];
+    let usage2 = package_pool(&seeds2, 0)?.dynamic_memory_usage();
+    let expired_memory = entry_memory_usage(&p1_tx) + entry_memory_usage(&p2_tx) + 2 * boundary;
+    let newcomer_memory = entry_memory_usage(&fat_tx) + boundary;
+    let bounded2 = package_pool(&seeds2, usage2 - expired_memory + newcomer_memory)?;
+    let fat = MempoolEntry::new(Arc::new(fat_tx), 100, 1_000, now, 7, 0);
+    bounded2
+        .prepare_package(vec![fat], now)
+        .expect("the exact release of both expired children fits the boundary");
+    Ok(())
 }
