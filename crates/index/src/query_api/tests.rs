@@ -286,7 +286,7 @@ fn default_history_page_skips_the_cursor_and_restarts_when_unknown()
 
 // IDX-02
 #[test]
-fn default_history_page_serves_a_duplicated_txid_once_per_height()
+fn default_history_page_lists_a_duplicated_txid_at_its_newest_occurrence()
 -> Result<(), crate::portable::TestError> {
     let record = |id: u8, height| ScriptHistoryRecord {
         txid: Txid(Hash256::from_le_bytes(&[id; 32])),
@@ -297,13 +297,18 @@ fn default_history_page_serves_a_duplicated_txid_once_per_height()
 
     assert_eq!(
         source.history_page(script, None, usize::MAX)?,
-        vec![record(1, 7), record(2, 6), record(2, 3), record(3, 1)],
-        "a pre-BIP34 duplicate txid is served once per height"
+        vec![record(1, 7), record(2, 6), record(3, 1)],
+        "a duplicated txid lists once, at its newest occurrence"
     );
     assert_eq!(
         source.history_page(script, Some(record(2, 6).txid), usize::MAX)?,
-        vec![record(2, 3), record(3, 1)],
-        "an exclusive duplicate cursor continues below the newest occurrence"
+        vec![record(3, 1)],
+        "an exclusive cursor continues strictly below the newest occurrence"
+    );
+    assert_eq!(
+        source.history_page(script, Some(record(2, 3).txid), usize::MAX)?,
+        vec![record(3, 1)],
+        "the older occurrence resolves to the newest and never repeats"
     );
     Ok(())
 }

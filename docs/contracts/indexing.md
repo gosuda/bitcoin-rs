@@ -103,8 +103,9 @@ Owners:
 - The resolution picks the newest covered occurrence of that transaction id.
 - A pre-BIP34 duplicate transaction id names several rows of one script history.
 - The public cursor names the transaction id and carries no height.
-- A page after the older occurrence repeats the rows from below the newest occurrence through the older occurrence.
-- No cursor page drops a row.
+- A page lists a record only when the transaction index resolves its transaction id to that height.
+- A duplicated transaction id lists once, at its newest covered occurrence.
+- A cursor page never repeats a listed record and never drops a listed row.
 - Therefore a cursor page requires the transaction index.
 - Without `TxLookup`, the page starts from the first page, as `API-09` defines for an unknown cursor.
 

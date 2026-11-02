@@ -358,6 +358,51 @@ impl DerivedIndexQueryEngine {
         Self::none_below_floor(prefix.floor, "script history")
     }
 
+    fn lists_newest_covered_occurrence(
+        snapshot: &dyn TxIndexSnapshot,
+        prefix: &ReadPrefix,
+        budget: &mut QueryBudget,
+        scripthash: ScriptHash,
+        txid: &Txid,
+        height: u32,
+    ) -> Result<bool, TxQueryError> {
+        let limit = budget.next_scan_limit()?;
+        let scan = snapshot
+            .transaction_rows(txid, limit)
+            .map_err(storage_error)?;
+        let mut heights: Vec<u32> = budget
+            .accept_scan(scan)?
+            .into_iter()
+            .map(|row| row.row.height())
+            .filter(|row_height| prefix.covers(*row_height))
+            .collect();
+        heights.sort_unstable_by(|left, right| right.cmp(left));
+        heights.dedup();
+        if heights.is_empty() {
+            let found: Option<Txid> = Self::scoped_absence(prefix, "transaction index")?;
+            return Ok(found.is_some());
+        }
+        for newer in heights {
+            if newer <= height {
+                break;
+            }
+            let limit = budget.next_page_scan_limit(1, PAGE_SCAN_BYTES)?;
+            let scan = snapshot
+                .funding_rows_from(scripthash, newer, limit)
+                .map_err(storage_error)?;
+            let (rows, _) = budget.accept_page_scan(scan)?;
+            let Some(row) = rows.first().filter(|row| row.row.height() == newer) else {
+                continue;
+            };
+            if Self::occurrences(&row.value)?.iter().any(|occurrence| {
+                occurrence.scripthash == scripthash && occurrence.txid == *txid.as_bytes()
+            }) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub(super) fn confirmed_history_page_for(
         snapshot: &dyn TxIndexSnapshot,
         prefix: &ReadPrefix,
@@ -382,6 +427,7 @@ impl DerivedIndexQueryEngine {
         }
 
         let mut records: Vec<ScriptHistoryRecord> = Vec::with_capacity(limit);
+        let mut listed = std::collections::BTreeSet::<Txid>::new();
         let mut start_height = cursor.map_or(u32::MAX, |(height, _)| height);
         'scan: loop {
             let scan_limit = budget.next_page_scan_limit(PAGE_SCAN_ROWS, PAGE_SCAN_BYTES)?;
@@ -420,9 +466,13 @@ impl DerivedIndexQueryEngine {
                         continue;
                     }
                     let txid = occurrence.txid();
-                    if records
-                        .last()
-                        .is_some_and(|last| last.height == height && last.txid == txid)
+                    if !listed.insert(txid) {
+                        continue;
+                    }
+                    if cursor.is_some()
+                        && !Self::lists_newest_covered_occurrence(
+                            snapshot, prefix, budget, scripthash, &txid, height,
+                        )?
                     {
                         continue;
                     }
@@ -798,7 +848,7 @@ mod tests {
 
     // IDX-02
     #[test]
-    fn pre_bip34_duplicate_txid_is_served_once_per_height() {
+    fn pre_bip34_duplicate_txid_is_listed_at_its_newest_occurrence() {
         let script = ScriptHash::from_byte_array([3; 32]);
         let duplicate = occurrence(script, 9, 100);
         let snapshot =
@@ -812,14 +862,12 @@ mod tests {
             25,
         )
         .unwrap_or_else(|error| panic!("duplicate page failed: {error}"));
-        assert_eq!(
-            page.records.len(),
-            2,
-            "distinct heights stay distinct records"
-        );
+        assert_eq!(page.records.len(), 1, "one duplicated txid lists once");
         assert_eq!(page.records[0].height, 20);
-        assert_eq!(page.records[1].height, 5);
-        assert_eq!(page.records[0].txid, page.records[1].txid);
+        assert_eq!(
+            page.records[0].txid,
+            Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[9; 32]))
+        );
     }
 
     // IDX-02
@@ -862,24 +910,104 @@ mod tests {
             })
             .collect();
         let snapshot = HistorySnapshot::new(script, rows);
-        let budget = &mut QueryBudget::new();
-        let mut oracle: Vec<ScriptHistoryRecord> = snapshot
-            .rows
-            .iter()
-            .map(|(height, occurrences)| ScriptHistoryRecord {
-                txid: Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(
-                    &occurrences[0].txid,
-                )),
-                height: *height,
+        let oracle = newest_occurrence_listing(&snapshot.rows);
+        let served = page_all(&snapshot, script, 6, snapshot.rows.len() + 1);
+        assert_eq!(
+            served, oracle,
+            "the union of pages equals the newest-occurrence listing"
+        );
+    }
+
+    // IDX-02, API-09
+    #[test]
+    fn duplicated_txid_cursor_pages_terminate_for_every_limit() {
+        let script = ScriptHash::from_byte_array([6; 32]);
+        let snapshot = HistorySnapshot::new(script, duplicate_rows(script, 25, 20, 6));
+        let expected = newest_occurrence_listing(&snapshot.rows);
+        for limit in 1..=30_usize {
+            let served = page_all(&snapshot, script, limit, snapshot.rows.len() + 1);
+            for record in &expected {
+                let count = served.iter().filter(|entry| *entry == record).count();
+                assert_eq!(
+                    count, 1,
+                    "limit {limit} serves {record:?} more than the documented once"
+                );
+            }
+            assert_eq!(
+                served, expected,
+                "limit {limit} must cover the newest-occurrence listing in order"
+            );
+        }
+        for limit in 1..=30_usize {
+            let top = u32::try_from(2 * limit).unwrap_or(0);
+            let bottom = u32::try_from(limit).unwrap_or(0);
+            let snapshot = HistorySnapshot::new(script, duplicate_rows(script, top, top, bottom));
+            let expected = newest_occurrence_listing(&snapshot.rows);
+            let served = page_all(&snapshot, script, limit, snapshot.rows.len() + 1);
+            assert_eq!(
+                served, expected,
+                "the duplicate gap equals limit {limit} and paging must still terminate"
+            );
+        }
+    }
+
+    fn duplicate_rows(
+        script: ScriptHash,
+        rows_top: u32,
+        dup_top: u32,
+        dup_bottom: u32,
+    ) -> Vec<(u32, Vec<ScriptHistoryOccurrence>)> {
+        (1..=rows_top)
+            .rev()
+            .map(|height| match height {
+                h if h == dup_top => (height, vec![occurrence(script, 9, 100)]),
+                h if h == dup_bottom => (height, vec![occurrence(script, 9, 90)]),
+                other => (
+                    other,
+                    vec![occurrence(
+                        script,
+                        u8::try_from(100 + other).unwrap_or(0),
+                        CURSOR_OFFSET,
+                    )],
+                ),
             })
-            .collect();
-        oracle.sort_by_key(|record| core::cmp::Reverse(record.height));
-        let limit = 6;
+            .collect()
+    }
+
+    fn newest_occurrence_listing(
+        rows: &[(u32, Vec<ScriptHistoryOccurrence>)],
+    ) -> Vec<ScriptHistoryRecord> {
+        let mut listed: Vec<ScriptHistoryRecord> = Vec::new();
+        let mut seen: Vec<[u8; 32]> = Vec::new();
+        for (height, occurrences) in rows {
+            for occurrence in occurrences {
+                if seen.contains(&occurrence.txid) {
+                    continue;
+                }
+                seen.push(occurrence.txid);
+                listed.push(ScriptHistoryRecord {
+                    txid: Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(
+                        &occurrence.txid,
+                    )),
+                    height: *height,
+                });
+            }
+        }
+        listed
+    }
+
+    fn page_all(
+        snapshot: &HistorySnapshot,
+        script: ScriptHash,
+        limit: usize,
+        page_bound: usize,
+    ) -> Vec<ScriptHistoryRecord> {
+        let budget = &mut QueryBudget::new();
         let mut served: Vec<ScriptHistoryRecord> = Vec::new();
         let mut cursor = None;
-        loop {
+        for _ in 0..=page_bound {
             let page = DerivedIndexQueryEngine::confirmed_history_page_for(
-                &snapshot,
+                snapshot,
                 &prefix(),
                 budget,
                 script,
@@ -888,20 +1016,13 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("history page failed: {error}"));
             assert!(page.cursor_found, "every fixture cursor resolves");
-            let short = page.records.len() < limit;
-            served.extend(page.records);
-            if short {
-                break;
+            served.extend(page.records.iter().copied());
+            if page.records.len() < limit {
+                return served;
             }
-            let Some(last) = served.last() else {
-                break;
-            };
-            cursor = Some(last.txid);
+            cursor = page.records.last().map(|record| record.txid);
         }
-        assert_eq!(
-            served, oracle,
-            "the union of pages equals the newest-first full scan"
-        );
+        panic!("paging did not terminate within {page_bound} pages");
     }
 
     // IDX-02

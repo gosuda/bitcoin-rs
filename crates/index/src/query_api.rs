@@ -243,11 +243,18 @@ pub trait ScriptIndexQuery: Send + Sync {
                 .cmp(&left.height)
                 .then_with(|| right.txid.cmp(&left.txid))
         });
-        history.dedup_by(|left, right| left.txid == right.txid && left.height == right.height);
-        let start = cursor.and_then(|txid| history.iter().position(|record| record.txid == txid));
+        let mut listed: Vec<ScriptHistoryRecord> = Vec::with_capacity(history.len());
+        let mut seen = std::collections::BTreeSet::<Txid>::new();
+        for record in history {
+            if !seen.insert(record.txid) {
+                continue;
+            }
+            listed.push(record);
+        }
+        let start = cursor.and_then(|txid| listed.iter().position(|record| record.txid == txid));
         let cursor_found = cursor.is_none() || start.is_some();
         Ok(ScriptHistoryPage {
-            records: history
+            records: listed
                 .into_iter()
                 .skip(start.map_or(0, |index| index + 1))
                 .take(limit.min(SCRIPT_HISTORY_PAGE_MAX))

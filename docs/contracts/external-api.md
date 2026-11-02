@@ -361,7 +361,8 @@ wallet interoperability remain unverified.
 - A valid known cursor strictly excludes it and earlier entries.
 - The cursor is the lowercase `txid` display text alone and carries no height.
 - A `txid` duplicated across heights resolves to its newest covered occurrence.
-- A page after the older occurrence repeats the rows from below the newest occurrence through the older occurrence instead of dropping them.
+- The confirmed page lists a duplicated transaction id once, at its newest covered occurrence.
+- A page after a known cursor serves only the rows below it, so a paging client visits each listed record exactly once and terminates.
 - Lag, reorg, or disabled capability returns the declared unavailable response, never an empty success.
 - `/txs/chain[/<last_seen_txid>]` reads are bounded to the requested page (up to 25 items).
 - Confirmation, block metadata, and transaction projections hydrate only the page slice, never the full history.
