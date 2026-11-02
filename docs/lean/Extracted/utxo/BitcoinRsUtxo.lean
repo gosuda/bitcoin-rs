@@ -84,7 +84,7 @@ axiom core.result.Result.ok
 axiom bitcoin_rs_primitives.units.Amount : Type
 
 /-- [bitcoin_rs_primitives::units::{bitcoin_rs_primitives::units::Amount}::MAX_MONEY]
-    Source: 'crates/primitives/src/units.rs', lines 10:4-10:29
+    Source: 'crates/primitives/src/units.rs', lines 11:4-11:29
     Name pattern: [bitcoin_rs_primitives::units::{bitcoin_rs_primitives::units::Amount}::MAX_MONEY]
     Visibility: public -/
 @[rust_const
@@ -93,7 +93,7 @@ axiom bitcoin_rs_primitives.units.Amount.MAX_MONEY
   : Result bitcoin_rs_primitives.units.Amount
 
 /-- [bitcoin_rs_primitives::units::{bitcoin_rs_primitives::units::Amount}::to_sat]:
-    Source: 'crates/primitives/src/units.rs', lines 18:4-18:36
+    Source: 'crates/primitives/src/units.rs', lines 19:4-19:36
     Name pattern: [bitcoin_rs_primitives::units::{bitcoin_rs_primitives::units::Amount}::to_sat]
     Visibility: public -/
 @[rust_fun

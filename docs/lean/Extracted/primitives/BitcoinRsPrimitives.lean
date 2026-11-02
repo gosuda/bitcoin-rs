@@ -88,7 +88,7 @@ def layout.MIN_WITNESS_ITEM_LEN : Std.Usize := 1#usize
 def layout.MIN_SCRIPT_BYTE_LEN : Std.Usize := 1#usize
 
 /-- [bitcoin_rs_primitives::units::LockTime]
-    Source: 'crates/primitives/src/units.rs', lines 96:0-96:25
+    Source: 'crates/primitives/src/units.rs', lines 99:0-99:25
     Visibility: public -/
 @[reducible]
 def units.LockTime := Std.U32
@@ -113,7 +113,7 @@ structure tx.TxOut where
   script_pubkey : script.Script
 
 /-- [bitcoin_rs_primitives::units::Sequence]
-    Source: 'crates/primitives/src/units.rs', lines 40:0-40:25
+    Source: 'crates/primitives/src/units.rs', lines 41:0-41:25
     Visibility: public -/
 @[reducible]
 def units.Sequence := Std.U32
