@@ -36,6 +36,7 @@ mod storage_backend;
 #[doc(hidden)]
 pub mod test_support;
 #[cfg(any(test, feature = "test-seam"))]
+#[doc(hidden)]
 pub use test_support::TestError;
 pub mod sync;
 #[cfg(not(feature = "test-seam"))]
