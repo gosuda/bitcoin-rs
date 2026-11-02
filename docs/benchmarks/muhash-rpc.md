@@ -23,7 +23,18 @@ The query is a bounded read under the existing read fence; it cannot consume the
 
 ## Status
 
-`planned_not_executed` under the identity, acceptance and status rules of [`README.md`](README.md).
+`planned_not_executed` under the identity, acceptance and status rules of
+[`README.md`](README.md).
+
+2026-11-02: the refresh record's candidate-arm CLI gap is closed. The
+emitter now gives the bitcoin-rs arm the node CLI family (`--config`,
+`--rpc-cookie`, `--data-dir`, `--rpc-bind`) with the loopback host and the
+allocated port joined into one socket-address token, plus a node-valid
+TOML config document. The release binary boots with that exact expanded
+argv and answers `getblockchaininfo`; the proof pinned a regtest network
+override to stay off the mainnet default. The Core arm still needs its
+state-writing wrapper, and no unmodified-daemon smoke against a frozen-tip
+corpus exists, so the cell stays `planned_not_executed`.
 
 ## Prior candidate evidence (controller contract before the rewrite)
 
