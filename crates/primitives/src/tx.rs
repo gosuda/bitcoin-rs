@@ -38,6 +38,7 @@ impl Tx {
         self.inputs.iter().any(|input| !input.witness.is_empty())
     }
 
+    /// Computes the transaction id: double-SHA256 of the non-witness serialization.
     #[must_use]
     pub fn txid(&self) -> Txid {
         let mut engine: Sha256 = Sha256::new();
@@ -46,6 +47,7 @@ impl Tx {
         Txid(finalize_double_sha256(engine))
     }
 
+    /// Computes the witness transaction id: double-SHA256 of the full serialization.
     #[must_use]
     pub fn wtxid(&self) -> Wtxid {
         let mut engine = Sha256::new();

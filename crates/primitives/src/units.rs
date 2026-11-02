@@ -7,6 +7,7 @@ impl Amount {
     pub const ZERO: Self = Self(0);
     pub const SAT: Self = Self(1);
     pub const COIN: Self = Self(100_000_000);
+    /// Consensus maximum money (21 million bitcoin).
     pub const MAX_MONEY: Self = Self(21_000_000 * Self::COIN.0);
 
     #[must_use]
@@ -53,7 +54,9 @@ pub const SEQUENCE_LOCKTIME_MASK: u32 = 0x0000_ffff;
 
 impl Sequence {
     pub const ZERO: Self = Self(0);
+    /// `0xffffffff`: final, disables relative locktime and RBF signaling.
     pub const MAX: Self = Self(u32::MAX);
+    /// BIP125 opt-in RBF without locktime (`0xfffffffd`).
     pub const ENABLE_RBF_NO_LOCKTIME: Self = Self(0xffff_fffd);
 
     #[must_use]
@@ -96,6 +99,7 @@ impl core::ops::BitAnd<u32> for Sequence {
 pub struct LockTime(u32);
 
 impl LockTime {
+    /// Locktime zero: always final from the locktime field alone.
     pub const ZERO: Self = Self(0);
 
     #[must_use]
