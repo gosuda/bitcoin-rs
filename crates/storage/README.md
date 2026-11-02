@@ -40,10 +40,11 @@ refuses a lease over deleted history.
 
 ## Cache budget
 
-`dbcache` is one process-wide budget. `cache_budget::split_cache_budget` divides
-it across the persistent namespaces: chainstate 80% and txindex 20% when
-enabled. It floors each share and hands the remainder (plus every disabled
-namespace's share) to chainstate, so the shares always sum to at most the
+`dbcache` is one process-wide budget. `cache_budget::split_cache_budget_with_txindex`
+divides it across the persistent namespaces: chainstate 80% and txindex 20%.
+`cache_budget::split_cache_budget_without_txindex` gives the whole budget to
+chainstate when the transaction index is disabled. Both floor the txindex share
+and hand the remainder to chainstate, so the shares always sum to at most the
 budget. Each backend accepts its namespace's share through `open_with_cache`
 (`open_redb_tx_index_store_with_cache` for the redb transaction index); fjall
 sizes its block cache, redb its page cache, and `RocksDB` its LRU block cache.
