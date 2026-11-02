@@ -687,7 +687,7 @@ pub(crate) fn decode_payload(command: &str, payload: &bytes::Bytes) -> Result<Me
     }
 
     let message = match command {
-        "version" => Message::Version(decode_version(payload)?),
+        "version" => Message::Version(encode::deserialize::<VersionMessage>(payload)?),
         "verack" => empty_payload(payload, Message::Verack)?,
         "addr" => Message::Addr(decode_addr(payload)?),
         "inv" => Message::Inv(decode_inventory(payload)?),
@@ -887,40 +887,26 @@ fn decode_headers(payload: &[u8]) -> Result<Vec<Header>, PeerError> {
     Ok(headers)
 }
 
-fn decode_version(payload: &[u8]) -> Result<VersionMessage, PeerError> {
-    let message = encode::deserialize::<VersionMessage>(payload)?;
-    if payload.len() >= 85 {
-        let (ua_len, consumed) = bitcoin_rs_primitives::varint::decode(&payload[80..])?;
-        let ua_len_usize =
-            usize::try_from(ua_len).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
-        let relay_offset = 80_usize
-            .checked_add(consumed)
-            .and_then(|offset| offset.checked_add(ua_len_usize))
-            .and_then(|offset| offset.checked_add(4))
-            .ok_or(PeerError::Misbehavior("version payload offset overflow"))?;
-        if payload.len() > relay_offset && payload[relay_offset] > 1 {
-            return Err(PeerError::Misbehavior("non-canonical boolean in version"));
-        }
-    }
-    Ok(message)
-}
-
-fn decode_sendcmpct(payload: &[u8]) -> Result<SendCmpct, PeerError> {
-    if let Some(&first) = payload.first() {
-        if first > 1 {
-            return Err(PeerError::Misbehavior("non-canonical boolean in sendcmpct"));
-        }
-    }
-    let message = encode::deserialize::<SendCmpct>(payload)?;
-    Ok(message)
-}
-
 fn empty_payload(payload: &[u8], message: Message) -> Result<Message, PeerError> {
     if payload.is_empty() {
         Ok(message)
     } else {
         Err(PeerError::Misbehavior("expected empty payload"))
     }
+}
+
+fn decode_sendcmpct(payload: &[u8]) -> Result<SendCmpct, PeerError> {
+    if payload.len() < 9 {
+        return Err(
+            bitcoin::consensus::encode::Error::ParseFailed("sendcmpct payload too short").into(),
+        );
+    }
+    let mut version = [0_u8; 8];
+    version.copy_from_slice(&payload[1..9]);
+    Ok(SendCmpct {
+        send_compact: payload[0] != 0,
+        version: u64::from_le_bytes(version),
+    })
 }
 
 fn encode_command(command: &CommandString) -> Result<[u8; COMMAND_LEN], PeerError> {

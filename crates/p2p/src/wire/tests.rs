@@ -5,7 +5,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 
 use super::{
-    HEADER_LEN, MAX_MESSAGE_PAYLOAD, PeerError, encode_payload, read_message, wire_len,
+    HEADER_LEN, MAX_MESSAGE_PAYLOAD, Message, PeerError, encode_payload, read_message, wire_len,
     write_message,
 };
 
@@ -578,8 +578,9 @@ fn empty_command_in_v1_header_is_rejected() {
     assert!(matches!(result, Err(PeerError::InvalidCommand(_))));
 }
 
+// P2P-01
 #[test]
-fn non_canonical_boolean_in_version_is_rejected() -> Result<(), PeerError> {
+fn version_relay_reads_any_nonzero_byte_as_true() -> Result<(), PeerError> {
     let mut frame = Vec::new();
     frame.extend_from_slice(&Magic::REGTEST.to_bytes());
     let mut cmd = [0u8; 12];
@@ -595,7 +596,7 @@ fn non_canonical_boolean_in_version_is_rejected() -> Result<(), PeerError> {
     payload.extend_from_slice(&0u64.to_le_bytes());
     payload.push(0);
     payload.extend_from_slice(&0i32.to_le_bytes());
-    payload.push(246);
+    payload.push(2);
 
     let len =
         u32::try_from(payload.len()).map_err(|_| PeerError::PayloadTooLarge(payload.len()))?;
@@ -604,16 +605,17 @@ fn non_canonical_boolean_in_version_is_rejected() -> Result<(), PeerError> {
     frame.extend_from_slice(&payload);
 
     let mut cursor = Cursor::new(frame);
-    let result = read_message(&mut cursor, Magic::REGTEST);
-    assert!(
-        result.is_err(),
-        "non-canonical boolean in version must be rejected"
-    );
+    let (message, _) = read_message(&mut cursor, Magic::REGTEST)?;
+    let Message::Version(version) = message else {
+        panic!("expected a version message");
+    };
+    assert!(version.relay, "Core reads any nonzero relay byte as true");
     Ok(())
 }
 
+// P2P-01
 #[test]
-fn non_canonical_boolean_in_sendcmpct_is_rejected() -> Result<(), PeerError> {
+fn sendcmpct_announce_reads_any_nonzero_byte_as_true() -> Result<(), PeerError> {
     let mut frame = Vec::new();
     frame.extend_from_slice(&Magic::REGTEST.to_bytes());
     let mut cmd = [0u8; 12];
@@ -623,7 +625,37 @@ fn non_canonical_boolean_in_sendcmpct_is_rejected() -> Result<(), PeerError> {
     let mut payload = Vec::new();
     payload.push(2);
     payload.extend_from_slice(&2u64.to_le_bytes());
+    payload.push(0xAA);
 
+    let len =
+        u32::try_from(payload.len()).map_err(|_| PeerError::PayloadTooLarge(payload.len()))?;
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&super::checksum(&payload));
+    frame.extend_from_slice(&payload);
+
+    let mut cursor = Cursor::new(frame);
+    let (message, _) = read_message(&mut cursor, Magic::REGTEST)?;
+    let Message::SendCmpct(sendcmpct) = message else {
+        panic!("expected a sendcmpct message");
+    };
+    assert!(
+        sendcmpct.send_compact,
+        "Core reads any nonzero announce byte as true"
+    );
+    assert_eq!(sendcmpct.version, 2);
+    Ok(())
+}
+
+// P2P-01
+#[test]
+fn sendcmpct_payload_shorter_than_nine_bytes_fails_to_parse() -> Result<(), PeerError> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&Magic::REGTEST.to_bytes());
+    let mut cmd = [0u8; 12];
+    cmd[..9].copy_from_slice(b"sendcmpct");
+    frame.extend_from_slice(&cmd);
+
+    let payload: [u8; 8] = [1, 2, 0, 0, 0, 0, 0, 0];
     let len =
         u32::try_from(payload.len()).map_err(|_| PeerError::PayloadTooLarge(payload.len()))?;
     frame.extend_from_slice(&len.to_le_bytes());
@@ -633,8 +665,8 @@ fn non_canonical_boolean_in_sendcmpct_is_rejected() -> Result<(), PeerError> {
     let mut cursor = Cursor::new(frame);
     let result = read_message(&mut cursor, Magic::REGTEST);
     assert!(
-        result.is_err(),
-        "non-canonical boolean in sendcmpct must be rejected"
+        matches!(result, Err(PeerError::Encode(_))),
+        "a short sendcmpct payload is a parse failure, not misbehavior"
     );
     Ok(())
 }
