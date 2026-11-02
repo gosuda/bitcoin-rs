@@ -624,6 +624,7 @@ impl Mempool {
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used)]
 mod tests {
     use super::trim_bump;
     use super::*;
