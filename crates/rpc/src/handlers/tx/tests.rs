@@ -814,6 +814,7 @@ fn gettxoutproof_finds_genesis_coinbase_through_the_index() {
     assert_eq!(arr.len(), 1);
 }
 
+// API-02
 #[test]
 fn gettxoutproof_with_blockhash_answers_core_message_for_a_bodyless_block() {
     let ctx = Arc::new(Context::new());
@@ -847,6 +848,7 @@ fn gettxoutproof_with_blockhash_answers_core_message_for_a_bodyless_block() {
     );
 }
 
+// API-02
 #[test]
 fn gettxoutproof_with_blockhash_answers_core_message_for_a_header_only_block() {
     let ctx = Arc::new(Context::new());
@@ -1304,6 +1306,7 @@ fn gettxoutproof_maps_a_transient_index_error_instead_of_reporting_absence() {
     );
 }
 
+// API-02
 #[test]
 fn gettxoutproof_index_path_reports_the_missing_body() {
     let block = distinct_block(6);
@@ -1331,6 +1334,7 @@ fn gettxoutproof_index_path_reports_the_missing_body() {
     );
 }
 
+// API-02
 #[test]
 fn gettxoutproof_answers_core_pruned_message_when_the_node_has_pruned() {
     let block = distinct_block(6);
@@ -1378,6 +1382,7 @@ impl crate::context::PruneService for PrunedStub {
     }
 }
 
+// API-02
 #[test]
 fn gettxoutproof_answers_core_message_for_an_empty_txid_list() {
     let ctx = Arc::new(Context::new());
@@ -1395,6 +1400,7 @@ fn gettxoutproof_answers_core_message_for_an_empty_txid_list() {
     );
 }
 
+// API-02
 #[test]
 fn gettxoutproof_answers_core_message_for_a_duplicated_txid() {
     let block = distinct_block(7);
@@ -1416,6 +1422,7 @@ fn gettxoutproof_answers_core_message_for_a_duplicated_txid() {
     );
 }
 
+// API-02
 #[test]
 fn gettxoutproof_answers_a_type_error_for_a_non_string_blockhash() {
     let block = distinct_block(8);
@@ -1432,6 +1439,7 @@ fn gettxoutproof_answers_a_type_error_for_a_non_string_blockhash() {
     );
 }
 
+// API-02
 #[test]
 fn gettxoutproof_answers_block_not_found_for_an_unknown_blockhash() {
     let block = distinct_block(9);
@@ -1474,6 +1482,7 @@ impl bitcoin_rs_chain::BlockBodySource for CorruptBodySource {
     }
 }
 
+// API-02
 #[test]
 fn gettxoutproof_answers_core_read_error_for_an_undecodable_body() {
     let block = distinct_block(10);
@@ -1505,6 +1514,7 @@ fn gettxoutproof_answers_core_read_error_for_an_undecodable_body() {
     );
 }
 
+// API-02
 #[test]
 fn gettxoutproof_utxo_path_answers_interrupted_when_cancelled() {
     let block = distinct_block(11);
@@ -1522,11 +1532,7 @@ fn gettxoutproof_utxo_path_answers_interrupted_when_cancelled() {
     let latch = bitcoin_rs_chain::LatchWriter::new();
     latch.trigger();
 
-    let cancelled = super::gettxoutproof(
-        &ctx,
-        &json!([[txid.to_string()]]),
-        &latch.reader(),
-    );
+    let cancelled = super::gettxoutproof(&ctx, &json!([[txid.to_string()]]), &latch.reader());
     assert!(
         matches!(
             cancelled,
@@ -1536,6 +1542,7 @@ fn gettxoutproof_utxo_path_answers_interrupted_when_cancelled() {
     );
 }
 
+// API-02
 #[test]
 fn gettxoutproof_utxo_path_interrupts_for_a_mixed_txid_list() {
     let block = distinct_block(12);
