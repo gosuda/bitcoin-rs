@@ -40,6 +40,7 @@ impl<S: KvStore> Indexer<S> {
         })
     }
 
+    /// Returns prefix rows in store order, newest first, with decoded ascending heights.
     pub fn iter_funding_rows(
         &self,
         scripthash: crate::ScriptHash,
