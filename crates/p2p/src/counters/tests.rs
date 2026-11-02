@@ -634,9 +634,12 @@ fn message_account_names_round_trip_through_from_command() {
 #[test]
 fn receive_buckets_cover_core_v31_known_commands() {
     // Core v31.1 src/protocol.h ALL_NET_MESSAGE_TYPES, verbatim. Pinned as
-    // compatibility evidence: the table's `both` rows are these commands
-    // plus `feature`, so a Core peer's frames keep their own receive
-    // buckets.
+    // compatibility evidence: every Core-known command keeps its own
+    // receive bucket. The table is deliberately wider: this node's
+    // supported extensions (`feature`, BIP331 `sendpackages`, `ancpkginfo`,
+    // `getpkgtxns`, `pkgtxns`, BIP332 `staletip`) carry their own receive
+    // buckets too, because we process them inbound — Core's internal
+    // whitelist is not our receive surface.
     let core_known = [
         "version",
         "verack",
@@ -694,11 +697,56 @@ fn feature_counts_by_name_in_both_directions() {
 
 #[test]
 fn unknown_and_send_only_receives_fold_into_other() {
-    for command in ["frobnicate", "", "sendpackages", "staletip", "alert"] {
+    // `alert` and `reject` are decoded but never processed inbound, so a
+    // received frame under them folds exactly like an unknown command.
+    for command in ["frobnicate", "", "alert", "reject"] {
         assert_eq!(
             MessageAccount::receive(command),
             MessageAccount::Other,
             "{command:?} must fold into *other* like Core's receive accounting"
+        );
+    }
+}
+
+#[test]
+fn received_extension_commands_count_under_their_own_names() {
+    // BIP331/BIP332 frames this node processes inbound: a real decoded
+    // frame charges its own receive bucket, not *other* the way Core
+    // v31.1's known-command list would.
+    for (command, message) in [
+        (
+            "sendpackages",
+            crate::wire::Message::SendPackages(crate::packages::SendPackages { versions: 3 }),
+        ),
+        (
+            "ancpkginfo",
+            crate::wire::Message::AncPkgInfo(crate::packages::AncPkgInfo {
+                wtxids: vec![bitcoin_rs_primitives::Wtxid(
+                    bitcoin_rs_primitives::Hash256::from_le_bytes(&[1; 32]),
+                )],
+            }),
+        ),
+    ] {
+        let mut frame = Vec::new();
+        crate::wire::write_message(&mut frame, bitcoin::p2p::Magic::BITCOIN, &message)
+            .unwrap_or_else(|error| panic!("encode {command}: {error}"));
+        let counters = Arc::new(PeerCounters::default());
+        let mut peer = crate::peer::Peer::new(
+            std::io::Cursor::new(frame.clone()),
+            bitcoin::p2p::Magic::BITCOIN,
+        );
+        peer.account_message_bytes(Arc::clone(&counters));
+        let (decoded, _) = peer
+            .read_message()
+            .unwrap_or_else(|error| panic!("decode {command}: {error}"))
+            .unwrap_or_else(|| panic!("{command} decodes to a frame"));
+        assert_eq!(decoded, message, "{command} round-trips");
+        let framed_len = u64::try_from(frame.len())
+            .unwrap_or_else(|_| panic!("{command} framed length fits u64"));
+        assert_eq!(
+            counters.recv_per_message(),
+            vec![(command, framed_len)],
+            "{command} inbound accounting keeps its own bucket"
         );
     }
 }
