@@ -301,6 +301,7 @@ fn from_handles_shares_chain_handles_with_caller() {
             local_services: 0x09,
             user_agent: bitcoin_rs_primitives::USER_AGENT.to_owned(),
             overlay: bitcoin_rs_p2p::overlay::OverlayConfig::default(),
+            v2_transport: false,
         },
         ..ContextHandles::default()
     });

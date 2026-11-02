@@ -63,6 +63,7 @@ fn rpc_network_handles(state: &NodeState) -> NetworkHandles {
         local_services: state.p2p().local_services().to_u64(),
         user_agent: state.p2p().user_agent().to_owned(),
         overlay: state.p2p().overlay_config().clone(),
+        v2_transport: state.config().p2p.v2_transport,
     }
 }
 

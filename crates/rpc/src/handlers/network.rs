@@ -471,22 +471,30 @@ pub(crate) fn ping(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErro
     Ok(Value::new_null())
 }
 
-/// Core `addnode "node" "command" ( "v2transport" )`: the optional
-/// `v2transport` argument is not accepted. This node has no per-dial
-/// transport selection — manual dials follow the node-wide `v2_transport`
-/// setting (v2 attempted with v1 fallback when enabled) — so the argument
-/// errors as unknown rather than being silently ignored (deviation recorded
-/// in the registry row).
+/// Core `addnode "node" "command" ( "v2transport" )`. This node has no
+/// per-dial transport selection — manual dials follow the node-wide
+/// `v2_transport` setting (v2 attempted with v1 fallback when enabled) —
+/// so an explicit `v2transport` argument is accepted only when it equals
+/// that node-wide setting: equality confirms the dial's transport already
+/// matches the request (a no-op, not a silent ignore). An omitted or null
+/// value follows the setting. A differing value is refused with -8 naming
+/// the conflict rather than ignored (deviation recorded in the registry
+/// row).
 pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    const ADD_NODE_ARGUMENTS: &[&str] = &["node", "command"];
+    const ADD_NODE_ARGUMENTS: &[&str] = &["node", "command", "v2transport"];
     let bound = super::bind_named_params(params, ADD_NODE_ARGUMENTS)?;
     let params = bound.as_ref();
-    super::ensure_at_most_params(params, 2)?;
+    super::ensure_at_most_params(params, 3)?;
     let node = required_str(params, 0, "node is required")?;
     let command = required_str(params, 1, "command is required")?;
     if !matches!(command, "add" | "onetry" | "remove") {
         return Err(RpcError::InvalidParams(
             "command must be one of: add, remove, onetry",
+        ));
+    }
+    if optional_bool(params, 2, ctx.network.v2_transport)? != ctx.network.v2_transport {
+        return Err(RpcError::InvalidParameter(
+            "v2transport conflicts with this node's -v2transport setting; per-dial transport selection is not supported (see -v2transport)".to_owned(),
         ));
     }
     let addr = if let Ok(endpoint) = bitcoin_rs_p2p::PeerEndpoint::from_str(node) {
@@ -758,9 +766,12 @@ mod admin_rpc_tests {
     }
 
     /// Core accepts named params on addnode (`RPCHelpMan` "node", "command",
-    /// "v2transport"; `src/rpc/net.cpp`); the framework reaches both named
-    /// shapes: `connect_nodes(peer_advertises_v2=...)` sends all three as
-    /// kwargs and `feature_proxy.py` sends a positional pair plus `v2transport=`.
+    /// "v2transport"; `src/rpc/net.cpp`); this binding follows that order.
+    /// The framework's `v2transport` forms (`connect_nodes(
+    /// peer_advertises_v2=...)` sending all three as kwargs and
+    /// `feature_proxy.py` sending a positional pair plus `v2transport=`)
+    /// are validated against the node-wide setting separately, in
+    /// `addnode_validation_tests.rs`.
     #[test]
     fn addnode_binds_named_arguments_in_cores_order() {
         let ctx = Arc::new(Context::new());
