@@ -52,7 +52,7 @@ fn accepts_valid_headers_across_batches_and_rejects_bad_bits() -> Result<(), Tes
         Ok(_) => panic!("oversized target must be rejected"),
         Err(error) => error,
     };
-    assert!(matches!(err, ChainError::TargetExceedsLimit { .. }));
+    assert!(matches!(err, ChainError::TargetBitsOverflow { .. }));
 
     Ok(())
 }
@@ -398,8 +398,8 @@ fn invalid_unknown_suffix_after_duplicate_inputs_propagates_consensus_error_with
         Err(error) => error,
     };
     assert!(
-        matches!(err, ChainError::TargetExceedsLimit { .. }),
-        "expected TargetExceedsLimit for the unknown suffix, got {err:?}"
+        matches!(err, ChainError::TargetBitsOverflow { .. }),
+        "expected TargetBitsOverflow for the unknown suffix, got {err:?}"
     );
 
     let tip_after = tree.tip().ok_or("missing tip after failed batch")?;
