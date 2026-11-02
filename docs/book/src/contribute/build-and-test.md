@@ -22,6 +22,7 @@ The default build is kernel-free. `cargo build -p bitcoin-rs` uses the native Ru
 | `test` | `test-crates`, then `test-binary`, then `test-workspace` |
 | `deny` | `cargo deny` over the full dependency graph, including the kernel feature |
 | `contracts` | `cargo run --locked -p contract-index -- --check` |
+| `book` | mdBook build of the handbook plus the link check |
 | `proofs` | Kani, the Lean pipeline, and the TLA+ model checker |
 | `deep` | Clippy and all three test lanes, collecting every failure |
 | `all` | `fmt`, `deep`, `deny`, and `contracts` |
@@ -54,7 +55,7 @@ For a formatting-only change, run `./scripts/ci-pr.sh fmt`. For a contract or ev
 
 ## What CI runs
 
-Pull requests run `fmt`, `deny`, `clippy`, and `test-crates` in parallel jobs. Merge-group requests add `test-binary` and `test-workspace`, plus the kernel-consensus and full-node-compile lanes. Main pushes and manual dispatches add the full-node feature set with the C++ kernel and `--include-ignored` consensus vectors. They also run the kernel oracle, benchmark-smoke compilation, Python comparator tests, the Core differential lane, and native-script evidence.
+Pull requests run `fmt`, `deny`, `contracts`, `clippy`, and `test-crates` in parallel jobs. Merge-group requests add `book`, `test-binary`, and `test-workspace`, plus the kernel-consensus and full-node-compile lanes. Main pushes and manual dispatches add the full-node feature set with the C++ kernel and `--include-ignored` consensus vectors. They also run the book build, the kernel oracle, benchmark-smoke compilation, Python comparator tests, the Core differential lane, and native-script evidence.
 
 The compatibility campaign runs MSRV, dependency-range, and feature-matrix lanes. The model-check workflow is manual. The documented lane list is in [`CONCEPTS.md`](https://github.com/gosuda/bitcoin-rs/blob/main/CONCEPTS.md) under CI lane parity, and [`CONTRIBUTING.md`](https://github.com/gosuda/bitcoin-rs/blob/main/CONTRIBUTING.md) owns the pull-request verification rules.
 
