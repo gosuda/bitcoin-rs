@@ -31,9 +31,10 @@ on the PR-stack tree with a byte-identical binary and the same 8/5/33; see
 (main's node code had moved, so binary identity no longer held), a sixth
 execution re-anchored the record on the rebased tree with a new binary
 identity and the same 8/5/33 and per-test statuses; see
-[Run 5b](#run-5b-post-rebase-re-anchor) below. Run 5b predates the
-post-review node commits landed on PRs 2 and 3 after it; those commits are
-unmeasured and named in the run-5b note rather than silently covered. The
+[Run 5b](#run-5b-post-rebase-re-anchor) below. Run 5b predates all node
+code `main` gained after its `cd12d7c90` base (the PR 2/PR 3 review
+rounds and `main`-only changes alike); that gap is stated as a range rule
+in the run-5b note rather than silently covered. The
 runs' `report.json`/`report.md` under `target/core-functional/results/` are
 the evidence owners.
 No claim beyond the 46 selected candidates is made; nothing here extrapolates
@@ -72,16 +73,19 @@ change binary identity; run 5 below re-measures this stack's tree to anchor
 that. The per-run campaign commits (including the per-run README deltas this
 record replaces) live on the local-only `core-functional-compat` and
 `core-functional-compat-backup` archive branches, which are not pushed to
-the remote; every `sha` cited below is one of those local archive commits.
-Where such a commit carried node code, its content landed in the stack as:
+the remote; every campaign `sha` cited below is one of those local archive
+commits. Where such a commit carried node code, its content landed on
+`main` via the stack's PRs - the merge queue rebased those PRs, so the
+landed-commit column cites `main`'s post-merge hashes (subject-matched),
+not the rewritten PR-branch hashes:
 
 | campaign hash | landed commit | where |
 |---------------|---------------|-------|
-| `7913be736` | `a719b9223` | PR 3 (`stop` RPC) |
-| `862068637` | `aca495e5a` | PR 3 (named params, `syncwithvalidationinterfacequeue`, `--version`, shim sync) |
-| `a32b3856e` | `68f61a3a7` | PR 3 (uacomment / named params / silent console) |
-| `cb9cf472c` | `f492559a7` | PR 2 (getpeerinfo per-message byte accounting) |
-| `e18b2ade2` | `cbcfd5489` | PR 2 (ping origination) |
+| `7913be736` | `c8358bd3` | PR 3 (`stop` RPC) |
+| `862068637` | `8cad89ef` | PR 3 (named params, `syncwithvalidationinterfacequeue`, `--version`, shim sync) |
+| `a32b3856e` | `b77c8928` | PR 3 (uacomment / named params / silent console) |
+| `cb9cf472c` | `fe72f535` | PR 2 (getpeerinfo per-message byte accounting) |
+| `e18b2ade2` | `d76a1750` | PR 2 (ping origination) |
 
 First measured run: **2026-10-30**, on the local `core-functional-compat` branch.
 
@@ -374,7 +378,7 @@ landed in the working tree (uncommitted at run time):
   `off` (bare global directive, no per-crate floors); in the landed tree the
   node keeps Core's bare-`off` semantics reverted and the wrapper's
   `printtoconsole=0` translation composes
-  `--log-level=off,fjall=off,rocksdb=off` (`790010444`).
+  `--log-level=off,fjall=off,rocksdb=off` (`a0e99247`).
 
 - bitcoin-rs commit: `a32b3856e` (run 4 measured the byte-identical
   working tree one commit later than `1f51eb4ab` plus these fixes; the
@@ -507,15 +511,26 @@ replay fixes, mempool/rpc fixes, test-suite consolidation), so run 5's
   present in 0.2s, and no test rebuilt it
 - shim patches: the same three as runs 2-5, unchanged
 
-Coverage note: run 5b measured the rebased stack tip as of 2026-10-31. Node
-code landed on PRs 2 and 3 after that measurement is unmeasured by this
-record: PR 2's `33d9449bf`, `9bbf93dcf`, and `d5eb93b45` (MessageAccount
-table, v2 undefined-type charging, per-frame burst accounting, outbound
-control lane) and PR 3's `790010444` and `9db0b4f4e` (stop reply string,
-one-line `--version`, `run.rs` `off` revert, the
-`syncwithvalidationinterfacequeue` barrier). The gap is stated rather than
-covered: a future run re-anchoring on this tip owns the fresh binary
-identity and report.
+Coverage note: run 5b measured a stack whose node code, relative to `main`,
+was current as of `cd12d7c90` (rebased onto it on 2026-10-31; the only node
+code on top of that base is the campaign content mapped above). Every
+commit touching `bin/` or `crates/` in `cd12d7c90..<the `main` commit this
+PR lands on>` is therefore unmeasured by this record - 33 such commits as
+of this PR's base `8f28da9b`. Named examples, not an enumeration: PR 2's
+review-round accounting commits (`8d9e0538` MessageAccount table,
+`ed3283d7` v2 undefined-type and burst charging, `698a9bc1` keepalive
+control lane) and PR 3's (`a0e99247` stop reply string, one-line
+`--version`, `run.rs` `off` revert; `2430ced6` the
+`syncwithvalidationinterfacequeue` barrier); PR 2's keepalive-lane
+follow-ups (`b3e2dbdf`, `62fb432e`, `20f0e739`); `main`-only
+consensus/script/esplora/clippy changes (`f5cd4dae`, `64168bf9`,
+`63025397`, `51ec3152`, `204641b9`); and - most significant for this
+suite, because Core's `connect_nodes` sends `addnode` with a `v2transport`
+kwarg in every multi-node test - the `addnode` `v2transport` history:
+`bb4227d2` refused the argument, and `f1acd70c` accepts it only when it
+equals the node-wide `-v2transport` setting. The gap is stated rather than
+covered: a future run 6 re-anchoring on the landed `main` tip owns the
+fresh binary identity and report.
 
 **8 of the 46 selected candidates passed** (8 pass / 5 skip / 33 fail) -
 per-test statuses identical to runs 4 and 5 for all 46 candidates, and every
@@ -639,7 +654,7 @@ raw unshimmed reproductions under `results/raw-evidence*/`.
   to `--log-level=off`. In the landed tree the node-side bare `off` was
   reverted to Core's semantics (`off` means `off,fjall=warn,rocksdb=warn`
   again) and the closure moved entirely into the wrapper, which now
-  composes `--log-level=off,fjall=off,rocksdb=off` (`790010444`) - the same
+  composes `--log-level=off,fjall=off,rocksdb=off` (`a0e99247`) - the same
   fully-silent console the tests assert. Direct probe
   (`results/run4/gap-probes.md`): a node at `off` writes 0 stderr bytes
   across a dial the node warns about, where `warn` writes 489. Run 4
@@ -697,7 +712,7 @@ raw unshimmed reproductions under `results/raw-evidence*/`.
   the flag exists and `feature_help` passes that leg; run 2 measured the
   earlier copyright-bearing form). The landed `--version` prints exactly one
   line, `bitcoin-rs daemon version <ver>` - no copyright block
-  (`790010444`).
+  (`a0e99247`).
 - ~~**NG-16 no originated ping/keepalive**~~ **CLOSED by commit `e18b2ade2`**
   (run 3 measured the byte-identical pre-commit tree; binary sha256
   `800aa9739c...`, see Run 3): the p2p `Keepalive` owner now owes the first
