@@ -149,8 +149,8 @@ cargo test -p bitcoin-rs-consensus --features kernel \
   --test suite -- kernel_block_parity:: kernel_boundary_parity:: kernel_vector_parity:: --nocapture
 ```
 
-The tests in both parity modules are not ignored. Passing `--ignored` would skip
-them rather than run the oracle checks.
+The tests in all three parity modules are not ignored. Passing `--ignored`
+would skip them rather than run the oracle checks.
 
 ### Benchmark compilation check
 
