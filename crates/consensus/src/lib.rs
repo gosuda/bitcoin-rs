@@ -38,6 +38,17 @@ pub enum LocktimeRule {
     CandidateTime,
 }
 
+impl LocktimeRule {
+    #[must_use]
+    pub const fn from_csv_active(csv_active: bool) -> Self {
+        if csv_active {
+            Self::MedianTimePast
+        } else {
+            Self::CandidateTime
+        }
+    }
+}
+
 #[must_use]
 pub const fn locktime_cutoff(
     rule: LocktimeRule,

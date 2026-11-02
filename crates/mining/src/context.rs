@@ -61,11 +61,7 @@ impl MiningChainContext {
 
     #[must_use]
     pub(crate) const fn locktime_cutoff(&self, candidate_time: u32) -> u32 {
-        let rule = if self.csv_active {
-            LocktimeRule::MedianTimePast
-        } else {
-            LocktimeRule::CandidateTime
-        };
+        let rule = LocktimeRule::from_csv_active(self.csv_active);
         locktime_cutoff(rule, self.prev_median_time_past, candidate_time)
     }
 }

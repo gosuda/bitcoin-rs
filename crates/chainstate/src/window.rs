@@ -467,11 +467,8 @@ fn window_contexts(
             .and_then(|height| height.checked_add(1))?;
         let softfork =
             bitcoin_rs_chain::softfork_state(&tree, handles.network, Some(parent_id), height);
-        let locktime_rule = if softfork.csv_active {
-            bitcoin_rs_consensus::LocktimeRule::MedianTimePast
-        } else {
-            bitcoin_rs_consensus::LocktimeRule::CandidateTime
-        };
+        let locktime_rule =
+            bitcoin_rs_consensus::LocktimeRule::from_csv_active(softfork.csv_active);
         let cutoff = bitcoin_rs_consensus::locktime_cutoff(
             locktime_rule,
             tree.median_time_past_at(parent_id).unwrap_or(0),

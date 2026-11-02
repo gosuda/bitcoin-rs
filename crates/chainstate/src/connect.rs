@@ -197,11 +197,8 @@ fn validation_contexts(
             bitcoin_rs_chain::softfork_state(&tree, handles.network, None, height),
         )
     };
-    let locktime_rule = if softfork_state.csv_active {
-        bitcoin_rs_consensus::LocktimeRule::MedianTimePast
-    } else {
-        bitcoin_rs_consensus::LocktimeRule::CandidateTime
-    };
+    let locktime_rule =
+        bitcoin_rs_consensus::LocktimeRule::from_csv_active(softfork_state.csv_active);
     let locktime_cutoff = bitcoin_rs_consensus::locktime_cutoff(
         locktime_rule,
         prev_median_time_past,
