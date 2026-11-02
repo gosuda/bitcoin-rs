@@ -98,7 +98,8 @@ wallet interoperability remain unverified.
 - Bare P2PK/multisig keeps Core syntactic key handling.
 - This is an input and work limit, not a response-size limit.
 - Pinned matrix: `overhaul_process_harness::script_decode_cases` (classes, encodings, wrappers, checksums, params, networks, shared projections).
-- `gettxoutproof` without `blockhash` finds the block from the UTXO set: it probes the requested txids in ascending txid order for an unspent output (`MAX_OUTPUTS_PER_BLOCK` vouts per txid) and answers from that block.
+- `gettxoutproof` without `blockhash` finds the block from the UTXO set: it answers `has_live_outputs_for_txid` once per requested txid in ascending txid order (an absent txid costs one lookup), checks the request latch before each txid, and answers from the first txid that holds a live output (`MAX_OUTPUTS_PER_BLOCK` vouts per txid).
+- Missing block data answers Core `-1` (`Block not available (pruned data)` on a pruned node, `Block not available (not fully downloaded)` otherwise); a body that does not decode answers Core `-32603` (`Can't read block from disk`); an empty txid list answers Core `-8`, a duplicated txid answers Core `-8` naming the raw input, and a non-string `blockhash` answers a Core `-3` type error.
 - With no unspent coin, it consults the txindex about the first txid only.
 - With neither source, it answers Core `-5` (`Transaction not yet in block`) and reads no block body.
 - A resolved block that does not hold every txid answers Core `-5` (`Not all transactions found in specified or retrieved block`).

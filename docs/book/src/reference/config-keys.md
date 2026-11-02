@@ -4,7 +4,9 @@ Each setting has a TOML key. Most also have an uppercase `BITCOIN_RS_*` environm
 
 ## File rules
 
-The `--config` file is strict. An unknown key is an error. The `--bitcoin-conf` file is lenient: keys without a mapping below are ignored, a leading `-` is stripped, and the first `#` starts a comment. `rpcpassword` is the exception: a `#` in that line is refused as ambiguous because the parser cannot tell a comment from part of the password.
+The `--config` file is strict. An unknown key is an error. The `--bitcoin-conf` file follows the Bitcoin Core file rules: keys without a mapping below are ignored, a line whose key starts with `-` is a parse error (`options in configuration file must be specified without leading -`), and the first `#` starts a comment. `rpcpassword` is the exception: a `#` in that line is refused as ambiguous because the parser cannot tell a comment from part of the password.
+
+Boolean values in `bitcoin.conf` follow Core's `InterpretBool`: an empty value is true, and any other value is `LocaleIndependentAtoi` (a full, in-range integer with an optional `-`), so `dnsseed=2` is true, `dnsseed=0`, `dnsseed=true`, and `dnsseed=+1` are false.
 
 `bitcoin.conf` sections select a network: `[main]` or `[mainnet]`, `[test]`, `[testnet]`, or `[testnet3]`, `[testnet4]`, `[signet]`, `[regtest]`. The selected section overrides global keys. The network comes from the TOML file, the environment, or the CLI, and the later layer wins.
 
