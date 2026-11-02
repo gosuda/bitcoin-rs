@@ -177,12 +177,7 @@ impl FjallStore {
                     let keyspace = cached_keyspace(self, &mut keyspaces, cf)?;
                     let keys = keyspace
                         .range(start.as_slice()..end.as_slice())
-                        .map(|guard| {
-                            guard
-                                .key()
-                                .map(|key| key.to_vec())
-                                .map_err(StorageError::backend)
-                        })
+                        .map(|guard| guard.key().map(|key| key.to_vec()).map_err(map_fjall_error))
                         .collect::<Result<Vec<_>, _>>()?;
                     for key in keys {
                         fjall_batch.remove(keyspace, key);
@@ -211,7 +206,7 @@ impl KvStore for FjallStore {
     ) -> Result<Option<Vec<u8>>, crate::BoundedReadError> {
         self.keyspace(cf)?
             .get(key)
-            .map_err(StorageError::backend)?
+            .map_err(map_fjall_error)?
             .map(|value| crate::error::copy_bounded(&value, max_bytes))
             .transpose()
     }
@@ -220,7 +215,7 @@ impl KvStore for FjallStore {
         self.keyspace(cf)?
             .get(key)
             .map(|value| value.map(|bytes| bytes.to_vec()))
-            .map_err(StorageError::backend)
+            .map_err(map_fjall_error)
     }
 
     fn iter_prefix<'a>(
@@ -232,7 +227,7 @@ impl KvStore for FjallStore {
             guard
                 .into_inner()
                 .map(|(key, value)| (key.to_vec(), value.to_vec()))
-                .map_err(StorageError::backend)
+                .map_err(map_fjall_error)
         });
         Ok(Box::new(iterator))
     }
@@ -247,7 +242,7 @@ impl KvStore for FjallStore {
         let rows = self
             .keyspace(cf)?
             .range::<&[u8], _>(core::cmp::max(start, prefix)..)
-            .map(|guard| guard.into_inner().map_err(StorageError::backend));
+            .map(|guard| guard.into_inner().map_err(map_fjall_error));
         crate::trait_::collect_bounded_prefix(rows, prefix, limit)
     }
 
@@ -282,7 +277,7 @@ impl KvStore for FjallStore {
         for condition in conditions {
             let (cf, key) = condition.location();
             let keyspace = cached_keyspace(self, &mut keyspaces, cf)?;
-            let current = keyspace.get(key).map_err(StorageError::backend)?;
+            let current = keyspace.get(key).map_err(map_fjall_error)?;
             if !condition.matches(current.as_ref().map(std::convert::AsRef::as_ref)) {
                 return Ok(false);
             }
@@ -339,7 +334,7 @@ impl KvSnapshot for FjallSnapshot<'_> {
         self.snapshot
             .get(self.store.keyspace(cf)?, key)
             .map(|value| value.map(|bytes| bytes.to_vec()))
-            .map_err(StorageError::backend)
+            .map_err(map_fjall_error)
     }
 
     fn iter_prefix<'a>(
@@ -354,7 +349,7 @@ impl KvSnapshot for FjallSnapshot<'_> {
                 guard
                     .into_inner()
                     .map(|(key, value)| (key.to_vec(), value.to_vec()))
-                    .map_err(StorageError::backend)
+                    .map_err(map_fjall_error)
             });
         Ok(Box::new(iterator))
     }
@@ -375,7 +370,7 @@ impl KvSnapshot for FjallSnapshot<'_> {
                 guard
                     .into_inner()
                     .map(|(key, value)| (key.to_vec(), value.to_vec()))
-                    .map_err(StorageError::backend)
+                    .map_err(map_fjall_error)
             })
             .transpose()
     }
@@ -390,7 +385,7 @@ impl KvSnapshot for FjallSnapshot<'_> {
         let rows = self
             .snapshot
             .range::<&[u8], _>(self.store.keyspace(cf)?, core::cmp::max(start, prefix)..)
-            .map(|guard| guard.into_inner().map_err(StorageError::backend));
+            .map(|guard| guard.into_inner().map_err(map_fjall_error));
         crate::trait_::collect_bounded_prefix(rows, prefix, limit)
     }
 }

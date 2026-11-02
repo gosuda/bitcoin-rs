@@ -106,8 +106,9 @@ impl CheckpointPublisher {
         retirement: DisconnectRetirement,
     ) -> core::result::Result<CheckpointWrite, CheckpointError> {
         let _exclusive_apply = self.admission.pause();
-        // A waiting maintenance publication can acquire this fence after a fatal
-        // window left uncommitted in-memory coins. Never certify those coins.
+        // Closure either precedes this check or waits until the entire publication
+        // (including journal compaction and marker retirement) has completed.
+        let _publication = self.admission.publication.lock();
         if self.admission.ensure_open().is_err() {
             return Err(CheckpointError::ClosedForRecovery);
         }
