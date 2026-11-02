@@ -323,7 +323,7 @@ pub(crate) fn gettxoutproof(
     ordered.sort_unstable();
     if let Some(record) = ctx
         .chain
-        .with_stable_chainstate(|| block_from_utxo(ctx, &ordered))
+        .with_stable_chainstate(|| block_from_utxo(ctx, &ordered, cancellation))?
     {
         return proof_from_single_record(ctx, &record, &wanted, cancellation);
     }
@@ -339,16 +339,26 @@ pub(crate) fn gettxoutproof(
 
 const MAX_OUTPUTS_PER_BLOCK: u32 = 111_111;
 
-fn block_from_utxo(ctx: &Arc<Context>, ordered: &[Txid]) -> Option<BlockRecord> {
+fn block_from_utxo(
+    ctx: &Arc<Context>,
+    ordered: &[Txid],
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Option<BlockRecord>, RpcError> {
     for txid in ordered {
+        if cancellation.is_triggered() {
+            return Err(proof_interrupted());
+        }
+        if !ctx.chain.utxo.has_live_outputs_for_txid(&Hash256::from(*txid)) {
+            continue;
+        }
         for vout in 0..MAX_OUTPUTS_PER_BLOCK {
             let Some(coin) = ctx.chain.utxo.get_entry(&OutPoint::new(*txid, vout)) else {
                 continue;
             };
-            return ctx.chain.block_by_height(coin.height);
+            return Ok(ctx.chain.block_by_height(coin.height));
         }
     }
-    None
+    Ok(None)
 }
 
 fn block_via_index(

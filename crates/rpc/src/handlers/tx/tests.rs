@@ -1490,3 +1490,64 @@ fn sendrawtransaction_rebuilds_admission_context_after_transient_rejection() {
         "the parent must remain pooled"
     );
 }
+
+#[test]
+fn gettxoutproof_utxo_path_answers_interrupted_when_cancelled() {
+    let block = distinct_block(11);
+    let Some(txid) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let mut ctx = Context::new();
+    attach_body_for_block(&mut ctx, &block, 1);
+    ctx.chain.add_block(BlockRecord::synthetic(
+        0,
+        BlockHash::from(Hash256::from_le_bytes(&[3_u8; 32])),
+    ));
+    ctx.chain.add_block(BlockRecord::from_block(1, &block));
+    let ctx = Arc::new(ctx);
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    latch.trigger();
+
+    let cancelled = super::gettxoutproof(
+        &ctx,
+        &json!([[txid.to_string()]]),
+        &latch.reader(),
+    );
+    assert!(
+        matches!(
+            cancelled,
+            Err(RpcError::Misc(reason)) if reason == "gettxoutproof interrupted"
+        ),
+        "a cancelled request must stop the utxo probe"
+    );
+}
+
+#[test]
+fn gettxoutproof_utxo_path_interrupts_for_a_mixed_txid_list() {
+    let block = distinct_block(12);
+    let Some(txid) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let unknown = Hash256::from_le_bytes(&[0x77; 32]);
+    let unknown_txid = Txid(unknown);
+    let mut ctx = Context::new();
+    attach_body_for_block(&mut ctx, &block, 1);
+    ctx.chain.add_block(BlockRecord::from_block(1, &block));
+    let ctx = Arc::new(ctx);
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    latch.trigger();
+
+    let cancelled = super::gettxoutproof(
+        &ctx,
+        &json!([[unknown_txid.to_string(), txid.to_string()]]),
+        &latch.reader(),
+    );
+    assert!(
+        matches!(
+            cancelled,
+            Err(RpcError::Misc(reason)) if reason == "gettxoutproof interrupted"
+        ),
+        "the per-txid check must fire before any lookup"
+    );
+}
+
