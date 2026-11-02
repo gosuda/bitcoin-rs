@@ -19,6 +19,8 @@ data-dir/
   mempool-snapshot.dat      optional clean-shutdown pool snapshot
 ```
 
+`.lock` holds a POSIX record lock (`F_SETLK`), which does not conflict with the `flock` that binaries from before this change take. Stop the old process before starting the new one during an upgrade or downgrade; overlapping binaries can otherwise open the same data directory.
+
 The key-value layer is one trait, `KvStore`, with `get`, ordered `iter_prefix`, bounded prefix scans, point-in-time `snapshot`, and one buffered write batch applied by `write`, `write_deferred`, or `write_durable`. `bitcoin-rs-storage` is the only crate allowed to depend on an engine crate (`ARCH-02`). The engine is selected at runtime by `storage.backend` (`fjall` by default, `redb` and `rocksdb` as compiled alternatives). A build that lacks the selected engine refuses to start.
 
 Block bodies do not go through the key-value store. `FlatFileBlockStore` appends them to flat files and addresses them by `BlockFilePosition`; the key-value row holds only the locator.

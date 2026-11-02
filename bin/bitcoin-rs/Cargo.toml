@@ -28,6 +28,7 @@ bitcoin-rs-consensus.workspace = true
 
 [dev-dependencies]
 parking_lot.workspace = true
+rustix.workspace = true
 sonic-rs.workspace = true
 tempfile.workspace = true
 bitcoin.workspace = true

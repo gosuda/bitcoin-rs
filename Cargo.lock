@@ -295,6 +295,7 @@ dependencies = [
  "clap",
  "mimalloc",
  "parking_lot",
+ "rustix",
  "sonic-rs",
  "tempfile",
  "thiserror",

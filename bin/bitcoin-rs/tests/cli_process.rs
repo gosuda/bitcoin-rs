@@ -361,7 +361,33 @@ fn a_second_process_refuses_the_locked_data_dir() -> Result<(), TestError> {
         first.rpc_result(Some(credentials)).is_ok(),
         "the running node keeps serving after the refusal"
     );
-    first.stop()
+
+    let lock_path = first.data_dir.join(".lock");
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    let held_outcome =
+        rustix::fs::fcntl_lock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive);
+    assert!(
+        held_outcome.is_err(),
+        "the live node's directory record lock must refuse a second lock while it runs"
+    );
+    drop(held);
+
+    first.stop()?;
+
+    let released = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    rustix::fs::fcntl_lock(
+        &released,
+        rustix::fs::FlockOperation::NonBlockingLockExclusive,
+    )
+    .map_err(|error| TestError::Io(std::io::Error::from(error)))?;
+    drop(released);
+    Ok(())
 }
 
 // EMB-07

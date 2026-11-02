@@ -25,6 +25,12 @@ pub enum DataDirLockError {
 /// the registry restores the per-process exclusivity that POSIX ownership
 /// semantics do not provide, and its lock is held across check, open, lock,
 /// insert, close, and remove so check-then-act stays atomic.
+///
+/// The kernel lock is a POSIX `F_SETLK` record lock. It does not conflict with
+/// the BSD `flock` that this change replaced, so during an upgrade or
+/// downgrade a binary from the other side of this change can open the same
+/// data directory. Stopping the old process before starting the new one is a
+/// required upgrade step.
 static HELD_DATA_DIRS: LazyLock<Mutex<HashSet<(u64, u64)>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
