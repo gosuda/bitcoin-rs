@@ -49,7 +49,7 @@ scripts/run-fuzz-campaign.sh all 60
 
 `all` discovers every target from `fuzz/Cargo.toml` and runs each for 60 seconds. A single target uses `scripts/run-fuzz-campaign.sh p2p_message 60`. The script exits nonzero when `fuzz/artifacts/<target>/` or `campaign-output/artifacts/` contains a crash, OOM, or timeout.
 
-Fuzz builds enable AddressSanitizer, value profiling, debug assertions, and integer overflow checks. Campaigns enforce an RSS ceiling, a malloc ceiling, and a per-input timeout. The smoke gate on `fuzz/**` pull requests compiles every target and runs each for 30 seconds. The daily campaign minimizes seeds and publishes non-empty corpora.
+Fuzz builds enable AddressSanitizer, value profiling, debug assertions, and integer overflow checks. Campaigns enforce an RSS ceiling, a malloc ceiling, and a per-input timeout. The build gate on `fuzz/**` pull requests compiles every target. The daily campaign owns execution, minimizes seeds, and publishes non-empty corpora.
 
 The corpus verdict gate is separate from a live campaign:
 

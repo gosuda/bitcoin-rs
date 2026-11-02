@@ -79,7 +79,7 @@ Campaign configuration environment variables:
 
 The campaign script verifies that zero crash artifacts exist in `fuzz/artifacts/<target>/` or `campaign-output/artifacts/`, exiting non-zero if any crash, OOM, or timeout occurs.
 
-PRs touching `fuzz/**` run [`fuzz-build.yml`](../.github/workflows/fuzz-build.yml), which compiles all targets and runs each for 30 seconds as an automated smoke gate.
+PRs touching `fuzz/**` run [`fuzz-build.yml`](../.github/workflows/fuzz-build.yml), which compiles all targets; execution stays with the scheduled daily campaign below.
 
 A daily campaign runs each target, minimizes with `cargo fuzz cmin`, and publishes non-empty minimized corpora via `github-actions[bot]`.
 

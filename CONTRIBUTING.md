@@ -186,8 +186,8 @@ cargo install cargo-fuzz
 cargo +nightly fuzz run block_validate --target x86_64-unknown-linux-gnu -- -runs=10000
 ```
 
-[`fuzz-build.yml`](.github/workflows/fuzz-build.yml) builds all five targets
-on `fuzz/**` pull requests; the scheduled campaign is defined in
+[`fuzz-build.yml`](.github/workflows/fuzz-build.yml) compiles every fuzz
+target on `fuzz/**` pull requests; the scheduled campaign is defined in
 [`.github/workflows/daily-fuzz.yml`](.github/workflows/daily-fuzz.yml). See
 [`fuzz/README.md`](fuzz/README.md) for local fuzzing, the
 [shared corpus and local campaigns](fuzz/README.md#shared-corpus-and-local-campaigns),
