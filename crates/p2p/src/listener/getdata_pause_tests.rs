@@ -402,7 +402,10 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     let block_len = wire_len_of(&Message::BlockPayload(entry_a.1.clone()))?;
     let notfound_len = wire_len_of(&Message::NotFound(vec![unknown_tx]))?;
     let ping_len = wire_len_of(&Message::Ping(3))?;
-    let budget = OutboundBudget::with_block_reserve(100, 2 * block_len + ping_len - 1, block_len);
+    // Sized so block A plus the miss's notfound fill the data lane while
+    // block B and the pong park; the keepalive probe rides the bounded
+    // control lane and never enters these counts.
+    let budget = OutboundBudget::with_block_reserve(100, block_len + notfound_len, block_len);
     let chain = ScriptedChain {
         blocks: vec![entry_a, entry_b],
     };
@@ -415,10 +418,9 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     ]))?;
     served.client.send(&Message::Ping(7))?;
 
-    // The originated keepalive probe takes one slot ahead of the request.
-    let parked = (3, ping_len + block_len + notfound_len);
+    let parked = (2, block_len + notfound_len);
     wait_until("block A and the notfound to be queued", || {
-        served.budget.pending() == parked
+        served.budget.pending() == parked && served.budget.control_pending() == (1, ping_len)
     })?;
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
@@ -507,7 +509,8 @@ fn lease_cancel_ends_a_parked_session() -> TestResult {
         inventory_of(&block_b),
     ]))?;
     wait_until("block A to be queued", || {
-        served.budget.pending() == (2, ping_len + block_len)
+        served.budget.pending() == (1, block_len)
+            && served.budget.control_pending() == (1, ping_len)
     })?;
     std::thread::sleep(Duration::from_millis(200));
 
@@ -539,11 +542,13 @@ fn tiny_item_flood_pauses_at_the_item_cap_and_drains_in_order() -> TestResult {
 
     served.client.send(&Message::GetData(items))?;
 
-    // The originated keepalive probe holds one of the three item slots, so
-    // two transactions queue before the flood parks.
-    let full = (3, 2 * tx_len + wire_len_of(&Message::Ping(0))?);
-    wait_until("the probe and two transactions to be queued", || {
-        served.budget.pending() == full
+    // Regression guard: the originated keepalive probe rides the bounded
+    // control lane, so a saturated data queue still carries three whole
+    // transactions of useful outbound data instead of two behind a probe.
+    let ping_len = wire_len_of(&Message::Ping(0))?;
+    let full = (3, 3 * tx_len);
+    wait_until("the probe and three transactions to be queued", || {
+        served.budget.pending() == full && served.budget.control_pending() == (1, ping_len)
     })?;
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
@@ -570,8 +575,8 @@ fn tiny_item_flood_pauses_at_the_item_cap_and_drains_in_order() -> TestResult {
         vec![
             Message::Tx(txs[0].clone()),
             Message::Tx(txs[1].clone()),
-            Message::NotFound(vec![unknown]),
             Message::Tx(txs[2].clone()),
+            Message::NotFound(vec![unknown]),
             Message::Tx(txs[3].clone()),
             Message::Tx(txs[4].clone()),
         ],
@@ -615,10 +620,12 @@ fn a_getdata_that_fills_the_last_slot_parks_its_trailing_notfound_and_the_next_p
     ]))?;
     served.client.send(&Message::Ping(11))?;
 
-    // The originated keepalive probe holds one of the three item slots.
-    let full = (3, 2 * tx_len + wire_len_of(&Message::Ping(0))?);
-    wait_until("the probe and two transactions to be queued", || {
-        served.budget.pending() == full
+    // The keepalive probe rides the control lane; the data lane fills with
+    // the three request hits.
+    let ping_len = wire_len_of(&Message::Ping(0))?;
+    let full = (3, 3 * tx_len);
+    wait_until("the probe and three transactions to be queued", || {
+        served.budget.pending() == full && served.budget.control_pending() == (1, ping_len)
     })?;
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
