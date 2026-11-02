@@ -35,13 +35,13 @@ use bitcoin::{
     script::Builder as OracleBuilder, transaction,
 };
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
-use bitcoin_rs_consensus::compute_merkle_root;
+use bitcoin_rs_consensus::{MAX_BLOCK_SIGOPS_COST, compute_merkle_root};
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_script::push_int;
+use bitcoin_rs_script::{push_int, sigops::count_tx_legacy};
 pub mod evidence;
 
 #[path = "../../../tools/benchmark-support/disk_backed_tmpdir.rs"]
@@ -1787,7 +1787,7 @@ fn build_signed_p2pkh_spend(
         }],
         output: vec![OracleTxOut {
             value: OracleAmount::from_sat(output_value),
-            script_pubkey: OracleScriptBuf::from_bytes(bench_multisig_output_script(keys)),
+            script_pubkey: OracleScriptBuf::from_bytes(bench_p2pkh_output_script(keys)),
         }],
     };
     let cache = SighashCache::new(&tx);
@@ -1835,7 +1835,7 @@ fn build_signed_p2wpkh_spend(
         }],
         output: vec![OracleTxOut {
             value: OracleAmount::from_sat(output_value),
-            script_pubkey: OracleScriptBuf::from_bytes(bench_multisig_output_script(keys)),
+            script_pubkey: OracleScriptBuf::from_bytes(bench_p2pkh_output_script(keys)),
         }],
     };
     let mut cache = SighashCache::new(&tx);
@@ -1882,7 +1882,7 @@ fn build_signed_p2wsh_spend(
         }],
         output: vec![OracleTxOut {
             value: OracleAmount::from_sat(output_value),
-            script_pubkey: OracleScriptBuf::from_bytes(bench_multisig_output_script(keys)),
+            script_pubkey: OracleScriptBuf::from_bytes(bench_p2pkh_output_script(keys)),
         }],
     };
     let mut cache = SighashCache::new(&tx);
@@ -1946,16 +1946,8 @@ fn print_signed_spend_proxy_summary(blocks: &[Block]) {
     );
 }
 
-fn bench_multisig_output_script(keys: &SigningKeys) -> Vec<u8> {
-    OracleBuilder::new()
-        .push_int(2)
-        .push_key(&keys.p2wsh[0])
-        .push_key(&keys.p2wsh[1])
-        .push_key(&keys.p2wsh[2])
-        .push_int(3)
-        .push_opcode(opcodes::all::OP_CHECKMULTISIG)
-        .into_script()
-        .to_bytes()
+fn bench_p2pkh_output_script(keys: &SigningKeys) -> Vec<u8> {
+    OracleScriptBuf::new_p2pkh(&keys.p2pkh[0].pubkey_hash()).to_bytes()
 }
 
 fn legacy_signed_spend_proxy_blocks() -> Vec<Block> {
@@ -2517,6 +2509,15 @@ fn build_corpus_targets(
             block.txs.len(),
             BLOCK_TEMPLATE_TARGET_SPENDS.saturating_add(1),
             "target {run} must carry coinbase plus 2000 spends"
+        );
+        let legacy_cost: u32 = block
+            .txs
+            .iter()
+            .fold(0_u32, |total, tx| total.saturating_add(count_tx_legacy(tx)))
+            .saturating_mul(4);
+        assert!(
+            legacy_cost <= MAX_BLOCK_SIGOPS_COST,
+            "target {run} legacy sigop cost {legacy_cost} exceeds budget {MAX_BLOCK_SIGOPS_COST}"
         );
     }
     for (index, block) in target_blocks.iter().enumerate() {
