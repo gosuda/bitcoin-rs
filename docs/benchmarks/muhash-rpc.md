@@ -270,9 +270,14 @@ under the [comparator custody](README.md#comparator-custody) rules.
 The protocol contract above is implemented and covered by local fixture
 tests. One test is a lifecycle-owned campaign against fixture RPC daemons
 for every bitcoin-rs backend (`fjall`, `rocksdb`, `redb`) paired with a
-Core arm. The live evidence is not present. No unmodified-daemon smoke has
+Core arm. The live evidence is not present, and the live bitcoin-rs arm has
+a named CLI gap: the comparator passes `{rpc_bind}` and `{rpc_port}` as two
+argv tokens, while the node accepts only `--rpc-bind <SocketAddr>` and
+rejects a bare address (`invalid socket address syntax`), so the spawned arm
+cannot listen on the comparator-allocated port. No unmodified-daemon smoke has
 confirmed that both Bitcoin Core 31.1 and the bitcoin-rs RPC server accept
 the exact triplet against a frozen-tip corpus. Any future comparative claim
 must come from executing that campaign against unmodified daemons and
 publishing its result file. Until then this document records a controller,
-not a measurement.
+not a measurement. The 2026-11-02 refresh record is
+[data/evidence-refresh-2026-11-02.md](data/evidence-refresh-2026-11-02.md).

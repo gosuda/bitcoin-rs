@@ -15,7 +15,7 @@ Both lanes run under full validation (`--assume-valid-height 0`), strict-Rust cr
 
 | Cell | Metric | Status |
 |---|---|---|
-| Offline replay, C150, bitcoin-rs versus Core `v31.1` | p50/p95/p99/max wall, CPU, peak RSS, per-owner storage bytes; ratio only after gates | `planned_not_executed` |
+| Offline replay, C150, bitcoin-rs versus Core `v31.1` | p50/p95/p99/max wall, CPU, peak RSS, per-owner storage bytes; ratio only after gates | `measured 2026-11-02, no acceptance verdict`; see [the first gated campaign](#first-gated-c150-offline-campaign-2026-11-02) |
 | Offline replay, Cmodern, bitcoin-rs versus Core `v31.1` | same | `BLOCKED`: Cmodern corpus missing; the archive and manifest were retired from `.outline/reference-corpus` and `acquire-modern` is empty (recorded identity: manifest file sha256 `b694c91880ac15edbb3e8dbb8a62bf8c0a0c1c64ef7dbec2e3f79eadf918db7d`, logical `manifest_sha256` `b87bac6720d1b68acadaa9863b56073ee213f4613e8dfa4a93c4459dc5f017cd`) |
 | Offline replay, full mainnet to pinned stop | same, plus certified end state and physical high-water | `planned_not_executed` |
 | Live IBD loopback, bounded range, one peer and multi-peer | wall, blocks/s, peak RSS, requeue exactness on disconnect | `planned_not_executed` |
@@ -35,19 +35,56 @@ The promotion, regression, reporting, retention and `BLOCKED` rules of [`README.
 
 ## Status
 
-`planned_not_executed`, as defined in [`README.md`](README.md).
+`planned_not_executed` for every end-state cell except the C150 offline
+replay row, which measured on 2026-11-02 with no acceptance verdict. The
+vocabulary is defined in [`README.md`](README.md).
+
+## First gated C150 offline campaign (2026-11-02)
+
+The offline comparator ran its first live campaign against the staged C150
+custody on this head, `0c0975652`. Seven alternating pairs, Core 31.1 first on
+even pairs. Every comparator gate passed: arm count, alternation, archive and
+binary identity, exit 0 on all 14 arms, full validation, indexes off, and
+equal certified state across arms. The result document is
+`offline-full-validation-result-v1` with `result_sha256`
+`ea355abdab58a7333c252846120e73fefa6dc3cd19987ad28179174c00abf067`. A copy
+sits beside `.outline/evidence/evidence-refresh-20261102/records/published/`
+with the operator identity bundle `operator-identity-offline-import.json`
+(`bundle_sha256` `45c589b34e03b21b4f18e55e86e63d670180f738960e0de07b688014ea37d98e`).
+
+| Arm | wall p50 | wall p95, p99, max | CPU per arm | peak RSS per arm |
+|---|---:|---:|---:|---:|
+| Core `v31.1` (wrapper arm) | 109.504 s | 117.346 s | not attributed (wrapper process) | not attributed (wrapper process) |
+| bitcoin-rs, fjall | 824.676 s | 881.600 s | 4754 to 4915 s | 0.60 to 0.72 GiB |
+
+`candidate_over_core_p50_ratio` is 7.531. Core validates the 150,001-block
+archive about 7.5 times faster than bitcoin-rs on this host, full validation
+on both sides, no acceptance verdict attached. The candidate and Core arm
+walls spread 11.7 and 12.6 percent from minimum to maximum, above the 5
+percent stability band of [`README.md`](README.md#acceptance-rule), so this
+run is a baseline observation, not a promotion gate. The ledger cell
+`offline.c150.x86_64.fjall` carries the seven bitcoin-rs walls as its first
+seven samples.
+
+Two reading rules for these numbers. The Core arm runs through a wrapper
+script that spawns `bitcoind` and then dumps the certified state, so the
+per-arm CPU and peak-RSS fields measure the wrapper process on that arm and
+attribute no Core resource cost; the wall still spans spawn to clean exit
+with nothing subtracted. The campaign started at 1-minute load 3.48 and the
+only sustained load in its two-hour window was the campaign itself, but the
+shared host cannot prove an empty window, so read single-arm values with the
+spread above. The certified states of both arms agree with the `CORP-05`
+oracle on height, best block, txouts, total amount, and MuHash.
+
+
 
 ## Historical C150 comparator ratio
 
-A disk-bounded campaign at commit
-`de8001e83bd4e09077d4cebbbdd23d0cebade194` used the exact mainnet range
-0–150,000. Both implementations used full validation, the same stop hash, and
-CPU set 0–31. The row is observed once, not evidence, and is kept for context
-only.
-
-| Workload | bitcoin-rs observed | Bitcoin Core 31.1 observed | Core / bitcoin-rs | Result |
-|---|---:|---:|---:|---|
-| Full-validation local replay / chainstate reindex | 39.251s | 64.922s | 1.654× | Observed once, not evidence |
+Removed on 2026-11-02. A disk-bounded campaign at commit
+`de8001e83bd4e09077d4cebbbdd23d0cebade194` once recorded a 1.654x
+Core-over-bitcoin-rs ratio for the same mainnet range, observed once, not
+evidence. The gated campaign above now owns this comparison from this head
+and measures the opposite direction. The retired row lives in Git history.
 
 ## History
 

@@ -1,6 +1,6 @@
 # Offline full-validation comparator
 
-Harness `tools/benchmark-campaign/offline_full_validation.py`, tests `tools/benchmark-campaign/test_offline_full_validation.py`; addresses issue #34, implements the frozen parity contract of issue #46. Core 31.1 and bitcoin-rs build chainstate from the same hash-pinned Core-framed archive; neither node is reached inside; the ratio is computed only after all custody and correctness gates pass. No live C150/Cmodern campaign is claimed: CI proves the harness with fixture nodes only.
+Harness `tools/benchmark-campaign/offline_full_validation.py`, tests `tools/benchmark-campaign/test_offline_full_validation.py`; addresses issue #34, implements the frozen parity contract of issue #46. Core 31.1 and bitcoin-rs build chainstate from the same hash-pinned Core-framed archive; neither node is reached inside; the ratio is computed only after all custody and correctness gates pass. The first live C150 campaign ran on 2026-11-02 and published a gated result (see [`end-to-end-sync.md`](end-to-end-sync.md)). No Cmodern campaign is claimed: CI still proves the harness with fixture nodes only.
 
 ## What is held identical
 
@@ -28,4 +28,4 @@ Tests use a two-block Core-framed archive plus deterministic fixture nodes. Inde
 
 Bounds admit Cmodern (genesis to 709,635). They do NOT admit the live full-tip chain, which is about 760 GiB and not a product corpus under #42.
 
-Conclusion: this is the processing-bound regime, where local blocks make the wall equal validation plus durable commit. It is NOT download-bound IBD. Historical 1.654x C150 numbers are not carried forward. A new ratio exists only after a gated result file against a frozen corpus.
+Conclusion: this is the processing-bound regime, where local blocks make the wall equal validation plus durable commit. It is NOT download-bound IBD. Historical 1.654x C150 numbers are not carried forward. The first gated result file against the frozen C150 corpus exists now: 2026-11-02, [`end-to-end-sync.md`](end-to-end-sync.md), ratio 7.531.
