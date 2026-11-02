@@ -8,7 +8,7 @@ const IGNORE_BIT: u8 = 1 << 7;
 
 const MAX_CONTENTS_LEN: usize = (1 << 24) - 1;
 
-const PACKET_OVERHEAD: usize = LENGTH_FIELD_LEN + HEADER_LEN + TAG_LEN;
+pub(crate) const PACKET_OVERHEAD: usize = LENGTH_FIELD_LEN + HEADER_LEN + TAG_LEN;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PacketError {

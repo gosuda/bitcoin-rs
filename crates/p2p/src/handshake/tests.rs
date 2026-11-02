@@ -11,6 +11,7 @@ use super::{
 use crate::feature::{FEATURE_VERSION, FeatureAnnouncement, FeatureId};
 use crate::packages::{PKG_RELAY_ANC, PKG_RELAY_PKGTXNS, SendPackages};
 use crate::wire::{PROTOCOL_VERSION, read_message, write_message};
+use bitcoin_rs_primitives::USER_AGENT;
 
 struct ScriptedStream {
     inbound: Cursor<Vec<u8>>,
@@ -78,6 +79,7 @@ fn expanding_commands_before_readiness_are_refused_before_materialization() -> R
             1,
             0,
             services(),
+            USER_AGENT,
             &lease,
             std::time::Instant::now() + std::time::Duration::from_secs(5),
         );
@@ -92,7 +94,7 @@ fn expanding_commands_before_readiness_are_refused_before_materialization() -> R
 fn remote_version(version: u32) -> Message {
     Message::Version(VersionMessage {
         version,
-        ..version_message(99, 0, PeerRole::FullRelay, services())
+        ..version_message(99, 0, PeerRole::FullRelay, services(), USER_AGENT)
     })
 }
 
@@ -134,6 +136,7 @@ fn inbound_handshake_with(
         1,
         0,
         services(),
+        USER_AGENT,
         &lease,
         std::time::Instant::now() + std::time::Duration::from_secs(5),
     );
@@ -173,6 +176,7 @@ fn inbound_handshake_sends_one_sendpackages_before_verack_and_activates_the_comm
         0,
         PeerRole::FullRelay,
         services(),
+        USER_AGENT,
     ))];
     expected.extend(feature_messages());
     expected.extend(
@@ -232,7 +236,7 @@ fn outbound_start_offers_package_relay_only_on_relaying_roles() {
         let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::BITCOIN);
         peer.offer_package_relay(PKG_RELAY_ANC);
 
-        start(&mut peer, 7, 0, role, services());
+        start(&mut peer, 7, 0, role, services(), USER_AGENT);
 
         assert_eq!(peer.package_relay.unsent_offer(), offered, "{role:?}");
     }
@@ -276,6 +280,7 @@ fn inbound_handshake_announces_an_offered_bip332_between_feature_messages_and_ve
             0,
             PeerRole::FullRelay,
             services(),
+            USER_AGENT,
         ))];
         expected.extend(feature_messages());
         expected.push(Message::Feature(FeatureAnnouncement::bip332(
@@ -316,6 +321,7 @@ fn inbound_handshake_to_a_pre_bip434_peer_is_unchanged() -> Result<(), PeerError
         0,
         PeerRole::FullRelay,
         services(),
+        USER_AGENT,
     ))];
     expected.extend(feature_messages());
     expected.push(Message::Verack);
@@ -337,6 +343,7 @@ fn inbound_handshake_sends_negotiated_features_between_feature_messages_and_vera
         0,
         PeerRole::FullRelay,
         services(),
+        USER_AGENT,
     ))];
     expected.extend(feature_messages());
     expected.extend(
@@ -406,6 +413,7 @@ fn inbound_handshake_reaches_ready_after_remote_version_and_verack() -> Result<(
             0,
             PeerRole::FullRelay,
             ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            USER_AGENT,
         )),
     )?;
     write_message(&mut remote_outbound, magic, &Message::Verack)?;
@@ -421,6 +429,7 @@ fn inbound_handshake_reaches_ready_after_remote_version_and_verack() -> Result<(
         1,
         0,
         ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        USER_AGENT,
         &lease,
         std::time::Instant::now() + std::time::Duration::from_secs(5),
     )?;
@@ -485,6 +494,7 @@ fn inbound_handshake_resumes_frames_split_by_poll_timeouts() -> Result<(), PeerE
             0,
             PeerRole::FullRelay,
             ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            USER_AGENT,
         )),
     )?;
     let mut verack = Vec::new();
@@ -506,6 +516,7 @@ fn inbound_handshake_resumes_frames_split_by_poll_timeouts() -> Result<(), PeerE
         1,
         0,
         ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        USER_AGENT,
         &lease,
         std::time::Instant::now() + std::time::Duration::from_secs(5),
     )?;
@@ -517,11 +528,18 @@ fn inbound_handshake_resumes_frames_split_by_poll_timeouts() -> Result<(), PeerE
 #[test]
 fn version_message_advertises_relay_only_for_full_relay() {
     assert!(
-        version_message(1, 0, PeerRole::FullRelay, ServiceFlags::NETWORK).relay,
+        version_message(1, 0, PeerRole::FullRelay, ServiceFlags::NETWORK, USER_AGENT).relay,
         "a full-relay handshake asks for transaction relay"
     );
     assert!(
-        !version_message(1, 0, PeerRole::BlockRelayOnly, ServiceFlags::NETWORK).relay,
+        !version_message(
+            1,
+            0,
+            PeerRole::BlockRelayOnly,
+            ServiceFlags::NETWORK,
+            USER_AGENT,
+        )
+        .relay,
         "a block-relay-only handshake asks for none"
     );
 }
@@ -536,6 +554,7 @@ fn outbound_handshake_start_carries_the_connection_role() {
         42,
         PeerRole::BlockRelayOnly,
         ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        USER_AGENT,
     );
     assert_eq!(
         messages.len(),
@@ -560,7 +579,7 @@ fn self_connection_nonce_is_rejected() -> Result<(), PeerError> {
         magic,
         &Message::Version(VersionMessage {
             nonce: our_nonce,
-            ..version_message(our_nonce, 0, PeerRole::FullRelay, services())
+            ..version_message(our_nonce, 0, PeerRole::FullRelay, services(), USER_AGENT)
         }),
     )?;
 
@@ -573,6 +592,7 @@ fn self_connection_nonce_is_rejected() -> Result<(), PeerError> {
         our_nonce,
         0,
         services(),
+        USER_AGENT,
         &lease,
         std::time::Instant::now() + std::time::Duration::from_secs(5),
     );

@@ -316,6 +316,7 @@ impl Served {
                         close,
                         &mut gated,
                         &mut SendTransport::V1(MAGIC),
+                        &crate::PeerCounters::default(),
                         None,
                     );
                     let _ = gated.socket.shutdown(Shutdown::Both);
@@ -327,7 +328,8 @@ impl Served {
                     crate::CountingStream::new(
                         writer_socket,
                         Arc::new(crate::PeerCounters::default()),
-                    ),
+                    )
+                    .recording_send_activity(lease.send_activity()),
                     SendTransport::V1(MAGIC),
                     outbound_rx,
                     close,
@@ -430,7 +432,11 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     let unknown_tx = Inventory::Transaction(bitcoin::Txid::from_byte_array([7; 32]));
     let block_len = wire_len_of(&Message::BlockPayload(entry_a.1.clone()))?;
     let notfound_len = wire_len_of(&Message::NotFound(vec![unknown_tx]))?;
-    let budget = OutboundBudget::with_block_reserve(100, 2 * block_len - 1, block_len);
+    let ping_len = wire_len_of(&Message::Ping(3))?;
+    // Sized so block A plus the miss's notfound fill the data lane while
+    // block B and the pong park; the keepalive probe rides the bounded
+    // control lane and never enters these counts.
+    let budget = OutboundBudget::with_block_reserve(100, block_len + notfound_len, block_len);
     let chain = ScriptedChain {
         blocks: vec![entry_a, entry_b],
     };
@@ -445,7 +451,7 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
 
     let parked = (2, block_len + notfound_len);
     wait_until("block A and the notfound to be queued", || {
-        served.budget.pending() == parked
+        served.budget.pending() == parked && served.budget.control_pending() == (1, ping_len)
     })?;
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
@@ -459,9 +465,16 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     );
 
     served.open_gate();
-    let received = read_messages(&mut served.client, 4)?;
+    let received = read_messages(&mut served.client, 5)?;
+    let [probe, drained @ ..] = &received[..] else {
+        panic!("expected five drained messages, got {received:?}");
+    };
+    assert!(
+        matches!(probe, Message::Ping(_)),
+        "the originated keepalive probe drains first: {received:?}"
+    );
     assert_eq!(
-        received,
+        drained,
         vec![
             Message::Block(bitcoin_rs_primitives::BlockPayload::from_local(block_a)),
             Message::NotFound(vec![unknown_tx]),
@@ -516,6 +529,7 @@ fn lease_cancel_ends_a_parked_session() -> TestResult {
     let (block_a, block_b) = (block(4), block(5));
     let (entry_a, entry_b) = (scripted(&block_a), scripted(&block_b));
     let block_len = wire_len_of(&Message::BlockPayload(entry_a.1.clone()))?;
+    let ping_len = wire_len_of(&Message::Ping(3))?;
     let budget = OutboundBudget::with_block_reserve(100, 2 * block_len - 1, block_len);
     let chain = ScriptedChain {
         blocks: vec![entry_a, entry_b],
@@ -527,6 +541,7 @@ fn lease_cancel_ends_a_parked_session() -> TestResult {
     ]))?;
     wait_until("block A to be queued", || {
         served.budget.pending() == (1, block_len)
+            && served.budget.control_pending() == (1, ping_len)
     })?;
     std::thread::sleep(Duration::from_millis(200));
 
@@ -558,9 +573,13 @@ fn tiny_item_flood_pauses_at_the_item_cap_and_drains_in_order() -> TestResult {
 
     served.client.send(&Message::GetData(items))?;
 
+    // Regression guard: the originated keepalive probe rides the bounded
+    // control lane, so a saturated data queue still carries three whole
+    // transactions of useful outbound data instead of two behind a probe.
+    let ping_len = wire_len_of(&Message::Ping(0))?;
     let full = (3, 3 * tx_len);
-    wait_until("three transactions to be queued", || {
-        served.budget.pending() == full
+    wait_until("the probe and three transactions to be queued", || {
+        served.budget.pending() == full && served.budget.control_pending() == (1, ping_len)
     })?;
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
@@ -574,9 +593,16 @@ fn tiny_item_flood_pauses_at_the_item_cap_and_drains_in_order() -> TestResult {
     );
 
     served.open_gate();
-    let received = read_messages(&mut served.client, 6)?;
+    let received = read_messages(&mut served.client, 7)?;
+    let [probe, drained @ ..] = &received[..] else {
+        panic!("expected seven drained messages, got {received:?}");
+    };
+    assert!(
+        matches!(probe, Message::Ping(_)),
+        "the originated keepalive probe drains first: {received:?}"
+    );
     assert_eq!(
-        received,
+        drained,
         vec![
             Message::Tx(txs[0].clone()),
             Message::Tx(txs[1].clone()),
@@ -625,9 +651,12 @@ fn a_getdata_that_fills_the_last_slot_parks_its_trailing_notfound_and_the_next_p
     ]))?;
     served.client.send(&Message::Ping(11))?;
 
+    // The keepalive probe rides the control lane; the data lane fills with
+    // the three request hits.
+    let ping_len = wire_len_of(&Message::Ping(0))?;
     let full = (3, 3 * tx_len);
-    wait_until("three transactions to be queued", || {
-        served.budget.pending() == full
+    wait_until("the probe and three transactions to be queued", || {
+        served.budget.pending() == full && served.budget.control_pending() == (1, ping_len)
     })?;
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
@@ -641,9 +670,16 @@ fn a_getdata_that_fills_the_last_slot_parks_its_trailing_notfound_and_the_next_p
     );
 
     served.open_gate();
-    let received = read_messages(&mut served.client, 5)?;
+    let received = read_messages(&mut served.client, 6)?;
+    let [probe, drained @ ..] = &received[..] else {
+        panic!("expected six drained messages, got {received:?}");
+    };
+    assert!(
+        matches!(probe, Message::Ping(_)),
+        "the originated keepalive probe drains first: {received:?}"
+    );
     assert_eq!(
-        received,
+        drained,
         vec![
             Message::Tx(txs[0].clone()),
             Message::Tx(txs[1].clone()),
@@ -893,5 +929,220 @@ fn an_open_queue_resumes_notfound_first_and_reparks_what_the_gate_stops() -> Tes
     assert_eq!(peer.pending_getdata, vec![inventory_of(&block_b)]);
     assert_eq!(peer.pending_notfound, Vec::new());
     assert!(!lease.is_cancelled(), "re-parking is not a disconnect");
+    Ok(())
+}
+
+/// A reader that replays concatenated framed pings, then paces its dry
+/// reads with `WouldBlock`: inbound traffic stays live indefinitely while
+/// this side of the connection never writes.
+struct InboundPingStream {
+    script: io::Cursor<Vec<u8>>,
+}
+
+impl io::Read for InboundPingStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match io::Read::read(&mut self.script, buf) {
+            Ok(0) => {
+                std::thread::sleep(Duration::from_millis(100));
+                Err(io::Error::from(io::ErrorKind::WouldBlock))
+            }
+            Ok(read) => Ok(read),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl io::Write for InboundPingStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The socket a healthy writer owns: accepts every offered byte.
+struct AcceptsAll;
+
+impl io::Write for AcceptsAll {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn write_vectored(&mut self, buffers: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn framed_pings(count: usize) -> Vec<u8> {
+    let mut script = Vec::new();
+    for nonce in 0..u64::try_from(count).unwrap_or(u64::MAX) {
+        crate::wire::write_message(&mut script, MAGIC, &Message::Ping(nonce))
+            .unwrap_or_else(|error| panic!("encode ping {nonce}: {error}"));
+    }
+    script
+}
+
+/// Backdates the lease's send-activity clock so `margin` of real time
+/// separates `last_write` from the send-silence threshold.
+fn backdated_send_clock(margin: Duration) -> Result<Instant, TestError> {
+    let since_last_write = TIMEOUT_INTERVAL
+        .checked_sub(margin)
+        .ok_or("the margin must stay under the timeout interval")?;
+    Instant::now()
+        .checked_sub(since_last_write)
+        .ok_or_else(|| "test instant underflow".into())
+}
+
+#[test]
+fn blocked_writer_send_silence_expires_despite_inbound_traffic() -> TestResult {
+    // A stalled writer: no thread consumes the outbound queue, so the
+    // socket accepts nothing while the queue keeps admitting frames.
+    let margin = Duration::from_secs(10);
+    let last_write = backdated_send_clock(margin)?;
+    let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+    let lease = PeerLease::new(outbound_tx);
+    *lease.send_activity().lock() = last_write;
+    let shared = shared_with(ScriptedChain { blocks: Vec::new() });
+    let mut peer = crate::Peer::new(
+        InboundPingStream {
+            script: io::Cursor::new(framed_pings(64)),
+        },
+        MAGIC,
+    );
+    peer.state = PeerState::Ready;
+    let session_lease = lease.clone();
+    let (outcome_tx, outcome_rx) = crossbeam_channel::bounded(1);
+    let session = std::thread::spawn(move || {
+        let _ = outcome_tx.send(run_message_loop(
+            &mut peer,
+            PeerEndpoint::from(([127, 0, 0, 1], 18_449)),
+            &session_lease,
+            &shared,
+            None,
+        ));
+    });
+
+    // Below the threshold the session must stay up: inbound pings keep the
+    // receive clock fresh and the originated probe merely queues.
+    std::thread::sleep(margin / 2);
+    assert!(
+        matches!(
+            outcome_rx.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Empty)
+        ),
+        "an admit-only probe and fresh inbound traffic must not expire the loop early"
+    );
+    let ping_len = wire_len_of(&Message::Ping(0))?;
+    assert_eq!(
+        lease.budget_handle().control_pending(),
+        (1, ping_len),
+        "the probe was admitted to the control lane while nothing was written"
+    );
+
+    let outcome = outcome_rx
+        .recv_timeout(FAILSAFE)
+        .map_err(|_| "the session did not expire within the failsafe")?;
+    session.join().map_err(|_| "session join")?;
+    assert!(
+        outcome.is_ok(),
+        "send-silence expiry at TIMEOUT_INTERVAL past the last actual write is a clean close: {outcome:?}"
+    );
+    assert!(
+        last_write.elapsed() >= margin,
+        "expiry must wait out the send clock, not fire on the first pass"
+    );
+    assert!(
+        matches!(
+            outbound_rx.try_recv().map(|frame| frame.into_message()),
+            Ok(Message::Ping(_))
+        ),
+        "the probe stayed queued ahead of the pongs: admitted, never written"
+    );
+    Ok(())
+}
+
+#[test]
+fn healthy_writer_actual_writes_reset_the_send_silence_clock() -> TestResult {
+    let margin = Duration::from_secs(10);
+    let last_write = backdated_send_clock(margin)?;
+    let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+    let lease = PeerLease::new(outbound_tx);
+    *lease.send_activity().lock() = last_write;
+    let shared = shared_with(ScriptedChain { blocks: Vec::new() });
+
+    let counters = Arc::new(crate::PeerCounters::default());
+    let writer = {
+        let budget = lease.budget_handle();
+        let close = lease.close_signal();
+        let activity = lease.send_activity();
+        let counters = Arc::clone(&counters);
+        std::thread::spawn(move || {
+            let _exit = WriterExit {
+                budget,
+                outbound_rx: &outbound_rx,
+            };
+            let mut sink =
+                crate::CountingStream::new(AcceptsAll, counters).recording_send_activity(activity);
+            run_writer_loop(
+                &outbound_rx,
+                close,
+                &mut sink,
+                &mut SendTransport::V1(MAGIC),
+                &crate::PeerCounters::default(),
+                None,
+            );
+        })
+    };
+    let mut peer = crate::Peer::new(
+        InboundPingStream {
+            script: io::Cursor::new(framed_pings(64)),
+        },
+        MAGIC,
+    );
+    peer.state = PeerState::Ready;
+    let session_lease = lease.clone();
+    let (outcome_tx, outcome_rx) = crossbeam_channel::bounded(1);
+    let session = std::thread::spawn(move || {
+        let _ = outcome_tx.send(run_message_loop(
+            &mut peer,
+            PeerEndpoint::from(([127, 0, 0, 1], 18_450)),
+            &session_lease,
+            &shared,
+            None,
+        ));
+    });
+
+    // The writer's accepted bytes stamp the same send-activity clock the
+    // loop observes; without those stamps the backdated clock would
+    // expire the session `margin` after start.
+    wait_until(
+        "the writer's first accepted bytes to stamp the clock",
+        || lease.last_send() > last_write,
+    )?;
+    let started = Instant::now();
+    while started.elapsed() < margin + Duration::from_secs(3) {
+        assert!(
+            matches!(
+                outcome_rx.try_recv(),
+                Err(crossbeam_channel::TryRecvError::Empty)
+            ),
+            "actual writes (the probe included) must reset the send-silence clock"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    lease.cancel();
+    let outcome = outcome_rx
+        .recv_timeout(FAILSAFE)
+        .map_err(|_| "the session did not end after cancel")?;
+    session.join().map_err(|_| "session join")?;
+    writer.join().map_err(|_| "writer join")?;
+    assert!(outcome.is_ok(), "{outcome:?}");
     Ok(())
 }

@@ -480,3 +480,332 @@ fn an_idle_read_unblocks_on_the_cancel_latch() -> IoResult<()> {
     );
     Ok(())
 }
+
+#[test]
+fn send_activity_advances_only_on_actual_socket_writes() {
+    use std::time::{Duration, Instant};
+
+    let (queue, _rx) = crossbeam_channel::unbounded();
+    let lease = crate::PeerLease::new(queue);
+    let stale = Instant::now()
+        .checked_sub(Duration::from_secs(30))
+        .unwrap_or_else(|| panic!("a 30-second backdate fits the monotonic clock"));
+    *lease.send_activity().lock() = stale;
+
+    lease
+        .send(crate::Message::Ping(1))
+        .unwrap_or_else(|error| panic!("queue admission failed: {error}"));
+    assert_eq!(
+        lease.last_send(),
+        stale,
+        "queue admission must not advance the send-silence clock"
+    );
+
+    let counters = Arc::new(PeerCounters::default());
+    let mut stream = CountingStream::new(std::io::Cursor::new(Vec::new()), Arc::clone(&counters))
+        .recording_send_activity(lease.send_activity());
+    let written = stream
+        .write(&[0_u8; 4])
+        .unwrap_or_else(|error| panic!("write failed: {error}"));
+    assert_eq!(written, 4);
+    assert!(
+        lease.last_send() > stale,
+        "a socket write acceptance stamps the clock the loop observes"
+    );
+
+    // The writer-thread clone of a connected stream carries the same
+    // clock, the way `run_connected_session` hands the writer its handle.
+    use std::net::{TcpListener, TcpStream};
+    let listener =
+        TcpListener::bind("127.0.0.1:0").unwrap_or_else(|error| panic!("bind failed: {error}"));
+    let addr = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("local_addr failed: {error}"));
+    let _client =
+        TcpStream::connect(addr).unwrap_or_else(|error| panic!("connect failed: {error}"));
+    let connected = listener
+        .accept()
+        .unwrap_or_else(|error| panic!("accept failed: {error}"))
+        .0;
+    let stream = CountingStream::new(connected, Arc::new(PeerCounters::default()))
+        .recording_send_activity(lease.send_activity());
+    let mut clone = stream
+        .try_clone()
+        .unwrap_or_else(|error| panic!("try_clone failed: {error}"));
+    assert!(
+        clone.send_activity.is_some(),
+        "the writer-thread clone carries the same send-activity clock"
+    );
+    // Some clock is not enough: it must be the lease's cell. Writing
+    // through the clone is the writer thread's only stamping point, so
+    // backdate the shared clock and prove the clone's write moves it.
+    *lease.send_activity().lock() = stale;
+    let written = clone
+        .write(&[0_u8; 4])
+        .unwrap_or_else(|error| panic!("write through the clone failed: {error}"));
+    assert_eq!(written, 4);
+    assert!(
+        lease.last_send() > stale,
+        "a write accepted by the clone stamps the lease's own clock"
+    );
+}
+
+#[test]
+fn message_account_names_round_trip_through_from_command() {
+    for account in MessageAccount::ALL {
+        if matches!(account, MessageAccount::Other) {
+            continue;
+        }
+        assert_eq!(
+            MessageAccount::from_command(account.name()),
+            Some(account),
+            "{} must classify back to itself",
+            account.name()
+        );
+    }
+}
+
+#[test]
+fn receive_buckets_cover_core_v31_known_commands() {
+    // Core v31.1 src/protocol.h ALL_NET_MESSAGE_TYPES, verbatim. Pinned as
+    // compatibility evidence: every Core-known command keeps its own
+    // receive bucket. The table is deliberately wider: this node's
+    // supported extensions (`feature`, BIP331 `sendpackages`, `ancpkginfo`,
+    // `getpkgtxns`, `pkgtxns`, BIP332 `staletip`) carry their own receive
+    // buckets too, because we process them inbound — Core's internal
+    // whitelist is not our receive surface.
+    let core_known = [
+        "version",
+        "verack",
+        "addr",
+        "addrv2",
+        "sendaddrv2",
+        "inv",
+        "getdata",
+        "merkleblock",
+        "getblocks",
+        "getheaders",
+        "tx",
+        "headers",
+        "block",
+        "getaddr",
+        "mempool",
+        "ping",
+        "pong",
+        "notfound",
+        "filterload",
+        "filteradd",
+        "filterclear",
+        "sendheaders",
+        "feefilter",
+        "sendcmpct",
+        "cmpctblock",
+        "getblocktxn",
+        "blocktxn",
+        "getcfilters",
+        "cfilter",
+        "getcfheaders",
+        "cfheaders",
+        "getcfcheckpt",
+        "cfcheckpt",
+        "wtxidrelay",
+        "sendtxrcncl",
+    ];
+    for command in core_known {
+        assert_eq!(
+            MessageAccount::receive(command).name(),
+            command,
+            "Core v31.1 known command must keep its own receive bucket"
+        );
+    }
+}
+
+#[test]
+fn feature_counts_by_name_in_both_directions() {
+    // BIP434 negotiation is a command this node receives, so a received
+    // feature frame keeps its own bucket instead of folding into *other*.
+    assert_eq!(MessageAccount::receive("feature"), MessageAccount::Feature);
+    assert_eq!(MessageAccount::receive("feature").name(), "feature");
+    assert_eq!(MessageAccount::send("feature"), MessageAccount::Feature);
+}
+
+#[test]
+fn unknown_and_send_only_receives_fold_into_other() {
+    // `alert` and `reject` are decoded but never processed inbound, so a
+    // received frame under them folds exactly like an unknown command.
+    for command in ["frobnicate", "", "alert", "reject"] {
+        assert_eq!(
+            MessageAccount::receive(command),
+            MessageAccount::Other,
+            "{command:?} must fold into *other* like Core's receive accounting"
+        );
+    }
+}
+
+#[test]
+fn received_extension_commands_count_under_their_own_names() {
+    // BIP331/BIP332 frames this node processes inbound: a real decoded
+    // frame charges its own receive bucket, not *other* the way Core
+    // v31.1's known-command list would. All five `both`-classified
+    // extension commands get a frame, one per bucket.
+    let wtxid =
+        bitcoin_rs_primitives::Wtxid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[1; 32]));
+    let tx = bitcoin_rs_primitives::Tx {
+        inputs: vec![bitcoin_rs_primitives::TxIn {
+            previous_output: bitcoin_rs_primitives::OutPoint::new(
+                bitcoin_rs_primitives::Txid(wtxid.0),
+                0,
+            ),
+            ..bitcoin_rs_primitives::TxIn::default()
+        }],
+        ..bitcoin_rs_primitives::Tx::default()
+    };
+    let staletip = crate::staletip::StaleTipAnnouncement {
+        fork_point: bitcoin_rs_primitives::Hash256::from_le_bytes(&[3; 32]),
+        headers: vec![crate::staletip::CompressedHeader {
+            version: 0x2000_0000,
+            merkle_root: bitcoin_rs_primitives::Hash256::from_le_bytes(&[4; 32]),
+            time: 1_700_000_000,
+            bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x1703_4219),
+            nonce: 1,
+        }],
+        have_block: true,
+    };
+    for (command, message) in [
+        (
+            "sendpackages",
+            crate::wire::Message::SendPackages(crate::packages::SendPackages { versions: 3 }),
+        ),
+        (
+            "ancpkginfo",
+            crate::wire::Message::AncPkgInfo(crate::packages::AncPkgInfo {
+                wtxids: vec![wtxid],
+            }),
+        ),
+        (
+            "getpkgtxns",
+            crate::wire::Message::GetPkgTxns(crate::packages::GetPkgTxns {
+                wtxids: vec![wtxid],
+            }),
+        ),
+        (
+            "pkgtxns",
+            crate::wire::Message::PkgTxns(crate::packages::PkgTxns { txs: vec![tx] }),
+        ),
+        ("staletip", crate::wire::Message::StaleTip(staletip)),
+    ] {
+        // The decoder never parses a received `pkgtxns` into transactions:
+        // it hands back the raw payload so ingress can charge the frame
+        // first, so that command's round trip is payload bytes, not the
+        // typed variant it was framed from.
+        let expected = match &message {
+            crate::wire::Message::PkgTxns(package) => {
+                let payload = package
+                    .encode()
+                    .unwrap_or_else(|error| panic!("encode {command}: {error}"));
+                crate::wire::Message::PkgTxnsPayload(bytes::Bytes::from(payload))
+            }
+            framed => framed.clone(),
+        };
+        let mut frame = Vec::new();
+        crate::wire::write_message(&mut frame, bitcoin::p2p::Magic::BITCOIN, &message)
+            .unwrap_or_else(|error| panic!("encode {command}: {error}"));
+        let counters = Arc::new(PeerCounters::default());
+        let mut peer = crate::peer::Peer::new(
+            std::io::Cursor::new(frame.clone()),
+            bitcoin::p2p::Magic::BITCOIN,
+        );
+        peer.account_message_bytes(Arc::clone(&counters));
+        let (decoded, _) = peer
+            .read_message()
+            .unwrap_or_else(|error| panic!("decode {command}: {error}"))
+            .unwrap_or_else(|| panic!("{command} decodes to a frame"));
+        assert_eq!(decoded, expected, "{command} round-trips");
+        let framed_len = u64::try_from(frame.len())
+            .unwrap_or_else(|_| panic!("{command} framed length fits u64"));
+        assert_eq!(
+            counters.recv_per_message(),
+            vec![(command, framed_len)],
+            "{command} inbound accounting keeps its own bucket"
+        );
+    }
+}
+
+#[test]
+fn sends_are_attributed_to_their_own_command() {
+    assert_eq!(MessageAccount::send("staletip"), MessageAccount::StaleTip);
+    assert_eq!(
+        MessageAccount::send("sendpackages"),
+        MessageAccount::SendPackages
+    );
+    assert_eq!(MessageAccount::send("frobnicate"), MessageAccount::Other);
+}
+
+#[test]
+fn per_message_recording_counts_by_command_and_omits_zero_buckets() {
+    let counters = PeerCounters::default();
+    assert_eq!(
+        counters.sent_per_message(),
+        Vec::<(&'static str, u64)>::new()
+    );
+    assert_eq!(
+        counters.recv_per_message(),
+        Vec::<(&'static str, u64)>::new()
+    );
+
+    counters.record_msg_recv("pong", 32);
+    counters.record_msg_recv("pong", 32);
+    counters.record_msg_recv("frobnicate", 99);
+    counters.record_msg_sent("verack", 24);
+
+    assert_eq!(
+        counters.recv_per_message(),
+        vec![("pong", 64), ("*other*", 99)]
+    );
+    assert_eq!(counters.sent_per_message(), vec![("verack", 24)]);
+}
+
+#[test]
+fn a_framed_pong_satisfies_the_framework_wait_threshold() {
+    // Core v31.1's test_framework connect_nodes polls until
+    // bytesrecv_per_msg['pong'] >= 29; a pong frame is 24 header bytes
+    // plus its 8-byte nonce.
+    let mut frame = Vec::new();
+    crate::wire::write_message(
+        &mut frame,
+        bitcoin::p2p::Magic::BITCOIN,
+        &crate::wire::Message::Pong(0xfeed_face),
+    )
+    .unwrap_or_else(|error| panic!("encode pong: {error}"));
+
+    let counters = PeerCounters::default();
+    counters.record_msg_recv("pong", frame.len());
+
+    let pong = counters
+        .recv_per_message()
+        .into_iter()
+        .find(|(command, _)| *command == "pong")
+        .unwrap_or_else(|| panic!("pong bucket missing: {:?}", counters.recv_per_message()));
+    assert_eq!(pong, ("pong", 32));
+    assert!(pong.1 >= 29, "framed pong must clear the wait threshold");
+}
+
+#[test]
+fn per_message_recording_leaves_the_socket_aggregates_alone() {
+    let counters = PeerCounters::default();
+    counters.record_msg_recv("version", 86);
+    counters.record_msg_sent("ping", 32);
+    assert_eq!(counters.bytes_recv(), 0);
+    assert_eq!(counters.bytes_sent(), 0);
+    assert_eq!(counters.last_recv(), 0);
+    assert_eq!(counters.last_send(), 0);
+}
+
+#[test]
+fn equality_compares_per_message_buckets_too() {
+    let left = PeerCounters::default();
+    let right = PeerCounters::default();
+    assert_eq!(left, right);
+    right.record_msg_recv("pong", 32);
+    assert_ne!(left, right);
+}

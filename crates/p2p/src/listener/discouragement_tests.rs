@@ -1,5 +1,7 @@
 use super::*;
 use crate::{Message, PeerError, PeerLease, PeerRole};
+use bitcoin_rs_primitives::USER_AGENT;
+
 #[derive(Debug, thiserror::Error)]
 enum TestError {
     #[error(transparent)]
@@ -120,6 +122,7 @@ fn accepted_version_updates_once_without_replaying_on_later_steps() -> TestResul
                 0,
                 PeerRole::FullRelay,
                 ServiceFlags::from(9),
+                USER_AGENT,
             )),
         )?;
         let update_at = (!repeated_version).then_some(u64::try_from(wire.len())?);
@@ -132,6 +135,7 @@ fn accepted_version_updates_once_without_replaying_on_later_steps() -> TestResul
                     0,
                     PeerRole::FullRelay,
                     ServiceFlags::from(1),
+                    USER_AGENT,
                 )),
             )?;
         } else {
@@ -264,6 +268,7 @@ fn manual_and_protected_local_connections_never_discourage_an_ip() -> TestResult
             0,
             PeerRole::FullRelay,
             ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            USER_AGENT,
         );
         let mut info =
             crate::PeerInfo::outbound_from_version(address, local, &version, 0, 0, counters);
@@ -352,6 +357,7 @@ fn only_current_remote_protocol_faults_change_automatic_avoidance() -> TestResul
                 0,
                 PeerRole::FullRelay,
                 ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+                USER_AGENT,
             )),
         )?;
         crate::wire::write_message(&mut bytes, Magic::REGTEST, &Message::Verack)?;

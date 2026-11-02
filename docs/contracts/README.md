@@ -11,7 +11,7 @@
 - [dependency-range.md](dependency-range.md): `DEP-01`–`DEP-03`, `FEAT-01`–`FEAT-02`.
 - [ecosystem-compatibility.md](ecosystem-compatibility.md): `ECO-01`–`ECO-09`.
 - [embedding.md](embedding.md): `EMB-01`–`EMB-10`.
-- [external-api.md](external-api.md): `API-01`–`API-35`.
+- [external-api.md](external-api.md): `API-01`–`API-36`.
 - [formal-verification.md](formal-verification.md): no clause IDs.
 - [hot-path-attribution.md](hot-path-attribution.md): `HPA-01`–`HPA-13`, `MRPC-01`–`MRPC-03`.
 - [indexing.md](indexing.md): `IDX-01`–`IDX-12`.

@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::hex::DisplayHex;
 use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
-use bitcoin_rs_primitives::{USER_AGENT, unix_time_secs};
+use bitcoin_rs_primitives::unix_time_secs;
 use sonic_rs::{JsonValueTrait, Value};
 
 use crate::context::Context;
@@ -132,7 +132,7 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     }
     typed_to_sonic(&v31::GetNetworkInfo {
         version: usize::try_from(bitcoin_rs_primitives::client_version()).unwrap_or(usize::MAX),
-        subversion: USER_AGENT.to_owned(),
+        subversion: ctx.network.user_agent.clone(),
         protocol_version: usize::try_from(bitcoin_rs_p2p::wire::PROTOCOL_VERSION)
             .unwrap_or(usize::MAX),
         local_services: format!("{local_services:016x}"),
@@ -290,6 +290,15 @@ struct PeerInfoWire {
     session_id: String,
 }
 
+/// The per-message byte maps of one `getpeerinfo` row: wire-frame totals per
+/// command with zero buckets omitted, as Core renders them.
+fn per_message_map(entries: Vec<(&'static str, u64)>) -> std::collections::BTreeMap<String, u64> {
+    entries
+        .into_iter()
+        .map(|(command, bytes)| (command.to_owned(), bytes))
+        .collect()
+}
+
 fn peer_info_wire(
     session: &bitcoin_rs_p2p::PeerSession,
     peer: &bitcoin_rs_p2p::PeerInfo,
@@ -342,8 +351,8 @@ fn peer_info_wire(
             Vec::new()
         },
         minimum_fee_filter,
-        bytes_sent_per_message: std::collections::BTreeMap::new(),
-        bytes_received_per_message: std::collections::BTreeMap::new(),
+        bytes_sent_per_message: per_message_map(peer.counters.sent_per_message()),
+        bytes_received_per_message: per_message_map(peer.counters.recv_per_message()),
         inv_to_send: 0,
         last_inv_sequence: 0,
         connection_type: Some(if session.lease.is_inbound() {
@@ -441,6 +450,9 @@ pub(crate) fn clearbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 }
 
 pub(crate) fn setnetworkactive(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    const SET_NETWORK_ACTIVE_ARGUMENTS: &[&str] = &["state"];
+    let bound = super::bind_named_params(params, SET_NETWORK_ACTIVE_ARGUMENTS)?;
+    let params = bound.as_ref();
     let array = params_array(params)?;
     let state = array
         .first()
@@ -454,12 +466,30 @@ pub(crate) fn ping(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErro
     Ok(Value::new_null())
 }
 
+/// Core `addnode "node" "command" ( "v2transport" )`. This node has no
+/// per-dial transport selection — manual dials follow the node-wide
+/// `v2_transport` setting (v2 attempted with v1 fallback when enabled) —
+/// so an explicit `v2transport` argument is accepted only when it equals
+/// that node-wide setting: equality confirms the dial's transport already
+/// matches the request (a no-op, not a silent ignore). An omitted or null
+/// value follows the setting. A differing value is refused with -8 naming
+/// the conflict rather than ignored (deviation recorded in the registry
+/// row).
 pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    const ADD_NODE_ARGUMENTS: &[&str] = &["node", "command", "v2transport"];
+    let bound = super::bind_named_params(params, ADD_NODE_ARGUMENTS)?;
+    let params = bound.as_ref();
+    super::ensure_at_most_params(params, 3)?;
     let node = required_str(params, 0, "node is required")?;
     let command = required_str(params, 1, "command is required")?;
     if !matches!(command, "add" | "onetry" | "remove") {
         return Err(RpcError::InvalidParams(
             "command must be one of: add, remove, onetry",
+        ));
+    }
+    if optional_bool(params, 2, ctx.network.v2_transport)? != ctx.network.v2_transport {
+        return Err(RpcError::InvalidParameter(
+            "v2transport conflicts with this node's -v2transport setting; per-dial transport selection is not supported (see -v2transport)".to_owned(),
         ));
     }
     let addr = if let Ok(endpoint) = bitcoin_rs_p2p::PeerEndpoint::from_str(node) {
@@ -702,6 +732,59 @@ mod admin_rpc_tests {
             assert_eq!(result.as_bool(), Some(active));
             assert_eq!(ctx.network.p2p.network_active(), active);
         }
+    }
+
+    /// Core accepts named params on setnetworkactive (`RPCHelpMan` "state";
+    /// `src/rpc/net.cpp`), and `feature_loadblock.py` calls exactly that form
+    /// through authproxy (`setnetworkactive(state=False)`).
+    #[test]
+    fn setnetworkactive_binds_the_named_state_argument() {
+        let ctx = Arc::new(Context::new());
+        let named = setnetworkactive(&ctx, &json!({"state": false}))
+            .unwrap_or_else(|err| panic!("named setnetworkactive failed: {err}"));
+        assert_eq!(named.as_bool(), Some(false));
+        assert!(!ctx.network.p2p.network_active());
+
+        // Unknown names keep Core's -8 "Unknown named parameter".
+        assert!(matches!(
+            setnetworkactive(&ctx, &json!({"unknown": false})),
+            Err(RpcError::InvalidParameter(_))
+        ));
+    }
+
+    /// Core accepts named params on addnode (`RPCHelpMan` "node", "command",
+    /// "v2transport"; `src/rpc/net.cpp`); this binding follows that order.
+    /// The framework's `v2transport` forms (`connect_nodes(
+    /// peer_advertises_v2=...)` sending all three as kwargs and
+    /// `feature_proxy.py` sending a positional pair plus `v2transport=`)
+    /// are validated against the node-wide setting separately, in
+    /// `addnode_validation_tests.rs`.
+    #[test]
+    fn addnode_binds_named_arguments_in_cores_order() {
+        let ctx = Arc::new(Context::new());
+        let named = addnode(
+            &ctx,
+            &json!({"node": "127.0.0.1:8333", "command": "remove"}),
+        )
+        .unwrap_or_else(|err| panic!("named addnode failed: {err}"));
+        let positional = addnode(&ctx, &json!(["127.0.0.1:8333", "remove"]))
+            .unwrap_or_else(|err| panic!("positional addnode failed: {err}"));
+        assert_eq!(named, positional);
+
+        let prefixed = addnode(
+            &ctx,
+            &json!({"args": ["127.0.0.1:8333"], "command": "remove"}),
+        )
+        .unwrap_or_else(|err| panic!("args-prefixed addnode failed: {err}"));
+        assert_eq!(prefixed, named);
+
+        assert!(matches!(
+            addnode(
+                &ctx,
+                &json!({"node": "127.0.0.1:8333", "command": "remove", "bogus": true})
+            ),
+            Err(RpcError::InvalidParameter(_))
+        ));
     }
 
     #[test]

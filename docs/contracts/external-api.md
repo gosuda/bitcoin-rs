@@ -1,6 +1,6 @@
 # External API contract
 
-`API-01`–`API-35` govern RPC, REST, Esplora and ZMQ under the
+`API-01`–`API-36` govern RPC, REST, Esplora and ZMQ under the
 [contracts precedence rule](README.md). The clauses below own each behavior.
 [Verification boundaries](#verification-boundaries) distinguish current coverage from unverified comparisons.
 
@@ -32,6 +32,7 @@ wallet interoperability remain unverified.
 
 - Parameter type and coercion rules follow the pinned Core 31.1 contract.
 - Named and positional forms, declared JSON-RPC 1 and 2 envelopes, notifications, authentication, and error ordering also follow that contract.
+- Object `params` bind per method: `bind_named_params` (`crates/rpc/src/handlers.rs`) is the counterpart of Core's `transformNamedArguments` with its per-command arg names (`src/rpc/server.cpp`), reordering a named object into the positional array the handler already parses (null-filled holes, the `args` positional prefix, Core's `-8` for duplicate/unknown names). An *empty* params object is accepted for every method exactly like `[]`/absent, unconditionally in the envelope (`server.rs::handle_single_json`, where Core likewise resolves `{}` to no arguments). Coverage of *non-empty* named objects is per-method and incremental: it exists only where parameter names are declared to the binder — every registry row that carries a parameter list (`getblocktweaks`, `getblockhash`, `getblockheader`, `getblock`, `gettxoutsetinfo`, `scantxoutset`, `gettxout`, `sendrawtransaction`, `testmempoolaccept`, `decoderawtransaction`, `compressrawtransaction`, `decompressrawtransaction`, `createrawtransaction`, `finalizepsbt`, `getrawmempool`, `getmempoolancestors`, `getmempooldescendants`, `estimatesmartfee`, `getdescriptorinfo`, `deriveaddresses`, `disconnectnode`, `setban`, `getnodeaddresses`, `generatetoaddress`, `generateblock`, `dumptxoutset`, `getblockfilter`, `getdeploymentinfo`, the `waitfor*` waits, `decodescript`, and `submitpackage`) plus handler-level declarations (`setnetworkactive`, `addnode`, `submitheader`, `loadtxoutset`, and the silent-payments extension). A method without a name map keeps rejecting named objects with its local `-32602` shape error — an honest partial deviation, not a silent reordering; callers use positional or named forms as Core documents.
 - The server validates the envelope before dispatch (`crates/rpc/src/server.rs::handle_single_json`, mirroring `src/rpc/request.cpp`).
 - A non-null `jsonrpc` field MUST be a string `"1.0"` (accepted legacy) or `"2.0"`.
 - `params` MUST be an array, object, or `null`.
@@ -846,6 +847,13 @@ wallet interoperability remain unverified.
 - Active traversal observes shared RPC shutdown lifecycle.
 - Blocking scan starts share the server bounded blocking admission while status and abort stay ordinary.
 - No second HTTP pool or scan index exists.
+
+### `API-36`: `stop` lifecycle control
+
+- Owner: `stop` in `crates/rpc/src/handlers/util.rs`, triggering the node's single graceful-shutdown latch (`Chainstate::request_shutdown`, the same latch the SIGTERM/SIGINT handler trips). No second shutdown path exists.
+- The reply is this node's own status string (`bitcoin-rs stopping`); the latch is tripped before the reply is written, and teardown normally lets the reply finish before the process exits 0. The string deliberately differs from Core's (`Bitcoin Core stopping`, `src/rpc/server.cpp`): the functional framework discards the stop reply (`test_node.py` `stop` never reads it), so no test required Core-string equality, and this node does not imitate Core's identity elsewhere (`--version`). A context without attached node control (embedded/test use) answers `-32603`.
+- Declared deviation: Core's hidden numeric `wait` argument is not honored — any argument is refused with the local `-32602` shape error — and the node does not wait for other in-flight RPC connections to drain before exiting.
+- Proof: `handlers::util::stop` unit tests (status string, shutdown trigger, missing control, argument refusal) and `e2e/tests/lifecycle.rs::stop_rpc_answers_the_node_status_and_exits_zero` (real binary, node-shaped reply, exit code 0 within a bounded wait).
 
 ## RPC differential testing and in-process embedding status
 

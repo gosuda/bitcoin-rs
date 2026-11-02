@@ -162,6 +162,7 @@ fn rpc_network_handles_borrow_p2p_service_state() -> Result<(), TestError> {
     assert!(Arc::ptr_eq(&handles.peer_table, &p2p.table()));
     assert!(Arc::ptr_eq(&handles.p2p, &p2p));
     assert_eq!(handles.local_services, p2p.local_services().to_u64());
+    assert_eq!(handles.v2_transport, state.config().p2p.v2_transport);
     Ok(())
 }
 

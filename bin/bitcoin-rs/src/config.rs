@@ -91,6 +91,9 @@ macro_rules! emit_cli {
             pub(crate) config: Option<PathBuf>,
             #[arg(long = "bitcoin-conf")]
             pub(crate) bitcoin_conf: Option<PathBuf>,
+            /// Print the node version and license notice, then exit.
+            #[arg(long)]
+            pub(crate) version: bool,
             #[arg(long, help = "Core-framed corpus archive to replay offline")]
             pub(crate) corpus: Option<PathBuf>,
             #[arg(long, help = "Corpus manifest pinning the archive and stop height")]
@@ -331,6 +334,14 @@ impl CoreValue for Option<String> {
     }
 }
 
+impl CoreValue for Option<Vec<String>> {
+    fn apply(_key: &str, value: &str, slot: &mut Self) -> Result<(), String> {
+        let entries = slot.get_or_insert_with(Vec::new);
+        entries.push(value.to_owned());
+        Ok(())
+    }
+}
+
 impl CoreValue for Option<PathBuf> {
     fn apply(_key: &str, value: &str, slot: &mut Self) -> Result<(), String> {
         *slot = Some(PathBuf::from(value));
@@ -473,6 +484,8 @@ rpcuser=someuser
 rpcpassword=somepass
 rpccookiefile=/tmp/.cookie
 listen=0
+uacomment=testnode0
+uacomment=foo
 ",
             Network::Regtest,
         )
@@ -489,6 +502,12 @@ listen=0
             Some(Path::new("/tmp/.cookie"))
         );
         assert_eq!(global.p2p.listen, Some(Vec::new()));
+        // Repeated conf keys accumulate, mirroring Core's multi-value
+        // `-uacomment`.
+        assert_eq!(
+            global.p2p.ua_comments,
+            Some(vec!["testnode0".to_owned(), "foo".to_owned()])
+        );
     }
 
     #[test]

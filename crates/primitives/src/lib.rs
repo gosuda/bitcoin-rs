@@ -43,7 +43,9 @@ pub use units::{
     Amount, CompactTarget, LOCKTIME_THRESHOLD, LockTime, SEQUENCE_FINAL,
     SEQUENCE_LOCKTIME_DISABLE_FLAG, SEQUENCE_LOCKTIME_MASK, SEQUENCE_LOCKTIME_TYPE_FLAG, Sequence,
 };
-pub use version::{PKG_VERSION, USER_AGENT, client_version};
+pub use version::{
+    MAX_SUBVERSION_LENGTH, PKG_VERSION, USER_AGENT, client_version, sub_version, ua_comment_is_safe,
+};
 
 #[must_use]
 pub fn unix_time_secs() -> u64 {

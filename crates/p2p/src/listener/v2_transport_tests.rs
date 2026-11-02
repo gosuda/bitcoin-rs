@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_primitives::{PeerEndpoint, USER_AGENT};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -170,6 +170,7 @@ fn bip434_windows_preserve_bip332_and_package_negotiation_on_v1_and_v2() -> Test
                     0,
                     PeerRole::FullRelay,
                     ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+                    USER_AGENT,
                 );
                 announcement.version = version;
                 peer.send(&Message::Version(announcement))?;
@@ -278,6 +279,7 @@ fn an_outbound_v2_dial_negotiates_bip324() -> TestResult {
             9,
             0,
             ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            USER_AGENT,
             &lease,
             deadline(),
         )
@@ -455,6 +457,7 @@ fn spawn_decoy_then_ping_writer(
             9,
             0,
             ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            USER_AGENT,
             &writer_lease,
             deadline(),
         )
@@ -526,16 +529,28 @@ fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
             std::thread::spawn(move || run_message_loop(&mut peer, addr, &lease, &client, None));
         let arrived = Instant::now();
         let pong = loop {
-            match replies.recv_timeout(Duration::from_millis(200)) {
-                Ok(frame) => break frame.into_message(),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            let frame = match replies.recv_timeout(Duration::from_millis(200)) {
+                Ok(frame) => frame,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    if arrived.elapsed() >= Duration::from_secs(10) {
+                        return Err(
+                            "the loop never dispatched the peer's ping past the decoy run".into(),
+                        );
+                    }
+                    continue;
+                }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                     return Err("the loop dropped the reply queue".into());
                 }
+            };
+            let message = frame.into_message();
+            if matches!(message, Message::Ping(_)) {
+                // The loop originates its first keepalive probe right after
+                // the handshake; it is this node's own traffic, not the
+                // peer's real message crossing the decoy run.
+                continue;
             }
-            if arrived.elapsed() >= Duration::from_secs(10) {
-                return Err("the loop never dispatched the peer's ping past the decoy run".into());
-            }
+            break message;
         };
         if pong != Message::Pong(41) {
             return Err("the decoy run must precede exactly one real message".into());

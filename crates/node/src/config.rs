@@ -164,6 +164,13 @@ pub enum ConfigError {
     MagicRequiresConnect,
     #[error("P2P magic overrides require --dns-seeds-enabled=false")]
     MagicRequiresDnsOff,
+    #[error("User Agent comment ({0}) contains unsafe characters.")]
+    UaCommentUnsafe(String),
+    #[error(
+        "Total length of network version string ({length}) exceeds maximum length ({max}). \
+         Reduce the number or size of uacomments."
+    )]
+    SubVersionTooLong { length: usize, max: usize },
     #[error(
         "proxy/overlay routing requires --dns-seeds-enabled=false; DNS seeds resolve via local DNS and would bypass the privacy route"
     )]
@@ -526,6 +533,9 @@ pub struct P2pConfig {
     pub fast_sync: bool,
     pub v2_transport: bool,
     pub relay_offers: bitcoin_rs_p2p::RelayOffers,
+    /// `-uacomment` values, composed into the subversion exactly as Core's
+    /// `InitSubversion` does (`crates/primitives` `sub_version`).
+    pub ua_comments: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -773,6 +783,7 @@ impl NodeConfig {
 
     fn validate_p2p_network(&self) -> Result<(), ConfigError> {
         self.validate_overlay()?;
+        self.validate_ua_comments()?;
         if self.p2p.magic != self.network.magic() {
             if self.network != Network::Mainnet {
                 return Err(ConfigError::MagicRequiresMainnet);
@@ -783,6 +794,26 @@ impl NodeConfig {
             if self.p2p.dns_seeds_enabled {
                 return Err(ConfigError::MagicRequiresDnsOff);
             }
+        }
+        Ok(())
+    }
+
+    /// Core's `InitSubversion` (`src/init.cpp`): every `-uacomment` must sit
+    /// in the BIP-0014 safe subset and the composed subversion within
+    /// `MAX_SUBVERSION_LENGTH`, or startup fails with Core's messages.
+    fn validate_ua_comments(&self) -> Result<(), ConfigError> {
+        for comment in &self.p2p.ua_comments {
+            if !bitcoin_rs_primitives::ua_comment_is_safe(comment) {
+                return Err(ConfigError::UaCommentUnsafe(comment.clone()));
+            }
+        }
+        let sub_version = bitcoin_rs_primitives::sub_version(&self.p2p.ua_comments);
+        let max = bitcoin_rs_primitives::MAX_SUBVERSION_LENGTH;
+        if sub_version.len() > max {
+            return Err(ConfigError::SubVersionTooLong {
+                length: sub_version.len(),
+                max,
+            });
         }
         Ok(())
     }
@@ -898,6 +929,7 @@ fn materialize_p2p(
             stale_tip_relay: settings.stale_tip_relay.unwrap_or(false),
             stale_tip_prefers_blocks: settings.stale_tip_prefers_blocks.unwrap_or(false),
         },
+        ua_comments: settings.ua_comments.clone().unwrap_or_default(),
     }
 }
 

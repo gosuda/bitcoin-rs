@@ -3,13 +3,182 @@ use bitcoin_rs_primitives::unix_time_secs;
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
-#[derive(Debug, Default)]
+use parking_lot::Mutex;
+
+/// Declares [`MessageAccount`]: one row per accounted wire command, plus the
+/// [`MessageAccount::Other`] bucket appended last.
+///
+/// Each row is `classification Variant = "command"`, where the
+/// classification drives both directions of accounting:
+///
+/// - `both` — this node receives and sends the command, so frames count
+///   under the command's own name in either direction;
+/// - `send_only` — this node only ever puts the command on the wire; a sent
+///   frame still counts under its own name, while a received frame under it
+///   folds into `Other`, the bucket every unknown command lands in.
+///
+/// `alert` and `reject` are decoded but never processed inbound, so they
+/// stay `send_only`. The BIP331/BIP332 extension rows (`sendpackages`,
+/// `ancpkginfo`, `getpkgtxns`, `pkgtxns`, `staletip`) are classified `both`
+/// even though Core v31.1's known-command list omits them: this node
+/// processes their inbound frames, so their received bytes keep their own
+/// buckets — a deliberate divergence from Core's internal whitelist that
+/// preserves the observable contract (Core-known names, the `*other*`
+/// fallback, and the fixed map size all stay as they were).
+///
+/// The enum variants, the declaration-order bucket array, the command
+/// lookup, the reporting names, and the receive-side fold are all derived
+/// from the one table, so the mapping is declared exactly once.
+macro_rules! message_accounts {
+    (@count $classification:ident) => {
+        1
+    };
+    (@receive_bucket both $variant:ident) => {
+        Self::$variant
+    };
+    (@receive_bucket send_only $variant:ident) => {
+        Self::Other
+    };
+    (
+        $( $classification:ident $variant:ident = $command:literal ),* $(,)?
+    ) => {
+        /// One per-message accounting bucket, named by its wire command.
+        ///
+        /// The bucket set is fixed by the [`message_accounts`] table: a
+        /// command a remote peer sends that no row carries folds into
+        /// [`MessageAccount::Other`] and can never grow the map, which is
+        /// why the per-peer counters stay fixed-size and bounded (the same
+        /// reason `CNode::ReceiveMsgBytes` pre-seeds only a fixed command
+        /// map, Core v31.1 `src/net.cpp`).
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(crate) enum MessageAccount {
+            $( $variant, )*
+            Other,
+        }
+
+        impl MessageAccount {
+            /// Every bucket in declaration order; indexing into the
+            /// per-message counter arrays uses the position here.
+            const ALL: [Self; Self::COUNT] = [ $( Self::$variant, )* Self::Other ];
+
+            const COUNT: usize = 0 $( + message_accounts!(@count $classification) )* + 1;
+
+            /// The bucket a frame under `command` lands in, or `None` when
+            /// no bucket carries that command name.
+            fn from_command(command: &str) -> Option<Self> {
+                match command {
+                    $( $command => Some(Self::$variant), )*
+                    _ => None,
+                }
+            }
+
+            /// The receive-side bucket for `command`: `both` rows count
+            /// under their own name, `send_only` rows and unknown commands
+            /// fold into `*other*`.
+            fn receive(command: &str) -> Self {
+                match command {
+                    $( $command => message_accounts!(@receive_bucket $classification $variant), )*
+                    _ => Self::Other,
+                }
+            }
+
+            /// The send-side bucket for `command`: our own outgoing commands
+            /// are attributed by name, as Core's send accounting does.
+            fn send(command: &str) -> Self {
+                Self::from_command(command).unwrap_or(Self::Other)
+            }
+
+            /// The wire command this bucket reports as in the per-message
+            /// maps.
+            const fn name(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $command, )*
+                    Self::Other => "*other*",
+                }
+            }
+        }
+    };
+}
+
+message_accounts! {
+    both Version = "version",
+    both Verack = "verack",
+    both Addr = "addr",
+    both AddrV2 = "addrv2",
+    both SendAddrV2 = "sendaddrv2",
+    both Inv = "inv",
+    both GetData = "getdata",
+    both MerkleBlock = "merkleblock",
+    both GetBlocks = "getblocks",
+    both GetHeaders = "getheaders",
+    both Tx = "tx",
+    both Headers = "headers",
+    both Block = "block",
+    both GetAddr = "getaddr",
+    both MemPool = "mempool",
+    both Ping = "ping",
+    both Pong = "pong",
+    both NotFound = "notfound",
+    both FilterLoad = "filterload",
+    both FilterAdd = "filteradd",
+    both FilterClear = "filterclear",
+    both SendHeaders = "sendheaders",
+    both FeeFilter = "feefilter",
+    both SendCmpct = "sendcmpct",
+    both CmpctBlock = "cmpctblock",
+    both GetBlockTxn = "getblocktxn",
+    both BlockTxn = "blocktxn",
+    both GetCFilters = "getcfilters",
+    both CFilter = "cfilter",
+    both GetCFHeaders = "getcfheaders",
+    both CFHeaders = "cfheaders",
+    both GetCFCheckpt = "getcfcheckpt",
+    both CFCheckpt = "cfcheckpt",
+    both WtxidRelay = "wtxidrelay",
+    both SendTxrcncl = "sendtxrcncl",
+    both Feature = "feature",
+    both SendPackages = "sendpackages",
+    both AncPkgInfo = "ancpkginfo",
+    both GetPkgTxns = "getpkgtxns",
+    both PkgTxns = "pkgtxns",
+    both StaleTip = "staletip",
+    send_only Alert = "alert",
+    send_only Reject = "reject",
+}
+
+impl MessageAccount {
+    #[expect(
+        clippy::as_conversions,
+        reason = "the enum is field-less with implicit sequential discriminants, so the cast is the bucket's array position"
+    )]
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Debug)]
 pub struct PeerCounters {
     bytes_sent: AtomicU64,
     bytes_recv: AtomicU64,
     last_send: AtomicU64,
     last_recv: AtomicU64,
+    sent_per_message: [AtomicU64; MessageAccount::COUNT],
+    recv_per_message: [AtomicU64; MessageAccount::COUNT],
+}
+
+impl Default for PeerCounters {
+    fn default() -> Self {
+        Self {
+            bytes_sent: AtomicU64::new(0),
+            bytes_recv: AtomicU64::new(0),
+            last_send: AtomicU64::new(0),
+            last_recv: AtomicU64::new(0),
+            sent_per_message: std::array::from_fn(|_| AtomicU64::new(0)),
+            recv_per_message: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
 }
 
 impl PeerCounters {
@@ -33,6 +202,52 @@ impl PeerCounters {
         self.last_recv.load(Ordering::Relaxed)
     }
 
+    /// Per-message sent-byte totals keyed by wire command, zero buckets
+    /// omitted, in bucket declaration order — what `getpeerinfo` renders as
+    /// `bytessent_per_msg`.
+    #[must_use]
+    pub fn sent_per_message(&self) -> Vec<(&'static str, u64)> {
+        per_message_snapshot(&self.sent_per_message)
+    }
+
+    /// Per-message received-byte totals keyed by wire command, zero buckets
+    /// omitted, in bucket declaration order — what `getpeerinfo` renders as
+    /// `bytesrecv_per_msg`.
+    #[must_use]
+    pub fn recv_per_message(&self) -> Vec<(&'static str, u64)> {
+        per_message_snapshot(&self.recv_per_message)
+    }
+
+    /// Charges one fully framed outgoing message to its command's bucket.
+    ///
+    /// The connection layer's send accounting entry point; the per-message
+    /// maps live beside the socket-level aggregates: this never touches
+    /// `bytes_sent`, which only [`CountingStream`] counts from the bytes the
+    /// socket accepted.
+    pub fn record_msg_sent(&self, command: &str, framed_len: usize) {
+        if framed_len == 0 {
+            return;
+        }
+        self.sent_per_message[MessageAccount::send(command).index()]
+            .fetch_add(u64::try_from(framed_len).unwrap_or(0), Ordering::Relaxed);
+    }
+
+    /// Charges one fully framed incoming message to its command's bucket:
+    /// commands this node receives under their own name, anything else under
+    /// `*other*`.
+    ///
+    /// The connection layer's receive accounting entry point, called after
+    /// checksum or BIP324 authentication passed but before payload decode, so
+    /// a frame that fails to decode is charged to the command it claimed
+    /// rather than `*other*`.
+    pub fn record_msg_recv(&self, command: &str, framed_len: usize) {
+        if framed_len == 0 {
+            return;
+        }
+        self.recv_per_message[MessageAccount::receive(command).index()]
+            .fetch_add(u64::try_from(framed_len).unwrap_or(0), Ordering::Relaxed);
+    }
+
     fn record_sent(&self, bytes: usize) {
         if bytes == 0 {
             return;
@@ -54,12 +269,34 @@ impl PeerCounters {
     }
 }
 
+fn per_message_snapshot(counters: &[AtomicU64; MessageAccount::COUNT]) -> Vec<(&'static str, u64)> {
+    MessageAccount::ALL
+        .iter()
+        .zip(counters)
+        .filter_map(|(account, counter)| {
+            let bytes = counter.load(Ordering::Relaxed);
+            (bytes > 0).then_some((account.name(), bytes))
+        })
+        .collect()
+}
+
+fn per_message_equal(
+    left: &[AtomicU64; MessageAccount::COUNT],
+    right: &[AtomicU64; MessageAccount::COUNT],
+) -> bool {
+    left.iter()
+        .zip(right)
+        .all(|(left, right)| left.load(Ordering::Relaxed) == right.load(Ordering::Relaxed))
+}
+
 impl PartialEq for PeerCounters {
     fn eq(&self, other: &Self) -> bool {
         self.bytes_sent() == other.bytes_sent()
             && self.bytes_recv() == other.bytes_recv()
             && self.last_send() == other.last_send()
             && self.last_recv() == other.last_recv()
+            && per_message_equal(&self.sent_per_message, &other.sent_per_message)
+            && per_message_equal(&self.recv_per_message, &other.recv_per_message)
     }
 }
 
@@ -71,6 +308,11 @@ pub struct CountingStream<S> {
     counters: Arc<PeerCounters>,
     lease: Option<crate::PeerLease>,
     cancel_guard: Option<bitcoin_rs_chain::HookGuard>,
+    /// The connection's send-activity clock, shared with the lease the
+    /// message loop reads it through. Stamped beside the byte counters
+    /// when the socket accepts bytes, so keepalive send silence tracks
+    /// actual writer progress, never queue admission.
+    send_activity: Option<Arc<Mutex<Instant>>>,
     read_buf: Vec<u8>,
     read_pos: usize,
     read_end: usize,
@@ -86,6 +328,7 @@ impl<S> CountingStream<S> {
             counters,
             lease: None,
             cancel_guard: None,
+            send_activity: None,
             read_buf: Vec::new(),
             read_pos: 0,
             read_end: 0,
@@ -95,6 +338,24 @@ impl<S> CountingStream<S> {
     #[must_use]
     pub const fn counters(&self) -> &Arc<PeerCounters> {
         &self.counters
+    }
+
+    pub(crate) fn recording_send_activity(mut self, activity: Arc<Mutex<Instant>>) -> Self {
+        self.send_activity = Some(activity);
+        self
+    }
+
+    /// The one point that observes the socket accepting outbound bytes:
+    /// both the byte counters and the send-activity clock advance, and a
+    /// zero-byte acceptance is no activity.
+    fn note_send(&self, written: usize) {
+        if written == 0 {
+            return;
+        }
+        self.counters.record_sent(written);
+        if let Some(activity) = &self.send_activity {
+            *activity.lock() = Instant::now();
+        }
     }
 
     #[must_use]
@@ -146,10 +407,9 @@ impl CountingStream<std::net::TcpStream> {
     }
 
     pub fn try_clone(&self) -> IoResult<Self> {
-        Ok(Self::new(
-            self.inner.try_clone()?,
-            Arc::clone(&self.counters),
-        ))
+        let mut clone = Self::new(self.inner.try_clone()?, Arc::clone(&self.counters));
+        clone.send_activity = self.send_activity.clone();
+        Ok(clone)
     }
 
     pub fn set_read_timeout(&self, timeout: Option<core::time::Duration>) -> IoResult<()> {
@@ -219,13 +479,13 @@ impl<S: Read> Read for CountingStream<S> {
 impl<S: Write> Write for CountingStream<S> {
     fn write(&mut self, buffer: &[u8]) -> IoResult<usize> {
         let written = self.inner.write(buffer)?;
-        self.counters.record_sent(written);
+        self.note_send(written);
         Ok(written)
     }
 
     fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
         let written = self.inner.write_vectored(buffers)?;
-        self.counters.record_sent(written);
+        self.note_send(written);
         Ok(written)
     }
 

@@ -11,7 +11,7 @@ use bitcoin_rs_primitives::Header;
 
 use super::getdata_pause_tests::{
     FAILSAFE, MAGIC, ScriptedChain, Served, TestResult, WriterKind, block, inventory_of,
-    parked_peer, read_messages, scripted, shared_with, wire_len_of,
+    parked_peer, read_messages, scripted, shared_with, wait_until, wire_len_of,
 };
 use super::{
     DeferredStep, Keepalive, KeepaliveAction, ParkedStep, ProductionSink, TIMEOUT_INTERVAL,
@@ -421,10 +421,12 @@ fn answered_once_after_the_aggregate_drains(request: &Message, expected: Message
 
     served.client.send(request)?;
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(
-        served.budget.pending(),
-        (0, 0),
-        "{request:?}: no reply is reserved or queued while the aggregate is full"
+    let ping_len = wire_len_of(&Message::Ping(0))?;
+    assert!(
+        served.budget.pending() == (0, 0) && served.budget.control_pending() <= (1, ping_len),
+        "{request:?}: no reply is reserved or queued while the aggregate is full \
+         (only the originated control probe may sit, on its bounded lane): {:?}",
+        served.budget.pending()
     );
     assert!(
         !served.lease.is_cancelled(),
@@ -433,12 +435,28 @@ fn answered_once_after_the_aggregate_drains(request: &Message, expected: Message
 
     drop(hold);
     served.open_gate();
-    assert_eq!(read_messages(&mut served.client, 1)?, vec![expected]);
+    // The message loop's first-pass keepalive probe met the same full
+    // aggregate as the deferred reply: whether it was refused or queued
+    // under the remaining room depends on the request's reply bound (the
+    // relaxed pending check above accepts either). With room again it
+    // drains first (top-of-pass), then the deferred reply follows.
+    assert!(
+        matches!(
+            read_messages(&mut served.client, 1)?.as_slice(),
+            [Message::Ping(_)]
+        ),
+        "{request:?}: the originated keepalive probe drains with the aggregate"
+    );
+    assert_eq!(
+        read_messages(&mut served.client, 1)?,
+        vec![expected],
+        "{request:?}: the deferred request was answered exactly once"
+    );
     served.client.send(&Message::Ping(99))?;
     assert_eq!(
         read_messages(&mut served.client, 1)?,
         vec![Message::Pong(99)],
-        "{request:?}: the deferred request was answered exactly once"
+        "{request:?}: the session serves fresh traffic after the drain"
     );
 
     served.lease.cancel();
@@ -481,21 +499,28 @@ fn a_bulk_tail_parked_on_the_aggregate_leaves_the_margin_for_control() -> TestRe
         .send(&Message::GetData(vec![inventory_of(&block_a)]))?;
     std::thread::sleep(Duration::from_millis(300));
     let ping_len = wire_len_of(&Message::Ping(3))?;
+    wait_until("the originated keepalive probe to be queued", || {
+        served.budget.control_pending() == (1, ping_len)
+    })?;
     served
         .lease
         .send(Message::Ping(3))
         .map_err(|_| "the margin keeps control traffic flowing")?;
     assert_eq!(served.budget.pending(), (1, ping_len));
-    assert_eq!(aggregate.pending(), 8 * block_len + 1 + ping_len);
+    assert_eq!(served.budget.control_pending(), (1, ping_len));
+    assert_eq!(aggregate.pending(), 8 * block_len + 1 + 2 * ping_len);
     assert!(
         !served.lease.is_cancelled(),
         "a parked bulk tail never cancels the lease"
     );
 
     served.open_gate();
-    assert_eq!(
-        read_messages(&mut served.client, 1)?,
-        vec![Message::Ping(3)]
+    assert!(
+        matches!(
+            read_messages(&mut served.client, 2)?.as_slice(),
+            [Message::Ping(_), Message::Ping(3)],
+        ),
+        "the originated probe and the queued control ping drain in order"
     );
     drop(hold);
     assert_eq!(
@@ -520,11 +545,16 @@ fn conditional_compact_defers_on_locally_full_queue() -> TestResult {
         &WriterKind::Gated,
     )?;
     let ping_len = wire_len_of(&Message::Ping(1))?;
+    // The message loop's first-pass keepalive probe rides the bounded
+    // control lane; a data-path send fills the one slot the queue admits.
+    wait_until(
+        "the originated keepalive probe to take the control lane",
+        || served.budget.control_pending() == (1, ping_len),
+    )?;
     served
         .lease
         .send(Message::Ping(1))
-        .map_err(|_| "a fresh queue admits one message")?;
-    assert_eq!(served.budget.pending(), (1, ping_len));
+        .map_err(|_| "a fresh queue admits its one message")?;
     assert!(
         !served.budget.writer_dead(),
         "the gated writer is live while its gate stays shut"
@@ -550,9 +580,12 @@ fn conditional_compact_defers_on_locally_full_queue() -> TestResult {
     );
 
     served.open_gate();
-    assert_eq!(
-        read_messages(&mut served.client, 1)?,
-        vec![Message::Ping(1)]
+    assert!(
+        matches!(
+            read_messages(&mut served.client, 2)?.as_slice(),
+            [Message::Ping(_), Message::Ping(1)]
+        ),
+        "the originated keepalive probe and the queued ping drain in order"
     );
     served.client.send(&Message::Ping(99))?;
     assert_eq!(

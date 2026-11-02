@@ -1186,6 +1186,7 @@ fn announced_transactions_request_witness_without_changing_hashes() {
                 0,
                 crate::peer_info::PeerRole::FullRelay,
                 bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+                bitcoin_rs_primitives::USER_AGENT,
             );
             version.services = if witness {
                 bitcoin::p2p::ServiceFlags::WITNESS
@@ -1296,6 +1297,7 @@ fn inv_block_uses_headers_not_body_getdata() {
                 0,
                 crate::peer_info::PeerRole::FullRelay,
                 bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+                bitcoin_rs_primitives::USER_AGENT,
             );
             version.services = if witness {
                 bitcoin::p2p::ServiceFlags::WITNESS
@@ -1863,6 +1865,7 @@ fn version_at(version: u32) -> Message {
             0,
             crate::peer_info::PeerRole::FullRelay,
             bitcoin::p2p::ServiceFlags::NETWORK,
+            bitcoin_rs_primitives::USER_AGENT,
         )
     })
 }

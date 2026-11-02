@@ -12,7 +12,7 @@ use bitcoin::p2p::Magic;
 
 use super::{
     collect_write_burst, run_connected_session, run_message_loop, run_writer_loop,
-    spawn_connection_writer, test_shared,
+    spawn_connection_writer, test_shared, write_ready_burst,
 };
 use crate::connection::OutboundBudget;
 use crate::peer::{Peer, PeerState};
@@ -397,7 +397,7 @@ fn message_loop_keeps_current_lease_running() {
 }
 
 #[test]
-fn message_loop_does_not_probe_a_peer_inside_one_interval() {
+fn message_loop_probes_a_fresh_peer_immediately_then_stays_quiet() {
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
     let lease = crate::PeerLease::new(outbound_tx);
     let reads = Arc::new(AtomicUsize::new(0));
@@ -413,10 +413,17 @@ fn message_loop_does_not_probe_a_peer_inside_one_interval() {
     assert!(run_message_loop(&mut peer, addr, &lease, &shared, None).is_err());
     assert!(
         matches!(
+            outbound_rx.try_recv().map(|frame| frame.message().clone()),
+            Ok(crate::Message::Ping(_))
+        ),
+        "the first pass after the handshake owes an immediate probe, like Core's epoch-initialized m_ping_start",
+    );
+    assert!(
+        matches!(
             outbound_rx.try_recv(),
             Err(crossbeam_channel::TryRecvError::Empty)
         ),
-        "a peer quiet for less than one interval owes no probe",
+        "a peer already probed owes no second probe inside one interval",
     );
 }
 
@@ -593,6 +600,7 @@ fn writer_mid_write_exits_on_unblock_deterministically() {
             close_rx,
             &mut writer,
             &mut crate::transport::SendTransport::V1(Magic::BITCOIN),
+            &crate::PeerCounters::default(),
             Some(&net_trace),
         );
         let _ = done_tx.send(());
@@ -646,6 +654,7 @@ fn writer_releases_budget_after_write() {
             close_rx,
             &mut writer,
             &mut crate::transport::SendTransport::V1(Magic::BITCOIN),
+            &crate::PeerCounters::default(),
             None,
         );
         let _ = done_tx.send(());
@@ -1093,6 +1102,91 @@ fn collect_write_burst_emits_a_bulk_payload_alone() {
         rx.try_recv().map(crate::QueuedFrame::into_message),
         Ok(crate::Message::Ping(1))
     ));
+}
+
+/// Accepts at most `budget` bytes per vectored call, then fails once the
+/// budget is spent: a socket that took a prefix of the burst and broke.
+struct BrokenAfter {
+    budget: usize,
+}
+
+impl io::Write for BrokenAfter {
+    fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+        panic!("the burst path must write vectored");
+    }
+    fn write_vectored(&mut self, buffers: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        if self.budget == 0 {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "socket broke"));
+        }
+        let offered: usize = buffers.iter().map(|slice| slice.len()).sum();
+        let take = offered.min(self.budget);
+        self.budget -= take;
+        Ok(take)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Accepts at most `per_call` bytes per vectored call and never fails:
+/// backpressure that spreads one burst over many partial accepts.
+struct Dribble {
+    per_call: usize,
+}
+
+impl io::Write for Dribble {
+    fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+        panic!("the burst path must write vectored");
+    }
+    fn write_vectored(&mut self, buffers: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        let offered: usize = buffers.iter().map(|slice| slice.len()).sum();
+        Ok(offered.min(self.per_call))
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_failed_burst_write_keeps_charges_only_for_fully_accepted_frames() {
+    let (_lease, rx) = queued(&[crate::Message::Ping(0), crate::Message::Pong(1)]);
+    let first = rx.try_recv().expect("the first queued frame");
+    let ping_len = crate::wire::wire_len(&crate::Message::Ping(0)).expect("ping encodes");
+    let mut writer = BrokenAfter { budget: ping_len };
+    let mut transport = crate::transport::SendTransport::V1(Magic::BITCOIN);
+    let counters = crate::PeerCounters::default();
+
+    let alive = write_ready_burst(first, &rx, &mut writer, &mut transport, &counters, None);
+
+    assert!(!alive, "a write error ends the writer");
+    assert_eq!(
+        counters.sent_per_message(),
+        vec![("ping", u64::try_from(ping_len).expect("fits u64"))],
+        "the frame the socket accepted in full keeps its charge; the torn one keeps none"
+    );
+}
+
+#[test]
+fn partial_acceptance_across_calls_charges_every_frame() {
+    let (_lease, rx) = queued(&[crate::Message::Ping(0), crate::Message::Pong(1)]);
+    let first = rx.try_recv().expect("the first queued frame");
+    let ping_len = crate::wire::wire_len(&crate::Message::Ping(0)).expect("ping encodes");
+    let pong_len = crate::wire::wire_len(&crate::Message::Pong(1)).expect("pong encodes");
+    let mut writer = Dribble { per_call: 7 };
+    let mut transport = crate::transport::SendTransport::V1(Magic::BITCOIN);
+    let counters = crate::PeerCounters::default();
+
+    let alive = write_ready_burst(first, &rx, &mut writer, &mut transport, &counters, None);
+
+    assert!(alive, "partial acceptance is backpressure, not an error");
+    assert_eq!(
+        counters.sent_per_message(),
+        vec![
+            ("ping", u64::try_from(ping_len).expect("fits u64")),
+            ("pong", u64::try_from(pong_len).expect("fits u64")),
+        ],
+        "every fully written frame is charged exactly once across the retries"
+    );
 }
 
 #[test]

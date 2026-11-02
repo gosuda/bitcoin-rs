@@ -60,7 +60,9 @@ fn rpc_network_handles(state: &NodeState) -> NetworkHandles {
         peer_table: state.peer_table(),
         p2p: state.p2p(),
         local_services: state.p2p().local_services().to_u64(),
+        user_agent: state.p2p().user_agent().to_owned(),
         overlay: state.p2p().overlay_config().clone(),
+        v2_transport: state.config().p2p.v2_transport,
     }
 }
 
@@ -185,9 +187,14 @@ fn rpc_context_handles(
 ) -> ContextHandles {
     let config = state.config();
     let chainstate = state.chainstate();
+    let shutdown_request: Arc<dyn Fn() + Send + Sync> = {
+        let chainstate = Arc::clone(&chainstate);
+        Arc::new(move || chainstate.request_shutdown())
+    };
     ContextHandles {
         silent_payments: config.rpc.silent_payments,
         compressed_transactions: config.rpc.compressed_transactions,
+        shutdown_request: Some(shutdown_request),
         chain: ChainHandles {
             chain_tip: chainstate.header_tip_reader(),
             applied_tip: chainstate.applied_tip_reader(),

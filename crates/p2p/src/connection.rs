@@ -305,6 +305,7 @@ pub(crate) enum Refusal {
 pub(crate) struct OutboundCredit {
     budget: Arc<OutboundBudget>,
     bytes: usize,
+    control: bool,
 }
 
 impl OutboundCredit {
@@ -319,7 +320,7 @@ impl OutboundCredit {
 
 impl Drop for OutboundCredit {
     fn drop(&mut self) {
-        self.budget.release(self.bytes);
+        self.budget.release(self.bytes, self.control);
     }
 }
 
@@ -384,6 +385,11 @@ const _: () = assert!(OUTBOUND_QUEUE_MAX_BYTES * 4 == SHARED_OUTBOUND_QUEUE_MAX_
 
 pub(crate) const MAX_UNSOLICITED_BLOCK_FORWARDS: usize = 16;
 
+// Originated control traffic rides a small bounded lane outside the data
+// caps so a queued control frame can never displace a pending response.
+const CONTROL_QUEUE_MAX_MESSAGES: usize = 8;
+const CONTROL_QUEUE_MAX_BYTES: usize = 64 * 1024;
+
 #[derive(Debug)]
 pub(crate) struct BlockForwardCredit(Option<Arc<AtomicUsize>>);
 
@@ -402,6 +408,8 @@ pub(crate) struct OutboundBudget {
     block_reserve: usize,
     pending_messages: AtomicUsize,
     pending_bytes: AtomicUsize,
+    control_messages: AtomicUsize,
+    control_bytes: AtomicUsize,
     #[cfg(test)]
     refusals: AtomicUsize,
     drained: Condvar,
@@ -423,6 +431,8 @@ impl OutboundBudget {
             block_reserve,
             pending_messages: AtomicUsize::new(0),
             pending_bytes: AtomicUsize::new(0),
+            control_messages: AtomicUsize::new(0),
+            control_bytes: AtomicUsize::new(0),
             #[cfg(test)]
             refusals: AtomicUsize::new(0),
             drained: Condvar::new(),
@@ -469,6 +479,44 @@ impl OutboundBudget {
         Ok(self.commit_locked(wire_len))
     }
 
+    /// Charge a frame against the bounded control lane instead of the data
+    /// caps, so a queued control frame can never displace a pending data
+    /// response. A dead writer or a full lane is connection-local
+    /// congestion and refuses `Local` — a deferral, never a keepalive
+    /// stall; the lane still honors the shared aggregate cap, whose
+    /// backpressure refuses `Shared`, so control traffic stays retryable
+    /// rather than exempt.
+    pub(crate) fn try_charge_control(
+        self: &Arc<Self>,
+        wire_len: usize,
+    ) -> Result<OutboundCredit, Refusal> {
+        let _guard = self.drained_lock.lock();
+        if self.writer_dead.load(Ordering::Acquire) {
+            #[cfg(test)]
+            self.refusals.fetch_add(1, Ordering::Relaxed);
+            return Err(Refusal::Local);
+        }
+        if self.control_messages.load(Ordering::Acquire) >= CONTROL_QUEUE_MAX_MESSAGES
+            || self
+                .control_bytes
+                .load(Ordering::Acquire)
+                .saturating_add(wire_len)
+                > CONTROL_QUEUE_MAX_BYTES
+        {
+            #[cfg(test)]
+            self.refusals.fetch_add(1, Ordering::Relaxed);
+            return Err(Refusal::Local);
+        }
+        if let Some(shared) = &self.shared
+            && !shared.try_charge(wire_len, shared.max_bytes)
+        {
+            #[cfg(test)]
+            self.refusals.fetch_add(1, Ordering::Relaxed);
+            return Err(Refusal::Shared);
+        }
+        Ok(self.commit_control_locked(wire_len))
+    }
+
     pub(crate) fn try_reserve_production(self: &Arc<Self>) -> Result<OutboundCredit, Refusal> {
         let _guard = self.drained_lock.lock();
         if self.writer_dead.load(Ordering::Acquire) || !self.local_production_headroom() {
@@ -499,6 +547,17 @@ impl OutboundBudget {
         OutboundCredit {
             budget: Arc::clone(self),
             bytes,
+            control: false,
+        }
+    }
+
+    fn commit_control_locked(self: &Arc<Self>, bytes: usize) -> OutboundCredit {
+        self.control_messages.fetch_add(1, Ordering::AcqRel);
+        self.control_bytes.fetch_add(bytes, Ordering::AcqRel);
+        OutboundCredit {
+            budget: Arc::clone(self),
+            bytes,
+            control: true,
         }
     }
 
@@ -511,7 +570,7 @@ impl OutboundBudget {
         credit.bytes -= excess;
         {
             let _guard = self.drained_lock.lock();
-            self.release_bytes_locked(excess);
+            self.release_bytes_locked(excess, credit.control);
             if let Some(shared) = &self.shared {
                 shared.release_counter(excess);
             }
@@ -519,16 +578,19 @@ impl OutboundBudget {
         self.wake_after_release();
     }
 
-    fn release(&self, wire_len: usize) {
+    fn release(&self, wire_len: usize, control: bool) {
         {
             let _guard = self.drained_lock.lock();
-            let messages =
-                self.pending_messages
-                    .try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
-                        pending.checked_sub(1)
-                    });
-            debug_assert!(messages.is_ok(), "released more messages than charged");
-            self.release_bytes_locked(wire_len);
+            let messages = if control {
+                &self.control_messages
+            } else {
+                &self.pending_messages
+            };
+            let released = messages.try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                pending.checked_sub(1)
+            });
+            debug_assert!(released.is_ok(), "released more messages than charged");
+            self.release_bytes_locked(wire_len, control);
             if let Some(shared) = &self.shared {
                 shared.release_counter(wire_len);
             }
@@ -536,12 +598,15 @@ impl OutboundBudget {
         self.wake_after_release();
     }
 
-    fn release_bytes_locked(&self, bytes: usize) {
-        let released =
-            self.pending_bytes
-                .try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
-                    pending.checked_sub(bytes)
-                });
+    fn release_bytes_locked(&self, bytes: usize, control: bool) {
+        let counter = if control {
+            &self.control_bytes
+        } else {
+            &self.pending_bytes
+        };
+        let released = counter.try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+            pending.checked_sub(bytes)
+        });
         debug_assert!(released.is_ok(), "released more bytes than charged");
     }
 
@@ -595,6 +660,15 @@ impl OutboundBudget {
         (
             self.pending_messages.load(Ordering::Acquire),
             self.pending_bytes.load(Ordering::Acquire),
+        )
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn control_pending(&self) -> (usize, usize) {
+        (
+            self.control_messages.load(Ordering::Acquire),
+            self.control_bytes.load(Ordering::Acquire),
         )
     }
 
@@ -660,7 +734,11 @@ pub struct PeerLease {
     close_rx: Receiver<()>,
     budget: Arc<OutboundBudget>,
     unsolicited_forwards: Arc<AtomicUsize>,
-    last_send: Arc<Mutex<Instant>>,
+    /// The instant of this connection's last actual socket write. The
+    /// writer's stream accounting stamps it when the socket accepts bytes;
+    /// queue admission never does. The message loop reads it as the
+    /// send-silence feed for keepalive expiry.
+    send_activity: Arc<Mutex<Instant>>,
     inbound: bool,
     role: crate::peer_info::PeerRole,
     manual: bool,
@@ -741,7 +819,7 @@ impl PeerLease {
             close_rx,
             budget: Arc::new(budget),
             unsolicited_forwards: Arc::new(AtomicUsize::new(0)),
-            last_send: Arc::new(Mutex::new(Instant::now())),
+            send_activity: Arc::new(Mutex::new(Instant::now())),
             inbound,
             role,
             manual,
@@ -874,7 +952,14 @@ impl PeerLease {
 
     #[must_use]
     pub(crate) fn last_send(&self) -> Instant {
-        *self.last_send.lock()
+        *self.send_activity.lock()
+    }
+
+    /// The shared send-activity clock, so the stream the writer owns can
+    /// stamp it at the point the socket accepts bytes.
+    #[must_use]
+    pub(crate) fn send_activity(&self) -> Arc<Mutex<Instant>> {
+        Arc::clone(&self.send_activity)
     }
 
     #[must_use]
@@ -949,10 +1034,9 @@ impl PeerLease {
         credit: OutboundCredit,
     ) -> Result<(), OutboundRefusal> {
         match self.outbound.try_send(QueuedFrame { message, credit }) {
-            Ok(()) => {
-                *self.last_send.lock() = Instant::now();
-                Ok(())
-            }
+            // Admission to the queue is not send activity: only the
+            // writer's socket accounting advances the send-silence clock.
+            Ok(()) => Ok(()),
             Err(TrySendError::Full(frame) | TrySendError::Disconnected(frame)) => {
                 let message = frame.into_message();
                 self.cancel();

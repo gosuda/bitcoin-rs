@@ -8,6 +8,9 @@ mod packet;
 mod reader;
 
 pub use handshake::{Established, Handshake, Step};
+pub(crate) use packet::PACKET_OVERHEAD;
+#[cfg(test)]
+pub(crate) use packet::RecvCipher;
 pub use packet::SendCipher;
 #[cfg(feature = "fuzzing")]
 pub use packet::{PacketError, RecvCipher};
@@ -82,7 +85,7 @@ mod vector_tests {
         let result = receiver.read_message(
             &mut std::io::Cursor::new(frame),
             bitcoin::p2p::Magic::REGTEST,
-            |command, payload| {
+            |command, payload, _wire_len| {
                 assert_eq!(command, "block");
                 assert_eq!(payload.len(), 80);
                 called = true;

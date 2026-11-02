@@ -95,6 +95,8 @@ pub struct ConnectionShared {
     pub block_announcer: Option<Arc<crate::block_announce::BlockAnnouncer>>,
     pub max_inbound: usize,
     pub local_services: ServiceFlags,
+    /// The subversion this node advertises in its version handshake.
+    pub user_agent: String,
     pub v2_transport: bool,
     pub relay_offers: RelayOffers,
     pub(crate) overlay: Arc<crate::overlay::OverlayTransport>,
@@ -165,6 +167,7 @@ impl ConnectionShared {
             block_announcer: extras.block_announcer,
             max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            user_agent: bitcoin_rs_primitives::USER_AGENT.to_owned(),
             v2_transport: false,
             relay_offers: RelayOffers::default(),
             overlay: Arc::new(crate::overlay::OverlayTransport::new(Arc::default())),
@@ -1006,6 +1009,7 @@ fn dial(
     };
     let stream = match stream
         .stop_reading_when(lease.clone())
+        .recording_send_activity(lease.send_activity())
         .with_cancel(&connection_cancel.reader(), &shared.cancel_clone())
         .map_err(crate::wire::PeerError::Io)
     {
@@ -1072,6 +1076,7 @@ fn dial(
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
     let mut peer = Peer::with_transport(stream, shared.magic, negotiated);
+    peer.account_message_bytes(std::sync::Arc::clone(&counters));
     let trace = if origin == ConnectionOrigin::Manual {
         crate::net_trace::NetTrace::manual_outbound(lease.node_id(), addr.into())
     } else {
@@ -1153,6 +1158,7 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
         start_height,
         lease.role(),
         shared.advertised_services(),
+        &shared.user_agent,
     );
     for message in outbound_messages {
         peer.send(&message)?;
@@ -1297,6 +1303,7 @@ fn run_handshake(
         .and_then(|stream| {
             stream
                 .stop_reading_when(lease.clone())
+                .recording_send_activity(lease.send_activity())
                 .with_cancel(&connection_cancel.reader(), &std::net::TcpStream::try_clone)
         })
         .map_err(crate::wire::PeerError::Io)
@@ -1344,6 +1351,7 @@ fn run_handshake(
 
     let nonce = generate_nonce(peer_addr);
     let mut peer = Peer::with_transport(stream, shared.magic, negotiated);
+    peer.account_message_bytes(std::sync::Arc::clone(&counters));
     peer.attach_net_trace(crate::net_trace::NetTrace::inbound(
         lease.node_id(),
         peer_addr,
@@ -1354,6 +1362,7 @@ fn run_handshake(
         nonce,
         0,
         shared.advertised_services(),
+        &shared.user_agent,
         &lease,
         handshake_deadline,
     ) {
@@ -1647,19 +1656,32 @@ impl Keepalive {
         self.last_recv = now;
     }
 
-    fn record_send(&mut self, now: Instant) {
-        self.last_send = now;
+    /// The message loop's ledger: the receive clock starts at loop entry
+    /// (nothing has been received in this session yet), the send clock at
+    /// the connection's last actual socket write, which the lease's
+    /// send-activity feed carries (the handshake's final bytes), so a
+    /// quiet handshake tail cannot mask send silence.
+    fn starting_message_loop(now: Instant, last_send: Instant) -> Self {
+        Self {
+            last_recv: now,
+            last_send,
+            ..Self::starting(now)
+        }
     }
 
+    /// The writer's accounting feed: advances only, because the observed
+    /// instant can predate a stall-shifted ledger.
     fn observe_send(&mut self, sent: Instant) {
         if sent > self.last_send {
             self.last_send = sent;
         }
     }
 
+    /// One probe's admission: it owes its cadence (`last_ping`) but is not
+    /// send activity — only actual socket writes feed the send-silence
+    /// clock, so a queued-but-unwritten probe cannot mask a stalled writer.
     fn record_probe(&mut self, now: Instant) {
         self.last_ping = Some(now);
-        self.record_send(now);
     }
 
     fn next_action(&self, now: Instant) -> KeepaliveAction {
@@ -1684,7 +1706,10 @@ impl Keepalive {
         let probe_owed = self
             .last_ping
             .is_none_or(|last| now.saturating_duration_since(last) >= self.ping_interval);
-        if probe_owed && idle {
+        // Core initializes a peer's `m_ping_start` to the clock epoch, so the
+        // first `MaybeSendPing` pass after VERACK owes a probe without waiting
+        // for silence (v31.1 net_processing.cpp); later probes stay idle-gated.
+        if probe_owed && (self.last_ping.is_none() || idle) {
             KeepaliveAction::Ping
         } else {
             KeepaliveAction::Idle
@@ -1698,15 +1723,32 @@ mod keepalive_tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn probes_owe_one_ping_per_idle_interval() {
+    fn first_probe_is_owed_immediately() {
         let t0 = Instant::now();
         let mut keepalive = Keepalive::starting(t0);
         assert_eq!(
             keepalive.next_action(t0),
+            KeepaliveAction::Ping,
+            "Core's m_ping_start initializes to the clock epoch, so the first pass after the handshake pings without waiting for silence"
+        );
+        keepalive.record_probe(t0);
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL / 2),
+            KeepaliveAction::Idle,
+            "after the first probe a busy-enough connection sends no keepalive"
+        );
+    }
+
+    #[test]
+    fn probes_owe_one_ping_per_idle_interval() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        keepalive.record_probe(t0);
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL / 2),
             KeepaliveAction::Idle,
             "a busy-enough connection sends no keepalive"
         );
-        keepalive.record_send(t0);
         assert_eq!(
             keepalive.next_action(t0 + PING_INTERVAL),
             KeepaliveAction::Ping,
@@ -1727,7 +1769,7 @@ mod keepalive_tests {
     fn receive_silence_expires_the_connection() {
         let t0 = Instant::now();
         let mut keepalive = Keepalive::starting(t0);
-        keepalive.record_send(t0 + TIMEOUT_INTERVAL);
+        keepalive.observe_send(t0 + TIMEOUT_INTERVAL);
         assert_eq!(
             keepalive.next_action(t0 + TIMEOUT_INTERVAL + Duration::from_secs(1)),
             KeepaliveAction::Expired
@@ -1749,7 +1791,7 @@ mod keepalive_tests {
     fn parked_loop_does_not_expire_on_receive_silence() {
         let t0 = Instant::now();
         let mut keepalive = Keepalive::starting(t0);
-        keepalive.record_send(t0 + TIMEOUT_INTERVAL);
+        keepalive.observe_send(t0 + TIMEOUT_INTERVAL);
         let now = t0 + TIMEOUT_INTERVAL + Duration::from_secs(1);
         assert_eq!(keepalive.next_action(now), KeepaliveAction::Expired);
         assert_ne!(
@@ -1774,7 +1816,7 @@ mod keepalive_tests {
     fn parked_loop_orders_the_same_probe_as_an_unparked_one() {
         let t0 = Instant::now();
         let mut keepalive = Keepalive::starting(t0);
-        keepalive.record_send(t0);
+        keepalive.observe_send(t0);
         assert_eq!(
             keepalive.next_action_while_parked(t0 + PING_INTERVAL),
             KeepaliveAction::Ping
@@ -1787,7 +1829,7 @@ mod keepalive_tests {
         let mut keepalive = Keepalive::starting(t0);
         let fresh = t0 + TIMEOUT_INTERVAL / 2;
         keepalive.record_recv(fresh);
-        keepalive.record_send(fresh);
+        keepalive.observe_send(fresh);
         assert_eq!(
             keepalive.next_action(t0 + TIMEOUT_INTERVAL),
             KeepaliveAction::Ping
@@ -1796,6 +1838,63 @@ mod keepalive_tests {
         assert_eq!(
             keepalive.next_action(t0 + TIMEOUT_INTERVAL + PING_INTERVAL / 2),
             KeepaliveAction::Idle
+        );
+    }
+
+    #[test]
+    fn an_admitted_probe_is_not_send_activity() {
+        let t0 = Instant::now();
+        let expired = t0 + TIMEOUT_INTERVAL + Duration::from_secs(1);
+        let mut keepalive = Keepalive::starting_message_loop(t0, t0);
+        // The probe is admitted to the queue minutes after the last actual
+        // write; inbound traffic keeps the receive clock fresh the whole
+        // time. Expiry is still judged from the last actual write.
+        keepalive.record_probe(t0 + PING_INTERVAL);
+        keepalive.record_recv(expired);
+        assert_eq!(
+            keepalive.next_action(expired),
+            KeepaliveAction::Expired,
+            "send silence runs from the last actual write, not probe admission"
+        );
+    }
+
+    #[test]
+    fn a_refused_probe_stays_owed_until_sent() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        keepalive.note_refusal(crate::connection::Refusal::Shared);
+        keepalive.settle_pass(t0, &mut None);
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL),
+            KeepaliveAction::Ping,
+            "a refused probe is retryable, not silently lost"
+        );
+        keepalive.record_probe(t0 + PING_INTERVAL);
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL + PING_INTERVAL / 2),
+            KeepaliveAction::Idle
+        );
+    }
+
+    #[test]
+    fn refusal_classification_keeps_the_silence_clock_honest() {
+        let t0 = Instant::now();
+        let expired = t0 + TIMEOUT_INTERVAL + Duration::from_secs(1);
+        let mut locally_refused = Keepalive::starting(t0);
+        locally_refused.note_refusal(crate::connection::Refusal::Local);
+        locally_refused.settle_pass(expired, &mut None);
+        assert_eq!(
+            locally_refused.next_action(expired),
+            KeepaliveAction::Expired,
+            "connection-local control congestion is not a stall: a wire-silent peer whose queue is stuck full still expires"
+        );
+        let mut aggregate_refused = Keepalive::starting(t0);
+        aggregate_refused.note_refusal(crate::connection::Refusal::Shared);
+        aggregate_refused.settle_pass(t0 + Duration::from_secs(1), &mut None);
+        assert_ne!(
+            aggregate_refused.next_action(expired),
+            KeepaliveAction::Expired,
+            "aggregate backpressure is a stall, not keepalive silence"
         );
     }
 }
@@ -1983,7 +2082,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     let tx_relay_open =
         || ibd.is_none_or(|(latch, network)| !latch.is_active(unix_time_secs(), *network));
 
-    let mut keepalive = Keepalive::starting(Instant::now());
+    let mut keepalive = Keepalive::starting_message_loop(Instant::now(), lease.last_send());
     #[cfg(test)]
     if let Some((ping_interval, timeout_interval)) = shared.test_keepalive_intervals.get() {
         keepalive.ping_interval = *ping_interval;
@@ -2024,14 +2123,29 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
         match action {
             KeepaliveAction::Idle => {}
             KeepaliveAction::Ping => {
-                if budget.local_production_headroom() {
-                    match lease.send(crate::Message::Ping(generate_nonce(peer_addr))) {
-                        Ok(()) => keepalive.record_probe(Instant::now()),
-                        Err(crate::OutboundRefusal::Saturated(_)) => {
-                            keepalive.note_refusal(crate::connection::Refusal::Shared);
-                        }
-                        Err(crate::OutboundRefusal::Closed(_)) => return Err(closed_queue()),
+                // The probe rides the bounded control lane so it stays prompt
+                // without ever displacing a pending data response. The
+                // budget owns the refusal classification: aggregate
+                // (`Shared`) backpressure is a keepalive stall, while a full
+                // lane or a dead writer is connection-local congestion that
+                // defers the probe — it stays owed — without pausing the
+                // silence clock.
+                let probe = crate::Message::Ping(generate_nonce(peer_addr));
+                let Ok(wire_len) = crate::wire::wire_len(&probe) else {
+                    lease.cancel();
+                    return Err(closed_queue());
+                };
+                match budget.try_charge_control(wire_len) {
+                    Ok(credit) => {
+                        lease
+                            .send_with(credit, probe)
+                            .map(|()| keepalive.record_probe(Instant::now()))
+                            .map_err(|_| closed_queue())?;
                     }
+                    Err(refusal @ crate::connection::Refusal::Shared) => {
+                        keepalive.note_refusal(refusal);
+                    }
+                    Err(crate::connection::Refusal::Local) => {}
                 }
             }
             KeepaliveAction::Expired => {
@@ -2065,10 +2179,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             let serving = chain.serve_compact_filters(
                 &parked.pending,
                 &|| sink.headroom(),
-                &mut |response| {
-                    sink.send(response)
-                        .map(|()| keepalive.record_send(Instant::now()))
-                },
+                &mut |response| sink.send(response),
             )?;
             parked.last = crate::peer::FilterHalt::from_refusal(sink.refusal());
             if let crate::FilterServing::Pending(remainder) = serving {
@@ -2203,10 +2314,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             shared.tx_inventory.as_deref(),
             &tx_relay_open,
             &|| sink.headroom(),
-            &mut |response| {
-                sink.send(response)
-                    .map(|()| keepalive.record_send(Instant::now()))
-            },
+            &mut |response| sink.send(response),
             &mut |hash| shared.announce_block(lease.source(peer_addr.endpoint()), hash),
             &mut |items| {
                 shared
@@ -2534,7 +2642,6 @@ fn report_parked_misses<S>(
     let misses = std::mem::take(&mut peer.pending_notfound);
     lease
         .send_with(credit, crate::Message::NotFound(misses))
-        .map(|()| keepalive.record_send(Instant::now()))
         .map_err(|_| closed_queue())?;
     Ok(true)
 }
@@ -2551,10 +2658,7 @@ fn resume_parked_getdata<S>(
     budget: &Arc<crate::connection::OutboundBudget>,
 ) -> Result<(), crate::wire::PeerError> {
     let sink = ProductionSink::new(lease, None);
-    let mut send = |response: crate::Message| {
-        sink.send(response)
-            .map(|()| keepalive.record_send(Instant::now()))
-    };
+    let mut send = |response: crate::Message| sink.send(response);
     let compact_version = peer.compact_blocks.servable_version();
     let mut not_found = Vec::new();
     let tail = crate::dispatch::serve_getdata(
@@ -2740,6 +2844,7 @@ fn spawn_connection_writer(
     net_trace: Option<crate::net_trace::NetTrace>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let peer_addr = peer_addr.into();
+    let counters = std::sync::Arc::clone(stream.counters());
     std::thread::Builder::new()
         .name(format!("bitcoin-rs-p2p-writer-{peer_addr}"))
         .spawn(move || {
@@ -2752,6 +2857,7 @@ fn spawn_connection_writer(
                 close_rx,
                 &mut stream,
                 &mut transport,
+                &counters,
                 net_trace.as_ref(),
             );
             let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -2794,6 +2900,7 @@ fn write_ready_burst(
     outbound_rx: &crossbeam_channel::Receiver<crate::QueuedFrame>,
     writer: &mut dyn std::io::Write,
     transport: &mut crate::transport::SendTransport,
+    counters: &crate::PeerCounters,
     net_trace: Option<&crate::net_trace::NetTrace>,
 ) -> bool {
     let mut pending = Some(first);
@@ -2813,7 +2920,16 @@ fn write_ready_burst(
         for (queued, frame) in burst.iter().zip(&frames) {
             crate::net_trace::outbound_message(net_trace, queued.message(), frame.payload());
         }
-        let written = crate::wire::write_frames(writer, &frames);
+        // Each frame is charged to its command once the writer accepts its
+        // final byte, Core's flush semantics. A write error still tears the
+        // connection down, but the frames the socket already accepted in
+        // full keep their charges, so the per-message buckets track the
+        // socket counter's accepted bytes; a frame the error cut short is
+        // never charged.
+        let written = crate::wire::write_frames(writer, &frames, &mut |index: usize| {
+            let command = burst[index].message().command();
+            counters.record_msg_sent(command.as_ref(), frames[index].wire_len());
+        });
         drop(burst);
         match written {
             Ok(()) => pending = leftover,
@@ -2831,13 +2947,14 @@ fn run_writer_loop(
     mut close_rx: crossbeam_channel::Receiver<()>,
     writer: &mut dyn std::io::Write,
     transport: &mut crate::transport::SendTransport,
+    counters: &crate::PeerCounters,
     net_trace: Option<&crate::net_trace::NetTrace>,
 ) {
     loop {
         crossbeam_channel::select! {
             recv(outbound_rx) -> message => {
                 let Ok(first) = message else { break };
-                if !write_ready_burst(first, outbound_rx, writer, transport, net_trace) {
+                if !write_ready_burst(first, outbound_rx, writer, transport, counters, net_trace) {
                     break;
                 }
             }
@@ -2898,6 +3015,7 @@ fn test_shared(
 #[cfg(test)]
 mod transaction_poll_tests {
     use super::*;
+    use bitcoin_rs_primitives::USER_AGENT;
     use std::sync::atomic::AtomicUsize;
 
     struct InventoryReads(AtomicUsize);
@@ -2941,6 +3059,7 @@ mod transaction_poll_tests {
             0,
             crate::PeerRole::FullRelay,
             ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            USER_AGENT,
         );
         table.publish_info(
             addr,
@@ -3580,6 +3699,16 @@ mod address_tests {
     use crate::{Message, PeerState};
     use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
 
+    /// The message loop originates one keepalive ping on its first pass; the
+    /// once-per-connection assertions below strip that probe so they keep
+    /// judging only the address replies.
+    fn keepalive_probes_stripped(replies: Vec<Message>) -> Vec<Message> {
+        replies
+            .into_iter()
+            .filter(|message| !matches!(message, Message::Ping(_)))
+            .collect()
+    }
+
     #[test]
     fn local_dial_cancellation_is_not_attempt_evidence_but_tcp_failure_is() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -3695,7 +3824,7 @@ mod address_tests {
         peer.state = PeerState::Ready;
         let _ = run_message_loop(&mut peer, source, &lease, &shared, None);
         assert_eq!(book.len(), 1);
-        let replies = receiver.drain_messages();
+        let replies = keepalive_probes_stripped(receiver.drain_messages());
         let [Message::Addr(addresses)] = replies.as_slice() else {
             panic!("expected exactly one addr response: {replies:?}");
         };
@@ -3743,7 +3872,7 @@ mod address_tests {
         let mut peer = Peer::new(std::io::Cursor::new(input), shared.magic);
         peer.state = PeerState::Ready;
         let _ = run_message_loop(&mut peer, source, &lease, &shared, None);
-        let replies = receiver.drain_messages();
+        let replies = keepalive_probes_stripped(receiver.drain_messages());
         let [Message::AddrV2(rows)] = replies.as_slice() else {
             panic!("expected exactly one addrv2 response: {replies:?}");
         };
@@ -3764,6 +3893,7 @@ mod address_tests {
 #[expect(clippy::expect_used)]
 mod feeler_tests {
     use super::*;
+    use bitcoin_rs_primitives::USER_AGENT;
     use std::sync::atomic::AtomicUsize;
 
     struct Scripted(std::io::Cursor<Vec<u8>>);
@@ -3779,6 +3909,16 @@ mod feeler_tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    fn feeler_version(services: u64) -> crate::Message {
+        crate::Message::Version(crate::handshake::version_message(
+            123,
+            0,
+            crate::PeerRole::FullRelay,
+            ServiceFlags::from(services),
+            USER_AGENT,
+        ))
     }
 
     #[test]
@@ -3839,12 +3979,7 @@ mod feeler_tests {
                     let replacement = crate::PeerLease::new(crossbeam_channel::unbounded().0);
                     remote_table.register(address, replacement);
                 }
-                let sent = peer.send(&crate::Message::Version(crate::handshake::version_message(
-                    123,
-                    0,
-                    crate::PeerRole::FullRelay,
-                    ServiceFlags::from(services),
-                )));
+                let sent = peer.send(&feeler_version(services));
                 if revoked == 0 {
                     sent.expect("VERSION only");
                 }
@@ -3897,6 +4032,7 @@ mod feeler_tests {
                     0,
                     crate::PeerRole::FullRelay,
                     ServiceFlags::from(services),
+                    USER_AGENT,
                 )),
             )
             .expect("wire");
@@ -3957,6 +4093,7 @@ mod feeler_tests {
                     0,
                     crate::PeerRole::FullRelay,
                     ServiceFlags::from(services),
+                    USER_AGENT,
                 )),
             )
             .expect("VERSION");
