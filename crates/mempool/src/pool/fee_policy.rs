@@ -244,17 +244,6 @@ impl Mempool {
         for candidate in candidates {
             let candidate_index = after.nodes.len();
             tx_positions.insert(candidate.txid, candidate_index);
-            after.nodes.push(GraphNode {
-                id: None,
-                txid: candidate.txid,
-                vsize: candidate.vsize,
-                memory: self.admission_memory(candidate),
-                affected: true,
-                value: FeeWeight {
-                    fee: self.modified_fee_for(candidate.txid, candidate.fee)?,
-                    weight: policy_weight(candidate.weight, candidate.vsize, candidate.sigop_cost)?,
-                },
-            });
             let mut parents: Vec<_> = candidate
                 .tx
                 .inputs
@@ -263,14 +252,38 @@ impl Mempool {
                 .collect();
             parents.sort_unstable();
             parents.dedup();
-            after.parents.push(parents);
+            let mut child_edges = 0_usize;
             for child in self.in_pool_children(candidate.txid) {
                 if let Some(&old) = positions.get(&child)
                     && let Some(&new) = surviving.get(&old)
                 {
                     after.parents[new].push(candidate_index);
+                    after.nodes[new].memory = after.nodes[new]
+                        .memory
+                        .saturating_add(link_memory_usage(1, 1));
+                    child_edges += 1;
                 }
             }
+            for &parent in &parents {
+                after.nodes[parent].memory = after.nodes[parent]
+                    .memory
+                    .saturating_add(link_memory_usage(1, 1));
+            }
+            let edges = parents.len() + child_edges;
+            after.nodes.push(GraphNode {
+                id: None,
+                txid: candidate.txid,
+                vsize: candidate.vsize,
+                memory: self
+                    .admission_memory(candidate)
+                    .saturating_sub(link_memory_usage(edges, 1)),
+                affected: true,
+                value: FeeWeight {
+                    fee: self.modified_fee_for(candidate.txid, candidate.fee)?,
+                    weight: policy_weight(candidate.weight, candidate.vsize, candidate.sigop_cost)?,
+                },
+            });
+            after.parents.push(parents);
         }
         Ok((before, after))
     }

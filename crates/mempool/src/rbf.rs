@@ -740,6 +740,7 @@ mod tests {
         Ok(())
     }
 
+    // POL-03
     #[test]
     fn trim_stops_at_the_exact_boundary_of_true_released_memory() -> Result<(), TestError> {
         let young = crate::policy::MEMPOOL_EXPIRY_SECS + 100;
