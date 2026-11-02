@@ -2,24 +2,39 @@
 #![expect(clippy::expect_used, reason = "fixture construction must fail loudly")]
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bitcoin::p2p::Magic;
 use bitcoin_rs_p2p::wire::{Message, PeerError, read_message};
 use sha2::{Digest, Sha256};
 
+thread_local! {
+    static MEASURING: Cell<bool> = const { Cell::new(false) };
+    static THREAD_ALLOCATION_LIVE: Cell<usize> = const { Cell::new(0) };
+    static THREAD_ALLOCATION_PEAK: Cell<usize> = const { Cell::new(0) };
+}
+
 struct CountingAllocator;
 
-static ALLOCATION_COUNTING: AtomicBool = AtomicBool::new(false);
-static ALLOCATION_LIVE: AtomicUsize = AtomicUsize::new(0);
-static ALLOCATION_PEAK: AtomicUsize = AtomicUsize::new(0);
+fn measuring() -> bool {
+    MEASURING.try_with(Cell::get).unwrap_or(false)
+}
 
-static MEASUREMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn observe(live: usize) {
+    THREAD_ALLOCATION_PEAK.with(|peak| {
+        if live > peak.get() {
+            peak.set(live);
+        }
+    });
+}
 
 fn grow(bytes: usize) {
-    let live = ALLOCATION_LIVE.fetch_add(bytes, Ordering::SeqCst) + bytes;
-    ALLOCATION_PEAK.fetch_max(live, Ordering::SeqCst);
+    THREAD_ALLOCATION_LIVE.with(|live| {
+        let next = live.get() + bytes;
+        live.set(next);
+        observe(next);
+    });
 }
 
 // SAFETY: every call forwards to `System` with the caller's layout; the counters only observe sizes.
@@ -27,7 +42,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller upholds the `GlobalAlloc::alloc` contract for `layout`.
         let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && ALLOCATION_COUNTING.load(Ordering::SeqCst) {
+        if !pointer.is_null() && measuring() {
             grow(layout.size());
         }
         pointer
@@ -36,15 +51,15 @@ unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller upholds the `GlobalAlloc::alloc_zeroed` contract for `layout`.
         let pointer = unsafe { System.alloc_zeroed(layout) };
-        if !pointer.is_null() && ALLOCATION_COUNTING.load(Ordering::SeqCst) {
+        if !pointer.is_null() && measuring() {
             grow(layout.size());
         }
         pointer
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        if ALLOCATION_COUNTING.load(Ordering::SeqCst) {
-            ALLOCATION_LIVE.fetch_sub(layout.size(), Ordering::SeqCst);
+        if measuring() {
+            THREAD_ALLOCATION_LIVE.with(|live| live.set(live.get().saturating_sub(layout.size())));
         }
         // SAFETY: the caller passes a pointer and layout from a matching `alloc` call.
         unsafe { System.dealloc(pointer, layout) };
@@ -53,9 +68,12 @@ unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // SAFETY: the caller upholds the `GlobalAlloc::realloc` contract.
         let moved = unsafe { System.realloc(pointer, layout, new_size) };
-        if !moved.is_null() && ALLOCATION_COUNTING.load(Ordering::SeqCst) {
-            ALLOCATION_LIVE.fetch_sub(layout.size(), Ordering::SeqCst);
-            grow(new_size);
+        if !moved.is_null() && measuring() {
+            THREAD_ALLOCATION_LIVE.with(|live| {
+                let next = live.get().saturating_sub(layout.size()) + new_size;
+                live.set(next);
+                observe(next);
+            });
         }
         moved
     }
@@ -63,6 +81,27 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
 #[global_allocator]
 static DECODE_HEAP_TESTS_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+struct Measurement;
+
+impl Measurement {
+    fn start() -> Self {
+        MEASURING.with(|flag| flag.set(true));
+        THREAD_ALLOCATION_LIVE.with(|live| live.set(0));
+        THREAD_ALLOCATION_PEAK.with(|peak| peak.set(0));
+        Measurement
+    }
+
+    fn peak(&self) -> usize {
+        THREAD_ALLOCATION_PEAK.with(Cell::get)
+    }
+}
+
+impl Drop for Measurement {
+    fn drop(&mut self) {
+        MEASURING.with(|flag| flag.set(false));
+    }
+}
 
 fn checksum(payload: &[u8]) -> [u8; 4] {
     let first = Sha256::digest(payload);
@@ -101,20 +140,15 @@ fn one_witness_input_blocktxn_payload() -> Vec<u8> {
 
 #[test]
 fn blocktxn_decode_allocation_stays_within_the_reservation() {
-    let _measurement = MEASUREMENT_LOCK
-        .lock()
-        .expect("measurement lock must not be poisoned");
     let invalid_payload = one_witness_input_blocktxn_payload();
     let invalid_reservation =
         bitcoin_rs_primitives::layout::decode_reservation(invalid_payload.len());
     let invalid_frame = frame(b"blocktxn", &invalid_payload);
 
-    ALLOCATION_LIVE.store(0, Ordering::SeqCst);
-    ALLOCATION_PEAK.store(0, Ordering::SeqCst);
-    ALLOCATION_COUNTING.store(true, Ordering::SeqCst);
+    let measurement = Measurement::start();
     let invalid_outcome = read_message(&mut Cursor::new(invalid_frame), Magic::REGTEST);
-    ALLOCATION_COUNTING.store(false, Ordering::SeqCst);
-    let invalid_peak = ALLOCATION_PEAK.load(Ordering::SeqCst);
+    let invalid_peak = measurement.peak();
+    drop(measurement);
     assert!(
         invalid_peak <= invalid_reservation,
         "transient decode allocation {invalid_peak} exceeded the {invalid_reservation}-byte reservation for a {}-byte payload",
@@ -144,15 +178,13 @@ fn blocktxn_decode_allocation_stays_within_the_reservation() {
     let reservation = bitcoin_rs_primitives::layout::decode_reservation(payload.len());
     let frame = frame(b"blocktxn", &payload);
 
-    ALLOCATION_LIVE.store(0, Ordering::SeqCst);
-    ALLOCATION_PEAK.store(0, Ordering::SeqCst);
-    ALLOCATION_COUNTING.store(true, Ordering::SeqCst);
+    let measurement = Measurement::start();
     let outcome = read_message(&mut Cursor::new(frame), Magic::REGTEST);
-    ALLOCATION_COUNTING.store(false, Ordering::SeqCst);
+    let peak = measurement.peak();
+    drop(measurement);
 
     let (message, _) = outcome.expect("a valid blocktxn decodes");
     assert!(matches!(message, Message::BlockTxn(_)));
-    let peak = ALLOCATION_PEAK.load(Ordering::SeqCst);
     assert!(
         peak <= reservation,
         "transient decode allocation {peak} exceeded the {reservation}-byte reservation for a {}-byte payload",
@@ -162,9 +194,6 @@ fn blocktxn_decode_allocation_stays_within_the_reservation() {
 
 #[test]
 fn cmpctblock_prefilled_transaction_decode_allocation_stays_within_the_reservation() {
-    let _measurement = MEASUREMENT_LOCK
-        .lock()
-        .expect("measurement lock must not be poisoned");
     let mut payload = Vec::new();
     payload.extend_from_slice(&[0x00; 80]);
     payload.extend_from_slice(&[0x00; 8]);
@@ -182,12 +211,10 @@ fn cmpctblock_prefilled_transaction_decode_allocation_stays_within_the_reservati
     let reservation = bitcoin_rs_primitives::layout::decode_reservation(payload.len());
     let frame = frame(b"cmpctblock", &payload);
 
-    ALLOCATION_LIVE.store(0, Ordering::SeqCst);
-    ALLOCATION_PEAK.store(0, Ordering::SeqCst);
-    ALLOCATION_COUNTING.store(true, Ordering::SeqCst);
+    let measurement = Measurement::start();
     let outcome = read_message(&mut Cursor::new(frame), Magic::REGTEST);
-    ALLOCATION_COUNTING.store(false, Ordering::SeqCst);
-    let peak = ALLOCATION_PEAK.load(Ordering::SeqCst);
+    let peak = measurement.peak();
+    drop(measurement);
     assert!(
         peak <= reservation,
         "transient decode allocation {peak} exceeded the {reservation}-byte reservation for a {}-byte cmpctblock payload",
