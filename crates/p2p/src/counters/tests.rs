@@ -607,12 +607,24 @@ fn send_activity_advances_only_on_actual_socket_writes() {
         .0;
     let stream = CountingStream::new(connected, Arc::new(PeerCounters::default()))
         .recording_send_activity(lease.send_activity());
-    let clone = stream
+    let mut clone = stream
         .try_clone()
         .unwrap_or_else(|error| panic!("try_clone failed: {error}"));
     assert!(
         clone.send_activity.is_some(),
         "the writer-thread clone carries the same send-activity clock"
+    );
+    // Some clock is not enough: it must be the lease's cell. Writing
+    // through the clone is the writer thread's only stamping point, so
+    // backdate the shared clock and prove the clone's write moves it.
+    *lease.send_activity().lock() = stale;
+    let written = clone
+        .write(&[0_u8; 4])
+        .unwrap_or_else(|error| panic!("write through the clone failed: {error}"));
+    assert_eq!(written, 4);
+    assert!(
+        lease.last_send() > stale,
+        "a write accepted by the clone stamps the lease's own clock"
     );
 }
 
@@ -712,7 +724,31 @@ fn unknown_and_send_only_receives_fold_into_other() {
 fn received_extension_commands_count_under_their_own_names() {
     // BIP331/BIP332 frames this node processes inbound: a real decoded
     // frame charges its own receive bucket, not *other* the way Core
-    // v31.1's known-command list would.
+    // v31.1's known-command list would. All five `both`-classified
+    // extension commands get a frame, one per bucket.
+    let wtxid =
+        bitcoin_rs_primitives::Wtxid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[1; 32]));
+    let tx = bitcoin_rs_primitives::Tx {
+        inputs: vec![bitcoin_rs_primitives::TxIn {
+            previous_output: bitcoin_rs_primitives::OutPoint::new(
+                bitcoin_rs_primitives::Txid(wtxid.0),
+                0,
+            ),
+            ..bitcoin_rs_primitives::TxIn::default()
+        }],
+        ..bitcoin_rs_primitives::Tx::default()
+    };
+    let staletip = crate::staletip::StaleTipAnnouncement {
+        fork_point: bitcoin_rs_primitives::Hash256::from_le_bytes(&[3; 32]),
+        headers: vec![crate::staletip::CompressedHeader {
+            version: 0x2000_0000,
+            merkle_root: bitcoin_rs_primitives::Hash256::from_le_bytes(&[4; 32]),
+            time: 1_700_000_000,
+            bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x1703_4219),
+            nonce: 1,
+        }],
+        have_block: true,
+    };
     for (command, message) in [
         (
             "sendpackages",
@@ -721,12 +757,34 @@ fn received_extension_commands_count_under_their_own_names() {
         (
             "ancpkginfo",
             crate::wire::Message::AncPkgInfo(crate::packages::AncPkgInfo {
-                wtxids: vec![bitcoin_rs_primitives::Wtxid(
-                    bitcoin_rs_primitives::Hash256::from_le_bytes(&[1; 32]),
-                )],
+                wtxids: vec![wtxid],
             }),
         ),
+        (
+            "getpkgtxns",
+            crate::wire::Message::GetPkgTxns(crate::packages::GetPkgTxns {
+                wtxids: vec![wtxid],
+            }),
+        ),
+        (
+            "pkgtxns",
+            crate::wire::Message::PkgTxns(crate::packages::PkgTxns { txs: vec![tx] }),
+        ),
+        ("staletip", crate::wire::Message::StaleTip(staletip)),
     ] {
+        // The decoder never parses a received `pkgtxns` into transactions:
+        // it hands back the raw payload so ingress can charge the frame
+        // first, so that command's round trip is payload bytes, not the
+        // typed variant it was framed from.
+        let expected = match &message {
+            crate::wire::Message::PkgTxns(package) => {
+                let payload = package
+                    .encode()
+                    .unwrap_or_else(|error| panic!("encode {command}: {error}"));
+                crate::wire::Message::PkgTxnsPayload(bytes::Bytes::from(payload))
+            }
+            framed => framed.clone(),
+        };
         let mut frame = Vec::new();
         crate::wire::write_message(&mut frame, bitcoin::p2p::Magic::BITCOIN, &message)
             .unwrap_or_else(|error| panic!("encode {command}: {error}"));
@@ -740,7 +798,7 @@ fn received_extension_commands_count_under_their_own_names() {
             .read_message()
             .unwrap_or_else(|error| panic!("decode {command}: {error}"))
             .unwrap_or_else(|| panic!("{command} decodes to a frame"));
-        assert_eq!(decoded, message, "{command} round-trips");
+        assert_eq!(decoded, expected, "{command} round-trips");
         let framed_len = u64::try_from(frame.len())
             .unwrap_or_else(|_| panic!("{command} framed length fits u64"));
         assert_eq!(
