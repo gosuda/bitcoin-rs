@@ -106,9 +106,7 @@ pub fn save(data_dir: &Path, history_bytes: &[u8]) {
         std::io::Write::write_all(&mut file, history_bytes)?;
         file.sync_all()?;
         std::fs::rename(&temp_path, &live_path)?;
-        if let Ok(dir) = std::fs::File::open(data_dir)
-            && let Err(error) = dir.sync_all()
-        {
+        if let Err(error) = std::fs::File::open(data_dir).and_then(|dir| dir.sync_all()) {
             tracing::warn!(
                 path = %live_path.display(),
                 %error,
