@@ -343,6 +343,10 @@ class MuhashEmissionTests(EmitterTestCase):
         self.assertEqual(document["core"]["backend"], "coinsdb")
         self.assertEqual(document["candidate"]["backend"], "fjall")
         self.assertNotEqual(document["core"]["arm_id"], document["candidate"]["arm_id"])
+        self.assertEqual(document["core"]["command"], list(emitter.MUHASH_COMMAND))
+        self.assertEqual(
+            document["candidate"]["command"], list(emitter.MUHASH_CANDIDATE_COMMAND)
+        )
         side = self.output.with_suffix(".frozen-state.json")
         self.assertTrue(side.is_file())
         frozen = json.loads(side.read_bytes(), parse_float=Decimal)
@@ -350,6 +354,17 @@ class MuhashEmissionTests(EmitterTestCase):
         self.assertEqual(frozen["muhash"], MUHASH)
         self.assertEqual(frozen["transactions"], TRANSACTIONS)
         self.assertEqual(frozen["txouts"], TXOUTS)
+        candidate_node = self.output.with_suffix(".candidate-node.toml")
+        self.assertTrue(candidate_node.is_file())
+        candidate_bytes = candidate_node.read_bytes()
+        self.assertEqual(
+            candidate_bytes, b'network = "main"\nstorage_backend = "fjall"\n'
+        )
+        self.assertEqual(
+            document["candidate"]["config"]["sha256"], _sha256(candidate_bytes)
+        )
+        self.assertEqual(document["candidate"]["config"]["bytes"], len(candidate_bytes))
+        self.assertEqual(document["core"]["config"]["sha256"], _sha256(side.read_bytes()))
         config = muhash_rpc._parse_campaign_config(document)
         self.assertEqual(config.campaign_id, f"{CORPUS_ID}-muhash-rpc")
         self.assertEqual(config.policy, "process-cold/page-cache-unspecified")
@@ -409,11 +424,13 @@ class CustodyRefusalTests(EmitterTestCase):
         os.mkdir(self.output.parent, 0o700)
         self.output.write_bytes(b"sentinel")
         side = self.output.with_suffix(".frozen-state.json")
+        candidate_node = self.output.with_suffix(".candidate-node.toml")
         code, stderr = self.fixture.emit("muhash", self.output)
         self.assertEqual(code, 2)
         self.assertIn("output already exists", stderr)
         self.assertEqual(self.output.read_bytes(), b"sentinel")
         self.assertFalse(side.exists())
+        self.assertFalse(candidate_node.exists())
 
 
 class PublicationFailureTests(EmitterTestCase):
@@ -424,7 +441,7 @@ class PublicationFailureTests(EmitterTestCase):
 
         def failing_fsync(descriptor: int) -> None:
             calls.append(descriptor)
-            if len(calls) == 3:
+            if len(calls) == 5:
                 on_third(side)
                 raise OSError("injected config publish failure")
             real_fsync(descriptor)
@@ -442,7 +459,7 @@ class PublicationFailureTests(EmitterTestCase):
         self.assertIn("cannot write the result payload", stderr)
         self.assertFalse(side.exists())
         self.assertFalse(self.output.exists())
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 7)
 
         code, stderr = self.fixture.emit("muhash", self.output)
         self.assertEqual((code, stderr), (0, ""))
@@ -461,7 +478,7 @@ class PublicationFailureTests(EmitterTestCase):
         self.assertIn("cannot write the result payload", stderr)
         self.assertEqual(side.read_bytes(), b"foreign\n")
         self.assertFalse(self.output.exists())
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 6)
 
 
 

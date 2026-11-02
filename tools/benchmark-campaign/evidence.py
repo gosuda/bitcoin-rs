@@ -532,3 +532,14 @@ def publish_result(result: JsonObject, output: Path) -> None:
         raise ContractError("publication requires Linux O_TMPFILE support")
     _validate_json_depth(result, "result")
     _publish_payload(canonical_bytes(result) + b"\n", output)
+
+
+def publish_payload(payload: bytes, output: Path) -> None:
+    """Atomically publish one raw payload.
+
+    Same commit point and crash behavior as ``publish_result``; the caller
+    owns the byte format.
+    """
+    if sys.platform != "linux":
+        raise ContractError("publication requires Linux O_TMPFILE support")
+    _publish_payload(payload, output)

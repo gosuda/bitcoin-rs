@@ -13,8 +13,8 @@ and writes the exact config document that comparator parses:
   4,096-step bounds apply, so a large corpus refuses here exactly as it
   would at campaign time.
 - ``muhash`` writes ``muhash-rpc-campaign-config-v2`` plus one frozen
-  state document beside it, and validates the config with
-  ``muhash_rpc._parse_campaign_config``.
+  state document and one candidate node config document beside it, and
+  validates the config with ``muhash_rpc._parse_campaign_config``.
 
 Custody layout::
 
@@ -63,7 +63,11 @@ backend. The arm command templates follow the placeholder contracts the
 comparators enforce; the offline template uses the documented harness
 argument family (``--data-dir/--corpus/--manifest/--state`` with
 assume-valid off), so a Bitcoin Core arm needs the state-writing wrapper
-that the certified-state gate already requires of both arms.
+that the certified-state gate already requires of both arms. The muhash
+candidate arm uses the node CLI family (``--config``, ``--rpc-cookie``,
+``--data-dir``, ``--rpc-bind``) with the loopback host and the allocated
+port joined into one socket-address token, so the emitted command is
+accepted by the release binary unchanged.
 """
 
 import argparse
@@ -84,7 +88,13 @@ import corpus
 import muhash_rpc
 import offline_full_validation as offline
 import p2p_loopback
-from evidence import ContractError, JsonObject, canonical_bytes, publish_result
+from evidence import (
+    ContractError,
+    JsonObject,
+    canonical_bytes,
+    publish_payload,
+    publish_result,
+)
 
 CONTRACT_ERRORS = (
     ContractError,
@@ -99,6 +109,7 @@ CREDENTIAL_NAME = "rpc.cookie"
 ARCHIVE_SUFFIX = ".archive.bin"
 MANIFEST_SUFFIX = ".manifest.json"
 FROZEN_STATE_SUFFIX = ".frozen-state.json"
+CANDIDATE_NODE_SUFFIX = ".candidate-node.toml"
 ACQUISITION_SCHEMA = "bitcoin-rs-custody-acquisition-record-v1"
 ACQUISITION_RECORD_LIMIT = offline.MAX_CONFIG_BYTES
 CERTIFIED_STATE_KEYS = (
@@ -151,6 +162,17 @@ MUHASH_COMMAND: tuple[str, ...] = (
     "{config}",
     "--data-dir",
     "{data_dir}",
+)
+MUHASH_CANDIDATE_COMMAND: tuple[str, ...] = (
+    "{binary}",
+    "--config",
+    "{config}",
+    "--rpc-cookie",
+    "{cookie}",
+    "--data-dir",
+    "{data_dir}",
+    "--rpc-bind",
+    "{rpc_bind}:{rpc_port}",
 )
 
 
@@ -685,6 +707,13 @@ def _muhash_document(
         "sha256": hashlib.sha256(frozen_bytes).hexdigest(),
         "bytes": len(frozen_bytes),
     }
+    candidate_node_bytes = _candidate_node_config_bytes()
+    candidate_node_path = output.with_suffix(CANDIDATE_NODE_SUFFIX)
+    candidate_config_ref = {
+        "path": str(candidate_node_path),
+        "sha256": hashlib.sha256(candidate_node_bytes).hexdigest(),
+        "bytes": len(candidate_node_bytes),
+    }
     corpus_id = custody.product.corpus_id
     core = {
         "arm_id": f"{corpus_id}-core",
@@ -699,9 +728,9 @@ def _muhash_document(
         "arm_id": f"{corpus_id}-bitcoin-rs",
         "binary": str(arms.candidate_path),
         "binary_sha256": arms.candidate_sha256,
-        "command": list(MUHASH_COMMAND),
+        "command": list(MUHASH_CANDIDATE_COMMAND),
         "backend": MUHASH_CANDIDATE_BACKEND,
-        "config": arm_config_ref,
+        "config": candidate_config_ref,
         "datadir": str(output.with_suffix(".candidate-data")),
     }
     document: JsonObject = {
@@ -728,7 +757,15 @@ def _muhash_document(
         "eviction_procedure": None,
     }
     muhash_rpc._parse_campaign_config(document)
-    return document, (side, frozen)
+    return document, (side, frozen), (candidate_node_path, candidate_node_bytes)
+
+
+def _candidate_node_config_bytes() -> bytes:
+    lines = (
+        'network = "main"',
+        f'storage_backend = "{MUHASH_CANDIDATE_BACKEND}"',
+    )
+    return ("\n".join(lines) + "\n").encode()
 
 
 def _unlink_linked(parent: Path, name: str, published: os.stat_result) -> None:
@@ -758,26 +795,38 @@ def _unlink_linked(parent: Path, name: str, published: os.stat_result) -> None:
 
 
 def _publish(
-    output: Path, document: JsonObject, side: tuple[Path, JsonObject] | None
+    output: Path,
+    document: JsonObject,
+    frozen_side: tuple[Path, JsonObject] | None,
+    candidate_side: tuple[Path, bytes] | None,
 ) -> None:
     if output.exists():
         raise ContractError(f"output already exists: {output}")
-    if side is not None and side[0].exists():
-        raise ContractError(f"output already exists: {side[0]}")
+    for side in (frozen_side, candidate_side):
+        if side is not None and side[0].exists():
+            raise ContractError(f"output already exists: {side[0]}")
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    published: os.stat_result | None = None
-    if side is not None:
-        publish_result(side[1], side[0])
-        try:
-            published = os.stat(side[0], follow_symlinks=False)
-        except OSError:
-            published = None
+    linked: list[tuple[Path, os.stat_result | None]] = []
     try:
+        if frozen_side is not None:
+            publish_result(frozen_side[1], frozen_side[0])
+            linked.append((_linked_stat(frozen_side[0])))
+        if candidate_side is not None:
+            publish_payload(candidate_side[1], candidate_side[0])
+            linked.append((_linked_stat(candidate_side[0])))
         publish_result(document, output)
     except BaseException:
-        if side is not None and published is not None:
-            _unlink_linked(side[0].parent, side[0].name, published)
+        for path, published in reversed(linked):
+            if published is not None:
+                _unlink_linked(path.parent, path.name, published)
         raise
+
+
+def _linked_stat(path: Path) -> tuple[Path, os.stat_result | None]:
+    try:
+        return path, os.stat(path, follow_symlinks=False)
+    except OSError:
+        return path, None
 
 
 def _run(args: argparse.Namespace) -> None:
@@ -790,15 +839,17 @@ def _run(args: argparse.Namespace) -> None:
     if arms.oracle_sha256 != oracle_sha256:
         raise ContractError("oracle binary digest does not match the acquisition record")
     output = args.output.absolute()
+    frozen_side = None
+    candidate_side = None
     if args.kind == "offline":
         document = _offline_document(custody, record_corpus, arms)
-        side = None
     elif args.kind == "p2p":
         document = _p2p_document(custody, record_corpus, entries, arms)
-        side = None
     else:
-        document, side = _muhash_document(custody, record_corpus, arms, output)
-    _publish(output, document, side)
+        document, frozen_side, candidate_side = _muhash_document(
+            custody, record_corpus, arms, output
+        )
+    _publish(output, document, frozen_side, candidate_side)
 
 
 def _parser() -> argparse.ArgumentParser:
