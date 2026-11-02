@@ -471,10 +471,17 @@ pub(crate) fn ping(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErro
     Ok(Value::new_null())
 }
 
+/// Core `addnode "node" "command" ( "v2transport" )`: the optional
+/// `v2transport` argument is not accepted. This node has no per-dial
+/// transport selection — manual dials follow the node-wide `v2_transport`
+/// setting (v2 attempted with v1 fallback when enabled) — so the argument
+/// errors as unknown rather than being silently ignored (deviation recorded
+/// in the registry row).
 pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    const ADD_NODE_ARGUMENTS: &[&str] = &["node", "command", "v2transport"];
+    const ADD_NODE_ARGUMENTS: &[&str] = &["node", "command"];
     let bound = super::bind_named_params(params, ADD_NODE_ARGUMENTS)?;
     let params = bound.as_ref();
+    super::ensure_at_most_params(params, 2)?;
     let node = required_str(params, 0, "node is required")?;
     let command = required_str(params, 1, "command is required")?;
     if !matches!(command, "add" | "onetry" | "remove") {

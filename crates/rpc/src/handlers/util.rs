@@ -77,10 +77,14 @@ pub(crate) fn getrpcinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, Rp
     })
 }
 
-/// Core `src/rpc/server.cpp` `stop`: trips the node's graceful-shutdown latch,
-/// then returns this node's own status string; the reply is written before
-/// teardown can begin. The framework never reads the reply (`test_node.py`
-/// `stop` discards it), so Core's exact string is not copied.
+/// Core `src/rpc/server.cpp` `stop`: trips the node's graceful-shutdown
+/// latch, then returns this node's own status string. Only that much happens
+/// here: the rpc-connection thread writes the reply later, and teardown
+/// normally lets it finish — the lifecycle e2e test asserts the
+/// `bitcoin-rs stopping` reply and then exit 0, not that the reply always
+/// precedes teardown (docs/contracts/external-api.md API-36). The framework
+/// never reads the reply (`test_node.py` `stop` discards it), so Core's
+/// exact string is not copied.
 pub(crate) fn stop(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     crate::handlers::ensure_no_params(params)?;
     let request_shutdown = ctx.shutdown_request.as_ref().ok_or_else(|| {
