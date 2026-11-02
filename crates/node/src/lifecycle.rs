@@ -362,6 +362,12 @@ impl NodeServices {
 
         self.join_core_services(state, &mut first_error);
         self.join_bootstrap_and_signal_workers(state, &mut first_error);
+        if state.is_some_and(|state| state.chainstate().is_closed_for_recovery()) {
+            set_first_error(
+                &mut first_error,
+                anyhow::anyhow!("chainstate closed for recovery; restart required"),
+            );
+        }
         publish_clean_checkpoint_if_eligible(state, mode, &mut first_error);
         if let Some(state) = state {
             let history = state.mempool_reader().read().estimator_history();

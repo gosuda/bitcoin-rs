@@ -97,6 +97,8 @@ pub(crate) enum CheckpointWrite {
 
 #[derive(Debug, Error)]
 pub enum CheckpointError {
+    #[error("checkpoint refused because chainstate is closed for recovery")]
+    ClosedForRecovery,
     #[error("header checkpoint failed: {0}")]
     Header(#[from] headers::HeaderCheckpointError),
     #[error("checkpoint chain state failed: {0}")]

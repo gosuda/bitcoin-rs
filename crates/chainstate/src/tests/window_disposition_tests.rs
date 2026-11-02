@@ -66,6 +66,22 @@ fn apply_errors_classify_into_their_documented_dispositions() {
             DurableHeadCommit(StorageError::backend("head batch lost")),
             Fatal,
         ),
+        (
+            ApplyError::UndoPersistence(StorageError::Unrecoverable("poisoned".into())),
+            Fatal,
+        ),
+        (
+            ApplyError::BlockBodyPersistence(StorageError::Unrecoverable("poisoned".into())),
+            Fatal,
+        ),
+        (
+            ApplyError::UndoPersistence(StorageError::backend("temporary undo failure")),
+            Operational,
+        ),
+        (
+            ApplyError::BlockBodyPersistence(StorageError::backend("temporary body failure")),
+            Operational,
+        ),
     ];
 
     for (error, expected) in cases {

@@ -337,7 +337,9 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
     use WindowApplyDisposition::{BodyMutated, Fatal, Operational, Permanent};
     use bitcoin_rs_consensus::{ConsensusError, ScriptEngine};
     match error {
-        ApplyError::UtxoCommit(_)
+        ApplyError::UndoPersistence(bitcoin_rs_storage::StorageError::Unrecoverable(_))
+        | ApplyError::BlockBodyPersistence(bitcoin_rs_storage::StorageError::Unrecoverable(_))
+        | ApplyError::UtxoCommit(_)
         | ApplyError::DurableHeadCommit(_)
         | ApplyError::DurableHeadLineage { .. }
         | ApplyError::DurableHeadGapUnrecoverable { .. } => Fatal,

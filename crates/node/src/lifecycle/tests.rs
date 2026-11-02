@@ -376,6 +376,46 @@ fn clean_shutdown_publishes_checkpoint_and_returns_success() -> anyhow::Result<(
 }
 
 #[test]
+fn recovery_shutdown_returns_failure_preserves_checkpoint_and_replays_committed_tail()
+-> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let config = isolated_config(dir.path());
+    let state = NodeState::open(config.clone(), None)?;
+    let (current, previous) = seed_checkpoint(&state)?;
+    drop(state);
+
+    let node = start_node(config.clone(), RuntimeInputs::default(), false)?;
+    let block = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(
+        crate::Network::Regtest.genesis_block().block_hash(),
+        1,
+    )?;
+    node.state
+        .apply_block(&BlockPayload::from_local(block.clone()))?;
+    node.state.chainstate().fail_closed_for_recovery();
+    let error = node
+        .shutdown_blocking()
+        .expect_err("recovery cannot exit successfully");
+    assert!(error.to_string().contains("chainstate closed for recovery"));
+    assert_eq!(
+        std::fs::read(current)?,
+        previous,
+        "recovery must retain the previous checkpoint"
+    );
+
+    let reopened = NodeState::open(config, None)?;
+    let tip = reopened
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or_else(|| anyhow::anyhow!("replayed tip missing"))?;
+    assert_eq!(
+        (tip.height, tip.hash),
+        (1, Hash256::from(block.block_hash()))
+    );
+    assert!(!reopened.chainstate().is_closed_for_recovery());
+    Ok(())
+}
+
+#[test]
 fn shutdown_checkpoint_io_failure_is_returned_and_preserves_current() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = isolated_config(&temp.path().join("node-checkpoint-failure"));

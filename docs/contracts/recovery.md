@@ -147,6 +147,7 @@ Tests must exercise actual process death and storage fault semantics in an isola
 
 ### `RCV-14`: Checkpoint reconcile against the durable head
 
+- Under the exclusive apply fence, publication refuses a recovery-closed admission before freezing the journal or writing any checkpoint artifacts. A fatal window can leave in-memory coins ahead of its committed/published prefix; neither queued maintenance nor shutdown may certify those coins. Proof: `crates/chainstate/src/tests/persistence_tests.rs::unrecoverable_undo_failure_retains_committed_prefix_and_closes_admission`.
 - The checkpoint publisher freezes the published state, which always trails or meets the durable head, because publication follows the batch. Before writing, the publisher loads the head and refuses a checkpoint whose tip is at or above the head without being certified by it. A tip below the head is the committed-but-unpublished gap a crash can leave; checkpointing the older state is harmless and keeps the node operating until replay closes the gap.
 
 ### `RCV-15`: Disconnect marker recovery

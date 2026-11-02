@@ -24,16 +24,22 @@ use crate::test_fixtures::{handles, seed_genesis};
 
 struct RejectingUndoStore {
     inner: InMemoryUndoStore,
+    unrecoverable: bool,
+    fail_from: u32,
 }
 
 impl UndoStore for RejectingUndoStore {
-    fn persist_undo(
-        &self,
-        _height: u32,
-        _hash: Hash256,
-        _record: &[u8],
-    ) -> Result<(), StorageError> {
-        Err(StorageError::backend("injected undo-persist failure"))
+    fn persist_undo(&self, height: u32, hash: Hash256, record: &[u8]) -> Result<(), StorageError> {
+        if height < self.fail_from {
+            return self.inner.persist_undo(height, hash, record);
+        }
+        if self.unrecoverable {
+            Err(StorageError::Unrecoverable(
+                "injected poisoned store".into(),
+            ))
+        } else {
+            Err(StorageError::backend("injected undo-persist failure"))
+        }
     }
 
     fn load_undo(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
@@ -97,6 +103,8 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
     let utxo_len = utxo.len();
     handles.undo_store = Arc::new(RejectingUndoStore {
         inner: InMemoryUndoStore::default(),
+        unrecoverable: false,
+        fail_from: 0,
     });
     let next = mined_child(first.block_hash(), 2)?;
     let next_hash = Hash256::from(next.block_hash());
@@ -117,7 +125,8 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
         assert!(Instant::now() < registration_deadline, "waiter must park");
         std::thread::yield_now();
     }
-    let outcome = handles.apply_block(&BlockPayload::from_local(next));
+    let payload = BlockPayload::from_local(next);
+    let outcome = handles.apply_block(&payload);
     let pending = answer_rx.recv_timeout(Duration::from_millis(30));
     let remained_pending = matches!(pending, Err(mpsc::RecvTimeoutError::Timeout));
     stop.store(true, Ordering::Release);
@@ -130,6 +139,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
         .join()
         .map_err(|_| std::io::Error::other("tip observer panicked"))??;
     assert!(matches!(outcome, Err(ApplyError::UndoPersistence(_))));
+    assert!(!handles.is_closed_for_recovery());
     assert!(
         remained_pending,
         "failed persistence must leave the waiter pending"
@@ -149,6 +159,84 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
         handles.block_tree.read().node_by_hash(next_hash).is_none(),
         "tree preparation must not survive a failed undo write"
     );
+    handles.undo_store = Arc::new(InMemoryUndoStore::default());
+    assert_eq!(handles.apply_block(&payload)?.hash, next_hash);
+    Ok(())
+}
+
+#[test]
+fn unrecoverable_undo_failure_retains_committed_prefix_and_closes_admission()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    chain.block_body_store = Some(Arc::new(crate::test_fixtures::MemoryBodies::default()));
+    let genesis = chain
+        .apply_block(&BlockPayload::from_local(Network::Regtest.genesis_block()))?
+        .tip;
+    chain.configure_checkpointing(
+        dir.path(),
+        Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        None,
+    )?;
+    assert!(chain.publish_checkpoint()?.is_some());
+    let current = dir
+        .path()
+        .join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT)
+        .join("CURRENT");
+    let previous = std::fs::read(&current)?;
+    let committed_blocks = crate::window::DURABLE_HEAD_GROUP_BLOCKS;
+    let failed_height = u32::try_from(committed_blocks)? + 2;
+    chain.undo_store = Arc::new(RejectingUndoStore {
+        inner: InMemoryUndoStore::default(),
+        unrecoverable: true,
+        fail_from: failed_height,
+    });
+    let mut parent = BlockHash(genesis.hash);
+    let mut payloads = Vec::new();
+    for height in 1..=failed_height {
+        let block = mined_child(parent, height)?;
+        parent = block.block_hash();
+        payloads.push(BlockPayload::from_local(block));
+    }
+    let refs = payloads.iter().collect::<Vec<_>>();
+    let error = chain
+        .apply_window(&refs)
+        .expect_err("poisoned undo must fail");
+    assert_eq!(error.disposition, crate::WindowApplyDisposition::Fatal);
+    assert!(matches!(
+        error.source,
+        ApplyError::UndoPersistence(StorageError::Unrecoverable(_))
+    ));
+    assert_eq!(error.applied, committed_blocks);
+    assert_eq!(error.committed.len(), committed_blocks);
+    assert!(
+        error.invalidated.is_empty(),
+        "storage failure cannot invalidate headers"
+    );
+    let committed_hash = Hash256::from(payloads[committed_blocks - 1].block().block_hash());
+    let tip = chain
+        .applied_tip_snapshot()
+        .ok_or("committed prefix missing")?;
+    assert_eq!(
+        (tip.height, tip.hash),
+        (u32::try_from(committed_blocks)?, committed_hash)
+    );
+    assert_eq!(
+        chain.durable_head.load()?.ok_or("head missing")?.tip,
+        committed_hash
+    );
+    assert_eq!(chain.chain_events.snapshot().tip_hash, committed_hash);
+    assert!(chain.is_closed_for_recovery());
+    assert!(chain.shutdown_reader().is_triggered());
+    assert!(matches!(
+        chain.begin_transition(),
+        Err(ApplyError::Shutdown)
+    ));
+    assert!(matches!(
+        chain.publish_checkpoint(),
+        Err(crate::CheckpointError::ClosedForRecovery)
+    ));
+    assert_eq!(std::fs::read(current)?, previous);
     Ok(())
 }
 

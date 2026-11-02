@@ -14,6 +14,9 @@ pub enum StorageError {
     /// Backend-specific failure converted to a stable storage error.
     #[error("backend-specific: {0}")]
     Backend(String),
+    /// The backend cannot continue in this process; close and recover on reopen.
+    #[error("unrecoverable backend: {0}")]
+    Unrecoverable(String),
     /// Input would violate a backend-independent storage invariant.
     #[error("invalid operation: {0}")]
     InvalidOperation(&'static str),

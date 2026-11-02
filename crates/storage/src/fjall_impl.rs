@@ -9,6 +9,15 @@ use fjall::{CompressionType, Database, Keyspace, KeyspaceCreateOptions, PersistM
 
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
 
+fn map_fjall_error(error: fjall::Error) -> StorageError {
+    match error {
+        fjall::Error::Poisoned | fjall::Error::Unrecoverable => {
+            StorageError::Unrecoverable(error.to_string())
+        }
+        _ => StorageError::backend(error),
+    }
+}
+
 /// Fjall's default block-cache capacity for unbudgeted opens.
 pub const FJALL_DEFAULT_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -58,15 +67,12 @@ impl FjallStore {
         let db = Database::builder(path.as_ref())
             .cache_size(cache_bytes)
             .open()
-            .map_err(StorageError::backend)?;
+            .map_err(map_fjall_error)?;
         let mut keyspaces = Vec::with_capacity(ColumnFamily::ALL.len());
         for cf in ColumnFamily::ALL.iter().copied() {
             let opts = KeyspaceCreateOptions::default()
                 .data_block_compression_policy(CompressionPolicy::all(CompressionType::Lz4));
-            keyspaces.push(
-                db.keyspace(cf.name(), || opts)
-                    .map_err(StorageError::backend)?,
-            );
+            keyspaces.push(db.keyspace(cf.name(), || opts).map_err(map_fjall_error)?);
         }
         Ok(Self {
             db,
@@ -116,7 +122,7 @@ impl FjallStore {
                 if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Sync) {
                     let mut fjall_batch = self.db.batch();
                     self.stage_ops(&mut fjall_batch, batch.ops)?;
-                    fjall_batch.commit().map_err(StorageError::backend)?;
+                    fjall_batch.commit().map_err(map_fjall_error)?;
                     return Err(fault.injected_error());
                 }
             }
@@ -131,9 +137,9 @@ impl FjallStore {
             return self
                 .db
                 .persist(PersistMode::SyncAll)
-                .map_err(StorageError::backend);
+                .map_err(map_fjall_error);
         }
-        fjall_batch.commit().map_err(StorageError::backend)
+        fjall_batch.commit().map_err(map_fjall_error)
     }
 
     /// Stages `ops` into `fjall_batch` without committing.
@@ -253,7 +259,7 @@ impl KvStore for FjallStore {
         let _guard = self.write_lock.lock();
         self.keyspace(cf)?
             .insert(key, value)
-            .map_err(StorageError::backend)
+            .map_err(map_fjall_error)
     }
 
     fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
@@ -293,7 +299,7 @@ impl KvStore for FjallStore {
         }
         self.db
             .persist(PersistMode::SyncAll)
-            .map_err(StorageError::backend)
+            .map_err(map_fjall_error)
     }
 
     fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
@@ -401,4 +407,25 @@ fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_fjall_errors_keep_their_recovery_classification() {
+        for error in [fjall::Error::Poisoned, fjall::Error::Unrecoverable] {
+            let message = error.to_string();
+            assert!(
+                matches!(map_fjall_error(error), StorageError::Unrecoverable(reason) if reason == message)
+            );
+        }
+        assert!(matches!(
+            map_fjall_error(fjall::Error::Io(std::io::Error::other(
+                "retryable sentinel"
+            ))),
+            StorageError::Backend(_)
+        ));
+    }
 }
