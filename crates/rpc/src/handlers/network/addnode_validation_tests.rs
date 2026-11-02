@@ -3,6 +3,15 @@ use alloc::sync::Arc;
 use sonic_rs::JsonValueTrait;
 use sonic_rs::json;
 
+/// A context whose network handles carry the given node-wide
+/// `-v2transport` setting, as the node crate passes it from
+/// `p2p.v2_transport` into `NetworkHandles`.
+fn context_with_v2_transport(v2_transport: bool) -> Arc<Context> {
+    let mut handles = crate::context::ContextHandles::default();
+    handles.network.v2_transport = v2_transport;
+    Arc::new(Context::from_handles(handles))
+}
+
 #[test]
 fn addnode_rejects_bad_address() {
     let ctx = Arc::new(Context::new());
@@ -25,42 +34,80 @@ fn addnode_accepts_well_formed_input() {
     assert!(result.is_null());
 }
 
-/// Core's optional `v2transport` argument is not advertised: the named form
-/// answers an unknown-argument error and the positional third value answers
-/// a too-many-parameters error, so no caller can believe it selected a
-/// transport (per-dial choice is not plumbed; see the registry row).
+/// Core accepts the optional `v2transport` argument in every form
+/// (`src/rpc/net.cpp`); this node has no per-dial selection, so the value
+/// is validated against the node-wide setting: an omitted or null argument
+/// follows the setting, and an equal explicit value is a no-op confirmation.
 #[test]
-fn addnode_rejects_the_v2transport_argument() {
-    let ctx = Arc::new(Context::new());
-    let error = addnode(
-        &ctx,
-        &json!({"node": "127.0.0.1:8333", "command": "onetry", "v2transport": true}),
-    )
-    .err()
-    .unwrap_or_else(|| panic!("the named v2transport argument must be refused"));
-    assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
-    assert_eq!(error.to_string(), "Unknown named parameter v2transport");
-    for params in [
-        json!(["127.0.0.1:8333", "onetry", true]),
-        json!(["127.0.0.1:8333", "add", false]),
-        json!({"node": "127.0.0.1:8333", "command": "add", "v2transport": false}),
-    ] {
+fn addnode_accepts_an_absent_or_null_v2transport() {
+    for v2_transport in [false, true] {
+        let ctx = context_with_v2_transport(v2_transport);
+        for params in [
+            json!(["127.0.0.1:8333", "onetry"]),
+            json!(["127.0.0.1:8333", "onetry", null]),
+            json!({"node": "127.0.0.1:8333", "command": "onetry"}),
+            json!({"node": "127.0.0.1:8333", "command": "onetry", "v2transport": null}),
+        ] {
+            addnode(&ctx, &params)
+                .unwrap_or_else(|err| panic!("v2_transport={v2_transport} {params}: {err}"));
+        }
+    }
+}
+
+/// An explicit `v2transport` equal to the node-wide setting is accepted:
+/// the dial's transport already matches the request, so the argument is a
+/// no-op confirmation. Covers `true` on a v2-enabled node and `false` on a
+/// v2-disabled node, in the named and positional forms the framework sends.
+#[test]
+fn addnode_accepts_a_v2transport_equal_to_the_node_wide_setting() {
+    let cases = [
+        (
+            true,
+            json!({"args": ["127.0.0.1:8333", "onetry"], "v2transport": true}),
+        ),
+        (true, json!(["127.0.0.1:8333", "onetry", true])),
+        (
+            false,
+            json!({"args": ["127.0.0.1:8333", "onetry"], "v2transport": false}),
+        ),
+        (false, json!(["127.0.0.1:8333", "onetry", false])),
+    ];
+    for (v2_transport, params) in cases {
+        let ctx = context_with_v2_transport(v2_transport);
+        addnode(&ctx, &params)
+            .unwrap_or_else(|err| panic!("v2_transport={v2_transport} {params}: {err}"));
+    }
+}
+
+/// A `v2transport` differing from the node-wide setting is refused with
+/// Core's `-8` refusal shape, never silently ignored — per-dial selection
+/// is not plumbed. `true` on a v2-disabled node is Core's own refusal case.
+#[test]
+fn addnode_refuses_a_v2transport_differing_from_the_node_wide_setting() {
+    const CONFLICT: &str = "v2transport conflicts with this node's -v2transport setting; per-dial transport selection is not supported (see -v2transport)";
+    let cases = [
+        (
+            false,
+            json!({"node": "127.0.0.1:8333", "command": "onetry", "v2transport": true}),
+        ),
+        (false, json!(["127.0.0.1:8333", "onetry", true])),
+        (
+            true,
+            json!({"node": "127.0.0.1:8333", "command": "add", "v2transport": false}),
+        ),
+        (true, json!(["127.0.0.1:8333", "add", false])),
+    ];
+    for (v2_transport, params) in cases {
+        let ctx = context_with_v2_transport(v2_transport);
         let error = addnode(&ctx, &params)
             .err()
-            .unwrap_or_else(|| panic!("{params}: v2transport must not be accepted"));
-        let expected = if params.is_array() {
-            (
-                "invalid params: too many parameters",
-                RpcError::INVALID_PARAMS,
-            )
-        } else {
-            (
-                "Unknown named parameter v2transport",
-                RpcError::CORE_INVALID_PARAMETER,
-            )
-        };
-        assert_eq!(error.code(), expected.1, "{params}: {error}");
-        assert_eq!(error.to_string(), expected.0, "{params}: {error}");
+            .unwrap_or_else(|| panic!("v2_transport={v2_transport} {params} must be refused"));
+        assert_eq!(
+            error.code(),
+            RpcError::CORE_INVALID_PARAMETER,
+            "{params}: {error}"
+        );
+        assert_eq!(error.to_string(), CONFLICT, "{params}: {error}");
     }
 }
 

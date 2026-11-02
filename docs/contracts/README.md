@@ -12,7 +12,7 @@
 - [mempool-mutations.md](mempool-mutations.md): `MPL-01`–`MPL-04`.
 - [mempool-policy.md](mempool-policy.md): `POL-01`–`POL-06`.
 - [pool.md](pool.md): `POOL-01`–`POOL-09`.
-- [external-api.md](external-api.md): `API-01`–`API-35`.
+- [external-api.md](external-api.md): `API-01`–`API-36`.
 - [wallet-facing.md](wallet-facing.md): `WF-01`–`WF-03`.
 - [p2p-wire.md](p2p-wire.md): `P2P-01`–`P2P-11`.
 - [synchronization.md](synchronization.md): `CONV-1`, `SYNC-01`–`SYNC-07`.

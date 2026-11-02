@@ -1523,6 +1523,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
             p2p: state.p2p(),
             local_services: state.p2p().local_services().to_u64(),
             user_agent: state.p2p().user_agent().to_owned(),
+            v2_transport: state.config().p2p.v2_transport,
         },
         mining: MiningHandles {
             mining_control: None,
