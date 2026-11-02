@@ -162,9 +162,7 @@ impl MiningCoordinator {
             .first()
             .and_then(|tx| tx.inputs.first())
             .map(|input| input.witness.len());
-        if segwit_active {
-            update_uncommitted_block_structures(block);
-        }
+        update_uncommitted_block_structures(block, segwit_active);
         witness_len
             != block
                 .txs
@@ -457,7 +455,7 @@ impl MiningControl for MiningCoordinator {
                         .is_segwit_active(prev.height.saturating_add(1))
                 })
         };
-        if segwit_active == Some(true) && needs_witness_reserved_value(payload.block()) {
+        if needs_witness_reserved_value(payload.block(), segwit_active == Some(true)) {
             let mut trial = payload.block().clone();
             if self.fill_uncommitted_witness(&mut trial) {
                 let filled = BlockPayload::from_local(trial);
