@@ -27,7 +27,7 @@ Step 8 is the load-bearing check: steps 1 through 7 bound resource use and rejec
 
 ## Activation
 
-The RPC path is `loadtxoutset` (`crates/rpc/src/handlers/chain.rs:104`), which routes through `crates/node/src/snapshot.rs:473`: `read_verified`, then `AssumeUtxoManager::activate_verified_snapshot` (`crates/chainstate/src/assumeutxo.rs:561`). The sequence:
+The RPC path is `loadtxoutset` (`crates/rpc/src/handlers/chain.rs`), which routes through `crates/node/src/snapshot.rs:473`: `read_verified`, then `AssumeUtxoManager::activate_verified_snapshot` (`crates/chainstate/src/assumeutxo.rs:561`). The sequence:
 
 1. The manager refuses unless disk status is `Uninitialized` (`require_unactivated`) and no full-revalidation marker exists (`AssumeUtxoError::AlreadyActive`, `FullRevalidationRequired`).
 2. `install_snapshot` (`crates/chainstate/src/lib.rs:590`) takes admission and the chain-transition lock and checks the tip is settled: the durable head and the applied tip must name the same `(hash, height, tx count)`. A mismatch fails closed and returns `SnapshotTipNotSettled`; this is the "validating head refusal" in reverse, refusing activation while a head transition is unsettled.
@@ -74,7 +74,7 @@ Historical progress checkpoints reuse the checkpoint format in a separate namesp
 
 ## Offline import
 
-`--corpus`, `--manifest`, and `--state` (`bin/bitcoin-rs/src/config.rs:52`) must be given together; any one alone is a config error. This is `run_offline_import` (`crates/node/src/offline_import.rs:396`): replay a pinned archive of blocks offline, validate it fully, and certify the resulting state.
+`--corpus`, `--manifest`, and `--state` (`bin/bitcoin-rs/src/config.rs`) must be given together; any one alone is a config error. This is `run_offline_import` (`crates/node/src/offline_import.rs:396`): replay a pinned archive of blocks offline, validate it fully, and certify the resulting state.
 
 Preconditions (`validate_offline_import_config_and_manifest`): assume-valid height must be 0, auxiliary indexes (txindex, blockfilterindex, script index) must be off, and no stale persisted index may remain. The manifest must be one of two schemas, `core-framed-archive-manifest-v1` or `bitcoin-rs-corpus-manifest` v1, with the node's network name and magic, contiguous heights from `start_height` to `stop_height`, and the archive's SHA-256 and byte count.
 

@@ -24,7 +24,7 @@ The manifest (`CheckpointManifestV1`) records, among other fields: generation nu
 
 ## The publish protocol
 
-`CheckpointPublisher` (`crates/chainstate/src/checkpoint/publisher.rs`) drives publication in `publish_transaction`. The node publishes on clean shutdown (`crates/node/src/lifecycle.rs:575`, the `published clean chainstate checkpoint` line) and when recovery work completes. The sequence:
+`CheckpointPublisher` (`crates/chainstate/src/checkpoint/publisher.rs`) drives publication in `publish_transaction`. The node publishes on clean shutdown (`crates/node/src/lifecycle.rs`, the `published clean chainstate checkpoint` line) and when recovery work completes. The sequence:
 
 1. Pause block admission (`ApplyAdmission::pause`) and freeze the chainstate journal writer, so the state cannot move under the write.
 2. Refuse if a disconnect marker is `InFlight` (`publisher.rs:205-220`), or if the applied tip is ahead of the durable head (`CheckpointError::AheadOfDurableHead`, `publisher.rs:225-235`). The durable head is the commit point; a checkpoint can never legitimately name a tip the head has not certified.
@@ -99,7 +99,7 @@ $ curl -s --user "$COOKIE" -H 'content-type: application/json' \
 $ kill -TERM <pid>
 ```
 
-Clean shutdown publishes generation 1 (`crates/node/src/lifecycle.rs:575`):
+Clean shutdown publishes generation 1 (`crates/node/src/lifecycle.rs`):
 
 ```
 {"message":"published clean chainstate checkpoint","generation":1},"target":"bitcoin_rs_node::lifecycle"}

@@ -43,7 +43,7 @@ test sync::tests::headers_presync::sufficient_work_chain_syncs_presync_then_redo
 
 Deployment state comes from `softfork_state` (`crates/chain/src/deployment.rs:88`): CSV and segwit are evaluated per block tree via `deployment_active`, falling back to the static network schedule when signalling data is unavailable. `signalling_deployments` (`deployment.rs:118`) reports which named deployments (`csv`, `segwit`, `deployment.rs:114`) are `Started` or `LockedIn` at a height. The connect path reads this per block to pick witness rules and version gates (`validation_contexts`, `crates/chainstate/src/connect.rs:179`).
 
-`ChainProgressReader` (`crates/chain/src/progress.rs:24`) is what `getblockchaininfo` serves: blocks and headers heights, bits, median time, `verification_progress`, and `chain_work`. `InitialBlockDownload` (`crates/chain/src/ibd.rs:8`) latches exit from IBD: once the applied tip's chainwork reaches `network.minimum_chain_work` and its header time is within `MAX_TIP_AGE_SECONDS = 24h` (`ibd.rs:6`), the latch closes and never reopens (`ibd.rs:34`). Relayers use the latch to delay announcements; see `with_ibd` wiring at `crates/node/src/lifecycle.rs:728`.
+`ChainProgressReader` (`crates/chain/src/progress.rs:24`) is what `getblockchaininfo` serves: blocks and headers heights, bits, median time, `verification_progress`, and `chain_work`. `InitialBlockDownload` (`crates/chain/src/ibd.rs:8`) latches exit from IBD: once the applied tip's chainwork reaches `network.minimum_chain_work` and its header time is within `MAX_TIP_AGE_SECONDS = 24h` (`ibd.rs:6`), the latch closes and never reopens (`ibd.rs:34`). Relayers use the latch to delay announcements; see `with_ibd` wiring at `crates/node/src/lifecycle.rs`.
 
 ## The download window and stager
 

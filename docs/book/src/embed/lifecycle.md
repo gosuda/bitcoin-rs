@@ -50,7 +50,7 @@ The P2P listener logs its configured address, not the bound one. A run with `--p
 `Node::shutdown(self)` consumes the node and runs the ordered sequence exactly once; repeated entry is inert (`EMB-07`). The order matters because later stages depend on earlier ones having stopped:
 
 1. The derived-index worker stops first under a bounded join. If it cannot stop, the teardown records `JoinDeadlineExceeded`, poisons the namespace, and never publishes a checkpoint while detached index I/O could still write.
-2. The chainstate shutdown latch triggers. The node latch is a child of the chainstate latch (`crates/node/src/state/open.rs:709`), so a chainstate failure reaches every node worker.
+2. The chainstate shutdown latch triggers. The node latch is a child of the chainstate latch (`crates/node/src/state/open.rs`), so a chainstate failure reaches every node worker.
 3. The event loop, RPC listeners, P2P core, ingress, and relay workers, bootstrap and checkpoint workers, and metrics stop and join.
 4. A clean checkpoint publishes only if every prior stage succeeded. The first failure is remembered while later stages still run.
 5. Fee-estimator history is saved, and the mempool snapshot is saved when `persist_mempool` is on and the teardown is clean.
