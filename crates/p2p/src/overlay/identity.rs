@@ -255,7 +255,16 @@ pub(super) fn create(path: &Path, text: &str, kind: Kind) -> io::Result<()> {
     })();
     let cleanup = fs::remove_file(&temporary);
     match result {
-        Ok(()) => cleanup,
+        Ok(()) => {
+            if let Err(error) = cleanup {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "overlay identity published; temporary file cleanup failed"
+                );
+            }
+            Ok(())
+        }
         Err(error) => {
             drop(cleanup);
             Err(error)
