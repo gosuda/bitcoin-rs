@@ -979,6 +979,7 @@ pub(crate) fn read_request_body(
     })
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 pub fn read_http_request(
     reader: &mut impl BufRead,
 ) -> Result<Option<HttpRequest>, RequestReadError> {
