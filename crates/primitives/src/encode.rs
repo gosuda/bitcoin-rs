@@ -222,8 +222,7 @@ fn witness_stack_size(witness: &crate::Witness) -> usize {
     )
 }
 
-pub(crate) fn encode_tx_base(tx: &Tx, sink: &mut impl Sink) {
-    sink.write_all(&tx.version.to_le_bytes());
+fn encode_tx_inputs_and_outputs(tx: &Tx, sink: &mut impl Sink) {
     write_compact(sink, compact_len(tx.inputs.len()));
     for input in &tx.inputs {
         input.consensus_encode(sink);
@@ -232,6 +231,11 @@ pub(crate) fn encode_tx_base(tx: &Tx, sink: &mut impl Sink) {
     for output in &tx.outputs {
         output.consensus_encode(sink);
     }
+}
+
+pub(crate) fn encode_tx_base(tx: &Tx, sink: &mut impl Sink) {
+    sink.write_all(&tx.version.to_le_bytes());
+    encode_tx_inputs_and_outputs(tx, sink);
     sink.write_all(&tx.lock_time.to_le_bytes());
 }
 
@@ -242,14 +246,7 @@ pub(crate) fn encode_tx(tx: &Tx, sink: &mut impl Sink) {
     }
     sink.write_all(&tx.version.to_le_bytes());
     sink.write_all(&[0x00, 0x01]);
-    write_compact(sink, compact_len(tx.inputs.len()));
-    for input in &tx.inputs {
-        input.consensus_encode(sink);
-    }
-    write_compact(sink, compact_len(tx.outputs.len()));
-    for output in &tx.outputs {
-        output.consensus_encode(sink);
-    }
+    encode_tx_inputs_and_outputs(tx, sink);
     for input in &tx.inputs {
         write_compact(sink, compact_len(input.witness.len()));
         for item in &input.witness {
