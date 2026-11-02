@@ -294,7 +294,10 @@ idle-gated cadence; both connection directions).
 - NG-16 closure verified directly (see `results/run3/gap-probes.md`): the
   two-node experiment that showed zero pings for 50s in run 2 now shows
   `ping: 29` sent and `pong: 29` received on BOTH sides within 1s of
-  `addnode onetry`, and no second ping inside 30s (2-minute cadence held).
+  `addnode onetry`, and no second ping inside the observed 30-second window
+  (the interval exceeds 30s; the 2-minute `PING_INTERVAL` cadence itself is
+  pinned by the keepalive unit tests and the P2P-02 contract, not by this
+  probe).
 
 **4 of the 46 selected candidates passed** (4 pass / 5 skip / 37 fail) - the
 same tests as runs 1-2, zero status changes, but **all six NG-16 tests moved
