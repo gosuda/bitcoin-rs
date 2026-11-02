@@ -1761,6 +1761,42 @@ class PureHelperTests(unittest.TestCase):
         self.assertEqual(stats["p50_ns"], 4)
         self.assertEqual(stats["max_ns"], 7)
 
+    def test_command_accepts_joined_placeholder_token(self) -> None:
+        command = module._command(
+            [
+                "{binary}",
+                "--rpc-bind",
+                "{rpc_bind}:{rpc_port}",
+                "--rpc-cookie",
+                "{cookie}",
+                "--config",
+                "{config}",
+                "--data-dir",
+                "{data_dir}",
+            ],
+            "candidate.command",
+        )
+        argv = module._expand_command(
+            command,
+            {
+                "{binary}": "/bin/node",
+                "{config}": "/tmp/config.toml",
+                "{data_dir}": "/tmp/data",
+                "{rpc_port}": "18443",
+                "{rpc_bind}": "127.0.0.1",
+                "{cookie}": "/tmp/rpc.cookie",
+            },
+        )
+        self.assertEqual(argv[2], "127.0.0.1:18443")
+        self.assertEqual(argv[4], "/tmp/rpc.cookie")
+
+    def test_command_rejects_unknown_placeholder_inside_token(self) -> None:
+        with self.assertRaises(module.ContractError):
+            module._command(
+                ["{binary}", "--rpc-bind", "{rpc_addr}", "--config", "{config}"],
+                "candidate.command",
+            )
+
     def test_endpoint_validation_rejects_dns_names(self) -> None:
         with self.assertRaises(module.ContractError):
             module._validate_endpoint("http://localhost:8332/", "endpoint")

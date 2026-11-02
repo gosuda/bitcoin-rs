@@ -73,6 +73,7 @@ CACHE_POLICIES = frozenset(CACHE_POLICY_ACTIONS)
 _CAMPAIGN_PLACEHOLDERS = frozenset(
     {"{binary}", "{config}", "{data_dir}", "{rpc_port}", "{rpc_bind}", "{cookie}"}
 )
+_CAMPAIGN_PLACEHOLDER_FIELD = re.compile(r"\{([a-z_]+)\}")
 _TCP_ESTABLISHED = 0x01
 _TCP_LISTEN = 0x0A
 _LOOPBACK_V4 = "0100007F"
@@ -1494,7 +1495,11 @@ def _command(value: object, field: str) -> tuple[str, ...]:
     if "{config}" not in command:
         raise ContractError(f"{field} must include {{config}}")
     for part in command:
-        if "{" in part and part not in _CAMPAIGN_PLACEHOLDERS:
+        for name in _CAMPAIGN_PLACEHOLDER_FIELD.findall(part):
+            if f"{{{name}}}" not in _CAMPAIGN_PLACEHOLDERS:
+                raise ContractError(f"{field} contains an unsupported placeholder")
+        remainder = _CAMPAIGN_PLACEHOLDER_FIELD.sub("", part)
+        if "{" in remainder or "}" in remainder:
             raise ContractError(f"{field} contains an unsupported placeholder")
     return command
 
@@ -1836,24 +1841,14 @@ def _open_verified_snapshot(
             os.close(snapshot)
 
 
-def _expand_command(
-    template: tuple[str, ...],
-    *,
-    binary: Path,
-    config: Path,
-    data_dir: Path,
-    port: int,
-    cookie: Path,
-) -> list[str]:
-    replacements = {
-        "{binary}": str(binary),
-        "{config}": str(config),
-        "{data_dir}": str(data_dir),
-        "{rpc_port}": str(port),
-        "{rpc_bind}": "127.0.0.1",
-        "{cookie}": str(cookie),
-    }
-    return [replacements.get(part, part) for part in template]
+def _expand_command(template: tuple[str, ...], replacements: dict[str, str]) -> list[str]:
+    def substitute(match: re.Match[str]) -> str:
+        token = f"{{{match.group(1)}}}"
+        if token not in replacements:
+            raise ContractError("arm command contains an unsupported placeholder")
+        return replacements[token]
+
+    return [_CAMPAIGN_PLACEHOLDER_FIELD.sub(substitute, part) for part in template]
 
 
 class _ArmProcess:
@@ -1909,11 +1904,14 @@ class _ArmProcess:
             try:
                 argv = _expand_command(
                     self.spec.command,
-                    binary=Path(f"/proc/self/fd/{binary_fd}"),
-                    config=Path(f"/proc/self/fd/{config_fd}"),
-                    data_dir=self.spec.datadir,
-                    port=self.port,
-                    cookie=self.cookie,
+                    {
+                        "{binary}": f"/proc/self/fd/{binary_fd}",
+                        "{config}": f"/proc/self/fd/{config_fd}",
+                        "{data_dir}": str(self.spec.datadir),
+                        "{rpc_port}": str(self.port),
+                        "{rpc_bind}": "127.0.0.1",
+                        "{cookie}": str(self.cookie),
+                    },
                 )
                 self._process = subprocess.Popen(
                     argv,
