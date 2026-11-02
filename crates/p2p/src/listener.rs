@@ -823,7 +823,9 @@ fn dial(
             "transport or network unavailable",
         ));
     };
-    let stream = stream.stop_reading_when(lease.clone());
+    let stream = stream
+        .stop_reading_when(lease.clone())
+        .recording_send_activity(lease.send_activity());
     if let Err(error) = shared.check_destination(addr, manual) {
         shared.peer_table.remove_current(addr, &lease);
         let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -1096,6 +1098,7 @@ fn run_handshake(
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
     let stream = match crate::CountingStream::from_connected(stream, counters)
         .map(|stream| stream.stop_reading_when(lease.clone()))
+        .map(|stream| stream.recording_send_activity(lease.send_activity()))
         .map_err(crate::wire::PeerError::Io)
     {
         Ok(stream) => stream,
@@ -1434,19 +1437,32 @@ impl Keepalive {
         self.last_recv = now;
     }
 
-    fn record_send(&mut self, now: Instant) {
-        self.last_send = now;
+    /// The message loop's ledger: the receive clock starts at loop entry
+    /// (nothing has been received in this session yet), the send clock at
+    /// the connection's last actual socket write, which the lease's
+    /// send-activity feed carries (the handshake's final bytes), so a
+    /// quiet handshake tail cannot mask send silence.
+    fn starting_message_loop(now: Instant, last_send: Instant) -> Self {
+        Self {
+            last_recv: now,
+            last_send,
+            ..Self::starting(now)
+        }
     }
 
+    /// The writer's accounting feed: advances only, because the observed
+    /// instant can predate a stall-shifted ledger.
     fn observe_send(&mut self, sent: Instant) {
         if sent > self.last_send {
             self.last_send = sent;
         }
     }
 
+    /// One probe's admission: it owes its cadence (`last_ping`) but is not
+    /// send activity — only actual socket writes feed the send-silence
+    /// clock, so a queued-but-unwritten probe cannot mask a stalled writer.
     fn record_probe(&mut self, now: Instant) {
         self.last_ping = Some(now);
-        self.record_send(now);
     }
 
     fn next_action(&self, now: Instant) -> KeepaliveAction {
@@ -1534,7 +1550,7 @@ mod keepalive_tests {
     fn receive_silence_expires_the_connection() {
         let t0 = Instant::now();
         let mut keepalive = Keepalive::starting(t0);
-        keepalive.record_send(t0 + TIMEOUT_INTERVAL);
+        keepalive.observe_send(t0 + TIMEOUT_INTERVAL);
         assert_eq!(
             keepalive.next_action(t0 + TIMEOUT_INTERVAL + Duration::from_secs(1)),
             KeepaliveAction::Expired
@@ -1556,7 +1572,7 @@ mod keepalive_tests {
     fn parked_loop_does_not_expire_on_receive_silence() {
         let t0 = Instant::now();
         let mut keepalive = Keepalive::starting(t0);
-        keepalive.record_send(t0 + TIMEOUT_INTERVAL);
+        keepalive.observe_send(t0 + TIMEOUT_INTERVAL);
         let now = t0 + TIMEOUT_INTERVAL + Duration::from_secs(1);
         assert_eq!(keepalive.next_action(now), KeepaliveAction::Expired);
         assert_ne!(
@@ -1581,7 +1597,7 @@ mod keepalive_tests {
     fn parked_loop_orders_the_same_probe_as_an_unparked_one() {
         let t0 = Instant::now();
         let mut keepalive = Keepalive::starting(t0);
-        keepalive.record_send(t0);
+        keepalive.observe_send(t0);
         assert_eq!(
             keepalive.next_action_while_parked(t0 + PING_INTERVAL),
             keepalive.next_action(t0 + PING_INTERVAL)
@@ -1594,7 +1610,7 @@ mod keepalive_tests {
         let mut keepalive = Keepalive::starting(t0);
         let fresh = t0 + TIMEOUT_INTERVAL / 2;
         keepalive.record_recv(fresh);
-        keepalive.record_send(fresh);
+        keepalive.observe_send(fresh);
         assert_eq!(
             keepalive.next_action(t0 + TIMEOUT_INTERVAL),
             KeepaliveAction::Ping
@@ -1603,6 +1619,23 @@ mod keepalive_tests {
         assert_eq!(
             keepalive.next_action(t0 + TIMEOUT_INTERVAL + PING_INTERVAL / 2),
             KeepaliveAction::Idle
+        );
+    }
+
+    #[test]
+    fn an_admitted_probe_is_not_send_activity() {
+        let t0 = Instant::now();
+        let expired = t0 + TIMEOUT_INTERVAL + Duration::from_secs(1);
+        let mut keepalive = Keepalive::starting_message_loop(t0, t0);
+        // The probe is admitted to the queue minutes after the last actual
+        // write; inbound traffic keeps the receive clock fresh the whole
+        // time. Expiry is still judged from the last actual write.
+        keepalive.record_probe(t0 + PING_INTERVAL);
+        keepalive.record_recv(expired);
+        assert_eq!(
+            keepalive.next_action(expired),
+            KeepaliveAction::Expired,
+            "send silence runs from the last actual write, not probe admission"
         );
     }
 
@@ -1830,7 +1863,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     let tx_relay_open =
         || ibd.is_none_or(|(latch, network)| !latch.is_active(unix_time_secs(), *network));
 
-    let mut keepalive = Keepalive::starting(Instant::now());
+    let mut keepalive = Keepalive::starting_message_loop(Instant::now(), lease.last_send());
     let budget = lease.budget_handle();
     let mut parked_since: Option<Instant> = None;
     let mut compact_reconstruction = crate::compact_blocks::Reconstruction::new();
@@ -1922,10 +1955,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             let serving = chain.serve_compact_filters(
                 &parked.pending,
                 &|| sink.headroom(),
-                &mut |response| {
-                    sink.send(response)
-                        .map(|()| keepalive.record_send(Instant::now()))
-                },
+                &mut |response| sink.send(response),
             )?;
             parked.last = crate::peer::FilterHalt::from_refusal(sink.refusal());
             if let crate::FilterServing::Pending(remainder) = serving {
@@ -2053,10 +2083,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             shared.tx_inventory.as_deref(),
             &tx_relay_open,
             &|| sink.headroom(),
-            &mut |response| {
-                sink.send(response)
-                    .map(|()| keepalive.record_send(Instant::now()))
-            },
+            &mut |response| sink.send(response),
             &mut |hash| shared.announce_block(lease.source(peer_addr.endpoint()), hash),
             &mut |items| {
                 shared
@@ -2384,7 +2411,6 @@ fn report_parked_misses<S>(
     let misses = std::mem::take(&mut peer.pending_notfound);
     lease
         .send_with(credit, crate::Message::NotFound(misses))
-        .map(|()| keepalive.record_send(Instant::now()))
         .map_err(|_| closed_queue())?;
     Ok(true)
 }
@@ -2401,10 +2427,7 @@ fn resume_parked_getdata<S>(
     budget: &Arc<crate::connection::OutboundBudget>,
 ) -> Result<(), crate::wire::PeerError> {
     let sink = ProductionSink::new(lease, None);
-    let mut send = |response: crate::Message| {
-        sink.send(response)
-            .map(|()| keepalive.record_send(Instant::now()))
-    };
+    let mut send = |response: crate::Message| sink.send(response);
     let compact_version = peer.compact_blocks.servable_version();
     let mut not_found = Vec::new();
     let tail = crate::dispatch::serve_getdata(
