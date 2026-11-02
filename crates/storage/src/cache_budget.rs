@@ -24,9 +24,8 @@ pub fn clamp_dbcache_bytes(dbcache_mb: u64) -> u64 {
 /// The returned shares therefore always sum to at most `total_bytes`.
 #[must_use]
 pub fn split_cache_budget_with_txindex(total_bytes: u64) -> Vec<CacheBudgetShare> {
-    let txindex_bytes =
-        u64::try_from(u128::from(total_bytes) * u128::from(TXINDEX_CACHE_SHARE_PCT) / 100)
-            .unwrap_or(total_bytes);
+    let txindex_bytes = total_bytes / 100 * TXINDEX_CACHE_SHARE_PCT
+        + total_bytes % 100 * TXINDEX_CACHE_SHARE_PCT / 100;
     cache_shares(total_bytes, txindex_bytes)
 }
 
