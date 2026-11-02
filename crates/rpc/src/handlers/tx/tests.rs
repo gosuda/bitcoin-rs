@@ -209,14 +209,18 @@ fn sendrawtransaction_answers_core_tx_size_for_hex_beyond_the_broadcast_bound() 
     let error = ctx
         .chain
         .with_stable_chainstate(|| super::sendrawtransaction(&ctx, &json!([raw.clone()])))
-        .expect_err("an oversize transaction must answer Core tx-size");
+        .expect_err("a transaction over the consensus bound must answer Core bad-txns-oversize");
 
     assert_eq!(
         error.code(),
         RpcError::CORE_VERIFY_REJECTED,
         "Core answers -26 for an oversize transaction: {error}"
     );
-    assert_eq!(error.to_string(), "tx-size");
+    assert_eq!(
+        error.to_string(),
+        "bad-txns-oversize",
+        "Core CheckTransaction answers bad-txns-oversize before the standard weight check"
+    );
 }
 
 // API-10

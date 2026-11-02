@@ -316,7 +316,7 @@ fn sendrawtransaction_honors_maxburnamount_before_admission() {
     );
     let refused = tx::sendrawtransaction(&rpc_ctx, &json!([raw, null, "0.00001"]))
         .expect_err("unknown prevout must still be refused");
-    assert_eq!(refused.code(), RpcError::CORE_VERIFY_ERROR);
+    assert_eq!(refused.code(), RpcError::CORE_VERIFY_REJECTED);
     let refused = tx::sendrawtransaction(&rpc_ctx, &json!([raw, null, "0.00000999"]))
         .expect_err("burn above the explicit cap must be refused");
     assert!(
@@ -329,7 +329,7 @@ fn sendrawtransaction_honors_maxburnamount_before_admission() {
             &json!({"hexstring": raw, "maxburnamount": "0.00001"}),
         )
         .expect_err("unknown prevout must still be refused");
-    assert_eq!(refused.code(), RpcError::CORE_VERIFY_ERROR);
+    assert_eq!(refused.code(), RpcError::CORE_VERIFY_REJECTED);
 }
 
 #[derive(Debug, Default)]
