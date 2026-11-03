@@ -3,6 +3,7 @@ use std::io::{Cursor, Read};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
+use bitcoin::p2p::ServiceFlags;
 
 use super::{
     HEADER_LEN, MAX_MESSAGE_PAYLOAD, Message, PeerError, encode_payload, read_message, wire_len,
@@ -610,6 +611,83 @@ fn version_relay_reads_any_nonzero_byte_as_true() -> Result<(), PeerError> {
         panic!("expected a version message");
     };
     assert!(version.relay, "Core reads any nonzero relay byte as true");
+    Ok(())
+}
+
+fn read_version_payload(
+    payload: &[u8],
+) -> Result<bitcoin::p2p::message_network::VersionMessage, PeerError> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&Magic::REGTEST.to_bytes());
+    let mut cmd = [0u8; 12];
+    cmd[..7].copy_from_slice(b"version");
+    frame.extend_from_slice(&cmd);
+    let len =
+        u32::try_from(payload.len()).map_err(|_| PeerError::PayloadTooLarge(payload.len()))?;
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&super::checksum(payload));
+    frame.extend_from_slice(payload);
+    let (message, _) = read_message(&mut Cursor::new(frame), Magic::REGTEST)?;
+    let Message::Version(version) = message else {
+        panic!("expected a version message");
+    };
+    Ok(version)
+}
+
+// P2P-01
+#[test]
+fn version_without_optional_fields_decodes_with_core_defaults() -> Result<(), PeerError> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&70_017u32.to_le_bytes());
+    payload.extend_from_slice(
+        &(ServiceFlags::NETWORK | ServiceFlags::WITNESS)
+            .to_u64()
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(&0i64.to_le_bytes());
+
+    let version = read_version_payload(&payload)?;
+    assert_eq!(version.version, 70_017);
+    assert_eq!(version.nonce, 1);
+    assert!(version.user_agent.is_empty());
+    assert_eq!(version.start_height, -1);
+    assert!(version.relay);
+
+    payload.extend_from_slice(&[0u8; 26]);
+    let version = read_version_payload(&payload)?;
+    assert_eq!(version.nonce, 1);
+    assert!(version.user_agent.is_empty());
+    assert!(version.relay);
+
+    payload.extend_from_slice(&[0u8; 26]);
+    payload.extend_from_slice(&7u64.to_le_bytes());
+    let version = read_version_payload(&payload)?;
+    assert_eq!(version.nonce, 7);
+    assert!(version.user_agent.is_empty());
+    assert_eq!(version.start_height, -1);
+    assert!(version.relay);
+    Ok(())
+}
+
+// P2P-01
+#[test]
+fn version_trailing_bytes_are_ignored_like_core() -> Result<(), PeerError> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&70_017u32.to_le_bytes());
+    payload.extend_from_slice(&0u64.to_le_bytes());
+    payload.extend_from_slice(&0i64.to_le_bytes());
+    payload.extend_from_slice(&[0u8; 26]);
+    payload.extend_from_slice(&[0u8; 26]);
+    payload.extend_from_slice(&9u64.to_le_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&0i32.to_le_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&[0xAA; 4]);
+
+    let version = read_version_payload(&payload)?;
+    assert_eq!(version.nonce, 9);
+    assert!(!version.relay);
+    assert_eq!(version.start_height, 0);
     Ok(())
 }
 

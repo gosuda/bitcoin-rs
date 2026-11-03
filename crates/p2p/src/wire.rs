@@ -8,7 +8,7 @@ use bitcoin::bip152::{
 };
 use bitcoin::consensus::encode::{self, Decodable};
 use bitcoin::p2p::Magic;
-use bitcoin::p2p::address::AddrV2Message;
+use bitcoin::p2p::address::{AddrV2Message, Address};
 use bitcoin::p2p::message::{CommandString, NetworkMessage};
 use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
 use bitcoin::p2p::message_bloom::{FilterAdd, FilterLoad};
@@ -687,7 +687,7 @@ pub(crate) fn decode_payload(command: &str, payload: &bytes::Bytes) -> Result<Me
     }
 
     let message = match command {
-        "version" => Message::Version(encode::deserialize::<VersionMessage>(payload)?),
+        "version" => Message::Version(decode_version(payload)?),
         "verack" => empty_payload(payload, Message::Verack)?,
         "addr" => Message::Addr(decode_addr(payload)?),
         "inv" => Message::Inv(decode_inventory(payload)?),
@@ -907,6 +907,68 @@ fn decode_sendcmpct(payload: &[u8]) -> Result<SendCmpct, PeerError> {
         send_compact: payload[0] != 0,
         version: u64::from_le_bytes(version),
     })
+}
+
+fn decode_version(payload: &[u8]) -> Result<VersionMessage, PeerError> {
+    let mut reader = payload;
+    let version = u32::consensus_decode(&mut reader)?;
+    let services = bitcoin::p2p::ServiceFlags::consensus_decode(&mut reader)?;
+    let timestamp = i64::consensus_decode(&mut reader)?;
+    let receiver = if reader.is_empty() {
+        unspecified_address()
+    } else {
+        Address::consensus_decode(&mut reader)?
+    };
+    let (sender, nonce) = if reader.is_empty() {
+        (unspecified_address(), 1)
+    } else {
+        let sender = Address::consensus_decode(&mut reader)?;
+        (sender, u64::consensus_decode(&mut reader)?)
+    };
+    let user_agent = if reader.is_empty() {
+        String::new()
+    } else {
+        let len = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+        let len = usize::try_from(len).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+        if len > reader.len() {
+            return Err(
+                bitcoin::consensus::encode::Error::ParseFailed("version subversion exceeds the payload")
+                    .into(),
+            );
+        }
+        let (agent, rest) = reader.split_at(len);
+        reader = rest;
+        String::from_utf8_lossy(agent).into_owned()
+    };
+    let start_height = if reader.is_empty() {
+        -1
+    } else {
+        i32::consensus_decode(&mut reader)?
+    };
+    let relay = if reader.is_empty() {
+        true
+    } else {
+        bool::consensus_decode(&mut reader)?
+    };
+    Ok(VersionMessage {
+        version,
+        services,
+        timestamp,
+        receiver,
+        sender,
+        nonce,
+        user_agent,
+        start_height,
+        relay,
+    })
+}
+
+fn unspecified_address() -> Address {
+    Address {
+        services: bitcoin::p2p::ServiceFlags::NONE,
+        address: [0; 8],
+        port: 0,
+    }
 }
 
 fn encode_command(command: &CommandString) -> Result<[u8; COMMAND_LEN], PeerError> {
