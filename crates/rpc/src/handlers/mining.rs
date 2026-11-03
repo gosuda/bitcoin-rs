@@ -251,7 +251,22 @@ pub(crate) fn generateblock(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let output = required_str(params, 0, "output is required")?;
     let payout =
         generateblock_payout_script(output, convert::bitcoin_network(ctx.chain.chain_network))?;
-    let transactions = parse_generateblock_transactions(ctx, params)?;
+    let array = params_array(params)?;
+    let Some(value) = array.get(1) else {
+        return Err(RpcError::InvalidParams("transactions is required"));
+    };
+    if value.is_null() {
+        return Err(RpcError::InvalidParams("transactions must be an array"));
+    }
+    let Some(entries) = value.as_array() else {
+        return Err(RpcError::InvalidType(
+            "transactions must be an array".to_owned(),
+        ));
+    };
+    let _decode = ctx
+        .tx_decode_admission
+        .reserve(entries.iter().filter_map(JsonValueTrait::as_str))?;
+    let transactions = parse_generateblock_transactions(ctx, entries)?;
     let submit = optional_bool(params, 2, true)?;
     let generated = control
         .generate(GenerateRequest {
@@ -369,20 +384,8 @@ fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcEr
 
 fn parse_generateblock_transactions(
     ctx: &Context,
-    params: &Value,
+    entries: &sonic_rs::Array,
 ) -> Result<Vec<GenerateTx>, RpcError> {
-    let array = params_array(params)?;
-    let Some(value) = array.get(1) else {
-        return Err(RpcError::InvalidParams("transactions is required"));
-    };
-    if value.is_null() {
-        return Err(RpcError::InvalidParams("transactions must be an array"));
-    }
-    let Some(entries) = value.as_array() else {
-        return Err(RpcError::InvalidType(
-            "transactions must be an array".to_owned(),
-        ));
-    };
     let mut transactions = Vec::with_capacity(entries.len());
     let mut snapshot: Option<MempoolMiningSnapshot> = None;
     for entry in entries {

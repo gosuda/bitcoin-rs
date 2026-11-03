@@ -1057,11 +1057,14 @@ impl JsonRpcVersion {
         }
     }
 
-    fn success_response(self, result: &Value, id: &Value) -> Value {
-        match self {
-            Self::Legacy => json!({"result": result, "error": null, "id": id}),
-            Self::V2 => json!({"jsonrpc": "2.0", "result": result, "id": id}),
-        }
+    fn success_response(self, result: Value, id: &Value) -> Value {
+        let mut response = match self {
+            Self::Legacy => json!({"result": null, "error": null, "id": id}),
+            Self::V2 => json!({"jsonrpc": "2.0", "result": null, "id": id}),
+        };
+        // Transfer large inspection results instead of serializing a second DOM.
+        let _ = response.insert("result", result);
+        response
     }
 
     fn error_response(self, error: &RpcError, id: &Value) -> Value {
@@ -1268,7 +1271,7 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
             close: worker_held,
             status: 200,
             reason: reason_for_status(200),
-            body: Some(json!(responses)),
+            body: Some(Value::from(responses)),
         };
     }
     let close = crate::registry::blocking_request(request);
@@ -1349,7 +1352,7 @@ fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
         };
     }
     match result {
-        Ok(result) => CallResponse::reply(version.success_response(&result, &id), version, None),
+        Ok(result) => CallResponse::reply(version.success_response(result, &id), version, None),
         Err(error) => {
             CallResponse::reply(version.error_response(&error, &id), version, Some(error))
         }

@@ -25,15 +25,17 @@ pub(crate) fn submitpackage(ctx: &Arc<Context>, params: &Value) -> Result<Value,
             "maxburnamount is out of range".to_owned(),
         ));
     }
+    let _decode = ctx
+        .tx_decode_admission
+        .reserve(raws.iter().filter_map(JsonValueTrait::as_str))?;
     let mut txs = Vec::with_capacity(raws.len());
     for raw in raws {
         let raw = raw
             .as_str()
             .ok_or_else(|| RpcError::InvalidType("raw transaction must be a string".to_owned()))?;
-        let tx = decode_tx(
-            raw,
-            "TX decode failed. Make sure the tx has at least one input.".to_owned(),
-        )?;
+        let tx = decode_tx(raw, || {
+            "TX decode failed. Make sure the tx has at least one input.".to_owned()
+        })?;
         for output in &tx.outputs {
             let script = output.script_pubkey.as_bytes();
             if (script.len() > bitcoin_rs_script::MAX_SCRIPT_SIZE

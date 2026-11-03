@@ -144,13 +144,17 @@ pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Response {
             if let Err(error) = crate::handlers::tx::check_broadcast_hex_len(hex) {
                 return bad_request(error);
             }
+            let ctx = handler.context();
+            let _decode = match ctx.tx_decode_admission.reserve([hex]) {
+                Ok(permit) => permit,
+                Err(error) => return service_unavailable(error.to_string()),
+            };
             let transaction = Vec::<u8>::from_hex(hex)
                 .ok()
                 .and_then(|bytes| deserialize::<Tx>(&bytes).ok());
             let Some(transaction) = transaction else {
                 return bad_request("TX decode failed. Make sure the tx has at least one input.");
             };
-            let ctx = handler.context();
             let txid = transaction.txid();
             match ctx.mempool.gateway.submit_local_transaction(
                 Arc::new(transaction),

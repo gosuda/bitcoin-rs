@@ -72,3 +72,8 @@ cap-fs-ext.workspace = true
 [[test]]
 name = "suite"
 path = "tests/suite.rs"
+
+# Independent process-global allocator custody for request heap measurements.
+[[test]]
+name = "tx_decode_heap"
+path = "tests/tx_decode_heap.rs"
