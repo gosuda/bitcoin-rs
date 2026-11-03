@@ -463,3 +463,87 @@ fn unfunded_over_standard_weight_tx_answers_tx_size_before_missing_inputs() {
         "Core IsStandardTx answers tx-size before bad-txns-inputs-missingorspent"
     );
 }
+
+// POL-03
+#[test]
+fn unfunded_dust_tx_answers_missing_inputs_before_ephemeral_dust() {
+    let pool = Mempool::new(crate::MempoolLimits::default());
+    let mut tx = standard_tx(1);
+    tx.inputs[0].previous_output = OutPoint::new(
+        bitcoin_rs_primitives::Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[9; 32])),
+        0,
+    );
+    tx.outputs[0].value = Amount::from_sat(1);
+    let context = PackageTxContext {
+        fee: 1_000,
+        vsize: 100,
+        sigop_cost: 0,
+        missing_inputs: true,
+    };
+    let fact = evaluate_one(
+        &pool,
+        &policy(),
+        &tx,
+        &[],
+        context,
+        None,
+        None,
+        &Bip68Admission::default(),
+    );
+    assert_eq!(
+        fact.reject_reason,
+        Some(AcceptanceRejectReason::MissingInputs),
+        "Core PreChecks answers bad-txns-inputs-missingorspent before PreCheckEphemeralTx"
+    );
+    let resolved = PackageTxContext {
+        missing_inputs: false,
+        ..context
+    };
+    let fact = evaluate_one(
+        &pool,
+        &policy(),
+        &tx,
+        &[],
+        resolved,
+        None,
+        None,
+        &Bip68Admission::default(),
+    );
+    assert_eq!(
+        fact.reject_reason,
+        Some(AcceptanceRejectReason::NonStandard(
+            StandardnessError::DustOutput
+        )),
+        "PreCheckEphemeralTx refuses a nonzero-fee dust transaction once its inputs resolve"
+    );
+}
+
+// POL-03
+#[test]
+fn coinbase_transaction_answers_core_coinbase_reason() {
+    let pool = Mempool::new(crate::MempoolLimits::default());
+    let mut tx = standard_tx(1);
+    tx.inputs[0].previous_output = OutPoint::null();
+    let context = PackageTxContext {
+        fee: 0,
+        vsize: 100,
+        sigop_cost: 0,
+        missing_inputs: true,
+    };
+    let fact = evaluate_one(
+        &pool,
+        &policy(),
+        &tx,
+        &[],
+        context,
+        None,
+        None,
+        &Bip68Admission::default(),
+    );
+    assert_eq!(
+        fact.reject_reason,
+        Some(AcceptanceRejectReason::Coinbase),
+        "Core PreChecks refuses a loose coinbase with reason coinbase"
+    );
+    assert_eq!(AcceptanceRejectReason::Coinbase.to_string(), "coinbase");
+}

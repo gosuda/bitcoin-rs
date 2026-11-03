@@ -1185,22 +1185,56 @@ fn coinbase_and_nonstandard_missing_transactions_are_not_held() {
     nonstandard.version = 4;
     let mut coinbase = (*child).clone();
     coinbase.inputs[0].previous_output = OutPoint::null();
-    for tx in [nonstandard, coinbase] {
+    for (tx, reason) in [
+        (
+            nonstandard,
+            AcceptanceRejectReason::NonStandard(crate::StandardnessError::Version),
+        ),
+        (coinbase, AcceptanceRejectReason::Coinbase),
+    ] {
         let tx = Arc::new(tx);
-        assert!(
-            gateway
-                .submit_transaction(
-                    Arc::clone(&tx),
-                    AdmissionOrigin::Peer(source()),
-                    None,
-                    1,
-                    &Coins(vec![])
-                )
-                .is_err()
+        assert_eq!(
+            gateway.submit_transaction(
+                Arc::clone(&tx),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &Coins(vec![])
+            ),
+            Err(SubmitError::Policy(reason))
         );
         assert!(gateway.is_rejected(Hash256::from(tx.txid())));
         assert_eq!(gateway.orphan_count(), 0);
     }
+}
+
+// POL-03
+#[test]
+fn dust_tx_with_an_unknown_parent_is_held_as_an_orphan() {
+    let gateway = gateway();
+    let (parent, child) = parent_and_child();
+    insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+    let mut tx = (*child).clone();
+    tx.outputs[0].value = Amount::from_sat(1);
+    let unknown = OutPoint::new(Txid(Hash256::from_le_bytes(&[7; 32])), 0);
+    tx.inputs.push(TxIn {
+        previous_output: unknown,
+        ..tx.inputs[0].clone()
+    });
+    assert_eq!(
+        gateway.submit_transaction(
+            Arc::new(tx),
+            AdmissionOrigin::Peer(source()),
+            None,
+            1,
+            &Coins(vec![])
+        ),
+        Ok(SubmitOutcome::Held {
+            missing_parents: vec![unknown.txid]
+        }),
+        "Core PreChecks answers bad-txns-inputs-missingorspent before PreCheckEphemeralTx"
+    );
+    assert_eq!(gateway.orphan_count(), 1);
 }
 
 struct ReplaceOrphanDuringSnapshot {

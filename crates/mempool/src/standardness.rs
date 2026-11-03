@@ -182,6 +182,8 @@ pub enum AcceptanceRejectReason {
     AlreadyInMempool,
     #[error("missing-inputs")]
     MissingInputs,
+    #[error("coinbase")]
+    Coinbase,
     #[error("min relay fee not met")]
     MinRelayFeeNotMet,
     #[error("max-fee-exceeded")]
@@ -282,17 +284,17 @@ pub(crate) fn evaluate_one(
             StandardnessError::Oversize,
         ))
     } else if tx.is_coinbase() {
-        Some(AcceptanceRejectReason::MissingInputs)
+        Some(AcceptanceRejectReason::Coinbase)
     } else if let Err(err) = is_standard_tx(tx, policy) {
         Some(AcceptanceRejectReason::NonStandard(err))
+    } else if context.missing_inputs {
+        Some(AcceptanceRejectReason::MissingInputs)
     } else if tx_has_dust_outputs(tx, policy.dust_relay_fee)
         && (context.fee != 0 || pool.modified_fee_for(txid, context.fee) != Ok(0))
     {
         Some(AcceptanceRejectReason::NonStandard(
             StandardnessError::DustOutput,
         ))
-    } else if context.missing_inputs {
-        Some(AcceptanceRejectReason::MissingInputs)
     } else if prevouts.len() == tx.inputs.len()
         && let Err(err) = is_standard_spend(tx, prevouts)
     {

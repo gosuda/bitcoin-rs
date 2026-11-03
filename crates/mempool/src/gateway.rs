@@ -211,6 +211,7 @@ impl PreparedAdmission {
             Some(
                 AcceptanceRejectReason::NonStandard(_)
                     | AcceptanceRejectReason::MissingInputs
+                    | AcceptanceRejectReason::Coinbase
                     | AcceptanceRejectReason::AlreadyInMempool
                     | AcceptanceRejectReason::TooManySigops
             )

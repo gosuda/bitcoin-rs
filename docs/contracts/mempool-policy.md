@@ -52,6 +52,9 @@ The deviation notes in that registry carry the rationale.
 - Fee-only prioritisation changes do not advance the public mempool sequence.
 - They invalidate prepared graphs and contextual rejection-cache entries.
 - Standardness, available inputs, sigop limits, modified fee floors, next-block finality, and graph policy precede scripts.
+- The dust output count stays with `IsStandardTx` before the available-inputs refusal.
+- Core's ephemeral zero-fee dust rule (`PreCheckEphemeralTx`) follows the available-inputs refusal.
+- A dust transaction with an unknown parent answers `bad-txns-inputs-missingorspent` and MAY be held as an orphan.
 - The caller maximum fee guard runs only after successful admission verification.
 - It compares the base fee to `CFeeRate::GetFee(vsize)` rather than a rounded rate quote.
 - An invalid transaction cannot select a more convenient maximum-fee error.
