@@ -2795,3 +2795,61 @@ fn expire_returns_none_when_fresh_and_some_when_stale() {
     );
     assert!(gateway.expire(AdmissionOrigin::Rpc, now).is_none());
 }
+
+#[test]
+fn failed_next_block_flag_pass_rejects_with_or_without_a_script_cache() {
+    use bitcoin_rs_script::VerifyFlags;
+
+    for cache in [
+        None,
+        Some(Arc::new(bitcoin_rs_consensus::ScriptExecutionCache::new())),
+    ] {
+        let caching = cache.is_some();
+        let gateway = Arc::new(MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            None,
+            ValidationEngine::Native,
+            cache,
+        ));
+        let candidate = standard_tx(0x64);
+        let mut request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
+        let outpoint = candidate.inputs[0].previous_output;
+        let prepare = |request: &AdmissionRequest| {
+            let mut prepared = MempoolGateway::prepare_admission(
+                &gateway.read(),
+                request,
+                AdmissionMode::Single,
+                crate::admission::AdmissionFence::Stable,
+                gateway.engine(),
+            );
+            assert!(prepared.rejection.is_none());
+            prepared.prevouts = vec![(
+                outpoint,
+                TxOut {
+                    value: Amount::from_sat(11_000),
+                    script_pubkey: Script::from_bytes(vec![0x51]),
+                },
+            )];
+            prepared
+        };
+
+        let mut violating = candidate.clone();
+        violating.inputs[0].script_sig = Script::from_bytes(vec![0x61]);
+        let violating = Arc::new(violating);
+
+        let mut prepared = prepare(&request);
+        request.tx = Arc::clone(&violating);
+        prepared.verify_scripts(&request, gateway.script_cache());
+        assert!(prepared.rejection.is_none(), "STANDARD alone accepts it");
+        assert_eq!(prepared.script_cache_key.is_some(), caching);
+
+        request.next_block_script_flags = VerifyFlags::STANDARD.union(VerifyFlags::SIGPUSHONLY);
+        let mut prepared = prepare(&admit_request(&gateway, &candidate, AdmissionOrigin::Rpc));
+        prepared.verify_scripts(&request, gateway.script_cache());
+        assert!(
+            matches!(prepared.rejection, Some((AdmitError::Consensus, _))),
+            "a failed next-block flag pass must reject, caching={caching}"
+        );
+        assert!(prepared.script_cache_key.is_none());
+    }
+}

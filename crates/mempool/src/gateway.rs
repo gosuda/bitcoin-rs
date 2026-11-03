@@ -328,11 +328,12 @@ impl PreparedAdmission {
         if self.rejection.is_some() {
             return;
         }
-        let Some(_) = script_cache.filter(|_| self.engine == ValidationEngine::Native) else {
-            return;
-        };
+        let caching = script_cache.is_some() && self.engine == ValidationEngine::Native;
         let flags = request.next_block_script_flags;
-        if let Err(error) = verify_transaction(
+        if !caching && VerifyFlags::STANDARD.contains(flags) {
+            return;
+        }
+        let next_block_pass = verify_transaction(
             &request.tx,
             &PrevoutMap::new(&self.prevouts),
             height,
@@ -340,16 +341,20 @@ impl PreparedAdmission {
             flags,
             self.engine,
             Some(&signature_cache),
-        ) {
-            tracing::warn!(
+        );
+        if let Err(error) = next_block_pass {
+            tracing::error!(
                 txid = %request.tx.txid(),
                 flags = flags.bits(),
                 error = %error,
-                "script cache second pass failed after a STANDARD pass; not caching",
+                "next-block script flags failed after a STANDARD pass; rejecting",
             );
+            self.reject(AdmitError::Consensus, default_scope);
             return;
         }
-        self.script_cache_key = Some((request.tx.wtxid(), flags));
+        if caching {
+            self.script_cache_key = Some((request.tx.wtxid(), flags));
+        }
     }
 }
 
