@@ -47,10 +47,12 @@ def encoded(value):
 class Witness:
     def __init__(self, config):
         url = urlsplit(config["url"])
+        address = ipaddress.ip_address(url.hostname)
         if (url.scheme != "http" or url.username or url.password or url.path not in ("", "/")
-                or url.query or url.fragment or not ipaddress.ip_address(url.hostname).is_loopback):
-            raise ValueError("use a numeric loopback HTTP RPC endpoint")
-        self.host, self.port = url.hostname, url.port
+                or url.query or url.fragment or not address.is_loopback or "%" in str(address)):
+            raise ValueError("use an unscoped numeric loopback HTTP RPC endpoint")
+        self.host = str(address)
+        self.port = http.client.HTTP_PORT if url.port is None else url.port
         self.replay = None
         self.cookie = Path(config["credentials"])
         self.settings = config["settings"]

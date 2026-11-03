@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - scripts/consensus_monitor.py
+      - crates/node/src/divergence.rs
       - bin/bitcoin-rs/tests/consensus_divergence.rs
       - bin/bitcoin-rs/tests/support/divergence_witness.py
       - .github/workflows/consensus-monitor.yml
