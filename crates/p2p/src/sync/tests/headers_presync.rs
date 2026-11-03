@@ -1396,3 +1396,69 @@ fn body_carried_low_work_valid_header_stays_deferred() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn forks_below_the_applied_tip_work_window_are_presynced_not_stored() -> TestResult {
+    let floor = ChainWork::from(WORK_PER_HEADER * 10);
+    let mut tree = BlockTree::new();
+    let genesis = genesis_header();
+    tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+    let harness = SyncHarness::with_chain_work(tree, crate::sync::syncing_ibd_latch(), floor);
+    install_budget(
+        &harness.sync,
+        SyncBudget {
+            max_pending_blocks: 0,
+            ..default_sync_budget(Network::Regtest)
+        },
+    );
+    let mut main = Vec::new();
+    let mut prev = genesis.compute_hash();
+    for height in 1..=400_u32 {
+        let header = test_header(prev, height);
+        prev = header.compute_hash();
+        main.push(header);
+    }
+    assert!(matches!(
+        harness.sync.chain.admit_headers(&main),
+        HeaderAdmission::Accepted { .. }
+    ));
+    let applied = {
+        let tree = harness.block_tree.read();
+        let tip_id = tree.lookup(Hash256::from(prev)).ok_or("missing main tip")?;
+        let node = tree.node(tip_id)?;
+        TipSnapshot {
+            tip_id,
+            chain_tx_count: node.chain_tx_count,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+        }
+    };
+    harness.applied_tip.store(Some(Arc::new(applied)));
+
+    let before = tree_node_count(&harness.sync);
+    let (addr, _lease, _rx) = connect(&harness.peers, 9799, 100_000);
+    let source = current_source(&harness.peers, addr);
+    for fork_index in 0..50_u32 {
+        let parent = &main[usize::try_from(19 + fork_index)?];
+        let fork = chain_on(parent, 20 + fork_index, 3);
+        deliver_headers(&harness.inbound_headers_tx, fork, source)?;
+        harness.sync.tick();
+    }
+    assert_eq!(
+        tree_node_count(&harness.sync),
+        before,
+        "forks far below tip work minus 144 blocks must not reach the block tree"
+    );
+    assert!(harness.peers.is_connected(addr));
+
+    let near_tip = chain_on(&main[389], 390, 3);
+    deliver_headers(&harness.inbound_headers_tx, near_tip, source)?;
+    harness.sync.tick();
+    assert_eq!(
+        tree_node_count(&harness.sync),
+        before + 3,
+        "a fork inside the 144-block work window is admitted directly"
+    );
+    Ok(())
+}

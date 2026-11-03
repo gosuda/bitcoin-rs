@@ -25,13 +25,17 @@ use crate::download_window::SyncPeer;
 use crate::peer_info::PeerInfo;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
-use bitcoin_rs_chain::{ChainError, NodeId, NodeStatus, validate_pow};
+use bitcoin_rs_chain::{BlockTree, ChainError, ChainWork, NodeId, NodeStatus, validate_pow};
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
 use std::time::Instant;
 use std::vec::Vec;
 
 const MAX_UNRESOLVED_DEMONSTRATED_TIPS: usize = 8;
+
+/// Core's `GetAntiDoSWorkThreshold` buffer: a fork must reach the applied tip's work minus this many
+/// blocks of work before its headers are stored.
+const NEAR_TIP_WORK_BLOCKS: u64 = 144;
 
 pub(super) const MAX_HEADER_BATCHES_PER_TICK: usize = 32;
 /// Stop between whole batches, never in a download-twice response page.
@@ -941,7 +945,7 @@ impl BlockSync {
                 let Some(anchor) = self.presync_anchor(headers) else {
                     return Some(self.chain.admit_headers(headers));
                 };
-                let minimum_work = self.chain.minimum_chain_work();
+                let minimum_work = self.anti_dos_work_threshold(&self.chain.block_tree());
                 let params = anchor.network.headers_sync_params();
                 HeadersSyncState::new(anchor, minimum_work, params, presync_salt())
             };
@@ -1074,11 +1078,24 @@ impl BlockSync {
         }
     }
 
+    fn anti_dos_work_threshold(&self, tree: &BlockTree) -> ChainWork {
+        let minimum_work = self.chain.minimum_chain_work();
+        let Some(tip) = self.chain.applied_tip() else {
+            return minimum_work;
+        };
+        let Ok(node) = tree.node(tip.tip_id) else {
+            return minimum_work;
+        };
+        let buffer = bitcoin_rs_chain::block_work(&node.header)
+            .saturating_mul(ChainWork::from(NEAR_TIP_WORK_BLOCKS));
+        minimum_work.max(node.chainwork.saturating_sub(buffer))
+    }
+
     fn presync_anchor(&self, headers: &[Header]) -> Option<HeaderAnchor> {
         let first = headers.first()?;
         let network = self.chain.network();
-        let minimum_work = self.chain.minimum_chain_work();
         let tree = self.chain.block_tree();
+        let minimum_work = self.anti_dos_work_threshold(&tree);
         let fork_id = tree.lookup(Hash256::from(first.prev_blockhash))?;
         let fork = tree.node(fork_id).ok()?;
         if fork.status == NodeStatus::Invalid {

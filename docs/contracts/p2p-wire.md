@@ -422,7 +422,7 @@ Proof for header ingress:
 - `BlockSync::route_headers_batch` (`sync/headers.rs`) is the sole caller.
 - `SyncChain::admit_headers` is reached directly (at-assumed-work fork, released chain) or with committed headers, never a collected-but-unverified batch.
 - Authority: Core `HeadersSync` (`headerssync.h`, `headerssync.cpp`, wired at `net_processing.cpp`).
-- Below-`minimum_chain_work` chains are collected first.
+- Chains below the anti-DoS work threshold are collected first. The threshold is `max(minimum_chain_work, applied-tip work - 144 blocks of the tip's work)` (Core `GetAntiDoSWorkThreshold`; `BlockSync::anti_dos_work_threshold`), so a low-work fork off an old block is never stored.
 - Checks include per-header continuity, own proof of work, and permitted difficulty transition.
 - The chain reduces to one salted commitment bit per `commitment_period` heights.
 - Header presync stores one-bit verification commitments in packed sixty-four-bit words.
