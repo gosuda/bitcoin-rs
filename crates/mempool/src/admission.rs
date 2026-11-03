@@ -671,14 +671,7 @@ impl MempoolGateway {
     #[must_use]
     pub fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
         let pool = self.pool.read();
-        if let Some(entry) = pool.entry_by_wtxid(&wtxid) {
-            return Some((*entry.tx).clone());
-        }
-        self.lifecycle
-            .lock()
-            .orphans
-            .get(wtxid)
-            .map(|held| (*held.tx).clone())
+        pool.entry_by_wtxid(&wtxid).map(|entry| (*entry.tx).clone())
     }
 
     #[cfg(any(test, feature = "test-seam"))]
