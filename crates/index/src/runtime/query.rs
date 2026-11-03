@@ -266,10 +266,31 @@ impl DerivedIndexQueryEngine {
     }
 
     fn script_budget(&self, budget: &mut QueryBudget) {
-        // One funding read, one spender read and their fallbacks per entry.
-        // The shared row/byte bounds still apply to the entire request.
         budget.remaining_body_reads = self.scripthash_limit.saturating_mul(4).saturating_add(1);
         budget.remaining_scans = self.scripthash_limit.saturating_mul(2).saturating_add(2);
+    }
+
+    fn script_page_requirements(&self, cursor: Option<Txid>) -> IndexCapabilities {
+        if cursor.is_some() && self.enabled.contains(IndexCapability::TxLookup) {
+            IndexCapabilities::SCRIPT_HISTORY.insert(IndexCapability::TxLookup)
+        } else {
+            IndexCapabilities::SCRIPT_HISTORY
+        }
+    }
+
+    fn require_cursor_tx_lookup_coverage(
+        cursor: Option<Txid>,
+        floors: &CapabilityFloors,
+    ) -> Result<(), TxQueryError> {
+        if cursor.is_some() && floors.tx_lookup > floors.script_history {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::PrunedPrefixUnproven {
+                    family: "transaction index",
+                    floor: floors.tx_lookup,
+                },
+            ));
+        }
+        Ok(())
     }
 
     fn query_health(&self) -> Result<(), TxQueryError> {
@@ -681,20 +702,19 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         last: Option<Txid>,
         limit: usize,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
-        self.with_snapshot(
-            IndexCapabilities::SCRIPT_HISTORY,
-            |snapshot, tip, budget, floors| {
-                self.script_budget(budget);
-                let prefix = ReadPrefix {
-                    anchor_id: tip.tip_id,
-                    height: tip.height,
-                    hash: tip.hash,
-                    floor: floors.script_history,
-                    bound: PrefixBound::ExactTip,
-                };
-                Self::history_page_for(snapshot, &prefix, budget, script, last, limit)
-            },
-        )
+        let required = self.script_page_requirements(last);
+        self.with_snapshot(required, |snapshot, tip, budget, floors| {
+            self.script_budget(budget);
+            Self::require_cursor_tx_lookup_coverage(last, &floors)?;
+            let prefix = ReadPrefix {
+                anchor_id: tip.tip_id,
+                height: tip.height,
+                hash: tip.hash,
+                floor: floors.script_history,
+                bound: PrefixBound::ExactTip,
+            };
+            Self::history_page_for(snapshot, &prefix, budget, script, last, limit)
+        })
     }
     fn history_snapshot(
         &self,
@@ -742,21 +762,18 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         cursor: Option<Txid>,
         limit: usize,
     ) -> Result<ScriptHistoryPage, TxQueryError> {
-        self.with_snapshot(
-            IndexCapabilities::SCRIPT_HISTORY,
-            |snapshot, tip, budget, floors| {
-                let prefix = ReadPrefix {
-                    anchor_id: tip.tip_id,
-                    height: tip.height,
-                    hash: tip.hash,
-                    floor: floors.script_history,
-                    bound: PrefixBound::ExactTip,
-                };
-                Self::confirmed_history_page_for(
-                    snapshot, &prefix, budget, scripthash, cursor, limit,
-                )
-            },
-        )
+        let required = self.script_page_requirements(cursor);
+        self.with_snapshot(required, |snapshot, tip, budget, floors| {
+            Self::require_cursor_tx_lookup_coverage(cursor, &floors)?;
+            let prefix = ReadPrefix {
+                anchor_id: tip.tip_id,
+                height: tip.height,
+                hash: tip.hash,
+                floor: floors.script_history,
+                bound: PrefixBound::ExactTip,
+            };
+            Self::confirmed_history_page_for(snapshot, &prefix, budget, scripthash, cursor, limit)
+        })
     }
 
     fn unspent_outputs(

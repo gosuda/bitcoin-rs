@@ -2894,3 +2894,106 @@ fn historical_deep_stale_branch_exhausts_shared_ancestry_budget()
     ));
     Ok(())
 }
+
+// IDX-02, IDX-04
+#[test]
+fn cursor_page_requires_txlookup_floor_that_covers_the_page()
+-> Result<(), crate::portable::TestError> {
+    let (genesis, chain, scripthash) = paying_chain()?;
+    let mut tree = BlockTree::new();
+    let mut tip_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    for block in &chain {
+        tip_id = tree.insert_header(block.header, NodeStatus::HeaderValid)?;
+    }
+    let watermark = watermark_for(&tree, tip_id)?;
+    let mut funding_rows = Vec::new();
+    for (height, block) in
+        std::iter::once((0_u32, &genesis)).chain([1_u32, 2_u32].into_iter().zip(chain.iter()))
+    {
+        for (index, tx) in block.txs.iter().enumerate() {
+            funding_rows.push(history_row(
+                scripthash,
+                height,
+                &[(
+                    tx.txid(),
+                    position_of_transaction(block, index)?,
+                    crate::types::ScriptHistoryOccurrence::FUNDING,
+                )],
+            ));
+        }
+    }
+    funding_rows.reverse();
+    let tip_txid = chain[1].txs[0].txid();
+    let middle_txids = [chain[0].txs[0].txid(), chain[0].txs[1].txid()];
+    let tx_scan = |txid: &Txid, height: u32| {
+        scan_response(
+            ColumnFamily::TxConfirmed,
+            TxidRow::scan_prefix(txid),
+            vec![(TxidRow::row(txid, height).to_db_row().to_vec(), vec![0_u8])],
+            true,
+        )
+    };
+    let scans = vec![
+        scan_response(
+            ColumnFamily::Funding,
+            ScriptHashRow::scan_prefix(scripthash),
+            funding_rows,
+            true,
+        ),
+        tx_scan(&tip_txid, 2),
+        tx_scan(&middle_txids[0], 1),
+        tx_scan(&middle_txids[1], 1),
+    ];
+    let (fixture, _) = HistoricalFixture::build(
+        tree,
+        tip_id,
+        HistoricalConfig {
+            tx_watermark: Some(watermark),
+            sh_watermark: Some(watermark),
+            tx_floor: 1,
+            sh_floor: 0,
+            scans,
+            bodies: Vec::new(),
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+
+    let first = fixture.engine.confirmed_history_page(scripthash, None, 3)?;
+    assert_eq!(
+        first.records.len(),
+        3,
+        "a first page lists the three newest records without tx lookups"
+    );
+
+    let paged = fixture
+        .engine
+        .confirmed_history_page(scripthash, Some(tip_txid), 3);
+    assert!(
+        matches!(
+            &paged,
+            Err(TxQueryError::Unavailable(
+                TxUnavailableCause::PrunedPrefixUnproven {
+                    family: "transaction index",
+                    floor: 1,
+                }
+            ))
+        ),
+        "a cursor page must refuse when the tx floor cannot cover it: {paged:?}"
+    );
+
+    let genesis_txid = genesis.txs[0].txid();
+    let paged = fixture
+        .engine
+        .confirmed_history_page(scripthash, Some(genesis_txid), 3);
+    assert!(
+        matches!(
+            &paged,
+            Err(TxQueryError::Unavailable(
+                TxUnavailableCause::PrunedPrefixUnproven { .. }
+            ))
+        ),
+        "a cursor below the tx floor must refuse instead of restarting: {paged:?}"
+    );
+    Ok(())
+}

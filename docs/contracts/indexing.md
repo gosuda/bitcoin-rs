@@ -107,6 +107,8 @@ Owners:
 - A duplicated transaction id lists once, at its newest covered occurrence.
 - A cursor page never repeats a listed record and never drops a listed row.
 - Therefore a cursor page requires the transaction index.
+- An enabled `TxLookup` whose watermark is not at the applied tip refuses a cursor page with `Retry`.
+- An enabled `TxLookup` whose floor does not cover the page refuses a cursor page with a typed unavailable cause.
 - Without `TxLookup`, the page starts from the first page, as `API-09` defines for an unknown cursor.
 
 ### `IDX-03`: Query gating and snapshot consistency
