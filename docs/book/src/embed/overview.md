@@ -28,7 +28,7 @@ In-process embedding fits tools that already own a Tokio runtime or an execution
 | Settled reads | `settled_snapshot()`, `subscribe_chain()`, `poll_chain()`, `pin_chain()`, `replay_chain()` | Replay is positional and bounded |
 | Historical index reads | `transaction_at_prefix()`, `script_history_at_prefix()`, `spender_at_prefix()` | Synchronous, caller-selected prefix |
 
-During quarantine, `tx_by_id()` returns bytes for the requested ID and `mempool_info()` reports local pool statistics for diagnosis. Neither result establishes transaction confirmation or finality. Check `consensus_quarantined()` before interpreting diagnostic observations as current. New broadcasts, mining work, fee estimates and historical prefix queries are unavailable.
+During quarantine, `tx_by_id()` returns the transaction for the requested ID and `mempool_info()` reports local pool statistics for diagnosis. Neither result establishes transaction confirmation or finality. Check `consensus_quarantined()` before interpreting diagnostic observations as current. New broadcasts, mining work, fee estimates, snapshot activation and historical prefix queries are unavailable.
 
 Every read mirrors an RPC fact without JSON: `snapshot()` is the coherent applied-tip cell, and `sync_progress()` runs the `getblockchaininfo` projection through the same `ChainHandles` code the RPC dispatcher uses. Settled reads exist for followers that must not observe a half-applied transition; the plain `snapshot()` keeps live applied-tip semantics.
 
