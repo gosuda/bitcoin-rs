@@ -23,7 +23,7 @@ use connect::{apply_block_admitted, apply_committed_block_admitted};
 use disconnect::disconnect_block_admitted;
 pub use durable::recover_disconnect_marker;
 use hashbrown::HashMap;
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use window::{PublishMode, apply_window_admitted};
@@ -125,6 +125,11 @@ const LOCAL_OVERLAY_TXID_SET_THRESHOLD: usize = 8;
 pub(crate) struct ApplyAdmission {
     closed: LatchWriter,
     barrier: RwLock<()>,
+    // Acquire after the apply barrier when both are needed. Recovery closure
+    // takes only this lock, including when its caller holds an apply permit.
+    publication: Mutex<()>,
+    #[cfg(test)]
+    close_attempted: AtomicBool,
 }
 
 impl ApplyAdmission {
@@ -132,6 +137,9 @@ impl ApplyAdmission {
         Self {
             closed: LatchWriter::new(),
             barrier: RwLock::new(()),
+            publication: Mutex::new(()),
+            #[cfg(test)]
+            close_attempted: AtomicBool::new(false),
         }
     }
 
@@ -153,7 +161,7 @@ impl ApplyAdmission {
     }
 
     pub(crate) fn close(&self) -> RwLockWriteGuard<'_, ()> {
-        self.closed.trigger();
+        self.close_permanently();
         self.barrier.write()
     }
 
@@ -162,6 +170,9 @@ impl ApplyAdmission {
     }
 
     pub(crate) fn close_permanently(&self) {
+        #[cfg(test)]
+        self.close_attempted.store(true, Ordering::Release);
+        let _publication = self.publication.lock();
         self.closed.trigger();
     }
 
