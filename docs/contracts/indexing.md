@@ -178,8 +178,16 @@ Owners:
 - This format provides newest-first history-occurrence rows with inverted heights, 43-byte live rows, and 6-byte positions.
 - The format is owned by `docs/benchmarks/scriptindex-format.md`.
 - Every older marker returns `IndexError::UnsupportedTxIndexFormatVersion`.
-- In that case, `open_writer` in `crates/index/src/runtime/startup.rs` full-resets the derived store for rebuild without an in-place upgrade path.
+- In that case, `crates/index/src/runtime/startup/rebuild.rs` recreates the closed derived namespace for rebuild without an in-place upgrade path.
+- A missing format marker with persisted index rows requires the same namespace recreation.
+- A valid current reset claim for all capabilities returns `IndexError::FullResetRequired` on open. Startup recreates that namespace instead of resuming a row purge.
+- Startup writes and syncs `.txindex.reset` in the data root before it removes the index directory. The file contains `bitcoin-rs-derived-index-reset-v1` followed by a newline.
+- Startup syncs the parent directory before deletion. It deletes engine files without index-row scans or tombstone batches, then creates and opens a fresh namespace.
+- Startup removes and syncs the reset intent only after the fresh store opens. A restart with a valid intent completes deletion before it opens the engine.
+- An unknown intent, an indirect namespace path, or an unrelated backend error does not authorize deletion. Recreation errors fail the index worker.
+- Recreation work depends on engine files, not index keys. No constant filesystem latency is promised.
 - Selective reset under `IDX-04` covers corrupt watermarks, not versions.
+- Live capability resets retain their conditional row purge and monotonic fences. Startup namespace recreation starts before any reader or writer is published.
 - Reset recovery accepts only current 17-byte claims and 9-byte Idle states.
 - Idle versions MUST remain monotonic generations to prevent ABA races.
 - Obsolete or malformed claims return `InvalidResetMarker` without modifying derived rows.

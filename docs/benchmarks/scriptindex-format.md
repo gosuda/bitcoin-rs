@@ -4,7 +4,7 @@ This document owns the on-disk format of the derived index. It states the row fa
 
 ## Durability gate
 
-`IndexWriter::open` accepts one durability marker in `ColumnFamily::UtxoMeta`: key `[0x00, b'V']`, value `06 00 00 00`. The marker covers key layout and row-value widths. Any other marker returns `IndexError::UnsupportedTxIndexFormatVersion`. `open_writer` in `crates/index/src/runtime/startup.rs` then resets the derived namespace and rebuilds it from chainstate. There is no translator, no legacy reader, and no in-place upgrade. Authoritative chainstate bytes are untouched. The datadir-wide `CURRENT_SCHEMA` does not move.
+`IndexWriter::open` accepts one durability marker in `ColumnFamily::UtxoMeta`: key `[0x00, b'V']`, value `06 00 00 00`. The marker covers key layout and row-value widths. Any other marker returns `IndexError::UnsupportedTxIndexFormatVersion`. Namespace recovery in `crates/index/src/runtime/startup/rebuild.rs` then recreates the closed derived store and rebuilds it from chainstate under `IDX-05`. There is no translator, no legacy reader, and no in-place upgrade. Authoritative chainstate bytes are untouched. The datadir-wide `CURRENT_SCHEMA` does not move.
 
 ## Row families
 

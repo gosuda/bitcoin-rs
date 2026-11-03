@@ -42,6 +42,7 @@ impl<S: KvStore> IndexWriter<S> {
                 }
             }
         }
+        super::state::check_open_reset(indexer.store.as_ref())?;
         resume_capability_reset(indexer.store.as_ref(), generation, 0)?;
         Ok(Self {
             indexer,

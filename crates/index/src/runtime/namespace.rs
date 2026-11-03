@@ -20,17 +20,13 @@ impl NamespaceRegistry {
     }
 
     pub(super) fn validate_child(root: &Path, child: &str) -> Result<PathBuf, String> {
-        if child.is_empty() {
-            return Err("namespace child is empty".to_owned());
-        }
-        if child.contains(std::path::MAIN_SEPARATOR) {
-            return Err(format!("namespace child {child} contains a path separator"));
-        }
-        if child == "." || child == ".." {
-            return Err(format!("namespace child {child} is a path traversal"));
-        }
-        if Path::new(child).is_absolute() {
-            return Err(format!("namespace child {child} is absolute"));
+        let mut components = Path::new(child).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+        {
+            return Err(format!(
+                "namespace child {child:?} is not one normal path component"
+            ));
         }
         Ok(root.join(child))
     }
