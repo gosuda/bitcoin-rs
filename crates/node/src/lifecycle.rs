@@ -181,6 +181,7 @@ fn rpc_context_handles(
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
     pool: bitcoin_rs_rpc::context::PoolHandles,
+    quarantine: bitcoin_rs_chain::LatchReader,
 ) -> ContextHandles {
     let config = state.config();
     let chainstate = state.chainstate();
@@ -189,6 +190,7 @@ fn rpc_context_handles(
         Arc::new(move || chainstate.request_shutdown())
     };
     ContextHandles {
+        quarantine,
         silent_payments: config.rpc.silent_payments,
         compressed_transactions: config.rpc.compressed_transactions,
         shutdown_request: Some(shutdown_request),
@@ -244,9 +246,8 @@ fn bind_rpc_with_pool(
 ) -> Result<RpcBindings, RunError> {
     let config = state.config();
     let rpc_auth = Arc::new(config.rpc.auth.to_rpc_auth(&config.data_dir)?);
-    let handles = rpc_context_handles(state, mining_control, block_body_source, pool);
+    let handles = rpc_context_handles(state, mining_control, block_body_source, pool, quarantine);
     let context = Context::from_handles(handles)
-        .with_quarantine(quarantine)
         .with_esplora_derived_index(state.esplora_derived_index_query())
         .with_esplora_query_limit(
             std::num::NonZeroUsize::new(config.rpc.esplora_max_queries)

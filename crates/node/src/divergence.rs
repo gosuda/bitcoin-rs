@@ -28,10 +28,14 @@ impl DivergenceWatch {
         let detect = move || match std::fs::symlink_metadata(&marker) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => false,
             result => {
-                if let Err(error) = result {
-                    tracing::error!(%error, "cannot inspect the consensus quarantine marker");
+                match result {
+                    Err(error) => {
+                        tracing::error!(%error, "incident marker inspection failed; services suspended until restart")
+                    }
+                    Ok(_) => tracing::error!(
+                        "consensus incident marker present; mining and economic services suspended"
+                    ),
                 }
-                tracing::error!("consensus quarantine: mining and economic services suspended");
                 incident.trigger();
                 metric.set(1.0);
                 true

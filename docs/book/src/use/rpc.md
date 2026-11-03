@@ -165,7 +165,7 @@ REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test suite manifest_coverag
 
 `crates/rpc/core-compat.toml` pins the reference identities: the released Bitcoin Core 31.1 artifacts, the development kernel tree used by the oracle lane, and two replay corpora. Its `differential_harness` flag is currently `false`, so no row can claim `Supported`.
 
-The generated reference reports 0 Supported, 37 Deviation, 55 Implemented (unverified), 14 Extension, and 82 Unimplemented rows. "Implemented (unverified)" means the method ships. It does not mean its values were compared with Core.
+"Implemented (unverified)" means the method ships. It does not mean its values were compared with Core.
 
 The behavior clauses are owned by the external API contract, starting at [API-01](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/external-api.md#api-01-single-manifest-owner) and [API-02](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/external-api.md#api-02-json-rpc-mechanics-and-the-wallet-free-surface). Contract gaps stay gaps.
 

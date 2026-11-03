@@ -28,23 +28,16 @@ pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> 
     })
 }
 
-pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response> {
-    let ctx = handler.context();
+pub(super) fn post_route(path: &str) -> Option<fn(&Context, &[u8]) -> Response> {
     match path {
-        "/internal/txs" => Some(internal_transactions_scoped(
-            ctx.as_ref(),
-            body,
-            TransactionScope::All,
-        )),
-        "/internal/mempool/txs" => Some(internal_transactions_scoped(
-            ctx.as_ref(),
-            body,
-            TransactionScope::MempoolOnly,
-        )),
-        "/internal/txs/outspends/by-txid" => Some(internal_outspends_by_txid(ctx.as_ref(), body)),
-        "/internal/txs/outspends/by-outpoint" => {
-            Some(internal_outspends_by_outpoint(ctx.as_ref(), body))
+        "/internal/txs" => {
+            Some(|ctx, body| internal_transactions_scoped(ctx, body, TransactionScope::All))
         }
+        "/internal/mempool/txs" => {
+            Some(|ctx, body| internal_transactions_scoped(ctx, body, TransactionScope::MempoolOnly))
+        }
+        "/internal/txs/outspends/by-txid" => Some(internal_outspends_by_txid),
+        "/internal/txs/outspends/by-outpoint" => Some(internal_outspends_by_outpoint),
         _ => None,
     }
 }

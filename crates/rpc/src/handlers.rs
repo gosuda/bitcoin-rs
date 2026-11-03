@@ -138,7 +138,12 @@ impl Handler {
             }
         }?;
         if self.ctx.quarantined() {
-            if !admitted() {
+            let receipt = row.completes_with_receipt
+                && !(method == "generateblock"
+                    && params.get(2).and_then(Value::as_bool) == Some(false))
+                || matches!(row.execution, crate::registry::Execution::Scan)
+                    && params.get(0).and_then(Value::as_str) == Some("abort");
+            if !admitted() && !receipt {
                 return Err(RpcError::Quarantined);
             }
             if let Some(object) = result.as_object_mut() {

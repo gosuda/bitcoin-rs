@@ -6,7 +6,7 @@ The optional monitor in `scripts/consensus_monitor.py` MUST compare the same blo
 
 ### `DIV-02`: Incident publication
 
-The monitor owns the divergence decision. It MUST reproduce a direct valid/consensus-invalid disagreement in two observations before it publishes a confirmed incident. The network, bytes, parent, tips, settings, versions and verdicts MUST agree across the observations. A higher-work active chain that contains a hash with an invalid tree flag MUST raise suspicion only. A tip difference alone MUST NOT publish an incident.
+The monitor owns the divergence decision. It MUST reproduce a direct valid/consensus-invalid disagreement in two observations before it publishes a confirmed incident. Both observations MUST identify the same accepting witness and the same rejecting witness for the same bytes. The network, parent, tips, settings and versions MUST match across the observations. A higher-work active chain that contains a hash with an invalid tree flag MUST raise suspicion only. A tip difference alone MUST NOT publish an incident.
 
 The first confirmed record in the private node data directory is the single durable containment decision. Publication MUST preserve a prior incident. Evidence MUST have a finite size. It MUST identify the block, its parent and work context, both witnesses, and the observation time. The monitor MUST NOT submit blocks or change an authoritative chain or peer score.
 
@@ -14,7 +14,7 @@ The first confirmed record in the private node data directory is the single dura
 
 The node MUST read the record before it opens mining service admission. At runtime it MUST latch containment when it observes the record. A marker access error MUST suspend exposed services. It MUST NOT count as a peer consensus rejection.
 
-The latch MUST cancel template preparation and long polls, refuse fresh jobs and local block submissions, invalidate pool work, and disconnect mining sessions. Work already admitted to a chain transition MAY finish. The node MUST NOT reverse such a transition. Economic JSON-RPC, REST and Esplora calls MUST report unavailability. Diagnostic access MUST include incident health, hash-addressed block examination and graceful shutdown. Indexes, peer observation and the storage recovery owner keep their normal authority.
+The latch MUST cancel template preparation and long polls, refuse fresh jobs and local block submissions, invalidate pool work, and disconnect mining sessions. Work already admitted to a chain transition MAY finish and MUST preserve its actual receipt. The node MUST NOT reverse such a transition. Economic JSON-RPC, REST and Esplora calls MUST report unavailability. Diagnostic access MUST include incident health, hash-addressed block examination and graceful shutdown. Indexes, peer observation and the storage recovery owner keep their normal authority.
 
 ### `DIV-04`: Restart and release
 

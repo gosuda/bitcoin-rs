@@ -70,14 +70,7 @@ pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     render_mining_info(&info)
 }
 
-pub(crate) fn getblockverdict(
-    ctx: &Arc<Context>,
-    params: &Value,
-    stop: &bitcoin_rs_chain::LatchReader,
-) -> Result<Value, RpcError> {
-    if stop.is_triggered() {
-        return Err(RpcError::Internal("RPC is stopping".into()));
-    }
+pub(crate) fn getblockverdict(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_at_most_params(params, 1)?;
     let hex = required_str(params, 0, "block hex is required")?;
     if hex.len() > 8_000_000 {

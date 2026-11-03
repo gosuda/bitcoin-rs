@@ -91,20 +91,19 @@ fn dispatch_get(
 
 #[must_use]
 pub(crate) fn route_post(handler: &Handler, surface: Surface, path: &str, body: &[u8]) -> Response {
-    crate::rest::economic_response(handler.context(), || submit(handler, surface, path, body))
-}
-
-fn submit(handler: &Handler, surface: Surface, path: &str, body: &[u8]) -> Response {
-    if surface == Surface::Backend {
+    if surface == Surface::Backend
+        && let Some(read) = backend::post_route(path)
+    {
         let ctx = handler.context();
-        let projection = Projection::new(&ctx);
-        let chain_view = projection.capture_chain_view();
-        if let Some(response) = backend::post(handler, path, body) {
-            return match projection.ensure_chain_view(chain_view.as_ref()) {
+        return crate::rest::economic_response(ctx, || {
+            let projection = Projection::new(ctx);
+            let chain_view = projection.capture_chain_view();
+            let response = read(ctx, body);
+            match projection.ensure_chain_view(chain_view.as_ref()) {
                 Ok(()) => response,
-                Err(response) => response,
-            };
-        }
+                Err(error) => error,
+            }
+        });
     }
     public::post(handler, path, body)
 }

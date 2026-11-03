@@ -100,6 +100,10 @@ mod tests {
     fn dispatch_error_maps_internal_variants_to_service_unavailable() {
         let response = super::dispatch_error(crate::RpcError::Parse("bad input".into()));
         assert_eq!(response.status, 503);
+        assert_eq!(
+            super::dispatch_error(crate::RpcError::Quarantined).status,
+            503
+        );
         let nf = super::dispatch_error(crate::RpcError::NotFound("missing"));
         assert_eq!(nf.status, 404);
     }

@@ -465,6 +465,7 @@ impl MiningControl for MiningCoordinator {
     }
 
     fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
+        self.ensure_work_open()?;
         let tip = self.chainstate.applied_tip_snapshot();
         let network_hashes_per_second = {
             let tree = self.block_tree.read();
@@ -478,20 +479,26 @@ impl MiningControl for MiningCoordinator {
             })
         };
         let warnings = Vec::new();
-        self.service
-            .mining_info(network_hashes_per_second, warnings, tip.as_deref())
+        let info = self
+            .service
+            .mining_info(network_hashes_per_second, warnings, tip.as_deref())?;
+        self.ensure_work_open()?;
+        Ok(info)
     }
 
     fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError> {
+        self.ensure_work_open()?;
         let tree = self.block_tree.read();
         let tip = self.chainstate.applied_tip_snapshot();
-        bitcoin_rs_mining::network_hash_ps(
+        let rate = bitcoin_rs_mining::network_hash_ps(
             &tree,
             tip.as_deref(),
             lookup,
             height,
             self.chainstate.network(),
-        )
+        )?;
+        self.ensure_work_open()?;
+        Ok(rate)
     }
 
     #[expect(
@@ -526,6 +533,7 @@ impl MiningControl for MiningCoordinator {
     }
 
     fn submit_header(&self, header: Header) -> Result<(), MiningControlError> {
+        self.ensure_work_open()?;
         {
             let tree = self.block_tree.read();
             let hash = header.compute_hash().into();
@@ -620,7 +628,9 @@ impl MiningControl for MiningCoordinator {
                 generated.push(GeneratedBlock { hash, hex });
             }
         }
-        self.ensure_work_open()?;
+        if !request.submit {
+            self.ensure_work_open()?;
+        }
         Ok(generated)
     }
 }
