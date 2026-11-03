@@ -98,6 +98,9 @@ impl CheckpointPublisher {
         retirement: DisconnectRetirement,
     ) -> core::result::Result<CheckpointWrite, CheckpointError> {
         let _exclusive_apply = self.admission.pause();
+        if self.admission.is_closed() {
+            return Err(CheckpointError::ClosedForRecovery);
+        }
         let journal_handle = self.journal.read().clone();
         let mut journal = journal_handle.as_ref().map(|journal| journal.lock());
         if let Some(writer) = journal.as_mut() {

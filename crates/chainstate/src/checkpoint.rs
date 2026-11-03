@@ -111,6 +111,8 @@ pub enum CheckpointError {
     Store(#[from] StoreError),
     #[error("checkpoint refused while disconnect of block {hash} at height {height} is in flight")]
     DisconnectInFlight { hash: Hash256, height: u32 },
+    #[error("checkpoint refused while the chainstate is closed for recovery")]
+    ClosedForRecovery,
     #[error(
         "checkpoint of tip {tip} at height {tip_height} is ahead of the durable head {head} at height {head_height}"
     )]

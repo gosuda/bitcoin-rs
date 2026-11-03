@@ -291,6 +291,8 @@ std::thread_local! {
         const { std::cell::Cell::new(false) };
     static BEFORE_CLEAN_CHECKPOINT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    static BEFORE_RECOVERY_RECHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -324,6 +326,25 @@ fn run_before_clean_checkpoint_hook() {
 
 #[cfg(not(test))]
 const fn run_before_clean_checkpoint_hook() {}
+
+#[cfg(test)]
+fn inject_before_recovery_recheck(hook: impl FnOnce() + 'static) {
+    BEFORE_RECOVERY_RECHECK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_before_recovery_recheck_hook() {
+    BEFORE_RECOVERY_RECHECK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+const fn run_before_recovery_recheck_hook() {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TeardownMode {
@@ -376,8 +397,6 @@ impl NodeServices {
             }
             &*state
         });
-        let closed_for_recovery =
-            state.is_some_and(|state| state.chainstate().is_closed_for_recovery());
         shutdown::mark_shutdown_stage();
         #[cfg(feature = "pool")]
         if let Some(mut pool) = self.pool.take() {
@@ -392,6 +411,9 @@ impl NodeServices {
 
         self.join_core_services(state, &mut first_error);
         self.join_bootstrap_and_signal_workers(state, &mut first_error);
+        run_before_recovery_recheck_hook();
+        let closed_for_recovery =
+            state.is_some_and(|state| state.chainstate().is_closed_for_recovery());
         publish_clean_checkpoint_if_eligible(state, mode, closed_for_recovery, &mut first_error);
         if let Some(state) = state {
             let history = state.mempool_reader().read().estimator_history();

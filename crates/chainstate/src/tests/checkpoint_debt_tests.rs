@@ -56,3 +56,32 @@ fn checkpoint_refuses_inflight_disconnect_and_preserves_state() -> TestResult {
     assert_eq!(checkpoint_dirs(&checkpoint_root)?, dirs_before);
     Ok(())
 }
+
+// SYNC-04
+#[test]
+fn checkpoint_refuses_a_closed_for_recovery_chainstate() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let network = Network::Regtest;
+    let mut handles = crate::test_fixtures::handles(network, Arc::new(UtxoSet::new()));
+    handles.block_body_store = Some(Arc::new(MemoryBodies::default()));
+    handles.apply_block(&BlockPayload::from_local(network.genesis_block()))?;
+    handles.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)), None)?;
+    assert!(handles.publish_checkpoint()?.is_some());
+
+    let checkpoint_root = dir.path().join(CHECKPOINT_ROOT);
+    let current_before = std::fs::read(checkpoint_root.join("CURRENT"))?;
+    let dirs_before = checkpoint_dirs(&checkpoint_root)?;
+
+    handles.fail_closed_for_recovery();
+    let result = handles.publish_checkpoint();
+    let Err(CheckpointError::ClosedForRecovery) = result else {
+        panic!("expected ClosedForRecovery refusal, got {result:?}");
+    };
+
+    assert_eq!(
+        std::fs::read(checkpoint_root.join("CURRENT"))?,
+        current_before
+    );
+    assert_eq!(checkpoint_dirs(&checkpoint_root)?, dirs_before);
+    Ok(())
+}

@@ -748,6 +748,43 @@ fn fatal_settlement_teardown_skips_the_checkpoint_and_answers_an_error() -> Resu
     }
     Ok(())
 }
+
+// SYNC-04
+#[test]
+fn recovery_closure_during_teardown_skips_the_checkpoint_and_answers_an_error()
+-> Result<(), TestError> {
+    let temp = tempfile::tempdir()?;
+    let config = isolated_config(&temp.path().join("node-recovery-recheck"));
+    let state = NodeState::open(config.clone(), None)?;
+    let (current, previous) = seed_checkpoint(&state)?;
+    let snapshot = state.data_dir().join("mempool-snapshot.dat");
+    assert!(
+        !snapshot.exists(),
+        "the fixture must not start from a stored mempool snapshot"
+    );
+    drop(state);
+
+    let node = start_node(config, RuntimeInputs::default(), false)?;
+    let chain = node.state.chainstate();
+    inject_before_recovery_recheck(move || chain.fail_closed_for_recovery());
+
+    match node.shutdown_blocking() {
+        Err(crate::embed::NodeError::ClosedForRecovery) => {}
+        other => panic!(
+            "a chainstate closed while teardown joins its workers must not exit cleanly: {other:?}"
+        ),
+    }
+    assert_eq!(
+        std::fs::read(&current)?,
+        previous,
+        "a chainstate closed during teardown must not publish a fresh checkpoint"
+    );
+    assert!(
+        !snapshot.exists(),
+        "a chainstate closed during teardown must not save the mempool snapshot"
+    );
+    Ok(())
+}
 const WITNESS_BOUND: Duration = Duration::from_secs(10);
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 
