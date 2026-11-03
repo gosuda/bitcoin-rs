@@ -8,6 +8,8 @@ The optional monitor in `scripts/consensus_monitor.py` MUST compare the same blo
 
 The monitor owns the divergence decision. It MUST reproduce a direct valid/consensus-invalid disagreement in two observations before it publishes a confirmed incident. Both observations MUST identify the same accepting witness and the same rejecting witness for the same bytes. The network, parent, tips, settings and versions MUST match across the observations. A higher-work active chain that contains a hash with an invalid tree flag MUST raise suspicion only. A tip difference alone MUST NOT publish an incident.
 
+If Core returns `duplicate-invalid`, the monitor MAY query a separate Core replay witness at the matching active parent. It MUST check the network, genesis, version, effective settings, parent height, work and deployments. Only a direct consensus rejection of the exact bytes on that witness MAY supply the rejecting verdict. A cached result or a successful proposal on the replay witness MUST NOT confirm an incident. The evidence MUST identify the cached reply, the replay witness and its direct rejection.
+
 The first confirmed record in the private node data directory is the single durable containment decision. Publication MUST preserve a prior incident. Evidence MUST have a finite size. It MUST identify the block, its parent and work context, both witnesses, and the observation time. The monitor MUST NOT submit blocks or change an authoritative chain or peer score.
 
 ### `DIV-03`: Service containment

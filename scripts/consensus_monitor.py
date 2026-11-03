@@ -51,6 +51,7 @@ class Witness:
                 or url.query or url.fragment or not ipaddress.ip_address(url.hostname).is_loopback):
             raise ValueError("use a numeric loopback HTTP RPC endpoint")
         self.host, self.port = url.hostname, url.port
+        self.replay = None
         self.cookie = Path(config["credentials"])
         self.settings = config["settings"]
         if len(encoded(self.settings)) > 4096:
@@ -77,6 +78,17 @@ class Witness:
             return reply["result"]
         finally:
             conn.close()
+
+
+def configured_witnesses(config):
+    witnesses = [Witness(config[name]) for name in ("local", "reference")]
+    endpoints = list(witnesses)
+    if "reference_replay" in config:
+        witnesses[1].replay = Witness(config["reference_replay"])
+        endpoints.append(witnesses[1].replay)
+    if len({(w.host, w.port) for w in endpoints}) != len(endpoints):
+        raise ValueError("use separate RPC endpoints for the node, reference and replay")
+    return witnesses
 
 
 def exact_block(raw):
@@ -137,6 +149,33 @@ def deployments(w, parent, height):
     return rules
 
 
+def core_proposal(w, network, raw):
+    rules = ["segwit", "signet"] if network == "signet" else ["segwit"]
+    return w.call("getblocktemplate", {"mode": "proposal", "rules": rules, "data": raw.hex()})
+
+
+def proposal_verdict(reason):
+    if isinstance(reason, str) and (reason in PERMANENT or
+            (reason.startswith("block-script-verify-flag-failed (") and reason.endswith(")"))):
+        return dict(category="consensus-invalid", reason=reason[:256])
+    return dict(category="pending", reason=str(reason or "proposal only; no active-chain proof")[:256])
+
+
+def replay_cached_rejection(w, tip, parent, height, raw):
+    replay = w.replay
+    snap = snapshot(replay)
+    if (any(snap[k] != tip[k] for k in ("network", "genesis", "version", "software", "settings"))
+            or snap["tip"] != parent or snap["height"] != height - 1
+            or snap["work"] != w.call("getblockheader", parent)["chainwork"]
+            or deployments(replay, parent, height - 1) != deployments(w, parent, height - 1)):
+        raise Unknown("replay witness does not match the reference and active parent")
+    verdict = proposal_verdict(core_proposal(replay, snap["network"], raw))
+    if replay.call("getbestblockhash") != parent:
+        raise Unknown("replay tip changed during validation")
+    return dict(verdict, cached_reason="duplicate-invalid",
+                replay=dict(snap, endpoint=[replay.host, replay.port]))
+
+
 def verdict(w, tip, block, raw, height, local):
     block_hash, parent = block["hash"], block["parent"]
     if height <= tip["height"] and w.call("getblockhash", height) == block_hash:
@@ -144,7 +183,7 @@ def verdict(w, tip, block, raw, height, local):
             return dict(category="pending", reason="same header, different block bytes")
         return dict(category="valid", reason="exact body on fully validated active chain",
                     chainwork=w.call("getblockheader", block_hash)["chainwork"])
-    if tip["tip"] != parent:
+    if tip["tip"] != parent and (local or w.replay is None):
         return dict(category="pending", reason="parent is not the applied tip")
     if local:
         reply = w.call("getblockverdict", raw.hex())
@@ -154,12 +193,17 @@ def verdict(w, tip, block, raw, height, local):
         if category not in ("pending", "consensus-invalid", "operational-failure"):
             raise Unknown("unknown local verdict")
         return dict(category=category, reason=str(reply["reason"] or category)[:256])
-    rules = ["segwit", "signet"] if tip["network"] == "signet" else ["segwit"]
-    reason = w.call("getblocktemplate", {"mode": "proposal", "rules": rules, "data": raw.hex()})
-    if isinstance(reason, str) and (reason in PERMANENT or
-            (reason.startswith("block-script-verify-flag-failed (") and reason.endswith(")"))):
-        return dict(category="consensus-invalid", reason=reason[:256])
-    return dict(category="pending", reason=str(reason or "proposal only; no active-chain proof")[:256])
+    reason = core_proposal(w, tip["network"], raw)
+    if reason == "duplicate-invalid" and w.replay is not None:
+        try:
+            return replay_cached_rejection(w, tip, parent, height, raw)
+        except Unknown as error:
+            return dict(category="pending", reason=str(error)[:256], cached_reason=reason)
+        except (RpcFailure, OSError, ValueError, KeyError, TypeError, AttributeError, IndexError, http.client.HTTPException) as error:
+            return dict(category="operational-failure", reason=str(error)[:256], cached_reason=reason)
+    if tip["tip"] != parent:
+        return dict(category="pending", reason="parent is not the applied tip")
+    return proposal_verdict(reason)
 
 
 def compare(witnesses, snapshots, raw):
@@ -240,7 +284,7 @@ def observe(witnesses, supplied=None):
         return dict(state="consistent", reason="same observed tip", witnesses=dict(zip(
             ("local", "reference"), snapshots))), None
     common = common_height(witnesses, min(a["height"], b["height"]))
-    last = None
+    last = cached = None
     for w, snap in zip(witnesses, snapshots):
         if snap["height"] <= common:
             continue
@@ -251,8 +295,13 @@ def observe(witnesses, supplied=None):
         last = compare(witnesses, snapshots, raw)
         if last["state"] == "suspected":
             return last, raw
+        if "cached_reason" in last["verdicts"]["reference"]:
+            cached = last
     flagged = invalid_tip(witnesses, snapshots, common)
-    return flagged or last or dict(state="inconclusive", reason="changing tips"), None
+    if flagged and cached and flagged["block"] == cached["block"]:
+        cached.update(state=flagged["state"], reason=flagged["reason"])
+        return cached, None
+    return flagged or cached or last or dict(state="inconclusive", reason="changing tips"), None
 
 
 def fsync_dir(path):
@@ -403,10 +452,7 @@ def main():
         return 0
     if not 1 <= args.interval <= 3600:
         parser.error("interval must be 1..3600 seconds")
-    config = json.loads(args.config.read_bytes())
-    witnesses = [Witness(config[name]) for name in ("local", "reference")]
-    if (witnesses[0].host, witnesses[0].port) == (witnesses[1].host, witnesses[1].port):
-        parser.error("use separate endpoints")
+    witnesses = configured_witnesses(json.loads(args.config.read_bytes()))
     raw = None
     if args.block:
         with args.block.open("rb") as f:

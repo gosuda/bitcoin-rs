@@ -36,6 +36,26 @@ python3 scripts/consensus_monitor.py --datadir /private/node watch --config /pri
 
 Use `--block /path/to/block.bin` for a specific binary block. Otherwise the monitor finds the first differing height, probes both branches, and checks up to 16 invalid tips per side against a higher-work validated chain. It compares active rule heights irrespective of their buried/versionbits RPC representation and excludes the signaling-only testdummy bit. It does not accept chain selection by work alone. The local `getblockverdict` RPC checks complete encoded bytes against the applied parent without submitting them. On Core, proposal mode supplies a possible rejection. A matching hash or a successful proposal does not establish consensus acceptance. Both proposal paths omit checks such as proof of work; the monitor requires the exact body on a fully validated active chain. Unknown reject reasons, administrative invalidation, policy rejection and incomplete proposals do not authorize quarantine. The local classification uses the chainstate error disposition. Only explicitly recognized Core consensus reasons can escalate.
 
+## When Core has already rejected the block
+
+Core 31.1 looks up the header hash before it validates a proposal. A cached consensus failure and a manual `invalidateblock` can both return `duplicate-invalid`. This reply does not identify which bytes failed or why. Without a replay witness the monitor cannot confirm this case.
+
+To check it, configure an optional `reference_replay` endpoint alongside `local` and `reference`. Use a separate Core process, RPC port, credentials file and private data directory. Add the following top-level entry to the existing configuration.
+
+```json
+{
+  "reference_replay": {
+    "url": "http://127.0.0.1:28332",
+    "credentials": "/private/replay.cookie",
+    "settings": {"consensus": {"network": "main", "profile": "BTC mainnet"}, "full_validation": true}
+  }
+}
+```
+
+Use the same verified Core build, effective consensus settings and full-validation policy as the primary reference. Prepare the disposable copy from a clean, stopped backup or independently replay the chain through the candidate's parent. Keep peer networking disabled. Check that `getbestblockhash` returns the parent and that `getblockheader` cannot find the candidate in the copy. Using an index that already contains the rejected hash keeps the duplicate result cached. The live node and primary reference can continue running. The replay process must be out of IBD with a recent validated tip, as required of the other witnesses.
+
+When the primary reports `duplicate-invalid`, the monitor sends the exact bytes to the replay process using read-only proposal validation. It checks the network, genesis, Core version, settings, parent height, work and deployments. The primary can already have advanced onto another branch with that parent. A recognized permanent rejection on replay can confirm the disagreement only if the accepting node serves those exact bytes on its validated chain and the second observation reproduces the evidence. A successful proposal, another cached verdict, an unavailable replay or a mismatched parent keeps quarantine off. The incident records the primary's cached reply and the replay endpoint, tip, version, settings and direct rejection reason. Historical cases beyond the witness freshness window require offline investigation.
+
 The latest observation replaces `consensus-divergence-latest.json` (at most 32 KiB). It reports consistent, suspected, confirmed or inconclusive. A matching tip means that the tips match at this observation. Reference outages, IBD, a tip older than a day, assumed chainstate, different settings, a moving parent, unavailable historical bytes, or different bytes for one header prevent confirmation. Sampling can miss a transient conflict. Historical side branches may need independent replay from the matching ancestor. A faulty or misconfigured witness can still misdiagnose a mismatch.
 
 ## During quarantine

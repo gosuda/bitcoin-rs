@@ -3,31 +3,37 @@ use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions};
 use sonic_rs::{JsonValueTrait as _, json};
 use std::path::Path;
 
+#[cfg(unix)]
+fn core_reference() -> Result<ProcessNode, TestError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mut core = ProcessNode::spawn_with(
+        Kind::Core,
+        &SpawnOptions {
+            extra_args: &[
+                "-assumevalid=0",
+                "-testactivationheight=bip34@500",
+                "-testactivationheight=dersig@1251",
+                "-testactivationheight=cltv@1351",
+                "-testactivationheight=csv@432",
+            ],
+            ..Default::default()
+        },
+    )?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| TestError::Missing("clock"))?
+        .as_secs();
+    core.rpc("setmocktime", &json!([now]))?;
+    Ok(core)
+}
+
 // DIV-01, DIV-02, DIV-03, DIV-04
 #[cfg(unix)]
 #[test]
 fn reference_pair_confirms_both_injected_consensus_disagreements() -> Result<(), TestError> {
     use bitcoin_rs_e2e::{differential::mine_common_chain, helpers};
-    use std::time::{SystemTime, UNIX_EPOCH};
     for rejected in ["local", "reference", "fork"] {
-        let mut core = ProcessNode::spawn_with(
-            Kind::Core,
-            &SpawnOptions {
-                extra_args: &[
-                    "-assumevalid=0",
-                    "-testactivationheight=bip34@500",
-                    "-testactivationheight=dersig@1251",
-                    "-testactivationheight=cltv@1351",
-                    "-testactivationheight=csv@432",
-                ],
-                ..Default::default()
-            },
-        )?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| TestError::Missing("clock"))?
-            .as_secs();
-        core.rpc("setmocktime", &json!([now]))?;
+        let mut core = core_reference()?;
         let options = SpawnOptions {
             binary: Some(Path::new(env!("CARGO_BIN_EXE_bitcoin-rs"))),
             ..Default::default()
@@ -120,6 +126,67 @@ fn reference_pair_confirms_both_injected_consensus_disagreements() -> Result<(),
         resumed.stop()?;
         core.stop()?;
     }
+    Ok(())
+}
+
+// DIV-01, DIV-02, DIV-03
+#[cfg(unix)]
+#[test]
+fn replays_a_real_core_cached_rejection_without_promoting_administrative_flags()
+-> Result<(), TestError> {
+    use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
+    use bitcoin::hex::DisplayHex as _;
+    use bitcoin_rs_e2e::{differential::mine_common_chain, helpers};
+
+    let mut core = core_reference()?;
+    let mut replay = core_reference()?;
+    let mut node = ProcessNode::spawn_with(
+        Kind::BitcoinRs,
+        &SpawnOptions {
+            binary: Some(Path::new(env!("CARGO_BIN_EXE_bitcoin-rs"))),
+            ..Default::default()
+        },
+    )?;
+    let common = mine_common_chain(&mut core, &mut node, 2)?;
+    for bytes in common.common_block_bytes {
+        assert!(
+            replay
+                .rpc("submitblock", &json!([bytes.as_hex().to_string()]))?
+                .is_null()
+        );
+    }
+    helpers::mine_bare_blocks(&mut node, 1)?;
+    let tip = node.rpc("getbestblockhash", &json!([]))?;
+    let body = node.rpc("getblock", &json!([tip, 0]))?;
+    let mut valid: bitcoin::Block = deserialize_hex(
+        body.as_str()
+            .ok_or(TestError::Missing("local block bytes"))?,
+    )?;
+    valid.txdata[0].output[0].value = bitcoin::Amount::from_sat(5_000_000_001);
+    let invalid = crate::support::regtest_blocks::block(
+        valid.header.prev_blockhash,
+        valid.header.time,
+        valid.txdata,
+    )?;
+    let output = std::process::Command::new("python3")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/divergence_witness.py"))
+        .arg("cached")
+        .args([
+            node.rpc_addr.port().to_string(),
+            core.rpc_addr.port().to_string(),
+            replay.rpc_addr.port().to_string(),
+            serialize_hex(&invalid),
+            helpers::funding_address()?.to_string(),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    node.stop()?;
+    core.stop()?;
+    replay.stop()?;
     Ok(())
 }
 
