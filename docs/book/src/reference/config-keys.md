@@ -6,11 +6,15 @@ Each setting has a TOML key. Most also have an uppercase `BITCOIN_RS_*` environm
 
 The `--config` file is strict. An unknown key is an error. The `--bitcoin-conf` file follows the Bitcoin Core file rules: keys without a mapping below are ignored, a line whose key starts with `-` is a parse error (`options in configuration file must be specified without leading -`), and the first `#` starts a comment. `rpcpassword` is the exception: a `#` in that line is refused as ambiguous because the parser cannot tell a comment from part of the password.
 
-Boolean values in `bitcoin.conf` follow Core's `InterpretBool`: an empty value is true, and any other value is `LocaleIndependentAtoi` (a full, in-range integer with an optional `-`), so `dnsseed=2` is true, `dnsseed=0`, `dnsseed=true`, and `dnsseed=+1` are false.
+Boolean values in `bitcoin.conf` follow Core's `InterpretBool`: an empty value is true, and any other value goes through Core's `LocaleIndependentAtoi`. That parser trims surrounding whitespace, accepts one leading `+` (but answers 0 for `+-`), parses only the numeric prefix of the value, and saturates out-of-range numbers at the 32-bit limits. So `dnsseed=2`, `dnsseed=+1`, `dnsseed=1abc`, and `dnsseed=2147483648` are true, while `dnsseed=0`, `dnsseed=true`, and `dnsseed=--1` are false.
+
+A key of the form `no<key>` negates a key that has a `bitcoin.conf` alias in the tables below, following Core's negation rule. `no<key>=1` (or any value that reads as true) stores the false reading: booleans become false, integer keys become `0`, string keys hold the word `0`, repeatable keys (`uacomment`, `onlynet`) become empty lists, and address, path, and `listen` keys are cleared. `no<key>=0` stores the true reading: booleans become true, integer keys become `1`, string and path keys hold the word `1`, repeatable keys still become empty lists, and an address key then refuses the word `1` as an invalid address, exactly like a literal line. Keys without a `bitcoin.conf` alias keep being ignored, with or without the `no` prefix.
+
+A line, a key, and a value are trimmed with the space, tab, carriage return, and line feed characters only, as in Core; any other leading or trailing whitespace is part of the key or the value.
 
 `bitcoin.conf` sections select a network: `[main]` or `[mainnet]`, `[test]`, `[testnet]`, or `[testnet3]`, `[testnet4]`, `[signet]`, `[regtest]`. The selected section overrides global keys. The network comes from the TOML file, the environment, or the CLI, and the later layer wins.
 
-`listen=0` in `bitcoin.conf` is the one special case: it sets an empty P2P listen list. There is no `includeconf` support.
+`listen=0` and `nolisten=1` in `bitcoin.conf` set an empty P2P listen list; `nolisten=0` leaves the default list in place. There is no `includeconf` support.
 
 Environment booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off`. TOML uses native booleans.
 
@@ -35,7 +39,7 @@ Environment booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `of
 | --- | --- | --- | --- |
 | `p2p_magic` | `BITCOIN_RS_P2P_MAGIC` | no | network magic |
 | `ua_comments` | no | `uacomment` (repeatable) | empty |
-| `p2p_listen` | `BITCOIN_RS_P2P_LISTEN` | `listen` (only `0` is handled) | `0.0.0.0:<p2p port>` |
+| `p2p_listen` | `BITCOIN_RS_P2P_LISTEN` | `listen` (`0` and `nolisten` clear the list) | `0.0.0.0:<p2p port>` |
 | `dns_seeds_enabled` | `BITCOIN_RS_DNS_SEEDS_ENABLED` | `dnsseed` | `true`; `false` for `drynet4` |
 | `asmap` | `BITCOIN_RS_ASMAP` | no | unset |
 | `p2p_noban` | `BITCOIN_RS_P2P_NOBAN` | no | empty |

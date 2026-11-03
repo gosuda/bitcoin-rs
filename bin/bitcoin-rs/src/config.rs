@@ -196,6 +196,10 @@ fn user_config_from_bitcoin_conf(
     parse_for_network(&text, network)
 }
 
+fn trim_conf_space(value: &str) -> &str {
+    value.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\r' | '\n'))
+}
+
 fn parse_for_network(text: &str, network: Network) -> Result<[UserConfig; 2], BinError> {
     let mut global = UserConfig::default();
     let mut selected = UserConfig::default();
@@ -204,7 +208,7 @@ fn parse_for_network(text: &str, network: Network) -> Result<[UserConfig; 2], Bi
 
     for (index, raw_line) in text.lines().enumerate() {
         let line_number = index + 1;
-        let line = strip_inline_comment(raw_line).trim();
+        let line = trim_conf_space(strip_inline_comment(raw_line));
         if line.is_empty() {
             continue;
         }
@@ -218,7 +222,7 @@ fn parse_for_network(text: &str, network: Network) -> Result<[UserConfig; 2], Bi
             ));
             continue;
         };
-        let key = raw_key.trim();
+        let key = trim_conf_space(raw_key);
         if key.starts_with('-') {
             errors.push(format!(
                 "parse error on line {line_number}: {line}, options in configuration file must be specified without leading -"
@@ -231,7 +235,7 @@ fn parse_for_network(text: &str, network: Network) -> Result<[UserConfig; 2], Bi
             ));
             continue;
         }
-        let value = raw_value.trim();
+        let value = trim_conf_space(raw_value);
         let outcome = match current_section_selected {
             None => apply_core_key(&mut global, key, value),
             Some(true) => apply_core_key(&mut selected, key, value),
@@ -285,6 +289,11 @@ macro_rules! emit_core_conf {
             if apply_core_exception(layer, key, value) {
                 return Ok(());
             }
+            if let Some(stripped) = key.strip_prefix("no") {
+                if apply_core_negation(layer, key, stripped, value)? {
+                    return Ok(());
+                }
+            }
             match key {
                 $(
                     $( $fckey => CoreValue::apply(key, value, &mut layer.$fid), )?
@@ -297,6 +306,32 @@ macro_rules! emit_core_conf {
                 _ => Ok(()),
             }
         }
+
+        fn apply_core_negation(
+            layer: &mut UserConfig,
+            key: &str,
+            stripped: &str,
+            value: &str,
+        ) -> Result<bool, String> {
+            let stored = !parse_core_bool(value);
+            match stripped {
+                $(
+                    $( $fckey => {
+                        CoreValue::negate(key, stored, &mut layer.$fid)?;
+                        Ok(true)
+                    }, )?
+                )*
+                $(
+                    $(
+                        $( $gckey => {
+                            CoreValue::negate(key, stored, &mut layer.$gid.$rfield)?;
+                            Ok(true)
+                        }, )?
+                    )*
+                )*
+                _ => Ok(false),
+            }
+        }
     };
 }
 
@@ -304,11 +339,17 @@ bitcoin_rs_node::option_rows!(emit_core_conf);
 
 trait CoreValue {
     fn apply(key: &str, value: &str, slot: &mut Self) -> Result<(), String>;
+    fn negate(key: &str, stored: bool, slot: &mut Self) -> Result<(), String>;
 }
 
 impl CoreValue for Option<bool> {
     fn apply(_key: &str, value: &str, slot: &mut Self) -> Result<(), String> {
         *slot = Some(parse_core_bool(value));
+        Ok(())
+    }
+
+    fn negate(_key: &str, stored: bool, slot: &mut Self) -> Result<(), String> {
+        *slot = Some(stored);
         Ok(())
     }
 }
@@ -318,6 +359,11 @@ impl CoreValue for Option<u64> {
         if let Ok(number) = value.parse() {
             *slot = Some(number);
         }
+        Ok(())
+    }
+
+    fn negate(_key: &str, stored: bool, slot: &mut Self) -> Result<(), String> {
+        *slot = Some(u64::from(stored));
         Ok(())
     }
 }
@@ -331,11 +377,21 @@ impl CoreValue for Option<usize> {
         );
         Ok(())
     }
+
+    fn negate(_key: &str, stored: bool, slot: &mut Self) -> Result<(), String> {
+        *slot = Some(usize::from(stored));
+        Ok(())
+    }
 }
 
 impl CoreValue for Option<String> {
     fn apply(_key: &str, value: &str, slot: &mut Self) -> Result<(), String> {
         *slot = Some(value.to_owned());
+        Ok(())
+    }
+
+    fn negate(_key: &str, stored: bool, slot: &mut Self) -> Result<(), String> {
+        *slot = Some(if stored { "1" } else { "0" }.to_owned());
         Ok(())
     }
 }
@@ -346,11 +402,21 @@ impl CoreValue for Option<Vec<String>> {
         entries.push(value.to_owned());
         Ok(())
     }
+
+    fn negate(_key: &str, _stored: bool, slot: &mut Self) -> Result<(), String> {
+        *slot = Some(Vec::new());
+        Ok(())
+    }
 }
 
 impl CoreValue for Option<PathBuf> {
     fn apply(_key: &str, value: &str, slot: &mut Self) -> Result<(), String> {
         *slot = Some(PathBuf::from(value));
+        Ok(())
+    }
+
+    fn negate(_key: &str, stored: bool, slot: &mut Self) -> Result<(), String> {
+        *slot = stored.then(|| PathBuf::from("1"));
         Ok(())
     }
 }
@@ -364,6 +430,14 @@ impl CoreValue for Option<SocketAddr> {
             }
             Err(_) => Err(format!("{key}={value:?} is not a valid socket address")),
         }
+    }
+
+    fn negate(key: &str, stored: bool, slot: &mut Self) -> Result<(), String> {
+        if stored {
+            return Self::apply(key, "1", slot);
+        }
+        *slot = None;
+        Ok(())
     }
 }
 
@@ -388,6 +462,11 @@ impl CoreValue for Option<Vec<bitcoin_rs_node::options::NetworkLabel>> {
                 entries.push(label);
             }
         }
+        Ok(())
+    }
+
+    fn negate(_key: &str, _stored: bool, slot: &mut Self) -> Result<(), String> {
+        *slot = Some(Vec::new());
         Ok(())
     }
 }
@@ -415,19 +494,33 @@ impl CoreValue for Option<Vec<bitcoin_rs_node::options::PeerNetwork>> {
         }
         Ok(())
     }
+
+    fn negate(_key: &str, _stored: bool, slot: &mut Self) -> Result<(), String> {
+        *slot = Some(Vec::new());
+        Ok(())
+    }
 }
+
 fn apply_core_exception(layer: &mut UserConfig, key: &str, value: &str) -> bool {
-    if key != "listen" {
+    let (name, negated) = match key.strip_prefix("no") {
+        Some(rest) => (rest, true),
+        None => (key, false),
+    };
+    if name != "listen" {
         return false;
     }
-    if !parse_core_bool(value) {
+    let clears = if negated {
+        parse_core_bool(value)
+    } else {
+        !parse_core_bool(value)
+    };
+    if clears {
         layer.p2p.listen = Some(Vec::new());
     }
     true
 }
 
 fn parse_core_bool(value: &str) -> bool {
-    let value = value.trim();
     if value.is_empty() {
         return true;
     }
@@ -435,19 +528,38 @@ fn parse_core_bool(value: &str) -> bool {
 }
 
 fn locale_independent_atoi(value: &str) -> i32 {
-    if value.starts_with('+') {
+    let trimmed =
+        value.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}'));
+    let unsigned = match trimmed.strip_prefix('+') {
+        Some(rest) if rest.starts_with('-') => return 0,
+        Some(rest) => rest,
+        None => trimmed,
+    };
+    let (negative, digits) = match unsigned.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, unsigned),
+    };
+    let digits = &digits[..digits
+        .bytes()
+        .position(|byte| !byte.is_ascii_digit())
+        .unwrap_or(digits.len())];
+    if digits.is_empty() {
         return 0;
     }
-    let magnitude = value.strip_prefix('-').unwrap_or(value);
-    let Ok(parsed) = magnitude.parse::<i64>() else {
-        return 0;
-    };
-    let signed = if value.starts_with('-') {
-        -parsed
+    let limit = i64::from(i32::MAX) + 1;
+    let mut magnitude: i64 = 0;
+    for byte in digits.bytes() {
+        magnitude = (magnitude * 10 + i64::from(byte - b'0')).min(limit);
+        if magnitude == limit {
+            break;
+        }
+    }
+    let signed = if negative {
+        -magnitude
     } else {
-        parsed
+        magnitude.min(i64::from(i32::MAX))
     };
-    i32::try_from(signed).unwrap_or(0)
+    i32::try_from(signed).unwrap_or(if negative { i32::MIN } else { i32::MAX })
 }
 
 fn parse_section(line: &str) -> Option<&str> {
@@ -541,6 +653,112 @@ uacomment=foo
             layers[0].rpc.rest,
             Some(false),
             "Core's InterpretBool answers atoi, so a non-integer word is false"
+        );
+    }
+
+    #[test]
+    fn negated_core_keys_store_core_reading_of_the_negated_setting() {
+        let layers = parse_for_network(
+            "
+nolisten=1
+nodnsseed=1
+nodbcache=1
+noprune=1
+nouacomment=1
+noproxy=1
+noonion=1
+noi2psam=1
+notorcontrol=1
+noi2pacceptincoming=1
+noproxyrandomize=1
+noonlynet=1
+nov2transport=1
+norest=1
+norpcuser=1
+norpcpassword=1
+norpccookiefile=1
+noscripthash-limit=1
+notxindex=1
+noblockfilterindex=1
+nomaxmempool=1
+",
+            Network::Regtest,
+        )
+        .unwrap_or_else(|error| panic!("negations parse: {error}"));
+        let layer = &layers[0];
+        assert_eq!(layer.p2p.listen, Some(Vec::new()));
+        assert_eq!(layer.p2p.dns_seeds, Some(false));
+        assert_eq!(layer.storage.dbcache_mb, Some(0));
+        assert_eq!(layer.storage.prune_target_mb, Some(0));
+        assert_eq!(layer.p2p.ua_comments, Some(Vec::new()));
+        assert_eq!(layer.p2p.proxy, None);
+        assert_eq!(layer.p2p.onion_proxy, None);
+        assert_eq!(layer.p2p.i2p_sam, None);
+        assert_eq!(layer.p2p.tor_control, None);
+        assert_eq!(layer.p2p.i2p_accept, Some(false));
+        assert_eq!(layer.p2p.proxy_randomize_credentials, Some(false));
+        assert_eq!(layer.p2p.onlynet, Some(Vec::new()));
+        assert_eq!(layer.p2p.v2_transport, Some(false));
+        assert_eq!(layer.rpc.rest, Some(false));
+        assert_eq!(layer.rpc.user.as_deref(), Some("0"));
+        assert_eq!(layer.rpc.password.as_deref(), Some("0"));
+        assert_eq!(layer.rpc.cookie, None);
+        assert_eq!(layer.indexes.scripthash_limit, Some(0));
+        assert_eq!(layer.indexes.txindex, Some(false));
+        assert_eq!(layer.indexes.blockfilterindex, Some(false));
+    }
+
+    #[test]
+    fn double_negatives_store_core_reading_of_true() {
+        let layers = parse_for_network(
+            "
+nolisten=0
+nodnsseed=0
+nodbcache=0
+nouacomment=0
+norpcuser=0
+norpccookiefile=0
+noscripthash-limit=0
+",
+            Network::Regtest,
+        )
+        .unwrap_or_else(|error| panic!("double negatives parse: {error}"));
+        let layer = &layers[0];
+        assert_eq!(layer.p2p.listen, None);
+        assert_eq!(layer.p2p.dns_seeds, Some(true));
+        assert_eq!(layer.storage.dbcache_mb, Some(1));
+        assert_eq!(layer.p2p.ua_comments, Some(Vec::new()));
+        assert_eq!(layer.rpc.user.as_deref(), Some("1"));
+        assert_eq!(layer.rpc.cookie.as_deref(), Some(Path::new("1")));
+        assert_eq!(layer.indexes.scripthash_limit, Some(1));
+    }
+
+    #[test]
+    fn a_double_negative_on_an_address_key_names_the_key_as_invalid() {
+        let error = match parse_for_network("noonion=0\n", Network::Regtest) {
+            Ok(_) => panic!("the stored word 1 is not an address"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("noonion"),
+            "the refusal names the negated key: {error}"
+        );
+    }
+
+    #[test]
+    fn conf_trimming_uses_core_s_ascii_set_only() {
+        let unknown_key = parse_for_network("\u{00a0}dnsseed=1\n", Network::Regtest)
+            .unwrap_or_else(|error| panic!("fixture parses: {error}"));
+        assert_eq!(
+            unknown_key[0].p2p.dns_seeds, None,
+            "Core trims a key with the space, tab, CR, and LF set only (config.cpp:45-57), so the non-breaking space is part of the key"
+        );
+        let padded_value = parse_for_network("dnsseed=\u{00a0}1\n", Network::Regtest)
+            .unwrap_or_else(|error| panic!("fixture parses: {error}"));
+        assert_eq!(
+            padded_value[0].p2p.dns_seeds,
+            Some(false),
+            "Core keeps a non-breaking space in the value, and InterpretBool's atoi answer is 0 (config.cpp:57, args.cpp:57-62)"
         );
     }
 }
@@ -668,12 +886,45 @@ onlynet=onion,i2p
             !word_is_false.p2p.dns_seeds_enabled,
             "Core's InterpretBool answers atoi, so a non-integer word is false"
         );
-        let overflow_is_false = load_conf("dnsseed=2147483648\n", Network::Mainnet)?;
-        assert!(!overflow_is_false.p2p.dns_seeds_enabled);
-        let plus_sign_is_false = load_conf("dnsseed=+1\n", Network::Mainnet)?;
+        let leading_plus_is_true = load_conf("dnsseed=+1\n", Network::Mainnet)?;
         assert!(
-            !plus_sign_is_false.p2p.dns_seeds_enabled,
-            "Core's from_chars rejects a leading plus sign"
+            leading_plus_is_true.p2p.dns_seeds_enabled,
+            "Core strips one leading '+' before from_chars (strencodings.h LocaleIndependentAtoi)"
+        );
+        let plus_minus_is_false = load_conf("dnsseed=+-1\n", Network::Mainnet)?;
+        assert!(
+            !plus_minus_is_false.p2p.dns_seeds_enabled,
+            "Core answers 0 for a '+-' prefix"
+        );
+        let double_minus_is_false = load_conf("dnsseed=--1\n", Network::Mainnet)?;
+        assert!(
+            !double_minus_is_false.p2p.dns_seeds_enabled,
+            "Core's from_chars rejects a second minus sign"
+        );
+        let minus_plus_is_false = load_conf("dnsseed=-+1\n", Network::Mainnet)?;
+        assert!(
+            !minus_plus_is_false.p2p.dns_seeds_enabled,
+            "Core's from_chars rejects a sign after the minus sign"
+        );
+        let numeric_prefix_is_true = load_conf("dnsseed=1abc\n", Network::Mainnet)?;
+        assert!(
+            numeric_prefix_is_true.p2p.dns_seeds_enabled,
+            "Core's from_chars parses the numeric prefix, so '1abc' is 1"
+        );
+        let overflow_is_true = load_conf("dnsseed=2147483648\n", Network::Mainnet)?;
+        assert!(
+            overflow_is_true.p2p.dns_seeds_enabled,
+            "Core saturates out-of-range atoi input at i32::MAX, which is nonzero"
+        );
+        let underflow_is_true = load_conf("dnsseed=-2147483649\n", Network::Mainnet)?;
+        assert!(
+            underflow_is_true.p2p.dns_seeds_enabled,
+            "Core saturates out-of-range atoi input at i32::MIN, which is nonzero"
+        );
+        let wide_overflow_is_true = load_conf("dnsseed=99999999999999999999\n", Network::Mainnet)?;
+        assert!(
+            wide_overflow_is_true.p2p.dns_seeds_enabled,
+            "Core saturates atoi input wider than i64 at i32::MAX, which is nonzero"
         );
         Ok(())
     }
