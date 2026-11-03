@@ -59,13 +59,13 @@ struct HeaderRecord {
 
 #[must_use]
 pub fn route(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Response {
-    economic_response(ctx, || route_get(ctx, path, query, enabled))
-}
-
-fn route_get(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Response {
     if !enabled {
         return not_found();
     }
+    economic_response(ctx, || route_get(ctx, path, query))
+}
+
+fn route_get(ctx: &Arc<Context>, path: &str, query: &str) -> Response {
     if let Some(suffix) = path.strip_prefix("/rest/tx/") {
         return route_tx(ctx, suffix);
     }
@@ -109,7 +109,10 @@ pub(crate) fn getutxos_suffix(path: &str) -> Option<&str> {
 
 #[must_use]
 pub fn route_post(ctx: &Arc<Context>, path: &str, body: &[u8], enabled: bool) -> Response {
-    economic_response(ctx, || post_getutxos(ctx, path, body, enabled))
+    if !enabled {
+        return not_found();
+    }
+    economic_response(ctx, || post_getutxos(ctx, path, body))
 }
 
 pub(crate) fn economic_response(ctx: &Context, produce: impl FnOnce() -> Response) -> Response {
@@ -122,10 +125,7 @@ pub(crate) fn economic_response(ctx: &Context, produce: impl FnOnce() -> Respons
     service_unavailable(RpcError::Quarantined.to_string())
 }
 
-fn post_getutxos(ctx: &Arc<Context>, path: &str, body: &[u8], enabled: bool) -> Response {
-    if !enabled {
-        return not_found();
-    }
+fn post_getutxos(ctx: &Arc<Context>, path: &str, body: &[u8]) -> Response {
     let Some(suffix) = getutxos_suffix(path) else {
         return not_found();
     };

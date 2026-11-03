@@ -158,6 +158,7 @@ fn stopped_pool_refuses_to_reinstall_a_cached_candidate() -> TestResult {
     let cached = candidate(100, 0xab)?;
     let _ = core.install(Arc::clone(&cached), Vec::new())?;
     stop.trigger();
+    assert!(core.with_active_job_book(|_| ()).is_none());
     assert_eq!(core.invalidate_active().len(), 1);
     assert!(matches!(
         core.install(cached, Vec::new()),

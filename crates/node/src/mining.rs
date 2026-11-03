@@ -465,7 +465,6 @@ impl MiningControl for MiningCoordinator {
     }
 
     fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
-        self.ensure_work_open()?;
         let tip = self.chainstate.applied_tip_snapshot();
         let network_hashes_per_second = {
             let tree = self.block_tree.read();
@@ -479,26 +478,20 @@ impl MiningControl for MiningCoordinator {
             })
         };
         let warnings = Vec::new();
-        let info = self
-            .service
-            .mining_info(network_hashes_per_second, warnings, tip.as_deref())?;
-        self.ensure_work_open()?;
-        Ok(info)
+        self.service
+            .mining_info(network_hashes_per_second, warnings, tip.as_deref())
     }
 
     fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError> {
-        self.ensure_work_open()?;
         let tree = self.block_tree.read();
         let tip = self.chainstate.applied_tip_snapshot();
-        let rate = bitcoin_rs_mining::network_hash_ps(
+        bitcoin_rs_mining::network_hash_ps(
             &tree,
             tip.as_deref(),
             lookup,
             height,
             self.chainstate.network(),
-        )?;
-        self.ensure_work_open()?;
-        Ok(rate)
+        )
     }
 
     #[expect(

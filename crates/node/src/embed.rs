@@ -65,6 +65,9 @@ impl Node {
     }
 
     pub fn mining_control(&self) -> Result<&dyn bitcoin_rs_mining::MiningControl, NodeError> {
+        if self.consensus_quarantined() {
+            return Err(NodeError::Quarantined);
+        }
         self.context
             .mining
             .mining_control
@@ -395,18 +398,7 @@ mod tests {
         ))
         .expect("diagnostic node starts");
         assert!(node.consensus_quarantined());
-        let mining = node.mining_control().expect("mining control");
-        assert!(mining.mining_info().is_err());
-        assert!(mining.network_hash_ps(120, -1).is_err());
-        assert!(
-            mining
-                .submit_header(
-                    bitcoin_rs_primitives::Network::Regtest
-                        .genesis_block()
-                        .header
-                )
-                .is_err()
-        );
+        assert!(matches!(node.mining_control(), Err(NodeError::Quarantined)));
         let tx = Tx {
             version: 2,
             lock_time: LockTime::ZERO,

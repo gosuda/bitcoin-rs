@@ -370,6 +370,16 @@ impl PoolCore {
         operation(&mut book)
     }
 
+    fn work_stopped(&self) -> bool {
+        self.work_stop
+            .as_ref()
+            .is_some_and(bitcoin_rs_chain::LatchReader::is_triggered)
+    }
+
+    pub fn with_active_job_book<R>(&self, operation: impl FnOnce(&mut JobBook) -> R) -> Option<R> {
+        self.with_job_book(|book| (!self.work_stopped()).then(|| operation(book)))
+    }
+
     #[must_use]
     pub fn current_job(&self) -> Option<Arc<Job>> {
         self.with_job_book(|book| book.current().cloned())
@@ -422,11 +432,7 @@ impl PoolCore {
         extra_outputs: Vec<TxOut>,
     ) -> Result<Installed, JobError> {
         let mut book = locked(&self.book);
-        if self
-            .work_stop
-            .as_ref()
-            .is_some_and(bitcoin_rs_chain::LatchReader::is_triggered)
-        {
+        if self.work_stopped() {
             return Err(JobError::Suspended);
         }
         if invalidate && !book.invalidate_active().is_empty() {
@@ -632,11 +638,7 @@ impl PoolCore {
 
         let outcome = {
             let mut book = locked(&self.book);
-            if self
-                .work_stop
-                .as_ref()
-                .is_some_and(bitcoin_rs_chain::LatchReader::is_triggered)
-            {
+            if self.work_stopped() {
                 return Err(SubmitFailure::Share(ShareError::Stale {
                     job: request.job,
                     reason: StaleReason::Invalidated,
@@ -654,6 +656,12 @@ impl PoolCore {
                 .map_err(SubmitFailure::Share)?
         };
 
+        if self.work_stopped() {
+            return Err(SubmitFailure::Share(ShareError::Stale {
+                job: request.job,
+                reason: StaleReason::Invalidated,
+            }));
+        }
         match outcome {
             ShareOutcome::Share(accepted) => self.credit_share(worker, accepted, &mut reservation),
             ShareOutcome::Block(found) => self.credit_block(worker, found, &mut reservation),

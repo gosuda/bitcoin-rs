@@ -751,8 +751,10 @@ pub(crate) fn start_node(
     let sync = state.sync();
     let peer_ready_sync = Arc::clone(&sync);
     let loop_handle = EventLoop::with_sync_wake(sync, sync_wake_rx);
-    let watch =
-        crate::divergence::DivergenceWatch::start(state.data_dir(), &state.shutdown_reader())?;
+    let watch = crate::divergence::DivergenceWatch::start(
+        state.data_dir(),
+        &state.chainstate().shutdown_reader(),
+    )?;
     let quarantine = watch.quarantine.clone();
     let mining_stop = watch.mining_stop.clone();
     guard.services.divergence = Some(watch);
