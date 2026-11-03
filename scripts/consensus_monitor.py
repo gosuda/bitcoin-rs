@@ -154,8 +154,8 @@ def verdict(w, tip, block, raw, height, local):
         if category not in ("pending", "consensus-invalid", "operational-failure"):
             raise Unknown("unknown local verdict")
         return dict(category=category, reason=str(reply["reason"] or category)[:256])
-    reason = w.call("getblocktemplate", {"mode": "proposal", "rules": ["segwit", "signet"],
-                                          "data": raw.hex()})
+    rules = ["segwit", "signet"] if tip["network"] == "signet" else ["segwit"]
+    reason = w.call("getblocktemplate", {"mode": "proposal", "rules": rules, "data": raw.hex()})
     if isinstance(reason, str) and (reason in PERMANENT or
             (reason.startswith("block-script-verify-flag-failed (") and reason.endswith(")"))):
         return dict(category="consensus-invalid", reason=reason[:256])
@@ -279,6 +279,7 @@ def publish(path, record, exclusive=False):
             os.fsync(out.fileno())
         if exclusive:
             os.link(staging, path)
+            os.fsync(directory)
             staging.unlink()
         else:
             os.replace(staging, path)
@@ -300,6 +301,7 @@ def tail(w):
 
 
 def sample(witnesses, datadir, *, arm, supplied=None):
+    confirmed_block = None
     try:
         local_info = witnesses[0].call("getrpcinfo")
         if Path(local_info["logpath"]).resolve().parent != datadir:
@@ -323,6 +325,7 @@ def sample(witnesses, datadir, *, arm, supplied=None):
             again, _ = observe(witnesses, raw)
             if encoded(again) == encoded(record):
                 record.update(state="confirmed", first_seen=first_seen)
+                confirmed_block = raw
             else:
                 record.update(state="suspected", reason="second observation did not agree")
     except Unknown as error:
@@ -330,8 +333,8 @@ def sample(witnesses, datadir, *, arm, supplied=None):
     except (OSError, RpcFailure, ValueError, KeyError, TypeError, AttributeError, IndexError, http.client.HTTPException) as error:
         record = dict(state="inconclusive", category="operational-failure", reason=str(error)[:256])
     record.update(timestamp=int(time.time()), schema=1)
-    if record["state"] == "confirmed" and arm:
-        incident = dict(record, block_hex=raw.hex(), logs=dict(zip(("local", "reference"), map(tail, witnesses))))
+    if arm and confirmed_block is not None and record["state"] == "confirmed":
+        incident = dict(record, block_hex=confirmed_block.hex(), logs=dict(zip(("local", "reference"), map(tail, witnesses))))
         incident["incident_id"] = digest(encoded(incident))
         try:
             publish(datadir / MARKER, incident, exclusive=True)
@@ -370,7 +373,7 @@ def clear(datadir, incident_id, archive, verification):
         record = load_incident(datadir)
         if record["incident_id"] != incident_id:
             raise ValueError("incident does not match the acknowledged evidence")
-        with archive.open("xb") as output:
+        with os.fdopen(os.open(archive, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as output:
             output.write(encoded(dict(incident=record, verification=verification, cleared=int(time.time()))))
             output.flush()
             os.fsync(output.fileno())

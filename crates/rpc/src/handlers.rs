@@ -92,6 +92,8 @@ impl Handler {
                     method,
                     "getrpcinfo"
                         | "getblockchaininfo"
+                        | "getchainstates"
+                        | "getdeploymentinfo"
                         | "getblockheader"
                         | "getblock"
                         | "getblockverdict"
@@ -139,9 +141,7 @@ impl Handler {
             if !admitted() {
                 return Err(RpcError::Quarantined);
             }
-            if matches!(method, "getrpcinfo" | "getblockchaininfo")
-                && let Some(object) = result.as_object_mut()
-            {
+            if let Some(object) = result.as_object_mut() {
                 object.insert("consensus_quarantine", sonic_rs::json!(true));
             }
         }

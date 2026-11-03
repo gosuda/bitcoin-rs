@@ -106,7 +106,7 @@ pub(crate) fn getblockverdict(
     };
     Ok(json!({"hash": payload.block().block_hash().to_string(),
         "parent": payload.block().header.prev_blockhash.to_string(),
-        "sha256": sha256::Hash::hash(payload.bytes()).to_string(), "verdict": verdict, "reason": reason}))
+        "sha256": sha256::Hash::hash(payload.bytes()).as_byte_array().as_hex().to_string(), "verdict": verdict, "reason": reason}))
 }
 
 pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {

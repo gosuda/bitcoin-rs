@@ -62,6 +62,15 @@ fn reference_pair_confirms_both_injected_consensus_disagreements() -> Result<(),
             core.stop()?;
             continue;
         }
+        let tip = node.rpc("getblockchaininfo", &json!([]))?["bestblockhash"].clone();
+        for method in ["getblock", "getblockheader"] {
+            let block = node.rpc(method, &json!([tip]))?;
+            assert_eq!(
+                block["consensus_quarantine"].as_bool(),
+                Some(true),
+                "{method}"
+            );
+        }
         for method in [
             "getblockcount",
             "getblocktemplate",
@@ -101,7 +110,8 @@ fn reference_pair_confirms_both_injected_consensus_disagreements() -> Result<(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(archive.is_file());
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(std::fs::metadata(&archive)?.permissions().mode() & 0o077, 0);
         let mut resumed = ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &options, dir)?;
         assert_eq!(
             resumed.rpc("getblockcount", &json!([]))?.as_u64(),

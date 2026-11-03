@@ -4,7 +4,7 @@ Use the optional POSIX monitor with a private bitcoin-rs data directory and a se
 
 ## Connect the witnesses
 
-Put each RPC credential in its own private file containing `user:password`. A Core cookie works. Use numeric loopback HTTP addresses, or local ends of authenticated tunnels. Run the monitor as the node data-directory owner. Its local RPC must report the same directory in `getrpcinfo.logpath`.
+Put each RPC credential in its own private file containing `user:password`. A Core cookie works. Use numeric loopback HTTP addresses, or local ends of authenticated tunnels. Run the monitor as the node data-directory owner on the same POSIX filesystem, with working hard links, directory fsync and POSIX record locks. Its local RPC must report the same directory in `getrpcinfo.logpath`.
 
 Create a private JSON configuration like this:
 
@@ -42,7 +42,7 @@ The latest observation replaces `consensus-divergence-latest.json` (at most 32 K
 
 Armed confirmation creates `consensus-divergence.json` once. It retains the exact block (up to 4,000,000 bytes, hex encoded), body digest, header identity, work context, both observations' time range, versions, settings, verdict categories, reasons and available log tails. A later observation cannot replace the first incident. Two fixed staging names bound interrupted writes; subsequent observations report the latched incident and current witness availability. Copy the incident, logs, binaries and configuration to a separate incident directory before touching existing data.
 
-The node checks the marker on startup and polls it at 250 ms intervals. Check `getrpcinfo.consensus_quarantine`, the `node.consensus_quarantine` gauge, or `GET /api/health` (HTTP 503 when quarantined) to verify that the node observed it. `getblockchaininfo` also marks its result. Economic RPC calls return `-32001`; Esplora and REST return HTTP 503. Hash-addressed block/header reads, read-only diagnostic validation, peer information and stop remain available. SV1/SV2 sessions disconnect and fresh templates, cached jobs and pool submissions stop. An already admitted operation may finish. P2P continues normal header and block observation with its existing relay and peer rules. Quarantine does not set `closed_for_recovery` or certify that the reference is correct.
+The node checks the marker on startup and polls it at 250 ms intervals. Check `getrpcinfo.consensus_quarantine`, the `node.consensus_quarantine` gauge, or `GET /api/health` (HTTP 503 when quarantined) to verify that the node observed it. Object-shaped diagnostic replies, including verbose block and header reads with confirmation counts, also mark their results. Economic RPC calls return `-32001`; Esplora and REST return HTTP 503. Hash-addressed block/header reads, read-only diagnostic validation, peer information and stop remain available. SV1/SV2 sessions disconnect and fresh templates, cached jobs and pool submissions stop. An already admitted operation may finish. P2P continues normal header and block observation with its existing relay and peer rules. Quarantine does not set `closed_for_recovery` or certify that the reference is correct.
 
 ## Verify and release
 
