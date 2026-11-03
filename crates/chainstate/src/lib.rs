@@ -127,6 +127,11 @@ pub(crate) struct ApplyAdmission {
     // Acquire after the apply barrier when both are needed. Recovery closure
     // takes only this lock, including when its caller holds an apply permit.
     publication: Mutex<()>,
+    // Test-only probe flipped before the publication lock attempt so
+    // interleaving regressions can prove closure is parked on the mutex
+    // rather than merely unscheduled.
+    #[cfg(test)]
+    close_attempted: AtomicBool,
 }
 
 impl ApplyAdmission {
@@ -135,6 +140,8 @@ impl ApplyAdmission {
             closed: Arc::new(AtomicBool::new(false)),
             barrier: RwLock::new(()),
             publication: Mutex::new(()),
+            #[cfg(test)]
+            close_attempted: AtomicBool::new(false),
         }
     }
 
@@ -165,6 +172,8 @@ impl ApplyAdmission {
     }
 
     pub(crate) fn close_permanently(&self) {
+        #[cfg(test)]
+        self.close_attempted.store(true, Ordering::Release);
         let _publication = self.publication.lock();
         self.closed.store(true, Ordering::Release);
     }

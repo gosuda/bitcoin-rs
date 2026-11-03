@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bitcoin_rs_primitives::{BlockPayload, Hash256, Network};
 use bitcoin_rs_storage::StorageError;
@@ -116,14 +116,22 @@ fn recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication(
     let publisher = std::thread::spawn(move || publishing.publish_checkpoint());
     entered_rx.recv_timeout(Duration::from_secs(2))?;
     let closing = chain.clone();
-    let (started_tx, started_rx) = mpsc::channel();
     let (closed_tx, closed_rx) = mpsc::channel();
     let closer = std::thread::spawn(move || {
-        let _ = started_tx.send(());
         closing.fail_closed_for_recovery();
         let _ = closed_tx.send(());
     });
-    started_rx.recv_timeout(Duration::from_secs(2))?;
+    // `close_permanently` flips `close_attempted` immediately before the
+    // publication lock, so once the probe is set the closer is provably parked
+    // on the mutex held by the in-flight publication, not merely unscheduled.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !chain.admission.close_attempted.load(Ordering::Acquire) {
+        if Instant::now() >= deadline {
+            release_tx.send(())?;
+            panic!("recovery closure never attempted the publication mutex");
+        }
+        std::thread::yield_now();
+    }
     let blocked = closed_rx.recv_timeout(Duration::from_millis(50));
     let closed_during_publication = chain.is_closed_for_recovery();
     // Release the checkpoint before checking observations, even on a regression.
