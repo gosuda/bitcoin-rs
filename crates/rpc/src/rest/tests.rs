@@ -112,6 +112,12 @@ fn count_boundaries_and_errors() {
     );
     assert_eq!(parse_count("count=bad").expect_err("bad count").status, 400);
     assert_eq!(
+        parse_count("count=+5")
+            .expect_err("leading plus count")
+            .status,
+        400
+    );
+    assert_eq!(
         parse_count("count=18446744073709551616")
             .expect_err("overflow count")
             .status,
@@ -616,6 +622,7 @@ fn route_status_table() {
         ("/rest/getutxos/not-a-txid-0.json".into(), "", 400),
         (format!("/rest/getutxos/{HASH}-0"), "", 404),
         (format!("/rest/getutxos/{HASH}-0.json"), "", 200),
+        (format!("/rest/getutxos/{HASH}-+1.json"), "", 400),
         ("/rest/deploymentinfo.json".into(), "", 200),
         ("/rest/deploymentinfo.bin".into(), "", 404),
         ("/rest/deploymentinfo/not-a-hash.json".into(), "", 400),
@@ -630,6 +637,7 @@ fn route_status_table() {
         ("/rest/blockhashbyheight/0".into(), "", 404),
         ("/rest/blockhashbyheight/0.txt".into(), "", 400),
         ("/rest/blockhashbyheight/-1.json".into(), "", 400),
+        ("/rest/blockhashbyheight/+1.json".into(), "", 400),
         ("/rest/blockhashbyheight/4294967296.json".into(), "", 400),
         (format!("/rest/spenttxouts/{HASH}.json"), "", 404),
         ("/rest/spenttxouts/not-a-hash.json".into(), "", 400),
@@ -643,6 +651,7 @@ fn route_status_table() {
         (format!("/rest/headers/{HASH}.json"), "count=2001", 400),
         (format!("/rest/headers/{HASH}.json"), "count=-1", 400),
         (format!("/rest/headers/{HASH}.json"), "count=abc", 400),
+        (format!("/rest/headers/{HASH}.json"), "count=+5", 400),
         (format!("/rest/getutxos/{HASH}-0.txt"), "", 400),
         (
             format!("/rest/getutxos/checkmempool/{HASH}-0.json"),

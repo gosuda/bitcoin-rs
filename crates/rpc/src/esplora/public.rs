@@ -21,6 +21,7 @@ use super::model::{
 use super::projection::{Confirmation, ParentSource, Projection};
 use crate::context::Context;
 use crate::convert;
+use crate::decimal::parse_ascii_decimal;
 use crate::handlers::Handler;
 use crate::rest::{
     Response, bad_request, internal_error, json_ok, not_found, service_unavailable, text_response,
@@ -54,15 +55,15 @@ pub(super) fn get(ctx: &Context, path: &str) -> Response {
         ["block", hash, "status"] => block_status(&ctx, hash),
         ["block", hash, "raw"] => block_raw(&ctx, hash),
         ["block", hash, "txs"] => block_txs(&ctx, hash, 0),
-        ["block", hash, "txs", start] => match start.parse::<usize>() {
-            Ok(n) if n % CHAIN_PAGE == 0 => block_txs(&ctx, hash, n),
+        ["block", hash, "txs", start] => match parse_ascii_decimal::<usize>(start) {
+            Some(n) if n % CHAIN_PAGE == 0 => block_txs(&ctx, hash, n),
             _ => bad_request("transaction start index must be a multiple of 25"),
         },
         ["block", hash, "txids"] => block_txids(&ctx, hash),
         ["block", hash, "txid", index] => block_txid(&ctx, hash, index),
         ["block", hash] => block(&ctx, hash),
-        ["block-height", height] => height.parse::<u32>().map_or_else(
-            |_| bad_request("height must be an unsigned integer"),
+        ["block-height", height] => parse_ascii_decimal::<u32>(height).map_or_else(
+            || bad_request("height must be an unsigned integer"),
             |height| {
                 ctx.chain
                     .block_hash_at_height(height)
@@ -72,8 +73,8 @@ pub(super) fn get(ctx: &Context, path: &str) -> Response {
             },
         ),
         ["blocks"] => blocks(&ctx, None),
-        ["blocks", height] => height.parse::<u32>().map_or_else(
-            |_| bad_request("start height must be an unsigned integer"),
+        ["blocks", height] => parse_ascii_decimal::<u32>(height).map_or_else(
+            || bad_request("start height must be an unsigned integer"),
             |h| blocks(&ctx, Some(h)),
         ),
         ["mempool"] => mempool(&ctx),
@@ -300,7 +301,7 @@ fn merkle_proof(mut level: Vec<Txid>, mut position: usize) -> Vec<String> {
 }
 
 fn tx_outspend(ctx: &Context, id: &str, vout: &str) -> Response {
-    let Ok(vout) = vout.parse::<u32>() else {
+    let Some(vout) = parse_ascii_decimal::<u32>(vout) else {
         return bad_request("vout must be an unsigned integer");
     };
     let projection = Projection::new(ctx);
@@ -519,7 +520,7 @@ fn block_txids(ctx: &Context, h: &str) -> Response {
     )
 }
 fn block_txid(ctx: &Context, h: &str, index: &str) -> Response {
-    let Ok(index) = index.parse::<usize>() else {
+    let Some(index) = parse_ascii_decimal::<usize>(index) else {
         return bad_request("transaction index must be an unsigned integer");
     };
     let projection = Projection::new(ctx);

@@ -776,6 +776,51 @@ fn bitcoin_esplora_errors_distinguish_bad_missing_and_unavailable() {
 }
 
 #[test]
+fn esplora_numeric_path_segments_refuse_leading_plus() -> Result<(), TestError> {
+    let (handler, transaction, block, _) = contract_fixture()?;
+    let block_hash = block.block_hash().to_string();
+    assert_eq!(route(&handler, "/block-height/+1", "").status, 400);
+    assert_eq!(route(&handler, "/blocks/+1", "").status, 400);
+    assert_eq!(
+        route(&handler, &format!("/block/{block_hash}/txs/+25"), "").status,
+        400
+    );
+    assert_eq!(
+        route(
+            &handler,
+            &format!("/tx/{}/outspend/+0", transaction.txid()),
+            ""
+        )
+        .status,
+        400
+    );
+    assert_eq!(
+        route(&handler, &format!("/block/{block_hash}/txid/+0"), "").status,
+        400
+    );
+    assert_eq!(route(&handler, "/block-height/0", "").status, 200);
+    assert_eq!(route(&handler, "/blocks/0", "").status, 200);
+    assert_eq!(
+        route(&handler, &format!("/block/{block_hash}/txs/25"), "").status,
+        200
+    );
+    assert_eq!(
+        route(
+            &handler,
+            &format!("/tx/{}/outspend/0", transaction.txid()),
+            ""
+        )
+        .status,
+        200
+    );
+    assert_eq!(
+        route(&handler, &format!("/block/{block_hash}/txid/0"), "").status,
+        200
+    );
+    Ok(())
+}
+
+#[test]
 fn esplora_lives_only_under_the_api_prefix() -> Result<(), TestError> {
     let (handler, _, _, _) = contract_fixture()?;
     let genesis = route(&handler, "/block-height/0", "");

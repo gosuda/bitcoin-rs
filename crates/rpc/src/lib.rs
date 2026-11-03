@@ -9,6 +9,7 @@ mod base64;
 pub(crate) mod compressed_tx;
 pub mod context;
 pub(crate) mod convert;
+pub(crate) mod decimal;
 mod error;
 pub mod esplora;
 pub mod handlers;
