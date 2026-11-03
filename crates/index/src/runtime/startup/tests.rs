@@ -358,3 +358,5 @@ fn recovery_heartbeat_stops_after_a_successful_open() -> std::io::Result<()> {
     assert_no_heartbeat_lines_after_the_open_phase(&counter, "successful open");
     Ok(())
 }
+
+mod namespace_reset;

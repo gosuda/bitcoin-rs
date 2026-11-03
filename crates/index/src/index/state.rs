@@ -16,7 +16,7 @@ pub(super) const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
 /// On-disk format 6: newest-first exact `ScriptHistory` occurrences, 43-byte
 /// `ScriptLive` keys with u24 `vout`, and 6-byte `TxPosition` locators. Any
 /// older marker refuses start (`UnsupportedTxIndexFormatVersion`), so
-/// `open_writer` resets the derived store and rebuilds it from chainstate; no
+/// startup recreates the derived namespace and rebuilds it from chainstate; no
 /// in-place upgrade or dual-read path exists.
 pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = [0x06, 0x00, 0x00, 0x00];
 
@@ -122,6 +122,16 @@ fn parse_reset_state(bytes: &[u8]) -> Result<ResetState, IndexError> {
         }
         _ => Err(IndexError::InvalidResetMarker),
     }
+}
+
+pub(super) fn check_open_reset<S: KvStore>(store: &S) -> Result<(), IndexError> {
+    if let Some(bytes) = store.get(ColumnFamily::UtxoMeta, RESET_CAPABILITIES_KEY)?
+        && let ResetState::Claim { mask, .. } = parse_reset_state(&bytes)?
+        && mask == IndexCapabilities::ALL.to_mask()
+    {
+        return Err(IndexError::FullResetRequired);
+    }
+    Ok(())
 }
 
 pub(super) fn capture_write_fence<S: KvStore>(

@@ -24,6 +24,8 @@ pub enum IndexError {
     InvalidLiveRowValue { len: usize },
     #[error("unsupported TxIndex format version {version}")]
     UnsupportedTxIndexFormatVersion { version: u32 },
+    #[error("interrupted full index reset requires namespace recreation")]
+    FullResetRequired,
     #[error(
         "block body identity mismatch at height {height}: expected {expected:?}, found {actual:?}"
     )]

@@ -29,26 +29,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-fn open_writer<S>(store: &Arc<S>, generation: u64) -> Result<IndexWriter<S>, IndexError>
-where
-    S: bitcoin_rs_storage::KvStore,
-{
-    match IndexWriter::open(Arc::clone(store), generation) {
-        Ok(writer) => Ok(writer),
-        Err(
-            error @ (IndexError::LegacyCursorlessIndex
-            | IndexError::UnsupportedTxIndexFormatVersion { .. }),
-        ) => {
-            tracing::warn!(
-                %error,
-                "resetting incompatible derived transaction index for rebuild"
-            );
-            IndexWriter::reset_index(store.as_ref(), generation)?;
-            IndexWriter::open(Arc::clone(store), generation)
-        }
-        Err(error) => Err(error),
-    }
-}
+mod rebuild;
 
 pub(super) fn run_worker_with_open(
     runtime: &Arc<DerivedIndexRuntime>,
@@ -395,14 +376,29 @@ pub(super) fn open_derived_index_with_timeout(
     let (tx, rx) = crossbeam_channel::bounded(1);
     let open_store = Arc::clone(&spec.open_store);
     let dir = txindex_dir.to_path_buf();
+    let root = spec.canonical_data_root.clone();
+    let namespace = spec.namespace;
+    let abandoned = LatchWriter::new();
+    let abandoned_reader = abandoned.reader();
+    let shutdown_reader = shutdown.clone();
     let _join = thread::Builder::new()
         .name("bitcoin-rs-txindex-open".to_owned())
         .spawn(move || {
-            let _receiver_gone = tx.send(open_store(&dir));
+            let result = rebuild::open(
+                &root,
+                namespace,
+                &dir,
+                || abandoned_reader.is_triggered() || shutdown_reader.is_triggered(),
+                |path| open_store(path),
+            );
+            let _receiver_gone = tx.send(result);
         })
         .map_err(|e| DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
 
     let result = wait_for_open_result(&rx, open_timeout, shutdown, should_stop);
+    if result.is_err() {
+        abandoned.trigger();
+    }
     if matches!(&result, Err(DerivedIndexWorkerError::OpenTimeout { .. })) {
         tracing::error!(
             timeout_secs = open_timeout.as_secs(),
@@ -422,7 +418,7 @@ pub fn open_derived_index_store_on_worker<S>(
 where
     S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
 {
-    let writer = open_writer(&store, epoch)?;
+    let writer = IndexWriter::open(Arc::clone(&store), epoch)?;
     let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(writer));
     let reader: Arc<dyn crate::IndexReader> = Arc::new(crate::Indexer::new(store));
     Ok(OpenDerivedIndex {

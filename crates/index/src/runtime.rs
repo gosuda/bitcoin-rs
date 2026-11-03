@@ -655,6 +655,8 @@ enum ReconcileAction {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DerivedIndexWorkerError {
+    #[error("txindex namespace recreation failed: {0}")]
+    NamespaceReset(#[from] std::io::Error),
     #[error("txindex worker stopped")]
     Stopped,
     #[error("txindex store open abandoned on shutdown")]
