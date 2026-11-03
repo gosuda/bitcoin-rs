@@ -623,6 +623,82 @@ fn declared_but_unsent_body_allocates_only_received_bytes() {
 }
 
 #[test]
+fn content_length_accepts_only_digit_strings() -> io::Result<()> {
+    for value in ["+2", ""] {
+        let request =
+            format!("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {value}\r\n\r\n{{}}");
+        match read_fed_request(request.into_bytes(), usize::MAX)? {
+            Err(RequestReadError::Io(error)) => {
+                assert_eq!(
+                    error.kind(),
+                    io::ErrorKind::InvalidData,
+                    "content-length {value:?} must be a framing error"
+                );
+            }
+            _ => panic!("content-length {value:?} was accepted"),
+        }
+    }
+    let request = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}".to_owned();
+    let Ok(Some(received)) = read_fed_request(request.into_bytes(), usize::MAX)? else {
+        panic!("a digit content-length must decode");
+    };
+    assert_eq!(received.body, b"{}");
+    Ok(())
+}
+
+#[test]
+fn header_values_trim_only_core_whitespace() -> io::Result<()> {
+    let request =
+        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: \u{00a0}2\r\n\r\n{}".to_owned();
+    match read_fed_request(request.into_bytes(), usize::MAX)? {
+        Err(RequestReadError::Io(error)) => {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+        _ => panic!("a non breaking space inside content-length was accepted"),
+    }
+    Ok(())
+}
+
+#[test]
+fn request_line_takes_single_space_separators_only() -> io::Result<()> {
+    for request_line in ["POST\t/ HTTP/1.1", "POST  / HTTP/1.1", "POST /  HTTP/1.1"] {
+        let request = format!("{request_line}\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{{}}");
+        match read_fed_request(request.into_bytes(), usize::MAX)? {
+            Err(RequestReadError::Io(error)) => {
+                assert_eq!(
+                    error.kind(),
+                    io::ErrorKind::InvalidData,
+                    "request line {request_line:?} must be a framing error"
+                );
+            }
+            _ => panic!("request line {request_line:?} was accepted"),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn duplicate_content_length_compares_the_field_text() -> io::Result<()> {
+    let request =
+        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 7\r\nContent-Length: 07\r\n\r\n{}"
+            .to_owned();
+    match read_fed_request(request.into_bytes(), usize::MAX)? {
+        Err(RequestReadError::Io(error)) => {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+        _ => panic!("different content-length field texts were accepted"),
+    }
+    let request =
+        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{}"
+            .to_owned();
+    let Ok(Some(received)) = read_fed_request(request.into_bytes(), usize::MAX)? else {
+        panic!("identical content-length fields must decode");
+    };
+    assert_eq!(received.body, b"{}");
+    Ok(())
+}
+
+#[test]
 fn full_body_capacity_stays_within_the_declared_length() -> io::Result<()> {
     for content_length in [MAX_BODY_BYTES, 9_000_000] {
         let mut request = format!(

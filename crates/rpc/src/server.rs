@@ -825,11 +825,18 @@ fn read_head_line(reader: &mut impl BufRead, remaining: usize) -> io::Result<(St
     Ok((line, read))
 }
 
+fn trim_header_value(value: &str) -> &str {
+    value.trim_matches(|byte: char| {
+        matches!(byte, ' ' | '\t' | '\n' | '\u{000b}' | '\u{000c}' | '\r')
+    })
+}
+
 fn read_headers(
     reader: &mut impl BufRead,
     mut header_bytes: usize,
 ) -> io::Result<(usize, Option<usize>, Option<String>, bool)> {
     let mut content_length = None;
+    let mut content_length_text = None;
     let mut authorization = None;
     let mut keep_alive = false;
     let mut header_count = 0;
@@ -858,20 +865,24 @@ fn read_headers(
         if name.is_empty() || !name.bytes().all(is_token_char) || value.contains('\0') {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid header"));
         }
-        let value = value.trim();
+        let value = trim_header_value(value);
         if name.eq_ignore_ascii_case("content-length") {
-            let parsed = value.parse::<usize>().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid content-length")
-            })?;
+            let Some(parsed) = crate::decimal::parse_ascii_decimal::<usize>(value) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid content-length",
+                ));
+            };
             if parsed > MAX_BODY_BYTES {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "body too large"));
             }
-            if content_length.is_some_and(|previous| previous != parsed) {
+            if content_length_text.is_some_and(|previous| previous != value) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "conflicting content-length",
                 ));
             }
+            content_length_text = Some(value.to_owned());
             content_length = Some(parsed);
         } else if name.eq_ignore_ascii_case("transfer-encoding") {
             return Err(io::Error::new(
@@ -917,7 +928,7 @@ pub(crate) fn read_request_head(
     }
 
     let request_target = request_line.trim_end_matches(['\r', '\n']);
-    let mut request_parts = request_target.split_whitespace();
+    let mut request_parts = request_target.split(' ');
     let Some(method) = request_parts.next() else {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request line").into());
     };
