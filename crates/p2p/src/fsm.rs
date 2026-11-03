@@ -1,7 +1,7 @@
 use crate::feature::{FEATURE_VERSION, FeatureAnnouncement};
 use crate::packages::SendPackages;
 use crate::peer::{Peer, PeerState};
-use crate::wire::{Message, PeerError};
+use crate::wire::{MIN_PEER_PROTO_VERSION, Message, PeerError};
 
 pub(crate) fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerError> {
     match message {
@@ -92,6 +92,9 @@ fn receive_version<S>(
 ) -> Result<(), PeerError> {
     if peer.remote_version.is_some() {
         return Err(PeerError::Misbehavior("duplicate version message"));
+    }
+    if version.version < MIN_PEER_PROTO_VERSION || i32::try_from(version.version).is_err() {
+        return Err(PeerError::ObsoleteVersion(version.version));
     }
     if peer
         .inbound_handshake_nonces
