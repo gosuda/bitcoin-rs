@@ -1,8 +1,12 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use bitcoin_rs_primitives::{BlockPayload, Hash256, Network};
+use bitcoin_rs_storage::StorageError;
+use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT;
 use bitcoin_rs_utxo::UtxoSet;
 
@@ -83,5 +87,104 @@ fn checkpoint_refuses_a_closed_for_recovery_chainstate() -> TestResult {
         current_before
     );
     assert_eq!(checkpoint_dirs(&checkpoint_root)?, dirs_before);
+    Ok(())
+}
+
+struct PausedBodySync {
+    inner: MemoryBodies,
+    pause: AtomicBool,
+    entered: mpsc::SyncSender<()>,
+    release: parking_lot::Mutex<mpsc::Receiver<()>>,
+}
+
+impl BlockBodyStore for PausedBodySync {
+    fn persist_block_body(
+        &self,
+        height: u32,
+        hash: Hash256,
+        body: &[u8],
+    ) -> Result<(), StorageError> {
+        self.inner.persist_block_body(height, hash, body)
+    }
+
+    fn load_block_body(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.load_block_body(height, hash)
+    }
+
+    fn sync(&self) -> Result<(), StorageError> {
+        if self.pause.swap(false, Ordering::AcqRel) {
+            self.entered.send(()).map_err(StorageError::backend)?;
+            self.release.lock().recv().map_err(StorageError::backend)?;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::channel();
+    let bodies = Arc::new(PausedBodySync {
+        inner: MemoryBodies::default(),
+        pause: AtomicBool::new(false),
+        entered: entered_tx,
+        release: parking_lot::Mutex::new(release_rx),
+    });
+    let mut chain = crate::test_fixtures::handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    chain.block_body_store = Some(bodies.clone());
+    chain.apply_block(&BlockPayload::from_local(Network::Regtest.genesis_block()))?;
+    chain.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)), None)?;
+    assert!(chain.publish_checkpoint()?.is_some());
+    let root = dir.path().join(CHECKPOINT_ROOT);
+    let previous = std::fs::read(root.join("CURRENT"))?;
+
+    bodies.pause.store(true, Ordering::Release);
+    let publishing = chain.clone();
+    let publisher = std::thread::spawn(move || publishing.publish_checkpoint());
+    entered_rx.recv_timeout(Duration::from_secs(2))?;
+    let closing = chain.clone();
+    let (closed_tx, closed_rx) = mpsc::channel();
+    let closer = std::thread::spawn(move || {
+        closing.fail_closed_for_recovery();
+        let _ = closed_tx.send(());
+    });
+    // Wait until closure reaches the publication lock attempt before observing
+    // that it cannot complete while body sync is paused.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !chain.admission.close_attempted.load(Ordering::Acquire) {
+        if Instant::now() >= deadline {
+            let _ = release_tx.send(());
+            panic!("recovery closure never attempted the publication mutex");
+        }
+        std::thread::yield_now();
+    }
+    let blocked = closed_rx.recv_timeout(Duration::from_millis(50));
+    let closed_during_publication = chain.is_closed_for_recovery();
+    // Release the checkpoint before checking observations, even on a regression.
+    release_tx.send(()).map_err(StorageError::backend)?;
+    let published = publisher
+        .join()
+        .map_err(|_| "checkpoint thread panicked")??;
+    closer
+        .join()
+        .map_err(|_| "recovery closure thread panicked")?;
+    assert!(matches!(blocked, Err(mpsc::RecvTimeoutError::Timeout)));
+    assert!(!closed_during_publication);
+    assert!(published.is_some());
+    assert!(chain.is_closed_for_recovery());
+    assert!(chain.shutdown_reader().is_triggered());
+    let current = std::fs::read(root.join("CURRENT"))?;
+    assert_ne!(
+        current, previous,
+        "the admitted checkpoint precedes closure"
+    );
+    let directories = checkpoint_dirs(&root)?;
+    assert!(matches!(
+        chain.publish_checkpoint(),
+        Err(CheckpointError::ClosedForRecovery)
+    ));
+    assert_eq!(std::fs::read(root.join("CURRENT"))?, current);
+    assert_eq!(checkpoint_dirs(&root)?, directories);
     Ok(())
 }

@@ -123,3 +123,21 @@ fn shutdown_hooks_run_without_the_tip_gate() {
         "cancellation hooks must run without the tip gate held"
     );
 }
+
+#[test]
+fn recovery_closure_does_not_upgrade_an_apply_permit() {
+    let admission = Arc::new(ApplyAdmission::new());
+    let closing = Arc::clone(&admission);
+    let (tx, rx) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let Ok(_permit) = closing.enter() else {
+            panic!("initial apply must be admitted");
+        };
+        closing.close_permanently();
+        let _ = tx.send(());
+    });
+    assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok());
+    assert!(thread.join().is_ok());
+    assert!(admission.is_closed());
+    assert!(matches!(admission.enter(), Err(ApplyError::Shutdown)));
+}
