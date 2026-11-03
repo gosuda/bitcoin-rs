@@ -716,9 +716,9 @@ pub(crate) fn decode_payload(command: &str, payload: &bytes::Bytes) -> Result<Me
         "getcfcheckpt" => Message::GetCFCheckpt(encode::deserialize::<GetCFCheckpt>(payload)?),
         "cfcheckpt" => Message::CFCheckpt(encode::deserialize::<CFCheckpt>(payload)?),
         "sendcmpct" => Message::SendCmpct(decode_sendcmpct(payload)?),
-        "cmpctblock" => Message::CmpctBlock(decode_cmpctblock(payload)?),
-        "getblocktxn" => Message::GetBlockTxn(decode_getblocktxn(payload)?),
-        "blocktxn" => Message::BlockTxn(decode_blocktxn(payload)?),
+        "cmpctblock" => decode_cmpctblock(payload)?,
+        "getblocktxn" => decode_getblocktxn(payload)?,
+        "blocktxn" => decode_blocktxn(payload)?,
         "reject" => Message::Reject(encode::deserialize::<Reject>(payload)?),
         "alert" => Message::Alert(encode::deserialize::<Vec<u8>>(payload)?),
         "feefilter" => Message::FeeFilter(encode::deserialize::<i64>(payload)?),
@@ -931,10 +931,10 @@ fn decode_version(payload: &[u8]) -> Result<VersionMessage, PeerError> {
         let len = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
         let len = usize::try_from(len).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
         if len > reader.len() {
-            return Err(
-                bitcoin::consensus::encode::Error::ParseFailed("version subversion exceeds the payload")
-                    .into(),
-            );
+            return Err(bitcoin::consensus::encode::Error::ParseFailed(
+                "version subversion exceeds the payload",
+            )
+            .into());
         }
         let (agent, rest) = reader.split_at(len);
         reader = rest;
@@ -1004,57 +1004,47 @@ pub(crate) fn read_command(raw: &[u8]) -> Result<String, PeerError> {
         .map_err(|_| PeerError::InvalidCommand(String::from_utf8_lossy(raw).into_owned()))
 }
 
-fn decode_cmpctblock(payload: &[u8]) -> Result<CmpctBlock, PeerError> {
-    let mut reader = payload;
+/// Core reads the whole struct and throws when the declared transaction count
+/// exceeds `uint16_t` or cannot fit the payload; `ProcessMessages` logs that
+/// failure and keeps the connection, so the message is dropped, not punished.
+fn decode_cmpctblock(payload: &bytes::Bytes) -> Result<Message, PeerError> {
+    let mut reader = payload.as_ref();
     let header = bitcoin::block::Header::consensus_decode(&mut reader)?;
     let nonce = u64::consensus_decode(&mut reader)?;
     let short_ids_count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
-    let short_ids_cap =
-        usize::try_from(short_ids_count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
-    if short_ids_cap > MAX_BLOCK_TX_COUNT {
-        return Err(PeerError::Misbehavior(
-            "cmpctblock short_ids count too large",
-        ));
+    let short_ids_room = u64::try_from(reader.len() / SHORT_ID_WIRE_BYTES).unwrap_or(u64::MAX);
+    if short_ids_count > short_ids_room {
+        return dropped_message("cmpctblock", payload);
     }
-    let mut short_ids = Vec::with_capacity(short_ids_cap.min(reader.len() / SHORT_ID_WIRE_BYTES));
+    let mut short_ids = Vec::with_capacity(usize::try_from(short_ids_count).unwrap_or(0));
     for _ in 0..short_ids_count {
         short_ids.push(ShortId::consensus_decode(&mut reader)?);
     }
     let prefilled_count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
-    let prefilled_cap =
-        usize::try_from(prefilled_count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
-    if prefilled_cap > MAX_BLOCK_TX_COUNT {
-        return Err(PeerError::Misbehavior(
-            "cmpctblock prefilled_txs count too large",
-        ));
+    if short_ids_count.saturating_add(prefilled_count) > u64::from(u16::MAX) {
+        return dropped_message("cmpctblock", payload);
     }
-    if short_ids_cap.saturating_add(prefilled_cap) > MAX_BLOCK_TX_COUNT {
-        return Err(PeerError::Misbehavior(
-            "cmpctblock total transactions too large",
-        ));
+    let prefilled_room = u64::try_from(reader.len() / MIN_PREFILLED_WIRE_BYTES).unwrap_or(u64::MAX);
+    if prefilled_count > prefilled_room {
+        return dropped_message("cmpctblock", payload);
     }
-    let mut prefilled_txs =
-        Vec::with_capacity(prefilled_cap.min(reader.len() / MIN_PREFILLED_WIRE_BYTES));
+    let mut prefilled_txs = Vec::with_capacity(usize::try_from(prefilled_count).unwrap_or(0));
     for _ in 0..prefilled_count {
-        let idx =
-            u16::try_from(bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0)
-                .map_err(|_| PeerError::Misbehavior("cmpctblock prefilled index out of bounds"))?;
+        let index = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+        let Ok(idx) = u16::try_from(index) else {
+            return dropped_message("cmpctblock", payload);
+        };
         let tx = decode_bounded_transaction(&mut reader)?;
         prefilled_txs.push(PrefilledTransaction { idx, tx });
     }
-    if !reader.is_empty() {
-        return Err(PeerError::Misbehavior(
-            "trailing bytes after cmpctblock payload",
-        ));
-    }
-    Ok(CmpctBlock {
+    Ok(Message::CmpctBlock(CmpctBlock {
         compact_block: HeaderAndShortIds {
             header,
             nonce,
             short_ids,
             prefilled_txs,
         },
-    })
+    }))
 }
 
 fn decode_bounded_transaction(reader: &mut &[u8]) -> Result<Transaction, PeerError> {
@@ -1063,43 +1053,35 @@ fn decode_bounded_transaction(reader: &mut &[u8]) -> Result<Transaction, PeerErr
     Transaction::consensus_decode(&mut raw.as_slice()).map_err(PeerError::from)
 }
 
-fn decode_blocktxn(payload: &[u8]) -> Result<BlockTxn, PeerError> {
-    let mut reader = payload;
+fn decode_blocktxn(payload: &bytes::Bytes) -> Result<Message, PeerError> {
+    let mut reader = payload.as_ref();
     let block_hash = bitcoin::BlockHash::consensus_decode(&mut reader)?;
     let count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
-    let capacity = usize::try_from(count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
-    if capacity > MAX_BLOCK_TX_COUNT {
-        return Err(PeerError::Misbehavior("blocktxn count too large"));
+    let room = u64::try_from(reader.len() / MIN_TRANSACTION_WIRE_BYTES).unwrap_or(u64::MAX);
+    if count > room {
+        return dropped_message("blocktxn", payload);
     }
-    let mut transactions =
-        Vec::with_capacity(capacity.min(reader.len() / MIN_TRANSACTION_WIRE_BYTES));
+    let mut transactions = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
     for _ in 0..count {
         transactions.push(decode_bounded_transaction(&mut reader)?);
     }
-    if !reader.is_empty() {
-        return Err(PeerError::Misbehavior(
-            "trailing bytes after blocktxn payload",
-        ));
-    }
-    Ok(BlockTxn {
+    Ok(Message::BlockTxn(BlockTxn {
         transactions: BlockTransactions {
             block_hash,
             transactions,
         },
-    })
+    }))
 }
 
-fn decode_getblocktxn(payload: &[u8]) -> Result<GetBlockTxn, PeerError> {
-    let mut reader = payload;
+fn decode_getblocktxn(payload: &bytes::Bytes) -> Result<Message, PeerError> {
+    let mut reader = payload.as_ref();
     let block_hash = bitcoin::BlockHash::consensus_decode(&mut reader)?;
     let count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
-    let capacity = usize::try_from(count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
-    if capacity > MAX_BLOCK_TX_COUNT {
-        return Err(PeerError::Misbehavior(
-            "getblocktxn indexes count too large",
-        ));
+    let room = u64::try_from(reader.len()).unwrap_or(u64::MAX);
+    if count > room {
+        return dropped_message("getblocktxn", payload);
     }
-    let mut indexes = Vec::with_capacity(capacity.min(reader.len()));
+    let mut indexes = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
     let mut last_index: u64 = 0;
     for _ in 0..count {
         let differential = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
@@ -1111,16 +1093,18 @@ fn decode_getblocktxn(payload: &[u8]) -> Result<GetBlockTxn, PeerError> {
             .checked_add(1)
             .ok_or_else(|| PeerError::Misbehavior("getblocktxn index overflow"))?;
     }
-    if !reader.is_empty() {
-        return Err(PeerError::Misbehavior(
-            "trailing bytes after getblocktxn payload",
-        ));
-    }
-    Ok(GetBlockTxn {
+    Ok(Message::GetBlockTxn(GetBlockTxn {
         txs_request: BlockTransactionsRequest {
             block_hash,
             indexes,
         },
+    }))
+}
+
+fn dropped_message(command: &str, payload: &bytes::Bytes) -> Result<Message, PeerError> {
+    Ok(Message::Unknown {
+        command: command_string(command)?,
+        payload: payload.to_vec(),
     })
 }
 
