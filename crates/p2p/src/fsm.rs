@@ -93,6 +93,13 @@ fn receive_version<S>(
     if peer.remote_version.is_some() {
         return Err(PeerError::Misbehavior("duplicate version message"));
     }
+    if peer
+        .inbound_handshake_nonces
+        .as_ref()
+        .is_some_and(|nonces| nonces.is_in_flight(version.nonce))
+    {
+        return Err(PeerError::SelfConnection);
+    }
     if let Some(local_nonce) = peer.local_nonce {
         if version.nonce == local_nonce && local_nonce != 0 {
             return Err(PeerError::SelfConnection);

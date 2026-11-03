@@ -1335,3 +1335,14 @@ fn ban_list_policy_limits_and_expiry() -> crate::test_support::TestResult {
     ));
     Ok(())
 }
+
+#[test]
+fn outbound_handshake_nonce_is_in_flight_only_while_its_guard_lives() {
+    let table = PeerTable::new();
+    let nonce = 0x5eed_0011_2233_4455;
+    assert!(!table.outbound_handshake_nonces().is_in_flight(nonce));
+    let guard = table.begin_outbound_handshake_nonce(nonce);
+    assert!(table.outbound_handshake_nonces().is_in_flight(nonce));
+    drop(guard);
+    assert!(!table.outbound_handshake_nonces().is_in_flight(nonce));
+}

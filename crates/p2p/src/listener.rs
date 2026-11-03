@@ -1072,6 +1072,7 @@ fn dial(
     };
 
     let nonce = generate_nonce(addr);
+    let nonce_guard = shared.peer_table.begin_outbound_handshake_nonce(nonce);
 
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
@@ -1105,6 +1106,7 @@ fn dial(
         }
         return Err(error);
     }
+    drop(nonce_guard);
 
     let Some(remote_version) = peer.remote_version.as_ref() else {
         shared.peer_table.remove_current(addr, &lease);
@@ -1356,6 +1358,7 @@ fn run_handshake(
         lease.node_id(),
         peer_addr,
     ));
+    peer.check_inbound_nonce_against(shared.peer_table.outbound_handshake_nonces());
     shared.offer_relay_capabilities(&mut peer, lease.role());
     if let Err(error) = run_inbound_handshake(
         &mut peer,

@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_primitives::{PeerEndpoint, USER_AGENT};
 use std::io::{self, Read};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -7,8 +7,11 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use bitcoin::p2p::Magic;
+use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_p2p::PeerRole;
+use bitcoin_rs_p2p::handshake::version_message;
 use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve, spawn_outbound_connection};
+use bitcoin_rs_p2p::wire::{Message, read_message, write_message};
 use bitcoin_rs_p2p::{
     BannedSubnet, IpSubnet, ListenerExtras, NetworkActivity, PeerError, PeerTable,
 };
@@ -241,6 +244,67 @@ fn cancelled_start_refuses_outbound_before_connect() -> Result<(), TestError> {
 
 #[test]
 fn live_handshake_traffic_reaches_the_aggregate_ledger() -> Result<(), TestError> {
+    let listener = TcpListener::bind(
+        PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
+    let addr = listener.local_addr()?;
+
+    let peer_table = Arc::new(PeerTable::new());
+    let shared = wiring(
+        Arc::clone(&peer_table),
+        Arc::new(RwLock::new(Vec::new())),
+        Arc::new(AtomicBool::new(true)),
+        bitcoin_rs_chain::LatchWriter::new().reader(),
+    );
+    let outbound_handle = spawn_outbound_connection(addr.into(), shared, PeerRole::FullRelay);
+
+    let (mut server, _) = listener.accept()?;
+    server.set_read_timeout(Some(Duration::from_secs(5)))?;
+    server.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let Ok((Message::Version(_), _)) = read_message(&mut server, Magic::BITCOIN) else {
+        return Err(io::Error::other("the dial opens with a version message").into());
+    };
+    write_message(
+        &mut server,
+        Magic::BITCOIN,
+        &Message::Version(version_message(
+            1,
+            0,
+            PeerRole::FullRelay,
+            ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            USER_AGENT,
+        )),
+    )?;
+    write_message(&mut server, Magic::BITCOIN, &Message::Verack)?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (received, sent) = peer_table.traffic_totals();
+        if received > 0 && sent > 0 {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "handshake traffic never reached the aggregate ledger \
+                 (received={received}, sent={sent})"
+            ))
+            .into());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_ne!(peer_table.len(), 0);
+
+    drop(server);
+    if outbound_handle.join().is_err() {
+        return Err(io::Error::other("outbound thread panicked during teardown").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn self_dial_is_refused_by_its_own_in_flight_nonce() -> Result<(), TestError> {
     let listener = bind_listener(
         PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
             .socket_addr()
@@ -264,39 +328,32 @@ fn live_handshake_traffic_reaches_the_aggregate_ledger() -> Result<(), TestError
     let outbound_handle = spawn_outbound_connection(addr.into(), shared, PeerRole::FullRelay);
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let (received, sent) = peer_table.traffic_totals();
-        if received > 0 && sent > 0 {
-            break;
-        }
-        if Instant::now() >= deadline {
-            let detail = format!(
-                "handshake traffic never reached the aggregate ledger \
-                 (received={received}, sent={sent})"
-            );
-            teardown_epoch(
-                &session_cancel,
-                &peer_table,
-                &shutdown,
-                serve_handle,
-                outbound_handle,
-            )?;
-            return Err(io::Error::other(detail).into());
-        }
+    while !outbound_handle.is_finished() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    let (received, sent) = peer_table.traffic_totals();
-    assert!(received > 0, "aggregate recv must count handshake bytes");
-    assert!(sent > 0, "aggregate sent must count handshake bytes");
-    assert_ne!(peer_table.len(), 0);
+    let finished = outbound_handle.is_finished();
 
-    teardown_epoch(
-        &session_cancel,
-        &peer_table,
-        &shutdown,
-        serve_handle,
-        outbound_handle,
-    )
+    session_cancel.trigger();
+    peer_table.cancel_all();
+    shutdown.trigger();
+    join_listener(serve_handle)?;
+    let joined = outbound_handle.join();
+    assert!(
+        finished,
+        "a dial to our own listener must not stay connected"
+    );
+    match joined {
+        Ok(Err(_)) => {}
+        Ok(Ok(())) => {
+            return Err(io::Error::other("a dial to our own listener completed").into());
+        }
+        Err(_) => return Err(io::Error::other("outbound thread panicked").into()),
+    }
+    assert!(
+        peer_table.live_sessions().is_empty(),
+        "a refused self-connection leaves no live session"
+    );
+    Ok(())
 }
 
 fn wiring(
@@ -407,25 +464,5 @@ fn join_listener(
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(error.into()),
         Err(_) => Err(io::Error::other("listener thread panicked").into()),
-    }
-}
-
-fn teardown_epoch(
-    session_cancel: &bitcoin_rs_chain::LatchWriter,
-    peer_table: &PeerTable,
-    shutdown: &bitcoin_rs_chain::LatchWriter,
-    serve_handle: thread::JoinHandle<Result<(), bitcoin_rs_p2p::listener::ListenerError>>,
-    outbound_handle: thread::JoinHandle<Result<(), bitcoin_rs_p2p::PeerError>>,
-) -> Result<(), TestError> {
-    session_cancel.trigger();
-    peer_table.cancel_all();
-    shutdown.trigger();
-    join_listener(serve_handle)?;
-    match outbound_handle.join() {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => {
-            Err(io::Error::other(format!("outbound ended with error: {error}")).into())
-        }
-        Err(_) => Err(io::Error::other("outbound thread panicked during teardown").into()),
     }
 }

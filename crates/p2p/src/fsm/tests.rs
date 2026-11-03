@@ -484,3 +484,28 @@ fn messages_before_handshake_completion_are_rejected() -> Result<(), PeerError> 
     ));
     Ok(())
 }
+
+#[test]
+fn inbound_version_matching_an_in_flight_outbound_nonce_is_a_self_connection()
+-> Result<(), PeerError> {
+    let nonces = std::sync::Arc::new(crate::peer_table::OutboundHandshakeNonces::default());
+    let dialed_nonce = 0x0123_4567_89ab_cdef;
+    let guard = nonces.begin(dialed_nonce);
+    let mut peer = fresh_peer();
+    peer.check_inbound_nonce_against(std::sync::Arc::clone(&nonces));
+    let version = Message::Version(VersionMessage {
+        nonce: dialed_nonce,
+        ..version_message()
+    });
+
+    assert!(matches!(
+        step(&mut peer, &version),
+        Err(PeerError::SelfConnection)
+    ));
+    assert!(peer.remote_version.is_none());
+
+    drop(guard);
+    step(&mut peer, &version)?;
+    assert!(peer.remote_version.is_some());
+    Ok(())
+}

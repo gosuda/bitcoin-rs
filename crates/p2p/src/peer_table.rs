@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_primitives::{Hash256, Txid, Wtxid};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use parking_lot::RwLock;
 
 use crate::connection::{ConnectionId, OutboundRefusal, PeerLease, PeerSource};
@@ -111,6 +111,42 @@ fn live_sessions_of(entries: &TableView) -> Vec<PeerSource> {
         .collect()
 }
 
+/// Nonces of outbound handshakes still in flight.
+///
+/// INVARIANT: a nonce is present exactly while its outbound handshake has not
+///   completed. An inbound `version` carrying it proves we dialed ourselves
+///   (Core `CConnman::CheckIncomingNonce`, `net.cpp`).
+#[derive(Debug, Default)]
+pub(crate) struct OutboundHandshakeNonces {
+    nonces: parking_lot::Mutex<HashSet<u64>>,
+}
+
+impl OutboundHandshakeNonces {
+    pub(crate) fn begin(self: &Arc<Self>, nonce: u64) -> OutboundHandshakeNonce {
+        self.nonces.lock().insert(nonce);
+        OutboundHandshakeNonce {
+            nonces: Arc::clone(self),
+            nonce,
+        }
+    }
+
+    pub(crate) fn is_in_flight(&self, nonce: u64) -> bool {
+        self.nonces.lock().contains(&nonce)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct OutboundHandshakeNonce {
+    nonces: Arc<OutboundHandshakeNonces>,
+    nonce: u64,
+}
+
+impl Drop for OutboundHandshakeNonce {
+    fn drop(&mut self) {
+        self.nonces.nonces.lock().remove(&self.nonce);
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct PeerTable {
     entries: RwLock<TableView>,
@@ -118,12 +154,21 @@ pub struct PeerTable {
     next_useful_tx_sequence: AtomicU64,
     netgroup_key: RandomState,
     pub(crate) tx_policy: parking_lot::Mutex<crate::tx_policy::TxPolicy>,
+    outbound_handshake_nonces: Arc<OutboundHandshakeNonces>,
 }
 
 impl PeerTable {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+    pub(crate) fn begin_outbound_handshake_nonce(&self, nonce: u64) -> OutboundHandshakeNonce {
+        self.outbound_handshake_nonces.begin(nonce)
+    }
+
+    #[must_use]
+    pub(crate) fn outbound_handshake_nonces(&self) -> Arc<OutboundHandshakeNonces> {
+        Arc::clone(&self.outbound_handshake_nonces)
     }
 
     pub(crate) fn cancel_transport_epoch(&self, epoch: &Arc<AtomicBool>) {

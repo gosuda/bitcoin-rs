@@ -205,6 +205,8 @@ pub struct Peer<S> {
     pub magic: Magic,
     pub local_nonce: Option<u64>,
     pub remote_version: Option<VersionMessage>,
+    pub(crate) inbound_handshake_nonces:
+        Option<std::sync::Arc<crate::peer_table::OutboundHandshakeNonces>>,
     pub version_received_time: Option<u64>,
     pub received_verack: bool,
     sent_verack: bool,
@@ -245,6 +247,7 @@ impl<S> Peer<S> {
             magic,
             local_nonce: None,
             remote_version: None,
+            inbound_handshake_nonces: None,
             version_received_time: None,
             received_verack: false,
             sent_verack: false,
@@ -293,6 +296,15 @@ impl<S> Peer<S> {
     /// [`Peer::remote_feature`] reports for `b"BIP332"`.
     pub fn offer_stale_tip_relay(&mut self, prefers_blocks: bool) {
         self.stale_tip_offer = Some(prefers_blocks);
+    }
+
+    /// Rejects an inbound `version` whose nonce belongs to one of our own
+    /// in-flight outbound handshakes (Core `CConnman::CheckIncomingNonce`).
+    pub(crate) fn check_inbound_nonce_against(
+        &mut self,
+        nonces: std::sync::Arc<crate::peer_table::OutboundHandshakeNonces>,
+    ) {
+        self.inbound_handshake_nonces = Some(nonces);
     }
 
     /// INVARIANT: this node sends `wtxidrelay` and `verack` in the same
