@@ -33,21 +33,29 @@ impl Shared {
     }
 
     fn trigger(&self) {
-        if self.triggered.load(Ordering::Acquire) {
-            return;
-        }
-        let (hooks_to_run, parent_guard) = {
+        self.trigger_deferred()();
+    }
+
+    fn trigger_deferred(&self) -> impl FnOnce() + use<> {
+        let pending = if self.triggered.load(Ordering::Acquire) {
+            None
+        } else {
             let mut hooks_guard = self.hooks.lock();
             if self.triggered.swap(true, Ordering::Release) {
-                return;
+                None
+            } else {
+                drop(self.wake_tx.lock().take());
+                let guard = self.parent_guard.lock().take();
+                Some((hooks_guard.take().unwrap_or_default(), guard))
             }
-            drop(self.wake_tx.lock().take());
-            let guard = self.parent_guard.lock().take();
-            (hooks_guard.take().unwrap_or_default(), guard)
         };
-        drop(parent_guard);
-        for (_id, hook) in hooks_to_run {
-            hook();
+        move || {
+            if let Some((hooks_to_run, parent_guard)) = pending {
+                drop(parent_guard);
+                for (_id, hook) in hooks_to_run {
+                    hook();
+                }
+            }
         }
     }
 
@@ -132,6 +140,13 @@ impl LatchWriter {
 
     pub fn trigger(&self) {
         self.shared.trigger();
+    }
+
+    /// The latch is triggered and waiters are woken before return. The caller must
+    /// release external locks before it calls the returned function to run the hooks.
+    #[must_use = "call after releasing external locks to run cancellation hooks"]
+    pub fn trigger_deferred(&self) -> impl FnOnce() + use<> {
+        self.shared.trigger_deferred()
     }
 
     #[cfg(test)]

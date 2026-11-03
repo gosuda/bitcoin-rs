@@ -403,7 +403,8 @@ The crash and error points in this contract and `docs/policies/db-migration.md` 
 
 - Publication acquires the exclusive apply fence, then admission's publication mutex, and checks recovery closure before writing artifacts.
 - Recovery closure takes only the publication mutex, so it can run while its caller holds an apply permit. A publication admitted first completes before closure; closure that wins first refuses later publication.
-- Proof: `crates/chainstate/src/tests/checkpoint_debt_tests.rs::recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication` (paused body sync), `checkpoint_refuses_a_closed_for_recovery_chainstate` (closure first), and `crates/chainstate/src/tests/admission_tests.rs::recovery_closure_does_not_upgrade_an_apply_permit` (lock order). The interleaving proof does not inject journal compaction/resume or marker-retirement faults.
+- Recovery closure triggers its latch and wakes waiters under the publication mutex. It releases that mutex before it runs cancellation hooks. A hook can call recovery closure again without a lock cycle.
+- Proof: `crates/chainstate/src/tests/checkpoint_debt_tests.rs::recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication` (paused body sync), `checkpoint_refuses_a_closed_for_recovery_chainstate` (closure first), and `crates/chainstate/src/tests/admission_tests.rs::recovery_closure_does_not_upgrade_an_apply_permit` (lock order) and `recovery_closure_hooks_can_reenter_after_publication_unlocks` (cancellation hooks). The interleaving proof does not inject journal compaction/resume or marker-retirement faults.
 - The checkpoint publisher freezes the published state.
 - The published state always trails or meets the durable head, because publication follows the batch.
 - Before writing, the publisher loads the head.

@@ -61,7 +61,7 @@ fn checkpoint_refuses_inflight_disconnect_and_preserves_state() -> TestResult {
     Ok(())
 }
 
-// SYNC-04
+// RCV-14, SYNC-04
 #[test]
 fn checkpoint_refuses_a_closed_for_recovery_chainstate() -> TestResult {
     let dir = tempfile::tempdir()?;
@@ -120,6 +120,7 @@ impl BlockBodyStore for PausedBodySync {
     }
 }
 
+// RCV-14, SYNC-04
 #[test]
 fn recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication() -> TestResult {
     let dir = tempfile::tempdir()?;
@@ -149,19 +150,16 @@ fn recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication(
         closing.fail_closed_for_recovery();
         let _ = closed_tx.send(());
     });
-    // Wait until closure reaches the publication lock attempt before observing
-    // that it cannot complete while body sync is paused.
     let deadline = Instant::now() + Duration::from_secs(2);
     while !chain.admission.close_attempted.load(Ordering::Acquire) {
         if Instant::now() >= deadline {
             let _ = release_tx.send(());
             panic!("recovery closure never attempted the publication mutex");
         }
-        std::thread::yield_now();
+        std::thread::sleep(Duration::from_millis(1));
     }
     let blocked = closed_rx.recv_timeout(Duration::from_millis(50));
     let closed_during_publication = chain.is_closed_for_recovery();
-    // Release the checkpoint before checking observations, even on a regression.
     release_tx.send(()).map_err(StorageError::backend)?;
     let published = publisher
         .join()

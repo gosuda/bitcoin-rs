@@ -124,6 +124,7 @@ fn shutdown_hooks_run_without_the_tip_gate() {
     );
 }
 
+// RCV-14
 #[test]
 fn recovery_closure_does_not_upgrade_an_apply_permit() {
     let admission = Arc::new(ApplyAdmission::new());
@@ -140,4 +141,31 @@ fn recovery_closure_does_not_upgrade_an_apply_permit() {
     assert!(thread.join().is_ok());
     assert!(admission.is_closed());
     assert!(matches!(admission.enter(), Err(ApplyError::Shutdown)));
+}
+
+// RCV-14, SYNC-04
+#[test]
+fn recovery_closure_hooks_can_reenter_after_publication_unlocks() {
+    let chain = Arc::new(crate::test_fixtures::handles(
+        bitcoin_rs_primitives::Network::Regtest,
+        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+    ));
+    let owner = Arc::clone(&chain);
+    let _hook = chain.closed_for_recovery_reader().on_cancel(move || {
+        assert!(owner.is_closed_for_recovery());
+        owner.fail_closed_for_recovery();
+    });
+    let closing = Arc::clone(&chain);
+    let (tx, rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        closing.fail_closed_for_recovery();
+        let _ = tx.send(());
+    });
+    assert!(
+        rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+        "recovery closure must return after its cancellation hook reenters closure"
+    );
+    assert!(worker.join().is_ok());
+    assert!(chain.shutdown_reader().is_triggered());
+    assert!(matches!(chain.lock_transition(), Err(ApplyError::Shutdown)));
 }
