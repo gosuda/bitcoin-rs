@@ -295,15 +295,7 @@ pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
         height,
         record_count,
     } = read_snapshot_metadata_v4(reader)?;
-    if record_count > MAX_SNAPSHOT_RECORDS {
-        return Err(UtxoError::SnapshotRecordCountTooLarge {
-            count: record_count,
-        });
-    }
-    let record_count_usize =
-        usize::try_from(record_count).map_err(|_| UtxoError::SnapshotRecordCountTooLarge {
-            count: record_count,
-        })?;
+    let record_count_usize = checked_record_count(record_count)?;
 
     let set = UtxoSet::new();
     let mut seen_vouts = HashSet::new();
@@ -375,6 +367,37 @@ pub fn read_snapshot_strict_v4_witnessed<O: SnapshotCoinObserver>(
     Ok((load, observer, witness))
 }
 
+fn checked_record_count(record_count: u64) -> Result<usize, UtxoError> {
+    if record_count > MAX_SNAPSHOT_RECORDS {
+        return Err(UtxoError::SnapshotRecordCountTooLarge {
+            count: record_count,
+        });
+    }
+    usize::try_from(record_count).map_err(|_| UtxoError::SnapshotRecordCountTooLarge {
+        count: record_count,
+    })
+}
+
+fn checked_output_count(output_count: u32) -> Result<usize, UtxoError> {
+    if output_count > MAX_SNAPSHOT_COINS_PER_TXID {
+        let count = usize::try_from(output_count)
+            .map_err(|_| UtxoError::SnapshotOutputCountTooLarge { count: usize::MAX })?;
+        return Err(UtxoError::SnapshotOutputCountTooLarge { count });
+    }
+    usize::try_from(output_count)
+        .map_err(|_| UtxoError::SnapshotOutputCountTooLarge { count: usize::MAX })
+}
+
+fn checked_record_vout(
+    output: &OwnedUtxoOut,
+    seen_vouts: &mut HashSet<u32>,
+) -> Result<(), UtxoError> {
+    if !seen_vouts.insert(output.vout) {
+        return Err(UtxoError::SnapshotDuplicateVout { vout: output.vout });
+    }
+    Ok(())
+}
+
 fn read_snapshot_record_head(reader: &mut impl Read) -> Result<(Hash256, u32), UtxoError> {
     let record_header_bytes =
         read_array::<{ core::mem::size_of::<SnapshotRecordHeaderV4>() }>(reader)?;
@@ -408,18 +431,12 @@ fn read_snapshot_outputs(
     output_count: u32,
     seen_vouts: &mut HashSet<u32>,
 ) -> Result<Vec<OwnedUtxoOut>, UtxoError> {
-    if output_count > MAX_SNAPSHOT_COINS_PER_TXID {
-        let count = usize::try_from(output_count)
-            .map_err(|_| UtxoError::SnapshotOutputCountTooLarge { count: usize::MAX })?;
-        return Err(UtxoError::SnapshotOutputCountTooLarge { count });
-    }
+    let output_count = checked_output_count(output_count)?;
     seen_vouts.clear();
     let mut outputs = Vec::new();
     for _ in 0..output_count {
         let output = read_snapshot_output(reader)?;
-        if !seen_vouts.insert(output.vout) {
-            return Err(UtxoError::SnapshotDuplicateVout { vout: output.vout });
-        }
+        checked_record_vout(&output, seen_vouts)?;
         outputs.push(output);
     }
     Ok(outputs)
@@ -854,16 +871,20 @@ fn read_raw_snapshot_stream<E, F: FnMut(&OutPoint, &[u8]) -> Result<(), E> + ?Si
         height,
         record_count,
     } = read_snapshot_metadata_v4(reader).map_err(map_snapshot_error)?;
-    let record_count_usize = usize::try_from(record_count).map_err(|_| RawSeedError::Integrity)?;
+    let record_count_usize = checked_record_count(record_count).map_err(map_snapshot_error)?;
 
+    let mut seen_vouts = HashSet::new();
     let mut outputs = 0_u64;
     for _ in 0..record_count_usize {
         let (txid, output_count) = read_snapshot_record_head(reader).map_err(map_snapshot_error)?;
         if output_count == 0 {
             return Err(RawSeedError::Integrity);
         }
-        for _ in 0..output_count {
+        let record_outputs = checked_output_count(output_count).map_err(map_snapshot_error)?;
+        seen_vouts.clear();
+        for _ in 0..record_outputs {
             let output = read_snapshot_output(reader).map_err(map_snapshot_error)?;
+            checked_record_vout(&output, &mut seen_vouts).map_err(map_snapshot_error)?;
             let outpoint = OutPoint::new(Txid::from(txid), output.vout);
             emit(&outpoint, &output.script_pubkey).map_err(RawSeedError::Emit)?;
             outputs = outputs.checked_add(1).ok_or(RawSeedError::Integrity)?;
@@ -940,7 +961,9 @@ impl<R: Read + ?Sized> Read for TeeReader<'_, R> {
 #[cfg(test)]
 mod seed_no_token_tests {
     use super::{
-        read_snapshot_strict_v4, read_snapshot_strict_v4_witnessed, write_snapshot_witnessed,
+        MAX_SNAPSHOT_COINS_PER_TXID, MAX_SNAPSHOT_RECORDS, RawSeedError, RawStreamCounts,
+        read_raw_snapshot_stream, read_snapshot_strict_v4, read_snapshot_strict_v4_witnessed,
+        write_snapshot_witnessed,
     };
     use crate::{
         UtxoError, UtxoKey, UtxoSet,
@@ -1085,6 +1108,55 @@ mod seed_no_token_tests {
                 declared: 1,
                 actual: 0
             })
+        ));
+        Ok(())
+    }
+
+    fn raw_stream(bytes: &[u8]) -> Result<RawStreamCounts, RawSeedError<TestError>> {
+        read_raw_snapshot_stream(
+            &mut Cursor::new(bytes),
+            &mut |_outpoint, _script| Ok(()),
+            &|| false,
+        )
+    }
+
+    #[test]
+    fn raw_and_strict_loaders_refuse_the_same_malformed_snapshots() -> TestResult {
+        let (_, tip, height) = fixture_set()?;
+        let over_records = header(tip, height, MAX_SNAPSHOT_RECORDS + 1);
+        assert!(matches!(
+            read_snapshot_strict_v4(&mut Cursor::new(over_records.clone())),
+            Err(UtxoError::SnapshotRecordCountTooLarge { .. })
+        ));
+        assert!(matches!(
+            raw_stream(&over_records),
+            Err(RawSeedError::Integrity)
+        ));
+
+        let mut over_outputs = header(tip, height, 1);
+        over_outputs.extend_from_slice(&record_head(txid(31), MAX_SNAPSHOT_COINS_PER_TXID + 1));
+        assert!(matches!(
+            read_snapshot_strict_v4(&mut Cursor::new(over_outputs.clone())),
+            Err(UtxoError::SnapshotOutputCountTooLarge { .. })
+        ));
+        assert!(matches!(
+            raw_stream(&over_outputs),
+            Err(RawSeedError::Integrity)
+        ));
+
+        let repeated = txid(32);
+        let mut duplicate_vout = header(tip, height, 1);
+        duplicate_vout.extend_from_slice(&record_head(repeated, 2));
+        duplicate_vout.extend_from_slice(&output(1, height, &[0x51])?);
+        duplicate_vout.extend_from_slice(&output(1, height, &[0x51])?);
+        duplicate_vout.extend_from_slice(&[0_u8; 384]);
+        assert!(matches!(
+            read_snapshot_strict_v4(&mut Cursor::new(duplicate_vout.clone())),
+            Err(UtxoError::SnapshotDuplicateVout { vout: 1 })
+        ));
+        assert!(matches!(
+            raw_stream(&duplicate_vout),
+            Err(RawSeedError::Integrity)
         ));
         Ok(())
     }
