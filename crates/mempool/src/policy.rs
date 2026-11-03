@@ -29,6 +29,8 @@ pub enum PolicyError {
     InvalidVirtualSize,
     #[error("fee policy arithmetic overflow")]
     FeeArithmetic,
+    #[error("mempool graph is inconsistent")]
+    InconsistentGraph,
     #[error("fee rate {tx_rate} sat/kvB below min-relay-fee {min_rate} sat/kvB")]
     BelowMinRelayFee { tx_rate: u64, min_rate: u64 },
     #[error("too many transactions in cluster")]

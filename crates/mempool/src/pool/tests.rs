@@ -1888,9 +1888,21 @@ fn pool_expiry_projection_releases_surviving_neighbor_link_sides() -> Result<(),
     let expired_memory = entry_memory_usage(&p1_tx) + entry_memory_usage(&p2_tx) + 2 * boundary;
     let newcomer_memory = entry_memory_usage(&fat_tx) + boundary;
     let bounded2 = package_pool(&seeds2, usage2 - expired_memory + newcomer_memory)?;
-    let fat = MempoolEntry::new(Arc::new(fat_tx), 100, 1_000, now, 7, 0);
+    let fat = MempoolEntry::new(Arc::new(fat_tx.clone()), 100, 1_000, now, 7, 0);
     bounded2
         .prepare_package(vec![fat], now)
         .expect("the exact release of both expired children fits the boundary");
+
+    let tighter = package_pool(&seeds2, usage2 - expired_memory + newcomer_memory - 1)?;
+    let oversized = MempoolEntry::new(Arc::new(fat_tx), 100, 1_000, now, 7, 0);
+    assert!(
+        matches!(
+            tighter.prepare_package(vec![oversized], now),
+            Err(crate::standardness::AcceptanceRejectReason::Mempool(
+                MempoolError::Full
+            ))
+        ),
+        "one byte below the exact boundary must report mempool-full"
+    );
     Ok(())
 }

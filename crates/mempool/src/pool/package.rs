@@ -43,7 +43,7 @@ impl Mempool {
             .collect();
         let mut expired_memory = self
             .removal_memory_release(&expired_ids, &expired_set)
-            .ok_or(PolicyError::FeeArithmetic)?;
+            .ok_or(PolicyError::InconsistentGraph)?;
 
         let mut expired_pending_indices = HashSet::new();
         let mut changed = true;

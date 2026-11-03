@@ -197,7 +197,7 @@ fn decoderawtransaction_rejects_odd_length_and_invalid_and_oversize_hex() {
 }
 // API-10
 #[test]
-fn sendrawtransaction_answers_core_tx_size_for_hex_beyond_the_broadcast_bound() {
+fn sendrawtransaction_answers_core_oversize_for_hex_beyond_the_broadcast_bound() {
     let ctx = Context::new();
     fund_coin(
         &ctx,
