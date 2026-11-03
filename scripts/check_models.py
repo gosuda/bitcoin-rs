@@ -257,58 +257,6 @@ class LaneJob:
     start_k: int
 
 
-def tool_version(root: Path) -> str:
-    manifest_path = root / "crates/rpc/core-compat.toml"
-    with manifest_path.open("rb") as stream:
-        manifest = tomllib.load(stream)
-    return str(manifest["reference"]["formal_tool"]["version"])
-
-
-def load_memo(path: Path) -> dict[str, dict[str, int | str]]:
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            return data
-        return {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def memo_bound(
-    memo: dict[str, dict[str, int | str]],
-    module: Module,
-    kind: str,
-    tool_ver: str,
-) -> int | None:
-    lane_key = f"{module.name}:{kind}"
-    entry = memo.get(lane_key)
-    if not isinstance(entry, dict):
-        return None
-    if entry.get("tla_sha256") != module.tla_sha256:
-        return None
-    if entry.get("cfg_sha256") != module.cfg_sha256:
-        return None
-    if entry.get("tool_version") != tool_ver:
-        return None
-    bound = entry.get("k")
-    if isinstance(bound, int) and module.bound <= bound:
-        return bound
-    return None
-
-
-def save_memo(path: Path, memo: dict[str, dict[str, int | str]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-    try:
-        tmp_path.write_text(json.dumps(memo, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        tmp_path.replace(path)
-    except OSError as error:
-        with PRINT_LOCK:
-            print(f"warning: failed to write memo: {error}", file=sys.stderr, flush=True)
-
-
 def run_lane(env: RunEnv, job: LaneJob) -> tuple[Module, str, dict[str, int | str | None]]:
     try:
         record = run_module(
@@ -323,12 +271,7 @@ def run_lane(env: RunEnv, job: LaneJob) -> tuple[Module, str, dict[str, int | st
     return job.module, job.kind, record
 
 
-def build_jobs(
-    inventory: tuple[Module, ...],
-    explicit_k: int | None,
-    memo: dict[str, dict[str, int | str]],
-    tool_ver: str,
-) -> list[LaneJob]:
+def build_jobs(inventory: tuple[Module, ...], explicit_k: int | None) -> list[LaneJob]:
     jobs: list[LaneJob] = []
     for module in inventory:
         for property_arg in PROPERTIES:
@@ -336,8 +279,7 @@ def build_jobs(
             if explicit_k is not None:
                 start_k = explicit_k
             else:
-                cached = memo_bound(memo, module, kind, tool_ver)
-                start_k = cached if cached is not None else max(START_BOUND, module.bound)
+                start_k = max(START_BOUND, module.bound)
             jobs.append(LaneJob(module, property_arg, kind, start_k))
     return jobs
 
@@ -401,30 +343,6 @@ def write_summary_report(
     print(f"summary: {report}", flush=True)
 
 
-def update_memo(
-    memo: dict[str, dict[str, int | str]],
-    jobs: list[LaneJob],
-    summary: dict[str, dict[str, dict[str, int | str | None]]],
-    tool_ver: str,
-    memo_path: Path,
-) -> None:
-    for job in jobs:
-        record = summary[job.module.name][job.kind]
-        lane_key = f"{job.module.name}:{job.kind}"
-        bound = record.get("k")
-        if (record.get("evidence_rc") == 0 and isinstance(bound, int)
-                and bound >= job.module.bound):
-            memo[lane_key] = {
-                "tla_sha256": job.module.tla_sha256,
-                "cfg_sha256": job.module.cfg_sha256,
-                "tool_version": tool_ver,
-                "k": bound,
-            }
-        else:
-            memo.pop(lane_key, None)
-    save_memo(memo_path, memo)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-only", action="store_true",
@@ -432,9 +350,8 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=3600,
                         help="maximum seconds per solver invocation")
     parser.add_argument("--k-start", type=int, default=None,
-                        help=f"first step bound (default {START_BOUND} or memo)")
-    parser.add_argument("--k-memo", default="target/apalache/k-memo.json",
-                        help="path to K bound memo cache (default target/apalache/k-memo.json)")
+                        help=f"first step bound (default: the module K floor or {START_BOUND}, "
+                             "whichever is larger)")
     parser.add_argument("--jobs", "-j", type=int, default=None,
                         help="maximum concurrent lanes (default: min(cpu_count, lanes))")
     parser.add_argument("--module", action="append", default=None,
@@ -460,16 +377,10 @@ def main() -> int:
         if args.check_only:
             print(f"Tool and {len(inventory)} model identities checked; properties NOT evaluated.")
             return 0
-        tool_ver = tool_version(ROOT)
-        memo_path = Path(args.k_memo)
-        if not memo_path.is_absolute():
-            memo_path = ROOT / memo_path
-        memo = load_memo(memo_path)
-        jobs = build_jobs(inventory, args.k_start, memo, tool_ver)
+        jobs = build_jobs(inventory, args.k_start)
         results = execute_jobs(ROOT, executable, jobs, args.timeout, ROOT / args.out_dir, args.jobs)
         summary = build_summary(inventory, results)
         write_summary_report(ROOT / args.out_dir, summary)
-        update_memo(memo, jobs, summary, tool_ver, memo_path)
         codes = [
             int(record["evidence_rc"]) for lanes in summary.values()
             for record in lanes.values()

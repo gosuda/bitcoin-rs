@@ -362,65 +362,80 @@ class ModelEvidenceTests(unittest.TestCase):
         self.assertEqual(list(summary_raw["ChainAdmission/Commit"].keys()), ["safety", "temporal"])
         self.assertEqual(list(summary_raw["PeerLeases/Session"].keys()), ["safety", "temporal"])
 
-    def test_k_memo_used_only_when_hashes_and_version_match(self) -> None:
+    def test_default_starts_follow_the_documented_floor_even_with_a_stale_memo(self) -> None:
+        directory = self.root / "docs/models/Deep"
+        directory.mkdir(parents=True)
+        tla = directory / "Scan.tla"
+        tla.write_text("fixture\n", encoding="utf-8")
+        cfg = directory / "Scan.cfg"
+        cfg.write_text("CONSTANTS\nN = 1\nINIT Init\nNEXT Next\n", encoding="utf-8")
+        shas = {}
+        rows = []
+        for owner, machine, floor in (
+            ("ChainAdmission", "Commit", 16),
+            ("PeerLeases", "Session", 128),
+            ("Deep", "Scan", 256),
+        ):
+            path = self.root / "docs/models" / owner / f"{machine}.tla"
+            cfg_path = self.root / "docs/models" / owner / f"{machine}.cfg"
+            shas[f"{owner}/{machine}"] = (
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                hashlib.sha256(cfg_path.read_bytes()).hexdigest(),
+            )
+            rows.append(
+                f"| {owner}/{machine} | {shas[f'{owner}/{machine}'][0]} "
+                f"| {shas[f'{owner}/{machine}'][1]} | N=1 | {floor} | BLOCKED | - | - |"
+            )
+        contract = self.root / check_models.FORMAL_CONTRACT
+        contract.write_text("\n".join(rows), encoding="utf-8")
         memo_path = self.root / "target/apalache/k-memo.json"
         memo_path.parent.mkdir(parents=True, exist_ok=True)
-        commit_module = self.module(0)
-        started_k: dict[str, int] = {}
+        memo_path.write_text(
+            json.dumps({
+                "ChainAdmission/Commit:safety": {
+                    "tla_sha256": shas["ChainAdmission/Commit"][0],
+                    "cfg_sha256": shas["ChainAdmission/Commit"][1],
+                    "tool_version": "0.62.4",
+                    "k": 16,
+                },
+                "PeerLeases/Session:safety": {
+                    "tla_sha256": shas["PeerLeases/Session"][0],
+                    "cfg_sha256": shas["PeerLeases/Session"][1],
+                    "tool_version": "0.62.4",
+                    "k": 128,
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+        started: dict[str, int] = {}
 
         def recording_runner(root, executable, module, property_arg, timeout=3600, *args, **kwargs):
             kind = "safety" if property_arg.startswith("--inv=") else "temporal"
             start = args[0] if args else kwargs.get("start", 128)
-            started_k[f"{module.name}:{kind}"] = start
+            started[f"{module.name}:{kind}"] = start
             return {"k": start, "native_rc": 0, "evidence_rc": 0, "run": "test"}
 
-        def write_entry(**overrides: object) -> None:
-            entry: dict[str, object] = {
-                "tla_sha256": commit_module.tla_sha256,
-                "cfg_sha256": commit_module.cfg_sha256,
-                "tool_version": "0.62.4",
-                "k": 16,
-            }
-            entry.update(overrides)
-            memo_path.write_text(
-                json.dumps({f"{commit_module.name}:safety": entry}) + "\n",
-                encoding="utf-8",
-            )
-
-        def run_main(*extra: str) -> None:
-            started_k.clear()
+        def run_main(*extra: str) -> int:
+            started.clear()
             with (
                 patch.object(check_models, "ROOT", self.root),
                 patch.object(check_models, "run_module", side_effect=recording_runner),
                 patch.object(sys, "argv", ["check_models.py", "--jobs", "1", *extra]),
                 patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}),
             ):
-                self.assertEqual(check_models.main(), 0)
+                return check_models.main()
 
-        write_entry()
-        run_main()
-        self.assertEqual(started_k[f"{commit_module.name}:safety"], 16)
-        self.assertEqual(started_k[f"{commit_module.name}:temporal"], 128)
+        self.assertEqual(run_main(), 0)
+        self.assertEqual(started["ChainAdmission/Commit:safety"], 128)
+        self.assertEqual(started["ChainAdmission/Commit:temporal"], 128)
+        self.assertEqual(started["PeerLeases/Session:safety"], 128)
+        self.assertEqual(started["PeerLeases/Session:temporal"], 128)
+        self.assertEqual(started["Deep/Scan:safety"], 256)
+        self.assertEqual(started["Deep/Scan:temporal"], 256)
 
-        write_entry(tla_sha256="0" * 64)
-        run_main()
-        self.assertEqual(started_k[f"{commit_module.name}:safety"], 128)
-
-        write_entry(cfg_sha256="0" * 64)
-        run_main()
-        self.assertEqual(started_k[f"{commit_module.name}:safety"], 128)
-
-        write_entry(tool_version="0.61.0")
-        run_main()
-        self.assertEqual(started_k[f"{commit_module.name}:safety"], 128)
-
-        write_entry(k=8)
-        run_main()
-        self.assertEqual(started_k[f"{commit_module.name}:safety"], 128)
-
-        write_entry()
-        run_main("--k-start", "32")
-        self.assertEqual(started_k[f"{commit_module.name}:safety"], 32)
+        self.assertEqual(run_main("--k-start", "32"), 0)
+        self.assertEqual(started["ChainAdmission/Commit:safety"], 32)
+        self.assertEqual(started["Deep/Scan:safety"], 32)
 
     def test_failing_lane_yields_nonzero_exit_when_others_pass(self) -> None:
         def mixed_runner(root, executable, module, property_arg, timeout=3600, *args, **kwargs):
@@ -429,7 +444,6 @@ class ModelEvidenceTests(unittest.TestCase):
             if module.name == "ChainAdmission/Commit" and kind == "temporal":
                 return {"k": start, "native_rc": 255, "evidence_rc": 14, "run": "err"}
             return {"k": start, "native_rc": 0, "evidence_rc": 0, "run": "ok"}
-        memo_file = self.root / "target/apalache/k-memo.json"
         with (
             patch.object(check_models, "ROOT", self.root),
             patch.object(check_models, "run_module", side_effect=mixed_runner),
@@ -441,9 +455,6 @@ class ModelEvidenceTests(unittest.TestCase):
         summary = json.loads((self.root / "target/apalache/summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["ChainAdmission/Commit"]["temporal"]["evidence_rc"], 14)
         self.assertEqual(summary["ChainAdmission/Commit"]["safety"]["evidence_rc"], 0)
-        if memo_file.is_file():
-            memo = json.loads(memo_file.read_text(encoding="utf-8"))
-            self.assertNotIn("ChainAdmission/Commit:temporal", memo)
 
     def test_counterexample_outranks_unavailable_evidence(self) -> None:
         def diverging_runner(root, executable, module, property_arg, *args, **kwargs):
