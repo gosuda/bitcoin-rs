@@ -5,7 +5,10 @@ use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::chainstate_journal::JournalWriterError;
 
 use crate::{ApplyError, CheckpointError, WindowApplyDisposition, classify_apply_error};
-use ApplyError::{BlockBodyPersistence, JournalBackpressure, RecoveryPublication, UndoPersistence};
+use ApplyError::{
+    BlockBodyPersistence, BlockOutputsExceedInputs, BlockValueOverflow, JournalBackpressure,
+    RecoveryPublication, UndoPersistence,
+};
 
 // SYNC-04
 #[test]
@@ -45,7 +48,7 @@ fn apply_errors_classify_into_their_documented_dispositions() {
         ),
         (Consensus(PrevoutMismatch { input_index: 1 }), Operational),
         (Consensus(Kernel("parse failed".to_owned())), Operational),
-        (Consensus(script(ScriptEngine::Kernel)), Operational),
+        (Consensus(script(ScriptEngine::Kernel)), Permanent),
         (Consensus(script(ScriptEngine::Native)), Permanent),
         (Consensus(SignetSolution), Permanent),
         (
@@ -90,6 +93,8 @@ fn apply_errors_classify_into_their_documented_dispositions() {
             )))),
             Fatal,
         ),
+        (BlockValueOverflow, Permanent),
+        (BlockOutputsExceedInputs, Permanent),
         (
             RecoveryPublication(Box::new(CheckpointError::Storage(StorageError::backend(
                 "checkpoint write lost",

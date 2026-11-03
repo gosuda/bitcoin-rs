@@ -352,7 +352,10 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
         | ApplyError::RecoveryPublication(_) => Fatal,
         ApplyError::JournalBackpressure(error) if error.is_backpressure() => Operational,
         ApplyError::JournalBackpressure(_) => Fatal,
-        ApplyError::ProofOfWork { .. } | ApplyError::TargetAboveLimit => Permanent,
+        ApplyError::ProofOfWork { .. }
+        | ApplyError::TargetAboveLimit
+        | ApplyError::BlockValueOverflow
+        | ApplyError::BlockOutputsExceedInputs => Permanent,
         ApplyError::Chain(error) => classify_chain_error(error),
         ApplyError::Consensus(error) => classify_consensus_error(error),
         ApplyError::Shutdown
@@ -362,8 +365,6 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
         | ApplyError::HeightOverflow(_)
         | ApplyError::VoutOverflow { .. }
         | ApplyError::TxidCountMismatch { .. }
-        | ApplyError::BlockValueOverflow
-        | ApplyError::BlockOutputsExceedInputs
         | ApplyError::UndoPrevoutMissing { .. }
         | ApplyError::UndoLoad(_)
         | ApplyError::DisconnectNotTip { .. }
@@ -406,7 +407,7 @@ fn classify_consensus_error(
     error: &bitcoin_rs_consensus::ConsensusError,
 ) -> WindowApplyDisposition {
     use WindowApplyDisposition::{BodyMutated, Operational, Permanent};
-    use bitcoin_rs_consensus::{ConsensusError, ScriptEngine};
+    use bitcoin_rs_consensus::ConsensusError;
     match error {
         ConsensusError::MerkleRoot
         | ConsensusError::MerkleMutation
@@ -419,11 +420,7 @@ fn classify_consensus_error(
         | ConsensusError::PrevoutCount { .. }
         | ConsensusError::PrevoutMismatch { .. }
         | ConsensusError::UnsupportedEngine { .. }
-        | ConsensusError::Kernel(_)
-        | ConsensusError::Script {
-            engine: ScriptEngine::Kernel,
-            ..
-        } => Operational,
+        | ConsensusError::Kernel(_) => Operational,
         ConsensusError::EmptyInputs
         | ConsensusError::EmptyOutputs
         | ConsensusError::CoinbaseScriptSigSize { .. }
