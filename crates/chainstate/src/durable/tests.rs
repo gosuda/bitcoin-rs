@@ -575,6 +575,13 @@ impl DurableHeadStore for AttestFailHeadStore {
         self.inner.load_attestation(head)
     }
 
+    fn load_suffix_attestation(
+        &self,
+        head: &DurableHead,
+    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
+        self.inner.load_suffix_attestation(head)
+    }
+
     fn attest(
         &self,
         _head: &DurableHead,
@@ -720,6 +727,13 @@ impl DurableHeadStore for CrashWindowHeadStore {
         head: &DurableHead,
     ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
         self.inner.load_attestation(head)
+    }
+
+    fn load_suffix_attestation(
+        &self,
+        head: &DurableHead,
+    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
+        self.inner.load_suffix_attestation(head)
     }
 
     fn attest(

@@ -1233,8 +1233,20 @@ impl AssumeUtxoManager {
                 .or(prior.body_extent),
             ..prior
         };
+        let finalized_full = match status {
+            AssumeUtxoDiskStatus::Finalized {
+                base_height,
+                base_hash,
+                ..
+            } => {
+                (next.height == base_height && next.tip == base_hash)
+                    || active.durable_head.load_suffix_attestation(&prior)?
+                        >= bitcoin_rs_storage::ScriptAttestation::Full
+            }
+            _ => false,
+        };
         active.durable_head.commit(Some(&prior), &next, &records)?;
-        if matches!(status, AssumeUtxoDiskStatus::Finalized { .. }) {
+        if finalized_full {
             active
                 .durable_head
                 .attest(&next, bitcoin_rs_storage::ScriptAttestation::Full)?;

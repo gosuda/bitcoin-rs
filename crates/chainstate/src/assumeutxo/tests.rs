@@ -41,6 +41,12 @@ impl DurableHeadStore for FaultHead {
     ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
         self.inner.load_attestation(head)
     }
+    fn load_suffix_attestation(
+        &self,
+        head: &DurableHead,
+    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
+        self.inner.load_suffix_attestation(head)
+    }
     fn attest(
         &self,
         head: &DurableHead,
@@ -1041,6 +1047,118 @@ fn finalized_replay_attests_full_so_a_full_start_skips_revalidation() -> TestRes
     assert!(
         !crate::recovery::requires_full_revalidation(dir.path()),
         "a finalized assumeutxo datadir must not take the cold revalidation path"
+    );
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn finalized_replay_keeps_an_assume_valid_suffix_below_full() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let prior = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing activated head"))?;
+    let next = DurableHead {
+        commit_id: prior.commit_id + 1,
+        height: prior.height + 1,
+        tip: Hash256::from_le_bytes(&[0x33; 32]),
+        chain_tx_count: prior.chain_tx_count + 1,
+        ..prior
+    };
+    fixture.active.durable_head.commit(
+        Some(&prior),
+        &next,
+        &CommitRecords {
+            attestation: Some(bitcoin_rs_storage::ScriptAttestation::AssumeValid),
+            ..CommitRecords::default()
+        },
+    )?;
+    assert_eq!(
+        fixture.active.durable_head.load_suffix_attestation(&next)?,
+        bitcoin_rs_storage::ScriptAttestation::AssumeValid,
+        "a block above the base that skipped scripts must lower the suffix level"
+    );
+    for block in &fixture.blocks {
+        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+    }
+    let finalized = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing finalized head"))?;
+    assert_eq!(
+        fixture.active.durable_head.load_attestation(&finalized)?,
+        bitcoin_rs_storage::ScriptAttestation::AssumeValid,
+        "the finalized head spans blocks above the base that never executed scripts"
+    );
+    crate::recovery::require_full_script_attestation(
+        dir.path(),
+        crate::ValidationMode::Full,
+        Some(&finalized),
+        fixture.active.durable_head.as_ref(),
+        false,
+    )?;
+    assert!(
+        crate::recovery::requires_full_revalidation(dir.path()),
+        "a full start must revalidate a chain whose suffix skipped scripts"
+    );
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn finalized_replay_attests_full_after_an_executed_suffix() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let block = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(
+        fixture
+            .blocks
+            .last()
+            .ok_or(TestError::Missing("missing base block"))?
+            .block_hash(),
+        3,
+    )?;
+    fixture
+        .active
+        .block_tree
+        .write()
+        .insert_header(block.header, NodeStatus::HeaderValid)?;
+    fixture
+        .active
+        .apply_block(&BlockPayload::from_local(block))?;
+    let executed = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing executed head"))?;
+    assert_eq!(executed.height, 3);
+    assert_eq!(
+        fixture
+            .active
+            .durable_head
+            .load_suffix_attestation(&executed)?,
+        bitcoin_rs_storage::ScriptAttestation::Full,
+        "a block above the base that executed scripts keeps the suffix level Full"
+    );
+    for block in &fixture.blocks {
+        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+    }
+    let finalized = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing finalized head"))?;
+    assert_eq!(
+        fixture.active.durable_head.load_attestation(&finalized)?,
+        bitcoin_rs_storage::ScriptAttestation::Full,
+        "the historical replay and every suffix block executed scripts"
     );
     Ok(())
 }

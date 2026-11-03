@@ -395,6 +395,85 @@ fn crash_windows_failing_backend_writer_at_each_write_index_preserves_atomic_reo
     Ok(())
 }
 
+fn validating_head(commit_id: u64, height: u32) -> DurableHead {
+    DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Validating {
+            base_height: 2,
+            base_hash: Hash256::from_le_bytes(&[0xB1; 32]),
+            expected_hash_serialized: Hash256::from_le_bytes(&[0xB2; 32]),
+            chain_tx_count: 3,
+            historical_height: 0,
+            historical_hash: Hash256::default(),
+            pending: None,
+            checkpoint: None,
+        },
+        commit_id,
+        height,
+        tip: Hash256::from_le_bytes(&[0xB0; 32]),
+        chain_tx_count: 10,
+        body_extent: None,
+        undo_extent: None,
+    }
+}
+
+#[cfg(feature = "fjall")]
+#[test]
+fn fjall_suffix_attestation_tracks_only_pending_validation_commits() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let store = Arc::new(KvDurableHeadStore::new(Arc::new(
+        bitcoin_rs_storage::FjallStore::open(temp.path())?,
+    )));
+    let base = validating_head(1, 2);
+    store.commit(None, &base, &CommitRecords::default())?;
+    assert_eq!(
+        store.load_suffix_attestation(&base)?,
+        ScriptAttestation::Full,
+        "installing the base leaves no suffix commit to distrust"
+    );
+    let skipped = validating_head(2, 3);
+    store.commit(
+        Some(&base),
+        &skipped,
+        &CommitRecords {
+            attestation: Some(ScriptAttestation::AssumeValid),
+            ..CommitRecords::default()
+        },
+    )?;
+    assert_eq!(
+        store.load_suffix_attestation(&skipped)?,
+        ScriptAttestation::AssumeValid
+    );
+    let executed = validating_head(3, 4);
+    store.commit(
+        Some(&skipped),
+        &executed,
+        &CommitRecords {
+            attestation: Some(ScriptAttestation::Full),
+            ..CommitRecords::default()
+        },
+    )?;
+    assert_eq!(
+        store.load_suffix_attestation(&executed)?,
+        ScriptAttestation::AssumeValid,
+        "a commit never raises the weakest suffix level"
+    );
+    let progress = validating_head(4, 4);
+    store.commit(Some(&executed), &progress, &CommitRecords::default())?;
+    assert_eq!(
+        store.load_suffix_attestation(&progress)?,
+        ScriptAttestation::AssumeValid,
+        "a status-only commit keeps the suffix level"
+    );
+    let finalized = head(5, 4);
+    store.commit(Some(&progress), &finalized, &CommitRecords::default())?;
+    assert_eq!(
+        store.load_suffix_attestation(&finalized)?,
+        ScriptAttestation::Unattested,
+        "the suffix row names only a pending-validation head"
+    );
+    Ok(())
+}
+
 fn key_states(
     store: &Arc<bitcoin_rs_storage::FjallStore>,
     cf: bitcoin_rs_storage::ColumnFamily,

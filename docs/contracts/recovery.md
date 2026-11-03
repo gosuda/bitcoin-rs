@@ -155,7 +155,7 @@ For one block, or a bounded fully verified prefix during IBD:
 6. Feed the committed chain update into the mempool canonical lifecycle, update the fee estimator, and reconcile projections.
 
 Script attestation rules:
-- The atomic batch in step 4 also holds one `node:script-attestation` row in `UtxoMeta`.
+- The atomic batch in step 4 also holds the `node:script-attestation` row in `UtxoMeta`.
 - The row carries the `commit_id` of the head it describes.
 - The row carries one level: `Unattested`, `AssumeValid` or `Full`.
 - A commit writes the weakest of the previous level and the level of its own batch.
@@ -168,9 +168,11 @@ Script attestation rules:
 - When the datadir is pruned, that start stops instead.
 - The stop message names `--validation-mode assume-valid` and resync.
 - A cold rebuild that reaches the stored head writes `Full`.
-- A finalized assumeutxo historical replay attests the finalized head `Full`.
+- A second `node:script-attestation-suffix` row folds only the commits made above a pending assumeutxo base.
+- The suffix row starts at `Full` when the base installs; an absent row, or a row naming another `commit_id`, reads as `Unattested`.
+- A finalized assumeutxo replay attests the head `Full` when the head is the validated base or the suffix row is `Full`; otherwise the stored level stays.
 - An `AssumeValid` start never raises a level.
-- The row does not change the head encoding, so no schema epoch moves.
+- The rows do not change the head encoding, so no schema epoch moves.
 
 7. Publish the stable coherent generation only after mempool and projection alignment.
 8. Dispatch notifications and relay in the declared observable order outside all domain locks.

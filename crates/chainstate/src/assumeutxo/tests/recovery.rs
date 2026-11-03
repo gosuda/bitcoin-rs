@@ -738,6 +738,12 @@ impl DurableHeadStore for KillPointHead {
     ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
         self.inner.load_attestation(head)
     }
+    fn load_suffix_attestation(
+        &self,
+        head: &DurableHead,
+    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
+        self.inner.load_suffix_attestation(head)
+    }
     fn attest(
         &self,
         head: &DurableHead,
@@ -1067,6 +1073,12 @@ impl DurableHeadStore for RejectTerminalHead {
         head: &DurableHead,
     ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
         self.inner.load_attestation(head)
+    }
+    fn load_suffix_attestation(
+        &self,
+        head: &DurableHead,
+    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
+        self.inner.load_suffix_attestation(head)
     }
     fn attest(
         &self,

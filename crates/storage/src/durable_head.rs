@@ -1,5 +1,6 @@
 use bitcoin_rs_primitives::Hash256;
 
+use crate::assumeutxo::AssumeUtxoDiskStatus;
 use crate::chainstate_journal::crc32c;
 use crate::pruning::{BLOCK_DATA_CF, block_body_key, block_undo_key};
 use crate::{ColumnFamily, KvStore, StorageError, WriteCondition};
@@ -7,6 +8,7 @@ use crate::{ColumnFamily, KvStore, StorageError, WriteCondition};
 pub const DURABLE_HEAD_KEY: &[u8] = b"node:durable-head";
 
 pub const SCRIPT_ATTESTATION_KEY: &[u8] = b"node:script-attestation";
+pub const SCRIPT_ATTESTATION_SUFFIX_KEY: &[u8] = b"node:script-attestation-suffix";
 
 const SCRIPT_ATTESTATION_ROW_LEN: usize = 9;
 
@@ -192,6 +194,13 @@ pub trait DurableHeadStore: Send + Sync + 'static {
 
     fn load_attestation(&self, head: &DurableHead) -> Result<ScriptAttestation, StorageError>;
 
+    /// The weakest level of the commits made above a pending assumeutxo base.
+    /// An absent row, or a row naming another head, reads as `Unattested`.
+    fn load_suffix_attestation(
+        &self,
+        head: &DurableHead,
+    ) -> Result<ScriptAttestation, StorageError>;
+
     fn attest(&self, head: &DurableHead, level: ScriptAttestation) -> Result<(), StorageError>;
 }
 
@@ -232,6 +241,29 @@ impl<S: KvStore> KvDurableHeadStore<S> {
         }
         Ok(())
     }
+
+    fn suffix_row(
+        &self,
+        expected: Option<&DurableHead>,
+        next: &DurableHead,
+        records: &CommitRecords<'_>,
+    ) -> Result<Option<(ScriptAttestation, u64)>, StorageError> {
+        if !matches!(next.assumeutxo, AssumeUtxoDiskStatus::Validating { .. }) {
+            return Ok(None);
+        }
+        let level = match expected {
+            Some(current)
+                if matches!(current.assumeutxo, AssumeUtxoDiskStatus::Validating { .. }) =>
+            {
+                let previous = self.load_suffix_attestation(current)?;
+                records
+                    .attestation
+                    .map_or(previous, |batch| previous.min(batch))
+            }
+            _ => ScriptAttestation::Full,
+        };
+        Ok(Some((level, next.commit_id)))
+    }
 }
 
 impl<S: KvStore> DurableHeadStore for KvDurableHeadStore<S> {
@@ -250,6 +282,17 @@ impl<S: KvStore> DurableHeadStore for KvDurableHeadStore<S> {
     fn load_attestation(&self, head: &DurableHead) -> Result<ScriptAttestation, StorageError> {
         self.store
             .get(ColumnFamily::UtxoMeta, SCRIPT_ATTESTATION_KEY)?
+            .map_or(Ok(ScriptAttestation::Unattested), |row| {
+                ScriptAttestation::from_row(&row, head)
+            })
+    }
+
+    fn load_suffix_attestation(
+        &self,
+        head: &DurableHead,
+    ) -> Result<ScriptAttestation, StorageError> {
+        self.store
+            .get(ColumnFamily::UtxoMeta, SCRIPT_ATTESTATION_SUFFIX_KEY)?
             .map_or(Ok(ScriptAttestation::Unattested), |row| {
                 ScriptAttestation::from_row(&row, head)
             })
@@ -278,6 +321,13 @@ impl<S: KvStore> DurableHeadStore for KvDurableHeadStore<S> {
             SCRIPT_ATTESTATION_KEY,
             &attestation.row(next.commit_id),
         );
+        if let Some((level, commit_id)) = self.suffix_row(expected, next, records)? {
+            batch.put(
+                ColumnFamily::UtxoMeta,
+                SCRIPT_ATTESTATION_SUFFIX_KEY,
+                &level.row(commit_id),
+            );
+        }
         for (height, hash, record) in &records.undo_rows {
             batch.put(
                 ColumnFamily::UndoData,
@@ -341,6 +391,7 @@ impl<S: KvStore> DurableHeadStore for KvDurableHeadStore<S> {
 pub struct InMemoryDurableHeadStore {
     head: parking_lot::RwLock<Option<DurableHead>>,
     attestation: parking_lot::RwLock<Option<(u64, ScriptAttestation)>>,
+    suffix: parking_lot::RwLock<Option<(u64, ScriptAttestation)>>,
 }
 
 impl InMemoryDurableHeadStore {
@@ -349,6 +400,7 @@ impl InMemoryDurableHeadStore {
         Self {
             head: parking_lot::RwLock::new(None),
             attestation: parking_lot::RwLock::new(None),
+            suffix: parking_lot::RwLock::new(None),
         }
     }
 }
@@ -361,6 +413,17 @@ impl DurableHeadStore for InMemoryDurableHeadStore {
     fn load_attestation(&self, head: &DurableHead) -> Result<ScriptAttestation, StorageError> {
         let attestation = *self.attestation.read();
         Ok(match attestation {
+            Some((commit_id, level)) if commit_id == head.commit_id => level,
+            _ => ScriptAttestation::Unattested,
+        })
+    }
+
+    fn load_suffix_attestation(
+        &self,
+        head: &DurableHead,
+    ) -> Result<ScriptAttestation, StorageError> {
+        let suffix = *self.suffix.read();
+        Ok(match suffix {
             Some((commit_id, level)) if commit_id == head.commit_id => level,
             _ => ScriptAttestation::Unattested,
         })
@@ -397,6 +460,20 @@ impl DurableHeadStore for InMemoryDurableHeadStore {
             .attestation
             .map_or(previous, |batch| previous.min(batch));
         *self.attestation.write() = Some((next.commit_id, level));
+        if matches!(next.assumeutxo, AssumeUtxoDiskStatus::Validating { .. }) {
+            let suffix = match expected {
+                Some(current)
+                    if matches!(current.assumeutxo, AssumeUtxoDiskStatus::Validating { .. }) =>
+                {
+                    let previous = self.load_suffix_attestation(current)?;
+                    records
+                        .attestation
+                        .map_or(previous, |batch| previous.min(batch))
+                }
+                _ => ScriptAttestation::Full,
+            };
+            *self.suffix.write() = Some((next.commit_id, suffix));
+        }
         *head = Some(*next);
         Ok(())
     }

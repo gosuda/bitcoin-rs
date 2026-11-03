@@ -142,6 +142,13 @@ impl DurableHeadStore for CrashOnCommitHead {
         self.inner.load_attestation(head)
     }
 
+    fn load_suffix_attestation(
+        &self,
+        head: &DurableHead,
+    ) -> Result<ScriptAttestation, StorageError> {
+        self.inner.load_suffix_attestation(head)
+    }
+
     fn attest(&self, head: &DurableHead, level: ScriptAttestation) -> Result<(), StorageError> {
         self.inner.attest(head, level)
     }
