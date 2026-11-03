@@ -1,5 +1,3 @@
-//! Bounded prepared-block ownership and batch admission.
-
 use super::{capability::IndexCapabilities, capability::IndexWatermark, rows::PendingRows};
 
 pub(crate) use super::rows::IndexRowBytes;

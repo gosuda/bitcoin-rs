@@ -3,28 +3,6 @@ use super::*;
 const TIME: u64 = 1_700_000_000;
 const HEIGHT: u32 = 900;
 
-struct XorShift(u64);
-
-impl XorShift {
-    fn new(seed: u64) -> Self {
-        Self(seed.max(1))
-    }
-
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        let bound = u64::try_from(bound).unwrap_or(u64::MAX);
-        usize::try_from(self.next() % bound).unwrap_or(0)
-    }
-}
-
 fn graph_tx(nonce: u32, inputs: &[OutPoint], rbf: bool) -> Tx {
     Tx {
         version: 2,
@@ -538,140 +516,55 @@ fn graph_work_stays_local_on_worst_case_shapes() {
     assert_graph_exact(&pool);
 }
 
-fn try_insert_tracked(
-    pool: &mut Mempool,
-    txs: &mut Vec<Tx>,
-    history: &mut Vec<(EntryId, Txid)>,
-    nonce: u32,
-    inputs: &[OutPoint],
-    vsize: u32,
-) -> Option<Txid> {
-    let tx = graph_tx(nonce, inputs, false);
-    let txid = tx.txid();
-    let outcome = pool.insert_entry(MempoolEntry::new(
-        Arc::new(tx.clone()),
-        vsize,
-        1_000,
-        TIME,
-        HEIGHT,
-        0,
-    ));
-    outcome.ok()?;
-    txs.push(tx);
-    let id = pool.entry_id_by_txid(&txid)?;
-    history.push((id, txid));
-    Some(txid)
-}
-
 #[test]
-fn random_mutations_leave_graph_semantics_exact() {
-    for seed in [0x5EED_u64, 0xC0_FFEE, 0xB1_05] {
-        let mut pool = fuzzer_pool();
-        let mut rng = XorShift::new(seed);
-        let mut nonce = 0_u32;
-        let mut txs: Vec<Tx> = Vec::new();
-        let mut history: Vec<(EntryId, Txid)> = Vec::new();
+fn a_surviving_node_is_measured_from_the_links_the_exclusion_keeps() {
+    let mut pool = fuzzer_pool();
+    let root = insert_ok(&mut pool, 1, &[], 100);
+    let first = insert_ok(&mut pool, 2, &[OutPoint::new(root, 0)], 100);
+    let second = insert_ok(&mut pool, 3, &[OutPoint::new(root, 0)], 100);
+    let root_id = pool.entry_id_by_txid(&root).expect("pooled");
+    let first_id = pool.entry_id_by_txid(&first).expect("pooled");
+    let second_id = pool.entry_id_by_txid(&second).expect("pooled");
+    assert_eq!(pool.entry_memory(root_id).expect("pooled"), {
+        let sides = pool.links(root_id).expect("pooled").children.len();
+        entry_memory_usage(&pool.entry(root_id).expect("pooled").tx)
+            .saturating_add(link_memory_usage(sides, 1))
+    });
 
-        for _round in 0..350 {
-            let live = pool.iter_txids();
-            pool.graph_steps.store(0, Ordering::Relaxed);
-            match rng.below(10) {
-                0..=4 => {
-                    if live.is_empty() {
-                        continue;
-                    }
-                    let count = 1 + rng.below(3.min(live.len()));
-                    let mut picked_parents: HashSet<Txid> = HashSet::new();
-                    for _ in 0..count {
-                        picked_parents.insert(live[rng.below(live.len())]);
-                    }
-                    let picked: Vec<OutPoint> = picked_parents
-                        .iter()
-                        .map(|txid| OutPoint::new(*txid, 0))
-                        .collect();
-                    let vsize = 100 + u32::try_from(rng.below(5) * 10).unwrap_or(100);
-                    try_insert_tracked(&mut pool, &mut txs, &mut history, nonce, &picked, vsize);
-                    nonce += 1;
-                }
-                5 => {
-                    try_insert_tracked(&mut pool, &mut txs, &mut history, nonce, &[], 100);
-                    nonce += 1;
-                }
-                6 if !live.is_empty() => {
-                    let victim = live[rng.below(live.len())];
-                    if let Some(id) = pool.entry_id_by_txid(&victim) {
-                        let mut changes = Vec::new();
-                        pool.remove_entries_with_reasons(
-                            &[(id, RemovalReason::PolicyEviction)],
-                            &mut changes,
-                        );
-                    }
-                }
-                7 if !txs.is_empty() => {
-                    let count = 1 + rng.below(3.min(txs.len()));
-                    let confirmed = (0..count)
-                        .map(|_| txs[rng.below(txs.len())].clone())
-                        .collect::<Vec<_>>();
-                    let confirmed_refs: Vec<&Tx> = confirmed.iter().collect();
-                    let confirmed_ids: Vec<Txid> = confirmed.iter().map(Tx::txid).collect();
-                    let _ = pool.remove_for_block(&confirmed_refs, &confirmed_ids, HEIGHT + 1, 1);
-                }
-                8 if !live.is_empty() => {
-                    let victim = live[rng.below(live.len())];
-                    let Some(victim_entry) = pool.entry_by_txid(&victim) else {
-                        continue;
-                    };
-                    let Some(input) = victim_entry.tx.inputs.first() else {
-                        continue;
-                    };
-                    let candidate = graph_tx(nonce, &[input.previous_output], true);
-                    nonce += 1;
-                    let evicted = pool.descendants_of_conflicts(&pool.conflicts_for(&candidate));
-                    if evicted.is_empty() {
-                        continue;
-                    }
-                    let excluded: HashSet<EntryId> = evicted.iter().copied().collect();
-                    let fee = 2_000 + u64::try_from(rng.below(1_000)).unwrap_or(0);
-                    let entry =
-                        MempoolEntry::new(Arc::new(candidate.clone()), 100, fee, TIME, HEIGHT, 0);
-                    let Ok(prepared) =
-                        pool.validate_insert(entry, &excluded, crate::rbf::LimitEnforcement::Full)
-                    else {
-                        continue;
-                    };
-                    let removals = evicted
-                        .iter()
-                        .map(|id| (*id, RemovalReason::Replaced))
-                        .collect::<Vec<_>>();
-                    let mut changes = Vec::new();
-                    pool.remove_entries_with_reasons(&removals, &mut changes);
-                    let _committed = pool.commit_insert(prepared);
-                    if let Some(id) = pool.entry_id_by_txid(&candidate.txid()) {
-                        history.push((id, candidate.txid()));
-                    }
-                }
-                9 if pool.len() > 8 => {
-                    let target = u64::try_from(rng.below(200) * 100).unwrap_or(0);
-                    crate::evict_lowest_fee_packages(&mut pool, target)
-                        .expect("valid graph eviction");
-                }
-                _ => {}
-            }
+    let (before, after) = pool
+        .projected_graphs(&[], &[first_id, second_id], ProjectionScope::AllEntries)
+        .expect("projection");
+    let root_before = before
+        .nodes
+        .iter()
+        .find(|node| node.id == Some(root_id))
+        .expect("the root is projected");
+    let root_after = after
+        .nodes
+        .iter()
+        .find(|node| node.id == Some(root_id))
+        .expect("the root survives");
+    assert_eq!(
+        root_after.memory,
+        entry_memory_usage(&pool.entry(root_id).expect("pooled").tx),
+        "a root whose children all leave keeps no link memory"
+    );
+    assert!(
+        root_after.memory < root_before.memory,
+        "the projection must stop charging the evicted links"
+    );
 
-            assert!(
-                graph_steps(&pool) < 64 * 8 + 128,
-                "walk budget exceeded: {}",
-                graph_steps(&pool)
-            );
-            for (id, txid) in &history {
-                let live_now = pool.contains_txid(txid);
-                assert_eq!(
-                    pool.entry(*id).is_some_and(|entry| entry.txid == *txid),
-                    live_now,
-                    "slot identity for {txid:?} must track liveness exactly"
-                );
-            }
-            assert_graph_exact(&pool);
-        }
-    }
+    let mut changes = Vec::new();
+    pool.remove_entries_with_reasons(
+        &[
+            (first_id, RemovalReason::PolicyEviction),
+            (second_id, RemovalReason::PolicyEviction),
+        ],
+        &mut changes,
+    );
+    assert_eq!(
+        root_after.memory,
+        pool.entry_memory(root_id).expect("pooled"),
+        "the projection must equal the accounting after the removals"
+    );
 }

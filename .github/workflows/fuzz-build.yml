@@ -49,3 +49,4 @@ jobs:
       - run: cargo +nightly metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
       # cargo-fuzz can otherwise select an unavailable musl target.
       - run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
+

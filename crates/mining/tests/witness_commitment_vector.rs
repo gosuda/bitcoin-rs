@@ -1,6 +1,6 @@
 use crate::support::fixtures as common;
 
-use std::error::Error;
+use crate::support::TestError;
 
 use bitcoin::consensus::encode::serialize as bitcoin_serialize;
 use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
@@ -30,7 +30,7 @@ const VECTOR_COMMITMENT: [u8; 32] = [
 ];
 
 #[test]
-fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<(), Box<dyn Error>> {
+fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<(), TestError> {
     let parent = witnessed_tx(1, 50_000, None);
     let child = witnessed_tx(2, 40_000, Some(parent.txid()));
     let pool = pool_with(&[parent.clone(), child.clone()], &[2_000, 3_000])?;
@@ -116,7 +116,7 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
     Ok(())
 }
 
-fn pool_with(txs: &[Tx], fees: &[u64]) -> Result<Mempool, Box<dyn Error>> {
+fn pool_with(txs: &[Tx], fees: &[u64]) -> Result<Mempool, TestError> {
     assert_eq!(txs.len(), fees.len());
     let mut pool = Mempool::new(MempoolLimits::default());
     for (tx, &fee) in txs.iter().zip(fees) {

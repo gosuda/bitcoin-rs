@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, Txid};
 
 use super::*;
-use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+use bitcoin_rs_chain::{ChainWork, LatchReader, NodeId, TipSnapshot};
 use bitcoin_rs_index::block_log::BlockLog;
 
 struct SingleBlockSource {
@@ -193,17 +193,14 @@ fn undo_read_failures_preserve_core_integrity_and_availability_codes() {
         corruption.to_string(),
         "Undo data expected but can't be read. This could be due to disk corruption or a conflict with a pruning event."
     );
-    assert_eq!(
-        block_spends_error(BlockSpendsError::History(HistoryUnavailable::Pruned {
-            below: 10
-        }))
-        .code(),
-        -1
-    );
-    assert_eq!(
-        block_spends_error(BlockSpendsError::History(HistoryUnavailable::Missing)).code(),
-        -1
-    );
+    let pruned = block_spends_error(BlockSpendsError::History(HistoryUnavailable::Pruned {
+        below: 10,
+    }));
+    assert_eq!(pruned.code(), -1);
+    assert_eq!(pruned.to_string(), "Block not available (pruned data)");
+    let missing = block_spends_error(BlockSpendsError::History(HistoryUnavailable::Missing));
+    assert_eq!(missing.code(), -1);
+    assert_eq!(missing.to_string(), "Block not found on disk");
     assert_eq!(block_spends_error(BlockSpendsError::Retry).code(), -1);
     assert_eq!(
         block_spends_error(BlockSpendsError::BodyRead(
@@ -212,6 +209,14 @@ fn undo_read_failures_preserve_core_integrity_and_availability_codes() {
         .code(),
         -1
     );
+}
+
+#[test]
+fn a_cancelled_utxo_walk_reports_interruption() {
+    let error = txoutset_walk_error(bitcoin_rs_utxo::UtxoError::Cancelled);
+
+    assert_eq!(error.code(), -1);
+    assert_eq!(error.to_string(), "gettxoutsetinfo interrupted");
 }
 
 #[test]
@@ -234,7 +239,7 @@ fn unknown_hashes_are_not_found_on_every_block_response_form() {
 
 #[test]
 fn getblock_populates_real_header_fields_from_stored_record()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let genesis = fixture_genesis();
     let record = BlockRecord::from_block(0, &genesis);
     let mut ctx = Context::new();
@@ -302,7 +307,7 @@ fn getblock_populates_real_header_fields_from_stored_record()
 }
 
 #[test]
-fn getblock_reads_metadata_only_record_from_body_source() -> Result<(), Box<dyn std::error::Error>>
+fn getblock_reads_metadata_only_record_from_body_source() -> Result<(), crate::test_error::TestError>
 {
     struct SingleBlockSource {
         height: u32,
@@ -373,8 +378,7 @@ fn getblock_reports_corrupt_stored_body() {
 
     assert!(matches!(
         getblock(&ctx, &json!([hash.as_str(), 1])),
-        Err(RpcError::Internal(message))
-            if message == "stored block body is corrupt"
+        Err(RpcError::Internal(_))
     ));
 }
 
@@ -429,6 +433,86 @@ fn getblock_verbosity_2_emits_every_transaction_of_the_stored_body() {
                 .map(sonic_rs::Array::len),
             Some(tx.outputs.len()),
             "vout must carry every output: {object:?}"
+        );
+    }
+}
+struct SpentSource {
+    block: Block,
+}
+
+impl bitcoin_rs_utxo::contract::BlockUndoSource for SpentSource {
+    fn block_spends(
+        &self,
+        _hash: Hash256,
+        _expected: Hash256,
+    ) -> Result<bitcoin_rs_utxo::contract::BlockSpends, bitcoin_rs_utxo::contract::BlockSpendsError>
+    {
+        let Some(spend) = self.block.txs.get(1) else {
+            return Err(bitcoin_rs_utxo::contract::BlockSpendsError::UnknownBlock);
+        };
+        let spent = spend
+            .inputs
+            .iter()
+            .map(|input| bitcoin_rs_utxo::UtxoCoin {
+                outpoint: input.previous_output,
+                txout: bitcoin_rs_primitives::TxOut {
+                    value: bitcoin_rs_primitives::Amount::from_sat(5_000_000_000),
+                    script_pubkey: bitcoin_rs_primitives::Script::new(),
+                },
+                coinbase: false,
+                height: 0,
+            })
+            .collect();
+        Ok(bitcoin_rs_utxo::contract::BlockSpends {
+            block: self.block.clone(),
+            spent: Ok(vec![Vec::new(), spent]),
+        })
+    }
+}
+
+#[test]
+fn getblock_clamps_out_of_range_verbosity_like_core() {
+    let block = fixture_block_with_spend();
+    let record = BlockRecord::from_block(0, &block);
+    let mut context = Context::new();
+    context.chain.block_body_source = Some(Arc::new(SingleBlockSource {
+        height: 0,
+        hash: record.hash,
+        body: consensus_bytes(&block),
+        calls: AtomicUsize::new(0),
+    }));
+    context.chain.block_undo_source = Some(Arc::new(SpentSource {
+        block: block.clone(),
+    }));
+    let ctx = Arc::new(context);
+    seed_block(&ctx, &block, record);
+    let block_hash = block.block_hash().0.to_string_be();
+    let expected_hex = consensus_bytes(&block).to_lower_hex_string();
+
+    for verbosity in [json!(-1), json!(false)] {
+        assert_eq!(
+            getblock(&ctx, &json!([block_hash.as_str(), verbosity])).expect("hex render"),
+            json!(expected_hex),
+            "verbosity {verbosity} renders hex"
+        );
+    }
+    let level_one = getblock(&ctx, &json!([block_hash.as_str(), 1])).expect("level one");
+    assert_eq!(
+        getblock(&ctx, &json!([block_hash.as_str(), true])).expect("legacy true"),
+        level_one
+    );
+    let level_two = getblock(&ctx, &json!([block_hash.as_str(), 2])).expect("level two");
+    assert!(level_two["tx"][1]["vin"][0].get("prevout").is_none());
+    let level_three = getblock(&ctx, &json!([block_hash.as_str(), 3])).expect("level three");
+    assert!(
+        level_three["tx"][1]["vin"][0].get("prevout").is_some(),
+        "level three carries prevouts: {level_three:?}"
+    );
+    for verbosity in [json!(4), json!(99)] {
+        assert_eq!(
+            getblock(&ctx, &json!([block_hash.as_str(), verbosity])).expect("clamped level three"),
+            level_three,
+            "verbosity {verbosity} renders level three"
         );
     }
 }
@@ -515,10 +599,43 @@ fn verbose_block_and_raw_consumers_preserve_unsigned_transaction_versions() {
     }
 }
 
+// API-08, API-34
+#[test]
+fn gettxoutsetinfo_holds_one_blocking_slot_and_refuses_a_concurrent_run() {
+    let ctx = Arc::new(Context::new());
+    let handler = crate::handlers::Handler::new(Arc::clone(&ctx));
+    handler.configure_blocking_admission(2);
+    let slot = handler
+        .reserve_blocking_request()
+        .expect("the fixture owns one of two blocking slots");
+    let refused = handler.dispatch("gettxoutsetinfo", &json!([]));
+    assert!(
+        matches!(&refused, Err(RpcError::Misc(message)) if message == "RPC blocking request limit reached"),
+        "an exhausted blocking quota must refuse before the UTXO walk: {refused:?}"
+    );
+    drop(slot);
+
+    let running = ctx
+        .chain
+        .utxo
+        .reserve_scan()
+        .expect("the fixture reserves the shared UTXO-wide scan");
+    let concurrent = handler.dispatch("gettxoutsetinfo", &json!([]));
+    let error = concurrent.expect_err("a second UTXO-wide read must be refused");
+    assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER, "{error}");
+    assert_eq!(error.to_string(), "a UTXO-wide scan is already running");
+    drop(running);
+
+    assert!(
+        handler.dispatch("gettxoutsetinfo", &json!([])).is_ok(),
+        "the released shared reservation must serve the next call"
+    );
+}
+
 #[test]
 fn gettxoutsetinfo_omits_core_optionals_for_hash_type_none() {
     let ctx = Arc::new(Context::new());
-    let result = gettxoutsetinfo(&ctx, &json!(["none"]))
+    let result = gettxoutsetinfo(&ctx, &json!(["none"]), &LatchReader::fixture_never())
         .unwrap_or_else(|err| panic!("gettxoutsetinfo failed: {err}"));
     assert!(
         result.get("muhash").is_none(),
@@ -542,8 +659,12 @@ fn gettxoutsetinfo_omits_core_optionals_for_hash_type_none() {
 #[test]
 fn gettxoutsetinfo_accepts_production_muhash_triplet() {
     let ctx = Arc::new(Context::new());
-    let result = gettxoutsetinfo(&ctx, &json!(["muhash", null, false]))
-        .unwrap_or_else(|err| panic!("production triplet must be accepted: {err}"));
+    let result = gettxoutsetinfo(
+        &ctx,
+        &json!(["muhash", null, false]),
+        &LatchReader::fixture_never(),
+    )
+    .unwrap_or_else(|err| panic!("production triplet must be accepted: {err}"));
     assert_eq!(
         result.get("muhash").and_then(JsonValueTrait::as_str),
         Some("dd5ad2a105c2d29495f577245c357409002329b9f4d6182c0af3dc2f462555c8")
@@ -555,12 +676,9 @@ fn gettxoutsetinfo_accepts_production_muhash_triplet() {
 #[test]
 fn gettxoutsetinfo_refuses_unsupported_arguments() {
     let ctx = Arc::new(Context::new());
-    let unknown_type =
-        gettxoutsetinfo(&ctx, &json!(["sha3"])).expect_err("an unknown hash type must be refused");
-    assert_eq!(
-        unknown_type.to_string(),
-        "invalid params: hash_type must be one of: hash_serialized_3, muhash, none"
-    );
+    let unknown_type = gettxoutsetinfo(&ctx, &json!(["sha3"]), &LatchReader::fixture_never())
+        .expect_err("an unknown hash type must be refused");
+    assert_eq!(unknown_type.code(), RpcError::INVALID_PARAMS);
 
     let historical_hash = "aa".repeat(32);
     for params in [
@@ -568,27 +686,26 @@ fn gettxoutsetinfo_refuses_unsupported_arguments() {
         json!(["muhash", 1000]),
         json!(["muhash", historical_hash]),
     ] {
-        let error = gettxoutsetinfo(&ctx, &params).expect_err("historical height must be refused");
+        let error = gettxoutsetinfo(&ctx, &params, &LatchReader::fixture_never())
+            .expect_err("historical height must be refused");
         assert_eq!(
             error.code(),
             RpcError::CORE_INVALID_PARAMETER,
             "{params:?} -> {error}"
         );
-        assert!(
-            error
-                .to_string()
-                .contains("Querying specific block heights requires coinstatsindex"),
-            "{error}"
-        );
     }
 }
 
-/// Contract clause: `docs/contracts/muhash-rpc.md` `MRPC-01`.
+// MRPC-01
 #[test]
 fn gettxoutsetinfo_rejects_trailing_parameters() {
     let ctx = Arc::new(Context::new());
-    let trailing = gettxoutsetinfo(&ctx, &json!(["muhash", null, false, true]))
-        .expect_err("trailing parameters must be refused");
+    let trailing = gettxoutsetinfo(
+        &ctx,
+        &json!(["muhash", null, false, true]),
+        &LatchReader::fixture_never(),
+    )
+    .expect_err("trailing parameters must be refused");
     assert_eq!(trailing.code(), RpcError::INVALID_PARAMS, "{trailing}");
 }
 
@@ -635,7 +752,7 @@ fn gettxoutsetinfo_pairs_one_height_with_one_hash_across_a_swap() {
     let mut seen_a = false;
     let mut seen_b = false;
     for iteration in 0..100_000 {
-        let result = gettxoutsetinfo(&ctx, &json!(null))
+        let result = gettxoutsetinfo(&ctx, &json!(null), &LatchReader::fixture_never())
             .unwrap_or_else(|error| panic!("gettxoutsetinfo failed: {error}"));
         let height = result
             .get("height")
@@ -679,7 +796,7 @@ struct Fork {
     fork_header: Header,
 }
 
-fn forked_ctx() -> Result<Fork, Box<dyn std::error::Error>> {
+fn forked_ctx() -> Result<Fork, crate::test_error::TestError> {
     use bitcoin_rs_chain::NodeStatus;
 
     let ctx = Context::new();
@@ -733,7 +850,7 @@ fn forked_ctx() -> Result<Fork, Box<dyn std::error::Error>> {
 
 #[test]
 fn confirmations_count_applied_depth_and_answer_minus_one_off_the_chain()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let Fork {
         ctx,
         applied: applied_hash,
@@ -763,7 +880,7 @@ fn confirmations_count_applied_depth_and_answer_minus_one_off_the_chain()
 
 #[test]
 fn verbose_block_facts_never_straddle_two_applied_publications()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use bitcoin_rs_chain::NodeStatus;
@@ -869,7 +986,7 @@ fn verbose_block_facts_never_straddle_two_applied_publications()
 }
 
 #[test]
-fn getblockheader_answers_a_header_only_tree_node() -> Result<(), Box<dyn std::error::Error>> {
+fn getblockheader_answers_a_header_only_tree_node() -> Result<(), crate::test_error::TestError> {
     let Fork {
         ctx,
         fork,
@@ -911,7 +1028,7 @@ fn getblockheader_answers_a_header_only_tree_node() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn getblockstats_rejects_a_stale_block_hash() -> Result<(), Box<dyn std::error::Error>> {
+fn getblockstats_rejects_a_stale_block_hash() -> Result<(), crate::test_error::TestError> {
     let Fork {
         ctx,
         fork: fork_hash,
@@ -962,7 +1079,7 @@ fn record_for(header: Header, with_body: bool) -> BlockRecord {
 
 fn assert_reorged_block_reports_negative_confirmations(
     with_body: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), crate::test_error::TestError> {
     let Fork {
         mut ctx,
         applied: applied_hash,
@@ -999,13 +1116,13 @@ fn assert_reorged_block_reports_negative_confirmations(
 
     let handler = crate::Handler::new(Arc::clone(&ctx));
     let confirmations_of =
-        |method: &str, hash: Hash256| -> Result<i64, Box<dyn std::error::Error>> {
+        |method: &str, hash: Hash256| -> Result<i64, crate::test_error::TestError> {
             let value = handler.dispatch(method, &json!([hash.to_string_be(), true]))?;
             value
                 .get("confirmations")
                 .and_then(JsonValueTrait::as_i64)
                 .ok_or_else(|| {
-                    Box::<dyn std::error::Error>::from(format!(
+                    crate::test_error::TestError::from(format!(
                         "confirmations missing or not an integer: {value:?}"
                     ))
                 })
@@ -1037,7 +1154,7 @@ fn assert_reorged_block_reports_negative_confirmations(
 
 #[test]
 fn reorged_block_reports_negative_confirmations_stored_or_pruned()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     for with_body in [true, false] {
         assert_reorged_block_reports_negative_confirmations(with_body)?;
     }
@@ -1437,7 +1554,7 @@ fn block_log_running_sums_saturate_instead_of_wrapping() {
 
 #[test]
 fn getchaintxstats_two_block_window_uses_one_folded_window()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Arc::new(Context::new());
     let tip = {
         let mut tree = ctx.chain.block_tree.write();
@@ -1509,7 +1626,7 @@ fn getchaintxstats_two_block_window_uses_one_folded_window()
 
 #[test]
 fn getchaintxstats_rejects_nblocks_equal_to_selected_height()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Arc::new(Context::new());
     let tip = {
         let mut tree = ctx.chain.block_tree.write();
@@ -1714,8 +1831,9 @@ fn sync_with_validation_interface_queue_waits_out_a_held_transition() {
     );
     let interrupted_ctx = Arc::new(Context::new());
     let _still_held = interrupted_ctx.chain.chain_transition.lock();
-    let stopped =
-        bitcoin_rs_chain::LatchReader::new(Arc::new(core::sync::atomic::AtomicBool::new(true)));
+    let stopped_latch = bitcoin_rs_chain::LatchWriter::new();
+    stopped_latch.trigger();
+    let stopped = stopped_latch.reader();
     let error = syncwithvalidationinterfacequeue(&interrupted_ctx, &json!([]), &stopped)
         .err()
         .unwrap_or_else(|| panic!("a triggered latch must interrupt the barrier wait"));

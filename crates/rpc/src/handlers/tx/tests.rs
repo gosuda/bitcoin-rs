@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use bitcoin_rs_chain::NodeStatus;
+use bitcoin_rs_chain::{LatchReader, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, arm_admission_park, reset_admission_park};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
@@ -12,7 +12,7 @@ use std::thread;
 
 use super::{getrawtransaction, gettxout};
 use crate::Handler;
-use crate::context::{Context, DerivedIndexQuery, TxQueryError, TxUnavailableCause};
+use crate::context::{Context, DerivedIndexQuery, TxQueryError};
 use crate::error::RpcError;
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_index::block_log::BlockRecord;
@@ -51,7 +51,7 @@ fn fixture_genesis() -> Block {
 
 #[test]
 fn getrawtransaction_falls_back_to_mempool_for_unconfirmed()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Arc::new(Context::new());
     let genesis = fixture_genesis();
     let coinbase = genesis
@@ -83,10 +83,261 @@ fn getrawtransaction_falls_back_to_mempool_for_unconfirmed()
     assert!(gettxout(&ctx, &json!([txid.to_string(), 1]))?.is_null());
     Ok(())
 }
+struct SpentRows {
+    block: Block,
+}
+
+impl bitcoin_rs_utxo::contract::BlockUndoSource for SpentRows {
+    fn block_spends(
+        &self,
+        _hash: Hash256,
+        _expected: Hash256,
+    ) -> Result<bitcoin_rs_utxo::contract::BlockSpends, bitcoin_rs_utxo::contract::BlockSpendsError>
+    {
+        use bitcoin_rs_primitives::{Amount, Script};
+        let Some(spend) = self.block.txs.get(1) else {
+            return Err(bitcoin_rs_utxo::contract::BlockSpendsError::UnknownBlock);
+        };
+        let spent = spend
+            .inputs
+            .iter()
+            .map(|input| bitcoin_rs_utxo::UtxoCoin {
+                outpoint: input.previous_output,
+                txout: TxOut {
+                    value: Amount::from_sat(5_000_000_000),
+                    script_pubkey: Script::new(),
+                },
+                coinbase: false,
+                height: 0,
+            })
+            .collect();
+        Ok(bitcoin_rs_utxo::contract::BlockSpends {
+            block: self.block.clone(),
+            spent: Ok(vec![vec![], spent]),
+        })
+    }
+}
+
+#[test]
+fn getrawtransaction_clamps_out_of_range_verbosity_like_core()
+-> Result<(), crate::test_error::TestError> {
+    let block = block_with_two_txs(9);
+    let spend = block
+        .txs
+        .get(1)
+        .cloned()
+        .ok_or_else(|| RpcError::Internal("fixture lost its spend".to_owned()))?;
+    let mut ctx = Context::new();
+    ctx.chain
+        .block_tree
+        .write()
+        .insert_node(None, block.header, NodeStatus::Active)
+        .expect("header");
+    ctx.chain.block_undo_source = Some(Arc::new(SpentRows {
+        block: block.clone(),
+    }));
+    attach_body_for_block(&mut ctx, &block, 0);
+    let ctx = Arc::new(ctx);
+    let hash = block.block_hash().to_string();
+    let txid = spend.txid().to_string();
+    let expected_hex = consensus_bytes(&spend).to_lower_hex_string();
+    for verbosity in [json!(-1), json!(0), json!(false)] {
+        let value = getrawtransaction(&ctx, &json!([txid.as_str(), verbosity, hash.as_str()]))?;
+        assert_eq!(
+            value.as_str(),
+            Some(expected_hex.as_str()),
+            "verbosity {verbosity} renders hex"
+        );
+    }
+    let level_one = getrawtransaction(&ctx, &json!([txid.as_str(), true, hash.as_str()]))?;
+    assert!(level_one["vin"][0].get("prevout").is_none());
+    for verbosity in [json!(2), json!(3), json!(4), json!(99)] {
+        let value = getrawtransaction(&ctx, &json!([txid.as_str(), verbosity, hash.as_str()]))?;
+        assert!(
+            value["vin"][0].get("prevout").is_some(),
+            "verbosity {verbosity} renders level two: {value:?}"
+        );
+    }
+    Ok(())
+}
+#[test]
+fn sendrawtransaction_rejects_odd_length_and_invalid_and_oversize_hex() {
+    let ctx = Arc::new(Context::new());
+    let odd =
+        super::sendrawtransaction(&ctx, &json!(["abc"])).expect_err("odd length hex must fail");
+    assert_eq!(odd.code(), RpcError::CORE_DESERIALIZATION_ERROR);
+
+    let invalid =
+        super::sendrawtransaction(&ctx, &json!(["zz"])).expect_err("invalid hex must fail");
+    assert_eq!(invalid.code(), RpcError::CORE_DESERIALIZATION_ERROR);
+
+    let limit = usize::try_from(super::MAX_BROADCAST_HEX_CHARS / 2).unwrap_or(0);
+    let oversize = "00".repeat(limit + 1);
+    let too_large =
+        super::sendrawtransaction(&ctx, &json!([oversize])).expect_err("oversize hex must fail");
+    assert_eq!(too_large.code(), RpcError::CORE_DESERIALIZATION_ERROR);
+}
+
+#[test]
+fn decoderawtransaction_rejects_odd_length_and_invalid_and_oversize_hex() {
+    let ctx = Arc::new(Context::new());
+    let latch = bitcoin_rs_chain::LatchWriter::new().reader();
+    let odd = super::decoderawtransaction(&ctx, &json!(["abc"]), &latch)
+        .expect_err("odd length hex must fail");
+    assert_eq!(odd.code(), RpcError::CORE_DESERIALIZATION_ERROR);
+
+    let invalid = super::decoderawtransaction(&ctx, &json!(["zz"]), &latch)
+        .expect_err("invalid hex must fail");
+    assert_eq!(invalid.code(), RpcError::CORE_DESERIALIZATION_ERROR);
+
+    let oversize = "00".repeat(1_000_001);
+    let too_large = super::decoderawtransaction(&ctx, &json!([oversize]), &latch)
+        .expect_err("oversize hex must fail");
+    assert_eq!(too_large.code(), RpcError::CORE_DESERIALIZATION_ERROR);
+}
+// API-10
+#[test]
+fn sendrawtransaction_answers_core_oversize_for_hex_beyond_the_broadcast_bound() {
+    let ctx = Context::new();
+    fund_coin(
+        &ctx,
+        OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5a; 32])), 0),
+        29_424_000,
+    );
+    let ctx = Arc::new(ctx);
+    let raw = consensus_bytes(&many_output_tx(29_424)).to_lower_hex_string();
+    let error = ctx
+        .chain
+        .with_stable_chainstate(|| super::sendrawtransaction(&ctx, &json!([raw.clone()])))
+        .expect_err("a transaction over the consensus bound must answer Core bad-txns-oversize");
+
+    assert_eq!(
+        error.code(),
+        RpcError::CORE_VERIFY_REJECTED,
+        "Core answers -26 for an oversize transaction: {error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "bad-txns-oversize",
+        "Core CheckTransaction answers bad-txns-oversize before the standard weight check"
+    );
+}
+
+// API-10
+#[test]
+fn sendrawtransaction_maps_the_gateway_weight_reject_to_core_tx_size() {
+    let ctx = Context::new();
+    fund_coin(
+        &ctx,
+        OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5a; 32])), 0),
+        2_954_000,
+    );
+    let ctx = Arc::new(ctx);
+    let raw = consensus_bytes(&many_output_tx(2_954)).to_lower_hex_string();
+    let error = ctx
+        .chain
+        .with_stable_chainstate(|| super::sendrawtransaction(&ctx, &json!([raw.clone()])))
+        .expect_err("a transaction above the standard weight must answer Core tx-size");
+
+    assert_eq!(
+        error.code(),
+        RpcError::CORE_VERIFY_REJECTED,
+        "Core answers -26 for an oversize transaction: {error}"
+    );
+    assert_eq!(error.to_string(), "tx-size");
+}
+
+// API-10
+#[test]
+fn testmempoolaccept_reports_core_tx_size_on_the_oversize_row() {
+    let ctx = Context::new();
+    fund_coin(
+        &ctx,
+        OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5a; 32])), 0),
+        2_954_000,
+    );
+    let ctx = Arc::new(ctx);
+    let raw = consensus_bytes(&many_output_tx(2_954)).to_lower_hex_string();
+    let rows = ctx
+        .chain
+        .with_stable_chainstate(|| super::testmempoolaccept(&ctx, &json!([[raw.clone()]])))
+        .unwrap_or_else(|err| panic!("one oversize row must not fail the request: {err}"));
+    let rows = rows.as_array().unwrap_or_else(|| panic!("rows: {rows:?}"));
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row["allowed"].as_bool(), Some(false), "row: {row}");
+    assert_eq!(row["reject-reason"].as_str(), Some("tx-size"), "row: {row}");
+    assert_eq!(
+        row["reject-details"].as_str(),
+        Some("tx-size"),
+        "row: {row}"
+    );
+}
+
+// API-10
+#[test]
+fn testmempoolaccept_survives_one_oversize_row_with_package_too_large() {
+    let ctx = Context::new();
+    let outpoint = retry_fund_utxo(&ctx, 1, 10_000);
+    let small = retry_tx(outpoint, 9_000);
+    let oversize_raw = consensus_bytes(&many_output_tx(29_424)).to_lower_hex_string();
+    let small_raw = consensus_bytes(&small).to_lower_hex_string();
+    let ctx = Arc::new(ctx);
+    let rows = ctx
+        .chain
+        .with_stable_chainstate(|| {
+            super::testmempoolaccept(&ctx, &json!([[oversize_raw, small_raw]]))
+        })
+        .unwrap_or_else(|err| panic!("one oversize row must not fail the request: {err}"));
+    let rows = rows.as_array().unwrap_or_else(|| panic!("rows: {rows:?}"));
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(
+            row["package-error"].as_str(),
+            Some("package-too-large"),
+            "row: {row}"
+        );
+        assert!(
+            row["allowed"].is_null(),
+            "unfinished rows carry no allowed key: {row}"
+        );
+    }
+}
+
+// API-02
+#[test]
+fn decoderawtransaction_decodes_oversize_hex_like_core() {
+    let ctx = Arc::new(Context::new());
+    let latch = bitcoin_rs_chain::LatchWriter::new().reader();
+    let raw = consensus_bytes(&many_output_tx(117_700)).to_lower_hex_string();
+    let value = super::decoderawtransaction(&ctx, &json!([raw]), &latch)
+        .unwrap_or_else(|err| panic!("Core decodes any hex that fits the request: {err}"));
+    assert_eq!(
+        value["vout"].as_array().map(|items| items.len()),
+        Some(117_700),
+        "the decoded transaction renders every output"
+    );
+}
+
+#[test]
+fn testmempoolaccept_binds_named_parameters_and_rejects_excess() {
+    let ctx = Arc::new(Context::new());
+    let excess = super::testmempoolaccept(&ctx, &json!([[], 0, "extra"]))
+        .expect_err("excess parameters must fail");
+    assert!(matches!(excess, RpcError::InvalidParams(_)));
+
+    let handler = crate::Handler::new(Arc::clone(&ctx));
+    let named = handler.dispatch("testmempoolaccept", &json!({"rawtxs": []}));
+    let positional = handler.dispatch("testmempoolaccept", &json!([[]]));
+    assert_eq!(
+        named.expect_err("named empty rawtxs").to_string(),
+        positional.expect_err("positional empty rawtxs").to_string()
+    );
+}
 
 #[test]
 fn getrawtransaction_checks_mempool_before_failing_txindex()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     struct FailingQuery;
 
     impl DerivedIndexQuery for FailingQuery {
@@ -144,33 +395,6 @@ fn getrawtransaction_checks_mempool_before_failing_txindex()
         }
     }
     Ok(())
-}
-
-#[test]
-fn getrawtransaction_with_blockhash_finds_tx_in_specific_block() {
-    let genesis = fixture_genesis();
-    let Some(coinbase) = genesis.txs.first() else {
-        panic!("genesis has no transactions");
-    };
-    let txid = coinbase.txid();
-    let block_hash = genesis.block_hash();
-    let mut ctx = Context::new();
-    attach_body_for_block(&mut ctx, &genesis, 0);
-    ctx.chain
-        .block_tree
-        .write()
-        .insert_node(None, genesis.header, NodeStatus::Active)
-        .expect("insert genesis header");
-    ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
-    let ctx = Arc::new(ctx);
-    let handler = Handler::new(Arc::clone(&ctx));
-    let result = handler
-        .dispatch(
-            "getrawtransaction",
-            &json!([txid.to_string(), false, block_hash.to_string()]),
-        )
-        .unwrap_or_else(|err| panic!("getrawtransaction with blockhash: {err}"));
-    assert!(result.is_str(), "expected hex string, got {result:?}");
 }
 
 #[test]
@@ -567,13 +791,16 @@ fn getrawtransaction_with_unknown_blockhash_errors() {
 }
 
 #[test]
-fn gettxoutproof_finds_genesis_coinbase() {
+fn gettxoutproof_finds_genesis_coinbase_through_the_index() {
     let genesis = fixture_genesis();
     let Some(coinbase) = genesis.txs.first() else {
         panic!("genesis has no transactions");
     };
     let txid = coinbase.txid();
-    let ctx = context_with_blocks(std::slice::from_ref(&genesis));
+    let mut ctx = Context::new();
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
+    install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
+    let ctx = Arc::new(ctx);
     let handler = Handler::new(Arc::clone(&ctx));
     let result = handler
         .dispatch("gettxoutproof", &json!([[txid.to_string()]]))
@@ -591,73 +818,9 @@ fn gettxoutproof_finds_genesis_coinbase() {
     assert_eq!(arr.len(), 1);
 }
 
+// API-02
 #[test]
-fn gettxoutproof_skips_pruned_blocks_before_matching_block() {
-    let genesis = fixture_genesis();
-    let Some(coinbase) = genesis.txs.first() else {
-        panic!("genesis has no transactions");
-    };
-    let txid = coinbase.txid();
-    let mut ctx = Context::new();
-    ctx.chain.block_body_source = Some(Arc::new(ScriptedBodySource {
-        responses: parking_lot::Mutex::new(std::collections::VecDeque::from([
-            None,
-            Some(consensus_bytes(&genesis)),
-        ])),
-    }));
-    ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
-    ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
-    let ctx = Arc::new(ctx);
-    let handler = Handler::new(Arc::clone(&ctx));
-
-    let result = handler.dispatch("gettxoutproof", &json!([[txid.to_string()]]));
-
-    assert!(
-        result.as_ref().is_ok_and(|value| value.as_str().is_some()),
-        "gettxoutproof should skip pruned blocks before matching retained blocks: {result:?}"
-    );
-}
-
-#[test]
-fn gettxoutproof_with_blockhash_skips_unrelated_records() {
-    let genesis = fixture_genesis();
-    let Some(coinbase) = genesis.txs.first() else {
-        panic!("genesis has no transactions");
-    };
-    let txid = coinbase.txid();
-    let unrelated_hash = BlockHash::from(Hash256::from_le_bytes(&[7_u8; 32]));
-    let record = BlockRecord::from_block(0, &genesis);
-    let block_hash = record.hash;
-    let mut ctx = Context::new();
-    ctx.chain.block_body_source = Some(Arc::new(PanicUnlessBodySource {
-        height: record.height,
-        hash: record.hash,
-        body: consensus_bytes(&genesis),
-    }));
-    ctx.chain
-        .block_tree
-        .write()
-        .insert_node(None, genesis.header, NodeStatus::Active)
-        .expect("insert genesis header");
-    ctx.chain
-        .add_block(BlockRecord::synthetic(0, unrelated_hash));
-    ctx.chain.add_block(record);
-    let ctx = Arc::new(ctx);
-    let handler = Handler::new(Arc::clone(&ctx));
-
-    let result = handler.dispatch(
-        "gettxoutproof",
-        &json!([[txid.to_string()], block_hash.to_string()]),
-    );
-
-    assert!(
-        result.as_ref().is_ok_and(|value| value.as_str().is_some()),
-        "gettxoutproof should inspect only the specified block: {result:?}"
-    );
-}
-
-#[test]
-fn gettxoutproof_with_blockhash_reports_pruned_block_body() {
+fn gettxoutproof_with_blockhash_answers_core_message_for_a_bodyless_block() {
     let ctx = Arc::new(Context::new());
     let genesis = fixture_genesis();
     let Some(coinbase) = genesis.txs.first() else {
@@ -679,14 +842,19 @@ fn gettxoutproof_with_blockhash_reports_pruned_block_body() {
         &json!([[txid.to_string()], block_hash.to_string()]),
     );
 
-    assert!(matches!(
-        result,
-        Err(RpcError::NotFound("block data pruned"))
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(RpcError::Misc(reason))
+                if reason == "Block not available (not fully downloaded)"
+        ),
+        "Core v31.1 answers RPC_MISC_ERROR not fully downloaded for a bodyless block"
+    );
 }
 
+// API-02
 #[test]
-fn gettxoutproof_with_blockhash_reports_pruned_body_for_a_header_only_block() {
+fn gettxoutproof_with_blockhash_answers_core_message_for_a_header_only_block() {
     let ctx = Arc::new(Context::new());
     let genesis = fixture_genesis();
     let Some(coinbase) = genesis.txs.first() else {
@@ -705,10 +873,141 @@ fn gettxoutproof_with_blockhash_reports_pruned_body_for_a_header_only_block() {
         &json!([[coinbase.txid().to_string()], block_hash.to_string()]),
     );
 
-    assert!(matches!(
-        result,
-        Err(RpcError::NotFound("block data pruned"))
+    assert!(
+        matches!(
+            result,
+            Err(RpcError::Misc(reason))
+                if reason == "Block not available (not fully downloaded)"
+        ),
+        "Core v31.1 answers RPC_MISC_ERROR not fully downloaded for a header-only block"
+    );
+}
+
+// API-02
+#[test]
+fn gettxoutproof_without_blockhash_answers_from_the_utxo_set() {
+    let genesis = fixture_genesis();
+    let Some(coinbase) = genesis.txs.first() else {
+        panic!("genesis has no transactions");
+    };
+    let txid = coinbase.txid();
+    let mut ctx = Context::new();
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(
+        OutPoint::new(txid, 0),
+        coinbase.outputs[0].clone(),
+        false,
+        0,
     ));
+    bitcoin_rs_utxo::contract::commit_block_changes(
+        &ctx.chain.utxo.fixture_set(),
+        &changes,
+        &Hash256::default(),
+    )
+    .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+    install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
+    let ctx = Arc::new(ctx);
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    let value = handler
+        .dispatch("gettxoutproof", &json!([[txid.to_string()]]))
+        .unwrap_or_else(|err| panic!("gettxoutproof failed: {err}"));
+    let Some(proof_hex) = value.as_str() else {
+        panic!("expected proof hex, got {value:?}");
+    };
+    let extracted = handler
+        .dispatch("verifytxoutproof", &json!([proof_hex]))
+        .unwrap_or_else(|err| panic!("verifytxoutproof failed: {err}"));
+    let Some(arr) = extracted.as_array() else {
+        panic!("expected array, got {extracted:?}");
+    };
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0].as_str(), Some(txid.to_string()).as_deref());
+}
+
+// API-02
+#[test]
+fn gettxoutproof_without_blockhash_answers_core_message_when_the_transaction_is_unknown() {
+    let genesis = fixture_genesis();
+    let Some(coinbase) = genesis.txs.first() else {
+        panic!("genesis has no transactions");
+    };
+    let txid = coinbase.txid();
+    let mut ctx = Context::new();
+    let source = Arc::new(CountingBodySource::default());
+    let body_source: Arc<dyn bitcoin_rs_chain::BlockBodySource> =
+        Arc::<CountingBodySource>::clone(&source);
+    ctx.chain.block_body_source = Some(body_source);
+    ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
+    ctx.chain.add_block(BlockRecord::from_block(1, &genesis));
+    let ctx = Arc::new(ctx);
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    let error = handler
+        .dispatch("gettxoutproof", &json!([[txid.to_string()]]))
+        .expect_err("a transaction with no coin and no index must answer Core's miss");
+
+    assert_eq!(
+        error.code(),
+        RpcError::CORE_NOT_FOUND,
+        "Core answers -5 for a transaction it cannot place: {error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "Transaction not yet in block",
+        "Core's miss text for a transaction outside the UTXO set and index"
+    );
+    assert_eq!(
+        source.calls.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the miss must not read any block body"
+    );
+}
+
+fn many_output_tx(output_count: usize) -> Tx {
+    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
+    let mut script = vec![0x76, 0xa9, 0x14];
+    script.extend_from_slice(&[0x11_u8; 20]);
+    script.push(0x88);
+    script.push(0xac);
+    let script = Script::from_bytes(script);
+    let outputs = (0..output_count)
+        .map(|_index| TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: script.clone(),
+        })
+        .collect::<Vec<_>>();
+    Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5a; 32])), 0),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs,
+    }
+}
+
+fn fund_coin(ctx: &Context, outpoint: OutPoint, value_sat: u64) {
+    use bitcoin_rs_primitives::{Amount, Script};
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(
+        outpoint,
+        TxOut {
+            value: Amount::from_sat(value_sat),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        },
+        false,
+        0,
+    ));
+    bitcoin_rs_utxo::contract::commit_block_changes(
+        &ctx.chain.utxo.fixture_set(),
+        &changes,
+        &Hash256::default(),
+    )
+    .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
 }
 
 fn distinct_block(marker: u8) -> Block {
@@ -803,17 +1102,19 @@ impl bitcoin_rs_chain::BlockBodySource for PanicUnlessBodySource {
 use crate::context::BlockBodies;
 
 #[derive(Default)]
-struct ScriptedBodySource {
-    responses: parking_lot::Mutex<std::collections::VecDeque<Option<Vec<u8>>>>,
+struct CountingBodySource {
+    calls: core::sync::atomic::AtomicUsize,
 }
 
-impl bitcoin_rs_chain::BlockBodySource for ScriptedBodySource {
+impl bitcoin_rs_chain::BlockBodySource for CountingBodySource {
     fn block_body(
         &self,
         _height: u32,
         _hash: BlockHash,
     ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
-        Ok(self.responses.lock().pop_front().flatten())
+        self.calls
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        Ok(None)
     }
 }
 
@@ -834,10 +1135,28 @@ fn install_blocks(ctx: &mut Context, blocks: &[Block]) {
     }
 }
 
-fn context_with_blocks(blocks: &[Block]) -> Arc<Context> {
-    let mut ctx = Context::new();
-    install_blocks(&mut ctx, blocks);
-    Arc::new(ctx)
+fn install_chain_blocks(ctx: &mut Context, blocks: &[Block]) {
+    install_blocks(ctx, blocks);
+    let tip = {
+        let mut tree = ctx.chain.block_tree.write();
+        let mut parent: Option<NodeId> = None;
+        for block in blocks {
+            parent = Some(
+                tree.insert_node(parent, block.header, NodeStatus::Active)
+                    .unwrap_or_else(|err| panic!("insert chain header: {err}")),
+            );
+        }
+        let tip_id = parent.expect("chain blocks produce a tip");
+        let node = tree.node(tip_id).expect("tip node");
+        Arc::new(TipSnapshot {
+            tip_id,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+            chain_tx_count: node.chain_tx_count,
+        })
+    };
+    ctx.chain.applied_tip.store(Some(tip));
 }
 
 fn attach_body_for_block(ctx: &mut Context, block: &Block, height: u32) {
@@ -849,7 +1168,7 @@ fn attach_body_for_block(ctx: &mut Context, block: &Block, height: u32) {
 
 fn proof_for(ctx: &Arc<Context>, txids: &[Txid]) -> Result<sonic_rs::Value, RpcError> {
     let names = txids.iter().map(ToString::to_string).collect::<Vec<_>>();
-    super::gettxoutproof(ctx, &json!([names]))
+    super::gettxoutproof(ctx, &json!([names]), &LatchReader::fixture_never())
 }
 
 #[test]
@@ -886,49 +1205,7 @@ fn gettxoutproof_index_path_does_not_read_unrelated_block_bodies() {
     );
 }
 
-#[test]
-fn gettxoutproof_falls_back_to_the_scan_when_the_index_cannot_answer() {
-    let blocks = [distinct_block(1), distinct_block(2)];
-    let Some(wanted) = blocks[1].txs.first().map(Tx::txid) else {
-        panic!("block has no transactions");
-    };
-
-    let mut ctx = Context::new();
-    install_blocks(&mut ctx, &blocks);
-    let ctx = Arc::new(ctx);
-
-    let result = proof_for(&ctx, &[wanted]);
-
-    assert!(
-        result.as_ref().is_ok_and(|value| value.as_str().is_some()),
-        "an index that cannot answer must not turn a findable proof into an error: {result:?}"
-    );
-}
-
-#[test]
-fn gettxoutproof_falls_back_when_the_indexed_block_lacks_some_wanted_txids() {
-    let both = block_with_two_txs(9);
-    let blocks = [distinct_block(1), both.clone()];
-    let wanted = both.txs.iter().map(Tx::txid).collect::<Vec<_>>();
-
-    let scan_ctx = context_with_blocks(&blocks);
-    let scanned =
-        proof_for(&scan_ctx, &wanted).unwrap_or_else(|err| panic!("scan path failed: {err}"));
-
-    let mut index_ctx = Context::new();
-    index_ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
-    install_blocks(&mut index_ctx, &blocks);
-    let index_ctx = Arc::new(index_ctx);
-    let fell_back =
-        proof_for(&index_ctx, &wanted).unwrap_or_else(|err| panic!("fallback path failed: {err}"));
-
-    assert_eq!(
-        fell_back.as_str(),
-        scanned.as_str(),
-        "a candidate block missing some wanted txids must fall back to the scan"
-    );
-}
-
+// API-02
 #[test]
 fn gettxoutproof_keeps_its_error_when_no_block_holds_every_txid() {
     let blocks = [distinct_block(1), distinct_block(2)];
@@ -946,52 +1223,61 @@ fn gettxoutproof_keeps_its_error_when_no_block_holds_every_txid() {
 
     assert!(
         matches!(
-            result,
-            Err(RpcError::NotFound("no block contains all requested txids"))
+            &result,
+            Err(RpcError::InvalidAddressOrKey(reason))
+                if reason == "Not all transactions found in specified or retrieved block"
         ),
-        "txids spread across blocks must keep the pre-index error: {result:?}"
+        "a resolved block missing txids must answer Core's not-all error: {result:?}"
     );
 }
 
 #[test]
 fn gettxoutproof_index_path_answers_for_several_txids_in_one_block() {
-    let block = block_with_two_txs(11);
+    let genesis = fixture_genesis();
+    let mut block = block_with_two_txs(11);
+    block.header.prev_blockhash = genesis.block_hash();
     let wanted = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
     let resolvable = wanted.iter().map(|txid| (*txid, 1)).collect::<Vec<_>>();
 
     let mut ctx = Context::new();
     ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(resolvable))));
-    let indexed = BlockRecord::from_block(1, &block);
-    ctx.chain.block_body_source = Some(Arc::new(PanicUnlessBodySource {
-        height: indexed.height,
-        hash: indexed.hash,
-        body: consensus_bytes(&block),
-    }));
-    ctx.chain.add_block(BlockRecord::synthetic(
-        0,
-        BlockHash::from(Hash256::from_le_bytes(&[5_u8; 32])),
-    ));
-    ctx.chain.add_block(indexed);
+    install_chain_blocks(&mut ctx, &[genesis, block]);
     let ctx = Arc::new(ctx);
 
-    let result = proof_for(&ctx, &wanted);
-
-    assert!(
-        result.as_ref().is_ok_and(|value| value.as_str().is_some()),
-        "several txids in one block should resolve through the index: {result:?}"
-    );
+    let proof = proof_for(&ctx, &wanted).expect("proof generation must succeed");
+    let proof_hex = proof.as_str().expect("proof hex string");
+    let verified = super::verifytxoutproof(&ctx, &json!([proof_hex]))
+        .unwrap_or_else(|err| panic!("verifytxoutproof failed: {err}"));
+    let mut verified_txids: Vec<_> = verified
+        .as_array()
+        .expect("array of txids")
+        .iter()
+        .map(|v| v.as_str().expect("txid string").to_owned())
+        .collect();
+    let mut expected_txids: Vec<_> = wanted.iter().map(ToString::to_string).collect();
+    verified_txids.sort();
+    expected_txids.sort();
+    assert_eq!(verified_txids, expected_txids);
 }
 
+// API-02
 #[test]
-fn gettxoutproof_probes_every_txid_before_giving_up_on_the_index() {
+fn gettxoutproof_asks_the_index_about_the_first_txid_only() {
     let block = block_with_two_txs(12);
-    let wanted = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
-    let Some(only_one) = wanted.last().copied() else {
+    let mut wanted: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
+    wanted.sort_unstable();
+    let Some(first) = wanted.first().copied() else {
         panic!("block has no transactions");
     };
 
     let mut ctx = Context::new();
-    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(vec![(only_one, 1)]))));
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(move |txid: &Txid| {
+        if *txid == first {
+            Ok(Some(1))
+        } else {
+            panic!("the index must not be asked about later txids: {txid}")
+        }
+    })));
     let indexed = BlockRecord::from_block(1, &block);
     ctx.chain.block_body_source = Some(Arc::new(PanicUnlessBodySource {
         height: indexed.height,
@@ -1009,42 +1295,373 @@ fn gettxoutproof_probes_every_txid_before_giving_up_on_the_index() {
 
     assert!(
         result.as_ref().is_ok_and(|value| value.as_str().is_some()),
-        "one unresolvable probe must not abandon the index path: {result:?}"
+        "one index answer for the first txid must resolve the whole proof: {result:?}"
     );
 }
 
 #[test]
-fn gettxoutproof_falls_back_to_the_scan_when_the_index_errors() {
-    for error in [
-        TxQueryError::Retry,
-        TxQueryError::Unavailable(TxUnavailableCause::Other("worker stopped".into())),
-        TxQueryError::Storage("disk full".into()),
-    ] {
-        let blocks = [distinct_block(1), distinct_block(2)];
-        let Some(wanted) = blocks[1].txs.first().map(Tx::txid) else {
-            panic!("block has no transactions");
-        };
+fn gettxoutproof_maps_a_transient_index_error_instead_of_reporting_absence() {
+    let block = distinct_block(5);
+    let Some(wanted) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let mut ctx = Context::new();
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(
+        |_: &Txid| -> Result<Option<u32>, TxQueryError> { Err(TxQueryError::Retry) },
+    )));
+    install_blocks(&mut ctx, std::slice::from_ref(&block));
+    let ctx = Arc::new(ctx);
 
-        let scan_ctx = context_with_blocks(&blocks);
-        let scanned =
-            proof_for(&scan_ctx, &[wanted]).unwrap_or_else(|err| panic!("scan path failed: {err}"));
+    let error =
+        proof_for(&ctx, &[wanted]).expect_err("a transient index failure is not an absence answer");
 
-        let failure = error.clone();
-        let mut ctx = Context::new();
-        ctx.indexes.derived_index =
-            Some(Arc::new(HeightQuery(move |_: &Txid| Err(failure.clone()))));
-        install_blocks(&mut ctx, &blocks);
-        let ctx = Arc::new(ctx);
+    assert_eq!(
+        error.code(),
+        -32603,
+        "a transient index failure must not read as 'no block contains the txid': {error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "internal error: transaction index is still catching up; retry later"
+    );
+}
 
-        let result = proof_for(&ctx, &[wanted]);
+// API-02
+#[test]
+fn gettxoutproof_index_path_reports_the_missing_body() {
+    let block = distinct_block(6);
+    let Some(wanted) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let mut ctx = Context::new();
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(1)))));
+    ctx.chain.add_block(BlockRecord::synthetic(
+        0,
+        BlockHash::from(Hash256::from_le_bytes(&[9_u8; 32])),
+    ));
+    ctx.chain.add_block(BlockRecord::from_block(1, &block));
+    let ctx = Arc::new(ctx);
 
-        assert_eq!(
-            result.as_ref().ok().and_then(|value| value.as_str()),
-            scanned.as_str(),
-            "an index reporting {error} must fall back to the scan, \
-                 not fail or answer the call: {result:?}"
-        );
+    let error = proof_for(&ctx, &[wanted]).expect_err("a missing indexed body is not absence");
+
+    assert!(
+        matches!(
+            error,
+            RpcError::Misc(reason)
+                if reason == "Block not available (not fully downloaded)"
+        ),
+        "the indexed height holds no body, so the answer is Core's not-downloaded error"
+    );
+}
+
+// API-02
+#[test]
+fn gettxoutproof_answers_core_pruned_message_when_the_node_has_pruned() {
+    let block = distinct_block(6);
+    let Some(wanted) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let mut ctx = Context::new();
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(1)))));
+    ctx.chain.add_block(BlockRecord::synthetic(
+        0,
+        BlockHash::from(Hash256::from_le_bytes(&[9_u8; 32])),
+    ));
+    ctx.chain.add_block(BlockRecord::from_block(1, &block));
+    ctx.chain.prune_service = Some(Arc::new(PrunedStub));
+    let ctx = Arc::new(ctx);
+
+    let error = proof_for(&ctx, &[wanted]).expect_err("a missing body on a pruned node");
+
+    assert!(
+        matches!(
+            error,
+            RpcError::Misc(reason) if reason == "Block not available (pruned data)"
+        ),
+        "Core v31.1 answers RPC_MISC_ERROR pruned data once the node has pruned"
+    );
+}
+
+struct PrunedStub;
+
+impl crate::context::PruneService for PrunedStub {
+    fn prune_to_height(
+        &self,
+        _requested_height: u32,
+    ) -> Result<crate::context::PruneResult, crate::context::PruneServiceError> {
+        Err(crate::context::PruneServiceError::Failed(
+            "pruning is stubbed".to_owned(),
+        ))
     }
+
+    fn status(&self) -> crate::context::PruneStatus {
+        crate::context::PruneStatus {
+            pruned: true,
+            pruneheight: Some(0),
+        }
+    }
+}
+
+// API-02
+#[test]
+fn gettxoutproof_answers_core_message_for_an_empty_txid_list() {
+    let ctx = Arc::new(Context::new());
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    let result = handler.dispatch("gettxoutproof", &json!([[]]));
+
+    assert!(
+        matches!(
+            result,
+            Err(RpcError::InvalidParameter(reason))
+                if reason == "Parameter 'txids' cannot be empty"
+        ),
+        "Core v31.1 answers RPC_INVALID_PARAMETER for an empty txid list"
+    );
+}
+
+// API-02
+#[test]
+fn gettxoutproof_answers_core_message_for_a_duplicated_txid() {
+    let block = distinct_block(7);
+    let Some(txid) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let raw = txid.to_string();
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let result = handler.dispatch("gettxoutproof", &json!([[raw.clone(), raw.clone()]]));
+
+    assert!(
+        matches!(
+            result,
+            Err(RpcError::InvalidParameter(reason))
+                if reason == format!("Invalid parameter, duplicated txid: {raw}")
+        ),
+        "Core v31.1 rejects a duplicated txid naming the raw input"
+    );
+}
+
+// API-02
+#[test]
+fn gettxoutproof_answers_a_type_error_for_a_non_string_blockhash() {
+    let block = distinct_block(8);
+    let Some(txid) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let result = handler.dispatch("gettxoutproof", &json!([[txid.to_string()], 123]));
+
+    let message = match result {
+        Err(RpcError::InvalidType(message)) => message,
+        other => panic!("Core v31.1 answers a -3 type error for a numeric blockhash: {other:?}"),
+    };
+    assert_eq!(
+        message,
+        "Wrong type passed:\n{\n    \"Position 2 (blockhash)\": \"JSON value of type number is not of expected type string\"\n}",
+        "Core v31.1 answers the RPCHelpMan wrong type shape for a numeric blockhash"
+    );
+}
+
+// API-02
+#[test]
+fn gettxoutproof_answers_core_wrong_type_for_a_non_array_txid_list() {
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let result = handler.dispatch("gettxoutproof", &json!([42]));
+
+    let message = match result {
+        Err(RpcError::InvalidType(message)) => message,
+        other => {
+            panic!(
+                "Core v31.1 answers the RPCHelpMan wrong type shape for a non array txids: {other:?}"
+            )
+        }
+    };
+    assert_eq!(
+        message,
+        "Wrong type passed:\n{\n    \"Position 1 (txids)\": \"JSON value of type number is not of expected type array\"\n}",
+        "Core v31.1 names Position 1 for a non array txids argument"
+    );
+}
+
+// API-02
+#[test]
+fn gettxoutproof_answers_core_type_error_for_a_non_string_txid_element() {
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let result = handler.dispatch("gettxoutproof", &json!([[42]]));
+
+    let message = match result {
+        Err(RpcError::InvalidType(message)) => message,
+        other => {
+            panic!("Core v31.1 answers the univalue type error shape for a numeric txid: {other:?}")
+        }
+    };
+    assert_eq!(
+        message, "JSON value of type number is not of expected type string",
+        "Core v31.1 keeps the plain type error for an inner array element"
+    );
+}
+
+// API-02
+#[test]
+fn gettxoutproof_answers_index_corrupt_when_the_index_names_an_absent_block() {
+    let block = distinct_block(13);
+    let Some(txid) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let mut ctx = Context::new();
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(3)))));
+    ctx.chain.add_block(BlockRecord::from_block(0, &block));
+    let ctx = Arc::new(ctx);
+
+    let result = proof_for(&ctx, &[txid]);
+
+    let reason = match result {
+        Err(RpcError::CoreInternal(reason)) => reason,
+        other => panic!(
+            "Core v31.1 answers -32603 when the index names a block the chain lacks: {other:?}"
+        ),
+    };
+    assert_eq!(
+        reason, "Transaction index corrupt",
+        "Core v31.1 keeps the index corrupt text instead of the not yet in block answer"
+    );
+}
+
+// API-02
+#[test]
+fn gettxoutproof_answers_block_not_found_for_an_unknown_blockhash() {
+    let block = distinct_block(9);
+    let Some(txid) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let unknown = Hash256::from_le_bytes(&[0xEE; 32]);
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let result = handler.dispatch(
+        "gettxoutproof",
+        &json!([[txid.to_string()], unknown.to_string()]),
+    );
+
+    assert!(
+        matches!(
+            result,
+            Err(RpcError::InvalidAddressOrKey(reason)) if reason == "Block not found"
+        ),
+        "Core v31.1 answers Block not found for an unknown blockhash"
+    );
+}
+
+struct CorruptBodySource {
+    height: u32,
+    hash: BlockHash,
+}
+
+impl bitcoin_rs_chain::BlockBodySource for CorruptBodySource {
+    fn block_body(
+        &self,
+        height: u32,
+        hash: BlockHash,
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+        if height == self.height && hash == self.hash {
+            Ok(Some(vec![0xFF_u8; 80]))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+// API-02
+#[test]
+fn gettxoutproof_answers_core_read_error_for_an_undecodable_body() {
+    let block = distinct_block(10);
+    let Some(wanted) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let mut ctx = Context::new();
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(1)))));
+    ctx.chain.add_block(BlockRecord::synthetic(
+        0,
+        BlockHash::from(Hash256::from_le_bytes(&[9_u8; 32])),
+    ));
+    let record = BlockRecord::from_block(1, &block);
+    ctx.chain.block_body_source = Some(Arc::new(CorruptBodySource {
+        height: record.height,
+        hash: record.hash,
+    }));
+    ctx.chain.add_block(record);
+    let ctx = Arc::new(ctx);
+
+    let error = proof_for(&ctx, &[wanted]).expect_err("an undecodable body is not absence");
+
+    assert!(
+        matches!(
+            error,
+            RpcError::CoreInternal(reason) if reason == "Can't read block from disk"
+        ),
+        "Core v31.1 answers Can't read block from disk instead of hiding storage damage"
+    );
+}
+
+// API-02
+#[test]
+fn gettxoutproof_utxo_path_answers_interrupted_when_cancelled() {
+    let block = distinct_block(11);
+    let Some(txid) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let mut ctx = Context::new();
+    attach_body_for_block(&mut ctx, &block, 1);
+    ctx.chain.add_block(BlockRecord::synthetic(
+        0,
+        BlockHash::from(Hash256::from_le_bytes(&[3_u8; 32])),
+    ));
+    ctx.chain.add_block(BlockRecord::from_block(1, &block));
+    let ctx = Arc::new(ctx);
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    latch.trigger();
+
+    let cancelled = super::gettxoutproof(&ctx, &json!([[txid.to_string()]]), &latch.reader());
+    assert!(
+        matches!(
+            cancelled,
+            Err(RpcError::Misc(reason)) if reason == "gettxoutproof interrupted"
+        ),
+        "a cancelled request must stop the utxo probe"
+    );
+}
+
+// API-02
+#[test]
+fn gettxoutproof_utxo_path_interrupts_for_a_mixed_txid_list() {
+    let block = distinct_block(12);
+    let Some(txid) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let unknown = Hash256::from_le_bytes(&[0x77; 32]);
+    let unknown_txid = Txid(unknown);
+    let mut ctx = Context::new();
+    attach_body_for_block(&mut ctx, &block, 1);
+    ctx.chain.add_block(BlockRecord::from_block(1, &block));
+    let ctx = Arc::new(ctx);
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    latch.trigger();
+
+    let cancelled = super::gettxoutproof(
+        &ctx,
+        &json!([[unknown_txid.to_string(), txid.to_string()]]),
+        &latch.reader(),
+    );
+    assert!(
+        matches!(
+            cancelled,
+            Err(RpcError::Misc(reason)) if reason == "gettxoutproof interrupted"
+        ),
+        "the per-txid check must fire before any lookup"
+    );
 }
 
 #[test]
@@ -1070,127 +1687,15 @@ fn gettxoutproof_with_blockhash_never_consults_the_index() {
     ctx.chain.add_block(record);
     let ctx = Arc::new(ctx);
 
-    let result = super::gettxoutproof(&ctx, &json!([[wanted.to_string()], block_hash.to_string()]));
+    let result = super::gettxoutproof(
+        &ctx,
+        &json!([[wanted.to_string()], block_hash.to_string()]),
+        &LatchReader::fixture_never(),
+    );
 
     assert!(
         result.as_ref().is_ok_and(|value| value.as_str().is_some()),
         "the explicit-blockhash path should answer without the index: {result:?}"
-    );
-}
-
-#[test]
-fn gettxoutproof_asks_the_index_about_every_wanted_txid() {
-    let block = block_with_two_txs(13);
-    let wanted = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
-    let probes = Arc::new(core::sync::atomic::AtomicUsize::new(0));
-
-    let counter = Arc::clone(&probes);
-    let mut ctx = Context::new();
-    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(move |_: &Txid| {
-        counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        Ok(None)
-    })));
-    install_blocks(&mut ctx, std::slice::from_ref(&block));
-    let ctx = Arc::new(ctx);
-
-    let result = proof_for(&ctx, &wanted);
-    assert!(
-        result.as_ref().is_ok_and(|value| value.as_str().is_some()),
-        "the scan must still answer when the index resolves nothing: {result:?}"
-    );
-
-    assert_eq!(
-        probes.load(core::sync::atomic::Ordering::Relaxed),
-        wanted.len(),
-        "every wanted txid must be probed before the index path gives up"
-    );
-}
-
-#[test]
-fn gettxoutproof_keeps_probing_after_a_candidate_block_fails_verification() {
-    let block = block_with_two_txs(14);
-    let wanted = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
-    let probes = Arc::new(core::sync::atomic::AtomicUsize::new(0));
-
-    let counter = Arc::clone(&probes);
-    let mut ctx = Context::new();
-    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(move |_: &Txid| {
-        counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        Ok(Some(0))
-    })));
-    install_blocks(&mut ctx, &[distinct_block(15), block]);
-    let ctx = Arc::new(ctx);
-
-    let result = proof_for(&ctx, &wanted);
-    assert!(
-        result.as_ref().is_ok_and(|value| value.as_str().is_some()),
-        "the scan must still answer when no candidate verifies: {result:?}"
-    );
-
-    assert_eq!(
-        probes.load(core::sync::atomic::Ordering::Relaxed),
-        wanted.len(),
-        "a candidate that does not hold every wanted txid must not end the walk"
-    );
-}
-
-#[test]
-fn scan_does_not_hold_the_block_log_lock_across_a_body_load() {
-    struct LockProbeSource {
-        blocks: bitcoin_rs_index::BlockLogReader,
-        bodies: Vec<(u32, Vec<u8>)>,
-    }
-
-    impl bitcoin_rs_chain::BlockBodySource for LockProbeSource {
-        fn block_body(
-            &self,
-            height: u32,
-            _hash: BlockHash,
-        ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
-            assert!(
-                self.blocks.raw_handle().try_write().is_some(),
-                "the block-record lock must not be held across a body load"
-            );
-            Ok(self
-                .bodies
-                .iter()
-                .find(|(known, _)| *known == height)
-                .map(|(_, bytes)| bytes.clone()))
-        }
-    }
-
-    let blocks = [distinct_block(21), distinct_block(22), distinct_block(23)];
-    let Some(wanted) = blocks[2].txs.first().map(Tx::txid) else {
-        panic!("block has no transactions");
-    };
-
-    let mut ctx = Context::new();
-    let log = ctx.chain.blocks.clone();
-    let bodies = blocks
-        .iter()
-        .enumerate()
-        .map(|(height, block)| {
-            let height = u32::try_from(height).unwrap_or_else(|err| panic!("height: {err}"));
-            (height, consensus_bytes(block))
-        })
-        .collect::<Vec<_>>();
-    ctx.chain.block_body_source = Some(Arc::new(LockProbeSource {
-        blocks: log,
-        bodies,
-    }));
-    let ctx = Arc::new(ctx);
-
-    for (height, block) in blocks.iter().enumerate() {
-        let height = u32::try_from(height).unwrap_or_else(|err| panic!("height: {err}"));
-        let hash = block.block_hash();
-        ctx.chain.add_block(BlockRecord::synthetic(height, hash));
-    }
-
-    let result = proof_for(&ctx, &[wanted]);
-
-    assert!(
-        result.as_ref().is_ok_and(|value| value.as_str().is_some()),
-        "the scan should answer from the body source: {result:?}"
     );
 }
 
@@ -1329,4 +1834,113 @@ fn sendrawtransaction_rebuilds_admission_context_after_transient_rejection() {
         ctx.mempool.gateway.read().contains_txid(&parent_txid),
         "the parent must remain pooled"
     );
+}
+
+// API-02
+#[test]
+fn verifytxoutproof_refuses_a_header_outside_the_active_chain()
+-> Result<(), crate::test_error::TestError> {
+    let genesis = fixture_genesis();
+    let Some(txid) = genesis.txs.first().map(Tx::txid) else {
+        panic!("genesis has no transactions");
+    };
+    let mut ctx = Context::new();
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
+    install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
+    let ctx = Arc::new(ctx);
+
+    let proof = proof_for(&ctx, &[txid])?;
+    let proof_hex = proof.as_str().expect("proof hex string");
+    let bytes = bitcoin_rs_primitives::hex::hex_decode(proof_hex).expect("proof hex");
+    let mut merkle_block =
+        bitcoin::consensus::encode::deserialize::<bitcoin::merkle_tree::MerkleBlock>(&bytes)
+            .expect("proof decodes");
+    merkle_block.header.nonce = merkle_block.header.nonce.wrapping_add(1);
+    let tampered = bitcoin::consensus::encode::serialize(&merkle_block).to_lower_hex_string();
+
+    let refusal = match super::verifytxoutproof(&ctx, &json!([tampered])) {
+        Err(RpcError::InvalidAddressOrKey(reason)) => reason,
+        other => {
+            panic!("Core v31.1 answers -5 for a header the active chain does not name: {other:?}")
+        }
+    };
+    assert_eq!(
+        refusal, "Block not found in chain",
+        "Core v31.1 names the missing chain entry"
+    );
+    Ok(())
+}
+
+// API-02
+#[test]
+fn verifytxoutproof_answers_an_empty_list_when_the_transaction_count_differs()
+-> Result<(), crate::test_error::TestError> {
+    let genesis = fixture_genesis();
+    let Some(txid) = genesis.txs.first().map(Tx::txid) else {
+        panic!("genesis has no transactions");
+    };
+    let proof_hex = {
+        let mut ctx = Context::new();
+        ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
+        install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
+        let proof = proof_for(&Arc::new(ctx), &[txid])?;
+        proof.as_str().expect("proof hex string").to_owned()
+    };
+
+    let matching = {
+        let mut ctx = Context::new();
+        install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
+        Arc::new(ctx)
+    };
+    let listed = super::verifytxoutproof(&matching, &json!([proof_hex]))?;
+    assert_eq!(
+        listed.as_array().map(|items| items.len()),
+        Some(1),
+        "the same proof lists its transaction when the recorded count matches"
+    );
+
+    let mismatching = {
+        let mut ctx = Context::new();
+        let mut stale = BlockRecord::from_block(0, &genesis);
+        stale.tx_count = 2;
+        let hash = stale.hash;
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
+            bodies: vec![(0, hash, consensus_bytes(&genesis))],
+        }));
+        ctx.chain.add_block(stale);
+        {
+            let mut tree = ctx.chain.block_tree.write();
+            tree.insert_node(None, genesis.header, NodeStatus::Active)
+                .expect("genesis header");
+        }
+        let tip = ctx.chain.block_tree.read().tip().expect("chain tip");
+        ctx.chain.applied_tip.store(Some(Arc::new((*tip).clone())));
+        Arc::new(ctx)
+    };
+    let mismatched = super::verifytxoutproof(&mismatching, &json!([proof_hex]))?;
+    assert_eq!(
+        mismatched.as_array().map(|items| items.len()),
+        Some(0),
+        "Core v31.1 lists nothing when the recorded transaction count differs"
+    );
+
+    let ctx = Context::new();
+    {
+        let mut tree = ctx.chain.block_tree.write();
+        tree.insert_node(None, genesis.header, NodeStatus::Active)
+            .expect("genesis header");
+    }
+    let header_only = Arc::new(ctx);
+    let uncounted = super::verifytxoutproof(&header_only, &json!([proof_hex]));
+    let uncounted_message = match uncounted {
+        Err(RpcError::InvalidAddressOrKey(reason)) => reason,
+        other => panic!(
+            "Core v31.1 answers -5 while the chain entry records no transaction count: {other:?}"
+        ),
+    };
+    assert_eq!(
+        uncounted_message, "Block not found in chain",
+        "Core v31.1 names the missing chain entry"
+    );
+    Ok(())
 }

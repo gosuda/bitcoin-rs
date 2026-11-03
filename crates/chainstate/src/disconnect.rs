@@ -7,7 +7,9 @@ use super::{Chainstate, DisconnectOutcome, DisconnectPlan};
 use crate::error::ApplyError;
 use bitcoin_rs_chain::{ChainTxCount, TipSnapshot};
 use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid};
-use bitcoin_rs_utxo::contract::{RollbackError, load_block_undo, rollback_block};
+use bitcoin_rs_utxo::contract::{
+    BlockUndoCheck, RollbackError, load_block_undo_for_block, rollback_block,
+};
 
 pub(super) fn plan_disconnect(
     handles: &Chainstate,
@@ -77,7 +79,16 @@ pub(super) fn plan_disconnect(
         )
     };
 
-    let undo = load_block_undo(handles.undo_store.as_ref(), height, block_hash)?;
+    let undo = load_block_undo_for_block(
+        handles.undo_store.as_ref(),
+        height,
+        block_hash,
+        &BlockUndoCheck {
+            block,
+            txids: &txids,
+            max_script_size: bitcoin_rs_consensus::MAX_SCRIPT_SIZE,
+        },
+    )?;
 
     let tx_count_delta = tx_count_delta_for(block);
     handles

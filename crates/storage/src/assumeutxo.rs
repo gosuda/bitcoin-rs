@@ -1,22 +1,13 @@
-//! Snapshot identity and validation state committed with the authoritative head.
-
 use bitcoin_rs_primitives::Hash256;
 
-/// One body durably retained before validation, but not exposed to index readers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingHistoricalBlock {
     pub height: u32,
     #[serde(with = "serde_hash256")]
     pub hash: Hash256,
-    /// Staged flat-file position; volatile stores have no position.
     pub position: Option<crate::BlockFilePosition>,
 }
 
-/// The latest complete historical checkpoint accepted by the durable head.
-///
-/// The checkpoint files are recovery artifacts.  The durable head remains the
-/// authority for whether this generation may be used and how far historical
-/// validation has durably progressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HistoricalCheckpointRef {
     pub checkpoint: crate::checkpoint::CheckpointReference,
@@ -45,32 +36,22 @@ mod serde_hash256 {
     }
 }
 
-/// The persistent lifecycle status of `AssumeUTXO` coordination.
-/// The durable head owns this record; commitments use
-/// Bitcoin Core's serialized-set hash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AssumeUtxoDiskStatus {
     Uninitialized,
-    /// Snapshot is active; background historical validation is progressing towards `base_height`.
     Validating {
         base_height: u32,
         #[serde(with = "serde_hash256")]
         base_hash: Hash256,
-        /// Pinned Bitcoin Core `hash_serialized_3` commitment at `base_height`.
         #[serde(with = "serde_hash256")]
         expected_hash_serialized: Hash256,
-        /// Cumulative transaction count through `base_height`.
         chain_tx_count: u64,
-        /// Last durably archived historical height; live replay may lag.
         historical_height: u32,
-        /// Hash of the last durably archived historical block.
         #[serde(with = "serde_hash256")]
         historical_hash: Hash256,
-        /// Unfinished validation must complete during startup before serving.
         pending: Option<PendingHistoricalBlock>,
         checkpoint: Option<HistoricalCheckpointRef>,
     },
-    /// Background historical validation succeeded and matched the pinned commitment.
     Finalized {
         base_height: u32,
         #[serde(with = "serde_hash256")]
@@ -78,7 +59,6 @@ pub enum AssumeUtxoDiskStatus {
         #[serde(with = "serde_hash256")]
         validated_hash_serialized: Hash256,
     },
-    /// Background validation failed (e.g. commitment mismatch). The node must fail closed.
     Failed {
         base_height: u32,
         #[serde(with = "serde_hash256")]

@@ -1,7 +1,3 @@
-//! Applied-chain seam driven by the block-download executor. The
-//! implementation owns applied-tip mutation (node, ARCH-07); the executor
-//! owns download scheduling, staging, and peer policy.
-
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
@@ -18,7 +14,27 @@ use bitcoin_rs_primitives::Network;
 use parking_lot::RwLockReadGuard;
 use std::sync::Arc;
 
-pub type SyncChainError = Box<dyn core::error::Error + Send + Sync>;
+#[derive(Debug, thiserror::Error)]
+pub enum SyncChainError {
+    #[error(transparent)]
+    Apply(#[from] bitcoin_rs_chainstate::ApplyError),
+    #[error(transparent)]
+    AssumeUtxo(#[from] bitcoin_rs_chainstate::assumeutxo::AssumeUtxoError),
+    #[error(transparent)]
+    BodyBinding(#[from] bitcoin_rs_consensus::ConsensusError),
+    #[error(transparent)]
+    Chain(#[from] bitcoin_rs_chain::ChainError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Message(String),
+}
+
+impl From<&'static str> for SyncChainError {
+    fn from(msg: &'static str) -> Self {
+        Self::Message(msg.to_owned())
+    }
+}
 
 pub struct WindowCommitError {
     pub applied: usize,
@@ -53,6 +69,13 @@ pub trait SyncChain: Send + Sync {
         None
     }
 
+    /// True once the chain authority closed for recovery: apply must stop
+    /// scheduling and planning new work, because the only recovery is a
+    /// supervised restart that replays durable state.
+    fn closed_for_recovery(&self) -> bool {
+        false
+    }
+
     fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
         Ok(HistoricalAdvance::Complete)
     }
@@ -72,9 +95,6 @@ pub trait SyncChain: Send + Sync {
 
     fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission;
 
-    /// INVARIANT: the threshold has exactly one source — the configured
-    ///   network's parameter table; implementations override only to
-    ///   substitute a fixture threshold.
     fn minimum_chain_work(&self) -> bitcoin_rs_chain::ChainWork {
         bitcoin_rs_chain::ChainWork::from_be_bytes(self.network().minimum_chain_work())
     }
@@ -83,6 +103,7 @@ pub trait SyncChain: Send + Sync {
 
     fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize;
 
+    #[expect(clippy::result_large_err)]
     fn commit_window(&self, payloads: &[&BlockPayload]) -> Result<usize, WindowCommitError>;
 
     fn switch_to_branch(

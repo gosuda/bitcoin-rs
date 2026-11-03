@@ -1,4 +1,4 @@
-//! I2P SAM v3 client (pinned IVNP bridge) for typed I2P transports.
+#![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
 
 use parking_lot::{Mutex, MutexGuard};
 use std::cell::Cell;
@@ -79,7 +79,7 @@ fn session_id_for(private_destination: &str) -> String {
 }
 
 #[must_use]
-pub(crate) fn i2p_base64_decode(text: &str) -> Option<Vec<u8>> {
+pub fn i2p_base64_decode(text: &str) -> Option<Vec<u8>> {
     if text.is_empty() {
         return None;
     }
@@ -265,7 +265,7 @@ impl SamConn {
     }
 }
 
-fn check_hello(reply: &str) -> io::Result<()> {
+pub fn check_hello(reply: &str) -> io::Result<()> {
     let fields = parse_fields(reply, "HELLO REPLY")?;
     if field(&fields, "RESULT") != Some("OK") || field(&fields, "VERSION") != Some("3.3") {
         return Err(io::Error::new(
@@ -276,7 +276,7 @@ fn check_hello(reply: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn parse_fields(reply: &str, prefix: &str) -> io::Result<Vec<(String, String)>> {
+pub fn parse_fields(reply: &str, prefix: &str) -> io::Result<Vec<(String, String)>> {
     let rest = if reply == prefix {
         ""
     } else if let Some(stripped) = reply.strip_prefix(prefix) {
@@ -376,7 +376,7 @@ fn sanitize_sam_result(result: &str) -> &'static str {
     }
 }
 
-fn require_ok(reply: &str, prefix: &str) -> io::Result<Vec<(String, String)>> {
+pub fn require_ok(reply: &str, prefix: &str) -> io::Result<Vec<(String, String)>> {
     let fields = parse_fields(reply, prefix)?;
     if field(&fields, "RESULT") != Some("OK") {
         let raw = field(&fields, "RESULT").unwrap_or("");
@@ -390,7 +390,7 @@ fn require_ok(reply: &str, prefix: &str) -> io::Result<Vec<(String, String)>> {
 }
 
 #[must_use]
-fn destination_identity_len(bytes: &[u8]) -> Option<usize> {
+pub fn destination_identity_len(bytes: &[u8]) -> Option<usize> {
     const BASE: usize = 384;
     if bytes.len() < BASE + 3 {
         return None;
@@ -993,6 +993,38 @@ impl SamSession {
         let hash = destination_hash(&bytes);
         Ok((value, hash))
     }
+    fn retry_stream_connect(
+        &self,
+        root: u64,
+        destination: &str,
+        port: u16,
+        deadline: Instant,
+    ) -> Result<TcpStream, crate::endpoint::DialFailure> {
+        use crate::endpoint::DialFailure;
+        self.retire_root(root, deadline)
+            .map_err(DialFailure::Transport)?;
+        if self.ensure_control(deadline).is_ok() {
+            if let Ok(mut retry_conn) = SamConn::connect_with_deadline(self.sam, deadline) {
+                if retry_conn.hello(deadline).is_ok() {
+                    let cmd = format!(
+                        "STREAM CONNECT ID={} DESTINATION={destination} TO_PORT={port}",
+                        self.id
+                    );
+                    if let Ok(retry_reply) = retry_conn.command(&cmd, deadline) {
+                        if let Ok(retry_fields) = parse_fields(&retry_reply, "STREAM STATUS") {
+                            if field(&retry_fields, "RESULT") == Some("OK") {
+                                return Ok(retry_conn.into_stream());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(DialFailure::Transport(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "sam stream request failed: STREAM STATUS RESULT=INVALID_ID",
+        )))
+    }
 
     pub fn connect(
         &self,
@@ -1041,35 +1073,7 @@ impl SamSession {
                     format!("sam peer unreachable: STREAM STATUS RESULT={result}"),
                 )))
             }
-            Some("INVALID_ID") => {
-                self.retire_root(root, deadline)
-                    .map_err(DialFailure::Transport)?;
-                if self.ensure_control(deadline).is_ok() {
-                    if let Ok(mut retry_conn) = SamConn::connect_with_deadline(self.sam, deadline) {
-                        if retry_conn.hello(deadline).is_ok() {
-                            if let Ok(retry_reply) = retry_conn.command(
-                                &format!(
-                                    "STREAM CONNECT ID={} DESTINATION={destination} TO_PORT={port}",
-                                    self.id
-                                ),
-                                deadline,
-                            ) {
-                                if let Ok(retry_fields) =
-                                    parse_fields(&retry_reply, "STREAM STATUS")
-                                {
-                                    if field(&retry_fields, "RESULT") == Some("OK") {
-                                        return Ok(retry_conn.into_stream());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(DialFailure::Transport(io::Error::new(
-                    io::ErrorKind::NotConnected,
-                    "sam stream request failed: STREAM STATUS RESULT=INVALID_ID",
-                )))
-            }
+            Some("INVALID_ID") => self.retry_stream_connect(root, &destination, port, deadline),
             Some(result) => Err(DialFailure::Transport(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
                 format!(

@@ -2,7 +2,6 @@ use bytes::Bytes;
 
 use crate::ColumnFamily;
 
-/// One recorded mutation inside a [`BufferedWriteBatch`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BatchOp {
     Put {
@@ -21,20 +20,13 @@ pub enum BatchOp {
     },
 }
 
-/// Ordered, backend-neutral operations awaiting an engine commit.
-/// INVARIANT: the recorded sequence keeps its append order, and every backend
-/// applies the operations in that order inside one atomic commit.
 #[derive(Default)]
 pub struct BufferedWriteBatch {
     pub(crate) ops: Vec<BatchOp>,
-    /// Supplied key, value, and range-bound bytes, not physical engine I/O.
     pub(crate) encoded_bytes: usize,
 }
 
 impl BufferedWriteBatch {
-    /// Inserts or replaces `key` with `value` in `cf`.
-    /// PRE: none. POST: the batch records one `BatchOp::Put` after its
-    /// recorded operations. INVARIANT: append order equals commit order.
     pub fn put(&mut self, cf: ColumnFamily, key: &[u8], value: &[u8]) {
         self.put_value(cf, key, Bytes::copy_from_slice(value));
     }
@@ -68,19 +60,12 @@ impl BufferedWriteBatch {
         });
     }
 
-    /// Consumes the batch and returns its recorded operations.
-    ///
-    /// PRE: none. POST: returns every recorded [`BatchOp`] in the order the backend
-    /// applies it. INVARIANT: consuming it leaves no batch from which those operations
-    /// can be read again.
     #[must_use]
     pub fn into_ops(self) -> Vec<BatchOp> {
         self.ops
     }
 }
 
-/// Half of `ops` (rounded up; the whole batch for a single op, empty when
-/// `ops` is empty) for the partial-apply fault.
 #[cfg(all(
     any(feature = "fjall", feature = "redb"),
     any(test, feature = "test-seam")

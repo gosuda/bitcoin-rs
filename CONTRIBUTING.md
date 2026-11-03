@@ -43,12 +43,12 @@ job set.
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs for pull requests
 against any base branch (including stacked PRs), on merge-group requests, and
 for pushes to `main`. PR green is fast feedback only: `fmt`, `deny`,
-`clippy`, and `test-crates` passed while `test-binary` and `test-workspace`
-are skipped. Merge-group green adds those two heavy lanes as the pre-main
-integration signal; main checks are post-merge evidence. Every lane fails
-fast at its first failing profile. Every gate command lives in
-[`scripts/ci-pr.sh`](scripts/ci-pr.sh), which CI, the pre-commit hooks, and
-this guide all invoke:
+`contracts`, `clippy`, and `test-crates` passed while `book`, `test-binary`,
+and `test-workspace` are skipped. Merge-group green adds those three heavy
+lanes as the pre-main integration signal; main checks are post-merge
+evidence. Every lane fails fast at its first failing profile. Every gate
+command lives in [`scripts/ci-pr.sh`](scripts/ci-pr.sh), which CI, the
+pre-commit hooks, and this guide all invoke:
 
 ```sh
 ./scripts/ci-pr.sh fmt            # format check
@@ -58,8 +58,10 @@ this guide all invoke:
 ./scripts/ci-pr.sh test-workspace # workspace kernel-free pass
 ./scripts/ci-pr.sh test           # every test lane in sequence, smallest first
 ./scripts/ci-pr.sh deny           # full dependency graph, metadata only
+./scripts/ci-pr.sh contracts      # contract index drift check
+./scripts/ci-pr.sh book           # book build and link check
 ./scripts/ci-pr.sh deep           # every profile, collecting all failures
-./scripts/ci-pr.sh all            # fmt + deep + deny
+./scripts/ci-pr.sh all            # fmt + deep + deny + contracts
 ```
 
 In CI the test lanes run under cargo-nextest's pooled scheduler and link
@@ -92,10 +94,11 @@ bypassing the queue are disallowed for standard pull requests.
 The merge queue enforces the integration contract on the latest combined ref
 (`merge_group`) before updating `main`:
 - **PR green (`pull_request`)**: Fast feedback only. `ci-gate` requires `fmt`,
-  `deny`, `clippy`, and `test-crates`; `test-binary`, `test-workspace`, and
-  kernel/native checks are skipped to keep feedback fast (<3 min).
+  `deny`, `contracts`, `clippy`, and `test-crates`; `book`, `test-binary`,
+  `test-workspace`, and kernel/native checks are skipped to keep feedback fast
+  (<3 min).
 - **Merge-group green (`merge_group`)**: Pre-main integration eligibility.
-  `ci-gate` strictly requires `test-binary` and `test-workspace`;
+  `ci-gate` strictly requires `book`, `test-binary`, and `test-workspace`;
   [`ci-merge-gate.yml`](.github/workflows/ci-merge-gate.yml) strictly requires
   `kernel-consensus` and `full-node-compile`.
 - **Main green (`push`)**: Post-merge historical evidence. Runs extended
@@ -109,10 +112,11 @@ current base before `main` moves forward.
 ## Post-merge CI lanes
 
 [`.github/workflows/main.yml`](.github/workflows/main.yml) runs kernel-enabled
-tests and the main-only verification lanes on pushes to `main` and manual
-dispatch: bench smoke (with the witness-activation kernel regression and the
-SegWit-v0 kernel oracle), native-script evidence, the comparator corpus, and
-Core differential.
+tests and the main-only verification lanes. It triggers on pushes to `main` and
+on manual dispatch. The lanes are bench smoke, native-script evidence, the
+comparator corpus, the kernel oracle, and Core differential. Bench smoke
+includes the witness-activation kernel regression and the SegWit-v0 kernel
+oracle.
 Pull-request-triggered checks are defined in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and the path-scoped
 [`fuzz-build.yml`](.github/workflows/fuzz-build.yml).
@@ -141,11 +145,11 @@ cargo test -p bitcoin-rs-consensus --no-fail-fast -- --include-ignored
 
 # Run differential kernel parity verification (requires kernel feature)
 cargo test -p bitcoin-rs-consensus --features kernel \
-  --test suite -- kernel_block_parity:: kernel_vector_parity:: --nocapture
+  --test suite -- kernel_block_parity:: kernel_boundary_parity:: kernel_vector_parity:: --nocapture
 ```
 
-The tests in both parity modules are not ignored. Passing `--ignored` would skip
-them rather than run the oracle checks.
+The tests in all three parity modules are not ignored. Passing `--ignored`
+would skip them rather than run the oracle checks.
 
 ### Benchmark compilation check
 
@@ -164,8 +168,8 @@ cargo bench -p bitcoin-rs-node --no-run \
 ```
 
 The same `bench-smoke` job also compiles the kernel-enabled binary-package
-benches (`--features rocksdb,fjall,redb,kernel`), runs the witness-activation
-kernel regression, and checks the SegWit-v0 kernel oracle with retained
+benches (`--features rocksdb,fjall,redb,kernel`). It runs the witness-activation
+kernel regression. It also checks the SegWit-v0 kernel oracle with retained
 diagnostics.
 
 ### Fuzzing
@@ -181,8 +185,8 @@ cargo install cargo-fuzz
 cargo +nightly fuzz run block_validate --target x86_64-unknown-linux-gnu -- -runs=10000
 ```
 
-[`fuzz-build.yml`](.github/workflows/fuzz-build.yml) builds all five targets
-on `fuzz/**` pull requests; the scheduled campaign is defined in
+[`fuzz-build.yml`](.github/workflows/fuzz-build.yml) compiles every fuzz
+target on `fuzz/**` pull requests; the scheduled campaign is defined in
 [`.github/workflows/daily-fuzz.yml`](.github/workflows/daily-fuzz.yml). See
 [`fuzz/README.md`](fuzz/README.md) for local fuzzing, the
 [shared corpus and local campaigns](fuzz/README.md#shared-corpus-and-local-campaigns),
@@ -290,10 +294,10 @@ current coverage map.
 
 ### Architectural changes
 
-The project boundary is stable external contracts, replaceable internal
-architecture. Internal breaking changes are acceptable with clear rationale;
-breaking a supported external contract is a regression. For a change that
-reshapes internals, reviewers evaluate:
+The project boundary is stable external contracts and replaceable internal
+architecture. Internal breaking changes are acceptable with a clear rationale.
+Breaking a supported external contract is a regression. Reviewers evaluate
+these questions for a change that reshapes internals:
 
 1. **External contract preserved?** Consensus, P2P, and every affected
    supported external API keep observable behavior, proven with the
@@ -319,4 +323,4 @@ are redesigned, the stronger the external validation evidence must be.
 - [CONSTRAINTS.md](CONSTRAINTS.md): repository-wide project invariants
 - [CONCEPTS.md](CONCEPTS.md): domain terminology and concepts
 
-Documentation follows the [ownership policy](docs/policies/documentation.md): keep requirements with their enforcing owners and current execution evidence with CI or the PR.
+Documentation follows the [ownership policy](docs/policies/documentation.md). Keep requirements with their enforcing owners, and keep current execution evidence with CI or the PR.

@@ -1,6 +1,3 @@
-//! Snapshot-gated compact-filter queries. No chain-transition lock is needed:
-//! these answers depend only on immutable block identities and index rows.
-
 use super::{
     DerivedIndexInfo, DerivedIndexQueryEngine, Hash256, IndexCapabilities, TxIndexSnapshot,
     TxQueryError, TxUnavailableCause,

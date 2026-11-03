@@ -1,5 +1,3 @@
-//! Session reconciliation, useful-peer selection, and stalled-peer retirement.
-
 use super::BlockSync;
 use super::GetheadersOutcome;
 use super::SchedulerState;
@@ -32,6 +30,7 @@ pub(super) fn is_peer_fault(error: &ChainError) -> bool {
         ChainError::NbitsMismatch { .. }
         | ChainError::InvalidPow { .. }
         | ChainError::TargetExceedsLimit { .. }
+        | ChainError::TargetBitsOverflow { .. }
         | ChainError::ZeroTarget { .. }
         | ChainError::NonContinuousHeader { .. }
         | ChainError::ChainworkOverflow { .. }
@@ -50,9 +49,6 @@ pub(super) fn is_peer_fault(error: &ChainError) -> bool {
     }
 }
 
-/// The one eligibility and ordering rule for demonstrated-best-known height
-/// peer selection (P2P-03): a peer is request-eligible when its demonstrated
-/// height exceeds `floor`, and among eligible peers the greatest height wins.
 pub(super) fn sync_peer_candidate(
     source: PeerSource,
     peer: &PeerInfo,
@@ -67,8 +63,6 @@ pub(super) fn sync_peer_candidate(
     })
 }
 
-/// Whether `candidate` outranks `current`: strictly greater demonstrated
-/// height; first-wins on ties.
 pub(super) fn outranks(current: SyncPeer, candidate: SyncPeer) -> bool {
     candidate.best_known_height > current.best_known_height
 }
@@ -131,17 +125,10 @@ pub(super) fn active_demonstrated_height(
         .max()
 }
 
-/// How long a full-relay outbound connection may sit below our tip before it
-/// is probed, and then retired: `CHAIN_SYNC_TIMEOUT` is 20 * 60 seconds, as
-/// Core sets it (`net_processing.cpp`).
 const CHAIN_SYNC_TIMEOUT: Duration = Duration::from_mins(20);
 
-/// How long the answer to that probe is awaited: `HEADERS_RESPONSE_TIME` is
-/// 2 * 60 seconds, as Core sets it (`net_processing.cpp`).
 pub(super) const HEADERS_RESPONSE_TIME: Duration = Duration::from_mins(2);
 
-/// How many tip-reaching outbound connections are never retired. Core's
-/// `MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT` (`net_processing.cpp`).
 const MAX_OUTBOUND_PEERS_TO_PROTECT: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,7 +236,7 @@ impl BlockSync {
     }
 
     pub(super) fn reconcile_window_recovery(&self, chain: &ChainFrontier, now: Instant) {
-        if chain.apply_halted {
+        if chain.closed_for_recovery {
             return;
         }
         let frontier_hash = chain.next_required.map(|body| body.hash);
@@ -451,7 +438,7 @@ impl BlockSync {
         candidates: &mut [FanoutCandidate],
         now: Instant,
     ) -> (usize, bool, Option<SyncPeer>) {
-        let tree = (!frontier.chain.apply_halted
+        let tree = (!frontier.chain.closed_for_recovery
             && frontier.chain.chain_tip.is_some()
             && frontier.chain.next_required.is_some())
         .then(|| self.chain.block_tree());
@@ -462,7 +449,7 @@ impl BlockSync {
             body_unavailable,
             ..
         } = &mut *scheduler;
-        if !frontier.chain.apply_halted
+        if !frontier.chain.closed_for_recovery
             && let (Some(tree), Some(chain_tip), Some(required)) = (
                 tree.as_deref(),
                 frontier.chain.chain_tip.as_ref(),
@@ -635,6 +622,7 @@ mod tests {
                 timestamp: 1,
                 median: 2,
             },
+            ChainError::TargetBitsOverflow { bits: 0x2300_0001 },
             ChainError::NbitsMismatch {
                 actual: 1,
                 expected: 2,
@@ -684,7 +672,7 @@ mod tests {
 
     #[test]
     fn descendant_of_an_invalidated_block_spares_the_sender()
-    -> Result<(), Box<dyn std::error::Error>> {
+    -> Result<(), crate::test_support::TestError> {
         let mut tree = BlockTree::new();
         let genesis = mined_header(BlockHash::default(), 900_000);
         let genesis_id = tree.insert_header(genesis, NodeStatus::HeaderValid)?;

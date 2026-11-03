@@ -1,6 +1,3 @@
-//! BIP337 compressed-transaction codec (`compressrawtransaction` /
-//! `decompressrawtransaction`).
-
 use bitcoin::hashes::{Hash as _, hash160};
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, RecoveryId, Signature};
 use bitcoin::secp256k1::{Message, Secp256k1};
@@ -8,6 +5,7 @@ use bitcoin_rs_primitives::{
     Amount, LockTime, OutPoint, Script, Sequence, SighashCache, Tx, TxIn, TxOut, Txid, Witness,
     consensus_bytes, varint,
 };
+use bitcoin_rs_script::push_data;
 use hashbrown::HashMap;
 
 use crate::error::RpcError;
@@ -23,7 +21,6 @@ pub(crate) const MAX_RESOLVER_STATE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_CUMULATIVE_BODY_LOADS: usize = MAX_RETAINED_BODIES * 2;
 pub(crate) const MAX_CUMULATIVE_BODY_BYTES: usize = MAX_RETAINED_BODY_BYTES * 2;
 
-/// Cancellation is polled once per this many codec inputs.
 const CANCELLATION_POLL_INPUTS: usize = 256;
 
 type FlatLookup = Option<Result<Option<u32>, LookupError>>;
@@ -88,11 +85,6 @@ pub(crate) trait PrevoutResolver {
     fn cancelled(&self) -> bool;
 }
 
-/// Codec failure.
-///
-/// Each variant maps to exactly one [`RpcError`]: structural malformation is `-22`,
-/// oversize input or output is `-8`, budget exhaustion and cancellation are retryable
-/// `-1`, a proved-absent prevout during decompress is `-5`.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CodecError {
     #[error("compressed transaction is truncated")]
@@ -480,12 +472,24 @@ enum PrevoutKind {
 
 fn prevout_kind(script: &[u8]) -> PrevoutKind {
     match output_shape(script) {
-        (OutputShape::P2pkh, payload) => {
-            PrevoutKind::P2pkh(payload.try_into().unwrap_or([0_u8; 20]))
+        (OutputShape::P2pkh, payload) =>
+        {
+            #[expect(clippy::expect_used, reason = "P2pkh payload shape is 20 bytes")]
+            PrevoutKind::P2pkh(payload.try_into().expect("P2pkh payload shape is 20 bytes"))
         }
-        (OutputShape::P2sh, payload) => PrevoutKind::P2sh(payload.try_into().unwrap_or([0_u8; 20])),
-        (OutputShape::P2wpkh, payload) => {
-            PrevoutKind::P2wpkh(payload.try_into().unwrap_or([0_u8; 20]))
+        (OutputShape::P2sh, payload) =>
+        {
+            #[expect(clippy::expect_used, reason = "P2sh payload shape is 20 bytes")]
+            PrevoutKind::P2sh(payload.try_into().expect("P2sh payload shape is 20 bytes"))
+        }
+        (OutputShape::P2wpkh, payload) =>
+        {
+            #[expect(clippy::expect_used, reason = "P2wpkh payload shape is 20 bytes")]
+            PrevoutKind::P2wpkh(
+                payload
+                    .try_into()
+                    .expect("P2wpkh payload shape is 20 bytes"),
+            )
         }
         (OutputShape::P2wsh, _) => PrevoutKind::P2wsh,
         (OutputShape::P2tr, _) => PrevoutKind::P2tr,
@@ -495,26 +499,6 @@ fn prevout_kind(script: &[u8]) -> PrevoutKind {
 
 fn hash160_20(data: &[u8]) -> [u8; 20] {
     *hash160::Hash::hash(data).as_byte_array()
-}
-
-fn push_data(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() + 3);
-    match data.len() {
-        len if len < 76 => {
-            out.push(u8::try_from(len).unwrap_or(0));
-        }
-        len if len <= 0xff => {
-            out.push(0x4c);
-            out.push(u8::try_from(len).unwrap_or(0));
-        }
-        len => {
-            out.push(0x4d);
-            let len = u16::try_from(len).unwrap_or(u16::MAX);
-            out.extend_from_slice(&len.to_le_bytes());
-        }
-    }
-    out.extend_from_slice(data);
-    out
 }
 
 fn read_push(script: &[u8], pos: usize) -> Option<(&[u8], usize)> {
@@ -565,12 +549,15 @@ fn der_encode(sig64: &[u8; 64]) -> Vec<u8> {
     let s = integer(&sig64[32..]);
     let mut der = Vec::with_capacity(r.len() + s.len() + 6);
     der.push(0x30);
-    der.push(u8::try_from(r.len() + s.len() + 4).unwrap_or(0));
+    #[expect(clippy::expect_used, reason = "DER sequence length fits in u8")]
+    der.push(u8::try_from(r.len() + s.len() + 4).expect("DER sequence length fits in u8"));
     der.push(0x02);
-    der.push(u8::try_from(r.len()).unwrap_or(0));
+    #[expect(clippy::expect_used, reason = "DER integer r length fits in u8")]
+    der.push(u8::try_from(r.len()).expect("DER integer r length fits in u8"));
     der.extend_from_slice(&r);
     der.push(0x02);
-    der.push(u8::try_from(s.len()).unwrap_or(0));
+    #[expect(clippy::expect_used, reason = "DER integer s length fits in u8")]
+    der.push(u8::try_from(s.len()).expect("DER integer s length fits in u8"));
     der.extend_from_slice(&s);
     der
 }
@@ -579,7 +566,6 @@ struct CompressedSig {
     sig: [u8; 64],
     pubkey_hash: Option<[u8; 20]>,
     hash_type: Option<u8>,
-    /// Standard hash type: `0x01` ECDSA, `0x00` (absent byte) taproot.
     standard: bool,
 }
 
@@ -595,93 +581,107 @@ fn ecdsa_compressed(sig_item: &[u8]) -> Option<CompressedSig> {
     })
 }
 
-/// Extracts the compressed form of `input`'s signature when the prevout
-/// kind is in the closed compressible set and the authorization has the
-/// exact expected shape; `None` selects the uncompressed envelope.
+fn compress_p2tr_signature(input: &TxIn) -> Option<CompressedSig> {
+    if !input.script_sig.is_empty() || input.witness.len() != 1 {
+        return None;
+    }
+    let item = input.witness.first()?;
+    match item.len() {
+        64 => {
+            #[expect(clippy::expect_used, reason = "item slice length is exactly 64")]
+            let sig = item.try_into().expect("item slice length is exactly 64");
+            Some(CompressedSig {
+                sig,
+                pubkey_hash: None,
+                hash_type: None,
+                standard: true,
+            })
+        }
+        65 => {
+            let (sig, hash_type) = item.split_at(64);
+            #[expect(clippy::expect_used, reason = "split_at(64) produces 64-byte slice")]
+            let sig = sig.try_into().expect("split_at(64) produces 64-byte slice");
+            Some(CompressedSig {
+                sig,
+                pubkey_hash: None,
+                hash_type: Some(*hash_type.first()?),
+                standard: false,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn compress_p2pkh_signature(input: &TxIn, expected: &[u8; 20]) -> Option<CompressedSig> {
+    if !input.witness.is_empty() {
+        return None;
+    }
+    let script = input.script_sig.as_bytes();
+    let (sig_item, pos) = read_push(script, 0)?;
+    let (pubkey, end) = read_push(script, pos)?;
+    if end != script.len() {
+        return None;
+    }
+    let mut canonical = push_data(sig_item);
+    canonical.extend_from_slice(&push_data(pubkey));
+    if canonical != script {
+        return None;
+    }
+    let compressed = pubkey.len() == 33 && (pubkey[0] == 0x02 || pubkey[0] == 0x03);
+    if !compressed && (pubkey.len() != 65 || pubkey.first() != Some(&0x04)) {
+        return None;
+    }
+    if hash160_20(pubkey) != *expected {
+        return None;
+    }
+    ecdsa_compressed(sig_item)
+}
+
+fn compress_p2wpkh_signature(input: &TxIn, expected: &[u8; 20]) -> Option<CompressedSig> {
+    if !input.script_sig.is_empty() || input.witness.len() != 2 {
+        return None;
+    }
+    let pubkey = input.witness.get(1)?;
+    if pubkey.len() != 33 || hash160_20(pubkey) != *expected {
+        return None;
+    }
+    ecdsa_compressed(input.witness.first()?)
+}
+
+fn compress_p2sh_signature(input: &TxIn, script_hash: &[u8; 20]) -> Option<CompressedSig> {
+    let script_sig = input.script_sig.as_bytes();
+    if script_sig.len() != 23
+        || script_sig[0] != 0x16
+        || script_sig[1] != 0x00
+        || script_sig[2] != 0x14
+    {
+        return None;
+    }
+    if input.witness.len() != 2 {
+        return None;
+    }
+    let pubkey = input.witness.get(1)?;
+    if pubkey.len() != 33 {
+        return None;
+    }
+    #[expect(clippy::expect_used, reason = "slice 3..23 has length 20")]
+    let redeem_hash: [u8; 20] = script_sig[3..23]
+        .try_into()
+        .expect("slice 3..23 has length 20");
+    if hash160_20(pubkey) != redeem_hash || hash160_20(&script_sig[1..]) != *script_hash {
+        return None;
+    }
+    let mut compressed = ecdsa_compressed(input.witness.first()?)?;
+    compressed.pubkey_hash = Some(redeem_hash);
+    Some(compressed)
+}
+
 fn compressed_signature(input: &TxIn, kind: &PrevoutKind) -> Option<CompressedSig> {
     match kind {
-        PrevoutKind::P2tr => {
-            if !input.script_sig.is_empty() || input.witness.len() != 1 {
-                return None;
-            }
-            let item = input.witness.first()?;
-            match item.len() {
-                64 => Some(CompressedSig {
-                    sig: item.as_slice().try_into().ok()?,
-                    pubkey_hash: None,
-                    hash_type: None,
-                    standard: true,
-                }),
-                65 => {
-                    let (sig, hash_type) = item.split_at(64);
-                    Some(CompressedSig {
-                        sig: sig.try_into().ok()?,
-                        pubkey_hash: None,
-                        hash_type: Some(*hash_type.first()?),
-                        standard: false,
-                    })
-                }
-                _ => None,
-            }
-        }
-        PrevoutKind::P2pkh(expected) => {
-            if !input.witness.is_empty() {
-                return None;
-            }
-            let script = input.script_sig.as_bytes();
-            let (sig_item, pos) = read_push(script, 0)?;
-            let (pubkey, end) = read_push(script, pos)?;
-            if end != script.len() {
-                return None;
-            }
-            let mut canonical = push_data(sig_item);
-            canonical.extend_from_slice(&push_data(pubkey));
-            if canonical != script {
-                return None;
-            }
-            let compressed = pubkey.len() == 33 && (pubkey[0] == 0x02 || pubkey[0] == 0x03);
-            if !compressed && (pubkey.len() != 65 || pubkey.first() != Some(&0x04)) {
-                return None;
-            }
-            if hash160_20(pubkey) != *expected {
-                return None;
-            }
-            ecdsa_compressed(sig_item)
-        }
-        PrevoutKind::P2wpkh(expected) => {
-            if !input.script_sig.is_empty() || input.witness.len() != 2 {
-                return None;
-            }
-            let pubkey = input.witness.get(1)?;
-            if pubkey.len() != 33 || hash160_20(pubkey) != *expected {
-                return None;
-            }
-            ecdsa_compressed(input.witness.first()?)
-        }
-        PrevoutKind::P2sh(script_hash) => {
-            let script_sig = input.script_sig.as_bytes();
-            if script_sig.len() != 23
-                || script_sig[0] != 0x16
-                || script_sig[1] != 0x00
-                || script_sig[2] != 0x14
-            {
-                return None;
-            }
-            if input.witness.len() != 2 {
-                return None;
-            }
-            let pubkey = input.witness.get(1)?;
-            if pubkey.len() != 33 {
-                return None;
-            }
-            let redeem_hash: [u8; 20] = script_sig[3..23].try_into().ok()?;
-            if hash160_20(pubkey) != redeem_hash || hash160_20(&script_sig[1..]) != *script_hash {
-                return None;
-            }
-            let mut compressed = ecdsa_compressed(input.witness.first()?)?;
-            compressed.pubkey_hash = Some(redeem_hash);
-            Some(compressed)
-        }
+        PrevoutKind::P2tr => compress_p2tr_signature(input),
+        PrevoutKind::P2pkh(expected) => compress_p2pkh_signature(input, expected),
+        PrevoutKind::P2wpkh(expected) => compress_p2wpkh_signature(input, expected),
+        PrevoutKind::P2sh(script_hash) => compress_p2sh_signature(input, script_hash),
         PrevoutKind::P2wsh | PrevoutKind::Other => None,
     }
 }
@@ -765,9 +765,6 @@ struct Plan {
     sequence: u32,
 }
 
-/// Compresses `tx`. Missing contextual facts degrade a single input to
-/// its raw outpoint with one `UTXO(i): <reason>` warning; retained
-/// budget exhaustion and cancellation are errors, never downgrades.
 pub(crate) fn compress_transaction(
     tx: &Tx,
     resolver: &mut dyn PrevoutResolver,
@@ -783,6 +780,33 @@ pub(crate) fn compress_transaction(
         return Err(CodecError::Overflow);
     }
 
+    let (resolved, degraded) = resolve_inputs_prevouts(tx, resolver)?;
+    let min_height = compute_min_height(tx, &resolved, options.compress_outpoints);
+    let flat_results = if options.compress_outpoints {
+        let (order, members) = flat_lookup_groups(tx, &resolved, &degraded);
+        resolve_flats_grouped(tx, resolver, &order, &members)?
+    } else {
+        vec![None; tx.inputs.len()]
+    };
+
+    let (plans, warnings) = build_compression_plans(
+        tx,
+        &resolved,
+        &degraded,
+        &flat_results,
+        min_height,
+        options.compress_outpoints,
+    )?;
+    let bytes = write_compressed_transaction(tx, &plans, min_height)?;
+    Ok((bytes, warnings))
+}
+
+type ResolvedInputs = (Vec<Option<ResolvedPrevout>>, Vec<Option<String>>);
+
+fn resolve_inputs_prevouts(
+    tx: &Tx,
+    resolver: &mut dyn PrevoutResolver,
+) -> Result<ResolvedInputs, CodecError> {
     let mut resolved: Vec<Option<ResolvedPrevout>> = Vec::with_capacity(tx.inputs.len());
     let mut degraded: Vec<Option<String>> = Vec::with_capacity(tx.inputs.len());
     for (index, input) in tx.inputs.iter().enumerate() {
@@ -819,14 +843,21 @@ pub(crate) fn compress_transaction(
             }
         }
     }
+    Ok((resolved, degraded))
+}
 
+fn compute_min_height(
+    tx: &Tx,
+    resolved: &[Option<ResolvedPrevout>],
+    compress_outpoints: bool,
+) -> u32 {
     let locktime = tx.lock_time.to_consensus();
     let mut min_height: Option<u32> = if locktime != 0 {
         Some(locktime - 1)
     } else {
         None
     };
-    if options.compress_outpoints {
+    if compress_outpoints {
         for prevout in resolved.iter().flatten() {
             if let Some(height) = prevout.confirmed_height {
                 let candidate = height.saturating_sub(1);
@@ -834,15 +865,17 @@ pub(crate) fn compress_transaction(
             }
         }
     }
-    let min_height = min_height.unwrap_or(0);
+    min_height.unwrap_or(0)
+}
 
-    let flat_results = if options.compress_outpoints {
-        let (order, members) = flat_lookup_groups(tx, &resolved, &degraded);
-        resolve_flats_grouped(tx, resolver, &order, &members)?
-    } else {
-        vec![None; tx.inputs.len()]
-    };
-
+fn build_compression_plans(
+    tx: &Tx,
+    resolved: &[Option<ResolvedPrevout>],
+    degraded: &[Option<String>],
+    flat_results: &[Option<Result<Option<u32>, LookupError>>],
+    min_height: u32,
+    compress_outpoints: bool,
+) -> Result<(Vec<Plan>, Vec<String>), CodecError> {
     let mut plans: Vec<Plan> = Vec::with_capacity(tx.inputs.len());
     let mut warnings: Vec<String> = Vec::new();
     for (index, input) in tx.inputs.iter().enumerate() {
@@ -853,7 +886,7 @@ pub(crate) fn compress_transaction(
         let mut outpoint_compressed = false;
         let mut height_offset = 0_u64;
         let mut flat_index = 0_u64;
-        if options.compress_outpoints {
+        if compress_outpoints {
             let reason = match (prevout, degraded.get(index).and_then(Option::as_ref)) {
                 (_, Some(reason)) => Some(reason.clone()),
                 (None, None) => Some("prevout not found".to_owned()),
@@ -903,7 +936,14 @@ pub(crate) fn compress_transaction(
             sequence: input.sequence.to_consensus(),
         });
     }
+    Ok((plans, warnings))
+}
 
+fn write_compressed_transaction(
+    tx: &Tx,
+    plans: &[Plan],
+    min_height: u32,
+) -> Result<Vec<u8>, CodecError> {
     let flag = |value: u32| -> u8 {
         if (1..=3).contains(&value) {
             u8::try_from(value).unwrap_or(0)
@@ -913,6 +953,7 @@ pub(crate) fn compress_transaction(
     };
     let input_count = u32::try_from(tx.inputs.len()).map_err(|_| CodecError::Overflow)?;
     let output_count = u32::try_from(tx.outputs.len()).map_err(|_| CodecError::Overflow)?;
+    let locktime = tx.lock_time.to_consensus();
     let mut metadata = flag(tx.version);
     metadata |= flag(input_count) << 2;
     metadata |= flag(output_count) << 4;
@@ -945,7 +986,7 @@ pub(crate) fn compress_transaction(
     }
 
     let mut input_meta: Vec<u8> = Vec::with_capacity(plans.len());
-    for plan in &plans {
+    for plan in plans {
         let mut meta = 0_u8;
         if let Some(signature) = &plan.signature {
             meta |= 1;
@@ -968,8 +1009,13 @@ pub(crate) fn compress_transaction(
     }
     writer.write(&encode_bits(&input_meta, &output_meta))?;
 
-    for (index, (input, plan)) in tx.inputs.iter().zip(plans.iter()).enumerate() {
-        let _ = index;
+    write_compressed_inputs(&mut writer, tx, plans)?;
+    write_compressed_outputs(&mut writer, tx)?;
+    Ok(writer.bytes)
+}
+
+fn write_compressed_inputs(writer: &mut Writer, tx: &Tx, plans: &[Plan]) -> Result<(), CodecError> {
+    for (input, plan) in tx.inputs.iter().zip(plans.iter()) {
         if plan.outpoint_compressed {
             writer.write_varint(plan.height_offset)?;
             writer.write_varint(plan.flat_index)?;
@@ -998,7 +1044,10 @@ pub(crate) fn compress_transaction(
             writer.write_varint(u64::from(plan.sequence))?;
         }
     }
+    Ok(())
+}
 
+fn write_compressed_outputs(writer: &mut Writer, tx: &Tx) -> Result<(), CodecError> {
     for output in &tx.outputs {
         let (shape, payload) = output_shape(output.script_pubkey.as_bytes());
         if shape == OutputShape::Custom {
@@ -1008,8 +1057,7 @@ pub(crate) fn compress_transaction(
         }
         writer.write_varint(output.value.to_sat())?;
     }
-
-    Ok((writer.bytes, warnings))
+    Ok(())
 }
 
 enum SigParts {
@@ -1186,6 +1234,42 @@ pub(crate) fn decompress_prepare(
         return Err(CodecError::Overflow);
     }
     let mut reader = Reader::new(bytes);
+    let header = parse_decompress_header(&mut reader)?;
+    let parsed =
+        parse_decompress_inputs(&mut reader, &header.input_meta, header.min_height, resolver)?;
+    let inputs = resolve_decompress_inputs(parsed, resolver)?;
+    let outputs = parse_decompress_outputs(&mut reader, &header.output_meta)?;
+
+    if reader.remaining() != 0 {
+        return Err(CodecError::NonCanonical);
+    }
+
+    let tx = Tx {
+        version: header.version,
+        inputs: inputs
+            .iter()
+            .map(|part| TxIn {
+                previous_output: part.outpoint,
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(part.sequence),
+                witness: Witness::new(),
+            })
+            .collect(),
+        outputs,
+        lock_time: LockTime::from_consensus(header.locktime),
+    };
+    Ok(DecompressPlan { tx, inputs })
+}
+
+struct DecompressHeader {
+    version: u32,
+    locktime: u32,
+    min_height: u32,
+    input_meta: Vec<u8>,
+    output_meta: Vec<u8>,
+}
+
+fn parse_decompress_header(reader: &mut Reader<'_>) -> Result<DecompressHeader, CodecError> {
     let metadata = reader.read_u8()?;
     let version_flag = metadata & 0x03;
     let input_flag = (metadata >> 2) & 0x03;
@@ -1194,7 +1278,7 @@ pub(crate) fn decompress_prepare(
     let has_min_height = metadata & 0x80 != 0;
 
     let version = if version_flag == 0 {
-        read_u32_compact_size(&mut reader)?
+        read_u32_compact_size(reader)?
     } else {
         u32::from(version_flag)
     };
@@ -1220,7 +1304,7 @@ pub(crate) fn decompress_prepare(
         None
     };
     let min_height = if has_min_height {
-        read_u32_varint(&mut reader)?
+        read_u32_varint(reader)?
     } else {
         0
     };
@@ -1232,35 +1316,35 @@ pub(crate) fn decompress_prepare(
         None => 0,
     };
 
-    let (input_meta, output_meta) = decode_bits(&mut reader, input_count, output_count)?;
+    let (input_meta, output_meta) = decode_bits(reader, input_count, output_count)?;
+    Ok(DecompressHeader {
+        version,
+        locktime,
+        min_height,
+        input_meta,
+        output_meta,
+    })
+}
 
-    let mut parsed: Vec<ParsedInput> = Vec::with_capacity(input_count);
-    for index in 0..input_count {
+fn parse_decompress_inputs(
+    reader: &mut Reader<'_>,
+    input_meta: &[u8],
+    min_height: u32,
+    resolver: &dyn PrevoutResolver,
+) -> Result<Vec<ParsedInput>, CodecError> {
+    let mut parsed: Vec<ParsedInput> = Vec::with_capacity(input_meta.len());
+    for (index, &meta) in input_meta.iter().enumerate() {
         if index % CANCELLATION_POLL_INPUTS == 0 && resolver.cancelled() {
             return Err(CodecError::Cancelled);
         }
-        let meta = *input_meta.get(index).ok_or(CodecError::Truncated)?;
         let sig_compressed = meta & 1 != 0;
         let pkh_present = meta & 0x02 != 0;
         let standard = meta & 0x04 != 0;
         let seq_code = (meta >> 3) & 0x03;
         let outpoint_compressed = meta & 0x20 != 0;
 
-        let (height_flat, raw_outpoint) = if outpoint_compressed {
-            let offset = read_u32_varint(&mut reader)?;
-            let flat = read_u32_varint(&mut reader)?;
-            let height = min_height.checked_add(offset).ok_or(CodecError::Overflow)?;
-            (Some((height, flat)), None)
-        } else {
-            let mut txid_bytes = [0_u8; 32];
-            txid_bytes.copy_from_slice(reader.take(32)?);
-            let vout = read_u32_compact_size(&mut reader)?;
-            let outpoint = OutPoint::new(
-                Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&txid_bytes)),
-                vout,
-            );
-            (None, Some(outpoint))
-        };
+        let (height_flat, raw_outpoint) =
+            read_input_outpoint(reader, outpoint_compressed, min_height)?;
 
         let signature = if sig_compressed {
             let mut sig = [0_u8; 64];
@@ -1299,7 +1383,7 @@ pub(crate) fn decompress_prepare(
                 witness,
             }
         };
-        let sequence = sequence_value(seq_code, &mut reader)?;
+        let sequence = sequence_value(seq_code, reader)?;
 
         parsed.push(ParsedInput {
             height_flat,
@@ -1308,10 +1392,39 @@ pub(crate) fn decompress_prepare(
             signature,
         });
     }
+    Ok(parsed)
+}
 
-    let mut located = resolve_outpoints_grouped(&parsed, &mut *resolver)?;
+type InputOutpointResult = (Option<(u32, u32)>, Option<OutPoint>);
 
-    let mut inputs: Vec<InputParts> = Vec::with_capacity(input_count);
+fn read_input_outpoint(
+    reader: &mut Reader<'_>,
+    outpoint_compressed: bool,
+    min_height: u32,
+) -> Result<InputOutpointResult, CodecError> {
+    if outpoint_compressed {
+        let offset = read_u32_varint(reader)?;
+        let flat = read_u32_varint(reader)?;
+        let height = min_height.checked_add(offset).ok_or(CodecError::Overflow)?;
+        Ok((Some((height, flat)), None))
+    } else {
+        let mut txid_bytes = [0_u8; 32];
+        txid_bytes.copy_from_slice(reader.take(32)?);
+        let vout = read_u32_compact_size(reader)?;
+        let outpoint = OutPoint::new(
+            Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&txid_bytes)),
+            vout,
+        );
+        Ok((None, Some(outpoint)))
+    }
+}
+
+fn resolve_decompress_inputs(
+    parsed: Vec<ParsedInput>,
+    resolver: &mut dyn PrevoutResolver,
+) -> Result<Vec<InputParts>, CodecError> {
+    let mut located = resolve_outpoints_grouped(&parsed, resolver)?;
+    let mut inputs: Vec<InputParts> = Vec::with_capacity(parsed.len());
     for (index, part) in parsed.into_iter().enumerate() {
         if index % CANCELLATION_POLL_INPUTS == 0 && resolver.cancelled() {
             return Err(CodecError::Cancelled);
@@ -1337,7 +1450,7 @@ pub(crate) fn decompress_prepare(
             },
         };
         let resolved = if sig_compressed {
-            resolve_sig_prevout(&mut *resolver, &outpoint, resolved)?
+            resolve_sig_prevout(resolver, &outpoint, resolved)?
         } else {
             resolved
         };
@@ -1349,10 +1462,15 @@ pub(crate) fn decompress_prepare(
             signature,
         });
     }
+    Ok(inputs)
+}
 
-    let mut outputs: Vec<TxOut> = Vec::with_capacity(output_count);
-    for index in 0..output_count {
-        let code = *output_meta.get(index).ok_or(CodecError::Truncated)?;
+fn parse_decompress_outputs(
+    reader: &mut Reader<'_>,
+    output_meta: &[u8],
+) -> Result<Vec<TxOut>, CodecError> {
+    let mut outputs: Vec<TxOut> = Vec::with_capacity(output_meta.len());
+    for &code in output_meta {
         let script = match code {
             0 => reader.read_vlp()?.to_vec(),
             1 => output_script(1, reader.take(65)?)?,
@@ -1370,26 +1488,7 @@ pub(crate) fn decompress_prepare(
             script_pubkey: Script::from_bytes(script),
         });
     }
-
-    if reader.remaining() != 0 {
-        return Err(CodecError::NonCanonical);
-    }
-
-    let tx = Tx {
-        version,
-        inputs: inputs
-            .iter()
-            .map(|part| TxIn {
-                previous_output: part.outpoint,
-                script_sig: Script::new(),
-                sequence: Sequence::from_consensus(part.sequence),
-                witness: Witness::new(),
-            })
-            .collect(),
-        outputs,
-        lock_time: LockTime::from_consensus(locktime),
-    };
-    Ok(DecompressPlan { tx, inputs })
+    Ok(outputs)
 }
 
 pub(crate) fn decompress_finalize(
@@ -1403,89 +1502,7 @@ pub(crate) fn decompress_finalize(
         if index % CANCELLATION_POLL_INPUTS == 0 && resolver.cancelled() {
             return Err(CodecError::Cancelled);
         }
-        let fill = match &part.signature {
-            SigParts::Uncompressed {
-                script_sig,
-                witness,
-            } => (
-                Script::from_bytes(script_sig.clone()),
-                Witness::from_stack(witness.clone()),
-            ),
-            SigParts::Compressed {
-                sig,
-                pubkey_hash,
-                hash_type,
-                standard,
-            } => {
-                let prevout = part
-                    .resolved
-                    .as_ref()
-                    .ok_or(CodecError::PrevoutMissing(part.outpoint))?;
-                let kind = prevout_kind(prevout.txout.script_pubkey.as_bytes());
-                match kind {
-                    PrevoutKind::P2tr => {
-                        if pubkey_hash.is_some() {
-                            return Err(CodecError::UnsupportedScript);
-                        }
-                        let mut item = sig.to_vec();
-                        if !standard {
-                            item.push(hash_type.ok_or(CodecError::NonCanonical)?);
-                        }
-                        (Script::new(), Witness::from_stack(vec![item]))
-                    }
-                    PrevoutKind::P2pkh(_) | PrevoutKind::P2wpkh(_) | PrevoutKind::P2sh(_) => {
-                        let hash_type_byte = if *standard {
-                            1_u8
-                        } else {
-                            hash_type.ok_or(CodecError::NonCanonical)?
-                        };
-                        let public = recover_pubkey(
-                            &cache,
-                            &Recovery {
-                                index,
-                                sig,
-                                hash_type: hash_type_byte,
-                                kind: &kind,
-                                prevout,
-                                stored_pkh: pubkey_hash.as_ref(),
-                            },
-                        )?;
-                        let mut sig_item = der_encode(sig);
-                        sig_item.push(hash_type_byte);
-                        match kind {
-                            PrevoutKind::P2pkh(_) => {
-                                let mut script_sig = push_data(&sig_item);
-                                script_sig.extend_from_slice(&push_data(&public));
-                                (Script::from_bytes(script_sig), Witness::new())
-                            }
-                            PrevoutKind::P2wpkh(_) => {
-                                (Script::new(), Witness::from_stack(vec![sig_item, public]))
-                            }
-                            PrevoutKind::P2sh(script_hash) => {
-                                let redeem_hash =
-                                    pubkey_hash.ok_or(CodecError::UnsupportedScript)?;
-                                let mut redeem = Vec::with_capacity(22);
-                                redeem.extend_from_slice(&[0x00, 0x14]);
-                                redeem.extend_from_slice(&redeem_hash);
-                                if hash160_20(&redeem) != script_hash {
-                                    return Err(CodecError::UnsupportedScript);
-                                }
-                                (
-                                    Script::from_bytes(push_data(&redeem)),
-                                    Witness::from_stack(vec![sig_item, public]),
-                                )
-                            }
-                            PrevoutKind::P2wsh | PrevoutKind::P2tr | PrevoutKind::Other => {
-                                return Err(CodecError::UnsupportedScript);
-                            }
-                        }
-                    }
-                    PrevoutKind::P2wsh | PrevoutKind::Other => {
-                        return Err(CodecError::UnsupportedScript);
-                    }
-                }
-            }
-        };
+        let fill = finalize_input_signature(index, part, &cache)?;
         fills.push(fill);
     }
     for (input, (script_sig, witness)) in tx.inputs.iter_mut().zip(fills) {
@@ -1497,6 +1514,96 @@ pub(crate) fn decompress_finalize(
         return Err(CodecError::Overflow);
     }
     Ok(tx)
+}
+
+fn finalize_input_signature(
+    index: usize,
+    part: &InputParts,
+    cache: &SighashCache<'_>,
+) -> Result<(Script, Witness), CodecError> {
+    match &part.signature {
+        SigParts::Uncompressed {
+            script_sig,
+            witness,
+        } => Ok((
+            Script::from_bytes(script_sig.clone()),
+            Witness::from_stack(witness.clone()),
+        )),
+        SigParts::Compressed {
+            sig,
+            pubkey_hash,
+            hash_type,
+            standard,
+        } => {
+            let prevout = part
+                .resolved
+                .as_ref()
+                .ok_or(CodecError::PrevoutMissing(part.outpoint))?;
+            let kind = prevout_kind(prevout.txout.script_pubkey.as_bytes());
+            match kind {
+                PrevoutKind::P2tr => {
+                    if pubkey_hash.is_some() {
+                        return Err(CodecError::UnsupportedScript);
+                    }
+                    let mut item = sig.to_vec();
+                    if !standard {
+                        item.push(hash_type.ok_or(CodecError::NonCanonical)?);
+                    }
+                    Ok((Script::new(), Witness::from_stack(vec![item])))
+                }
+                PrevoutKind::P2pkh(_) | PrevoutKind::P2wpkh(_) | PrevoutKind::P2sh(_) => {
+                    let hash_type_byte = if *standard {
+                        1_u8
+                    } else {
+                        hash_type.ok_or(CodecError::NonCanonical)?
+                    };
+                    let recovery = Recovery {
+                        index,
+                        sig,
+                        hash_type: hash_type_byte,
+                        kind: &kind,
+                        prevout,
+                        stored_pkh: pubkey_hash.as_ref(),
+                    };
+                    recover_and_build_legacy_witness(&recovery, cache)
+                }
+                PrevoutKind::P2wsh | PrevoutKind::Other => Err(CodecError::UnsupportedScript),
+            }
+        }
+    }
+}
+
+fn recover_and_build_legacy_witness(
+    recovery: &Recovery<'_>,
+    cache: &SighashCache<'_>,
+) -> Result<(Script, Witness), CodecError> {
+    let public = recover_pubkey(cache, recovery)?;
+    let mut sig_item = der_encode(recovery.sig);
+    sig_item.push(recovery.hash_type);
+    match recovery.kind {
+        PrevoutKind::P2pkh(_) => {
+            let mut script_sig = push_data(&sig_item);
+            script_sig.extend_from_slice(&push_data(&public));
+            Ok((Script::from_bytes(script_sig), Witness::new()))
+        }
+        PrevoutKind::P2wpkh(_) => Ok((Script::new(), Witness::from_stack(vec![sig_item, public]))),
+        PrevoutKind::P2sh(script_hash) => {
+            let redeem_hash = recovery.stored_pkh.ok_or(CodecError::UnsupportedScript)?;
+            let mut redeem = Vec::with_capacity(22);
+            redeem.extend_from_slice(&[0x00, 0x14]);
+            redeem.extend_from_slice(redeem_hash);
+            if hash160_20(&redeem) != *script_hash {
+                return Err(CodecError::UnsupportedScript);
+            }
+            Ok((
+                Script::from_bytes(push_data(&redeem)),
+                Witness::from_stack(vec![sig_item, public]),
+            ))
+        }
+        PrevoutKind::P2wsh | PrevoutKind::P2tr | PrevoutKind::Other => {
+            Err(CodecError::UnsupportedScript)
+        }
+    }
 }
 
 #[cfg(test)]

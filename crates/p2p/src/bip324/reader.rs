@@ -1,4 +1,4 @@
-//! Resumable reads of BIP324 packets from a blocking stream.
+#![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
 
 use std::io::Read;
 
@@ -10,18 +10,16 @@ use super::packet::{HEADER_LEN, RecvCipher};
 use crate::recv;
 use crate::wire::MAX_MESSAGE_PAYLOAD;
 
-/// Largest contents length accepted from a peer: a type byte, a 12-byte long
-/// type, and a payload of up to [`MAX_MESSAGE_PAYLOAD`] bytes, as Bitcoin Core
-/// accepts.
 pub(crate) const MAX_RECV_CONTENTS_LEN: usize = 1 + 12 + MAX_MESSAGE_PAYLOAD;
 
 #[derive(Debug)]
-pub(crate) struct PacketReader {
+pub struct PacketReader {
     cipher: RecvCipher,
     aad: Vec<u8>,
     field: [u8; LENGTH_FIELD_LEN],
     field_filled: usize,
     body: Option<PendingBody>,
+    failed: bool,
 }
 
 #[derive(Debug)]
@@ -31,39 +29,54 @@ struct PendingBody {
 }
 
 impl PacketReader {
-    /// `aad` authenticates the first packet: the garbage the peer sent before
-    /// its garbage terminator.
-    pub(crate) const fn new(cipher: RecvCipher, aad: Vec<u8>) -> Self {
+    pub const fn new(cipher: RecvCipher, aad: Vec<u8>) -> Self {
         Self {
             cipher,
             aad,
             field: [0; LENGTH_FIELD_LEN],
             field_filled: 0,
             body: None,
+            failed: false,
         }
     }
 
-    /// A contents length above [`MAX_RECV_CONTENTS_LEN`] is refused before any byte of
-    /// its body is read.
-    ///
-    /// POST: on `Ok(None)` every packet byte is consumed and its cipher advanced; the
-    /// next call reads a fresh packet.
-    pub(crate) fn read_contents<R: Read>(
+    pub fn read_contents<R: Read>(
         &mut self,
         reader: &mut R,
     ) -> Result<Option<Bytes>, TransportError> {
+        if self.failed {
+            return Err(TransportError::Packet(
+                crate::bip324::packet::PacketError::AuthFailed(crate::bip324::cipher::AuthFailed),
+            ));
+        }
         let mut body = match self.body.take() {
             Some(body) => body,
-            None => self.read_length(reader)?,
+            None => match self.read_length(reader) {
+                Ok(body) => body,
+                Err(error) => {
+                    if !is_poll_timeout(&error) {
+                        self.failed = true;
+                    }
+                    return Err(error);
+                }
+            },
         };
         if let Err(error) = recv::fill_growing(reader, &mut body.bytes, body.len) {
             if recv::is_poll_timeout(&error) {
                 self.body = Some(body);
+            } else {
+                self.failed = true;
             }
             return Err(error.into());
         }
         let aad = core::mem::take(&mut self.aad);
-        let opened = self.cipher.open(&aad, &mut body.bytes)?;
+        let opened = match self.cipher.open(&aad, &mut body.bytes) {
+            Ok(opened) => opened,
+            Err(error) => {
+                self.failed = true;
+                return Err(error.into());
+            }
+        };
         if opened.ignore {
             return Ok(None);
         }
@@ -71,8 +84,6 @@ impl PacketReader {
         Ok(Some(Bytes::from(body.bytes).slice(HEADER_LEN..end)))
     }
 
-    /// Completes and decrypts the next length field. The cipher advances only
-    /// once all three bytes are in.
     fn read_length<R: Read>(&mut self, reader: &mut R) -> Result<PendingBody, TransportError> {
         if let Err(error) = recv::fill(reader, &mut self.field, &mut self.field_filled) {
             if !recv::is_poll_timeout(&error) {
@@ -92,7 +103,7 @@ impl PacketReader {
     }
 }
 
-pub(crate) fn is_poll_timeout(error: &TransportError) -> bool {
+pub fn is_poll_timeout(error: &TransportError) -> bool {
     matches!(error, TransportError::Io(error) if recv::is_poll_timeout(error))
 }
 
@@ -105,7 +116,17 @@ mod tests {
     use crate::bip324::packet::{RecvCipher, SendCipher};
     use crate::recv::RECEIVE_CHUNK;
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    #[derive(Debug, thiserror::Error)]
+    enum TestError {
+        #[error(transparent)]
+        Packet(#[from] crate::bip324::packet::PacketError),
+        #[error(transparent)]
+        Transport(#[from] super::super::TransportError),
+        #[error(transparent)]
+        Io(#[from] std::io::Error),
+    }
+
+    type TestResult = Result<(), TestError>;
 
     struct Dribble(VecDeque<u8>);
 
@@ -210,6 +231,25 @@ mod tests {
                 .ok_or_else(|| io::Error::other("a real packet"))?
                 .len(),
             MAX_RECV_CONTENTS_LEN
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tag_failure_poisons_reader_so_subsequent_packets_are_never_accepted() -> TestResult {
+        let (mut sender, mut reader) = pair();
+        let mut corrupted = sender.seal(b"first", &[], false)?;
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0x01;
+        let valid = sender.seal(b"second", &[], false)?;
+
+        let mut stream1 = std::io::Cursor::new(corrupted);
+        assert!(reader.read_contents(&mut stream1).is_err());
+
+        let mut stream2 = std::io::Cursor::new(valid);
+        assert!(
+            reader.read_contents(&mut stream2).is_err(),
+            "no packet may be accepted after authentication tag failure"
         );
         Ok(())
     }

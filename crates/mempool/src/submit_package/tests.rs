@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_fixtures::{p2sh_true_script, true_redeem_script_sig};
 use crate::{ChainAdmissionSnapshot, Mempool, MempoolLimits, MempoolObserver, MutationEnvelope};
 use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin_rs_consensus::ValidationEngine;
@@ -6,7 +7,7 @@ use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, PeerEndpoint, Script, Sequence, TxIn, TxOut, Witness,
 };
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult = Result<(), crate::test_error::TestError>;
 
 #[derive(Default)]
 struct Seen(parking_lot::Mutex<Vec<MutationEnvelope>>);
@@ -53,7 +54,7 @@ fn funded(tags: &[u32]) -> Coins {
                     coin(*tag),
                     TxOut {
                         value: Amount::from_sat(100_000),
-                        script_pubkey: Script::from_bytes(vec![0x51]),
+                        script_pubkey: Script::from_bytes(p2sh_true_script()),
                     },
                 )
             })
@@ -70,14 +71,14 @@ fn output(value: u64) -> TxOut {
 }
 
 fn spend_coins(inputs: &[OutPoint], outputs: &[u64]) -> Tx {
-    spend_with(inputs, outputs, &Witness::new())
+    spend_with(inputs, outputs, &true_redeem_script_sig(), &Witness::new())
 }
 
 fn spend_outputs(inputs: &[OutPoint], outputs: &[u64]) -> Tx {
-    spend_with(inputs, outputs, &Witness::from_stack(vec![vec![0x51]]))
+    spend_with(inputs, outputs, &[], &Witness::from_stack(vec![vec![0x51]]))
 }
 
-fn spend_with(inputs: &[OutPoint], outputs: &[u64], witness: &Witness) -> Tx {
+fn spend_with(inputs: &[OutPoint], outputs: &[u64], script_sig: &[u8], witness: &Witness) -> Tx {
     Tx {
         version: 2,
         lock_time: LockTime::ZERO,
@@ -86,7 +87,7 @@ fn spend_with(inputs: &[OutPoint], outputs: &[u64], witness: &Witness) -> Tx {
             .map(|outpoint| TxIn {
                 previous_output: *outpoint,
                 sequence: Sequence::MAX,
-                script_sig: Script::new(),
+                script_sig: Script::from_bytes(script_sig.to_vec()),
                 witness: witness.clone(),
             })
             .collect(),

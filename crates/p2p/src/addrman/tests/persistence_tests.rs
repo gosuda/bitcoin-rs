@@ -1,5 +1,5 @@
-use sonic_rs::{JsonValueTrait as _, JsonValueMutTrait as _, JsonContainerTrait as _};
 use super::*;
+use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait as _};
 
 const SHARED_FIXTURE: &str = include_str!("../../../tests/data/addrman-canonical-v1-shared.json");
 const TOR_ADDR: &str = "fivcukrkfivcukrkfivcukrkfivcukrkfivcukrkfivcukrkfivjcrid.onion:8334";
@@ -190,6 +190,7 @@ fn faithful_old_v9_without_marker_is_preserved_and_never_decoded() {
     }
 }
 
+// RCV-11
 #[test]
 fn synthetic_old_shapes_are_preserved_without_decoding() {
     for version in [1, 8, 9] {
@@ -414,7 +415,7 @@ fn ipv6_and_overlay_source_round_trip_with_anchors() {
         decoded,
         sonic_rs::to_value(&restored.state.lock().stored).expect("stored")
     );
-    restored.attempted(target(), true, EPOCH + 100);
+    restored.attempt_failed(target(), EPOCH + 100);
     restored.save();
     let mutated = fs::read(&path).expect("mutated publication");
     assert_ne!(mutated, published, "a dirty revision must republish");

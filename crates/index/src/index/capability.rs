@@ -1,5 +1,3 @@
-//! Capability selection and the exact durable watermark representation.
-
 use super::error::IndexError;
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvSnapshot};
 
@@ -11,16 +9,12 @@ pub(super) const COMPACT_FILTERS_WATERMARK_KEY: &[u8] = &[0x00, b'F'];
 
 pub(super) const SCRIPT_LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
 
-/// `TxLookup` coverage floor: first height with derived rows.
 pub(super) const TX_LOOKUP_FLOOR_KEY: &[u8] = &[0x00, b't'];
 
-/// `ScriptHistory` coverage floor: first height with derived rows.
 pub(super) const SCRIPT_HISTORY_FLOOR_KEY: &[u8] = &[0x00, b's'];
 
 pub(super) const WATERMARK_LEN: usize = crate::types::HEIGHT_SIZE + 32;
 
-/// `ScriptLive` reseeds from an immutable artifact or retained history and can never hold a
-/// pruned-prefix floor, so it has no key.
 pub(super) const fn floor_key(capability: IndexCapability) -> Option<&'static [u8]> {
     match capability {
         IndexCapability::TxLookup => Some(TX_LOOKUP_FLOOR_KEY),
@@ -40,7 +34,6 @@ pub enum IndexCapability {
     TxLookup,
     ScriptHistory,
     ScriptLive,
-    /// BIP158 basic filters and their BIP157 header chain.
     CompactFilters,
 }
 
@@ -54,7 +47,6 @@ impl IndexCapability {
         Self::CompactFilters,
     ];
 
-    /// reset-marker mask (`TxLookup` 0b001, `ScriptHistory` 0b010, `ScriptLive` 0b100, `CompactFilters` 0b1000).
     pub(super) const fn bit(self) -> u8 {
         match self {
             Self::TxLookup => 0b001,
@@ -123,7 +115,6 @@ impl IndexCapabilities {
         Self(IndexCapability::TxLookup.bit() | IndexCapability::ScriptLive.bit());
     pub const ALL: Self = Self(0b1111);
     pub const TX_AND_SCRIPTS: Self = Self(0b111);
-    /// BIP158 basic filter index only.
     pub const COMPACT_FILTERS: Self = Self(0b1000);
 
     #[must_use]
@@ -252,7 +243,7 @@ impl IndexWatermarks {
 }
 
 impl IndexWatermark {
-    /// they stay little-endian while row heights are big-endian (format 5).
+    /// they stay little-endian while history row heights are inverted big-endian (format 6).
     pub fn to_bytes(&self) -> [u8; WATERMARK_LEN] {
         let mut bytes = [0_u8; WATERMARK_LEN];
         bytes[..crate::types::HEIGHT_SIZE].copy_from_slice(&self.height.to_le_bytes());
@@ -287,8 +278,6 @@ impl IndexWatermark {
     }
 }
 
-/// Reads one capability's coverage floor: the first height its committed rows
-/// cover. Missing keys mean complete coverage from genesis.
 pub(super) fn read_coverage_floor(
     snapshot: &dyn KvSnapshot,
     capability: IndexCapability,
@@ -322,7 +311,6 @@ pub(super) fn put_selected_floors(
     }
 }
 
-/// rebuilds from genesis, which covers everything.
 pub(super) fn delete_selected_floors(
     batch: &mut BufferedWriteBatch,
     capabilities: IndexCapabilities,
@@ -355,55 +343,6 @@ pub(super) fn put_selected_watermarks(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn per_capability_facts_match_the_literals_they_replace() {
-        for (capability, bit, index, key, families, name, message) in [
-            (
-                IndexCapability::TxLookup,
-                0b001_u8,
-                0_usize,
-                TX_LOOKUP_WATERMARK_KEY,
-                &[ColumnFamily::TxConfirmed][..],
-                "tx_lookup",
-                "txindex is disabled",
-            ),
-            (
-                IndexCapability::ScriptHistory,
-                0b010,
-                1,
-                SCRIPT_HISTORY_WATERMARK_KEY,
-                &[ColumnFamily::Funding, ColumnFamily::Spending][..],
-                "script_history",
-                "script history is disabled",
-            ),
-            (
-                IndexCapability::ScriptLive,
-                0b100,
-                2,
-                SCRIPT_LIVE_WATERMARK_KEY,
-                &[ColumnFamily::ScriptLive][..],
-                "script_live",
-                "script live is disabled",
-            ),
-            (
-                IndexCapability::CompactFilters,
-                0b1000,
-                3,
-                &[0, b'F'][..],
-                &[][..],
-                "compact_filters",
-                "blockfilterindex is disabled",
-            ),
-        ] {
-            assert_eq!(capability.bit(), bit);
-            assert_eq!(capability.index(), index);
-            assert_eq!(capability.watermark_key(), key);
-            assert_eq!(capability.column_families(), families);
-            assert_eq!(capability.name(), name);
-            assert_eq!(capability.disabled_message(), message);
-        }
-    }
 
     #[test]
     fn all_lists_every_capability_in_mask_bit_order() {

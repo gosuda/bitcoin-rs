@@ -1,5 +1,3 @@
-//! Typed logical peer endpoint identity, independent of any socket.
-
 use std::{
     fmt,
     net::{IpAddr, SocketAddr},
@@ -31,7 +29,6 @@ pub enum NetworkLabel {
 }
 
 impl NetworkLabel {
-    /// Core `getnetworkinfo` / `getpeerinfo` spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -50,7 +47,6 @@ impl fmt::Display for NetworkLabel {
 }
 
 impl PeerEndpoint {
-    /// BIP155 network id: 1 `IPv4`, 2 `IPv6`, 4 `TorV3`, 5 `I2P`.
     #[must_use]
     pub const fn network_id(self) -> u8 {
         match self {

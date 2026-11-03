@@ -12,7 +12,10 @@ pub use block_file::{
     encode_block_file_max_height,
 };
 
-pub use cache_budget::{CacheBudgetShare, clamp_dbcache_bytes, split_cache_budget};
+pub use cache_budget::{
+    CacheBudgetShare, clamp_dbcache_bytes, split_cache_budget_with_txindex,
+    split_cache_budget_without_txindex,
+};
 
 pub use column_families::ColumnFamily;
 
@@ -24,7 +27,9 @@ pub use trait_::{
     KvIter, KvPair, KvSnapshot, KvStore, PrefixScan, PrefixScanLimit, WriteCondition,
 };
 
-pub use undo::{DisconnectMarker, DisconnectPhase, InMemoryUndoStore, KvUndoStore, UndoStore};
+pub use undo::{
+    DisconnectMarker, DisconnectPhase, InMemoryUndoStore, KvUndoStore, UndoStore, block_undo_key,
+};
 
 pub use pruning::{MandatoryRetention, RetentionError, RetentionLease, RetentionRegistry};
 
@@ -40,7 +45,7 @@ pub type StoreGuard = std::sync::Arc<dyn core::any::Any + Send + Sync>;
 
 pub use durable_head::{
     BodyExtent, CommitRecords, DurableHead, DurableHeadStore, InMemoryDurableHeadStore,
-    KvDurableHeadStore,
+    KvDurableHeadStore, SCRIPT_ATTESTATION_KEY, ScriptAttestation,
 };
 
 #[cfg(feature = "fjall")]
@@ -63,7 +68,6 @@ pub enum StorageBackend {
 }
 
 impl StorageBackend {
-    /// Returns the stable configuration spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -73,7 +77,6 @@ impl StorageBackend {
         }
     }
 
-    /// Whether this backend is compiled into the current crate.
     #[must_use]
     pub const fn is_compiled_in(self) -> bool {
         match self {
@@ -125,3 +128,5 @@ mod rocksdb_impl;
 
 pub mod chainstate_journal;
 pub mod checkpoint;
+#[cfg(test)]
+pub(crate) mod test_support;

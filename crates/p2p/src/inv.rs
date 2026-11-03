@@ -50,7 +50,9 @@ pub fn request_missing_parents(
     if items.is_empty() {
         return false;
     }
-    request_witness(&mut items, witness);
+    if witness {
+        request_witness(&mut items);
+    }
     let retained = peers.request_parent_transactions(connection, &items);
     retained && !lease.is_cancelled()
 }
@@ -64,11 +66,7 @@ pub fn request_package_info(
     peers.request_package_info_from_token(source, subject, parents)
 }
 
-/// Applies BIP144's witness request flag to transaction vectors without
-pub(crate) fn request_witness(items: &mut [Inventory], witness: bool) {
-    if !witness {
-        return;
-    }
+pub(crate) fn request_witness(items: &mut [Inventory]) {
     for item in items {
         if let Inventory::Transaction(txid) = *item {
             *item = Inventory::WitnessTransaction(txid);
@@ -86,7 +84,6 @@ pub(crate) fn inventory_block_hash(item: &Inventory) -> Option<Hash256> {
     }
 }
 
-/// `WTx` (BIP339) it is the wtxid. The caller interprets the hash according
 pub(crate) fn inventory_tx_hash(item: &Inventory) -> Option<Hash256> {
     use bitcoin::hashes::Hash as _;
     match item {
@@ -230,10 +227,7 @@ mod tests {
             },
         ];
         let unchanged = items.clone();
-        request_witness(&mut items, false);
-        assert_eq!(items, unchanged);
-
-        request_witness(&mut items, true);
+        request_witness(&mut items);
         let mut expected = unchanged;
         expected[0] = Inventory::WitnessTransaction(txid);
         assert_eq!(items, expected);

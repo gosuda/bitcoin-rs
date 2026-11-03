@@ -59,8 +59,6 @@ pub(crate) fn change(txid: &Txid, outcome: MutationOutcome) -> MutationChange {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MutationResult {
     pub changes: Vec<MutationChange>,
-    /// Mempool sequence assigned to `changes[0]`; each later change took the
-    /// next value. `0` when `changes` is empty.
     pub sequence_base: u64,
 }
 
@@ -139,8 +137,9 @@ impl From<LocalOrigin> for AdmissionOrigin {
 pub struct MutationEnvelope {
     pub origin: AdmissionOrigin,
     pub result: MutationResult,
-    /// Accepted bodies retained under the commit writer, keyed by change index.
-    /// Empty when no observer requests transaction payloads.
+    /// Accepted transaction bodies as `(index into `result.changes`, body)`
+    /// pairs in change order. The list is empty when no observer asked for
+    /// bodies.
     pub accepted_transactions: Vec<(usize, alloc::sync::Arc<bitcoin_rs_primitives::Tx>)>,
 }
 

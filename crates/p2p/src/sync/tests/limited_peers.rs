@@ -30,6 +30,7 @@ fn sent_messages(rx: &crate::test_support::MessageReceiver) -> Vec<Message> {
     rx.try_iter().collect()
 }
 
+// P2P-09
 #[test]
 fn predicate_excludes_limited_peer_during_initial_block_download() -> TestResult {
     let addr = test_addr(9600, 0)?;
@@ -45,6 +46,7 @@ fn predicate_excludes_limited_peer_during_initial_block_download() -> TestResult
     Ok(())
 }
 
+// P2P-09
 #[test]
 fn predicate_limits_pruned_peer_to_the_retained_window() -> TestResult {
     let addr = test_addr(9601, 0)?;
@@ -100,6 +102,7 @@ fn predicate_keeps_full_service_peer_at_any_height() -> TestResult {
     Ok(())
 }
 
+// P2P-09
 #[test]
 fn tick_asks_no_bodies_from_limited_peer_during_initial_block_download() -> TestResult {
     let (sync, peers, _tree, _applied, _expected) =

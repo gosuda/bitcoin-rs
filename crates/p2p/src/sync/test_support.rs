@@ -28,6 +28,7 @@ pub(crate) struct TestChain {
     pub(super) historical: Mutex<std::collections::VecDeque<(u32, Hash256)>>,
     pub(super) historical_connected: Mutex<Vec<Hash256>>,
     pub(super) historical_replay_pending: Mutex<bool>,
+    closed_for_recovery: std::sync::atomic::AtomicBool,
 }
 
 impl TestChain {
@@ -48,7 +49,13 @@ impl TestChain {
             historical: Mutex::new(std::collections::VecDeque::new()),
             historical_connected: Mutex::new(Vec::new()),
             historical_replay_pending: Mutex::new(false),
+            closed_for_recovery: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn close_for_recovery(&self) {
+        self.closed_for_recovery
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -62,8 +69,11 @@ impl TestChain {
                 bitcoin_rs_chain::softfork_state(tree, self.network, node.parent, node.height)
                     .segwit_active
             });
-        bitcoin_rs_consensus::check_block_body_binding(block, segwit_active)
-            .map_err(|error| -> SyncChainError { Box::new(error) })
+        bitcoin_rs_consensus::check_block_body_binding(
+            block,
+            bitcoin_rs_consensus::BlockRuleContext { segwit_active },
+        )
+        .map_err(SyncChainError::from)
     }
 
     #[must_use]
@@ -76,6 +86,11 @@ impl TestChain {
 impl SyncChain for TestChain {
     fn historical_base(&self) -> Option<Hash256> {
         self.historical.lock().back().map(|(_, hash)| *hash)
+    }
+
+    fn closed_for_recovery(&self) -> bool {
+        self.closed_for_recovery
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
@@ -224,11 +239,15 @@ impl SyncChain for TestChain {
                 _ => None,
             };
             if let Some((_, disposition)) = failure {
+                if disposition == WindowApplyDisposition::Fatal {
+                    self.closed_for_recovery
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 return Err(WindowCommitError {
                     applied,
                     disposition,
                     invalidated: Box::default(),
-                    source: Box::new(std::io::Error::other("scripted commit failure")),
+                    source: std::io::Error::other("scripted commit failure").into(),
                 });
             }
             let Some(node_id) = tree.lookup(hash) else {
@@ -236,7 +255,7 @@ impl SyncChain for TestChain {
                     applied,
                     disposition: WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
-                    source: Box::new(std::io::Error::other("commit block not in tree")),
+                    source: std::io::Error::other("commit block not in tree").into(),
                 });
             };
             let coinbase_shaped = |tx: &Tx| {
@@ -253,7 +272,7 @@ impl SyncChain for TestChain {
                     applied,
                     disposition: WindowApplyDisposition::Permanent,
                     invalidated,
-                    source: Box::new(std::io::Error::other("extra coinbase")),
+                    source: std::io::Error::other("extra coinbase").into(),
                 });
             }
             if !block.txs.is_empty() {
@@ -271,7 +290,7 @@ impl SyncChain for TestChain {
                     applied,
                     disposition: WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
-                    source: Box::new(std::io::Error::other("commit node missing")),
+                    source: std::io::Error::other("commit node missing").into(),
                 });
             };
             self.applied_tip.store(Some(Arc::new(TipSnapshot {
@@ -366,7 +385,7 @@ pub(crate) fn synced_ibd_latch() -> Arc<InitialBlockDownload> {
 pub(crate) fn mined_chain(
     body_height: u32,
     header_only: u32,
-) -> Result<(BlockTree, Vec<Block>), Box<dyn std::error::Error>> {
+) -> Result<(BlockTree, Vec<Block>), crate::test_support::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
     let mut tip_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;

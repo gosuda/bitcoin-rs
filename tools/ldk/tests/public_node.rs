@@ -1,7 +1,3 @@
-//! Real public-API consumer on a blocking OS thread; no test-seam or RPC client.
-
-use std::error::Error;
-
 use bitcoin::{
     Amount, Block, BlockHash, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid,
     WPubkeyHash, Witness, absolute, consensus, hashes::Hash, transaction,
@@ -10,9 +6,31 @@ use bitcoin_rs_ldk_spike::{AdapterError, NativeBackend};
 use bitcoin_rs_node::{Network, Node, NodeConfig, NodeError, RuntimeInputs};
 use futures_executor::block_on;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
-use lightning_block_sync::{BlockData, BlockSource, BlockSourceErrorKind};
+use lightning_block_sync::{BlockData, BlockSource, BlockSourceError, BlockSourceErrorKind};
 
-type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("node error: {0}")]
+    Node(#[from] NodeError),
+    #[error("bitcoin consensus error: {0}")]
+    Consensus(#[from] bitcoin::consensus::encode::Error),
+    #[error("primitives decode error: {0}")]
+    Primitives(#[from] bitcoin_rs_primitives::DecodeError),
+    #[error("addr parse error: {0}")]
+    AddrParse(#[from] std::net::AddrParseError),
+    #[error("adapter error: {0}")]
+    Adapter(#[from] AdapterError),
+    #[error("block source error: {0}")]
+    BlockSource(String),
+}
+
+fn block_source_error(error: BlockSourceError) -> TestError {
+    TestError::BlockSource(error.into_inner().to_string())
+}
+
+type TestResult = Result<(), TestError>;
 
 #[test]
 fn public_node_reads_fees_and_admission_refusals() -> TestResult {
@@ -40,11 +58,10 @@ fn probe() -> TestResult {
         let fees: &dyn FeeEstimator = &backend;
         let broadcaster: &dyn BroadcasterInterface = &backend;
 
-        let (hash, height) =
-            block_on(source.get_best_block()).map_err(|error| error.into_inner())?;
+        let (hash, height) = block_on(source.get_best_block()).map_err(block_source_error)?;
         assert_eq!(height, Some(0));
         let BlockData::FullBlock(block) =
-            block_on(source.get_block(&hash)).map_err(|error| error.into_inner())?
+            block_on(source.get_block(&hash)).map_err(block_source_error)?
         else {
             panic!("Node supplies full blocks");
         };
@@ -84,8 +101,7 @@ fn probe() -> TestResult {
         assert_eq!(error.kind(), BlockSourceErrorKind::Transient);
 
         for hint in [None, Some(0), Some(123)] {
-            let data =
-                block_on(source.get_header(&hash, hint)).map_err(|error| error.into_inner())?;
+            let data = block_on(source.get_header(&hash, hint)).map_err(block_source_error)?;
             assert_eq!(data.header, block.header);
             assert_eq!(data.height, 0);
             assert_eq!(data.chainwork, block.header.work());
@@ -100,7 +116,7 @@ fn probe() -> TestResult {
         let validated = block_on(lightning_block_sync::init::validate_best_block_header(
             &backend,
         ))
-        .map_err(|error| error.into_inner())?;
+        .map_err(block_source_error)?;
         assert_eq!(validated.height, 0);
 
         let tx = orphan_transaction();

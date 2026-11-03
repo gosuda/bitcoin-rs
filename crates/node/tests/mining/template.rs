@@ -1,4 +1,6 @@
-use anyhow::Result;
+use bitcoin_rs_node::test_support::TestError;
+
+type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin_rs_mining::{
     BlockTemplateMode, BlockTemplateRequest, BlockValidationResult, CoinbaseBudget,
     MiningCapability, MiningControl, MiningControlError, TemplateId, solve_block,
@@ -11,6 +13,7 @@ use super::support::{
     regtest_mining, template_request,
 };
 
+// API-20
 #[test]
 fn template_does_not_echo_client_capabilities() -> Result<()> {
     let (_state, mining) = regtest_mining()?;

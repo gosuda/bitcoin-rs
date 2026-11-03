@@ -34,7 +34,7 @@ Precedence, low to high:
 4. `BITCOIN_RS_*` environment variables
 5. CLI flags
 
- A later layer overrides only fields it supplies. Network-dependent validation, including mining payout addresses, runs after merge. Runtime test controls are not public configuration.
+ A later layer overrides only fields it supplies. Network-dependent validation, including mining payout addresses, runs after merge. An empty data directory fails configuration validation because the node fails fast instead of using a silent default directory. Runtime test controls are not public configuration.
 
 Common network names are `mainnet`, `signet`, `testnet4`, and `regtest`; retained aliases are documented by the compatibility contracts.
 
@@ -226,7 +226,7 @@ The optional `silent-payments` build feature plus `--silent-payments` enables
 the authenticated, experimental `getblocktweaks` RPC. It needs retained certified
 block inputs rather than txindex; see [Silent Payments usage and limits](silent-payments.md).
 
-`--fast-sync` (also `BITCOIN_RS_FAST_SYNC` or `fast_sync` in TOML) relaxes the block-download policy: the node targets 32 full-relay outbound peers instead of 8 (its two block-relay-only slots are unchanged), fans block requests out as soon as two eligible outbound peers are connected instead of eight, and divides the 256-block download window across the eligible peers with a floor of 8 blocks per peer instead of 16 (two peers get 128 each; the 8-block floor is reached at 32 peers). Consensus validation is unchanged. The mode is opt-in and its throughput has not been measured against the default.
+`--fast-sync` (also `BITCOIN_RS_FAST_SYNC` or `fast_sync` in TOML) relaxes the block-download policy. The node targets 32 full-relay outbound peers instead of 8 (its two block-relay-only slots are unchanged). It fans block requests out as soon as two eligible outbound peers are connected instead of eight. It divides the 256-block download window across the eligible peers with a floor of 8 blocks per peer instead of 16; two peers get 128 each. The 8-block floor is reached at 32 peers. Consensus validation is unchanged. The mode is opt-in and its throughput has not been measured against the default.
 
 ## Check progress
 
@@ -239,7 +239,7 @@ curl -s --user "$(cat .bitcoin-rs/.cookie)" \
 
 For the tip hash only, use `getbestblockhash` with the same empty parameter list.
 
-[rpc-reference.md](rpc-reference.md) is generated from the RPC registry and names each surface's honest state: `Supported`, `Deviation`, `Implemented (unverified)`, `Extension`, `Disabled`, or `Unimplemented`. The node has no in-tree wallet or private-key custody; key-free descriptor/PSBT helpers remain available for external signers.
+[rpc-reference.md](rpc-reference.md) is generated from the RPC registry. It names each surface's honest state: `Supported`, `Deviation`, `Implemented (unverified)`, `Extension`, `Disabled`, or `Unimplemented`. The node has no in-tree wallet or private-key custody. Key-free descriptor/PSBT helpers remain available for external signers.
 
 ## Capability state
 
@@ -340,8 +340,7 @@ See [contracts/storage-footprint.md](contracts/storage-footprint.md).
 `--validation-mode` (also `BITCOIN_RS_VALIDATION_MODE` or `validation_mode` in TOML) selects which historical script verification the apply path may skip. Non-script consensus checks always run.
 
 - `assume-valid` (default): Bitcoin Core `-assumevalid` semantics. Scripts are skipped through `--assume-valid-height` only while the active chain contains the pinned network anchor.
-- `full`: every script executes; `--assume-valid-height` is ignored.
-- `fast`: scripts are skipped for every block that lies on the best header chain strictly below its tip, so only the block at the tip executes scripts while catching up. Blocks on competing branches always run scripts. This trusts the most-work header chain and is independent of `--fast-sync`.
+- `full`: every script executes; `--assume-valid-height` is ignored. Every committed block must have executed its scripts. When the stored chain was committed with scripts skipped, or its attestation is missing, the next `full` start rebuilds the chainstate from the stored blocks. It executes every script; this needs an unpruned datadir. A datadir that was pruned stops with `full validation requires an unpruned datadir; restart with --validation-mode assume-valid or resync`.
 
 Startup replay distinguishes cold revalidation from recovery after an accepted checkpoint; [the recovery contract](contracts/recovery.md#rcv-02-ordered-commit-protocol) defines that trust boundary.
 
@@ -351,28 +350,28 @@ Startup replay distinguishes cold revalidation from recovery after an accepted c
 
 ## Validation engine
 
-`--validation-engine` (also `BITCOIN_RS_VALIDATION_ENGINE` or `validation_engine` in TOML) selects which script-verification engine validation runs on. The setting is resolved once at startup and passed to every script-verification seam; `--validation-mode` above is a separate policy and is unchanged. Layers run in the documented precedence — defaults, then config file, then environment, then CLI — so an operator override at any of them wins over the layer below.
+`--validation-engine` (also `BITCOIN_RS_VALIDATION_ENGINE` or `validation_engine` in TOML) selects which script-verification engine validation runs on. The node resolves the setting once at startup and passes it to every script-verification seam. `--validation-mode` above is a separate policy and is unchanged. Layers run in the documented precedence: defaults, then config file, then environment, then CLI. An operator override at any of them wins over the layer below.
 
 - `native` (default): the native Rust interpreter. It is compiled in every build.
 - `kernel`: Bitcoin Core's C++ engine (`libbitcoinkernel`). Requires a build with `--features kernel` (plus `cmake` and `libboost-dev`). The feature compiles kernel support in; the setting selects it.
 
-Setting `kernel` on a build without the `kernel` feature fails at startup with an unsupported-build error — ``validation engine `kernel` is not supported by this build: bitcoinkernel support is not compiled in (enable the `kernel` feature)`` — before chain state opens or workers start. There is no silent engine substitution.
+Setting `kernel` on a build without the `kernel` feature fails at startup with an unsupported-build error. The error message is: ``validation engine `kernel` is not supported by this build: bitcoinkernel support is not compiled in (enable the `kernel` feature)``. The failure comes before chain state opens or workers start. The node never substitutes another engine silently.
 
 ```sh
 cargo build --release -p bitcoin-rs --features kernel
 ./target/release/bitcoin-rs --data-dir .bitcoin-rs --validation-engine kernel
 ```
 
-Direct `bitcoin-rs-consensus` library callers have no config file, environment, or CLI to set: `kernel::BlockParse::parse(raw, engine)` takes a `bitcoin_rs_consensus::ValidationEngine` value, while `kernel::verify_tx_scripts(tx, spent, flags, engine, signature_cache)` and `verify_transaction(..., engine, signature_cache)` take both the engine and a trailing `Option<&bitcoin_rs_script::SignatureCache>`. Pass `None` for uncached calls, or `Some(&cache)` for serial native reuse across multiple passes over the same transaction. When `ValidationEngine::Kernel` is selected, kernel verification ignores the signature cache while running all standard checks, and its behavior is unchanged. Lower-level callers using `PreparedTransaction::verify_input(input_index, flags, signature_cache)` also pass the optional cache reference per call without storing it inside the prepared transaction, keeping `PreparedTransaction` shareable across parallel input checks during block verification. A binary embedder that wants one setting should resolve `ValidationEngine` itself and pass it down exactly as `bitcoin-rs-node` does.
+Direct `bitcoin-rs-consensus` library callers have no config file, environment, or CLI to set. `kernel::BlockParse::parse(raw, engine)` takes a `bitcoin_rs_consensus::ValidationEngine` value. `kernel::verify_tx_scripts(tx, spent, flags, engine, signature_cache)` and `verify_transaction(..., engine, signature_cache)` take both the engine and a trailing `Option<&bitcoin_rs_script::SignatureCache>`. Pass `None` for uncached calls. Pass `Some(&cache)` for serial native reuse across multiple passes over the same transaction. When `ValidationEngine::Kernel` is selected, kernel verification ignores the signature cache while running all standard checks, and its behavior is unchanged. Lower-level callers using `PreparedTransaction::verify_input(input_index, flags, signature_cache)` also pass the optional cache reference per call without storing it inside the prepared transaction. That keeps `PreparedTransaction` shareable across parallel input checks during block verification. A binary embedder that wants one setting should resolve `ValidationEngine` itself and pass it down exactly as `bitcoin-rs-node` does.
 
 ## Operator migration: validation engine
 
 - No change for `bin/bitcoin-rs` users who never set an engine: the binary's default was already kernel-free and remains `native`. Direct library users take the next bullet instead.
-- `crates/consensus`, `crates/chainstate`, and `crates/node` library builds changed behavior: their defaults used to compile **and implicitly select** `kernel`, and now compile nothing kernel-related and default to `native`. A library user who relied on the old kernel default must both enable the `kernel` feature and select `validation_engine = "kernel"` (binary config, env, or CLI) — or, for a direct `bitcoin-rs-consensus` caller, pass `ValidationEngine::Kernel` to the verify/parse entries described above.
+- `crates/consensus`, `crates/chainstate`, and `crates/node` library builds changed behavior. Their defaults used to compile **and implicitly select** `kernel`. They now compile nothing kernel-related and default to `native`. A library user who relied on the old kernel default must enable the `kernel` feature and select `validation_engine = "kernel"` (binary config, env, or CLI). A direct `bitcoin-rs-consensus` caller instead passes `ValidationEngine::Kernel` to the verify/parse entries described above.
 - To use bitcoinkernel, do both: build with `--features kernel` and set `validation_engine = "kernel"` (TOML), `BITCOIN_RS_VALIDATION_ENGINE=kernel` (env), or `--validation-engine kernel` (CLI).
 - Setting `kernel` without the feature fails at startup with the unsupported-build error above.
-- Bare `bitcoin-rs` runs native. The shipped Docker image compiles kernel support (`--features fjall,kernel`) and selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`), so bare `docker run` keeps today's kernel behavior while `BITCOIN_RS_VALIDATION_ENGINE=native` or a config file mounted over that one still override it without touching CMD. A CLI override (`--validation-engine`) replaces CMD wholesale under docker semantics — `docker run IMAGE args` runs `bitcoin-rs args` — so going that route means repeating the whole argument list (`--config --data-dir --p2p-listen` included).
-- `--validation-mode` / `validation_mode` (Full/AssumeValid/Fast) is the separate script-skip policy and is unchanged.
+- Bare `bitcoin-rs` runs native. The shipped Docker image compiles kernel support (`--features fjall,kernel`) and selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`). Bare `docker run` therefore keeps today's kernel behavior. `BITCOIN_RS_VALIDATION_ENGINE=native` or a config file mounted over that one still overrides it without touching CMD. A CLI override (`--validation-engine`) replaces CMD wholesale under docker semantics, where `docker run IMAGE args` runs `bitcoin-rs args`. Going that route means repeating the whole argument list (`--config --data-dir --p2p-listen` included).
+- `--validation-mode fast` was removed. The supported modes are `full` and `assume-valid` (also `BITCOIN_RS_VALIDATION_MODE` or `validation_mode` in TOML). Starting in `full` mode forces a cold rebuild from block files if the stored chain has a durable attestation weaker than `Full`. This cold rebuild validates every script and requires an unpruned datadir. If your datadir was pruned, restart with `--validation-mode assume-valid` or resync.
 
 ## More
 

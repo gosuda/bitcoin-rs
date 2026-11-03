@@ -1,10 +1,7 @@
-//! Process-lifetime ownership of index storage namespaces.
-
 use std::path::{Path, PathBuf};
 
 use hashbrown::HashMap;
 
-/// Process-global namespace ownership state.
 #[derive(Debug)]
 enum NamespaceEntry {
     Active(u64),

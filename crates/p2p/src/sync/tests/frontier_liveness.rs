@@ -7,7 +7,6 @@ fn answer_requests(
     bodies: &HashMap<Hash256, Block>,
     inbound_headers_tx: &crossbeam_channel::Sender<InboundHeaders>,
     inbound_blocks_tx: &crossbeam_channel::Sender<crate::InboundBlock>,
-    wire_response: bool,
 ) -> TestResult {
     while let Ok(message) = rx.try_recv() {
         match message {
@@ -15,7 +14,7 @@ fn answer_requests(
                 inbound_headers_tx.send(InboundHeaders {
                     headers: headers.to_vec(),
                     source: Some(source),
-                    wire_response,
+                    wire_response: true,
                 })?;
             }
             Message::GetData(inventory) => {
@@ -120,7 +119,6 @@ fn replacements_carry_frontier_after_serving_peer_timeouts() -> TestResult {
             &bodies,
             &inbound_headers_tx,
             &inbound_blocks_tx,
-            true,
         )?;
         answer_requests(
             &r2_rx,
@@ -129,7 +127,6 @@ fn replacements_carry_frontier_after_serving_peer_timeouts() -> TestResult {
             &bodies,
             &inbound_headers_tx,
             &inbound_blocks_tx,
-            true,
         )?;
         if applied_tip.load_full().is_some_and(|tip| tip.height >= 6) {
             advanced = true;
@@ -210,16 +207,14 @@ fn losing_fork_evidence_never_revokes_the_height_a_peer_was_asked_at() -> TestRe
             &bodies,
             &inbound_headers_tx,
             &inbound_blocks_tx,
-            true,
         )?;
         if applied_tip.load_full().is_some_and(|tip| tip.height >= 2) {
             return Ok(());
         }
     }
-    Err(format!(
+    Err(crate::test_support::TestError::Liveness(format!(
         "a peer that holds the frontier block and answers every request must be asked for it; \
          applied tip stayed at {:?}",
         applied_tip.load_full().map(|tip| tip.height)
-    )
-    .into())
+    )))
 }

@@ -1,7 +1,6 @@
-//! IVNP SAM v3 STREAM session lifecycle, naming, connect, and accept.
 use super::{
     Arc, AtomicBool, Connected, Duration, Instant, Ordering, OverlayTransport, PeerAddress,
-    PeerEndpoint, SETUP_TIMEOUT, Setup, SocketAddr, cancelled_error, identity, invalid, io, pause,
+    PeerEndpoint, SETUP_TIMEOUT, Setup, SocketAddr, cancelled_error, identity, invalid, io,
 };
 use sha2::{Digest, Sha256};
 pub(super) struct Session {
@@ -174,69 +173,78 @@ impl OverlayTransport {
             alive: Some(alive),
         })
     }
+    fn establish_sam_session<'a>(
+        &self,
+        address: SocketAddr,
+        key: &mut Option<String>,
+        cancelled: &'a dyn Fn() -> bool,
+    ) -> io::Result<(Setup<'a>, String, Arc<AtomicBool>)> {
+        use bitcoin::secp256k1::rand::RngCore as _;
+        let mut control = Setup::new(address, cancelled)?;
+        hello(&mut control)?;
+        if self.config.i2p_accept && key.is_none() {
+            control.write(b"DEST GENERATE SIGNATURE_TYPE=7\n")?;
+            let line = control.line()?;
+            if !line.starts_with("DEST REPLY ") {
+                return Err(invalid("SAM destination generation refused"));
+            }
+            let private =
+                field(&line, "PRIV").ok_or_else(|| invalid("SAM destination lacks private key"))?;
+            *key = Some(private.to_owned());
+        }
+        if let Some(private) = key.as_deref() {
+            identity::create(
+                &self.config.identity_dir.join("i2p.key"),
+                private,
+                identity::Kind::I2p,
+            )?;
+        }
+        let id = format!(
+            "bitcoin-rs-{:016x}",
+            bitcoin::secp256k1::rand::thread_rng().next_u64()
+        );
+        control.deadline = Instant::now() + Duration::from_secs(120);
+        control.write(
+            format!(
+                "SESSION CREATE STYLE=STREAM ID={id} DESTINATION={} TO_PORT={}\n",
+                key.as_deref().unwrap_or("TRANSIENT"),
+                self.config.port
+            )
+            .as_bytes(),
+        )?;
+        status(&mut control, "SESSION STATUS ")?;
+        control.deadline = Instant::now() + SETUP_TIMEOUT;
+        control.write(b"NAMING LOOKUP NAME=ME\n")?;
+        let reply = status(&mut control, "NAMING REPLY ")?;
+        let local = PeerEndpoint::new(
+            destination(
+                field(&reply, "VALUE").ok_or_else(|| invalid("SAM local destination missing"))?,
+            )?,
+            self.config.port,
+        );
+        let alive = Arc::new(AtomicBool::new(true));
+        *self.sam.write() = Some(Session {
+            id: id.clone(),
+            alive: Arc::clone(&alive),
+            local_address: local,
+        });
+        Ok((control, id, alive))
+    }
+
     pub(super) fn run_sam(
         &self,
         address: SocketAddr,
         mut key: Option<String>,
         shared: &crate::listener::ConnectionShared,
-        shutdown: &AtomicBool,
+        shutdown: &bitcoin_rs_chain::LatchReader,
     ) {
-        use bitcoin::secp256k1::rand::RngCore as _;
-        let cancelled = || shutdown.load(Ordering::Acquire) || shared.is_session_cancelled();
+        let cancelled = || shutdown.is_triggered() || shared.is_session_cancelled();
         let mut backoff = Duration::from_secs(1);
         while !cancelled() {
             let result = (|| -> io::Result<()> {
-                let mut control = Setup::new(address, &cancelled)?;
-                hello(&mut control)?;
-                if self.config.i2p_accept && key.is_none() {
-                    control.write(b"DEST GENERATE SIGNATURE_TYPE=7\n")?;
-                    let line = control.line()?;
-                    if !line.starts_with("DEST REPLY ") {
-                        return Err(invalid("SAM destination generation refused"));
-                    }
-                    let private = field(&line, "PRIV")
-                        .ok_or_else(|| invalid("SAM destination lacks private key"))?;
-                    key = Some(private.to_owned());
-                }
-                if let Some(private) = &key {
-                    identity::create(
-                        &self.config.identity_dir.join("i2p.key"),
-                        private,
-                        identity::Kind::I2p,
-                    )?;
-                }
-                let id = format!(
-                    "bitcoin-rs-{:016x}",
-                    bitcoin::secp256k1::rand::thread_rng().next_u64()
-                );
-                control.deadline = Instant::now() + Duration::from_secs(120);
-                control.write(
-                    format!(
-                        "SESSION CREATE STYLE=STREAM ID={id} DESTINATION={} TO_PORT={}\n",
-                        key.as_deref().unwrap_or("TRANSIENT"),
-                        self.config.port
-                    )
-                    .as_bytes(),
-                )?;
-                status(&mut control, "SESSION STATUS ")?;
-                control.deadline = Instant::now() + SETUP_TIMEOUT;
-                control.write(b"NAMING LOOKUP NAME=ME\n")?;
-                let reply = status(&mut control, "NAMING REPLY ")?;
-                let local = PeerEndpoint::new(
-                    destination(
-                        field(&reply, "VALUE")
-                            .ok_or_else(|| invalid("SAM local destination missing"))?,
-                    )?,
-                    self.config.port,
-                );
-                let alive = Arc::new(AtomicBool::new(true));
-                *self.sam.write() = Some(Session {
-                    id: id.clone(),
-                    alive: Arc::clone(&alive),
-                    local_address: local,
-                });
+                let (mut control, id, alive) =
+                    self.establish_sam_session(address, &mut key, &cancelled)?;
                 let healthy_since = Instant::now();
-
                 std::thread::scope(|scope| {
                     let accept = self
                         .config
@@ -253,7 +261,11 @@ impl OverlayTransport {
                             if healthy_since.elapsed() >= Duration::from_secs(60) {
                                 backoff = Duration::from_secs(1);
                             }
-                            pause(&stop, Duration::from_secs(1));
+                            crossbeam_channel::select! {
+                                recv(shutdown.closed()) -> _ => break,
+                                recv(shared.session_cancel.closed()) -> _ => break,
+                                recv(crossbeam_channel::after(Duration::from_secs(1))) -> _ => {}
+                            }
                         }
                         if !alive.load(Ordering::Acquire) && !cancelled() {
                             Err(io::Error::new(io::ErrorKind::NotConnected, InvalidSession))
@@ -263,7 +275,9 @@ impl OverlayTransport {
                     })();
                     alive.store(false, Ordering::Release);
                     if let Some(accept) = accept {
-                        let _ = accept.join();
+                        if accept.join().is_err() && monitored.is_ok() {
+                            return Err(invalid("SAM accept worker failed"));
+                        }
                     }
                     monitored
                 })
@@ -278,7 +292,11 @@ impl OverlayTransport {
                     tracing::warn!(%error, "IVNP SAM unavailable; retiring streams and retrying");
                 }
             }
-            pause(&cancelled, backoff);
+            crossbeam_channel::select! {
+                recv(shutdown.closed()) -> _ => {},
+                recv(shared.session_cancel.closed()) -> _ => {},
+                recv(crossbeam_channel::after(backoff)) -> _ => {},
+            }
             backoff = (backoff * 2).min(Duration::from_secs(60));
         }
     }
@@ -325,7 +343,10 @@ impl OverlayTransport {
             if let Err(error) = result {
                 if !stop() {
                     tracing::warn!(%error, "IVNP inbound stream rejected");
-                    pause(&stop, Duration::from_secs(1));
+                    crossbeam_channel::select! {
+                        recv(shared.session_cancel.closed()) -> _ => {},
+                        recv(crossbeam_channel::after(Duration::from_secs(1))) -> _ => {}
+                    }
                 }
             }
         }

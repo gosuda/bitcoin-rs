@@ -13,7 +13,9 @@ use crate::connection::MAX_UNSOLICITED_BLOCK_FORWARDS;
 use crate::sync::BlockSync;
 use crate::sync::chain::SyncChain;
 use crate::sync::test_support::{TestChain, mined_chain};
-use crate::test_support::{connect_peer, current_source, synthetic_peer, test_addr};
+use crate::test_support::{
+    TestError, TestResult, connect_peer, current_source, synthetic_peer, test_addr,
+};
 use bitcoin_rs_chain::regtest_fixture;
 
 fn genesis_body() -> bitcoin_rs_primitives::Block {
@@ -31,7 +33,7 @@ struct MinedSyncFixture {
 
 fn test_sync_with_mined_chain(
     peers: &Arc<crate::PeerTable>,
-) -> Result<MinedSyncFixture, Box<dyn std::error::Error>> {
+) -> Result<MinedSyncFixture, TestError> {
     let (mut tree, blocks) = mined_chain(1, 0)?;
     let chain_tip = tree.tip_handle();
     let block_tree = Arc::new(RwLock::new(tree));
@@ -59,7 +61,7 @@ fn test_sync_with_mined_chain(
 }
 
 #[test]
-fn unsolicited_block_flood_is_bounded_per_source() -> Result<(), Box<dyn std::error::Error>> {
+fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
     let peers = Arc::new(crate::PeerTable::new());
     let MinedSyncFixture {
         sync,
@@ -193,7 +195,7 @@ struct CompactTestFixture {
 
 fn test_sync_with_applied_chain(
     peers: &Arc<crate::PeerTable>,
-) -> Result<CompactTestFixture, Box<dyn std::error::Error>> {
+) -> Result<CompactTestFixture, TestError> {
     let (mut tree, blocks) = mined_chain(2, 0)?;
     let chain_tip = tree.tip_handle();
     let applied_tip = Arc::new(ArcSwapOption::new(chain_tip.load_full()));
@@ -243,7 +245,7 @@ fn deliver_compact_block(
     lease: &crate::PeerLease,
     addr: crate::PeerRemote,
     shared: &ConnectionShared,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), TestError> {
     let block: bitcoin::Block = bitcoin::consensus::encode::deserialize(&consensus_bytes(block))?;
     let message = crate::Message::CmpctBlock(CmpctBlock {
         compact_block: HeaderAndShortIds::from_block(&block, 7, 2, &[]).expect("compact block"),
@@ -264,7 +266,7 @@ fn deliver_compact_block(
 }
 
 #[test]
-fn compact_reconstruction_requires_an_earning_header() -> Result<(), Box<dyn std::error::Error>> {
+fn compact_reconstruction_requires_an_earning_header() -> TestResult {
     let peers = Arc::new(crate::PeerTable::new());
     let fixture = test_sync_with_applied_chain(&peers)?;
     let sync = fixture.sync;

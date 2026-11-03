@@ -1,14 +1,14 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::Result;
 use bitcoin_rs_index::{CapabilityState, DerivedIndexCapabilitySource};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use parking_lot::Mutex;
+
+use crate::run::RunError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Sha256Hex(pub [u8; 32]);
@@ -30,11 +30,19 @@ impl core::fmt::Display for Sha256Hex {
     }
 }
 
-impl core::str::FromStr for Sha256Hex {
-    type Err = String;
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
+pub enum Sha256HexError {
+    #[error("digest {text:?} is not 64 lowercase hex characters")]
+    Malformed { text: String },
+}
 
-    fn from_str(text: &str) -> Result<Self, String> {
-        let malformed = || format!("digest {text:?} is not 64 lowercase hex characters");
+impl core::str::FromStr for Sha256Hex {
+    type Err = Sha256HexError;
+
+    fn from_str(text: &str) -> Result<Self, Sha256HexError> {
+        let malformed = || Sha256HexError::Malformed {
+            text: text.to_owned(),
+        };
         if text.len() != 64 {
             return Err(malformed());
         }
@@ -97,7 +105,7 @@ fn hardware_identity() -> String {
 }
 
 impl EvidenceIdentity {
-    pub fn of_process(config: &crate::config::NodeConfig) -> Result<Self> {
+    pub fn of_process(config: &crate::config::NodeConfig) -> std::io::Result<Self> {
         let executable = std::env::current_exe()?;
         let binary_sha256 = Sha256Hex::digest(&std::fs::read(&executable)?);
         let journal = config.chainstate_journal;
@@ -237,18 +245,17 @@ fn describe_node_metrics() {
 
 static PROMETHEUS_HANDLE: Mutex<Option<(EvidenceIdentity, PrometheusHandle)>> = Mutex::new(None);
 
-fn prometheus_handle(identity: &EvidenceIdentity) -> Result<PrometheusHandle> {
+fn prometheus_handle(identity: &EvidenceIdentity) -> Result<PrometheusHandle, RunError> {
     let mut slot = PROMETHEUS_HANDLE.lock();
     if let Some((installed, handle)) = slot.as_ref() {
-        anyhow::ensure!(
-            installed == identity,
-            "metrics recorder already serves a different evidence identity"
-        );
+        if installed != identity {
+            return Err(RunError::MetricsIdentityMismatch);
+        }
         return Ok(handle.clone());
     }
     let handle = PrometheusBuilder::new()
         .install_recorder()
-        .map_err(|error| anyhow::anyhow!("install prometheus recorder: {error}"))?;
+        .map_err(|error| RunError::MetricsInstall { error })?;
     *slot = Some((identity.clone(), handle.clone()));
     Ok(handle)
 }
@@ -256,7 +263,7 @@ fn prometheus_handle(identity: &EvidenceIdentity) -> Result<PrometheusHandle> {
 pub(crate) struct MetricsServer {
     #[cfg(test)]
     local_addr: SocketAddr,
-    stop: Arc<AtomicBool>,
+    cancel: bitcoin_rs_chain::LatchWriter,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -265,8 +272,10 @@ impl MetricsServer {
         addr: SocketAddr,
         shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
         identity: &EvidenceIdentity,
-    ) -> Result<Self> {
+    ) -> Result<Self, RunError> {
         let shutdown = shutdown.into();
+        let cancel = shutdown.child();
+        let cancel_reader = cancel.reader();
         let listener = TcpListener::bind(addr)?;
         #[cfg(test)]
         let local_addr = listener.local_addr()?;
@@ -274,16 +283,13 @@ impl MetricsServer {
         listener.local_addr()?;
         let handle = prometheus_handle(identity)?;
         describe_node_metrics();
-        listener.set_nonblocking(true)?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread_stop = Arc::clone(&stop);
         let thread = thread::Builder::new()
             .name("bitcoin-rs-metrics".into())
-            .spawn(move || serve_metrics(&listener, &handle, &thread_stop, &shutdown))?;
+            .spawn(move || serve_metrics(&listener, &handle, &cancel_reader))?;
         Ok(Self {
             #[cfg(test)]
             local_addr,
-            stop,
+            cancel,
             thread: Some(thread),
         })
     }
@@ -294,12 +300,12 @@ impl MetricsServer {
         self.local_addr
     }
 
-    pub(crate) fn stop_and_join(&mut self) -> Result<()> {
-        self.stop.store(true, Ordering::Release);
+    pub(crate) fn stop_and_join(&mut self) -> Result<(), RunError> {
+        self.cancel.trigger();
         if let Some(thread) = self.thread.take() {
             thread
                 .join()
-                .map_err(|_| anyhow::anyhow!("metrics scrape thread panicked"))?;
+                .map_err(|_| RunError::MetricsScrapeThreadPanicked)?;
         }
         Ok(())
     }
@@ -317,7 +323,7 @@ pub(crate) fn start_metrics(
     bind: Option<SocketAddr>,
     shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     identity: &EvidenceIdentity,
-) -> Result<Option<MetricsServer>> {
+) -> Result<Option<MetricsServer>, RunError> {
     let shutdown = shutdown.into();
     bind.map(|addr| MetricsServer::bind(addr, shutdown, identity))
         .transpose()
@@ -326,23 +332,25 @@ pub(crate) fn start_metrics(
 fn serve_metrics(
     listener: &TcpListener,
     handle: &PrometheusHandle,
-    stop: &Arc<AtomicBool>,
-    shutdown: &bitcoin_rs_chain::LatchReader,
+    cancel: &bitcoin_rs_chain::LatchReader,
 ) {
-    loop {
-        if stop.load(Ordering::Acquire) || shutdown.is_triggered() {
-            break;
-        }
+    let Ok(local_addr) = listener.local_addr() else {
+        return;
+    };
+    let connect_addr = crate::run::loopback_connect_addr(local_addr);
+    let _guard = cancel.on_cancel(move || {
+        let _ = TcpStream::connect(connect_addr);
+    });
+    while !cancel.is_triggered() {
         match listener.accept() {
             Ok((mut stream, _)) => {
+                if cancel.is_triggered() {
+                    break;
+                }
                 let _ = stream.set_nodelay(true);
-                let _ = stream.set_nonblocking(false);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
                 serve_scrape(&mut stream, handle);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(20));
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => break,
@@ -377,21 +385,20 @@ pub(crate) fn publish_txindex_readiness(source: &dyn DerivedIndexCapabilitySourc
 
 pub(crate) fn spawn_readiness_sampler(
     source: Arc<dyn DerivedIndexCapabilitySource>,
-    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
-) -> anyhow::Result<JoinHandle<()>> {
-    let shutdown = shutdown.into();
+    shutdown: bitcoin_rs_chain::LatchReader,
+) -> Result<JoinHandle<()>, RunError> {
     std::thread::Builder::new()
         .name("bitcoin-rs-metrics-readiness".into())
         .spawn(move || {
             while !shutdown.is_triggered() {
                 publish_txindex_readiness(source.as_ref());
-                let deadline = Instant::now() + READINESS_SAMPLE_INTERVAL;
-                while !shutdown.is_triggered() && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(100));
+                crossbeam_channel::select! {
+                    recv(shutdown.closed()) -> _ => break,
+                    recv(crossbeam_channel::after(READINESS_SAMPLE_INTERVAL)) -> _ => {}
                 }
             }
         })
-        .map_err(|error| anyhow::anyhow!("spawn readiness sampler: {error}"))
+        .map_err(|error| RunError::SpawnReadinessSampler { error })
 }
 
 #[cfg(test)]

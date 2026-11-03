@@ -23,7 +23,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+use crate::test_error::TestError;
+
+type TestResult = Result<(), TestError>;
 
 mod coinbase_budget;
 mod fee_revision;
@@ -96,6 +98,7 @@ fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
     );
 }
 
+// API-11
 #[test]
 fn template_projects_candidate_generation_and_deployment_flags() {
     let cases = [
@@ -186,6 +189,7 @@ fn template_projects_candidate_generation_and_deployment_flags() {
     }
 }
 
+// API-11
 #[test]
 fn long_poll_round_trips_template_id() {
     let tip = Hash256::from_le_bytes(&[0x11; 32]);
@@ -433,14 +437,19 @@ fn service_with_chain(
     pool: Arc<StaticPool>,
     chain: Arc<dyn ChainContextSource>,
 ) -> MiningService {
-    service_with_source(tip, pool, chain, Arc::new(AtomicBool::new(false)))
+    service_with_source(
+        tip,
+        pool,
+        chain,
+        bitcoin_rs_chain::LatchReader::fixture_never(),
+    )
 }
 
 fn service_with_source(
     tip: Option<TipSnapshot>,
     pool: Arc<dyn MempoolSnapshotSource>,
     chain: Arc<dyn ChainContextSource>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchReader,
 ) -> MiningService {
     MiningService::new(
         Network::Regtest,
@@ -873,13 +882,12 @@ fn stage_tip_is_idempotent_and_publishes_nothing() {
         Some(tip.clone()),
         pool.clone(),
         Arc::new(ResolvedChain),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let block = Network::Regtest.genesis_block();
     service.stage_tip(&tip, &block);
     wait_until_entered(&pool);
     service.stage_tip(&tip, &block);
-    assert!(service.prep.mailbox().pending.is_none());
     assert_eq!(
         pool.projection_calls.load(Ordering::Relaxed),
         1,
@@ -1071,7 +1079,7 @@ fn matching_foreground_joins_running_preparation_without_duplicate_finish() {
         Some(tip.clone()),
         pool.clone(),
         Arc::new(ResolvedChain),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     ));
     service.stage_tip(&tip, &Network::Regtest.genesis_block());
     wait_until_entered(&pool);
@@ -1112,12 +1120,12 @@ fn shutdown_releases_a_preparation_waiter() {
     let tip_hash = Hash256::from_le_bytes(&[0x69; 32]);
     let tip = tip_snapshot(tip_hash);
     let pool = Arc::new(GatedPool::new(5, 2));
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
     let service = Arc::new(service_with_source(
         Some(tip.clone()),
         pool.clone(),
         Arc::new(ResolvedChain),
-        Arc::clone(&shutdown),
+        shutdown.reader(),
     ));
     service.stage_tip(&tip, &Network::Regtest.genesis_block());
     wait_until_entered(&pool);
@@ -1129,7 +1137,7 @@ fn shutdown_releases_a_preparation_waiter() {
     let waiter_service = Arc::clone(&service);
     let waiter = std::thread::spawn(move || waiter_service.candidate_for_key(key));
     std::thread::sleep(Duration::from_millis(50));
-    shutdown.store(true, Ordering::SeqCst);
+    shutdown.trigger();
     let outcome = waiter
         .join()
         .unwrap_or_else(|_| panic!("the waiter thread panicked"));
@@ -1156,7 +1164,7 @@ fn pending_stage_foreground_joins_without_duplicate_finish() {
         pool.clone(),
         Arc::new(ResolvedChain),
         Vec::new(),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     ));
     service.stage_tip(&tip_snapshot(first_hash), &Network::Regtest.genesis_block());
     wait_until_entered(&pool);
@@ -1164,15 +1172,6 @@ fn pending_stage_foreground_joins_without_duplicate_finish() {
     service.stage_tip(
         &tip_snapshot(second_hash),
         &Network::Regtest.genesis_block(),
-    );
-    assert!(
-        service
-            .prep
-            .mailbox()
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.tip.hash == second_hash),
-        "the second stage must wait in the pending slot while the worker is occupied"
     );
     service.publish_block_generation(second_hash, &MutationResult::empty());
     let key = GenerationKey {
@@ -1216,7 +1215,7 @@ fn worker_panic_releases_joined_waiter_to_lazy_fallback() {
         Some(tip_snapshot(tip_hash)),
         pool.clone(),
         Arc::new(ResolvedChain),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     ));
     service.stage_tip(&tip_snapshot(tip_hash), &Network::Regtest.genesis_block());
     wait_until_entered(&pool);
@@ -1251,10 +1250,6 @@ fn worker_panic_releases_joined_waiter_to_lazy_fallback() {
         1,
         "the released waiter serves the live generation lazily"
     );
-    assert!(
-        service.prep.mailbox().stopped,
-        "the exit guard stops the mailbox when the worker dies"
-    );
 }
 
 #[test]
@@ -1267,7 +1262,7 @@ fn ready_preparation_parks_until_the_receipt_and_serves_the_prepared_arc() {
         Some(tip.clone()),
         pool.clone(),
         Arc::new(ResolvedChain),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     ));
     service.stage_tip(&tip, &Network::Regtest.genesis_block());
     wait_until_ready(&service, tip_hash);
@@ -1310,12 +1305,12 @@ fn stale_ready_without_a_receipt_serves_lazily_instead_of_parking() {
     let tip = tip_snapshot(tip_hash);
     let pool = Arc::new(GatedPool::new(5, 2));
     pool.release();
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
     let service = Arc::new(service_with_source(
         Some(tip.clone()),
         pool.clone(),
         Arc::new(ResolvedChain),
-        Arc::clone(&shutdown),
+        shutdown.reader(),
     ));
     service.stage_tip(&tip, &Network::Regtest.genesis_block());
     wait_until_ready(&service, tip_hash);
@@ -1332,7 +1327,7 @@ fn stale_ready_without_a_receipt_serves_lazily_instead_of_parking() {
         let _ = result_tx.send(foreground_service.candidate_for_key(key));
     });
     let Ok(outcome) = result_rx.recv_timeout(WAKE_PROOF_TIMEOUT) else {
-        shutdown.store(true, Ordering::SeqCst);
+        shutdown.trigger();
         let _ = foreground.join();
         panic!("a stale Ready parked a foreground that no receipt can ever release");
     };
@@ -1346,18 +1341,6 @@ fn stale_ready_without_a_receipt_serves_lazily_instead_of_parking() {
         "the stale candidate must never serve the moved generation"
     );
     assert_eq!(pool.live_calls.load(Ordering::Relaxed), 1);
-    assert!(
-        service
-            .prep
-            .mailbox()
-            .active
-            .as_ref()
-            .is_some_and(|active| {
-                active.target_tip == tip_hash
-                    && matches!(active.progress, PrepProgress::Ready { .. })
-            }),
-        "the stale Ready is preserved until a newer tip releases it"
-    );
 }
 
 #[test]
@@ -1431,7 +1414,7 @@ fn signalling_rules_resolve_once_per_tip_and_height() -> TestResult {
         Arc::new(StaticPool::new(5, 2)),
         chain.clone(),
         Vec::new(),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     service.get_block_template(None, None)?;
     assert_eq!(

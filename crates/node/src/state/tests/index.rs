@@ -1,5 +1,8 @@
 use super::*;
 
+use crate::test_support::TestError;
+
+// IDX-01
 #[test]
 fn script_index_capabilities_match_the_storage_contract() {
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -42,8 +45,9 @@ fn script_index_capabilities_match_the_storage_contract() {
     );
 }
 
+// IDX-01
 #[test]
-fn open_skips_tx_index_when_disabled() -> anyhow::Result<()> {
+fn open_skips_tx_index_when_disabled() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -64,7 +68,7 @@ fn open_skips_tx_index_when_disabled() -> anyhow::Result<()> {
 }
 
 #[test]
-fn index_workers_start_only_when_asked() -> anyhow::Result<()> {
+fn index_workers_start_only_when_asked() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -93,7 +97,7 @@ fn index_workers_start_only_when_asked() -> anyhow::Result<()> {
 }
 
 #[test]
-fn start_index_workers_twice_is_idempotent() -> anyhow::Result<()> {
+fn start_index_workers_twice_is_idempotent() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -117,7 +121,7 @@ fn start_index_workers_twice_is_idempotent() -> anyhow::Result<()> {
 }
 
 #[test]
-fn derived_index_status_answers_when_disabled() -> anyhow::Result<()> {
+fn derived_index_status_answers_when_disabled() -> Result<(), TestError> {
     use bitcoin_rs_index::CapabilityState;
 
     let dir = tempfile::tempdir()?;
@@ -138,7 +142,7 @@ fn derived_index_status_answers_when_disabled() -> anyhow::Result<()> {
 }
 
 #[test]
-fn bounded_shutdown_stops_the_worker_and_allows_reopen() -> anyhow::Result<()> {
+fn bounded_shutdown_stops_the_worker_and_allows_reopen() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -180,7 +184,7 @@ fn bounded_shutdown_stops_the_worker_and_allows_reopen() -> anyhow::Result<()> {
 }
 
 #[test]
-fn script_index_builds_without_advertising_core_txindex() -> anyhow::Result<()> {
+fn script_index_builds_without_advertising_core_txindex() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -207,7 +211,7 @@ fn script_index_builds_without_advertising_core_txindex() -> anyhow::Result<()> 
 }
 
 #[test]
-fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<()> {
+fn script_index_modes_give_concrete_unspent_outputs_answers() -> Result<(), TestError> {
     use bitcoin_rs_index::{IndexCapability, ScriptHash};
     use bitcoin_rs_rpc::context::{TxQueryError, TxUnavailableCause};
 
@@ -306,7 +310,7 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<
 }
 
 #[test]
-fn drop_joins_txindex_worker_before_reopen() -> anyhow::Result<()> {
+fn drop_joins_txindex_worker_before_reopen() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -325,7 +329,7 @@ fn drop_joins_txindex_worker_before_reopen() -> anyhow::Result<()> {
 }
 
 #[test]
-fn open_rejects_txindex_with_pruning() -> anyhow::Result<()> {
+fn open_rejects_txindex_with_pruning() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -334,7 +338,7 @@ fn open_rejects_txindex_with_pruning() -> anyhow::Result<()> {
     config.storage.prune_target_mb = 1;
 
     let error = match NodeState::open(config, None) {
-        Ok(_) => anyhow::bail!("txindex with pruning must be rejected"),
+        Ok(_) => return Err(TestError::message("txindex with pruning must be rejected")),
         Err(error) => error,
     };
     assert!(

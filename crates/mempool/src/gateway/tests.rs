@@ -6,13 +6,14 @@ use super::{
 use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationOutcome, RemovalReason};
 use crate::orphan::RejectScope;
 use crate::standardness::PackageTxContext;
+use crate::test_fixtures::{p2sh_true_script, true_redeem_script_sig};
 use crate::{Mempool, MempoolEntry, MempoolLimits};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::{Mutex, RwLock};
 use std::sync::mpsc;
 
@@ -74,6 +75,10 @@ impl metrics::Recorder for CounterKeyRecorder {
     }
 }
 
+fn unit() -> u64 {
+    crate::pool::entry_memory_usage(&tx(1))
+}
+
 fn tx(label: u8) -> Tx {
     Tx {
         version: 2,
@@ -126,7 +131,7 @@ impl MempoolObserver for PayloadObserver {
 
 #[test]
 fn package_expiry_preserves_same_batch_accepted_bodies_and_indices()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let observer = Arc::new(PayloadObserver::default());
     let gateway = gateway_with_bodies(observer.clone());
     let expired = tx(181);
@@ -182,7 +187,7 @@ fn package_expiry_preserves_same_batch_accepted_bodies_and_indices()
 
 #[test]
 fn failed_mutation_clears_capture_scope_before_the_next_success()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let observer = Arc::new(PayloadObserver::default());
     let gateway = gateway_with_bodies(observer.clone());
     let stale = Arc::new(tx(183));
@@ -232,9 +237,10 @@ impl MempoolObserver for LockOrderObserver {
     }
 }
 
+// MPL-01
 #[test]
-fn commit_runs_no_observer_code_under_the_pool_write_lock() -> Result<(), Box<dyn std::error::Error>>
-{
+fn commit_runs_no_observer_code_under_the_pool_write_lock()
+-> Result<(), crate::test_error::TestError> {
     let composite = CompositeObserver::new();
     assert!(!composite.wants_bodies());
     let metadata = Arc::new(RecordingObserver::default());
@@ -318,7 +324,7 @@ fn standard_tx(label: u8) -> Tx {
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
-            script_sig: Script::new(),
+            script_sig: Script::from_bytes(true_redeem_script_sig()),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
@@ -327,6 +333,10 @@ fn standard_tx(label: u8) -> Tx {
             script_pubkey: script.into(),
         }],
     }
+}
+
+fn p2pkh_prevout_script() -> Vec<u8> {
+    [vec![0x76, 0xa9, 0x14], vec![0x2b; 20], vec![0x88, 0xac]].concat()
 }
 
 fn prevout_spend(prev: OutPoint, value: u64, script: u8) -> Tx {
@@ -363,7 +373,7 @@ fn admit_request(gateway: &MempoolGateway, tx: &Tx, origin: AdmissionOrigin) -> 
             tx.inputs[0].previous_output,
             TxOut {
                 value: Amount::from_sat(11_000),
-                script_pubkey: vec![0x51].into(),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )],
         prevout_meta: hashbrown::HashMap::new(),
@@ -575,6 +585,7 @@ fn no_observer_still_mutates() {
     assert_eq!(gateway.read().sequence_number(), 1);
 }
 
+// MPL-02
 #[test]
 fn sequence_base_matches_per_change_assignment() {
     let gateway = gateway_with(None);
@@ -602,7 +613,7 @@ fn insert_reports_accepted_then_policy_evictions() {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 150,
+            max_total_bytes: unit() * 3 / 2,
             ..MempoolLimits::default()
         }))),
         Some((dyn_observer(&observer), BodyInterest::Metadata)),
@@ -823,6 +834,7 @@ impl MempoolObserver for ReentrantObserver {
     }
 }
 
+// MPL-01
 #[test]
 fn reentrant_observer_mutation_completes_with_callback_sequence_1_2() {
     let observer = Arc::new(ReentrantObserver {
@@ -1036,7 +1048,7 @@ fn refused_insertion_preserves_state_and_publishes_nothing() {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 150,
+            max_total_bytes: unit() * 3 / 2,
             ..MempoolLimits::default()
         }))),
         Some((dyn_observer(&observer), BodyInterest::Metadata)),
@@ -1076,12 +1088,86 @@ fn refused_insertion_preserves_state_and_publishes_nothing() {
 }
 
 #[test]
+fn replacement_fitting_after_eviction_is_not_refused_by_dead_links() {
+    let gateway = MempoolGateway::new(
+        Arc::new(RwLock::new(Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        }))),
+        None,
+        ValidationEngine::Native,
+        None,
+    );
+
+    let parents: Vec<Tx> = (0..24u8).map(|index| tx(100 + index)).collect();
+    for parent in &parents {
+        gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(parent.clone()), 100, 1_000, 1, 7, 0),
+            )
+            .expect("parent in");
+    }
+    let conflict_inputs: Vec<TxIn> = parents
+        .iter()
+        .map(|parent| TxIn {
+            previous_output: OutPoint::new(parent.txid(), 0),
+            script_sig: Script::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        })
+        .collect();
+    let mut conflict = tx(250);
+    conflict.inputs = conflict_inputs.clone();
+    let conflict_txid = conflict.txid();
+    gateway
+        .insert_entry(
+            AdmissionOrigin::Rpc,
+            MempoolEntry::new(Arc::new(conflict), 100, 1_000, 1, 7, 0),
+        )
+        .expect("conflict in");
+
+    let mut replacement = tx(251);
+    replacement.inputs = conflict_inputs;
+    let replacement_entry = MempoolEntry::new(Arc::new(replacement.clone()), 100, 100_000, 1, 7, 0);
+    let stale_cap = {
+        let pool = gateway.read();
+        let conflict_id = pool
+            .entry_id_by_txid(&conflict_txid)
+            .expect("conflict is in the pool");
+        pool.dynamic_memory_usage()
+            .checked_sub(pool.entry_memory(conflict_id).expect("conflict memory"))
+            .and_then(|size| size.checked_add(pool.admission_memory(&replacement_entry)))
+            .expect("cap arithmetic fits u64")
+            - 1
+    };
+    gateway.pool.write().limits.max_total_bytes = stale_cap;
+
+    let result = gateway
+        .replace_transaction(
+            AdmissionOrigin::Rpc,
+            &crate::ReplacementCandidate::new(Arc::new(replacement), 100, 100_000, 1),
+            1,
+            7,
+        )
+        .expect("each evicted link releases both endpoints, so the replacement fits once the conflict is gone");
+    assert_eq!(
+        result.changes,
+        vec![
+            crate::mutation::change(&conflict_txid, removed(RemovalReason::Replaced)),
+            crate::mutation::change(&replacement_entry.txid, MutationOutcome::Accepted,),
+        ],
+        "the eviction removes the conflict, then the replacement lands"
+    );
+}
+
+#[test]
 fn rejected_replacement_preserves_pool_history_and_publication() {
     let observer = Arc::new(RecordingObserver::default());
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 1_000,
+            max_total_bytes: unit() * 5 / 2,
             ..MempoolLimits::default()
         }))),
         Some((dyn_observer(&observer), BodyInterest::Metadata)),
@@ -1109,7 +1195,9 @@ fn rejected_replacement_preserves_pool_history_and_publication() {
         )
         .expect("bystander in");
 
-    let replacement = prevout_spend(prev, 100, 0x52);
+    let mut replacement = prevout_spend(prev, 100, 0x52);
+    replacement.outputs[0].script_pubkey =
+        vec![0x52; usize::try_from(unit()).unwrap_or(usize::MAX)].into();
     let replacement_txid = replacement.txid();
     observer.seen.lock().clear();
 
@@ -1154,7 +1242,7 @@ fn admit_transaction_rejects_a_script_invalid_input() {
     let tx = standard_tx(0x83);
 
     let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
-    request.prevouts[0].1.script_pubkey = vec![0x00].into();
+    request.prevouts[0].1.script_pubkey = Script::from_bytes(p2pkh_prevout_script());
 
     let result = gateway.admit_transaction(request);
     assert!(
@@ -1165,12 +1253,15 @@ fn admit_transaction_rejects_a_script_invalid_input() {
 }
 
 #[test]
-fn admission_counts_resolved_sigops_before_verification() -> Result<(), Box<dyn std::error::Error>>
+fn admission_counts_resolved_sigops_before_verification() -> Result<(), crate::test_error::TestError>
 {
     let gateway = gateway_with(None);
     let mut tx = standard_tx(0x84);
-    let redeem_script = vec![0xae; 201];
-    tx.inputs[0].script_sig = Script::from_bytes(bitcoin_rs_script::push_data(&redeem_script));
+    let witness_script = vec![0xae; 900];
+    tx.inputs[0].script_sig = Script::from_bytes(bitcoin_rs_script::push_data(
+        &[vec![0x00, 0x20], vec![1; 32]].concat(),
+    ));
+    tx.inputs[0].witness = Witness::from_stack(vec![witness_script]);
     let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
     request.prevouts[0].1.script_pubkey =
         Script::from_bytes([vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat());
@@ -1270,7 +1361,7 @@ fn stale_mempool_sequence_rejects_without_mutation_or_publication() {
 
 #[test]
 fn admit_write_gate_retries_when_the_stamp_moved_after_prepare()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let observer = Arc::new(RecordingObserver::default());
     let gateway = gateway_with(Some(dyn_observer(&observer)));
     let resident = tx(60);
@@ -1328,6 +1419,167 @@ fn admit_write_gate_retries_when_the_stamp_moved_after_prepare()
     ));
     assert!(gateway.read().contains_txid(&candidate_txid));
     Ok(())
+}
+
+fn p2wpkh_prevout_script() -> Vec<u8> {
+    [vec![0x00, 0x14], vec![0x2b; 20]].concat()
+}
+
+fn multi_input_tx(input_count: u32) -> (Tx, Vec<(OutPoint, TxOut)>) {
+    let count = usize::try_from(input_count).expect("input count fits usize");
+    let mut inputs = Vec::with_capacity(count);
+    let mut prevouts = Vec::with_capacity(count);
+    for index in 0..input_count {
+        let mut bytes = [0_u8; 32];
+        bytes[..4].copy_from_slice(&index.to_le_bytes());
+        let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&bytes)), 0);
+        inputs.push(TxIn {
+            previous_output: outpoint,
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        });
+        prevouts.push((
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(p2wpkh_prevout_script()),
+            },
+        ));
+    }
+    let tx = Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs,
+        outputs: vec![TxOut {
+            value: Amount::from_sat(10_000),
+            script_pubkey: Script::from_bytes(p2pkh_prevout_script()),
+        }],
+    };
+    (tx, prevouts)
+}
+
+fn multi_input_request(
+    gateway: &MempoolGateway,
+    tx: Tx,
+    prevouts: Vec<(OutPoint, TxOut)>,
+    fee: u64,
+) -> AdmissionRequest {
+    let generation = gateway
+        .stable_generation()
+        .expect("generation is even in test setup");
+    let sequence = gateway.read().sequence_number();
+    AdmissionRequest {
+        tx: Arc::new(tx),
+        context: PackageTxContext {
+            fee,
+            vsize: 1,
+            sigop_cost: 0,
+            missing_inputs: false,
+        },
+        prevouts,
+        prevout_meta: hashbrown::HashMap::new(),
+        csv_active: false,
+        next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+        locktime_cutoff: 0,
+        max_feerate_sat_per_kvb: None,
+        time: 1,
+        height: 1,
+        origin: AdmissionOrigin::Rpc,
+        expected_generation: generation,
+        expected_sequence: sequence,
+    }
+}
+
+#[test]
+fn oversize_multi_input_tx_is_rejected_before_prevout_resolution() {
+    let gateway = gateway_with(None);
+    let (tx, prevouts) = multi_input_tx(20_000);
+    let oracle: bitcoin::Transaction =
+        bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&tx))
+            .expect("the attack frame parses as a Core transaction");
+    assert!(
+        oracle.total_size() <= 4_000_000,
+        "the attack frame stays inside the 4,000,000-byte wire limit, got {}",
+        oracle.total_size()
+    );
+    let weight = oracle.weight().to_wu();
+    assert!(
+        weight > crate::standardness::MAX_STANDARD_TX_WEIGHT,
+        "the rust-bitcoin weight oracle {weight} must exceed the Core tx-size limit"
+    );
+    let request = multi_input_request(&gateway, tx, prevouts, 1_000_000);
+    super::reset_prevout_probes();
+    let prepared = {
+        let pool = gateway.read();
+        MempoolGateway::prepare_admission(
+            &pool,
+            &request,
+            AdmissionMode::Single,
+            crate::admission::AdmissionFence::Stable,
+            gateway.engine(),
+        )
+    };
+    assert_eq!(
+        prepared.fact.reject_reason,
+        Some(crate::standardness::AcceptanceRejectReason::NonStandard(
+            crate::standardness::StandardnessError::Weight
+        )),
+        "the Core tx-size rule rejects the frame regardless of prevout resolution"
+    );
+    assert_eq!(
+        super::prevout_probes(),
+        0,
+        "an over-size frame must be rejected before any prevout index probe"
+    );
+}
+
+#[test]
+fn many_input_admission_probes_each_prevout_once() {
+    let gateway = gateway_with(None);
+    let (tx, prevouts) = multi_input_tx(2_400);
+    let oracle: bitcoin::Transaction =
+        bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&tx))
+            .expect("the attack frame parses as a Core transaction");
+    let weight = oracle.weight().to_wu();
+    assert!(
+        weight <= crate::standardness::MAX_STANDARD_TX_WEIGHT,
+        "the rust-bitcoin weight oracle {weight} must stay inside the Core tx-size limit"
+    );
+    let reference: std::collections::HashMap<OutPoint, TxOut> = prevouts.iter().cloned().collect();
+    let request = multi_input_request(&gateway, tx, prevouts, 1_000_000);
+    super::reset_prevout_probes();
+    let prepared = {
+        let pool = gateway.read();
+        MempoolGateway::prepare_admission(
+            &pool,
+            &request,
+            AdmissionMode::Single,
+            crate::admission::AdmissionFence::Stable,
+            gateway.engine(),
+        )
+    };
+    assert_eq!(
+        prepared.fact.reject_reason, None,
+        "the policy oracle accepts a standard spend that stays inside every relay bound"
+    );
+    assert_eq!(
+        prepared.prevouts.len(),
+        reference.len(),
+        "every input must resolve against the chain prevout index"
+    );
+    for (outpoint, output) in &prepared.prevouts {
+        assert_eq!(
+            reference.get(outpoint),
+            Some(output),
+            "the indexed lookup must return the plain HashMap result for {outpoint:?}"
+        );
+    }
+    let probes = super::prevout_probes();
+    assert!(
+        probes <= usize::try_from(2_400).expect("input count fits usize"),
+        "each input must cost at most one prevout probe, got {probes}"
+    );
 }
 
 #[test]
@@ -1396,7 +1648,7 @@ fn admit_transaction_publishes_ordered_removals_then_one_accept() {
             replacement.inputs[0].previous_output,
             TxOut {
                 value: Amount::from_sat(10_000),
-                script_pubkey: vec![0x51].into(),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )],
         prevout_meta: hashbrown::HashMap::new(),
@@ -1585,7 +1837,7 @@ fn block_and_size_limit_removals_are_not_retained() {
     assert_eq!(gateway.reconstruction_tx_by_wtxid(mined.wtxid()), None);
 
     let trimmed = gateway
-        .enforce_size_limit(AdmissionOrigin::Rpc, 100)
+        .enforce_size_limit(AdmissionOrigin::Rpc, unit())
         .expect("size trim");
     assert_eq!(trimmed.removed_txids().len(), 1);
     for resident in [&first, &second] {
@@ -1712,6 +1964,7 @@ fn explicit_finish_restores_even_generation() {
     );
 }
 
+// MPL-04
 #[test]
 fn dropping_chain_change_stays_unstable() {
     let gateway = gateway_with(None);
@@ -1747,24 +2000,38 @@ fn chain_generation_overflow_fails_closed() {
     );
 }
 
+// MPL-04
 #[test]
 fn begin_chain_change_serializes_with_inflight_admission() {
     let gateway = gateway_with(None);
 
     let (held_tx, held_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
+    let admission_released = Arc::new(AtomicBool::new(false));
+    let released_probe = Arc::clone(&admission_released);
     let gateway_a = Arc::clone(&gateway);
     let a_handle = std::thread::spawn(move || {
-        let _guard = gateway_a.pool().write();
+        let guard = gateway_a.pool().write();
         held_tx.send(()).expect("test waiting for lock acquisition");
-        release_rx
-            .recv_timeout(core::time::Duration::from_secs(10))
-            .expect("test alive to release");
+        release_rx.recv().expect("test alive to release");
+        released_probe.store(true, Ordering::SeqCst);
+        drop(guard);
     });
 
     held_rx
-        .recv_timeout(core::time::Duration::from_secs(10))
+        .recv()
         .expect("thread A acquired the pool write lock");
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (lock_held_tx, lock_held_rx) = mpsc::channel::<bool>();
+    let (resume_tx, resume_rx) = mpsc::channel::<()>();
+    let held_when_probed = Arc::clone(&admission_released);
+    gateway.install_begin_chain_change_probes(
+        entered_tx,
+        lock_held_tx,
+        resume_rx,
+        Box::new(move || held_when_probed.load(Ordering::SeqCst)),
+    );
 
     let gateway_b = Arc::clone(&gateway);
     let (b_done_tx, b_done_rx) = mpsc::channel();
@@ -1777,18 +2044,40 @@ fn begin_chain_change_serializes_with_inflight_admission() {
             .expect("test waiting for begin result");
     });
 
-    std::thread::sleep(core::time::Duration::from_millis(100));
+    entered_rx
+        .recv()
+        .expect("thread B entered begin_chain_change");
+    assert!(
+        gateway.pool().is_locked_exclusive(),
+        "the admission holds the pool write lock that parks begin_chain_change"
+    );
+    assert!(
+        b_done_rx.try_recv().is_err(),
+        "begin_chain_change must not complete while the admission holds the write lock"
+    );
     assert_eq!(
         gateway.stable_generation(),
         Some(0),
         "begin must not store odd while an admission holds the write lock"
     );
+    assert!(
+        lock_held_rx.try_recv().is_err(),
+        "begin_chain_change must still be parked on the pool write lock held by the admission"
+    );
 
     release_tx.send(()).expect("thread A alive");
     a_handle.join().expect("thread A completed");
 
+    let lock_held_after_release = lock_held_rx
+        .recv()
+        .expect("begin_chain_change reached the pool write lock");
+    resume_tx.send(()).expect("resume begin_chain_change");
+    assert!(
+        lock_held_after_release,
+        "begin_chain_change must pass the pool write lock only after the admission released it"
+    );
     let guard = b_done_rx
-        .recv_timeout(core::time::Duration::from_secs(10))
+        .recv()
         .expect("begin_chain_change returned after lock release");
     assert_eq!(guard.odd_generation(), 1);
     assert_eq!(guard.reserved_even(), 2);
@@ -2043,6 +2332,38 @@ fn input_structure_nonstandard_transactions_keep_policy_precedence() {
     }
 }
 
+#[test]
+fn nonstandard_inputs_rejection_caches_the_txid_for_witness_transactions() {
+    use crate::standardness::{AcceptanceRejectReason, StandardnessError};
+    let gateway = gateway_with(None);
+    let mut candidate = standard_tx(95);
+    candidate.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
+    let origin = AdmissionOrigin::Peer(crate::PeerToken {
+        endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+            core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+        )),
+        addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
+            [127, 0, 0, 1],
+            8333,
+        ))),
+        connection_id: 7,
+    });
+    let mut request = admit_request(&gateway, &candidate, origin);
+    request.prevouts[0].1.script_pubkey = Script::new();
+    assert_eq!(
+        gateway.admit_transaction(request),
+        Err(AdmitError::Policy(AcceptanceRejectReason::NonStandard(
+            StandardnessError::NonStandardInput
+        )))
+    );
+    let lifecycle = gateway.lifecycle.lock();
+    assert!(
+        lifecycle.rejects_inventory(Hash256::from(candidate.txid()), false),
+        "a txid announcement must be filtered after bad-txns-nonstandard-inputs"
+    );
+    assert!(lifecycle.rejects_inventory(Hash256::from(candidate.wtxid()), true));
+}
+
 fn p2sh_prevout() -> TxOut {
     let mut script = Vec::with_capacity(23);
     script.push(0xa9);
@@ -2244,7 +2565,7 @@ fn floor_trim_gateway_with_filler() -> MempoolGateway {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 150,
+            max_total_bytes: unit() * 3 / 2,
             ..MempoolLimits::default()
         }))),
         None,
@@ -2295,7 +2616,7 @@ fn admit_transaction_invalid_script_refusal_leaves_the_floor() {
     let gateway = floor_trim_gateway_with_filler();
 
     let mut request = floor_trim_candidate(&gateway);
-    request.prevouts[0].1.script_pubkey = vec![0x00].into();
+    request.prevouts[0].1.script_pubkey = Script::from_bytes(p2pkh_prevout_script());
     let error = gateway
         .admit_transaction(request)
         .expect_err("candidate cannot survive trimming");
@@ -2339,7 +2660,7 @@ fn admission_prepared_before_a_floor_raise_is_retried() {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 1_000,
+            max_total_bytes: unit() * 3 / 2,
             ..MempoolLimits::default()
         }))),
         None,
@@ -2363,7 +2684,19 @@ fn admission_prepared_before_a_floor_raise_is_retried() {
     let error = gateway
         .insert_entry(
             AdmissionOrigin::Rpc,
-            MempoolEntry::new(Arc::new(tx(92)), 950, 100, 1, 7, 0),
+            MempoolEntry::new(
+                Arc::new({
+                    let mut padded = tx(92);
+                    padded.outputs[0].script_pubkey =
+                        vec![92; usize::try_from(unit()).unwrap_or(usize::MAX)].into();
+                    padded
+                }),
+                950,
+                100,
+                1,
+                7,
+                0,
+            ),
         )
         .expect_err("oversized");
     assert_eq!(error, crate::MempoolError::Full);
@@ -2389,7 +2722,7 @@ fn remove_for_block_stamps_the_floor_for_decay() {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 1_000,
-            max_total_bytes: 400,
+            max_total_bytes: 2 * unit(),
             ..MempoolLimits::default()
         }))),
         None,
@@ -2409,7 +2742,7 @@ fn remove_for_block_stamps_the_floor_for_decay() {
         )
         .expect("high");
     gateway
-        .enforce_size_limit(AdmissionOrigin::Rpc, 200)
+        .enforce_size_limit(AdmissionOrigin::Rpc, unit())
         .expect("eviction");
     assert_eq!(gateway.read().min_fee_sat_per_kvb(1_000), 3_000);
     gateway.remove_for_block(AdmissionOrigin::Rpc, &[], &[], 8, 1_000);

@@ -81,6 +81,7 @@ fn journal_backpressure_is_operational() {
     ));
 }
 
+// API-30
 #[test]
 fn generateblock_validity_wraps_bip22_reason() {
     let error = test_block_validity_error(&ApplyError::UndoPrevoutMissing {
@@ -129,6 +130,12 @@ fn apply_errors_delegate_consensus_and_chain_reasons() {
         rejected(ApplyError::Chain(ChainError::InvalidPow {
             hash: Hash256::default(),
             target: ChainWork::ZERO,
+        })),
+        "high-hash"
+    );
+    assert_eq!(
+        rejected(ApplyError::Chain(ChainError::TargetBitsOverflow {
+            bits: 0x2300_0001,
         })),
         "high-hash"
     );

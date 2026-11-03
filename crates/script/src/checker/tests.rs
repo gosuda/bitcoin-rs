@@ -318,13 +318,9 @@ fn sighash_json_corpus_legacy_path() {
 
         let script_code = remove_all(&hex_decode(script_hex), &[OP_CODESEPARATOR]).0;
 
-        #[expect(
-            clippy::as_conversions,
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "Core casts int nHashType to uint32_t (bit-preserving)"
-        )]
-        let hashtype_u32 = hashtype_raw as i32 as u32;
+        let mut raw_bytes = [0_u8; 4];
+        raw_bytes.copy_from_slice(&hashtype_raw.to_le_bytes()[..4]);
+        let hashtype_u32 = u32::from_le_bytes(raw_bytes);
 
         let cache = SighashCache::new(&tx);
         let sighash = cache

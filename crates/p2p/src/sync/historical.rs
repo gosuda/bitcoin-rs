@@ -1,5 +1,3 @@
-//! Bounded delivery of pinned snapshot history beside the foreground window.
-
 use std::time::Instant;
 
 use bitcoin::hashes::Hash as _;
@@ -16,8 +14,6 @@ use crate::download_window::{
 };
 use crate::{BlockStager, InboundBlock, Message};
 
-/// Independent role, shared download policy. Unvalidated bodies stay transient;
-/// only the chainstate manager can publish their durable archive receipt.
 pub(super) struct HistoricalDownload {
     pub(super) window: DownloadWindow,
     pub(super) stager: BlockStager,
@@ -152,10 +148,9 @@ impl BlockSync {
                 }
                 let is_refused = |hash| refused.contains(&hash);
                 let mut refusals = RefusalFilter::new(&is_refused);
-                window.next_peer_request(
+                window.next_peer_request_allowing_retry(
                     stager,
                     *source,
-                    true,
                     &tip,
                     height,
                     u32::try_from(info.best_known_height).unwrap_or(0),
@@ -176,13 +171,13 @@ impl BlockSync {
                     Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array(hash.to_le_bytes()))
                 })
                 .collect();
-            let _ = self
-                .peer_table
-                .send_then(*source, Message::GetData(inventory), || {
-                    let mut historical = self.historical.lock();
-                    let HistoricalDownload { window, stager, .. } = &mut *historical;
-                    window.mark_requested(stager, &request, *source, now);
-                });
+            let _receiver_gone =
+                self.peer_table
+                    .send_then(*source, Message::GetData(inventory), || {
+                        let mut historical = self.historical.lock();
+                        let HistoricalDownload { window, stager, .. } = &mut *historical;
+                        window.mark_requested(stager, &request, *source, now);
+                    });
         }
     }
 

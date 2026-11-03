@@ -18,11 +18,14 @@ use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn, Se
 use bitcoin::pow::CompactTarget;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 use bitcoin_rs_p2p::PeerRole;
+use bitcoin_rs_p2p::dispatch::dispatch_inbound;
 use bitcoin_rs_p2p::handshake::version_message;
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
 use bitcoin_rs_p2p::wire::{
-    MAX_ADDR_MESSAGE_COUNT, MAX_LOCATOR_HASHES, Message, PeerError, read_message, write_message,
+    MAX_ADDR_MESSAGE_COUNT, MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, Message, PeerError,
+    read_message, write_message,
 };
+use bitcoin_rs_p2p::{Peer, PeerState};
 use sha2::{Digest, Sha256};
 
 #[test]
@@ -357,4 +360,337 @@ fn compact_block_transaction() -> Transaction {
             script_pubkey: ScriptBuf::new(),
         }],
     }
+}
+
+#[test]
+fn command_padding_rejects_non_ascii_control_and_dirty_padding() {
+    let cases = [
+        (
+            &b"ping\0\0\0\0\0\0\0\x01"[..],
+            "dirty padding after nul terminator",
+        ),
+        (&b"ping\n\0\0\0\0\0\0\0"[..], "control character in command"),
+        (&b"ping\x1f\0\0\0\0\0\0\0"[..], "control byte below space"),
+        (&b"ping\x7f\0\0\0\0\0\0\0"[..], "del byte in command"),
+        (&b"ping\x80\0\0\0\0\0\0\0"[..], "non-ascii byte in command"),
+        (&b"\0\0\0\0\0\0\0\0\0\0\0\0"[..], "empty command"),
+    ];
+
+    for (cmd, desc) in cases {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&Magic::BITCOIN.to_bytes());
+        frame.extend_from_slice(cmd);
+        frame.extend_from_slice(&0u32.to_le_bytes());
+        frame.extend_from_slice(&checksum(&[]));
+
+        let res = read_message(&mut Cursor::new(frame), Magic::BITCOIN);
+        assert!(
+            matches!(res, Err(PeerError::InvalidCommand(_))),
+            "{desc} must fail with InvalidCommand, got {res:?}"
+        );
+    }
+}
+
+#[test]
+fn space_byte_in_command_name_is_a_valid_unknown_command() -> Result<(), PeerError> {
+    let frame = message_frame(b"pi ng", &[])?;
+    let (message, payload) = read_message(&mut Cursor::new(frame), Magic::BITCOIN)?;
+    assert!(payload.is_empty());
+    assert!(matches!(message, Message::Unknown { .. }));
+    assert_eq!(message.command().as_ref(), "pi ng");
+
+    let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::BITCOIN);
+    let responses = dispatch_inbound(
+        &mut peer,
+        &Message::Version(version_message(
+            1,
+            0,
+            PeerRole::FullRelay,
+            ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            bitcoin_rs_primitives::USER_AGENT,
+        )),
+    )?;
+    assert_eq!(
+        responses,
+        vec![
+            Message::WtxidRelay,
+            Message::SendAddrV2,
+            Message::SendHeaders,
+            Message::Verack
+        ]
+    );
+    dispatch_inbound(&mut peer, &Message::Verack)?;
+    assert_eq!(peer.state, PeerState::Ready);
+
+    let unknown = Message::Unknown {
+        command: "pi ng"
+            .parse()
+            .map_err(|_| PeerError::InvalidCommand("pi ng".to_owned()))?,
+        payload: Vec::new(),
+    };
+    let responses = dispatch_inbound(&mut peer, &unknown)?;
+    assert_eq!(responses, []);
+    assert_eq!(peer.state, PeerState::Ready);
+    Ok(())
+}
+
+#[test]
+fn compact_block_counts_beyond_cores_sixteen_bit_limit_are_dropped() -> Result<(), PeerError> {
+    let at_limit = u64::from(u16::MAX);
+
+    let mut payload = Vec::new();
+    compact_block_header()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    0u64.consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(at_limit)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    for _ in 0..at_limit {
+        ShortId::default()
+            .consensus_encode(&mut payload)
+            .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    }
+    VarInt(0)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let frame = message_frame(b"cmpctblock", &payload)?;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Ok((Message::CmpctBlock(_), _))
+    ));
+
+    let mut payload = Vec::new();
+    compact_block_header()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    0u64.consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(at_limit + 1)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    for _ in 0..=at_limit {
+        ShortId::default()
+            .consensus_encode(&mut payload)
+            .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    }
+    VarInt(0)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let frame = message_frame(b"cmpctblock", &payload)?;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Ok((Message::Unknown { command, .. }, _)) if command.as_ref() == "cmpctblock"
+    ));
+
+    let mut payload = Vec::new();
+    compact_block_header()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    0u64.consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(0)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(at_limit)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let frame = message_frame(b"cmpctblock", &payload)?;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Ok((Message::Unknown { command, .. }, _)) if command.as_ref() == "cmpctblock"
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn compact_block_prefilled_index_beyond_the_wire_type_is_dropped() -> Result<(), PeerError> {
+    let mut payload = Vec::new();
+    compact_block_header()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    0u64.consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(0)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(1)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(u64::from(u16::MAX) + 1)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    compact_block_transaction()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let frame = message_frame(b"cmpctblock", &payload)?;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Ok((Message::Unknown { command, .. }, _)) if command.as_ref() == "cmpctblock"
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn compact_block_counts_beyond_the_payload_are_dropped() -> Result<(), PeerError> {
+    let mut payload = Vec::new();
+    BlockHash::all_zeros()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(2)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let frame = message_frame(b"blocktxn", &payload)?;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Ok((Message::Unknown { command, .. }, _)) if command.as_ref() == "blocktxn"
+    ));
+
+    let mut payload = Vec::new();
+    BlockHash::all_zeros()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(2)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let frame = message_frame(b"getblocktxn", &payload)?;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Ok((Message::Unknown { command, .. }, _)) if command.as_ref() == "getblocktxn"
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn compact_block_trailing_bytes_decode_like_core() -> Result<(), PeerError> {
+    let mut payload = Vec::new();
+    compact_block_header()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    0u64.consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(1)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    ShortId::default()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(0)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    payload.push(0x42);
+    let frame = message_frame(b"cmpctblock", &payload)?;
+    let Ok((Message::CmpctBlock(compact), _)) =
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN)
+    else {
+        panic!("a cmpctblock with trailing bytes must decode");
+    };
+    assert_eq!(compact.compact_block.short_ids.len(), 1);
+    assert!(compact.compact_block.prefilled_txs.is_empty());
+
+    let mut payload = Vec::new();
+    BlockHash::all_zeros()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(0)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    payload.push(0x42);
+    let frame = message_frame(b"blocktxn", &payload)?;
+    let Ok((Message::BlockTxn(txn), _)) = read_message(&mut Cursor::new(frame), Magic::BITCOIN)
+    else {
+        panic!("a blocktxn with trailing bytes must decode");
+    };
+    assert!(txn.transactions.transactions.is_empty());
+    assert_eq!(txn.transactions.block_hash, BlockHash::all_zeros());
+
+    let mut payload = Vec::new();
+    BlockHash::all_zeros()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(0)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    payload.push(0x42);
+    let frame = message_frame(b"getblocktxn", &payload)?;
+    let Ok((Message::GetBlockTxn(request), _)) =
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN)
+    else {
+        panic!("a getblocktxn with trailing bytes must decode");
+    };
+    assert!(request.txs_request.indexes.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn framing_attacks_magic_checksum_and_length_boundaries() -> Result<(), PeerError> {
+    let mut frame = message_frame(b"ping", &[1; 8])?;
+    frame[0] ^= 0xff;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Err(PeerError::WrongNetwork { .. })
+    ));
+
+    let mut frame = message_frame(b"ping", &[1; 8])?;
+    frame[20] ^= 1;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Err(PeerError::BadChecksum)
+    ));
+
+    let mut frame = message_frame(b"ping", &[1; 8])?;
+    frame[24] ^= 1;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Err(PeerError::BadChecksum)
+    ));
+
+    let mut header_n_minus_1 = Vec::new();
+    header_n_minus_1.extend_from_slice(&Magic::BITCOIN.to_bytes());
+    header_n_minus_1.extend_from_slice(b"ping\0\0\0\0\0\0\0\0");
+    let len_n_minus_1 = u32::try_from(MAX_MESSAGE_PAYLOAD - 1)
+        .map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    header_n_minus_1.extend_from_slice(&len_n_minus_1.to_le_bytes());
+    header_n_minus_1.extend_from_slice(&[0u8; 4]);
+    assert!(matches!(
+        read_message(&mut Cursor::new(header_n_minus_1), Magic::BITCOIN),
+        Err(PeerError::Io(_))
+    ));
+
+    let mut header_n = Vec::new();
+    header_n.extend_from_slice(&Magic::BITCOIN.to_bytes());
+    header_n.extend_from_slice(b"ping\0\0\0\0\0\0\0\0");
+    let len_n =
+        u32::try_from(MAX_MESSAGE_PAYLOAD).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    header_n.extend_from_slice(&len_n.to_le_bytes());
+    header_n.extend_from_slice(&[0u8; 4]);
+    assert!(matches!(
+        read_message(&mut Cursor::new(header_n), Magic::BITCOIN),
+        Err(PeerError::Io(_))
+    ));
+
+    let mut header_n_plus_1 = Vec::new();
+    header_n_plus_1.extend_from_slice(&Magic::BITCOIN.to_bytes());
+    header_n_plus_1.extend_from_slice(b"ping\0\0\0\0\0\0\0\0");
+    let len_n_plus_1 = u32::try_from(MAX_MESSAGE_PAYLOAD + 1)
+        .map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    header_n_plus_1.extend_from_slice(&len_n_plus_1.to_le_bytes());
+    header_n_plus_1.extend_from_slice(&[0u8; 4]);
+    assert!(matches!(
+        read_message(&mut Cursor::new(header_n_plus_1), Magic::BITCOIN),
+        Err(PeerError::PayloadTooLarge(len)) if len == MAX_MESSAGE_PAYLOAD + 1
+    ));
+
+    let partial_header = vec![0u8; 12];
+    assert!(matches!(
+        read_message(&mut Cursor::new(partial_header), Magic::BITCOIN),
+        Err(PeerError::Io(_))
+    ));
+
+    Ok(())
 }

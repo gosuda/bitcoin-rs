@@ -57,13 +57,9 @@ fn request_frontier_retains_parent_plan_on_height_gaps() -> TestResult {
         .or_fail("regtest fixture header");
     let child = tree.insert_node(Some(root), header, NodeStatus::HeaderValid)?;
     tree.node_mut(child)?.height = 2;
-    let plan = bitcoin_rs_chain::plan_reorg(&tree, root, child)?;
-    let [first] = plan.connect.as_slice() else {
-        return Err("expected one connect node".into());
-    };
     assert_eq!(
         BlockSync::first_connect_height(&tree, root_hash, child),
-        Some(tree.node(*first)?.height),
+        Some(2),
     );
     Ok(())
 }
@@ -121,9 +117,8 @@ fn fork_getdata_starts_at_common_ancestor_child() -> TestResult {
     assert!(
         sync.send_getdata_for_pending_blocks(
             current_source(&sync.peer_table, peer),
-            false,
             100,
-            &test_frontier(&sync)
+            &test_frontier(&sync),
         )
         .sent
     );
@@ -135,8 +130,7 @@ fn fork_getdata_starts_at_common_ancestor_child() -> TestResult {
     Ok(())
 }
 
-fn pending_reorg_fixture()
--> Result<(SyncHarness, TipSnapshot, Vec<Block>), Box<dyn std::error::Error>> {
+fn pending_reorg_fixture() -> Result<(SyncHarness, TipSnapshot, Vec<Block>), TestError> {
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis_header(), NodeStatus::HeaderValid)?;
     let losing1 = regtest_fixture::mined_regtest_header(genesis_header().compute_hash(), 1)

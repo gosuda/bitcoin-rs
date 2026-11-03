@@ -1,5 +1,3 @@
-//! Consumer-boundary tests, grouped into one integration binary.
-
 mod auth;
 mod core_compat;
 mod core_parity;

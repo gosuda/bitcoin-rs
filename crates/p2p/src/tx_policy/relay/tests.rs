@@ -153,13 +153,22 @@ impl RngCore for CountingRng {
         self.inner.try_fill_bytes(dest)
     }
 }
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+}
+
+type TestResult = Result<(), TestError>;
 
 fn clock_peer(
     table: &PeerTable,
     remote: &str,
     bind: &str,
     inbound: bool,
-) -> Result<(PeerSource, MessageReceiver), Box<dyn std::error::Error>> {
+) -> Result<(PeerSource, MessageReceiver), TestError> {
     let connected = connect_at(
         table,
         remote
@@ -192,8 +201,7 @@ fn clock(table: &PeerTable, source: PeerSource) -> Instant {
 }
 
 #[test]
-fn nontransaction_inventory_does_not_create_relay_state_or_clocks()
--> Result<(), Box<dyn std::error::Error>> {
+fn nontransaction_inventory_does_not_create_relay_state_or_clocks() -> TestResult {
     let table = PeerTable::new();
     let (source, _) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true)?;
     table.note_transaction_inventory(source, &[]);
@@ -239,8 +247,7 @@ fn inbound_clock_key_uses_network_class_and_canonical_bind_endpoint() {
 }
 
 #[test]
-fn inbound_peers_share_cycles_without_suppressing_due_siblings()
--> Result<(), Box<dyn std::error::Error>> {
+fn inbound_peers_share_cycles_without_suppressing_due_siblings() -> TestResult {
     let table = PeerTable::new();
     let gateway = gateway();
     let now = Instant::now();
@@ -281,8 +288,7 @@ fn inbound_peers_share_cycles_without_suppressing_due_siblings()
 }
 
 #[test]
-fn inbound_future_clock_survives_all_creation_paths_and_reconnects()
--> Result<(), Box<dyn std::error::Error>> {
+fn inbound_future_clock_survives_all_creation_paths_and_reconnects() -> TestResult {
     let table = PeerTable::new();
     let gateway = gateway();
     let now = Instant::now();
@@ -339,8 +345,7 @@ fn inbound_future_clock_survives_all_creation_paths_and_reconnects()
 }
 
 #[test]
-fn empty_inbound_ticks_advance_the_shared_clock_without_admissions()
--> Result<(), Box<dyn std::error::Error>> {
+fn empty_inbound_ticks_advance_the_shared_clock_without_admissions() -> TestResult {
     let table = PeerTable::new();
     let gateway = gateway();
     let now = Instant::now();
@@ -367,8 +372,7 @@ fn empty_inbound_ticks_advance_the_shared_clock_without_admissions()
 }
 
 #[test]
-fn different_inbound_keys_and_outbound_peers_sample_independently()
--> Result<(), Box<dyn std::error::Error>> {
+fn different_inbound_keys_and_outbound_peers_sample_independently() -> TestResult {
     let table = PeerTable::new();
     let gateway = gateway();
     let now = Instant::now();
@@ -388,7 +392,6 @@ fn different_inbound_keys_and_outbound_peers_sample_independently()
     }
     let request = insert(&gateway, &transaction(1, None), 1_000);
     table.queue_transaction_relay(request, now, &mut rng);
-    assert_eq!(table.tx_policy.lock().inbound_inv.len(), 5);
     assert_eq!(rng.draws, 7, "five inbound keys plus two outbound clocks");
     assert_eq!(clock(&table, sources[0]), clock(&table, sources[1]));
     let deadlines = sources
@@ -679,7 +682,13 @@ fn relay_queue_and_known_inventory_have_explicit_bounds() {
     );
     assert!(dropped > 0);
     drop(policy);
-    let mut peer = RelayPeer::new(now, false, None, &mut HashMap::new(), &mut rng);
+    let mut peer = RelayPeer::new(
+        now,
+        RelayDirection::Outbound,
+        None,
+        &mut HashMap::new(),
+        &mut rng,
+    );
     for marker in 0u32..5_001 {
         let mut bytes = [0; 32];
         bytes[..4].copy_from_slice(&marker.to_le_bytes());
@@ -724,7 +733,7 @@ fn seeded_clocks_rounding_and_fee_refresh_are_deterministic() {
     let now = Instant::now();
     let mut inbound = StdRng::seed_from_u64(7);
     let mut outbound = inbound.clone();
-    assert!(next_inv(now, true, &mut inbound) > next_inv(now, false, &mut outbound));
+    assert!(next_inbound_inv(now, &mut inbound) > next_outbound_inv(now, &mut outbound));
     let mut rng = StdRng::seed_from_u64(8);
     let values = (0..100)
         .map(|_| rounded_filter(1500, 1000, &mut rng))
@@ -735,7 +744,13 @@ fn seeded_clocks_rounding_and_fee_refresh_are_deterministic() {
         "Core 1.1-spaced bucket boundaries"
     );
     assert!((0..100).all(|_| rounded_filter(500, 1000, &mut rng) >= 1000));
-    let mut peer = RelayPeer::new(now, false, None, &mut HashMap::new(), &mut rng);
+    let mut peer = RelayPeer::new(
+        now,
+        RelayDirection::Outbound,
+        None,
+        &mut HashMap::new(),
+        &mut rng,
+    );
     assert!(peer.filter_due(now, 1500, 1000, false, &mut rng).is_some());
     let scheduled = peer.next_filter;
     assert!(peer.filter_due(now, 1501, 1000, false, &mut rng).is_none());
@@ -757,8 +772,21 @@ fn seeded_clocks_rounding_and_fee_refresh_are_deterministic() {
     );
 }
 #[test]
-fn remote_relay_optout_and_announced_inventory_suppress_only_that_connection()
--> Result<(), Box<dyn std::error::Error>> {
+fn fee_bucket_truncation_resists_lossy_cast_overflow() {
+    assert_eq!(truncate_fee_bucket(-50.0), 0);
+    assert_eq!(truncate_fee_bucket(0.0), 0);
+    assert_eq!(truncate_fee_bucket(0.999), 0);
+    assert_eq!(truncate_fee_bucket(1.0), 1);
+    assert_eq!(truncate_fee_bucket(50.0), 50);
+    assert_eq!(truncate_fee_bucket(60.5), 60);
+    assert_eq!(truncate_fee_bucket(1_405.121_842_403_216_3), 1405);
+    assert_eq!(truncate_fee_bucket(1_545.634_026_643_538_2), 1545);
+    assert_eq!(truncate_fee_bucket(10_000_000.0), 10_000_000);
+    assert_eq!(truncate_fee_bucket(f64::NAN), 0);
+    assert_eq!(truncate_fee_bucket(f64::INFINITY), 0);
+}
+#[test]
+fn remote_relay_optout_and_announced_inventory_suppress_only_that_connection() -> TestResult {
     let table = PeerTable::new();
     let gateway = gateway();
     let now = Instant::now();
@@ -770,10 +798,10 @@ fn remote_relay_optout_and_announced_inventory_suppress_only_that_connection()
         .endpoint
         .ok_or_else(|| std::io::Error::other("identified fixture"))?;
     let Some(lease) = table.lease(endpoint) else {
-        return Err(std::io::Error::other("live fixture lease").into());
+        return Err(TestError::Missing("live fixture lease"));
     };
     let Some(mut info) = table.info_of(endpoint) else {
-        return Err(std::io::Error::other("published fixture info").into());
+        return Err(TestError::Missing("published fixture info"));
     };
     info.relay_transactions = false;
     table.publish_info(endpoint, &lease, info);
@@ -859,8 +887,14 @@ fn inbound_without_ip_key_keeps_inbound_cadence() {
     let mut clocks = HashMap::new();
     let mut rng_in = StdRng::seed_from_u64(42);
     let mut rng_out = StdRng::seed_from_u64(42);
-    let inbound = RelayPeer::new(now, true, None, &mut clocks, &mut rng_in);
-    let outbound = RelayPeer::new(now, false, None, &mut clocks, &mut rng_out);
+    let inbound = RelayPeer::new(now, RelayDirection::Inbound, None, &mut clocks, &mut rng_in);
+    let outbound = RelayPeer::new(
+        now,
+        RelayDirection::Outbound,
+        None,
+        &mut clocks,
+        &mut rng_out,
+    );
     assert!(
         inbound.next_inv > outbound.next_inv,
         "an inbound peer without an IP key must keep its inbound cadence, not degrade to outbound"

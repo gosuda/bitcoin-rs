@@ -1,5 +1,3 @@
-//! Budgeted body requests, prefix probes, and cold-front hedges.
-
 use super::BlockSync;
 use super::GetdataRequestOutcome;
 use super::SchedulerState;
@@ -23,27 +21,10 @@ use std::time::Duration;
 use std::time::Instant;
 use std::vec::Vec;
 
-/// Requested blocks within this distance of the header tip ride the compact-block
-/// flavor: reconstruction costs a fraction of the full-body transfer exactly where
-/// blocks are freshest.
-///
-/// Deeper requests keep the witness flavor, where full-body availability dominates; the
-/// download window stays hash-keyed, so either answer resolves the same pending
-/// request.
 pub(super) const COMPACT_RELAY_NEAR_TIP_BLOCKS: u32 = 5;
 
-/// How long a connection that answered `notfound` for a body is demoted for
-/// that same body: it is the last resort for the hash, and the request path
-/// refuses to ask it again, until the interval passes.
 pub(super) const BODY_UNAVAILABLE_RETRY: Duration = Duration::from_mins(1);
 
-/// Safety ceiling on retained availability records: every live record below it is kept,
-/// so ledger pressure can never evict one peer's live answer to make room for
-/// another's.
-///
-/// The bound caps memory at a few mebibytes, and evicting above it costs at most one
-/// redundant round trip — never a stall — because per-entry filtering only re-asks a
-/// peer it wrongly forgot.
 pub(super) const MAX_UNAVAILABLE_BODY_RECORDS: usize = 65_536;
 
 #[derive(Debug, Default)]
@@ -258,22 +239,6 @@ impl BlockSync {
         );
     }
 
-    fn build_inventory(
-        request: &crate::download_window::PeerRequest,
-        compact_fetch: bool,
-    ) -> Vec<Inventory> {
-        let mut inventory = Vec::with_capacity(request.len());
-        for (_, hash) in request.entries() {
-            let block_hash = bitcoin::BlockHash::from_byte_array(*hash.as_byte_array());
-            inventory.push(if compact_fetch {
-                Inventory::CompactBlock(block_hash)
-            } else {
-                Inventory::WitnessBlock(block_hash)
-            });
-        }
-        inventory
-    }
-
     fn compact_fetch_eligible(
         &self,
         request: &crate::download_window::PeerRequest,
@@ -292,46 +257,77 @@ impl BlockSync {
     pub(super) fn send_getdata_for_pending_blocks(
         &self,
         source: PeerSource,
+        peer_best_height: u32,
+        frontier: &ChainFrontier,
+    ) -> GetdataRequestOutcome {
+        self.send_getdata_for_pending_blocks_internal(source, false, peer_best_height, frontier)
+    }
+
+    pub(super) fn send_getdata_for_pending_blocks_allowing_retry(
+        &self,
+        source: PeerSource,
+        peer_best_height: u32,
+        frontier: &ChainFrontier,
+    ) -> GetdataRequestOutcome {
+        self.send_getdata_for_pending_blocks_internal(source, true, peer_best_height, frontier)
+    }
+
+    fn send_getdata_for_pending_blocks_internal(
+        &self,
+        source: PeerSource,
         allow_expired_retry_from_peer: bool,
         peer_best_height: u32,
         frontier: &ChainFrontier,
     ) -> GetdataRequestOutcome {
         let now = Instant::now();
-        let (Some(chain_tip), Some(applied_tip), Some(required)) = (
-            frontier.chain_tip.as_ref(),
-            frontier.applied_tip.as_ref(),
-            frontier.next_required,
+        let Some(request) = self.plan_peer_getdata_request(
+            source,
+            allow_expired_retry_from_peer,
+            peer_best_height,
+            frontier,
+            now,
         ) else {
             return GetdataRequestOutcome::default();
         };
+        self.dispatch_getdata_request(source, &request, frontier, now)
+    }
 
-        let Some(info) = self.peer_table.info_of_source(source) else {
-            return GetdataRequestOutcome::default();
-        };
+    fn plan_peer_getdata_request(
+        &self,
+        source: PeerSource,
+        allow_expired_retry_from_peer: bool,
+        peer_best_height: u32,
+        frontier: &ChainFrontier,
+        now: Instant,
+    ) -> Option<crate::download_window::PeerRequest> {
+        let chain_tip = frontier.chain_tip.as_ref()?;
+        let _applied_tip = frontier.applied_tip.as_ref()?;
+        let required = frontier.next_required?;
+
+        let info = self.peer_table.info_of_source(source)?;
         let policy = BlockDownloadPolicy {
             ibd: Arc::clone(&self.ibd),
             network: self.chain.network(),
             requested_height: required.height,
         };
         if !serves_requested_height(&info, &policy) {
-            return GetdataRequestOutcome::default();
+            return None;
         }
         let servable_floor = servable_floor(&info, &policy);
         let tree = self.chain.block_tree();
-        let request = {
-            let mut scheduler = self.scheduler.lock();
-            let SchedulerState {
-                window,
-                stager,
-                body_unavailable,
-                ..
-            } = &mut *scheduler;
-            let is_refused = |hash| body_unavailable.refuses(source, hash, now);
-            let mut refusals = RefusalFilter::new(&is_refused);
-            window.next_peer_request(
+        let mut scheduler = self.scheduler.lock();
+        let SchedulerState {
+            window,
+            stager,
+            body_unavailable,
+            ..
+        } = &mut *scheduler;
+        let is_refused = |hash| body_unavailable.refuses(source, hash, now);
+        let mut refusals = RefusalFilter::new(&is_refused);
+        if allow_expired_retry_from_peer {
+            window.next_peer_request_allowing_retry(
                 stager,
                 source,
-                allow_expired_retry_from_peer,
                 chain_tip,
                 required.height,
                 peer_best_height,
@@ -340,14 +336,38 @@ impl BlockSync {
                 now,
                 &mut refusals,
             )
-        };
-        drop(tree);
-        let Some(request) = request else {
-            return GetdataRequestOutcome::default();
-        };
+        } else {
+            window.next_peer_request(
+                stager,
+                source,
+                chain_tip,
+                required.height,
+                peer_best_height,
+                servable_floor,
+                &tree,
+                now,
+                &mut refusals,
+            )
+        }
+    }
 
-        let compact_fetch = self.compact_fetch_eligible(&request, frontier);
-        let inventory = Self::build_inventory(&request, compact_fetch);
+    fn dispatch_getdata_request(
+        &self,
+        source: PeerSource,
+        request: &crate::download_window::PeerRequest,
+        frontier: &ChainFrontier,
+        now: Instant,
+    ) -> GetdataRequestOutcome {
+        let compact_fetch = self.compact_fetch_eligible(request, frontier);
+        let mut inventory = Vec::with_capacity(request.len());
+        for (_, hash) in request.entries() {
+            let block_hash = bitcoin::BlockHash::from_byte_array(*hash.as_byte_array());
+            inventory.push(if compact_fetch {
+                Inventory::CompactBlock(block_hash)
+            } else {
+                Inventory::WitnessBlock(block_hash)
+            });
+        }
         let count = inventory.len();
         let msg = Message::GetData(inventory);
 
@@ -355,7 +375,7 @@ impl BlockSync {
         let sent = self.peer_table.send_then(source, msg, || {
             let mut scheduler = self.scheduler.lock();
             let SchedulerState { window, stager, .. } = &mut *scheduler;
-            has_request_capacity = window.mark_requested(stager, &request, source, now);
+            has_request_capacity = window.mark_requested(stager, request, source, now);
         });
         if let Err(refusal) = sent {
             if refusal.is_saturated() {
@@ -383,8 +403,8 @@ impl BlockSync {
             peer_addr = ?source.endpoint,
             count,
             compact = compact_fetch,
-            applied_height = applied_tip.height,
-            chain_height = chain_tip.height,
+            applied_height = frontier.applied_tip.as_ref().map_or(0, |t| t.height),
+            chain_height = frontier.chain_tip.as_ref().map_or(0, |t| t.height),
             "block sync: sent getdata batch"
         );
         GetdataRequestOutcome {
@@ -543,7 +563,6 @@ mod tests {
             .next_peer_request(
                 &mut stager,
                 owner,
-                false,
                 &chain_tip,
                 1,
                 10,

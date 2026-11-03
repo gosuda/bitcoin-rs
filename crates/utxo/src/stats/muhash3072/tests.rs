@@ -372,17 +372,47 @@ fn from_parts_boundary_bytes_match_reference_oracle() {
     }
 }
 
+fn proptest_config(default_cases: u32) -> ProptestConfig {
+    let cases = std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|val| val.parse().ok())
+        .unwrap_or(default_cases);
+    ProptestConfig {
+        cases,
+        ..ProptestConfig::default()
+    }
+}
+
+fn boundary_limbs_strategy() -> impl Strategy<Value = [u64; LIMBS]> {
+    prop_oneof![
+        2 => prop::sample::select(boundary_limb_patterns()),
+        3 => proptest::collection::vec(any::<u64>(), LIMBS).prop_map(|v| {
+            let mut arr = [0_u64; LIMBS];
+            arr.copy_from_slice(&v);
+            arr
+        }),
+    ]
+}
+
+fn boundary_element_strategy() -> impl Strategy<Value = Vec<u8>> {
+    prop_oneof![
+        1 => Just(Vec::new()),
+        1 => Just(vec![0x00]),
+        1 => Just(vec![0xff; 32]),
+        1 => Just(vec![0xaa; 80]),
+        1 => Just((0..32_u8).collect()),
+        3 => proptest::collection::vec(any::<u8>(), 0..=80),
+    ]
+}
+
 proptest! {
+    #![proptest_config(proptest_config(1024))]
+
     #[test]
     fn generated_multiplication_matches_reference_oracle(
-        left_limbs in proptest::collection::vec(any::<u64>(), LIMBS),
-        right_limbs in proptest::collection::vec(any::<u64>(), LIMBS),
+        left_array in boundary_limbs_strategy(),
+        right_array in boundary_limbs_strategy(),
     ) {
-        let mut left_array = [0_u64; LIMBS];
-        let mut right_array = [0_u64; LIMBS];
-        left_array.copy_from_slice(&left_limbs);
-        right_array.copy_from_slice(&right_limbs);
-
         let left = U3072::from_limbs(left_array);
         let right = U3072::from_limbs(right_array);
         let mut candidate = Num3072 { limbs: left_array };
@@ -396,10 +426,10 @@ proptest! {
         ops in proptest::collection::vec(
             (
                 0_u8..3,
-                proptest::collection::vec(any::<u8>(), 0..80),
-                proptest::collection::vec(any::<u8>(), 0..80),
+                boundary_element_strategy(),
+                boundary_element_strategy(),
             ),
-            0..128,
+            0..64,
         )
     ) {
         let mut candidate = MuHash3072::new();
@@ -432,5 +462,66 @@ proptest! {
             prop_assert_eq!(candidate.numerator_bytes(), reference.numerator_bytes());
             prop_assert_eq!(candidate.denominator_bytes(), reference.denominator_bytes());
         }
+    }
+
+    #[test]
+    fn muhash_algebraic_laws_order_independence_and_inverses(
+        elements in proptest::collection::vec(boundary_element_strategy(), 1..=16),
+        extra in boundary_element_strategy(),
+    ) {
+        let mut forward = MuHash3072::new();
+        for elem in &elements {
+            forward.insert(elem);
+        }
+
+        let mut reversed = MuHash3072::new();
+        for elem in elements.iter().rev() {
+            reversed.insert(elem);
+        }
+
+        prop_assert_eq!(
+            forward.finalize(),
+            reversed.finalize(),
+            "insert order independence"
+        );
+        prop_assert_eq!(
+            forward.finalize_hash(),
+            reversed.finalize_hash(),
+            "hash order independence"
+        );
+
+        let mut inverter = forward.clone();
+        inverter.insert(&extra);
+        inverter.remove(&extra);
+        prop_assert_eq!(
+            inverter.finalize(),
+            forward.finalize(),
+            "insert then remove is identity"
+        );
+
+        let mut inverter2 = forward.clone();
+        inverter2.remove(&extra);
+        inverter2.insert(&extra);
+        prop_assert_eq!(
+            inverter2.finalize(),
+            forward.finalize(),
+            "remove then insert is identity"
+        );
+
+        let mid = elements.len() / 2;
+        let mut left_half = MuHash3072::new();
+        for elem in &elements[..mid] {
+            left_half.insert(elem);
+        }
+        let mut right_half = MuHash3072::new();
+        for elem in &elements[mid..] {
+            right_half.insert(elem);
+        }
+        left_half.combine(&right_half);
+        prop_assert_eq!(
+            left_half.finalize(),
+            forward.finalize(),
+            "combine decomposes insert stream"
+        );
     }
 }

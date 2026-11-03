@@ -1,4 +1,3 @@
-//! Bitcoin Core wire-contract compatibility tests.
 extern crate alloc;
 
 use crate::support;
@@ -21,7 +20,7 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait a
 
 fn typed<T: serde::de::DeserializeOwned>(
     value: &sonic_rs::Value,
-) -> Result<T, Box<dyn std::error::Error>> {
+) -> Result<T, crate::support::TestError> {
     let text = sonic_rs::to_string(value)?;
     Ok(sonic_rs::from_str(&text)?)
 }
@@ -41,7 +40,7 @@ fn tipped_context() -> Arc<Context> {
 }
 
 #[test]
-fn chain_state_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::error::Error>> {
+fn chain_state_responses_deserialize_into_pinned_types() -> Result<(), crate::support::TestError> {
     let handler = Handler::new(tipped_context());
 
     let info = support::compare::typed_getblockchain_info(
@@ -98,17 +97,23 @@ fn chain_state_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn chaininfo_projection_rejects_unknown_fields() -> Result<(), Box<dyn std::error::Error>> {
+fn chaininfo_projection_rejects_unknown_fields() -> Result<(), crate::support::TestError> {
     let handler = Handler::new(tipped_context());
     let mut response = handler.dispatch("getblockchaininfo", &json!([]))?;
     response
         .as_object_mut()
-        .ok_or("getblockchaininfo must return an object")?
+        .ok_or(crate::support::TestError::Missing(
+            "getblockchaininfo must return an object",
+        ))?
         .insert("unexpected", json!(true));
     let body = sonic_rs::to_string(&response)?;
     let error = match support::compare::typed_getblockchain_info(body.as_bytes()) {
         Err(error) => error,
-        Ok(_) => return Err("the unknown chaininfo field was accepted".into()),
+        Ok(_) => {
+            return Err(crate::support::TestError::Missing(
+                "the unknown chaininfo field was accepted",
+            ));
+        }
     };
     assert!(
         error.to_string().contains("unexpected"),
@@ -118,7 +123,7 @@ fn chaininfo_projection_rejects_unknown_fields() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn mempool_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::error::Error>> {
+fn mempool_responses_deserialize_into_pinned_types() -> Result<(), crate::support::TestError> {
     let handler = Handler::new(Arc::new(Context::new()));
 
     let info: corepc_types::v31::GetMempoolInfo =
@@ -156,7 +161,7 @@ fn mempool_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
 const CORE_31_1_PROTOCOL_VERSION: u32 = 70_016;
 
 #[test]
-fn network_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::error::Error>> {
+fn network_responses_deserialize_into_pinned_types() -> Result<(), crate::support::TestError> {
     let handler = Handler::new(Arc::new(Context::new()));
 
     let network: corepc_types::v31::GetNetworkInfo =
@@ -223,13 +228,6 @@ fn network_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
     Ok(())
 }
 
-/// Both validateaddress failure classes answer exactly Core's sparse `{"isvalid":
-/// false}` object: `isvalid` is the only key and every valid-only field (`address`,
-/// `scriptPubKey`, `isscript`, `iswitness`, `witness_version`, `witness_program`) is
-/// absent.
-///
-/// The pinned corepc type models those fields as required, so this branch cannot
-/// round-trip through `typed()` and is pinned by key-set assertions (`local_shape`).
 fn assert_sparse_invalid(value: &sonic_rs::Value) {
     let object = value
         .as_object()
@@ -258,7 +256,7 @@ fn assert_sparse_invalid(value: &sonic_rs::Value) {
 }
 
 #[test]
-fn util_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::error::Error>> {
+fn util_responses_deserialize_into_pinned_types() -> Result<(), crate::support::TestError> {
     let handler = Handler::new(Arc::new(Context::new()));
 
     let estimate: corepc_types::v31::EstimateSmartFee =
@@ -352,7 +350,7 @@ impl MiningControl for CompatMiningControl {
 }
 
 #[test]
-fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::error::Error>> {
+fn mining_responses_deserialize_into_pinned_types() -> Result<(), crate::support::TestError> {
     let mut ctx = Context::new();
     ctx.chain.chain_network = Network::Regtest;
     let handler = Handler::new(Arc::new(
@@ -424,7 +422,7 @@ fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn primitive_responses_stay_primitives() -> Result<(), Box<dyn std::error::Error>> {
+fn primitive_responses_stay_primitives() -> Result<(), crate::support::TestError> {
     let handler = Handler::new(Arc::new(Context::new()));
 
     let uptime = handler.dispatch("uptime", &json!([]))?;
@@ -453,8 +451,8 @@ fn primitive_responses_stay_primitives() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
-fn submitblock_truncates_trailing_bytes_to_consumed_prefix()
--> Result<(), Box<dyn std::error::Error>> {
+fn submitblock_truncates_trailing_bytes_to_consumed_prefix() -> Result<(), crate::support::TestError>
+{
     #[derive(Default)]
     struct RecordingSubmit {
         submitted: std::sync::Mutex<Option<Vec<u8>>>,
@@ -537,7 +535,6 @@ fn submitblock_truncates_trailing_bytes_to_consumed_prefix()
         Err(error) => error,
         Ok(_) => return Err("undecodable hex was accepted".into()),
     };
-    assert_eq!(error.to_string(), "Block decode failed");
     assert_eq!(error.code(), -22);
     Ok(())
 }

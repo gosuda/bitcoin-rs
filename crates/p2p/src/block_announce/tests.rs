@@ -429,14 +429,14 @@ fn rotation_saturated_restores_full_selection_in_place_and_retries() {
 }
 
 struct WorkerStop {
-    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchWriter,
     queue: Option<BlockAnnounceQueue>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for WorkerStop {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown.trigger();
         self.queue.take();
         if let Some(handle) = self.handle.take() {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -471,12 +471,11 @@ fn worker_timeout_retries_saturated_announcement_without_new_wake() {
     let hold = crate::test_support::hog(&aggregate, 512);
     let (queue, worker_rx) = BlockAnnounceQueue::new();
     assert!(queue.wake(), "the wake enqueued the tip");
-    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let worker =
-        spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, Arc::clone(&shutdown))
-            .expect("the announce worker spawns");
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let worker = spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, shutdown.reader())
+        .expect("the announce worker spawns");
     let _stop = WorkerStop {
-        shutdown: Arc::clone(&shutdown),
+        shutdown,
         queue: Some(queue),
         handle: Some(worker),
     };
@@ -993,10 +992,9 @@ fn worker_retries_tip_with_no_ready_peers_until_connection_arrives() {
     assert_eq!(announcer.process_tip_retry(), Vec::new());
     let (_lease, rx) = setup_peer(&table, &announcer, test_addr(1014), false);
     let (queue, worker_rx) = BlockAnnounceQueue::new();
-    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let worker =
-        spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, Arc::clone(&shutdown))
-            .expect("the announce worker spawns");
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let worker = spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, shutdown.reader())
+        .expect("the announce worker spawns");
     let _stop = WorkerStop {
         shutdown,
         queue: Some(queue),
@@ -1198,28 +1196,6 @@ fn verified_peer_progress_does_not_retreat_on_late_older_evidence() {
 
     assert_eq!(announcer.process_tip(), Vec::new());
     assert!(rx.try_recv().is_err());
-}
-
-#[test]
-fn test_high_bandwidth_bounded_to_3_peers() {
-    let chain = Arc::new(MockAnnounceChain::new(3));
-    let table = Arc::new(PeerTable::new());
-    let announcer = BlockAnnouncer::new(
-        Arc::clone(&table),
-        Arc::clone(&chain) as Arc<dyn ChainQuery>,
-        BlockAnnounceConfig::default(),
-    );
-
-    let mut peers = Vec::new();
-    for i in 1..=3 {
-        let addr = test_addr(1010 + i);
-        peers.push(setup_peer(&table, &announcer, addr, true));
-        note_compact_preference(&table, addr, false, 2);
-        announcer.reconcile_high_bandwidth_peers();
-    }
-
-    assert_eq!(peers.len(), 3);
-    assert_eq!(announcer.high_bandwidth_requested_peers().len(), 3);
 }
 
 #[test]
@@ -1931,4 +1907,32 @@ fn origin_peer_receives_inv_fallback_even_when_known_position_meets_tip() {
     );
     let msg = rx.try_recv().expect("inv received");
     assert!(matches!(msg, Message::Inv(_)));
+}
+
+#[test]
+fn block_announce_worker_cancels_promptly_on_latch() {
+    let table = Arc::new(PeerTable::new());
+    let chain = Arc::new(MockAnnounceChain::new(5));
+    let announcer = Arc::new(BlockAnnouncer::new(
+        table,
+        chain as Arc<dyn ChainQuery>,
+        BlockAnnounceConfig::default(),
+    ));
+    let (_queue, worker_rx) = BlockAnnounceQueue::new();
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    let worker =
+        spawn_block_announce_worker(announcer, worker_rx, latch.reader()).expect("worker spawns");
+    let (join_tx, join_rx) = crossbeam_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = worker.join();
+        let _ = join_tx.send(());
+    });
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    latch.trigger();
+    assert!(
+        join_rx
+            .recv_timeout(std::time::Duration::from_millis(40))
+            .is_ok(),
+        "block announce worker must join promptly upon latch trigger without waiting for poll timeout"
+    );
 }

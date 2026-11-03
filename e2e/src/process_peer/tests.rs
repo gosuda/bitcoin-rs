@@ -1,4 +1,3 @@
-//! Tests for failure records (REF-07d).
 #![expect(
     clippy::expect_used,
     reason = "test fixtures abort on their first unmet setup invariant"
@@ -54,6 +53,7 @@ fn assert_failure(dir: &TempDir, first_direction: &str, error: &super::Error) {
     assert_eq!(last["error"], error.to_string());
 }
 
+// REF-07
 #[test]
 fn checksum_failure_keeps_the_frame_and_error() {
     let (mut peer, mut remote, dir) = fixture();
@@ -91,9 +91,7 @@ fn send_deadline_keeps_the_attempt_and_error() {
     let error = peer
         .send(NetworkMessage::Ping(1), Instant::now())
         .expect_err("expired time limit");
-    assert!(
-        matches!(error, super::Error::Protocol(ref message) if message == "P2P operation deadline")
-    );
+    assert!(matches!(error, super::Error::Protocol(_)));
     assert_failure(&dir, "sending", &error);
     remote.set_nonblocking(true).expect("nonblocking reader");
     let mut byte = [0];

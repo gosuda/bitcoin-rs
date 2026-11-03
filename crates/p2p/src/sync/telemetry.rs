@@ -1,5 +1,3 @@
-//! Read-only synchronization progress and bounded-window metrics.
-
 use super::BlockSync;
 
 impl BlockSync {
@@ -97,11 +95,6 @@ pub(super) fn metric_count(value: usize) -> f64 {
     f64::from(u32::try_from(value).unwrap_or(u32::MAX))
 }
 
-/// A byte attribution as a gauge value without the `u32` clamp of [`metric_count`]: the
-/// retained gauges exist to show residency growing past the serialized budget, so a
-/// total above 4 GiB must not saturate.
-///
-/// The high and low 32-bit halves each convert to `f64` exactly.
 fn metric_bytes(value: usize) -> f64 {
     let value = u64::try_from(value).unwrap_or(u64::MAX);
     let high = u32::try_from(value >> 32).unwrap_or(u32::MAX);

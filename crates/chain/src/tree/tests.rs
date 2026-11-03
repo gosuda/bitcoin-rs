@@ -1,6 +1,7 @@
 use bitcoin_rs_primitives::{BlockHash, CompactTarget};
 
 use super::{BlockTree, Hash256};
+use crate::test_error::TestError;
 use crate::{
     ChainError, ChainTxCount,
     node::{BlockHeader, NodeId, NodeStatus},
@@ -89,8 +90,7 @@ fn timed_chain(count: u32) -> Result<(BlockTree, Vec<NodeId>, Vec<u32>), ChainEr
 }
 
 #[test]
-fn block_locator_falls_back_after_active_parent_mutation() -> Result<(), Box<dyn std::error::Error>>
-{
+fn block_locator_falls_back_after_active_parent_mutation() -> Result<(), TestError> {
     let (mut tree, ids) = linear_chain(2)?;
     let (a, c) = (ids[0], ids[2]);
 
@@ -102,8 +102,7 @@ fn block_locator_falls_back_after_active_parent_mutation() -> Result<(), Box<dyn
 }
 
 #[test]
-fn block_locator_falls_back_on_same_height_fork_index_corruption()
--> Result<(), Box<dyn std::error::Error>> {
+fn block_locator_falls_back_on_same_height_fork_index_corruption() -> Result<(), TestError> {
     let (mut tree, ids) = linear_chain(2)?;
     let (genesis_id, main_child_id, main_tip_id) = (ids[0], ids[1], ids[2]);
 
@@ -136,8 +135,7 @@ fn block_locator_falls_back_on_same_height_fork_index_corruption()
 }
 
 #[test]
-fn block_locator_rejects_coherent_side_fork_index_substitution()
--> Result<(), Box<dyn std::error::Error>> {
+fn block_locator_rejects_coherent_side_fork_index_substitution() -> Result<(), TestError> {
     let (mut tree, main_ids) = linear_chain(40)?;
 
     let side_ids = extend_branch(&mut tree, main_ids[18], 1019..=1026)?;
@@ -184,7 +182,7 @@ fn block_locator_rejects_coherent_side_fork_index_substitution()
 }
 
 #[test]
-fn node_at_height_from_ignores_tainted_index_slot() -> Result<(), Box<dyn std::error::Error>> {
+fn node_at_height_from_ignores_tainted_index_slot() -> Result<(), TestError> {
     let (mut tree, main_ids) = linear_chain(40)?;
     let side_id = extend(&mut tree, main_ids[18], 1019)?;
 
@@ -200,8 +198,7 @@ fn node_at_height_from_ignores_tainted_index_slot() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn bounded_ancestry_rejects_side_parent_gap_before_index_shortcut()
--> Result<(), Box<dyn std::error::Error>> {
+fn bounded_ancestry_rejects_side_parent_gap_before_index_shortcut() -> Result<(), TestError> {
     let (mut tree, main) = linear_chain(5)?;
     let side = extend_branch(&mut tree, main[0], 11..=13)?;
     let tip = *side.last().ok_or("no side tip")?;
@@ -213,7 +210,7 @@ fn bounded_ancestry_rejects_side_parent_gap_before_index_shortcut()
 }
 
 #[test]
-fn bounded_ancestry_counts_only_unindexed_parent_hops() -> Result<(), Box<dyn std::error::Error>> {
+fn bounded_ancestry_counts_only_unindexed_parent_hops() -> Result<(), TestError> {
     let (mut tree, main) = linear_chain(10_000)?;
     let side = extend_branch(&mut tree, main[4000], 20_000..=24_095)?;
     let tip = *side.last().ok_or("no side tip")?;
@@ -237,8 +234,7 @@ fn bounded_ancestry_counts_only_unindexed_parent_hops() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn node_at_height_from_indexes_active_prefix_but_walks_side_chain()
--> Result<(), Box<dyn std::error::Error>> {
+fn node_at_height_from_indexes_active_prefix_but_walks_side_chain() -> Result<(), TestError> {
     let (mut tree, main_ids) = linear_chain(5)?;
     let mut side_ids = vec![main_ids[0]];
     side_ids.extend(extend_branch(&mut tree, main_ids[0], 11..=13)?);
@@ -259,8 +255,7 @@ fn node_at_height_from_indexes_active_prefix_but_walks_side_chain()
 }
 
 #[test]
-fn median_time_past_matches_an_independent_median_over_every_prefix()
--> Result<(), Box<dyn std::error::Error>> {
+fn median_time_past_matches_an_independent_median_over_every_prefix() -> Result<(), TestError> {
     let (tree, ids, times) = timed_chain(15)?;
     let tip = *ids.last().ok_or("chain has a tip")?;
 
@@ -296,7 +291,7 @@ fn expected_median_time_past(times_oldest_first: &[u32], window: usize) -> u32 {
 }
 
 #[test]
-fn tip_id_returns_published_tip() -> Result<(), Box<dyn std::error::Error>> {
+fn tip_id_returns_published_tip() -> Result<(), TestError> {
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(
         None,
@@ -314,8 +309,8 @@ fn tip_id_returns_published_tip() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn node_at_height_from_uses_rebuilt_active_height_index_after_fork_switch()
--> Result<(), Box<dyn std::error::Error>> {
+fn node_at_height_from_uses_rebuilt_active_height_index_after_fork_switch() -> Result<(), TestError>
+{
     let (mut tree, main_ids) = linear_chain(2)?;
     let (genesis_id, main_child_id, main_tip_id) = (main_ids[0], main_ids[1], main_ids[2]);
     assert_eq!(
@@ -344,8 +339,7 @@ fn node_at_height_from_uses_rebuilt_active_height_index_after_fork_switch()
 }
 
 #[test]
-fn a_fork_has_two_leaves_whose_common_ancestor_is_the_fork_point()
--> Result<(), Box<dyn std::error::Error>> {
+fn a_fork_has_two_leaves_whose_common_ancestor_is_the_fork_point() -> Result<(), TestError> {
     let mut tree = BlockTree::new();
     let genesis = test_header(BlockHash::default(), 0);
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -369,8 +363,7 @@ fn a_fork_has_two_leaves_whose_common_ancestor_is_the_fork_point()
 }
 
 #[test]
-fn find_common_ancestor_resolves_uneven_branches_after_index_taint()
--> Result<(), Box<dyn std::error::Error>> {
+fn find_common_ancestor_resolves_uneven_branches_after_index_taint() -> Result<(), TestError> {
     let (mut tree, trunk) = linear_chain(8)?;
     let side = extend_branch(&mut tree, trunk[2], 101..=103)?;
     let other = extend_branch(&mut tree, trunk[4], 201..=202)?;
@@ -396,8 +389,7 @@ fn find_common_ancestor_resolves_uneven_branches_after_index_taint()
 }
 
 #[test]
-fn find_common_ancestor_refuses_disconnected_and_broken_chains()
--> Result<(), Box<dyn std::error::Error>> {
+fn find_common_ancestor_refuses_disconnected_and_broken_chains() -> Result<(), TestError> {
     let (mut tree, a) = linear_chain(3)?;
     let b_root = tree.insert_node(
         None,
@@ -418,8 +410,8 @@ fn find_common_ancestor_refuses_disconnected_and_broken_chains()
 }
 
 #[test]
-fn node_at_height_from_terminates_on_two_node_cycle_with_malformed_height()
--> Result<(), Box<dyn std::error::Error>> {
+fn node_at_height_from_terminates_on_two_node_cycle_with_malformed_height() -> Result<(), TestError>
+{
     let (mut tree, ids) = linear_chain(1)?;
     let (a, b) = (ids[0], ids[1]);
 
@@ -431,8 +423,8 @@ fn node_at_height_from_terminates_on_two_node_cycle_with_malformed_height()
 }
 
 #[test]
-fn refresh_active_height_index_clears_on_every_untrustworthy_chain_shape()
--> Result<(), Box<dyn std::error::Error>> {
+fn refresh_active_height_index_clears_on_every_untrustworthy_chain_shape() -> Result<(), TestError>
+{
     type Corruption = fn(&mut BlockTree, &[NodeId]) -> Result<(), ChainError>;
     let corruptions: [(&str, u32, Corruption); 3] = [
         ("parent cycle", 1, |tree, ids| {
@@ -474,7 +466,7 @@ fn locator_hashes_at_heights(
     tree: &BlockTree,
     nodes: &[NodeId],
     heights: &[u32],
-) -> Result<Vec<Hash256>, Box<dyn std::error::Error>> {
+) -> Result<Vec<Hash256>, TestError> {
     let mut out = Vec::with_capacity(heights.len());
     for &height in heights {
         let idx = usize::try_from(height)?;
@@ -485,7 +477,7 @@ fn locator_hashes_at_heights(
 }
 
 #[test]
-fn locator_doubles_only_after_more_than_ten() -> Result<(), Box<dyn std::error::Error>> {
+fn locator_doubles_only_after_more_than_ten() -> Result<(), TestError> {
     let (short, ids) = linear_chain(4)?;
     let mut short_expected: Vec<_> = (0..=4)
         .scan(BlockHash::default(), |prev, height| {
@@ -535,8 +527,8 @@ fn test_header(prev_blockhash: BlockHash, height: u32) -> BlockHeader {
 }
 
 #[test]
-fn invalidate_subtree_marks_root_and_descendants_invalid_and_reselects_tip()
--> Result<(), Box<dyn std::error::Error>> {
+fn invalidate_subtree_marks_root_and_descendants_invalid_and_reselects_tip() -> Result<(), TestError>
+{
     use bitcoin_rs_consensus::{CSV_DEPLOYMENT_ID, SEGWIT_DEPLOYMENT_ID};
 
     let (mut tree, main_ids) = linear_chain(2)?;
@@ -590,8 +582,7 @@ fn invalidate_subtree_marks_root_and_descendants_invalid_and_reselects_tip()
 }
 
 #[test]
-fn invalidate_subtree_uses_insertion_order_for_equal_work_tie_break()
--> Result<(), Box<dyn std::error::Error>> {
+fn invalidate_subtree_uses_insertion_order_for_equal_work_tie_break() -> Result<(), TestError> {
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(
         None,
@@ -617,8 +608,7 @@ fn invalidate_subtree_uses_insertion_order_for_equal_work_tie_break()
 }
 
 #[test]
-fn insert_under_invalid_parent_is_invalid_and_does_not_publish()
--> Result<(), Box<dyn std::error::Error>> {
+fn insert_under_invalid_parent_is_invalid_and_does_not_publish() -> Result<(), TestError> {
     let mut tree = BlockTree::new();
     let genesis = test_header(BlockHash::default(), 0);
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -643,7 +633,7 @@ fn insert_under_invalid_parent_is_invalid_and_does_not_publish()
 }
 
 #[test]
-fn linear_extension_reports_no_demotion() -> Result<(), Box<dyn std::error::Error>> {
+fn linear_extension_reports_no_demotion() -> Result<(), TestError> {
     let mut tree = BlockTree::new();
     let genesis = tree.insert_node(
         None,
@@ -660,7 +650,7 @@ fn linear_extension_reports_no_demotion() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
-fn side_branch_that_is_not_best_reports_no_demotion() -> Result<(), Box<dyn std::error::Error>> {
+fn side_branch_that_is_not_best_reports_no_demotion() -> Result<(), TestError> {
     let (mut tree, main) = linear_chain(2)?;
     let side = extend_branch_with_facts(&mut tree, main[0], 101..=102)?;
 
@@ -672,7 +662,7 @@ fn side_branch_that_is_not_best_reports_no_demotion() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn branch_switch_reports_the_displaced_tip() -> Result<(), Box<dyn std::error::Error>> {
+fn branch_switch_reports_the_displaced_tip() -> Result<(), TestError> {
     let (mut tree, main) = linear_chain(2)?;
     let displaced = tree.node(main[2])?.hash;
     let side = extend_branch_with_facts(&mut tree, main[0], 101..=103)?;
@@ -684,8 +674,7 @@ fn branch_switch_reports_the_displaced_tip() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn nested_reorg_reports_the_tip_active_before_each_switch() -> Result<(), Box<dyn std::error::Error>>
-{
+fn nested_reorg_reports_the_tip_active_before_each_switch() -> Result<(), TestError> {
     let (mut tree, main) = linear_chain(2)?;
     let first_old = tree.node(main[2])?.hash;
     let second = extend_branch_with_facts(&mut tree, main[0], 101..=103)?;
@@ -706,8 +695,7 @@ fn nested_reorg_reports_the_tip_active_before_each_switch() -> Result<(), Box<dy
 }
 
 #[test]
-fn descendant_reached_through_a_zero_work_node_is_not_a_displacement()
--> Result<(), Box<dyn std::error::Error>> {
+fn descendant_reached_through_a_zero_work_node_is_not_a_displacement() -> Result<(), TestError> {
     let (mut tree, main) = linear_chain(2)?;
     let tip_hash = tree.node(main[2])?.hash;
     let zero_work = BlockHeader {
@@ -726,8 +714,7 @@ fn descendant_reached_through_a_zero_work_node_is_not_a_displacement()
 }
 
 #[test]
-fn invalidation_reports_a_valid_tip_it_displaces_onto_another_branch()
--> Result<(), Box<dyn std::error::Error>> {
+fn invalidation_reports_a_valid_tip_it_displaces_onto_another_branch() -> Result<(), TestError> {
     let (mut tree, main) = linear_chain(2)?;
     let displaced = tree.node(main[2])?.hash;
     let mut heavy = Vec::new();
@@ -754,8 +741,7 @@ fn invalidation_reports_a_valid_tip_it_displaces_onto_another_branch()
 }
 
 #[test]
-fn invalidation_selecting_a_descendant_of_the_old_tip_reports_nothing()
--> Result<(), Box<dyn std::error::Error>> {
+fn invalidation_selecting_a_descendant_of_the_old_tip_reports_nothing() -> Result<(), TestError> {
     let (mut tree, main) = linear_chain(2)?;
     let held = test_header(BlockHash(tree.node(main[2])?.hash), 101);
     let descendant = tree.insert_node(Some(main[2]), held, NodeStatus::Invalid)?;
@@ -771,7 +757,7 @@ fn invalidation_selecting_a_descendant_of_the_old_tip_reports_nothing()
 }
 
 #[test]
-fn applied_transaction_counts_follow_each_nodes_parent() -> Result<(), Box<dyn std::error::Error>> {
+fn applied_transaction_counts_follow_each_nodes_parent() -> Result<(), TestError> {
     let mut tree = BlockTree::new();
     let genesis = test_header(BlockHash::default(), 0);
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -805,8 +791,7 @@ fn applied_transaction_counts_follow_each_nodes_parent() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn unknown_parent_count_stays_unknown_until_authenticated_restore()
--> Result<(), Box<dyn std::error::Error>> {
+fn unknown_parent_count_stays_unknown_until_authenticated_restore() -> Result<(), TestError> {
     let mut tree = BlockTree::new();
     let genesis = test_header(BlockHash::default(), 0);
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -831,7 +816,7 @@ fn unknown_parent_count_stays_unknown_until_authenticated_restore()
 }
 
 #[test]
-fn a_restored_wire_zero_stays_unknown_at_the_boundary() -> Result<(), Box<dyn std::error::Error>> {
+fn a_restored_wire_zero_stays_unknown_at_the_boundary() -> Result<(), TestError> {
     let mut tree = BlockTree::new();
     let genesis = test_header(BlockHash::default(), 0);
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -842,7 +827,7 @@ fn a_restored_wire_zero_stays_unknown_at_the_boundary() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn recording_a_count_refreshes_only_the_published_tip() -> Result<(), Box<dyn std::error::Error>> {
+fn recording_a_count_refreshes_only_the_published_tip() -> Result<(), TestError> {
     let mut tree = BlockTree::new();
     let genesis = test_header(BlockHash::default(), 0);
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;

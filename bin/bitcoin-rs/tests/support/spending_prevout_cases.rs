@@ -1,5 +1,3 @@
-//! API-32: public wire observations against the checksum-pinned Core 31.1.
-
 use bitcoin::Sequence;
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin_rs_e2e::differential::{compare_rpc, mine_common_chain};

@@ -1,6 +1,4 @@
-//! Big-endian key-order vs numeric-height-order contract tests.
-
-use crate::support::common;
+use crate::support::{TestError, common};
 
 use std::sync::Arc;
 
@@ -14,7 +12,7 @@ fn spent_outpoint(label: u8, vout: u32) -> OutPoint {
 }
 
 #[test]
-fn funding_rows_iterate_in_numeric_height_order() -> Result<(), Box<dyn std::error::Error>> {
+fn funding_rows_iterate_newest_height_first() -> Result<(), TestError> {
     let script = vec![0x51, 0x01];
     let scripthash = ScriptHash::from_script_bytes(&script);
     let store = Arc::new(MemoryStore::default());
@@ -27,14 +25,14 @@ fn funding_rows_iterate_in_numeric_height_order() -> Result<(), Box<dyn std::err
 
     assert_eq!(
         rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
-        vec![1, 256],
-        "BE byte order matches numeric height order"
+        vec![256, 1],
+        "inverted heights make ascending byte order newest first"
     );
     Ok(())
 }
 
 #[test]
-fn spending_rows_also_use_numeric_height_order() -> Result<(), Box<dyn std::error::Error>> {
+fn spending_rows_also_use_numeric_height_order() -> Result<(), TestError> {
     let outpoint = spent_outpoint(7, 0);
     let store = Arc::new(MemoryStore::default());
     put_spending_row(&store, &outpoint, 1)?;

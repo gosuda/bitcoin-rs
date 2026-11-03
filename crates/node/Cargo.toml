@@ -23,6 +23,7 @@ test-seam = [
     "bitcoin-rs-mempool/test-seam",
     "bitcoin-rs-index/test-seam",
     "bitcoin-rs-mining/test-seam",
+    "dep:toml",
 ]
 
 # A node is non-functional without a storage backend, and its `NodeStorage` /
@@ -95,10 +96,10 @@ metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 quanta.workspace = true
 thiserror.workspace = true
-anyhow.workspace = true
 rayon.workspace = true
 sha2.workspace = true
 sonic-rs.workspace = true
+toml = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true

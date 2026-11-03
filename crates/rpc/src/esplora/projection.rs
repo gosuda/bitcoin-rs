@@ -1,11 +1,9 @@
-//! Consistent chain, transaction, and script-activity projections for Esplora.
-
 use core::str::FromStr as _;
 use std::sync::Arc;
 
 use bitcoin::hex::DisplayHex;
 use bitcoin_rs_chain::{TipSnapshot, softfork_state};
-use bitcoin_rs_consensus::check_block_body_binding;
+use bitcoin_rs_consensus::{BlockRuleContext, check_block_body_binding};
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
 use bitcoin_rs_primitives::{
@@ -171,7 +169,6 @@ impl<'a> Projection<'a> {
             .ok_or_else(|| service_unavailable("confirming transaction unavailable"))
     }
 
-    /// Resolves confirmation only against the current applied chain.
     pub(super) fn confirmation(&self, txid: &Txid) -> Result<Option<Confirmation>, Response> {
         if self
             .ctx
@@ -333,7 +330,6 @@ impl<'a> Projection<'a> {
                     input
                         .witness
                         .iter()
-                        .map(Vec::as_slice)
                         .map(DisplayHex::to_lower_hex_string)
                         .collect()
                 }),
@@ -412,11 +408,10 @@ impl<'a> Projection<'a> {
         })
     }
 
-    pub(super) fn required_block(
+    pub(super) fn block_from_record(
         &self,
-        text_hash: &str,
+        record: bitcoin_rs_index::block_log::BlockRecord,
     ) -> Result<(bitcoin_rs_index::block_log::BlockRecord, Block), Response> {
-        let record = self.required_block_record(text_hash)?;
         let bytes = self
             .ctx
             .chain
@@ -434,7 +429,7 @@ impl<'a> Projection<'a> {
                 .and_then(|node| node.parent);
             softfork_state(&tree, self.ctx.chain.chain_network, parent, record.height).segwit_active
         };
-        check_block_body_binding(&block, segwit_active).map_err(|_| {
+        check_block_body_binding(&block, BlockRuleContext { segwit_active }).map_err(|_| {
             internal_error("stored block transaction or witness commitment mismatch")
         })?;
         Ok((record, block))
@@ -487,7 +482,6 @@ impl<'a> Projection<'a> {
                 .cmp(&left.record.height)
                 .then_with(|| right.record.txid.cmp(&left.record.txid))
         });
-        confirmed.dedup_by_key(|activity| activity.record.txid);
 
         let confirmed_unspent = index.unspent_outputs(script_hash).map_err(query_error)?;
         let mempool = self.mempool_activity(script_hash, &confirmed_unspent)?;
@@ -499,10 +493,10 @@ impl<'a> Projection<'a> {
         })
     }
 
-    pub(super) fn history_page(
+    pub(super) fn confirmed_history_page(
         &self,
         script_hash: ScriptHash,
-        last: Option<Txid>,
+        cursor: Option<Txid>,
         limit: usize,
     ) -> Result<Vec<ScriptHistoryRecord>, Response> {
         let index = self
@@ -511,9 +505,16 @@ impl<'a> Projection<'a> {
             .script_index
             .as_ref()
             .ok_or_else(|| service_unavailable("script index is disabled"))?;
-        index
-            .history_page(script_hash, last, limit)
-            .map_err(query_error)
+        let page = index
+            .confirmed_history_page(script_hash, cursor, limit)
+            .map_err(query_error)?;
+        if cursor.is_some() && !page.cursor_found {
+            return Ok(index
+                .confirmed_history_page(script_hash, None, limit)
+                .map_err(query_error)?
+                .records);
+        }
+        Ok(page.records)
     }
 
     pub(super) fn mempool_activity_for(
@@ -554,19 +555,19 @@ impl<'a> Projection<'a> {
                 })
                 .collect::<Vec<_>>()
         };
-        let mut confirmations = std::collections::HashMap::<u32, TransactionStatus>::new();
+        let mut confirmations: std::collections::HashMap<u32, Confirmation> =
+            std::collections::HashMap::new();
         let mut outputs = confirmed
             .into_iter()
             .map(|record| {
-                let status = match confirmations.entry(record.height) {
-                    std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        let status = self
-                            .confirmation_at_height(record.height)
-                            .map(TransactionStatus::from)
-                            .ok_or_else(|| service_unavailable("funding block unavailable"))?;
-                        entry.insert(status).clone()
-                    }
+                let status = if let Some(confirmation) = confirmations.get(&record.height) {
+                    TransactionStatus::from(*confirmation)
+                } else {
+                    let confirmation = self
+                        .confirmation_at_height(record.height)
+                        .ok_or_else(|| service_unavailable("funding block unavailable"))?;
+                    confirmations.insert(record.height, confirmation);
+                    TransactionStatus::from(confirmation)
                 };
                 Ok(UtxoValue {
                     txid: record.txid.to_string(),
@@ -700,7 +701,6 @@ impl<'a> Projection<'a> {
     }
 }
 
-/// Names one script shape in the Esplora `scriptpubkey_type` dialect.
 const fn esplora_type_name(shape: convert::ScriptShape) -> &'static str {
     match shape {
         convert::ScriptShape::Empty => "empty",
@@ -734,7 +734,7 @@ fn inner_scripts(
     let witness_script = is_witness_script
         .then(|| input.witness.last())
         .flatten()
-        .cloned();
+        .map(<[u8]>::to_vec);
     (redeem, witness_script)
 }
 

@@ -217,8 +217,6 @@ fn assert_post_switch_recovery(core: &mut ProcessNode, mut node: ProcessNode) ->
 }
 
 #[test]
-/// Bitcoin Core's `interface_zmq.py` checks that `sequence` publishes every
-/// disconnected block newest-first, then every connected block oldest-first.
 fn sequence_reports_exact_disconnect_connect_order() -> Result<()> {
     let mut core = ProcessNode::spawn(Kind::Core)?;
     let (_socket_dir, mut node, _context, subscriber) = spawn_sequence_subscriber()?;

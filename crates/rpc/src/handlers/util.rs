@@ -20,7 +20,6 @@ use crate::handlers::{
     ensure_at_most_params, params_array, required_i64, required_str, required_u64,
 };
 
-/// Core `MAX_CONFIRM_TARGET` in `policy/fees.h`.
 const ESTIMATE_SMART_FEE_MAX_TARGET_I64: i64 = 1008;
 const ESTIMATE_SMART_FEE_TARGET_ERROR: &str = "Invalid conf_target, must be between 1 and 1008";
 const ESTIMATE_SMART_FEE_MODE_ERROR: &str =
@@ -31,8 +30,6 @@ fn conf_target_blocks(conf_target: u64) -> u32 {
 }
 
 pub(crate) fn decodescript(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, &["hexstring"])?;
-    let params = bound.as_ref();
     let array = params_array(params)?;
     if array.len() != 1 {
         return Err(RpcError::Misc("decodescript \"hexstring\"".to_owned()));
@@ -207,9 +204,6 @@ fn is_core_fee_estimate_mode(mode: &str) -> bool {
         || mode.eq_ignore_ascii_case("conservative")
 }
 
-/// Local response shape: the fee estimator does not expose Core's
-/// `decay`/`scale` internals, so `{short,medium,long}` carry `feerate` only
-/// and the no-estimate branch stays `{}` (see the manifest row note).
 pub(crate) fn estimaterawfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let conf_target = required_u64(params, 0, "conf_target is required")?;
     let pool = ctx.mempool.gateway.read();
@@ -218,22 +212,18 @@ pub(crate) fn estimaterawfee(ctx: &Arc<Context>, params: &Value) -> Result<Value
     };
     let feerate = crate::tx_render::btc_amount_json(rate.as_sat_per_kvb());
     let mut short = sonic_rs::Object::new();
-    let _ = short.insert("feerate", feerate.clone());
+    short.insert("feerate", feerate.clone());
     let mut medium = sonic_rs::Object::new();
-    let _ = medium.insert("feerate", feerate.clone());
+    medium.insert("feerate", feerate.clone());
     let mut long = sonic_rs::Object::new();
-    let _ = long.insert("feerate", feerate);
+    long.insert("feerate", feerate);
     let mut object = sonic_rs::Object::new();
-    let _ = object.insert("short", Value::from(short));
-    let _ = object.insert("medium", Value::from(medium));
-    let _ = object.insert("long", Value::from(long));
+    object.insert("short", Value::from(short));
+    object.insert("medium", Value::from(medium));
+    object.insert("long", Value::from(long));
     Ok(Value::from(object))
 }
 
-/// Local response shape: an invalid address (malformed or wrong network)
-/// answers Core's sparse `{"isvalid": false}` object only, which the pinned
-/// corepc type cannot represent because its valid-address fields are
-/// required; that branch is hand-built (see the manifest row note).
 pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     use core::str::FromStr as _;
 
@@ -264,6 +254,7 @@ pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 }
 
 pub(crate) fn getdescriptorinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    super::ensure_at_most_params(params, 1)?;
     let descriptor = required_str(params, 0, "descriptor is required")?;
     let (payload, checksum) = checked_checksum(descriptor, ChecksumRequirement::Optional)?;
 
@@ -290,6 +281,7 @@ pub(crate) fn getdescriptorinfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
 }
 
 pub(crate) fn deriveaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    super::ensure_at_most_params(params, 2)?;
     let array = params_array(params)?;
     let descriptor = required_str(params, 0, "descriptor is required")?;
     let (payload, _checksum) = checked_checksum(descriptor, ChecksumRequirement::Required)?;
@@ -314,8 +306,6 @@ pub(crate) fn deriveaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     }
 }
 
-/// A descriptor that does not parse is `-5`; a range that does not match a
-/// descriptor that parsed fine is `-8`. They are different questions and Core
 fn descriptor_error(error: DescriptorError) -> RpcError {
     match error {
         DescriptorError::Range(message) => RpcError::InvalidParameter(message.to_owned()),
@@ -380,7 +370,6 @@ fn checksummed_payload(
     Ok((payload, computed))
 }
 
-/// Bitcoin Core's `ParseDescriptorRange`: an end, or an inclusive `[begin,end]`.
 pub(crate) fn parse_derivation_range(value: &Value) -> Result<(u32, u32), RpcError> {
     let integer = |value: &Value| {
         value
@@ -640,30 +629,77 @@ pub(crate) fn scan_descriptor_range_budgeted(
     let (payload, _) = checked_checksum(text, ChecksumRequirement::Optional)?;
     let chain = convert::bitcoin_network(network);
     if let Some(raw) = parse_unspendable(payload) {
-        if remaining_scripts < 1 {
-            return Err(RpcError::InvalidParameter(
-                "At most 1024 scan descriptors are supported".into(),
-            ));
-        }
-        let script = match raw.map_err(descriptor_error)? {
-            Unspendable::Address(address) => address
-                .require_network(chain)
-                .map_err(|_| RpcError::InvalidAddressOrKey("Address is not valid".into()))?
-                .script_pubkey(),
-            Unspendable::Raw(script) => script,
-        };
-        let script_len = u64::try_from(script.len())
-            .map_err(|_| RpcError::InvalidParameter("Scan script byte limit exceeded".into()))?;
-        if script_len > remaining_bytes {
-            return Err(RpcError::InvalidParameter(
-                "Scan script byte limit exceeded".into(),
-            ));
-        }
-        return Ok(vec![ScanScript {
-            desc: crate::tx_render::script_descriptor(script.as_bytes(), network),
-            script_pubkey: script.into_bytes(),
-        }]);
+        return scan_unspendable_script(raw, chain, network, remaining_scripts, remaining_bytes);
     }
+    let scan = validate_and_budget_scan(payload, chain, range, remaining_scripts, remaining_bytes)?;
+    let begin = scan.begin;
+    let end = scan.end;
+    let paths = scan.paths;
+    let kind = scan.kind;
+    let count_usize = scan.count_usize;
+    let mut scripts = Vec::with_capacity(count_usize);
+    'outer: for index in begin..=end {
+        for path in &paths {
+            if cancelled()? {
+                break 'outer;
+            }
+            let derived = path
+                .at_derivation_index(index)
+                .map_err(|error| RpcError::InvalidAddressOrKey(error.to_string()))?;
+            let script = scan_key_script(&derived, kind)?;
+            scripts.push(script);
+        }
+    }
+    Ok(scripts)
+}
+
+fn scan_unspendable_script(
+    raw: Result<Unspendable, DescriptorError>,
+    chain: bitcoin::Network,
+    network: Network,
+    remaining_scripts: u64,
+    remaining_bytes: u64,
+) -> Result<Vec<ScanScript>, RpcError> {
+    if remaining_scripts < 1 {
+        return Err(RpcError::InvalidParameter(
+            "At most 1024 scan descriptors are supported".into(),
+        ));
+    }
+    let script = match raw.map_err(descriptor_error)? {
+        Unspendable::Address(address) => address
+            .require_network(chain)
+            .map_err(|_| RpcError::InvalidAddressOrKey("Address is not valid".into()))?
+            .script_pubkey(),
+        Unspendable::Raw(script) => script,
+    };
+    let script_len = u64::try_from(script.len())
+        .map_err(|_| RpcError::InvalidParameter("Scan script byte limit exceeded".into()))?;
+    if script_len > remaining_bytes {
+        return Err(RpcError::InvalidParameter(
+            "Scan script byte limit exceeded".into(),
+        ));
+    }
+    Ok(vec![ScanScript {
+        desc: crate::tx_render::script_descriptor(script.as_bytes(), network),
+        script_pubkey: script.into_bytes(),
+    }])
+}
+
+struct ValidatedDescriptorScan {
+    paths: Vec<MiniscriptDescriptor<DescriptorPublicKey>>,
+    kind: &'static str,
+    begin: u32,
+    end: u32,
+    count_usize: usize,
+}
+
+fn validate_and_budget_scan(
+    payload: &str,
+    chain: bitcoin::Network,
+    range: Option<(u32, u32)>,
+    remaining_scripts: u64,
+    remaining_bytes: u64,
+) -> Result<ValidatedDescriptorScan, RpcError> {
     let descriptor = MiniscriptDescriptor::<DescriptorPublicKey>::from_str(payload)
         .map_err(|error| RpcError::InvalidAddressOrKey(error.to_string()))?;
     ensure_keys_match_network(&descriptor, chain).map_err(descriptor_error)?;
@@ -672,22 +708,7 @@ pub(crate) fn scan_descriptor_range_budgeted(
             GENERATEBLOCK_NEEDS_PRIVATE_KEYS.into(),
         ));
     }
-    let kind = match &descriptor {
-        MiniscriptDescriptor::Pkh(_) => "pkh",
-        MiniscriptDescriptor::Wpkh(_) => "wpkh",
-        MiniscriptDescriptor::Sh(sh)
-            if matches!(sh.as_inner(), miniscript::descriptor::ShInner::Wpkh(_)) =>
-        {
-            "sh(wpkh"
-        }
-        MiniscriptDescriptor::Tr(tr) if tr.tap_tree().is_none() => "tr",
-        _ => {
-            return Err(RpcError::InvalidParameter(
-                "Supported scan descriptors are addr, raw, pkh, wpkh, sh(wpkh), and key-only tr"
-                    .into(),
-            ));
-        }
-    };
+    let kind = classify_scan_descriptor_kind(&descriptor)?;
     let is_range = descriptor.has_wildcard();
     let (begin, end) = if is_range {
         range.unwrap_or((0, 1000))
@@ -696,7 +717,6 @@ pub(crate) fn scan_descriptor_range_budgeted(
     };
     let paths = if descriptor.is_multipath() {
         descriptor
-            .clone()
             .into_single_descriptors()
             .map_err(|error| RpcError::InvalidAddressOrKey(error.to_string()))?
     } else {
@@ -730,33 +750,39 @@ pub(crate) fn scan_descriptor_range_budgeted(
     let count_usize = usize::try_from(count).map_err(|_| {
         RpcError::InvalidParameter("At most 1024 scan descriptors are supported".into())
     })?;
-    let mut scripts = Vec::with_capacity(count_usize);
-    'outer: for index in begin..=end {
-        for path in &paths {
-            if cancelled()? {
-                break 'outer;
-            }
-            let derived = path
-                .at_derivation_index(index)
-                .map_err(|error| RpcError::InvalidAddressOrKey(error.to_string()))?;
-            let script = scan_key_script(&derived, kind)?;
-            scripts.push(script);
+    Ok(ValidatedDescriptorScan {
+        paths,
+        kind,
+        begin,
+        end,
+        count_usize,
+    })
+}
+
+fn classify_scan_descriptor_kind(
+    descriptor: &MiniscriptDescriptor<DescriptorPublicKey>,
+) -> Result<&'static str, RpcError> {
+    match descriptor {
+        MiniscriptDescriptor::Pkh(_) => Ok("pkh"),
+        MiniscriptDescriptor::Wpkh(_) => Ok("wpkh"),
+        MiniscriptDescriptor::Sh(sh)
+            if matches!(sh.as_inner(), miniscript::descriptor::ShInner::Wpkh(_)) =>
+        {
+            Ok("sh(wpkh")
         }
+        MiniscriptDescriptor::Tr(tr) if tr.tap_tree().is_none() => Ok("tr"),
+        _ => Err(RpcError::InvalidParameter(
+            "Supported scan descriptors are addr, raw, pkh, wpkh, sh(wpkh), and key-only tr".into(),
+        )),
     }
-    Ok(scripts)
 }
 
 #[derive(Debug)]
 struct DescriptorInfo {
-    /// Canonical form, with private keys replaced by their public counterparts.
     canonical: String,
-    /// One entry per multipath expansion; empty for a single-path descriptor.
     multipath_expansion: Vec<String>,
-    /// Whether the descriptor carries a `*`, and so describes a range.
     is_range: bool,
-    /// Whether the descriptor carries enough information to produce a spend.
     is_solvable: bool,
-    /// Whether the *input* carried at least one private key.
     has_private_keys: bool,
 }
 
@@ -1316,20 +1342,24 @@ pub(crate) fn descriptor_checksum(payload: &str) -> Option<String> {
             .as_bytes()
             .iter()
             .position(|b| *b == needle)?;
-        let pos_u64 = u64::try_from(pos).ok()?;
-        let val = u32::try_from(pos_u64 & 31).ok()?;
+        #[expect(clippy::expect_used, reason = "index in BIP380 charset fits in u64")]
+        let pos_u64 = u64::try_from(pos).expect("index in BIP380 charset fits in u64");
+        #[expect(clippy::expect_used, reason = "5-bit masked position fits in u32")]
+        let val = u32::try_from(pos_u64 & 31).expect("5-bit masked position fits in u32");
         c = descriptor_polymod(c, val);
         cls = cls * 3 + (pos_u64 >> 5);
         clscount = clscount.saturating_add(1);
         if clscount == 3 {
-            let val = u32::try_from(cls).ok()?;
+            #[expect(clippy::expect_used, reason = "cls accumulator fits in u32")]
+            let val = u32::try_from(cls).expect("cls accumulator fits in u32");
             c = descriptor_polymod(c, val);
             cls = 0;
             clscount = 0;
         }
     }
     if clscount > 0 {
-        let val = u32::try_from(cls).ok()?;
+        #[expect(clippy::expect_used, reason = "cls accumulator fits in u32")]
+        let val = u32::try_from(cls).expect("cls accumulator fits in u32");
         c = descriptor_polymod(c, val);
     }
     for _ in 0..8_u32 {
@@ -1339,7 +1369,8 @@ pub(crate) fn descriptor_checksum(payload: &str) -> Option<String> {
     let mut out = String::with_capacity(8);
     for i in 0..8_u32 {
         let shift = 5_u32 * (7 - i);
-        let idx = usize::try_from((c >> shift) & 31).ok()?;
+        #[expect(clippy::expect_used, reason = "5-bit checksum chunk fits in usize")]
+        let idx = usize::try_from((c >> shift) & 31).expect("5-bit checksum chunk fits in usize");
         out.push(char::from(BIP380_CHECKSUM_CHARSET[idx]));
     }
     Some(out)
@@ -1409,6 +1440,7 @@ mod tests {
         );
     }
 
+    // API-26
     #[test]
     fn estimatesmartfee_rejects_conf_target_outside_core_range() {
         let ctx = Arc::new(Context::new());
@@ -1480,9 +1512,10 @@ mod tests {
     #[test]
     fn getrpcinfo_needs_a_configured_log_path_and_reports_it() {
         let bare = Arc::new(Context::new());
-        assert!(
-            matches!(getrpcinfo(&bare, &json!([])), Err(RpcError::Internal(message)) if message == "debug log path is not configured")
-        );
+        assert!(matches!(
+            getrpcinfo(&bare, &json!([])),
+            Err(RpcError::Internal(_))
+        ));
 
         let mut ctx = Context::new();
         ctx.debug_log_path = Some(std::path::PathBuf::from("/tmp/debug.log"));

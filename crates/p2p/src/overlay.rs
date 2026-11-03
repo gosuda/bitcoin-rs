@@ -1,4 +1,3 @@
-//! Opt-in transport setup. Successful streams enter the ordinary P2P session owner.
 use bitcoin_rs_primitives::{PeerAddress, PeerEndpoint, PeerNetwork};
 use parking_lot::RwLock;
 use std::{
@@ -212,12 +211,11 @@ impl OverlayTransport {
         let stream = match endpoint.address() {
             PeerAddress::Ip(_) => {
                 if let Some(proxy) = self.config.proxy {
-                    socks(
-                        proxy,
-                        endpoint,
-                        self.config.randomize_credentials,
-                        cancelled,
-                    )
+                    if self.config.randomize_credentials {
+                        socks_isolated(proxy, endpoint, cancelled)
+                    } else {
+                        socks_unauthenticated(proxy, endpoint, cancelled)
+                    }
                 } else {
                     TcpStream::connect_timeout(
                         &endpoint
@@ -227,14 +225,17 @@ impl OverlayTransport {
                     )
                 }
             }
-            PeerAddress::Onion(_) => socks(
-                self.config
+            PeerAddress::Onion(_) => {
+                let onion_proxy = self
+                    .config
                     .onion_proxy
-                    .ok_or_else(|| invalid("onion route disabled"))?,
-                endpoint,
-                self.config.randomize_credentials,
-                cancelled,
-            ),
+                    .ok_or_else(|| invalid("onion route disabled"))?;
+                if self.config.randomize_credentials {
+                    socks_isolated(onion_proxy, endpoint, cancelled)
+                } else {
+                    socks_unauthenticated(onion_proxy, endpoint, cancelled)
+                }
+            }
             PeerAddress::I2p(_) => return self.sam_connect(endpoint, cancelled),
         }?;
         Ok(Connected {
@@ -296,7 +297,7 @@ impl OverlayTransport {
     pub(crate) fn start(
         self: &Arc<Self>,
         shared: &crate::listener::ConnectionShared,
-        shutdown: &Arc<AtomicBool>,
+        shutdown: &bitcoin_rs_chain::LatchReader,
     ) -> io::Result<Vec<std::thread::JoinHandle<Result<(), crate::listener::ListenerError>>>> {
         self.config.validate()?;
         let i2p_key = if self.config.i2p_accept {
@@ -315,18 +316,20 @@ impl OverlayTransport {
         } else {
             None
         };
+        let abort_latch = shutdown.child();
+        let abort_reader = abort_latch.reader();
         let mut workers = Vec::new();
         if let Some(address) = self.config.i2p_sam
             && self.config.allows(PeerNetwork::I2p)
         {
             let owner = Arc::clone(self);
             let shared = shared.clone();
-            let shutdown = Arc::clone(shutdown);
+            let sam_shutdown = abort_reader.clone();
             workers.push(
                 std::thread::Builder::new()
                     .name("bitcoin-rs-ivnp-sam".into())
                     .spawn(move || {
-                        owner.run_sam(address, i2p_key, &shared, &shutdown);
+                        owner.run_sam(address, i2p_key, &shared, &sam_shutdown);
                         Ok(())
                     })?,
             );
@@ -334,7 +337,7 @@ impl OverlayTransport {
         if let Some(address) = self.config.tor_control {
             let owner = Arc::clone(self);
             let shared = shared.clone();
-            let tor_shutdown = Arc::clone(shutdown);
+            let tor_shutdown = abort_reader;
             match std::thread::Builder::new()
                 .name("bitcoin-rs-tor-control".into())
                 .spawn(move || {
@@ -343,7 +346,7 @@ impl OverlayTransport {
                 }) {
                 Ok(worker) => workers.push(worker),
                 Err(error) => {
-                    shutdown.store(true, Ordering::Release);
+                    abort_latch.trigger();
                     for worker in workers {
                         let _ = worker.join();
                     }
@@ -499,7 +502,23 @@ fn connect(
     }
 }
 
-fn socks(
+fn socks_unauthenticated(
+    proxy: SocketAddr,
+    endpoint: PeerEndpoint,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<TcpStream> {
+    socks_impl(proxy, endpoint, false, cancelled)
+}
+
+fn socks_isolated(
+    proxy: SocketAddr,
+    endpoint: PeerEndpoint,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<TcpStream> {
+    socks_impl(proxy, endpoint, true, cancelled)
+}
+
+fn socks_impl(
     proxy: SocketAddr,
     endpoint: PeerEndpoint,
     isolate: bool,
@@ -578,11 +597,4 @@ fn socks(
     };
     setup.read(&mut vec![0; length + 2])?;
     setup.finish()
-}
-
-fn pause(cancelled: &dyn Fn() -> bool, delay: Duration) {
-    let deadline = Instant::now() + delay;
-    while !cancelled() && Instant::now() < deadline {
-        std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
-    }
 }

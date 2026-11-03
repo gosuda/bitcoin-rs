@@ -12,6 +12,42 @@ fn entry(height: u32, hash: &str, offset: u64, len: usize) -> ManifestBlock {
 }
 
 #[test]
+fn offline_import_assume_valid_height_bail_is_typed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = offline_import_config(&dir.path().join("node"));
+    config.validation.assume_valid_height = 100;
+    let error = run_offline_import(
+        config,
+        std::path::Path::new("corpus"),
+        std::path::Path::new("manifest"),
+        std::path::Path::new("state"),
+    )
+    .expect_err("nonzero assume-valid height must refuse offline import");
+    assert!(
+        matches!(error, OfflineImportError::AssumeValidHeightRequired),
+        "assume-valid refusal must be OfflineImportError::AssumeValidHeightRequired, got: {error:?}"
+    );
+}
+
+#[test]
+fn offline_import_auxiliary_indexes_bail_is_typed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = offline_import_config(&dir.path().join("node"));
+    config.indexes.txindex = true;
+    let error = run_offline_import(
+        config,
+        std::path::Path::new("corpus"),
+        std::path::Path::new("manifest"),
+        std::path::Path::new("state"),
+    )
+    .expect_err("enabled txindex must refuse offline import");
+    assert!(
+        matches!(error, OfflineImportError::AuxiliaryIndexesRequiredOff),
+        "index refusal must be OfflineImportError::AuxiliaryIndexesRequiredOff, got: {error:?}"
+    );
+}
+
+#[test]
 fn manifest_shape_rejects_gaps() {
     let doc = Manifest {
         network: "mainnet".to_owned(),
@@ -234,11 +270,7 @@ fn manifest_network_matches_configured_identity() {
 #[test]
 fn offline_import_pins_full_validation_mode() {
     use bitcoin_rs_chainstate::ValidationMode;
-    for inherited in [
-        ValidationMode::Full,
-        ValidationMode::AssumeValid,
-        ValidationMode::Fast,
-    ] {
+    for inherited in [ValidationMode::Full, ValidationMode::AssumeValid] {
         assert_eq!(
             resolve_offline_validation_mode(inherited),
             ValidationMode::Full
@@ -325,7 +357,7 @@ fn two_block_archive() -> TwoBlockArchive {
     hasher.update(&corpus);
     let manifest = format!(
         r#"{{"schema":"core-framed-archive-manifest-v1","network":"regtest","network_magic":"fabfb5da","start_height":0,"stop_height":1,"archive_sha256":"{digest}","archive_bytes":{bytes},"blocks":[{blocks}]}}"#,
-        digest = bitcoin_rs_primitives::encode::hex_encode(&hasher.finalize()),
+        digest = bitcoin_rs_primitives::hex::hex_encode(&hasher.finalize()),
         bytes = corpus.len(),
         blocks = entries.join(",")
     );
@@ -460,5 +492,8 @@ fn manifest_read_refuses_oversized_input_without_buffering_it() {
     std::fs::write(&path, [b' '; 17]).expect("manifest");
     assert_eq!(read_bounded(&path, 17).expect("at bound").len(), 17);
     let error = read_bounded(&path, 16).expect_err("oversized manifest");
-    assert!(error.to_string().contains("byte bound"), "{error}");
+    assert!(
+        matches!(error, OfflineImportError::ManifestExceedsBound),
+        "{error:?}"
+    );
 }

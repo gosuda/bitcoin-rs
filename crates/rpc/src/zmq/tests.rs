@@ -3,6 +3,8 @@ use super::*;
 use std::thread;
 #[cfg(feature = "zmq")]
 use std::time::{Duration, Instant};
+#[cfg(feature = "zmq")]
+type TestResult<T = ()> = std::result::Result<T, crate::test_error::TestError>;
 
 #[cfg(feature = "zmq")]
 fn endpoint(endpoint: impl Into<String>, topics: Vec<ZmqTopic>, hwm: u32) -> ZmqEndpointConfig {
@@ -23,20 +25,17 @@ fn rejects_zero_zmq_hwm_before_socket_binding() {
     let Err(error) = validate_endpoint_configs(std::slice::from_ref(&config)) else {
         panic!("zero HWM must fail configuration validation");
     };
-    assert!(
-        error.to_string().contains("ZMQ HWM must be positive"),
-        "{error}"
-    );
+    assert!(matches!(error, ZmqConfigError::NonPositiveHwm));
 
     #[cfg(feature = "zmq")]
     {
         let Err(error) = SocketZmqPublisher::bind(&[config]) else {
             panic!("zero HWM must also fail socket binding");
         };
-        assert!(
-            error.to_string().contains("ZMQ HWM must be positive"),
-            "{error}"
-        );
+        assert!(matches!(
+            error,
+            ZmqBindError::Config(ZmqConfigError::NonPositiveHwm)
+        ));
     }
 }
 
@@ -74,6 +73,7 @@ fn sequence_event_payload_uses_core_hash_orientation_and_label() {
     );
 }
 
+// MPL-03
 #[test]
 fn mempool_event_payloads_carry_reversed_txid_label_and_le_sequence() {
     let txid = Txid(Hash256::from_le_bytes(&[
@@ -120,7 +120,7 @@ fn socket_publisher_rejects_duplicate_endpoint_groups() {
 
 #[cfg(feature = "zmq")]
 #[test]
-fn socket_publisher_reports_rawtx_interest_from_configured_topics() -> anyhow::Result<()> {
+fn socket_publisher_reports_rawtx_interest_from_configured_topics() -> TestResult {
     let without_rawtx = SocketZmqPublisher::bind(&[endpoint(
         "inproc://bitcoin-rs-zmq-hashblock-only",
         vec![ZmqTopic::HashBlock],
@@ -152,7 +152,7 @@ fn socket_publisher_reports_rawtx_interest_from_configured_topics() -> anyhow::R
 
 #[cfg(feature = "zmq")]
 #[test]
-fn socket_publisher_delivers_pub_sub_multipart_notification() -> anyhow::Result<()> {
+fn socket_publisher_delivers_pub_sub_multipart_notification() -> TestResult {
     let socket_dir = tempfile::tempdir()?;
     let socket_path = socket_dir.path().join("hashblock.sock");
     let endpoint = format!("ipc://{}", socket_path.display());
@@ -189,12 +189,12 @@ fn socket_publisher_delivers_pub_sub_multipart_notification() -> anyhow::Result<
         }
     }
 
-    anyhow::bail!("timed out waiting for ZMQ PUB/SUB notification")
+    Err("timed out waiting for ZMQ PUB/SUB notification".into())
 }
 
 #[cfg(feature = "zmq")]
 #[test]
-fn socket_publisher_delivers_shared_sequence_stream() -> anyhow::Result<()> {
+fn socket_publisher_delivers_shared_sequence_stream() -> TestResult {
     let socket_dir = tempfile::tempdir()?;
     let socket_path = socket_dir.path().join("sequence.sock");
     let endpoint = format!("ipc://{}", socket_path.display());
@@ -243,7 +243,7 @@ fn socket_publisher_delivers_shared_sequence_stream() -> anyhow::Result<()> {
 
 #[cfg(feature = "zmq")]
 #[test]
-fn socket_publisher_enumerates_live_notifiers_in_publication_order() -> anyhow::Result<()> {
+fn socket_publisher_enumerates_live_notifiers_in_publication_order() -> TestResult {
     use std::sync::Arc;
 
     let shared = "inproc://bitcoin-rs-zmq-enumerate-shared".to_owned();
@@ -295,7 +295,7 @@ fn non_socket_publishers_report_no_live_notifiers() {
 
 #[cfg(feature = "zmq")]
 #[test]
-fn socket_publisher_deduplicates_exact_topic_endpoint_pairs() -> anyhow::Result<()> {
+fn socket_publisher_deduplicates_exact_topic_endpoint_pairs() -> TestResult {
     use std::sync::Arc;
 
     let shared = "inproc://bitcoin-rs-zmq-dedupe-shared".to_owned();

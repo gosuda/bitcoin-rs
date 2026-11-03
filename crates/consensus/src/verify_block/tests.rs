@@ -151,7 +151,10 @@ fn live_and_non_contextual_checks_reject_invalid_transactions_with_valid_merkle_
     ];
     assert_eq!(
         verify_block_non_contextual(&Block::default()),
-        Err(ConsensusError::EmptyBlock)
+        Err(ConsensusError::BlockBaseSize {
+            size: 81,
+            max: 1_000_000,
+        })
     );
     for (mutate, error) in cases {
         let mut txs = vec![coinbase_tx(), spend_tx(1, vec![])];
@@ -202,6 +205,49 @@ fn non_contextual_size_and_aggregate_legacy_sigops_have_core_boundaries() {
             size: 1_000_001,
             max: 1_000_000
         })
+    );
+}
+
+#[test]
+fn verify_block_rules_rejects_coinbase_empty_outputs() {
+    let mut coinbase = coinbase_tx();
+    coinbase.outputs.clear();
+    let block = block_with_transactions(vec![coinbase]);
+    assert_eq!(
+        verify_block_rules(&block),
+        Err(ConsensusError::EmptyOutputs),
+        "coinbase with empty outputs must be rejected by verify_block_rules"
+    );
+}
+
+#[test]
+fn verify_block_rules_enforces_legacy_sigop_budget_boundaries() {
+    let mut coinbase = coinbase_tx();
+    coinbase.outputs[0].script_pubkey =
+        Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 19_999]);
+    assert_eq!(
+        verify_block_rules(&block_with_transactions(vec![coinbase.clone()])),
+        Ok(()),
+        "79,996 legacy sigop cost is within budget"
+    );
+
+    coinbase.outputs[0].script_pubkey =
+        Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 20_000]);
+    assert_eq!(
+        verify_block_rules(&block_with_transactions(vec![coinbase.clone()])),
+        Ok(()),
+        "80,000 legacy sigop cost is at exact budget"
+    );
+
+    coinbase.outputs[0].script_pubkey =
+        Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 20_001]);
+    assert_eq!(
+        verify_block_rules(&block_with_transactions(vec![coinbase])),
+        Err(ConsensusError::SigopsLimit {
+            cost: 80_004,
+            max: 80_000,
+        }),
+        "80,004 legacy sigop cost exceeds budget"
     );
 }
 
@@ -327,7 +373,7 @@ fn structural_block_rules_hold_under_both_activation_states() {
         (vec![coinbase_tx()], Ok(())),
         (
             vec![coinbase_tx(), coinbase_tx()],
-            Err(ConsensusError::ExtraCoinbase { tx_index: 1 }),
+            Err(ConsensusError::MerkleMutation),
         ),
         (
             vec![spend_tx(1, Vec::new())],
@@ -335,7 +381,7 @@ fn structural_block_rules_hold_under_both_activation_states() {
         ),
         (
             vec![duplicated.clone(), duplicated.clone()],
-            Err(ConsensusError::MissingCoinbase),
+            Err(ConsensusError::MerkleMutation),
         ),
         (
             vec![
@@ -402,9 +448,84 @@ fn witness_without_commitment_and_oversized_blocks_are_rejected() {
         assert!(
             matches!(
                 check_block_rules(&heavy_block, context),
-                Err(ConsensusError::BlockWeight { .. })
+                Err(ConsensusError::BlockBaseSize { .. })
             ),
-            "segwit_active {segwit_active}"
+            "a block over the 1,000,000-byte stripped limit is bad-blk-length, \
+             segwit_active {segwit_active}"
+        );
+    }
+}
+
+#[test]
+fn wrong_merkle_root_precedes_the_second_coinbase() {
+    let mut block = block_with_transactions(vec![coinbase_tx()]);
+    block.txs.push(sixty_four_byte_coinbase());
+    let mut hashes: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
+    let Some((root, mutated)) = merkle_root_and_mutation(&mut hashes) else {
+        panic!("two distinct coinbases have a merkle root");
+    };
+    let two_coinbase_root: Hash256 = root.into();
+    assert!(!mutated, "distinct coinbases are not a merkle mutation");
+    assert_ne!(
+        two_coinbase_root, block.header.merkle_root,
+        "the fixture header must keep the single-coinbase root"
+    );
+    for segwit_active in [false, true] {
+        assert_eq!(
+            check_block_rules(&block, BlockRuleContext { segwit_active }),
+            Err(ConsensusError::MerkleRoot),
+            "Core CheckBlock reports the wrong merkle root before the coinbase count, \
+             segwit_active {segwit_active}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_inputs_precede_the_block_weight_limit() {
+    let reserved = vec![0u8; 32];
+    let mut spend = spend_tx(1, vec![vec![7_u8; 4_000_000]]);
+    let first = spend.inputs[0].clone();
+    spend.inputs.push(first);
+    let mut coinbase = coinbase_tx();
+    coinbase.inputs[0].witness = Witness::from_stack(vec![reserved.clone()]);
+    let mut txs = vec![coinbase, spend];
+    let commitment = compute_witness_commitment(&txs, &reserved);
+    txs[0].outputs.push(commitment_output(commitment));
+    let block = block_with_transactions(txs);
+    assert!(
+        block.weight() > super::MAX_BLOCK_WEIGHT,
+        "the fixture must also break the block weight limit so only the order can decide"
+    );
+    for segwit_active in [false, true] {
+        assert_eq!(
+            check_block_rules(&block, BlockRuleContext { segwit_active }),
+            Err(ConsensusError::DuplicateInput { input_index: 1 }),
+            "Core CheckTransaction runs duplicated inputs before Core CheckWitnessMalleation \
+             and the weight limit, segwit_active {segwit_active}"
+        );
+    }
+}
+
+#[test]
+#[expect(clippy::expect_used)]
+fn the_stripped_size_limit_precedes_the_block_weight_limit() {
+    let mut tx = coinbase_tx();
+    tx.outputs[0].script_pubkey = Script::from_bytes(vec![0; 1_000_001]);
+    let block = block_with_transactions(vec![tx]);
+    assert!(
+        block.weight() > super::MAX_BLOCK_WEIGHT,
+        "the fixture must also break the block weight limit so only the order can decide"
+    );
+    let size = u64::try_from(block.stripped_size()).expect("fixture stripped size fits u64");
+    for segwit_active in [false, true] {
+        assert_eq!(
+            check_block_rules(&block, BlockRuleContext { segwit_active }),
+            Err(ConsensusError::BlockBaseSize {
+                size,
+                max: 1_000_000,
+            }),
+            "Core CheckBlock reports the stripped size limit before the weight limit, \
+             segwit_active {segwit_active}"
         );
     }
 }
@@ -460,7 +581,7 @@ fn assert_sixty_four_byte_mutation(txs: Vec<Tx>, label: &str) {
             "rules, {label}, segwit_active {segwit_active}"
         );
         assert_eq!(
-            check_block_body_binding(&block, segwit_active),
+            check_block_body_binding(&block, BlockRuleContext { segwit_active }),
             Err(ConsensusError::SixtyFourByteMutation),
             "binding, {label}, segwit_active {segwit_active}"
         );
@@ -496,7 +617,7 @@ fn binding_reports_a_wrong_root_before_the_sixty_four_byte_mutation() {
     block.header.merkle_root = Hash256::from_le_bytes(&[0xff; 32]);
     for segwit_active in [false, true] {
         assert_eq!(
-            check_block_body_binding(&block, segwit_active),
+            check_block_body_binding(&block, BlockRuleContext { segwit_active }),
             Err(ConsensusError::MerkleRoot),
             "segwit_active {segwit_active}"
         );
@@ -515,7 +636,7 @@ fn sixty_byte_body_without_coinbase_stays_missing_coinbase_and_binds() {
             "segwit_active {segwit_active}"
         );
         assert_eq!(
-            check_block_body_binding(&block, segwit_active),
+            check_block_body_binding(&block, BlockRuleContext { segwit_active }),
             Ok(()),
             "a coinbase-less body of another size is bound to its header"
         );
@@ -540,7 +661,7 @@ fn a_body_with_a_coinbase_is_never_a_sixty_four_byte_mutation() {
                 "segwit_active {segwit_active}"
             );
             assert_eq!(
-                check_block_body_binding(&block, segwit_active),
+                check_block_body_binding(&block, BlockRuleContext { segwit_active }),
                 Ok(()),
                 "segwit_active {segwit_active}"
             );

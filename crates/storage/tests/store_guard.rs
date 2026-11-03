@@ -3,7 +3,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+use crate::support::TestResult;
 
 struct Probe {
     live: Arc<AtomicBool>,

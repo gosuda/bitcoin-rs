@@ -1,5 +1,3 @@
-//! Shared parse-once block facts for native validation.
-
 use bitcoin_rs_primitives::{
     Header, Tx, TxOut, Txid, Wtxid,
     encode::{double_sha256, finalize_double_sha256},

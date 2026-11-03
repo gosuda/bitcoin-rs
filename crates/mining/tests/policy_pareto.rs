@@ -2,8 +2,8 @@
 
 use crate::support::fixtures as common;
 
+use crate::support::TestError;
 use std::collections::{HashMap, HashSet};
-use std::error::Error;
 
 use bitcoin_rs_mempool::{ChunkView, EntryId, Mempool};
 use bitcoin_rs_mining::{
@@ -38,37 +38,31 @@ fn selected(candidate: &Candidate) -> Vec<Txid> {
 }
 
 #[test]
-fn selects_independent_transactions_in_modified_fee_order() -> Result<(), Box<dyn Error>> {
+fn selects_independent_transactions_in_modified_fee_order() -> Result<(), TestError> {
     let mut mempool = zero_fee_pool();
+    let mut expected = Vec::with_capacity(50);
     for index in 0_u32..50 {
         let fee = u64::from(50_u32 - index) * 1_000;
+        let transaction = tx(u8::try_from(index)?, 1_000, None);
+        expected.push(transaction.txid());
         insert(
             &mut mempool,
-            tx(u8::try_from(index)?, 1_000, None),
-            100 + (index % 5),
+            transaction,
+            200,
             fee,
             u64::from(index),
             800_000,
         )?;
     }
 
-    let snapshot = mempool.mining_snapshot();
     let candidate = assemble_candidate(&context(), &mempool, PAYOUT)?;
     assert_eq!(candidate.transactions.len(), 50);
-
-    assert_eq!(
-        selected(&candidate),
-        snapshot
-            .entries
-            .iter()
-            .map(|entry| entry.txid)
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(selected(&candidate), expected);
     Ok(())
 }
 
 #[test]
-fn package_selection_is_dependency_closed_and_topological() -> Result<(), Box<dyn Error>> {
+fn package_selection_is_dependency_closed_and_topological() -> Result<(), TestError> {
     let mut mempool = zero_fee_pool();
     let parent = tx(1, 50_000, None);
     let parent_txid = parent.txid();
@@ -91,7 +85,7 @@ fn package_selection_is_dependency_closed_and_topological() -> Result<(), Box<dy
 }
 
 #[test]
-fn modified_fees_rank_but_actual_fees_fund_coinbase() -> Result<(), Box<dyn Error>> {
+fn modified_fees_rank_but_actual_fees_fund_coinbase() -> Result<(), TestError> {
     let mut mempool = zero_fee_pool();
     let low = tx(1, 1_000, None);
     let low_txid = low.txid();
@@ -115,7 +109,7 @@ fn modified_fees_rank_but_actual_fees_fund_coinbase() -> Result<(), Box<dyn Erro
 }
 
 #[test]
-fn weight_size_and_sigop_limits_are_independent() -> Result<(), Box<dyn Error>> {
+fn weight_size_and_sigop_limits_are_independent() -> Result<(), TestError> {
     let cases = [
         (
             1_u8,
@@ -160,8 +154,8 @@ fn weight_size_and_sigop_limits_are_independent() -> Result<(), Box<dyn Error>> 
 }
 
 #[test]
-fn unconfirmed_bip68_lock_skips_its_whole_chunk_only_while_csv_is_active()
--> Result<(), Box<dyn Error>> {
+fn unconfirmed_bip68_lock_skips_its_whole_chunk_only_while_csv_is_active() -> Result<(), TestError>
+{
     for (csv_active, expected) in [(true, 0), (false, 2)] {
         let mut pool = zero_fee_pool();
         let parent_tx = tx(1, 1_000, None);
@@ -188,7 +182,7 @@ fn unconfirmed_bip68_lock_skips_its_whole_chunk_only_while_csv_is_active()
 }
 
 #[test]
-fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dyn Error>> {
+fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), TestError> {
     let empty = zero_fee_pool();
     let reservation = assemble_candidate(&context(), &empty, PAYOUT)?;
 
@@ -240,7 +234,7 @@ fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dy
 }
 
 #[test]
-fn coinbase_reservation_accepts_exact_limits_and_rejects_one_over() -> Result<(), Box<dyn Error>> {
+fn coinbase_reservation_accepts_exact_limits_and_rejects_one_over() -> Result<(), TestError> {
     let payout = vec![0xac];
     let empty = zero_fee_pool();
     let reservation = assemble_candidate(&context(), &empty, &payout)?;
@@ -292,7 +286,7 @@ fn coinbase_reservation_accepts_exact_limits_and_rejects_one_over() -> Result<()
 }
 
 #[test]
-fn non_final_packages_are_skipped() -> Result<(), Box<dyn Error>> {
+fn non_final_packages_are_skipped() -> Result<(), TestError> {
     let mut non_final = tx(2, 1_000, None);
     non_final.lock_time = LockTime::from_consensus(500_000_100);
     for input in &mut non_final.inputs {
@@ -316,7 +310,7 @@ fn non_final_packages_are_skipped() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn oversized_residual_package_is_skipped_atomically() -> Result<(), Box<dyn Error>> {
+fn oversized_residual_package_is_skipped_atomically() -> Result<(), TestError> {
     let parent_txid = tx(1, 1_000, None).txid();
     let mut child_tx = tx(2, 1_000, Some(parent_txid));
     child_tx.lock_time = LockTime::ZERO;
@@ -333,8 +327,8 @@ fn oversized_residual_package_is_skipped_atomically() -> Result<(), Box<dyn Erro
 }
 
 #[test]
-fn stops_candidate_package_construction_once_a_positive_dimension_is_full()
--> Result<(), Box<dyn Error>> {
+fn stops_candidate_package_construction_once_a_positive_dimension_is_full() -> Result<(), TestError>
+{
     let empty = zero_fee_pool();
     let reservation = assemble_candidate(&context(), &empty, PAYOUT)?;
     for context in [
@@ -465,7 +459,7 @@ fn candidate_positions(candidate: &Candidate) -> HashMap<Txid, usize> {
 
 #[test]
 fn negative_modified_fee_standalone_chunk_is_excluded_while_same_size_positive_is_included()
--> Result<(), Box<dyn Error>> {
+-> Result<(), TestError> {
     let mut pool = zero_fee_pool();
     let negative = tx(10, 1_000, None);
     let negative_txid = negative.txid();
@@ -482,7 +476,7 @@ fn negative_modified_fee_standalone_chunk_is_excluded_while_same_size_positive_i
 }
 
 #[test]
-fn negative_modified_fee_chunk_is_excluded_as_a_whole() -> Result<(), Box<dyn Error>> {
+fn negative_modified_fee_chunk_is_excluded_as_a_whole() -> Result<(), TestError> {
     let parent_txid = tx(12, 1_000, None).txid();
     let child_txid = tx(13, 1_000, Some(parent_txid)).txid();
 
@@ -513,7 +507,7 @@ fn negative_modified_fee_chunk_is_excluded_as_a_whole() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn zero_fee_parent_is_rescued_by_child_aggregate() -> Result<(), Box<dyn Error>> {
+fn zero_fee_parent_is_rescued_by_child_aggregate() -> Result<(), TestError> {
     let parent_txid = tx(14, 1_000, None).txid();
     let child_txid = tx(15, 1_000, Some(parent_txid)).txid();
 
@@ -539,7 +533,7 @@ fn zero_fee_parent_is_rescued_by_child_aggregate() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn negative_modified_parent_is_rescued_by_child_fees() -> Result<(), Box<dyn Error>> {
+fn negative_modified_parent_is_rescued_by_child_fees() -> Result<(), TestError> {
     let parent_txid = tx(16, 1_000, None).txid();
     let child_txid = tx(17, 1_000, Some(parent_txid)).txid();
 
@@ -567,7 +561,7 @@ fn negative_modified_parent_is_rescued_by_child_fees() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn tail_fills_weight_with_prefix_of_skipped_chunk() -> Result<(), Box<dyn Error>> {
+fn tail_fills_weight_with_prefix_of_skipped_chunk() -> Result<(), TestError> {
     let empty = zero_fee_pool();
     let reservation = assemble_candidate(&context(), &empty, PAYOUT)?;
     let ctx = limits(reservation.weight + 1_000, 4_000_000, 80_000);
@@ -589,7 +583,7 @@ fn tail_fills_weight_with_prefix_of_skipped_chunk() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn tail_prefix_rate_uses_exact_charged_weight_not_summed_vsize() -> Result<(), Box<dyn Error>> {
+fn tail_prefix_rate_uses_exact_charged_weight_not_summed_vsize() -> Result<(), TestError> {
     let empty = zero_fee_pool();
     let reservation = assemble_candidate(&context(), &empty, PAYOUT)?;
     let ctx = limits(reservation.weight + 5_000, 4_000_000, 80_000);
@@ -616,7 +610,7 @@ fn tail_prefix_rate_uses_exact_charged_weight_not_summed_vsize() -> Result<(), B
 }
 
 #[test]
-fn tail_skips_child_when_parent_prefix_cannot_fit() -> Result<(), Box<dyn Error>> {
+fn tail_skips_child_when_parent_prefix_cannot_fit() -> Result<(), TestError> {
     let empty = zero_fee_pool();
     let reservation = assemble_candidate(&context(), &empty, PAYOUT)?;
     let ctx = limits(reservation.weight + 1_000, 4_000_000, 80_000);
@@ -639,7 +633,7 @@ fn tail_skips_child_when_parent_prefix_cannot_fit() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn tail_does_not_rescue_prefix_from_non_final_chunk() -> Result<(), Box<dyn Error>> {
+fn tail_does_not_rescue_prefix_from_non_final_chunk() -> Result<(), TestError> {
     let parent_txid = tx(40, 1_000, None).txid();
     let mut child = tx(41, 1_000, Some(parent_txid));
     child.lock_time = LockTime::from_consensus(500_000_100);
@@ -665,15 +659,40 @@ fn tail_does_not_rescue_prefix_from_non_final_chunk() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+fn policy_pareto_cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(1024)
+}
+
 proptest! {
+    #![proptest_config(ProptestConfig { cases: policy_pareto_cases(), ..ProptestConfig::default() })]
+
     #[test]
     fn independent_selection_is_deterministic(
-        fees in prop::collection::vec(1_000_u64..50_000, 1..30),
+        fees in prop::collection::vec(
+            prop_oneof![
+                6 => 1_000_u64..50_000,
+                1 => Just(0_u64),
+                1 => Just(2_u64.pow(50)),
+                1 => Just(1_u64),
+            ],
+            1..30,
+        ),
+        weights in prop::collection::vec(
+            prop_oneof![
+                6 => Just(400_u64),
+                1 => prop_oneof![Just(512_u64), Just(1_000), Just(4_000), Just(16_000), Just(40_000), Just(64_000)],
+            ],
+            1..30,
+        ),
     ) {
+        let count = fees.len().min(weights.len());
         let mut pool = zero_fee_pool();
-        for (index, fee) in fees.iter().enumerate() {
+        for index in 0..count {
             let label = u8::try_from(index).expect("proptest vec is bounded");
-            insert_forged(&mut pool, tx(label, 1_000, None), Forged::new(*fee, 400, 100))
+            insert_forged(&mut pool, tx(label, 1_000, None), consistent(fees[index], weights[index]))
                 .expect("pool admits fixture");
         }
         let left = assemble_candidate(&context(), &pool, PAYOUT).expect("left assembly");
@@ -697,7 +716,12 @@ proptest! {
     #[test]
     fn tail_pass_never_loses_fees_and_preserves_invariants(
         inputs in prop::collection::vec(
-            (0_u64..20_000, 400_u64..2_000, 0_usize..8, -5_000_i64..5_000),
+            (
+                prop_oneof![0_u64..20_000, Just(0_u64), Just(2_u64.pow(50))],
+                prop_oneof![400_u64..2_000, Just(400_u64), Just(10_000_u64)],
+                0_usize..32,
+                prop_oneof![-5_000_i64..5_000, Just(i64::MIN), Just(i64::MAX), Just(0)],
+            ),
             1..12,
         ),
     ) {
@@ -785,7 +809,7 @@ proptest! {
 }
 
 #[test]
-fn projected_selection_treats_staged_parent_as_confirmed_for_bip68() -> Result<(), Box<dyn Error>> {
+fn projected_selection_treats_staged_parent_as_confirmed_for_bip68() -> Result<(), TestError> {
     let parent_tx = tx(1, 1_000, None);
     let parent_txid = parent_tx.txid();
     let mut child_tx = tx(2, 1_000, Some(parent_txid));

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::{
     CommitRecords, DurableHead, DurableHeadStore, KvDurableHeadStore, KvStore, PersistFault,
-    StorageError,
+    ScriptAttestation, StorageError,
 };
 
 fn head(commit_id: u64, height: u32) -> DurableHead {
@@ -113,9 +113,6 @@ fn fjall_durable_head_faults_never_tear_the_state() -> Result<(), StorageError> 
     Ok(())
 }
 
-/// After a one-shot fault on the head commit, a reopened store shows either
-/// the complete old head or the complete new head — never absence, never a
-/// torn decode (`P2` at the storage boundary).
 fn fault_leaves_an_intact_head(fault: PersistFault) -> Result<(), StorageError> {
     let temp = tempfile::tempdir()?;
     let first = head(1, 1);
@@ -139,4 +136,355 @@ fn fault_leaves_an_intact_head(fault: PersistFault) -> Result<(), StorageError> 
         "fault {fault:?} left a torn head: {recovered:?} (commit outcome {outcome:?})"
     );
     Ok(())
+}
+
+fn open_store(
+    path: &std::path::Path,
+) -> Result<
+    (
+        Arc<bitcoin_rs_storage::FjallStore>,
+        KvDurableHeadStore<bitcoin_rs_storage::FjallStore>,
+    ),
+    StorageError,
+> {
+    let backend = Arc::new(bitcoin_rs_storage::FjallStore::open(path)?);
+    Ok((backend.clone(), KvDurableHeadStore::new(backend)))
+}
+
+fn batch_of(level: ScriptAttestation) -> CommitRecords<'static> {
+    CommitRecords {
+        attestation: Some(level),
+        ..CommitRecords::default()
+    }
+}
+
+// RCV-02
+#[test]
+fn a_commit_keeps_the_weakest_attestation_of_the_chain_so_far() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let (_backend, store) = open_store(temp.path())?;
+
+    let first = head(1, 1);
+    store.commit(None, &first, &batch_of(ScriptAttestation::Full))?;
+    assert_eq!(store.load_attestation(&first)?, ScriptAttestation::Full);
+
+    let second = head(2, 2);
+    store.commit(
+        Some(&first),
+        &second,
+        &batch_of(ScriptAttestation::AssumeValid),
+    )?;
+    assert_eq!(
+        store.load_attestation(&second)?,
+        ScriptAttestation::AssumeValid
+    );
+
+    let third = head(3, 3);
+    store.commit(Some(&second), &third, &batch_of(ScriptAttestation::Full))?;
+    assert_eq!(
+        store.load_attestation(&third)?,
+        ScriptAttestation::AssumeValid,
+        "executing scripts for a later block never repairs an earlier skipped one"
+    );
+
+    let fourth = head(4, 4);
+    store.commit(Some(&third), &fourth, &CommitRecords::default())?;
+    assert_eq!(
+        store.load_attestation(&fourth)?,
+        ScriptAttestation::AssumeValid,
+        "a replay that attests nothing carries the previous value to the new head"
+    );
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn a_head_committed_before_attestation_existed_reads_unattested_and_still_commits()
+-> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let (backend, store) = open_store(temp.path())?;
+    let legacy = head(7, 7);
+    let mut batch = backend.new_batch();
+    batch.put(
+        bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+        bitcoin_rs_storage::durable_head::DURABLE_HEAD_KEY,
+        &legacy.encode(),
+    );
+    backend.write_durable(batch)?;
+    assert_eq!(store.load()?, Some(legacy));
+    assert_eq!(
+        store.load_attestation(&legacy)?,
+        ScriptAttestation::Unattested
+    );
+
+    let next = head(8, 8);
+    store.commit(Some(&legacy), &next, &batch_of(ScriptAttestation::Full))?;
+    assert_eq!(
+        store.load_attestation(&next)?,
+        ScriptAttestation::Unattested,
+        "a weaker or unknown history is never upgraded by a stronger batch"
+    );
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn an_attestation_row_bound_to_another_head_reads_unattested() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let (_backend, store) = open_store(temp.path())?;
+    let first = head(1, 1);
+    store.commit(None, &first, &batch_of(ScriptAttestation::Full))?;
+    let other = head(2, 2);
+    assert_eq!(
+        store.load_attestation(&other)?,
+        ScriptAttestation::Unattested,
+        "the row names commit 1, so a different head cannot inherit it"
+    );
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn a_corrupt_attestation_row_fails_closed() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let (backend, store) = open_store(temp.path())?;
+    let first = head(1, 1);
+    store.commit(None, &first, &batch_of(ScriptAttestation::Full))?;
+    for corrupt in [&[0_u8; 3][..], &[1, 0, 0, 0, 0, 0, 0, 0, 9][..]] {
+        let mut batch = backend.new_batch();
+        batch.put(
+            bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+            bitcoin_rs_storage::SCRIPT_ATTESTATION_KEY,
+            corrupt,
+        );
+        backend.write_durable(batch)?;
+        assert!(
+            matches!(
+                store.load_attestation(&first),
+                Err(StorageError::IncompatibleData(_))
+            ),
+            "{corrupt:?} must be refused, never read as a weaker or stronger level"
+        );
+    }
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn attest_raises_only_the_current_head() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let (_backend, store) = open_store(temp.path())?;
+    let first = head(1, 1);
+    store.commit(None, &first, &batch_of(ScriptAttestation::AssumeValid))?;
+    store.attest(&first, ScriptAttestation::Full)?;
+    assert_eq!(store.load_attestation(&first)?, ScriptAttestation::Full);
+    let moved = head(2, 2);
+    store.commit(Some(&first), &moved, &CommitRecords::default())?;
+    assert!(
+        store.attest(&first, ScriptAttestation::Full).is_err(),
+        "a head that is no longer current cannot be attested"
+    );
+    Ok(())
+}
+
+// RCV-01, RCV-04
+#[test]
+fn rejects_reopen_with_corrupt_or_truncated_durable_head() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let (backend, store) = open_store(temp.path())?;
+    let valid = head(1, 1);
+    store.commit(None, &valid, &CommitRecords::default())?;
+    let encoded = valid.encode();
+    let cf = bitcoin_rs_storage::ColumnFamily::UtxoMeta;
+    let key = bitcoin_rs_storage::durable_head::DURABLE_HEAD_KEY;
+
+    let mut truncated = backend.new_batch();
+    truncated.put(cf, key, &encoded[..10]);
+    backend.write_durable(truncated)?;
+    assert!(matches!(
+        store.load(),
+        Err(StorageError::IncompatibleData(_))
+    ));
+
+    let mut bad_magic = encoded;
+    bad_magic[0] = b'X';
+    let mut batch = backend.new_batch();
+    batch.put(cf, key, &bad_magic);
+    backend.write_durable(batch)?;
+    assert!(matches!(
+        store.load(),
+        Err(StorageError::IncompatibleData(_))
+    ));
+
+    let mut bad_version = encoded;
+    bad_version[4] = 99;
+    let mut batch = backend.new_batch();
+    batch.put(cf, key, &bad_version);
+    backend.write_durable(batch)?;
+    assert!(matches!(
+        store.load(),
+        Err(StorageError::IncompatibleData(_))
+    ));
+
+    let mut bad_crc = encoded;
+    let last = bad_crc.len() - 1;
+    bad_crc[last] ^= 0xff;
+    let mut batch = backend.new_batch();
+    batch.put(cf, key, &bad_crc);
+    backend.write_durable(batch)?;
+    assert!(matches!(
+        store.load(),
+        Err(StorageError::IncompatibleData(_))
+    ));
+
+    Ok(())
+}
+
+// RCV-03, RCV-04
+#[test]
+fn crash_windows_failing_backend_writer_at_each_write_index_preserves_atomic_reopen()
+-> Result<(), StorageError> {
+    let cf = bitcoin_rs_storage::ColumnFamily::TxConfirmed;
+    let mut wrote_keys_before_fault = false;
+    for fail_index in 0..=5_u8 {
+        let temp = tempfile::tempdir()?;
+        let present;
+        {
+            let backend = Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?);
+            let mut prefix_batch = backend.new_batch();
+            for i in 0..fail_index {
+                prefix_batch.put(cf, &[i], &[i, i]);
+            }
+            backend.write_durable(prefix_batch)?;
+            if fail_index < 5 {
+                for i in 0..fail_index {
+                    assert_eq!(
+                        backend.get(cf, &[i])?.as_deref(),
+                        Some(&[i, i][..]),
+                        "fail_index {fail_index}: witness key {i} missing before the fault"
+                    );
+                }
+                if fail_index > 0 {
+                    wrote_keys_before_fault = true;
+                }
+                let mut full_batch = backend.new_batch();
+                for i in 0..5_u8 {
+                    full_batch.put(cf, &[i], &[i, i]);
+                }
+                backend.arm_persist_fault(PersistFault::LostApply);
+                let _ = backend.write_durable(full_batch);
+            }
+            present = key_states(&backend, cf)?;
+        }
+        let reopened = Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?);
+        let reopened_present = key_states(&reopened, cf)?;
+        let pre_batch: Vec<u8> = (0..fail_index).collect();
+        let post_batch: Vec<u8> = (0..5).collect();
+        assert!(
+            reopened_present == pre_batch || reopened_present == post_batch,
+            "fail_index {fail_index} reopened a torn state with keys {reopened_present:?} \
+             present; expected exactly {pre_batch:?} or {post_batch:?}"
+        );
+        assert_eq!(present, pre_batch);
+        assert_eq!(reopened_present, present);
+    }
+    assert!(
+        wrote_keys_before_fault,
+        "no fail_index run observed written keys before its fault"
+    );
+    Ok(())
+}
+
+fn validating_head(commit_id: u64, height: u32) -> DurableHead {
+    DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Validating {
+            base_height: 2,
+            base_hash: Hash256::from_le_bytes(&[0xB1; 32]),
+            expected_hash_serialized: Hash256::from_le_bytes(&[0xB2; 32]),
+            chain_tx_count: 3,
+            historical_height: 0,
+            historical_hash: Hash256::default(),
+            pending: None,
+            checkpoint: None,
+        },
+        commit_id,
+        height,
+        tip: Hash256::from_le_bytes(&[0xB0; 32]),
+        chain_tx_count: 10,
+        body_extent: None,
+        undo_extent: None,
+    }
+}
+
+#[cfg(feature = "fjall")]
+#[test]
+fn fjall_suffix_attestation_tracks_only_pending_validation_commits() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let store = Arc::new(KvDurableHeadStore::new(Arc::new(
+        bitcoin_rs_storage::FjallStore::open(temp.path())?,
+    )));
+    let base = validating_head(1, 2);
+    store.commit(None, &base, &CommitRecords::default())?;
+    assert_eq!(
+        store.load_suffix_attestation(&base)?,
+        ScriptAttestation::Full,
+        "installing the base leaves no suffix commit to distrust"
+    );
+    let skipped = validating_head(2, 3);
+    store.commit(
+        Some(&base),
+        &skipped,
+        &CommitRecords {
+            attestation: Some(ScriptAttestation::AssumeValid),
+            ..CommitRecords::default()
+        },
+    )?;
+    assert_eq!(
+        store.load_suffix_attestation(&skipped)?,
+        ScriptAttestation::AssumeValid
+    );
+    let executed = validating_head(3, 4);
+    store.commit(
+        Some(&skipped),
+        &executed,
+        &CommitRecords {
+            attestation: Some(ScriptAttestation::Full),
+            ..CommitRecords::default()
+        },
+    )?;
+    assert_eq!(
+        store.load_suffix_attestation(&executed)?,
+        ScriptAttestation::AssumeValid,
+        "a commit never raises the weakest suffix level"
+    );
+    let progress = validating_head(4, 4);
+    store.commit(Some(&executed), &progress, &CommitRecords::default())?;
+    assert_eq!(
+        store.load_suffix_attestation(&progress)?,
+        ScriptAttestation::AssumeValid,
+        "a status-only commit keeps the suffix level"
+    );
+    let finalized = head(5, 4);
+    store.commit(Some(&progress), &finalized, &CommitRecords::default())?;
+    assert_eq!(
+        store.load_suffix_attestation(&finalized)?,
+        ScriptAttestation::Unattested,
+        "the suffix row names only a pending-validation head"
+    );
+    Ok(())
+}
+
+fn key_states(
+    store: &Arc<bitcoin_rs_storage::FjallStore>,
+    cf: bitcoin_rs_storage::ColumnFamily,
+) -> Result<Vec<u8>, StorageError> {
+    let mut present = Vec::new();
+    for i in 0..5_u8 {
+        let value = store.get(cf, &[i])?;
+        if let Some(bytes) = value {
+            assert_eq!(bytes.as_slice(), &[i, i][..], "key {i} holds torn bytes");
+            present.push(i);
+        }
+    }
+    Ok(present)
 }

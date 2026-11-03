@@ -1,23 +1,17 @@
-//! BIP324 packet sealing and opening.
-//! A packet is the encrypted 3-byte contents length, then one header byte and
-//! the contents sealed together under the packet cipher, then the tag.
+#![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
 
 use super::cipher::{AuthFailed, FsChaCha20, FsChaCha20Poly1305, LENGTH_FIELD_LEN, TAG_LEN};
 
-/// Bytes of the header that precedes the contents inside the sealed body.
 pub(crate) const HEADER_LEN: usize = 1;
 
-/// Header bit marking a decoy packet the receiver discards.
 const IGNORE_BIT: u8 = 1 << 7;
 
-/// Largest contents length the 3-byte length field can express.
 const MAX_CONTENTS_LEN: usize = (1 << 24) - 1;
 
-/// Bytes a packet adds to its contents: length field, header byte and tag.
 pub(crate) const PACKET_OVERHEAD: usize = LENGTH_FIELD_LEN + HEADER_LEN + TAG_LEN;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum PacketError {
+pub enum PacketError {
     #[error("BIP324 packet contents of {0} bytes exceed the length field")]
     ContentsTooLarge(usize),
     #[error("BIP324 sealed body of {0} bytes is shorter than its header and tag")]
@@ -27,23 +21,20 @@ pub(crate) enum PacketError {
 }
 
 #[derive(Debug)]
-pub(crate) struct SendCipher {
+pub struct SendCipher {
     length: FsChaCha20,
     packet: FsChaCha20Poly1305,
 }
 
 impl SendCipher {
-    pub(crate) fn new(length_key: [u8; 32], packet_key: [u8; 32]) -> Self {
+    pub fn new(length_key: [u8; 32], packet_key: [u8; 32]) -> Self {
         Self {
             length: FsChaCha20::new(length_key),
             packet: FsChaCha20Poly1305::new(packet_key),
         }
     }
 
-    /// Seals one packet carrying `contents`. `aad` authenticates the garbage
-    /// sent before the first packet of a direction and is empty afterwards;
-    /// `ignore` marks a decoy.
-    pub(crate) fn seal(
+    pub fn seal(
         &mut self,
         contents: &[u8],
         aad: &[u8],
@@ -76,22 +67,19 @@ pub(crate) struct Opened<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) struct RecvCipher {
+pub struct RecvCipher {
     length: FsChaCha20,
     packet: FsChaCha20Poly1305,
 }
 
 impl RecvCipher {
-    pub(crate) fn new(length_key: [u8; 32], packet_key: [u8; 32]) -> Self {
+    pub fn new(length_key: [u8; 32], packet_key: [u8; 32]) -> Self {
         Self {
             length: FsChaCha20::new(length_key),
             packet: FsChaCha20Poly1305::new(packet_key),
         }
     }
 
-    /// Decrypts the next packet's length field: the contents length, which
-    /// sizes the sealed body (`HEADER_LEN + length + TAG_LEN` bytes) that
-    /// follows it.
     pub(crate) fn decrypt_length(&mut self, mut field: [u8; LENGTH_FIELD_LEN]) -> usize {
         self.length.crypt(&mut field);
         usize::from(field[0]) | (usize::from(field[1]) << 8) | (usize::from(field[2]) << 16)

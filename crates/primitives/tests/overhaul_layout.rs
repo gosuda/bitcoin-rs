@@ -1,5 +1,3 @@
-//! Scenario tests for the checked borrowed wire layout (`layout` module).
-
 #![expect(clippy::expect_used, reason = "test assertions")]
 
 use bitcoin_rs_primitives::layout::{ByteSpan, ParsedBlock, ParsedTransaction};
@@ -130,7 +128,7 @@ fn segwit_flag_rules_hold() {
         parsed
             .transactions()
             .iter()
-            .any(|tx| !tx.witness_spans().is_empty()),
+            .any(|tx| tx.inputs().iter().any(|input| input.witness_items() > 0)),
         "height 481824 carries witness data"
     );
 
@@ -155,30 +153,30 @@ fn segwit_flag_rules_hold() {
 }
 
 #[test]
-fn metadata_ranges_distinct_from_byte_spans() {
+fn witness_item_spans_resolve_and_match_the_materialized_witness() {
     let bytes = read_fixture(481_824);
     let parsed = ParsedBlock::parse_exact(&bytes).expect("segwit golden parses");
-    let transaction = parsed
-        .transactions()
-        .iter()
-        .find(|tx| !tx.witness_spans().is_empty())
-        .expect("a transaction with witness data");
-    let input = transaction
-        .inputs()
-        .iter()
-        .find(|input| !input.witness().is_empty())
-        .expect("an input with witness items");
-    let witness_range = input.witness().as_range();
-    assert!(witness_range.end <= transaction.witness_spans().len());
-    for index in witness_range {
-        assert!(
-            parsed
-                .span_bytes(transaction.witness_spans()[index])
-                .is_some(),
-            "witness item {index} span stays in bounds"
-        );
+    let materialized = parsed.materialize();
+    let mut checked_items = 0;
+    for (transaction, tx) in parsed.transactions().iter().zip(&materialized.txs) {
+        for (input_index, input) in tx.inputs.iter().enumerate() {
+            let spans: Vec<ByteSpan> = transaction.witness_item_spans(input_index).collect();
+            assert_eq!(
+                spans.len(),
+                input.witness.len(),
+                "layout item count equals the materialized witness length"
+            );
+            for (span, item) in spans.iter().zip(&input.witness) {
+                assert_eq!(
+                    parsed.span_bytes(*span),
+                    Some(item),
+                    "witness item span resolves to the materialized item bytes"
+                );
+                checked_items += 1;
+            }
+        }
     }
-    let _: Option<ByteSpan> = None;
+    assert!(checked_items > 0, "height 481824 carries witness data");
 }
 
 #[test]
@@ -235,4 +233,14 @@ fn parsed_transaction_txid_and_base_size_match_materialized_form() {
         segwit > 0 && segwit < compared,
         "the fixtures must exercise both encodings, got {segwit} SegWit of {compared}"
     );
+}
+
+#[test]
+fn stripped_parts_never_panics_on_truncated_or_boundary_segwit_tx() {
+    let raw = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    if let Ok(parsed) = ParsedTransaction::parse_exact(&raw) {
+        let _ = parsed.stripped_parts();
+        let _ = parsed.txid();
+        let _ = parsed.base_size();
+    }
 }

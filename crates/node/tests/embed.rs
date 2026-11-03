@@ -1,6 +1,7 @@
-use std::task::{Context, Poll, Waker};
+use bitcoin_rs_node::test_support::TestError;
 
-use anyhow::{Result, bail};
+type Result<T, E = TestError> = core::result::Result<T, E>;
+use crate::support::{block_on, p2sh_true_output, p2sh_true_spend_script_sig};
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_index::query_api::HistoricalQueryError;
@@ -9,8 +10,8 @@ use bitcoin_rs_node::ScriptIndexMode;
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, Node, NodeConfig, NodeError};
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx,
-    TxIn, TxOut, Txid, Witness, consensus_bytes,
+    Amount, Block, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn,
+    TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_script::push_int;
 
@@ -20,18 +21,7 @@ const SEED_BLOCK_INTERVAL: u32 = 600;
 const REGTEST_SUBSIDY_SATS: u64 = 50 * 100_000_000;
 const MEMPOOL_TX_FEE_SATS: u64 = 10_000;
 
-fn block_on<F: Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    let waker = Waker::noop();
-    let mut cx = Context::from_waker(waker);
-    loop {
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::yield_now(),
-        }
-    }
-}
-
+// EMB-06, EMB-07
 #[test]
 fn embedded_node_lifecycle_round_trip() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -218,7 +208,11 @@ fn assert_broadcast_and_lookups(node: &Node) -> Result<()> {
                 "the gate must name the missing capability: {message}"
             );
         }
-        other => bail!("expected the TxLookup gate error, got {other:?}"),
+        other => {
+            return Err(TestError::message(format!(
+                "expected the TxLookup gate error, got {other:?}"
+            )));
+        }
     }
     Ok(())
 }
@@ -256,16 +250,21 @@ fn wait_historical_transaction(
             Ok(answer) => return Ok(answer),
             Err(HistoricalQueryError::Retry | HistoricalQueryError::Unavailable(_)) => {}
             Err(HistoricalQueryError::Storage(message)) => {
-                bail!("historical index storage error while waiting: {message}")
+                return Err(TestError::message(format!(
+                    "historical index storage error while waiting: {message}"
+                )));
             }
         }
         if std::time::Instant::now() >= deadline {
-            bail!("historical index did not become ready in 60s");
+            return Err(TestError::message(
+                "historical index did not become ready in 60s",
+            ));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
+// IDX-12
 #[test]
 fn embedded_node_historical_prefix_queries() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -288,7 +287,7 @@ fn embedded_node_historical_prefix_queries() -> Result<()> {
     let known_tx = seed_coinbase(1);
     let known_txid = known_tx.txid();
     let known_outpoint = OutPoint::new(known_txid, 0);
-    let script = ScriptHash::from_script_bytes(&[0x51]);
+    let script = ScriptHash::from_script_bytes(known_tx.outputs[0].script_pubkey.as_bytes());
 
     let ready = wait_historical_transaction(&node, &known_txid)?;
     assert_eq!(ready.prefix.floor, 0, "seeded chain covers from genesis");
@@ -300,7 +299,9 @@ fn embedded_node_historical_prefix_queries() -> Result<()> {
     assert_eq!(at.prefix.height, SEED_BLOCKS);
     assert_eq!(at.prefix.hash, node.snapshot().tip_hash);
     let Some((height, tx)) = at.answer else {
-        bail!("known seed coinbase must resolve historically")
+        return Err(TestError::message(
+            "known seed coinbase must resolve historically",
+        ));
     };
     assert_eq!(height, 1);
     assert!(at.prefix.floor <= height && height <= at.prefix.height);
@@ -353,7 +354,7 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<(Hash256, Hash256, Vec<u8
     let applied = state.chainstate().applied_tip_reader();
     let mut tip = applied
         .load_full()
-        .ok_or_else(|| anyhow::anyhow!("genesis must publish an applied tip"))?;
+        .ok_or_else(|| TestError::message("genesis must publish an applied tip"))?;
     let mut first_block: Option<(Hash256, Vec<u8>)> = None;
     for height in 1..=count {
         let coinbase = seed_coinbase(height);
@@ -369,21 +370,21 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<(Hash256, Hash256, Vec<u8
             txs: vec![coinbase],
         };
         block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-            .ok_or_else(|| anyhow::anyhow!("seed block must have a merkle root"))?;
+            .ok_or_else(|| TestError::message("seed block must have a merkle root"))?;
         regtest_fixture::mine_block_to_declared_target(&mut block)?;
         state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
             block.clone(),
         ))?;
         tip = applied
             .load_full()
-            .ok_or_else(|| anyhow::anyhow!("applied tip must exist after apply"))?;
+            .ok_or_else(|| TestError::message("applied tip must exist after apply"))?;
         assert_eq!(tip.height, height, "seed block must become the tip");
         if height == 1 {
             first_block = Some((Hash256::from(block.block_hash()), consensus_bytes(&block)));
         }
     }
     let (first_hash, first_bytes) =
-        first_block.ok_or_else(|| anyhow::anyhow!("at least one block must be seeded"))?;
+        first_block.ok_or_else(|| TestError::message("at least one block must be seeded"))?;
     Ok((tip.hash, first_hash, first_bytes))
 }
 
@@ -398,7 +399,7 @@ fn seed_coinbase(height: u32) -> Tx {
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
-            script_pubkey: vec![0x51].into(),
+            script_pubkey: p2sh_true_output(),
         }],
         lock_time: LockTime::ZERO,
     }
@@ -410,7 +411,7 @@ fn seed_coinbase_spend() -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(seed_coinbase.txid(), 0),
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
@@ -422,6 +423,7 @@ fn seed_coinbase_spend() -> Tx {
     }
 }
 
+// EMB-07
 #[test]
 fn dropped_node_releases_services_and_datadir_for_reopen() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -497,10 +499,12 @@ fn startup_failure_after_state_open_rolls_back_releases_state() -> Result<()> {
                 "the failure should name the bind conflict, got: {message}"
             );
         }
-        other => bail!(
-            "expected a startup failure on the held port, got {:?}",
-            other.err()
-        ),
+        other => {
+            return Err(TestError::message(format!(
+                "expected a startup failure on the held port, got {:?}",
+                other.err()
+            )));
+        }
     }
 
     let resumed = NodeState::open(seed_config(&failed_dir), None)?;

@@ -1,14 +1,17 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use hashbrown::HashSet;
 
 use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut};
 
 use super::*;
+use crate::rbf::LimitEnforcement;
 
 fn change_txids(result: &crate::mutation::MutationResult) -> Vec<Hash256> {
     result.changes.iter().map(|change| change.txid).collect()
 }
 
+// MPL-02
 #[test]
 fn mutation_batch_crossing_sequence_rollover_keeps_base_and_lookups() {
     let mut pool = Mempool::new(MempoolLimits::default());
@@ -1214,22 +1217,23 @@ fn enforce_size_limit_evicts_lowest_fee_until_below_target() -> Result<(), Mempo
     let high_txid = high.txid();
     pool.insert_entry(MempoolEntry::new(Arc::new(high), 500, 10_000, 1, 7, 0))?;
 
-    let evicted = pool.enforce_size_limit(600)?;
+    let evicted = pool.enforce_size_limit(unit())?;
 
     assert_eq!(evicted.len(), 1);
     assert!(!pool.contains_txid(&low_txid));
     assert!(pool.contains_txid(&high_txid));
-    assert!(pool.total_vsize() <= 600);
+    assert!(pool.dynamic_memory_usage() <= unit());
     Ok(())
 }
 
 #[test]
 fn insert_entry_triggers_size_limit_eviction_when_overflow() {
     let limits = MempoolLimits {
-        max_total_bytes: 1_000,
+        max_total_bytes: unit() * 3 / 2,
         min_relay_fee_sat_per_kvb: 0,
         ..MempoolLimits::default()
     };
+    let limit = limits.max_total_bytes;
     let mut pool = Mempool::new(limits);
 
     for nonce in 0..2_u32 {
@@ -1245,9 +1249,9 @@ fn insert_entry_triggers_size_limit_eviction_when_overflow() {
     }
 
     assert!(
-        pool.total_vsize() <= 1_000,
+        pool.dynamic_memory_usage() <= limit,
         "size limit must hold after inserts: {}",
-        pool.total_vsize()
+        pool.dynamic_memory_usage()
     );
 }
 
@@ -1263,7 +1267,7 @@ fn capacity_rejection_is_atomic_and_a_better_arrival_can_enter() {
     }
 
     let limits = MempoolLimits {
-        max_total_bytes: 1_000,
+        max_total_bytes: unit() * 3 / 2,
         min_relay_fee_sat_per_kvb: 0,
         ..MempoolLimits::default()
     };
@@ -1293,7 +1297,7 @@ fn capacity_rejection_is_atomic_and_a_better_arrival_can_enter() {
 #[test]
 fn a_replacement_that_would_be_shed_leaves_the_pool_unchanged() {
     let limits = MempoolLimits {
-        max_total_bytes: 1_000,
+        max_total_bytes: unit() * 5 / 2,
         min_relay_fee_sat_per_kvb: 0,
         ..MempoolLimits::default()
     };
@@ -1330,7 +1334,7 @@ fn a_replacement_that_would_be_shed_leaves_the_pool_unchanged() {
         &[prev],
         Sequence::ENABLE_RBF_NO_LOCKTIME,
         100,
-        vec![0x52].into(),
+        vec![0x52; usize::try_from(unit()).unwrap_or(usize::MAX)].into(),
     );
     let replacement_txid = replacement.txid();
     let before = (
@@ -1449,7 +1453,8 @@ fn incremental_metadata_matches_the_full_recompute_after_removals() -> Result<()
 #[test]
 fn eviction_during_insertion_leaves_metadata_a_rebuild_agrees_with() -> Result<(), MempoolError> {
     let limits = MempoolLimits {
-        max_total_bytes: 400,
+        max_total_bytes: 4 * crate::pool::entry_memory_usage(&tx(31, vec![OutPoint::default()]))
+            + 16,
         ..MempoolLimits::default()
     };
     let mut pool = Mempool::new(limits);
@@ -1610,7 +1615,7 @@ fn inserting_a_parent_after_its_child_refreshes_the_child() -> Result<(), Mempoo
 #[test]
 fn full_refusal_raises_the_floor_to_the_candidate_chunk_rate() {
     let mut pool = Mempool::new(MempoolLimits {
-        max_total_bytes: 1_000,
+        max_total_bytes: unit() * 3 / 2,
         min_relay_fee_sat_per_kvb: 0,
         ..MempoolLimits::default()
     });
@@ -1629,7 +1634,7 @@ fn full_refusal_raises_the_floor_to_the_candidate_chunk_rate() {
 fn remove_for_block_stamps_the_floor_for_decay_even_when_empty() {
     let mut pool = Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 1_000,
-        max_total_bytes: 400,
+        max_total_bytes: 2 * unit(),
         ..MempoolLimits::default()
     });
     pool.insert_entry(MempoolEntry::new(
@@ -1650,12 +1655,13 @@ fn remove_for_block_stamps_the_floor_for_decay_even_when_empty() {
         0,
     ))
     .expect("high");
-    crate::eviction::evict_lowest_fee_packages(&mut pool, 200).expect("eviction");
+    crate::eviction::evict_lowest_fee_packages(&mut pool, unit()).expect("eviction");
     assert_eq!(pool.min_fee_sat_per_kvb(1_000), 3_000);
     pool.remove_for_block(&[], &[], 8, 1_000);
     assert_eq!(pool.min_fee_sat_per_kvb(1_000 + 12 * 60 * 60), 1_500);
 }
 
+// MPL-02
 #[test]
 fn expire_removes_stale_root_with_descendants() {
     let mut pool = Mempool::new(MempoolLimits::default());
@@ -1751,6 +1757,15 @@ fn has_expired_entries_false_when_empty_or_cleared() {
     assert!(!pool.has_expired_entries(crate::policy::MEMPOOL_EXPIRY_SECS + 1));
 }
 
+fn unit() -> u64 {
+    crate::pool::entry_memory_usage(&single_output_tx(
+        &[],
+        Sequence::MAX,
+        1_000,
+        vec![0x51].into(),
+    ))
+}
+
 fn single_output_tx(
     previous_outputs: &[OutPoint],
     sequence: Sequence,
@@ -1794,4 +1809,100 @@ fn tx(label: u8, previous_outputs: Vec<OutPoint>) -> Tx {
             script_pubkey: vec![label].into(),
         }],
     }
+}
+
+// POL-03
+#[test]
+fn pool_expiry_projection_releases_surviving_neighbor_link_sides() -> Result<(), MempoolError> {
+    fn seed(pool: &mut Mempool, entry: MempoolEntry) -> Result<(), MempoolError> {
+        let prepared = pool.prepare_insert(entry, &HashSet::new(), LimitEnforcement::Deferred)?;
+        pool.commit_insert(prepared);
+        Ok(())
+    }
+    fn package_pool(seeds: &[MempoolEntry], max_total_bytes: u64) -> Result<Mempool, MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            max_total_bytes,
+            ..MempoolLimits::default()
+        });
+        for entry in seeds {
+            seed(&mut pool, entry.clone())?;
+        }
+        Ok(pool)
+    }
+    let young = crate::policy::MEMPOOL_EXPIRY_SECS + 100;
+    let now = young + 1;
+    let boundary = link_memory_usage(1, 2);
+
+    let s_tx = single_output_tx(&[], Sequence::MAX, 90_000, vec![0x51].into());
+    let s_txid = s_tx.txid();
+    let p_tx = single_output_tx(
+        &[OutPoint::new(s_txid, 0)],
+        Sequence::MAX,
+        80_000,
+        vec![0x52].into(),
+    );
+    let x_tx = single_output_tx(
+        &[OutPoint::new(s_txid, 0)],
+        Sequence::MAX,
+        80_000,
+        vec![0x53].into(),
+    );
+    let seeds = [
+        MempoolEntry::new(Arc::new(s_tx.clone()), 100, 1_000, young, 7, 0),
+        MempoolEntry::new(Arc::new(p_tx.clone()), 100, 1_000, 1, 7, 0),
+    ];
+    let usage = package_pool(&seeds, 0)?.dynamic_memory_usage();
+    let bounded = package_pool(&seeds, usage)?;
+    let newcomer = MempoolEntry::new(Arc::new(x_tx), 100, 1_000, now, 7, 0);
+    bounded
+        .prepare_package(vec![newcomer], now)
+        .expect("removing the expired child frees its own and the parent's side records");
+
+    let s2_tx = single_output_tx(&[], Sequence::MAX, 90_000, vec![0x51].into());
+    let s2_txid = s2_tx.txid();
+    let p1_tx = single_output_tx(
+        &[OutPoint::new(s2_txid, 0)],
+        Sequence::MAX,
+        80_000,
+        vec![0x52].into(),
+    );
+    let p2_tx = single_output_tx(
+        &[OutPoint::new(s2_txid, 1)],
+        Sequence::MAX,
+        80_000,
+        vec![0x53].into(),
+    );
+    let fat_tx = single_output_tx(
+        &[OutPoint::new(s2_txid, 2)],
+        Sequence::MAX,
+        80_000,
+        Script::from_bytes(vec![0x54; 40]),
+    );
+    let seeds2 = [
+        MempoolEntry::new(Arc::new(s2_tx.clone()), 100, 1_000, young, 7, 0),
+        MempoolEntry::new(Arc::new(p1_tx.clone()), 100, 1_000, 1, 7, 0),
+        MempoolEntry::new(Arc::new(p2_tx.clone()), 100, 1_000, 1, 7, 0),
+    ];
+    let usage2 = package_pool(&seeds2, 0)?.dynamic_memory_usage();
+    let expired_memory = entry_memory_usage(&p1_tx) + entry_memory_usage(&p2_tx) + 2 * boundary;
+    let newcomer_memory = entry_memory_usage(&fat_tx) + boundary;
+    let bounded2 = package_pool(&seeds2, usage2 - expired_memory + newcomer_memory)?;
+    let fat = MempoolEntry::new(Arc::new(fat_tx.clone()), 100, 1_000, now, 7, 0);
+    bounded2
+        .prepare_package(vec![fat], now)
+        .expect("the exact release of both expired children fits the boundary");
+
+    let tighter = package_pool(&seeds2, usage2 - expired_memory + newcomer_memory - 1)?;
+    let oversized = MempoolEntry::new(Arc::new(fat_tx), 100, 1_000, now, 7, 0);
+    assert!(
+        matches!(
+            tighter.prepare_package(vec![oversized], now),
+            Err(crate::standardness::AcceptanceRejectReason::Mempool(
+                MempoolError::Full
+            ))
+        ),
+        "one byte below the exact boundary must report mempool-full"
+    );
+    Ok(())
 }

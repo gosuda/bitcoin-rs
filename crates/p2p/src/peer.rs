@@ -26,13 +26,10 @@ pub enum PeerState {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PeerCapabilities {
-    /// Peer requested header announcements per BIP130.
     pub send_headers: bool,
-    /// Peer supports BIP155 addrv2 messages.
     pub addr_v2: bool,
 }
 
-/// BIP339 wtxid-relay negotiation state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WtxidRelayState {
     peer_advertised: bool,
@@ -43,15 +40,11 @@ impl WtxidRelayState {
         self.peer_advertised = true;
     }
 
-    /// Return true if the remote peer advertised BIP339 support.
     pub const fn peer_supported(self) -> bool {
         self.peer_advertised
     }
 }
 
-/// BIP331 package-relay negotiation state.
-/// (see [`Peer::package_relay_versions`]). Nothing here is a BIP434 feature:
-/// BIP331 negotiates through its own pre-`verack` message.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PackageRelayNegotiation {
     offered: u64,
@@ -96,18 +89,14 @@ impl PackageRelayNegotiation {
     }
 }
 
-/// The one BIP331 download `dispatch` asks the request owner to start after
-/// an `ancpkginfo`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PackageRequest {
     pub(crate) subject: Wtxid,
     pub(crate) wtxids: Vec<Wtxid>,
 }
 
-/// BIP152 compact-block protocol version this node speaks and advertises.
 pub const COMPACT_BLOCK_VERSION: u64 = 2;
 
-/// Remote BIP152 compact-block negotiation preference.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CompactBlockNegotiation {
     pub remote_send_compact: Option<bool>,
@@ -121,7 +110,6 @@ impl CompactBlockNegotiation {
         version == COMPACT_BLOCK_VERSION
     }
 
-    /// for versions we did not advertise have no effect, as BIP152 requires.
     pub(crate) const fn record_remote_preference(&mut self, preference: &SendCmpct) {
         if !Self::supports_version(preference.version) {
             return;
@@ -150,8 +138,6 @@ impl CompactBlockNegotiation {
         }
     }
 
-    /// `None` while the peer has not announced a mutually supported BIP152
-    /// version. Unsupported messages never change the negotiated profile.
     #[must_use]
     pub(crate) const fn servable_version(&self) -> Option<u64> {
         match self.remote_preference() {
@@ -217,27 +203,20 @@ pub struct Peer<S> {
     pub stream: S,
     pub state: PeerState,
     pub magic: Magic,
+    pub local_nonce: Option<u64>,
     pub remote_version: Option<VersionMessage>,
+    pub(crate) inbound_handshake_nonces:
+        Option<std::sync::Arc<crate::peer_table::OutboundHandshakeNonces>>,
     pub version_received_time: Option<u64>,
     pub received_verack: bool,
-    /// Whether our VERACK was successfully written; closes the BIP434 send window.
     sent_verack: bool,
     pub capabilities: PeerCapabilities,
-    /// BIP152 compact-block negotiation state for the peer.
     pub compact_blocks: CompactBlockNegotiation,
-    /// BIP339 state for the peer.
     pub wtxid_relay: WtxidRelayState,
-    /// BIP434 feature announcements the peer sent between its `version` and
-    /// `verack`, by identifier.
     pub(crate) remote_features: HashMap<FeatureId, Vec<u8>>,
-    /// BIP331 `sendpackages` negotiation for the peer.
     pub(crate) package_relay: PackageRelayNegotiation,
-    /// Whether this node announces BIP332 stale-tip relay to the peer, and
-    /// its `prefers_blocks` byte; `None`, the default, announces nothing.
     pub(crate) stale_tip_offer: Option<bool>,
     pub(crate) pending_package_request: Option<PackageRequest>,
-    /// One BIP157 request waiting for asynchronous index publication or for
-    /// outbound room.
     pub(crate) pending_filter_request: Option<ParkedFilter>,
     pub(crate) deferred_inbound: Option<Message>,
     pub(crate) pending_getdata: Vec<Inventory>,
@@ -266,7 +245,9 @@ impl<S> Peer<S> {
             stream,
             state: PeerState::Disconnected,
             magic,
+            local_nonce: None,
             remote_version: None,
+            inbound_handshake_nonces: None,
             version_received_time: None,
             received_verack: false,
             sent_verack: false,
@@ -304,8 +285,6 @@ impl<S> Peer<S> {
         self.send.take()
     }
 
-    /// Offer BIP331 package relay on this connection with `versions`, the
-    /// `PKG_RELAY_*` bits to put in our `sendpackages`.
     pub fn offer_package_relay(&mut self, versions: u64) {
         self.package_relay.offer(versions);
     }
@@ -317,6 +296,15 @@ impl<S> Peer<S> {
     /// [`Peer::remote_feature`] reports for `b"BIP332"`.
     pub fn offer_stale_tip_relay(&mut self, prefers_blocks: bool) {
         self.stale_tip_offer = Some(prefers_blocks);
+    }
+
+    /// Rejects an inbound `version` whose nonce belongs to one of our own
+    /// in-flight outbound handshakes (Core `CConnman::CheckIncomingNonce`).
+    pub(crate) fn check_inbound_nonce_against(
+        &mut self,
+        nonces: std::sync::Arc<crate::peer_table::OutboundHandshakeNonces>,
+    ) {
+        self.inbound_handshake_nonces = Some(nonces);
     }
 
     /// INVARIANT: this node sends `wtxidrelay` and `verack` in the same
@@ -343,8 +331,6 @@ impl<S> Peer<S> {
         self.pending_package_request.take()
     }
 
-    /// The payload the peer announced for the recognised BIP434 feature `id`,
-    /// or `None` when it announced no valid one before `verack`.
     #[must_use]
     pub fn remote_feature(&self, id: &[u8]) -> Option<&[u8]> {
         self.remote_features.get(id).map(Vec::as_slice)
@@ -441,9 +427,9 @@ impl<S: Read> Peer<S> {
     > {
         let mut credit = None;
         let Some((message, raw)) = self.read_message_admitted(|command, payload| {
-            if command == "block" {
+            if crate::inbound::block_memory::expands_on_decode(command) {
                 credit = Some(memory.reserve(
-                    bitcoin_rs_primitives::layout::ParsedBlock::decode_heap_bound(payload.len()),
+                    bitcoin_rs_primitives::layout::decode_reservation(payload.len()),
                     cancelled,
                 )?);
             }
@@ -452,13 +438,17 @@ impl<S: Read> Peer<S> {
         else {
             return Ok(None);
         };
-        if let (Message::Block(payload), Some(credit)) = (&message, credit.as_mut()) {
-            credit.retain(
+        match (&message, credit.as_mut()) {
+            (Message::Block(payload), Some(credit)) => credit.retain(
                 payload
                     .bytes()
                     .len()
                     .saturating_add(payload.block().retained_heap_bytes()),
-            )?;
+            )?,
+            (Message::Tx(tx), Some(credit)) => {
+                credit.retain(tx.total_size().saturating_add(tx.retained_heap_bytes()))?;
+            }
+            _ => {}
         }
         Ok(Some((message, raw, credit)))
     }
@@ -701,7 +691,6 @@ mod tests {
             4,
             crate::PeerRemote::Endpoint(PeerEndpoint::from(([127, 0, 0, 1], 8333))),
             crate::peer_info::PeerRole::FullRelay,
-            false,
         ));
 
         let written = peer.send(&Message::Ping(9))?;

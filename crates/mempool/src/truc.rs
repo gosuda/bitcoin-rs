@@ -1,25 +1,23 @@
-//! BIP431 TRUC topology checks over the admitted graph.
-
 use bitcoin_rs_primitives::{Tx, Txid};
 use hashbrown::HashSet;
 use thiserror::Error;
 
 use crate::{EntryId, Mempool, RbfError};
 
-/// A typed TRUC rejection. The public policy reason is `TRUC-violation`.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[error("TRUC-violation")]
 pub enum TrucError {
-    /// Confirmed transactions may cross versions; unconfirmed parents may not.
     Version,
-    /// A version-3 transaction exceeds 10,000 sigop-adjusted virtual bytes.
     Size,
-    /// A version-3 child exceeds 1,000 sigop-adjusted virtual bytes.
     ChildSize,
-    /// A version-3 transaction would have more than one unconfirmed ancestor.
     Ancestors,
-    /// A version-3 parent would have more than one descendant.
     Descendants,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SiblingEviction {
+    Forbidden,
+    Allowed,
 }
 
 impl Mempool {
@@ -27,7 +25,7 @@ impl Mempool {
         &self,
         tx: &Tx,
         vsize: u32,
-        allow_sibling: bool,
+        sibling_policy: SiblingEviction,
     ) -> Result<(Vec<EntryId>, bool), RbfError> {
         let mut conflicts = self.conflicts_for(tx);
         let mut sibling_eviction = false;
@@ -65,7 +63,7 @@ impl Mempool {
             let replacing_child = descendants.iter().any(|id| conflicts.contains(id));
             if !descendants.is_empty() && !replacing_child {
                 let sibling = descendants.first().copied().filter(|id| {
-                    allow_sibling
+                    sibling_policy == SiblingEviction::Allowed
                         && descendants.len() == 1
                         && self.ancestor_ids_for_entry(*id).len() == 1
                 });

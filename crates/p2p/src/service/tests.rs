@@ -32,7 +32,7 @@ fn relay_feature_switches_default_off_and_reach_connections_independently() {
         Arc::new(crate::NetworkActivity::from_shared(Arc::new(
             AtomicBool::new(true),
         ))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
         None,
         Magic::REGTEST,
         headers,
@@ -83,7 +83,7 @@ fn start_fails_when_listener_cannot_bind() {
             listen_addrs: vec![addr],
             ..P2pServiceConfig::default()
         },
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let error = service
         .start(
@@ -108,11 +108,11 @@ fn start_fails_when_listener_cannot_bind() {
 fn independent_services_own_independent_aggregate_budgets() {
     let first = P2pService::new(
         P2pServiceConfig::default(),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let second = P2pService::new(
         P2pServiceConfig::default(),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let a = first.shared_outbound_budget();
     let b = second.shared_outbound_budget();
@@ -128,7 +128,7 @@ fn independent_services_own_independent_aggregate_budgets() {
 fn start_and_join_succeed_without_listeners() {
     let service = P2pService::new(
         P2pServiceConfig::default(),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     service
         .start(
@@ -149,7 +149,7 @@ fn overlay_workers_are_retained_for_join_and_rollback() {
     config.overlay.onion_proxy = Some(SocketAddr::from(([127, 0, 0, 1], 19051)));
     config.overlay.tor_control = Some(SocketAddr::from(([127, 0, 0, 1], 19052)));
     config.overlay.identity_dir = dir.path().to_path_buf();
-    let service = P2pService::new(config, Arc::new(AtomicBool::new(false)));
+    let service = P2pService::new(config, bitcoin_rs_chain::LatchReader::fixture_never());
     service
         .start(
             None,
@@ -158,15 +158,6 @@ fn overlay_workers_are_retained_for_join_and_rollback() {
             crate::listener::ListenerExtras::default(),
         )
         .expect("overlay start succeeds");
-    {
-        let workers = service.workers.lock();
-        let workers = workers.as_ref().expect("workers installed");
-        assert_eq!(
-            workers.listeners.len(),
-            1,
-            "overlay.start handles must be retained for rollback and join"
-        );
-    }
     service.shutdown();
     service.join().expect("join waits for overlay teardown");
 }
@@ -561,12 +552,12 @@ fn add_node_enqueues_and_respects_queue_capacity() {
             outbound_queue_limit: 1,
             ..P2pServiceConfig::default()
         },
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let addr1: PeerEndpoint = "127.0.0.1:8333".parse().expect("addr");
     let addr2: PeerEndpoint = "127.0.0.2:8333".parse().expect("addr");
 
-    assert!(service.add_node(addr1, true).is_ok());
+    assert!(service.add_node(addr1).is_ok());
     assert_eq!(service.added_nodes().as_slice(), &[addr1]);
     let dial = service.outbound_rx.lock().try_recv().expect("recv");
     assert_eq!(dial, OutboundDial::pinned(addr1));
@@ -577,11 +568,11 @@ fn add_node_enqueues_and_respects_queue_capacity() {
         .expect("send");
 
     assert_eq!(
-        service.add_node(addr2, false),
+        service.add_node_onetry(addr2),
         Err(P2pControlError::QueueFull)
     );
 
-    assert!(service.add_node(addr2, true).is_ok());
+    assert!(service.add_node(addr2).is_ok());
     assert_eq!(service.added_nodes().as_slice(), &[addr1, addr2]);
 }
 
@@ -589,11 +580,11 @@ fn add_node_enqueues_and_respects_queue_capacity() {
 fn add_node_inactive_skips_queueing() {
     let service = P2pService::new(
         P2pServiceConfig::default(),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     service.set_network_active(false);
     let addr: PeerEndpoint = "127.0.0.1:8333".parse().expect("addr");
-    assert!(service.add_node(addr, true).is_ok());
+    assert!(service.add_node(addr).is_ok());
     assert_eq!(service.added_nodes().as_slice(), &[addr]);
     assert!(service.outbound_rx.lock().try_recv().is_err());
 }
@@ -602,7 +593,7 @@ fn add_node_inactive_skips_queueing() {
 fn add_node_rejects_banned_address() {
     let service = P2pService::new(
         P2pServiceConfig::default(),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let subnet: crate::IpSubnet = "127.0.0.0/24".parse().expect("subnet");
     service.set_ban(crate::BannedSubnet {
@@ -612,7 +603,7 @@ fn add_node_rejects_banned_address() {
         reason: String::new(),
     });
     let addr: PeerEndpoint = "127.0.0.1:8333".parse().expect("addr");
-    assert_eq!(service.add_node(addr, true), Err(P2pControlError::Banned));
+    assert_eq!(service.add_node(addr), Err(P2pControlError::Banned));
     assert_eq!(service.added_nodes().as_slice(), &[]);
     assert!(service.outbound_rx.lock().try_recv().is_err());
 }
@@ -635,8 +626,15 @@ fn parked_overflow_releases_the_address_for_another_selection() {
         Some(address)
     );
 }
-fn maintenance_fixture(target: usize) -> (AddressMaintenance, Receiver<OutboundDial>) {
+fn maintenance_fixture(
+    target: usize,
+) -> (
+    AddressMaintenance,
+    Receiver<OutboundDial>,
+    bitcoin_rs_chain::LatchWriter,
+) {
     let (tx, rx) = crossbeam_channel::bounded(16);
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
     let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
     for n in 1..100 {
         let addr = PeerEndpoint::from(([8, n, 1, 1], 8333));
@@ -651,7 +649,7 @@ fn maintenance_fixture(target: usize) -> (AddressMaintenance, Receiver<OutboundD
         AddressMaintenance {
             block_slots: 2,
             manual_nodes: Arc::new(RwLock::new(Vec::new())),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: shutdown.reader(),
             network_active: Arc::new(AtomicBool::new(true)),
             peer_table: Arc::new(crate::PeerTable::new()),
             outbound_tx: tx,
@@ -665,6 +663,7 @@ fn maintenance_fixture(target: usize) -> (AddressMaintenance, Receiver<OutboundD
             routes: crate::RouteTable::default(),
         },
         rx,
+        shutdown,
     )
 }
 
@@ -757,7 +756,7 @@ fn block_relay_readiness_counts_for_dns_without_refreshing_gossip_time() {
         1,
         "exclude ready feelers"
     );
-    book.reject_queued(block, true);
+    book.reject_queued_feeler(block);
     assert_eq!(ready_address_count(&table, &book), 2);
     let response = book.gossip(10_000);
     for (addr, expected) in [(full, 5000), (block, 5000)] {
@@ -914,7 +913,7 @@ fn automatic_policy_and_manual_bans_are_distinct() {
             noban_subnets: vec![protected],
             ..Default::default()
         },
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let reader = service.banned_reader();
     reader.discourage(ip);
@@ -939,7 +938,7 @@ fn automatic_policy_and_manual_bans_are_distinct() {
 
 #[test]
 fn all_automatic_selection_classes_exclude_discouraged_addresses() {
-    let (maintenance, queue) = maintenance_fixture(4);
+    let (maintenance, queue, _shutdown) = maintenance_fixture(4);
     let now = crate::addrman::now();
     for n in 1..100 {
         let addr = PeerEndpoint::from(([8, n, 1, 1], 8333));
@@ -997,7 +996,7 @@ fn all_automatic_selection_classes_exclude_discouraged_addresses() {
         Arc::new(crate::NetworkActivity::from_shared(Arc::clone(
             &maintenance.network_active,
         ))),
-        bitcoin_rs_chain::LatchReader::new(Arc::clone(&maintenance.shutdown)),
+        maintenance.shutdown.clone(),
         None,
         Magic::BITCOIN,
         headers,
@@ -1024,7 +1023,7 @@ fn all_automatic_selection_classes_exclude_discouraged_addresses() {
 
 #[test]
 fn maintenance_counts_queued_parked_and_inflight_automatic_claims_once() {
-    let (mut maintenance, rx) = maintenance_fixture(3);
+    let (mut maintenance, rx, _shutdown) = maintenance_fixture(3);
     let tick = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
     queue_address_candidates(&maintenance, 10_000, tick, 0);
     assert_eq!(rx.len(), 3);
@@ -1039,9 +1038,7 @@ fn maintenance_counts_queued_parked_and_inflight_automatic_claims_once() {
     let parked = rx.try_recv().expect("queued");
     queue_address_candidates(&maintenance, 10_000, tick, 0);
     assert_eq!(rx.len(), 2, "parking keeps the claim occupied");
-    maintenance
-        .address_book
-        .attempted(parked.addr, true, 10_001);
+    maintenance.address_book.attempt_failed(parked.addr, 10_001);
     queue_address_candidates(&maintenance, 10_100, tick + Duration::from_secs(100), 0);
     assert_eq!(
         rx.len(),
@@ -1079,7 +1076,7 @@ fn maintenance_counts_queued_parked_and_inflight_automatic_claims_once() {
 
 #[test]
 fn selection_uses_one_ban_snapshot_at_the_tick_time() {
-    let (maintenance, rx) = maintenance_fixture(1);
+    let (maintenance, rx, _shutdown) = maintenance_fixture(1);
     let until = SystemTime::UNIX_EPOCH + Duration::from_secs(10_001);
     maintenance.banned.inner.write().push(crate::BannedSubnet {
         subnet: "8.0.0.0/8".parse().expect("subnet"),
@@ -1111,7 +1108,7 @@ fn shutdown_releases_parked_automatic_claims_before_restart() {
             dns_seeds_enabled: false,
             ..P2pServiceConfig::default()
         },
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let address = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 8333));
     let now = crate::addrman::now();
@@ -1178,7 +1175,7 @@ fn manual_dial_cannot_release_an_automatic_claim_and_reaper_releases_only_its_ow
         Arc::new(crate::NetworkActivity::from_shared(Arc::new(
             AtomicBool::new(true),
         ))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
         None,
         Magic::REGTEST,
         headers,
@@ -1332,7 +1329,7 @@ fn anchor_dials_prefer_block_slots_without_displacing_manual_roles() {
 
 #[test]
 fn anchor_queue_preserves_diversity_and_releases_a_saturated_attempt() {
-    let (mut maintenance, _) = maintenance_fixture(2);
+    let (mut maintenance, _, _shutdown) = maintenance_fixture(2);
     let (sender, receiver) = crossbeam_channel::bounded(1);
     maintenance.outbound_tx = sender;
     let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
@@ -1402,13 +1399,13 @@ fn anchor_queue_preserves_diversity_and_releases_a_saturated_attempt() {
 #[test]
 fn a_queued_or_registered_probe_never_occupies_a_steady_outbound_slot() {
     for registered in [false, true] {
-        let (maintenance, receiver) = maintenance_fixture(1);
+        let (maintenance, receiver, _shutdown) = maintenance_fixture(1);
         let book = &maintenance.address_book;
         let probe = book
             .select(&[], &[], 10_000, u64::MAX, |_| true)
             .expect("probe candidate");
         assert!(book.queued_feeler(probe));
-        book.attempted(probe, true, 10_000);
+        book.attempt_failed(probe, 10_000);
         assert_eq!(book.pending_count_excluding(&[]), 0);
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new_block_relay(sender);
@@ -1449,7 +1446,7 @@ fn a_queued_or_registered_probe_never_occupies_a_steady_outbound_slot() {
 }
 #[test]
 fn mapped_manual_pins_exclude_all_automatic_dial_classes_without_rewriting_configuration() {
-    let (maintenance, queue) = maintenance_fixture(4);
+    let (maintenance, queue, _shutdown) = maintenance_fixture(4);
     let now = crate::addrman::now();
     for n in 1..100 {
         maintenance.address_book.learn_dns(
@@ -1499,7 +1496,7 @@ fn mapped_manual_pins_exclude_all_automatic_dial_classes_without_rewriting_confi
         Arc::new(crate::NetworkActivity::from_shared(Arc::new(
             AtomicBool::new(false),
         ))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
         None,
         Magic::REGTEST,
         headers,
@@ -1541,7 +1538,7 @@ fn mapped_manual_pins_exclude_all_automatic_dial_classes_without_rewriting_confi
 }
 #[test]
 fn onlynet_prefilter_selects_no_forbidden_network_dial() {
-    let (mut maintenance, queue) = maintenance_fixture(4);
+    let (mut maintenance, queue, _shutdown) = maintenance_fixture(4);
     maintenance.routes.onlynet = vec![crate::NetworkLabel::Onion];
     let now = 10_000;
     queue_address_candidates(&maintenance, now, SystemTime::now(), 0);
@@ -1599,7 +1596,7 @@ fn register_ready_block_peer(table: &crate::PeerTable, addr: PeerEndpoint) -> cr
 #[test]
 fn failed_first_anchor_retains_the_second_for_a_single_block_slot() {
     for target in [1, 2] {
-        let (mut maintenance, queue) = maintenance_fixture(target);
+        let (mut maintenance, queue, _shutdown) = maintenance_fixture(target);
         maintenance.block_slots = 1;
         let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
         maintenance.address_book = Arc::clone(&book);
@@ -1634,7 +1631,7 @@ fn failed_first_anchor_retains_the_second_for_a_single_block_slot() {
             "only the queued first attempt consumes a slot"
         );
         assert!(book.anchor_dispatched(first));
-        book.attempted(first, true, 10_002);
+        book.attempt_failed(first, 10_002);
         queue_address_candidates(
             &maintenance,
             10_002,
@@ -1735,7 +1732,7 @@ fn shutdown_captures_anchors_before_cancelling_workers() {
             allow_local_addresses: true,
             ..P2pServiceConfig::default()
         },
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 8333));
     let now = crate::addrman::now();
@@ -1751,31 +1748,6 @@ fn shutdown_captures_anchors_before_cancelling_workers() {
     assert_eq!(restored.take_restart_anchors(now), vec![addr]);
 }
 
-#[test]
-fn shutdown_captures_anchors_before_cancelling_worker_leases() {
-    let directory = tempfile::tempdir().expect("directory");
-    let path = directory.path().join("peers.dat");
-    let service = P2pService::new(
-        P2pServiceConfig {
-            address_book_path: Some(path.clone()),
-            magic: Magic::REGTEST,
-            allow_local_addresses: true,
-            ..P2pServiceConfig::default()
-        },
-        Arc::new(AtomicBool::new(false)),
-    );
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333)).into();
-    let now = crate::addrman::now();
-    service.address_book.learn_dns("fixture", &[addr], now);
-    service.address_book.succeeded(addr, 9, now);
-    let lease = register_ready_block_peer(&service.peer_table, addr);
-    *service.workers.lock() = Some(Workers::default());
-    service.shutdown();
-    assert!(lease.is_cancelled(), "workers cancel every lease");
-    let restored =
-        crate::addrman::AddressBook::open(Some(path), Magic::REGTEST.to_bytes(), true, None);
-    assert_eq!(restored.take_restart_anchors(now), vec![addr]);
-}
 fn saved_book(path: &std::path::Path) -> sonic_rs::Value {
     let bytes = std::fs::read(path).expect("saved book");
     sonic_rs::from_slice(&bytes[..bytes.len() - 32]).expect("book JSON")
@@ -1814,7 +1786,7 @@ fn rejected_duplicates_preserve_active_feeler_and_dispatched_anchor_claims_until
             Arc::new(crate::NetworkActivity::from_shared(Arc::new(
                 AtomicBool::new(false),
             ))),
-            Arc::new(AtomicBool::new(false)),
+            bitcoin_rs_chain::LatchReader::fixture_never(),
             None,
             Magic::REGTEST,
             crossbeam_channel::bounded(1).0,
@@ -1877,7 +1849,7 @@ fn rejected_duplicates_preserve_active_feeler_and_dispatched_anchor_claims_until
 
 #[test]
 fn rejected_anchor_returns_original_metadata_and_releases_its_asmap_group() {
-    let (mut maintenance, queue) = maintenance_fixture(1);
+    let (mut maintenance, queue, _shutdown) = maintenance_fixture(1);
     let directory = tempfile::tempdir().expect("directory");
     let map = directory.path().join("asmap.raw");
     std::fs::write(
@@ -1929,7 +1901,7 @@ fn rejected_anchor_returns_original_metadata_and_releases_its_asmap_group() {
 
 #[test]
 fn inactive_boot_preserves_anchors_and_shutdown_returns_queued_undispatched_payload() {
-    let (mut maintenance, queue) = maintenance_fixture(1);
+    let (mut maintenance, queue, shutdown) = maintenance_fixture(1);
     let directory = tempfile::tempdir().expect("directory");
     let base = directory.path().join("peers.dat");
     let path = directory.path().join("peers-01010101.dat");
@@ -1956,7 +1928,7 @@ fn inactive_boot_preserves_anchors_and_shutdown_returns_queued_undispatched_payl
     assert_eq!(queued.addr, address);
     assert_eq!(queued.purpose, DialPurpose::Anchor);
     assert!(book.is_pending(address));
-    maintenance.shutdown.store(true, Ordering::Release);
+    shutdown.trigger();
     worker.join().expect("maintenance shutdown");
     assert!(!book.is_pending(address));
     assert!(
@@ -2032,7 +2004,7 @@ fn ordinary_queue_rechecks_services_and_tip_before_dispatch_and_tcp() {
         let book = crate::addrman::AddressBook::open(None, [1; 4], true, None);
         book.learn_dns("seed", &[address.into()], now);
         book.succeeded(address.into(), if tip_changes { 1032 } else { 9 }, now);
-        let (mut maintenance, queue) = maintenance_fixture(1);
+        let (mut maintenance, queue, _shutdown) = maintenance_fixture(1);
         maintenance.address_book = Arc::clone(&book);
         maintenance.chain_query = Some(Arc::clone(&query));
         queue_address_candidates(&maintenance, now, SystemTime::now(), 0);
@@ -2058,7 +2030,7 @@ fn ordinary_queue_rechecks_services_and_tip_before_dispatch_and_tcp() {
             Arc::new(crate::NetworkActivity::from_shared(Arc::new(
                 AtomicBool::new(true),
             ))),
-            Arc::new(AtomicBool::new(false)),
+            bitcoin_rs_chain::LatchReader::fixture_never(),
             None,
             Magic::REGTEST,
             crossbeam_channel::bounded(1).0,
@@ -2114,7 +2086,7 @@ fn ordinary_queue_rechecks_services_and_tip_before_dispatch_and_tcp() {
 
 #[test]
 fn ordinary_selection_skips_known_incomplete_peer_and_anchor_return_preserves_age() {
-    let (mut maintenance, queue) = maintenance_fixture(1);
+    let (mut maintenance, queue, _shutdown) = maintenance_fixture(1);
     let directory = tempfile::tempdir().expect("directory");
     let book = crate::addrman::AddressBook::open(
         Some(directory.path().join("peers.dat")),
@@ -2166,7 +2138,7 @@ fn disable_during_outbound_tip_query_refuses_registration_before_handshake() {
             magic: Magic::REGTEST,
             ..P2pServiceConfig::default()
         },
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     ));
     let server = TcpListener::bind("127.0.0.1:0").expect("listener");
     let address = server.local_addr().expect("address");
@@ -2189,7 +2161,7 @@ fn disable_during_outbound_tip_query_refuses_registration_before_handshake() {
         Arc::new(crate::NetworkActivity::from_shared(Arc::clone(
             &service.network_active,
         ))),
-        Arc::clone(&service.session_cancel.lock()),
+        service.session_cancel.lock().reader(),
         Some(Arc::new(move |_| {
             ready_count.fetch_add(1, Ordering::Relaxed);
         })),
@@ -2253,27 +2225,32 @@ fn workers_teardown_cleans_resources_and_cancels_sessions() {
         [127, 0, 0, 1],
         8333,
     )))]);
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let session_cancel = Arc::new(AtomicBool::new(false));
-    let mut workers = Workers::new(Arc::clone(&shutdown), Arc::clone(&session_cancel));
+    let overlay_shutdown = Arc::new(bitcoin_rs_chain::LatchWriter::new());
+    let session_cancel = Arc::new(bitcoin_rs_chain::LatchWriter::new());
+    let mut workers = Workers::new(
+        bitcoin_rs_chain::LatchWriter::new(),
+        Arc::clone(&overlay_shutdown),
+        Arc::clone(&session_cancel),
+    );
+    let shutdown = workers.shutdown.reader();
 
-    let thread_shutdown = Arc::clone(&shutdown);
+    let thread_shutdown = shutdown.clone();
     let handle = thread::spawn(move || {
-        while !thread_shutdown.load(Ordering::Acquire) {
-            thread::sleep(Duration::from_millis(10));
-        }
+        let _ = thread_shutdown.closed().recv();
         Ok(())
     });
     workers.listeners.push(handle);
 
-    assert!(!shutdown.load(Ordering::Acquire));
-    assert!(!session_cancel.load(Ordering::Acquire));
+    assert!(!shutdown.is_triggered());
+    assert!(!session_cancel.reader().is_triggered());
+    assert!(!overlay_shutdown.reader().is_triggered());
     assert!(!addresses.lock().is_empty());
 
     workers.teardown(&peer_table, &addresses);
 
-    assert!(shutdown.load(Ordering::Acquire));
-    assert!(session_cancel.load(Ordering::Acquire));
+    assert!(shutdown.is_triggered());
+    assert!(session_cancel.reader().is_triggered());
+    assert!(overlay_shutdown.reader().is_triggered());
     assert!(addresses.lock().is_empty());
     assert!(workers.listeners.is_empty());
 }

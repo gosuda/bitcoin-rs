@@ -32,7 +32,7 @@ impl MemberFacts<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct ChunkKey {
     pub(crate) modified_fee: i128,
     pub(crate) charged_weight: u64,
@@ -54,6 +54,14 @@ impl Ord for ChunkKey {
             .then_with(|| self.ordinal.cmp(&other.ordinal))
     }
 }
+
+impl PartialEq for ChunkKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for ChunkKey {}
 
 impl PartialOrd for ChunkKey {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -224,9 +232,7 @@ pub struct ChunkView<'a> {
     pool: &'a Mempool,
     pub members: &'a [EntryId],
     pub txids: &'a [Txid],
-    /// Modified fee of the whole chunk: actual fees plus signed overlays.
     pub modified_fee: i128,
-    /// Charged weight of the whole chunk, the feerate denominator.
     pub charged_weight: u64,
     confirmed: Option<&'a HashSet<EntryId>>,
 }
@@ -361,6 +367,7 @@ impl ChunkIndex {
         self.order.iter().map(move |key| self.view(pool, key))
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn dynamic_memory_usage(&self) -> u64 {
         use core::mem::size_of;
@@ -571,6 +578,9 @@ impl<'s> Iterator for ProjectedChunksIter<'s> {
 fn component_index(component: ComponentId) -> usize {
     usize::try_from(component).unwrap_or(usize::MAX)
 }
+
+#[cfg(kani)]
+mod proofs;
 
 #[cfg(test)]
 mod tests;

@@ -1,5 +1,3 @@
-//! One HTTP/1.1 transport for every harness request to a node listener: the
-
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};

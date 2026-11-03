@@ -1,4 +1,4 @@
-//! The BIP324 handshake as a resumable state machine over a blocking stream.
+#![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
 
 use std::io::Read;
 
@@ -13,20 +13,16 @@ use super::packet::{RecvCipher, SendCipher};
 use super::reader::{PacketReader, is_poll_timeout};
 use crate::recv::{fill, read_up_to};
 
-/// Bytes of an `ElligatorSwift` public key encoding.
 const ELLSWIFT_LEN: usize = 64;
 
-/// Most garbage either side may send before its garbage terminator.
 const MAX_GARBAGE_LEN: usize = 4095;
 
-/// Bytes a responder compares against a v1 `version` header.
 const V1_PREFIX_LEN: usize = 16;
 
-/// The command field of a v1 `version` header.
 const V1_VERSION_COMMAND: &[u8; 12] = b"version\0\0\0\0\0";
 
 #[derive(Debug)]
-pub(crate) enum Step {
+pub enum Step {
     Send,
     V1([u8; V1_PREFIX_LEN]),
     Yield,
@@ -34,14 +30,14 @@ pub(crate) enum Step {
 }
 
 #[derive(Debug)]
-pub(crate) struct Established {
-    pub(crate) send: SendCipher,
-    pub(crate) recv: PacketReader,
-    pub(crate) session_id: [u8; 32],
+pub struct Established {
+    pub send: SendCipher,
+    pub recv: PacketReader,
+    pub session_id: [u8; 32],
 }
 
 #[derive(Debug)]
-pub(crate) struct Handshake {
+pub struct Handshake {
     role: Role,
     magic: Magic,
     secret_key: SecretKey,
@@ -78,7 +74,7 @@ enum State {
 }
 
 impl Handshake {
-    pub(crate) fn initiator<G: Rng + ?Sized>(magic: Magic, rng: &mut G) -> Self {
+    pub fn initiator<G: Rng + ?Sized>(magic: Magic, rng: &mut G) -> Self {
         let mut handshake = Self::new(
             Role::Initiator,
             magic,
@@ -92,9 +88,7 @@ impl Handshake {
         handshake
     }
 
-    /// Answers an inbound connection. Nothing is sent until the first bytes
-    /// rule out a v1 peer.
-    pub(crate) fn responder<G: Rng + ?Sized>(magic: Magic, rng: &mut G) -> Self {
+    pub fn responder<G: Rng + ?Sized>(magic: Magic, rng: &mut G) -> Self {
         Self::new(
             Role::Responder,
             magic,
@@ -124,20 +118,15 @@ impl Handshake {
         }
     }
 
-    pub(crate) fn take_outbound(&mut self) -> Vec<u8> {
+    pub fn take_outbound(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.outbound)
     }
 
-    /// Whether any byte has arrived from the peer. An initiator whose peer
-    /// closed without sending anything may retry the connection as v1.
     pub(crate) const fn received_any(&self) -> bool {
         self.received_any
     }
 
-    /// Reads toward the next step. A poll-timeout I/O error keeps all
-    /// progress; any other error ends the handshake. [`Step::Yield`] hands
-    /// control back after one decoy packet, leaving the handshake to resume.
-    pub(crate) fn advance<R: Read>(&mut self, reader: &mut R) -> Result<Step, TransportError> {
+    pub fn advance<R: Read>(&mut self, reader: &mut R) -> Result<Step, TransportError> {
         loop {
             if !self.outbound.is_empty() {
                 return Ok(Step::Send);
@@ -244,8 +233,6 @@ impl Handshake {
         Ok(None)
     }
 
-    /// Derives the session from the peer's key, then queues our garbage
-    /// terminator and the version packet, which authenticates our garbage.
     fn key_received(&mut self, key: [u8; ELLSWIFT_LEN]) -> Result<State, TransportError> {
         let theirs = ElligatorSwift::from_array(key);
         let secret = shared_secret(self.secret_key, self.ellswift, theirs, self.role);

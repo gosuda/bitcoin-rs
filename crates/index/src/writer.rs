@@ -1,5 +1,3 @@
-//! Object-safe access to the existing durable index writer.
-
 use bitcoin_rs_primitives::OutPoint;
 use parking_lot::RwLock;
 

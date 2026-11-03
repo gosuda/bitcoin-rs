@@ -1,0 +1,14 @@
+[book]
+title = "bitcoin-rs"
+description = "Run, use, embed, and verify the bitcoin-rs full node."
+authors = ["bitcoin-rs contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "../../target/book"
+
+[output.html]
+git-repository-url = "https://github.com/gosuda/bitcoin-rs"
+edit-url-template = "https://github.com/gosuda/bitcoin-rs/edit/main/docs/book/{path}"
+site-url = "/bitcoin-rs/"

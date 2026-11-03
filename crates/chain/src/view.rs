@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwapOption;
 #[cfg(any(test, feature = "test-seam"))]
@@ -27,44 +26,6 @@ impl TipReader {
     #[cfg(any(test, feature = "test-seam"))]
     pub fn store(&self, tip: Option<Arc<TipSnapshot>>) {
         self.inner.store(tip);
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct LatchReader {
-    inner: Arc<AtomicBool>,
-}
-
-impl From<Arc<AtomicBool>> for LatchReader {
-    fn from(inner: Arc<AtomicBool>) -> Self {
-        Self::new(inner)
-    }
-}
-
-impl LatchReader {
-    #[must_use]
-    pub const fn new(inner: Arc<AtomicBool>) -> Self {
-        Self { inner }
-    }
-
-    #[must_use]
-    pub fn load(&self) -> bool {
-        self.inner.load(Ordering::Acquire)
-    }
-
-    #[must_use]
-    pub fn is_triggered(&self) -> bool {
-        self.load()
-    }
-
-    #[must_use]
-    pub fn fixture_never() -> Self {
-        Self::new(Arc::new(AtomicBool::new(false)))
-    }
-
-    #[cfg(any(test, feature = "test-seam"))]
-    pub fn store(&self, value: bool) {
-        self.inner.store(value, Ordering::Release);
     }
 }
 

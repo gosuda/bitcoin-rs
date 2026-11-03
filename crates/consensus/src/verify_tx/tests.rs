@@ -12,6 +12,8 @@ use bitcoin_rs_script::{VerifyFlags, push_int};
 use super::{ScriptStageTimings, is_final_tx, verify_coinbase_script_sig_size, verify_transaction};
 use crate::ValidationEngine;
 
+use crate::test_error::TestError;
+
 fn parsed_block_for(txs: &[Tx], engine: ValidationEngine) -> crate::kernel::BlockScriptSource {
     let block = Block {
         header: Header {
@@ -57,8 +59,7 @@ impl UtxoView for hashbrown::HashMap<OutPoint, TxOut> {
 }
 
 #[test]
-fn assume_valid_and_prepared_sigop_checks_follow_witness_activation()
--> Result<(), Box<dyn std::error::Error>> {
+fn assume_valid_and_prepared_sigop_checks_follow_witness_activation() -> Result<(), TestError> {
     let cost = crate::MAX_BLOCK_SIGOPS_COST + 1;
     let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[9; 32])), 0);
     let tx = Tx {
@@ -569,7 +570,7 @@ fn op_equal_txout(value: u64) -> TxOut {
 }
 
 #[test]
-fn script_cache_hit_skips_scripts_for_exact_flags_only() -> Result<(), Box<dyn std::error::Error>> {
+fn script_cache_hit_skips_scripts_for_exact_flags_only() -> Result<(), TestError> {
     use crate::script_cache::{ScriptExecutionCache, WindowCacheTakes};
 
     let txs = vec![
@@ -675,8 +676,7 @@ fn witnessed_mismatch_input(outpoint: OutPoint) -> TxIn {
 }
 
 #[test]
-fn script_cache_hit_uses_derived_witness_ids_for_witness_bearing_bodies()
--> Result<(), Box<dyn std::error::Error>> {
+fn script_cache_hit_uses_derived_witness_ids_for_witness_bearing_bodies() -> Result<(), TestError> {
     use crate::script_cache::{ScriptExecutionCache, WindowCacheTakes};
 
     let txs = vec![

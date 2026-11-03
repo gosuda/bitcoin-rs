@@ -79,7 +79,8 @@
           "size_on_disk": 293,
           "pruned": false,
           "warnings": [],
-          "is_closed_for_recovery": false
+          "is_closed_for_recovery": false,
+          "is_apply_halted": false
         },
         "error": null,
         "id": 4
@@ -123,7 +124,8 @@
             "size_on_disk"
           ],
           "gap_keys": [
-            "is_closed_for_recovery"
+            "is_closed_for_recovery",
+            "is_apply_halted"
           ]
         }
       }
@@ -142,6 +144,7 @@
   "gap_paths": [
     "body.result.difficulty",
     "body.result.is_closed_for_recovery",
+    "body.result.is_apply_halted",
     "headers.content-type"
   ]
 }

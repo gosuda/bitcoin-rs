@@ -25,8 +25,6 @@ pub enum ApplyError {
     ProofOfWork {
         hash: bitcoin_rs_primitives::Hash256,
     },
-    #[error("declared target exceeds network max_target")]
-    TargetAboveLimit,
     #[error("consensus: {0}")]
     Consensus(#[from] bitcoin_rs_consensus::ConsensusError),
     #[error("chain: {0}")]

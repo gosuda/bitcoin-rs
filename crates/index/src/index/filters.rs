@@ -1,10 +1,7 @@
-//! BIP158 basic filters and their BIP157 commitments, owned by the derived index.
-
 use super::{IndexError, SpentCoinScripts};
 use bitcoin_rs_primitives::{encode, layout::ParsedBlock};
 use bitcoin_rs_storage::{ColumnFamily, KvSnapshot};
 
-/// Additive namespace in the index metadata table; no backend table, reset scans only this prefix.
 pub(super) const PREFIX: &[u8] = &[1, b'F'];
 
 pub(super) fn key(hash: &[u8; 32]) -> [u8; 34] {
@@ -14,14 +11,10 @@ pub(super) fn key(hash: &[u8; 32]) -> [u8; 34] {
     key
 }
 
-/// One serialized basic filter and its double-SHA256 commitments (wire byte order).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BasicFilter {
-    /// BIP158 `CompactSize` element count followed by Golomb-Rice coded deltas.
     pub filter: Vec<u8>,
-    /// Double SHA256 of `filter`.
     pub hash: [u8; 32],
-    /// Double SHA256 of `hash || previous_header`.
     pub header: [u8; 32],
 }
 
@@ -72,12 +65,6 @@ pub(super) fn read(
         .transpose()
 }
 
-/// Resolves inputs from earlier transactions in this block before consulting the
-/// authoritative undo source.
-///
-/// A missing external prevout fails closed. Empty and `OP_RETURN` outputs are excluded,
-/// but no UTXO admission rule applies: oversized scripts and genesis stay in the
-/// filter.
 pub(super) fn build(
     parsed: &ParsedBlock<'_>,
     height: u32,
@@ -143,6 +130,10 @@ pub(super) fn build(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test fixture construction failures abort"
+)]
 mod tests {
     use super::*;
     use bitcoin::{consensus::deserialize, hashes::Hash as _, hex::FromHex as _};
@@ -155,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_filters_match_pinned_core_vectors() -> Result<(), Box<dyn std::error::Error>> {
+    fn basic_filters_match_pinned_core_vectors() -> Result<(), crate::portable::TestError> {
         let vectors: Vec<sonic_rs::Value> =
             sonic_rs::from_str(include_str!("../../tests/data/blockfilters-core-31.1.json"))?;
         for vector in vectors.into_iter().skip(1) {
@@ -195,7 +186,7 @@ mod tests {
 
     #[test]
     fn same_block_spends_resolve_locally_and_empty_filters_encode_zero()
-    -> Result<(), Box<dyn std::error::Error>> {
+    -> Result<(), crate::portable::TestError> {
         use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut, consensus::serialize};
 
         let mut block = bitcoin::constants::genesis_block(bitcoin::Network::Regtest);
@@ -255,6 +246,39 @@ mod tests {
                 ..
             })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_scripts_stay_in_basic_filters() -> Result<(), crate::portable::TestError> {
+        use bitcoin::{ScriptBuf, consensus::serialize};
+
+        let mut block = bitcoin::constants::genesis_block(bitcoin::Network::Regtest);
+        let oversized = ScriptBuf::from_bytes(vec![0x51_u8; crate::MAX_LIVE_SCRIPT_SIZE + 1]);
+        block.txdata[0].output[0].script_pubkey = oversized.clone();
+        let bytes = serialize(&block);
+        let filter = build(
+            &ParsedBlock::parse_exact(&bytes)?,
+            0,
+            &block.block_hash().to_byte_array(),
+            &Scripts(hashbrown::HashMap::new()),
+        )
+        .expect("oversized script stays in the filter");
+
+        let mut expected = Vec::new();
+        let hash = block.block_hash().to_byte_array();
+        let mut writer = bitcoin::bip158::GcsFilterWriter::new(
+            &mut expected,
+            u64::from_le_bytes(hash[..8].try_into().expect("eight bytes")),
+            u64::from_le_bytes(hash[8..16].try_into().expect("eight bytes")),
+            784_931,
+            19,
+        );
+        writer.add_element(oversized.as_bytes());
+        writer
+            .finish()
+            .expect("reference filter encodes one element");
+        assert_eq!(filter.filter, expected);
         Ok(())
     }
 }

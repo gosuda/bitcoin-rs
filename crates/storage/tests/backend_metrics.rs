@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use bitcoin_rs_storage::cache_budget::{MIN_DBCACHE_BYTES, split_cache_budget};
+use crate::support::TestResult;
+use bitcoin_rs_storage::cache_budget::{MIN_DBCACHE_BYTES, split_cache_budget_with_txindex};
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use metrics::{
     Counter, CounterFn, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder,
@@ -13,7 +14,7 @@ use metrics::{
 };
 
 fn txindex_share() -> u64 {
-    let share = split_cache_budget(MIN_DBCACHE_BYTES, true)[1].bytes;
+    let share = split_cache_budget_with_txindex(MIN_DBCACHE_BYTES)[1].bytes;
     assert_eq!(share, 3_355_443, "txindex keeps a floored 20% of 16 MiB");
     share
 }
@@ -157,7 +158,7 @@ fn assert_gauge_eq(recorder: &LabeledRecorder, key: &str, expected: u64) {
 
 #[test]
 #[cfg(feature = "fjall")]
-fn fjall_counts_each_durability_path_once() -> Result<(), Box<dyn std::error::Error>> {
+fn fjall_counts_each_durability_path_once() -> TestResult {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
     let store = bitcoin_rs_storage::FjallStore::open_with_cache(dir.path(), txindex_share())?;
@@ -183,7 +184,7 @@ fn fjall_counts_each_durability_path_once() -> Result<(), Box<dyn std::error::Er
 
 #[test]
 #[cfg(feature = "fjall")]
-fn fjall_configures_the_budgeted_share_verbatim() -> Result<(), Box<dyn std::error::Error>> {
+fn fjall_configures_the_budgeted_share_verbatim() -> TestResult {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
     let share = txindex_share();
@@ -198,7 +199,7 @@ fn fjall_configures_the_budgeted_share_verbatim() -> Result<(), Box<dyn std::err
 
 #[test]
 #[cfg(feature = "redb")]
-fn redb_counts_each_durability_path_once() -> Result<(), Box<dyn std::error::Error>> {
+fn redb_counts_each_durability_path_once() -> TestResult {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
     let store = bitcoin_rs_storage::RedbStore::open_with_cache(dir.path(), txindex_share())?;
@@ -226,7 +227,7 @@ fn redb_counts_each_durability_path_once() -> Result<(), Box<dyn std::error::Err
 
 #[test]
 #[cfg(feature = "redb")]
-fn redb_configures_the_budgeted_share_verbatim() -> Result<(), Box<dyn std::error::Error>> {
+fn redb_configures_the_budgeted_share_verbatim() -> TestResult {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
     let share = txindex_share();
@@ -241,8 +242,7 @@ fn redb_configures_the_budgeted_share_verbatim() -> Result<(), Box<dyn std::erro
 
 #[test]
 #[cfg(feature = "redb")]
-fn redb_txindex_wrapper_configures_the_budgeted_share_verbatim()
--> Result<(), Box<dyn std::error::Error>> {
+fn redb_txindex_wrapper_configures_the_budgeted_share_verbatim() -> TestResult {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
     let share = txindex_share();
@@ -259,7 +259,7 @@ fn redb_txindex_wrapper_configures_the_budgeted_share_verbatim()
 
 #[test]
 #[cfg(feature = "rocksdb")]
-fn rocksdb_deferred_and_durable_writes_count_once() -> Result<(), Box<dyn std::error::Error>> {
+fn rocksdb_deferred_and_durable_writes_count_once() -> TestResult {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
     let store = bitcoin_rs_storage::RocksDbStore::open_with_cache(dir.path(), txindex_share())?;
@@ -291,7 +291,7 @@ fn rocksdb_deferred_and_durable_writes_count_once() -> Result<(), Box<dyn std::e
 
 #[test]
 #[cfg(feature = "rocksdb")]
-fn rocksdb_configures_the_budgeted_share_verbatim() -> Result<(), Box<dyn std::error::Error>> {
+fn rocksdb_configures_the_budgeted_share_verbatim() -> TestResult {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
     let share = txindex_share();

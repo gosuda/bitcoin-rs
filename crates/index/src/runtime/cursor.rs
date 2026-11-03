@@ -1,5 +1,3 @@
-//! Fenced row/cursor commits and retained forward-batch settlement.
-
 use super::CursorCommit;
 use super::DerivedIndexWorkerError;
 use super::PendingForward;
@@ -124,13 +122,15 @@ impl Worker {
         aligned.then(|| snapshot.to_bytes())
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "caller guarantees pending batch is present"
+    )]
     pub(super) fn commit_pending(
         &self,
         pending: &mut Option<PendingForward>,
     ) -> Result<bool, DerivedIndexWorkerError> {
-        let Some(state) = pending.take() else {
-            unreachable!("commit_pending has a pending batch");
-        };
+        let state = pending.take().expect("commit_pending has a pending batch");
         Ok(self.sync_and_commit(state)?.is_some())
     }
 }

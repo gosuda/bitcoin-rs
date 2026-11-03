@@ -1,10 +1,10 @@
 # Kernel script-parity fixture corpus
 
 Per-transaction script-verdict fixtures for
-`crates/consensus/tests/kernel_block_parity.rs` (plan 2026-06-10-001, R4/U3).
+`crates/consensus/tests/kernel_block_parity.rs`.
 One JSON per script class; each carries the raw transaction hex, its expected
 `txid` **and** `wtxid`, **every** input's prevout (scriptPubKey hex + amount
-in sats — the kernel taproot path needs all prevouts for
+in sats, because the kernel taproot path needs all prevouts for
 `PrecomputedTransactionData`), and the Core-named verify flags the production
 apply path computes at the spend height. For pre-segwit transactions
 `wtxid == txid`; it is recorded (computed, not assumed) so the schema stays
@@ -15,8 +15,8 @@ The corpus is committed so CI depends on neither the local datadir nor the
 network. The test loader recomputes each transaction's txid **and wtxid**
 from `tx_hex` and fails loudly on any mismatch with the `txid`/`wtxid` fields
 below. The txid alone covers only the witness-stripped serialization; the
-wtxid commits to the witness bytes too, so the full raw data — witnesses
-included — is self-authenticating against the recorded provenance.
+wtxid commits to the witness bytes too, so the full raw data, witnesses
+included, is self-authenticating against the recorded provenance.
 
 ## Manifest
 
@@ -31,16 +31,16 @@ included — is self-authenticating against the recorded provenance.
 
 ## Selection notes
 
-- **`legacy_p2pk`** is the canonical block-170 Satoshi→Finney transaction —
+- **`legacy_p2pk`** is the canonical block-170 Satoshi→Finney transaction,
   the first ever non-coinbase Bitcoin transaction, spending the block-9
   coinbase P2PK output.
 - **`legacy_p2pkh`** is the first transaction in the local 0→150k datadir
   whose every input spends a P2PKH (`pubkeyhash`) prevout, found by a forward
   scan from genesis (height 2812).
 - **`p2sh_spend`** is post-activation (BIP16 activated at height ≈173,805,
-  satisfying R4's `≥ 173,805` bound). Height 400,000 was chosen after
+  height >= 173,805 after BIP16 activation). Height 400,000 was chosen after
   mechanical scans of the activation window (173,805–173,905 plus spot blocks
-  at 183k/200k/220k/250k/290k/320k) found no all-P2SH-input spend — organic
+  at 183k/200k/220k/250k/290k/320k) found no all-P2SH-input spend. Organic
   P2SH usage stayed rare for years after activation. The redeem script is a
   2-of-2 multisig, so this fixture also exercises `OP_CHECKMULTISIG`
   (the "multisig era" legacy semantics) through the kernel.
@@ -56,21 +56,21 @@ included — is self-authenticating against the recorded provenance.
 All six fixtures carry `interpreter_parity: true` for the kernel-vs-interpreter
 differential.
 
-Esplora data was fetched from `mempool.space` (the recorded source URLs);
-`blockstream.info` serves the identical transactions under the same API paths
-for independent cross-checking.
+Esplora data was fetched from `mempool.space`, and the manifest records each
+source URL. `blockstream.info` serves the identical transactions under the same
+API paths, for independent cross-checking.
 
 ## Flags
 
-`flags` strings parse via `VerifyFlags::from_core_names` and match the
+`flags` strings parse via `VerifyFlags::from_core_names`. They match the
 derivation in production's `bitcoin_rs_consensus::verify_flags`
-(`crates/consensus/src/verify_block.rs`): `P2SH` is set at every height
-**except** the network's BIP16 exception hash (`Network::is_bip16_p2sh_exception`:
-mainnet block 170060, testnet3 block 394), for which it is omitted (BIP16 is
-otherwise treated as always-on for supported validation paths — hence
-`P2SH`, never `NONE`, on the height-170/2812 legacy fixtures, where it is
-verdict-identical because no P2SH-pattern output is spent), and the remaining
-bits follow mainnet activation heights (BIP66 DERSIG ≥ 363,725; BIP65 CLTV ≥
-388,381; CSV ≥ 419,328; segwit WITNESS+NULLDUMMY ≥ 481,824; TAPROOT ≥
-709,632). They stay within `VerifyFlags::MANDATORY`, the set `kernel_bits()`
-forwards to `bitcoinkernel::verify`.
+(`crates/consensus/src/verify_block.rs`). `P2SH` is set at every height
+(`Network::is_bip16_p2sh_exception`: mainnet block 170060, testnet3 block 394).
+The code omits it for that hash. BIP16 is otherwise treated as always-on
+for supported validation paths. That rule gives `P2SH`, never `NONE`, on the
+height-170/2812 legacy fixtures. Both choices give the same verdict there,
+because no P2SH-pattern output is spent. The remaining bits follow mainnet
+activation heights: BIP66 DERSIG ≥ 363,725, BIP65 CLTV ≥ 388,381, CSV ≥
+419,328, segwit WITNESS+NULLDUMMY ≥ 481,824, and TAPROOT ≥ 709,632. They stay
+within `VerifyFlags::MANDATORY`, the set `kernel_bits()` forwards to
+`bitcoinkernel::verify`.

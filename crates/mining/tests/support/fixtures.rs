@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use std::error::Error;
 use std::sync::Arc;
 
 use bitcoin_rs_consensus::transaction_sigop_cost;
@@ -51,7 +50,7 @@ pub(crate) fn insert(
     fee: u64,
     time: u64,
     height: u32,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), crate::support::TestError> {
     insert_with_cost(pool, tx, vsize, fee, time, height, 0)
 }
 
@@ -63,7 +62,7 @@ pub(crate) fn insert_with_cost(
     time: u64,
     height: u32,
     sigop_cost: u32,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), crate::support::TestError> {
     pool.insert_entry(MempoolEntry::new(
         Arc::new(tx),
         vsize,
@@ -110,7 +109,7 @@ pub(crate) fn insert_forged(
     pool: &mut Mempool,
     tx: Tx,
     forged: Forged,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), crate::support::TestError> {
     let mut entry = MempoolEntry::new(
         Arc::new(tx),
         forged.vsize,
@@ -208,11 +207,13 @@ fn build_tx(label: u8, value: u64, parent: Option<Txid>, witness: Witness) -> Tx
     }
 }
 
-pub(crate) fn oracle_transaction(tx: &Tx) -> Result<bitcoin::Transaction, Box<dyn Error>> {
+pub(crate) fn oracle_transaction(
+    tx: &Tx,
+) -> Result<bitcoin::Transaction, crate::support::TestError> {
     Ok(bitcoin::consensus::deserialize(&consensus_bytes(tx))?)
 }
 
-pub(crate) fn oracle_sigop_cost(tx: &Tx) -> Result<u64, Box<dyn Error>> {
+pub(crate) fn oracle_sigop_cost(tx: &Tx) -> Result<u64, crate::support::TestError> {
     Ok(u64::try_from(
         oracle_transaction(tx)?.total_sigop_cost(|_| None),
     )?)

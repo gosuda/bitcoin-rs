@@ -17,12 +17,10 @@ use bitcoin_rs_primitives::{
 };
 
 use super::ApplyError;
-use crate::test_fixtures::{handles, seed_genesis};
+use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
 
 mod sigops;
 mod transaction_structure;
-
-type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn empty_handles() -> Arc<crate::Chainstate> {
     Arc::new(handles(
@@ -34,7 +32,7 @@ fn empty_handles() -> Arc<crate::Chainstate> {
 fn apply_regtest_chain_to_height(
     handles: &crate::Chainstate,
     height: u32,
-) -> Result<BlockHash, Box<dyn std::error::Error>> {
+) -> TestResult<BlockHash> {
     let genesis = Network::Regtest.genesis_block();
     let mut parent = genesis.block_hash();
     for current in 1..=height {
@@ -112,7 +110,7 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
         );
         let final_coin = utxo
             .get_entry(&final_outpoint)
-            .ok_or("final same-block output must be live")?;
+            .ok_or(TestError::Missing("final same-block output must be live"))?;
         assert_eq!(final_coin.txout.value.to_sat(), 900);
 
         match (&outcome.raw_txs, capture_rawtx) {
@@ -129,7 +127,9 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
         let undo = handles
             .undo_store
             .load_undo(501, outcome.hash)?
-            .ok_or("a committed block must persist its undo record")?;
+            .ok_or(TestError::Missing(
+                "a committed block must persist its undo record",
+            ))?;
         assert!(!undo.is_empty(), "undo record must carry the spent coins");
         undo_records.push(undo);
 
@@ -171,7 +171,9 @@ fn version_max_tx_enforces_bip68_relative_lock() -> TestResult {
     let error = handles
         .apply_block(&BlockPayload::from_local(block.clone()))
         .err()
-        .ok_or("an unmet relative lock must reject the block")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "an unmet relative lock must reject the block",
+        ))?;
     let ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip { bip, .. }) = error else {
         panic!("expected a BIP68 consensus error, got {error:?}");
     };
@@ -194,7 +196,7 @@ const CORE_SIGNET_BLOCK_1: &str = "00000020f61eee3b63a380a477a063af32b2bbc97c9ff
 /// The marker of the BIP325 solution inside the witness-commitment output.
 const SIGNET_HEADER: [u8; 4] = [0xec, 0xc7, 0xda, 0xa2];
 
-fn signet_block_1() -> Result<Block, Box<dyn std::error::Error>> {
+fn signet_block_1() -> TestResult<Block> {
     let bytes = (0..CORE_SIGNET_BLOCK_1.len())
         .step_by(2)
         .map(|start| u8::from_str_radix(&CORE_SIGNET_BLOCK_1[start..start + 2], 16))
@@ -208,14 +210,14 @@ fn solution_offset(script: &[u8]) -> Option<usize> {
         .position(|window| window == SIGNET_HEADER.as_slice())
 }
 
-fn with_invalid_solution(valid: &Block) -> Result<Block, Box<dyn std::error::Error>> {
+fn with_invalid_solution(valid: &Block) -> TestResult<Block> {
     let mut block = valid.clone();
     let (index, solution_at) = block.txs[0]
         .outputs
         .iter()
         .enumerate()
         .find_map(|(index, output)| solution_offset(&output.script_pubkey).map(|at| (index, at)))
-        .ok_or("block 1 carries the solution header")?;
+        .ok_or(TestError::Missing("block 1 carries the solution header"))?;
     let mut script = block.txs[0].outputs[index].script_pubkey.to_vec();
     script[solution_at + SIGNET_HEADER.len() + 16] ^= 0x01;
     block.txs[0].outputs[index].script_pubkey = Script::from_bytes(script);
@@ -241,7 +243,9 @@ fn signet_solution_is_checked_on_commit_not_proposal() -> TestResult {
     let error = handles
         .apply_block(&invalid_payload)
         .err()
-        .ok_or("a bad solution must not commit")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "a bad solution must not commit",
+        ))?;
     assert!(
         matches!(error, ApplyError::Consensus(ConsensusError::SignetSolution)),
         "expected a signet solution failure, got {error:?}"
@@ -259,7 +263,7 @@ fn signet_solution_is_checked_on_commit_not_proposal() -> TestResult {
 }
 
 use super::*;
-use crate::test_fixtures::MemoryBodies;
+use crate::test_support::MemoryBodies;
 use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
@@ -285,8 +289,7 @@ fn witness_child(
 }
 
 #[test]
-fn preserved_witness_body_is_bound_before_commit_and_disconnect_keeps_exact_bytes()
--> Result<(), Box<dyn std::error::Error>> {
+fn preserved_witness_body_is_bound_before_commit_and_disconnect_keeps_exact_bytes() -> TestResult {
     for engine in bitcoin_rs_consensus::ValidationEngine::ALL
         .iter()
         .copied()
@@ -302,7 +305,7 @@ fn preserved_witness_body_is_bound_before_commit_and_disconnect_keeps_exact_byte
         let child = witness_child(genesis.block_hash(), 1)?;
         let raw = bytes::Bytes::from(consensus_bytes(&child));
         let before = chain.chain_snapshot();
-        let valid = BlockPayload::from_raw(raw.clone()).map_err(|error| error.to_string())?;
+        let valid = BlockPayload::from_raw(raw.clone())?;
         assert_eq!(valid.block().block_hash(), child.block_hash());
         assert_eq!(valid.bytes(), &raw);
         let mut changed = child.clone();
@@ -330,11 +333,13 @@ fn preserved_witness_body_is_bound_before_commit_and_disconnect_keeps_exact_byte
 
         let mut bad_merkle = witness_child(child.block_hash(), 2)?;
         bad_merkle.txs[0].outputs[0].value = Amount::from_sat(1);
-        let bad_payload = BlockPayload::from_raw(bytes::Bytes::from(consensus_bytes(&bad_merkle)))
-            .map_err(|error| error.to_string())?;
+        let bad_payload = BlockPayload::from_raw(bytes::Bytes::from(consensus_bytes(&bad_merkle)))?;
         assert!(chain.apply_block(&bad_payload).is_err());
         assert_eq!(
-            chain.applied_tip_snapshot().ok_or("missing tip")?.hash,
+            chain
+                .applied_tip_snapshot()
+                .ok_or(TestError::Missing("missing tip"))?
+                .hash,
             child.block_hash().0
         );
         assert!(

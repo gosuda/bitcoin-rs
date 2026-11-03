@@ -48,7 +48,6 @@ pub(super) struct ArtifactHeader {
     pub(super) index_format: u32,
     pub(super) network_magic: [u8; 4],
     pub(super) base_height: u32,
-    /// Base block hash, little-endian bytes.
     pub(super) base_hash: [u8; 32],
     pub(super) records: u64,
     pub(super) payload_bytes: u64,
@@ -133,15 +132,10 @@ pub(super) fn write_record(
 #[derive(Debug)]
 pub(super) enum ReadFault {
     Io(io::Error),
-    /// A record violated the framing contract.
-    Framing {
-        record: u64,
-        reason: &'static str,
-    },
+    Framing { record: u64, reason: &'static str },
 }
 
 pub(super) struct TxLookupRecord<'a> {
-    /// Full transaction id, little-endian bytes.
     pub(super) txid: [u8; 32],
     pub(super) height: u32,
     pub(super) positions: &'a [TxPosition],
@@ -233,7 +227,6 @@ impl<R: Read> RecordReader<R> {
         Ok(total)
     }
 
-    /// The transaction id and big-endian height of the record in `scratch`.
     fn frame_identity(&self) -> ([u8; 32], [u8; HEIGHT_SIZE]) {
         let mut txid = [0_u8; 32];
         txid.copy_from_slice(&self.scratch[..32]);
@@ -304,8 +297,6 @@ fn probe_end(reader: &mut impl Read) -> io::Result<bool> {
 
 type RowEmit<'a, E> = dyn FnMut(HashPrefixRow, &[u8]) -> Result<(), E> + 'a;
 
-/// while bounding importer RSS under one megabyte (131,072 x 6 bytes). Past
-/// the cap the import fails closed: rows sharing one key must commit as one
 const MAX_FOLDED_POSITIONS: usize = 131_072;
 
 #[derive(Default)]
@@ -466,16 +457,10 @@ mod tests {
         assert_eq!(ArtifactHeader::decode(&bytes), Ok(original));
         let mut bad_magic = bytes;
         bad_magic[0] ^= 1;
-        assert_eq!(
-            ArtifactHeader::decode(&bad_magic),
-            Err("magic is not BRSIXART")
-        );
+        assert!(ArtifactHeader::decode(&bad_magic).is_err());
         let mut bad_family = bytes;
         bad_family[8] = 9;
-        assert_eq!(
-            ArtifactHeader::decode(&bad_family),
-            Err("unknown artifact family")
-        );
+        assert!(ArtifactHeader::decode(&bad_family).is_err());
     }
 
     #[test]

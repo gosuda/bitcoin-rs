@@ -1,0 +1,33 @@
+# Block validation dictionary for libFuzzer
+# Block header versions (u32 little-endian)
+ver_1="\x01\x00\x00\x00"
+ver_2_bip34="\x02\x00\x00\x00"
+ver_3_bip66="\x03\x00\x00\x00"
+ver_4_bip65="\x04\x00\x00\x00"
+ver_versionbits="\x00\x00\x00\x20"
+
+# Target / nBits (u32 little-endian)
+nbits_regtest="\xff\xff\x7f\x20"
+nbits_mainnet_min="\xff\xff\x00\x1d"
+
+# Genesis timestamp (1231006505)
+time_genesis="\x29\xab\x5f\x49"
+
+# Segwit commitment magic in coinbase OP_RETURN
+segwit_commitment_magic="\xaa\x21\xa9\xed"
+op_return="\x6a"
+
+# Coinbase previous outpoint
+prevout_coinbase_hash="\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+prevout_coinbase_index="\xff\xff\xff\xff"
+
+# Transaction sequence and locktime
+seq_final="\xff\xff\xff\xff"
+locktime_zero="\x00\x00\x00\x00"
+
+# CompactSize boundaries
+varint_0="\x00"
+varint_fc="\xfc"
+varint_fd="\xfd\xfd\x00"
+varint_fe="\xfe\x00\x00\x01\x00"
+varint_ff="\xff\x00\x00\x00\x00\x01\x00\x00\x00"

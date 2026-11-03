@@ -1,5 +1,3 @@
-//! Header request ownership, locator construction, and inbound header admission.
-
 use super::GetdataRequestOutcome;
 use super::GetheadersOutcome;
 use super::HEADER_REQUEST_TIMEOUT;
@@ -8,7 +6,6 @@ use super::HeaderRequestKind;
 use super::HeaderRequestState;
 use super::LOCATOR_MAX_ENTRIES;
 use super::chain::HeaderAdmission;
-use super::chain::SyncChainError;
 use super::frontier::ChainFrontier;
 use super::frontier::SyncFrontier;
 use super::headers_presync::HeaderAnchor;
@@ -34,12 +31,8 @@ use bitcoin_rs_primitives::Header;
 use std::time::Instant;
 use std::vec::Vec;
 
-/// Cap on retained off-chain tips per session: honest peers announce one
-/// chain, so more than this many distinct side branches is a misbehavior
-/// signal rather than evidence worth keeping.
 const MAX_UNRESOLVED_DEMONSTRATED_TIPS: usize = 8;
 
-/// Empty and stale-source batches must also yield to block/recovery work.
 pub(super) const MAX_HEADER_BATCHES_PER_TICK: usize = 32;
 /// Stop between whole batches, never in a download-twice response page.
 /// A final protocol-bounded batch can exceed this by at most 1,999 headers.
@@ -55,8 +48,6 @@ struct PresyncOutcome {
 }
 
 impl BlockSync {
-    /// Receipt ends the peer's response deadline, but admission still owns
-    /// request consumption and presync cursor advancement.
     pub(crate) fn note_header_response_received(&self, source: PeerSource) {
         let now = Instant::now();
         self.peer_table.with_current(source, || {
@@ -137,74 +128,102 @@ impl BlockSync {
                     self.record_demoted_tip(demoted);
                 }
             }
-            match admission {
-                HeaderAdmission::Accepted {
+            self.handle_header_admission(
+                admission,
+                source,
+                wire_response,
+                batch_len,
+                &mut direct_fetch,
+                &mut credit_refresh_needed,
+            );
+        }
+        self.post_headers_drain(credit_refresh_needed, direct_fetch, total_headers);
+    }
+
+    fn handle_header_admission(
+        &self,
+        admission: HeaderAdmission,
+        source: Option<PeerSource>,
+        wire_response: bool,
+        batch_len: usize,
+        direct_fetch: &mut Vec<(PeerSource, Hash256)>,
+        credit_refresh_needed: &mut bool,
+    ) {
+        match admission {
+            HeaderAdmission::Accepted {
+                accepted,
+                announced_tip,
+                active_height,
+                demoted_tip,
+            } => {
+                self.record_admitted_tips(demoted_tip, announced_tip, source);
+                if let (Some(tip_hash), Some(source)) = (announced_tip, source) {
+                    self.peer_table
+                        .note_announced_tip(source, tip_hash, active_height);
+                    if wire_response && !self.owns_body_fetch(source, tip_hash) {
+                        direct_fetch.push((source, tip_hash));
+                    }
+                }
+                *credit_refresh_needed = true;
+                tracing::debug!(
                     accepted,
-                    announced_tip,
-                    active_height,
-                    demoted_tip,
-                } => {
-                    self.record_admitted_tips(demoted_tip, announced_tip, source);
-                    if let (Some(tip_hash), Some(source)) = (announced_tip, source) {
-                        self.peer_table
-                            .note_announced_tip(source, tip_hash, active_height);
-                        if wire_response && !self.owns_body_fetch(source, tip_hash) {
-                            direct_fetch.push((source, tip_hash));
-                        }
+                    received = batch_len,
+                    "block sync: accepted inbound headers batch",
+                );
+            }
+            HeaderAdmission::Rejected(error) if is_peer_fault(&error) => {
+                let mut blamed_peer = None;
+                if let Some(source) = source {
+                    let disconnected = self.peer_table.disconnect_source(source);
+                    self.scheduler.lock().clear_headers_sync_for(source);
+                    if disconnected {
+                        self.scheduler
+                            .lock()
+                            .window
+                            .mark_peer_unresponsive(source, Instant::now());
+                        blamed_peer = Some(source.endpoint);
                     }
-                    credit_refresh_needed = true;
-                    tracing::debug!(
-                        accepted,
+                }
+                if let Some(peer_addr) = blamed_peer {
+                    tracing::warn!(
+                        peer_addr = ?peer_addr,
                         received = batch_len,
-                        "block sync: accepted inbound headers batch",
+                        %error,
+                        "block sync: peer served invalid headers; disconnecting",
                     );
-                }
-                HeaderAdmission::Rejected(error) if is_peer_fault(&error) => {
-                    let mut blamed_peer = None;
-                    if let Some(source) = source {
-                        let disconnected = self.peer_table.disconnect_source(source);
-                        self.scheduler.lock().clear_headers_sync_for(source);
-                        if disconnected {
-                            self.scheduler
-                                .lock()
-                                .window
-                                .mark_peer_unresponsive(source, Instant::now());
-                            blamed_peer = Some(source.endpoint);
-                        }
-                    }
-                    if let Some(peer_addr) = blamed_peer {
-                        tracing::warn!(
-                            peer_addr = ?peer_addr,
-                            received = batch_len,
-                            %error,
-                            "block sync: peer served invalid headers; disconnecting",
-                        );
-                    } else {
-                        tracing::warn!(
-                            received = batch_len,
-                            %error,
-                            "block sync: rejected source-less or stale headers batch",
-                        );
-                    }
-                }
-                HeaderAdmission::Rejected(error) => {
-                    if matches!(
-                        error,
-                        ChainError::MissingParent { .. } | ChainError::NoCommonAncestor { .. }
-                    ) {
-                        self.request_headers_from(source);
-                    }
+                } else {
                     tracing::warn!(
                         received = batch_len,
                         %error,
-                        "block sync: rejected inbound headers batch",
+                        "block sync: rejected source-less or stale headers batch",
                     );
                 }
-                HeaderAdmission::Refused(error) => {
-                    self.request_ancestry_after_refusal(source, &error);
+            }
+            HeaderAdmission::Rejected(error) => {
+                if matches!(
+                    error,
+                    ChainError::MissingParent { .. } | ChainError::NoCommonAncestor { .. }
+                ) {
+                    self.request_headers_from(source);
                 }
+                tracing::warn!(
+                    received = batch_len,
+                    %error,
+                    "block sync: rejected inbound headers batch",
+                );
+            }
+            HeaderAdmission::Refused(error) => {
+                self.request_ancestry_after_refusal(source, &error);
             }
         }
+    }
+
+    fn post_headers_drain(
+        &self,
+        credit_refresh_needed: bool,
+        direct_fetch: Vec<(PeerSource, Hash256)>,
+        total_headers: usize,
+    ) {
         if credit_refresh_needed {
             self.refresh_active_peer_credit();
         }
@@ -273,7 +292,7 @@ impl BlockSync {
         else {
             return GetdataRequestOutcome::default();
         };
-        if chain.apply_halted {
+        if chain.closed_for_recovery {
             return GetdataRequestOutcome::default();
         }
         let Some(height) = self.tip_height_on_active_branch(chain_tip.tip_id, announced_tip) else {
@@ -284,7 +303,7 @@ impl BlockSync {
         {
             return GetdataRequestOutcome::default();
         }
-        self.send_getdata_for_pending_blocks(source, false, height, chain)
+        self.send_getdata_for_pending_blocks(source, height, chain)
     }
 
     fn tip_height_on_active_branch(&self, tip: NodeId, hash: Hash256) -> Option<u32> {
@@ -296,7 +315,11 @@ impl BlockSync {
             .then_some(height)
     }
 
-    fn request_ancestry_after_refusal(&self, source: Option<PeerSource>, error: &SyncChainError) {
+    fn request_ancestry_after_refusal(
+        &self,
+        source: Option<PeerSource>,
+        error: &bitcoin_rs_chain::HeaderRefusal,
+    ) {
         let now = Instant::now();
         let mut last = self.refused_rerequest_at.lock();
         if last.is_none_or(|last| now.duration_since(last) >= HEADER_REQUEST_TIMEOUT) {
@@ -386,30 +409,30 @@ impl BlockSync {
     }
 
     pub(super) fn retire_timed_out_header_syncs(&self, now: Instant) {
-        let below_floor = self.below_header_work_floor();
-        let expired: Vec<_> = {
-            let mut scheduler = self.scheduler.lock();
-            let expired: Vec<_> = scheduler
-                .headers_sync
-                .iter()
-                .filter_map(|(source, owned)| {
-                    let request = owned.request?;
-                    (request.state == HeaderRequestState::AwaitingResponse
-                        && (below_floor || owned.presync.is_some())
-                        && now.saturating_duration_since(request.requested_at) >= request.timeout())
-                    .then_some(*source)
-                })
-                .collect();
-            // Receipt and timeout settle under the same request-state lock.
-            for source in &expired {
-                scheduler.clear_headers_sync_for(*source);
-            }
-            expired
-        };
-        for source in expired {
+        for source in self.clear_timed_out_header_syncs(now) {
             self.peer_table.disconnect_source(source);
             tracing::debug!(peer_addr = ?source.endpoint, "block sync: header sync request timed out");
         }
+    }
+
+    fn clear_timed_out_header_syncs(&self, now: Instant) -> Vec<PeerSource> {
+        let below_floor = self.below_header_work_floor();
+        let mut scheduler = self.scheduler.lock();
+        let expired: Vec<_> = scheduler
+            .headers_sync
+            .iter()
+            .filter_map(|(source, owned)| {
+                let request = owned.request?;
+                (request.state == HeaderRequestState::AwaitingResponse
+                    && (below_floor || owned.presync.is_some())
+                    && now.saturating_duration_since(request.requested_at) >= request.timeout())
+                .then_some(*source)
+            })
+            .collect();
+        for source in &expired {
+            scheduler.clear_headers_sync_for(*source);
+        }
+        expired
     }
 
     fn below_header_work_floor(&self) -> bool {
@@ -654,8 +677,6 @@ impl BlockSync {
         }
     }
 
-    /// P2P-05: probes the capability frontier at the applied anchor through
-    /// `source` — the peer `SyncFrontier::probe_pick` selected this tick.
     pub(super) fn probe_frontier_peer(
         &self,
         frontier: &SyncFrontier,

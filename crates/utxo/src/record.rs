@@ -111,7 +111,7 @@ fn pack_height(height: u32, coinbase: bool) -> u64 {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OneUtxoOut<'a> {
+pub struct OneUtxoOut<'a> {
     pub vout: u32,
     pub value: u64,
     pub script_pubkey: &'a [u8],
@@ -120,7 +120,7 @@ pub(crate) struct OneUtxoOut<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct UtxoRecord {
+pub struct UtxoRecord {
     buf: Box<[u8]>,
 }
 
@@ -131,7 +131,7 @@ struct RecordHeader {
     inline_len: usize,
 }
 
-pub(crate) struct UtxoOutputIter<'a> {
+pub struct UtxoOutputIter<'a> {
     bytes: &'a [u8],
     layout: V5Layout,
     index: usize,
@@ -166,19 +166,17 @@ impl<'a> Iterator for UtxoOutputIter<'a> {
 impl ExactSizeIterator for UtxoOutputIter<'_> {}
 
 impl UtxoRecord {
-    pub(crate) fn from_encoded(buf: Box<[u8]>) -> Result<Self, UtxoError> {
+    pub fn from_encoded(buf: Box<[u8]>) -> Result<Self, UtxoError> {
         validate_encoded(&buf)?;
         Ok(Self { buf })
     }
 
-    fn bytes(&self) -> &[u8] {
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
         &self.buf
     }
 
-    pub(crate) fn from_owned_outputs(
-        txid: Hash256,
-        outputs: &[OwnedUtxoOut],
-    ) -> Result<Self, UtxoError> {
+    pub fn from_owned_outputs(txid: Hash256, outputs: &[OwnedUtxoOut]) -> Result<Self, UtxoError> {
         let buf = encode_record(
             txid,
             outputs.len().min(INLINE_CAPACITY),
@@ -193,21 +191,21 @@ impl UtxoRecord {
         UtxoKey::from_prefix(prefix)
     }
 
-    pub(crate) fn txid(&self) -> Hash256 {
+    pub fn txid(&self) -> Hash256 {
         let mut txid = [0_u8; TXID_LEN];
         txid.copy_from_slice(&self.bytes()[..TXID_LEN]);
         Hash256::from_le_bytes(&txid)
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.output_count() == 0
     }
 
-    pub(crate) fn output_count(&self) -> usize {
+    pub fn output_count(&self) -> usize {
         self.header().output_count
     }
 
-    pub(crate) fn outputs(&self) -> UtxoOutputIter<'_> {
+    pub fn outputs(&self) -> UtxoOutputIter<'_> {
         let bytes = self.bytes();
         let layout = match self.layout() {
             Ok(layout) => layout,
@@ -221,7 +219,7 @@ impl UtxoRecord {
         }
     }
 
-    pub(crate) fn find_output(&self, vout: u32) -> Option<OneUtxoOut<'_>> {
+    pub fn find_output(&self, vout: u32) -> Option<OneUtxoOut<'_>> {
         let bytes = self.bytes();
         let layout = self.layout().ok()?;
         let index = (0..layout.count)
@@ -233,7 +231,7 @@ impl UtxoRecord {
         }
     }
 
-    pub(crate) fn max_vout(&self) -> Option<u32> {
+    pub fn max_vout(&self) -> Option<u32> {
         let bytes = self.bytes();
         let layout = self.layout().ok()?;
         (0..layout.count)
@@ -245,24 +243,37 @@ impl UtxoRecord {
         existing: Option<&Self>,
         txid: Hash256,
         additions: &'p [OutputParts<'p>],
-        add_unique: bool,
         overwritten: Option<&mut Vec<Option<OwnedUtxoOut>>>,
     ) -> Result<Self, UtxoError> {
-        if add_unique {
-            let appended = match existing {
-                Some(record) => record.append_unique_run(additions)?,
-                None => Some(Self::from_output_parts(
-                    txid,
-                    additions.len().min(INLINE_CAPACITY),
-                    additions,
-                )?),
-            };
-            if let Some(record) = appended {
-                if let Some(sink) = overwritten {
-                    sink.resize(sink.len().saturating_add(additions.len()), None);
-                }
-                return Ok(record);
+        if vouts_are_strictly_increasing(
+            existing.and_then(Self::max_vout),
+            additions.iter().map(|part| part.vout),
+        ) {
+            Self::append_run(existing, txid, additions, overwritten)
+        } else {
+            Self::overwrite_run(existing, txid, additions, overwritten)
+        }
+    }
+
+    fn append_run<'p>(
+        existing: Option<&Self>,
+        txid: Hash256,
+        additions: &'p [OutputParts<'p>],
+        overwritten: Option<&mut Vec<Option<OwnedUtxoOut>>>,
+    ) -> Result<Self, UtxoError> {
+        let appended = match existing {
+            Some(record) => record.append_unique_run(additions)?,
+            None => Some(Self::from_output_parts(
+                txid,
+                additions.len().min(INLINE_CAPACITY),
+                additions,
+            )?),
+        };
+        if let Some(record) = appended {
+            if let Some(sink) = overwritten {
+                sink.resize(sink.len().saturating_add(additions.len()), None);
             }
+            return Ok(record);
         }
         let (mut parts, mut inline_len) = match existing {
             Some(record) => (record.output_parts(), record.header().inline_len),
@@ -271,13 +282,28 @@ impl UtxoRecord {
         let mut staged = overwritten
             .is_some()
             .then(|| Vec::with_capacity(additions.len()));
-        apply_additions(
-            &mut parts,
-            &mut inline_len,
-            additions,
-            add_unique,
-            staged.as_mut(),
-        );
+        append_parts(&mut parts, &mut inline_len, additions, staged.as_mut());
+        let record = Self::from_output_parts(txid, inline_len, &parts)?;
+        if let (Some(sink), Some(events)) = (overwritten, staged) {
+            sink.extend(events);
+        }
+        Ok(record)
+    }
+
+    fn overwrite_run<'p>(
+        existing: Option<&Self>,
+        txid: Hash256,
+        additions: &'p [OutputParts<'p>],
+        overwritten: Option<&mut Vec<Option<OwnedUtxoOut>>>,
+    ) -> Result<Self, UtxoError> {
+        let (mut parts, mut inline_len) = match existing {
+            Some(record) => (record.output_parts(), record.header().inline_len),
+            None => (Vec::with_capacity(additions.len()), 0),
+        };
+        let mut staged = overwritten
+            .is_some()
+            .then(|| Vec::with_capacity(additions.len()));
+        overwrite_parts(&mut parts, &mut inline_len, additions, staged.as_mut());
         let record = Self::from_output_parts(txid, inline_len, &parts)?;
         if let (Some(sink), Some(events)) = (overwritten, staged) {
             sink.extend(events);
@@ -411,14 +437,12 @@ impl UtxoRecord {
             if additions.is_empty() {
                 return Ok(RemovedRecord::Emptied);
             }
-            let add_unique =
-                vouts_are_strictly_increasing(None, additions.iter().map(|part| part.vout));
-            let record = Self::add_run_replacement(None, self.txid(), additions, add_unique, None)?;
+            let record = Self::add_run_replacement(None, self.txid(), additions, None)?;
             return Ok(RemovedRecord::Replaced(record));
         }
         let mut parts = self.output_parts();
         let mut inline_len = self.header().inline_len;
-        let add_unique = vouts_are_strictly_increasing(
+        let appends = vouts_are_strictly_increasing(
             parts.iter().map(|part| part.vout).max(),
             additions.iter().map(|part| part.vout),
         );
@@ -427,7 +451,11 @@ impl UtxoRecord {
                 remove_part_at(&mut parts, &mut inline_len, index);
             }
         }
-        apply_additions(&mut parts, &mut inline_len, additions, add_unique, None);
+        if appends {
+            append_parts(&mut parts, &mut inline_len, additions, None);
+        } else {
+            overwrite_parts(&mut parts, &mut inline_len, additions, None);
+        }
         if parts.is_empty() {
             return Ok(RemovedRecord::Emptied);
         }
@@ -573,26 +601,35 @@ fn owned_parts(outputs: &[OwnedUtxoOut]) -> Vec<OutputParts<'_>> {
     outputs.iter().map(OutputParts::from_owned).collect()
 }
 
-fn apply_additions<'a>(
+fn append_parts<'a>(
     parts: &mut Vec<OutputParts<'a>>,
     inline_len: &mut usize,
     additions: &[OutputParts<'a>],
-    add_unique: bool,
+    overwritten: Option<&mut Vec<Option<OwnedUtxoOut>>>,
+) {
+    for &addition in additions {
+        debug_assert!(parts.iter().all(|part| part.vout != addition.vout));
+        push_part(parts, inline_len, addition);
+    }
+    if let Some(sink) = overwritten {
+        sink.extend(additions.iter().map(|_| None));
+    }
+}
+
+fn overwrite_parts<'a>(
+    parts: &mut Vec<OutputParts<'a>>,
+    inline_len: &mut usize,
+    additions: &[OutputParts<'a>],
     overwritten: Option<&mut Vec<Option<OwnedUtxoOut>>>,
 ) {
     let mut displaced = Vec::with_capacity(additions.len());
     for &addition in additions {
-        let old = if add_unique {
-            debug_assert!(parts.iter().all(|part| part.vout != addition.vout));
-            None
-        } else {
-            parts
-                .iter()
-                .position(|part| part.vout == addition.vout)
-                .map(|index| remove_part_at(parts, inline_len, index))
-        };
+        let previous = parts
+            .iter()
+            .position(|part| part.vout == addition.vout)
+            .map(|index| remove_part_at(parts, inline_len, index));
         push_part(parts, inline_len, addition);
-        displaced.push(old.map(OutputParts::into_owned));
+        displaced.push(previous.map(OutputParts::into_owned));
     }
     if let Some(sink) = overwritten {
         sink.extend(displaced);
@@ -623,7 +660,7 @@ fn remove_part_at<'a>(
     }
 }
 
-pub(crate) fn vouts_are_strictly_increasing(
+fn vouts_are_strictly_increasing(
     previous: Option<u32>,
     vouts: impl IntoIterator<Item = u32>,
 ) -> bool {
@@ -747,8 +784,25 @@ fn validate_encoded(bytes: &[u8]) -> Result<RecordHeader, UtxoError> {
     let mut max_vout = 0_u64;
     let mut max_len = 0_u64;
     let mut cursor = layout.payloads;
+    let mut seen = if layout.count > 16 {
+        Some(hashbrown::HashSet::with_capacity(layout.count.min(1024)))
+    } else {
+        None
+    };
     for index in 0..layout.count {
-        max_vout = max_vout.max(u64::from(layout.vout_at(bytes, index)?));
+        let vout = layout.vout_at(bytes, index)?;
+        if let Some(set) = seen.as_mut() {
+            if !set.insert(vout) {
+                return Err(UtxoError::CorruptRecord);
+            }
+        } else {
+            for prior in 0..index {
+                if layout.vout_at(bytes, prior)? == vout {
+                    return Err(UtxoError::CorruptRecord);
+                }
+            }
+        }
+        max_vout = max_vout.max(u64::from(vout));
         let len = layout.payload_len_at(bytes, index)?;
         max_len = max_len.max(u64::try_from(len).unwrap_or(u64::MAX));
         let (_, next) = decode_output_at(bytes, &layout, index, cursor)?;
@@ -854,16 +908,17 @@ fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OwnedUtxoOut {
-    pub(crate) vout: u32,
-    pub(crate) value: u64,
-    pub(crate) script_pubkey: Vec<u8>,
-    pub(crate) coinbase: bool,
-    pub(crate) height: u32,
+pub struct OwnedUtxoOut {
+    pub vout: u32,
+    pub value: u64,
+    pub script_pubkey: Vec<u8>,
+    pub coinbase: bool,
+    pub height: u32,
 }
 
 impl OwnedUtxoOut {
-    pub(crate) const fn new(
+    #[must_use]
+    pub const fn new(
         vout: u32,
         value: u64,
         script_pubkey: Vec<u8>,

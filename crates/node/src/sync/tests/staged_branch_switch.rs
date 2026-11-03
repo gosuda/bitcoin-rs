@@ -1,8 +1,9 @@
 use super::*;
+use crate::test_support::TestError;
 
 #[test]
-fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dyn std::error::Error>>
-{
+fn branch_switch_uses_staged_bodies_without_durable_store()
+-> Result<(), crate::test_support::TestError> {
     use bitcoin_rs_primitives::Script;
     let (handles, main, mut bodies) = matured_chain(101)?;
     assert!(
@@ -17,7 +18,7 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
         .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
-        .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
+        .ok_or(TestError::Missing("fork root node"))?;
     let mut fork_prev = fork_root_hash;
     let mut fork = Vec::new();
     for height in 101..=103_u32 {
@@ -51,7 +52,7 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
     )?;
     let tip = applied_tip
         .load_full()
-        .ok_or_else(|| std::io::Error::other("branch switch did not publish a tip"))?;
+        .ok_or(TestError::Missing("published branch-switch tip"))?;
     assert_eq!(
         tip.hash,
         Hash256::from_le_bytes(fork[2].block_hash().as_bytes()),
@@ -67,7 +68,7 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
         .block_tree()
         .read()
         .lookup(main_tip_hash)
-        .ok_or_else(|| std::io::Error::other("missing original branch tip"))?;
+        .ok_or(TestError::Missing("original branch tip"))?;
     crate::reorg::switch_to_branch(
         &handles,
         &followers,
@@ -77,7 +78,7 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
     )?;
     let restored = applied_tip
         .load_full()
-        .ok_or_else(|| std::io::Error::other("reverse switch did not publish a tip"))?;
+        .ok_or(TestError::Missing("published reverse-switch tip"))?;
     assert_eq!(
         restored.hash, main_tip_hash,
         "bounded staging must supply the reverse branch switch without durable storage"
@@ -92,7 +93,7 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
 
 #[test]
 fn branch_switch_replans_after_a_competing_connect_before_transition()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_support::TestError> {
     use bitcoin_rs_primitives::Script;
     let (handles, main, mut bodies) = matured_chain(101)?;
     let followers = crate::chain_effects::ChainFollowers::noop();
@@ -103,7 +104,7 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
         .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
-        .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
+        .ok_or(TestError::Missing("fork root node"))?;
     let mut fork_prev = fork_root_hash;
     let mut fork = Vec::new();
     for height in 101..=103_u32 {
@@ -128,7 +129,7 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
         .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(main[100].block_hash().as_bytes()))
-        .ok_or_else(|| std::io::Error::other("missing main branch tip"))?;
+        .ok_or(TestError::Missing("main branch tip"))?;
     let mut racing_coinbase = regtest_fixture::coinbase(102);
     racing_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
     let racing = mined_block_with_prev_hash(main[100].block_hash(), 102, vec![racing_coinbase]);
@@ -145,7 +146,7 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
 
     let (preloaded_tx, preloaded_rx) = std::sync::mpsc::sync_channel(0);
     let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
-    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+    std::thread::scope(|scope| -> Result<(), crate::test_support::TestError> {
         let handles = &handles;
         let bodies = &bodies;
         let worker = scope.spawn(move || {
@@ -166,22 +167,20 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
                 |_| {},
             )
         });
-        preloaded_rx.recv().map_err(|_| {
-            std::io::Error::other("branch switch did not pause after preloading began")
-        })?;
+        preloaded_rx
+            .recv()
+            .map_err(|_| TestError::Timeout("branch switch pauses after preloading"))?;
         handles.apply_block(&BlockPayload::from_local(racing))?;
         continue_tx
             .send(())
-            .map_err(|_| std::io::Error::other("branch switch stopped before replanning"))?;
-        worker
-            .join()
-            .map_err(|_| std::io::Error::other("branch switch worker panicked"))??;
+            .map_err(|_| TestError::ExpectationFailed("branch switch replans"))?;
+        worker.join().map_err(|_| TestError::ThreadPanicked)??;
         Ok(())
     })?;
 
     let tip = applied_tip
         .load_full()
-        .ok_or_else(|| std::io::Error::other("branch switch did not publish a tip"))?;
+        .ok_or(TestError::Missing("published branch-switch tip"))?;
     assert_eq!(
         tip.hash,
         Hash256::from_le_bytes(fork[2].block_hash().as_bytes()),

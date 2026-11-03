@@ -1,5 +1,3 @@
-//! Buffered reads that survive a peer socket's poll interval.
-
 use std::io::{self, Read};
 
 pub(crate) const RECEIVE_CHUNK: usize = 16 * 1024;

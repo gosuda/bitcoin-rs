@@ -37,3 +37,4 @@ __pycache__/
 # Seed corpora live in gosuda/bitcoin-rs-fuzz-corpus; local cargo-fuzz runs
 # write here and must stay untracked.
 fuzz/corpus/
+docs/lean/.lake/

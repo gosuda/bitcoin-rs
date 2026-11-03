@@ -13,10 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::{
     AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, ChainstateRole, known_progress,
 };
-use crate::test_fixtures::handles;
+use crate::test_fixtures::{TestError, TestResult, handles};
 use crate::{ApplyError, Chainstate};
-
-type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn chainstate() -> Arc<Chainstate> {
     let stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
@@ -36,6 +34,25 @@ struct FaultHead {
 impl DurableHeadStore for FaultHead {
     fn load(&self) -> Result<Option<DurableHead>, StorageError> {
         self.inner.load()
+    }
+    fn load_attestation(
+        &self,
+        head: &DurableHead,
+    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
+        self.inner.load_attestation(head)
+    }
+    fn load_suffix_attestation(
+        &self,
+        head: &DurableHead,
+    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
+        self.inner.load_suffix_attestation(head)
+    }
+    fn attest(
+        &self,
+        head: &DurableHead,
+        level: bitcoin_rs_storage::ScriptAttestation,
+    ) -> Result<(), StorageError> {
+        self.inner.attest(head, level)
     }
     fn commit(
         &self,
@@ -68,12 +85,15 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    fn new() -> TestResult<Self> {
         let source = chainstate();
         let mut blocks = vec![Network::Regtest.genesis_block()];
         for height in 1..=2 {
             blocks.push(bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(
-                blocks.last().ok_or("missing predecessor")?.block_hash(),
+                blocks
+                    .last()
+                    .ok_or(TestError::Missing("missing predecessor"))?
+                    .block_hash(),
                 height,
             )?);
         }
@@ -83,7 +103,9 @@ impl Fixture {
                 .into_transition()
                 .connect(&BlockPayload::from_local((*block).clone()))?;
         }
-        let tip = source.applied_tip_snapshot().ok_or("missing source tip")?;
+        let tip = source
+            .applied_tip_snapshot()
+            .ok_or(TestError::Missing("missing source tip"))?;
         let pinned = AssumeUtxoData {
             height: tip.height,
             block_hash: tip.hash,
@@ -95,7 +117,7 @@ impl Fixture {
         let mut active = chainstate();
         let head = Arc::new(FaultHead::default());
         Arc::get_mut(&mut active)
-            .ok_or("shared active fixture")?
+            .ok_or(TestError::Missing("shared active fixture"))?
             .durable_head = head.clone();
         for block in &blocks {
             active
@@ -134,7 +156,7 @@ impl Fixture {
     }
 }
 
-fn disk_status(active: &Chainstate) -> Result<AssumeUtxoDiskStatus, Box<dyn std::error::Error>> {
+fn disk_status(active: &Chainstate) -> TestResult<AssumeUtxoDiskStatus> {
     Ok(active
         .durable_head
         .load()?
@@ -152,14 +174,14 @@ fn untrusted_snapshot_cannot_assert_its_own_commitment() -> TestResult {
     )?;
     let pinned = Network::Regtest
         .assume_utxo_for_height(110)
-        .ok_or("missing pin")?;
+        .ok_or(TestError::Missing("missing pin"))?;
     for (height, hash) in [
         (1234, pinned.block_hash),
         (110, Hash256::default()),
         (110, pinned.block_hash),
     ] {
         let Err(error) = manager.activate_snapshot_state(UtxoSet::new(), hash, height) else {
-            return Err("untrusted snapshot accepted".into());
+            return Err(TestError::UnexpectedSuccess("untrusted snapshot accepted"));
         };
         match height {
             1234 => assert!(matches!(
@@ -217,11 +239,11 @@ fn snapshot_rejects_invalid_base_and_descendant_before_persistence() -> TestResu
             let mut tree = fixture.active.block_tree.write();
             let invalid = tree
                 .lookup(fixture.blocks[invalid_height].block_hash().0)
-                .ok_or("invalidated header missing")?;
+                .ok_or(TestError::Missing("invalidated header missing"))?;
             tree.invalidate_subtree(invalid)?;
             let base = tree
                 .node_by_hash(fixture.pinned.block_hash)
-                .ok_or("snapshot base missing")?;
+                .ok_or(TestError::Missing("snapshot base missing"))?;
             assert_eq!(base.status, NodeStatus::Invalid);
         }
         let before_stats = fixture.active.coin_stats.snapshot();
@@ -257,7 +279,7 @@ fn snapshot_rejects_invalid_base_and_descendant_before_persistence() -> TestResu
     Ok(())
 }
 
-fn competing_snapshot_headers() -> Result<Vec<Block>, Box<dyn std::error::Error>> {
+fn competing_snapshot_headers() -> TestResult<Vec<Block>> {
     let mut parent = Network::Regtest.genesis_block().block_hash();
     let mut fork = Vec::new();
     for height in 1..=3 {
@@ -300,10 +322,12 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
         for block in &fork[1..] {
             tree.insert_header(block.header, NodeStatus::HeaderValid)?;
         }
-        let tip = tree.tip().ok_or("best header missing")?;
+        let tip = tree
+            .tip()
+            .ok_or(TestError::Missing("best header missing"))?;
         let base = tree
             .node_by_hash(fixture.pinned.block_hash)
-            .ok_or("snapshot base missing")?;
+            .ok_or(TestError::Missing("snapshot base missing"))?;
         assert!(tip.chainwork > base.chainwork);
         assert_eq!(tip.hash, fork[2].block_hash().0);
         root
@@ -351,7 +375,7 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
         fixture
             .active
             .applied_tip_snapshot()
-            .ok_or("snapshot tip missing")?
+            .ok_or(TestError::Missing("snapshot tip missing"))?
             .hash,
         fixture.pinned.block_hash
     );
@@ -369,10 +393,12 @@ fn snapshot_rejects_base_above_shorter_best_work_header_chain() -> TestResult {
     {
         let mut tree = fixture.active.block_tree.write();
         tree.insert_header(harder.header, NodeStatus::HeaderValid)?;
-        let tip = tree.tip().ok_or("best header missing")?;
+        let tip = tree
+            .tip()
+            .ok_or(TestError::Missing("best header missing"))?;
         let base = tree
             .node_by_hash(fixture.pinned.block_hash)
-            .ok_or("base missing")?;
+            .ok_or(TestError::Missing("base missing"))?;
         assert!(tip.height < base.height);
         assert!(tip.chainwork > base.chainwork);
         assert_eq!(tip.hash, harder.block_hash().0);
@@ -429,7 +455,7 @@ fn snapshot_accepts_base_below_best_header_tip_on_same_ancestry() -> TestResult 
         fixture
             .active
             .applied_tip_snapshot()
-            .ok_or("snapshot tip missing")?
+            .ok_or(TestError::Missing("snapshot tip missing"))?
             .hash,
         fixture.pinned.block_hash
     );
@@ -439,7 +465,7 @@ fn snapshot_accepts_base_below_best_header_tip_on_same_ancestry() -> TestResult 
             .block_tree
             .read()
             .tip()
-            .ok_or("best header missing")?
+            .ok_or(TestError::Missing("best header missing"))?
             .hash,
         child.block_hash().0
     );
@@ -450,13 +476,16 @@ fn snapshot_work_branch(
     height: u32,
     bits: u32,
     time_offset: u32,
-) -> Result<(Vec<Block>, SnapshotLoad, CoinStats), Box<dyn std::error::Error>> {
+) -> TestResult<(Vec<Block>, SnapshotLoad, CoinStats)> {
     let source = chainstate();
     let mut blocks = vec![Network::Regtest.genesis_block()];
     for next_height in 1..=height {
         blocks.push(
             bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at_time(
-                blocks.last().ok_or("branch parent missing")?.block_hash(),
+                blocks
+                    .last()
+                    .ok_or(TestError::Missing("branch parent missing"))?
+                    .block_hash(),
                 bitcoin_rs_chain::regtest_fixture::genesis_time() + time_offset + next_height,
                 next_height,
             )?,
@@ -473,7 +502,11 @@ fn snapshot_work_branch(
         blocks[index].header.nonce = 0;
         bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut blocks[index])?;
     }
-    let tip = blocks.last().ok_or("branch tip missing")?.block_hash().0;
+    let tip = blocks
+        .last()
+        .ok_or(TestError::Missing("branch tip missing"))?
+        .block_hash()
+        .0;
     let mut encoded = Vec::new();
     write_snapshot_observed(&source.utxo, &tip, height, &mut encoded, ())?;
     let loaded = read_snapshot_strict_v4(&mut Cursor::new(encoded))?;
@@ -485,7 +518,7 @@ fn snapshot_work_fixture(
     snapshot_bits: u32,
     applied_height: u32,
     applied_bits: u32,
-) -> Result<Fixture, Box<dyn std::error::Error>> {
+) -> TestResult<Fixture> {
     let (blocks, snapshot, stats) = snapshot_work_branch(snapshot_height, snapshot_bits, 0)?;
     let (applied_blocks, mut applied, applied_stats) =
         snapshot_work_branch(applied_height, applied_bits, 100)?;
@@ -495,7 +528,7 @@ fn snapshot_work_fixture(
     }
     let applied_id = tree
         .lookup(applied.tip_hash)
-        .ok_or("applied header missing")?;
+        .ok_or(TestError::Missing("applied header missing"))?;
     tree.restore_chain_tx_count(
         applied_id,
         bitcoin_rs_chain::ChainTxCount::established(applied_stats.tx_count),
@@ -564,7 +597,7 @@ fn snapshot_rejects_higher_base_with_less_work_than_applied_tip() -> TestResult 
     let before = fixture
         .active
         .applied_tip_snapshot()
-        .ok_or("applied tip missing")?;
+        .ok_or(TestError::Missing("applied tip missing"))?;
     let before_head = fixture.active.durable_head.load()?;
     let before_stats = fixture.active.coin_stats.snapshot();
     let before_coins = fixture.active.utxo.lock_stable_view().hash_serialized_3()?;
@@ -578,10 +611,12 @@ fn snapshot_rejects_higher_base_with_less_work_than_applied_tip() -> TestResult 
     {
         let mut tree = fixture.active.block_tree.write();
         tree.insert_header(child.header, NodeStatus::HeaderValid)?;
-        let best = tree.tip().ok_or("best header missing")?;
+        let best = tree
+            .tip()
+            .ok_or(TestError::Missing("best header missing"))?;
         let base_id = tree
             .lookup(fixture.pinned.block_hash)
-            .ok_or("base missing")?;
+            .ok_or(TestError::Missing("base missing"))?;
         let base = tree.node(base_id)?;
         assert!(base.height > before.height);
         assert!(base.chainwork < before.chainwork);
@@ -622,20 +657,25 @@ fn snapshot_accepts_lower_base_with_more_work_than_applied_tip() -> TestResult {
     let before = fixture
         .active
         .applied_tip_snapshot()
-        .ok_or("applied tip missing")?;
+        .ok_or(TestError::Missing("applied tip missing"))?;
     let before_head = fixture
         .active
         .durable_head
         .load()?
-        .ok_or("durable head missing")?;
+        .ok_or(TestError::Missing("durable head missing"))?;
     {
         let tree = fixture.active.block_tree.read();
         let base = tree
             .node_by_hash(fixture.pinned.block_hash)
-            .ok_or("base missing")?;
+            .ok_or(TestError::Missing("base missing"))?;
         assert!(base.height < before.height);
         assert!(base.chainwork > before.chainwork);
-        assert_eq!(tree.tip().ok_or("best header missing")?.hash, base.hash);
+        assert_eq!(
+            tree.tip()
+                .ok_or(TestError::Missing("best header missing"))?
+                .hash,
+            base.hash
+        );
     }
     let manager = AssumeUtxoManager::open(
         Network::Regtest,
@@ -646,12 +686,12 @@ fn snapshot_accepts_lower_base_with_more_work_than_applied_tip() -> TestResult {
     let applied = fixture
         .active
         .applied_tip_snapshot()
-        .ok_or("snapshot tip missing")?;
+        .ok_or(TestError::Missing("snapshot tip missing"))?;
     let head = fixture
         .active
         .durable_head
         .load()?
-        .ok_or("snapshot head missing")?;
+        .ok_or(TestError::Missing("snapshot head missing"))?;
     assert_eq!(head.commit_id, before_head.commit_id + 1);
     assert_eq!(head.height, fixture.pinned.height);
     assert_eq!(head.tip, fixture.pinned.block_hash);
@@ -674,12 +714,12 @@ fn snapshot_refuses_work_comparison_when_durable_and_applied_tips_differ() -> Te
         let applied = fixture
             .active
             .applied_tip_snapshot()
-            .ok_or("applied tip missing")?;
+            .ok_or(TestError::Missing("applied tip missing"))?;
         let prior = fixture
             .active
             .durable_head
             .load()?
-            .ok_or("durable head missing")?;
+            .ok_or(TestError::Missing("durable head missing"))?;
         let unsettled = DurableHead {
             commit_id: prior.commit_id + 1,
             tip: if change_hash {
@@ -728,7 +768,7 @@ fn snapshot_installs_coins_statistics_and_resolved_header_together() -> TestResu
     let active = &fixture.active;
     let tip = active
         .applied_tip_snapshot()
-        .ok_or("missing snapshot tip")?;
+        .ok_or(TestError::Missing("missing snapshot tip"))?;
     let tree = active.block_tree.read();
     let node = tree.node(tip.tip_id)?;
     assert_eq!(
@@ -822,11 +862,11 @@ fn historical_replay_preserves_active_durable_head_and_notifications() -> TestRe
         .active
         .durable_head
         .load()?
-        .ok_or("missing active anchor")?;
+        .ok_or(TestError::Missing("missing active anchor"))?;
     let events = fixture.active.chain_events.snapshot();
     let historical = manager
         .historical_chainstate()
-        .ok_or("historical missing")?;
+        .ok_or(TestError::Missing("historical missing"))?;
     assert!(!Arc::ptr_eq(
         &historical.undo_store,
         &fixture.active.undo_store
@@ -842,7 +882,11 @@ fn historical_replay_preserves_active_durable_head_and_notifications() -> TestRe
     ));
     for block in &fixture.blocks {
         manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
-        let head = fixture.active.durable_head.load()?.ok_or("missing head")?;
+        let head = fixture
+            .active
+            .durable_head
+            .load()?
+            .ok_or(TestError::Missing("missing head"))?;
         assert_eq!(
             (head.tip, head.height, head.chain_tx_count),
             (
@@ -936,7 +980,7 @@ fn historical_restart_replays_coins_from_genesis_instead_of_fabricating_a_tip() 
     assert!(
         manager
             .historical_chainstate()
-            .ok_or("missing historical")?
+            .ok_or(TestError::Missing("missing historical"))?
             .coin_stats
             .snapshot()
             .utxo_count
@@ -946,7 +990,7 @@ fn historical_restart_replays_coins_from_genesis_instead_of_fabricating_a_tip() 
     let reopened = fixture.manager(dir.path())?;
     let historical = reopened
         .historical_chainstate()
-        .ok_or("missing historical after restart")?;
+        .ok_or(TestError::Missing("missing historical after restart"))?;
     assert!(historical.applied_tip_snapshot().is_none());
     assert_eq!(historical.coin_stats.snapshot(), CoinStats::default());
     for block in &fixture.blocks {
@@ -959,6 +1003,166 @@ fn historical_restart_replays_coins_from_genesis_instead_of_fabricating_a_tip() 
     Ok(())
 }
 
+// RCV-02
+#[test]
+fn finalized_replay_attests_full_so_a_full_start_skips_revalidation() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let activated = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing activated head"))?;
+    assert_eq!(
+        fixture.active.durable_head.load_attestation(&activated)?,
+        bitcoin_rs_storage::ScriptAttestation::AssumeValid,
+        "an activated snapshot has not executed the scripts below its base yet"
+    );
+    for block in &fixture.blocks {
+        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+    }
+    assert!(matches!(
+        manager.status()?,
+        AssumeUtxoDiskStatus::Finalized { .. }
+    ));
+    let finalized = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing finalized head"))?;
+    assert_eq!(
+        fixture.active.durable_head.load_attestation(&finalized)?,
+        bitcoin_rs_storage::ScriptAttestation::Full,
+        "the historical replay executed every script below the base"
+    );
+    crate::recovery::require_full_script_attestation(
+        dir.path(),
+        crate::ValidationMode::Full,
+        Some(&finalized),
+        fixture.active.durable_head.as_ref(),
+        false,
+    )?;
+    assert!(
+        !crate::recovery::requires_full_revalidation(dir.path()),
+        "a finalized assumeutxo datadir must not take the cold revalidation path"
+    );
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn finalized_replay_keeps_an_assume_valid_suffix_below_full() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let prior = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing activated head"))?;
+    let next = DurableHead {
+        commit_id: prior.commit_id + 1,
+        height: prior.height + 1,
+        tip: Hash256::from_le_bytes(&[0x33; 32]),
+        chain_tx_count: prior.chain_tx_count + 1,
+        ..prior
+    };
+    fixture.active.durable_head.commit(
+        Some(&prior),
+        &next,
+        &CommitRecords {
+            attestation: Some(bitcoin_rs_storage::ScriptAttestation::AssumeValid),
+            ..CommitRecords::default()
+        },
+    )?;
+    assert_eq!(
+        fixture.active.durable_head.load_suffix_attestation(&next)?,
+        bitcoin_rs_storage::ScriptAttestation::AssumeValid,
+        "a block above the base that skipped scripts must lower the suffix level"
+    );
+    for block in &fixture.blocks {
+        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+    }
+    let finalized = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing finalized head"))?;
+    assert_eq!(
+        fixture.active.durable_head.load_attestation(&finalized)?,
+        bitcoin_rs_storage::ScriptAttestation::AssumeValid,
+        "the finalized head spans blocks above the base that never executed scripts"
+    );
+    crate::recovery::require_full_script_attestation(
+        dir.path(),
+        crate::ValidationMode::Full,
+        Some(&finalized),
+        fixture.active.durable_head.as_ref(),
+        false,
+    )?;
+    assert!(
+        crate::recovery::requires_full_revalidation(dir.path()),
+        "a full start must revalidate a chain whose suffix skipped scripts"
+    );
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn finalized_replay_attests_full_after_an_executed_suffix() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let block = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(
+        fixture
+            .blocks
+            .last()
+            .ok_or(TestError::Missing("missing base block"))?
+            .block_hash(),
+        3,
+    )?;
+    fixture
+        .active
+        .block_tree
+        .write()
+        .insert_header(block.header, NodeStatus::HeaderValid)?;
+    fixture
+        .active
+        .apply_block(&BlockPayload::from_local(block))?;
+    let executed = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing executed head"))?;
+    assert_eq!(executed.height, 3);
+    assert_eq!(
+        fixture
+            .active
+            .durable_head
+            .load_suffix_attestation(&executed)?,
+        bitcoin_rs_storage::ScriptAttestation::Full,
+        "a block above the base that executed scripts keeps the suffix level Full"
+    );
+    for block in &fixture.blocks {
+        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+    }
+    let finalized = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing finalized head"))?;
+    assert_eq!(
+        fixture.active.durable_head.load_attestation(&finalized)?,
+        bitcoin_rs_storage::ScriptAttestation::Full,
+        "the historical replay and every suffix block executed scripts"
+    );
+    Ok(())
+}
+
 #[test]
 fn reconstructed_commitment_or_transaction_count_mismatch_fails_closed() -> TestResult {
     for wrong_count in [false, true] {
@@ -967,7 +1171,11 @@ fn reconstructed_commitment_or_transaction_count_mismatch_fails_closed() -> Test
         let manager = fixture.manager(dir.path())?;
         fixture.activate(&manager)?;
         {
-            let prior = fixture.active.durable_head.load()?.ok_or("missing head")?;
+            let prior = fixture
+                .active
+                .durable_head
+                .load()?
+                .ok_or(TestError::Missing("missing head"))?;
             let mut next = prior;
             if let AssumeUtxoDiskStatus::Validating {
                 ref mut expected_hash_serialized,
@@ -992,11 +1200,11 @@ fn reconstructed_commitment_or_transaction_count_mismatch_fails_closed() -> Test
         }
         let historical = manager
             .historical_chainstate()
-            .ok_or("missing historical")?;
+            .ok_or(TestError::Missing("missing historical"))?;
         let Err(error) =
             manager.step_historical(&BlockPayload::from_local(fixture.blocks[2].clone()))
         else {
-            return Err("divergence finalized".into());
+            return Err(TestError::UnexpectedSuccess("divergence finalized"));
         };
         if wrong_count {
             assert!(matches!(
@@ -1063,7 +1271,7 @@ fn mismatch_closes_admission_even_when_failure_record_cannot_be_written() -> Tes
     assert!(
         manager
             .historical_chainstate()
-            .ok_or("missing historical")?
+            .ok_or(TestError::Missing("missing historical"))?
             .lock_transition()
             .is_err()
     );
@@ -1104,13 +1312,14 @@ fn finalization_io_failure_keeps_assumed_role_and_closes_both_admissions() -> Te
     assert!(
         manager
             .historical_chainstate()
-            .ok_or("missing historical")?
+            .ok_or(TestError::Missing("missing historical"))?
             .lock_transition()
             .is_err()
     );
     Ok(())
 }
 
+// ARCH-07b
 #[test]
 fn assumed_reorg_and_historical_height_guards_remain_enforced() -> TestResult {
     let fixture = Fixture::new()?;
@@ -1127,7 +1336,7 @@ fn assumed_reorg_and_historical_height_guards_remain_enforced() -> TestResult {
     ));
     let historical = manager
         .historical_chainstate()
-        .ok_or("missing historical")?;
+        .ok_or(TestError::Missing("missing historical"))?;
     for block in &fixture.blocks {
         manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
     }
@@ -1157,7 +1366,7 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
     let before = fixture
         .active
         .applied_tip_snapshot()
-        .ok_or("genesis missing")?;
+        .ok_or(TestError::Missing("genesis missing"))?;
     let reader = fixture.active.chain_progress_reader();
     let loaded = fixture.load()?;
     let mut observed = None;
@@ -1176,21 +1385,25 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
                 observed = received
                     .recv_timeout(std::time::Duration::from_secs(1))
                     .ok();
-                Err(AssumeUtxoError::Archive(anyhow::anyhow!(
-                    "simulated persistence refusal"
-                )))
+                Err(AssumeUtxoError::Storage(
+                    bitcoin_rs_storage::StorageError::InvalidOperation(
+                        "simulated persistence refusal",
+                    ),
+                ))
             },
         )
     });
     assert!(result.is_err());
-    let progress = observed.ok_or("progress query blocked behind snapshot persistence")?;
+    let progress = observed.ok_or(TestError::UnexpectedSuccess(
+        "progress query blocked behind snapshot persistence",
+    ))?;
     assert_eq!(progress.blocks, before.height);
     assert_eq!(progress.best_block_hash, before.hash);
     assert_eq!(
         fixture
             .active
             .applied_tip_snapshot()
-            .ok_or("prior tip lost")?
+            .ok_or(TestError::UnexpectedSuccess("prior tip lost"))?
             .hash,
         before.hash
     );
@@ -1214,14 +1427,16 @@ fn lifecycle_report_refuses_contention_without_waiting_for_the_transition() -> T
         drop(guard);
         observed
     });
-    let report = observed.map_err(|_| "report waited for the lifecycle owner")??;
+    let report = observed??;
     assert!(
         report.is_none(),
         "busy lifecycle must not report fabricated roles"
     );
     let report = manager
         .try_chainstates_report()?
-        .ok_or("lifecycle remained busy after release")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "lifecycle remained busy after release",
+        ))?;
     assert_eq!(report.lifecycle, manager.chainstates_summary()?);
     Ok(())
 }
@@ -1236,6 +1451,30 @@ fn activation_stages_witness_only_after_durable_commit() -> TestResult {
     let staged = manager.take_pending_activation_witness();
     assert!(staged.is_some(), "activation must stage a witness");
     assert!(manager.take_pending_activation_witness().is_none());
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn activation_attests_the_snapshot_base_as_assume_valid() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let head = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing activated durable head"))?;
+    assert!(matches!(
+        head.assumeutxo,
+        AssumeUtxoDiskStatus::Validating { .. }
+    ));
+    assert_eq!(
+        fixture.active.durable_head.load_attestation(&head)?,
+        bitcoin_rs_storage::ScriptAttestation::AssumeValid,
+        "the snapshot base was not script-checked locally"
+    );
     Ok(())
 }
 
@@ -1273,7 +1512,7 @@ fn lifecycle_progress_omits_missing_and_unauthenticated_counts() -> TestResult {
     assert_eq!(
         manager
             .try_chainstates_report()?
-            .ok_or("uncontended lifecycle is busy")?
+            .ok_or(TestError::Missing("uncontended lifecycle is busy"))?
             .active_verification_progress,
         None
     );
@@ -1283,7 +1522,7 @@ fn lifecycle_progress_omits_missing_and_unauthenticated_counts() -> TestResult {
         .block_tree
         .read()
         .tip()
-        .ok_or("header tip missing")?;
+        .ok_or(TestError::Missing("header tip missing"))?;
     let mut tip = (*tip).clone();
     tip.chain_tx_count = bitcoin_rs_chain::ChainTxCount::UNKNOWN;
     assert_eq!(known_progress(Some(&tip), 0.5), None);
@@ -1320,5 +1559,27 @@ fn activation_offer_only_on_full_success() -> TestResult {
     let initial =
         crate::assumeutxo_snapshot::load_verified(dir.path(), Network::Regtest, &fixture.pinned)?;
     assert!(initial.script_live_seed.is_some());
+    Ok(())
+}
+
+// RCV-01, RCV-04
+#[test]
+fn rejects_assumeutxo_snapshot_with_truncated_headers() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    drop(manager);
+    let path = dir
+        .path()
+        .join("assumeutxo")
+        .join(fixture.pinned.block_hash.to_string());
+    std::fs::write(path.join("headers.dat"), [0_u8; 10])?;
+    let result =
+        crate::assumeutxo_snapshot::load_verified(dir.path(), Network::Regtest, &fixture.pinned);
+    assert!(matches!(
+        result,
+        Err(crate::assumeutxo_snapshot::SnapshotArchiveError::HeaderArchiveLength)
+    ));
     Ok(())
 }

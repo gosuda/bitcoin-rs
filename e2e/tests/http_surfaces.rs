@@ -1,5 +1,3 @@
-//! HTTP-surface E2E: RPC auth and protocol errors, batch semantics,
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 

@@ -1,5 +1,3 @@
-//! Wallet-facing electrs/Esplora routes.
-
 use core::str::FromStr as _;
 use std::sync::Arc;
 
@@ -23,6 +21,7 @@ use super::model::{
 use super::projection::{Confirmation, ParentSource, Projection};
 use crate::context::Context;
 use crate::convert;
+use crate::decimal::parse_ascii_decimal;
 use crate::handlers::Handler;
 use crate::rest::{
     Response, bad_request, internal_error, json_ok, not_found, service_unavailable, text_response,
@@ -31,8 +30,6 @@ use crate::rest::{
 pub(super) const CHAIN_PAGE: usize = 25;
 const MEMPOOL_PAGE: usize = 50;
 
-/// API-10: the raw hex broadcast route has no per-request override. Preserve
-/// its 0.1 BTC/kvB ceiling independently of RPC defaults and parameters.
 const MAX_BROADCAST_FEE_RATE_SAT_PER_KVB: u64 = 10_000_000;
 
 pub(super) fn get(ctx: &Context, path: &str) -> Response {
@@ -58,15 +55,15 @@ pub(super) fn get(ctx: &Context, path: &str) -> Response {
         ["block", hash, "status"] => block_status(&ctx, hash),
         ["block", hash, "raw"] => block_raw(&ctx, hash),
         ["block", hash, "txs"] => block_txs(&ctx, hash, 0),
-        ["block", hash, "txs", start] => match start.parse::<usize>() {
-            Ok(n) if n % CHAIN_PAGE == 0 => block_txs(&ctx, hash, n),
+        ["block", hash, "txs", start] => match parse_ascii_decimal::<usize>(start) {
+            Some(n) if n % CHAIN_PAGE == 0 => block_txs(&ctx, hash, n),
             _ => bad_request("transaction start index must be a multiple of 25"),
         },
         ["block", hash, "txids"] => block_txids(&ctx, hash),
         ["block", hash, "txid", index] => block_txid(&ctx, hash, index),
         ["block", hash] => block(&ctx, hash),
-        ["block-height", height] => height.parse::<u32>().map_or_else(
-            |_| bad_request("height must be an unsigned integer"),
+        ["block-height", height] => parse_ascii_decimal::<u32>(height).map_or_else(
+            || bad_request("height must be an unsigned integer"),
             |height| {
                 ctx.chain
                     .block_hash_at_height(height)
@@ -76,8 +73,8 @@ pub(super) fn get(ctx: &Context, path: &str) -> Response {
             },
         ),
         ["blocks"] => blocks(&ctx, None),
-        ["blocks", height] => height.parse::<u32>().map_or_else(
-            |_| bad_request("start height must be an unsigned integer"),
+        ["blocks", height] => parse_ascii_decimal::<u32>(height).map_or_else(
+            || bad_request("start height must be an unsigned integer"),
             |h| blocks(&ctx, Some(h)),
         ),
         ["mempool"] => mempool(&ctx),
@@ -101,10 +98,10 @@ pub(super) fn get(ctx: &Context, path: &str) -> Response {
             address_hash(&ctx, address).map_or_else(|r| r, |h| utxos(&ctx, h))
         }
         ["scripthash", hash, "txs"] => {
-            parse_script(hash).map_or_else(|r| r, |h| history(&ctx, h, None, true))
+            parse_script(hash).map_or_else(|r| r, |h| full_history(&ctx, h))
         }
         ["address", address, "txs"] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| history(&ctx, h, None, true))
+            address_hash(&ctx, address).map_or_else(|r| r, |h| full_history(&ctx, h))
         }
         ["scripthash", hash, "txs", "summary"] => {
             parse_script(hash).map_or_else(|r| r, |h| address_transaction_summary(&ctx, h))
@@ -113,22 +110,22 @@ pub(super) fn get(ctx: &Context, path: &str) -> Response {
             address_hash(&ctx, address).map_or_else(|r| r, |h| address_transaction_summary(&ctx, h))
         }
         ["scripthash", hash, "txs", "mempool"] => {
-            parse_script(hash).map_or_else(|r| r, |h| history(&ctx, h, Some(""), true))
+            parse_script(hash).map_or_else(|r| r, |h| mempool_history(&ctx, h))
         }
         ["address", address, "txs", "mempool"] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| history(&ctx, h, Some(""), true))
+            address_hash(&ctx, address).map_or_else(|r| r, |h| mempool_history(&ctx, h))
         }
         ["scripthash", hash, "txs", "chain"] => {
-            parse_script(hash).map_or_else(|r| r, |h| history(&ctx, h, None, false))
+            parse_script(hash).map_or_else(|r| r, |h| chain_history(&ctx, h, None))
         }
         ["address", address, "txs", "chain"] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| history(&ctx, h, None, false))
+            address_hash(&ctx, address).map_or_else(|r| r, |h| chain_history(&ctx, h, None))
         }
         ["scripthash", hash, "txs", "chain", last] => {
-            parse_script(hash).map_or_else(|r| r, |h| history(&ctx, h, Some(last), false))
+            parse_script(hash).map_or_else(|r| r, |h| chain_history(&ctx, h, Some(last)))
         }
         ["address", address, "txs", "chain", last] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| history(&ctx, h, Some(last), false))
+            address_hash(&ctx, address).map_or_else(|r| r, |h| chain_history(&ctx, h, Some(last)))
         }
         ["address-prefix", _] => {
             service_unavailable("address prefix search requires an address index")
@@ -143,7 +140,11 @@ pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Response {
             let Ok(hex) = core::str::from_utf8(body) else {
                 return bad_request("transaction body must be UTF-8 hex");
             };
-            let transaction = Vec::<u8>::from_hex(hex.trim())
+            let hex = hex.trim();
+            if let Err(error) = crate::handlers::tx::check_broadcast_hex_len(hex) {
+                return bad_request(error);
+            }
+            let transaction = Vec::<u8>::from_hex(hex)
                 .ok()
                 .and_then(|bytes| deserialize::<Tx>(&bytes).ok());
             let Some(transaction) = transaction else {
@@ -209,7 +210,7 @@ fn tx_status(ctx: &Context, id: &str) -> Response {
 fn tx_merkleblock_proof(ctx: &Context, id: &str) -> Response {
     confirmed_block(ctx, id).map_or_else(
         |r| r,
-        |(record, bytes, txid)| {
+        |(_record, bytes, txid, _render)| {
             let Ok(block) = bitcoin::consensus::encode::deserialize::<bitcoin::Block>(&bytes)
             else {
                 return internal_error("stored block body is corrupt");
@@ -217,7 +218,6 @@ fn tx_merkleblock_proof(ctx: &Context, id: &str) -> Response {
             let proof = MerkleBlock::from_block_with_predicate(&block, |candidate| {
                 candidate.as_byte_array() == txid.as_bytes()
             });
-            let _ = record;
             text_response(
                 "text/plain",
                 serialize(&proof).to_lower_hex_string().into_bytes(),
@@ -229,7 +229,7 @@ fn tx_merkleblock_proof(ctx: &Context, id: &str) -> Response {
 fn tx_merkle_proof(ctx: &Context, id: &str) -> Response {
     confirmed_block(ctx, id).map_or_else(
         |r| r,
-        |(record, bytes, txid)| {
+        |(record, bytes, txid, _render)| {
             let Ok(block) = deserialize::<Block>(&bytes) else {
                 return internal_error("stored block body is corrupt");
             };
@@ -250,7 +250,15 @@ fn tx_merkle_proof(ctx: &Context, id: &str) -> Response {
 fn confirmed_block(
     ctx: &Context,
     id: &str,
-) -> Result<(bitcoin_rs_index::block_log::BlockRecord, Vec<u8>, Txid), Response> {
+) -> Result<
+    (
+        bitcoin_rs_index::block_log::BlockRecord,
+        Vec<u8>,
+        Txid,
+        crate::context::BlockRenderPermit,
+    ),
+    Response,
+> {
     let (transaction, Some(status)) = Projection::new(ctx).required_transaction(id)? else {
         return Err(not_found());
     };
@@ -259,11 +267,14 @@ fn confirmed_block(
         .chain
         .block_by_height(status.height)
         .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+    let render = ctx
+        .try_acquire_block_render()
+        .ok_or_else(|| service_unavailable("too many concurrent full-block reads; retry"))?;
     let bytes = ctx
         .chain
         .block_body_bytes(&record)
         .ok_or_else(|| service_unavailable("confirming block body unavailable"))?;
-    Ok((record, bytes, txid))
+    Ok((record, bytes, txid, render))
 }
 
 fn merkle_proof(mut level: Vec<Txid>, mut position: usize) -> Vec<String> {
@@ -290,7 +301,7 @@ fn merkle_proof(mut level: Vec<Txid>, mut position: usize) -> Vec<String> {
 }
 
 fn tx_outspend(ctx: &Context, id: &str, vout: &str) -> Response {
-    let Ok(vout) = vout.parse::<u32>() else {
+    let Some(vout) = parse_ascii_decimal::<u32>(vout) else {
         return bad_request("vout must be an unsigned integer");
     };
     let projection = Projection::new(ctx);
@@ -379,6 +390,9 @@ fn block(ctx: &Context, text_hash: &str) -> Response {
         Ok(record) => record,
         Err(response) => return response,
     };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
     projection.block_value(&record).map_or_else(|r| r, json_ok)
 }
 fn block_header(ctx: &Context, h: &str) -> Response {
@@ -418,6 +432,9 @@ fn block_raw(ctx: &Context, text_hash: &str) -> Response {
         Ok(record) => record,
         Err(response) => return response,
     };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
     let Some(bytes) = ctx.chain.block_body_bytes(&record) else {
         return service_unavailable("block body unavailable");
     };
@@ -429,7 +446,15 @@ fn block_raw(ctx: &Context, text_hash: &str) -> Response {
     }
 }
 pub(super) fn block_txs(ctx: &Context, h: &str, start: usize) -> Response {
-    let (record, block) = match Projection::new(ctx).required_block(h) {
+    let projection = Projection::new(ctx);
+    let record = match projection.required_block_record(h) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    let (record, block) = match projection.block_from_record(record) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -474,7 +499,15 @@ pub(super) fn block_transaction_values(
     )
 }
 fn block_txids(ctx: &Context, h: &str) -> Response {
-    let (_, block) = match Projection::new(ctx).required_block(h) {
+    let projection = Projection::new(ctx);
+    let record = match projection.required_block_record(h) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    let (_, block) = match projection.block_from_record(record) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -487,10 +520,18 @@ fn block_txids(ctx: &Context, h: &str) -> Response {
     )
 }
 fn block_txid(ctx: &Context, h: &str, index: &str) -> Response {
-    let Ok(index) = index.parse::<usize>() else {
+    let Some(index) = parse_ascii_decimal::<usize>(index) else {
         return bad_request("transaction index must be an unsigned integer");
     };
-    let (_, block) = match Projection::new(ctx).required_block(h) {
+    let projection = Projection::new(ctx);
+    let record = match projection.required_block_record(h) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    let (_, block) = match projection.block_from_record(record) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -504,6 +545,9 @@ fn blocks(ctx: &Context, start_height: Option<u32>) -> Response {
     if ctx.chain.block_by_height_in_view(&view, start).is_none() {
         return not_found();
     }
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
     let mut values = Vec::with_capacity(10);
     let projection = Projection::new(ctx);
     for height in (0..=start).rev().take(10) {
@@ -518,7 +562,6 @@ fn blocks(ctx: &Context, start_height: Option<u32>) -> Response {
     }
     json_ok(&values)
 }
-/// POST: Capture aggregate statistics and one `(fee_rate, total_vsize)` row per distinct rate.
 fn mempool(ctx: &Context) -> Response {
     let (stats, fee_histogram) = {
         let pool = ctx.mempool.gateway.read();
@@ -537,7 +580,6 @@ fn mempool(ctx: &Context) -> Response {
             .collect(),
     })
 }
-/// POST: Capture the ten latest transactions by `(time, txid)`.
 fn mempool_recent(ctx: &Context) -> Response {
     const RECENT: usize = 10;
     let latest = {
@@ -620,30 +662,45 @@ fn utxos(ctx: &Context, h: ScriptHash) -> Response {
         .script_utxos(h)
         .map_or_else(|response| response, json_ok)
 }
-pub(super) fn history(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryScope {
+    Full,
+    Chain,
+}
+
+pub(super) fn full_history(ctx: &Context, h: ScriptHash) -> Response {
+    history_scoped(ctx, h, None, HistoryScope::Full)
+}
+
+pub(super) fn chain_history(ctx: &Context, h: ScriptHash, last: Option<&str>) -> Response {
+    history_scoped(ctx, h, last, HistoryScope::Chain)
+}
+
+pub(super) fn mempool_history(ctx: &Context, h: ScriptHash) -> Response {
+    let projection = Projection::new(ctx);
+    let mempool = match projection.mempool_activity_for(h) {
+        Ok(mempool) => mempool,
+        Err(response) => return response,
+    };
+    projection
+        .transaction_values(
+            mempool
+                .iter()
+                .take(MEMPOOL_PAGE)
+                .map(|tx| (tx.as_ref(), None)),
+            None,
+        )
+        .map_or_else(|r| r, json_ok)
+}
+
+fn history_scoped(
     ctx: &Context,
     h: ScriptHash,
     last: Option<&str>,
-    include_mempool: bool,
+    scope: HistoryScope,
 ) -> Response {
     let projection = Projection::new(ctx);
-    if last == Some("") {
-        let mempool = match projection.mempool_activity_for(h) {
-            Ok(mempool) => mempool,
-            Err(response) => return response,
-        };
-        return projection
-            .transaction_values(
-                mempool
-                    .iter()
-                    .take(MEMPOOL_PAGE)
-                    .map(|tx| (tx.as_ref(), None)),
-                None,
-            )
-            .map_or_else(|r| r, json_ok);
-    }
-
-    let mempool = if include_mempool {
+    let mempool = if scope == HistoryScope::Full {
         let mempool = match projection.mempool_activity_for(h) {
             Ok(mempool) => mempool,
             Err(response) => return response,
@@ -653,24 +710,29 @@ pub(super) fn history(
         Vec::new()
     };
 
-    let records = match projection.history_page(
-        h,
-        last.and_then(|value| {
-            Txid::from_str(value)
-                .ok()
-                .filter(|txid| txid.to_string() == value)
-        }),
-        CHAIN_PAGE,
-    ) {
+    let cursor = last.and_then(|text| {
+        Txid::from_str(text)
+            .ok()
+            .filter(|txid| txid.to_string() == text)
+    });
+    let records = match projection.confirmed_history_page(h, cursor, CHAIN_PAGE) {
         Ok(records) => records,
         Err(response) => return response,
     };
+    let mut confirmations: std::collections::HashMap<u32, Confirmation> =
+        std::collections::HashMap::new();
     let chain = match records
         .into_iter()
         .map(|record| {
-            let confirmation = projection
-                .confirmation_at_height(record.height)
-                .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+            let confirmation = if let Some(confirmation) = confirmations.get(&record.height) {
+                *confirmation
+            } else {
+                let confirmation = projection
+                    .confirmation_at_height(record.height)
+                    .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+                confirmations.insert(record.height, confirmation);
+                confirmation
+            };
             let transaction = projection.confirmed_transaction(&record.txid)?;
             Ok((transaction, Some(confirmation)))
         })

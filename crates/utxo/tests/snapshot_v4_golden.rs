@@ -3,7 +3,7 @@
 use std::io::Cursor;
 
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::encode::hex_encode;
+use bitcoin_rs_primitives::hex::hex_encode;
 use bitcoin_rs_utxo::read_snapshot_strict_v4;
 
 const GOLDEN: &[u8] = include_bytes!("fixtures/utxo-v4-golden.dat");

@@ -15,15 +15,48 @@ use bitcoin_rs_script::{is_p2sh, is_witness_program};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::mpsc;
 
-struct PrevoutMap<'a>(&'a [(OutPoint, TxOut)]);
+struct PrevoutMap<'a> {
+    index: HashMap<OutPoint, &'a TxOut>,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static PREVOUT_PROBES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn bump_prevout_probes(count: usize) {
+    PREVOUT_PROBES.with(|probes| probes.set(probes.get() + count));
+}
+
+#[cfg(test)]
+fn reset_prevout_probes() {
+    PREVOUT_PROBES.with(|probes| probes.set(0));
+}
+
+#[cfg(test)]
+fn prevout_probes() -> usize {
+    PREVOUT_PROBES.with(core::cell::Cell::get)
+}
+
+impl<'a> PrevoutMap<'a> {
+    fn new(prevouts: &'a [(OutPoint, TxOut)]) -> Self {
+        let mut index = HashMap::with_capacity(prevouts.len());
+        for (outpoint, output) in prevouts {
+            index.entry(*outpoint).or_insert(output);
+        }
+        Self { index }
+    }
+}
 
 impl UtxoView for PrevoutMap<'_> {
     fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
-        self.0
-            .iter()
-            .find(|(op, _)| op == outpoint)
-            .map(|(_, txout)| txout.clone())
+        #[cfg(test)]
+        bump_prevout_probes(1);
+        self.index.get(outpoint).map(|output| (*output).clone())
     }
 }
 
@@ -54,17 +87,12 @@ where
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ChainChangeError {
-    /// A chain change is already active (the current generation is odd).
     #[error("a chain change is already active")]
     AlreadyActive,
-    /// The reserved odd or even value would overflow `u64`.
     #[error("chain generation overflow")]
     Overflow,
-    /// The compare-exchange from the odd value to the reserved even value
-    /// failed because the generation moved underneath the guard.
     #[error("chain generation changed before finish")]
     GenerationMoved,
-    /// The guard was issued by a different gateway.
     #[error("chain change guard belongs to another gateway")]
     ForeignGuard,
 }
@@ -77,14 +105,10 @@ pub struct AdmissionRequest {
         bitcoin_rs_primitives::TxOut,
     )>,
     pub prevout_meta: hashbrown::HashMap<OutPoint, crate::PrevoutMeta>,
-    /// Median-time-past of the applied chain tip for BIP113 finality checks.
-    /// Zero disables the locktime cutoff (pre-genesis).
     pub locktime_cutoff: u32,
     pub csv_active: bool,
     pub next_block_script_flags: VerifyFlags,
-    /// Caller-supplied maximum fee rate in sat/kvB; `None` means no cap.
     pub max_feerate_sat_per_kvb: Option<u64>,
-    /// Wall-clock seconds for the mempool entry timestamp.
     pub time: u64,
     pub height: u32,
     pub origin: AdmissionOrigin,
@@ -100,21 +124,12 @@ pub enum AdmitOutcome {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AdmitError {
-    /// The chain generation changed between capture and the write-lock
-    /// check. The caller must retry with a fresh stable generation.
     #[error("chain generation changed before admission")]
     GenerationChanged,
-    /// The mempool sequence changed between capture and the write-lock
-    /// check. The caller must retry with fresh facts.
     #[error("mempool sequence changed before admission")]
     MempoolChanged,
-    /// The transaction was rejected by policy. The reason is mempool-owned.
     #[error(transparent)]
     Policy(#[from] crate::standardness::AcceptanceRejectReason),
-    /// The transaction failed consensus verification (finality, duplicate
-    /// inputs, overspend, sigop limits) or failed its input scripts under
-    /// Core's policy flags (`STANDARD_SCRIPT_VERIFY_FLAGS`, validation.cpp
-    /// `PolicyScriptChecks`).
     #[error("consensus verification failed")]
     Consensus,
 }
@@ -196,20 +211,21 @@ impl PreparedAdmission {
             Some(
                 AcceptanceRejectReason::NonStandard(_)
                     | AcceptanceRejectReason::MissingInputs
+                    | AcceptanceRejectReason::Coinbase
                     | AcceptanceRejectReason::AlreadyInMempool
                     | AcceptanceRejectReason::TooManySigops
             )
         ) {
             return;
         }
-        let default_scope = rejection_scope(&request.tx);
+        let default_scope = rejection_scope(&request.tx, None);
         let Some(height) = request.height.checked_add(1) else {
             self.reject(AdmitError::Consensus, default_scope);
             return;
         };
         if bitcoin_rs_consensus::verify_tx::verify_transaction_non_script(
             &request.tx,
-            &PrevoutMap(&self.prevouts),
+            &PrevoutMap::new(&self.prevouts),
             height,
             request.locktime_cutoff,
             VerifyFlags::STANDARD,
@@ -261,17 +277,21 @@ impl PreparedAdmission {
             self.refused_bump = None;
             return;
         };
-        let default_scope = rejection_scope(&request.tx);
+        let default_scope = rejection_scope(&request.tx, None);
         let signature_cache = bitcoin_rs_script::SignatureCache::new();
-        if let Err(error) = verify_transaction(
-            &request.tx,
-            &PrevoutMap(&self.prevouts),
-            height,
-            request.locktime_cutoff,
-            VerifyFlags::STANDARD,
-            self.engine,
-            Some(&signature_cache),
-        ) {
+        let standard_pass = {
+            let chain = PrevoutMap::new(&self.prevouts);
+            verify_transaction(
+                &request.tx,
+                &chain,
+                height,
+                request.locktime_cutoff,
+                VerifyFlags::STANDARD,
+                self.engine,
+                Some(&signature_cache),
+            )
+        };
+        if let Err(error) = standard_pass {
             if verifying_refusal {
                 self.refused_bump = None;
                 return;
@@ -314,7 +334,7 @@ impl PreparedAdmission {
         let flags = request.next_block_script_flags;
         if let Err(error) = verify_transaction(
             &request.tx,
-            &PrevoutMap(&self.prevouts),
+            &PrevoutMap::new(&self.prevouts),
             height,
             request.locktime_cutoff,
             flags,
@@ -348,7 +368,18 @@ fn replacement_rejection(error: RbfError) -> AdmitError {
     }
 }
 
-fn rejection_scope(tx: &Tx) -> RejectScope {
+fn rejection_scope(
+    tx: &Tx,
+    reason: Option<crate::standardness::AcceptanceRejectReason>,
+) -> RejectScope {
+    if matches!(
+        reason,
+        Some(crate::standardness::AcceptanceRejectReason::NonStandard(
+            crate::standardness::StandardnessError::NonStandardInput,
+        ))
+    ) {
+        return RejectScope::Transaction;
+    }
     if tx.has_witness() {
         RejectScope::Witness
     } else {
@@ -371,15 +402,12 @@ use crate::rbf::ReplacementCandidate;
 use crate::rbf::{LimitEnforcement, RbfError};
 
 pub trait MempoolObserver: Send + Sync {
-    /// Called once per committed, non-empty [`MutationEnvelope`].
     fn on_mutation(&self, envelope: &MutationEnvelope);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BodyInterest {
-    /// Retain accepted transaction bodies until ordered publication.
     Bodies,
-    /// Envelope metadata only; no body retention.
     Metadata,
 }
 
@@ -520,6 +548,20 @@ struct PublishState {
     draining: bool,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct BeginChainProbes {
+    entered: Option<mpsc::Sender<()>>,
+    lock_held: Option<BeginLockHold>,
+}
+
+#[cfg(test)]
+struct BeginLockHold {
+    signal: mpsc::Sender<bool>,
+    resume: mpsc::Receiver<()>,
+    released_probe: Box<dyn Fn() -> bool + Send>,
+}
+
 pub struct MempoolGateway {
     pub(crate) pool: Arc<RwLock<Mempool>>,
     pub(crate) lifecycle: Mutex<crate::orphan::AdmissionLifecycle>,
@@ -530,6 +572,8 @@ pub struct MempoolGateway {
     chain_generation: AtomicU64,
     engine: ValidationEngine,
     script_cache: Option<Arc<ScriptExecutionCache>>,
+    #[cfg(test)]
+    begin_probes: Mutex<BeginChainProbes>,
 }
 
 impl core::fmt::Debug for MempoolGateway {
@@ -567,6 +611,8 @@ impl MempoolGateway {
             chain_generation: AtomicU64::new(0),
             engine,
             script_cache,
+            #[cfg(test)]
+            begin_probes: Mutex::new(BeginChainProbes::default()),
         }
     }
 
@@ -609,14 +655,10 @@ impl MempoolGateway {
         &self.pool
     }
 
-    /// Read passthrough for lookup callers. Never mutate through this guard:
-    /// mutations must go through the gateway so observers stay in the loop.
     pub fn read(&self) -> RwLockReadGuard<'_, Mempool> {
         self.pool.read()
     }
 
-    /// Returns the exact even chain generation, or `None` when a chain change
-    /// is active (odd) or a failed chain change has closed admission.
     #[must_use]
     pub fn stable_generation(&self) -> Option<u64> {
         let value = self.chain_generation.load(Ordering::Acquire);
@@ -627,10 +669,12 @@ impl MempoolGateway {
         self.chain_generation.load(Ordering::Acquire)
     }
 
-    /// Reserves the next chain-change generation and returns a guard that owns
-    /// the exact odd value and the reserved next even value.
     pub fn begin_chain_change(self: &Arc<Self>) -> Result<ChainChangeGuard, ChainChangeError> {
+        #[cfg(test)]
+        self.notify_begin_entry();
         let pool_guard = self.pool.write();
+        #[cfg(test)]
+        self.hold_at_begin_lock();
         let current = self.chain_generation.load(Ordering::Relaxed);
         if !current.is_multiple_of(2) {
             return Err(ChainChangeError::AlreadyActive);
@@ -644,6 +688,42 @@ impl MempoolGateway {
             odd,
             even,
         })
+    }
+
+    #[cfg(test)]
+    fn notify_begin_entry(&self) {
+        if let Some(entered) = self.begin_probes.lock().entered.as_ref() {
+            let _ = entered.send(());
+        }
+    }
+
+    #[cfg(test)]
+    fn hold_at_begin_lock(&self) {
+        let Some(hold) = self.begin_probes.lock().lock_held.take() else {
+            return;
+        };
+        let released = (hold.released_probe)();
+        if hold.signal.send(released).is_err() {
+            return;
+        }
+        let _ = hold.resume.recv();
+    }
+
+    #[cfg(test)]
+    pub fn install_begin_chain_change_probes(
+        &self,
+        entered: mpsc::Sender<()>,
+        lock_held: mpsc::Sender<bool>,
+        resume: mpsc::Receiver<()>,
+        released_probe: Box<dyn Fn() -> bool + Send>,
+    ) {
+        let mut probes = self.begin_probes.lock();
+        probes.entered = Some(entered);
+        probes.lock_held = Some(BeginLockHold {
+            signal: lock_held,
+            resume,
+            released_probe,
+        });
     }
 
     #[cfg(any(test, feature = "test-seam"))]
@@ -804,7 +884,7 @@ impl MempoolGateway {
                     self.record_peer_failure(pool, request, error, scope);
                     return Err(error);
                 }
-                let default_reject_scope = rejection_scope(&request.tx);
+                let default_reject_scope = rejection_scope(&request.tx, None);
 
                 let ReplacementStage::Verified(plan) = prepared.replacement else {
                     return Err(AdmitError::MempoolChanged);
@@ -865,11 +945,18 @@ impl MempoolGateway {
         engine: ValidationEngine,
     ) -> PreparedAdmission {
         let policy = pool.policy_snapshot();
-        let chain = PrevoutMap(&request.prevouts);
-        let view = MempoolUtxoView::new(pool, &chain);
-        let standard =
-            crate::standardness::is_standard_tx(&request.tx, &policy.standardness).is_ok();
-        let prevouts: Vec<_> = if standard && !pool.contains_txid(&request.tx.txid()) {
+        let standard_result =
+            crate::standardness::is_standard_tx(&request.tx, &policy.standardness);
+        let already_known = pool.contains_txid(&request.tx.txid());
+        let oversize = matches!(
+            standard_result,
+            Err(crate::standardness::StandardnessError::Weight)
+        );
+        let prevouts: Vec<_> = if already_known || oversize {
+            Vec::new()
+        } else {
+            let chain = PrevoutMap::new(&request.prevouts);
+            let view = MempoolUtxoView::new(pool, &chain);
             request
                 .tx
                 .inputs
@@ -879,9 +966,8 @@ impl MempoolGateway {
                         .map(|output| (input.previous_output, output))
                 })
                 .collect()
-        } else {
-            Vec::new()
         };
+        let standard = standard_result.is_ok();
         let mut context = request.context;
         if standard {
             context.sigop_cost =
@@ -927,14 +1013,18 @@ impl MempoolGateway {
             pool,
             &policy.standardness,
             &request.tx,
+            &prevouts,
             context,
             None,
             floor,
             &finality,
         );
-        let rejection = fact
-            .reject_reason
-            .map(|reason| (AdmitError::Policy(reason), rejection_scope(&request.tx)));
+        let rejection = fact.reject_reason.map(|reason| {
+            (
+                AdmitError::Policy(reason),
+                rejection_scope(&request.tx, Some(reason)),
+            )
+        });
         let mut prepared = PreparedAdmission {
             fact,
             prevouts,
@@ -945,7 +1035,7 @@ impl MempoolGateway {
             engine,
             script_cache_key: None,
         };
-        if !pool.contains_txid(&request.tx.txid()) {
+        if !already_known {
             if standard
                 && bitcoin_rs_consensus::verify_tx::verify_transaction_input_outpoints(&request.tx)
                     .is_err()
@@ -971,20 +1061,31 @@ impl MempoolGateway {
                     AdmitError::Policy(
                         crate::standardness::AcceptanceRejectReason::MempoolConflict,
                     ),
-                    rejection_scope(&request.tx),
+                    rejection_scope(&request.tx, None),
                 );
             }
             if prepared.rejection.is_none() {
-                match pool.truc_conflicts(&request.tx, prepared.fact.vsize, false) {
+                match pool.truc_conflicts(
+                    &request.tx,
+                    prepared.fact.vsize,
+                    crate::truc::SiblingEviction::Forbidden,
+                ) {
                     Ok(_) => prepared.replacement = ReplacementStage::Package,
                     Err(error) => {
-                        prepared.reject(replacement_rejection(error), rejection_scope(&request.tx));
+                        prepared.reject(
+                            replacement_rejection(error),
+                            rejection_scope(&request.tx, None),
+                        );
                     }
                 }
             }
         } else if prepared.rejection.is_none() {
             let fee_estimation = crate::rbf::FeeEstimation::from_origin(&request.origin);
-            let conflict_set = pool.truc_conflicts(&request.tx, prepared.fact.vsize, true);
+            let conflict_set = pool.truc_conflicts(
+                &request.tx,
+                prepared.fact.vsize,
+                crate::truc::SiblingEviction::Allowed,
+            );
             let captured = conflict_set.and_then(|(conflicts, sibling_eviction)| {
                 let entry = MempoolEntry::new(
                     Arc::clone(&request.tx),
@@ -1010,7 +1111,10 @@ impl MempoolGateway {
             match captured {
                 Ok(inputs) => prepared.replacement = ReplacementStage::Captured(inputs),
                 Err(error) => {
-                    prepared.reject(replacement_rejection(error), rejection_scope(&request.tx));
+                    prepared.reject(
+                        replacement_rejection(error),
+                        rejection_scope(&request.tx, None),
+                    );
                 }
             }
             if prepared.rejection.is_none()
@@ -1025,7 +1129,7 @@ impl MempoolGateway {
                     AdmitError::Policy(
                         crate::standardness::AcceptanceRejectReason::MissingEphemeralSpends,
                     ),
-                    rejection_scope(&request.tx),
+                    rejection_scope(&request.tx, None),
                 );
             }
         }
@@ -1140,7 +1244,6 @@ impl MempoolGateway {
         })
     }
 
-    /// The configured total-size ceiling of the underlying pool, in vbytes.
     #[must_use]
     pub fn max_total_bytes(&self) -> u64 {
         self.pool.read().limits.max_total_bytes
@@ -1168,44 +1271,27 @@ impl MempoolGateway {
         self.commit_infallible(origin, Mempool::clear)
     }
 
-    /// Commits `pool.prioritise`. Never publishes: prioritisation emits no
-    /// mutation change, so there is nothing to order.
     pub fn prioritise(&self, txid: Txid, fee_delta: i64) -> Result<(), PrioritiseError> {
         let mut pool = self.pool.write();
         self.apply_prioritise(&mut pool, txid, fee_delta)
     }
 
-    /// A P2P getdata response is about to carry this witness body. The mark
-    /// is taken before the send so the initial-broadcast window cannot be
-    /// completed falsely. Membership and its public sequence do not change.
     pub fn mark_broadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
         self.pool.write().mark_broadcast(wtxid);
     }
 
-    /// The marked send committed: initial broadcast of this exact witness
-    /// body completed. Membership and its public sequence do not change.
     pub fn commit_broadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
         self.pool.write().commit_broadcast(wtxid);
     }
 
-    /// Reverts a broadcast mark when the response carrying the transaction
-    /// never reached the peer. The rollback is conditional on the entry's
-    /// broadcast state: it only re-flags while the transaction still needs
-    /// its initial broadcast and no send has committed or remains in
-    /// flight, so one peer's failure cannot undo another's success and a
-    /// replaced entry cannot be revived.
     pub fn restore_unbroadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
         self.pool.write().restore_broadcast(wtxid);
     }
 
-    /// Marks a snapshot-restored entry as still awaiting its initial
-    /// broadcast. Restore admissions are not flagged pending, so the saved
-    /// flag is re-applied explicitly.
     pub(crate) fn set_pending_broadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
         self.pool.write().set_unbroadcast(wtxid, true);
     }
 
-    /// Atomically rejects pooled dust before applying a fee overlay.
     pub fn prioritise_if_not_dust(
         &self,
         txid: Txid,
@@ -1390,8 +1476,6 @@ impl MempoolGateway {
         }
     }
 
-    /// Invokes `f` for every transaction a BIP152 reconstruction may match:
-    /// each pool entry, then each retained extra not already in the pool.
     pub fn for_each_reconstruction_identity(&self, mut f: impl FnMut(Txid, Wtxid)) {
         let pool = self.pool.read();
         for entry in pool.iter_entries() {
@@ -1405,8 +1489,6 @@ impl MempoolGateway {
         }
     }
 
-    /// The pool body for `txid`, else a retained reconstruction extra. Hint
-    /// use only; see [`Self::for_each_reconstruction_identity`].
     #[must_use]
     pub fn reconstruction_tx_by_txid(&self, txid: Txid) -> Option<Tx> {
         let pool = self.pool.read();
@@ -1416,8 +1498,6 @@ impl MempoolGateway {
         self.extra_txn.lock().by_txid(txid).map(|tx| (**tx).clone())
     }
 
-    /// The pool body for `wtxid`, else a retained reconstruction extra. Hint
-    /// use only; see [`Self::for_each_reconstruction_identity`].
     #[must_use]
     pub fn reconstruction_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
         let pool = self.pool.read();
@@ -1493,8 +1573,6 @@ impl MempoolGateway {
     }
 }
 
-/// Owns an active chain-change reservation: the exact odd generation and the
-/// reserved next even value.
 #[derive(Debug)]
 pub struct ChainChangeGuard {
     gateway: Arc<MempoolGateway>,
@@ -1518,7 +1596,6 @@ impl ChainChangeGuard {
         core::ptr::eq(Arc::as_ptr(&self.gateway), gateway)
     }
 
-    /// Compare-exchanges the exact odd value to the reserved even value.
     pub fn finish(self) -> Result<(), ChainChangeError> {
         let prev = self.gateway.chain_generation.compare_exchange(
             self.odd,
@@ -1571,8 +1648,8 @@ mod ordering_gate {
         }) else {
             return;
         };
-        let _ = parked_tx.send(());
-        let _ = release_rx.recv();
+        let _receiver_gone = parked_tx.send(());
+        let _sender_gone = release_rx.recv();
     }
 }
 

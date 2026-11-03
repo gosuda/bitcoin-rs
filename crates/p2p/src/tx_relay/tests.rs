@@ -3,7 +3,6 @@ use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_primitives::Hash256;
 use crossbeam_channel::bounded;
 use parking_lot::Mutex;
-use std::sync::atomic::AtomicBool;
 
 #[derive(Clone)]
 struct FakePeer {
@@ -375,8 +374,8 @@ fn relay_worker_announces_only_live_transactions() {
         1,
     );
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), Arc::clone(&shutdown))
+    let shutdown = bitcoin_rs_chain::LatchReader::fixture_never();
+    let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), shutdown)
         .expect("relay worker spawns");
     drop(queue);
     worker.join().expect("relay worker exits");
@@ -401,8 +400,8 @@ fn relay_worker_exits_when_queue_closes_with_observer_attached() {
         )
         .expect("observer slot");
     let sink = FakeSink::new(Vec::new());
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), Arc::clone(&shutdown))
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), shutdown.reader())
         .expect("relay worker spawns");
 
     drop(queue);
@@ -414,7 +413,7 @@ fn relay_worker_exits_when_queue_closes_with_observer_attached() {
     let queue_close = joined_rx.recv_timeout(std::time::Duration::from_secs(1));
     let exited_on_queue_close = matches!(&queue_close, Ok(true));
     if !exited_on_queue_close {
-        shutdown.store(true, Ordering::Relaxed);
+        shutdown.trigger();
         let stopped = joined_rx.recv_timeout(std::time::Duration::from_secs(1));
         assert!(
             matches!(&stopped, Ok(true)),
@@ -803,4 +802,30 @@ fn local_replacement_relay_uses_the_accepted_change_sequence() {
         (replacement.txid(), replacement.wtxid(), None)
     );
     assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn tx_relay_worker_promptly_exits_on_latch_trigger_while_idle() {
+    let gateway = relay_identity_gateway();
+    let (_queue, rx) = TxRelayQueue::new(8);
+    let sink = FakeSink::new(Vec::new());
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), latch.reader())
+        .expect("relay worker spawns");
+
+    std::thread::sleep(std::time::Duration::from_millis(15));
+
+    let started = std::time::Instant::now();
+    latch.trigger();
+
+    let (joined_tx, joined_rx) = bounded(1);
+    std::thread::spawn(move || {
+        let _ = worker.join();
+        let _ = joined_tx.send(());
+    });
+
+    joined_rx
+        .recv_timeout(std::time::Duration::from_millis(45))
+        .expect("relay worker must exit promptly on latch trigger within 45ms");
+    assert!(started.elapsed() < std::time::Duration::from_millis(45));
 }

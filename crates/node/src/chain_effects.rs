@@ -24,8 +24,6 @@ pub enum ConnectMutationError {
     },
 }
 
-/// INVARIANT: consumer failure is ignored. A full ZMQ socket or a lagged
-/// index cannot invalidate chainstate.
 #[derive(Clone)]
 pub struct ChainFollowers {
     blocks: Arc<RwLock<BlockLog>>,

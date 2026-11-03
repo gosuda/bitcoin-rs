@@ -1,6 +1,4 @@
 use crate::NodeConfig;
-use anyhow::Context as _;
-use anyhow::Result;
 use bitcoin_rs_chain::BlockBodySource;
 use bitcoin_rs_primitives::BlockBodyMetadata;
 use bitcoin_rs_rpc::context::{PruneResult, PruneService, PruneServiceError, PruneStatus};
@@ -17,12 +15,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use super::open::NodeOpenError;
+
 pub(super) struct NodeStorage {
     backend: StorageBackend,
     undo_store: Arc<dyn bitcoin_rs_chainstate::UndoStore>,
     durable_head: Arc<dyn bitcoin_rs_storage::DurableHeadStore>,
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
+    prune_height: Option<u32>,
     pub(super) deferred: Arc<dyn DeferredChainstateServices>,
 }
 
@@ -50,6 +51,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
         let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::seeded(
             bitcoin_rs_storage::pruning::ExecutedFrontier::reconstruct(&*store)?,
         ));
+        let prune_height = bitcoin_rs_storage::pruning::load_pruneheight(&*store)?;
         let block_files = Arc::new(
             match committed {
                 Some(extent) => {
@@ -71,6 +73,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
                 Arc::clone(&block_files),
             )),
             retention,
+            prune_height,
             deferred,
         };
         Ok((storage, block_files))
@@ -82,13 +85,17 @@ impl NodeStorage {
         config: &NodeConfig,
         chainstate_cache_bytes: u64,
         guard: &StoreGuard,
-    ) -> Result<(Self, Arc<FlatFileBlockStore>)> {
+    ) -> Result<(Self, Arc<FlatFileBlockStore>), NodeOpenError> {
         let chainstate_dir = config.data_dir.join("chainstate");
-        std::fs::create_dir_all(&chainstate_dir)
-            .with_context(|| format!("create chainstate_dir {}", chainstate_dir.display()))?;
+        std::fs::create_dir_all(&chainstate_dir).map_err(|source| {
+            NodeOpenError::CreateChainstateDir {
+                path: chainstate_dir.clone(),
+                source,
+            }
+        })?;
 
         let backend = config.storage.backend;
-        crate::storage_backend::open_generic(
+        let opened = crate::storage_backend::open_generic(
             "chainstate",
             backend,
             &chainstate_dir,
@@ -99,12 +106,16 @@ impl NodeStorage {
                 data_dir: &config.data_dir,
                 guard,
             },
-        )
-        .map_err(anyhow::Error::new)
+        )?;
+        Ok(opened)
     }
 
     pub(super) const fn kind(&self) -> &'static str {
         self.backend.as_str()
+    }
+
+    pub(super) const fn stored_prune_height(&self) -> Option<u32> {
+        self.prune_height
     }
 
     pub(super) fn block_body_store(
@@ -146,12 +157,12 @@ pub(super) trait DeferredChainstateServices: Send + Sync {
         authority: bitcoin_rs_chainstate::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
-    ) -> Result<Arc<dyn PruneService>>;
+    ) -> Result<Arc<dyn PruneService>, NodeOpenError>;
     fn journal_writer(
         &self,
         dir: cap_std::fs::Dir,
         bootstrap: bitcoin_rs_chainstate::JournalBootstrap,
-    ) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>;
+    ) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter, NodeOpenError>;
 }
 
 struct ChainstateStoreServices<S> {
@@ -165,7 +176,7 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
         authority: bitcoin_rs_chainstate::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
-    ) -> Result<Arc<dyn PruneService>> {
+    ) -> Result<Arc<dyn PruneService>, NodeOpenError> {
         Ok(Arc::new(NodePruneService::new(
             Arc::clone(&self.store),
             block_files,
@@ -179,7 +190,7 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
         &self,
         dir: cap_std::fs::Dir,
         bootstrap: bitcoin_rs_chainstate::JournalBootstrap,
-    ) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter> {
+    ) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter, NodeOpenError> {
         build_journal_writer(dir, Arc::clone(&self.store), &bootstrap)
     }
 }
@@ -188,7 +199,7 @@ fn build_journal_writer<S: KvStore + 'static>(
     dir: cap_std::fs::Dir,
     store: Arc<S>,
     bootstrap: &bitcoin_rs_chainstate::JournalBootstrap,
-) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter> {
+) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter, NodeOpenError> {
     let mut writer = if bootstrap.open_existing {
         bitcoin_rs_storage::chainstate_journal::JournalWriter::open(dir, store)?
     } else {
@@ -297,7 +308,7 @@ impl<S: KvStore> NodePruneService<S> {
         authority: bitcoin_rs_chainstate::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, NodeOpenError> {
         let pruneheight = bitcoin_rs_storage::pruning::load_pruneheight(&*store)?;
         Ok(Self {
             store,
@@ -375,7 +386,7 @@ impl bitcoin_rs_index::runtime::IndexAheadSink for RecoveryReporter {
         index_hash_be: &str,
         depth: u32,
         unix_secs: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), bitcoin_rs_index::runtime::IndexAheadError> {
         self.0
             .publish_index_ahead(
                 capability,

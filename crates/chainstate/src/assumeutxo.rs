@@ -1,14 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::assumeutxo_snapshot::SnapshotArchiveError;
+use crate::error::{ApplyError, DisconnectError};
+use crate::{Chainstate, ConnectOutcome};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::{AssumeUtxoData, Block, BlockPayload, Hash256, Network};
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::core_snapshot::{StateVerifyError, VerifiedSnapshotState};
 use parking_lot::{Mutex, MutexGuard, RwLock};
-
-use crate::error::{ApplyError, DisconnectError};
-use crate::{Chainstate, ConnectOutcome};
 
 mod serde_hash256 {
     use bitcoin_rs_primitives::Hash256;
@@ -55,7 +55,6 @@ mod serde_opt_hash256 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChainstateRole {
     Ordinary,
-    /// Serves normal node consumers, but rejects reorgs at or below `base_height`.
     AssumedActive {
         base_height: u32,
         #[serde(with = "serde_hash256")]
@@ -103,7 +102,6 @@ pub enum HistoricalAdvance {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssumeUtxoError {
-    /// The snapshot base must have strictly more accumulated work than the applied tip.
     #[error("snapshot base does not have more accumulated work than the applied tip")]
     ActivationBehindTip,
     #[error(
@@ -122,7 +120,55 @@ pub enum AssumeUtxoError {
     #[error("snapshot storage: {0}")]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error("snapshot archive: {0}")]
-    Archive(#[from] anyhow::Error),
+    Archive(SnapshotArchiveError),
+    #[error("open historical checkpoint data directory: {error}")]
+    HistoricalCheckpointDir { error: std::io::Error },
+    #[error("historical checkpoint load failed: {error}")]
+    HistoricalCheckpointLoad {
+        error: bitcoin_rs_storage::checkpoint::CheckpointLoadError,
+    },
+    #[error("publish historical checkpoint: {error}")]
+    HistoricalCheckpointPublish {
+        error: crate::checkpoint::CheckpointError,
+    },
+    #[error("historical checkpoint is ahead of certified validation progress")]
+    HistoricalCheckpointAheadOfProgress,
+    #[error("durable head names a historical checkpoint that is not published")]
+    HistoricalCheckpointNotPublished,
+    #[error("historical checkpoint does not match its durable-head reference")]
+    HistoricalCheckpointReferenceMismatch,
+    #[error("historical checkpoint has no certified transaction count")]
+    HistoricalCheckpointWithoutTransactionCount,
+    #[error("historical checkpoint is not on the pinned ancestry")]
+    HistoricalCheckpointNotOnAncestry,
+    #[error("historical checkpoint hash is not on the pinned ancestry")]
+    HistoricalCheckpointHashNotOnAncestry,
+    #[error("certified historical progress is not on the pinned ancestry")]
+    HistoricalProgressNotOnAncestry,
+    #[error("durable historical progress is not on the pinned ancestry")]
+    DurableHistoricalProgressNotOnAncestry,
+    #[error("historical archive body identity mismatch")]
+    HistoricalBodyIdentityMismatch,
+    #[error("historical validation intent exceeds snapshot base")]
+    ValidationIntentExceedsBase,
+    #[error("historical checkpoint is ahead of pending validation intent")]
+    HistoricalCheckpointAheadOfIntent,
+    #[error("missing historical body store")]
+    MissingHistoricalBodyStore,
+    #[error("missing historical validation dependency")]
+    MissingHistoricalDependencyBody,
+    #[error("historical validation dependency identity mismatch")]
+    HistoricalDependencyIdentityMismatch,
+    #[error("missing pending validation body store")]
+    MissingPendingBodyStore,
+    #[error("missing pending validation body")]
+    MissingPendingBody,
+    #[error("pending validation body identity mismatch")]
+    PendingBodyIdentityMismatch,
+    #[error("historical checkpoint is due without a historical chainstate")]
+    CheckpointDueWithoutChainstate,
+    #[error("historical checkpoint tip does not match certified progress")]
+    CheckpointTipMismatch,
     #[error("snapshot base header {0} is not present")]
     SnapshotHeaderMissing(Hash256),
     #[error("snapshot base header height {found} does not match pinned height {expected}")]
@@ -253,6 +299,25 @@ impl std::fmt::Debug for AssumeUtxoManager {
     }
 }
 
+struct HistoricalRecovery {
+    network: Network,
+    data_dir: PathBuf,
+    base_height: u32,
+    base_hash: Hash256,
+    historical_height: u32,
+    historical_hash: Hash256,
+    checkpoint: Option<HistoricalCheckpointRef>,
+    undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
+}
+
+#[derive(Clone, Copy)]
+struct ValidatingBase {
+    base_height: u32,
+    base_hash: Hash256,
+    expected_hash_serialized: Hash256,
+    chain_tx_count: u64,
+}
+
 impl AssumeUtxoManager {
     pub fn open(
         network: Network,
@@ -277,10 +342,37 @@ impl AssumeUtxoManager {
             .durable_head
             .load()?
             .map_or(AssumeUtxoDiskStatus::Uninitialized, |head| head.assumeutxo);
-
-        let mut historical = None;
         let historical_undo = Arc::new(bitcoin_rs_storage::InMemoryUndoStore::default());
-        match loaded_status {
+        let historical = Self::restore_historical(
+            &active_chainstate,
+            network,
+            &data_dir,
+            &loaded_status,
+            &historical_undo,
+        )?;
+
+        let manager = Self {
+            lifecycle: Mutex::new(()),
+            network,
+            active_chainstate,
+            historical_chainstate: RwLock::new(historical),
+            historical_undo,
+            data_dir,
+            historical_checkpoint_interval: historical_checkpoint_interval.max(1),
+            pending_activation_mint: Mutex::new(None),
+        };
+        manager.finish_open()?;
+        Ok(manager)
+    }
+
+    fn restore_historical(
+        active_chainstate: &Arc<Chainstate>,
+        network: Network,
+        data_dir: &Path,
+        loaded_status: &AssumeUtxoDiskStatus,
+        historical_undo: &Arc<bitcoin_rs_storage::InMemoryUndoStore>,
+    ) -> Result<Option<Arc<Chainstate>>, AssumeUtxoError> {
+        match *loaded_status {
             AssumeUtxoDiskStatus::Failed {
                 base_height,
                 expected_hash_serialized,
@@ -288,11 +380,11 @@ impl AssumeUtxoManager {
                 ..
             } => {
                 active_chainstate.fail_closed_for_recovery();
-                return Err(AssumeUtxoError::PreviouslyFailed {
+                Err(AssumeUtxoError::PreviouslyFailed {
                     base_height,
                     expected_hash_serialized,
                     actual_hash_serialized,
-                });
+                })
             }
             AssumeUtxoDiskStatus::Validating {
                 base_height,
@@ -306,79 +398,78 @@ impl AssumeUtxoManager {
                     base_height,
                     base_hash,
                 });
-                historical = Some(Self::open_historical_chainstate(
-                    &active_chainstate,
-                    network,
-                    &data_dir,
-                    base_height,
-                    base_hash,
-                    historical_height,
-                    historical_hash,
-                    checkpoint,
-                    Arc::clone(&historical_undo),
-                )?);
+                Self::open_historical_chainstate(
+                    active_chainstate,
+                    HistoricalRecovery {
+                        network,
+                        data_dir: data_dir.to_path_buf(),
+                        base_height,
+                        base_hash,
+                        historical_height,
+                        historical_hash,
+                        checkpoint,
+                        undo: Arc::clone(historical_undo),
+                    },
+                )
+                .map(Some)
             }
             AssumeUtxoDiskStatus::Finalized { .. } | AssumeUtxoDiskStatus::Uninitialized => {
                 active_chainstate.set_role(ChainstateRole::Ordinary);
+                Ok(None)
             }
         }
+    }
 
-        let manager = Self {
-            lifecycle: Mutex::new(()),
-            network,
-            active_chainstate,
-            historical_chainstate: RwLock::new(historical),
-            historical_undo,
-            data_dir,
-            historical_checkpoint_interval: historical_checkpoint_interval.max(1),
-            pending_activation_mint: Mutex::new(None),
-        };
-        manager.recover_pending().inspect_err(|_| {
-            manager.active_chainstate.fail_closed_for_recovery();
+    fn finish_open(&self) -> Result<(), AssumeUtxoError> {
+        self.recover_pending().inspect_err(|_| {
+            self.active_chainstate.fail_closed_for_recovery();
         })?;
         if let Err(error) =
-            crate::assumeutxo_snapshot::cleanup_reservations(&manager.data_dir, network)
+            crate::assumeutxo_snapshot::cleanup_reservations(&self.data_dir, self.network)
         {
             tracing::warn!(%error, "snapshot reservation cleanup deferred");
         }
-        match manager.status()? {
+        match self.status()? {
             AssumeUtxoDiskStatus::Validating {
                 checkpoint: Some(checkpoint),
                 ..
-            } => manager.cleanup_historical_checkpoints(Some(checkpoint.checkpoint)),
-            AssumeUtxoDiskStatus::Finalized { .. } => manager.cleanup_historical_checkpoints(None),
+            } => self.cleanup_historical_checkpoints(Some(checkpoint.checkpoint)),
+            AssumeUtxoDiskStatus::Finalized { .. } => self.cleanup_historical_checkpoints(None),
             _ => {}
         }
-        Ok(manager)
+        Ok(())
     }
 
     fn open_historical_chainstate(
         active: &Arc<Chainstate>,
-        network: Network,
-        data_dir: &Path,
-        base_height: u32,
-        base_hash: Hash256,
-        historical_height: u32,
-        historical_hash: Hash256,
-        checkpoint: Option<HistoricalCheckpointRef>,
-        undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
+        recovery: HistoricalRecovery,
     ) -> Result<Arc<Chainstate>, AssumeUtxoError> {
-        let Some(checkpoint) = checkpoint else {
-            return active.create_historical_counterpart(base_height, base_hash, undo, None);
+        let Some(checkpoint) = recovery.checkpoint else {
+            return active.create_historical_counterpart(
+                recovery.base_height,
+                recovery.base_hash,
+                recovery.undo,
+                None,
+            );
         };
-        if checkpoint.height > historical_height || checkpoint.height > base_height {
-            return Err(anyhow::anyhow!(
-                "historical checkpoint is ahead of certified validation progress"
-            )
-            .into());
+        if checkpoint.height > recovery.historical_height
+            || checkpoint.height > recovery.base_height
+        {
+            return Err(AssumeUtxoError::HistoricalCheckpointAheadOfProgress);
         }
-        let data =
-            bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir).map_err(|error| {
-                anyhow::anyhow!("open historical checkpoint data directory: {error}")
-            })?;
+        let restored = Self::load_historical_checkpoint(&recovery, &checkpoint)?;
+        Self::install_historical_checkpoint(active, recovery, &checkpoint, restored)
+    }
+
+    fn load_historical_checkpoint(
+        recovery: &HistoricalRecovery,
+        checkpoint: &HistoricalCheckpointRef,
+    ) -> Result<crate::checkpoint::RestoredChainstate, AssumeUtxoError> {
+        let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(&recovery.data_dir)
+            .map_err(|error| AssumeUtxoError::HistoricalCheckpointDir { error })?;
         let config = crate::checkpoint::headers::HeaderCheckpointConfig {
-            network,
-            genesis: network.genesis_block_hash(),
+            network: recovery.network,
+            genesis: recovery.network.genesis_block_hash(),
         };
         let loaded = crate::checkpoint::load_checkpoint_generation_from_dir(
             &data,
@@ -386,59 +477,54 @@ impl AssumeUtxoManager {
             bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
             checkpoint.checkpoint,
         )
-        .map_err(|error| anyhow::anyhow!("historical checkpoint load failed: {error}"))?;
+        .map_err(|error| AssumeUtxoError::HistoricalCheckpointLoad { error })?;
         let crate::checkpoint::CheckpointLoad::Complete(restored) = loaded else {
-            return Err(anyhow::anyhow!(
-                "durable head names a historical checkpoint that is not published"
-            )
-            .into());
+            return Err(AssumeUtxoError::HistoricalCheckpointNotPublished);
         };
         if restored.generation != checkpoint.checkpoint.generation
             || restored.applied_tip.height != checkpoint.height
             || restored.applied_tip.hash != checkpoint.hash
         {
-            return Err(anyhow::anyhow!(
-                "historical checkpoint does not match its durable-head reference"
-            )
-            .into());
+            return Err(AssumeUtxoError::HistoricalCheckpointReferenceMismatch);
         }
         if restored.applied_tip.chain_tx_count.get().is_none() {
-            return Err(anyhow::anyhow!(
-                "historical checkpoint has no certified transaction count"
-            )
-            .into());
+            return Err(AssumeUtxoError::HistoricalCheckpointWithoutTransactionCount);
         }
+        Ok(*restored)
+    }
 
+    fn install_historical_checkpoint(
+        active: &Arc<Chainstate>,
+        recovery: HistoricalRecovery,
+        checkpoint: &HistoricalCheckpointRef,
+        restored: crate::checkpoint::RestoredChainstate,
+    ) -> Result<Arc<Chainstate>, AssumeUtxoError> {
+        let HistoricalRecovery {
+            base_height,
+            base_hash,
+            undo,
+            ..
+        } = recovery;
         let mut tree = active.block_tree.write();
         let base_id = tree
             .lookup(base_hash)
             .ok_or(AssumeUtxoError::SnapshotHeaderMissing(base_hash))?;
         let checkpoint_id = tree
             .node_at_height_from(base_id, checkpoint.height)
-            .ok_or_else(|| {
-                anyhow::anyhow!("historical checkpoint is not on the pinned ancestry")
-            })?;
+            .ok_or(AssumeUtxoError::HistoricalCheckpointNotOnAncestry)?;
         let checkpoint_node = tree.node(checkpoint_id).map_err(ApplyError::from)?;
         if checkpoint_node.hash != checkpoint.hash || checkpoint_node.height != checkpoint.height {
-            return Err(anyhow::anyhow!(
-                "historical checkpoint hash is not on the pinned ancestry"
-            )
-            .into());
+            return Err(AssumeUtxoError::HistoricalCheckpointHashNotOnAncestry);
         }
         let checkpoint_height = checkpoint_node.height;
         let checkpoint_hash = checkpoint_node.hash;
         let checkpoint_chainwork = checkpoint_node.chainwork;
         let progress_id = tree
-            .node_at_height_from(base_id, historical_height)
-            .ok_or_else(|| {
-                anyhow::anyhow!("certified historical progress is not on the pinned ancestry")
-            })?;
+            .node_at_height_from(base_id, recovery.historical_height)
+            .ok_or(AssumeUtxoError::HistoricalProgressNotOnAncestry)?;
         let progress_node = tree.node(progress_id).map_err(ApplyError::from)?;
-        if progress_node.hash != historical_hash {
-            return Err(anyhow::anyhow!(
-                "durable historical progress is not on the pinned ancestry"
-            )
-            .into());
+        if progress_node.hash != recovery.historical_hash {
+            return Err(AssumeUtxoError::DurableHistoricalProgressNotOnAncestry);
         }
         tree.restore_chain_tx_count(checkpoint_id, restored.applied_tip.chain_tx_count)
             .map_err(ApplyError::from)?;
@@ -480,7 +566,7 @@ impl AssumeUtxoManager {
         let pinned = self
             .network
             .assume_utxo_for_height(state.height())
-            .ok_or(AssumeUtxoError::UntrustedSnapshotHeight(state.height()))?;
+            .ok_or_else(|| AssumeUtxoError::UntrustedSnapshotHeight(state.height()))?;
         self.require_unactivated()?;
         self.install_verified(state, pinned)
     }
@@ -546,13 +632,15 @@ impl AssumeUtxoManager {
         };
 
         let (set, stats, staging_witness) =
-            crate::assumeutxo_snapshot::write_coins_sealed(&self.data_dir, state, pinned)?;
+            crate::assumeutxo_snapshot::write_coins_sealed(&self.data_dir, state, pinned)
+                .map_err(AssumeUtxoError::Archive)?;
         self.active_chainstate
             .install_snapshot(set, stats, pinned, |tree, tip, prior| {
                 if crate::recovery::requires_full_revalidation(&self.data_dir) {
                     return Err(AssumeUtxoError::FullRevalidationRequired);
                 }
-                crate::assumeutxo_snapshot::write_headers(&self.data_dir, tree, tip)?;
+                crate::assumeutxo_snapshot::write_headers(&self.data_dir, tree, tip)
+                    .map_err(AssumeUtxoError::Archive)?;
                 let next = bitcoin_rs_storage::DurableHead {
                     assumeutxo: new_status,
                     commit_id: prior.map_or(1, |head| head.commit_id + 1),
@@ -565,7 +653,10 @@ impl AssumeUtxoManager {
                 self.active_chainstate.durable_head.commit(
                     prior,
                     &next,
-                    &bitcoin_rs_storage::CommitRecords::default(),
+                    &bitcoin_rs_storage::CommitRecords {
+                        attestation: Some(bitcoin_rs_storage::ScriptAttestation::AssumeValid),
+                        ..bitcoin_rs_storage::CommitRecords::default()
+                    },
                 )?;
                 Ok(())
             })?;
@@ -583,8 +674,6 @@ impl AssumeUtxoManager {
         Ok(())
     }
 
-    /// - On mismatch: fails closed immediately, sets both chainstates to closed,
-    ///   persists [`AssumeUtxoDiskStatus::Failed`], and returns an error.
     pub fn take_pending_activation_witness(&self) -> Option<bitcoin_rs_utxo::V4Witness> {
         self.pending_activation_mint.lock().take()
     }
@@ -599,7 +688,20 @@ impl AssumeUtxoManager {
             .read()
             .clone()
             .ok_or(AssumeUtxoError::NoHistoricalChainstate)?;
+        let (outcome, archived) = self.connect_historical_block(&historical, payload)?;
+        if !archived {
+            self.record_historical_progress(&historical, payload, &outcome)?;
+        }
+        self.historical_undo
+            .remove_archived(outcome.height, outcome.hash);
+        Ok(outcome)
+    }
 
+    fn connect_historical_block(
+        &self,
+        historical: &Arc<Chainstate>,
+        payload: &BlockPayload,
+    ) -> Result<(ConnectOutcome, bool), AssumeUtxoError> {
         let expected_prev = historical
             .applied_tip_snapshot()
             .map_or_else(Hash256::default, |tip| tip.hash);
@@ -611,52 +713,52 @@ impl AssumeUtxoManager {
             .into());
         }
         let archived = self
-            .begin_historical(payload.block(), &historical)
+            .begin_historical(payload.block(), historical)
             .inspect_err(|_| {
                 self.active_chainstate.fail_closed_for_recovery();
                 historical.fail_closed_for_recovery();
             })?;
-
         let result = {
             let transition = historical.lock_transition()?.into_transition();
             transition.connect(payload)
         };
-        let outcome = match result {
+        match result {
             Err(ApplyError::HistoricalTargetHashMismatch {
                 base_height,
                 expected,
                 found,
             }) => {
-                self.fail_historical(&historical)?;
-                return Err(AssumeUtxoError::HistoricalTargetHashMismatch {
+                self.fail_historical(historical)?;
+                Err(AssumeUtxoError::HistoricalTargetHashMismatch {
                     base_height,
                     expected,
                     found,
-                });
+                })
             }
             Err(error) => {
                 if matches!(
                     crate::classify_apply_error(&error),
                     crate::WindowApplyDisposition::Permanent | crate::WindowApplyDisposition::Fatal
                 ) {
-                    self.fail_historical(&historical)?;
+                    self.fail_historical(historical)?;
                 }
-                return Err(error.into());
+                Err(error.into())
             }
-            Ok(outcome) => outcome,
-        };
-
-        if archived {
-            self.historical_undo
-                .remove_archived(outcome.height, outcome.hash);
-            return Ok(outcome);
+            Ok(outcome) => Ok((outcome, archived)),
         }
+    }
 
+    fn record_historical_progress(
+        &self,
+        historical: &Arc<Chainstate>,
+        payload: &BlockPayload,
+        outcome: &ConnectOutcome,
+    ) -> Result<(), AssumeUtxoError> {
         let current_status = self.status().inspect_err(|_| {
             self.active_chainstate.fail_closed_for_recovery();
             historical.fail_closed_for_recovery();
         })?;
-        if let AssumeUtxoDiskStatus::Validating {
+        let AssumeUtxoDiskStatus::Validating {
             base_height,
             base_hash,
             expected_hash_serialized,
@@ -664,78 +766,93 @@ impl AssumeUtxoManager {
             checkpoint,
             ..
         } = current_status
-        {
-            if outcome.height < base_height {
-                let updated = AssumeUtxoDiskStatus::Validating {
-                    base_height,
-                    base_hash,
-                    expected_hash_serialized,
-                    chain_tx_count,
-                    historical_height: outcome.height,
-                    historical_hash: outcome.hash,
-                    pending: None,
-                    checkpoint,
-                };
-                self.persist_status(updated, Some((payload, &historical)))
-                    .inspect_err(|_| {
-                        self.active_chainstate.fail_closed_for_recovery();
-                        historical.fail_closed_for_recovery();
-                    })?;
-            } else if outcome.height == base_height {
-                if outcome.hash != base_hash {
-                    self.fail_historical(&historical)?;
-                    return Err(AssumeUtxoError::HistoricalTargetHashMismatch {
-                        base_height,
-                        expected: base_hash,
-                        found: outcome.hash,
-                    });
-                }
-
-                let actual_hash_serialized = historical
-                    .utxo
-                    .lock_stable_view()
-                    .hash_serialized_3()
-                    .inspect_err(|_| {
-                        self.active_chainstate.fail_closed_for_recovery();
-                        historical.fail_closed_for_recovery();
-                    })?;
-                let actual_count = historical
-                    .applied_tip_snapshot()
-                    .map_or(0, |tip| tip.chain_tx_count.to_wire());
-                if actual_count != chain_tx_count {
-                    self.fail_historical(&historical)?;
-                    return Err(AssumeUtxoError::HistoricalTransactionCountMismatch {
-                        expected: chain_tx_count,
-                        found: actual_count,
-                    });
-                }
-                if actual_hash_serialized == expected_hash_serialized {
-                    let finalized = AssumeUtxoDiskStatus::Finalized {
-                        base_height,
-                        base_hash,
-                        validated_hash_serialized: actual_hash_serialized,
-                    };
-                    self.persist_status(finalized, Some((payload, &historical)))
-                        .inspect_err(|_| {
-                            self.active_chainstate.fail_closed_for_recovery();
-                            historical.fail_closed_for_recovery();
-                        })?;
-                    self.active_chainstate.set_role(ChainstateRole::Ordinary);
-                    *self.historical_chainstate.write() = None;
-                } else {
-                    self.fail_historical(&historical)?;
-                    return Err(AssumeUtxoError::CommitmentMismatch {
-                        base_height,
-                        expected: expected_hash_serialized,
-                        actual: actual_hash_serialized,
-                    });
-                }
-            }
+        else {
+            return Ok(());
+        };
+        let base = ValidatingBase {
+            base_height,
+            base_hash,
+            expected_hash_serialized,
+            chain_tx_count,
+        };
+        if outcome.height < base_height {
+            let updated = AssumeUtxoDiskStatus::Validating {
+                base_height,
+                base_hash,
+                expected_hash_serialized,
+                chain_tx_count,
+                historical_height: outcome.height,
+                historical_hash: outcome.hash,
+                pending: None,
+                checkpoint,
+            };
+            return self
+                .persist_status(updated, Some((payload, historical.as_ref())))
+                .inspect_err(|_| {
+                    self.active_chainstate.fail_closed_for_recovery();
+                    historical.fail_closed_for_recovery();
+                });
         }
+        if outcome.height != base_height {
+            return Ok(());
+        }
+        self.finalize_historical_progress(historical, payload, base, outcome.hash)
+    }
 
-        self.historical_undo
-            .remove_archived(outcome.height, outcome.hash);
-        Ok(outcome)
+    fn finalize_historical_progress(
+        &self,
+        historical: &Arc<Chainstate>,
+        payload: &BlockPayload,
+        base: ValidatingBase,
+        outcome_hash: Hash256,
+    ) -> Result<(), AssumeUtxoError> {
+        if outcome_hash != base.base_hash {
+            self.fail_historical(historical)?;
+            return Err(AssumeUtxoError::HistoricalTargetHashMismatch {
+                base_height: base.base_height,
+                expected: base.base_hash,
+                found: outcome_hash,
+            });
+        }
+        let actual_hash_serialized = historical
+            .utxo
+            .lock_stable_view()
+            .hash_serialized_3()
+            .inspect_err(|_| {
+                self.active_chainstate.fail_closed_for_recovery();
+                historical.fail_closed_for_recovery();
+            })?;
+        let actual_count = historical
+            .applied_tip_snapshot()
+            .map_or(0, |tip| tip.chain_tx_count.to_wire());
+        if actual_count != base.chain_tx_count {
+            self.fail_historical(historical)?;
+            return Err(AssumeUtxoError::HistoricalTransactionCountMismatch {
+                expected: base.chain_tx_count,
+                found: actual_count,
+            });
+        }
+        if actual_hash_serialized != base.expected_hash_serialized {
+            self.fail_historical(historical)?;
+            return Err(AssumeUtxoError::CommitmentMismatch {
+                base_height: base.base_height,
+                expected: base.expected_hash_serialized,
+                actual: actual_hash_serialized,
+            });
+        }
+        let finalized = AssumeUtxoDiskStatus::Finalized {
+            base_height: base.base_height,
+            base_hash: base.base_hash,
+            validated_hash_serialized: actual_hash_serialized,
+        };
+        self.persist_status(finalized, Some((payload, historical.as_ref())))
+            .inspect_err(|_| {
+                self.active_chainstate.fail_closed_for_recovery();
+                historical.fail_closed_for_recovery();
+            })?;
+        self.active_chainstate.set_role(ChainstateRole::Ordinary);
+        *self.historical_chainstate.write() = None;
+        Ok(())
     }
 
     pub fn next_historical_block(&self) -> Result<Option<(u32, Hash256)>, AssumeUtxoError> {
@@ -789,10 +906,10 @@ impl AssumeUtxoManager {
             let Some(bytes) = bytes else {
                 return Ok(HistoricalAdvance::MissingBody { height, hash });
             };
-            let payload =
-                BlockPayload::from_raw(bytes::Bytes::from(bytes)).map_err(anyhow::Error::from)?;
+            let payload = BlockPayload::from_raw(bytes::Bytes::from(bytes))
+                .map_err(|error| AssumeUtxoError::Archive(SnapshotArchiveError::from(error)))?;
             if payload.block().block_hash().0 != hash {
-                return Err(anyhow::anyhow!("historical archive body identity mismatch").into());
+                return Err(AssumeUtxoError::HistoricalBodyIdentityMismatch);
             }
             self.step_historical(&payload)?;
         }
@@ -998,9 +1115,7 @@ impl AssumeUtxoManager {
             return Ok(());
         };
         if pending.height > base_height {
-            return Err(
-                anyhow::anyhow!("historical validation intent exceeds snapshot base").into(),
-            );
+            return Err(AssumeUtxoError::ValidationIntentExceedsBase);
         }
         let historical = self
             .historical_chainstate
@@ -1011,10 +1126,7 @@ impl AssumeUtxoManager {
             .applied_tip_snapshot()
             .map_or(0, |tip| tip.height.saturating_add(1));
         if replay_start > pending.height {
-            return Err(anyhow::anyhow!(
-                "historical checkpoint is ahead of pending validation intent"
-            )
-            .into());
+            return Err(AssumeUtxoError::HistoricalCheckpointAheadOfIntent);
         }
         for height in replay_start..pending.height {
             let (_, hash) = self
@@ -1027,15 +1139,14 @@ impl AssumeUtxoManager {
                     .active_chainstate
                     .block_body_store
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("missing historical body store"))?
+                    .ok_or(AssumeUtxoError::MissingHistoricalBodyStore)?
                     .load_block_body(height, hash)?
-                    .ok_or_else(|| anyhow::anyhow!("missing historical validation dependency"))?;
-                BlockPayload::from_raw(bytes::Bytes::from(bytes)).map_err(anyhow::Error::from)?
+                    .ok_or(AssumeUtxoError::MissingHistoricalDependencyBody)?;
+                BlockPayload::from_raw(bytes::Bytes::from(bytes))
+                    .map_err(|error| AssumeUtxoError::Archive(SnapshotArchiveError::from(error)))?
             };
             if payload.block().block_hash().0 != hash {
-                return Err(
-                    anyhow::anyhow!("historical validation dependency identity mismatch").into(),
-                );
+                return Err(AssumeUtxoError::HistoricalDependencyIdentityMismatch);
             }
             historical
                 .lock_transition()?
@@ -1050,13 +1161,14 @@ impl AssumeUtxoManager {
                 .active_chainstate
                 .block_body_store
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("missing pending validation body store"))?
+                .ok_or(AssumeUtxoError::MissingPendingBodyStore)?
                 .load_staged_body(pending.height, pending.hash, pending.position)?
-                .ok_or_else(|| anyhow::anyhow!("missing pending validation body"))?;
-            BlockPayload::from_raw(bytes::Bytes::from(bytes)).map_err(anyhow::Error::from)?
+                .ok_or(AssumeUtxoError::MissingPendingBody)?;
+            BlockPayload::from_raw(bytes::Bytes::from(bytes))
+                .map_err(|error| AssumeUtxoError::Archive(SnapshotArchiveError::from(error)))?
         };
         if payload.block().block_hash().0 != pending.hash {
-            return Err(anyhow::anyhow!("pending validation body identity mismatch").into());
+            return Err(AssumeUtxoError::PendingBodyIdentityMismatch);
         }
         self.step_historical(&payload)?;
         Ok(())
@@ -1121,7 +1233,24 @@ impl AssumeUtxoManager {
                 .or(prior.body_extent),
             ..prior
         };
+        let finalized_full = match status {
+            AssumeUtxoDiskStatus::Finalized {
+                base_height,
+                base_hash,
+                ..
+            } => {
+                (next.height == base_height && next.tip == base_hash)
+                    || active.durable_head.load_suffix_attestation(&prior)?
+                        >= bitcoin_rs_storage::ScriptAttestation::Full
+            }
+            _ => false,
+        };
         active.durable_head.commit(Some(&prior), &next, &records)?;
+        if finalized_full {
+            active
+                .durable_head
+                .attest(&next, bitcoin_rs_storage::ScriptAttestation::Full)?;
+        }
         if let AssumeUtxoDiskStatus::Validating {
             checkpoint: Some(checkpoint),
             ..
@@ -1185,24 +1314,16 @@ impl AssumeUtxoManager {
             return Ok(());
         }
         let Some(historical) = historical else {
-            return Err(anyhow::anyhow!(
-                "historical checkpoint is due without a historical chainstate"
-            )
-            .into());
+            return Err(AssumeUtxoError::CheckpointDueWithoutChainstate);
         };
         let tip = historical
             .applied_tip_snapshot()
             .ok_or(AssumeUtxoError::NoHistoricalChainstate)?;
         if tip.height != *historical_height || tip.height > *base_height {
-            return Err(anyhow::anyhow!(
-                "historical checkpoint tip does not match certified progress"
-            )
-            .into());
+            return Err(AssumeUtxoError::CheckpointTipMismatch);
         }
-        let data =
-            bitcoin_rs_storage::checkpoint::fs::open_data_dir(&self.data_dir).map_err(|error| {
-                anyhow::anyhow!("open historical checkpoint data directory: {error}")
-            })?;
+        let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(&self.data_dir)
+            .map_err(|error| AssumeUtxoError::HistoricalCheckpointDir { error })?;
         let config = crate::checkpoint::headers::HeaderCheckpointConfig {
             network: self.network,
             genesis: self.network.genesis_block_hash(),
@@ -1217,7 +1338,7 @@ impl AssumeUtxoManager {
             bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
             bitcoin_rs_storage::checkpoint::CheckpointRetention::UntilReferenced,
         )
-        .map_err(|error| anyhow::anyhow!("publish historical checkpoint: {error}"))?;
+        .map_err(|error| AssumeUtxoError::HistoricalCheckpointPublish { error })?;
         let reference = match write {
             crate::checkpoint::CheckpointWrite::Published { reference } => reference,
             crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => {

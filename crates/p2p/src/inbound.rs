@@ -1,5 +1,3 @@
-//! Inbound payloads received from peers.
-
 use bitcoin_rs_primitives::{Block, BlockPayload, Header, Tx};
 
 pub(crate) mod block_memory;
@@ -19,12 +17,26 @@ pub struct InboundHeaders {
 pub struct InboundTx {
     pub tx: Tx,
     pub source: crate::PeerSource,
+    pub(crate) memory_credit: Option<block_memory::BlockMemoryCredit>,
 }
 
 impl InboundTx {
     #[must_use]
     pub fn new(tx: Tx, source: crate::PeerSource) -> Self {
-        Self { tx, source }
+        Self {
+            tx,
+            source,
+            memory_credit: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn with_memory_credit(
+        mut self,
+        credit: Option<block_memory::BlockMemoryCredit>,
+    ) -> Self {
+        self.memory_credit = credit;
+        self
     }
 }
 

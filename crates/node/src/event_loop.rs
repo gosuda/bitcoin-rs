@@ -9,7 +9,6 @@ const SYNC_TICK: Duration = Duration::from_secs(1);
 const SYNC_PROGRESS_INTERVAL: Duration = Duration::from_mins(1);
 
 pub(crate) struct EventLoop {
-    shutdown_signal: Receiver<()>,
     sync_tick: Receiver<Instant>,
     sync_wake: Receiver<()>,
     sync: Arc<crate::BlockSync>,
@@ -17,13 +16,8 @@ pub(crate) struct EventLoop {
 
 impl EventLoop {
     #[must_use]
-    pub(crate) fn with_sync_wake(
-        shutdown_signal: Receiver<()>,
-        sync: Arc<crate::BlockSync>,
-        sync_wake: Receiver<()>,
-    ) -> Self {
+    pub(crate) fn with_sync_wake(sync: Arc<crate::BlockSync>, sync_wake: Receiver<()>) -> Self {
         Self {
-            shutdown_signal,
             sync_tick: tick(SYNC_TICK),
             sync_wake,
             sync,
@@ -44,7 +38,7 @@ impl EventLoop {
                 tracing::debug!(iterations, sync_ticks, "event loop heartbeat");
             }
             select! {
-                recv(self.shutdown_signal) -> _ => {
+                recv(shutdown.closed()) -> _ => {
                     request_shutdown();
                     metrics::gauge!("node.shutdown.requested").set(1.0);
                     break;
@@ -62,6 +56,12 @@ impl EventLoop {
                         self.on_sync_tick();
                     }
                 }
+            }
+            if self.sync.closed_for_recovery() {
+                metrics::counter!("node.sync.apply_halt_shutdowns").increment(1);
+                metrics::gauge!("node.shutdown.requested").set(1.0);
+                request_shutdown();
+                break;
             }
             let now = Instant::now();
             if progress_due(last_progress, now) {
@@ -87,6 +87,7 @@ fn progress_due(last: Instant, now: Instant) -> bool {
 mod tests {
     use super::*;
 
+    // EMB-10
     #[test]
     fn telemetry_uses_elapsed_time_not_wake_count() {
         let start = Instant::now();

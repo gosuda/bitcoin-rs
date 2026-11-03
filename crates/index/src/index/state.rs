@@ -1,5 +1,3 @@
-//! Coherent write fences and cooperative, versioned capability-reset recovery.
-
 use super::{
     capability::COMPACT_FILTERS_WATERMARK_KEY, capability::IndexCapabilities,
     capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,
@@ -15,10 +13,12 @@ use tracing::debug;
 /// data row keys begin with ASCII letters and can never collide.
 pub(super) const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
 
-/// On-disk format 5: big-endian height suffixes, 43-byte live rows with u24
-/// `vout`, and 6-byte `TxPosition` values. Any older marker refuses start
-/// from chainstate; no in-place upgrade path exists.
-pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = [0x05, 0x00, 0x00, 0x00];
+/// On-disk format 6: newest-first exact `ScriptHistory` occurrences, 43-byte
+/// `ScriptLive` keys with u24 `vout`, and 6-byte `TxPosition` locators. Any
+/// older marker refuses start (`UnsupportedTxIndexFormatVersion`), so
+/// `open_writer` resets the derived store and rebuilds it from chainstate; no
+/// in-place upgrade or dual-read path exists.
+pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = [0x06, 0x00, 0x00, 0x00];
 
 const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
 
@@ -26,8 +26,6 @@ const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
 /// `Idle(base_version + 1)`, which makes stale fences un-reusable (no ABA)
 const RESET_CAPABILITIES_KEY: &[u8] = &[0x00, b'R'];
 
-/// reconciliation consumer; data row keys begin with ASCII letters only and
-/// can never collide with the reserved `0x00` prefix.
 pub(super) const CONSUMER_CURSOR_KEY: &[u8] = &[0x00, b'C'];
 
 const RESET_SCAN_LIMIT: PrefixScanLimit = PrefixScanLimit {
@@ -46,7 +44,6 @@ enum ResetState {
     Idle {
         version: u64,
     },
-    /// A reset obligation derived on top of `base_version`. `process_epoch`
     Claim {
         mask: u8,
         process_epoch: u64,
@@ -93,7 +90,6 @@ fn valid_reset_mask(mask: u8) -> bool {
     mask != 0 && IndexCapabilities::from_mask(mask).is_ok()
 }
 
-/// Decodes exactly `size_of::<u64>()` bytes as little-endian; any other
 fn decode_le_u64(bytes: &[u8]) -> Result<u64, IndexError> {
     let raw: [u8; size_of::<u64>()] = bytes
         .try_into()
@@ -443,24 +439,10 @@ fn acquire_capability_reset<S: KvStore>(
         };
         let revision_bytes = revision.unwrap_or(0).to_le_bytes();
 
-        let (current_mask, base_version, observed_claim) = match observed.as_deref() {
-            Some(bytes) => match parse_reset_state(bytes) {
-                Ok(ResetState::Idle { .. }) if requested_mask == 0 => return Ok(None),
-                Ok(ResetState::Idle { version }) => (0, version, None),
-                Ok(ResetState::Claim {
-                    mask, base_version, ..
-                }) => (
-                    mask,
-                    base_version,
-                    Some(ExactResetClaim::from_observed(bytes)),
-                ),
-                Err(error) => {
-                    ensure_raw_reset_live(store, generation, Some(bytes))?;
-                    return Err(error);
-                }
-            },
-            None if requested_mask == 0 => return Ok(None),
-            None => (0, 0, None),
+        let Some((current_mask, base_version, observed_claim)) =
+            parse_observed_reset_state(store, generation, observed.as_deref(), requested_mask)?
+        else {
+            return Ok(None);
         };
         let mask = current_mask | requested_mask;
         if !valid_reset_mask(mask) {
@@ -493,23 +475,7 @@ fn acquire_capability_reset<S: KvStore>(
             observed_reset_condition,
             revision_condition(revision, &revision_bytes),
         ];
-        let mut batch = store.new_batch();
-        batch.put(
-            ColumnFamily::UtxoMeta,
-            RESET_CAPABILITIES_KEY,
-            work.claim.as_slice(),
-        );
-        batch.put(
-            ColumnFamily::UtxoMeta,
-            FORMAT_VERSION_KEY,
-            &FORMAT_VERSION_VALUE,
-        );
-        let capabilities = IndexCapabilities::from_mask(mask)?;
-        for capability in capabilities.iter() {
-            batch.delete(ColumnFamily::UtxoMeta, capability.watermark_key());
-        }
-        crate::index::capability::delete_selected_floors(&mut batch, capabilities);
-        batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
+        let batch = build_reset_batch(store, &work, mask)?;
         if store.write_durable_if(&conditions, batch)? {
             return Ok(Some(work));
         }
@@ -527,59 +493,16 @@ pub(super) fn resume_capability_reset<S: KvStore>(
             return Ok(());
         };
         requested_mask = 0;
-
         let capabilities = IndexCapabilities::from_mask(work.mask)?;
-        let mut scans: Vec<(ColumnFamily, &[u8])> = capabilities
-            .iter()
-            .flat_map(IndexCapability::column_families)
-            .map(|&cf| (cf, &[][..]))
-            .collect();
-        let unselected_cursor_remains = IndexCapability::ALL.into_iter().try_fold(
-            false,
-            |remains, capability| -> Result<bool, IndexError> {
-                if remains || capabilities.contains(capability) {
-                    return Ok(remains);
-                }
-                Ok(store
-                    .get(ColumnFamily::UtxoMeta, capability.watermark_key())?
-                    .is_some())
-            },
-        )?;
-        if !unselected_cursor_remains {
-            scans.push((ColumnFamily::BlockHeaders, &[]));
-        }
-
+        let scans = reset_scan_families(store, capabilities)?;
         let revision_bytes = work.revision.unwrap_or(0).to_le_bytes();
         let conditions = [
             work.claim.condition(),
             revision_condition(work.revision, &revision_bytes),
         ];
-        let mut claim_changed = false;
-        if capabilities.contains(IndexCapability::CompactFilters) {
-            scans.push((ColumnFamily::UtxoMeta, super::filters::PREFIX));
-        }
-        'families: for (cf, prefix) in scans {
-            loop {
-                let scan = store.scan_prefix_bounded(cf, prefix, RESET_SCAN_LIMIT)?;
-                if scan.rows.is_empty() {
-                    if scan.complete {
-                        break;
-                    }
-                    return Err(IndexError::ResetScanIncomplete);
-                }
-                let mut batch = store.new_batch();
-                for (key, _) in scan.rows {
-                    batch.delete(cf, &key);
-                }
-                if !store.write_durable_if(&conditions, batch)? {
-                    claim_changed = true;
-                    break 'families;
-                }
-                if scan.complete {
-                    break;
-                }
-            }
-        }
+        let scan_slices: Vec<(ColumnFamily, &[u8])> =
+            scans.iter().map(|&(cf, p)| (cf, p)).collect();
+        let claim_changed = purge_family_scans(store, &scan_slices, &conditions)?;
         if claim_changed {
             continue;
         }
@@ -598,5 +521,113 @@ pub(super) fn resume_capability_reset<S: KvStore>(
         if store.write_durable_if(&conditions, completion)? {
             return Ok(());
         }
+    }
+}
+fn build_reset_batch<S: KvStore>(
+    store: &S,
+    work: &ResetWork,
+    mask: u8,
+) -> Result<BufferedWriteBatch, IndexError> {
+    let mut batch = store.new_batch();
+    batch.put(
+        ColumnFamily::UtxoMeta,
+        RESET_CAPABILITIES_KEY,
+        work.claim.as_slice(),
+    );
+    batch.put(
+        ColumnFamily::UtxoMeta,
+        FORMAT_VERSION_KEY,
+        &FORMAT_VERSION_VALUE,
+    );
+    let capabilities = IndexCapabilities::from_mask(mask)?;
+    for capability in capabilities.iter() {
+        batch.delete(ColumnFamily::UtxoMeta, capability.watermark_key());
+    }
+    crate::index::capability::delete_selected_floors(&mut batch, capabilities);
+    batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
+    Ok(batch)
+}
+
+fn reset_scan_families<S: KvStore>(
+    store: &S,
+    capabilities: IndexCapabilities,
+) -> Result<Vec<(ColumnFamily, &'static [u8])>, IndexError> {
+    let mut scans: Vec<(ColumnFamily, &'static [u8])> = capabilities
+        .iter()
+        .flat_map(IndexCapability::column_families)
+        .map(|&cf| (cf, &[][..]))
+        .collect();
+    let unselected_cursor_remains = IndexCapability::ALL.into_iter().try_fold(
+        false,
+        |remains, capability| -> Result<bool, IndexError> {
+            if remains || capabilities.contains(capability) {
+                return Ok(remains);
+            }
+            Ok(store
+                .get(ColumnFamily::UtxoMeta, capability.watermark_key())?
+                .is_some())
+        },
+    )?;
+    if !unselected_cursor_remains {
+        scans.push((ColumnFamily::BlockHeaders, &[]));
+    }
+    if capabilities.contains(IndexCapability::CompactFilters) {
+        scans.push((ColumnFamily::UtxoMeta, super::filters::PREFIX));
+    }
+    Ok(scans)
+}
+
+fn purge_family_scans<S: KvStore>(
+    store: &S,
+    scans: &[(ColumnFamily, &[u8])],
+    conditions: &[WriteCondition<'_>],
+) -> Result<bool, IndexError> {
+    for &(cf, prefix) in scans {
+        loop {
+            let scan = store.scan_prefix_bounded(cf, prefix, RESET_SCAN_LIMIT)?;
+            if scan.rows.is_empty() {
+                if scan.complete {
+                    break;
+                }
+                return Err(IndexError::ResetScanIncomplete);
+            }
+            let mut batch = store.new_batch();
+            for (key, _) in scan.rows {
+                batch.delete(cf, &key);
+            }
+            if !store.write_durable_if(conditions, batch)? {
+                return Ok(true);
+            }
+            if scan.complete {
+                break;
+            }
+        }
+    }
+    Ok(false)
+}
+fn parse_observed_reset_state<S: KvStore>(
+    store: &S,
+    generation: u64,
+    observed: Option<&[u8]>,
+    requested_mask: u8,
+) -> Result<Option<(u8, u64, Option<ExactResetClaim>)>, IndexError> {
+    match observed {
+        Some(bytes) => match parse_reset_state(bytes) {
+            Ok(ResetState::Idle { .. }) if requested_mask == 0 => Ok(None),
+            Ok(ResetState::Idle { version }) => Ok(Some((0, version, None))),
+            Ok(ResetState::Claim {
+                mask, base_version, ..
+            }) => Ok(Some((
+                mask,
+                base_version,
+                Some(ExactResetClaim::from_observed(bytes)),
+            ))),
+            Err(error) => {
+                ensure_raw_reset_live(store, generation, Some(bytes))?;
+                Err(error)
+            }
+        },
+        None if requested_mask == 0 => Ok(None),
+        None => Ok(Some((0, 0, None))),
     }
 }

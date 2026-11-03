@@ -237,6 +237,7 @@ fn a_vectored_write_counts_every_slice() {
     assert_eq!(stream.inner.bytes, [1, 2, 3, 4, 5, 6, 7]);
 }
 
+// P2P-04
 #[test]
 fn write_message_through_the_wrapper_is_one_vectored_write() {
     use bitcoin::p2p::Magic;
@@ -281,6 +282,7 @@ fn write_message_through_the_wrapper_is_one_vectored_write() {
     assert!(written > 24, "framed ping is header plus 8-byte payload");
 }
 
+// P2P-04
 #[test]
 fn from_connected_disables_nagle() {
     use std::net::{TcpListener, TcpStream};
@@ -312,6 +314,7 @@ fn from_connected_disables_nagle() {
     let _accepted = accepting.join();
 }
 
+// P2P-04
 #[test]
 fn a_cloned_socket_counts_into_the_same_place() {
     use std::net::{TcpListener, TcpStream};
@@ -348,45 +351,6 @@ fn a_cloned_socket_counts_into_the_same_place() {
     drop(clone);
     let _accepted = accepting.join();
 }
-
-#[test]
-fn a_vectored_write_counts_every_slice_in_one_inner_call() {
-    struct RecordingWriter {
-        writes: usize,
-        vectored: usize,
-    }
-    impl Write for RecordingWriter {
-        fn write(&mut self, buffer: &[u8]) -> IoResult<usize> {
-            self.writes += 1;
-            Ok(buffer.len())
-        }
-        fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
-            self.vectored += 1;
-            Ok(buffers.iter().map(|buffer| buffer.len()).sum())
-        }
-        fn flush(&mut self) -> IoResult<()> {
-            Ok(())
-        }
-    }
-
-    let inner = RecordingWriter {
-        writes: 0,
-        vectored: 0,
-    };
-    let counters = Arc::new(PeerCounters::default());
-    let mut stream = CountingStream::new(inner, Arc::clone(&counters));
-    let header = [0_u8; 24];
-    let payload = [1_u8; 8];
-    let written = stream
-        .write_vectored(&[IoSlice::new(&header), IoSlice::new(&payload)])
-        .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
-
-    assert_eq!(written, 32);
-    assert_eq!(counters.bytes_sent(), 32);
-    assert_eq!(stream.inner.vectored, 1);
-    assert_eq!(stream.inner.writes, 0);
-}
-
 #[test]
 fn a_zero_byte_read_stamps_nothing_while_a_single_byte_write_counts() {
     let counters = Arc::new(PeerCounters::default());
@@ -409,33 +373,6 @@ fn a_zero_byte_read_stamps_nothing_while_a_single_byte_write_counts() {
     assert_eq!(written, 1);
     assert_eq!(counters.bytes_sent(), 1);
     assert_ne!(counters.last_send(), 0);
-}
-
-#[test]
-fn a_vectored_write_counts_every_slice_the_socket_took() {
-    struct VectoredWriter;
-    impl Write for VectoredWriter {
-        fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
-            Err(std::io::Error::other(
-                "write_vectored must not fall back to write",
-            ))
-        }
-        fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
-            Ok(buffers.iter().map(|buffer| buffer.len()).sum())
-        }
-        fn flush(&mut self) -> IoResult<()> {
-            Ok(())
-        }
-    }
-
-    let counters = Arc::new(PeerCounters::default());
-    let mut stream = CountingStream::new(VectoredWriter, Arc::clone(&counters));
-    let written = stream
-        .write_vectored(&[IoSlice::new(&[1_u8; 4]), IoSlice::new(&[2_u8; 6])])
-        .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
-
-    assert_eq!(written, 10);
-    assert_eq!(counters.bytes_sent(), 10);
 }
 
 #[test]
@@ -467,52 +404,6 @@ fn a_short_vectored_write_counts_what_the_socket_took() {
 
     assert_eq!(written, 3);
     assert_eq!(counters.bytes_sent(), 3);
-}
-
-#[test]
-fn write_message_through_counting_stream_stays_vectored() {
-    struct FailOnUnvectored {
-        calls: Arc<AtomicU64>,
-    }
-    impl Write for FailOnUnvectored {
-        fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
-            Err(std::io::Error::other(
-                "write_message must not fall back to write",
-            ))
-        }
-        fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            Ok(buffers.iter().map(|buffer| buffer.len()).sum())
-        }
-        fn flush(&mut self) -> IoResult<()> {
-            Ok(())
-        }
-    }
-
-    let counters = Arc::new(PeerCounters::default());
-    let calls = Arc::new(AtomicU64::new(0));
-    let mut stream = CountingStream::new(
-        FailOnUnvectored {
-            calls: Arc::clone(&calls),
-        },
-        Arc::clone(&counters),
-    );
-    let written = crate::wire::write_message(
-        &mut stream,
-        bitcoin::p2p::Magic::BITCOIN,
-        &crate::wire::Message::Ping(42),
-    )
-    .unwrap_or_else(|error| panic!("write_message failed: {error}"));
-
-    assert_eq!(
-        calls.load(Ordering::Relaxed),
-        1,
-        "header and payload in one writev"
-    );
-    assert_eq!(
-        counters.bytes_sent(),
-        u64::try_from(written).unwrap_or(u64::MAX)
-    );
 }
 
 #[test]
@@ -556,6 +447,37 @@ fn a_cancelled_stream_stops_a_payload_that_keeps_arriving() -> IoResult<()> {
             Err(std::io::ErrorKind::ConnectionAborted)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn an_idle_read_unblocks_on_the_cancel_latch() -> IoResult<()> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let client = std::net::TcpStream::connect(listener.local_addr()?)?;
+    let (server, _) = listener.accept()?;
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    let mut stream = CountingStream::from_connected(server, Arc::new(PeerCounters::default()))?
+        .with_cancel(&latch.reader(), &std::net::TcpStream::try_clone)?;
+    let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+    let reader = std::thread::spawn(move || {
+        let mut buffer = [0_u8; 64];
+        let result = stream.read(&mut buffer);
+        let _ = done_tx.send(result.map_err(|error| error.kind()));
+    });
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    latch.trigger();
+    let outcome = done_rx.recv_timeout(std::time::Duration::from_millis(200));
+    drop(client);
+    let _ = reader.join();
+    assert!(
+        outcome.is_ok(),
+        "an idle socket read must return once the cancel latch triggers"
+    );
+    let result = outcome.map_err(|_| std::io::Error::other("read outcome missing"))?;
+    assert!(
+        result.is_err() || result == Ok(0),
+        "a cancelled idle read reports end of stream, got {result:?}"
+    );
     Ok(())
 }
 

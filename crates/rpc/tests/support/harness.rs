@@ -1,9 +1,5 @@
-//! RAII harness: a real regtest `NodeState`, the real authenticated
-//! `RpcServer` on loopback, and the replay client that exercises them.
-
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use bitcoin_rs_node::state::NodeState;
@@ -63,7 +59,7 @@ impl NodeHarness {
 
 pub(crate) struct ServerHarness {
     address: SocketAddr,
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchWriter,
     join: Option<JoinHandle<()>>,
     transition: bitcoin_rs_chain::StableRead,
 }
@@ -122,8 +118,8 @@ impl ServerHarness {
             false,
         )?;
         let address = server.local_addr()?;
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&shutdown);
+        let shutdown = bitcoin_rs_chain::LatchWriter::new();
+        let flag = shutdown.reader();
         let join = std::thread::spawn(move || {
             let _ignored = server.serve_with_shutdown(flag);
         });
@@ -182,7 +178,7 @@ impl ServerHarness {
 
 impl Drop for ServerHarness {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown.trigger();
         if let Some(join) = self.join.take() {
             let _ignored = join.join();
         }

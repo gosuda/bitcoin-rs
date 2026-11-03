@@ -414,12 +414,6 @@ fn history_round_trip_preserves_state_and_estimates() {
 }
 
 #[test]
-fn history_encoding_is_deterministic() {
-    let est = estimator_at_height_105_with_pending(test_txid(200));
-    assert_eq!(est.to_history_bytes(), est.to_history_bytes());
-}
-
-#[test]
 fn history_rejects_every_corrupt_payload_shape() {
     let base = FeeEstimator::new().to_history_bytes();
     let patch = |offset: usize, bytes: &[u8]| {

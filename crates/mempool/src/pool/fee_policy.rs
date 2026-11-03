@@ -1,6 +1,6 @@
 use super::{
     EntryId, Mempool, MempoolEntry, MempoolError, MempoolLimits, MempoolPolicySnapshot,
-    PolicyError, VisitSet,
+    PolicyError, VisitSet, link_memory_usage,
 };
 use crate::fee_diagram::{self, FeeWeight};
 use crate::rbf::RbfError;
@@ -23,12 +23,19 @@ impl PolicyStamp {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProjectionScope {
+    ComponentOnly,
+    AllEntries,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GraphNode {
     pub(crate) id: Option<EntryId>,
     pub(crate) txid: Txid,
     pub(crate) value: FeeWeight,
     pub(crate) vsize: u32,
+    pub(crate) memory: u64,
     pub(crate) affected: bool,
 }
 
@@ -125,7 +132,7 @@ impl Mempool {
         &self,
         candidates: &[MempoolEntry],
         evicted: &[EntryId],
-        include_all: bool,
+        scope: ProjectionScope,
     ) -> Result<(PolicyGraph, PolicyGraph), RbfError> {
         let excluded: HashSet<_> = evicted.iter().copied().collect();
         let parents: Vec<_> = candidates
@@ -146,7 +153,7 @@ impl Mempool {
         }
         let affected: HashSet<_> = affected.into_iter().collect();
         let mut members = Vec::new();
-        if include_all {
+        if scope == ProjectionScope::AllEntries {
             members.extend(
                 self.entries
                     .iter()
@@ -173,6 +180,7 @@ impl Mempool {
                 id: Some(id),
                 txid: entry.txid,
                 vsize: entry.vsize,
+                memory: self.entry_memory(id).ok_or(RbfError::InconsistentGraph)?,
                 affected: affected.contains(&id),
                 value: FeeWeight {
                     fee,
@@ -200,7 +208,17 @@ impl Mempool {
                 continue;
             }
             surviving.insert(old, after.nodes.len());
-            after.nodes.push(node.clone());
+            let mut projected = node.clone();
+            if let Some(id) = node.id {
+                let links = self.links(id).ok_or(RbfError::InconsistentGraph)?;
+                let degree = links.parents.len() + links.children.len();
+                let surviving = links.surviving_sides(&excluded);
+                let dropped_sides = degree - surviving;
+                projected.memory = node
+                    .memory
+                    .saturating_sub(link_memory_usage(dropped_sides, 1));
+            }
+            after.nodes.push(projected);
         }
         for (old, node) in before.nodes.iter().enumerate() {
             if node.id.is_some_and(|id| excluded.contains(&id)) {
@@ -227,16 +245,6 @@ impl Mempool {
         for candidate in candidates {
             let candidate_index = after.nodes.len();
             tx_positions.insert(candidate.txid, candidate_index);
-            after.nodes.push(GraphNode {
-                id: None,
-                txid: candidate.txid,
-                vsize: candidate.vsize,
-                affected: true,
-                value: FeeWeight {
-                    fee: self.modified_fee_for(candidate.txid, candidate.fee)?,
-                    weight: policy_weight(candidate.weight, candidate.vsize, candidate.sigop_cost)?,
-                },
-            });
             let mut parents: Vec<_> = candidate
                 .tx
                 .inputs
@@ -245,14 +253,38 @@ impl Mempool {
                 .collect();
             parents.sort_unstable();
             parents.dedup();
-            after.parents.push(parents);
+            let mut child_edges = 0_usize;
             for child in self.in_pool_children(candidate.txid) {
                 if let Some(&old) = positions.get(&child)
                     && let Some(&new) = surviving.get(&old)
                 {
                     after.parents[new].push(candidate_index);
+                    after.nodes[new].memory = after.nodes[new]
+                        .memory
+                        .saturating_add(link_memory_usage(1, 1));
+                    child_edges += 1;
                 }
             }
+            for &parent in &parents {
+                after.nodes[parent].memory = after.nodes[parent]
+                    .memory
+                    .saturating_add(link_memory_usage(1, 1));
+            }
+            let edges = parents.len() + child_edges;
+            after.nodes.push(GraphNode {
+                id: None,
+                txid: candidate.txid,
+                vsize: candidate.vsize,
+                memory: self
+                    .admission_memory(candidate)
+                    .saturating_sub(link_memory_usage(edges, 1)),
+                affected: true,
+                value: FeeWeight {
+                    fee: self.modified_fee_for(candidate.txid, candidate.fee)?,
+                    weight: policy_weight(candidate.weight, candidate.vsize, candidate.sigop_cost)?,
+                },
+            });
+            after.parents.push(parents);
         }
         Ok((before, after))
     }

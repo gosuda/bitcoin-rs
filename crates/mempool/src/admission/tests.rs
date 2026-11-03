@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_fixtures::{p2sh_true_script, true_redeem_script_sig};
 use crate::{Mempool, MempoolEntry};
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, TxIn, Witness};
@@ -59,7 +60,7 @@ fn standard_spend(outpoint: OutPoint, marker: u8) -> Tx {
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: outpoint,
-            script_sig: Script::new(),
+            script_sig: Script::from_bytes(true_redeem_script_sig()),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
@@ -74,7 +75,7 @@ fn parent_and_child() -> (Tx, Arc<Tx>) {
     let mut parent = standard_spend(OutPoint::new(Txid(Hash256::from_le_bytes(&[9; 32])), 0), 1);
     parent.outputs[0] = TxOut {
         value: Amount::from_sat(10_000),
-        script_pubkey: Script::from_bytes(vec![0x51]),
+        script_pubkey: Script::from_bytes(p2sh_true_script()),
     };
     let child = Arc::new(standard_spend(OutPoint::new(parent.txid(), 0), 2));
     (parent, child)
@@ -220,7 +221,7 @@ fn funded_coin() -> (OutPoint, Coins) {
         coin,
         TxOut {
             value: Amount::from_sat(10_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     (coin, chain)
@@ -471,7 +472,9 @@ fn peer_policy_refusal_gate_counts_script_spare_capacity() {
     bytes.reserve(64);
     roomy_pubkey.outputs[0].script_pubkey = Script::from_bytes(bytes);
     let mut roomy_sig = packed.clone();
-    roomy_sig.inputs[0].script_sig = Script::from_bytes(Vec::with_capacity(64));
+    let mut script_sig = roomy_sig.inputs[0].script_sig.as_bytes().to_vec();
+    script_sig.reserve(64);
+    roomy_sig.inputs[0].script_sig = Script::from_bytes(script_sig);
     for roomy in [&roomy_pubkey, &roomy_sig] {
         assert_eq!(packed.total_size(), roomy.total_size(), "one wire size");
         assert_eq!(packed.wtxid(), roomy.wtxid(), "one witness identity");
@@ -511,9 +514,9 @@ fn peer_policy_refusal_gate_counts_witness_spare_capacity() {
     let packed =
         nonstandard_with_heap_usage(coin, 3, crate::gateway::EXTRA_TXN_MAX_MEMORY_BYTES - 100);
     let mut roomy_outer = packed.clone();
-    roomy_outer.inputs[0].witness = Witness::from_stack(Vec::with_capacity(8));
+    roomy_outer.inputs[0].witness = Witness::with_capacity(32, 0);
     let mut roomy_item = packed.clone();
-    roomy_item.inputs[0].witness = Witness::from_stack(vec![Vec::with_capacity(128)]);
+    roomy_item.inputs[0].witness = Witness::with_capacity(1, 128);
     for roomy in [&roomy_outer, &roomy_item] {
         assert!(crate::pool::transaction_heap_usage(&packed) < limit);
         assert!(
@@ -567,7 +570,7 @@ fn local_origin_policy_refusal_is_not_retained() {
 #[test]
 fn consensus_refusal_is_not_retained_for_reconstruction() {
     let gateway = gateway();
-    let (parent, valid) = parent_and_child();
+    let (parent, valid) = witness_parent_and_child();
     let chain = Coins(vec![(
         valid.inputs[0].previous_output,
         parent.outputs[0].clone(),
@@ -614,7 +617,7 @@ fn unspendable_pool_outpoint_refusal_is_not_retained_for_reconstruction() {
 
 #[test]
 fn no_chain_invalid_attempt_rebuilds_after_its_parent_leaves_the_pool()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     struct ResetPark;
     impl Drop for ResetPark {
         fn drop(&mut self) {
@@ -671,7 +674,7 @@ fn no_chain_invalid_attempt_rebuilds_after_its_parent_leaves_the_pool()
 
 fn assert_verified_admission_rebuilds_after_change(
     mode: u8,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), crate::test_error::TestError> {
     struct MutableCoins(Mutex<Coins>, AtomicUsize);
     impl AdmissionChain for MutableCoins {
         fn snapshot(&self, tx: &Tx) -> Option<ChainAdmissionSnapshot> {
@@ -859,7 +862,7 @@ fn stale_invalid_outpoint_claim_cannot_reject_a_refreshed_orphan() {
 #[test]
 fn rejected_witness_does_not_suppress_a_valid_body_with_the_same_txid() {
     let gateway = gateway();
-    let (parent, valid) = parent_and_child();
+    let (parent, valid) = witness_parent_and_child();
     let chain = Coins(vec![(
         valid.inputs[0].previous_output,
         parent.outputs[0].clone(),
@@ -895,6 +898,8 @@ fn rejected_stripped_body_does_not_suppress_its_valid_witness_variant() {
 
     let gateway = gateway();
     let (_, child) = parent_and_child();
+    let mut child = (*child).clone();
+    child.inputs[0].script_sig = Script::new();
     let witness_script = vec![0x51];
     let mut script_pubkey = vec![0x00, 0x20];
     script_pubkey.extend_from_slice(&sha256::Hash::hash(&witness_script).to_byte_array());
@@ -905,14 +910,20 @@ fn rejected_stripped_body_does_not_suppress_its_valid_witness_variant() {
             script_pubkey: Script::from_bytes(script_pubkey),
         },
     )]);
-    let mut valid = (*child).clone();
+    let mut valid = child.clone();
     valid.inputs[0].witness = Witness::from_stack(vec![witness_script]);
     let valid = Arc::new(valid);
     let stripped_wtxid = child.wtxid();
     assert_eq!(child.txid(), valid.txid());
     assert_ne!(stripped_wtxid, valid.wtxid());
     assert_eq!(
-        gateway.submit_transaction(child, AdmissionOrigin::Peer(source()), None, 1, &chain),
+        gateway.submit_transaction(
+            Arc::new(child),
+            AdmissionOrigin::Peer(source()),
+            None,
+            1,
+            &chain
+        ),
         Err(SubmitError::Consensus)
     );
     assert!(gateway.is_rejected(Hash256::from(valid.txid())));
@@ -1174,22 +1185,56 @@ fn coinbase_and_nonstandard_missing_transactions_are_not_held() {
     nonstandard.version = 4;
     let mut coinbase = (*child).clone();
     coinbase.inputs[0].previous_output = OutPoint::null();
-    for tx in [nonstandard, coinbase] {
+    for (tx, reason) in [
+        (
+            nonstandard,
+            AcceptanceRejectReason::NonStandard(crate::StandardnessError::Version),
+        ),
+        (coinbase, AcceptanceRejectReason::Coinbase),
+    ] {
         let tx = Arc::new(tx);
-        assert!(
-            gateway
-                .submit_transaction(
-                    Arc::clone(&tx),
-                    AdmissionOrigin::Peer(source()),
-                    None,
-                    1,
-                    &Coins(vec![])
-                )
-                .is_err()
+        assert_eq!(
+            gateway.submit_transaction(
+                Arc::clone(&tx),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &Coins(vec![])
+            ),
+            Err(SubmitError::Policy(reason))
         );
         assert!(gateway.is_rejected(Hash256::from(tx.txid())));
         assert_eq!(gateway.orphan_count(), 0);
     }
+}
+
+// POL-03
+#[test]
+fn dust_tx_with_an_unknown_parent_is_held_as_an_orphan() {
+    let gateway = gateway();
+    let (parent, child) = parent_and_child();
+    insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+    let mut tx = (*child).clone();
+    tx.outputs[0].value = Amount::from_sat(1);
+    let unknown = OutPoint::new(Txid(Hash256::from_le_bytes(&[7; 32])), 0);
+    tx.inputs.push(TxIn {
+        previous_output: unknown,
+        ..tx.inputs[0].clone()
+    });
+    assert_eq!(
+        gateway.submit_transaction(
+            Arc::new(tx),
+            AdmissionOrigin::Peer(source()),
+            None,
+            1,
+            &Coins(vec![])
+        ),
+        Ok(SubmitOutcome::Held {
+            missing_parents: vec![unknown.txid]
+        }),
+        "Core PreChecks answers bad-txns-inputs-missingorspent before PreCheckEphemeralTx"
+    );
+    assert_eq!(gateway.orphan_count(), 1);
 }
 
 struct ReplaceOrphanDuringSnapshot {
@@ -1382,6 +1427,7 @@ fn witness_parent_and_child() -> (Tx, Arc<Tx>) {
     let (mut parent, child) = parent_and_child();
     let mut tx = (*child).clone();
     tx.inputs[0].witness = Witness::from_stack(vec![vec![0x51]]);
+    tx.inputs[0].script_sig = Script::new();
     let mut script = vec![0x00, 0x20];
     script.extend_from_slice(&Sha256::digest([0x51]));
     parent.outputs[0].script_pubkey = Script::from_bytes(script);
@@ -1400,7 +1446,7 @@ fn witness_spend() -> (Arc<Tx>, Coins) {
 
 #[test]
 fn package_prevouts_preserve_sigops_without_mutating_the_pool()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     use bitcoin_rs_primitives::consensus_bytes;
     let gateway = gateway();
     let sequence = gateway.read().sequence_number();
@@ -1481,7 +1527,10 @@ fn package_prevouts_preserve_sigops_without_mutating_the_pool()
         let facts = gateway.preview_transactions(&txs, None, &Coins(vec![]))?;
         assert_eq!(
             facts.results[0].reject_reason,
-            Some(AcceptanceRejectReason::MissingInputs)
+            Some(AcceptanceRejectReason::NonStandard(
+                crate::standardness::StandardnessError::NonStandardOutput
+            )),
+            "Core IsStandardTx answers before the missing-inputs scan"
         );
         assert_eq!(
             facts.results[1].allowed, None,
@@ -1505,8 +1554,10 @@ fn package_prevouts_preserve_sigops_without_mutating_the_pool()
     Ok(())
 }
 
+// POL-06
 #[test]
-fn preview_matches_submission_and_has_no_side_effects() -> Result<(), Box<dyn std::error::Error>> {
+fn preview_matches_submission_and_has_no_side_effects() -> Result<(), crate::test_error::TestError>
+{
     struct Observer(AtomicUsize);
     impl crate::MempoolObserver for Observer {
         fn on_mutation(&self, _: &crate::MutationEnvelope) {
@@ -1590,9 +1641,10 @@ fn preview_matches_submission_and_has_no_side_effects() -> Result<(), Box<dyn st
     Ok(())
 }
 
+// POL-03
 #[test]
-fn preview_and_submission_check_scripts_before_maxfeerate() -> Result<(), Box<dyn std::error::Error>>
-{
+fn preview_and_submission_check_scripts_before_maxfeerate()
+-> Result<(), crate::test_error::TestError> {
     let gateway = gateway();
     let (valid, chain) = witness_spend();
     let mut invalid = (*valid).clone();
@@ -1619,8 +1671,9 @@ fn preview_and_submission_check_scripts_before_maxfeerate() -> Result<(), Box<dy
     Ok(())
 }
 
+// POL-03
 #[test]
-fn preview_retries_chain_pool_and_policy_changes() -> Result<(), Box<dyn std::error::Error>> {
+fn preview_retries_chain_pool_and_policy_changes() -> Result<(), crate::test_error::TestError> {
     struct ChangingRead {
         gateway: Arc<MempoolGateway>,
         coins: Coins,
@@ -1797,6 +1850,7 @@ fn p2wsh_parent_and_variants() -> (Tx, Arc<Tx>, Arc<Tx>) {
     };
     let outpoint = OutPoint::new(parent.txid(), 0);
     let mut first = standard_spend(outpoint, 2);
+    first.inputs[0].script_sig = Script::new();
     first.inputs[0].witness = Witness::from_stack(vec![vec![0x11], witness_script.clone()]);
     let first = Arc::new(first);
     let mut second = (*first).clone();
@@ -1901,7 +1955,7 @@ fn zero_hash_output_zero_is_requested_and_retried_as_an_ordinary_outpoint() {
         outpoint,
         TxOut {
             value: Amount::from_sat(10_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     let retried = gateway.retry_orphans(&coins, unix_time_secs());
@@ -2011,7 +2065,7 @@ fn input_structure_duplicate_rejection_is_shared_across_witnesses() {
                 outpoint,
                 TxOut {
                     value: Amount::from_sat(10_000),
-                    script_pubkey: Script::from_bytes(vec![0x51]),
+                    script_pubkey: Script::from_bytes(p2sh_true_script()),
                 },
             )]
         } else {
@@ -2094,9 +2148,17 @@ fn funded_chain(outpoint: OutPoint, value: u64) -> Coins {
         outpoint,
         TxOut {
             value: Amount::from_sat(value),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )])
+}
+
+fn one_entry_ceiling() -> u64 {
+    let unit = crate::pool::entry_memory_usage(&standard_spend(
+        OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), 0),
+        1,
+    ));
+    unit + unit / 2
 }
 
 fn seed_rolling_floor_via_capacity_eviction(gateway: &Arc<MempoolGateway>, now: u64) {
@@ -2109,7 +2171,7 @@ fn seed_rolling_floor_via_capacity_eviction(gateway: &Arc<MempoolGateway>, now: 
                     OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
                     TxOut {
                         value: Amount::from_sat(50_000),
-                        script_pubkey: Script::from_bytes(vec![0x51]),
+                        script_pubkey: Script::from_bytes(p2sh_true_script()),
                     },
                 )
             })
@@ -2269,9 +2331,9 @@ fn reconsider_disconnected_does_not_register_with_the_estimator() {
 #[test]
 #[expect(clippy::expect_used)]
 fn reconsider_disconnected_admits_below_floor_then_trims_once() {
-    const CEILING: u64 = 150;
+    let ceiling = one_entry_ceiling();
     let limits = crate::MempoolLimits {
-        max_total_bytes: CEILING,
+        max_total_bytes: ceiling,
         ..crate::MempoolLimits::default()
     };
     let log = Arc::new(ReorgBatchLog::default());
@@ -2328,7 +2390,7 @@ fn reconsider_disconnected_admits_below_floor_then_trims_once() {
         "a below-floor re-admission must not be refused"
     );
     assert!(
-        gateway.read().total_vsize() > CEILING,
+        gateway.read().dynamic_memory_usage() > ceiling,
         "no size trim may run during the walk"
     );
 
@@ -2336,13 +2398,13 @@ fn reconsider_disconnected_admits_below_floor_then_trims_once() {
     assert!(swept.is_empty(), "the funded family stays supported");
 
     let trimmed = gateway
-        .enforce_size_limit(AdmissionOrigin::Reorg, CEILING)
+        .enforce_size_limit(AdmissionOrigin::Reorg, ceiling)
         .expect("settlement trim");
     change.finish().expect("finish");
 
     assert!(!trimmed.changes.is_empty(), "the trim must act");
     assert!(
-        gateway.read().total_vsize() <= CEILING,
+        gateway.read().dynamic_memory_usage() <= ceiling,
         "one trim over the settled pool must reach the ceiling"
     );
 
@@ -2408,9 +2470,9 @@ fn assert_reorg_publication_order(batches: &[ReorgBatch], admissions: &[Txid], t
 #[test]
 #[expect(clippy::expect_used)]
 fn reconsider_control_refuses_fresh_relay_below_floor() {
-    const CEILING: u64 = 150;
+    let ceiling = one_entry_ceiling();
     let limits = crate::MempoolLimits {
-        max_total_bytes: CEILING,
+        max_total_bytes: ceiling,
         ..crate::MempoolLimits::default()
     };
     let control = Arc::new(MempoolGateway::new(
@@ -2486,14 +2548,14 @@ fn remove_for_reorg_sweeps_only_unsupported_residents() {
             valid_out,
             TxOut {
                 value: Amount::from_sat(20_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         ),
         (
             locktime_out,
             TxOut {
                 value: Amount::from_sat(20_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         ),
     ]);
@@ -2542,6 +2604,7 @@ fn remove_for_reorg_refuses_a_moved_generation() {
     assert!(gateway.read().contains_txid(&parent_txid));
 }
 
+// MPL-04
 #[test]
 #[expect(clippy::expect_used)]
 fn admission_state_accepts_only_the_current_generation() {
@@ -2661,7 +2724,7 @@ fn expiry_capacity_ordering_under_pressure() {
                 let observer: Arc<dyn crate::MempoolObserver> = log.clone();
                 let gateway = MempoolGateway::new(
                     Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits {
-                        max_total_bytes: 100,
+                        max_total_bytes: one_entry_ceiling(),
                         ..crate::MempoolLimits::default()
                     }))),
                     Some((observer, crate::BodyInterest::Metadata)),
@@ -2673,6 +2736,7 @@ fn expiry_capacity_ordering_under_pressure() {
                 insert_stale(&gateway, stale);
                 let (fresh, _) = independent_spend(71);
                 let chain = funded_chain(fresh.inputs[0].previous_output, 9_000 + fee);
+                let fresh_vsize = u32::try_from(fresh.vsize()).unwrap_or(u32::MAX);
                 let fresh_id = fresh.txid();
                 let now = unix_time_secs();
                 if expire_first {
@@ -2714,7 +2778,7 @@ fn expiry_capacity_ordering_under_pressure() {
                     pool.min_fee_sat_per_kvb(now)
                 );
                 assert!(result.is_ok());
-                assert_eq!(pool.total_vsize(), 85);
+                assert_eq!(pool.total_vsize(), u64::from(fresh_vsize));
                 assert_eq!(pool.min_fee_sat_per_kvb(now), 1_000);
             }
         }
@@ -2779,7 +2843,7 @@ fn child_of_a_stale_parent_expires_with_it_and_is_refused_as_full() {
         let observer: Arc<dyn crate::MempoolObserver> = log.clone();
         let gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits {
-                max_total_bytes: 100,
+                max_total_bytes: one_entry_ceiling(),
                 ..crate::MempoolLimits::default()
             }))),
             Some((observer, crate::BodyInterest::Metadata)),

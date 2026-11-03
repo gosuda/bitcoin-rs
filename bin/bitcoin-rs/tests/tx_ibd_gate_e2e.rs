@@ -11,7 +11,7 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::{
     Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
-use bitcoin_rs_e2e::helpers::coinbase_script_sig;
+use bitcoin_rs_e2e::helpers::bip34_coinbase_script_sig;
 use bitcoin_rs_e2e::process_peer::is_soft_recv_error;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
 use wire_peer::Peer;
@@ -162,19 +162,27 @@ fn now_unix() -> u32 {
     .unwrap_or(u32::MAX)
 }
 
-fn op_true_coinbase(height: u32, value: u64) -> Transaction {
+fn p2sh_true_script() -> ScriptBuf {
+    ScriptBuf::from_bytes(vec![0x51]).to_p2sh()
+}
+
+fn p2sh_true_spend_script_sig() -> ScriptBuf {
+    ScriptBuf::from_bytes(vec![0x01, 0x51])
+}
+
+fn p2sh_true_coinbase(height: u32, value: u64) -> Transaction {
     Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
             previous_output: OutPoint::null(),
-            script_sig: coinbase_script_sig(height),
+            script_sig: bip34_coinbase_script_sig(height),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         output: vec![TxOut {
             value: Amount::from_sat(value),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_script(),
         }],
     }
 }
@@ -185,13 +193,13 @@ fn funding_tx(previous_output: OutPoint, value: u64) -> Transaction {
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
             previous_output,
-            script_sig: ScriptBuf::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         output: vec![TxOut {
             value: Amount::from_sat(value),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_script(),
         }],
     }
 }
@@ -202,7 +210,7 @@ fn relayed_tx(funding: &Transaction, value: u64) -> Transaction {
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
             previous_output: OutPoint::new(funding.compute_txid(), 0),
-            script_sig: ScriptBuf::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
@@ -253,9 +261,9 @@ fn build_funding_chain(base_time: u32) -> (Vec<Block>, Transaction) {
                 .expect("coinbase exists")
                 .compute_txid();
             let funding = funding_tx(OutPoint::new(height_one_coinbase, 0), 40_000);
-            vec![op_true_coinbase(height, 5_000), funding]
+            vec![p2sh_true_coinbase(height, 5_000), funding]
         } else {
-            vec![op_true_coinbase(height, 50_000)]
+            vec![p2sh_true_coinbase(height, 50_000)]
         };
         let block = build_block(&parent, time, txs);
         parent = block.clone();

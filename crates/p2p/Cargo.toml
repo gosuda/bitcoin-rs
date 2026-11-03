@@ -17,6 +17,11 @@ workspace = true
 # builds.
 test-seam = []
 
+# Internal seam surface for the fuzz harnesses: lifts addrman, bip324, sam,
+# socks modules to pub so the out-of-tree targets can reach them. Never
+# enabled in release builds.
+fuzzing = []
+
 # Optional overlay transports (I2P SAM bridge, Tor control port). Declared
 # so baseline P2P (direct TCP) builds without the overlay surface; the
 # `mod` gates land as a verified follow-up once endpoint/service lanes add
@@ -60,6 +65,7 @@ bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 criterion.workspace = true
 proptest.workspace = true
+proptest-state-machine.workspace = true
 tempfile.workspace = true
 
 [[bench]]
@@ -73,3 +79,7 @@ harness = false
 [[test]]
 name = "suite"
 path = "tests/suite.rs"
+
+[[test]]
+name = "decode_heap_amplification"
+path = "tests/decode_heap_amplification.rs"

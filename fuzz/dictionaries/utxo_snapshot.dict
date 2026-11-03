@@ -1,0 +1,38 @@
+# UTXO snapshot dictionary for libFuzzer
+# Native v4 snapshot magic (0x5554584f, "UTXO" in LE: 'O','X','T','U')
+magic_native_v4="\x4f\x58\x54\x55"
+ver_native_v4="\x04\x00\x00\x00"
+
+# Bitcoin Core v2 snapshot magic ("utxo\xff") and version (2)
+magic_core_v2="utxo\xff"
+ver_core_v2="\x02\x00"
+
+# Network magic bytes
+magic_mainnet="\xf9\xbe\xb4\xd9"
+magic_testnet3="\x0b\x11\x09\x07"
+magic_testnet4="\x1c\x16\x3f\x28"
+magic_regtest="\xfa\xbf\xb5\xda"
+magic_signet="\x0a\x03\xcf\x40"
+
+# Heights (u32 little-endian)
+height_0="\x00\x00\x00\x00"
+height_200="\xc8\x00\x00\x00"
+height_840k="\x80\xd1\x0c\x00"
+
+# Script compression types
+comp_p2pkh="\x00"
+comp_p2sh="\x01"
+comp_p2pk_comp="\x02"
+comp_p2pk_uncomp="\x03"
+
+# Amounts (satoshis, u64 little-endian)
+amt_0="\x00\x00\x00\x00\x00\x00\x00\x00"
+amt_50btc="\x00\xf2\x05\x2a\x01\x00\x00\x00"
+amt_21m="\x00\x40\x07\x5a\xf0\x75\x07\x00"
+
+# CompactSize boundaries
+varint_0="\x00"
+varint_fc="\xfc"
+varint_fd="\xfd\xfd\x00"
+varint_fe="\xfe\x00\x00\x01\x00"
+varint_ff="\xff\x00\x00\x00\x00\x01\x00\x00\x00"

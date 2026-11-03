@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -13,7 +12,7 @@ use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut, Txid};
 
 use super::super::record::{Coin, Mutation};
 
-type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+use crate::test_support::TestResult;
 
 struct CountingStore {
     flushes: AtomicU64,

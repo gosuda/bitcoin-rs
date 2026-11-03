@@ -7,6 +7,32 @@ use bitcoin_rs_primitives::{Block, CompactTarget, Tx};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Peer(#[from] crate::PeerError),
+    #[error(transparent)]
+    Chain(#[from] bitcoin_rs_chain::ChainError),
+    #[error(transparent)]
+    TryFromInt(#[from] std::num::TryFromIntError),
+    #[error(transparent)]
+    Consensus(#[from] bitcoin::consensus::encode::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    RegtestFixture(#[from] bitcoin_rs_chain::regtest_fixture::RegtestFixtureError),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+}
+
+impl From<&'static str> for TestError {
+    fn from(msg: &'static str) -> Self {
+        Self::Missing(msg)
+    }
+}
+
+type TestResult = Result<(), TestError>;
+
 struct SingleBlockSource {
     height: u32,
     hash: BlockHash,
@@ -146,8 +172,7 @@ fn assert_complete_filter_range(request: &Message, responses: &[Message]) {
 }
 
 #[test]
-fn invalid_compact_filter_requests_are_ignored_without_querying_the_index()
--> Result<(), Box<dyn std::error::Error>> {
+fn invalid_compact_filter_requests_are_ignored_without_querying_the_index() -> TestResult {
     use bitcoin::p2p::message_filter::{GetCFCheckpt, GetCFHeaders, GetCFilters};
     use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
 
@@ -213,8 +238,7 @@ fn invalid_compact_filter_requests_are_ignored_without_querying_the_index()
 }
 
 #[test]
-fn compact_filters_wait_for_publication_without_replaying_sent_payloads()
--> Result<(), Box<dyn std::error::Error>> {
+fn compact_filters_wait_for_publication_without_replaying_sent_payloads() -> TestResult {
     use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -298,7 +322,7 @@ fn compact_filters_wait_for_publication_without_replaying_sent_payloads()
 
 #[test]
 fn filter_backpressure_defers_unsent_responses_and_parks_the_remainder_of_a_partial_stream()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
     use std::cell::Cell;
 
@@ -381,8 +405,7 @@ fn filter_backpressure_defers_unsent_responses_and_parks_the_remainder_of_a_part
 }
 
 #[test]
-fn compact_filters_follow_applied_chain_when_competing_headers_lead()
--> Result<(), Box<dyn std::error::Error>> {
+fn compact_filters_follow_applied_chain_when_competing_headers_lead() -> TestResult {
     use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
 
     struct Filters(Hash256);
@@ -459,8 +482,7 @@ fn compact_filters_follow_applied_chain_when_competing_headers_lead()
 }
 
 #[test]
-fn compact_filter_interruptions_that_are_not_backpressure_stay_errors()
--> Result<(), Box<dyn std::error::Error>> {
+fn compact_filter_interruptions_that_are_not_backpressure_stay_errors() -> TestResult {
     use bitcoin::p2p::message_filter::GetCFilters;
     use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
 
@@ -544,8 +566,7 @@ fn compact_filter_interruptions_that_are_not_backpressure_stay_errors()
 }
 
 #[test]
-fn a_resumed_filter_range_that_stops_before_its_first_filter_is_interrupted()
--> Result<(), Box<dyn std::error::Error>> {
+fn a_resumed_filter_range_that_stops_before_its_first_filter_is_interrupted() -> TestResult {
     use bitcoin::p2p::message_filter::GetCFilters;
     use bitcoin_rs_index::{
         BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError, TxUnavailableCause,
@@ -634,7 +655,7 @@ fn a_resumed_filter_range_that_stops_before_its_first_filter_is_interrupted()
 }
 
 #[test]
-fn getheaders_empty_locator_returns_only_active_stop() -> Result<(), Box<dyn std::error::Error>> {
+fn getheaders_empty_locator_returns_only_active_stop() -> TestResult {
     let headers = seed_headers(3);
     let stop = headers[2].compute_hash();
     let query = query_with(headers)?;
@@ -646,8 +667,7 @@ fn getheaders_empty_locator_returns_only_active_stop() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn committed_tip_reads_applied_tip_when_headers_are_ahead() -> Result<(), Box<dyn std::error::Error>>
-{
+fn committed_tip_reads_applied_tip_when_headers_are_ahead() -> TestResult {
     let headers = seed_headers(3);
     let mut tree = BlockTree::new();
     let genesis = tree.insert_node(None, headers[0], NodeStatus::Active)?;
@@ -671,8 +691,7 @@ fn committed_tip_reads_applied_tip_when_headers_are_ahead() -> Result<(), Box<dy
 }
 
 #[test]
-fn committed_tip_rejects_an_applied_tip_off_the_active_header_chain()
--> Result<(), Box<dyn std::error::Error>> {
+fn committed_tip_rejects_an_applied_tip_off_the_active_header_chain() -> TestResult {
     let headers = seed_headers(2);
     let mut tree = BlockTree::new();
     let genesis = tree.insert_node(None, headers[0], NodeStatus::Active)?;
@@ -694,8 +713,7 @@ fn committed_tip_rejects_an_applied_tip_off_the_active_header_chain()
 }
 
 #[test]
-fn getheaders_empty_locator_unknown_or_zero_stop_returns_empty()
--> Result<(), Box<dyn std::error::Error>> {
+fn getheaders_empty_locator_unknown_or_zero_stop_returns_empty() -> TestResult {
     let headers = seed_headers(3);
     let query = query_with(headers)?;
 
@@ -708,7 +726,7 @@ fn getheaders_empty_locator_unknown_or_zero_stop_returns_empty()
 }
 
 #[test]
-fn getheaders_unknown_locator_starts_after_genesis() -> Result<(), Box<dyn std::error::Error>> {
+fn getheaders_unknown_locator_starts_after_genesis() -> TestResult {
     let headers = seed_headers(3);
     let expected = vec![headers[1].compute_hash(), headers[2].compute_hash()];
     let query = query_with(headers)?;
@@ -724,7 +742,7 @@ fn getheaders_unknown_locator_starts_after_genesis() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn getheaders_after_locator_stops_at_stop_hash() -> Result<(), Box<dyn std::error::Error>> {
+fn getheaders_after_locator_stops_at_stop_hash() -> TestResult {
     let headers = seed_headers(5);
     let locator = headers[1].compute_hash();
     let stop = headers[3].compute_hash();
@@ -738,7 +756,7 @@ fn getheaders_after_locator_stops_at_stop_hash() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn getheaders_ignores_stale_fork_locator_and_stop() -> Result<(), Box<dyn std::error::Error>> {
+fn getheaders_ignores_stale_fork_locator_and_stop() -> TestResult {
     let genesis = test_header(BlockHash::default(), 0);
     let active1 = test_header(genesis.compute_hash(), 1);
     let active2 = test_header(active1.compute_hash(), 2);
@@ -761,7 +779,7 @@ fn getheaders_ignores_stale_fork_locator_and_stop() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn applied_prefix_when_headers_lead() -> Result<(), Box<dyn std::error::Error>> {
+fn applied_prefix_when_headers_lead() -> TestResult {
     let headers = seed_headers(4);
     let mut tree = BlockTree::new();
     let genesis = tree.insert_node(None, headers[0], NodeStatus::Active)?;
@@ -788,7 +806,7 @@ fn applied_prefix_when_headers_lead() -> Result<(), Box<dyn std::error::Error>> 
 }
 
 #[test]
-fn applied_fork_off_best_serves_own_ancestry() -> Result<(), Box<dyn std::error::Error>> {
+fn applied_fork_off_best_serves_own_ancestry() -> TestResult {
     let genesis = test_header(BlockHash::default(), 0);
     let shared = test_header(genesis.compute_hash(), 1);
     let fork_tip = test_header(shared.compute_hash(), 42);
@@ -820,7 +838,7 @@ fn applied_fork_off_best_serves_own_ancestry() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn best_only_locator_does_not_skip_applied_fork() -> Result<(), Box<dyn std::error::Error>> {
+fn best_only_locator_does_not_skip_applied_fork() -> TestResult {
     let genesis = test_header(BlockHash::default(), 0);
     let shared = test_header(genesis.compute_hash(), 1);
     let fork_tip = test_header(shared.compute_hash(), 42);
@@ -860,7 +878,7 @@ fn best_only_locator_does_not_skip_applied_fork() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn stop_hash_bounds_applied_response() -> Result<(), Box<dyn std::error::Error>> {
+fn stop_hash_bounds_applied_response() -> TestResult {
     let genesis = test_header(BlockHash::default(), 0);
     let shared = test_header(genesis.compute_hash(), 1);
     let fork_tip = test_header(shared.compute_hash(), 42);
@@ -899,7 +917,7 @@ fn stop_hash_bounds_applied_response() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
-fn low_work_chain_serves_no_headers() -> Result<(), Box<dyn std::error::Error>> {
+fn low_work_chain_serves_no_headers() -> TestResult {
     let genesis = test_header(BlockHash::default(), 0);
     let first = test_header(genesis.compute_hash(), 1);
     let second = test_header(first.compute_hash(), 2);
@@ -934,8 +952,7 @@ fn low_work_chain_serves_no_headers() -> Result<(), Box<dyn std::error::Error>> 
 }
 
 #[test]
-fn getdata_decodes_active_body_from_source_and_reports_missing_inventory()
--> Result<(), Box<dyn std::error::Error>> {
+fn getdata_decodes_active_body_from_source_and_reports_missing_inventory() -> TestResult {
     let headers = seed_headers(2);
     let block = Block {
         header: headers[1],
@@ -970,8 +987,7 @@ fn getdata_decodes_active_body_from_source_and_reports_missing_inventory()
 }
 
 #[test]
-fn getdata_block_encoding_matches_requested_inventory_on_wire()
--> Result<(), Box<dyn std::error::Error>> {
+fn getdata_block_encoding_matches_requested_inventory_on_wire() -> TestResult {
     use bitcoin::p2p::Magic;
     use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
 
@@ -1045,8 +1061,7 @@ fn getdata_block_encoding_matches_requested_inventory_on_wire()
 }
 
 #[test]
-fn getdata_block_encodings_keep_headroom_and_body_failure_rules()
--> Result<(), Box<dyn std::error::Error>> {
+fn getdata_block_encodings_keep_headroom_and_body_failure_rules() -> TestResult {
     let headers = seed_headers(2);
     let block = Block {
         header: headers[1],
@@ -1112,8 +1127,7 @@ fn getdata_block_encodings_keep_headroom_and_body_failure_rules()
 }
 
 #[test]
-fn getdata_block_encodings_recheck_active_chain_after_body_load()
--> Result<(), Box<dyn std::error::Error>> {
+fn getdata_block_encodings_recheck_active_chain_after_body_load() -> TestResult {
     struct SwitchingSource {
         tree: Arc<RwLock<BlockTree>>,
         body: Vec<u8>,
@@ -1162,7 +1176,7 @@ fn getdata_block_encodings_recheck_active_chain_after_body_load()
 }
 
 #[test]
-fn getdata_rejects_pruned_or_missing_body() -> Result<(), Box<dyn std::error::Error>> {
+fn getdata_rejects_pruned_or_missing_body() -> TestResult {
     let headers = seed_headers(2);
     let hash = headers[1].compute_hash();
     let query = query_with(headers)?;
@@ -1178,7 +1192,7 @@ fn getdata_rejects_pruned_or_missing_body() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
-fn getdata_reads_metadata_only_body_from_source() -> Result<(), Box<dyn std::error::Error>> {
+fn getdata_reads_metadata_only_body_from_source() -> TestResult {
     let headers = seed_headers(2);
     let block = Block {
         header: headers[1],
@@ -1203,7 +1217,7 @@ fn getdata_reads_metadata_only_body_from_source() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn p2p_chain_streams_each_body_once_in_order() -> Result<(), Box<dyn std::error::Error>> {
+fn p2p_chain_streams_each_body_once_in_order() -> TestResult {
     let headers = seed_headers(4);
     let blocks: Vec<Block> = headers[1..]
         .iter()
@@ -1251,7 +1265,7 @@ fn p2p_chain_streams_each_body_once_in_order() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn p2p_chain_does_not_gate_unknown_blocks() -> Result<(), Box<dyn std::error::Error>> {
+fn p2p_chain_does_not_gate_unknown_blocks() -> TestResult {
     let headers = seed_headers(2);
     let body_source = Arc::new(CountingBodySource {
         bodies: Vec::new(),
@@ -1285,7 +1299,7 @@ fn p2p_chain_does_not_gate_unknown_blocks() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
-fn p2p_chain_halts_at_gate_without_loading() -> Result<(), Box<dyn std::error::Error>> {
+fn p2p_chain_halts_at_gate_without_loading() -> TestResult {
     let headers = seed_headers(4);
     let blocks: Vec<Block> = headers[1..]
         .iter()
@@ -1332,7 +1346,7 @@ fn p2p_chain_halts_at_gate_without_loading() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn getblocktxn_halts_at_gate_without_loading() -> Result<(), Box<dyn std::error::Error>> {
+fn getblocktxn_halts_at_gate_without_loading() -> TestResult {
     let headers = seed_headers(12);
     let deep_block = block_at(&headers, 0)?;
     let body_source = Arc::new(CountingBodySource {
@@ -1366,8 +1380,7 @@ fn getblocktxn_halts_at_gate_without_loading() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn getdata_msg_cmpct_block_serves_negotiated_profile_and_notfound_without()
--> Result<(), Box<dyn std::error::Error>> {
+fn getdata_msg_cmpct_block_serves_negotiated_profile_and_notfound_without() -> TestResult {
     let headers = seed_headers(2);
     let block = Block {
         header: headers[1],
@@ -1420,7 +1433,7 @@ fn chain_at(
     Ok(query_with(headers.to_vec())?.with_block_body_source(Arc::new(source)))
 }
 
-fn block_at(headers: &[Header], height: u32) -> Result<Block, Box<dyn std::error::Error>> {
+fn block_at(headers: &[Header], height: u32) -> Result<Block, TestError> {
     let index = usize::try_from(height)?;
     Ok(Block {
         header: headers[index],
@@ -1428,7 +1441,7 @@ fn block_at(headers: &[Header], height: u32) -> Result<Block, Box<dyn std::error
     })
 }
 
-fn blocktxn_reply(headers: &[Header], height: u32) -> Result<Message, Box<dyn std::error::Error>> {
+fn blocktxn_reply(headers: &[Header], height: u32) -> Result<Message, TestError> {
     let block = block_at(headers, height)?;
     let query = chain_at(headers, height, &block)?;
     let request = bitcoin::bip152::BlockTransactionsRequest {
@@ -1440,7 +1453,7 @@ fn blocktxn_reply(headers: &[Header], height: u32) -> Result<Message, Box<dyn st
         .ok_or("an active body is always answered")?)
 }
 
-fn compact_reply(headers: &[Header], height: u32) -> Result<Message, Box<dyn std::error::Error>> {
+fn compact_reply(headers: &[Header], height: u32) -> Result<Message, TestError> {
     let block = block_at(headers, height)?;
     let query = chain_at(headers, height, &block)?;
     let item = Inventory::CompactBlock(wire_block_hash(block.block_hash()));
@@ -1452,15 +1465,14 @@ fn compact_reply(headers: &[Header], height: u32) -> Result<Message, Box<dyn std
     Ok(served.pop().ok_or("exactly one reply")?)
 }
 
-fn payload_body(payload: &bytes::Bytes) -> Result<RegistryBlock, Box<dyn std::error::Error>> {
+fn payload_body(payload: &bytes::Bytes) -> Result<RegistryBlock, TestError> {
     Ok(bitcoin::consensus::encode::deserialize::<RegistryBlock>(
         payload.as_ref(),
     )?)
 }
 
 #[test]
-fn getblocktxn_answers_active_body_and_disconnects_on_out_of_range_index()
--> Result<(), Box<dyn std::error::Error>> {
+fn getblocktxn_answers_active_body_and_disconnects_on_out_of_range_index() -> TestResult {
     let headers = seed_headers(2);
     let block = block_at(&headers, 1)?;
     let query = chain_at(&headers, 1, &block)?;
@@ -1506,8 +1518,7 @@ fn getblocktxn_answers_active_body_and_disconnects_on_out_of_range_index()
 }
 
 #[test]
-fn getblocktxn_depth_boundary_uses_full_block_beyond_ten() -> Result<(), Box<dyn std::error::Error>>
-{
+fn getblocktxn_depth_boundary_uses_full_block_beyond_ten() -> TestResult {
     let headers = seed_headers(12);
 
     let at_the_bound = blocktxn_reply(&headers, 1)?;
@@ -1525,7 +1536,7 @@ fn getblocktxn_depth_boundary_uses_full_block_beyond_ten() -> Result<(), Box<dyn
 }
 
 #[test]
-fn compact_depth_boundary_uses_full_block_beyond_five() -> Result<(), Box<dyn std::error::Error>> {
+fn compact_depth_boundary_uses_full_block_beyond_five() -> TestResult {
     let headers = seed_headers(12);
 
     let at_the_bound = compact_reply(&headers, 6)?;
@@ -1543,7 +1554,7 @@ fn compact_depth_boundary_uses_full_block_beyond_five() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn compact_prefills_coinbase_under_both_v1_v2() -> Result<(), Box<dyn std::error::Error>> {
+fn compact_prefills_coinbase_under_both_v1_v2() -> TestResult {
     let headers = seed_headers(3);
     let block = block_at(&headers, 2)?;
     let expected = consensus_bytes(&block.txs[0]);
@@ -1573,8 +1584,7 @@ fn compact_prefills_coinbase_under_both_v1_v2() -> Result<(), Box<dyn std::error
 }
 
 #[test]
-fn compact_exchange_keeps_the_mutually_supported_version() -> Result<(), Box<dyn std::error::Error>>
-{
+fn compact_exchange_keeps_the_mutually_supported_version() -> TestResult {
     use crate::dispatch::dispatch_inbound_full;
     use crate::peer::{Peer, PeerState};
     use bitcoin::p2p::Magic;
@@ -1669,8 +1679,7 @@ fn compact_exchange_keeps_the_mutually_supported_version() -> Result<(), Box<dyn
 }
 
 #[test]
-fn getblocktxn_versions_preserve_missing_body_and_invalid_index_outcomes()
--> Result<(), Box<dyn std::error::Error>> {
+fn getblocktxn_versions_preserve_missing_body_and_invalid_index_outcomes() -> TestResult {
     use crate::dispatch::dispatch_inbound_full;
     use crate::peer::{Peer, PeerState};
     use bitcoin::p2p::Magic;
@@ -1754,7 +1763,7 @@ fn assert_blocktxn_profile(
     original: &RegistryBlock,
     indexes: &[u64],
     strip_witness: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> TestResult {
     let mut expected = Vec::new();
     for index in indexes {
         let mut tx = original.txdata[usize::try_from(*index)?].clone();
@@ -1780,7 +1789,7 @@ fn dispatched_wire_response(
     peer: &mut crate::peer::Peer<std::io::Cursor<Vec<u8>>>,
     query: &ActiveChainQuery,
     request: &Message,
-) -> Result<bitcoin::p2p::message::RawNetworkMessage, Box<dyn std::error::Error>> {
+) -> Result<bitcoin::p2p::message::RawNetworkMessage, TestError> {
     let mut wire = Vec::new();
     crate::dispatch::dispatch_inbound_full(
         peer,
@@ -1836,7 +1845,7 @@ struct StaleFixture {
     source: Arc<CountingBodySource>,
 }
 
-fn stale_query(depth: u32) -> Result<StaleFixture, Box<dyn std::error::Error>> {
+fn stale_query(depth: u32) -> Result<StaleFixture, TestError> {
     let headers = seed_headers(2);
     let stale = block_at(&headers, 1)?;
     let query = query_with(headers)?;
@@ -1879,8 +1888,7 @@ fn stale_query(depth: u32) -> Result<StaleFixture, Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn stored_stale_blocks_are_hash_addressed_without_becoming_announcements()
--> Result<(), Box<dyn std::error::Error>> {
+fn stored_stale_blocks_are_hash_addressed_without_becoming_announcements() -> TestResult {
     let StaleFixture {
         query,
         stale,
@@ -1937,8 +1945,7 @@ fn stored_stale_blocks_are_hash_addressed_without_becoming_announcements()
 }
 
 #[test]
-fn stale_serving_keeps_depth_headroom_and_unknown_rules() -> Result<(), Box<dyn std::error::Error>>
-{
+fn stale_serving_keeps_depth_headroom_and_unknown_rules() -> TestResult {
     for (depth, blocktxn) in [(10, true), (11, false)] {
         let StaleFixture {
             query,
@@ -1986,8 +1993,7 @@ fn stale_serving_keeps_depth_headroom_and_unknown_rules() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn stale_inventory_requires_validation_and_core_age_bounds()
--> Result<(), Box<dyn std::error::Error>> {
+fn stale_inventory_requires_validation_and_core_age_bounds() -> TestResult {
     for (time_age, work_blocks, validated, allowed) in [
         (2_591_999, 4_319, true, true),
         (2_592_000, 4_319, true, false),
@@ -2062,7 +2068,7 @@ fn stale_inventory_requires_validation_and_core_age_bounds()
 }
 
 #[test]
-fn stale_invalid_or_missing_bodies_are_not_served() -> Result<(), Box<dyn std::error::Error>> {
+fn stale_invalid_or_missing_bodies_are_not_served() -> TestResult {
     let StaleFixture {
         mut query, stale, ..
     } = stale_query(1)?;
@@ -2104,8 +2110,7 @@ fn stale_invalid_or_missing_bodies_are_not_served() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn serving_depth_uses_applied_tip_when_headers_are_ahead() -> Result<(), Box<dyn std::error::Error>>
-{
+fn serving_depth_uses_applied_tip_when_headers_are_ahead() -> TestResult {
     let headers = seed_headers(15);
     let block = block_at(&headers, 1)?;
     let query = chain_at(&headers[..2], 1, &block)?;
@@ -2138,8 +2143,7 @@ fn serving_depth_uses_applied_tip_when_headers_are_ahead() -> Result<(), Box<dyn
 }
 
 #[test]
-fn serving_rechecks_reorg_invalidation_and_age_after_io() -> Result<(), Box<dyn std::error::Error>>
-{
+fn serving_rechecks_reorg_invalidation_and_age_after_io() -> TestResult {
     struct RacingSource {
         source: Arc<CountingBodySource>,
         tree: BlockTreeReader,
@@ -2238,8 +2242,7 @@ fn serving_rechecks_reorg_invalidation_and_age_after_io() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn getblocktxn_rechecks_inventory_policy_when_io_crosses_depth_ten()
--> Result<(), Box<dyn std::error::Error>> {
+fn getblocktxn_rechecks_inventory_policy_when_io_crosses_depth_ten() -> TestResult {
     struct AdvancingSource {
         source: Arc<CountingBodySource>,
         tree: BlockTreeReader,
@@ -2352,7 +2355,7 @@ fn header_hashes(headers: &[Header]) -> Vec<BlockHash> {
 }
 
 #[test]
-fn held_early_body_answers_before_the_store() -> Result<(), Box<dyn std::error::Error>> {
+fn held_early_body_answers_before_the_store() -> TestResult {
     let headers = seed_headers(2);
     let block = block_at(&headers, 1)?;
     let slot = RecentBlockSlot::default();
@@ -2410,8 +2413,7 @@ fn held_early_body_answers_before_the_store() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn held_body_without_serving_position_answers_compact_getdata()
--> Result<(), Box<dyn std::error::Error>> {
+fn held_body_without_serving_position_answers_compact_getdata() -> TestResult {
     let headers = seed_headers(2);
     let mut block = block_at(&headers, 1)?;
     block.header.nonce = 0x7a7a_7a7a;
@@ -2459,7 +2461,7 @@ fn held_body_without_serving_position_answers_compact_getdata()
 }
 
 #[test]
-fn held_invalid_body_is_not_served_from_inventory() -> Result<(), Box<dyn std::error::Error>> {
+fn held_invalid_body_is_not_served_from_inventory() -> TestResult {
     let headers = seed_headers(2);
     let block = block_at(&headers, 1)?;
     let slot = RecentBlockSlot::default();
@@ -2485,8 +2487,7 @@ fn held_invalid_body_is_not_served_from_inventory() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn held_stale_body_past_policy_is_not_served_from_inventory()
--> Result<(), Box<dyn std::error::Error>> {
+fn held_stale_body_past_policy_is_not_served_from_inventory() -> TestResult {
     let StaleFixture {
         mut query, stale, ..
     } = stale_query(1)?;
@@ -2513,7 +2514,7 @@ fn held_stale_body_past_policy_is_not_served_from_inventory()
 }
 
 #[test]
-fn held_tip_child_body_is_served_from_inventory() -> Result<(), Box<dyn std::error::Error>> {
+fn held_tip_child_body_is_served_from_inventory() -> TestResult {
     let headers = seed_headers(3);
     let block = block_at(&headers, 2)?;
     let slot = RecentBlockSlot::default();
@@ -2541,7 +2542,7 @@ fn held_tip_child_body_is_served_from_inventory() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn held_stale_tip_child_is_not_served_from_inventory() -> Result<(), Box<dyn std::error::Error>> {
+fn held_stale_tip_child_is_not_served_from_inventory() -> TestResult {
     let headers = seed_headers(2);
     let mut child = test_header(headers[1].compute_hash(), 3);
     child.time = 0;
@@ -2576,7 +2577,7 @@ fn held_stale_tip_child_is_not_served_from_inventory() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn held_deep_body_uses_full_block_inventory_policy() -> Result<(), Box<dyn std::error::Error>> {
+fn held_deep_body_uses_full_block_inventory_policy() -> TestResult {
     let headers = seed_headers(8);
     let block = block_at(&headers, 1)?;
     let slot = RecentBlockSlot::default();
@@ -2597,7 +2598,7 @@ fn held_deep_body_uses_full_block_inventory_policy() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn stale_tip_announcement_reconstructs_demoted_fork() -> Result<(), Box<dyn std::error::Error>> {
+fn stale_tip_announcement_reconstructs_demoted_fork() -> TestResult {
     use bitcoin_rs_chain::regtest_fixture::mined_regtest_header;
     let mut tree = BlockTree::new();
     let genesis = Network::Regtest.genesis_block().header;
@@ -2654,8 +2655,7 @@ fn stale_tip_announcement_reconstructs_demoted_fork() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn stale_tip_announcement_reports_too_many_above_twenty_headers()
--> Result<(), Box<dyn std::error::Error>> {
+fn stale_tip_announcement_reports_too_many_above_twenty_headers() -> TestResult {
     use bitcoin_rs_chain::regtest_fixture::mined_regtest_header;
     let mut tree = BlockTree::new();
     let genesis = Network::Regtest.genesis_block().header;

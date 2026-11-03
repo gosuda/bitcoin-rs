@@ -1,5 +1,3 @@
-//! Recovery-contract tests for the txindex worker (`docs/contracts/recovery.md`).
-
 use crate::reconcile::{ReconcileLeg, ReconcilePhase};
 use arc_swap::ArcSwapOption;
 
@@ -234,12 +232,20 @@ impl ForkFixture {
         self.bodies.bodies.lock().extend(lost);
     }
 
-    fn persist_undo(&self) {
+    fn branch_key(&self, branch: &[(NodeId, Hash256)], height: u32) -> (u32, [u8; 32]) {
+        if height == 0 {
+            return (0, self.genesis.to_le_bytes());
+        }
+        let index = usize::try_from(height - 1).expect("height index");
+        (height, branch[index].1.to_le_bytes())
+    }
+
+    fn persist_branch_undo(&self, branch: &[(NodeId, Hash256)]) {
         let store = InMemoryUndoStore::default();
         let mut coins = BranchCoins::default();
-        let tip_height = u32::try_from(self.a.len()).expect("branch length");
+        let tip_height = u32::try_from(branch.len()).expect("branch length");
         for height in 0..=tip_height {
-            let key = self.a_key(height);
+            let key = self.branch_key(branch, height);
             let block = {
                 let bodies = self.bodies.bodies.lock();
                 bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Block>(&bodies[&key])
@@ -248,15 +254,17 @@ impl ForkFixture {
             let txids = block.txids();
             if height > 0 {
                 let (_, undo, _) = bitcoin_rs_utxo::contract::build_block_changes(
-                    &block,
-                    height,
-                    &txids,
-                    None,
-                    0,
-                    0,
+                    &bitcoin_rs_utxo::contract::BlockChangeInputs {
+                        block: &block,
+                        height,
+                        txids: &txids,
+                        same_block_spent: None,
+                        add_capacity: 0,
+                        remove_capacity: 0,
+                        overwritten: None,
+                        max_script_size: crate::MAX_LIVE_SCRIPT_SIZE,
+                    },
                     &coins,
-                    None,
-                    crate::MAX_LIVE_SCRIPT_SIZE,
                 )
                 .expect("undo batch");
                 let record = bitcoin_rs_utxo::contract::persist_block_undo(
@@ -273,6 +281,10 @@ impl ForkFixture {
             }
             coins.connect(height, &block, &txids);
         }
+    }
+    fn persist_undo(&self) {
+        self.persist_branch_undo(&self.a.clone());
+        self.persist_branch_undo(&self.b.clone());
     }
 
     fn tip(&self, (node_id, _): (NodeId, Hash256)) -> Arc<TipSnapshot> {
@@ -298,6 +310,7 @@ struct Harness {
     worker: Worker,
 }
 
+// EVT-04, IDX-07
 #[test]
 fn unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark() {
     let fixture = ForkFixture::new(2);
@@ -361,6 +374,7 @@ impl Harness {
             enabled,
             chain_events: Arc::new(TestChainCursor),
             reporter,
+            shutdown: bitcoin_rs_chain::LatchReader::fixture_never(),
             wake_rx,
             quiet_period: Duration::ZERO,
             batch_delay: Duration::ZERO,
@@ -405,10 +419,14 @@ impl Harness {
         });
         let watermarks = self.watermarks();
         assert_eq!(watermarks.tx_lookup, expected, "tx_lookup watermark");
-        assert_eq!(
-            watermarks.script_history, expected,
-            "script_history watermark"
-        );
+        if self.worker.enabled.contains(IndexCapability::ScriptHistory)
+            && self.runtime.script_history_failure.read().is_none()
+        {
+            assert_eq!(
+                watermarks.script_history, expected,
+                "script_history watermark"
+            );
+        }
         assert_eq!(self.runtime.phase(), ReconcilePhase::FORWARD);
     }
 
@@ -471,9 +489,42 @@ fn missing_undo_during_filter_rollback_does_not_reset_filters_or_stop_siblings()
     assert!(!h.runtime.should_stop());
 }
 
+// IDX-06, IDX-07
+#[test]
+fn rollback_without_undo_preserves_script_history_and_rewinds_siblings() {
+    let f = ForkFixture::new(3);
+    f.persist_undo();
+    let h = Harness::with_enabled(&f, u32::MAX, IndexCapabilities::HISTORICAL);
+    let a3 = f.tip(f.a[2]);
+    h.set_tip(&a3);
+    h.settle(&mut None);
+    h.assert_at(&a3);
+
+    for height in 1..=3 {
+        f.bodies.undo.lock().remove(&f.a_key(height));
+    }
+    let a1 = f.tip(f.a[0]);
+    h.set_tip(&a1);
+    h.settle(&mut None);
+
+    assert_eq!(
+        h.watermarks().tx_lookup,
+        Some(at(&a1)),
+        "TxLookup rolls back without the undo anchor"
+    );
+    assert_eq!(
+        h.watermarks().script_history,
+        Some(at(&a3)),
+        "ScriptHistory keeps its rows and watermark"
+    );
+    assert!(h.runtime.script_history_failure.read().is_some());
+    assert!(!h.runtime.should_stop());
+}
+
 #[test]
 fn index_ahead_of_restored_tip_is_reported_once_and_rewound() {
     let f = ForkFixture::new(3);
+    f.persist_undo();
     let h = Harness::new(&f, u32::MAX);
     let mut pending = None;
 
@@ -493,8 +544,7 @@ fn index_ahead_of_restored_tip_is_reported_once_and_rewound() {
         "one warning per rollback pass"
     );
     match h.index_ahead_call() {
-        Some((capability, index_height, tip_height, tip_hash_be, index_hash_be, depth)) => {
-            assert_eq!(capability, "tx_lookup,script_history");
+        Some((_capability, index_height, tip_height, tip_hash_be, index_hash_be, depth)) => {
             assert_eq!((tip_height, index_height, depth), (1, 3, 2));
             assert_eq!(tip_hash_be, a1.hash.to_string_be());
             assert_eq!(index_hash_be, a3.hash.to_string_be());
@@ -503,9 +553,11 @@ fn index_ahead_of_restored_tip_is_reported_once_and_rewound() {
     }
 }
 
+// RCV-05
 #[test]
 fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     let f = ForkFixture::new(3);
+    f.persist_undo();
     let h = Harness::new(&f, 1);
     let mut pending = None;
 
@@ -533,9 +585,11 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
 }
 
+// RCV-07
 #[test]
 fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
     let f = ForkFixture::new(3);
+    f.persist_undo();
     let h = Harness::new(&f, u32::MAX);
     let mut pending = None;
     let a3 = f.tip(f.a[2]);
@@ -570,6 +624,7 @@ fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
     assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
 
     let f = ForkFixture::new(3);
+    f.persist_undo();
     let h = Harness::new(&f, u32::MAX);
     let mut pending = None;
     let a3 = f.tip(f.a[2]);
@@ -810,8 +865,6 @@ fn run_loop_commits_a_retained_prefix_and_retries_an_absent_body_without_a_wake(
     run.join().expect("worker thread").expect("worker run");
 }
 
-/// record resets only `ScriptLive`, which reseeds at the tip while its
-/// siblings keep their rows and finish from bodies alone.
 #[test]
 fn forward_script_live_follows_undo_present_missing_or_corrupt() {
     #[derive(Clone, Copy)]
@@ -858,7 +911,12 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
             let reset = h.watermarks();
             assert_eq!(reset.script_live, None, "ScriptLive is reset");
             assert_eq!(reset.tx_lookup, Some(at(&a2)), "siblings keep their rows");
-            assert_eq!(reset.script_history, Some(at(&a2)));
+            assert_eq!(
+                reset.script_history,
+                Some(at(&a2)),
+                "ScriptHistory keeps its rows and watermark"
+            );
+            assert!(h.runtime.script_history_failure.read().is_some());
             let (artifact, _keep) = cell_seed_artifact(a5.hash, a5.height, 32);
             h.cell.want();
             assert_eq!(
@@ -867,8 +925,17 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
             );
         }
         h.settle(&mut pending);
-        h.assert_at(&a5);
+        assert_eq!(h.watermarks().tx_lookup, Some(at(&a5)));
         assert_eq!(h.watermarks().script_live, Some(at(&a5)));
+        if matches!(undo, Undo::Present) {
+            h.assert_at(&a5);
+        } else {
+            assert_eq!(
+                h.watermarks().script_history,
+                Some(at(&a2)),
+                "an unavailable ScriptHistory never advances past its missing anchor"
+            );
+        }
     }
 }
 
@@ -920,6 +987,7 @@ fn preparation_failure_keeps_its_height_after_committed_successes() {
     assert_eq!(h.watermarks().script_live, committed);
 }
 
+// IDX-07
 #[test]
 fn undo_read_failure_is_not_a_missing_undo() {
     let f = ForkFixture::new(5);
@@ -1126,6 +1194,7 @@ impl SeedCellHarness {
             enabled,
             chain_events: Arc::new(TestChainCursor),
             reporter,
+            shutdown: bitcoin_rs_chain::LatchReader::fixture_never(),
             wake_rx,
             quiet_period: Duration::ZERO,
             batch_delay: Duration::ZERO,
@@ -1234,4 +1303,50 @@ fn cell_seed_artifact(
         },
     );
     (artifact, dir)
+}
+// EVT-03
+#[test]
+fn malformed_stored_consumer_cursor_never_causes_panic_and_overwrites_cleanly() {
+    let f = ForkFixture::new(3);
+    f.persist_undo();
+    let h = Harness::with_enabled(&f, u32::MAX, IndexCapabilities::TX_LOOKUP);
+    let mut tip = (*f.tip(f.a[0])).clone();
+    tip.height = 0;
+    tip.hash = Hash256::from_le_bytes(&[0; 32]);
+    h.applied_tip.store(Some(Arc::new(tip)));
+    let expected = IndexWatermark {
+        height: 0,
+        hash: [0; 32],
+    };
+    h.writer
+        .anchor_watermark(IndexCapabilities::TX_LOOKUP, expected, 0)
+        .expect("anchor");
+
+    for malformed in [
+        &b""[..],
+        &b"\xff"[..],
+        &b"corrupt-cursor-bytes"[..],
+        &[0xaa; 51][..],
+        &[0xbb; 53][..],
+        &[0xcc; 1024][..],
+    ] {
+        let (fence, _) = h.writer.fenced_watermarks().expect("fence");
+        h.writer
+            .commit_consumer_cursor(fence, malformed)
+            .expect("commit malformed cursor");
+
+        let commit = h
+            .worker
+            .persist_chain_cursor()
+            .expect("persist must not panic on malformed cursor");
+        assert!(matches!(commit, CursorCommit::Settled));
+
+        let stored = h
+            .writer
+            .consumer_cursor()
+            .expect("read cursor")
+            .expect("cursor exists");
+        assert_eq!(stored.len(), crate::reconcile::CURSOR_BYTE_LEN);
+        assert_eq!(stored, h.worker.chain_events.cursor().to_bytes());
+    }
 }

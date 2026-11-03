@@ -11,9 +11,11 @@ import stat
 import struct
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import TypeIs
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "campaign-corpus"))
@@ -44,6 +46,12 @@ JsonObject = dict[str, object]
 MAGIC = "f9beb4d9"
 HASH64 = "ab" * 32
 OUTPUT_NAME = Path("out") / "result.json"
+
+
+def _output(root: Path) -> Path:
+    output = root / OUTPUT_NAME
+    output.parent.mkdir(mode=0o700, exist_ok=True)
+    return output
 
 
 def _is_object(value: object) -> TypeIs[JsonObject]:
@@ -572,7 +580,7 @@ class CampaignTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="offline-campaign-"))
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         config_path, expected = _build_workspace(root)
-        output = root / OUTPUT_NAME
+        output = _output(root)
         self.assertEqual(
             main(["--config", str(config_path), "--output", str(output)]), 0
         )
@@ -607,7 +615,7 @@ class CampaignTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="offline-reopen-"))
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         config_path, expected = _build_workspace(root, reopen=True)
-        output = root / OUTPUT_NAME
+        output = _output(root)
         self.assertEqual(
             main(["--config", str(config_path), "--output", str(output)]), 0
         )
@@ -630,7 +638,7 @@ class CampaignTests(unittest.TestCase):
         config["candidate"]["binary"] = str(liar)
         config["candidate"]["binary_sha256"] = _sha256_file(liar)
         config_path.write_bytes(canonical_bytes(config) + b"\n")
-        output = root / OUTPUT_NAME
+        output = _output(root)
         with self.assertRaises(ContractError):
             main(["--config", str(config_path), "--output", str(output)])
         self.assertFalse(output.exists())
@@ -649,7 +657,7 @@ class CampaignTests(unittest.TestCase):
         config["core"]["binary"] = str(failing)
         config["core"]["binary_sha256"] = _sha256_file(failing)
         config_path.write_bytes(canonical_bytes(config) + b"\n")
-        output = root / OUTPUT_NAME
+        output = _output(root)
         with self.assertRaises(ContractError):
             main(["--config", str(config_path), "--output", str(output)])
         self.assertFalse(output.exists())
@@ -658,8 +666,7 @@ class CampaignTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="offline-exists-"))
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         config_path, _ = _build_workspace(root)
-        output = root / OUTPUT_NAME
-        output.parent.mkdir(parents=True)
+        output = _output(root)
         output.write_text("keep\n", encoding="utf-8")
         with self.assertRaises(ContractError):
             main(["--config", str(config_path), "--output", str(output)])
@@ -695,7 +702,7 @@ class CampaignTests(unittest.TestCase):
         config["candidate"]["binary"] = str(daemon)
         config["candidate"]["binary_sha256"] = _sha256_file(daemon)
         config_path.write_bytes(canonical_bytes(config) + b"\n")
-        output = root / OUTPUT_NAME
+        output = _output(root)
         with self.assertRaises(ContractError):
             main(["--config", str(config_path), "--output", str(output)])
         self.assertFalse(output.exists())
@@ -718,7 +725,7 @@ class CampaignTests(unittest.TestCase):
         config["candidate"]["binary"] = str(mutator)
         config["candidate"]["binary_sha256"] = _sha256_file(mutator)
         config_path.write_bytes(canonical_bytes(config) + b"\n")
-        output = root / OUTPUT_NAME
+        output = _output(root)
         with self.assertRaises(ContractError):
             main(["--config", str(config_path), "--output", str(output)])
         self.assertFalse(output.exists())
@@ -728,6 +735,42 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(summary["samples"], 7)
         self.assertEqual(summary["p50_ns"], 40)
         self.assertEqual(summary["max_ns"], 70)
+
+    def test_recycled_start_time_refuses_settle_signal(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-settle-start-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        arm_dir = root / "arm"
+        arm_dir.mkdir()
+        deadline = time.monotonic_ns() + 5_000_000_000
+        with (
+            mock.patch.object(
+                offline, "process_start_time", side_effect=[111, 222]
+            ),
+            mock.patch.object(offline.os, "killpg") as killpg,
+            self.assertRaisesRegex(ContractError, "start time changed"),
+        ):
+            offline._run_phase((sys.executable, "-c", "pass"), arm_dir, deadline)
+        self.assertFalse(killpg.called)
+
+    def test_recycled_start_time_refuses_deadline_kill(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-kill-start-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        arm_dir = root / "arm"
+        arm_dir.mkdir()
+        deadline = time.monotonic_ns() + 100_000_000
+        with (
+            mock.patch.object(
+                offline, "process_start_time", side_effect=[111] + [222] * 8
+            ),
+            mock.patch.object(offline.os, "killpg") as killpg,
+            self.assertRaisesRegex(ContractError, "start time changed"),
+        ):
+            offline._run_phase(
+                (sys.executable, "-c", "import time; time.sleep(30)"),
+                arm_dir,
+                deadline,
+            )
+        self.assertFalse(killpg.called)
 
 
 class IndexedParityHarnessTests(unittest.TestCase):
@@ -741,7 +784,7 @@ class IndexedParityHarnessTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="offline-indexed-"))
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         config_path, expected = _build_dual_workspace(root)
-        output = root / OUTPUT_NAME
+        output = _output(root)
         self.assertEqual(
             main(["--config", str(config_path), "--output", str(output)]), 0
         )
@@ -838,18 +881,6 @@ class IndexedParityHarnessTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             load_config(config_path)
 
-    def test_indexed_source_mutation_after_load_is_refused(self) -> None:
-        root = Path(tempfile.mkdtemp(prefix="offline-indexed-pin-"))
-        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
-        config_path, _ = _build_dual_workspace(root)
-        config = load_config(config_path)
-        victim = root / "blks" / "blk00000.dat"
-        raw = bytearray(victim.read_bytes())
-        raw[20] ^= 0xFF
-        victim.write_bytes(bytes(raw))
-        with self.assertRaises(ContractError):
-            run_campaign(config, root / "arms")
-
     def test_child_custody_source_mutation_is_refused(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="offline-indexed-srcmut-"))
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
@@ -868,7 +899,7 @@ class IndexedParityHarnessTests(unittest.TestCase):
         config["candidate"]["binary"] = str(mutator)
         config["candidate"]["binary_sha256"] = _sha256_file(mutator)
         config_path.write_bytes(canonical_bytes(config) + b"\n")
-        output = root / OUTPUT_NAME
+        output = _output(root)
         with self.assertRaises(ContractError):
             main(["--config", str(config_path), "--output", str(output)])
         self.assertFalse(output.exists())

@@ -1,5 +1,3 @@
-//! Applied-block record log shared between the chain owner and index consumers.
-
 #[cfg(any(test, feature = "test-seam"))]
 use parking_lot::RwLockWriteGuard;
 use parking_lot::{RwLock, RwLockReadGuard};
@@ -51,14 +49,11 @@ pub struct BlockRecord {
     pub hash: BlockHash,
     pub height: u32,
     pub body_size: usize,
-    /// Serialized block header bytes, when the record carries a header.
     pub header: Option<Box<[u8; bitcoin_rs_primitives::Header::LEN]>>,
     pub tx_count: usize,
     pub time: u32,
 }
 
-/// Boxing the header keeps the record at 64 bytes instead of 144;
-/// reverting it fails this compile-time gate.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(
     core::mem::size_of::<BlockRecord>() == 64,
@@ -73,8 +68,15 @@ const _: () = assert!(
 pub struct BlockLog {
     records: Vec<BlockRecord>,
     total_body_size: u64,
-    /// `cumulative_tx_count[i]` is the sum of `tx_count` over `records[..=i]`.
     cumulative_tx_count: Vec<u64>,
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "usize stays within u64 on every supported target"
+)]
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).expect("usize fits in u64")
 }
 
 impl BlockLog {
@@ -90,13 +92,13 @@ impl BlockLog {
     pub fn push(&mut self, record: BlockRecord) {
         self.total_body_size = self
             .total_body_size
-            .saturating_add(u64::try_from(record.body_size).unwrap_or(u64::MAX));
+            .saturating_add(usize_to_u64(record.body_size));
         let running = self
             .cumulative_tx_count
             .last()
             .copied()
             .unwrap_or(0)
-            .saturating_add(u64::try_from(record.tx_count).unwrap_or(0));
+            .saturating_add(usize_to_u64(record.tx_count));
         self.cumulative_tx_count.push(running);
         self.records.push(record);
     }
@@ -106,7 +108,7 @@ impl BlockLog {
         let _ = self.cumulative_tx_count.pop();
         self.total_body_size = self
             .total_body_size
-            .saturating_sub(u64::try_from(record.body_size).unwrap_or(u64::MAX));
+            .saturating_sub(usize_to_u64(record.body_size));
         Some(record)
     }
 
@@ -126,7 +128,7 @@ impl BlockLog {
         debug_assert_eq!(
             self.total_body_size,
             self.records.iter().fold(0_u64, |total, record| total
-                .saturating_add(u64::try_from(record.body_size).unwrap_or(u64::MAX))),
+                .saturating_add(usize_to_u64(record.body_size))),
             "running body-size total drifted from the records it summarizes"
         );
         self.total_body_size
@@ -149,7 +151,7 @@ impl BlockLog {
             self.records[..count]
                 .iter()
                 .fold(0_u64, |total, record| total
-                    .saturating_add(u64::try_from(record.tx_count).unwrap_or(0))),
+                    .saturating_add(usize_to_u64(record.tx_count))),
             "tx-count prefix sums drifted from the records they summarize"
         );
         prefix
@@ -188,7 +190,6 @@ pub fn cumulative_tx_count_through(log: &BlockLog, height: u32) -> Option<u64> {
     Some(log.tx_count_before(blocks.partition_point(|record| record.height <= height)))
 }
 
-/// Records must be sorted by non-decreasing height. Returns the first duplicate.
 #[must_use]
 pub fn record_at_height(records: &[BlockRecord], height: u32) -> Option<&BlockRecord> {
     if let Ok(index) = usize::try_from(height)
@@ -233,7 +234,6 @@ pub fn record_at_height_hash(
 }
 
 impl BlockRecord {
-    /// The record is metadata only: `body_size` is the native consensus-encoded length.
     #[must_use]
     pub fn from_block(height: u32, block: &Block) -> Self {
         let hash = block.block_hash();
@@ -267,7 +267,45 @@ impl BlockRecord {
     #[must_use]
     pub fn header_hex(&self) -> String {
         self.header.as_ref().map_or_else(String::new, |bytes| {
-            bitcoin_rs_primitives::encode::hex_encode(bytes.as_slice())
+            bitcoin_rs_primitives::hex::hex_encode(bytes.as_slice())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin_rs_primitives::{BlockHash, Hash256};
+
+    fn hash(v: u8) -> BlockHash {
+        BlockHash::from(Hash256::from_le_bytes(&[v; 32]))
+    }
+
+    #[test]
+    fn block_log_cumulative_tx_count_and_duplicate_height() {
+        let mut log = BlockLog::new();
+        log.push(BlockRecord {
+            hash: hash(1),
+            height: 0,
+            body_size: 100,
+            header: None,
+            tx_count: 5,
+            time: 1000,
+        });
+        log.push(BlockRecord {
+            hash: hash(2),
+            height: 1,
+            body_size: 200,
+            header: None,
+            tx_count: 3,
+            time: 1001,
+        });
+        assert_eq!(cumulative_tx_count_through(&log, 1), Some(8));
+
+        let records = vec![
+            BlockRecord::synthetic(1, hash(1)),
+            BlockRecord::synthetic(1, hash(2)),
+        ];
+        assert_eq!(record_at_height(&records, 1).map(|r| r.hash), Some(hash(1)));
     }
 }

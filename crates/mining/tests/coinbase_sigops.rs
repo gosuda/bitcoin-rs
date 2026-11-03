@@ -1,6 +1,6 @@
 use crate::support::fixtures as common;
 
-use std::error::Error;
+use crate::support::TestError;
 
 use bitcoin_rs_consensus::transaction_sigop_cost;
 use bitcoin_rs_mining::{
@@ -10,7 +10,7 @@ use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, Txid};
 use bitcoin_rs_script::VerifyFlags;
 use common::{context, insert_with_cost, oracle_sigop_cost, p2pkh, tx, zero_fee_pool};
 
-type TestResult = Result<(), Box<dyn Error>>;
+type TestResult = Result<(), TestError>;
 
 #[test]
 fn budgeted_coinbase_input_growth_sigop_boundary() -> TestResult {
@@ -185,7 +185,7 @@ fn coinbase_and_admitted_package_costs_share_one_inclusive_limit() -> TestResult
     Ok(())
 }
 
-fn block_sigop_cost(candidate: &Candidate) -> Result<u64, Box<dyn Error>> {
+fn block_sigop_cost(candidate: &Candidate) -> Result<u64, TestError> {
     Ok(candidate
         .into_unsolved_block()?
         .txs

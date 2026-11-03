@@ -1,5 +1,3 @@
-//! Native block header type and header hash computation.
-
 use crate::{BlockHash, CompactTarget, Hash256, encode::double_sha256};
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -64,7 +62,9 @@ mod tests {
     use crate::deserialize;
     use crate::{BlockHash, encode::DecodeError};
 
-    type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
+    use crate::test_error::TestError;
+
+    type Result<T, E = TestError> = std::result::Result<T, E>;
 
     #[test]
     fn genesis_header_hash_matches_published_id() -> Result<()> {

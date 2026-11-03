@@ -1,5 +1,3 @@
-//! Core-produced portable snapshots over the public RPC and P2P boundaries.
-
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeSet;

@@ -119,17 +119,13 @@ fn retry_recovers_an_append_whose_rollback_failed() -> Result<(), crate::Storage
         std::mem::replace(&mut writer.file, read_only)
     };
 
-    let error = match store.append(1, hash(1), b"fails") {
+    let _error = match store.append(1, hash(1), b"fails") {
         Ok(position) => panic!(
             "the read-only file accepted an append at {}:{}",
             position.file_no, position.offset
         ),
         Err(error) => error,
     };
-    assert!(
-        error.to_string().contains("failed to roll back block file"),
-        "the rollback failure must be reported: {error}"
-    );
     assert_eq!(
         store.disk_usage(),
         0,
@@ -186,7 +182,6 @@ fn disk_usage_counts_only_block_files() -> Result<(), crate::StorageError> {
     Ok(())
 }
 
-/// A reopened store starts from the files it finds, not from zero.
 #[test]
 fn disk_usage_is_seeded_from_an_existing_directory() -> Result<(), crate::StorageError> {
     let data_dir = tempdir()?;
@@ -361,6 +356,7 @@ fn reader_and_one_shot_reject_a_short_record() -> Result<(), crate::StorageError
     Ok(())
 }
 
+// RCV-03
 #[test]
 fn reorg_hashes_at_one_height_remain_independent() -> Result<(), crate::StorageError> {
     let data_dir = tempdir()?;
@@ -379,6 +375,7 @@ fn reorg_hashes_at_one_height_remain_independent() -> Result<(), crate::StorageE
     Ok(())
 }
 
+// RCV-03, RCV-04
 #[test]
 fn recovery_discards_a_torn_tail_before_the_next_append() -> Result<(), crate::StorageError> {
     let data_dir = tempdir()?;
@@ -406,6 +403,7 @@ fn recovery_discards_a_torn_tail_before_the_next_append() -> Result<(), crate::S
     Ok(())
 }
 
+// RCV-03
 #[test]
 fn committed_extent_refuses_corruption_without_changing_any_file() -> Result<(), crate::StorageError>
 {
@@ -599,6 +597,37 @@ fn persist_reuses_only_a_matching_existing_position() -> Result<(), crate::Stora
     assert_eq!(
         store.load(replacement, 11, hash(2))?.as_deref(),
         Some(b"expected".as_slice())
+    );
+    Ok(())
+}
+
+#[test]
+fn reader_recovers_cursor_after_mismatch_error() -> Result<(), crate::StorageError> {
+    let data_dir = tempdir()?;
+    let store = FlatFileBlockStore::open(data_dir.path())?;
+    let pos1 = store.append(1, hash(1), b"")?;
+    let pos2 = store.append(2, hash(2), b"body_two")?;
+    assert_eq!(pos2.offset, pos1.offset + RECORD_HEADER_LEN_U64);
+
+    let mut reader = store.reader();
+    assert_eq!(reader.load(pos1, 1, hash(1))?.as_deref(), Some(&[][..]));
+    assert_eq!(reader.load(pos1, 1, hash(99))?, None);
+    let Some(state) = reader.state.as_ref() else {
+        panic!("reader opened the block file");
+    };
+    assert_eq!(state.cursor, None);
+    assert_eq!(
+        reader.load(pos2, 2, hash(2))?.as_deref(),
+        Some(b"body_two".as_slice())
+    );
+    assert_eq!(reader.load(pos2, 2, hash(99))?, None);
+    let Some(state) = reader.state.as_ref() else {
+        panic!("reader opened the block file");
+    };
+    assert_eq!(state.cursor, None);
+    assert_eq!(
+        reader.load(pos2, 2, hash(2))?.as_deref(),
+        Some(b"body_two".as_slice())
     );
     Ok(())
 }

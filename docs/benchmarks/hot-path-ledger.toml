@@ -14,7 +14,7 @@ backends = ["fjall", "rocksdb", "redb"]
 [cell_defaults]
 custody = "none"
 residual = "unmeasured"
-residual_blocker = "comparator in-tree, custody staged; live product arms blocked by absent bitcoin-rs offline state construction (#34, #41) and live-IBD product lane (#35) — see docs/benchmarks/data/comparator-lanes-20260913.md"
+residual_blocker = "c150 custody staged at .outline/reference-corpus/reacquire-20261025-c150/corpora with digests matching the manifest and acquisition record; cmodern archive and manifest are gone (manifest file sha256 b694c91880ac15edbb3e8dbb8a62bf8c0a0c1c64ef7dbec2e3f79eadf918db7d, logical manifest_sha256 b87bac6720d1b68acadaa9863b56073ee213f4613e8dfa4a93c4459dc5f017cd), so every cmodern cell is blocked on the missing corpus; offline ingest ships (--corpus --manifest --state) and the first gated C150 offline campaign ran on 2026-11-02 at 0c0975652: seven alternating Core 31.1 and bitcoin-rs pairs passed every comparator gate and published candidate_over_core_p50_ratio 7.53 with arm spread above the 5 percent stability band, so no acceptance verdict attaches (docs/benchmarks/data/evidence-refresh-2026-11-02.md); the live muhash bitcoin-rs arm is blocked because the node accepts only --rpc-bind <SocketAddr> while the comparator passes {rpc_bind} and {rpc_port} as two argv tokens; live IBD has no stop-at-height flag (#35), see docs/benchmarks/data/product-cell-comparator-lanes-2026-09-13.md"
 noise_floor = "unobserved"
 # Wave-2 observation, 650-comparators, 2026-09-13. Three worktree
 # repetitions of tools/benchmark-campaign/comp_lanes.py on c97d1094,
@@ -25,14 +25,30 @@ noise_floor = "unobserved"
 # the staged Core 31.1 bitcoind. Within-run fixture-arm spread frequently
 # exceeds the 5% product-stability band because arms are ~0.1-0.13s
 # fixture process spawns on a shared 80-CPU host; this is not the HPA-03
-# noise floor. Live #34/#41 arms are blocked by absent bitcoin-rs offline
-# archive ingest / stop-at-height; #35 by no shipped live-IBD product
-# lane (comp_lanes.py is fixture-only). Staged custody (unmeasured
-# against): C150/Cmodern archives and Core 31.1 bitcoind under
-# .outline/reference-corpus/reacquire-20260909T010602Z-a721110f/.
+# noise floor. At this wave's date the live #34/#41 arms were blocked by
+# absent bitcoin-rs offline archive ingest / stop-at-height and #35 by no
+# shipped live-IBD product lane (comp_lanes.py is fixture-only).
+# Custody update 2026-11-01: C150 archive, manifest and the Core 31.1
+# oracle are staged under .outline/reference-corpus/reacquire-20261025-c150/
+# (corpora/ and custody/; digests match the manifest and acquisition
+# record). The Cmodern archive and manifest from the 2026-09-13 staging
+# are gone; every cmodern cell is blocked on the missing corpus identity
+# (HPA-08). bitcoin-rs offline archive ingest now ships as --corpus
+# --manifest --state (crates/node/src/offline_import.rs); live IBD still
+# has no stop-at-height flag and no shipped product lane.
+# Campaign update 2026-11-02: the first gated C150 offline campaign ran
+# on this head at 0c0975652 with staged custody. All comparator gates
+# passed and the result document published; the seven bitcoin-rs walls
+# landed in the offline.c150.x86_64.fjall history through the ledger
+# sample schema with the six-way identity. Arm spread exceeded the 5
+# percent stability band, so the result carries no acceptance verdict.
+# Method, numbers and identity bundle:
+# docs/benchmarks/data/evidence-refresh-2026-11-02.md.
 # Full method note, digests, and remaining residual statement:
-# docs/benchmarks/data/comparator-lanes-20260913.md. Per-cell histories
-# stay empty; noise floor stays unobserved (HPA-03, HPA-08).
+# docs/benchmarks/data/product-cell-comparator-lanes-2026-09-13.md. The
+# offline.c150.x86_64.fjall history took its first seven samples on
+# 2026-11-02; every other per-cell history stays empty and the noise
+# floor stays unobserved (HPA-03, HPA-08).
 
 # ---------------------------------------------------------------------------
 # Interval tree. Exclusive leaves hang off these; they are not addends.
@@ -367,18 +383,19 @@ evidence = "No product-safe skip of checksum/decode. Diagnostic bench: crates/p2
 #     block_285B_payload p50 8550.9 ns  p95 9759.2 ns  p99 10818.3 ns
 #   Product-cell comparator lanes (bounded out this wave): seven interleaved
 #     Core 31.1 / bitcoin-rs pairs per cell (HPA-02) over C150 (150,001 blocks)
-#     or Cmodern (709,636 blocks, 374,930,063,373-byte archive at
-#     .outline/reference-corpus/reacquire-20260909T010602Z-a721110f/corpora/
-#     Cmodern.archive.bin, manifest file sha256
-#     b694c91880ac15edbb3e8dbb8a62bf8c0a0c1c64ef7dbec2e3f79eadf918db7d,
+#     or Cmodern (709,636 blocks, 374,930,063,373-byte archive; manifest file
+#     sha256 b694c91880ac15edbb3e8dbb8a62bf8c0a0c1c64ef7dbec2e3f79eadf918db7d,
 #     logical manifest_sha256
 #     b87bac6720d1b68acadaa9863b56073ee213f4613e8dfa4a93c4459dc5f017cd,
 #     stop hash 00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f).
-#     Core 31.1 oracle binary is staged at
-#     .outline/reference-corpus/reacquire-20260909T010602Z-a721110f/tools/bitcoind
-#     (sha256 986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08),
-#     so custody is available, but the campaign is out of this wave's budget and
-#     #650 defers final product measurements to #629/#625. Per-cell samples stay
+#     Custody note 2026-11-01: the Cmodern archive and manifest above are
+#     gone; the 2026-09-13 staging root is retired and every cmodern cell is
+#     blocked on the missing corpus. The C150 corpus and the Core 31.1 oracle
+#     (sha256 986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08,
+#     matching the install pin and the C150 acquisition record) are staged
+#     under .outline/reference-corpus/reacquire-20261025-c150/ (corpora/ and
+#     custody/). The campaign stayed out of this wave's budget and #650
+#     defers final product measurements to #629/#625. Per-cell samples stay
 #     empty and the noise floor stays unobserved until those runs append through
 #     `Ledger` (`crates/node/benches/evidence.rs`) with the six-way identity (HPA-12).
 
@@ -838,7 +855,15 @@ reason = "Weakens the product lifecycle."
 
 [[cells]]
 id = "offline.c150.x86_64.fjall"
-samples = []
+samples = [
+    { path = "cell.wall", owner = "tools/benchmark-campaign/offline_full_validation.py", identity = { binary_sha256 = "dd3997aa544a7669a40281222c0321351e843135d2c1f3862fb3b337c703dcf5", version = "0.15.0", config_sha256 = "0142df78f4ba77bc36c7a0aa87e47afb6c0d137657bd513d51f5f490430d8a1d", corpus = { id = "c150", manifest_sha256 = "5eff01d897b6f3b39039d1ff7b9b4b0872a7a15463fa516b4cc7bfe7c001b91d" }, backend = "fjall", durability = "journal:500b/5s", hardware = "Intel(R) Xeon(R) Gold 6138 CPU @ 2.00GHz x80" }, interval = { kind = "inside", start_ns = 0, end_ns = 861336138514 }, cpu_ns = 4915240000000, elapsed_ns = 861336138514, rss_peak_bytes = 775487488 },
+    { path = "cell.wall", owner = "tools/benchmark-campaign/offline_full_validation.py", identity = { binary_sha256 = "dd3997aa544a7669a40281222c0321351e843135d2c1f3862fb3b337c703dcf5", version = "0.15.0", config_sha256 = "0142df78f4ba77bc36c7a0aa87e47afb6c0d137657bd513d51f5f490430d8a1d", corpus = { id = "c150", manifest_sha256 = "5eff01d897b6f3b39039d1ff7b9b4b0872a7a15463fa516b4cc7bfe7c001b91d" }, backend = "fjall", durability = "journal:500b/5s", hardware = "Intel(R) Xeon(R) Gold 6138 CPU @ 2.00GHz x80" }, interval = { kind = "inside", start_ns = 0, end_ns = 881600246404 }, cpu_ns = 4754280000000, elapsed_ns = 881600246404, rss_peak_bytes = 742436864 },
+    { path = "cell.wall", owner = "tools/benchmark-campaign/offline_full_validation.py", identity = { binary_sha256 = "dd3997aa544a7669a40281222c0321351e843135d2c1f3862fb3b337c703dcf5", version = "0.15.0", config_sha256 = "0142df78f4ba77bc36c7a0aa87e47afb6c0d137657bd513d51f5f490430d8a1d", corpus = { id = "c150", manifest_sha256 = "5eff01d897b6f3b39039d1ff7b9b4b0872a7a15463fa516b4cc7bfe7c001b91d" }, backend = "fjall", durability = "journal:500b/5s", hardware = "Intel(R) Xeon(R) Gold 6138 CPU @ 2.00GHz x80" }, interval = { kind = "inside", start_ns = 0, end_ns = 824675844935 }, cpu_ns = 4780930000000, elapsed_ns = 824675844935, rss_peak_bytes = 759508992 },
+    { path = "cell.wall", owner = "tools/benchmark-campaign/offline_full_validation.py", identity = { binary_sha256 = "dd3997aa544a7669a40281222c0321351e843135d2c1f3862fb3b337c703dcf5", version = "0.15.0", config_sha256 = "0142df78f4ba77bc36c7a0aa87e47afb6c0d137657bd513d51f5f490430d8a1d", corpus = { id = "c150", manifest_sha256 = "5eff01d897b6f3b39039d1ff7b9b4b0872a7a15463fa516b4cc7bfe7c001b91d" }, backend = "fjall", durability = "journal:500b/5s", hardware = "Intel(R) Xeon(R) Gold 6138 CPU @ 2.00GHz x80" }, interval = { kind = "inside", start_ns = 0, end_ns = 803596551100 }, cpu_ns = 4776220000000, elapsed_ns = 803596551100, rss_peak_bytes = 762368000 },
+    { path = "cell.wall", owner = "tools/benchmark-campaign/offline_full_validation.py", identity = { binary_sha256 = "dd3997aa544a7669a40281222c0321351e843135d2c1f3862fb3b337c703dcf5", version = "0.15.0", config_sha256 = "0142df78f4ba77bc36c7a0aa87e47afb6c0d137657bd513d51f5f490430d8a1d", corpus = { id = "c150", manifest_sha256 = "5eff01d897b6f3b39039d1ff7b9b4b0872a7a15463fa516b4cc7bfe7c001b91d" }, backend = "fjall", durability = "journal:500b/5s", hardware = "Intel(R) Xeon(R) Gold 6138 CPU @ 2.00GHz x80" }, interval = { kind = "inside", start_ns = 0, end_ns = 804794824551 }, cpu_ns = 4801670000000, elapsed_ns = 804794824551, rss_peak_bytes = 662052864 },
+    { path = "cell.wall", owner = "tools/benchmark-campaign/offline_full_validation.py", identity = { binary_sha256 = "dd3997aa544a7669a40281222c0321351e843135d2c1f3862fb3b337c703dcf5", version = "0.15.0", config_sha256 = "0142df78f4ba77bc36c7a0aa87e47afb6c0d137657bd513d51f5f490430d8a1d", corpus = { id = "c150", manifest_sha256 = "5eff01d897b6f3b39039d1ff7b9b4b0872a7a15463fa516b4cc7bfe7c001b91d" }, backend = "fjall", durability = "journal:500b/5s", hardware = "Intel(R) Xeon(R) Gold 6138 CPU @ 2.00GHz x80" }, interval = { kind = "inside", start_ns = 0, end_ns = 789159129605 }, cpu_ns = 4835770000000, elapsed_ns = 789159129605, rss_peak_bytes = 639438848 },
+    { path = "cell.wall", owner = "tools/benchmark-campaign/offline_full_validation.py", identity = { binary_sha256 = "dd3997aa544a7669a40281222c0321351e843135d2c1f3862fb3b337c703dcf5", version = "0.15.0", config_sha256 = "0142df78f4ba77bc36c7a0aa87e47afb6c0d137657bd513d51f5f490430d8a1d", corpus = { id = "c150", manifest_sha256 = "5eff01d897b6f3b39039d1ff7b9b4b0872a7a15463fa516b4cc7bfe7c001b91d" }, backend = "fjall", durability = "journal:500b/5s", hardware = "Intel(R) Xeon(R) Gold 6138 CPU @ 2.00GHz x80" }, interval = { kind = "inside", start_ns = 0, end_ns = 843455351804 }, cpu_ns = 4870270000000, elapsed_ns = 843455351804, rss_peak_bytes = 643731456 }
+]
 
 [[cells]]
 id = "offline.c150.x86_64.rocksdb"

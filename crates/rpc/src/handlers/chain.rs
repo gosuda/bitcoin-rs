@@ -5,8 +5,8 @@ use core::str::FromStr as _;
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_primitives::{
-    Block, BlockHash, CompactTarget, Hash256, Header, Network, TxOut, consensus_bytes, deserialize,
-    u64_to_f64,
+    Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, TxOut, consensus_bytes,
+    deserialize, u64_to_f64,
 };
 
 #[cfg(test)]
@@ -71,11 +71,10 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
             .unwrap_or_default(),
     };
     let mut response = typed_to_sonic_omitting_nulls(&response)?;
+    let closed_for_recovery = ctx.chain.closed_for_recovery.is_triggered();
     if let Some(object) = response.as_object_mut() {
-        object.insert(
-            "is_closed_for_recovery",
-            json!(ctx.chain.closed_for_recovery.load()),
-        );
+        object.insert("is_closed_for_recovery", json!(closed_for_recovery));
+        object.insert("is_apply_halted", json!(closed_for_recovery));
     }
     Ok(response)
 }
@@ -124,17 +123,14 @@ pub(crate) fn loadtxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     )
 }
 
-/// Core 31.1 `dumptxoutset`, restricted to `type = "latest"`: the snapshot is
-/// the applied tip's UTXO set. Rollback snapshots and `options` are not served.
 pub(crate) fn dumptxoutset(
     ctx: &Arc<Context>,
     params: &Value,
     cancellation: &bitcoin_rs_chain::LatchReader,
 ) -> Result<Value, RpcError> {
-    let params = super::bind_named_params(params, &["path", "type"])?;
-    super::ensure_at_most_params(&params, 2)?;
-    let path = required_str(&params, 0, "path is required")?;
-    let snapshot_type = match params_array(&params)?.get(1) {
+    super::ensure_at_most_params(params, 2)?;
+    let path = required_str(params, 0, "path is required")?;
+    let snapshot_type = match params_array(params)?.get(1) {
         Some(value) if !value.is_null() => value
             .as_str()
             .ok_or_else(|| super::wrong_type_plain(value, "string"))?,
@@ -312,12 +308,9 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 struct ChainTxStats {
     selected: bool,
     is_applied_tip: bool,
-    /// Cumulative transactions through the selected block, when known.
     total_tx_count: Option<u64>,
     tip_time: u32,
-    /// Transactions inside the window, when the window is open and known.
     window_tx_count: Option<u64>,
-    /// The window's length in seconds (a difference of two median times).
     window_interval: u64,
 }
 
@@ -487,8 +480,6 @@ pub(crate) fn getbestblockhash(ctx: &Arc<Context>, params: &Value) -> Result<Val
 }
 
 pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, &["blockhash", "verbosity"])?;
-    let params = bound.as_ref();
     let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
     let verbosity = getblock_verbosity(params)?;
     let _render = if verbosity >= 2 {
@@ -569,7 +560,62 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let fee_fields = compute_fee_fields(ctx, &block).map_err(crate::error::RpcError::from)?;
     let utxo_size_inc =
         utxo_size_inc_for_block(ctx, &block).map_err(crate::error::RpcError::from)?;
+    let stats = aggregate_block_tx_stats(&block.txs);
     let txs = u64::try_from(block.txs.len()).unwrap_or(u64::MAX);
+    let utxo_increase = i64::try_from(stats.outs)
+        .unwrap_or(i64::MAX)
+        .saturating_sub(i64::try_from(stats.ins).unwrap_or(i64::MAX));
+    typed_to_sonic(&v31::GetBlockStats {
+        average_fee: Some(fee_fields.avgfee),
+        average_fee_rate: Some(fee_fields.avgfeerate),
+        average_tx_size: Some(i64_saturated(stats.avgtxsize)),
+        block_hash: Some(block_hash.to_string()),
+        fee_rate_percentiles: Some(fee_fields.feerate_percentiles),
+        height: Some(i64::from(height)),
+        inputs: Some(i64_saturated(stats.ins)),
+        max_fee: Some(fee_fields.maxfee),
+        max_fee_rate: Some(fee_fields.maxfeerate),
+        max_tx_size: Some(i64_saturated(stats.maxtxsize)),
+        median_fee: Some(fee_fields.medianfee),
+        median_time: Some(i64_saturated(u64::from(mediantime))),
+        median_tx_size: Some(i64_saturated(stats.mediantxsize)),
+        minimum_fee: Some(fee_fields.minfee),
+        minimum_fee_rate: Some(fee_fields.minfeerate),
+        minimum_tx_size: Some(i64_saturated(stats.mintxsize)),
+        outputs: Some(i64_saturated(stats.outs)),
+        subsidy: Some(subsidy_sat),
+        segwit_total_size: Some(i64_saturated(stats.swtotal_size)),
+        segwit_total_weight: Some(stats.swtotal_weight),
+        segwit_txs: Some(i64_saturated(stats.swtxs)),
+        time: Some(i64_saturated(u64::from(record.time))),
+        total_out: Some(stats.total_out),
+        total_size: Some(i64_saturated(stats.total_size)),
+        total_weight: Some(stats.total_weight),
+        total_fee: Some(fee_fields.totalfee),
+        txs: Some(i64_saturated(txs)),
+        utxo_increase: Some(i32_saturated(utxo_increase)),
+        utxo_size_increase: Some(i32_saturated(utxo_size_inc)),
+        utxo_increase_actual: None,
+        utxo_size_increase_actual: None,
+    })
+}
+
+struct BlockTxAggregate {
+    ins: u64,
+    outs: u64,
+    total_out: u64,
+    total_size: u64,
+    total_weight: u64,
+    swtxs: u64,
+    swtotal_size: u64,
+    swtotal_weight: u64,
+    avgtxsize: u64,
+    maxtxsize: u64,
+    mintxsize: u64,
+    mediantxsize: u64,
+}
+
+fn aggregate_block_tx_stats(txs: &[Tx]) -> BlockTxAggregate {
     let mut total_out = 0_u64;
     let mut total_size = 0_u64;
     let mut total_weight = 0_u64;
@@ -579,7 +625,7 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let mut swtotal_size = 0_u64;
     let mut swtotal_weight = 0_u64;
     let mut tx_sizes = Vec::new();
-    for (index, tx) in block.txs.iter().enumerate() {
+    for (index, tx) in txs.iter().enumerate() {
         outs = outs.saturating_add(u64::try_from(tx.outputs.len()).unwrap_or(u64::MAX));
         if index == 0 {
             continue;
@@ -610,43 +656,21 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         let median = truncated_median(&mut tx_sizes);
         (avg, max, min, median)
     };
-    let utxo_increase = i64::try_from(outs)
-        .unwrap_or(i64::MAX)
-        .saturating_sub(i64::try_from(ins).unwrap_or(i64::MAX));
 
-    typed_to_sonic(&v31::GetBlockStats {
-        average_fee: Some(fee_fields.avgfee),
-        average_fee_rate: Some(fee_fields.avgfeerate),
-        average_tx_size: Some(i64_saturated(avgtxsize)),
-        block_hash: Some(block_hash.to_string()),
-        fee_rate_percentiles: Some(fee_fields.feerate_percentiles),
-        height: Some(i64::from(height)),
-        inputs: Some(i64_saturated(ins)),
-        max_fee: Some(fee_fields.maxfee),
-        max_fee_rate: Some(fee_fields.maxfeerate),
-        max_tx_size: Some(i64_saturated(maxtxsize)),
-        median_fee: Some(fee_fields.medianfee),
-        median_time: Some(i64_saturated(u64::from(mediantime))),
-        median_tx_size: Some(i64_saturated(mediantxsize)),
-        minimum_fee: Some(fee_fields.minfee),
-        minimum_fee_rate: Some(fee_fields.minfeerate),
-        minimum_tx_size: Some(i64_saturated(mintxsize)),
-        outputs: Some(i64_saturated(outs)),
-        subsidy: Some(subsidy_sat),
-        segwit_total_size: Some(i64_saturated(swtotal_size)),
-        segwit_total_weight: Some(swtotal_weight),
-        segwit_txs: Some(i64_saturated(swtxs)),
-        time: Some(i64_saturated(u64::from(record.time))),
-        total_out: Some(total_out),
-        total_size: Some(i64_saturated(total_size)),
-        total_weight: Some(total_weight),
-        total_fee: Some(fee_fields.totalfee),
-        txs: Some(i64_saturated(txs)),
-        utxo_increase: Some(i32_saturated(utxo_increase)),
-        utxo_size_increase: Some(i32_saturated(utxo_size_inc)),
-        utxo_increase_actual: None,
-        utxo_size_increase_actual: None,
-    })
+    BlockTxAggregate {
+        ins,
+        outs,
+        total_out,
+        total_size,
+        total_weight,
+        swtxs,
+        swtotal_size,
+        swtotal_weight,
+        avgtxsize,
+        maxtxsize,
+        mintxsize,
+        mediantxsize,
+    }
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -801,7 +825,6 @@ fn compute_fee_fields(ctx: &Context, block: &Block) -> Result<FeeFields, TxQuery
     })
 }
 
-/// Core's `PER_UTXO_OVERHEAD`: serialized outpoint plus creation height.
 const PER_UTXO_OVERHEAD: u64 = 36 + 4;
 
 fn output_utxo_size(output: &TxOut) -> u64 {
@@ -1000,7 +1023,15 @@ pub(crate) fn verifychain(
     typed_to_sonic(&v31::VerifyChain(verified))
 }
 
-pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+struct TxOutSetScan {
+    stats: bitcoin_rs_utxo::stats::CoinStats,
+    txouts: usize,
+    transactions: usize,
+    set_hash: Option<(&'static str, String)>,
+    disk_size: u64,
+}
+
+fn parse_txoutsetinfo_params(params: &Value) -> Result<&str, RpcError> {
     let array = if params.is_null() {
         None
     } else {
@@ -1028,54 +1059,101 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
             "Querying specific block heights requires coinstatsindex".to_owned(),
         ));
     }
+    Ok(hash_type)
+}
+
+fn compute_txoutset_hash(
+    stable: &bitcoin_rs_utxo::UtxoSetView<'_>,
+    stats: &bitcoin_rs_utxo::stats::CoinStats,
+    hash_type: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<(&'static str, String)>, RpcError> {
+    match hash_type {
+        "hash_serialized_3" => {
+            let hash = stable
+                .hash_serialized_3_cancellable(cancelled)
+                .map_err(txoutset_walk_error)?;
+            Ok(Some(("hash_serialized_3", hash.to_string_be())))
+        }
+        "muhash" => Ok(Some((
+            "muhash",
+            stats.muhash.finalize_hash().to_string_be(),
+        ))),
+        "none" => Ok(None),
+        _ => Err(RpcError::InvalidParams(
+            "hash_type must be one of: hash_serialized_3, muhash, none",
+        )),
+    }
+}
+
+fn txoutset_walk_error(error: bitcoin_rs_utxo::UtxoError) -> RpcError {
+    match error {
+        bitcoin_rs_utxo::UtxoError::Cancelled => {
+            RpcError::Misc("gettxoutsetinfo interrupted".to_owned())
+        }
+        error => RpcError::Internal(error.to_string()),
+    }
+}
+
+fn scan_txoutset_view(
+    ctx: &Context,
+    view: &AppliedView,
+    hash_type: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<TxOutSetScan, RpcError> {
+    if cancelled() {
+        return Err(RpcError::Misc("gettxoutsetinfo interrupted".to_owned()));
+    }
     let want_muhash = hash_type == "muhash";
-    let scan = |view: &AppliedView| {
-        ctx.chain.utxo.with_stable_view(|stable| {
-            let stats = bitcoin_rs_utxo::stats::scan_coin_stats(stable, view.height(), want_muhash)
-                .map_err(|err| RpcError::Internal(err.to_string()))?;
-            let set_hash = match hash_type {
-                "hash_serialized_3" => Some((
-                    "hash_serialized_3",
-                    stable
-                        .hash_serialized_3()
-                        .map_err(|err| RpcError::Internal(err.to_string()))?
-                        .to_string_be(),
-                )),
-                "muhash" => Some(("muhash", stats.muhash.finalize_hash().to_string_be())),
-                "none" => None,
-                _ => {
-                    return Err(RpcError::InvalidParams(
-                        "hash_type must be one of: hash_serialized_3, muhash, none",
-                    ));
-                }
-            };
-            Ok::<_, RpcError>((
-                stats,
-                stable.len(),
-                stable.record_count(),
-                set_hash,
-                u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX),
-            ))
+    ctx.chain.utxo.with_stable_view(|stable| {
+        let stats = bitcoin_rs_utxo::stats::scan_coin_stats_cancellable(
+            stable,
+            view.height(),
+            want_muhash,
+            cancelled,
+        )
+        .map_err(txoutset_walk_error)?;
+        let set_hash = compute_txoutset_hash(stable, &stats, hash_type, cancelled)?;
+        let disk_size = u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX);
+        Ok(TxOutSetScan {
+            stats,
+            txouts: stable.len(),
+            transactions: stable.record_count(),
+            set_hash,
+            disk_size,
         })
-    };
-    let mut contested = 0usize;
-    let (view, (stats, txouts, transactions, set_hash, disk_size)) = loop {
+    })
+}
+
+fn execute_txoutset_scan(
+    ctx: &Context,
+    hash_type: &str,
+    permit: &bitcoin_rs_utxo::scan::UtxoScanPermit<'_>,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<(AppliedView, TxOutSetScan), RpcError> {
+    let cancelled = || permit.aborted() || cancellation.is_triggered();
+    for _ in 0..4 {
         let view = ctx.chain.applied_view();
-        let scanned = scan(&view)?;
+        let scanned = scan_txoutset_view(ctx, &view, hash_type, &cancelled)?;
         if ctx.chain.applied_view().tip() == view.tip() {
-            break (view, scanned);
+            return Ok((view, scanned));
         }
-        contested += 1;
-        if contested == 4 {
-            break ctx.chain.with_stable_chainstate(|| {
-                let view = ctx.chain.applied_view();
-                scan(&view).map(|scanned| (view, scanned))
-            })?;
-        }
-    };
+    }
+    ctx.chain.with_stable_chainstate(|| {
+        let view = ctx.chain.applied_view();
+        let scanned = scan_txoutset_view(ctx, &view, hash_type, &cancelled)?;
+        Ok((view, scanned))
+    })
+}
+
+fn format_txoutsetinfo_response(
+    ctx: &Context,
+    view: &AppliedView,
+    scan: TxOutSetScan,
+) -> Result<Value, RpcError> {
     let applied_height = view.height();
     let best_block = view.hash(ctx.chain.chain_network);
-    let (hash_serialized_3, muhash) = set_hash.map_or((None, None), |(name, hash)| {
+    let (hash_serialized_3, muhash) = scan.set_hash.map_or((None, None), |(name, hash)| {
         if name == "hash_serialized_3" {
             (Some(hash), None)
         } else {
@@ -1085,21 +1163,35 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     typed_to_sonic_omitting_nulls(&v31::GetTxOutSetInfo {
         height: i64::from(applied_height),
         best_block: best_block.to_string_be(),
-        transactions: Some(i64_saturated(transactions)),
-        tx_outs: i64_saturated(u64::try_from(txouts).unwrap_or(u64::MAX)),
-        bogo_size: i64_saturated(stats.bogo_size),
+        transactions: Some(i64_saturated(scan.transactions)),
+        tx_outs: i64_saturated(u64::try_from(scan.txouts).unwrap_or(u64::MAX)),
+        bogo_size: i64_saturated(scan.stats.bogo_size),
         hash_serialized_3,
-        disk_size: Some(i64_saturated(disk_size)),
-        total_amount: sat_to_btc(stats.total_amount),
+        disk_size: Some(i64_saturated(scan.disk_size)),
+        total_amount: sat_to_btc(scan.stats.total_amount),
         muhash,
         total_unspendable_amount: None,
         block_info: None,
     })
 }
 
+pub(crate) fn gettxoutsetinfo(
+    ctx: &Arc<Context>,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
+    let hash_type = parse_txoutsetinfo_params(params)?;
+    let scan_permit = ctx.chain.utxo.reserve_scan().map_err(|error| match error {
+        bitcoin_rs_utxo::scan::UtxoScanError::InProgress => {
+            RpcError::InvalidParameter("a UTXO-wide scan is already running".to_owned())
+        }
+        error => RpcError::Internal(error.to_string()),
+    })?;
+    let (view, scan) = execute_txoutset_scan(ctx, hash_type, &scan_permit, cancellation)?;
+    format_txoutsetinfo_response(ctx, &view, scan)
+}
+
 pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, &["blockhash", "filtertype"])?;
-    let params = bound.as_ref();
     let hash =
         parse_hash(required_str(params, 0, "block hash is required")?).map_err(
             |error| match error {
@@ -1200,7 +1292,6 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     typed_to_sonic(&v31::GetIndexInfo(selected))
 }
 
-/// bitcoin-rs extension `getcapabilities`.
 pub(crate) fn getcapabilities(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let snapshot = bitcoin_rs_index::txindex_snapshot(ctx.indexes.derived_index_status.as_deref());
@@ -1217,8 +1308,7 @@ pub(crate) fn scantxoutset(
     params: &Value,
     cancellation: &bitcoin_rs_chain::LatchReader,
 ) -> Result<Value, RpcError> {
-    let params = super::bind_named_params(params, &["action", "scanobjects"])?;
-    let (action, objects) = scan_arguments(&params)?;
+    let (action, objects) = scan_arguments(params)?;
     match action {
         "start" => {
             let permit = ctx
@@ -1558,11 +1648,22 @@ fn getblock_verbosity(params: &Value) -> Result<u64, RpcError> {
     if value.is_null() {
         return Ok(1);
     }
-    if let Some(verbosity) = value.as_u64() {
-        return Ok(verbosity);
-    }
     if let Some(verbose) = value.as_bool() {
         return Ok(u64::from(verbose));
+    }
+    if let Some(verbosity) = value.as_i64() {
+        let Ok(verbosity) = i32::try_from(verbosity) else {
+            return Err(RpcError::Misc("JSON integer out of range".to_owned()));
+        };
+        return Ok(match verbosity {
+            ..=0 => 0,
+            1 => 1,
+            2 => 2,
+            _ => 3,
+        });
+    }
+    if value.is_number() {
+        return Err(RpcError::Misc("JSON integer out of range".to_owned()));
     }
     Err(RpcError::InvalidType(
         "verbosity must be number or boolean".to_owned(),
@@ -1573,8 +1674,6 @@ fn parse_hash(value: &str) -> Result<Hash256, RpcError> {
     Hash256::from_str(value).map_err(|_| RpcError::InvalidParams("hash must be 64 hex characters"))
 }
 
-/// The block's depth in the **active chain**, or `-1` when it is not in the
-/// active chain at all.
 pub(super) fn confirmations(ctx: &Context, view: &AppliedView, hash: Hash256, height: u32) -> i64 {
     let Some(tip) = view.tip() else {
         return -1;
@@ -1602,42 +1701,45 @@ fn block_verbose_typed(
     let header = decode_header(record)?;
     let hash = Hash256::from(record.hash);
     let view = ctx.chain.applied_view();
-    let block_confirmations = confirmations(ctx, &view, hash, record.height);
-    let mediantime = ctx.chain.median_time_past_for_hash(hash).unwrap_or(0);
-    let chainwork_hex = ctx
-        .chain
-        .chain_work_hex_for_hash(hash)
-        .unwrap_or_else(|| "00".to_owned());
-    let next_block_hash = (block_confirmations > 0)
-        .then(|| {
-            record
-                .height
-                .checked_add(1)
-                .and_then(|next| ctx.chain.active_hash_in_view(&view, next))
-        })
-        .flatten()
-        .map(BlockHash::from);
+    let facts = BlockHeaderRenderFacts {
+        confirmations: confirmations(ctx, &view, hash, record.height),
+        mediantime: ctx.chain.median_time_past_for_hash(hash).unwrap_or(0),
+        chainwork_hex: ctx
+            .chain
+            .chain_work_hex_for_hash(hash)
+            .unwrap_or_else(|| "00".to_owned()),
+        next_block_hash: (confirmations(ctx, &view, hash, record.height) > 0)
+            .then(|| {
+                record
+                    .height
+                    .checked_add(1)
+                    .and_then(|next| ctx.chain.active_hash_in_view(&view, next))
+            })
+            .flatten()
+            .map(BlockHash::from),
+    };
     if !include_block_fields {
-        return render_block_header_verbose(
-            ctx,
-            record,
-            &header,
-            BlockHeaderRenderFacts {
-                confirmations: block_confirmations,
-                mediantime,
-                chainwork_hex,
-                next_block_hash,
-            },
-        );
+        return render_block_header_verbose(ctx, record, &header, facts);
     }
-    let (block, spent) = block_with_spends(ctx, record, &view, verbosity)?;
+    render_block_body_verbose(ctx, record, &header, &view, facts, verbosity)
+}
+
+fn render_block_body_verbose(
+    ctx: &Context,
+    record: &BlockRecord,
+    header: &Header,
+    view: &AppliedView,
+    facts: BlockHeaderRenderFacts,
+    verbosity: u64,
+) -> Result<Value, RpcError> {
+    let (block, spent) = block_with_spends(ctx, record, view, verbosity)?;
     let coinbase_tx = convert::coinbase_transaction_typed(block.txs.first())
         .ok_or_else(|| RpcError::Internal("block has no coinbase transaction".to_owned()))?;
     let coinbase_version = u32::from_le_bytes(coinbase_tx.version.to_le_bytes());
     let mut value = if verbosity < 2 {
         typed_to_sonic(&v31::GetBlockVerboseOne {
             hash: record.hash.to_string(),
-            confirmations: block_confirmations,
+            confirmations: facts.confirmations,
             size: i64_saturated(block.total_size()),
             stripped_size: Some(i64_saturated(block.stripped_size())),
             weight: block.weight(),
@@ -1648,20 +1750,20 @@ fn block_verbose_typed(
             merkle_root: header.merkle_root.to_string_be(),
             tx: block.txs.iter().map(|tx| tx.txid().to_string()).collect(),
             time: i64::from(header.time),
-            median_time: Some(i64_saturated(u64::from(mediantime))),
+            median_time: Some(i64_saturated(u64::from(facts.mediantime))),
             nonce: i64::from(header.nonce),
             bits: format!("{:08x}", header.bits),
             target: compact_target_hex(header.bits),
             difficulty: ctx.chain.difficulty_for_bits(header.bits),
-            chain_work: chainwork_hex,
+            chain_work: facts.chainwork_hex,
             n_tx: i64_saturated(record.tx_count),
             previous_block_hash: Some(header.prev_blockhash.to_string()),
-            next_block_hash: next_block_hash.map(|hash| hash.to_string()),
+            next_block_hash: facts.next_block_hash.map(|hash| hash.to_string()),
         })?
     } else {
         let base = v31::GetBlockVerboseTwo {
             hash: record.hash.to_string(),
-            confirmations: block_confirmations,
+            confirmations: facts.confirmations,
             size: i64_saturated(block.total_size()),
             stripped_size: Some(i64_saturated(block.stripped_size())),
             weight: block.weight(),
@@ -1672,15 +1774,15 @@ fn block_verbose_typed(
             merkle_root: header.merkle_root.to_string_be(),
             tx: Vec::new(),
             time: i64::from(header.time),
-            median_time: Some(i64_saturated(u64::from(mediantime))),
+            median_time: Some(i64_saturated(u64::from(facts.mediantime))),
             nonce: i64::from(header.nonce),
             bits: format!("{:08x}", header.bits),
             target: compact_target_hex(header.bits),
             difficulty: ctx.chain.difficulty_for_bits(header.bits),
-            chain_work: chainwork_hex,
+            chain_work: facts.chainwork_hex,
             n_tx: i64_saturated(block.txs.len()),
             previous_block_hash: (record.height > 0).then(|| header.prev_blockhash.to_string()),
-            next_block_hash: next_block_hash.map(|hash| hash.to_string()),
+            next_block_hash: facts.next_block_hash.map(|hash| hash.to_string()),
         };
         render_detailed_block(
             &base,
@@ -2240,6 +2342,7 @@ mod dumptxoutset_tests {
         }
     }
 
+    // API-33
     #[test]
     fn positional_and_named_arguments_delegate_and_report_the_core_fields() {
         for params in [
@@ -2266,6 +2369,7 @@ mod dumptxoutset_tests {
         }
     }
 
+    // API-33
     #[test]
     fn only_the_latest_type_is_served_and_refusals_never_reach_the_control() {
         for params in [

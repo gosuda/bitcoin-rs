@@ -1,5 +1,3 @@
-//! Core-compatible projection of concrete service status.
-
 use serde::{Deserialize, Serialize};
 
 pub(crate) const TXINDEX_CAPABILITY: &str = "txindex";
@@ -50,8 +48,6 @@ impl CapabilityState {
         Self::ShutdownAbandoned,
     ];
 
-    /// The `getcapabilities` wire spelling of this state: the serde tag, so a
-    /// metrics label and the RPC row for one poll are the same token.
     #[must_use]
     pub const fn wire_name(&self) -> &'static str {
         match self {
@@ -120,6 +116,7 @@ mod tests {
         }
     }
 
+    // IDX-02
     #[test]
     fn missing_source_is_the_disabled_txindex_row() {
         let snapshot = txindex_snapshot(None);
@@ -156,6 +153,7 @@ mod tests {
         );
     }
 
+    // IDX-02
     #[test]
     fn attached_source_is_the_worker_row() {
         let snapshot = txindex_snapshot(Some(&ReadyEnabled));

@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(feature = "zmq")]
+type TestResult<T = ()> = std::result::Result<T, crate::test_error::TestError>;
+
 #[test]
 fn zmq_topic_names_match_the_compatibility_manifest() {
     let published: std::collections::BTreeSet<&str> = [
@@ -130,7 +133,7 @@ fn wired_sequence_gateway() -> (
 
 #[cfg(feature = "zmq")]
 #[test]
-fn admitted_unconfirmed_rawtx_is_exact_and_not_repeated() -> anyhow::Result<()> {
+fn admitted_unconfirmed_rawtx_is_exact_and_not_repeated() -> TestResult {
     struct EmptyChain;
     impl bitcoin_rs_mempool::AdmissionChain for EmptyChain {
         fn snapshot(
@@ -162,7 +165,7 @@ fn admitted_unconfirmed_rawtx_is_exact_and_not_repeated() -> anyhow::Result<()> 
             subscriber.recv_multipart(0)?;
             break;
         }
-        anyhow::ensure!(
+        assert!(
             std::time::Instant::now() < deadline,
             "ZMQ subscription timed out"
         );
@@ -326,6 +329,7 @@ fn mixed_package_changes_publish_only_their_indexed_admitted_bodies() {
     );
 }
 
+// API-04
 #[test]
 fn admission_publishes_one_a_frame_with_core_payload_bytes() {
     use bitcoin_rs_mempool::AdmissionOrigin;
@@ -369,6 +373,7 @@ fn policy_eviction_publishes_r_frames_in_commit_order() {
     );
 }
 
+// API-04, MPL-03
 #[test]
 fn block_inclusion_suppresses_r_frames() {
     use bitcoin_rs_mempool::AdmissionOrigin;
@@ -399,7 +404,7 @@ fn policy_eviction_publishes_r_frames_with_contiguous_sequences() {
     let gateway = MempoolGateway::new(
         std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 150,
+            max_total_bytes: bitcoin_rs_mempool::entry_memory_usage(&sequence_tx(5)) * 3 / 2,
             ..MempoolLimits::default()
         }))),
         Some((observer, bitcoin_rs_mempool::BodyInterest::Bodies)),
@@ -426,6 +431,7 @@ fn policy_eviction_publishes_r_frames_with_contiguous_sequences() {
     );
 }
 
+// EMB-08
 #[test]
 fn composite_observer_fans_out_to_sequence_then_mining_wake() {
     use bitcoin_rs_mempool::{

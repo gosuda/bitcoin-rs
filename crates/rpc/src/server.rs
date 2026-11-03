@@ -1,19 +1,23 @@
+#![cfg_attr(not(feature = "test-seam"), allow(unreachable_pub))]
+
 use alloc::sync::Arc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, IoSlice, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::auth::Auth;
 use crate::error::RpcError;
 use crate::handlers::Handler;
 
 const MAX_HEADER_BYTES: usize = 16 * 1_024;
+const MAX_HEADER_COUNT: usize = 100;
 const RESERVED_POOL_DIVISOR: usize = 4;
 const REQUEST_HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -27,7 +31,9 @@ const MAX_DRAIN_BYTES: usize = 64 * 1_024;
 const DRAIN_BUDGET: Duration = Duration::from_secs(1);
 
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
-const ACCEPT_SHUTDOWN_CHECK: Duration = Duration::from_millis(20);
+const CONNECTION_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+const LISTENER_TOKEN: mio::Token = mio::Token(0);
+const WAKER_TOKEN: mio::Token = mio::Token(1);
 
 const PUBLIC_ESPLORA_METHODS: &[&str] = &["GET", "POST", "OPTIONS"];
 
@@ -118,9 +124,39 @@ impl RpcServer {
         self,
         shutdown: &bitcoin_rs_chain::LatchReader,
         surface: RpcSurface,
+        accept: impl FnMut(&mio::net::TcpListener) -> io::Result<(mio::net::TcpStream, SocketAddr)>,
+    ) -> io::Result<()> {
+        self.serve_accept_loop_with_connections(
+            shutdown,
+            surface,
+            accept,
+            Arc::new(ConnectionTracker::default()),
+        )
+    }
+
+    #[cfg(test)]
+    fn serve_accept_loop_observed(
+        self,
+        shutdown: &bitcoin_rs_chain::LatchReader,
+        surface: RpcSurface,
+        accept: impl FnMut(&mio::net::TcpListener) -> io::Result<(mio::net::TcpStream, SocketAddr)>,
+        connections: Arc<ConnectionTracker>,
+    ) -> io::Result<()> {
+        self.serve_accept_loop_with_connections(shutdown, surface, accept, connections)
+    }
+
+    fn serve_accept_loop_with_connections(
+        self,
+        shutdown: &bitcoin_rs_chain::LatchReader,
+        surface: RpcSurface,
         mut accept: impl FnMut(&mio::net::TcpListener) -> io::Result<(mio::net::TcpStream, SocketAddr)>,
+        connections: Arc<ConnectionTracker>,
     ) -> io::Result<()> {
         let _stop = RpcStop(Arc::clone(&self.handler));
+        let handler_clone = Arc::clone(&self.handler);
+        let _handler_guard = shutdown.on_cancel(move || {
+            handler_clone.stop();
+        });
         self.handler
             .configure_blocking_admission(per_source_limit(self.max_connections));
         let mut readiness = mio::Poll::new()?;
@@ -129,52 +165,73 @@ impl RpcServer {
         let mut listener = mio::net::TcpListener::from_std(listener);
         readiness
             .registry()
-            .register(&mut listener, mio::Token(0), mio::Interest::READABLE)?;
-        let mut events = mio::Events::with_capacity(1);
-        let active = Arc::new(Mutex::new(ActiveConnections::default()));
+            .register(&mut listener, LISTENER_TOKEN, mio::Interest::READABLE)?;
+        let waker = Arc::new(mio::Waker::new(readiness.registry(), WAKER_TOKEN)?);
+        let waker_cancel = Arc::clone(&waker);
+        let _cancel_guard = shutdown.on_cancel(move || {
+            let _ = waker_cancel.wake();
+        });
+        let connection_waker = Arc::clone(&connections);
+        let _connection_guard = shutdown.on_cancel(move || {
+            connection_waker.wake_readers();
+        });
+        let mut events = mio::Events::with_capacity(2);
+        let context = AcceptContext {
+            active: Arc::new(Mutex::new(ActiveConnections::default())),
+            connections: Arc::clone(&connections),
+            shutdown: shutdown.clone(),
+            surface,
+        };
+        let mut outcome = Ok(());
         while !shutdown.is_triggered() {
             match accept(&listener) {
                 Ok((stream, addr)) => {
                     let stream: TcpStream = stream.into();
                     if let Err(error) = stream
                         .set_nonblocking(false)
-                        .and_then(|()| self.handle_accept(&active, stream, addr.ip(), surface))
+                        .and_then(|()| self.handle_accept(&context, stream, addr.ip()))
                     {
                         debug!(%error, "rpc connection setup failed");
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    while !shutdown.is_triggered() {
-                        match readiness.poll(&mut events, Some(ACCEPT_SHUTDOWN_CHECK)) {
-                            Ok(()) if !events.is_empty() => break,
-                            Ok(()) => {}
-                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                            Err(error) => return Err(error),
-                        }
+                    if let Err(error) =
+                        wait_for_accept_readiness(shutdown, &mut readiness, &mut events)
+                    {
+                        outcome = Err(error);
+                        break;
                     }
                 }
                 Err(error) => match error.kind() {
                     io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted => {
                         debug!(%error, "rpc accept interrupted or connection aborted");
                     }
-                    io::ErrorKind::InvalidInput | io::ErrorKind::NotConnected => return Err(error),
+                    io::ErrorKind::InvalidInput | io::ErrorKind::NotConnected => {
+                        outcome = Err(error);
+                        break;
+                    }
                     _ => {
                         warn!(%error, "rpc accept failed; retrying after backoff");
-                        thread::sleep(ACCEPT_ERROR_BACKOFF);
+                        if !wait_accept_backoff(shutdown) {
+                            break;
+                        }
                     }
                 },
             }
         }
-        Ok(())
+        connections.wake_readers();
+        drain_connections(&connections);
+        outcome
     }
 
     fn handle_accept(
         &self,
-        active: &Arc<Mutex<ActiveConnections>>,
+        context: &AcceptContext,
         stream: TcpStream,
         peer: IpAddr,
-        surface: RpcSurface,
     ) -> io::Result<()> {
+        context.connections.reap_finished();
+        let surface = context.surface;
         let mut stream = match prepare_http_socket(stream) {
             Ok(stream) => stream,
             Err(error) => {
@@ -182,7 +239,7 @@ impl RpcServer {
                 return Ok(());
             }
         };
-        let should_accept = active.lock().admit(peer, self.max_connections);
+        let should_accept = context.active.lock().admit(peer, self.max_connections);
         if !should_accept {
             metrics::counter!("rpc.connections.rejected_total", "surface" => surface.label())
                 .increment(1);
@@ -192,7 +249,7 @@ impl RpcServer {
         }
 
         let permit = ConnectionPermit {
-            active: Arc::clone(active),
+            active: Arc::clone(&context.active),
             peer,
             surface,
         };
@@ -201,17 +258,60 @@ impl RpcServer {
         let handler = Arc::clone(&self.handler);
         let rest_enabled = self.rest_enabled;
         let idle_timeout = self.idle_timeout;
-        thread::Builder::new()
+        let id = context.connections.next_id();
+        context.connections.admit(id, stream.try_clone()?);
+        if context.shutdown.is_triggered() {
+            context.connections.wake_readers();
+        }
+        let tracker = Arc::clone(&context.connections);
+        let spawned = thread::Builder::new()
             .name("rpc-connection".to_owned())
+            .stack_size(RPC_CONNECTION_STACK_BYTES)
             .spawn(move || {
+                let _slot = ConnectionSlot { tracker, id };
                 let _permit = permit;
                 if let Err(error) =
                     serve_connection(stream, &auth, &handler, rest_enabled, idle_timeout, surface)
                 {
                     debug!(%error, "rpc connection closed with error");
                 }
-            })?;
-        Ok(())
+            });
+        match spawned {
+            Ok(handle) => {
+                context.connections.record_thread(handle);
+                Ok(())
+            }
+            Err(error) => {
+                context.connections.release(id);
+                Err(error)
+            }
+        }
+    }
+}
+
+fn wait_for_accept_readiness(
+    shutdown: &bitcoin_rs_chain::LatchReader,
+    readiness: &mut mio::Poll,
+    events: &mut mio::Events,
+) -> io::Result<()> {
+    while !shutdown.is_triggered() {
+        match readiness.poll(events, None) {
+            Ok(()) if !events.is_empty() => break,
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn wait_accept_backoff(shutdown: &bitcoin_rs_chain::LatchReader) -> bool {
+    if shutdown.is_triggered() {
+        return false;
+    }
+    crossbeam_channel::select! {
+        recv(crossbeam_channel::after(ACCEPT_ERROR_BACKOFF)) -> _ => true,
+        recv(shutdown.closed()) -> _ => false,
     }
 }
 
@@ -263,6 +363,140 @@ impl Drop for ConnectionPermit {
     fn drop(&mut self) {
         self.active.lock().release(self.peer);
         metrics::gauge!("rpc.connections.active", "surface" => self.surface.label()).decrement(1.0);
+    }
+}
+
+struct AcceptContext {
+    active: Arc<Mutex<ActiveConnections>>,
+    connections: Arc<ConnectionTracker>,
+    shutdown: bitcoin_rs_chain::LatchReader,
+    surface: RpcSurface,
+}
+
+#[derive(Default)]
+struct LiveConnections {
+    ids: HashSet<u64>,
+}
+
+#[derive(Default)]
+struct ConnectionTracker {
+    streams: Mutex<HashMap<u64, TcpStream>>,
+    threads: Mutex<Vec<thread::JoinHandle<()>>>,
+    live: Mutex<LiveConnections>,
+    drained: Condvar,
+    next_id: AtomicU64,
+}
+
+impl ConnectionTracker {
+    fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn admit(&self, id: u64, stream: TcpStream) {
+        self.streams.lock().insert(id, stream);
+        self.live.lock().ids.insert(id);
+    }
+
+    fn release(&self, id: u64) {
+        self.streams.lock().remove(&id);
+        let mut live = self.live.lock();
+        if live.ids.remove(&id) && live.ids.is_empty() {
+            self.drained.notify_all();
+        }
+    }
+
+    fn record_thread(&self, handle: thread::JoinHandle<()>) {
+        self.threads.lock().push(handle);
+    }
+
+    fn reap_finished(&self) {
+        let mut finished = Vec::new();
+        {
+            let mut threads = self.threads.lock();
+            let mut index = 0;
+            while index < threads.len() {
+                if threads[index].is_finished() {
+                    finished.push(threads.swap_remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+        }
+        for handle in finished {
+            if handle.join().is_err() {
+                error!("rpc connection panicked");
+            }
+        }
+    }
+
+    fn wake_readers(&self) {
+        for stream in self.streams.lock().values() {
+            let _ = stream.shutdown(std::net::Shutdown::Read);
+        }
+    }
+
+    fn wait_for_drain(&self, deadline: Instant) -> bool {
+        let mut live = self.live.lock();
+        while !live.ids.is_empty() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            if self.drained.wait_for(&mut live, remaining).timed_out() && !live.ids.is_empty() {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn live_count(&self) -> usize {
+        self.live.lock().ids.len()
+    }
+
+    fn take_threads(&self) -> Vec<thread::JoinHandle<()>> {
+        std::mem::take(&mut *self.threads.lock())
+    }
+}
+
+#[cfg(test)]
+impl ConnectionTracker {
+    fn retained_threads(&self) -> usize {
+        self.threads.lock().len()
+    }
+
+    fn retained_threads_settled(&self) -> bool {
+        self.threads
+            .lock()
+            .iter()
+            .all(|handle| handle.is_finished())
+    }
+}
+
+struct ConnectionSlot {
+    tracker: Arc<ConnectionTracker>,
+    id: u64,
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.tracker.release(self.id);
+    }
+}
+
+fn drain_connections(connections: &ConnectionTracker) {
+    let deadline = Instant::now() + CONNECTION_DRAIN_DEADLINE;
+    let all_drained = connections.wait_for_drain(deadline);
+    if !all_drained {
+        warn!(
+            pending = connections.live_count(),
+            "rpc connections exceeded the drain deadline"
+        );
+    }
+    connections.reap_finished();
+    for handle in connections.take_threads() {
+        if (all_drained || handle.is_finished()) && handle.join().is_err() {
+            error!("rpc connection panicked");
+        }
     }
 }
 
@@ -349,39 +583,22 @@ fn serve_connection(
     stream.set_write_timeout(Some(idle_timeout))?;
     let mut reader = BufReader::new(RequestDeadlineStream::new(stream, idle_timeout));
     loop {
-        if handler.is_stopping() {
+        reader.get_mut().reset_deadline(idle_timeout);
+        if reader.fill_buf()?.is_empty() {
             return Ok(());
         }
-        reader.get_mut().reset_deadline(idle_timeout);
-        let head = match read_request_head(&mut reader, REQUEST_HEAD_TIMEOUT) {
+        reader.get_mut().reset_deadline(REQUEST_HEAD_TIMEOUT);
+        let head = match read_request_head(&mut reader) {
             Ok(Some(head)) => head,
             Ok(None) => return Ok(()),
-            Err(RequestReadError::RestBodyTooLarge) => {
-                let response = if rest_enabled && surface != RpcSurface::Management {
-                    crate::rest::getutxos_body_too_large()
-                } else {
-                    crate::rest::not_found()
-                };
-                write_response(
+            Err(error) => {
+                return handle_read_error(
                     reader.get_mut().socket_mut(),
-                    &response,
-                    false,
-                    CorsPolicy::Disabled,
-                )?;
-                return Ok(());
-            }
-            Err(RequestReadError::Io(error)) => {
-                let rpc_error = RpcError::InvalidRequest("invalid request: malformed http request");
-                let response =
-                    JsonRpcVersion::Legacy.error_response(&rpc_error, &Value::new_null());
-                write_json(
-                    reader.get_mut().socket_mut(),
-                    400,
-                    "Bad Request",
-                    &response,
-                    false,
-                )?;
-                return Err(error);
+                    error,
+                    rest_enabled,
+                    surface,
+                    "invalid request: malformed http request",
+                );
             }
         };
         let route = classify(&head.method, &head.path);
@@ -397,34 +614,17 @@ fn serve_connection(
         if authenticate_json_rpc_head(auth, &mut reader, &head)? {
             return Ok(());
         }
-        let request = match read_request_body(&mut reader, REQUEST_BODY_TIMEOUT, head) {
+        reader.get_mut().reset_deadline(REQUEST_BODY_TIMEOUT);
+        let request = match read_request_body(&mut reader, head) {
             Ok(request) => request,
-            Err(RequestReadError::RestBodyTooLarge) => {
-                let response = if rest_enabled && surface != RpcSurface::Management {
-                    crate::rest::getutxos_body_too_large()
-                } else {
-                    crate::rest::not_found()
-                };
-                write_response(
+            Err(error) => {
+                return handle_read_error(
                     reader.get_mut().socket_mut(),
-                    &response,
-                    false,
-                    CorsPolicy::Disabled,
-                )?;
-                return Ok(());
-            }
-            Err(RequestReadError::Io(error)) => {
-                let rpc_error = RpcError::InvalidRequest("malformed http request");
-                let response =
-                    JsonRpcVersion::Legacy.error_response(&rpc_error, &Value::new_null());
-                write_json(
-                    reader.get_mut().socket_mut(),
-                    400,
-                    "Bad Request",
-                    &response,
-                    false,
-                )?;
-                return Err(error);
+                    error,
+                    rest_enabled,
+                    surface,
+                    "malformed http request",
+                );
             }
         };
         if handler.is_stopping() {
@@ -441,6 +641,32 @@ fn serve_connection(
         }
         if !keep_alive {
             return Ok(());
+        }
+    }
+}
+
+fn handle_read_error(
+    stream: &mut TcpStream,
+    error: RequestReadError,
+    rest_enabled: bool,
+    surface: RpcSurface,
+    malformed_msg: &'static str,
+) -> io::Result<()> {
+    match error {
+        RequestReadError::RestBodyTooLarge => {
+            let response = if rest_enabled && surface != RpcSurface::Management {
+                crate::rest::getutxos_body_too_large()
+            } else {
+                crate::rest::not_found()
+            };
+            write_response(stream, &response, false, CorsPolicy::Disabled)?;
+            Ok(())
+        }
+        RequestReadError::Io(err) => {
+            let rpc_error = RpcError::InvalidRequest(malformed_msg);
+            let response = JsonRpcVersion::Legacy.error_response(&rpc_error, &Value::new_null());
+            write_json(stream, 400, "Bad Request", &response, false)?;
+            Err(err)
         }
     }
 }
@@ -557,11 +783,33 @@ fn dispatch_http_request(
     Ok(false)
 }
 
-struct HttpRequest {
-    method: String,
-    path: String,
-    keep_alive: bool,
-    body: Vec<u8>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HttpRequest {
+    pub method: String,
+    pub path: String,
+    pub keep_alive: bool,
+    pub body: Vec<u8>,
+}
+
+const fn is_token_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 fn read_head_line(reader: &mut impl BufRead, remaining: usize) -> io::Result<(String, usize)> {
@@ -577,13 +825,21 @@ fn read_head_line(reader: &mut impl BufRead, remaining: usize) -> io::Result<(St
     Ok((line, read))
 }
 
+fn trim_header_value(value: &str) -> &str {
+    value.trim_matches(|byte: char| {
+        matches!(byte, ' ' | '\t' | '\n' | '\u{000b}' | '\u{000c}' | '\r')
+    })
+}
+
 fn read_headers(
-    reader: &mut BufReader<RequestDeadlineStream>,
+    reader: &mut impl BufRead,
     mut header_bytes: usize,
 ) -> io::Result<(usize, Option<usize>, Option<String>, bool)> {
     let mut content_length = None;
+    let mut content_length_text = None;
     let mut authorization = None;
     let mut keep_alive = false;
+    let mut header_count = 0;
     loop {
         let (line, read) = read_head_line(reader, MAX_HEADER_BYTES - header_bytes)?;
         if read == 0 {
@@ -596,23 +852,37 @@ fn read_headers(
         if line == "\r\n" {
             return Ok((header_bytes, content_length, authorization, keep_alive));
         }
+        header_count += 1;
+        if header_count > MAX_HEADER_COUNT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "too many headers",
+            ));
+        }
         let Some((name, value)) = line.trim_end_matches(['\r', '\n']).split_once(':') else {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid header"));
         };
-        let value = value.trim();
+        if name.is_empty() || !name.bytes().all(is_token_char) || value.contains('\0') {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid header"));
+        }
+        let value = trim_header_value(value);
         if name.eq_ignore_ascii_case("content-length") {
-            let parsed = value.parse::<usize>().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid content-length")
-            })?;
+            let Some(parsed) = crate::decimal::parse_ascii_decimal::<usize>(value) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid content-length",
+                ));
+            };
             if parsed > MAX_BODY_BYTES {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "body too large"));
             }
-            if content_length.is_some_and(|previous| previous != parsed) {
+            if content_length_text.is_some_and(|previous| previous != value) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "conflicting content-length",
                 ));
             }
+            content_length_text = Some(value.to_owned());
             content_length = Some(parsed);
         } else if name.eq_ignore_ascii_case("transfer-encoding") {
             return Err(io::Error::new(
@@ -627,33 +897,28 @@ fn read_headers(
     }
 }
 
-enum RequestReadError {
-    Io(io::Error),
+#[derive(Debug, thiserror::Error)]
+pub enum RequestReadError {
+    #[error("i/o error reading request: {0}")]
+    Io(#[from] io::Error),
+    #[error("rest getutxos body exceeds limit")]
     RestBodyTooLarge,
 }
 
-impl From<io::Error> for RequestReadError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
-    }
+pub(crate) struct RequestHead {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) authorization: Option<String>,
+    pub(crate) keep_alive: bool,
+    pub(crate) content_length: usize,
 }
 
-struct RequestHead {
-    method: String,
-    path: String,
-    authorization: Option<String>,
-    keep_alive: bool,
-    content_length: usize,
-}
-
-fn read_request_head(
-    reader: &mut BufReader<RequestDeadlineStream>,
-    head_timeout: Duration,
+pub(crate) fn read_request_head(
+    reader: &mut impl BufRead,
 ) -> Result<Option<RequestHead>, RequestReadError> {
     if reader.fill_buf()?.is_empty() {
         return Ok(None);
     }
-    reader.get_mut().reset_deadline(head_timeout);
     let (request_line, bytes) = read_head_line(reader, MAX_HEADER_BYTES)?;
     if bytes == 0 {
         return Ok(None);
@@ -663,35 +928,26 @@ fn read_request_head(
     }
 
     let request_target = request_line.trim_end_matches(['\r', '\n']);
-    let mut request_parts = request_target.split_whitespace();
+    let mut request_parts = request_target.split(' ');
     let Some(method) = request_parts.next() else {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request line").into());
     };
     let Some(path) = request_parts.next() else {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request line").into());
     };
-    if method.is_empty()
-        || !method.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
-    {
+    let Some(version) = request_parts.next() else {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request line").into());
+    };
+    if request_parts.next().is_some() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request line").into());
+    }
+    if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request version").into());
+    }
+    if path.is_empty() || path.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request target").into());
+    }
+    if method.is_empty() || !method.bytes().all(is_token_char) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request method").into());
     }
     let (_, content_length, authorization, keep_alive) = read_headers(reader, request_line.len())?;
@@ -720,12 +976,10 @@ fn read_request_head(
     }))
 }
 
-fn read_request_body(
-    reader: &mut BufReader<RequestDeadlineStream>,
-    body_timeout: Duration,
+pub(crate) fn read_request_body(
+    reader: &mut impl Read,
     head: RequestHead,
 ) -> Result<HttpRequest, RequestReadError> {
-    reader.get_mut().reset_deadline(body_timeout);
     let mut body = Vec::new();
     read_body(reader, head.content_length, &mut body)?;
     Ok(HttpRequest {
@@ -734,6 +988,16 @@ fn read_request_body(
         keep_alive: head.keep_alive,
         body,
     })
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+pub fn read_http_request(
+    reader: &mut impl BufRead,
+) -> Result<Option<HttpRequest>, RequestReadError> {
+    match read_request_head(reader)? {
+        Some(head) => read_request_body(reader, head).map(Some),
+        None => Ok(None),
+    }
 }
 
 const BODY_READ_CHUNK: usize = 8 * 1_024;
@@ -761,11 +1025,12 @@ fn read_body(reader: &mut impl Read, content_length: usize, body: &mut Vec<u8>) 
     Ok(())
 }
 
-struct JsonResponse {
-    close: bool,
-    status: u16,
-    reason: &'static str,
-    body: Option<Value>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JsonResponse {
+    pub close: bool,
+    pub status: u16,
+    pub reason: &'static str,
+    pub body: Option<Value>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -814,9 +1079,6 @@ impl JsonRpcVersion {
         }
     }
 
-    /// HTTP status for a failing call in this dialect.
-    /// `RPC_INVALID_REQUEST` maps to 400 and `RPC_METHOD_NOT_FOUND` to 404;
-    /// every other code keeps 500.
     const fn error_status_for(self, error: &RpcError) -> u16 {
         self.error_status_for_code(error.code())
     }
@@ -897,14 +1159,53 @@ impl CallResponse {
     }
 }
 
-fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
-    let body = match core::str::from_utf8(body) {
+const RPC_CONNECTION_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+const MAX_JSON_DEPTH: usize = 512;
+
+fn check_json_depth(body: &[u8]) -> Result<(), RpcError> {
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for &byte in body {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else {
+            match byte {
+                b'"' => in_string = true,
+                b'[' | b'{' => {
+                    depth = depth.saturating_add(1);
+                    if depth > MAX_JSON_DEPTH {
+                        return Err(RpcError::TopLevelParse("JSON nesting depth limit exceeded"));
+                    }
+                }
+                b']' | b'}' => {
+                    depth = depth.saturating_sub(1);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
+    let body_str = match core::str::from_utf8(body) {
         Ok(body) => body,
         Err(error) => {
             return legacy_error_response(&RpcError::from(error), &Value::new_null());
         }
     };
-    let request = match sonic_rs::from_str::<Value>(body) {
+    if let Err(error) = check_json_depth(body) {
+        return legacy_error_response(&error, &Value::new_null());
+    }
+    let request = match sonic_rs::from_str::<Value>(body_str) {
         Ok(request) => request,
         Err(error) => {
             return legacy_error_response(&RpcError::from(error), &Value::new_null());
@@ -914,8 +1215,20 @@ fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
     handle_decoded_json(handler, &request)
 }
 
+const MAX_BATCH_ELEMENTS: usize = 1_000;
+
+fn v2_notification(request: &Value) -> bool {
+    request.get("jsonrpc").and_then(Value::as_str) == Some("2.0") && request.get("id").is_none()
+}
+
 fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
     if let Some(requests) = request.as_array() {
+        if requests.len() > MAX_BATCH_ELEMENTS {
+            return legacy_error_response(
+                &RpcError::InvalidRequest("Batch size limit exceeded"),
+                &Value::new_null(),
+            );
+        }
         if requests.is_empty() {
             return JsonResponse {
                 close: false,
@@ -927,11 +1240,21 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
         let mut responses = Vec::with_capacity(requests.len());
         let mut worker_held = false;
         for request in requests {
+            let notification = v2_notification(request);
             let response = handle_single_json(handler, request);
-            worker_held |=
+            let blocked =
                 crate::registry::blocking_request(request) && !response.pre_reservation_refusal();
-            if let CallResponse::Reply { body, .. } = response {
-                responses.push(body);
+            match response {
+                CallResponse::Reply {
+                    body,
+                    envelope_error,
+                    ..
+                } if !(envelope_error && notification) => {
+                    worker_held |= blocked;
+                    responses.push(body);
+                }
+                CallResponse::Reply { .. } => {}
+                CallResponse::Notification { .. } => worker_held |= blocked,
             }
         }
         if responses.is_empty() {
@@ -948,7 +1271,6 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
             body: Some(json!(responses)),
         };
     }
-
     let close = crate::registry::blocking_request(request);
     if !request.is_object() {
         return legacy_error_response(
@@ -1021,7 +1343,7 @@ fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
     };
     let result = handler.dispatch(method, params);
     let pre_reservation_refusal = matches!(&result, Err(RpcError::ScanInProgress(_)));
-    if version == JsonRpcVersion::V2 && request.get("id").is_none() {
+    if v2_notification(request) {
         return CallResponse::Notification {
             pre_reservation_refusal,
         };

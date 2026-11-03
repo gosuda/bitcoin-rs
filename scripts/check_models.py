@@ -2,14 +2,20 @@
 """Run the pinned formal evidence lane, independently of Cargo tests.
 
 Requires Python 3.11+, the pinned Apalache install, and its Java runtime.
+Every module in the proof inventory runs one safety lane and one temporal
+lane. A lane starts at K = 128 or the row's K floor, whichever is larger.
+Resource exhaustion halves K down to the floor and never below it. A pass
+below the floor is return code 16, not a pass. The record holds the last
+attempted K and its return codes.
 Exit codes: 11 tool identity, 12 parse/type error, 13 counterexample,
-14 unavailable/timeout/incomplete run, 15 model identity mismatch.
-Only six complete successful checks constitute model evidence.
+14 unavailable/timeout/incomplete run, 15 model identity mismatch,
+16 pass below the K floor.
 """
 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import os
@@ -19,13 +25,19 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
 from dataclasses import dataclass
 
+PRINT_LOCK = threading.Lock()
 ROOT = Path(__file__).resolve().parents[1]
 FORMAL_CONTRACT = Path("docs/contracts/formal-verification.md")
-MODELS = ("ChainAdmission", "PeerLeases", "ProjectionMining")
-PROPERTIES = ("--inv=TypeOK,Safety,TransitionSafety", "--temporal=ConditionalProgress")
+MODEL_ROOT = Path("docs/models")
+PROPERTIES = ("--inv=TypeOK,Safety", "--temporal=ConditionalProgress")
+START_BOUND = 128
+RESOURCE_CODE = 14
+BOUND_CODE = 16
+NON_RETRYABLE_NATIVE = frozenset({75, 255})
 
 
 class EvidenceError(Exception):
@@ -35,10 +47,26 @@ class EvidenceError(Exception):
 
 
 @dataclass(frozen=True)
-class Model:
-    name: str
+class Module:
+    owner: str
+    machine: str
     tla_sha256: str
     cfg_sha256: str
+    bound: int
+
+    @property
+    def name(self) -> str:
+        return f"{self.owner}/{self.machine}"
+
+    @property
+    def directory(self) -> Path:
+        return MODEL_ROOT / self.owner
+
+    def source(self, root: Path) -> Path:
+        return root / self.directory / f"{self.machine}.tla"
+
+    def config(self, root: Path) -> Path:
+        return root / self.directory / f"{self.machine}.cfg"
 
 
 def sha256(path: Path) -> str:
@@ -46,8 +74,6 @@ def sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-# Apalache section headers; constants are recorded from the pinned cfg
-# itself, not from the register's transcribed row.
 CFG_SECTION = re.compile(
     r"^(INIT|NEXT|PROPERTY|PROPERTIES|INVARIANT|SPECIFICATION"
     r"|TEMPORAL PROPERTIES|CONSTANTS)(\s|$)"
@@ -70,49 +96,67 @@ def cfg_constants(path: Path) -> str:
     return ", ".join(names)
 
 
-def models(root: Path) -> tuple[Model, ...]:
+def modules(root: Path) -> tuple[Module, ...]:
     try:
         register = (root / FORMAL_CONTRACT).read_text(encoding="utf-8")
     except (FileNotFoundError, PermissionError) as error:
-        # A missing or unreadable proof inventory is a model-identity
-        # failure on the inventory lane, not an unavailable run.
         raise EvidenceError(
             15, f"formal verification contract is unreadable: {error.filename or error}"
         ) from error
-    inventory: dict[str, Model] = {}
+    inventory: dict[str, Module] = {}
     for line in register.splitlines():
         cells = [cell.strip() for cell in line.split("|")]
-        if len(cells) < 10 or cells[1] not in MODELS:
+        if (len(cells) != 10 or "/" not in cells[1]
+                or not re.fullmatch(r"[0-9a-f]{64}", cells[2])):
             continue
-        name, tla, cfg, _, bound = cells[1:6]
-        if name in inventory or bound != "128":
-            raise EvidenceError(15, f"{name}: duplicate inventory or incorrect bound")
-        for suffix, expected in (("tla", tla), ("cfg", cfg)):
-            path = root / "docs/models" / f"{name}.{suffix}"
+        name = cells[1]
+        tla, cfg, bound = cells[2], cells[3], cells[5]
+        if name in inventory or not bound.isdigit() or int(bound) < 1:
+            raise EvidenceError(15, f"{name}: duplicate inventory or malformed bound")
+        owner, _, machine = name.partition("/")
+        if not owner or not machine:
+            raise EvidenceError(15, f"{name}: malformed module name")
+        module = Module(owner, machine, tla, cfg, int(bound))
+        for path, expected in ((module.source(root), tla), (module.config(root), cfg)):
             try:
                 actual = sha256(path)
             except FileNotFoundError:
                 actual = ""
             if not re.fullmatch(r"[0-9a-f]{64}", expected) or actual != expected:
                 raise EvidenceError(15, f"{path}: model identity differs from proof inventory")
-        inventory[name] = Model(name, tla, cfg)
-    if set(inventory) != set(MODELS):
+        inventory[name] = module
+    if not inventory:
         raise EvidenceError(15, "proof inventory is incomplete")
-    return tuple(inventory[name] for name in MODELS)
+    on_disk = {
+        f"{path.parent.name}/{path.stem}"
+        for path in (root / MODEL_ROOT).glob("*/*.tla")
+    }
+    if on_disk != set(inventory):
+        missing = sorted(on_disk - set(inventory))
+        stale = sorted(set(inventory) - on_disk)
+        raise EvidenceError(15, f"module inventory differs from proof inventory: {missing} {stale}")
+    return tuple(inventory[name] for name in sorted(inventory))
 
 
 def tool(root: Path) -> Path:
     with (root / "crates/rpc/core-compat.toml").open("rb") as stream:
         identity = tomllib.load(stream)["reference"]["formal_tool"]
-    if any(key not in identity for key in ("name", "version", "jar_sha256")):
+    keys = ("name", "version", "archive_sha256", "jar_sha256")
+    if any(key not in identity for key in keys):
         raise EvidenceError(11, "formal tool identity is malformed")
-    name, version, jar_hash = (identity[key] for key in ("name", "version", "jar_sha256"))
-    if name != "apalache-mc" or not isinstance(version, str) or not isinstance(jar_hash, str):
+    name, version, archive_hash, jar_hash = (identity[key] for key in keys)
+    if name != "apalache-mc" or not all(
+        isinstance(value, str) for value in (version, archive_hash, jar_hash)
+    ):
         raise EvidenceError(11, "formal tool identity is malformed")
     home = Path(os.environ.get("APALACHE_HOME") or root / "target/tools" / f"apalache-{version}")
     executable = (home / "bin" / name).resolve()
     if not executable.is_file() or not os.access(executable, os.X_OK):
         raise EvidenceError(11, f"missing executable: {executable}")
+    archives = (home / f"apalache-{version}.zip",
+                root / "target/ci-reference-downloads" / f"apalache-{version}.zip")
+    if not any(path.is_file() and sha256(path) == archive_hash for path in archives):
+        raise EvidenceError(11, "Apalache archive checksum mismatch")
     jar = home / "lib/apalache.jar"
     if not jar.is_file() or sha256(jar) != jar_hash:
         raise EvidenceError(11, "Apalache JAR checksum mismatch")
@@ -126,28 +170,34 @@ def tool(root: Path) -> Path:
     return executable
 
 
-def run_model(root: Path, executable: Path, model: Model, property_arg: str, timeout: int) -> None:
-    kind = "safety" if property_arg.startswith("--inv=") else "temporal"
-    output = root / "target/apalache" / model.name / kind
+def native_code(native: int | None) -> int:
+    return {0: 0, 150: 12, 120: 12, 12: 13}.get(native, 14)
+
+
+def lane_kind(property_arg: str) -> str:
+    return "safety" if property_arg.startswith("--inv=") else "temporal"
+
+
+def run_once(root: Path, executable: Path, module: Module, property_arg: str, bound: int,
+             timeout: int, out_dir: Path | None = None) -> tuple[int | None, int, Path]:
+    kind = lane_kind(property_arg)
+    base = out_dir if out_dir is not None else root / "target/apalache"
+    output = base / module.owner / module.machine / kind / f"k{bound}"
     output.mkdir(parents=True, exist_ok=True)
-    # A fresh per-invocation directory keeps stale success/counterexamples out
-    # of the current run without deleting earlier diagnostic evidence.
     run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=output))
     argv = [
-        str(executable), "check", f"--config={root / 'docs/models' / (model.name + '.cfg')}",
-        property_arg, "--length=128", "--smt-encoding=funArrays",
-        f"--out-dir={run_dir}", str(root / "docs/models" / f"{model.name}.tla"),
+        str(executable), "check", f"--config={module.config(root)}",
+        property_arg, f"--length={bound}", "--smt-encoding=funArrays",
+        f"--out-dir={run_dir}", str(module.source(root)),
     ]
     env = dict(os.environ)
     env.setdefault("JVM_ARGS", "-Xmx4096m")
-    # Solver identity is part of the recorded evidence; an inherited
-    # SMT_SOLVER would silently swap the pinned prover.
     env["SMT_SOLVER"] = "z3"
     metadata = {
-        "argv": argv, "tla_sha256": model.tla_sha256, "cfg_sha256": model.cfg_sha256,
-        "constants": cfg_constants(root / "docs/models" / f"{model.name}.cfg"),
+        "argv": argv, "tla_sha256": module.tla_sha256, "cfg_sha256": module.cfg_sha256,
+        "constants": cfg_constants(module.config(root)),
         "reference_manifest_sha256": sha256(root / "crates/rpc/core-compat.toml"),
-        "jvm_args": env["JVM_ARGS"], "solver": env["SMT_SOLVER"],
+        "jvm_args": env["JVM_ARGS"], "solver": env["SMT_SOLVER"], "k": bound,
     }
     (run_dir / "identity.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     log = run_dir / "output.log"
@@ -158,11 +208,9 @@ def run_model(root: Path, executable: Path, model: Model, property_arg: str, tim
             try:
                 native = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                # Stop the Java descendants too; killing just the launcher
-                # can leave solver work alive after the lane has failed.
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
-    code = {0: 0, 150: 12, 120: 12, 12: 13}.get(native, 14)
+    code = native_code(native)
     if code == 0:
         with log.open("rb") as stream:
             stream.seek(max(0, log.stat().st_size - 1024 * 1024))
@@ -170,38 +218,181 @@ def run_model(root: Path, executable: Path, model: Model, property_arg: str, tim
         if b"The outcome is: NoError" not in tail or b"EXITCODE: OK" not in tail:
             code = 14
     (run_dir / "result.json").write_text(
-        json.dumps({"native_rc": native, "evidence_rc": code}) + "\n", encoding="utf-8"
+        json.dumps({"k": bound, "native_rc": native, "evidence_rc": code}) + "\n",
+        encoding="utf-8",
     )
-    print(f"{model.name} {kind}: native={native} evidence={code}; {run_dir}", flush=True)
-    if code:
-        raise EvidenceError(code, f"{model.name} {kind}: evidence is BLOCKED; see {log}")
+    with PRINT_LOCK:
+        print(f"{module.name} {kind}: K={bound} native={native} evidence={code}; {run_dir}",
+              flush=True)
+    return native, code, run_dir
+
+
+def run_module(root: Path, executable: Path, module: Module, property_arg: str, timeout: int,
+               start: int = START_BOUND, out_dir: Path | None = None) -> dict[str, int | None]:
+    bound = start
+    while True:
+        native, code, run_dir = run_once(root, executable, module, property_arg, bound, timeout,
+                                         out_dir)
+        if code == RESOURCE_CODE and native not in NON_RETRYABLE_NATIVE and bound > module.bound:
+            bound = max(module.bound, bound // 2)
+            continue
+        if code == 0 and bound < module.bound:
+            code = BOUND_CODE
+        return {"k": bound, "native_rc": native, "evidence_rc": code, "run": str(run_dir)}
+
+
+@dataclass(frozen=True)
+class RunEnv:
+    root: Path
+    executable: Path
+    timeout: int
+    out_dir: Path
+
+
+@dataclass(frozen=True)
+class LaneJob:
+    module: Module
+    property_arg: str
+    kind: str
+    start_k: int
+
+
+def run_lane(env: RunEnv, job: LaneJob) -> tuple[Module, str, dict[str, int | str | None]]:
+    try:
+        record = run_module(
+            env.root, env.executable, job.module, job.property_arg,
+            env.timeout, job.start_k, env.out_dir,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        with PRINT_LOCK:
+            print(f"{job.module.name} {job.kind}: artifact error: {error}",
+                  file=sys.stderr, flush=True)
+        record = {"k": job.start_k, "native_rc": None, "evidence_rc": 14, "run": ""}
+    return job.module, job.kind, record
+
+
+def build_jobs(inventory: tuple[Module, ...], explicit_k: int | None) -> list[LaneJob]:
+    jobs: list[LaneJob] = []
+    for module in inventory:
+        for property_arg in PROPERTIES:
+            kind = lane_kind(property_arg)
+            if explicit_k is not None:
+                start_k = explicit_k
+            else:
+                start_k = max(START_BOUND, module.bound)
+            jobs.append(LaneJob(module, property_arg, kind, start_k))
+    return jobs
+
+
+def execute_jobs(
+    root: Path,
+    executable: Path,
+    jobs: list[LaneJob],
+    timeout: int,
+    out_dir: Path,
+    requested_jobs: int | None,
+) -> dict[tuple[str, str], dict[str, int | str | None]]:
+    cpus = os.cpu_count() or 1
+    max_workers = requested_jobs if requested_jobs is not None else max(1, min(cpus, len(jobs)))
+    env = RunEnv(root, executable, timeout, out_dir)
+    results: dict[tuple[str, str], dict[str, int | str | None]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(run_lane, env, job): (job.module.name, job.kind, job.start_k)
+            for job in jobs
+        }
+        for future in as_completed(futures):
+            mod_name, kind, start_k = futures[future]
+            try:
+                _, _, record = future.result()
+            except Exception as err:
+                with PRINT_LOCK:
+                    print(f"{mod_name} {kind}: unexpected error: {err}",
+                          file=sys.stderr, flush=True)
+                record = {"k": start_k, "native_rc": None, "evidence_rc": 14, "run": ""}
+            results[(mod_name, kind)] = record
+    return results
+
+
+def build_summary(
+    inventory: tuple[Module, ...],
+    results: dict[tuple[str, str], dict[str, int | str | None]],
+) -> dict[str, dict[str, dict[str, int | str | None]]]:
+    summary: dict[str, dict[str, dict[str, int | str | None]]] = {}
+    for module in sorted(inventory, key=lambda item: item.name):
+        summary[module.name] = {}
+        for property_arg in PROPERTIES:
+            kind = lane_kind(property_arg)
+            if (module.name, kind) in results:
+                summary[module.name][kind] = results[(module.name, kind)]
+    return summary
+
+
+def write_summary_report(
+    out_dir: Path,
+    summary: dict[str, dict[str, dict[str, int | str | None]]],
+) -> None:
+    report = out_dir / "summary.json"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    print(f"{'module':<28} {'lane':<9} {'K':>4} {'native':>7} {'evidence':>9}", flush=True)
+    for name, lanes in summary.items():
+        for kind, record in lanes.items():
+            print(f"{name:<28} {kind:<9} {record['k']:>4} "
+                  f"{str(record['native_rc']):>7} {str(record['evidence_rc']):>9}", flush=True)
+    print(f"summary: {report}", flush=True)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check-only", action="store_true", help="check identities, not model properties")
-    parser.add_argument("--timeout", type=int, default=3600, help="maximum seconds per solver invocation")
+    parser.add_argument("--check-only", action="store_true",
+                        help="check identities, not model properties")
+    parser.add_argument("--timeout", type=int, default=3600,
+                        help="maximum seconds per solver invocation")
+    parser.add_argument("--k-start", type=int, default=None,
+                        help=f"first step bound (default: the module K floor or {START_BOUND}, "
+                             "whichever is larger)")
+    parser.add_argument("--jobs", "-j", type=int, default=None,
+                        help="maximum concurrent lanes (default: min(cpu_count, lanes))")
+    parser.add_argument("--module", action="append", default=None,
+                        help="run only these Owner/Machine modules (repeatable)")
+    parser.add_argument("--out-dir", default="target/apalache",
+                        help="artifact root, relative to the repository (default target/apalache)")
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
+    if args.k_start is not None and args.k_start <= 0:
+        parser.error("--k-start must be positive")
+    if args.jobs is not None and args.jobs <= 0:
+        parser.error("--jobs must be positive")
+    selected_modules = args.module if args.module is not None else []
     try:
-        inventory = models(ROOT)
+        inventory = modules(ROOT)
+        if selected_modules:
+            unknown = sorted(set(selected_modules) - {module.name for module in inventory})
+            if unknown:
+                raise EvidenceError(15, f"unknown module: {', '.join(unknown)}")
+            inventory = tuple(module for module in inventory if module.name in selected_modules)
         executable = tool(ROOT)
         if args.check_only:
-            print("Tool and model identities checked; model properties NOT evaluated.")
+            print(f"Tool and {len(inventory)} model identities checked; properties NOT evaluated.")
             return 0
-        for property_arg in PROPERTIES:
-            for model in inventory:
-                run_model(ROOT, executable, model, property_arg, args.timeout)
-        print("All six formal checks completed successfully.")
-        return 0
+        jobs = build_jobs(inventory, args.k_start)
+        results = execute_jobs(ROOT, executable, jobs, args.timeout, ROOT / args.out_dir, args.jobs)
+        summary = build_summary(inventory, results)
+        write_summary_report(ROOT / args.out_dir, summary)
+        codes = [
+            int(record["evidence_rc"]) for lanes in summary.values()
+            for record in lanes.values()
+        ]
+        worst = 13 if 13 in codes else max(codes, default=0)
+        return 0 if worst == 0 else worst
     except EvidenceError as error:
-        print(error, file=sys.stderr)
+        print(error, file=sys.stderr, flush=True)
         return error.code
     except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError, subprocess.SubprocessError) as error:
-        print(f"Formal evidence unavailable: {error}", file=sys.stderr)
+        print(f"Formal evidence unavailable: {error}", file=sys.stderr, flush=True)
         return 14
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

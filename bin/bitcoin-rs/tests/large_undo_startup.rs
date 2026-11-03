@@ -5,14 +5,14 @@ use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, W
 use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions};
 use bitcoin_rs_storage::{FjallStore, KvUndoStore, UndoStore};
 use sonic_rs::json;
-use std::error::Error;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
-
+use crate::support::TestError;
 use crate::support::regtest_blocks;
 use regtest_blocks::{block, coinbase, submit};
+
+type Result<T = ()> = std::result::Result<T, TestError>;
 
 #[test]
 #[ignore = "manual pinned-Core reproduction: writes over 64 MiB of real spent scripts"]
@@ -61,7 +61,9 @@ fn valid_large_undo_reopens_and_verifies() -> Result {
         let hash =
             bitcoin_rs_primitives::Hash256::from_le_bytes(&candidate.block_hash().to_byte_array());
         let started = Instant::now();
-        let record = undo.load_undo(189, hash)?.ok_or("node-written undo")?;
+        let record = undo
+            .load_undo(189, hash)?
+            .ok_or(TestError::Missing("node-written undo"))?;
         println!(
             "D node_written_undo_bytes={} read_ms={}",
             record.len(),
@@ -107,7 +109,7 @@ fn peak_rss(pid: u32) -> Result<String> {
             ])
             .output()?;
         if !output.status.success() {
-            return Err("peak RSS query failed".into());
+            return Err(TestError::PeakRssQueryFailed);
         }
         Ok(String::from_utf8(output.stdout)?.trim().to_owned())
     }
@@ -117,14 +119,14 @@ fn peak_rss(pid: u32) -> Result<String> {
         let kilobytes: u64 = status
             .lines()
             .find(|line| line.starts_with("VmHWM:"))
-            .ok_or("VmHWM")?
+            .ok_or(TestError::Missing("VmHWM"))?
             .split_whitespace()
             .nth(1)
-            .ok_or("VmHWM value")?
+            .ok_or(TestError::Missing("VmHWM value"))?
             .parse()?;
         Ok(kilobytes
             .checked_mul(1024)
-            .ok_or("RSS overflow")?
+            .ok_or(TestError::Missing("RSS overflow"))?
             .to_string())
     }
     #[cfg(not(any(windows, target_os = "linux")))]

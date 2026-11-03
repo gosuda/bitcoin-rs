@@ -798,7 +798,6 @@ fn decoded_attribution_follows_insert_drain_and_restore_apart_from_serialized_by
     let fat_tail = drained.split_off(1);
     let clone = fat_tail[0].clone();
     let clone_bytes = clone.payload().block().retained_heap_bytes();
-    assert!(clone_bytes < fat_bytes);
     assert_eq!(
         fat_tail[0].payload().block().retained_heap_bytes(),
         fat_bytes

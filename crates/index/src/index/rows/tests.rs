@@ -4,7 +4,7 @@ use bitcoin_rs_primitives::{Hash256, OutPoint, Txid};
 use bitcoin_rs_storage::{BatchOp, BufferedWriteBatch, ColumnFamily};
 
 use super::*;
-use crate::types::{HashPrefixRow, ScriptHash, ScriptLiveRow, TxPosition};
+use crate::types::{HashPrefixRow, ScriptHash, ScriptHistoryOccurrence, ScriptLiveRow, TxPosition};
 
 fn op_cf(op: &BatchOp) -> ColumnFamily {
     match op {
@@ -37,11 +37,31 @@ fn positioned_rows() -> Vec<PositionedRow> {
     ]
 }
 
-/// Byte contract (`docs/benchmarks/scriptindex-format.md` § Logical vs physical
-/// bytes): `tx_lookup` 42 = 24 prefix + 18 pos; `script_history` 84; headers 80;
-/// `script_live` 86; filters 101.
-///
-/// Family total equals `encoded_bytes`; physical put bytes match the family total.
+fn positioned_histories() -> Vec<PositionedHistory> {
+    let first = HashPrefixRow::new([1; 8], 7);
+    let second = HashPrefixRow::new([2; 8], 7);
+    let occurrence = |offset: u32, txid: u8| ScriptHistoryOccurrence {
+        scripthash: ScriptHash::from_byte_array([txid; 32]),
+        txid: [txid; 32],
+        position: TxPosition::new(offset, 30),
+        flags: ScriptHistoryOccurrence::FUNDING,
+    };
+    vec![
+        PositionedHistory {
+            row: second,
+            occurrence: occurrence(500, 3),
+        },
+        PositionedHistory {
+            row: first,
+            occurrence: occurrence(256, 1),
+        },
+        PositionedHistory {
+            row: first,
+            occurrence: occurrence(81, 2),
+        },
+    ]
+}
+
 #[test]
 fn family_bytes_accounting() -> Result<(), IndexError> {
     let outpoint1 = OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), 0);
@@ -57,7 +77,7 @@ fn family_bytes_accounting() -> Result<(), IndexError> {
 
     let mut rows = PendingRows {
         txid_rows: positioned_rows(),
-        funding_rows: positioned_rows(),
+        funding_rows: positioned_histories(),
         spending_rows: positioned_rows(),
         header_rows: vec![[0x42; crate::types::HEADER_ROW_SIZE]],
         live_ops: vec![LiveOp::Insert(live_row1), LiveOp::Delete(live_row2)],
@@ -71,12 +91,12 @@ fn family_bytes_accounting() -> Result<(), IndexError> {
     assert_eq!(family.total()?, total_bytes);
 
     assert_eq!(family.tx_lookup, 42);
-    assert_eq!(family.script_history, 84);
+    assert_eq!(family.script_history, 279);
     assert_eq!(family.headers, 80);
     assert_eq!(family.script_live, 86);
     assert_eq!(family.filters, 101);
 
-    assert_eq!(total_bytes, 42 + 84 + 80 + 86 + 101);
+    assert_eq!(total_bytes, 42 + 279 + 80 + 86 + 101);
 
     let mut puts = BufferedWriteBatch::default();
     put_rows(&mut puts, &rows);
@@ -314,7 +334,7 @@ fn groups_preserve_distinct_keys_and_numeric_positions() {
 fn row_accounting_matches_emitted_bytes_and_shared_header_deletion() -> Result<(), IndexError> {
     let mut rows = PendingRows {
         txid_rows: positioned_rows(),
-        funding_rows: positioned_rows(),
+        funding_rows: positioned_histories(),
         spending_rows: positioned_rows(),
         header_rows: vec![[1; crate::types::HEADER_ROW_SIZE]],
         live_ops: Vec::new(),
@@ -347,7 +367,11 @@ fn row_accounting_matches_emitted_bytes_and_shared_header_deletion() -> Result<(
     assert_eq!(rows.encoded_bytes()?, encoded_bytes);
     for delete_shared_identity in [false, true] {
         let mut deletes = BufferedWriteBatch::default();
-        delete_rows(&mut deletes, &rows, delete_shared_identity);
+        if delete_shared_identity {
+            delete_rows_with_headers(&mut deletes, &rows);
+        } else {
+            delete_rows(&mut deletes, &rows);
+        }
         let deletes = deletes.into_ops();
         let expected: Vec<_> = puts
             .iter()
@@ -396,7 +420,11 @@ fn live_coalescing_matches_first_and_last_operations_for_all_small_sequences() {
             }
             for invert in [false, true] {
                 let mut batch = BufferedWriteBatch::default();
-                apply_live_ops(&mut batch, &ops, invert);
+                if invert {
+                    invert_live_ops(&mut batch, &ops);
+                } else {
+                    apply_live_ops(&mut batch, &ops);
+                }
                 let mut expected = BTreeMap::new();
                 for key in keys {
                     let matches_key = |op: &&LiveOp| match op {

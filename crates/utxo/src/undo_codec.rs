@@ -1,7 +1,3 @@
-//! Versioned on-disk encoding for [`UndoBatch`].
-//! 1. **Versioned.** The first byte is a format version, so a record written by
-//!    an older binary is rejected rather than misread.
-
 use std::collections::HashSet;
 
 use bitcoin_rs_primitives::{ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};
@@ -22,7 +18,6 @@ const RESTORE_COUNT_OFFSET: usize = VERSION_BYTES + BLOCK_HASH_BYTES;
 #[cfg(test)]
 const RESTORE_TRAILER_BYTES: usize = 1 + core::mem::size_of::<u32>() + COUNT_BYTES;
 
-/// Maximum encoded record for a consensus-valid block.
 pub fn record_size_limit(block: &bitcoin_rs_primitives::Block, max_spent_script: usize) -> usize {
     let inputs = block
         .txs
@@ -57,10 +52,12 @@ pub enum UndoCodecError {
     InvalidCoinbase { found: u8 },
     #[error("undo record repeats outpoint {txid}:{vout}")]
     DuplicateOutpoint { txid: Hash256, vout: u32 },
+    #[error("undo record does not match its block: {reason}")]
+    BlockMismatch { reason: &'static str },
 }
 
 #[must_use]
-pub(crate) fn encode(batch: &UndoBatch, block_hash: Hash256) -> Vec<u8> {
+pub fn encode(batch: &UndoBatch, block_hash: Hash256) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(UNDO_FORMAT_VERSION);
     out.extend_from_slice(&block_hash.to_le_bytes());
@@ -82,7 +79,6 @@ pub(crate) fn encode(batch: &UndoBatch, block_hash: Hash256) -> Vec<u8> {
     out
 }
 
-/// Decodes a record, rejecting any that is not for `expected_hash`.
 pub fn decode(bytes: &[u8], expected_hash: Hash256) -> Result<UndoBatch, UndoCodecError> {
     decode_bounded(bytes, expected_hash, usize::MAX, usize::MAX)
 }

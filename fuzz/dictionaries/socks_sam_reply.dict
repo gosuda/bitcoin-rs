@@ -1,0 +1,51 @@
+# SOCKS5 and SAM reply dictionary for libFuzzer
+# SOCKS5 greeting / auth replies
+socks5_no_auth="\x05\x00"
+socks5_gssapi="\x05\x01"
+socks5_user_pass="\x05\x02"
+socks5_no_acceptable="\x05\xff"
+
+# SOCKS5 connection replies
+socks5_rep_success="\x05\x00\x00\x01"
+socks5_rep_failure="\x05\x01\x00\x01"
+socks5_rep_not_allowed="\x05\x02\x00\x01"
+socks5_rep_net_unreach="\x05\x03\x00\x01"
+socks5_rep_host_unreach="\x05\x04\x00\x01"
+socks5_rep_conn_refused="\x05\x05\x00\x01"
+socks5_rep_ttl_expired="\x05\x06\x00\x01"
+socks5_rep_cmd_unsupported="\x05\x07\x00\x01"
+socks5_rep_addr_unsupported="\x05\x08\x00\x01"
+
+# SOCKS5 address types
+socks5_atyp_ipv4="\x01"
+socks5_atyp_domain="\x03"
+socks5_atyp_ipv6="\x04"
+
+# SOCKS4 replies
+socks4_rep_granted="\x00\x5a"
+socks4_rep_rejected="\x00\x5b"
+
+# SAM (I2P Simple Anonymous Messaging) commands and responses
+"HELLO VERSION"
+"MIN=3.0"
+"MAX=3.3"
+"SESSION CREATE"
+"STYLE=STREAM"
+"STYLE=DATAGRAM"
+"ID="
+"DESTINATION=TRANSIENT"
+"DESTINATION="
+"STREAM CONNECT"
+"STREAM ACCEPT"
+"STATUS"
+"RESULT=OK"
+"RESULT=CANT_REACH_PEER"
+"RESULT=I2P_ERROR"
+"RESULT=INVALID_KEY"
+"RESULT=INVALID_ID"
+"RESULT=TIMEOUT"
+"PEER="
+"NAMING LOOKUP"
+"NAME="
+"\x0a"
+"\x0d\x0a"

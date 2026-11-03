@@ -120,16 +120,18 @@ impl SyncChain for NodeSyncChain {
         }
     }
 
+    fn closed_for_recovery(&self) -> bool {
+        self.handles.is_closed_for_recovery()
+    }
+
     fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
         let Some(manager) = &self.assumeutxo else {
             return Ok(HistoricalAdvance::Complete);
         };
-        manager
-            .advance_historical()
-            .map_err(|error| -> SyncChainError {
-                self.handles.fail_closed_for_recovery();
-                Box::new(error)
-            })
+        manager.advance_historical().map_err(|error| {
+            self.handles.fail_closed_for_recovery();
+            SyncChainError::from(error)
+        })
     }
 
     fn connect_historical(&self, payload: &BlockPayload) -> Result<(), SyncChainError> {
@@ -140,7 +142,7 @@ impl SyncChain for NodeSyncChain {
         manager
             .step_historical(payload)
             .map(|_| ())
-            .map_err(|error| -> SyncChainError { Box::new(error) })
+            .map_err(SyncChainError::from)
     }
 
     fn network(&self) -> Network {
@@ -178,7 +180,7 @@ impl SyncChain for NodeSyncChain {
                 HeaderAdmission::Rejected(error)
             }
             Err(bitcoin_rs_chainstate::HeaderAdmissionError::Refused(error)) => {
-                HeaderAdmission::Refused(Box::new(error))
+                HeaderAdmission::Refused(bitcoin_rs_chain::HeaderRefusal::from_cause(&error))
             }
         }
     }
@@ -199,8 +201,11 @@ impl SyncChain for NodeSyncChain {
                     .segwit_active
                 })
         };
-        bitcoin_rs_consensus::check_block_body_binding(block, segwit_active)
-            .map_err(|error| -> SyncChainError { Box::new(error) })
+        bitcoin_rs_consensus::check_block_body_binding(
+            block,
+            bitcoin_rs_consensus::BlockRuleContext { segwit_active },
+        )
+        .map_err(SyncChainError::from)
     }
 
     fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize {
@@ -215,7 +220,7 @@ impl SyncChain for NodeSyncChain {
                 applied: 0,
                 disposition: WindowApplyDisposition::Operational,
                 invalidated: Box::default(),
-                source: Box::new(source),
+                source: source.into(),
             })?;
         let mempool_change =
             self.followers
@@ -224,7 +229,7 @@ impl SyncChain for NodeSyncChain {
                     applied: 0,
                     disposition: WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
-                    source: Box::new(source),
+                    source: source.into(),
                 })?;
         let result = match transition.connect_window(payloads) {
             Ok(outcomes) => {
@@ -245,7 +250,7 @@ impl SyncChain for NodeSyncChain {
             applied: error.applied,
             disposition: error.disposition,
             invalidated: error.invalidated,
-            source: Box::new(error.source),
+            source: error.source.into(),
         })
     }
 

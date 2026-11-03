@@ -1,5 +1,3 @@
-//! Block download window, peer-assignment, stall, and scheduling policy.
-
 use std::time::{Duration, Instant};
 
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
@@ -21,7 +19,6 @@ pub struct SyncBudget {
     pub max_pending_bytes: usize,
     pub max_received_blocks: usize,
     pub max_received_bytes: usize,
-    /// Wire storage plus materialized block heap retained by the stager.
     pub max_retained_bytes: usize,
     pub max_peer_inflight: usize,
     pub fanout_peer_inflight: usize,
@@ -1085,7 +1082,35 @@ impl DownloadWindow {
         &mut self,
         stager: &mut BlockStager,
         source: PeerSource,
-        allow_expired_retry_from_peer: bool,
+        chain_tip: &TipSnapshot,
+        request_start_height: u32,
+        peer_best_height: u32,
+        servable_floor: u32,
+        tree: &BlockTree,
+        now: Instant,
+        refusals: &mut RefusalFilter,
+    ) -> Option<PeerRequest> {
+        if self.peer_has_expired_pending(source, now) || self.peer_in_staller_cooldown(source, now)
+        {
+            return None;
+        }
+        self.next_peer_request_allowing_retry(
+            stager,
+            source,
+            chain_tip,
+            request_start_height,
+            peer_best_height,
+            servable_floor,
+            tree,
+            now,
+            refusals,
+        )
+    }
+
+    pub(crate) fn next_peer_request_allowing_retry(
+        &mut self,
+        stager: &mut BlockStager,
+        source: PeerSource,
         chain_tip: &TipSnapshot,
         request_start_height: u32,
         peer_best_height: u32,
@@ -1098,35 +1123,10 @@ impl DownloadWindow {
         if self.staged_bytes_exhausted(stager) {
             return None;
         }
-        if !allow_expired_retry_from_peer
-            && (self.peer_has_expired_pending(source, now)
-                || self.peer_in_staller_cooldown(source, now))
-        {
-            return None;
-        }
         let mut expired = self.expire_pending(now);
         expired.sort_by_key(|entry| entry.height);
 
-        let owned = self.pending_count_for(source);
-        let peer_capacity = self.effective_peer_inflight().saturating_sub(owned);
-        let block_capacity = self
-            .budget
-            .max_pending_blocks
-            .saturating_sub(self.pending.len())
-            .min(self.staged_count_headroom(stager, 0));
-        let mut byte_capacity = self
-            .budget
-            .max_pending_bytes
-            .saturating_sub(self.pending_bytes)
-            .min(self.staged_byte_headroom(stager));
-        let batch_limit = self
-            .budget
-            .getdata_batch_limit
-            .min(peer_capacity)
-            .min(block_capacity);
-        if batch_limit == 0 || byte_capacity < self.ewma_block_bytes {
-            return None;
-        }
+        let (batch_limit, mut byte_capacity) = self.compute_request_capacity(stager, source)?;
 
         let mut entries = self.expired_request_entries(
             stager,
@@ -1138,22 +1138,7 @@ impl DownloadWindow {
         );
         let selected_hashes = SelectedHashes::from_entries(&entries);
 
-        if request_start_height < self.next_request_height
-            && tree
-                .node_at_height_from(chain_tip.tip_id, request_start_height)
-                .and_then(|id| tree.node(id).ok())
-                .is_some_and(|node| {
-                    !self.pending.contains_key(&node.hash) && !stager.contains(&node.hash)
-                })
-        {
-            let previous_height = self.next_request_height;
-            self.next_request_height = request_start_height;
-            tracing::debug!(
-                previous_height,
-                request_start_height,
-                "block sync: rewound unowned request frontier"
-            );
-        }
+        self.maybe_rewind_request_frontier(request_start_height, chain_tip, stager, tree);
         let height = request_start_height
             .max(self.next_request_height)
             .max(servable_floor);
@@ -1192,6 +1177,59 @@ impl DownloadWindow {
                 .max(self.next_request_height);
         }
         non_empty_request(source, entries, next_request_height)
+    }
+    fn compute_request_capacity(
+        &self,
+        stager: &BlockStager,
+        source: PeerSource,
+    ) -> Option<(usize, usize)> {
+        let owned = self.pending_count_for(source);
+        let peer_capacity = self.effective_peer_inflight().saturating_sub(owned);
+        let block_capacity = self
+            .budget
+            .max_pending_blocks
+            .saturating_sub(self.pending.len())
+            .min(self.staged_count_headroom(stager, 0));
+        let byte_capacity = self
+            .budget
+            .max_pending_bytes
+            .saturating_sub(self.pending_bytes)
+            .min(self.staged_byte_headroom(stager));
+        let batch_limit = self
+            .budget
+            .getdata_batch_limit
+            .min(peer_capacity)
+            .min(block_capacity);
+        if batch_limit == 0 || byte_capacity < self.ewma_block_bytes {
+            None
+        } else {
+            Some((batch_limit, byte_capacity))
+        }
+    }
+
+    fn maybe_rewind_request_frontier(
+        &mut self,
+        request_start_height: u32,
+        chain_tip: &TipSnapshot,
+        stager: &BlockStager,
+        tree: &BlockTree,
+    ) {
+        if request_start_height < self.next_request_height
+            && tree
+                .node_at_height_from(chain_tip.tip_id, request_start_height)
+                .and_then(|id| tree.node(id).ok())
+                .is_some_and(|node| {
+                    !self.pending.contains_key(&node.hash) && !stager.contains(&node.hash)
+                })
+        {
+            let previous_height = self.next_request_height;
+            self.next_request_height = request_start_height;
+            tracing::debug!(
+                previous_height,
+                request_start_height,
+                "block sync: rewound unowned request frontier"
+            );
+        }
     }
 
     pub(crate) fn retarget_request_branch(
@@ -1616,6 +1654,16 @@ impl DownloadWindow {
     pub(crate) const fn seed_front_cadence_for_test(&mut self, ewma_ms: u64, now: Instant) {
         self.front_interval_ewma_ms = Some(ewma_ms);
         self.last_front_advance = Some(now);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn backdate_stall_for_test(&mut self, elapsed: Duration) {
+        if let Some(episode) = self.stall.as_mut() {
+            episode.since = episode.since.checked_sub(elapsed).unwrap_or(episode.since);
+        }
+        for since in self.owner_downloading_since.values_mut() {
+            *since = since.checked_sub(elapsed).unwrap_or(*since);
+        }
     }
 
     pub(crate) fn reject_delivery(

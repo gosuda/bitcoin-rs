@@ -1,5 +1,3 @@
-//! P2P E2E against a pinned Bitcoin Core 31.1 peer: initial sync, peer
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 

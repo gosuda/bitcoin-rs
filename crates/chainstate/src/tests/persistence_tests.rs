@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -15,12 +14,12 @@ use bitcoin_rs_storage::{
     InMemoryUndoStore, StorageError, UndoStore,
 };
 use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::contract::build_block_changes;
+use bitcoin_rs_utxo::contract::{BlockChangeInputs, build_block_changes};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use hashbrown::HashMap;
 
 use super::{ApplyError, ResolvedUtxoView};
-use crate::test_fixtures::{handles, seed_genesis};
+use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
 
 struct RejectingUndoStore {
     inner: InMemoryUndoStore,
@@ -62,8 +61,7 @@ impl UndoStore for RejectingUndoStore {
 }
 
 #[test]
-fn canonical_regtest_chain_connects_through_bip34_activation()
--> Result<(), Box<dyn std::error::Error>> {
+fn canonical_regtest_chain_connects_through_bip34_activation() -> TestResult {
     let network = Network::Regtest;
     let handles = handles(network, Arc::new(UtxoSet::new()));
     let genesis = network.genesis_block();
@@ -83,9 +81,9 @@ fn canonical_regtest_chain_connects_through_bip34_activation()
     Ok(())
 }
 
+// ARCH-09, RCV-04
 #[test]
-fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
--> Result<(), Box<dyn std::error::Error>> {
+fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let utxo = Arc::new(UtxoSet::new());
     let mut handles = handles(Network::Regtest, Arc::clone(&utxo));
@@ -102,8 +100,8 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
     let next_hash = Hash256::from(next.block_hash());
 
     let observer = handles.clone();
-    let stop = Arc::new(AtomicBool::new(false));
-    let cancellation = bitcoin_rs_chain::LatchReader::new(Arc::clone(&stop));
+    let stop = bitcoin_rs_chain::LatchWriter::new();
+    let cancellation = stop.reader();
     let (answer_tx, answer_rx) = mpsc::channel();
     let waiter = std::thread::spawn(move || {
         answer_tx.send(observer.wait_for_tip(
@@ -120,7 +118,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
     let outcome = handles.apply_block(&BlockPayload::from_local(next));
     let pending = answer_rx.recv_timeout(Duration::from_millis(30));
     let remained_pending = matches!(pending, Err(mpsc::RecvTimeoutError::Timeout));
-    stop.store(true, Ordering::Release);
+    stop.trigger();
     handles.wake_waiters();
     let observed = match pending {
         Ok(answer) => answer,
@@ -128,13 +126,18 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
     };
     waiter
         .join()
-        .map_err(|_| std::io::Error::other("tip observer panicked"))??;
+        .map_err(|_| TestError::WorkerPanicked("tip observer"))?
+        .map_err(|_| TestError::Exhausted("waiter send"))?;
     assert!(matches!(outcome, Err(ApplyError::UndoPersistence(_))));
     assert!(
-        remained_pending,
-        "failed persistence must leave the waiter pending"
+        !remained_pending,
+        "an unrecoverable undo failure closes admission and the shutdown wake releases the waiter"
     );
     assert_eq!(observed.map(|tip| tip.hash), Some(applied_hash));
+    assert!(
+        handles.is_closed_for_recovery(),
+        "undo persistence is unrecoverable in-process, so the transition fails closed"
+    );
     assert_eq!(
         handles.applied_tip.load_full().map(|tip| tip.hash),
         Some(applied_hash),
@@ -152,8 +155,9 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
     Ok(())
 }
 
+// RCV-08
 #[test]
-fn bip30_overwrite_undo_restores_original_coin() -> Result<(), Box<dyn std::error::Error>> {
+fn bip30_overwrite_undo_restores_original_coin() -> TestResult {
     let utxo = UtxoSet::new();
     let block = Block {
         header: Header {
@@ -184,15 +188,17 @@ fn bip30_overwrite_undo_restores_original_coin() -> Result<(), Box<dyn std::erro
         external: HashMap::new(),
     };
     let (_changes, undo, _totals) = build_block_changes(
-        &block,
-        91_842,
-        &txids,
-        None,
-        1,
-        0,
+        &BlockChangeInputs {
+            block: &block,
+            height: 91_842,
+            txids: &txids,
+            same_block_spent: None,
+            add_capacity: 1,
+            remove_capacity: 0,
+            overwritten: Some(&utxo),
+            max_script_size: MAX_SCRIPT_SIZE,
+        },
         &resolved,
-        Some(&utxo),
-        MAX_SCRIPT_SIZE,
     )?;
 
     assert_eq!(undo.removes(), []);
@@ -200,7 +206,7 @@ fn bip30_overwrite_undo_restores_original_coin() -> Result<(), Box<dyn std::erro
         .restores()
         .iter()
         .find(|entry| entry.outpoint == reused)
-        .ok_or("undo does not restore overwritten coin")?;
+        .ok_or(TestError::Missing("undo does not restore overwritten coin"))?;
     assert_eq!(restored.txout, older);
     assert_eq!(restored.height, 91_722);
     assert!(restored.coinbase);
@@ -210,16 +216,16 @@ fn bip30_overwrite_undo_restores_original_coin() -> Result<(), Box<dyn std::erro
 #[test]
 fn close_requests_shutdown() {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
-    let shutdown = handles.shutdown_handle();
-    assert!(!shutdown.load(Ordering::Acquire));
+    let shutdown = handles.shutdown_reader();
+    assert!(!shutdown.is_triggered());
 
     let _closed = handles.close();
 
-    assert!(shutdown.load(Ordering::Acquire));
+    assert!(shutdown.is_triggered());
 }
 
 #[test]
-fn direct_transition_fatal_error_closes_admission() -> Result<(), Box<dyn std::error::Error>> {
+fn direct_transition_fatal_error_closes_admission() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let mut handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     seed_genesis(&handles)?;
@@ -236,7 +242,7 @@ fn direct_transition_fatal_error_closes_admission() -> Result<(), Box<dyn std::e
     let durable = Arc::new(InMemoryDurableHeadStore::new());
     durable.commit(None, &incompatible, &CommitRecords::default())?;
     handles.durable_head = durable;
-    let shutdown = handles.shutdown_handle();
+    let shutdown = handles.shutdown_reader();
 
     let transition = handles.begin_transition()?;
     let outcome = transition.connect(&BlockPayload::from_local(child));
@@ -245,7 +251,7 @@ fn direct_transition_fatal_error_closes_admission() -> Result<(), Box<dyn std::e
         outcome,
         Err(ApplyError::DurableHeadLineage { .. })
     ));
-    assert!(shutdown.load(Ordering::Acquire));
+    assert!(shutdown.is_triggered());
     drop(transition);
     assert!(matches!(
         handles.begin_transition(),
@@ -254,9 +260,9 @@ fn direct_transition_fatal_error_closes_admission() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+// RCV-08
 #[test]
-fn disconnect_off_durable_head_refuses_without_mutation() -> Result<(), Box<dyn std::error::Error>>
-{
+fn disconnect_off_durable_head_refuses_without_mutation() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let utxo = Arc::new(UtxoSet::new());
     let mut handles = handles(Network::Regtest, Arc::clone(&utxo));
@@ -290,5 +296,53 @@ fn disconnect_off_durable_head_refuses_without_mutation() -> Result<(), Box<dyn 
         handles.begin_transition().is_ok(),
         "a refusal must leave admission open"
     );
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn use_after_close_refuses_operations() {
+    let utxo = Arc::new(UtxoSet::new());
+    let handles = handles(Network::Regtest, utxo);
+    assert!(!handles.is_closed_for_recovery());
+    handles.fail_closed_for_recovery();
+    assert!(handles.is_closed_for_recovery());
+
+    assert!(matches!(
+        handles.begin_transition(),
+        Err(ApplyError::Shutdown)
+    ));
+    let genesis = Network::Regtest.genesis_block();
+    let outcome = handles.apply_block(&BlockPayload::from_local(genesis));
+    assert!(matches!(outcome, Err(ApplyError::Shutdown)));
+}
+
+// RCV-09, RCV-11
+#[test]
+fn current_schema_version_mismatch_and_corruption_refuses_open() -> TestResult {
+    use bitcoin_rs_storage::checkpoint::{
+        CURRENT_SCHEMA_FILE, ensure_current_schema, open_data_dir,
+    };
+    let temp = tempfile::tempdir()?;
+    let dir = open_data_dir(temp.path())?;
+
+    std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"1\n")?;
+    let result = ensure_current_schema(&dir);
+    assert!(matches!(
+        &result,
+        Err(err) if err.to_string().contains("CURRENT_SCHEMA is not the current datadir schema epoch")
+    ));
+
+    std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"0\n")?;
+    assert!(ensure_current_schema(&dir).is_err());
+
+    std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"3\n")?;
+    assert!(ensure_current_schema(&dir).is_err());
+
+    std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"corrupt\n")?;
+    assert!(ensure_current_schema(&dir).is_err());
+
+    std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"2\n")?;
+    assert!(ensure_current_schema(&dir).is_ok());
     Ok(())
 }

@@ -1,4 +1,3 @@
-//! Native Stratum V1 pool adapter.
 #![forbid(unsafe_code)]
 
 mod session;
@@ -8,7 +7,7 @@ use std::fmt;
 
 use crate::pool::{Job, JobError, JobId, ShareTarget, WorkerIdentity};
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::encode::hex_encode as primitives_hex_encode;
+use bitcoin_rs_primitives::hex::{hex_decode, hex_encode as primitives_hex_encode, hex_nibble};
 use sonic_rs::{Array, JsonContainerTrait, JsonValueTrait, Value};
 
 pub use crate::pool::{BlockOutcome, PoolCore, RefreshError, Refreshed};
@@ -30,15 +29,6 @@ pub const MAX_EXTENSION_NAME_LEN: usize = 64;
 pub const MAX_JSON_DEPTH: usize = 8;
 pub const MAX_DIFFICULTY_TEXT_LEN: usize = 20;
 
-fn nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
 pub fn push_hex(out: &mut String, bytes: &[u8]) {
     out.push_str(&primitives_hex_encode(bytes));
 }
@@ -49,29 +39,15 @@ pub fn encode_hex(bytes: &[u8]) -> String {
 }
 
 #[must_use]
-pub fn decode_hex(text: &str) -> Option<Vec<u8>> {
-    let (pairs, odd_tail) = text.as_bytes().as_chunks::<2>();
-    if !odd_tail.is_empty() {
-        return None;
-    }
-    pairs
-        .iter()
-        .map(|&[high, low]| Some((nibble(high)? << 4) | nibble(low)?))
-        .collect()
-}
-
-#[must_use]
 pub fn parse_u32_hex(text: &str, min_digits: usize) -> Option<u32> {
     if text.len() < min_digits.max(1) || text.len() > 8 {
         return None;
     }
     text.bytes().try_fold(0_u32, |value, byte| {
-        Some((value << 4) | u32::from(nibble(byte)?))
+        Some((value << 4) | u32::from(hex_nibble(byte)?))
     })
 }
 
-/// Reverses the four bytes of each 32-bit word of a 32-byte hash. The swap is
-/// its own inverse.
 #[must_use]
 pub fn swap_words(hash: &[u8; 32]) -> [u8; 32] {
     let mut out = *hash;
@@ -81,7 +57,6 @@ pub fn swap_words(hash: &[u8; 32]) -> [u8; 32] {
     out
 }
 
-/// SV1 `prevhash` text for a parent hash in internal (header) byte order.
 #[must_use]
 pub fn prevhash_to_wire(internal: &[u8; 32]) -> String {
     encode_hex(&swap_words(internal))
@@ -89,11 +64,10 @@ pub fn prevhash_to_wire(internal: &[u8; 32]) -> String {
 
 #[must_use]
 pub fn prevhash_from_wire(text: &str) -> Option<[u8; 32]> {
-    let bytes: [u8; 32] = decode_hex(text)?.try_into().ok()?;
+    let bytes: [u8; 32] = hex_decode(text).ok()?.try_into().ok()?;
     Some(swap_words(&bytes))
 }
 
-/// SV1 `job_id` text of a native job id: eight lowercase hex digits.
 #[must_use]
 pub fn wire_job_id(id: JobId) -> String {
     format!("{:08x}", id.get())
@@ -111,8 +85,6 @@ pub fn parse_wire_job_id(text: &str) -> Option<JobId> {
     parse_u32_hex(text, 8).map(JobId::new)
 }
 
-/// One SV1 error triple `[code, message, null]`. Messages are fixed text:
-/// nothing internal reaches a client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WireError {
     pub code: i32,
@@ -137,16 +109,12 @@ impl fmt::Display for WireError {
     }
 }
 
-/// The SV1 error vocabulary this adapter speaks.
 pub mod errors {
     use super::WireError;
 
     pub const OTHER: i32 = 20;
-    /// Slush draft 21: job not found (stale).
     pub const JOB_NOT_FOUND: i32 = 21;
-    /// Slush draft 22: duplicate share.
     pub const DUPLICATE_SHARE: i32 = 22;
-    /// Slush draft 23: low difficulty share.
     pub const LOW_DIFFICULTY: i32 = 23;
     pub const UNAUTHORIZED_WORKER: i32 = 24;
     pub const NOT_SUBSCRIBED: i32 = 25;
@@ -192,7 +160,6 @@ pub mod errors {
         WireError::new(LOW_DIFFICULTY, "Low difficulty share");
 }
 
-/// Framing failure; the connection must be closed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameError {
     LineTooLong,
@@ -200,7 +167,6 @@ pub enum FrameError {
 
 const PUSH_SLACK: usize = 64 * 1024;
 
-/// Newline-delimited frame splitter with a hard memory bound.
 #[derive(Debug)]
 pub struct LineBuffer {
     buf: Vec<u8>,
@@ -603,7 +569,6 @@ pub enum DifficultyError {
     OutOfOrder,
 }
 
-/// A pool difficulty as plain decimal text plus the share target it names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Difficulty {
     text: String,
@@ -647,8 +612,6 @@ impl Difficulty {
     }
 }
 
-/// Session difficulty bounds: the starting value and the range a miner's
-/// `mining.suggest_difficulty` may move it within.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DifficultyPolicy {
     initial: Difficulty,
@@ -784,7 +747,7 @@ fn parse_submit(params: &[Value]) -> Result<Submit, WireError> {
     let job_id = required_text_at(params, 1, MAX_JOB_ID_LEN)?.to_owned();
     let extranonce2_text = required_text_at(params, 2, MAX_EXTRANONCE2_BYTES * 2)
         .map_err(|_| errors::INVALID_EXTRANONCE2)?;
-    let extranonce2 = decode_hex(extranonce2_text).ok_or(errors::INVALID_EXTRANONCE2)?;
+    let extranonce2 = hex_decode(extranonce2_text).map_err(|_| errors::INVALID_EXTRANONCE2)?;
     let ntime =
         parse_u32_hex(required_text_at(params, 3, 8)?, 8).ok_or(errors::INVALID_NTIME_FORMAT)?;
     let nonce =
@@ -899,7 +862,6 @@ fn encode_envelope(id: &RequestId, result_fragment: &str, error_fragment: &str) 
     )
 }
 
-/// `{"id":ID,"result":RESULT,"error":null}\n`
 #[must_use]
 pub fn encode_result(id: &RequestId, result_json: &str) -> String {
     encode_envelope(id, result_json, "null")
@@ -923,7 +885,6 @@ pub fn encode_set_difficulty(difficulty: &Difficulty) -> String {
     )
 }
 
-/// `mining.notify` notification for `job`.
 #[must_use]
 pub fn encode_notify(job: &Job, clean_jobs: bool) -> String {
     let parent = Hash256::from(job.previous_block_hash()).to_le_bytes();

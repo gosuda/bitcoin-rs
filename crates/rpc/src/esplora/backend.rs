@@ -1,5 +1,3 @@
-//! Mempool-backend electrs extensions: `/internal/*` and `/block-template`.
-
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
@@ -14,10 +12,10 @@ use crate::context::Context;
 use crate::handlers::Handler;
 use crate::handlers::mining::required_gbt_rules;
 use crate::rest::Response;
-use crate::rest::{bad_request, json_ok};
+use crate::rest::{bad_request, json_ok, service_unavailable};
 use sonic_rs::json as sonic_json;
 
-const TRANSACTION_BATCH_SIZE: usize = 25;
+pub(super) const TRANSACTION_BATCH_SIZE: usize = 25;
 
 pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> Option<Response> {
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
@@ -33,8 +31,16 @@ pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> 
 pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response> {
     let ctx = handler.context();
     match path {
-        "/internal/txs" => Some(internal_transactions(ctx.as_ref(), body, false)),
-        "/internal/mempool/txs" => Some(internal_transactions(ctx.as_ref(), body, true)),
+        "/internal/txs" => Some(internal_transactions_scoped(
+            ctx.as_ref(),
+            body,
+            TransactionScope::All,
+        )),
+        "/internal/mempool/txs" => Some(internal_transactions_scoped(
+            ctx.as_ref(),
+            body,
+            TransactionScope::MempoolOnly,
+        )),
         "/internal/txs/outspends/by-txid" => Some(internal_outspends_by_txid(ctx.as_ref(), body)),
         "/internal/txs/outspends/by-outpoint" => {
             Some(internal_outspends_by_outpoint(ctx.as_ref(), body))
@@ -44,7 +50,15 @@ pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Option<Respons
 }
 
 fn internal_block_txs(ctx: &Context, hash: &str) -> Response {
-    let (record, block) = match Projection::new(ctx).required_block(hash) {
+    let projection = Projection::new(ctx);
+    let record = match projection.required_block_record(hash) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    let (record, block) = match projection.block_from_record(record) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -126,7 +140,13 @@ fn select_mempool_page<'a>(
     selected
 }
 
-fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Response {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransactionScope {
+    All,
+    MempoolOnly,
+}
+
+fn internal_transactions_scoped(ctx: &Context, body: &[u8], scope: TransactionScope) -> Response {
     let Ok(text_ids) = sonic_rs::from_slice::<Vec<String>>(body) else {
         return bad_request("transaction request body must be a JSON array of txids");
     };
@@ -146,7 +166,7 @@ fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Resp
             if transactions.contains_key(id) {
                 continue;
             }
-            let transaction = if mempool_only {
+            let transaction = if scope == TransactionScope::MempoolOnly {
                 ctx.mempool
                     .gateway
                     .read()

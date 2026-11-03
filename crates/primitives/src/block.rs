@@ -1,4 +1,4 @@
-//! Native block type and block-level hashing helpers.
+use std::sync::Arc;
 
 use bytes::Bytes;
 
@@ -24,7 +24,6 @@ impl Block {
         self.txs.iter().map(Tx::txid).collect()
     }
 
-    /// Full consensus serialization length, including BIP144 witness sections.
     #[must_use]
     pub fn total_size(&self) -> usize {
         self.consensus_size()
@@ -39,7 +38,6 @@ impl Block {
             .saturating_add(self.txs.iter().map(Tx::base_size).sum())
     }
 
-    /// BIP141 block weight: `stripped_size * 3 + total_size` weight units.
     #[must_use]
     pub fn weight(&self) -> u64 {
         u64::try_from(self.stripped_size())
@@ -48,8 +46,6 @@ impl Block {
             .saturating_add(u64::try_from(self.total_size()).unwrap_or(u64::MAX))
     }
 
-    /// Returns the total heap bytes allocated for this block's transaction vector,
-    /// transactions, inputs, outputs, scripts, and witness stacks, including spare capacity.
     #[must_use]
     pub fn retained_heap_bytes(&self) -> usize {
         let mut total = self
@@ -65,33 +61,46 @@ impl Block {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockPayload {
-    block: Block,
+    block: Arc<Block>,
     bytes: Bytes,
 }
 
 impl BlockPayload {
     pub fn from_raw(raw: Bytes) -> Result<Self, DecodeError> {
         let block = deserialize::<Block>(&raw)?;
-        Ok(Self { block, bytes: raw })
+        Ok(Self {
+            block: Arc::new(block),
+            bytes: raw,
+        })
     }
 
     pub fn from_local(block: Block) -> Self {
         let bytes = Bytes::from(consensus_bytes(&block));
-        Self { block, bytes }
+        Self {
+            block: Arc::new(block),
+            bytes,
+        }
     }
 
-    // Own raw so the ignored submitblock suffix is released after copying the prefix.
+    /// The returned payload owns only the decoded prefix. The ignored suffix is not
+    /// retained.
     pub fn from_prefix(raw: Bytes) -> Result<(Self, usize), DecodeError> {
         let mut reader: &[u8] = &raw;
         let block = Block::consensus_decode(&mut reader)?;
         let consumed = raw.len() - reader.len();
         let bytes = Bytes::copy_from_slice(&raw[..consumed]);
-        Ok((Self { block, bytes }, consumed))
+        Ok((
+            Self {
+                block: Arc::new(block),
+                bytes,
+            },
+            consumed,
+        ))
     }
 
     #[must_use]
     pub fn block(&self) -> &Block {
-        &self.block
+        self.block.as_ref()
     }
 
     #[must_use]
@@ -101,7 +110,7 @@ impl BlockPayload {
 
     #[must_use]
     pub fn into_block(self) -> Block {
-        self.block
+        Arc::try_unwrap(self.block).unwrap_or_else(|block| (*block).clone())
     }
 }
 

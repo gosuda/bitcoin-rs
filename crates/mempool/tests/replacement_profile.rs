@@ -1,3 +1,4 @@
+use super::TestError;
 use std::sync::Arc;
 
 use bitcoin_rs_mempool::{
@@ -53,8 +54,7 @@ fn candidate(tx: Tx, fee: u64) -> ReplacementCandidate {
 }
 
 #[test]
-fn a_higher_direct_rate_and_total_fee_can_still_worsen_the_curve()
--> Result<(), Box<dyn std::error::Error>> {
+fn a_higher_direct_rate_and_total_fee_can_still_worsen_the_curve() -> Result<(), TestError> {
     let mut pool = pool();
     let parent = spend(1, &[coin(100)], 1);
     let parent_id = parent.txid();
@@ -77,8 +77,7 @@ fn a_higher_direct_rate_and_total_fee_can_still_worsen_the_curve()
 }
 
 #[test]
-fn lower_direct_rate_can_improve_the_parent_child_curve() -> Result<(), Box<dyn std::error::Error>>
-{
+fn lower_direct_rate_can_improve_the_parent_child_curve() -> Result<(), TestError> {
     let mut pool = pool();
     let parent = spend(1, &[coin(100)], 1);
     let parent_id = parent.txid();
@@ -100,8 +99,7 @@ fn lower_direct_rate_can_improve_the_parent_child_curve() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn limit_counts_conflicting_clusters_not_evicted_transactions()
--> Result<(), Box<dyn std::error::Error>> {
+fn limit_counts_conflicting_clusters_not_evicted_transactions() -> Result<(), TestError> {
     let mut pool = pool();
     let mut roots = Vec::new();
     for cluster in 0..3_u32 {
@@ -122,8 +120,7 @@ fn limit_counts_conflicting_clusters_not_evicted_transactions()
 }
 
 #[test]
-fn one_hundred_conflicting_clusters_is_the_exact_boundary() -> Result<(), Box<dyn std::error::Error>>
-{
+fn one_hundred_conflicting_clusters_is_the_exact_boundary() -> Result<(), TestError> {
     for count in [100_u32, 101] {
         let mut pool = pool();
         let mut inputs = Vec::new();
@@ -148,7 +145,7 @@ fn one_hundred_conflicting_clusters_is_the_exact_boundary() -> Result<(), Box<dy
 }
 
 #[test]
-fn modified_fees_and_small_relay_charges_are_enforced() -> Result<(), Box<dyn std::error::Error>> {
+fn modified_fees_and_small_relay_charges_are_enforced() -> Result<(), TestError> {
     let mut pool = pool();
     let original = spend(1, &[coin(100)], 1);
     let original_id = original.txid();
@@ -171,8 +168,7 @@ fn modified_fees_and_small_relay_charges_are_enforced() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn an_evicted_dependency_fails_without_narrowing_representable_fees()
--> Result<(), Box<dyn std::error::Error>> {
+fn an_evicted_dependency_fails_without_narrowing_representable_fees() -> Result<(), TestError> {
     let mut pool = pool();
     let original = spend(1, &[coin(100)], 1);
     let original_id = original.txid();
@@ -197,8 +193,7 @@ fn an_evicted_dependency_fails_without_narrowing_representable_fees()
 }
 
 #[test]
-fn truc_sizes_versions_and_sibling_eviction_match_bip431() -> Result<(), Box<dyn std::error::Error>>
-{
+fn truc_sizes_versions_and_sibling_eviction_match_bip431() -> Result<(), TestError> {
     use bitcoin_rs_mempool::TrucError;
     let mut pool = pool();
     let mut parent = spend(1, &[coin(100)], 2);

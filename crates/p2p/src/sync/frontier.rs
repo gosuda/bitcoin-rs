@@ -1,5 +1,3 @@
-//! Canonical sync-frontier reconciliation.
-
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -30,7 +28,7 @@ pub(crate) struct ChainFrontier {
     pub applied_tip: Option<Arc<TipSnapshot>>,
     pub chain_tip: Option<Arc<TipSnapshot>>,
     pub next_required: Option<RequiredBody>,
-    pub apply_halted: bool,
+    pub closed_for_recovery: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -55,22 +53,10 @@ pub(crate) fn body_capability(claimed: i32, active_height: Option<u32>) -> Optio
 }
 
 impl UsablePeer {
-    /// Demonstrated serving capability for this connection: the height it is
-    /// trusted at, precomputed once per observation instead of per request
-    /// peer.
     pub(crate) fn capability(&self) -> Option<u32> {
         body_capability(self.info.best_known_height, self.active_height)
     }
 
-    /// The height this connection PROVED it can serve by handing us headers that
-    /// entered the block tree.
-    ///
-    /// `None` while it has announced nothing we accepted, whatever its handshake
-    /// claimed: Core's eviction rule reads `pindexBestKnownBlock`, a tip the peer
-    /// actually sent, and never the version height (`net_processing.cpp`).
-    /// Where `capability` falls back to the claimed height to choose whom to ask for a
-    /// body, this one has no fallback, because the rule that reads it decides whether
-    /// to keep the connection.
     pub(crate) fn demonstrated_height(&self) -> Option<u32> {
         if self.demonstrated_tips.is_empty() {
             return None;
@@ -145,7 +131,7 @@ impl SyncFrontier {
             state => state,
         };
         let body_unowned =
-            matches!(body_state, Some(BodyState::Unowned)) && !self.chain.apply_halted;
+            matches!(body_state, Some(BodyState::Unowned)) && !self.chain.closed_for_recovery;
         let header_action = if self.header_request_live {
             HeaderAction::AwaitPending
         } else if !peers_exist {
@@ -162,7 +148,7 @@ impl SyncFrontier {
         };
 
         let Some(required) = self.chain.next_required else {
-            plan.no_progress = Some(if self.chain.apply_halted {
+            plan.no_progress = Some(if self.chain.closed_for_recovery {
                 NoProgressReason::ApplyHalted
             } else if self.chain.applied_tip.is_none() || self.chain.chain_tip.is_none() {
                 NoProgressReason::ChainViewUnavailable
@@ -174,7 +160,7 @@ impl SyncFrontier {
             return plan;
         };
 
-        if self.chain.apply_halted {
+        if self.chain.closed_for_recovery {
             plan.no_progress = Some(NoProgressReason::ApplyHalted);
             return plan;
         }
@@ -293,7 +279,7 @@ mod tests {
                     height: 5,
                     hash: Hash256::from_le_bytes(&[0x03; 32]),
                 }),
-                apply_halted: false,
+                closed_for_recovery: false,
             },
             body_state: Some(BodyState::Unowned),
             header_request: Some(super::super::HeaderRequest {

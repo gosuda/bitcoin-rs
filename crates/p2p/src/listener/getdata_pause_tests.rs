@@ -27,7 +27,35 @@ use crate::{
     TxInventory,
 };
 
-pub(super) type TestResult = Result<(), Box<dyn std::error::Error>>;
+#[derive(Debug, thiserror::Error)]
+pub(super) enum TestError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Peer(#[from] PeerError),
+    #[error(transparent)]
+    Consensus(#[from] bitcoin::consensus::encode::Error),
+    #[error("timeout: {0}")]
+    Timeout(String),
+    #[error("failure: {0}")]
+    Failure(String),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+}
+
+impl From<String> for TestError {
+    fn from(msg: String) -> Self {
+        Self::Failure(msg)
+    }
+}
+
+impl From<&'static str> for TestError {
+    fn from(msg: &'static str) -> Self {
+        Self::Missing(msg)
+    }
+}
+
+pub(super) type TestResult = Result<(), TestError>;
 
 pub(super) const MAGIC: Magic = Magic::BITCOIN;
 
@@ -238,7 +266,7 @@ impl Served {
         shared: ConnectionShared,
         budget: OutboundBudget,
         writer: &WriterKind,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, TestError> {
         Self::start_on(shared, budget, None, writer)
     }
 
@@ -247,7 +275,7 @@ impl Served {
         budget: OutboundBudget,
         aggregate: Option<&Arc<SharedOutboundBudget>>,
         writer: &WriterKind,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, TestError> {
         let listener = TcpListener::bind(
             PeerEndpoint::from(([127, 0, 0, 1], 0))
                 .socket_addr()
@@ -364,7 +392,7 @@ pub(super) fn wait_until(what: &str, mut condition: impl FnMut() -> bool) -> Tes
     let deadline = Instant::now() + FAILSAFE;
     while !condition() {
         if Instant::now() >= deadline {
-            return Err(format!("timed out waiting for {what}").into());
+            return Err(TestError::Timeout(format!("timed out waiting for {what}")));
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -374,12 +402,14 @@ pub(super) fn wait_until(what: &str, mut condition: impl FnMut() -> bool) -> Tes
 pub(super) fn read_messages(
     client: &mut Peer<TcpStream>,
     count: usize,
-) -> Result<Vec<Message>, Box<dyn std::error::Error>> {
+) -> Result<Vec<Message>, TestError> {
     let deadline = Instant::now() + FAILSAFE;
     let mut received = Vec::new();
     while received.len() < count {
         if Instant::now() >= deadline {
-            return Err(format!("only {received:?} arrived, wanted {count} messages").into());
+            return Err(TestError::Timeout(format!(
+                "only {received:?} arrived, wanted {count} messages"
+            )));
         }
         match client.read_message() {
             Ok(Some((message, _))) => received.push(message),
@@ -960,7 +990,7 @@ fn framed_pings(count: usize) -> Vec<u8> {
 
 /// Backdates the lease's send-activity clock so `margin` of real time
 /// separates `last_write` from the send-silence threshold.
-fn backdated_send_clock(margin: Duration) -> Result<Instant, Box<dyn std::error::Error>> {
+fn backdated_send_clock(margin: Duration) -> Result<Instant, TestError> {
     let since_last_write = TIMEOUT_INTERVAL
         .checked_sub(margin)
         .ok_or("the margin must stay under the timeout interval")?;

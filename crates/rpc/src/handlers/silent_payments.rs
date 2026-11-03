@@ -1,5 +1,3 @@
-//! Experimental, authenticated, one-block BIP352 read adapter. No durable state.
-
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 use std::time::Duration;
@@ -20,9 +18,6 @@ fn unavailable(message: &str) -> RpcError {
     RpcError::Misc(format!("Silent payments unavailable: {message}"))
 }
 
-/// Activation follows `consensus::verify_flags`, never the tip height; source
-/// rechecks certify the read, not the CPU/JSON projection it feeds, and the
-/// single-work slot bounds projection without waiting on validation or holding transition exclusion.
 pub(crate) fn getblocktweaks(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let service = ctx
         .silent_payments
@@ -30,9 +25,8 @@ pub(crate) fn getblocktweaks(ctx: &Arc<Context>, params: &Value) -> Result<Value
         .ok_or(RpcError::MethodDisabled(
             "getblocktweaks is disabled; enable --silent-payments",
         ))?;
-    let params = super::bind_named_params(params, &["block"])?;
-    super::ensure_at_most_params(&params, 1)?;
-    let params = super::params_array(&params)?;
+    super::ensure_at_most_params(params, 1)?;
+    let params = super::params_array(params)?;
     let selector = params
         .first()
         .ok_or(RpcError::InvalidParams("block height or hash is required"))?;

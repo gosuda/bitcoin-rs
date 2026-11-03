@@ -9,7 +9,6 @@ use fjall::{CompressionType, Database, Keyspace, KeyspaceCreateOptions, PersistM
 
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
 
-/// Fjall's default block-cache capacity for unbudgeted opens.
 pub const FJALL_DEFAULT_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 
 pub struct FjallStore {
@@ -42,11 +41,6 @@ impl FjallStore {
         Self::open_with_cache(path, FJALL_DEFAULT_CACHE_BYTES)
     }
 
-    /// Opens or creates a Fjall store with an explicit block-cache capacity.
-    ///
-    /// `cache_bytes` sizes fjall's shared block cache and is configured exactly: a
-    /// budgeted share is never raised above its allocation. Zero selects the engine
-    /// default for unbudgeted opens.
     pub fn open_with_cache(path: impl AsRef<Path>, cache_bytes: u64) -> Result<Self, StorageError> {
         let cache_bytes = if cache_bytes == 0 {
             FJALL_DEFAULT_CACHE_BYTES
@@ -136,7 +130,6 @@ impl FjallStore {
         fjall_batch.commit().map_err(StorageError::backend)
     }
 
-    /// Stages `ops` into `fjall_batch` without committing.
     fn stage_ops(
         &self,
         fjall_batch: &mut fjall::OwnedWriteBatch,
@@ -154,6 +147,11 @@ impl FjallStore {
         for (index, op) in ops.into_iter().enumerate() {
             match op {
                 BatchOp::Put { cf, key, value } => {
+                    if key.is_empty() {
+                        return Err(StorageError::InvalidOperation(
+                            "storage keys may not be empty",
+                        ));
+                    }
                     if last_range[cf.index()].is_some_and(|last| index < last) {
                         staged_puts[cf.index()].insert(key.clone());
                     }
@@ -164,6 +162,11 @@ impl FjallStore {
                     );
                 }
                 BatchOp::Delete { cf, key } => {
+                    if key.is_empty() {
+                        return Err(StorageError::InvalidOperation(
+                            "storage keys may not be empty",
+                        ));
+                    }
                     staged_puts[cf.index()].remove(&key);
                     fjall_batch.remove(cached_keyspace(self, &mut keyspaces, cf)?, key);
                 }
@@ -203,6 +206,9 @@ impl KvStore for FjallStore {
         key: &[u8],
         max_bytes: usize,
     ) -> Result<Option<Vec<u8>>, crate::BoundedReadError> {
+        if key.is_empty() {
+            return Ok(None);
+        }
         self.keyspace(cf)?
             .get(key)
             .map_err(StorageError::backend)?
@@ -211,6 +217,9 @@ impl KvStore for FjallStore {
     }
 
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        if key.is_empty() {
+            return Ok(None);
+        }
         self.keyspace(cf)?
             .get(key)
             .map(|value| value.map(|bytes| bytes.to_vec()))
@@ -250,6 +259,11 @@ impl KvStore for FjallStore {
     }
 
     fn put(&self, cf: ColumnFamily, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        if key.is_empty() {
+            return Err(StorageError::InvalidOperation(
+                "storage keys may not be empty",
+            ));
+        }
         let _guard = self.write_lock.lock();
         self.keyspace(cf)?
             .insert(key, value)
@@ -330,12 +344,14 @@ struct FjallSnapshot<'a> {
 
 impl KvSnapshot for FjallSnapshot<'_> {
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        if key.is_empty() {
+            return Ok(None);
+        }
         self.snapshot
             .get(self.store.keyspace(cf)?, key)
             .map(|value| value.map(|bytes| bytes.to_vec()))
             .map_err(StorageError::backend)
     }
-
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,
@@ -389,7 +405,6 @@ impl KvSnapshot for FjallSnapshot<'_> {
     }
 }
 
-/// Exclusive upper bound of a prefix range, if the prefix is not all `0xFF`.
 fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
     let mut end = prefix.to_vec();
     while let Some(byte) = end.last_mut() {

@@ -1,5 +1,3 @@
-//! Bounded retention of recent stale tips for BIP332 relay.
-
 use std::cmp::Reverse;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -12,15 +10,10 @@ use parking_lot::Mutex;
 use super::BlockSync;
 use crate::PeerSource;
 
-/// Most stale tips held at once.
 pub(crate) const MAX_RETAINED_STALE_TIPS: usize = 64;
 
-/// Most blocks a stale tip may lie behind the active tip and still be relayed
-/// (BIP332 `STALETIP_RECENT_WINDOW`).
 pub(crate) const STALETIP_RECENT_WINDOW: u32 = 1000;
 
-/// Most previously known stale tips advertised to a peer when relay with it
-/// begins (BIP332 `MAX_ADVERTISED_STALETIPS`).
 pub(crate) const MAX_ADVERTISED_STALETIPS: usize = 10;
 
 #[derive(Debug)]

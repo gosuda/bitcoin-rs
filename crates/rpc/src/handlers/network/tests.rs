@@ -71,7 +71,7 @@ fn getnetworkinfo_reports_zero_connections_on_fresh_context() {
 
 #[test]
 fn getnetworkinfo_reports_configured_overlay_state_without_probing()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let mut ctx = Context::new();
     let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
         bitcoin_rs_p2p::P2pServiceConfig {
@@ -144,7 +144,7 @@ fn getnetworkinfo_reports_configured_overlay_state_without_probing()
 
 #[test]
 fn getnetworkinfo_does_not_call_onion_reachable_with_control_only()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let mut ctx = Context::new();
     let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
         bitcoin_rs_p2p::P2pServiceConfig {
@@ -202,7 +202,7 @@ fn getnetworkinfo_does_not_call_onion_reachable_with_control_only()
 
 #[test]
 fn getnetworkinfo_calls_onion_reachable_with_an_outbound_socks_route()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     for (label, overlay, expect_reachable) in [
         (
             "onion route",
@@ -270,16 +270,20 @@ fn getnetworkinfo_calls_onion_reachable_with_an_outbound_socks_route()
 
 #[test]
 fn getnetworkinfo_reports_default_overlays_unconfigured_and_unreachable()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let plain = getnetworkinfo(&Arc::new(Context::new()), &json!(null))?;
     let Some(plain_networks) = plain.get("networks").and_then(JsonContainerTrait::as_array) else {
-        return Err("plain networks array missing".into());
+        return Err(crate::test_error::TestError::Missing(
+            "plain networks array missing",
+        ));
     };
     let Some(plain_onion) = plain_networks
         .iter()
         .find(|n| n.get("name").and_then(JsonValueTrait::as_str) == Some("onion"))
     else {
-        return Err("plain onion entry missing".into());
+        return Err(crate::test_error::TestError::Missing(
+            "plain onion entry missing",
+        ));
     };
     assert_eq!(
         plain_onion
@@ -326,7 +330,7 @@ fn getnetworkinfo_reports_default_overlays_unconfigured_and_unreachable()
 
 #[test]
 fn getnetworkinfo_reports_onlynet_and_credential_isolation()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let mut ctx = Context::new();
     let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
         bitcoin_rs_p2p::P2pServiceConfig {

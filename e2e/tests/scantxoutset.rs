@@ -1,5 +1,3 @@
-//! Public-process scan comparisons against pinned, unmodified Core 31.1.
-
 use bitcoin_rs_e2e::differential::{compare_reply, compare_rpc};
 use bitcoin_rs_e2e::helpers::submit_genesis;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};

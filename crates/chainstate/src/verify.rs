@@ -1,14 +1,12 @@
-//! Read-only verification of the newest applied blocks.
-
 use core::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use bitcoin_rs_chain::{
     BlockTreeReader, ChainError, LatchReader, NodeId, softfork_state, validate_pow,
 };
 use bitcoin_rs_consensus::{
-    ConsensusError, check_block_body_binding, verify_block::verify_block_non_contextual,
+    BlockRuleContext, ConsensusError, check_block_body_binding,
+    verify_block::verify_block_non_contextual,
 };
 use bitcoin_rs_primitives::{Block, DecodeError, Hash256, deserialize};
 use bitcoin_rs_storage::{
@@ -109,10 +107,6 @@ pub enum VerifyError {
         #[source]
         source: BoundedReadError,
     },
-    /// The chainstate closed for recovery: verification refuses to declare anything
-    /// verified from a chain that can no longer admit mutations.
-    ///
-    /// This names no block; it is fail-closed admission state, not damage.
     #[error("chainstate is closed for recovery")]
     ClosedForRecovery,
     #[error("block verification was interrupted")]
@@ -258,9 +252,6 @@ impl Walk<'_> {
         Ok(checked)
     }
 
-    /// One boundary poll: cancellation first, then fail-closed recovery,
-    /// then process shutdown, then the bounded history pin. A withdrawn pin
-    /// is skipped even when the rows it covered are still readable.
     fn poll_boundaries(&self, height: u32) -> Result<(), Stop> {
         if self
             .cancellation
@@ -272,7 +263,7 @@ impl Walk<'_> {
         if self.chainstate.is_closed_for_recovery() {
             return Err(Stop::Failed(VerifyError::ClosedForRecovery));
         }
-        if self.chainstate.shutdown.load(Ordering::Acquire) {
+        if self.chainstate.shutdown.reader().is_triggered() {
             return Err(Stop::Skipped { height });
         }
         if self.lease.floor().is_none() {
@@ -428,7 +419,13 @@ fn check_body(
 
 fn check_binding(block: &Block, height: u32, ancestor: &Ancestor) -> Result<(), VerifyError> {
     let hash = ancestor.hash;
-    check_block_body_binding(block, ancestor.segwit_active).map_err(|source| VerifyError::Binding {
+    check_block_body_binding(
+        block,
+        BlockRuleContext {
+            segwit_active: ancestor.segwit_active,
+        },
+    )
+    .map_err(|source| VerifyError::Binding {
         height,
         hash,
         source,

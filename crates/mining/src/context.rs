@@ -1,9 +1,7 @@
-//! Candidate chain context: version, work, and time.
-
 use bitcoin_rs_chain::{
     BlockTree, ChainError, candidate_version, header_sync, node::NodeId, softfork_state,
 };
-use bitcoin_rs_consensus::locktime_cutoff;
+use bitcoin_rs_consensus::{LocktimeRule, locktime_cutoff};
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -20,9 +18,6 @@ pub struct MiningChainContext {
 }
 
 impl MiningChainContext {
-    /// # Errors
-    /// Returns [`ChainError::UnknownNode`] when `previous_tip_id` is not in
-    /// the tree and [`ChainError::HeightOverflow`] at the last height.
     pub fn resolve(
         tree: &BlockTree,
         network: Network,
@@ -66,7 +61,8 @@ impl MiningChainContext {
 
     #[must_use]
     pub(crate) const fn locktime_cutoff(&self, candidate_time: u32) -> u32 {
-        locktime_cutoff(self.csv_active, self.prev_median_time_past, candidate_time)
+        let rule = LocktimeRule::from_csv_active(self.csv_active);
+        locktime_cutoff(rule, self.prev_median_time_past, candidate_time)
     }
 }
 
@@ -76,6 +72,7 @@ mod tests {
     use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
 
     use super::MiningChainContext;
+    use crate::test_error::TestError;
 
     fn synthetic_header_with_version(prev_blockhash: BlockHash, time: u32, version: i32) -> Header {
         Header {
@@ -89,7 +86,7 @@ mod tests {
     }
 
     #[test]
-    fn mining_context_resolves_regtest_candidate_facts() -> Result<(), Box<dyn std::error::Error>> {
+    fn mining_context_resolves_regtest_candidate_facts() -> Result<(), TestError> {
         let mut tree = BlockTree::new();
         let chain_bits: u32 = 0x207f_fffe;
         let tip = append_chain_with_bits(&mut tree, 12, 1_000_000, |_| 0x2000_0000, chain_bits)?;
@@ -122,8 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn mining_context_version_signals_started_and_clears_active_bits()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn mining_context_version_signals_started_and_clears_active_bits() -> Result<(), TestError> {
         let mut tree = BlockTree::new();
         let tip = append_chain_with_bits(
             &mut tree,
@@ -176,8 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn testnet4_bip94_min_time_uses_previous_time_floor() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn testnet4_bip94_min_time_uses_previous_time_floor() -> Result<(), TestError> {
         let start = 1_600_000_000_u32;
         let jump = 100_000_u32;
         let mut tree = BlockTree::new();
@@ -221,8 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn mining_context_resolves_staged_parent_predecessor_mtp()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn mining_context_resolves_staged_parent_predecessor_mtp() -> Result<(), TestError> {
         let mut tree = BlockTree::new();
         let tip = append_chain_with_bits(&mut tree, 12, 1_000_000, |_| 0x2000_0000, 0x207f_ffff)?;
         let tip_parent = tree.node(tip)?.parent;
@@ -247,8 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn mining_context_genesis_edge_falls_back_to_tip_mtp() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn mining_context_genesis_edge_falls_back_to_tip_mtp() -> Result<(), TestError> {
         let mut tree = BlockTree::new();
         let tip = append_chain_with_bits(&mut tree, 1, 1_000_000, |_| 0x2000_0000, 0x207f_ffff)?;
 
@@ -267,7 +260,7 @@ mod tests {
         start_time: u32,
         version_at: impl Fn(u32) -> i32,
         bits: u32,
-    ) -> Result<bitcoin_rs_chain::node::NodeId, Box<dyn std::error::Error>> {
+    ) -> Result<bitcoin_rs_chain::node::NodeId, TestError> {
         let mut prev = BlockHash::default();
         let mut tip = None;
         for height in 0..len {

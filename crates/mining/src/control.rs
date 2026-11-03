@@ -1,5 +1,3 @@
-//! Node-facing mining contract: one template model, one control trait.
-
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-seam"))]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -52,7 +50,6 @@ pub enum BlockTemplateMode {
     Proposal(Block),
 }
 
-/// Transport-neutral input to [`MiningControl::get_block_template`].
 #[derive(Clone, Debug)]
 pub struct BlockTemplateRequest {
     pub mode: BlockTemplateMode,
@@ -87,7 +84,6 @@ pub struct BlockTemplate {
     pub signet: Option<SignetMiningInfo>,
 }
 
-/// BIP22 validation vocabulary shared by proposal and solved-block submission.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BlockValidationResult {
     Accepted,
@@ -133,17 +129,12 @@ pub struct MiningInfo {
 
 #[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
 pub enum MiningControlError {
-    /// The semantic request is internally inconsistent or unsupported.
     #[error("{0}")]
     InvalidRequest(CompactString),
-    /// Authoritative mining state is not currently available.
     #[error("{0}")]
     Unavailable(CompactString),
-    /// Candidate construction, validation, or application failed operationally.
     #[error("{0}")]
     Failed(CompactString),
-    /// Consensus or contextual verification rejected the input.
-    /// RPC projects this as Bitcoin Core `RPC_VERIFY_ERROR` (-25).
     #[error("{0}")]
     Rejected(CompactString),
 }
@@ -181,7 +172,6 @@ impl GenerateRequest {
 }
 
 pub trait MiningControl: Send + Sync {
-    /// Assembles or long-polls a template, or dry-validates a proposal.
     fn get_block_template(
         &self,
         request: BlockTemplateRequest,
@@ -189,11 +179,6 @@ pub trait MiningControl: Send + Sync {
 
     fn mining_info(&self) -> Result<MiningInfo, MiningControlError>;
 
-    /// `lookup` must be a positive block count or `-1` (since the last difficulty
-    /// retarget).
-    ///
-    /// `height` must be `-1` (applied tip) or an existing applied-chain height. Matches
-    /// Bitcoin Core's `getnetworkhashps`.
     fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError>;
 
     fn submit_block(
@@ -201,10 +186,6 @@ pub trait MiningControl: Send + Sync {
         payload: BlockPayload,
     ) -> Result<BlockValidationResult, MiningControlError>;
 
-    /// Admits a header through the same tree path as inbound P2P headers.
-    ///
-    /// The previous header must already be in the tree. Duplicates succeed. Failures
-    /// are [`MiningControlError::Rejected`] with Core reject reasons.
     fn submit_header(&self, header: Header) -> Result<(), MiningControlError>;
 
     fn publish_generation(&self);
@@ -410,7 +391,6 @@ impl crate::coordinator::MempoolSequenceWake for FakeMiningControl {
     }
 }
 
-/// Returns the f64 difficulty for `bits` using Bitcoin Core's calculation.
 #[must_use]
 pub fn difficulty_for_bits(consensus_bits: CompactTarget) -> f64 {
     let consensus_bits = consensus_bits.to_consensus();

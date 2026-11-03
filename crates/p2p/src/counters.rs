@@ -1,5 +1,3 @@
-//! Per-connection traffic counters.
-
 use bitcoin_rs_primitives::unix_time_secs;
 
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
@@ -309,6 +307,7 @@ pub struct CountingStream<S> {
     inner: S,
     counters: Arc<PeerCounters>,
     lease: Option<crate::PeerLease>,
+    cancel_guard: Option<bitcoin_rs_chain::HookGuard>,
     /// The connection's send-activity clock, shared with the lease the
     /// message loop reads it through. Stamped beside the byte counters
     /// when the socket accepts bytes, so keepalive send silence tracks
@@ -328,6 +327,7 @@ impl<S> CountingStream<S> {
             inner,
             counters,
             lease: None,
+            cancel_guard: None,
             send_activity: None,
             read_buf: Vec::new(),
             read_pos: 0,
@@ -380,8 +380,6 @@ impl<S> CountingStream<S> {
 }
 
 impl CountingStream<std::net::TcpStream> {
-    /// # Errors
-    /// Returns the error `TcpStream::set_nodelay` returned.
     pub(crate) fn from_connected(
         stream: std::net::TcpStream,
         counters: Arc<PeerCounters>,
@@ -390,12 +388,24 @@ impl CountingStream<std::net::TcpStream> {
         Ok(Self::new(stream, counters))
     }
 
+    /// # Errors
+    /// Returns the error `clone` returned.
+    pub(crate) fn with_cancel(
+        mut self,
+        cancel: &bitcoin_rs_chain::LatchReader,
+        clone: &dyn Fn(&std::net::TcpStream) -> IoResult<std::net::TcpStream>,
+    ) -> IoResult<Self> {
+        let shutdown_stream = std::sync::Arc::new(clone(&self.inner)?);
+        self.cancel_guard = Some(cancel.on_cancel(move || {
+            let _ = shutdown_stream.shutdown(std::net::Shutdown::Both);
+        }));
+        Ok(self)
+    }
+
     pub fn nodelay(&self) -> IoResult<bool> {
         self.inner.nodelay()
     }
 
-    /// # Errors
-    /// Returns the error `TcpStream::try_clone` returned.
     pub fn try_clone(&self) -> IoResult<Self> {
         let mut clone = Self::new(self.inner.try_clone()?, Arc::clone(&self.counters));
         clone.send_activity = self.send_activity.clone();

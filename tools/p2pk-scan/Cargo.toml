@@ -1,0 +1,31 @@
+[package]
+autotests = false
+name = "bitcoin-rs-p2pk-scan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Read-only listing of unspent pay-to-pubkey outputs from a raw block file"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "p2pk-scan"
+path = "src/main.rs"
+[dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin-rs-script.workspace = true
+bitcoin-rs-utxo.workspace = true
+clap.workspace = true
+serde.workspace = true
+sonic-rs.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+bitcoin.workspace = true
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

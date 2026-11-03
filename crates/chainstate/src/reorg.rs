@@ -1,5 +1,3 @@
-//! Switching the applied chain from one tip to another.
-
 use crate::{
     ApplyError, ChainTransition, Chainstate, ConnectOutcome, DisconnectError, DisconnectOutcome,
 };
@@ -30,15 +28,7 @@ where
     O: ReorgObserver + ?Sized,
     S: FnMut(&mut O, core::result::Result<(), ReorgError>) -> core::result::Result<(), ReorgError>,
 {
-    let validation = (|| {
-        let tree = handles.block_tree.read();
-        let root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
-        if tree.node(root).map_err(ReorgError::Plan)?.height == 0 {
-            return Err(ReorgError::CannotInvalidateGenesis);
-        }
-        Ok(())
-    })();
-    if let Err(error) = validation {
+    if let Err(error) = invalidation_root(handles, hash).map(|_| ()) {
         return settle_reorg_without_transition(handles, observer, Err(error), &mut settle)
             .map(|()| InvalidationOutcome::default());
     }
@@ -58,11 +48,8 @@ where
     let mut invalidated = InvalidationOutcome::default();
     let outcome = (|| {
         let target = {
+            let root = invalidation_root(handles, hash)?;
             let tree = handles.block_tree.read();
-            let root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
-            if tree.node(root).map_err(ReorgError::Plan)?.height == 0 {
-                return Err(ReorgError::CannotInvalidateGenesis);
-            }
             tree.tip_after_invalidation(root)
                 .map_err(ReorgError::Plan)?
                 .ok_or(ReorgError::NoValidTip)?
@@ -104,6 +91,18 @@ where
         }
     })();
     settle_reorg_transition(transition, observer, outcome, &mut settle).map(|()| invalidated)
+}
+
+fn invalidation_root(
+    handles: &Chainstate,
+    hash: Hash256,
+) -> core::result::Result<NodeId, ReorgError> {
+    let tree = handles.block_tree.read();
+    let root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
+    if tree.node(root).map_err(ReorgError::Plan)?.height == 0 {
+        return Err(ReorgError::CannotInvalidateGenesis);
+    }
+    Ok(root)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -453,48 +452,69 @@ where
             &prepared.connect,
             &mut staged_body,
         );
-        let outcome = match outcome {
-            Err(
-                original @ ReorgError::ConnectFailed {
-                    disposition: crate::WindowApplyDisposition::Permanent,
-                    ..
-                },
-            ) if progress.disconnected > 0 && progress.connected == 0 => {
-                match restore_disconnected_branch(
-                    &transition,
-                    observer,
-                    &prepared.disconnect_nodes[..progress.disconnected],
-                    &mut staged_body,
-                ) {
-                    Ok(()) => Err(original),
-                    Err(source) => Err(ReorgError::RestorationFailed {
-                        source: Box::new(source),
-                        original: Box::new(original),
-                    }),
-                }
-            }
-            outcome => outcome,
-        };
-        let outcome = if outcome.as_ref().is_err_and(ReorgError::requires_recovery) {
-            outcome
-        } else {
-            let outcome = match (outcome, prepared.missing_connect) {
-                (Ok(()), Some((hash, height))) => Err(ReorgError::MissingBody { hash, height }),
-                (outcome, _) => outcome,
-            };
-            attach_reconsideration(
-                outcome,
-                revisit_disconnected_blocks(
-                    handles,
-                    observer,
-                    &prepared.disconnect_nodes,
-                    progress.disconnected,
-                    &mut staged_body,
-                ),
-            )
-        };
+        let outcome = finish_reorg_attempt(
+            &transition,
+            observer,
+            &prepared,
+            progress,
+            outcome,
+            &mut staged_body,
+        );
         return settle_reorg_transition(transition, observer, outcome, &mut settle);
     }
+}
+
+fn finish_reorg_attempt<F, O>(
+    transition: &ChainTransition<'_>,
+    observer: &mut O,
+    prepared: &PreparedBranches,
+    progress: LoadedPlanProgress,
+    outcome: core::result::Result<(), ReorgError>,
+    staged_body: &mut F,
+) -> core::result::Result<(), ReorgError>
+where
+    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+    O: ReorgObserver + ?Sized,
+{
+    let outcome = match outcome {
+        Err(
+            original @ ReorgError::ConnectFailed {
+                disposition: crate::WindowApplyDisposition::Permanent,
+                ..
+            },
+        ) if progress.disconnected > 0 && progress.connected == 0 => {
+            match restore_disconnected_branch(
+                transition,
+                observer,
+                &prepared.disconnect_nodes[..progress.disconnected],
+                staged_body,
+            ) {
+                Ok(()) => Err(original),
+                Err(source) => Err(ReorgError::RestorationFailed {
+                    source: Box::new(source),
+                    original: Box::new(original),
+                }),
+            }
+        }
+        outcome => outcome,
+    };
+    if outcome.as_ref().is_err_and(ReorgError::requires_recovery) {
+        return outcome;
+    }
+    let outcome = match (outcome, prepared.missing_connect) {
+        (Ok(()), Some((hash, height))) => Err(ReorgError::MissingBody { hash, height }),
+        (outcome, _) => outcome,
+    };
+    attach_reconsideration(
+        outcome,
+        revisit_disconnected_blocks(
+            transition.chainstate(),
+            observer,
+            &prepared.disconnect_nodes,
+            progress.disconnected,
+            staged_body,
+        ),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -921,7 +941,6 @@ mod tests {
     use bitcoin_rs_utxo::UtxoSet;
 
     use std::sync::Arc;
-    use std::sync::atomic::Ordering;
 
     struct NoopObserver;
 
@@ -936,7 +955,7 @@ mod tests {
     #[test]
     fn fatal_pretransition_settlement_closes_admission() {
         let handles = crate::test_fixtures::handles(Network::Regtest, Arc::new(UtxoSet::new()));
-        let shutdown = handles.shutdown_handle();
+        let shutdown = handles.shutdown_reader();
         let mut observer = NoopObserver;
         let mut settle = |_: &mut NoopObserver, _: core::result::Result<(), ReorgError>| {
             Err(ReorgError::TransitionSettlement {
@@ -951,7 +970,7 @@ mod tests {
             result,
             Err(ReorgError::TransitionSettlement { .. })
         ));
-        assert!(shutdown.load(Ordering::Acquire));
+        assert!(shutdown.is_triggered());
         assert!(matches!(
             handles.begin_transition(),
             Err(ApplyError::Shutdown)

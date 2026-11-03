@@ -15,11 +15,6 @@ fn marker_file(dir: &Path) -> PathBuf {
     dir.join(MARKER_FILE)
 }
 
-/// Reads back the most recent valid marker event.
-///
-/// The runtime never reads the marker (it is write-only audit evidence at runtime);
-/// these tests pin the write protocol, so the test reader lives here instead of
-/// production.
 fn read_marker(dir: &Path, genesis_hash: &str) -> Option<ChainRollbackEvent> {
     read_sidecar(dir, MARKER_FILE, |data| {
         ChainRollbackEvent::decode(data, genesis_hash)
@@ -267,6 +262,7 @@ fn marker_last_event_wins_preserves_prev() {
     );
 }
 
+// RCV-12
 #[test]
 fn checkpoint_fallback_with_index_far_ahead_converges_and_warns() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -291,6 +287,7 @@ fn checkpoint_fallback_with_index_far_ahead_converges_and_warns() {
     assert!(read_marker(dir.path(), G).is_some());
 }
 
+// RCV-12
 #[test]
 fn index_marker_failure_preserves_checkpoint_warning() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -310,6 +307,7 @@ fn index_marker_failure_preserves_checkpoint_warning() {
     assert!(warnings[1].contains("txindex"));
 }
 
+// RCV-12
 #[test]
 fn oversized_evidence_file_is_ignored() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -452,5 +450,39 @@ fn foreign_genesis_current_cannot_displace_valid_prev() {
         read_witness(dir2.path(), G),
         Some(w1),
         "valid .prev survives a wrong-format current"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_current_is_never_replaced_by_a_new_publication() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let w1 = AppliedTipWitness::new(G, 1, 100, "aaa", 1000);
+    let w2 = AppliedTipWitness::new(G, 2, 200, "bbb", 2000);
+    write_witness(dir.path(), &w1).expect("write w1");
+    let current = witness_file(dir.path());
+    std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o000))
+        .expect("make current unreadable");
+
+    let refusal = write_witness(dir.path(), &w2);
+    assert!(
+        matches!(refusal, Err(EvidenceError::Io(_))),
+        "a read error on the current record must refuse publication instead of \
+         discarding it, got {refusal:?}"
+    );
+    assert!(
+        !witness_tmp(dir.path()).exists(),
+        "a refused publication removes its staged tmp"
+    );
+
+    std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644))
+        .expect("restore permissions");
+    let kept = std::fs::read(&current).expect("current record still readable");
+    assert_eq!(
+        AppliedTipWitness::decode(&kept, G),
+        Some(w1),
+        "the refused publication leaves the last valid record in place"
     );
 }

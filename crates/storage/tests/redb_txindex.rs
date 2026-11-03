@@ -1,6 +1,3 @@
-//! `ScriptLive` rows in these tests protect the `IDX-01` empty-valued
-//! `script-hash-prefix || full-outpoint` representation.
-
 #![cfg(feature = "redb")]
 
 use bitcoin_rs_storage::{
@@ -8,7 +5,7 @@ use bitcoin_rs_storage::{
 };
 use redb::ReadableDatabase;
 
-type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+use crate::support::TestResult;
 
 const MAX_SCAN: PrefixScanLimit = PrefixScanLimit {
     max_rows: 10_000,
@@ -639,7 +636,7 @@ fn txindex_mixed_batch_ordering_and_interleaved_cf() -> TestResult<()> {
     batch.put(ColumnFamily::TxConfirmed, &k2, b"");
     batch.delete(ColumnFamily::TxConfirmed, &k1);
     batch.put(ColumnFamily::TxConfirmed, &k3, b"");
-    batch.delete_range(ColumnFamily::TxConfirmed, &k2, &k3); // deletes k2 only
+    batch.delete_range(ColumnFamily::TxConfirmed, &k2, &k3);
     batch.put(ColumnFamily::TxConfirmed, &k4, b"");
     store.write(batch)?;
 

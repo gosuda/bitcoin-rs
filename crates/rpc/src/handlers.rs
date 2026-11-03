@@ -33,7 +33,7 @@ pub fn live_registry() -> impl Iterator<Item = &'static str> {
 #[derive(Debug)]
 pub struct Handler {
     ctx: Arc<Context>,
-    stop: Arc<core::sync::atomic::AtomicBool>,
+    stop: bitcoin_rs_chain::LatchWriter,
     blocking_requests: parking_lot::Mutex<(usize, usize)>,
 }
 
@@ -42,14 +42,11 @@ impl Handler {
     pub fn new(ctx: Arc<Context>) -> Self {
         Self {
             ctx,
-            stop: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            stop: bitcoin_rs_chain::LatchWriter::new(),
             blocking_requests: parking_lot::Mutex::new((0, 16)),
         }
     }
 
-    /// Admits blocking calls on all but one of the connections a single
-    /// source may hold, so its own blocking calls never take its last
-    /// connection. A full pool still refuses every source.
     pub(crate) fn configure_blocking_admission(&self, source_connections: usize) {
         self.blocking_requests.lock().1 = source_connections.saturating_sub(1);
     }
@@ -66,11 +63,11 @@ impl Handler {
     }
 
     pub(crate) fn is_stopping(&self) -> bool {
-        self.stop.load(core::sync::atomic::Ordering::Acquire)
+        self.stop.reader().is_triggered()
     }
 
     pub(crate) fn stop(&self) {
-        self.stop.store(true, core::sync::atomic::Ordering::Release);
+        self.stop.trigger();
         if let Some(owner) = &self.ctx.chain.active_tip_wait {
             owner.wake_waiters();
         }
@@ -89,6 +86,11 @@ impl Handler {
         else {
             return Err(RpcError::MethodNotFound(method.to_owned()));
         };
+        let bound = row
+            .arg_names
+            .map(|names| bind_named_params(params, names))
+            .transpose()?;
+        let params = bound.as_ref().map_or(params, |bound| bound.as_ref());
         let _blocking = row
             .execution
             .is_blocking(params)
@@ -107,7 +109,7 @@ impl Handler {
             })
             .transpose()?;
         let _active = self.ctx.active_calls.begin(method);
-        let cancellation = bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.stop));
+        let cancellation = self.stop.reader();
         match handler {
             crate::registry::Dispatch::Immediate(handler) => handler(&self.ctx, params),
             crate::registry::Dispatch::Cancellable(handler) => {
@@ -156,12 +158,6 @@ pub(crate) fn params_array(params: &Value) -> Result<&sonic_rs::Array, RpcError>
         .ok_or(RpcError::InvalidParams("params must be an array"))
 }
 
-/// Binds a method's ordinary named arguments to its positional order.
-///
-/// Core's optional `args` prefix fills only the initial unnamed positions; explicit
-/// nulls still count as named arguments. Omitted trailing arguments stay omitted, and a
-/// non-array `args` value is consumed without effect. Method owners retain arity, type,
-/// default, and value validation.
 pub(crate) fn bind_named_params<'a>(
     params: &'a Value,
     names: &[&str],
@@ -211,7 +207,6 @@ pub(crate) fn bind_named_params<'a>(
     Ok(Cow::Owned(Value::from(values)))
 }
 
-/// Validate original object keys before a method folds named-only options.
 pub(crate) fn ensure_unique_named_params(object: &sonic_rs::Object) -> Result<(), RpcError> {
     let mut seen = hashbrown::HashSet::new();
     for (key, _) in object {
@@ -265,9 +260,10 @@ fn label_of(name: &str) -> &str {
 }
 
 pub(crate) fn optional_bool(params: &Value, index: usize, default: bool) -> Result<bool, RpcError> {
-    let Some(array) = params.as_array() else {
+    if params.is_null() {
         return Ok(default);
-    };
+    }
+    let array = params_array(params)?;
     let Some(value) = array.get(index) else {
         return Ok(default);
     };
@@ -313,9 +309,8 @@ pub(crate) fn required_i64(
     index: usize,
     name: &'static str,
 ) -> Result<i64, RpcError> {
-    let value = params
-        .as_array()
-        .and_then(|arr| arr.get(index))
+    let value = params_array(params)?
+        .get(index)
         .ok_or(RpcError::InvalidParams(name))?;
     if !value.is_number() {
         return Err(wrong_type(index + 1, label_of(name), value, "number"));

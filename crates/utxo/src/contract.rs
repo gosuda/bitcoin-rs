@@ -1,5 +1,3 @@
-//! The chainstate-facing apply/commit/disconnect contract.
-
 use std::borrow::Borrow;
 
 use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxOut, Txid};
@@ -11,7 +9,8 @@ use crate::stats::{CoinStatsListener, CoinStatsRewindError};
 use crate::undo_codec;
 
 pub use crate::undo_codec::{
-    UndoCodecError, decode as decode_undo_record, record_size_limit as undo_record_size_limit,
+    UndoCodecError, decode as decode_undo_record, encode as encode_undo_record,
+    record_size_limit as undo_record_size_limit,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,8 +162,6 @@ pub trait SpentOutputLookup {
     fn entry(&self, outpoint: &OutPoint) -> Option<&UtxoCoin>;
 }
 
-/// Where a block's prevouts are read from: the committed set, or a window
-/// overlay over blocks prepared but not yet committed.
 pub trait OutputSource {
     fn get_entry(&self, outpoint: &OutPoint) -> Option<UtxoCoin>;
 }
@@ -219,7 +216,6 @@ pub enum UndoLoadError {
 pub use bitcoin_rs_storage::{BoundedReadError, pruning::HistoryUnavailable};
 
 pub trait BlockUndoSource: Send + Sync {
-    /// Reads one complete block/input view without exposing storage mutation.
     fn block_spends(
         &self,
         hash: Hash256,
@@ -230,8 +226,6 @@ pub trait BlockUndoSource: Send + Sync {
 #[derive(Debug)]
 pub struct BlockSpends {
     pub block: Block,
-    /// Complete input rows (coinbase empty), or the typed reason this body
-    /// has no certified retained undo. Partial rows are never returned.
     pub spent: Result<Vec<Vec<UtxoCoin>>, HistoryUnavailable>,
 }
 
@@ -357,32 +351,17 @@ pub fn commit_block_changes<T: Borrow<TxOut>>(
     set.commit_block(changes, block_hash)
 }
 
-/// # Errors [`BlockChangeError::TxidCountMismatch`] when `txids` does not cover every
-/// transaction, refused before iterating so no trailing transaction can be silently
-/// dropped; [`BlockChangeError::VoutOverflow`] when a transaction carries more outputs
-/// than a `u32` vout can index; [`BlockChangeError::BlockValueOverflow`] when value
-/// totals overflow; and [`BlockChangeError::UndoPrevoutMissing`] when a spend has no
-/// resolved prevout.
-///
-/// Genesis returns empty mutations.
 pub fn build_block_changes<'a>(
-    block: &'a Block,
-    height: u32,
-    txids: &[Txid],
-    same_block_spent: Option<&HashSet<OutPoint>>,
-    add_capacity: usize,
-    remove_capacity: usize,
+    inputs: &BlockChangeInputs<'a, '_>,
     resolved: &impl SpentOutputLookup,
-    overwritten: Option<&UtxoSet>,
-    max_script_size: usize,
 ) -> Result<(BlockChanges<&'a TxOut>, UndoBatch, BlockValueTotals), BlockChangeError> {
-    if block.txs.len() != txids.len() {
+    if inputs.block.txs.len() != inputs.txids.len() {
         return Err(BlockChangeError::TxidCountMismatch {
-            transactions: block.txs.len(),
-            txids: txids.len(),
+            transactions: inputs.block.txs.len(),
+            txids: inputs.txids.len(),
         });
     }
-    if height == 0 {
+    if inputs.height == 0 {
         return Ok((
             BlockChanges::default(),
             UndoBatch::empty(),
@@ -390,79 +369,160 @@ pub fn build_block_changes<'a>(
         ));
     }
 
-    let net_same_block_spends = same_block_spent.is_some_and(|s| !s.is_empty());
-    let mut changes = BlockChanges::with_capacity(add_capacity, remove_capacity);
-    let mut undo = UndoBatch::empty();
-    let mut totals = BlockValueTotals::default();
-    for (tx, txid) in block.txs.iter().zip(txids) {
-        let txid = *txid;
+    let mut builder =
+        ChangeBuilder::with_capacity(inputs.add_capacity, inputs.remove_capacity, inputs.height);
+    for (tx, txid) in inputs.block.txs.iter().zip(inputs.txids) {
+        builder.add_outputs(tx, *txid, inputs)?;
+        if !tx.is_coinbase() {
+            builder.add_spends(tx, inputs, resolved)?;
+        }
+    }
+    Ok(builder.finish())
+}
+
+pub struct BlockChangeInputs<'a, 'b> {
+    pub block: &'a Block,
+    pub height: u32,
+    pub txids: &'b [Txid],
+    pub same_block_spent: Option<&'b HashSet<OutPoint>>,
+    pub add_capacity: usize,
+    pub remove_capacity: usize,
+    pub overwritten: Option<&'b UtxoSet>,
+    pub max_script_size: usize,
+}
+
+impl BlockChangeInputs<'_, '_> {
+    fn contains(&self, outpoint: OutPoint) -> bool {
+        self.same_block_spent
+            .is_some_and(|spends| spends.contains(&outpoint))
+    }
+
+    fn is_unstorable(&self, txout: &TxOut) -> bool {
+        txout.script_pubkey.first() == Some(&0x6a)
+            || txout.script_pubkey.len() > self.max_script_size
+    }
+}
+
+struct ChangeBuilder<'a> {
+    changes: BlockChanges<&'a TxOut>,
+    undo: UndoBatch,
+    totals: BlockValueTotals,
+    height: u32,
+}
+
+impl<'a> ChangeBuilder<'a> {
+    fn with_capacity(adds: usize, removes: usize, height: u32) -> Self {
+        Self {
+            changes: BlockChanges::with_capacity(adds, removes),
+            undo: UndoBatch::empty(),
+            totals: BlockValueTotals::default(),
+            height,
+        }
+    }
+
+    fn finish(self) -> (BlockChanges<&'a TxOut>, UndoBatch, BlockValueTotals) {
+        (self.changes, self.undo, self.totals)
+    }
+
+    fn add_outputs(
+        &mut self,
+        tx: &'a Tx,
+        txid: Txid,
+        inputs: &BlockChangeInputs<'_, '_>,
+    ) -> Result<(), BlockChangeError> {
         let coinbase = tx.is_coinbase();
         for (vout_idx, txout) in tx.outputs.iter().enumerate() {
-            let value = txout.value.to_sat();
             let vout =
                 u32::try_from(vout_idx).map_err(|_| BlockChangeError::VoutOverflow { txid })?;
             let outpoint = OutPoint::new(txid, vout);
-            let same_block =
-                net_same_block_spends && same_block_spent.is_some_and(|s| s.contains(&outpoint));
-            if coinbase {
-                totals.coinbase_out = totals
-                    .coinbase_out
-                    .checked_add(value)
-                    .ok_or(BlockChangeError::BlockValueOverflow)?;
-            } else if !same_block {
-                totals.created_out = totals
-                    .created_out
-                    .checked_add(value)
-                    .ok_or(BlockChangeError::BlockValueOverflow)?;
-            }
-            if same_block
-                || txout.script_pubkey.first() == Some(&0x6a)
-                || txout.script_pubkey.len() > max_script_size
-            {
+            let same_block = inputs.contains(outpoint);
+            self.account_output_value(coinbase, same_block, txout.value.to_sat())?;
+            if same_block || inputs.is_unstorable(txout) {
                 continue;
             }
-            let replaced = overwritten.and_then(|set| set.get_entry(&outpoint));
-            changes.add(UtxoAdd::new(outpoint, txout, coinbase, height));
-            match replaced {
-                Some(previous) => undo.restore(UtxoAdd::new(
-                    outpoint,
-                    previous.txout,
-                    previous.coinbase,
-                    previous.height,
-                )),
-                None => undo.remove(outpoint),
-            }
+            self.stage_created(outpoint, txout, coinbase, inputs.overwritten);
         }
+        Ok(())
+    }
 
-        if !coinbase {
-            for tx_input in &tx.inputs {
-                let previous_output = tx_input.previous_output;
-                if net_same_block_spends
-                    && same_block_spent.is_some_and(|s| s.contains(&previous_output))
-                {
-                    continue;
-                }
-                changes.remove(previous_output);
-                let spent = resolved.entry(&tx_input.previous_output).ok_or(
-                    BlockChangeError::UndoPrevoutMissing {
-                        txid: previous_output.txid,
-                        vout: previous_output.vout,
-                    },
-                )?;
-                totals.spent_in = totals
-                    .spent_in
-                    .checked_add(spent.txout.value.to_sat())
-                    .ok_or(BlockChangeError::BlockValueOverflow)?;
-                undo.restore(UtxoAdd::new(
-                    previous_output,
-                    spent.txout.clone(),
-                    spent.coinbase,
-                    spent.height,
-                ));
-            }
+    fn account_output_value(
+        &mut self,
+        coinbase: bool,
+        same_block: bool,
+        value: u64,
+    ) -> Result<(), BlockChangeError> {
+        let total = if coinbase {
+            &mut self.totals.coinbase_out
+        } else if !same_block {
+            &mut self.totals.created_out
+        } else {
+            return Ok(());
+        };
+        *total = total
+            .checked_add(value)
+            .ok_or(BlockChangeError::BlockValueOverflow)?;
+        Ok(())
+    }
+
+    fn stage_created(
+        &mut self,
+        outpoint: OutPoint,
+        txout: &'a TxOut,
+        coinbase: bool,
+        overwritten: Option<&UtxoSet>,
+    ) {
+        let replaced = overwritten.and_then(|set| set.get_entry(&outpoint));
+        self.changes
+            .add(UtxoAdd::new(outpoint, txout, coinbase, self.height));
+        match replaced {
+            Some(previous) => self.undo.restore(UtxoAdd::new(
+                outpoint,
+                previous.txout,
+                previous.coinbase,
+                previous.height,
+            )),
+            None => self.undo.remove(outpoint),
         }
     }
-    Ok((changes, undo, totals))
+
+    fn add_spends(
+        &mut self,
+        tx: &Tx,
+        inputs: &BlockChangeInputs<'_, '_>,
+        resolved: &impl SpentOutputLookup,
+    ) -> Result<(), BlockChangeError> {
+        for tx_input in &tx.inputs {
+            let previous_output = tx_input.previous_output;
+            if inputs.contains(previous_output) {
+                continue;
+            }
+            self.changes.remove(previous_output);
+            let spent =
+                resolved
+                    .entry(&previous_output)
+                    .ok_or(BlockChangeError::UndoPrevoutMissing {
+                        txid: previous_output.txid,
+                        vout: previous_output.vout,
+                    })?;
+            self.account_spent_value(spent.txout.value.to_sat())?;
+            self.undo.restore(UtxoAdd::new(
+                previous_output,
+                spent.txout.clone(),
+                spent.coinbase,
+                spent.height,
+            ));
+        }
+        Ok(())
+    }
+
+    fn account_spent_value(&mut self, value: u64) -> Result<(), BlockChangeError> {
+        self.totals.spent_in = self
+            .totals
+            .spent_in
+            .checked_add(value)
+            .ok_or(BlockChangeError::BlockValueOverflow)?;
+        Ok(())
+    }
 }
 
 pub fn persist_block_undo(
@@ -476,9 +536,6 @@ pub fn persist_block_undo(
     Ok(UndoRecord::new(record))
 }
 
-/// # Errors
-/// Read failure, absent record, or a record that does not decode as this
-/// block's.
 pub fn load_block_undo(
     store: &dyn UndoStore,
     height: u32,
@@ -491,9 +548,120 @@ pub fn load_block_undo(
     undo_codec::decode(&record, hash).map_err(|source| UndoLoadError::Unreadable { hash, source })
 }
 
-/// # Errors
-/// [`RollbackError::Refused`] before the marker is armed; every other variant
-/// after.
+pub struct BlockUndoCheck<'a> {
+    pub block: &'a Block,
+    pub txids: &'a [Txid],
+    pub max_script_size: usize,
+}
+
+pub fn load_block_undo_for_block(
+    store: &dyn UndoStore,
+    height: u32,
+    hash: Hash256,
+    check: &BlockUndoCheck<'_>,
+) -> Result<UndoBatch, UndoLoadError> {
+    let undo = load_block_undo(store, height, hash)?;
+    validate_undo_for_block(check, height, &undo)
+        .map_err(|source| UndoLoadError::Unreadable { hash, source })?;
+    Ok(undo)
+}
+
+fn validate_undo_for_block(
+    check: &BlockUndoCheck<'_>,
+    height: u32,
+    undo: &UndoBatch,
+) -> Result<(), UndoCodecError> {
+    if height == 0 {
+        return Ok(());
+    }
+    if check.block.txs.len() != check.txids.len() {
+        return Err(UndoCodecError::BlockMismatch {
+            reason: "transaction id count differs from the block transaction count",
+        });
+    }
+    let (created, mut expected_removes) = block_outputs(check)?;
+    let (external_inputs, same_block_inputs) = block_inputs(check);
+    expected_removes.retain(|outpoint| !same_block_inputs.contains(outpoint));
+
+    let mut restored: HashSet<OutPoint> = HashSet::with_capacity(undo.restores().len());
+    for add in undo.restores() {
+        if add.height >= height {
+            return Err(UndoCodecError::BlockMismatch {
+                reason: "restored coin height is not historical",
+            });
+        }
+        if !external_inputs.contains(&add.outpoint) && !created.contains(&add.outpoint) {
+            return Err(UndoCodecError::BlockMismatch {
+                reason: "restored outpoint is not an input or output of the block",
+            });
+        }
+        restored.insert(add.outpoint);
+    }
+    if !external_inputs
+        .iter()
+        .all(|outpoint| restored.contains(outpoint))
+    {
+        return Err(UndoCodecError::BlockMismatch {
+            reason: "an external input has no restored coin",
+        });
+    }
+    expected_removes.retain(|outpoint| !restored.contains(outpoint));
+    let removed: HashSet<OutPoint> = undo.removes().iter().copied().collect();
+    if removed != expected_removes {
+        return Err(UndoCodecError::BlockMismatch {
+            reason: "removed outpoints differ from the block's retained outputs",
+        });
+    }
+    Ok(())
+}
+
+fn block_outputs(
+    check: &BlockUndoCheck<'_>,
+) -> Result<(HashSet<OutPoint>, HashSet<OutPoint>), UndoCodecError> {
+    let mut created = HashSet::new();
+    let mut retained = HashSet::new();
+    for (tx, txid) in check.block.txs.iter().zip(check.txids) {
+        for (index, txout) in tx.outputs.iter().enumerate() {
+            let vout = u32::try_from(index).map_err(|_| UndoCodecError::BlockMismatch {
+                reason: "block output index exceeds the vout range",
+            })?;
+            let outpoint = OutPoint::new(*txid, vout);
+            created.insert(outpoint);
+            let unstorable = txout.script_pubkey.first() == Some(&0x6a)
+                || txout.script_pubkey.len() > check.max_script_size;
+            if !unstorable {
+                retained.insert(outpoint);
+            }
+        }
+    }
+    Ok((created, retained))
+}
+
+fn block_inputs(check: &BlockUndoCheck<'_>) -> (HashSet<OutPoint>, HashSet<OutPoint>) {
+    let mut prior_txids: HashSet<Txid> = HashSet::with_capacity(check.block.txs.len());
+    let mut external = HashSet::new();
+    let mut same_block = HashSet::new();
+    for (tx, txid) in check.block.txs.iter().zip(check.txids) {
+        if tx.is_coinbase() {
+            prior_txids.insert(*txid);
+            continue;
+        }
+        for input in &tx.inputs {
+            let outpoint = input.previous_output;
+            match prior_txids.contains(&outpoint.txid) {
+                true => {
+                    same_block.insert(outpoint);
+                }
+                false => {
+                    external.insert(outpoint);
+                }
+            }
+        }
+        prior_txids.insert(*txid);
+    }
+    (external, same_block)
+}
+
 pub fn rollback_block(
     store: &dyn UndoStore,
     utxo: &UtxoSet,
@@ -536,9 +704,6 @@ pub fn rollback_block(
     })
 }
 
-/// # Errors
-/// `RollbackError::Utxo` or `RollbackError::CoinStats`. Never `Refused`:
-/// the arming guard does not apply to a marker recovery already owns.
 pub fn rollback_block_recovery(
     utxo: &UtxoSet,
     coin_stats: &CoinStatsListener,

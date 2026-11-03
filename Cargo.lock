@@ -147,12 +147,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "arc-swap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -228,6 +222,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit-set"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
+dependencies = [
+ "bit-vec",
+]
+
+[[package]]
+name = "bit-vec"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
+
+[[package]]
 name = "bitcoin"
 version = "0.32.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -273,9 +282,8 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
- "anyhow",
  "bitcoin",
  "bitcoin-rs-chainstate",
  "bitcoin-rs-consensus",
@@ -287,6 +295,7 @@ dependencies = [
  "clap",
  "mimalloc",
  "parking_lot",
+ "rustix",
  "sonic-rs",
  "tempfile",
  "thiserror",
@@ -296,13 +305,14 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-chain"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
  "bitcoin-rs-chain",
  "bitcoin-rs-consensus",
  "bitcoin-rs-primitives",
+ "crossbeam-channel",
  "hashbrown 0.17.1",
  "parking_lot",
  "ruint",
@@ -312,9 +322,8 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-chainstate"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
- "anyhow",
  "arc-swap",
  "bitcoin-rs-chain",
  "bitcoin-rs-chainstate",
@@ -326,9 +335,12 @@ dependencies = [
  "bytes",
  "cap-fs-ext",
  "cap-std",
+ "crossbeam-channel",
  "hashbrown 0.17.1",
  "metrics",
  "parking_lot",
+ "proptest",
+ "proptest-state-machine",
  "quanta 0.13.0",
  "rayon",
  "serde",
@@ -341,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-consensus"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-primitives",
@@ -362,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-e2e"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-rpc",
@@ -375,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-index"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -391,6 +403,7 @@ dependencies = [
  "metrics",
  "parking_lot",
  "proptest",
+ "proptest-state-machine",
  "rayon",
  "secp256k1 0.29.1",
  "serde",
@@ -404,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-mempool"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-consensus",
@@ -426,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-mining"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "binary_sv2",
  "bitcoin",
@@ -447,6 +460,7 @@ dependencies = [
  "noise_sv2",
  "parking_lot",
  "proptest",
+ "proptest-state-machine",
  "rand 0.8.8",
  "ruint",
  "secp256k1 0.28.2",
@@ -460,9 +474,8 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-node"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
- "anyhow",
  "arc-swap",
  "binary_sv2",
  "bitcoin",
@@ -510,7 +523,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-p2p"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -532,6 +545,7 @@ dependencies = [
  "metrics",
  "parking_lot",
  "proptest",
+ "proptest-state-machine",
  "rustix",
  "serde",
  "sha2",
@@ -543,11 +557,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitcoin-rs-primitives"
-version = "0.14.0"
+name = "bitcoin-rs-p2pk-scan"
+version = "0.15.0"
 dependencies = [
+ "bitcoin",
+ "bitcoin-rs-primitives",
+ "bitcoin-rs-script",
+ "bitcoin-rs-utxo",
+ "clap",
+ "serde",
+ "sonic-rs",
+ "thiserror",
+]
+
+[[package]]
+name = "bitcoin-rs-primitives"
+version = "0.15.0"
+dependencies = [
+ "bitcoin",
  "bytemuck",
  "bytes",
+ "proptest",
  "ruint",
  "serde",
  "sha2",
@@ -560,9 +590,8 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-rpc"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
- "anyhow",
  "arc-swap",
  "bitcoin",
  "bitcoin-rs-chain",
@@ -603,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-script"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-consensus",
@@ -622,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-snapshot"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin-rs-utxo",
@@ -636,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-storage"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "arc-swap",
  "bitcoin-rs-primitives",
@@ -662,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-storage-footprint"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "rustix",
  "serde",
@@ -672,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-utxo"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-primitives",
@@ -1119,6 +1148,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea0095f6103c2a8b44acd6fd15960c801dafebf02e21940360833e0673f48ba7"
 
 [[package]]
+name = "contract-index"
+version = "0.15.0"
+dependencies = [
+ "clap",
+ "tempfile",
+]
+
+[[package]]
 name = "corepc-types"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1429,6 +1466,12 @@ checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
 dependencies = [
  "spin",
 ]
+
+[[package]]
+name = "fnv"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foldhash"
@@ -2322,13 +2365,26 @@ version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
 dependencies = [
+ "bit-set",
+ "bit-vec",
  "bitflags 2.13.2",
  "num-traits",
  "rand 0.9.5",
  "rand_chacha 0.9.0",
  "rand_xorshift",
  "regex-syntax",
+ "rusty-fork",
+ "tempfile",
  "unarray",
+]
+
+[[package]]
+name = "proptest-state-machine"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1675727965d66ff6f335e7d398e477184da08f4bed22f1a7f0dbf2f077f56f2e"
+dependencies = [
+ "proptest",
 ]
 
 [[package]]
@@ -2389,6 +2445,12 @@ dependencies = [
  "web-sys",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "quick-error"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
 
 [[package]]
 name = "quick_cache"
@@ -2737,6 +2799,18 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "rusty-fork"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc6bf79ff24e648f6da1f8d1f011e9cac26491b619e6b9280f2b47f1774e6ee2"
+dependencies = [
+ "fnv",
+ "quick-error",
+ "tempfile",
+ "wait-timeout",
+]
 
 [[package]]
 name = "same-file"
@@ -3500,6 +3574,15 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "wait-timeout"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "walkdir"

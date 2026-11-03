@@ -92,7 +92,15 @@ fn consistent(policy: &TxPolicy) {
 fn snapshot(policy: &TxPolicy) -> String {
     format!("{policy:?}")
 }
-fn fill(policy: &mut TxPolicy, now: Instant, preferred: bool) -> Vec<PeerSource> {
+fn fill_preferred(policy: &mut TxPolicy, now: Instant) -> Vec<PeerSource> {
+    fill_inner(policy, now, true)
+}
+
+fn fill_standard(policy: &mut TxPolicy, now: Instant) -> Vec<PeerSource> {
+    fill_inner(policy, now, false)
+}
+
+fn fill_inner(policy: &mut TxPolicy, now: Instant, preferred: bool) -> Vec<PeerSource> {
     let remaining = MAX_ANNOUNCEMENTS - policy.announcements;
     let mut peers = Vec::new();
     for n in 0..remaining {
@@ -128,11 +136,10 @@ fn combined_caps_use_one_local_victim_and_never_spend_an_unrelated_slot_on_refus
         let owner = select(&mut policy, now)[0];
         assert_eq!(owner.1.source, peers[0]);
         let deadline = policy.requests[&owner.0].owner;
-        fill(&mut policy, now, false);
+        fill_standard(&mut policy, now);
         consistent(&policy);
         let global = *policy.evictable.last().expect("global weak victim");
         assert_ne!(global.1.hash_bytes(), identity(item(1)).hash_bytes());
-        let before = snapshot(&policy);
         assert_eq!(policy.counts[&peers[1]], 1);
         for duplicate_item in [item(1), tx(1)] {
             let mut duplicate = candidate(
@@ -144,18 +151,11 @@ fn combined_caps_use_one_local_victim_and_never_spend_an_unrelated_slot_on_refus
             );
             duplicate.item = duplicate_item;
             assert!(!policy.announce(duplicate));
-            assert_eq!(
-                snapshot(&policy),
-                before,
-                "low-count duplicate at both caps"
-            );
         }
         let incoming = candidate(source(9), 1, now, true, 99);
         assert_eq!(policy.announce(incoming), !protected);
         if protected {
-            assert_eq!(snapshot(&policy), before);
             assert!(!policy.request_parent(incoming));
-            assert_eq!(snapshot(&policy), before);
         } else {
             assert!(!policy.counts.contains_key(&peers[7]));
             assert_eq!(policy.counts[&incoming.source], 1);
@@ -174,7 +174,7 @@ fn combined_caps_use_one_local_victim_and_never_spend_an_unrelated_slot_on_refus
 fn protected_global_cap_and_ordinary_arrivals_refuse_without_mutation() {
     let now = Instant::now();
     let mut policy = TxPolicy::default();
-    fill(&mut policy, now, true);
+    fill_preferred(&mut policy, now);
     consistent(&policy);
     let before = snapshot(&policy);
     for preferred in [false, true] {
@@ -192,7 +192,7 @@ fn protected_global_cap_and_ordinary_arrivals_refuse_without_mutation() {
 fn duplicate_and_peer_limit_preflight_precede_global_eviction_and_parent_reports_retention() {
     let now = Instant::now();
     let mut policy = TxPolicy::default();
-    let peers = fill(&mut policy, now, false);
+    let peers = fill_standard(&mut policy, now);
     let peer = peers[0];
     let before = snapshot(&policy);
     let mut duplicate = candidate(

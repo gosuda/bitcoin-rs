@@ -17,6 +17,9 @@ const SNAPSHOT_MAGIC: u32 = 0x55_54_58_4f;
 const SNAPSHOT_WRITE_VERSION: u32 = 4;
 const MUHASH_TRAILER_LEN: usize = 384;
 const SEED_READ_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_SNAPSHOT_RECORDS: u64 = 250_000_000;
+pub(crate) const WALK_CANCELLATION_INTERVAL: usize = 256;
+const MAX_SNAPSHOT_COINS_PER_TXID: u32 = 1_000_000;
 
 #[derive(Copy, Clone, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C, packed)]
@@ -292,10 +295,7 @@ pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
         height,
         record_count,
     } = read_snapshot_metadata_v4(reader)?;
-    let record_count_usize =
-        usize::try_from(record_count).map_err(|_| UtxoError::SnapshotRecordCountTooLarge {
-            count: record_count,
-        })?;
+    let record_count_usize = checked_record_count(record_count)?;
 
     let set = UtxoSet::new();
     let mut seen_vouts = HashSet::new();
@@ -367,6 +367,37 @@ pub fn read_snapshot_strict_v4_witnessed<O: SnapshotCoinObserver>(
     Ok((load, observer, witness))
 }
 
+fn checked_record_count(record_count: u64) -> Result<usize, UtxoError> {
+    if record_count > MAX_SNAPSHOT_RECORDS {
+        return Err(UtxoError::SnapshotRecordCountTooLarge {
+            count: record_count,
+        });
+    }
+    usize::try_from(record_count).map_err(|_| UtxoError::SnapshotRecordCountTooLarge {
+        count: record_count,
+    })
+}
+
+fn checked_output_count(output_count: u32) -> Result<usize, UtxoError> {
+    if output_count > MAX_SNAPSHOT_COINS_PER_TXID {
+        let count = usize::try_from(output_count)
+            .map_err(|_| UtxoError::SnapshotOutputCountTooLarge { count: usize::MAX })?;
+        return Err(UtxoError::SnapshotOutputCountTooLarge { count });
+    }
+    usize::try_from(output_count)
+        .map_err(|_| UtxoError::SnapshotOutputCountTooLarge { count: usize::MAX })
+}
+
+fn checked_record_vout(
+    output: &OwnedUtxoOut,
+    seen_vouts: &mut HashSet<u32>,
+) -> Result<(), UtxoError> {
+    if !seen_vouts.insert(output.vout) {
+        return Err(UtxoError::SnapshotDuplicateVout { vout: output.vout });
+    }
+    Ok(())
+}
+
 fn read_snapshot_record_head(reader: &mut impl Read) -> Result<(Hash256, u32), UtxoError> {
     let record_header_bytes =
         read_array::<{ core::mem::size_of::<SnapshotRecordHeaderV4>() }>(reader)?;
@@ -400,13 +431,12 @@ fn read_snapshot_outputs(
     output_count: u32,
     seen_vouts: &mut HashSet<u32>,
 ) -> Result<Vec<OwnedUtxoOut>, UtxoError> {
+    let output_count = checked_output_count(output_count)?;
     seen_vouts.clear();
     let mut outputs = Vec::new();
     for _ in 0..output_count {
         let output = read_snapshot_output(reader)?;
-        if !seen_vouts.insert(output.vout) {
-            return Err(UtxoError::SnapshotDuplicateVout { vout: output.vout });
-        }
+        checked_record_vout(&output, seen_vouts)?;
         outputs.push(output);
     }
     Ok(outputs)
@@ -438,26 +468,39 @@ fn read_snapshot_output(reader: &mut impl Read) -> Result<OwnedUtxoOut, UtxoErro
 }
 
 pub(crate) fn hash_serialized_3_stable(view: &UtxoSetView<'_>) -> Result<Hash256, UtxoError> {
-    hash_serialized_3_stable_inner(view, None)
+    hash_serialized_3_stable_inner(view, None, &|| false)
 }
 
 pub(crate) fn hash_serialized_3_stable_at_height(
     view: &UtxoSetView<'_>,
     snapshot_height: u32,
 ) -> Result<Hash256, UtxoError> {
-    hash_serialized_3_stable_inner(view, Some(snapshot_height))
+    hash_serialized_3_stable_inner(view, Some(snapshot_height), &|| false)
+}
+
+pub(crate) fn hash_serialized_3_stable_cancellable(
+    view: &UtxoSetView<'_>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Hash256, UtxoError> {
+    hash_serialized_3_stable_inner(view, None, cancelled)
 }
 
 fn hash_serialized_3_stable_inner(
     view: &UtxoSetView<'_>,
     snapshot_height: Option<u32>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Hash256, UtxoError> {
     let mut engine = SerializedUtxoHasher::new();
+    let mut visited = 0usize;
     for shard_idx in 0_u8..=u8::MAX {
         view.shard(usize::from(shard_idx)).with_table(|table| {
             let mut entries = Vec::with_capacity(table.output_count());
             for record in &table.table {
                 for output in record.outputs() {
+                    visited += 1;
+                    if visited.is_multiple_of(WALK_CANCELLATION_INTERVAL) && cancelled() {
+                        return Err(UtxoError::Cancelled);
+                    }
                     entries.push(HashSerializedEntry {
                         txid_le: record.txid().to_le_bytes(),
                         output,
@@ -525,15 +568,31 @@ impl SerializedUtxoHasher {
 }
 
 impl UtxoSetView<'_> {
-    pub(crate) fn for_each_coin<F>(&self, mut f: F) -> Result<(), UtxoError>
+    pub(crate) fn for_each_coin<F>(&self, f: F) -> Result<(), UtxoError>
     where
         F: FnMut(SnapshotCoin<'_>),
     {
+        self.for_each_coin_cancellable(f, &|| false)
+    }
+
+    pub(crate) fn for_each_coin_cancellable<F>(
+        &self,
+        mut f: F,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), UtxoError>
+    where
+        F: FnMut(SnapshotCoin<'_>),
+    {
+        let mut visited = 0usize;
         for shard_idx in 0_u8..=u8::MAX {
             self.shard(usize::from(shard_idx)).with_table(|table| {
                 for record in &table.table {
                     let txid = record.txid();
                     for output in record.outputs() {
+                        visited += 1;
+                        if visited.is_multiple_of(WALK_CANCELLATION_INTERVAL) && cancelled() {
+                            return Err(UtxoError::Cancelled);
+                        }
                         f(SnapshotCoin {
                             txid,
                             vout: output.vout,
@@ -812,16 +871,20 @@ fn read_raw_snapshot_stream<E, F: FnMut(&OutPoint, &[u8]) -> Result<(), E> + ?Si
         height,
         record_count,
     } = read_snapshot_metadata_v4(reader).map_err(map_snapshot_error)?;
-    let record_count_usize = usize::try_from(record_count).map_err(|_| RawSeedError::Integrity)?;
+    let record_count_usize = checked_record_count(record_count).map_err(map_snapshot_error)?;
 
+    let mut seen_vouts = HashSet::new();
     let mut outputs = 0_u64;
     for _ in 0..record_count_usize {
         let (txid, output_count) = read_snapshot_record_head(reader).map_err(map_snapshot_error)?;
         if output_count == 0 {
             return Err(RawSeedError::Integrity);
         }
-        for _ in 0..output_count {
+        let record_outputs = checked_output_count(output_count).map_err(map_snapshot_error)?;
+        seen_vouts.clear();
+        for _ in 0..record_outputs {
             let output = read_snapshot_output(reader).map_err(map_snapshot_error)?;
+            checked_record_vout(&output, &mut seen_vouts).map_err(map_snapshot_error)?;
             let outpoint = OutPoint::new(Txid::from(txid), output.vout);
             emit(&outpoint, &output.script_pubkey).map_err(RawSeedError::Emit)?;
             outputs = outputs.checked_add(1).ok_or(RawSeedError::Integrity)?;
@@ -898,7 +961,9 @@ impl<R: Read + ?Sized> Read for TeeReader<'_, R> {
 #[cfg(test)]
 mod seed_no_token_tests {
     use super::{
-        read_snapshot_strict_v4, read_snapshot_strict_v4_witnessed, write_snapshot_witnessed,
+        MAX_SNAPSHOT_COINS_PER_TXID, MAX_SNAPSHOT_RECORDS, RawSeedError, RawStreamCounts,
+        read_raw_snapshot_stream, read_snapshot_strict_v4, read_snapshot_strict_v4_witnessed,
+        write_snapshot_witnessed,
     };
     use crate::{
         UtxoError, UtxoKey, UtxoSet,
@@ -907,7 +972,7 @@ mod seed_no_token_tests {
     use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut, Txid};
     use std::io::Cursor;
 
-    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+    use crate::test_support::{TestError, TestResult};
 
     fn txid(seed: u64) -> Hash256 {
         let mut bytes = [0_u8; 32];
@@ -991,7 +1056,8 @@ mod seed_no_token_tests {
         let (set, tip, height) = fixture_set()?;
         let mut good = Vec::new();
         let (_, (), encode_witness) = write_snapshot_witnessed(&set, &tip, height, &mut good, ())?;
-        let encode_witness = encode_witness.ok_or("valid encode must mint a witness")?;
+        let encode_witness =
+            encode_witness.ok_or(TestError::Missing("valid encode must mint a witness"))?;
         assert_eq!(encode_witness.byte_len(), u64::try_from(good.len())?);
         assert_eq!(encode_witness.record_count(), 2);
         assert_eq!(encode_witness.output_count(), 3);
@@ -1044,5 +1110,108 @@ mod seed_no_token_tests {
             })
         ));
         Ok(())
+    }
+
+    fn raw_stream(bytes: &[u8]) -> Result<RawStreamCounts, RawSeedError<TestError>> {
+        read_raw_snapshot_stream(
+            &mut Cursor::new(bytes),
+            &mut |_outpoint, _script| Ok(()),
+            &|| false,
+        )
+    }
+
+    #[test]
+    fn raw_and_strict_loaders_refuse_the_same_malformed_snapshots() -> TestResult {
+        let (_, tip, height) = fixture_set()?;
+        let over_records = header(tip, height, MAX_SNAPSHOT_RECORDS + 1);
+        assert!(matches!(
+            read_snapshot_strict_v4(&mut Cursor::new(over_records.clone())),
+            Err(UtxoError::SnapshotRecordCountTooLarge { .. })
+        ));
+        assert!(matches!(
+            raw_stream(&over_records),
+            Err(RawSeedError::Integrity)
+        ));
+
+        let mut over_outputs = header(tip, height, 1);
+        over_outputs.extend_from_slice(&record_head(txid(31), MAX_SNAPSHOT_COINS_PER_TXID + 1));
+        assert!(matches!(
+            read_snapshot_strict_v4(&mut Cursor::new(over_outputs.clone())),
+            Err(UtxoError::SnapshotOutputCountTooLarge { .. })
+        ));
+        assert!(matches!(
+            raw_stream(&over_outputs),
+            Err(RawSeedError::Integrity)
+        ));
+
+        let repeated = txid(32);
+        let mut duplicate_vout = header(tip, height, 1);
+        duplicate_vout.extend_from_slice(&record_head(repeated, 2));
+        duplicate_vout.extend_from_slice(&output(1, height, &[0x51])?);
+        duplicate_vout.extend_from_slice(&output(1, height, &[0x51])?);
+        duplicate_vout.extend_from_slice(&[0_u8; 384]);
+        assert!(matches!(
+            read_snapshot_strict_v4(&mut Cursor::new(duplicate_vout.clone())),
+            Err(UtxoError::SnapshotDuplicateVout { vout: 1 })
+        ));
+        assert!(matches!(
+            raw_stream(&duplicate_vout),
+            Err(RawSeedError::Integrity)
+        ));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::WALK_CANCELLATION_INTERVAL;
+    use crate::{
+        UtxoError, UtxoSet,
+        contract::{BlockChanges, UtxoAdd, commit_block_changes},
+    };
+    use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
+    use std::cell::Cell;
+
+    fn set_with_coins(count: usize) -> UtxoSet {
+        let set = UtxoSet::new();
+        let mut changes = BlockChanges::default();
+        for index in 0..count {
+            let mut bytes = [0_u8; 32];
+            bytes[..8].copy_from_slice(&u64::try_from(index).unwrap_or(u64::MAX).to_le_bytes());
+            changes.add(UtxoAdd::new(
+                OutPoint::new(Hash256::from_le_bytes(&bytes).into(), 0),
+                TxOut {
+                    value: Amount::from_sat(7),
+                    script_pubkey: vec![0x51].into(),
+                },
+                false,
+                0,
+            ));
+        }
+        commit_block_changes(&set, &changes, &Hash256::default())
+            .unwrap_or_else(|error| panic!("fixture coins: {error}"));
+        set
+    }
+
+    #[test]
+    fn a_coin_walk_checks_cancellation_every_documented_interval() {
+        let set = set_with_coins(2 * WALK_CANCELLATION_INTERVAL);
+        let observed = Cell::new(0_usize);
+        let checks = Cell::new(0_usize);
+
+        let result = set.with_stable_view(|view| {
+            view.for_each_coin_cancellable(|_| observed.set(observed.get() + 1), &|| {
+                checks.set(checks.get() + 1);
+                true
+            })
+        });
+
+        assert!(matches!(result, Err(UtxoError::Cancelled)));
+        assert_eq!(
+            observed.get(),
+            WALK_CANCELLATION_INTERVAL - 1,
+            "the first check must run after the documented interval"
+        );
+        assert_eq!(checks.get(), 1, "one walk asks once before stopping");
     }
 }

@@ -116,7 +116,7 @@ fn bip341_binds_all_prevouts_and_the_transaction() {
         Interpreter.execute_with_prevouts(
             &[0x51],
             &[],
-            &[],
+            &bitcoin_rs_primitives::Witness::new(),
             VerifyFlags::NONE,
             &prevouts[..1],
             &tx,
@@ -137,7 +137,7 @@ fn supplied_witness_is_verified_without_mutating_the_transaction() {
     assert_eq!(verify(&tx, &prevouts, 0), Ok(true));
     let witness = tx.inputs[0].witness.clone();
     let mut corrupted_tx = tx;
-    corrupted_tx.inputs[0].witness[0][0] ^= 1;
+    corrupted_tx.inputs[0].witness = flip_first_byte(&corrupted_tx.inputs[0].witness, 0);
     assert!(verify(&corrupted_tx, &prevouts, 0).is_err());
     let unchanged_tx = corrupted_tx.clone();
     assert_eq!(
@@ -164,7 +164,7 @@ fn invalid_input_index_is_a_typed_error() {
             Interpreter.execute_with_prevouts(
                 &prevouts[0].script_pubkey,
                 &[],
-                &[],
+                &bitcoin_rs_primitives::Witness::new(),
                 VerifyFlags::MANDATORY,
                 &prevouts,
                 &tx,
@@ -176,4 +176,13 @@ fn invalid_input_index_is_a_typed_error() {
             })
         );
     }
+}
+
+fn flip_first_byte(
+    witness: &bitcoin_rs_primitives::Witness,
+    item: usize,
+) -> bitcoin_rs_primitives::Witness {
+    let mut stack: Vec<Vec<u8>> = witness.iter().map(<[u8]>::to_vec).collect();
+    stack[item][0] ^= 0x01;
+    bitcoin_rs_primitives::Witness::from_stack(stack)
 }

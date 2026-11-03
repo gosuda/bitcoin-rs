@@ -1,5 +1,3 @@
-//! Workspace release version surfaced for wire and RPC user-agent strings.
-
 pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub const USER_AGENT: &str = concat!("/bitcoin-rs:", env!("CARGO_PKG_VERSION"), "/");
@@ -34,9 +32,6 @@ pub fn sub_version(ua_comments: &[String]) -> String {
     let comments = ua_comments.join("; ");
     format!("{}({comments})/", USER_AGENT.trim_end_matches('/'))
 }
-
-/// Numeric client version, by Bitcoin Core's `CLIENT_VERSION` arithmetic.
-/// `10000 * major + 100 * minor + patch`, read from the same string the user
 #[must_use]
 pub fn client_version() -> i64 {
     let mut parts = [0_i64; 3];

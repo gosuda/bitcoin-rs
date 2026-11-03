@@ -112,22 +112,129 @@ fn max_txid_breaks_cross_component_ties() {
     assert!(higher > lower);
 }
 
+fn arb_chunk_key() -> impl Strategy<Value = ChunkKey> {
+    let fee_strat = prop_oneof![
+        Just(-100_000_000_i128),
+        Just(-1_000_i128),
+        Just(-1_i128),
+        Just(0_i128),
+        Just(1_i128),
+        Just(1_000_i128),
+        Just(2_100_000_000_000_000_i128),
+        -10_000_000_i128..10_000_000_i128,
+    ];
+    let weight_strat = prop_oneof![
+        Just(1_u64),
+        Just(4_u64),
+        Just(100_u64),
+        Just(400_u64),
+        Just(404_000_u64),
+        1_u64..1_000_000_u64,
+    ];
+    let prefix_strat = prop_oneof![
+        Just(0_u64),
+        Just(1_u64),
+        Just(400_u64),
+        Just(404_000_u64),
+        0_u64..10_000_000_u64,
+    ];
+    let byte_strat = prop_oneof![Just(0_u8), Just(1_u8), Just(255_u8), any::<u8>()];
+    let comp_strat = prop_oneof![Just(0_u32), Just(1_u32), 0_u32..16];
+    let ord_strat = prop_oneof![Just(0_u32), Just(1_u32), 0_u32..8];
+    (
+        fee_strat,
+        weight_strat,
+        prefix_strat,
+        byte_strat,
+        comp_strat,
+        ord_strat,
+    )
+        .prop_map(|(fee, weight, prefix, byte, comp, ord)| {
+            key(fee, weight, prefix, byte, comp, ord)
+        })
+}
+
+fn arb_related_keys() -> impl Strategy<Value = (ChunkKey, ChunkKey, ChunkKey)> {
+    prop_oneof![
+        (arb_chunk_key(), arb_chunk_key(), arb_chunk_key()),
+        arb_chunk_key().prop_flat_map(|base| {
+            let b1 = base;
+            let b2 = base;
+            (Just(base), Just(b1), Just(b2))
+        }),
+        (
+            arb_chunk_key(),
+            1_i128..8_i128,
+            any::<u8>(),
+            any::<u32>(),
+            any::<u32>()
+        )
+            .prop_map(|(base, scale, byte, comp, ord)| {
+                let mut tied = base;
+                tied.modified_fee = base.modified_fee.saturating_mul(scale);
+                let scale_u64 = u64::try_from(scale).unwrap_or(1);
+                tied.charged_weight = base.charged_weight.saturating_mul(scale_u64);
+                tied.max_txid = Txid::from(Hash256::from_le_bytes(&[byte; 32]));
+                tied.component = comp;
+                tied.ordinal = ord;
+                let mut third = tied;
+                third.ordinal = ord.wrapping_add(1);
+                (base, tied, third)
+            },),
+    ]
+}
+
+fn oracle_cmp(a: &ChunkKey, b: &ChunkKey) -> core::cmp::Ordering {
+    let ours = a.modified_fee * i128::from(b.charged_weight);
+    let theirs = b.modified_fee * i128::from(a.charged_weight);
+    theirs
+        .cmp(&ours)
+        .then_with(|| a.prefix_weight.cmp(&b.prefix_weight))
+        .then_with(|| a.max_txid.cmp(&b.max_txid))
+        .then_with(|| a.component.cmp(&b.component))
+        .then_with(|| a.ordinal.cmp(&b.ordinal))
+}
+
+fn proptest_cases(default: u32) -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: proptest_cases(1024),
+        ..ProptestConfig::default()
+    })]
+    // POL-05
     #[test]
-    fn chunk_key_order_is_total(
-        a in (0_i128..1_000_000_000, 1_u64..1_000_000, 1_u64..100_000_000, 0_u8..255, 0_u32..8, 0_u32..4),
-        b in (0_i128..1_000_000_000, 1_u64..1_000_000, 1_u64..100_000_000, 0_u8..255, 0_u32..8, 0_u32..4),
-        c in (0_i128..1_000_000_000, 1_u64..1_000_000, 1_u64..100_000_000, 0_u8..255, 0_u32..8, 0_u32..4),
+    fn chunk_key_ordering_obeys_total_order_and_independent_oracle(
+        (a, b, c) in arb_related_keys()
     ) {
-        let key = |(fee, weight, prefix, byte, component, ordinal)| {
-            self::key(fee, weight, prefix, byte, component, ordinal)
-        };
-        let (a, b, c) = (key(a), key(b), key(c));
-        prop_assert!(!(a < b && b < a), "order is antisymmetric");
-        if a <= b && b <= c {
-            prop_assert!(a <= c, "order is transitive");
+        prop_assert!(a >= a);
+        prop_assert_eq!(a.cmp(&a), core::cmp::Ordering::Equal);
+
+        prop_assert!(a <= b || b <= a);
+
+        prop_assert!(a >= b || b >= a);
+        if a <= b && b <= a {
+            prop_assert_eq!(a, b);
         }
-        prop_assert!(a <= b || b <= a, "order is total");
+
+        if a <= b && b <= c {
+            prop_assert!(a <= c);
+        }
+        if a < b && b < c {
+            prop_assert!(a < c);
+        }
+
+        let ord = a.cmp(&b);
+        prop_assert_eq!(a < b, ord == core::cmp::Ordering::Less);
+        prop_assert_eq!(a > b, ord == core::cmp::Ordering::Greater);
+        prop_assert_eq!(a == b, ord == core::cmp::Ordering::Equal);
+        prop_assert_eq!(a <= b, ord != core::cmp::Ordering::Greater);
+        prop_assert_eq!(ord, oracle_cmp(&a, &b));
     }
 }
 

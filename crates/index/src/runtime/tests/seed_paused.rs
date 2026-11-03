@@ -1,5 +1,3 @@
-//! Paused-write, poison, lease, and demand proofs for the immutable snapshot
-
 use super::super::*;
 
 use bitcoin::hashes::Hash as _;
@@ -486,15 +484,17 @@ impl SeedFixture {
             let txids = block.txids();
             if height > 0 {
                 let (_, undo, _) = bitcoin_rs_utxo::contract::build_block_changes(
-                    &block,
-                    height,
-                    &txids,
-                    None,
-                    0,
-                    0,
+                    &bitcoin_rs_utxo::contract::BlockChangeInputs {
+                        block: &block,
+                        height,
+                        txids: &txids,
+                        same_block_spent: None,
+                        add_capacity: 0,
+                        remove_capacity: 0,
+                        overwritten: None,
+                        max_script_size: crate::MAX_LIVE_SCRIPT_SIZE,
+                    },
                     &coins,
-                    None,
-                    crate::MAX_LIVE_SCRIPT_SIZE,
                 )
                 .expect("undo batch");
                 let record = bitcoin_rs_utxo::contract::persist_block_undo(
@@ -570,6 +570,7 @@ impl SeedHarness {
             enabled,
             chain_events: Arc::new(TestChainCursor),
             reporter,
+            shutdown: bitcoin_rs_chain::LatchReader::fixture_never(),
             wake_rx,
             quiet_period: Duration::ZERO,
             batch_delay: Duration::ZERO,
@@ -647,8 +648,6 @@ fn commit_lookup_block(writer: &Arc<dyn TxIndexWriter>, height: u32, hash: [u8; 
         .expect("commit lookup block");
 }
 
-/// block adds its coinbase and spend outputs and spends the previous
-/// coinbase. All fixture scripts are `[0x51]`.
 fn expected_chain_live(
     fixture: &SeedFixture,
     through: u32,
@@ -1288,7 +1287,7 @@ fn seed_reorg_below_h_rolls_back_through_pinned_undo() {
     control.bodies.undo.lock().remove(&control.a_key(2));
     let denied = SeedHarness::new(
         &control,
-        IndexCapabilities::TX_AND_SCRIPTS,
+        IndexCapabilities::TX_LOOKUP_SCRIPT_LIVE,
         Arc::new(UtxoSet::new()),
     );
     let control_tip = control.tip(control.a[1]);

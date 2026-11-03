@@ -3,9 +3,10 @@ use std::io::{Cursor, Read};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
+use bitcoin::p2p::ServiceFlags;
 
 use super::{
-    HEADER_LEN, MAX_MESSAGE_PAYLOAD, PeerError, encode_payload, read_message, wire_len,
+    HEADER_LEN, MAX_MESSAGE_PAYLOAD, Message, PeerError, encode_payload, read_message, wire_len,
     write_message,
 };
 
@@ -310,8 +311,10 @@ fn feature_message_v1_roundtrip() -> Result<(), PeerError> {
     let (decoded, raw) = read_message(&mut cursor, Magic::REGTEST)?;
     assert_eq!(decoded, message);
 
-    let payload = encode_payload(&message)?;
-    assert_eq!(raw.as_ref(), payload.as_slice());
+    assert_eq!(
+        raw.as_ref(),
+        &[6, b'B', b'I', b'P', b'3', b'3', b'2', 4, 1, 2, 3, 4]
+    );
     Ok(())
 }
 
@@ -525,9 +528,13 @@ fn staletip_roundtrips_and_over_limit_is_ignored_not_punished() -> Result<(), Pe
     )?;
     assert!(
         matches!(&ignored, super::Message::Unknown { command, payload }
-                if command.as_ref() == "staletip" && payload.is_empty()),
+                if command.as_ref() == "staletip" && payload.as_slice() == over.as_slice()),
         "{ignored:?}"
     );
+    let mut rewritten = Vec::new();
+    write_message(&mut rewritten, Magic::REGTEST, &ignored)?;
+    let (re_decoded, _) = read_message(&mut Cursor::new(rewritten), Magic::REGTEST)?;
+    assert_eq!(re_decoded, ignored);
 
     let result = read_message(
         &mut Cursor::new(frame_of(b"staletip", &[0u8; 31])?),
@@ -570,4 +577,174 @@ fn empty_command_in_v1_header_is_rejected() {
     let mut cursor = Cursor::new(frame);
     let result = read_message(&mut cursor, Magic::REGTEST);
     assert!(matches!(result, Err(PeerError::InvalidCommand(_))));
+}
+
+// P2P-01
+#[test]
+fn version_relay_reads_any_nonzero_byte_as_true() -> Result<(), PeerError> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&Magic::REGTEST.to_bytes());
+    let mut cmd = [0u8; 12];
+    cmd[..7].copy_from_slice(b"version");
+    frame.extend_from_slice(&cmd);
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&70017u32.to_le_bytes());
+    payload.extend_from_slice(&0u64.to_le_bytes());
+    payload.extend_from_slice(&0i64.to_le_bytes());
+    payload.extend_from_slice(&[0u8; 26]);
+    payload.extend_from_slice(&[0u8; 26]);
+    payload.extend_from_slice(&0u64.to_le_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&0i32.to_le_bytes());
+    payload.push(2);
+
+    let len =
+        u32::try_from(payload.len()).map_err(|_| PeerError::PayloadTooLarge(payload.len()))?;
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&super::checksum(&payload));
+    frame.extend_from_slice(&payload);
+
+    let mut cursor = Cursor::new(frame);
+    let (message, _) = read_message(&mut cursor, Magic::REGTEST)?;
+    let Message::Version(version) = message else {
+        panic!("expected a version message");
+    };
+    assert!(version.relay, "Core reads any nonzero relay byte as true");
+    Ok(())
+}
+
+fn read_version_payload(
+    payload: &[u8],
+) -> Result<bitcoin::p2p::message_network::VersionMessage, PeerError> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&Magic::REGTEST.to_bytes());
+    let mut cmd = [0u8; 12];
+    cmd[..7].copy_from_slice(b"version");
+    frame.extend_from_slice(&cmd);
+    let len =
+        u32::try_from(payload.len()).map_err(|_| PeerError::PayloadTooLarge(payload.len()))?;
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&super::checksum(payload));
+    frame.extend_from_slice(payload);
+    let (message, _) = read_message(&mut Cursor::new(frame), Magic::REGTEST)?;
+    let Message::Version(version) = message else {
+        panic!("expected a version message");
+    };
+    Ok(version)
+}
+
+// P2P-01
+#[test]
+fn version_without_optional_fields_decodes_with_core_defaults() -> Result<(), PeerError> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&70_017u32.to_le_bytes());
+    payload.extend_from_slice(
+        &(ServiceFlags::NETWORK | ServiceFlags::WITNESS)
+            .to_u64()
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(&0i64.to_le_bytes());
+
+    let version = read_version_payload(&payload)?;
+    assert_eq!(version.version, 70_017);
+    assert_eq!(version.nonce, 1);
+    assert!(version.user_agent.is_empty());
+    assert_eq!(version.start_height, -1);
+    assert!(version.relay);
+
+    payload.extend_from_slice(&[0u8; 26]);
+    let version = read_version_payload(&payload)?;
+    assert_eq!(version.nonce, 1);
+    assert!(version.user_agent.is_empty());
+    assert!(version.relay);
+
+    payload.extend_from_slice(&[0u8; 26]);
+    payload.extend_from_slice(&7u64.to_le_bytes());
+    let version = read_version_payload(&payload)?;
+    assert_eq!(version.nonce, 7);
+    assert!(version.user_agent.is_empty());
+    assert_eq!(version.start_height, -1);
+    assert!(version.relay);
+    Ok(())
+}
+
+// P2P-01
+#[test]
+fn version_trailing_bytes_are_ignored_like_core() -> Result<(), PeerError> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&70_017u32.to_le_bytes());
+    payload.extend_from_slice(&0u64.to_le_bytes());
+    payload.extend_from_slice(&0i64.to_le_bytes());
+    payload.extend_from_slice(&[0u8; 26]);
+    payload.extend_from_slice(&[0u8; 26]);
+    payload.extend_from_slice(&9u64.to_le_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&0i32.to_le_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&[0xAA; 4]);
+
+    let version = read_version_payload(&payload)?;
+    assert_eq!(version.nonce, 9);
+    assert!(!version.relay);
+    assert_eq!(version.start_height, 0);
+    Ok(())
+}
+
+// P2P-01
+#[test]
+fn sendcmpct_announce_reads_any_nonzero_byte_as_true() -> Result<(), PeerError> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&Magic::REGTEST.to_bytes());
+    let mut cmd = [0u8; 12];
+    cmd[..9].copy_from_slice(b"sendcmpct");
+    frame.extend_from_slice(&cmd);
+
+    let mut payload = Vec::new();
+    payload.push(2);
+    payload.extend_from_slice(&2u64.to_le_bytes());
+    payload.push(0xAA);
+
+    let len =
+        u32::try_from(payload.len()).map_err(|_| PeerError::PayloadTooLarge(payload.len()))?;
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&super::checksum(&payload));
+    frame.extend_from_slice(&payload);
+
+    let mut cursor = Cursor::new(frame);
+    let (message, _) = read_message(&mut cursor, Magic::REGTEST)?;
+    let Message::SendCmpct(sendcmpct) = message else {
+        panic!("expected a sendcmpct message");
+    };
+    assert!(
+        sendcmpct.send_compact,
+        "Core reads any nonzero announce byte as true"
+    );
+    assert_eq!(sendcmpct.version, 2);
+    Ok(())
+}
+
+// P2P-01
+#[test]
+fn sendcmpct_payload_shorter_than_nine_bytes_fails_to_parse() -> Result<(), PeerError> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&Magic::REGTEST.to_bytes());
+    let mut cmd = [0u8; 12];
+    cmd[..9].copy_from_slice(b"sendcmpct");
+    frame.extend_from_slice(&cmd);
+
+    let payload: [u8; 8] = [1, 2, 0, 0, 0, 0, 0, 0];
+    let len =
+        u32::try_from(payload.len()).map_err(|_| PeerError::PayloadTooLarge(payload.len()))?;
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&super::checksum(&payload));
+    frame.extend_from_slice(&payload);
+
+    let mut cursor = Cursor::new(frame);
+    let result = read_message(&mut cursor, Magic::REGTEST);
+    assert!(
+        matches!(result, Err(PeerError::Encode(_))),
+        "a short sendcmpct payload is a parse failure, not misbehavior"
+    );
+    Ok(())
 }

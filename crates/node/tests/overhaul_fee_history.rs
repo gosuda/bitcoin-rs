@@ -2,8 +2,11 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use bitcoin_rs_node::test_support::TestError;
 
+type Result<T, E = TestError> = core::result::Result<T, E>;
+
+use crate::support::{p2sh_true_output, p2sh_true_spend_script_sig, parent_txid};
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_mempool::{AdmissionOrigin, FeeEstimator, SubmitOutcome};
 use bitcoin_rs_node::state::NodeState;
@@ -36,16 +39,14 @@ fn open_regtest() -> Result<(NodeState, tempfile::TempDir)> {
 }
 
 fn reopen(config: NodeConfig) -> Result<NodeState> {
-    NodeState::open(config, None).map_err(|error| anyhow!("reopen failed: {error}"))
+    Ok(NodeState::open(config, None)?)
 }
 
 fn apply_genesis(state: &NodeState) -> Result<()> {
-    state
-        .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
-            Network::Regtest.genesis_block(),
-        ))
-        .map(|_| ())
-        .map_err(|error| anyhow!("genesis apply failed: {error}"))
+    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        Network::Regtest.genesis_block(),
+    ))?;
+    Ok(())
 }
 
 fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> Result<()> {
@@ -54,21 +55,17 @@ fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> Result<()> {
         OutPoint::new(parent, 0),
         TxOut {
             value: Amount::from_sat(value),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         },
         false,
-        100,
+        0,
     ));
     bitcoin_rs_utxo::contract::commit_block_changes(
         &state.chainstate().utxo_handle(),
         &changes,
         &Hash256::from_le_bytes(&[0xBB; 32]),
     )
-    .map_err(|error| anyhow!("utxo commit failed: {error}"))
-}
-
-fn parent_txid(marker: u8) -> Txid {
-    Txid::from(Hash256::from_le_bytes(&[marker; 32]))
+    .map_err(|error| TestError::message(format!("utxo commit failed: {error}")))
 }
 
 fn spending_tx(parent: Txid, fee_sats: u64, sequence: u32) -> Tx {
@@ -76,7 +73,7 @@ fn spending_tx(parent: Txid, fee_sats: u64, sequence: u32) -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent, 0),
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::from_consensus(sequence),
             witness: Witness::new(),
         }],
@@ -104,7 +101,7 @@ fn admit(state: &NodeState, tx: Tx) -> Result<SubmitOutcome> {
             unix_time_secs(),
             &view,
         )
-        .map_err(|error| anyhow!("admission failed: {error}"))
+        .map_err(|error| TestError::message(format!("admission failed: {error}")))
 }
 
 fn mine_and_apply(
@@ -124,7 +121,7 @@ fn mine_and_apply(
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         }],
         lock_time: LockTime::ZERO,
     };
@@ -142,13 +139,13 @@ fn mine_and_apply(
         txs: std::iter::once(coinbase).chain(txs).collect(),
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-        .ok_or_else(|| anyhow!("block must have a merkle root"))?;
+        .ok_or_else(|| TestError::message("block must have a merkle root"))?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
     state
         .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
             block.clone(),
         ))
-        .map_err(|error| anyhow!("apply failed at height {height}: {error}"))?;
+        .map_err(|error| TestError::message(format!("apply failed at height {height}: {error}")))?;
     Ok(block)
 }
 
@@ -170,8 +167,6 @@ fn assert_matches_declared_semantics(state: &NodeState, shadow: &FeeEstimator) {
 }
 
 fn seed_replayable_history(state: &NodeState) -> Result<()> {
-    // Restart rebuilds coins from block bodies, so these confirmations need
-    // real funding ancestry rather than the admission-only fund_utxo seam.
     let first = mine_and_apply(state, applied_tip_hash(state)?, 1, 0, Vec::new())?;
     let mut tip = first.block_hash().0;
     for height in 2..=100 {
@@ -183,7 +178,7 @@ fn seed_replayable_history(state: &NodeState) -> Result<()> {
     funding.outputs = vec![
         TxOut {
             value: Amount::from_sat(PARENT_VALUE_SATS),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         };
         2
     ];
@@ -455,7 +450,7 @@ fn reorg_reconfirm_records_exactly_one_observation() -> Result<()> {
         &state.chain_followers(),
         Hash256::from(block1.block_hash()),
     )
-    .map_err(|error| anyhow!("invalidate_block failed: {error}"))?;
+    .map_err(|error| TestError::message(format!("invalidate_block failed: {error}")))?;
     for tx in &txs {
         assert!(
             pool.read().contains_txid(&tx.txid()),
@@ -581,5 +576,5 @@ fn applied_tip_hash(state: &NodeState) -> Result<Hash256> {
         .chainstate()
         .applied_tip_snapshot()
         .map(|tip| tip.hash)
-        .ok_or_else(|| anyhow!("applied tip must exist"))
+        .ok_or_else(|| TestError::message("applied tip must exist"))
 }

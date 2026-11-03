@@ -1,4 +1,3 @@
-//! Bounded Noise/TDP sessions over an embedded Node. No internal RPC transport.
 use crate::{Config, Hub, TEMPLATE_RETRY_DELAY, template::TemplateState};
 use bitcoin_rs_mining::{
     BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, Candidate, CoinbaseBudget,

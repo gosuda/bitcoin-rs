@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::error::Error;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -42,7 +42,7 @@ use zeroize::Zeroizing;
 
 use super::{BlockPipeline, DeferredBlock, LedgerHost, announce_current_job, handle_events};
 
-type TestResult = Result<(), Box<dyn Error>>;
+type TestResult = Result<(), FixtureError>;
 
 #[derive(Debug, thiserror::Error)]
 enum FixtureError {
@@ -54,6 +54,24 @@ enum FixtureError {
     NoFrame(u8),
     #[error("fewer than {0} nonces of the requested class exist")]
     NonceSpace(usize),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Storage(#[from] bitcoin_rs_storage::StorageError),
+    #[error(transparent)]
+    Ledger(#[from] bitcoin_rs_mining::pool::ledger::LedgerError),
+    #[error(transparent)]
+    Mining(#[from] bitcoin_rs_mining::MiningError),
+    #[error(transparent)]
+    Job(#[from] bitcoin_rs_mining::pool::JobError),
+    #[error(transparent)]
+    Secp(#[from] bitcoin::secp256k1::Error),
+    #[error(transparent)]
+    Sv2Config(#[from] bitcoin_rs_mining::pool::stratum::sv2::ConfigError),
+    #[error(transparent)]
+    Transport(#[from] bitcoin_rs_mining::pool::stratum::sv2::Error),
+    #[error(transparent)]
+    Run(#[from] crate::run::RunError),
 }
 
 fn sv2<E: std::fmt::Debug>(stage: &'static str) -> impl FnOnce(E) -> FixtureError {
@@ -72,7 +90,7 @@ const LOGIN: &str = "42.rig";
 const PAYOUT: &[u8] = &[0x51];
 const EPOCH: u32 = 17;
 
-fn ledger_host(path: &Path) -> Result<Arc<LedgerHost>, Box<dyn Error>> {
+fn ledger_host(path: &Path) -> Result<Arc<LedgerHost>, FixtureError> {
     let store: Arc<dyn KvStore> = Arc::new(Store::open(path)?);
     let ledger = Ledger::create(store, PoolConfig::new(1_000, PAYOUT.to_vec()))?;
     ledger.set_payout_script(MinerId(42), PAYOUT)?;
@@ -86,7 +104,7 @@ fn ledger_host(path: &Path) -> Result<Arc<LedgerHost>, Box<dyn Error>> {
     )))
 }
 
-fn candidate(height: u32, parent: u8) -> Result<Arc<Candidate>, Box<dyn Error>> {
+fn candidate(height: u32, parent: u8) -> Result<Arc<Candidate>, FixtureError> {
     let context = CandidateContext {
         previous_block_hash: Hash256::from_le_bytes(&[parent; 32]),
         height,
@@ -110,7 +128,7 @@ fn candidate(height: u32, parent: u8) -> Result<Arc<Candidate>, Box<dyn Error>> 
 fn pool_core(
     control: &Arc<FakeMiningControl>,
     ledger: &Arc<LedgerHost>,
-) -> Result<PoolCore, Box<dyn Error>> {
+) -> Result<PoolCore, FixtureError> {
     let control: Arc<dyn MiningControl> = Arc::<FakeMiningControl>::clone(control);
     let ledger: Arc<dyn ShareLedger> = Arc::<LedgerHost>::clone(ledger);
     let config = JobBookConfig {
@@ -129,7 +147,7 @@ fn pool_core(
     Ok(PoolCore::new(config, control, ledger)?)
 }
 
-fn server_config(ledger: &Arc<LedgerHost>) -> Result<ServerConfig, Box<dyn Error>> {
+fn server_config(ledger: &Arc<LedgerHost>) -> Result<ServerConfig, FixtureError> {
     let mut config = ServerConfig::new(ShareTarget::from_le_bytes([0xff; 32])?);
     config.limits = Limits {
         max_frame_payload: 8 * 1024,
@@ -152,7 +170,7 @@ fn server_config(ledger: &Arc<LedgerHost>) -> Result<ServerConfig, Box<dyn Error
     Ok(config)
 }
 
-fn authority() -> Result<AuthorityKeypair, Box<dyn Error>> {
+fn authority() -> Result<AuthorityKeypair, FixtureError> {
     let secp = Secp256k1::new();
     let pair = Keypair::from_seckey_slice(&secp, &[0x11; 32])?;
     Ok(AuthorityKeypair::from_bytes(
@@ -401,7 +419,7 @@ struct Host {
 }
 
 impl Host {
-    fn new() -> Result<Self, Box<dyn Error>> {
+    fn new() -> Result<Self, FixtureError> {
         let directory = tempfile::tempdir()?;
         let ledger = ledger_host(directory.path())?;
         let control = Arc::new(FakeMiningControl::default());
@@ -426,12 +444,12 @@ impl Host {
         })
     }
 
-    fn deliver(&mut self, wire: &[u8]) -> Result<Vec<Frame>, Box<dyn Error>> {
+    fn deliver(&mut self, wire: &[u8]) -> Result<Vec<Frame>, FixtureError> {
         announce_current_job(&mut self.connection, &self.core)?;
         let permit = self
             .ledger
             .try_reserve_block_slot()
-            .ok_or("block record slot unavailable")?;
+            .ok_or(FixtureError::Missing("block record permit"))?;
         let mut permit = Some(permit);
         self.core
             .with_job_book(|book| self.connection.feed(wire, book))?;
@@ -447,10 +465,10 @@ impl Host {
             },
         )?;
         let sent = self.connection.take_transmit();
-        Ok(self.miner.open(&sent)?)
+        self.miner.open(&sent)
     }
 
-    fn open_channel(&mut self) -> Result<Channel, Box<dyn Error>> {
+    fn open_channel(&mut self) -> Result<Channel, FixtureError> {
         let setup = self.miner.setup()?;
         let frames = self.deliver(&setup)?;
         assert!(has(&frames, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS));
@@ -476,7 +494,7 @@ impl Host {
         sequence_number: u32,
         job: &Job,
         nonce: u32,
-    ) -> Result<Vec<Frame>, Box<dyn Error>> {
+    ) -> Result<Vec<Frame>, FixtureError> {
         let wire = self.miner.submit(channel, sequence_number, job, nonce)?;
         self.deliver(&wire)
     }
@@ -485,7 +503,7 @@ impl Host {
         self.control.submit_calls.load(Ordering::Relaxed)
     }
 
-    fn credited_shares(&self) -> Result<u64, Box<dyn Error>> {
+    fn credited_shares(&self) -> Result<u64, FixtureError> {
         Ok(self.ledger.ledger().share_count()?)
     }
 }
@@ -507,7 +525,7 @@ fn applied_sv2_block_retires_the_common_job_before_a_sibling_reaches_the_node() 
     let job = Arc::clone(&host.job);
     let winners = block_nonces(&job, &channel.prefix, 2)?;
     let &[first, second] = winners.as_slice() else {
-        return Err("two winning nonces exist".into());
+        return Err(FixtureError::NonceSpace(2));
     };
 
     let applied = host.submit(&channel, 1, &job, first)?;
@@ -544,7 +562,7 @@ fn undetermined_sv2_block_withholds_success_and_retries_authoritative_state() ->
     let job = Arc::clone(&host.job);
     let winner = block_nonces(&job, &channel.prefix, 1)?
         .pop()
-        .ok_or("a winning nonce exists")?;
+        .ok_or(FixtureError::NonceSpace(1))?;
 
     *host.control.submit.lock() = bitcoin_rs_mining::BlockValidationResult::Inconclusive;
     let pending = host.submit(&channel, 1, &job, winner)?;
@@ -558,7 +576,10 @@ fn undetermined_sv2_block_withholds_success_and_retries_authoritative_state() ->
     assert_eq!(host.node_submissions(), 1);
 
     *host.control.submit.lock() = bitcoin_rs_mining::BlockValidationResult::Accepted;
-    let entry = host.deferred.pop().ok_or("retained waiter missing")?;
+    let entry = host
+        .deferred
+        .pop()
+        .ok_or(FixtureError::Missing("retained waiter"))?;
     let waiter = super::settle_one_deferred(
         entry,
         &host.ledger,
@@ -580,8 +601,9 @@ fn undetermined_sv2_block_withholds_success_and_retries_authoritative_state() ->
     Ok(())
 }
 
+// POOL-09
 #[test]
-fn reaped_worker_panic_propagates_through_stop_join() -> TestResult {
+fn reaped_worker_panic_propagates_through_stop_join() {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
@@ -597,7 +619,7 @@ fn reaped_worker_panic_propagates_through_stop_join() -> TestResult {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .all(|handle| handle.is_finished())
+        .all(std::thread::JoinHandle::is_finished)
     {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -613,25 +635,25 @@ fn reaped_worker_panic_propagates_through_stop_join() -> TestResult {
             .is_empty(),
         "reaped handle leaves no join for stop_join"
     );
-    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel = bitcoin_rs_chain::LatchWriter::new();
     let mut service = super::Sv2Service {
         cancel,
         listener: None,
         connections,
         worker_panicked,
     };
-    let error = service
-        .stop_join(Instant::now() + Duration::from_secs(5))
-        .expect_err("reaped panic must fail shutdown");
+    let Err(error) = service.stop_join(Instant::now() + Duration::from_secs(5)) else {
+        panic!("reaped panic must fail shutdown");
+    };
     assert!(
         error.to_string().contains("panicked"),
         "unexpected error: {error:?}"
     );
-    Ok(())
 }
 
+// POOL-09
 #[test]
-fn stop_join_joins_remaining_workers_after_panic() -> TestResult {
+fn stop_join_joins_remaining_workers_after_panic() {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
@@ -648,16 +670,16 @@ fn stop_join_joins_remaining_workers_after_panic() -> TestResult {
             std::thread::sleep(Duration::from_millis(50));
         }));
     }
-    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel = bitcoin_rs_chain::LatchWriter::new();
     let mut service = super::Sv2Service {
         cancel,
         listener: None,
         connections: Arc::clone(&connections),
         worker_panicked: Arc::clone(&worker_panicked),
     };
-    let error = service
-        .stop_join(Instant::now() + Duration::from_secs(5))
-        .expect_err("worker panic must fail shutdown");
+    let Err(error) = service.stop_join(Instant::now() + Duration::from_secs(5)) else {
+        panic!("worker panic must fail shutdown");
+    };
     assert!(
         error.to_string().contains("panicked"),
         "unexpected error: {error:?}"
@@ -673,5 +695,47 @@ fn stop_join_joins_remaining_workers_after_panic() -> TestResult {
             .is_empty(),
         "stop_join joins every remaining worker"
     );
+}
+
+#[test]
+fn sv2_listener_stops_promptly_on_cancellation() -> TestResult {
+    let cancel = bitcoin_rs_chain::LatchWriter::new();
+    let cancel_reader = cancel.reader();
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").map_err(|error| FixtureError::Sv2 {
+            stage: "bind",
+            detail: error.to_string(),
+        })?;
+    let local_addr = listener.local_addr().map_err(|error| FixtureError::Sv2 {
+        stage: "local_addr",
+        detail: error.to_string(),
+    })?;
+    let cancel_hook = cancel_reader.on_cancel(move || {
+        let _ = std::net::TcpStream::connect(local_addr);
+    });
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let handle = std::thread::spawn(move || {
+        let _guard = cancel_hook;
+        while !cancel_reader.is_triggered() {
+            match listener.accept() {
+                Ok((_stream, _peer)) => {
+                    if cancel_reader.is_triggered() {
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        let _ = tx.send(());
+    });
+    std::thread::sleep(Duration::from_millis(5));
+    cancel.trigger();
+    let res = rx.recv_timeout(Duration::from_secs(5));
+    assert!(
+        res.is_ok(),
+        "join deadline exceeded: sv2 listener did not exit within 5 seconds"
+    );
+    assert!(handle.join().is_ok(), "thread panicked");
     Ok(())
 }

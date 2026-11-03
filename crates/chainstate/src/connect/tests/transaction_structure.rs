@@ -20,14 +20,8 @@ fn remine(block: &mut Block) -> TestResult {
 #[test]
 fn zero_output_coinbase_never_publishes_under_any_script_policy() -> TestResult {
     for height in [1, 101] {
-        for mode in [
-            ValidationMode::Full,
-            ValidationMode::Fast,
-            ValidationMode::AssumeValid,
-        ] {
+        for mode in [ValidationMode::Full, ValidationMode::AssumeValid] {
             for path in [Path::Direct, Path::Proposal, Path::Window] {
-                // Coinbase only, an independent spend, and a same-block spend
-                // cover the shortcut, parallel, and local-overlay dispatches.
                 for spends in 0..=if height == 101 { 2 } else { 0 } {
                     let mut chain =
                         handles(Network::Regtest, Arc::new(bitcoin_rs_utxo::UtxoSet::new()));

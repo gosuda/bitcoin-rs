@@ -1,0 +1,17 @@
+[package]
+name = "contract-index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Generate and check the contract evidence index from clause tags"
+
+[lints]
+workspace = true
+
+[dependencies]
+clap.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

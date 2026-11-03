@@ -1,10 +1,8 @@
-//! Independent admission and route boundaries for split HTTP listeners.
-
 use super::*;
 
 struct RunningServer {
     address: SocketAddr,
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchWriter,
     worker: Option<thread::JoinHandle<io::Result<()>>>,
     handler: Arc<Handler>,
 }
@@ -21,8 +19,8 @@ impl RunningServer {
         )?;
         let address = server.local_addr()?;
         let handler = Arc::clone(&server.handler);
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let stop = Arc::clone(&shutdown);
+        let shutdown = bitcoin_rs_chain::LatchWriter::new();
+        let stop = shutdown.reader();
         let worker = Some(thread::spawn(move || {
             server.serve_surface_with_shutdown(stop, surface)
         }));
@@ -48,7 +46,7 @@ impl RunningServer {
     }
 
     fn stop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown.trigger();
         if let Some(worker) = self.worker.take() {
             worker
                 .join()
@@ -285,6 +283,7 @@ fn poll_until_response(
     }
 }
 
+// WF-02
 #[test]
 fn split_listener_routes_are_closed_before_authentication_and_body_upload() -> io::Result<()> {
     let context = Arc::new(Context::new());

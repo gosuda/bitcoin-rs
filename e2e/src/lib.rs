@@ -1,5 +1,3 @@
-//! The one process-node harness: real child processes, public surfaces only.
-
 pub mod differential;
 pub mod error;
 pub mod helpers;

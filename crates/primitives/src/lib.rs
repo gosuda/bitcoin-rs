@@ -13,6 +13,7 @@ pub mod endpoint;
 pub use endpoint::{EndpointHost, NetworkLabel, PeerAddress, PeerEndpoint, PeerNetwork};
 pub mod hash;
 pub mod header;
+pub mod hex;
 pub mod ids;
 pub mod layout;
 pub mod network;
@@ -33,17 +34,19 @@ pub use header::Header;
 pub use ids::{BlockHash, Txid, Wtxid};
 pub use network::{AssumeUtxoData, ChainTxData, HeadersSyncParams, Network};
 pub use outpoint::OutPoint;
-pub use script::{Script, Witness};
+pub use script::{Script, Witness, WitnessItems};
 pub use sighash::{
     AnnexError, CODESEPARATOR_POSITION, Sighash, SighashCache, SighashError, tapleaf_hash,
 };
 pub use tx::{Tx, TxIn, TxOut};
-pub use units::{Amount, CompactTarget, LockTime, Sequence};
+pub use units::{
+    Amount, CompactTarget, LOCKTIME_THRESHOLD, LockTime, SEQUENCE_FINAL,
+    SEQUENCE_LOCKTIME_DISABLE_FLAG, SEQUENCE_LOCKTIME_MASK, SEQUENCE_LOCKTIME_TYPE_FLAG, Sequence,
+};
 pub use version::{
     MAX_SUBVERSION_LENGTH, PKG_VERSION, USER_AGENT, client_version, sub_version, ua_comment_is_safe,
 };
 
-/// Wall-clock seconds since the Unix epoch, `0` when the clock predates it.
 #[must_use]
 pub fn unix_time_secs() -> u64 {
     std::time::SystemTime::now()
@@ -65,6 +68,9 @@ pub fn i64_to_f64(value: i64) -> f64 {
     let magnitude = u64_to_f64(value.unsigned_abs());
     if value < 0 { -magnitude } else { magnitude }
 }
+
+#[cfg(test)]
+pub(crate) mod test_error;
 
 #[cfg(test)]
 mod float_conversion_tests {

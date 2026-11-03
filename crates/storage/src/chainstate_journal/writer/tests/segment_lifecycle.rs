@@ -1,6 +1,9 @@
 use super::*;
+use crate::chainstate_journal::CheckpointBase;
+use crate::test_support::{TestError, TestResult};
 use std::io::Write;
 
+// JW-BOOT-1
 #[test]
 fn writer_bootstrap_uses_chainstate_journal_config_defaults() -> TestResult {
     let writer = open_fresh("config-defaults", Arc::new(CountingStore::new()))?;
@@ -19,6 +22,7 @@ fn writer_bootstrap_uses_chainstate_journal_config_defaults() -> TestResult {
     Ok(())
 }
 
+// JW-REC-1
 #[test]
 fn torn_tail_beyond_head_is_ignored_on_reopen() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -39,6 +43,54 @@ fn torn_tail_beyond_head_is_ignored_on_reopen() -> TestResult {
     Ok(())
 }
 
+// JW-REC-1
+#[test]
+fn rejects_reopen_when_active_segment_is_truncated() -> TestResult {
+    let store = Arc::new(CountingStore::new());
+    let dir;
+    let seg_name;
+    {
+        let mut writer = open_fresh("seg-trunc", Arc::clone(&store))?;
+        writer.append(&sample_record(1))?;
+        writer.flush_to(1)?;
+        assert!(writer.durable.offset > 0);
+        dir = writer.dir.try_clone()?;
+        seg_name = segment_name(writer.segment_gen);
+        let file = dir.open_with(&seg_name, cap_std::fs::OpenOptions::new().write(true))?;
+        file.set_len(1)?;
+        file.sync_all()?;
+    }
+    let result = JournalWriter::open(dir, store);
+    assert!(matches!(
+        &result,
+        Err(JournalWriterError::CursorMismatch(msg)) if msg.contains("truncated")
+    ));
+    Ok(())
+}
+
+// JW-REC-1
+#[test]
+fn rejects_reopen_when_active_segment_is_missing() -> TestResult {
+    let store = Arc::new(CountingStore::new());
+    let dir;
+    {
+        let mut writer = open_fresh("seg-missing", Arc::clone(&store))?;
+        writer.append(&sample_record(1))?;
+        writer.flush_to(1)?;
+        assert!(writer.durable.offset > 0);
+        dir = writer.dir.try_clone()?;
+        let seg_name = segment_name(writer.segment_gen);
+        dir.remove_file(&seg_name)?;
+    }
+    let result = JournalWriter::open(dir, store);
+    assert!(matches!(
+        &result,
+        Err(JournalWriterError::CursorMismatch(msg)) if msg.contains("missing")
+    ));
+    Ok(())
+}
+
+// JW-REC-1
 #[test]
 fn partial_append_truncates_and_retries_idempotently() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -57,6 +109,7 @@ fn partial_append_truncates_and_retries_idempotently() -> TestResult {
     Ok(())
 }
 
+// JW-ORDER-1
 #[test]
 fn append_failure_blocks_the_next_apply_before_an_untracked_hole_grows() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -78,6 +131,7 @@ fn append_failure_blocks_the_next_apply_before_an_untracked_hole_grows() -> Test
     Ok(())
 }
 
+// JW-ORDER-1
 #[test]
 fn out_of_order_append_blocks_the_next_apply() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -102,6 +156,7 @@ fn out_of_order_append_blocks_the_next_apply() -> TestResult {
     Ok(())
 }
 
+// JW-REC-1
 #[test]
 fn partial_append_rolls_back_tail_and_restart_can_retry() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -161,6 +216,7 @@ fn failed_rewind_truncation_blocks_appends_until_restart() -> TestResult {
     Ok(())
 }
 
+// JW-ROT-1
 #[test]
 fn rotation_keeps_cursor_invariants() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -180,6 +236,7 @@ fn rotation_keeps_cursor_invariants() -> TestResult {
     Ok(())
 }
 
+// JW-FAIL-1
 #[test]
 fn failpoints_fire_documented_errors() -> TestResult {
     for boundary in [
@@ -211,6 +268,7 @@ fn failpoints_fire_documented_errors() -> TestResult {
     Ok(())
 }
 
+// JW-LIFE-1
 #[test]
 fn freeze_rejects_appends_and_compaction_flow_completes() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -219,16 +277,25 @@ fn freeze_rejects_appends_and_compaction_flow_completes() -> TestResult {
     writer.freeze()?;
     assert_eq!(writer.state(), WriterState::Frozen);
     let Err(error) = writer.append(&sample_record(2)) else {
-        return Err("frozen writer accepted an append".into());
+        return Err(TestError::UnexpectedSuccess(
+            "frozen writer accepted an append",
+        ));
     };
     assert!(matches!(error, JournalWriterError::NotOpen { .. }));
-    writer.compact_to_checkpoint(1, 1, [1; 32], [0; 32], 3, true)?;
+    writer.compact_to_checkpoint(CheckpointBase {
+        generation: 1,
+        height: 1,
+        hash: [1; 32],
+        prev_hash: [0; 32],
+        chain_tx_count: 3,
+    })?;
     writer.resume()?;
     assert_eq!(writer.state(), WriterState::Open);
     writer.append(&sample_record(2))?;
     Ok(())
 }
 
+// JW-MARK-2
 #[test]
 fn recovery_progress_compaction_preserves_full_revalidation_marker() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -239,13 +306,20 @@ fn recovery_progress_compaction_preserves_full_revalidation_marker() -> TestResu
     )?;
 
     writer.freeze()?;
-    writer.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0, false)?;
+    writer.compact_to_checkpoint_for_recovery(CheckpointBase {
+        generation: 1,
+        height: 0,
+        hash: [1; 32],
+        prev_hash: [0; 32],
+        chain_tx_count: 0,
+    })?;
     writer.resume()?;
 
     assert!(writer.dir.open(FULL_REVALIDATION_MARKER).is_ok());
     Ok(())
 }
 
+// JW-ORDER-1
 #[test]
 fn recovery_compaction_cannot_clear_an_append_gap() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -258,7 +332,13 @@ fn recovery_compaction_cannot_clear_an_append_gap() -> TestResult {
     ));
     assert_eq!(writer.state(), WriterState::Open);
     assert!(matches!(
-        writer.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0, false),
+        writer.compact_to_checkpoint_for_recovery(CheckpointBase {
+            generation: 1,
+            height: 0,
+            hash: [1; 32],
+            prev_hash: [0; 32],
+            chain_tx_count: 0,
+        }),
         Err(JournalWriterError::NotOpen {
             state: "not frozen"
         })
@@ -273,12 +353,19 @@ fn recovery_compaction_cannot_clear_an_append_gap() -> TestResult {
     frozen.freeze()?;
     frozen.mark_append_gap(1);
     assert!(matches!(
-        frozen.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0, false),
+        frozen.compact_to_checkpoint_for_recovery(CheckpointBase {
+            generation: 1,
+            height: 0,
+            hash: [1; 32],
+            prev_hash: [0; 32],
+            chain_tx_count: 0,
+        }),
         Err(JournalWriterError::AppendGap { height: 1 })
     ));
     Ok(())
 }
 
+// JW-MARK-2
 #[test]
 fn below_base_invalidation_settles_through_checkpoint_publication() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -313,7 +400,13 @@ fn below_base_invalidation_settles_through_checkpoint_publication() -> TestResul
         })
     ));
     writer.freeze()?;
-    writer.compact_to_checkpoint(7, 5, [5; 32], [4; 32], 15, true)?;
+    writer.compact_to_checkpoint(CheckpointBase {
+        generation: 7,
+        height: 5,
+        hash: [5; 32],
+        prev_hash: [4; 32],
+        chain_tx_count: 15,
+    })?;
     assert_eq!(
         writer
             .dir
@@ -379,6 +472,7 @@ fn cold_retention_removes_all_invalidated_generations_and_preserves_recovery() -
     Ok(())
 }
 
+// JW-DUR-1
 #[test]
 fn failed_boundary_retries_before_next_apply_below_lag_limit() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -408,6 +502,7 @@ fn failed_boundary_retries_before_next_apply_below_lag_limit() -> TestResult {
     Ok(())
 }
 
+// JW-ROT-1
 #[test]
 fn rotation_head_never_names_a_missing_segment() -> TestResult {
     let store = Arc::new(CountingStore::new());

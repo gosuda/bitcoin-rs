@@ -1,6 +1,7 @@
 //! Block budgets must survive script-proof and execution-skip paths (#1728).
 
 use super::*;
+use crate::test_fixtures::TestError;
 use crate::{AssumeValidGate, ValidationMode, WindowApplyDisposition};
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_chain::regtest_fixture::merkle_root;
@@ -8,7 +9,7 @@ use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_script::{opcode::*, push_data};
 use sha2::{Digest, Sha256};
 
-fn funded_chain() -> Result<(crate::Chainstate, Tx, BlockHash), Box<dyn std::error::Error>> {
+fn funded_chain() -> TestResult<(crate::Chainstate, Tx, BlockHash)> {
     let chain = handles(Network::Regtest, Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
     seed_genesis(&chain)?;
     let mut funding = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
@@ -30,7 +31,8 @@ fn funded_chain() -> Result<(crate::Chainstate, Tx, BlockHash), Box<dyn std::err
 }
 
 fn remine(block: &mut Block) -> TestResult {
-    block.header.merkle_root = merkle_root(&block.txs).ok_or("missing merkle root")?;
+    block.header.merkle_root =
+        merkle_root(&block.txs).ok_or(TestError::Missing("missing merkle root"))?;
     mine_block_to_declared_target(block)?;
     Ok(())
 }
@@ -56,19 +58,45 @@ fn input(outpoint: OutPoint, script_sig: Vec<u8>, witness: Witness) -> TxIn {
     }
 }
 
-fn legacy_block(
+fn legacy_block(parent: BlockHash, funding: &Tx, transactions: u32) -> TestResult<Block> {
+    let mut block = legacy_block_body(parent, funding, transactions)?;
+    remine(&mut block)?;
+    Ok(block)
+}
+
+fn legacy_block_with_coinbase_sigop(
     parent: BlockHash,
     funding: &Tx,
     transactions: u32,
-    extra_coinbase_sigop: bool,
-) -> Result<Block, Box<dyn std::error::Error>> {
-    let mut block = mined_child(parent, 101)?;
-    // Each input executes 200 non-push opcodes, within the script limit,
-    // but legacy counting charges 100 * 20 * 4 = 8,000 per transaction.
-    let script: Vec<u8> = (0..100)
+) -> TestResult<Block> {
+    let mut block = legacy_block_body(parent, funding, transactions)?;
+    block.txs[0].outputs.push(TxOut {
+        value: Amount::ZERO,
+        script_pubkey: vec![OP_CHECKSIG].into(),
+    });
+    remine(&mut block)?;
+    Ok(block)
+}
+
+fn legacy_sigop_heavy_script() -> Vec<u8> {
+    (0..100)
         .flat_map(|_| [OP_0, OP_0, OP_0, OP_CHECKMULTISIG, OP_DROP])
         .chain([OP_PUSHNUM_1])
-        .collect();
+        .collect()
+}
+
+fn dead_branch_multisig_script() -> Vec<u8> {
+    [
+        vec![OP_0, OP_IF],
+        vec![OP_CHECKMULTISIG; 100],
+        vec![OP_ENDIF, OP_PUSHNUM_1],
+    ]
+    .concat()
+}
+
+fn legacy_block_body(parent: BlockHash, funding: &Tx, transactions: u32) -> TestResult<Block> {
+    let mut block = mined_child(parent, 101)?;
+    let script = legacy_sigop_heavy_script();
     for vout in 0..transactions {
         block.txs.push(spend(vec![input(
             OutPoint::new(funding.txid(), vout),
@@ -76,13 +104,6 @@ fn legacy_block(
             Witness::new(),
         )]));
     }
-    if extra_coinbase_sigop {
-        block.txs[0].outputs.push(TxOut {
-            value: Amount::ZERO,
-            script_pubkey: vec![OP_CHECKSIG].into(),
-        });
-    }
-    remine(&mut block)?;
     Ok(block)
 }
 
@@ -98,9 +119,8 @@ fn check_budget(
     chain: &mut crate::Chainstate,
     block: Block,
     path: Path,
-    expected_cost: u32,
+    expected: &Result<(), ConsensusError>,
 ) -> TestResult {
-    let rejected = expected_cost > 80_000;
     let hash = block.block_hash().0;
     if matches!(path, Path::Window | Path::AssumeValid) {
         chain
@@ -118,7 +138,7 @@ fn check_budget(
     let snapshot = chain.chain_snapshot();
     let tip = chain
         .applied_tip_snapshot()
-        .ok_or("missing applied tip")?
+        .ok_or(TestError::Missing("missing applied tip"))?
         .hash;
     let head = chain.durable_head.load()?;
     let stats = chain.coin_stats.snapshot().to_bytes();
@@ -154,20 +174,23 @@ fn check_budget(
                 error.source
             }),
     };
-    if rejected {
-        assert!(
-            matches!(result, Err(ApplyError::Consensus(ConsensusError::SigopsLimit { cost, max: 80_000 })) if cost == expected_cost),
-            "{result:?}"
-        );
-    } else {
-        result?;
+    match &expected {
+        Ok(()) => {
+            result?;
+        }
+        Err(expected_error) => match &result {
+            Err(ApplyError::Consensus(err)) => assert_eq!(err, expected_error, "{result:?}"),
+            other => {
+                panic!("expected Err(ApplyError::Consensus({expected_error:?})), got {other:?}")
+            }
+        },
     }
-    if rejected || matches!(path, Path::Proposal) {
+    if expected.is_err() || matches!(path, Path::Proposal) {
         assert_eq!(chain.chain_snapshot(), snapshot);
         assert_eq!(
             chain
                 .applied_tip_snapshot()
-                .ok_or("missing applied tip")?
+                .ok_or(TestError::Missing("missing applied tip"))?
                 .hash,
             tip
         );
@@ -184,7 +207,7 @@ fn check_budget(
         assert_eq!(
             chain
                 .applied_tip_snapshot()
-                .ok_or("missing applied tip")?
+                .ok_or(TestError::Missing("missing applied tip"))?
                 .hash,
             hash
         );
@@ -200,13 +223,27 @@ fn aggregate_sigops_enforce_the_inclusive_budget_on_every_connect_path() -> Test
         Path::Window,
         Path::AssumeValid,
     ] {
-        for (transactions, extra, cost) in
-            [(10, false, 80_000), (10, true, 80_004), (11, false, 88_000)]
-        {
+        for (transactions, cost) in [(10, 80_000), (11, 88_000)] {
             let (mut chain, funding, parent) = funded_chain()?;
-            let block = legacy_block(parent, &funding, transactions, extra)?;
-            check_budget(&mut chain, block, path, cost)?;
+            let block = legacy_block(parent, &funding, transactions)?;
+            let expected = if cost > 80_000 {
+                Err(ConsensusError::SigopsLimit { cost, max: 80_000 })
+            } else {
+                Ok(())
+            };
+            check_budget(&mut chain, block, path, &expected)?;
         }
+        let (mut chain, funding, parent) = funded_chain()?;
+        let block = legacy_block_with_coinbase_sigop(parent, &funding, 10)?;
+        check_budget(
+            &mut chain,
+            block,
+            path,
+            &Err(ConsensusError::SigopsLimit {
+                cost: 80_004,
+                max: 80_000,
+            }),
+        )?;
     }
     Ok(())
 }
@@ -219,27 +256,25 @@ fn coinbase_only_blocks_obey_the_sigop_budget() -> TestResult {
         let mut block = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
         block.txs[0].outputs[0].script_pubkey = vec![OP_CHECKMULTISIG; count].into();
         remine(&mut block)?;
-        check_budget(&mut chain, block, Path::Direct, cost)?;
+        let expected = if cost > 80_000 {
+            Err(ConsensusError::SigopsLimit { cost, max: 80_000 })
+        } else {
+            Ok(())
+        };
+        check_budget(&mut chain, block, Path::Direct, &expected)?;
     }
     Ok(())
 }
 
 #[test]
 fn same_block_p2sh_and_witness_sigops_count_toward_the_budget() -> TestResult {
-    // Dead-branch multisig opcodes count toward sigops without needing keys.
-    let script: Vec<u8> = [
-        vec![OP_0, OP_IF],
-        vec![OP_CHECKMULTISIG; 100],
-        vec![OP_ENDIF, OP_PUSHNUM_1],
-    ]
-    .concat();
+    let script = dead_branch_multisig_script();
     for witness in [false, true] {
         for extra in [false, true] {
             let (mut chain, funding, parent) = funded_chain()?;
             let program = if witness {
                 [vec![0, 32], Sha256::digest(&script).to_vec()].concat()
             } else {
-                // HASH160 of the script above, independently computed fixture.
                 let hash = vec![
                     0x60, 0xdc, 0xe5, 0xf8, 0x78, 0x81, 0x19, 0xd9, 0x6e, 0x0d, 0x6e, 0xf6, 0x8b,
                     0x00, 0x72, 0x63, 0x85, 0xdc, 0x39, 0xe5,
@@ -294,7 +329,7 @@ fn same_block_p2sh_and_witness_sigops_count_toward_the_budget() -> TestResult {
                         .map(|tx| *tx.wtxid().0.as_byte_array()),
                 );
                 let root = bitcoin_rs_consensus::compute_merkle_root(&mut leaves)
-                    .ok_or("missing witness root")?;
+                    .ok_or(TestError::Missing("missing witness root"))?;
                 let commitment = double_sha256(&[root, [0; 32]].concat());
                 block.txs[0].outputs.push(TxOut {
                     value: Amount::ZERO,
@@ -307,13 +342,33 @@ fn same_block_p2sh_and_witness_sigops_count_toward_the_budget() -> TestResult {
                 });
             }
             remine(&mut block)?;
-            check_budget(
-                &mut chain,
-                block,
-                Path::Window,
-                if extra { 80_004 } else { 80_000 },
-            )?;
+            let expected = if extra {
+                Err(ConsensusError::SigopsLimit {
+                    cost: 80_004,
+                    max: 80_000,
+                })
+            } else {
+                Ok(())
+            };
+            check_budget(&mut chain, block, Path::Window, &expected)?;
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn empty_coinbase_outputs_rejected_on_every_connect_path() -> TestResult {
+    for path in [
+        Path::Direct,
+        Path::Proposal,
+        Path::Window,
+        Path::AssumeValid,
+    ] {
+        let (mut chain, _funding, parent) = funded_chain()?;
+        let mut block = mined_child(parent, 101)?;
+        block.txs[0].outputs.clear();
+        remine(&mut block)?;
+        check_budget(&mut chain, block, path, &Err(ConsensusError::EmptyOutputs))?;
     }
     Ok(())
 }

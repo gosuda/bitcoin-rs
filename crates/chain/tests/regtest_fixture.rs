@@ -4,7 +4,9 @@ use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_chain::validate_pow;
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Network};
 
-fn assert_merkle_root(block: &Block, height: u32) -> Result<(), Box<dyn std::error::Error>> {
+use crate::support::error::TestError;
+
+fn assert_merkle_root(block: &Block, height: u32) -> Result<(), TestError> {
     assert_eq!(
         Some(block.header.merkle_root),
         regtest_fixture::merkle_root(&block.txs),
@@ -25,7 +27,7 @@ fn assert_merkle_root(block: &Block, height: u32) -> Result<(), Box<dyn std::err
 
 #[test]
 fn mined_children_bind_transactions_and_meet_the_declared_target_deterministically()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), TestError> {
     let parent = BlockHash::from(Network::Regtest.genesis_block_hash());
     for height in 1..=3 {
         let child = regtest_fixture::mined_regtest_child_at(parent, height)?;
@@ -68,7 +70,7 @@ fn mined_children_bind_transactions_and_meet_the_declared_target_deterministical
 }
 
 #[test]
-fn mined_block_binds_an_odd_transaction_count() -> Result<(), Box<dyn std::error::Error>> {
+fn mined_block_binds_an_odd_transaction_count() -> Result<(), TestError> {
     let coinbase = regtest_fixture::coinbase(3);
     let mut tx2 = coinbase.clone();
     tx2.lock_time = bitcoin_rs_primitives::LockTime::from_consensus(1);

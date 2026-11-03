@@ -1,6 +1,6 @@
 #![expect(clippy::expect_used, reason = "fixed regression fixtures")]
 
-use bitcoin_rs_primitives::{Amount, Script, Tx, TxOut, deserialize};
+use bitcoin_rs_primitives::{Amount, Script, Tx, TxOut, Witness, deserialize};
 use bitcoin_rs_script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
 use secp256k1::{PublicKey, SECP256K1, SecretKey};
 use sha2::{Digest, Sha256};
@@ -38,7 +38,7 @@ fn verify_witness(
     Interpreter.execute_with_prevouts(
         &prevout.script_pubkey,
         &[],
-        witness,
+        &Witness::from_stack(witness.to_vec()),
         flags,
         &prevouts,
         tx,
@@ -91,7 +91,7 @@ fn check_via_script(
     Interpreter.execute_with_prevouts(
         &prevout.script_pubkey,
         &script_sig,
-        &witness,
+        &Witness::from_stack(witness),
         effective_flags,
         &prevouts,
         tx,
@@ -99,18 +99,24 @@ fn check_via_script(
     )
 }
 
-fn negative_check_script(pubkey: &[u8], multisig: bool) -> Vec<u8> {
+fn negative_checksig_script(pubkey: &[u8]) -> Vec<u8> {
     assert!(pubkey.len() <= 75);
     let mut script = Vec::new();
-    if multisig {
-        script.push(0x51);
-    }
     script.push(u8::try_from(pubkey.len()).expect("short test pubkey"));
     script.extend_from_slice(pubkey);
-    if multisig {
-        script.push(0x51);
-    }
-    script.push(if multisig { 0xae } else { 0xac });
+    script.push(0xac);
+    script.push(0x91);
+    script
+}
+
+fn negative_multisig_script(pubkey: &[u8]) -> Vec<u8> {
+    assert!(pubkey.len() <= 75);
+    let mut script = Vec::new();
+    script.push(0x51);
+    script.push(u8::try_from(pubkey.len()).expect("short test pubkey"));
+    script.extend_from_slice(pubkey);
+    script.push(0x51);
+    script.push(0xae);
     script.push(0x91);
     script
 }
@@ -134,8 +140,10 @@ fn empty_signature_cannot_bypass_key_encoding_policy() {
         ),
     ];
     for (key, policy, code, witness) in cases {
-        for multisig in [false, true] {
-            let script = negative_check_script(&key, multisig);
+        for (multisig, script) in [
+            (false, negative_checksig_script(&key)),
+            (true, negative_multisig_script(&key)),
+        ] {
             let mut witness_stack = vec![Vec::new()];
             if multisig {
                 witness_stack.push(Vec::new());
@@ -169,7 +177,7 @@ fn empty_signature_cannot_bypass_key_encoding_policy() {
                     Interpreter.execute_with_prevouts(
                         &script,
                         &script_sig,
-                        &[],
+                        &Witness::new(),
                         flags,
                         &prevouts,
                         &tx,
@@ -302,7 +310,7 @@ fn zero_signature_multisig_does_not_validate_unexamined_keys() {
         Interpreter.execute_with_prevouts(
             &script,
             &[0x00],
-            &[],
+            &Witness::new(),
             flags,
             &legacy_prevouts,
             &tx,
@@ -321,7 +329,7 @@ fn zero_signature_multisig_does_not_validate_unexamined_keys() {
         Interpreter.execute_with_prevouts(
             &witness_prevout.script_pubkey,
             &[],
-            &[Vec::new(), script],
+            &Witness::from_stack(vec![Vec::new(), script]),
             flags,
             &witness_prevouts,
             &tx,

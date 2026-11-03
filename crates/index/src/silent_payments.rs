@@ -1,5 +1,3 @@
-//! Keyless BIP352 v0 scan material for already validated transactions.
-
 use bitcoin_hashes::{Hash as _, hash160};
 use bitcoin_rs_primitives::{BlockHash, Script, Tx, TxIn, Txid, consensus_bytes};
 use bitcoin_rs_utxo::contract::{BlockSpends, BlockSpendsError};
@@ -49,8 +47,6 @@ pub enum TweakError {
     ResourceLimit,
 }
 
-/// prevout scripts. `None` means BIP352 v0 ineligibility, never incomplete history.
-/// programs rather than BIP341 Taproot outputs; the transaction produces no tweaks
 pub fn transaction_tweak(
     tx: &Tx,
     prevouts: &[Option<&Script>],
@@ -279,7 +275,7 @@ fn input_key(input: &TxIn, script: &[u8], index: usize) -> Result<Option<PublicK
             .map_err(|_| TweakError::InvalidInput { input: index });
     }
     if is_p2wpkh(script) || (is_p2sh(script) && redeem_script(input).is_some_and(is_p2wpkh)) {
-        return Ok(input.witness.last().and_then(|bytes| compressed_key(bytes)));
+        return Ok(input.witness.last().and_then(compressed_key));
     }
     if script.len() == 25 && script[..3] == [0x76, 0xa9, 0x14] && script[23..] == [0x88, 0xac] {
         return Ok(input.script_sig.windows(33).rev().find_map(|bytes| {

@@ -1,20 +1,7 @@
-//! Consensus encoding, hashing, and byte presentation for native protocol types.
-
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{Block, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, varint};
-
-#[must_use]
-pub fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
-}
 
 pub trait Sink {
     fn write_all(&mut self, bytes: &[u8]);
@@ -80,7 +67,6 @@ pub fn consensus_bytes<T: ConsensusEncode + ?Sized>(value: &T) -> Vec<u8> {
     bytes
 }
 
-/// Decodes a complete value from `bytes`, rejecting any trailing bytes.
 pub fn deserialize<T: ConsensusDecode>(bytes: &[u8]) -> Result<T, DecodeError> {
     let mut reader = bytes;
     let value = T::consensus_decode(&mut reader)?;
@@ -227,23 +213,16 @@ impl ConsensusDecode for TxIn {
     }
 }
 
-fn witness_stack_size(witness: &[Vec<u8>]) -> usize {
+fn witness_stack_size(witness: &crate::Witness) -> usize {
     varint::encoded_len(compact_len(witness.len())).saturating_add(
         witness
             .iter()
-            .map(|item| script_size(item))
+            .map(script_size)
             .fold(0_usize, usize::saturating_add),
     )
 }
 
-/// Serializes a transaction; `with_witness` controls the BIP144 marker/flag and witness
-/// sections (emitted only when some input carries witness data).
-pub(crate) fn encode_tx(tx: &Tx, sink: &mut impl Sink, with_witness: bool) {
-    sink.write_all(&tx.version.to_le_bytes());
-    let has_witness = with_witness && tx.has_witness();
-    if has_witness {
-        sink.write_all(&[0x00, 0x01]);
-    }
+fn encode_tx_inputs_and_outputs(tx: &Tx, sink: &mut impl Sink) {
     write_compact(sink, compact_len(tx.inputs.len()));
     for input in &tx.inputs {
         input.consensus_encode(sink);
@@ -252,13 +231,27 @@ pub(crate) fn encode_tx(tx: &Tx, sink: &mut impl Sink, with_witness: bool) {
     for output in &tx.outputs {
         output.consensus_encode(sink);
     }
-    if has_witness {
-        for input in &tx.inputs {
-            write_compact(sink, compact_len(input.witness.len()));
-            for item in &input.witness {
-                write_compact(sink, compact_len(item.len()));
-                sink.write_all(item);
-            }
+}
+
+pub(crate) fn encode_tx_base(tx: &Tx, sink: &mut impl Sink) {
+    sink.write_all(&tx.version.to_le_bytes());
+    encode_tx_inputs_and_outputs(tx, sink);
+    sink.write_all(&tx.lock_time.to_le_bytes());
+}
+
+pub(crate) fn encode_tx(tx: &Tx, sink: &mut impl Sink) {
+    if !tx.has_witness() {
+        encode_tx_base(tx, sink);
+        return;
+    }
+    sink.write_all(&tx.version.to_le_bytes());
+    sink.write_all(&[0x00, 0x01]);
+    encode_tx_inputs_and_outputs(tx, sink);
+    for input in &tx.inputs {
+        write_compact(sink, compact_len(input.witness.len()));
+        for item in &input.witness {
+            write_compact(sink, compact_len(item.len()));
+            sink.write_all(item);
         }
     }
     sink.write_all(&tx.lock_time.to_le_bytes());
@@ -297,7 +290,7 @@ fn tx_witness_size(tx: &Tx) -> usize {
 
 impl ConsensusEncode for Tx {
     fn consensus_encode(&self, sink: &mut impl Sink) {
-        encode_tx(self, sink, true);
+        encode_tx(self, sink);
     }
 
     fn consensus_size(&self) -> usize {
@@ -341,9 +334,12 @@ impl ConsensusDecode for Block {
 #[cfg(test)]
 mod tests {
     #![expect(clippy::expect_used, reason = "test assertions")]
-    use super::{ConsensusEncode, DecodeError, deserialize, hex_encode, varint};
+    use super::{ConsensusEncode, DecodeError, deserialize, varint};
+    use crate::hex::hex_encode;
 
-    type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
+    use crate::test_error::TestError;
+
+    type Result<T, E = TestError> = std::result::Result<T, E>;
 
     #[test]
     fn hex_encoding_preserves_byte_order_and_lowercase() {

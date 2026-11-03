@@ -759,14 +759,11 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
     Ok(rows)
 }
 
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "satoshi amounts from Core test vectors are non-negative integers represented as f64"
-)]
+#[expect(clippy::expect_used, reason = "Core satoshi amounts are valid u64")]
 fn btc_to_sats(btc: f64) -> u64 {
-    (btc * 100_000_000.0).round() as u64
+    format!("{:.0}", (btc * 100_000_000.0).round())
+        .parse::<u64>()
+        .expect("btc amount is non-negative and fits u64")
 }
 
 fn run_script_tests(
@@ -807,12 +804,6 @@ struct TxVectorRow {
     row_index: usize,
 }
 
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "test vector parser; vout indices are small non-negative integers stored as i64"
-)]
 fn load_tx_vectors(
     name: &str,
     expected_accept: bool,
@@ -895,7 +886,9 @@ fn load_tx_vectors(
                 prevout_error = true;
                 break;
             };
-            let vout = vout_i64 as u32;
+            let mut vout_bytes = [0_u8; 4];
+            vout_bytes.copy_from_slice(&vout_i64.to_le_bytes()[..4]);
+            let vout = u32::from_le_bytes(vout_bytes);
             let Some(script_asm) = spec_arr.get(2).and_then(sonic_rs::Value::as_str) else {
                 counts.record_skip("prevout script not a string");
                 prevout_error = true;
@@ -1153,6 +1146,7 @@ const NATIVE_SCRIPT_TESTS_EXECUTED: usize = 1233;
 const SCRIPT_TESTS_PROSE_SKIP: &str =
     "prose row (1 string element: format note or section header, no test fields)";
 
+// VAL-02
 #[test]
 fn script_tests_native_column() {
     let mut counts = Counts::default();
@@ -1168,7 +1162,7 @@ fn script_tests_native_column() {
         let result = Interpreter.execute_with_prevouts(
             &row.script_pubkey,
             &row.script_sig,
-            &row.witness,
+            &Witness::from_stack(row.witness.clone()),
             row.flags,
             &prevouts,
             spend,
@@ -1226,7 +1220,7 @@ fn is_policy_only_script_test(row: &ScriptTestRow) -> bool {
         Interpreter.execute_with_prevouts(
             &row.script_pubkey,
             &row.script_sig,
-            &row.witness,
+            &Witness::from_stack(row.witness.clone()),
             mand_flags,
             &prevouts,
             &spend,
@@ -1294,6 +1288,7 @@ const NATIVE_TX_VALID_FAILURES: usize = 0;
 const NATIVE_TX_VALID_SKIPS: usize = 0;
 const NATIVE_TX_VALID_EXECUTED: usize = 121;
 
+// VAL-02
 #[test]
 fn tx_valid_native_column() {
     let mut counts = Counts::default();
@@ -1369,6 +1364,7 @@ const NATIVE_TX_INVALID_SKIPS: usize = 9;
 const NATIVE_TX_INVALID_EXECUTED: usize = 84;
 const TX_INVALID_BADTX_SKIP: &str = "BADTX: fails CheckTransaction, not script verification";
 
+// VAL-02
 #[test]
 fn tx_invalid_native_column() {
     let mut counts = Counts::default();
@@ -1511,11 +1507,9 @@ fn push_shape(script: &[u8]) -> Vec<Option<usize>> {
 
 fn sigcache_flip_first_signature_byte(tx: &mut Tx) {
     for input in &mut tx.inputs {
-        for item in input.witness.iter_mut() {
-            if !item.is_empty() {
-                item[0] ^= 0x01;
-                return;
-            }
+        if let Some(index) = input.witness.iter().position(|item| !item.is_empty()) {
+            input.witness = flip_first_byte(&input.witness, index);
+            return;
         }
         if input.script_sig.as_bytes().is_empty() {
             continue;
@@ -1782,4 +1776,10 @@ fn signature_cache_policy_encoding_still_rejected_after_permissive_success() {
         }),
         "high-S rejection survives a permissive cached success"
     );
+}
+
+fn flip_first_byte(witness: &Witness, item: usize) -> Witness {
+    let mut stack: Vec<Vec<u8>> = witness.iter().map(<[u8]>::to_vec).collect();
+    stack[item][0] ^= 0x01;
+    Witness::from_stack(stack)
 }

@@ -1,5 +1,3 @@
-//! Exact-identity block reads and transaction position verification.
-
 use super::{
     Arc, Block, BlockTree, DerivedIndexQueryEngine, Hash256, MAX_SERIALIZED_BLOCK_BYTES, OutPoint,
     PrefixBound, QueryBudget, ReadPrefix, Tx, TxIndexSnapshot, TxPosition, TxPositionValue,
@@ -216,7 +214,6 @@ impl DerivedIndexQueryEngine {
         }
     }
 
-    /// `[floor, anchor]`, never a pruned-prefix refusal. Full history never
     pub(super) fn scoped_absence<T>(
         prefix: &ReadPrefix,
         family: &'static str,

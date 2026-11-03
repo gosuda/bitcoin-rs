@@ -15,14 +15,25 @@ use bitcoin_rs_rpc::{Handler, RpcError};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
+use crate::support::TestError;
+
 const P2WPKH_SCRIPT_HEX: &str = "00141111111111111111111111111111111111111111";
 
-fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
-    Vec::from_hex(hex).map_err(|error| error.to_string())
+fn hex_decode(hex: &str) -> Result<Vec<u8>, TestError> {
+    Ok(Vec::from_hex(hex)?)
 }
 
 fn is_op_return(script: &[u8]) -> bool {
     script.first() == Some(&0x6a_u8)
+}
+
+fn p2sh_true_script() -> Script {
+    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    Script::from_bytes(redeem.to_p2sh().into_bytes())
+}
+
+fn p2sh_true_spend_script_sig() -> Script {
+    Script::from_bytes(vec![0x01, 0x51])
 }
 
 fn make_tx(prevout: OutPoint, output_value: u64, script: Vec<u8>) -> Tx {
@@ -31,7 +42,7 @@ fn make_tx(prevout: OutPoint, output_value: u64, script: Vec<u8>) -> Tx {
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: prevout,
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::from_consensus(0xFFFF_FFFE),
             witness: Witness::new(),
         }],
@@ -50,7 +61,7 @@ fn fund_utxo(ctx: &Context, txid_byte: u8, value: u64) -> OutPoint {
         outpoint,
         TxOut {
             value: Amount::from_sat(value),
-            script_pubkey: vec![0x51].into(),
+            script_pubkey: p2sh_true_script(),
         },
         false,
         1,
@@ -65,7 +76,7 @@ fn fund_utxo(ctx: &Context, txid_byte: u8, value: u64) -> OutPoint {
 }
 
 #[test]
-fn sendrawtransaction_admits_standard_tx_to_mempool() -> Result<(), Box<dyn std::error::Error>> {
+fn sendrawtransaction_admits_standard_tx_to_mempool() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
     let prevout = fund_utxo(&ctx, 0x42, 10_000);
@@ -100,8 +111,7 @@ fn sendrawtransaction_rejects_missing_inputs() {
 }
 
 #[test]
-fn sendrawtransaction_idempotent_for_already_in_mempool() -> Result<(), Box<dyn std::error::Error>>
-{
+fn sendrawtransaction_idempotent_for_already_in_mempool() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
     let prevout = fund_utxo(&ctx, 0x43, 10_000);
@@ -120,8 +130,7 @@ fn sendrawtransaction_idempotent_for_already_in_mempool() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn sendrawtransaction_readmits_a_transaction_evicted_from_the_mempool()
--> Result<(), Box<dyn std::error::Error>> {
+fn sendrawtransaction_readmits_a_transaction_evicted_from_the_mempool() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
     let prevout = fund_utxo(&ctx, 0x44, 10_000);
@@ -159,7 +168,7 @@ fn funded_standard_tx(
     txid_byte: u8,
     funded: u64,
     output: u64,
-) -> Result<(Arc<Context>, Tx, String), Box<dyn std::error::Error>> {
+) -> Result<(Arc<Context>, Tx, String), TestError> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
     let prevout = fund_utxo(&ctx, txid_byte, funded);
@@ -169,8 +178,7 @@ fn funded_standard_tx(
 }
 
 #[test]
-fn sendrawtransaction_admits_the_lnd_wallet_broadcast_shape()
--> Result<(), Box<dyn std::error::Error>> {
+fn sendrawtransaction_admits_the_lnd_wallet_broadcast_shape() -> Result<(), TestError> {
     let (ctx, tx, raw) = funded_standard_tx(0x50, 10_000, 9_000)?;
     let handler = Handler::new(Arc::clone(&ctx));
 
@@ -185,8 +193,7 @@ fn sendrawtransaction_admits_the_lnd_wallet_broadcast_shape()
 }
 
 #[test]
-fn the_legacy_allowhighfees_false_keeps_the_default_fee_ceiling()
--> Result<(), Box<dyn std::error::Error>> {
+fn the_legacy_allowhighfees_false_keeps_the_default_fee_ceiling() -> Result<(), TestError> {
     let (ctx, tx, raw) = funded_standard_tx(0x51, 100_000_000, 1_000_000)?;
     let handler = Handler::new(Arc::clone(&ctx));
 
@@ -204,12 +211,8 @@ fn the_legacy_allowhighfees_false_keeps_the_default_fee_ceiling()
     Ok(())
 }
 
-/// Omitted, null, numeric and numeric-string ceilings keep Core's `maxfeerate`
-/// meaning, and everything that is neither an amount nor the legacy boolean
-/// is still refused before any admission.
 #[test]
-fn sendrawtransaction_fee_argument_keeps_core_amount_semantics()
--> Result<(), Box<dyn std::error::Error>> {
+fn sendrawtransaction_fee_argument_keeps_core_amount_semantics() -> Result<(), TestError> {
     for (index, fee) in [json!(null), json!(0.1), json!("0.1"), json!(0)]
         .into_iter()
         .enumerate()
@@ -259,8 +262,7 @@ fn sendrawtransaction_fee_argument_keeps_core_amount_semantics()
 }
 
 #[test]
-fn testmempoolaccept_still_refuses_a_boolean_maxfeerate() -> Result<(), Box<dyn std::error::Error>>
-{
+fn testmempoolaccept_still_refuses_a_boolean_maxfeerate() -> Result<(), TestError> {
     let (ctx, _tx, raw) = funded_standard_tx(0x80, 10_000, 9_000)?;
     let handler = Handler::new(Arc::clone(&ctx));
 
@@ -273,7 +275,7 @@ fn testmempoolaccept_still_refuses_a_boolean_maxfeerate() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn testmempoolaccept_reports_allowed_for_valid_tx() -> Result<(), Box<dyn std::error::Error>> {
+fn testmempoolaccept_reports_allowed_for_valid_tx() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
     let prevout = fund_utxo(&ctx, 0x44, 10_000);
@@ -293,8 +295,7 @@ fn testmempoolaccept_reports_allowed_for_valid_tx() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn testmempoolaccept_reports_reject_for_already_in_mempool()
--> Result<(), Box<dyn std::error::Error>> {
+fn testmempoolaccept_reports_reject_for_already_in_mempool() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
     let prevout = fund_utxo(&ctx, 0x45, 10_000);
@@ -327,7 +328,7 @@ fn testmempoolaccept_reports_reject_for_already_in_mempool()
 }
 
 #[test]
-fn testmempoolaccept_reports_reject_for_missing_inputs() -> Result<(), Box<dyn std::error::Error>> {
+fn testmempoolaccept_reports_reject_for_missing_inputs() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX).expect("script hex");
     let prevout = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x77; 32])), 0);
@@ -351,7 +352,7 @@ fn testmempoolaccept_reports_reject_for_missing_inputs() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn gettxout_returns_unconfirmed_output_from_mempool() -> Result<(), Box<dyn std::error::Error>> {
+fn gettxout_returns_unconfirmed_output_from_mempool() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
     let tx = Tx {
@@ -382,7 +383,7 @@ fn gettxout_returns_unconfirmed_output_from_mempool() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn gettxout_include_mempool_false_skips_mempool() -> Result<(), Box<dyn std::error::Error>> {
+fn gettxout_include_mempool_false_skips_mempool() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
     let tx = Tx {
@@ -410,7 +411,7 @@ fn gettxout_include_mempool_false_skips_mempool() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn gettxout_returns_null_for_outpoint_spent_in_mempool() -> Result<(), Box<dyn std::error::Error>> {
+fn gettxout_returns_null_for_outpoint_spent_in_mempool() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
 
@@ -431,7 +432,7 @@ fn gettxout_returns_null_for_outpoint_spent_in_mempool() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn createrawtransaction_builds_valid_hex_tx() -> Result<(), Box<dyn std::error::Error>> {
+fn createrawtransaction_builds_valid_hex_tx() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
 
@@ -463,7 +464,7 @@ fn createrawtransaction_builds_valid_hex_tx() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn createrawtransaction_creates_op_return_data_output() -> Result<(), Box<dyn std::error::Error>> {
+fn createrawtransaction_creates_op_return_data_output() -> Result<(), TestError> {
     let mut ctx = Context::new();
     ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
     let handler = Handler::new(Arc::new(ctx));
@@ -510,4 +511,68 @@ fn createrawtransaction_rejects_duplicate_input() {
         .dispatch("createrawtransaction", &json!([inputs, outputs]))
         .expect_err("duplicate input should be rejected");
     assert_eq!(err.code(), RpcError::INVALID_PARAMS);
+}
+
+#[test]
+fn broadcast_methods_report_unparseable_oversize_hex_like_core() -> Result<(), TestError> {
+    let ctx = Arc::new(Context::new());
+    let handler = Handler::new(Arc::clone(&ctx));
+    let oversized = "00".repeat(400_001);
+    let broadcast = handler.dispatch("sendrawtransaction", &json!([oversized.as_str()]));
+    let preview = handler.dispatch("testmempoolaccept", &json!([[oversized.as_str()]]));
+    for (method, result) in [
+        ("sendrawtransaction", broadcast),
+        ("testmempoolaccept", preview),
+    ] {
+        let error = result
+            .err()
+            .ok_or("oversized broadcast hex must be refused")?;
+        assert!(
+            matches!(&error, RpcError::Deserialization(message)
+                if message.starts_with("TX decode failed")),
+            "{method} refused with the wrong boundary: {error:?}"
+        );
+        assert_eq!(error.code(), -22, "Core answers -22 for unparseable hex");
+    }
+    assert!(ctx.mempool.gateway.read().is_empty());
+    Ok(())
+}
+
+#[test]
+fn decoderawtransaction_reports_unparseable_oversize_hex_like_core() -> Result<(), TestError> {
+    let ctx = Arc::new(Context::new());
+    let handler = Handler::new(Arc::clone(&ctx));
+    let oversized = "00".repeat(4_000_001);
+    let error = handler
+        .dispatch("decoderawtransaction", &json!([oversized.as_str()]))
+        .err()
+        .ok_or("oversized inspection hex must be refused")?;
+    assert!(
+        matches!(&error, RpcError::Deserialization(message) if message == "TX decode failed"),
+        "inspection refused with the wrong boundary: {error:?}"
+    );
+    assert_eq!(error.code(), -22, "Core answers -22 for unparseable hex");
+    Ok(())
+}
+
+#[test]
+fn decoderawtransaction_inspects_a_consensus_legal_non_standard_tx() -> Result<(), TestError> {
+    let ctx = Arc::new(Context::new());
+    let handler = Handler::new(Arc::clone(&ctx));
+    let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
+    let mut big = make_tx(fund_utxo(&ctx, 0x70, 100_000_000), 1_000, script.clone());
+    big.outputs = (0..3_400)
+        .map(|_| TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: script.clone().into(),
+        })
+        .collect();
+    let raw = consensus_bytes(&big).to_lower_hex_string();
+    let result = handler.dispatch("decoderawtransaction", &json!([raw.as_str()]))?;
+    assert_eq!(
+        result.get("txid").and_then(|value| value.as_str()),
+        Some(big.txid().to_string().as_str()),
+        "inspection must decode a consensus-legal tx past the standard weight bound"
+    );
+    Ok(())
 }

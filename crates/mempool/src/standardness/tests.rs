@@ -131,14 +131,11 @@ fn accepts_a_well_formed_bare_multisig() {
 #[test]
 fn accepts_three_of_three_bare_multisig() {
     let key = [0x02_u8; 33];
-    let mut script = vec![opcode::OP_PUSHNUM_1 + 2 /* OP_PUSHNUM_3 */];
+    let mut script = vec![opcode::OP_PUSHNUM_1 + 2];
     for _ in 0..3 {
         script.extend(push_data(&key));
     }
-    script.extend([
-        opcode::OP_PUSHNUM_1 + 2, /* OP_PUSHNUM_3 */
-        opcode::OP_CHECKMULTISIG,
-    ]);
+    script.extend([opcode::OP_PUSHNUM_1 + 2, opcode::OP_CHECKMULTISIG]);
 
     let mut tx = standard_tx(1);
     tx.outputs[0].script_pubkey = script.into();
@@ -152,10 +149,7 @@ fn rejects_one_of_four_bare_multisig() {
     for _ in 0..4 {
         script.extend(push_data(&key));
     }
-    script.extend([
-        opcode::OP_PUSHNUM_1 + 3, /* OP_PUSHNUM_4 */
-        opcode::OP_CHECKMULTISIG,
-    ]);
+    script.extend([opcode::OP_PUSHNUM_1 + 3, opcode::OP_CHECKMULTISIG]);
 
     let mut tx = standard_tx(1);
     tx.outputs[0].script_pubkey = script.into();
@@ -310,9 +304,16 @@ fn rejects_non_standard_output_script() {
 
 #[test]
 fn signed_delta_clamp_prevents_maxfeerate_rejection_and_retains_effective_rate()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let mut pool = Mempool::new(crate::MempoolLimits::default());
     let tx = standard_tx(2);
+    let prevouts = [(
+        tx.inputs[0].previous_output,
+        TxOut {
+            value: Amount::from_sat(200_000),
+            script_pubkey: p2pkh(&[7_u8; 20]).into(),
+        },
+    )];
     let txid = tx.txid();
 
     pool.prioritise(txid, -3_000)?;
@@ -329,6 +330,7 @@ fn signed_delta_clamp_prevents_maxfeerate_rejection_and_retains_effective_rate()
         &pool,
         &policy(),
         &tx,
+        &prevouts,
         context,
         Some(10_000),
         None,
@@ -345,7 +347,7 @@ fn signed_delta_clamp_prevents_maxfeerate_rejection_and_retains_effective_rate()
 }
 
 #[test]
-fn three_vsize_meanings_on_sigop_heavy_tx() -> Result<(), Box<dyn std::error::Error>> {
+fn three_vsize_meanings_on_sigop_heavy_tx() -> Result<(), crate::test_error::TestError> {
     use crate::accounting::prepared_context;
     use crate::entry::MempoolEntry;
     use alloc::sync::Arc;
@@ -394,4 +396,154 @@ fn three_vsize_meanings_on_sigop_heavy_tx() -> Result<(), Box<dyn std::error::Er
     assert_eq!(entry.bip141_vsize, u32::try_from(tx.vsize())?);
     assert_eq!(entry.weight, unadjusted_weight);
     Ok(())
+}
+
+fn oversize_script_sig_tx(script_bytes: usize) -> Tx {
+    let mut tx = standard_tx(2);
+    tx.inputs[0].script_sig = Script::from_bytes(vec![0x01; script_bytes]);
+    tx
+}
+
+// POL-03
+#[test]
+fn unfunded_over_block_weight_tx_answers_bad_txns_oversize() {
+    let pool = Mempool::new(crate::MempoolLimits::default());
+    let tx = oversize_script_sig_tx(1_100_000);
+    let context = PackageTxContext {
+        fee: 1_000,
+        vsize: 100,
+        sigop_cost: 0,
+        missing_inputs: true,
+    };
+    let fact = evaluate_one(
+        &pool,
+        &policy(),
+        &tx,
+        &[],
+        context,
+        None,
+        None,
+        &Bip68Admission::default(),
+    );
+    assert_eq!(
+        fact.reject_reason,
+        Some(AcceptanceRejectReason::NonStandard(
+            StandardnessError::Oversize
+        )),
+        "Core CheckTransaction answers bad-txns-oversize before the missing-inputs scan"
+    );
+}
+
+// POL-03
+#[test]
+fn unfunded_over_standard_weight_tx_answers_tx_size_before_missing_inputs() {
+    let pool = Mempool::new(crate::MempoolLimits::default());
+    let tx = oversize_script_sig_tx(120_000);
+    let context = PackageTxContext {
+        fee: 1_000,
+        vsize: 100,
+        sigop_cost: 0,
+        missing_inputs: true,
+    };
+    let fact = evaluate_one(
+        &pool,
+        &policy(),
+        &tx,
+        &[],
+        context,
+        None,
+        None,
+        &Bip68Admission::default(),
+    );
+    assert_eq!(
+        fact.reject_reason,
+        Some(AcceptanceRejectReason::NonStandard(
+            StandardnessError::Weight
+        )),
+        "Core IsStandardTx answers tx-size before bad-txns-inputs-missingorspent"
+    );
+}
+
+// POL-03
+#[test]
+fn unfunded_dust_tx_answers_missing_inputs_before_ephemeral_dust() {
+    let pool = Mempool::new(crate::MempoolLimits::default());
+    let mut tx = standard_tx(1);
+    tx.inputs[0].previous_output = OutPoint::new(
+        bitcoin_rs_primitives::Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[9; 32])),
+        0,
+    );
+    tx.outputs[0].value = Amount::from_sat(1);
+    let context = PackageTxContext {
+        fee: 1_000,
+        vsize: 100,
+        sigop_cost: 0,
+        missing_inputs: true,
+    };
+    let fact = evaluate_one(
+        &pool,
+        &policy(),
+        &tx,
+        &[],
+        context,
+        None,
+        None,
+        &Bip68Admission::default(),
+    );
+    assert_eq!(
+        fact.reject_reason,
+        Some(AcceptanceRejectReason::MissingInputs),
+        "Core PreChecks answers bad-txns-inputs-missingorspent before PreCheckEphemeralTx"
+    );
+    let resolved = PackageTxContext {
+        missing_inputs: false,
+        ..context
+    };
+    let fact = evaluate_one(
+        &pool,
+        &policy(),
+        &tx,
+        &[],
+        resolved,
+        None,
+        None,
+        &Bip68Admission::default(),
+    );
+    assert_eq!(
+        fact.reject_reason,
+        Some(AcceptanceRejectReason::NonStandard(
+            StandardnessError::DustOutput
+        )),
+        "PreCheckEphemeralTx refuses a nonzero-fee dust transaction once its inputs resolve"
+    );
+}
+
+// POL-03
+#[test]
+fn coinbase_transaction_answers_core_coinbase_reason() {
+    let pool = Mempool::new(crate::MempoolLimits::default());
+    let mut tx = standard_tx(1);
+    tx.inputs[0].previous_output = OutPoint::null();
+    let context = PackageTxContext {
+        fee: 0,
+        vsize: 100,
+        sigop_cost: 0,
+        missing_inputs: true,
+    };
+    let fact = evaluate_one(
+        &pool,
+        &policy(),
+        &tx,
+        &[],
+        context,
+        None,
+        None,
+        &Bip68Admission::default(),
+    );
+    assert_eq!(
+        fact.reject_reason,
+        Some(AcceptanceRejectReason::Coinbase),
+        "Core PreChecks refuses a loose coinbase with reason coinbase"
+    );
+    assert_eq!(AcceptanceRejectReason::Coinbase.to_string(), "coinbase");
 }

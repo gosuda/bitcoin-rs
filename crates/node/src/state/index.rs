@@ -3,10 +3,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result};
 use arc_swap::ArcSwap;
 
 use super::TxIndexSpawn;
+
+#[derive(Debug, thiserror::Error)]
+pub enum IndexWorkerError {
+    #[error("spawn txindex worker")]
+    Spawn(#[from] std::io::Error),
+    #[error("derived-index worker exited with a detached backend open still in flight")]
+    DetachedBackendOpen,
+    #[error("derived-index worker did not exit within the join deadline; join abandoned")]
+    JoinDeadlineExceeded,
+}
 
 pub(super) struct DerivedIndexHost {
     status: Arc<bitcoin_rs_index::runtime::DerivedIndexCapability>,
@@ -62,7 +71,7 @@ impl DerivedIndexHost {
         &mut self,
         chainstate: &bitcoin_rs_chainstate::Chainstate,
         history: bitcoin_rs_storage::pruning::HistoryAccess,
-    ) -> Result<()> {
+    ) -> Result<(), IndexWorkerError> {
         let Some(enabled) = self.enabled.as_mut() else {
             return Ok(());
         };
@@ -91,7 +100,7 @@ impl DerivedIndexHost {
             chainstate.shutdown_reader(),
             spawn.wake_rx,
         )
-        .context("spawn txindex worker")?;
+        .map_err(IndexWorkerError::Spawn)?;
         enabled.phase = DerivedIndexPhase::Running(worker);
         #[cfg(test)]
         {
@@ -100,7 +109,7 @@ impl DerivedIndexHost {
         Ok(())
     }
 
-    pub(super) fn shutdown(&mut self, deadline: Duration) -> Result<()> {
+    pub(super) fn shutdown(&mut self, deadline: Duration) -> Result<(), IndexWorkerError> {
         let start = Instant::now();
         let Some(enabled) = self.enabled.as_mut() else {
             return Ok(());
@@ -124,9 +133,7 @@ impl DerivedIndexHost {
             #[cfg(test)]
             self.worker_joined.store(true, Ordering::Release);
             if open_abandoned {
-                return Err(anyhow::anyhow!(
-                    "derived-index worker exited with a detached backend open still in flight"
-                ));
+                return Err(IndexWorkerError::DetachedBackendOpen);
             }
             return Ok(());
         }
@@ -137,9 +144,7 @@ impl DerivedIndexHost {
         ));
         worker.poison_namespace();
         worker.detach();
-        Err(anyhow::anyhow!(
-            "derived-index worker did not exit within the join deadline; join abandoned"
-        ))
+        Err(IndexWorkerError::JoinDeadlineExceeded)
     }
 
     pub(super) fn status(&self) -> Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> {

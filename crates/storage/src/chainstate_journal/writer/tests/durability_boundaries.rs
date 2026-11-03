@@ -1,5 +1,8 @@
 use super::*;
+use crate::chainstate_journal::CheckpointBase;
+use crate::test_support::TestError;
 
+// JW-MARK-1
 #[test]
 fn clear_full_revalidation_marker_unlinks_then_treats_absence_as_success() -> TestResult {
     let dir = tempfile::tempdir()?;
@@ -14,6 +17,7 @@ fn clear_full_revalidation_marker_unlinks_then_treats_absence_as_success() -> Te
     Ok(())
 }
 
+// JW-MARK-1
 #[test]
 fn marker_clear_retry_syncs_directory_after_prior_sync_failure() -> TestResult {
     let dir = tempfile::tempdir()?;
@@ -39,6 +43,7 @@ fn marker_clear_retry_syncs_directory_after_prior_sync_failure() -> TestResult {
     Ok(())
 }
 
+// JW-DUR-1
 #[test]
 fn head_never_advances_without_counted_storage_flush() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -55,6 +60,7 @@ fn head_never_advances_without_counted_storage_flush() -> TestResult {
     Ok(())
 }
 
+// JW-DUR-1
 #[test]
 fn configured_lag_limits_retry_persistent_flush_failures() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -99,12 +105,13 @@ fn configured_lag_time_forces_pre_apply_durability() -> TestResult {
     writer.append(&sample_record(1))?;
     writer.last_boundary = Instant::now()
         .checked_sub(Duration::from_secs(2))
-        .ok_or("test instant underflow")?;
+        .ok_or(TestError::Missing("test instant underflow"))?;
     writer.prepare_for_apply()?;
     assert_eq!(writer.head().height, 1);
     Ok(())
 }
 
+// JW-RET-1
 #[test]
 fn retention_limit_blocks_until_checkpoint_compaction() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -128,13 +135,20 @@ fn retention_limit_blocks_until_checkpoint_compaction() -> TestResult {
     ));
 
     writer.freeze()?;
-    writer.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0, true)?;
+    writer.compact_to_checkpoint(CheckpointBase {
+        generation: 1,
+        height: 0,
+        hash: [1; 32],
+        prev_hash: [0; 32],
+        chain_tx_count: 0,
+    })?;
     writer.resume()?;
     assert!(!writer.requires_compaction()?);
     writer.prepare_for_apply()?;
     Ok(())
 }
 
+// JW-LIFE-1
 #[test]
 fn freeze_failures_restore_open_state_for_retry() -> TestResult {
     for boundary in [
@@ -159,6 +173,7 @@ fn freeze_failures_restore_open_state_for_retry() -> TestResult {
     Ok(())
 }
 
+// JW-LIFE-1
 #[test]
 fn resume_failure_does_not_strand_frozen_writer() -> TestResult {
     let store = Arc::new(CountingStore::new());

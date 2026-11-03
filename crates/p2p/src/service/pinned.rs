@@ -1,4 +1,3 @@
-//! Connection retry policy for every configured pin, independent of its route.
 use super::{ActiveOutbound, HashMap, PeerEndpoint, is_manual_endpoint};
 use std::time::{Duration, Instant};
 
@@ -180,7 +179,7 @@ mod tests {
     #[test]
     fn fixed_and_persistent_addnode_ip_peers_retry_through_the_same_drain() {
         use super::super::{P2pService, P2pServiceConfig};
-        use std::sync::{Arc, atomic::AtomicBool};
+        use std::sync::Arc;
         for fixed in [false, true] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
             listener.set_nonblocking(true).expect("nonblocking");
@@ -198,12 +197,10 @@ mod tests {
                     outbound_block_relay_slots: 0,
                     ..P2pServiceConfig::default()
                 },
-                Arc::new(AtomicBool::new(false)),
+                bitcoin_rs_chain::LatchReader::fixture_never(),
             );
             if !fixed {
-                service
-                    .add_node(endpoint, true)
-                    .expect("persistent addnode");
+                service.add_node(endpoint).expect("persistent addnode");
             }
             let ready: Arc<dyn Fn(crate::PeerSource) + Send + Sync> = Arc::new(|_| {});
             service

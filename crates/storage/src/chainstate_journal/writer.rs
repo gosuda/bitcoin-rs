@@ -55,6 +55,25 @@ pub fn clear_full_revalidation_marker_at(data_dir: &Path) -> Result<(), JournalW
     clear_full_revalidation_marker(&dir)
 }
 
+pub fn mark_full_revalidation_at(data_dir: &Path) -> Result<(), JournalWriterError> {
+    use std::io::Write as _;
+
+    let path = data_dir.join(JOURNAL_DIR_NAME);
+    std::fs::create_dir_all(&path)?;
+    let dir = crate::checkpoint::fs::open_data_dir(&path)?;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    match dir.open_with(FULL_REVALIDATION_MARKER, &options) {
+        Ok(mut file) => {
+            file.write_all(b"required")?;
+            file.sync_all()?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    crate::checkpoint::fs::sync_dir(&dir).map_err(JournalWriterError::from)
+}
+
 fn clear_full_revalidation_marker(dir: &cap_std::fs::Dir) -> Result<(), JournalWriterError> {
     clear_full_revalidation_marker_with_sync(dir, crate::checkpoint::fs::sync_dir)
 }
@@ -110,8 +129,6 @@ pub enum JournalWriterError {
     NotOpen { state: &'static str },
     #[error("chainstate journal append out of order: got {got}, expected {expected}")]
     OutOfOrder { got: u32, expected: u32 },
-    /// A live block advanced after its journal append failed. Further applies
-    /// must stop until restart recovery discards the partial tail.
     #[error("chainstate journal has an untracked append gap at height {height}")]
     AppendGap { height: u32 },
     #[error("chainstate journal head marker is unreadable: {0}")]
@@ -122,6 +139,13 @@ pub enum JournalWriterError {
     RetentionLimit { bytes: u64, limit: u64 },
     #[error("journal fork height {fork_height} is below checkpoint base {base_height}")]
     ForkBelowBase { fork_height: u32, base_height: u32 },
+}
+
+impl JournalWriterError {
+    #[must_use]
+    pub fn is_backpressure(&self) -> bool {
+        matches!(self, Self::RetentionLimit { .. })
+    }
 }
 
 /// Serialized as: `HEAD_MAGIC | version u8 | crc32c(payload) | payload`,

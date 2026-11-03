@@ -1,5 +1,3 @@
-//! Read-side store access and typed prefix-row decoding for confirmed index rows.
-
 use super::{
     capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,
     capability::SCRIPT_LIVE_WATERMARK_KEY, error::IndexError,
@@ -42,14 +40,18 @@ impl<S: KvStore> Indexer<S> {
         })
     }
 
-    /// big-endian (format 5), so that order is chronological within a prefix.
+    /// Returns prefix rows in store order, newest first, with decoded ascending heights.
     pub fn iter_funding_rows(
         &self,
         scripthash: crate::ScriptHash,
     ) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
         let prefix = ScriptHashRow::scan_prefix(scripthash);
         let iter = self.store.iter_prefix(ColumnFamily::Funding, &prefix)?;
-        collect_prefix_rows(iter)
+        let mut rows = collect_prefix_rows(iter)?;
+        for row in &mut rows {
+            row.height = crate::types::ascending_history_height(row.height);
+        }
+        Ok(rows)
     }
 
     pub fn iter_live_outpoints(
@@ -78,7 +80,6 @@ impl<S: KvStore> Indexer<S> {
         Ok(outpoints)
     }
 
-    /// height suffix is big-endian (format 5), so prefix-range scans arrive
     pub fn iter_spending_rows(
         &self,
         outpoint: &OutPoint,
@@ -95,12 +96,13 @@ fn collect_prefix_rows(
     let mut rows = Vec::new();
     for entry in iter {
         let (key, _value) = entry?;
-        if key.len() == crate::HASH_PREFIX_ROW_SIZE {
-            rows.push(
-                zerocopy::FromBytes::read_from_bytes(&key[..])
-                    .map_err(|_| IndexError::InvalidHeaderLength { len: key.len() })?,
-            );
+        if key.len() != crate::HASH_PREFIX_ROW_SIZE {
+            return Err(IndexError::InvalidPrefixRowLength { len: key.len() });
         }
+        rows.push(
+            zerocopy::FromBytes::read_from_bytes(&key[..])
+                .map_err(|_| IndexError::InvalidPrefixRowLength { len: key.len() })?,
+        );
     }
     Ok(rows)
 }

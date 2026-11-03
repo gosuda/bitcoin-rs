@@ -378,7 +378,7 @@ fn signature_verification(c: &mut Criterion) {
 
 fn schnorr_negative_case(hit: &Case) -> Case {
     let mut bad_tx = hit.tx.clone();
-    bad_tx.inputs[0].witness[0][0] ^= 0x01;
+    bad_tx.inputs[0].witness = flip_first_byte(&bad_tx.inputs[0].witness, 0);
     Case {
         tx: bad_tx,
         rows: hit.rows.clone(),
@@ -568,4 +568,10 @@ fn main() {
     }
     benches();
     Criterion::default().configure_from_args().final_summary();
+}
+
+fn flip_first_byte(witness: &Witness, item: usize) -> Witness {
+    let mut stack: Vec<Vec<u8>> = witness.iter().map(<[u8]>::to_vec).collect();
+    stack[item][0] ^= 0x01;
+    Witness::from_stack(stack)
 }

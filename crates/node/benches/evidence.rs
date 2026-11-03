@@ -1,6 +1,5 @@
 #![allow(dead_code, reason = "each consumer uses a different subset")]
 
-use anyhow::Result;
 use bitcoin_rs_node::metrics::EvidenceIdentity;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -16,7 +15,6 @@ pub enum IntervalKind {
 pub struct Interval {
     pub kind: IntervalKind,
     pub start_ns: u64,
-    /// End offset, never before the start.
     pub end_ns: u64,
 }
 
@@ -28,8 +26,6 @@ impl Interval {
         Ok(())
     }
 
-    /// True when the intervals share any instant, which covers both nesting
-    /// and concurrency.
     #[must_use]
     pub fn overlaps(self, other: Self) -> bool {
         self.start_ns < other.end_ns && other.start_ns < self.end_ns
@@ -176,48 +172,10 @@ impl Ledger {
     }
 }
 
-pub const MIN_SAMPLES_FOR_P99: usize = 100;
+#[path = "../../../tools/benchmark-support/percentiles.rs"]
+mod percentiles;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Quantiles {
-    pub n: usize,
-    pub p50: u64,
-    pub p95: u64,
-    pub p99: u64,
-    pub max: u64,
-}
-
-impl Quantiles {
-    #[must_use]
-    pub fn of(samples: &[u64]) -> Option<Self> {
-        let mut sorted = samples.to_vec();
-        sorted.sort_unstable();
-        let max = *sorted.last()?;
-        let at = |percent: u64| -> u64 {
-            let last_rank = u64::try_from(sorted.len() - 1).unwrap_or(u64::MAX);
-            let scaled = percent.saturating_mul(last_rank);
-            let lower = usize::try_from(scaled / 100).unwrap_or(usize::MAX);
-            let remainder = scaled % 100;
-            let low = sorted[lower];
-            let high = sorted.get(lower + 1).copied().unwrap_or(low);
-            let span = u128::from(high - low);
-            let step = span * u128::from(remainder);
-            low + u64::try_from((step + 50) / 100).unwrap_or(u64::MAX)
-        };
-        Some(Self {
-            n: sorted.len(),
-            p50: at(50),
-            p95: at(95),
-            p99: at(99),
-            max,
-        })
-    }
-
-    #[must_use]
-    pub const fn p99_supported(&self) -> bool {
-        self.n >= MIN_SAMPLES_FOR_P99
-    }
-}
+pub use percentiles::{PercentileError, Quantiles};
 
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "benchmark evidence rejection tests")]
@@ -273,6 +231,7 @@ mod tests {
         kept.join("\n")
     }
 
+    // HPA-12
     #[test]
     fn evidence_without_an_identity_is_refused() {
         for field in [
@@ -320,6 +279,26 @@ mod tests {
     }
 
     #[test]
+    fn an_interval_never_ends_before_it_starts() {
+        let inverted = Interval {
+            kind: IntervalKind::Inside,
+            start_ns: 10,
+            end_ns: 9,
+        };
+        assert_eq!(
+            inverted.check(),
+            Err(EvidenceError::InvertedInterval(inverted))
+        );
+        let level = Interval {
+            kind: IntervalKind::Inside,
+            start_ns: 9,
+            end_ns: 9,
+        };
+        assert_eq!(level.check(), Ok(()));
+    }
+
+    // HPA-04, HPA-12
+    #[test]
     fn nested_and_concurrent_intervals_are_not_addends() {
         let outer = sample(0, 100);
         let nested = sample(10, 20);
@@ -353,6 +332,7 @@ mod tests {
         );
     }
 
+    // HPA-12
     #[test]
     fn repeated_samples_and_empty_cells_survive_a_round_trip() {
         let mut ledger = Ledger::parse(LEDGER_TOML).expect("checked-in ledger");
@@ -399,9 +379,14 @@ mod tests {
         assert_eq!(reparsed.cells.len(), ledger.cells.len());
     }
 
+    // HPA-13
     #[test]
     fn quantiles_are_exact_order_statistics_with_a_support_floor() {
-        assert_eq!(Quantiles::of(&[]), None, "an empty set is not a zero");
+        assert_eq!(
+            Quantiles::of(&[]),
+            Err(PercentileError::Empty),
+            "an empty set is not a zero"
+        );
 
         let single = Quantiles::of(&[7]).expect("one sample");
         assert_eq!(

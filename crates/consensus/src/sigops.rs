@@ -1,5 +1,3 @@
-//! Consensus transaction sigop-cost accounting.
-
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_script::sigops::{count_accurate, count_segwit, count_tx_legacy};

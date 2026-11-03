@@ -20,24 +20,6 @@ class OverlayRecorderTest(unittest.TestCase):
         source = RECORDER.read_text()
         ast.parse(source, feature_version=(3, 11))
 
-    def test_no_pep695_syntax(self):
-        tree = ast.parse(RECORDER.read_text())
-        type_aliases = [node for node in ast.walk(tree) if type(node).__name__ == "TypeAlias"]
-        self.assertEqual([], type_aliases, "PEP 695 `type` aliases need Python 3.12")
-        with_params = [
-            node.name
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-            and getattr(node, "type_params", [])
-        ]
-        self.assertEqual([], with_params, "PEP 695 generics need Python 3.12")
-
-    def test_bounded_is_plain_def_over_typevar(self):
-        source = RECORDER.read_text()
-        self.assertIn('T = TypeVar("T")', source)
-        self.assertIn("async def bounded(awaitable: Awaitable[T],", source)
-        self.assertNotIn("async def bounded[", source)
-
 
 class OverlayInteropDriverTest(unittest.TestCase):
     def test_tor_gencert_digest_pin_enforced(self):

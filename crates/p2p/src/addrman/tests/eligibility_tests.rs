@@ -74,7 +74,7 @@ fn accepted_version_service_update_is_metadata_only_canonical_and_idempotent() {
         &[(target(), 9, EPOCH)],
         EPOCH,
     );
-    book.attempted(target(), true, EPOCH + 1);
+    book.attempt_failed(target(), EPOCH + 1);
     let (before, revision, last_good) = {
         let manager = book.state.lock();
         (

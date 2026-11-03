@@ -12,19 +12,12 @@ pub struct MempoolEntry {
     pub tx: Arc<Tx>,
     pub txid: Txid,
     pub wtxid: Wtxid,
-    /// Policy-adjusted virtual transaction size in vbytes.
     pub vsize: u32,
-    /// BIP141 virtual transaction size in vbytes.
     pub bip141_vsize: u32,
-    /// Consensus serialization size, including witness, in bytes.
     pub size: u32,
-    /// Consensus transaction weight in weight units.
     pub weight: u64,
-    /// Actual transaction fee in satoshis.
     pub fee: u64,
-    /// Actual fee rate in sat/kvB.
     pub fee_rate: u64,
-    /// Signed mining-only fee adjustment for this transaction.
     pub fee_delta: i64,
     pub ancestor_size: u64,
     pub ancestor_fee: u64,
@@ -32,22 +25,12 @@ pub struct MempoolEntry {
     pub descendant_size: u64,
     pub descendant_fee: u64,
     pub descendant_fee_delta: i128,
-    /// Mempool acceptance time in wall-clock seconds since the Unix epoch.
     pub time: u64,
-    /// Effective flag: the transaction is awaiting its initial broadcast
-    /// (`broadcast_pending` set, no send committed, no serve in flight).
     pub unbroadcast: bool,
-    /// Admission intent: the transaction still needs an initial broadcast.
-    /// Kept across serve marks so a failed send can restore it.
     pub broadcast_pending: bool,
-    /// Latched when a served response commits; no later failure may
-    /// re-flag the transaction as unbroadcast.
     pub broadcast_done: bool,
-    /// Serve attempts currently holding a pre-send mark.
     pub broadcast_marks: u32,
-    /// Chain height at acceptance.
     pub height: u32,
-    /// BIP141 sigop cost, counted against the resolved prevouts.
     pub sigop_cost: u32,
 }
 
@@ -96,7 +79,6 @@ impl MempoolEntry {
         }
     }
 
-    /// Actual fee plus the signed mining-only adjustment.
     #[must_use]
     pub fn modified_fee(&self) -> i128 {
         i128::from(self.fee) + i128::from(self.fee_delta)
@@ -266,7 +248,8 @@ mod wire_metadata_tests {
     }
 
     #[test]
-    fn wire_metadata_matches_bip141_and_bip144_vectors() -> Result<(), Box<dyn std::error::Error>> {
+    fn wire_metadata_matches_bip141_and_bip144_vectors() -> Result<(), crate::test_error::TestError>
+    {
         let expected_txid = Txid(Hash256::from_str_be(
             "9e3f408ee773b8b6473f7cc02cbdef80644f916cee3981ee0704e279b7cdc6dc",
         )?);

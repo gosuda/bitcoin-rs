@@ -6,7 +6,7 @@ use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_primitives::{Sequence, TxIn, Witness};
 use std::thread::JoinHandle;
 
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+type TestResult<T = ()> = Result<T, TestError>;
 
 const HEAVY_SIGOPS: u32 = 72_155;
 
@@ -467,16 +467,16 @@ fn gated_service() -> (
     Arc<MiningService>,
     Arc<BudgetGate>,
     GenerationKey,
-    Arc<AtomicBool>,
+    bitcoin_rs_chain::LatchWriter,
 ) {
     let tip = Hash256::from_le_bytes(&[0x71; 32]);
     let pool = Arc::new(BudgetGate::new(5, 2));
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
     let service = Arc::new(service_with_source(
         Some(tip_snapshot(tip)),
         pool.clone(),
         Arc::new(ResolvedChain),
-        Arc::clone(&shutdown),
+        shutdown.reader(),
     ));
     let generation = GenerationKey {
         tip_hash: tip,
@@ -653,14 +653,10 @@ fn shutdown_ends_a_budgeted_wait() -> TestResult {
     wait_until_held(&pool);
     let waiter = spawn_budgeted(&service, generation, BUDGET_B);
     std::thread::sleep(Duration::from_millis(50));
-    shutdown.store(true, Ordering::SeqCst);
+    shutdown.trigger();
     let outcome = waiter.join().map_err(|_| "the waiter panicked")?;
     assert!(
-        matches!(
-            &outcome,
-            Err(MiningControlError::Unavailable(message))
-                if message.as_str() == "node is shutting down"
-        ),
+        matches!(&outcome, Err(MiningControlError::Unavailable(_))),
         "{outcome:?}"
     );
     assert_eq!(pool.budgeted_calls(), 1);

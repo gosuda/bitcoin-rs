@@ -2,7 +2,7 @@
 
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScan, PrefixScanLimit, StorageError};
 
-type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+use crate::support::TestResult;
 
 fn seed_rows<S: KvStore>(store: &S) -> Result<(), StorageError> {
     let mut batch = store.new_batch();
@@ -348,6 +348,7 @@ fn run_bounded_scan_suite<S: KvStore>(store: &S) -> Result<(), StorageError> {
     assert_oversized_first_row(store)
 }
 
+// ARCH-02
 #[cfg(feature = "fjall")]
 #[test]
 fn fjall_bounded_prefix_scan() -> TestResult<()> {

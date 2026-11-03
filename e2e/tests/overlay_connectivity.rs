@@ -1,4 +1,3 @@
-//! External Tor / pinned IVNP interoperability. Ordinary CI uses local protocol fixtures.
 #![allow(clippy::expect_used)]
 use bitcoin_rs_e2e::helpers::{mine_bare_blocks, submit_genesis};
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions};

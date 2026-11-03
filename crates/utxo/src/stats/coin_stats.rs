@@ -170,13 +170,28 @@ pub fn scan_coin_stats(
     height: u32,
     want_muhash: bool,
 ) -> Result<CoinStats, crate::UtxoError> {
-    let mut accumulator = if want_muhash {
+    let mut accumulator = new_accumulator(height, want_muhash);
+    view.for_each_coin(|coin| accumulator.observe_coin(coin))?;
+    Ok(accumulator.into_stats())
+}
+
+pub fn scan_coin_stats_cancellable(
+    view: &crate::UtxoSetView<'_>,
+    height: u32,
+    want_muhash: bool,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CoinStats, crate::UtxoError> {
+    let mut accumulator = new_accumulator(height, want_muhash);
+    view.for_each_coin_cancellable(|coin| accumulator.observe_coin(coin), cancelled)?;
+    Ok(accumulator.into_stats())
+}
+
+fn new_accumulator(height: u32, want_muhash: bool) -> CoinStatsAccumulator {
+    if want_muhash {
         CoinStatsAccumulator::with_muhash(height)
     } else {
         CoinStatsAccumulator::without_muhash(height)
-    };
-    view.for_each_coin(|coin| accumulator.observe_coin(coin))?;
-    Ok(accumulator.into_stats())
+    }
 }
 
 #[derive(Debug)]
@@ -837,38 +852,6 @@ mod tests {
     use super::{CoinStats, CoinStatsRewindError, TxOut, encode_txout_into};
 
     #[test]
-    fn rewind_inverts_finish_block_and_refuses_without_moving() {
-        let mut stats = CoinStats::default();
-        let empty = stats.clone();
-        stats.finish_block(7, 3);
-        let connected = stats.clone();
-
-        assert_eq!(
-            stats.rewind_block(7, 6, 4),
-            Err(CoinStatsRewindError::TxCountUnderflow {
-                tx_count: 3,
-                tx_delta: 4,
-            })
-        );
-        assert_eq!(
-            stats.rewind_block(9, 8, 1),
-            Err(CoinStatsRewindError::HeightMismatch {
-                expected: 9,
-                found: 7,
-            })
-        );
-        assert_eq!(stats, connected, "a refused rewind must change nothing");
-
-        assert_eq!(stats.rewind_block(7, 0, 3), Ok(()));
-        assert_eq!(stats, empty);
-        assert!(matches!(
-            stats.rewind_block(7, 0, 3),
-            Err(CoinStatsRewindError::HeightMismatch { .. })
-        ));
-        assert_eq!(stats, empty);
-    }
-
-    #[test]
     fn manual_txout_encoding_matches_consensus_boundaries() {
         for len in [0_usize, 1, 252, 253, 65_535, 65_536] {
             let value = 50_000 + u64::try_from(len).unwrap_or(u64::MAX);
@@ -1084,14 +1067,91 @@ mod tests {
         }
     }
 
+    fn proptest_config(default_cases: u32) -> ProptestConfig {
+        let cases = std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|val| val.parse().ok())
+            .unwrap_or(default_cases);
+        ProptestConfig {
+            cases,
+            ..ProptestConfig::default()
+        }
+    }
+
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(16))]
+        #![proptest_config(proptest_config(256))]
+
         #[test]
-        fn parallel_muhash_property_matches_serial_generated_streams(
-            count in 0_usize..1_500,
-            script_lens in proptest::collection::vec(0_usize..512, 1..8),
+        fn parallel_muhash_differential_and_order_independence(
+            count in 0_usize..=300_usize,
+            script_lens in proptest::collection::vec(0_usize..=512_usize, 1..=8),
         ) {
-            assert_parallel_serialized_match(&generated_coins(count, &script_lens));
+            let coins = generated_coins(count, &script_lens);
+            assert_parallel_serialized_match(&coins);
+
+            let mut forward = super::CoinStatsAccumulator::with_muhash(77);
+            observe_all(&mut forward, &coins);
+
+            let mut reversed_coins = coins;
+            reversed_coins.reverse();
+            let mut reversed = super::CoinStatsAccumulator::with_muhash(77);
+            observe_all(&mut reversed, &reversed_coins);
+
+            let forward_stats = forward.into_stats();
+            let reversed_stats = reversed.into_stats();
+            prop_assert_eq!(
+                forward_stats.muhash.finalize(),
+                reversed_stats.muhash.finalize(),
+                "MuHash must be order-independent"
+            );
+            prop_assert_eq!(forward_stats.total_amount, reversed_stats.total_amount);
+            prop_assert_eq!(forward_stats.bogo_size, reversed_stats.bogo_size);
+            prop_assert_eq!(forward_stats.utxo_count, reversed_stats.utxo_count);
+        }
+
+        #[test]
+        fn coin_stats_rewind_algebraic_law_and_refusals(
+            initial_height in 0_u32..10_000,
+            initial_tx in 0_u64..1_000_000,
+            tx_delta in 1_u64..10_000,
+            bad_height_delta in 1_u32..100,
+            excess_underflow in 1_u64..100,
+        ) {
+            let mut stats = CoinStats {
+                height: initial_height,
+                tx_count: initial_tx,
+                ..Default::default()
+            };
+            let original = stats.clone();
+
+            let next_height = initial_height.saturating_add(1);
+            stats.finish_block(next_height, tx_delta);
+            let connected = stats.clone();
+            prop_assert_eq!(connected.height, next_height);
+            prop_assert_eq!(connected.tx_count, initial_tx.saturating_add(tx_delta));
+
+            let wrong_height = next_height.saturating_add(bad_height_delta);
+            prop_assert_eq!(
+                stats.rewind_block(wrong_height, initial_height, tx_delta),
+                Err(CoinStatsRewindError::HeightMismatch {
+                    expected: wrong_height,
+                    found: next_height,
+                })
+            );
+            prop_assert_eq!(&stats, &connected, "refused rewind must change nothing");
+
+            let underflow_delta = connected.tx_count.saturating_add(excess_underflow);
+            prop_assert_eq!(
+                stats.rewind_block(next_height, initial_height, underflow_delta),
+                Err(CoinStatsRewindError::TxCountUnderflow {
+                    tx_count: connected.tx_count,
+                    tx_delta: underflow_delta,
+                })
+            );
+            prop_assert_eq!(&stats, &connected, "refused rewind must change nothing");
+
+            prop_assert_eq!(stats.rewind_block(next_height, initial_height, tx_delta), Ok(()));
+            prop_assert_eq!(&stats, &original, "rewind must invert finish_block byte-identically");
         }
     }
 }

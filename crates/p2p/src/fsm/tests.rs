@@ -383,3 +383,129 @@ fn feature_negotiation_is_accepted_during_and_after_handshake() -> Result<(), Pe
     );
     Ok(())
 }
+
+#[test]
+fn duplicate_verack_is_rejected() -> Result<(), PeerError> {
+    let mut peer = fresh_peer();
+    step(&mut peer, &Message::Version(version_message()))?;
+    step(&mut peer, &Message::Verack)?;
+    assert_eq!(peer.state, PeerState::Ready);
+    assert!(matches!(
+        step(&mut peer, &Message::Verack),
+        Err(PeerError::Misbehavior("duplicate verack message"))
+    ));
+    Ok(())
+}
+
+#[test]
+fn negotiation_messages_before_version_are_rejected() {
+    let mut peer = fresh_peer();
+    peer.state = PeerState::VersionExchange;
+
+    assert!(matches!(
+        step(&mut peer, &Message::SendHeaders),
+        Err(PeerError::Misbehavior(
+            "negotiation message received before version"
+        ))
+    ));
+    assert!(matches!(
+        step(&mut peer, &Message::SendAddrV2),
+        Err(PeerError::Misbehavior(
+            "negotiation message received before version"
+        ))
+    ));
+    assert!(matches!(
+        step(&mut peer, &Message::WtxidRelay),
+        Err(PeerError::Misbehavior(
+            "negotiation message received before version"
+        ))
+    ));
+    assert!(matches!(
+        step(&mut peer, &sendcmpct_message(true, 2)),
+        Err(PeerError::Misbehavior(
+            "negotiation message received before version"
+        ))
+    ));
+}
+
+#[test]
+fn negative_feefilter_is_ignored() -> Result<(), PeerError> {
+    let mut peer = fresh_peer();
+    step(&mut peer, &Message::Version(version_message()))?;
+    step(&mut peer, &Message::Verack)?;
+    assert_eq!(peer.state, PeerState::Ready);
+
+    step(&mut peer, &Message::FeeFilter(-1))?;
+    assert_eq!(peer.state, PeerState::Ready);
+    step(&mut peer, &Message::FeeFilter(i64::MIN))?;
+    assert_eq!(peer.state, PeerState::Ready);
+    step(&mut peer, &Message::FeeFilter(0))?;
+    step(&mut peer, &Message::FeeFilter(1_000))?;
+    assert_eq!(peer.state, PeerState::Ready);
+    Ok(())
+}
+
+#[test]
+fn messages_before_handshake_completion_are_rejected() -> Result<(), PeerError> {
+    let mut peer = fresh_peer();
+    peer.state = PeerState::VersionExchange;
+
+    assert!(matches!(
+        step(&mut peer, &Message::Ping(1)),
+        Err(PeerError::Misbehavior(
+            "message received before handshake completed"
+        ))
+    ));
+    assert!(matches!(
+        step(&mut peer, &Message::Headers(Vec::new())),
+        Err(PeerError::Misbehavior(
+            "message received before handshake completed"
+        ))
+    ));
+    assert!(matches!(
+        step(&mut peer, &Message::FeeFilter(1_000)),
+        Err(PeerError::Misbehavior(
+            "message received before handshake completed"
+        ))
+    ));
+
+    step(&mut peer, &Message::Version(version_message()))?;
+    assert!(matches!(
+        step(&mut peer, &Message::Ping(1)),
+        Err(PeerError::Misbehavior(
+            "message received before handshake completed"
+        ))
+    ));
+    assert!(matches!(
+        step(&mut peer, &Message::FeeFilter(1_000)),
+        Err(PeerError::Misbehavior(
+            "message received before handshake completed"
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn inbound_version_matching_an_in_flight_outbound_nonce_is_a_self_connection()
+-> Result<(), PeerError> {
+    let nonces = std::sync::Arc::new(crate::peer_table::OutboundHandshakeNonces::default());
+    let dialed_nonce = 0x0123_4567_89ab_cdef;
+    let guard = nonces.begin(dialed_nonce);
+    let mut peer = fresh_peer();
+    peer.check_inbound_nonce_against(std::sync::Arc::clone(&nonces));
+    let version = Message::Version(VersionMessage {
+        nonce: dialed_nonce,
+        ..version_message()
+    });
+
+    assert!(matches!(
+        step(&mut peer, &version),
+        Err(PeerError::SelfConnection)
+    ));
+    assert!(peer.remote_version.is_none());
+
+    drop(guard);
+    step(&mut peer, &version)?;
+    assert!(peer.remote_version.is_some());
+    Ok(())
+}

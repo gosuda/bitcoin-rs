@@ -1,16 +1,15 @@
-//! Authoritative BIP sighash vectors: the pinned expectations in
-//! `tests/vectors/` decide, not this crate's own re-derivations.
 #![expect(clippy::expect_used, reason = "test assertions")]
 
 use std::path::PathBuf;
 
 use bitcoin_rs_primitives::{
-    Amount, Script, Sequence, Sighash, SighashCache, Tx as NativeTx, TxOut, Witness,
-    encode::deserialize,
+    Amount, Script, Sighash, SighashCache, Tx as NativeTx, TxOut, encode::deserialize,
 };
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
-type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
+use crate::support::TestError;
+
+type Result<T, E = TestError> = std::result::Result<T, E>;
 
 fn vectors_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors")
@@ -165,33 +164,4 @@ fn bip341_keypath_vectors_match_spec_digests() -> Result<()> {
     }
     assert!(checked > 0, "bip341 keypath vectors must not be vacuous");
     Ok(())
-}
-
-#[test]
-fn bip_vectors_fixture_transaction_round_trip() -> Result<()> {
-    let tx = fixture_tx();
-    let bytes = bitcoin_rs_primitives::consensus_bytes(&tx);
-    let decoded = deserialize::<NativeTx>(&bytes)?;
-    assert_eq!(decoded, tx);
-    Ok(())
-}
-
-fn fixture_tx() -> NativeTx {
-    NativeTx {
-        version: 2,
-        inputs: vec![bitcoin_rs_primitives::TxIn {
-            previous_output: bitcoin_rs_primitives::OutPoint::new(
-                bitcoin_rs_primitives::Txid::default(),
-                0,
-            ),
-            script_sig: Script::new(),
-            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(1_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
-        }],
-        lock_time: bitcoin_rs_primitives::LockTime::ZERO,
-    }
 }

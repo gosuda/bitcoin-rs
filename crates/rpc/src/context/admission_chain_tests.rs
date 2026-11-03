@@ -1,10 +1,11 @@
-use anyhow::Context as _;
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_primitives::{Header, LockTime, Sequence, TxIn, TxOut, Witness};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use sha2::{Digest as _, Sha256};
 
 use super::*;
+
+type TestResult<T = ()> = std::result::Result<T, crate::test_error::TestError>;
 
 fn spendable_script() -> Vec<u8> {
     let mut script = vec![0x00, 0x20];
@@ -29,27 +30,25 @@ fn spending(outpoint: OutPoint) -> Tx {
     }
 }
 
-fn publish_tip(ctx: &Context, time: u32) -> anyhow::Result<()> {
+fn publish_tip(ctx: &Context, time: u32) -> TestResult {
     let mut tree = ctx.chain.block_tree.write();
     let parent = ctx.chain.applied_tip.load_full().map(|tip| tip.tip_id);
     let previous_hash = match parent {
         Some(id) => BlockHash::from(tree.node(id)?.hash),
         None => BlockHash::default(),
     };
-    let id = tree
-        .insert_node(
-            parent,
-            Header {
-                version: 1,
-                prev_blockhash: previous_hash,
-                merkle_root: Hash256::default(),
-                time,
-                bits: CompactTarget::from_consensus(0x207f_ffff),
-                nonce: time,
-            },
-            NodeStatus::Active,
-        )
-        .context("insert tip node")?;
+    let id = tree.insert_node(
+        parent,
+        Header {
+            version: 1,
+            prev_blockhash: previous_hash,
+            merkle_root: Hash256::default(),
+            time,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce: time,
+        },
+        NodeStatus::Active,
+    )?;
     let node = tree.node(id)?;
     ctx.chain.applied_tip.store(Some(Arc::new(TipSnapshot {
         tip_id: id,
@@ -62,7 +61,7 @@ fn publish_tip(ctx: &Context, time: u32) -> anyhow::Result<()> {
 }
 
 #[test]
-fn stable_chainstate_reader_does_not_block_transaction_admission() -> anyhow::Result<()> {
+fn stable_chainstate_reader_does_not_block_transaction_admission() -> TestResult {
     use sonic_rs::{JsonValueTrait as _, json};
 
     let ctx = Arc::new(Context::new());
@@ -95,7 +94,7 @@ fn stable_chainstate_reader_does_not_block_transaction_admission() -> anyhow::Re
 }
 
 #[test]
-fn unconfirmed_transaction_is_admitted_from_a_peer() -> anyhow::Result<()> {
+fn unconfirmed_transaction_is_admitted_from_a_peer() -> TestResult {
     use bitcoin_rs_mempool::{AdmissionOrigin, PeerToken, SubmitOutcome};
     let ctx = Context::new();
     let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[9; 32])), 0);
@@ -120,7 +119,7 @@ fn unconfirmed_transaction_is_admitted_from_a_peer() -> anyhow::Result<()> {
         !ctx.chain
             .admission_chain()
             .snapshot(&tx)
-            .context("snapshot")?
+            .ok_or("snapshot")?
             .confirmed
     );
     let result = ctx.mempool.gateway.submit_transaction(
@@ -142,7 +141,7 @@ fn unconfirmed_transaction_is_admitted_from_a_peer() -> anyhow::Result<()> {
 }
 
 #[test]
-fn confirmed_hint_requires_live_chain_outputs() -> anyhow::Result<()> {
+fn confirmed_hint_requires_live_chain_outputs() -> TestResult {
     let ctx = Context::new();
     let tx = spending(OutPoint::new(
         Txid::from(Hash256::from_le_bytes(&[10; 32])),
@@ -160,14 +159,14 @@ fn confirmed_hint_requires_live_chain_outputs() -> anyhow::Result<()> {
         ctx.chain
             .admission_chain()
             .snapshot(&tx)
-            .context("snapshot")?
+            .ok_or("snapshot")?
             .confirmed
     );
     Ok(())
 }
 
 #[test]
-fn admission_chain_uses_current_handles_and_one_applied_tip() -> anyhow::Result<()> {
+fn admission_chain_uses_current_handles_and_one_applied_tip() -> TestResult {
     let mut ctx = Context::new();
     let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[7; 32])), 0);
     let tx = spending(outpoint);
@@ -175,7 +174,7 @@ fn admission_chain_uses_current_handles_and_one_applied_tip() -> anyhow::Result<
         ctx.chain
             .admission_chain()
             .snapshot(&tx)
-            .context("empty snapshot")?
+            .ok_or("empty snapshot")?
             .prevouts,
         []
     );
@@ -195,15 +194,14 @@ fn admission_chain_uses_current_handles_and_one_applied_tip() -> anyhow::Result<
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::default(),
-    )
-    .context("fund input")?;
+    )?;
     publish_tip(&ctx, 100)?;
     publish_tip(&ctx, 200)?;
     let snapshot = ctx
         .chain
         .admission_chain()
         .snapshot(&tx)
-        .context("snapshot")?;
+        .ok_or("snapshot")?;
     assert_eq!(snapshot.height, 1);
     assert_eq!(snapshot.locktime_cutoff, 200);
     assert_eq!(snapshot.prevouts.len(), 1);
@@ -218,7 +216,7 @@ fn admission_chain_uses_current_handles_and_one_applied_tip() -> anyhow::Result<
 
 #[test]
 #[expect(clippy::expect_used)]
-fn admission_envelopes_share_gateway_outcomes() -> anyhow::Result<()> {
+fn admission_envelopes_share_gateway_outcomes() -> TestResult {
     use sonic_rs::{JsonValueTrait as _, Value, json};
 
     use crate::error::RpcError;
@@ -317,20 +315,21 @@ fn sendrawtransaction_honors_maxburnamount_before_admission() {
         "unexpected refusal: {refused}"
     );
     let refused = tx::sendrawtransaction(&rpc_ctx, &json!([raw, null, "0.00001"]))
-        .expect_err("unknown prevout must still be refused");
-    assert_eq!(refused.code(), RpcError::CORE_VERIFY_ERROR);
+        .expect_err("below the standard size minimum must still be refused");
+    assert_eq!(refused.code(), RpcError::CORE_VERIFY_REJECTED);
     let refused = tx::sendrawtransaction(&rpc_ctx, &json!([raw, null, "0.00000999"]))
         .expect_err("burn above the explicit cap must be refused");
     assert!(
         refused.to_string().contains("maxburnamount"),
         "unexpected refusal: {refused}"
     );
-    let refused = tx::sendrawtransaction(
-        &rpc_ctx,
-        &json!({"hexstring": raw, "maxburnamount": "0.00001"}),
-    )
-    .expect_err("unknown prevout must still be refused");
-    assert_eq!(refused.code(), RpcError::CORE_VERIFY_ERROR);
+    let refused = crate::Handler::new(Arc::clone(&rpc_ctx))
+        .dispatch(
+            "sendrawtransaction",
+            &json!({"hexstring": raw, "maxburnamount": "0.00001"}),
+        )
+        .expect_err("below the standard size minimum must still be refused");
+    assert_eq!(refused.code(), RpcError::CORE_VERIFY_REJECTED);
 }
 
 #[derive(Debug, Default)]
@@ -354,7 +353,7 @@ impl crate::zmq::ZmqPublisher for RecordingPublisher {
 
 #[test]
 #[expect(clippy::expect_used)]
-fn sendrawtransaction_publishes_hashtx_once_per_admission() -> anyhow::Result<()> {
+fn sendrawtransaction_publishes_hashtx_once_per_admission() -> TestResult {
     use sonic_rs::json;
 
     use crate::handlers::tx;
@@ -423,7 +422,7 @@ fn sendrawtransaction_publishes_hashtx_once_per_admission() -> anyhow::Result<()
 }
 
 #[test]
-fn submitpackage_publishes_hashtx_only_for_newly_admitted() -> anyhow::Result<()> {
+fn submitpackage_publishes_hashtx_only_for_newly_admitted() -> TestResult {
     use sonic_rs::json;
 
     use crate::handlers::tx::submit_package::submitpackage;
@@ -506,7 +505,8 @@ fn sendrawtransaction_rejects_unknown_extra_params() {
         refused.to_string().contains("too many parameters"),
         "unexpected refusal: {refused}"
     );
-    let refused = tx::sendrawtransaction(&rpc_ctx, &json!({"hexstring": raw, "bogus": 1}))
+    let refused = crate::Handler::new(Arc::clone(&rpc_ctx))
+        .dispatch("sendrawtransaction", &json!({"hexstring": raw, "bogus": 1}))
         .expect_err("an unknown named parameter must be refused");
     assert!(
         refused.to_string().contains("Unknown named parameter"),

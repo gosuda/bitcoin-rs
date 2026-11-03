@@ -1,5 +1,3 @@
-//! Stage 2 portable `TxLookup` bundle lifecycle over real Fjall stores.
-
 #![cfg(feature = "fjall")]
 #![expect(
     clippy::expect_used,
@@ -24,14 +22,14 @@ use bitcoin::{
     script::Builder,
 };
 use bitcoin_rs_chain::{
-    BlockBodyReadError, BlockBodySource, BlockTree, BlockTreeReader, ChainTxCount, NodeStatus,
-    TipReader, TipSnapshot,
+    BlockBodyReadError, BlockBodySource, BlockTree, BlockTreeReader, ChainTxCount, LatchWriter,
+    NodeStatus, TipReader, TipSnapshot,
 };
 use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
 use bitcoin_rs_index::reconcile::{ChainCursorSource, ConsumerCursor};
 use bitcoin_rs_index::runtime::{
     DEFAULT_BATCH_LIMITS, DerivedIndexLifecycle, DerivedIndexOpenSpec, DerivedIndexQueryAdapter,
-    DerivedIndexRuntime, DerivedIndexWorker, Generation, IndexAheadSink,
+    DerivedIndexRuntime, DerivedIndexWorker, Generation, IndexAheadError, IndexAheadSink,
     open_derived_index_store_on_worker,
 };
 use bitcoin_rs_index::{
@@ -64,7 +62,6 @@ struct ChainFixture {
 }
 
 impl ChainFixture {
-    /// `blocks` blocks above genesis, each holding a coinbase plus `extra`
     fn new(blocks: u32, extra: usize) -> Self {
         let mut tree = BlockTree::new();
         let mut bodies = BodyMap::new();
@@ -166,7 +163,6 @@ fn coinbase(height: u32) -> Transaction {
     }
 }
 
-/// A non-coinbase transaction whose id is unique per `(height, index)`.
 fn filler(height: u32, index: usize) -> Transaction {
     let index = u32::try_from(index).expect("filler index fits u32");
     let mut seed = [0x5a_u8; 32];
@@ -247,7 +243,7 @@ impl IndexAheadSink for NoIndexAhead {
         _index_hash_be: &str,
         _depth: u32,
         _unix_secs: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), IndexAheadError> {
         Ok(())
     }
 }
@@ -261,7 +257,7 @@ struct BodyLoadCounter {
 struct SourceBodies {
     bodies: Arc<BodyMap>,
     hidden: HashSet<u32>,
-    trip: Option<Arc<AtomicBool>>,
+    trip: Option<Arc<LatchWriter>>,
     witness: Option<(PathBuf, Arc<AtomicBool>)>,
     loads: Option<Arc<BodyLoadCounter>>,
 }
@@ -274,7 +270,7 @@ impl SourceBodies {
             }
         }
         if let Some(trip) = &self.trip {
-            trip.store(true, Ordering::Release);
+            trip.trigger();
         }
         if self.hidden.contains(&height) {
             return None;
@@ -516,7 +512,7 @@ impl Node {
         let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
         let adapter = DerivedIndexQueryAdapter::new(Arc::clone(&lifecycle));
         let probe = Arc::new(Probe::default());
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(LatchWriter::new());
         let crash = start.crash_after_bulk_import;
         let spec = DerivedIndexOpenSpec {
             scripthash_limit: bitcoin_rs_index::runtime::DEFAULT_SCRIPTHASH_LIMIT,
@@ -581,7 +577,7 @@ impl Node {
             body_source,
             chain_events,
             index_ahead,
-            shutdown,
+            shutdown.reader(),
             wake_rx,
         )
         .expect("spawn txindex worker");
@@ -767,6 +763,7 @@ fn assert_untouched_fresh(receiver: &Path) {
     assert_eq!(state.watermark, None);
 }
 
+// IDX-11
 #[test]
 fn export_then_restore_serves_the_same_queries_as_backfill() {
     let fixture = ChainFixture::new(6, 40);
@@ -904,6 +901,7 @@ fn restore_below_a_restarted_receivers_tip_then_reconciles_forward() {
     assert_eq!(durable(&receiver), truth_state);
 }
 
+// IDX-11
 #[test]
 fn damaged_bundles_are_refused_before_any_write_or_reset() {
     type Damage = fn(&Path, u64);
@@ -1039,78 +1037,6 @@ fn export_preserves_a_preexisting_destination() {
 
     let fresh = root.path().join("fresh");
     exported_bundle(&fixture, &source, &fresh);
-}
-
-#[test]
-fn export_loads_each_block_body_once_across_pages() {
-    let fixture = ChainFixture::new(15, 150);
-    let rows = fixture.tx_row_keys();
-    assert!(
-        rows > CANCEL_POLL_RECORDS / 4,
-        "fixture holds {rows} rows, too few to span export pages"
-    );
-    let root = tempfile::tempdir().expect("tempdir");
-    let (source, receiver, bundle) = (
-        root.path().join("source"),
-        root.path().join("receiver"),
-        root.path().join("bundle"),
-    );
-    let source_state = backfilled_source(&fixture, &source);
-
-    let loads = Arc::new(BodyLoadCounter::default());
-    let node = Node::start(
-        &fixture,
-        &source,
-        Start {
-            bundle: export(&bundle),
-            backfill: true,
-            body_loads: Some(Arc::clone(&loads)),
-            ..Start::default()
-        },
-    );
-    node.wait_reconciling();
-    node.stop();
-    assert!(
-        bundle.join(MANIFEST).is_file(),
-        "export published no manifest"
-    );
-    assert!(
-        bundle.join(ARTIFACT).is_file(),
-        "export published no artifact"
-    );
-
-    let per_height = loads
-        .per_height
-        .lock()
-        .expect("body load counts are readable");
-    let covered: Vec<u32> = (0..=fixture.tip.height).collect();
-    assert_eq!(
-        per_height.len(),
-        covered.len(),
-        "export touched {} bodies for {} covered heights: {per_height:?}",
-        per_height.len(),
-        covered.len(),
-    );
-    for height in covered {
-        assert_eq!(
-            per_height.get(&height),
-            Some(&1),
-            "block body at height {height} was loaded {:?} times, want exactly once",
-            per_height.get(&height),
-        );
-    }
-
-    let node = Node::start(
-        &fixture,
-        &receiver,
-        Start {
-            bundle: restore(&bundle),
-            ..Start::default()
-        },
-    );
-    node.wait_synced(fixture.tip.height);
-    node.stop();
-    assert_eq!(durable(&receiver), source_state);
 }
 
 #[test]

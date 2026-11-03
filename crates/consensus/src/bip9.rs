@@ -1,9 +1,7 @@
 use bitcoin_rs_primitives::Network;
 
 const BIP9_PERIOD: u32 = 2016;
-/// Deployment id for CSV (BIP68/112/113).
 pub const CSV_DEPLOYMENT_ID: u32 = 0;
-/// Deployment id for Segwit (BIP141/143).
 pub const SEGWIT_DEPLOYMENT_ID: u32 = 1;
 const MAINNET_THRESHOLD: u32 = 1916;
 const TESTNET3_THRESHOLD: u32 = 1512;

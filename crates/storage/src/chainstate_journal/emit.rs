@@ -2,20 +2,22 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::KvStore;
-
 use super::record::JournalRecord;
 use super::writer::{JournalWriter, JournalWriterError};
+use crate::KvStore;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CheckpointBase {
+    pub generation: u64,
+    pub height: u32,
+    pub hash: [u8; 32],
+    pub prev_hash: [u8; 32],
+    pub chain_tx_count: u64,
+}
 
 pub trait JournalEmit: Send + Sync {
     fn prepare_for_apply(&mut self) -> Result<(), JournalWriterError>;
 
-    /// The current apply records an append error, but the writer then enters a
-    /// fail-closed append-gap state.
-    ///
-    /// `prepare_for_apply` refuses the next block before mutation, so a transient I/O
-    /// failure cannot grow an untracked hole between live chainstate and the journal
-    /// frontier.
     fn append(&mut self, record: &JournalRecord) -> Result<(), JournalWriterError>;
 
     fn mark_append_gap(&mut self, height: u32);
@@ -36,20 +38,16 @@ pub trait JournalEmit: Send + Sync {
 
     fn freeze(&mut self) -> Result<(), JournalWriterError>;
 
-    fn compact_to_checkpoint(
+    fn compact_to_checkpoint(&mut self, base: CheckpointBase) -> Result<(), JournalWriterError>;
+
+    fn compact_to_checkpoint_for_recovery(
         &mut self,
-        checkpoint_generation: u64,
-        tip_height: u32,
-        tip_hash: [u8; 32],
-        tip_prev_hash: [u8; 32],
-        chain_tx_count: u64,
-        retire_full_revalidation_marker: bool,
+        base: CheckpointBase,
     ) -> Result<(), JournalWriterError>;
 
     fn resume(&mut self) -> Result<(), JournalWriterError>;
 }
 
-// inherent vs trait method disambiguation requires the type path
 impl<S: KvStore> JournalEmit for JournalWriter<S> {
     fn prepare_for_apply(&mut self) -> Result<(), JournalWriterError> {
         JournalWriter::prepare_for_apply(self)
@@ -89,24 +87,15 @@ impl<S: KvStore> JournalEmit for JournalWriter<S> {
         JournalWriter::freeze(self)
     }
 
-    fn compact_to_checkpoint(
+    fn compact_to_checkpoint(&mut self, base: CheckpointBase) -> Result<(), JournalWriterError> {
+        JournalWriter::compact_to_checkpoint(self, base)
+    }
+
+    fn compact_to_checkpoint_for_recovery(
         &mut self,
-        checkpoint_generation: u64,
-        tip_height: u32,
-        tip_hash: [u8; 32],
-        tip_prev_hash: [u8; 32],
-        chain_tx_count: u64,
-        retire_full_revalidation_marker: bool,
+        base: CheckpointBase,
     ) -> Result<(), JournalWriterError> {
-        JournalWriter::compact_to_checkpoint(
-            self,
-            checkpoint_generation,
-            tip_height,
-            tip_hash,
-            tip_prev_hash,
-            chain_tx_count,
-            retire_full_revalidation_marker,
-        )
+        JournalWriter::compact_to_checkpoint_for_recovery(self, base)
     }
 
     fn resume(&mut self) -> Result<(), JournalWriterError> {

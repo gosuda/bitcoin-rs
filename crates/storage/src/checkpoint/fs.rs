@@ -67,7 +67,6 @@ fn validate_current_schema(bytes: &[u8]) -> io::Result<()> {
     ))
 }
 
-/// Returns the newline-terminated bytes for the current schema marker.
 pub fn current_schema_bytes() -> Vec<u8> {
     let mut bytes = CURRENT_SCHEMA_VERSION.to_string().into_bytes();
     bytes.push(b'\n');

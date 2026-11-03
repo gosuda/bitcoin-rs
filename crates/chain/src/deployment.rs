@@ -377,6 +377,8 @@ mod tests {
     use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
 
     use super::softfork_state;
+    use crate::test_error::TestError;
+
     use crate::BlockTree;
 
     fn synthetic_header(prev_blockhash: BlockHash, time: u32) -> Header {
@@ -395,8 +397,8 @@ mod tests {
     }
 
     #[test]
-    fn deployment_history_keeps_current_next_since_and_branch_signalling()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn deployment_history_keeps_current_next_since_and_branch_signalling() -> Result<(), TestError>
+    {
         use bitcoin_rs_consensus::DeploymentState::{Active, Defined, LockedIn, Started};
         let mut tree = BlockTree::new();
         let mut ids = Vec::new();
@@ -464,11 +466,11 @@ mod tests {
     fn seed_known_bip34_activation_chain(
         tree: &mut BlockTree,
         network: Network,
-    ) -> Result<crate::NodeId, Box<dyn std::error::Error>> {
+    ) -> Result<crate::NodeId, TestError> {
         let activation_height = network.bip34_activation_height();
         let expected_hash = network
             .bip34_activation_hash()
-            .ok_or_else(|| std::io::Error::other("network has no fixed BIP34 activation hash"))?;
+            .ok_or("network has no fixed BIP34 activation hash")?;
         let mut prev_hash = BlockHash::default();
         let mut tip = None;
         let mut activation_id = None;
@@ -486,26 +488,25 @@ mod tests {
             prev_hash = BlockHash::from(tree.node(node_id)?.hash);
             tip = Some(node_id);
         }
-        activation_id.ok_or_else(|| std::io::Error::other("missing activation node"))?;
-        tip.ok_or_else(|| std::io::Error::other("missing previous tip").into())
+        activation_id.ok_or("missing activation node")?;
+        tip.ok_or(TestError::Missing("missing previous tip"))
     }
 
     #[test]
-    fn bip30_skips_duplicate_scan_after_known_bip34_activation()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn bip30_skips_duplicate_scan_after_known_bip34_activation() -> Result<(), TestError> {
         let network = Network::Testnet3;
         let height = network
             .bip34_activation_height()
             .checked_add(1)
-            .ok_or_else(|| std::io::Error::other("activation height overflow"))?;
+            .ok_or("activation height overflow")?;
         let mut tree = BlockTree::new();
         let previous_tip = seed_known_bip34_activation_chain(&mut tree, network)?;
         let expected = network
             .bip34_activation_hash()
-            .ok_or_else(|| std::io::Error::other("network has no fixed BIP34 activation hash"))?;
+            .ok_or("network has no fixed BIP34 activation hash")?;
         let child_id = tree
             .node_at_height_from(previous_tip, height)
-            .ok_or_else(|| std::io::Error::other("seeded child missing"))?;
+            .ok_or("seeded child missing")?;
         assert_eq!(
             tree.node(child_id)?.header.prev_blockhash,
             BlockHash::from(expected),
@@ -519,13 +520,12 @@ mod tests {
     }
 
     #[test]
-    fn bip30_duplicate_scan_runs_without_known_bip34_activation_hash()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn bip30_duplicate_scan_runs_without_known_bip34_activation_hash() -> Result<(), TestError> {
         let network = Network::Regtest;
         let height = network
             .bip34_activation_height()
             .checked_add(1)
-            .ok_or_else(|| std::io::Error::other("activation height overflow"))?;
+            .ok_or("activation height overflow")?;
 
         assert!(super::bip30_duplicate_scan_required(
             &BlockTree::new(),
@@ -547,8 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn mainnet_csv_activation_matches_consensus_thresholds()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn mainnet_csv_activation_matches_consensus_thresholds() -> Result<(), TestError> {
         let mut tree = BlockTree::new();
         let tip = append_chain(&mut tree, 6048, 1_462_060_800, |height| {
             if (2016..3932).contains(&height) {
@@ -566,8 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn testnet3_segwit_activation_matches_consensus_thresholds()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn testnet3_segwit_activation_matches_consensus_thresholds() -> Result<(), TestError> {
         let mut tree = BlockTree::new();
         let tip = append_chain(&mut tree, 6048, 1_462_060_800, |height| {
             if (2016..3528).contains(&height) {
@@ -589,7 +587,7 @@ mod tests {
         len: u32,
         start_time: u32,
         version_at: impl Fn(u32) -> i32,
-    ) -> Result<crate::NodeId, Box<dyn std::error::Error>> {
+    ) -> Result<crate::NodeId, TestError> {
         let mut prev = BlockHash::default();
         let mut tip = None;
         for height in 0..len {

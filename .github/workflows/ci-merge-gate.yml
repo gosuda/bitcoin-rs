@@ -74,7 +74,7 @@ jobs:
             --lib -- --nocapture
           cargo test --locked -p bitcoin-rs-consensus --features kernel \
             --test suite -- shared_sighash:: overhaul_parse_parity:: \
-            kernel_block_parity:: kernel_vector_parity:: --nocapture
+            kernel_block_parity:: kernel_boundary_parity:: kernel_vector_parity:: --nocapture
       - name: Kernel script core-vectors oracle test
         run: |
           cargo test --locked -p bitcoin-rs-script --features kernel \

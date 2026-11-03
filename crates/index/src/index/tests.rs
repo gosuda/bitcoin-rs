@@ -7,10 +7,51 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvStore, RocksDbStore};
 
-use super::{IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer};
+use super::{
+    IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer,
+    SpentCoinScripts,
+};
 use crate::{ScriptHash, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow};
 
 type StoredRows = Vec<(ColumnFamily, Vec<u8>)>;
+
+struct FixtureScripts;
+
+static FIXTURE_SPENT_SCRIPT: [u8; 2] = [0x51, 0x01];
+
+impl SpentCoinScripts for FixtureScripts {
+    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
+        Some(FIXTURE_SPENT_SCRIPT.as_slice())
+    }
+}
+
+fn commit_block<S: KvStore>(
+    writer: &mut IndexWriter<S>,
+    height: u32,
+    body: &[u8],
+) -> Result<IndexWatermark, IndexError> {
+    let header = body
+        .get(..crate::types::HEADER_ROW_SIZE)
+        .ok_or(IndexError::InvalidHeaderLength { len: body.len() })?;
+    let hash = bitcoin_rs_primitives::encode::double_sha256(header).to_le_bytes();
+    let prepared = writer.prepare_block_with_spent_scripts(
+        crate::IndexCapabilities::HISTORICAL,
+        height,
+        hash,
+        body,
+        &FixtureScripts,
+    )?;
+    let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
+        max_rows: usize::MAX,
+        max_bytes: usize::MAX,
+    });
+    if batch.try_push(prepared).is_err() {
+        return Err(IndexError::NonContiguousPrepared {
+            watermark: writer.watermark()?,
+        });
+    }
+    writer.commit_forward(batch)
+}
 
 fn commit_rollback_one<S: KvStore>(
     writer: &mut IndexWriter<S>,
@@ -18,12 +59,13 @@ fn commit_rollback_one<S: KvStore>(
     body: &[u8],
 ) -> Result<(), IndexError> {
     let (fence, _) = writer.fenced_watermarks()?;
-    writer.commit_rollback_one_for_with_cursor(
+    writer.commit_rollback_one_for_with_cursor_with_spent_scripts(
         fence,
         crate::IndexCapabilities::HISTORICAL,
         prev,
         body,
         crate::ConsumerCursorUpdate::Clear,
+        &FixtureScripts,
     )
 }
 
@@ -36,12 +78,12 @@ fn raw_op_return_check_matches_script_prefix_semantics() {
 }
 
 #[test]
-fn iter_funding_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
+fn iter_funding_rows_returns_indexed_rows() -> Result<(), crate::portable::TestError> {
     let script = vec![0x51, 0x01];
     let tx = tx(spent_outpoint(1, 0), script.clone());
     let (_dir, mut writer) = writer()?;
 
-    writer.commit_block(0, &consensus_bytes(&block(vec![tx])))?;
+    commit_block(&mut writer, 0, &consensus_bytes(&block(vec![tx])))?;
 
     let scripthash = ScriptHash::from_script_bytes(&script);
     assert_eq!(
@@ -51,12 +93,8 @@ fn iter_funding_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-/// Proves that lexicographic key byte order matches numeric height order within one
-/// prefix, because the height suffix is big-endian (format 5).
-///
-/// `[0x00, 0x00, 0x01, 0x00]`, so byte order puts 1 before 256.
 #[test]
-fn iter_funding_rows_height_order_is_numeric() -> Result<(), Box<dyn std::error::Error>> {
+fn iter_funding_rows_height_order_is_newest_first() -> Result<(), crate::portable::TestError> {
     let script = vec![0x51, 0x01];
     let scripthash = ScriptHash::from_script_bytes(&script);
     let dir = tempfile::tempdir()?;
@@ -70,14 +108,14 @@ fn iter_funding_rows_height_order_is_numeric() -> Result<(), Box<dyn std::error:
 
     assert_eq!(
         rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
-        vec![1, 256],
-        "BE byte order matches numeric height order"
+        vec![256, 1],
+        "inverted BE byte order is newest first"
     );
     Ok(())
 }
 
 #[test]
-fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), Box<dyn std::error::Error>>
+fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), crate::portable::TestError>
 {
     let script = vec![0x51, 0x05];
     let scripthash = ScriptHash::from_script_bytes(&script);
@@ -113,12 +151,12 @@ fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn iter_spending_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
+fn iter_spending_rows_returns_indexed_rows() -> Result<(), crate::portable::TestError> {
     let outpoint = spent_outpoint(2, 3);
     let tx = tx(outpoint, vec![0x51, 0x02]);
     let (_dir, mut writer) = writer()?;
 
-    writer.commit_block(0, &consensus_bytes(&block(vec![tx])))?;
+    commit_block(&mut writer, 0, &consensus_bytes(&block(vec![tx])))?;
 
     assert_eq!(
         writer.indexer().iter_spending_rows(&outpoint)?,
@@ -127,8 +165,6 @@ fn iter_spending_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// A block whose rows populate all four column families: a coinbase plus a
-/// spend, so funding and spending rows both exist alongside txid and header
 fn rollback_fixture_block() -> Block {
     let funded = tx(OutPoint::null(), vec![0x51]);
     let spender = tx(OutPoint::new(funded.txid(), 0), vec![0x52]);
@@ -136,13 +172,13 @@ fn rollback_fixture_block() -> Block {
 }
 
 #[test]
-fn rollback_removes_every_row_a_matching_commit_wrote() -> Result<(), Box<dyn std::error::Error>> {
+fn rollback_removes_every_row_a_matching_commit_wrote() -> Result<(), crate::portable::TestError> {
     let (_dir, mut writer) = writer()?;
     let candidate = rollback_fixture_block();
     let body = consensus_bytes(&candidate);
     let before = stored_rows(writer.indexer())?;
 
-    writer.commit_block(0, &body)?;
+    commit_block(&mut writer, 0, &body)?;
     let after_commit = stored_rows(writer.indexer())?;
     assert!(
         after_commit.len() > before.len(),
@@ -170,7 +206,7 @@ fn rollback_removes_every_row_a_matching_commit_wrote() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn rollback_without_a_watermark_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+fn rollback_without_a_watermark_is_rejected() -> Result<(), crate::portable::TestError> {
     let (_dir, mut writer) = writer()?;
     let candidate = rollback_fixture_block();
     let body = consensus_bytes(&candidate);
@@ -185,11 +221,11 @@ fn rollback_without_a_watermark_is_rejected() -> Result<(), Box<dyn std::error::
 
 #[test]
 fn a_second_rollback_is_rejected_once_the_watermark_is_gone()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     let (_dir, mut writer) = writer()?;
     let candidate = rollback_fixture_block();
     let body = consensus_bytes(&candidate);
-    writer.commit_block(0, &body)?;
+    commit_block(&mut writer, 0, &body)?;
     commit_rollback_one(&mut writer, None, &body)?;
     let after_first = stored_rows(writer.indexer())?;
 
@@ -271,7 +307,7 @@ impl bitcoin_rs_storage::KvStore for FailingWriteStore {
 }
 
 #[test]
-fn rollback_deletes_nothing_when_the_write_fails() -> Result<(), Box<dyn std::error::Error>> {
+fn rollback_deletes_nothing_when_the_write_fails() -> Result<(), crate::portable::TestError> {
     let dir = tempfile::tempdir()?;
     let candidate = rollback_fixture_block();
     let body = consensus_bytes(&candidate);
@@ -279,7 +315,7 @@ fn rollback_deletes_nothing_when_the_write_fails() -> Result<(), Box<dyn std::er
     {
         let store = Arc::new(RocksDbStore::open(dir.path())?);
         let mut writer = IndexWriter::open(store, 1)?;
-        writer.commit_block(0, &body)?;
+        commit_block(&mut writer, 0, &body)?;
     }
     let store = Arc::new(RocksDbStore::open(dir.path())?);
     let before = stored_rows(&Indexer::new(Arc::clone(&store)))?;
@@ -304,7 +340,7 @@ fn rollback_deletes_nothing_when_the_write_fails() -> Result<(), Box<dyn std::er
 
 #[test]
 fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     let (_dir, mut writer) = writer()?;
     let shared_script = vec![0x51];
 
@@ -325,9 +361,9 @@ fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
     );
 
     let old_body = consensus_bytes(&old_block);
-    writer.commit_block(0, &old_body)?;
+    commit_block(&mut writer, 0, &old_body)?;
     commit_rollback_one(&mut writer, None, &old_body)?;
-    writer.commit_block(0, &consensus_bytes(&replacement))?;
+    commit_block(&mut writer, 0, &consensus_bytes(&replacement))?;
     writer.indexer.store.flush()?;
     let after_replacement = stored_rows(writer.indexer())?;
     assert!(
@@ -351,7 +387,7 @@ fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
 
 #[test]
 fn anchor_watermark_stamps_a_coverage_floor_that_reset_clears()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     let (_dir, writer) = writer()?;
     let anchor = IndexWatermark {
         height: 41,
@@ -386,7 +422,7 @@ fn anchor_watermark_stamps_a_coverage_floor_that_reset_clears()
     Ok(())
 }
 
-fn writer() -> Result<(tempfile::TempDir, IndexWriter<RocksDbStore>), Box<dyn std::error::Error>> {
+fn writer() -> Result<(tempfile::TempDir, IndexWriter<RocksDbStore>), crate::portable::TestError> {
     let dir = tempfile::tempdir()?;
     let store = Arc::new(RocksDbStore::open(dir.path())?);
     Ok((dir, IndexWriter::open(store, 1)?))
@@ -396,18 +432,17 @@ fn put_funding_row(
     store: &RocksDbStore,
     scripthash: ScriptHash,
     height: u32,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), crate::portable::TestError> {
+    let mut row = ScriptHashRow::row(scripthash, height).to_db_row();
+    row[crate::types::HASH_PREFIX_LEN..]
+        .copy_from_slice(&crate::types::encode_history_height(height));
     let mut batch = store.new_batch();
-    batch.put(
-        ColumnFamily::Funding,
-        &ScriptHashRow::row(scripthash, height).to_db_row(),
-        &[],
-    );
+    batch.put(ColumnFamily::Funding, &row, &[]);
     store.write(batch)?;
     Ok(())
 }
 
-fn stored_rows(indexer: &Indexer<RocksDbStore>) -> Result<StoredRows, Box<dyn std::error::Error>> {
+fn stored_rows(indexer: &Indexer<RocksDbStore>) -> Result<StoredRows, crate::portable::TestError> {
     let mut rows = Vec::new();
     for cf in [
         ColumnFamily::TxConfirmed,

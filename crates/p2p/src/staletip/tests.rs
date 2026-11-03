@@ -1,6 +1,18 @@
 use super::*;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    ParseInt(#[from] std::num::ParseIntError),
+    #[error(transparent)]
+    StaleTip(#[from] StaleTipError),
+    #[error(transparent)]
+    Hash(#[from] bitcoin_rs_primitives::HashError),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+}
+
+type TestResult = Result<(), TestError>;
 
 const SIGNET_STALE_BRANCH_HEX: &str = concat!(
     "1c7e50802a59c42d780861d2c154a87cb02ff42305a933af2ede2f6012000000",
@@ -112,7 +124,7 @@ fn assert_published_vector(
 
     let headers = decoded.reconstruct();
     let Some(tip) = headers.last() else {
-        return Err("reconstructed branch is empty".into());
+        return Err(TestError::Missing("reconstructed branch is empty"));
     };
     assert_eq!(
         Hash256::from(tip.compute_hash()),

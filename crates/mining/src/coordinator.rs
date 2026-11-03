@@ -1,10 +1,9 @@
-//! Candidate lifecycle state and pure mining-domain projections.
-
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
 use bitcoin_rs_chain::ChainError;
+use bitcoin_rs_chain::HookGuard;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_consensus::transaction_sigop_cost;
@@ -188,8 +187,6 @@ pub trait AppliedTipSource: Send + Sync {
 
 pub trait MempoolSnapshotSource: Send + Sync {
     fn current_revisions(&self) -> (u64, u64);
-    /// Returns [`MiningControlError::Failed`] when selection refuses the
-    /// context's limits, including an unsatisfiable `budget`.
     fn select_template(
         &self,
         expected_sequences: Option<(u64, u64)>,
@@ -203,10 +200,6 @@ pub trait MempoolSnapshotSource: Send + Sync {
         context: &CandidateContext,
         payout: &[u8],
     ) -> Result<PreparedTemplateBody, MiningControlError>;
-    /// Returns [`MiningControlError::InvalidRequest`] when an `Ordered`
-    /// selection names a transaction that is not in the mempool, or
-    /// [`MiningControlError::Unavailable`] when the candidate tip changed
-    /// before copying raw transaction prevouts.
     fn selection_snapshot(
         &self,
         selection: &GenerateSelection,
@@ -236,7 +229,8 @@ pub struct MiningService {
     mempool: Arc<dyn MempoolSnapshotSource>,
     chain: Arc<dyn ChainContextSource>,
     state: Mutex<CoordinatorState>,
-    wake: Condvar,
+    wake: Arc<Condvar>,
+    _wake_guard: HookGuard,
     prep: PrepWorker,
 }
 
@@ -248,10 +242,14 @@ impl MiningService {
         mempool: Arc<dyn MempoolSnapshotSource>,
         chain: Arc<dyn ChainContextSource>,
         coinbase_script: Vec<u8>,
-        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+        shutdown: bitcoin_rs_chain::LatchReader,
     ) -> Self {
         let seed = mempool.current_revisions().0;
-        let shutdown = shutdown.into();
+        let wake = Arc::new(Condvar::new());
+        let wake_hook = Arc::clone(&wake);
+        let wake_guard = shutdown.on_cancel(move || {
+            wake_hook.notify_all();
+        });
         let shared = Arc::new(PrepShared {
             network,
             coinbase_script: coinbase_script.clone(),
@@ -272,7 +270,8 @@ impl MiningService {
                 seed,
                 ..CoordinatorState::default()
             }),
-            wake: Condvar::new(),
+            wake,
+            _wake_guard: wake_guard,
             prep: PrepWorker::spawn(shared),
         }
     }
@@ -435,7 +434,7 @@ impl MiningService {
             {
                 state.parked_long_poll_waiters += 1;
             }
-            let _ = self.wake.wait_for(&mut state, LONG_POLL_SLICE);
+            let _timed_out = self.wake.wait_for(&mut state, LONG_POLL_SLICE);
             #[cfg(any(test, feature = "test-seam"))]
             {
                 state.parked_long_poll_waiters -= 1;
@@ -443,8 +442,6 @@ impl MiningService {
         }
     }
 
-    /// [`MiningControlError::Failed`] when the budget cannot fit even an empty
-    /// block.
     pub fn get_block_template(
         &self,
         long_poll_id: Option<&str>,
@@ -718,19 +715,11 @@ impl MiningService {
         Ok(Some(ready.candidate))
     }
 
-    fn candidate_for_key(&self, key: GenerationKey) -> Result<Arc<Candidate>, MiningControlError> {
-        let cache_key = CandidateKey::ordinary(key);
-        {
-            let state = self.state.lock();
-            if let Some(cached) = state.cache_get(&cache_key) {
-                return Ok(cached);
-            }
-        }
-        if let Some(candidate) = self.prepared_candidate_for_key(key)? {
-            return Ok(candidate);
-        }
-        let mut state = self.state.lock();
-
+    fn await_flight(
+        &self,
+        key: GenerationKey,
+        state: &mut parking_lot::MutexGuard<'_, CoordinatorState>,
+    ) -> Result<Option<Arc<Candidate>>, MiningControlError> {
         loop {
             if self.shutdown.is_triggered() {
                 return Err(MiningControlError::Unavailable(CompactString::from(
@@ -744,9 +733,27 @@ impl MiningService {
                 break;
             }
             if let Some(result) = flight.result.clone() {
-                return result;
+                return result.map(Some);
             }
-            let _ = self.wake.wait_for(&mut state, LONG_POLL_SLICE);
+            let _timed_out = self.wake.wait_for(state, LONG_POLL_SLICE);
+        }
+        Ok(None)
+    }
+
+    fn candidate_for_key(&self, key: GenerationKey) -> Result<Arc<Candidate>, MiningControlError> {
+        let cache_key = CandidateKey::ordinary(key);
+        {
+            let state = self.state.lock();
+            if let Some(cached) = state.cache_get(&cache_key) {
+                return Ok(cached);
+            }
+        }
+        if let Some(candidate) = self.prepared_candidate_for_key(key)? {
+            return Ok(candidate);
+        }
+        let mut state = self.state.lock();
+        if let Some(candidate) = self.await_flight(key, &mut state)? {
+            return Ok(candidate);
         }
         if let Some(cached) = state.cache_get(&cache_key) {
             return Ok(cached);
@@ -863,7 +870,7 @@ impl MiningService {
             if now >= until {
                 return Err(assembly_busy());
             }
-            let _ = self.wake.wait_for(&mut state, until - now);
+            let _timed_out = self.wake.wait_for(&mut state, until - now);
         };
         let _slot = BudgetedSlot {
             service: self,
@@ -1066,11 +1073,18 @@ struct PrepShared {
 struct PrepWorker {
     shared: Arc<PrepShared>,
     handle: Option<std::thread::JoinHandle<()>>,
+    _wake_guard: HookGuard,
 }
 
 impl PrepWorker {
     fn spawn(shared: Arc<PrepShared>) -> Self {
         let worker = Arc::clone(&shared);
+        let weak_shared = Arc::downgrade(&shared);
+        let wake_guard = shared.shutdown.on_cancel(move || {
+            if let Some(shared) = weak_shared.upgrade() {
+                shared.wake.notify_all();
+            }
+        });
         let handle = match std::thread::Builder::new()
             .name("btcrs-template-prep".into())
             .spawn(move || {
@@ -1090,7 +1104,11 @@ impl PrepWorker {
                 None
             }
         };
-        Self { shared, handle }
+        Self {
+            shared,
+            handle,
+            _wake_guard: wake_guard,
+        }
     }
 
     fn owns_tip(&self, target: Hash256) -> bool {
@@ -1363,82 +1381,90 @@ pub fn snapshot_for_selection(
     match selection {
         GenerateSelection::Mempool => Ok(full),
         GenerateSelection::Ordered(items) => {
-            let flags = if segwit_active {
-                VerifyFlags::P2SH.union(VerifyFlags::WITNESS)
-            } else {
-                VerifyFlags::P2SH
-            };
-            let prevouts: HashMap<_, _> =
-                prevouts.iter().map(|(key, value)| (*key, value)).collect();
-            let mut selected_positions = HashMap::with_capacity(items.len());
-            let mut by_txid = HashMap::with_capacity(full.entries.len());
-            for (index, entry) in full.entries.iter().enumerate() {
-                let position = u32::try_from(index).unwrap_or(u32::MAX);
-                by_txid.insert(entry.txid, position);
-            }
-            let mut selected: Vec<SnapshotEntry> = Vec::with_capacity(items.len());
-            let mut old_to_new = HashMap::with_capacity(items.len());
-            for item in items {
-                match item {
-                    GenerateTx::Mempool(txid) => {
-                        let Some(&old) = by_txid.get(txid) else {
-                            return Err(MiningControlError::InvalidRequest(CompactString::from(
-                                "transaction not in mempool",
-                            )));
-                        };
-                        let new_index = u32::try_from(selected.len()).unwrap_or(u32::MAX);
-                        old_to_new.insert(old, new_index);
-                        let old_usize = usize::try_from(old).unwrap_or(usize::MAX);
-                        selected.push(full.entries[old_usize].clone());
-                    }
-                    GenerateTx::ResolvedMempool(entry) => {
-                        let mut entry = entry.clone();
-                        entry.ancestors.clear();
-                        selected.push(entry);
-                    }
-                    GenerateTx::Raw(tx) => {
-                        let resolved = tx
-                            .inputs
-                            .iter()
-                            .filter_map(|input| {
-                                let outpoint = input.previous_output;
-                                let earlier_output = selected_positions
-                                    .get(&outpoint.txid)
-                                    .and_then(|&index: &usize| selected.get(index))
-                                    .and_then(|entry| {
-                                        usize::try_from(outpoint.vout)
-                                            .ok()
-                                            .and_then(|vout| entry.tx.outputs.get(vout))
-                                    });
-                                earlier_output
-                                    .or_else(|| prevouts.get(&outpoint).copied())
-                                    .map(|output| (outpoint, output.clone()))
-                            })
-                            .collect::<Vec<_>>();
-                        selected.push(snapshot_entry_from_raw(tx, &resolved, flags));
-                    }
-                }
-                if let Some(entry) = selected.last() {
-                    selected_positions.insert(entry.txid, selected.len() - 1);
-                }
-            }
-            for entry in &mut selected {
-                entry.ancestors.retain_mut(|ancestor| {
-                    if let Some(&new_index) = old_to_new.get(ancestor) {
-                        *ancestor = new_index;
-                        true
-                    } else {
-                        false
-                    }
-                });
-            }
-            Ok(MempoolMiningSnapshot {
-                sequence: full.sequence,
-                fee_delta_sequence: full.fee_delta_sequence,
-                entries: selected,
-            })
+            ordered_snapshot(&full, items, prevouts, segwit_active)
         }
     }
+}
+
+fn ordered_snapshot(
+    full: &MempoolMiningSnapshot,
+    items: &[GenerateTx],
+    prevouts: &[(OutPoint, TxOut)],
+    segwit_active: bool,
+) -> Result<MempoolMiningSnapshot, MiningControlError> {
+    let flags = if segwit_active {
+        VerifyFlags::P2SH.union(VerifyFlags::WITNESS)
+    } else {
+        VerifyFlags::P2SH
+    };
+    let prevouts: HashMap<_, _> = prevouts.iter().map(|(key, value)| (*key, value)).collect();
+    let mut selected_positions = HashMap::with_capacity(items.len());
+    let mut by_txid = HashMap::with_capacity(full.entries.len());
+    for (index, entry) in full.entries.iter().enumerate() {
+        let position = u32::try_from(index).unwrap_or(u32::MAX);
+        by_txid.insert(entry.txid, position);
+    }
+    let mut selected: Vec<SnapshotEntry> = Vec::with_capacity(items.len());
+    let mut old_to_new = HashMap::with_capacity(items.len());
+    for item in items {
+        match item {
+            GenerateTx::Mempool(txid) => {
+                let Some(&old) = by_txid.get(txid) else {
+                    return Err(MiningControlError::InvalidRequest(CompactString::from(
+                        "transaction not in mempool",
+                    )));
+                };
+                let new_index = u32::try_from(selected.len()).unwrap_or(u32::MAX);
+                old_to_new.insert(old, new_index);
+                let old_usize = usize::try_from(old).unwrap_or(usize::MAX);
+                selected.push(full.entries[old_usize].clone());
+            }
+            GenerateTx::ResolvedMempool(entry) => {
+                let mut entry = entry.clone();
+                entry.ancestors.clear();
+                selected.push(entry);
+            }
+            GenerateTx::Raw(tx) => {
+                let resolved = tx
+                    .inputs
+                    .iter()
+                    .filter_map(|input| {
+                        let outpoint = input.previous_output;
+                        let earlier_output = selected_positions
+                            .get(&outpoint.txid)
+                            .and_then(|&index: &usize| selected.get(index))
+                            .and_then(|entry| {
+                                usize::try_from(outpoint.vout)
+                                    .ok()
+                                    .and_then(|vout| entry.tx.outputs.get(vout))
+                            });
+                        earlier_output
+                            .or_else(|| prevouts.get(&outpoint).copied())
+                            .map(|output| (outpoint, output.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                selected.push(snapshot_entry_from_raw(tx, &resolved, flags));
+            }
+        }
+        if let Some(entry) = selected.last() {
+            selected_positions.insert(entry.txid, selected.len() - 1);
+        }
+    }
+    for entry in &mut selected {
+        entry.ancestors.retain_mut(|ancestor| {
+            if let Some(&new_index) = old_to_new.get(ancestor) {
+                *ancestor = new_index;
+                true
+            } else {
+                false
+            }
+        });
+    }
+    Ok(MempoolMiningSnapshot {
+        sequence: full.sequence,
+        fee_delta_sequence: full.fee_delta_sequence,
+        entries: selected,
+    })
 }
 
 fn snapshot_entry_from_raw(

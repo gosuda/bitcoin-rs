@@ -147,15 +147,16 @@
             "size_on_disk": 293,
             "pruned": false,
             "warnings": [],
-            "is_closed_for_recovery": false
+            "is_closed_for_recovery": false,
+            "is_apply_halted": false
           },
           "id": "a"
         },
         {
           "jsonrpc": "2.0",
           "result": {
-            "version": 1400,
-            "subversion": "/bitcoin-rs:0.14.0/",
+            "version": 1500,
+            "subversion": "/bitcoin-rs:0.15.0/",
             "protocolversion": 70017,
             "localservices": "0000000000000809",
             "localservicesnames": [
@@ -247,7 +248,8 @@
               "size_on_disk"
             ],
             "gap_keys": [
-              "is_closed_for_recovery"
+              "is_closed_for_recovery",
+              "is_apply_halted"
             ]
           }
         },
@@ -308,6 +310,7 @@
     "body[1].result.subversion",
     "body[1].result.version",
     "body[0].result.is_closed_for_recovery",
+    "body[0].result.is_apply_halted",
     "headers.content-type"
   ]
 }

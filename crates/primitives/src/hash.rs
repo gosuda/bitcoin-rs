@@ -47,7 +47,6 @@ impl Hash256 {
         self.0
     }
 
-    /// Parses a conventional big-endian lowercase or uppercase hexadecimal hash.
     pub fn from_str_be(s: &str) -> Result<Self, HashError> {
         let bytes = s.as_bytes();
         if bytes.len() != 64 {
@@ -67,7 +66,6 @@ impl Hash256 {
         Ok(Self(out))
     }
 
-    /// Formats this hash as conventional big-endian lowercase hexadecimal.
     #[must_use]
     pub fn to_string_be(self) -> String {
         self.to_string()
@@ -108,11 +106,9 @@ impl core::str::FromStr for Hash256 {
 }
 
 const fn decode_nibble(byte: u8, offset: usize) -> Result<u8, HashError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(HashError::InvalidHex { offset, byte }),
+    match crate::hex::hex_nibble(byte) {
+        Some(value) => Ok(value),
+        None => Err(HashError::InvalidHex { offset, byte }),
     }
 }
 

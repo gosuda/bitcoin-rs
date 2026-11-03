@@ -1,7 +1,8 @@
+use crate::test_support::TestError;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use super::{Auth, NetworkSelection, NodeConfig, ScriptIndexMode, ValidationEngine};
+use super::{Auth, ConfigError, NetworkSelection, NodeConfig, ScriptIndexMode, ValidationEngine};
 use crate::options::{
     ChainstateJournalOverrides, P2pOverrides, RpcOverrides, StorageOverrides, UserConfig,
     ValidationOverrides,
@@ -42,10 +43,14 @@ fn pool_requires_compiled_feature() {
         Ok(config) => {
             panic!("pool configuration must be refused without the pool build feature: {config:?}")
         }
-        Err(error) => assert!(error.to_string().contains("pool build feature"), "{error}"),
+        Err(error) => assert!(
+            matches!(error, ConfigError::PoolFeatureRequired),
+            "{error:?}"
+        ),
     }
 }
 
+// POOL-01
 #[cfg(feature = "pool")]
 #[test]
 fn pool_requires_explicit_policy_and_listener() {
@@ -70,6 +75,24 @@ fn pool_requires_explicit_policy_and_listener() {
 
 #[cfg(feature = "pool")]
 #[test]
+fn an_absent_window_work_is_not_reported_as_non_positive() {
+    let mut layer = pool_layer();
+    layer.pool.window_work = None;
+    match super::resolve(&[&layer]) {
+        Err(ConfigError::PoolWindowWorkMissing) => {}
+        other => panic!("an absent window work is a required value, not a zero: {other:?}"),
+    }
+
+    let mut layer = pool_layer();
+    layer.pool.window_work = Some(0);
+    match super::resolve(&[&layer]) {
+        Err(ConfigError::PoolWindowWork) => {}
+        other => panic!("zero window work keeps the positive-value refusal: {other:?}"),
+    }
+}
+
+#[cfg(feature = "pool")]
+#[test]
 fn pool_composed_connection_defaults_are_pinned() {
     let config = resolved(&[&pool_layer()]);
     let pool = config
@@ -88,7 +111,7 @@ fn pool_composed_connection_defaults_are_pinned() {
 
 #[cfg(feature = "pool")]
 #[test]
-fn pool_layers_preserve_explicit_fields_and_override_policy() -> anyhow::Result<()> {
+fn pool_layers_preserve_explicit_fields_and_override_policy() -> Result<(), TestError> {
     let base = pool_layer();
     let later = UserConfig {
         pool: crate::options::PoolOverrides {
@@ -101,11 +124,11 @@ fn pool_layers_preserve_explicit_fields_and_override_policy() -> anyhow::Result<
     let config = super::resolve(&[&base, &later])?;
     let pool = config
         .pool
-        .ok_or_else(|| anyhow::anyhow!("enabled pool must resolve"))?;
+        .ok_or(TestError::Missing("pool configuration"))?;
     let expected_datadir = base
         .pool
         .datadir
-        .ok_or_else(|| anyhow::anyhow!("fixture must specify a pool directory"))?;
+        .ok_or(TestError::Missing("pool directory"))?;
     assert_eq!(pool.datadir, expected_datadir);
     assert_eq!(pool.v1_bind, base.pool.v1_bind);
     assert!(pool.sv2_bind.is_none());
@@ -132,6 +155,7 @@ fn pool_non_loopback_requires_explicit_opt_in() {
     assert!(super::resolve(&[&layer]).is_err());
 }
 
+// POOL-01
 #[cfg(feature = "pool")]
 #[test]
 fn pool_money_depth_and_capacity_bounds_are_validated() {
@@ -206,12 +230,12 @@ fn pool_sv2_requires_feature_and_paired_authority_path_without_opening_it() {
         assert!(super::resolve(&[&layer]).is_err());
     }
     #[cfg(not(feature = "pool-sv2"))]
-    assert!(
-        super::resolve(&[&layer])
-            .unwrap_err()
-            .to_string()
-            .contains("pool-sv2")
-    );
+    {
+        let Err(error) = super::resolve(&[&layer]) else {
+            panic!("resolve must fail without pool-sv2 feature");
+        };
+        assert!(error.to_string().contains("pool-sv2"));
+    }
     layer.pool.sv2_bind = None;
     assert!(super::resolve(&[&layer]).is_err());
 }
@@ -380,7 +404,7 @@ fn default_rpc_auth_uses_a_generated_cookie() {
 }
 
 #[test]
-fn generated_rpc_cookie_is_private_and_rotates() -> anyhow::Result<()> {
+fn generated_rpc_cookie_is_private_and_rotates() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join(".cookie");
     std::fs::write(dir.path().join(".cookie.tmp"), "stale")?;
@@ -411,7 +435,7 @@ fn generated_rpc_cookie_is_private_and_rotates() -> anyhow::Result<()> {
 }
 
 #[test]
-fn overlay_targets_without_routes_are_rejected() -> anyhow::Result<()> {
+fn overlay_targets_without_routes_are_rejected() -> Result<(), TestError> {
     let onlynet_onion = UserConfig {
         p2p: P2pOverrides {
             onlynet: Some(vec![bitcoin_rs_p2p::PeerNetwork::Onion]),
@@ -474,7 +498,7 @@ fn overlay_targets_without_routes_are_rejected() -> anyhow::Result<()> {
 }
 
 #[test]
-fn malformed_overlay_connect_targets_are_rejected() -> anyhow::Result<()> {
+fn malformed_overlay_connect_targets_are_rejected() -> Result<(), TestError> {
     let good_tor =
         bitcoin_rs_p2p::endpoint::format_endpoint(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
             key: [3u8; 32],
@@ -482,7 +506,7 @@ fn malformed_overlay_connect_targets_are_rejected() -> anyhow::Result<()> {
         });
     let (good_onion_host, _) = good_tor
         .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("formatted Tor endpoint contains port separator"))?;
+        .ok_or(TestError::Missing("Tor endpoint port separator"))?;
 
     let routes_layer = UserConfig {
         p2p: P2pOverrides {
@@ -537,7 +561,8 @@ fn malformed_overlay_connect_targets_are_rejected() -> anyhow::Result<()> {
 }
 
 #[test]
-fn malformed_i2p_with_routes_configured_rejects_target_not_missing_route() -> anyhow::Result<()> {
+fn malformed_i2p_with_routes_configured_rejects_target_not_missing_route() -> Result<(), TestError>
+{
     let good_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
     let routes_layer = UserConfig {
         p2p: P2pOverrides {
@@ -601,7 +626,7 @@ fn malformed_i2p_with_routes_configured_rejects_target_not_missing_route() -> an
 }
 
 #[test]
-fn ordinary_hostname_connect_targets_remain_accepted_at_startup() -> anyhow::Result<()> {
+fn ordinary_hostname_connect_targets_remain_accepted_at_startup() -> Result<(), TestError> {
     for target in [
         "drynet4.drivechain.dev:8533",
         "seed.bitcoin.sipa.be:8333",
@@ -621,7 +646,7 @@ fn ordinary_hostname_connect_targets_remain_accepted_at_startup() -> anyhow::Res
 }
 
 #[test]
-fn valid_overlay_connect_targets_enforce_routes() -> anyhow::Result<()> {
+fn valid_overlay_connect_targets_enforce_routes() -> Result<(), TestError> {
     let good_tor =
         bitcoin_rs_p2p::endpoint::format_endpoint(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
             key: [3u8; 32],
@@ -701,14 +726,14 @@ fn privacy_routes_with_default_dns_seeds_are_rejected() {
             panic!("a privacy route with default DNS seeds must fail validation");
         };
         assert!(
-            error.to_string().contains("--dns-seeds-enabled=false"),
-            "{error}"
+            matches!(error, ConfigError::PrivacyRequiresDnsOff),
+            "{error:?}"
         );
     }
 }
 
 #[test]
-fn privacy_route_with_dns_disabled_accepts_literal_ip() -> anyhow::Result<()> {
+fn privacy_route_with_dns_disabled_accepts_literal_ip() -> Result<(), TestError> {
     let layer = UserConfig {
         p2p: P2pOverrides {
             proxy: Some(SocketAddr::from(([127, 0, 0, 1], 9050))),
@@ -760,7 +785,7 @@ fn hostname_connect_targets_are_rejected_with_privacy_route() {
 }
 
 #[test]
-fn typed_overlay_connect_targets_are_accepted_with_dns_disabled() -> anyhow::Result<()> {
+fn typed_overlay_connect_targets_are_accepted_with_dns_disabled() -> Result<(), TestError> {
     let good_tor =
         bitcoin_rs_p2p::endpoint::format_endpoint(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
             key: [9u8; 32],
@@ -838,8 +863,8 @@ fn rpc_rejects_missing_or_public_credentials() {
         panic!("a non-loopback bind without credentials must fail validation");
     };
     assert!(
-        error.to_string().contains("non-loopback RPC bind"),
-        "{error}"
+        matches!(error, ConfigError::RpcNonLoopbackNeedsAuth),
+        "{error:?}"
     );
 
     let user_without_password = UserConfig {
@@ -852,10 +877,7 @@ fn rpc_rejects_missing_or_public_credentials() {
     let Err(error) = super::resolve(&[&user_without_password]) else {
         panic!("a user without a password must fail validation");
     };
-    assert!(
-        error.to_string().contains("nonempty username and password"),
-        "{error}"
-    );
+    assert!(matches!(error, ConfigError::RpcBasicAuthEmpty), "{error:?}");
 
     let legacy_password = UserConfig {
         rpc: RpcOverrides {
@@ -869,8 +891,8 @@ fn rpc_rejects_missing_or_public_credentials() {
         panic!("the legacy public password must fail validation");
     };
     assert!(
-        error.to_string().contains("publicly known legacy default"),
-        "{error}"
+        matches!(error, ConfigError::RpcPasswordDefault),
+        "{error:?}"
     );
 
     let explicit_password = UserConfig {
@@ -903,6 +925,37 @@ fn rpc_rejects_missing_or_public_credentials() {
 
 fn resolved(layers: &[&UserConfig]) -> NodeConfig {
     super::resolve(layers).unwrap_or_else(|error| panic!("valid layered configuration: {error}"))
+}
+
+#[test]
+fn apply_env_routes_unknown_network_through_the_option_parse_variant() {
+    let Err(error) =
+        UserConfig::default().apply_env("BITCOIN_RS_NETWORK", std::ffi::OsStr::new("bogus"))
+    else {
+        panic!("unknown network must fail");
+    };
+    assert!(
+        matches!(
+            error,
+            crate::config::ConfigError::OptionParse(
+                crate::options::OptionParseError::Network { ref value }
+            ) if value == "bogus"
+        ),
+        "apply_env failures must stay typed as ConfigError::OptionParse, got: {error:?}"
+    );
+}
+
+#[test]
+fn pool_suboptions_without_enablement_are_their_own_variant() {
+    let mut layer = UserConfig::default();
+    layer.pool.datadir = Some(PathBuf::from("/tmp/pool-without-flag"));
+    let Err(error) = super::resolve(&[&layer]) else {
+        panic!("pool sub-options require --pool");
+    };
+    assert!(
+        matches!(error, crate::config::ConfigError::PoolSuboptionsWithoutPool),
+        "pool sub-options without --pool must be PoolSuboptionsWithoutPool, got: {error:?}"
+    );
 }
 
 fn basic_auth(auth: &Auth) -> (String, String) {
@@ -1134,8 +1187,8 @@ fn p2p_magic_override_is_cross_field_validated() {
         panic!("a non-mainnet magic override must fail validation");
     };
     assert!(
-        error.to_string().contains("require --network mainnet"),
-        "{error}"
+        matches!(error, ConfigError::MagicRequiresMainnet),
+        "{error:?}"
     );
 
     let without_connect = UserConfig {
@@ -1150,8 +1203,8 @@ fn p2p_magic_override_is_cross_field_validated() {
         panic!("a magic override without a connect peer must fail validation");
     };
     assert!(
-        error.to_string().contains("at least one --connect peer"),
-        "{error}"
+        matches!(error, ConfigError::MagicRequiresConnect),
+        "{error:?}"
     );
 
     let with_dns_seeds = UserConfig {
@@ -1166,10 +1219,8 @@ fn p2p_magic_override_is_cross_field_validated() {
         panic!("a magic override with dns seeds on must fail validation");
     };
     assert!(
-        error
-            .to_string()
-            .contains("require --dns-seeds-enabled=false"),
-        "{error}"
+        matches!(error, ConfigError::MagicRequiresDnsOff),
+        "{error:?}"
     );
 
     let valid = UserConfig {
@@ -1198,10 +1249,8 @@ fn journal_retention_and_lag_bounds_are_cross_field_validated() {
         panic!("retention below rotation must fail validation");
     };
     assert!(
-        error
-            .to_string()
-            .contains("max_journal_mib must be >= rotate_mib"),
-        "{error}"
+        matches!(error, ConfigError::JournalMaxJournalMib),
+        "{error:?}"
     );
 
     let inverted_lag = UserConfig {
@@ -1216,10 +1265,8 @@ fn journal_retention_and_lag_bounds_are_cross_field_validated() {
         panic!("a lag bound below the batch size must fail validation");
     };
     assert!(
-        error
-            .to_string()
-            .contains("max_lag_blocks must be >= blocks"),
-        "{error}"
+        matches!(error, ConfigError::JournalMaxLagBlocks),
+        "{error:?}"
     );
 
     let zero_period = UserConfig {
@@ -1232,10 +1279,7 @@ fn journal_retention_and_lag_bounds_are_cross_field_validated() {
     let Err(error) = super::resolve(&[&zero_period]) else {
         panic!("a non-positive period must fail validation");
     };
-    assert!(
-        error.to_string().contains("seconds must be positive"),
-        "{error}"
-    );
+    assert!(matches!(error, ConfigError::JournalSeconds), "{error:?}");
 }
 
 #[test]
@@ -1277,4 +1321,44 @@ fn earlier_set_fields_survive_a_later_bare_network_selection() {
         bitcoin_rs_primitives::Network::Regtest.magic(),
         "a field no layer set still fills from the winning profile"
     );
+}
+
+#[test]
+fn prune_rejects_conflicting_index_options() {
+    for mode in [
+        (true, false, ScriptIndexMode::Disabled),
+        (false, true, ScriptIndexMode::Disabled),
+        (false, false, ScriptIndexMode::Utxo),
+        (false, false, ScriptIndexMode::Full),
+    ] {
+        let prune_with_index = UserConfig {
+            storage: StorageOverrides {
+                prune_target_mb: Some(1000),
+                ..StorageOverrides::default()
+            },
+            indexes: crate::options::IndexOverrides {
+                txindex: Some(mode.0),
+                blockfilterindex: Some(mode.1),
+                script_index: Some(mode.2),
+                ..crate::options::IndexOverrides::default()
+            },
+            ..UserConfig::default()
+        };
+        let Err(error) = super::resolve(&[&prune_with_index]) else {
+            panic!("prune with indexes must fail validation");
+        };
+        assert!(matches!(error, ConfigError::PruneWithIndexes), "{error:?}");
+    }
+}
+
+#[test]
+fn empty_data_dir_is_rejected_by_config_validation() {
+    let empty_dir = UserConfig {
+        data_dir: Some(std::path::PathBuf::from("")),
+        ..UserConfig::default()
+    };
+    let Err(error) = super::resolve(&[&empty_dir]) else {
+        panic!("empty data_dir must fail config validation");
+    };
+    assert!(matches!(error, ConfigError::DataDirEmpty), "{error:?}");
 }

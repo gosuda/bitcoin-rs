@@ -9,7 +9,7 @@ use bitcoin_rs_storage::{
 use super::*;
 use crate::stats::CoinStats;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+use crate::test_support::{TestError, TestResult};
 
 const HEIGHT: u32 = 91;
 const HASH: Hash256 = Hash256::from_le_bytes(&[0x5a; 32]);
@@ -199,6 +199,7 @@ fn persisted_record_bytes_decode_back_to_the_batch() -> TestResult {
     Ok(())
 }
 
+// ARCH-07a
 #[test]
 fn rollback_restores_the_exact_prior_state() -> TestResult {
     let (utxo, coin_stats, before, undo) = connected()?;
@@ -213,7 +214,9 @@ fn rollback_restores_the_exact_prior_state() -> TestResult {
     );
     assert_eq!(observe(&utxo, &coin_stats)?, before);
     assert_eq!(receipt.restored_parents, vec![FUNDED.txid]);
-    let marker = store.load_disconnect_marker()?.ok_or("marker missing")?;
+    let marker = store
+        .load_disconnect_marker()?
+        .ok_or(TestError::Missing("marker missing"))?;
     assert_eq!(
         (marker.phase, marker.height, marker.hash),
         (DisconnectPhase::RolledBack, HEIGHT, HASH)
@@ -236,7 +239,9 @@ fn in_flight_marker_refuses_before_arming() -> TestResult {
         "{outcome:?}"
     );
     assert_eq!(observe(&utxo, &coin_stats)?, connected_state);
-    let marker = store.load_disconnect_marker()?.ok_or("marker missing")?;
+    let marker = store
+        .load_disconnect_marker()?
+        .ok_or(TestError::Missing("marker missing"))?;
     assert_eq!(
         (marker.phase, marker.height, marker.hash),
         (DisconnectPhase::InFlight, HEIGHT - 1, torn)
@@ -254,7 +259,9 @@ fn recovery_rewind_preserves_the_surviving_marker() -> TestResult {
     rollback_block_recovery(&utxo, &coin_stats, HEIGHT, 1, 2, &undo)?;
 
     assert_eq!(observe(&utxo, &coin_stats)?, before);
-    let marker = store.load_disconnect_marker()?.ok_or("marker missing")?;
+    let marker = store
+        .load_disconnect_marker()?
+        .ok_or(TestError::Missing("marker missing"))?;
     assert_eq!(
         (marker.phase, marker.height, marker.hash),
         (DisconnectPhase::InFlight, HEIGHT - 1, torn)
@@ -274,7 +281,9 @@ fn rolled_back_marker_carries_into_the_next_disconnect() -> TestResult {
 
     assert_eq!(observe(&utxo, &coin_stats)?, before);
     assert_eq!(receipt.restored_parents, vec![FUNDED.txid]);
-    let marker = store.load_disconnect_marker()?.ok_or("marker missing")?;
+    let marker = store
+        .load_disconnect_marker()?
+        .ok_or(TestError::Missing("marker missing"))?;
     assert_eq!(
         (marker.phase, marker.height, marker.hash),
         (DisconnectPhase::RolledBack, HEIGHT, HASH)
@@ -348,7 +357,9 @@ fn completion_failure_is_fatal_and_leaves_the_marker_in_flight() -> TestResult {
         matches!(outcome, Err(RollbackError::Marker(_))),
         "{outcome:?}"
     );
-    let marker = store.load_disconnect_marker()?.ok_or("marker missing")?;
+    let marker = store
+        .load_disconnect_marker()?
+        .ok_or(TestError::Missing("marker missing"))?;
     assert_eq!(marker.phase, DisconnectPhase::InFlight);
     Ok(())
 }
@@ -386,7 +397,7 @@ fn undo_txout(seed: u64) -> TxOut {
     }
 }
 
-fn build_undo_blocks() -> Result<Vec<(BlockChanges, UndoBatch)>, Box<dyn std::error::Error>> {
+fn build_undo_blocks() -> Result<Vec<(BlockChanges, UndoBatch)>, TestError> {
     let mut live: Vec<UtxoAdd> = Vec::new();
     let mut blocks = Vec::with_capacity(10);
 
@@ -549,7 +560,19 @@ fn block_with_short_txids() -> (Block, Vec<Txid>) {
 fn a_short_txid_list_is_refused_at_every_height() {
     let (block, txids) = block_with_short_txids();
     for height in [0, HEIGHT] {
-        let outcome = build_block_changes(&block, height, &txids, None, 4, 4, &NoSpend, None, 64);
+        let outcome = build_block_changes(
+            &BlockChangeInputs {
+                block: &block,
+                height,
+                txids: &txids,
+                same_block_spent: None,
+                add_capacity: 4,
+                remove_capacity: 4,
+                overwritten: None,
+                max_script_size: 64,
+            },
+            &NoSpend,
+        );
         assert!(
             matches!(
                 outcome,
@@ -561,4 +584,160 @@ fn a_short_txid_list_is_refused_at_every_height() {
             "a short txid list was accepted at height {height}"
         );
     }
+}
+
+fn spending(previous_output: OutPoint, outputs: Vec<TxOut>) -> Tx {
+    Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output,
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs,
+    }
+}
+
+fn shaped_block() -> Block {
+    let coinbase_tx = spending(
+        OutPoint::null(),
+        vec![TxOut {
+            value: Amount::from_sat(50),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        }],
+    );
+    let parent = spending(FUNDED, vec![coin(90), coin(5)]);
+    let child = spending(OutPoint::new(parent.txid(), 0), vec![coin(80)]);
+    Block {
+        header: bitcoin_rs_primitives::Network::Regtest
+            .genesis_block()
+            .header,
+        txs: vec![coinbase_tx, parent, child],
+    }
+}
+
+fn shaped_undo(block: &Block) -> UndoBatch {
+    let mut undo = UndoBatch::empty();
+    undo.restore(UtxoAdd::new(FUNDED, coin(90), false, HEIGHT - 1));
+    undo.remove(OutPoint::new(block.txs[0].txid(), 0));
+    undo.remove(OutPoint::new(block.txs[1].txid(), 1));
+    undo.remove(OutPoint::new(block.txs[2].txid(), 0));
+    undo
+}
+
+// RCV-08
+#[test]
+fn undo_validation_matches_the_block_shape() -> TestResult {
+    const MAX_SCRIPT_SIZE: usize = 10_000;
+    let block = shaped_block();
+    let txids: Vec<Txid> = block.txs.iter().map(|tx| tx.txid()).collect();
+    let check = BlockUndoCheck {
+        block: &block,
+        txids: &txids,
+        max_script_size: MAX_SCRIPT_SIZE,
+    };
+    let undo = shaped_undo(&block);
+    assert_eq!(validate_undo_for_block(&check, HEIGHT, &undo), Ok(()));
+
+    let short = BlockUndoCheck {
+        block: &block,
+        txids: &txids[..2],
+        max_script_size: MAX_SCRIPT_SIZE,
+    };
+    assert!(
+        matches!(
+            validate_undo_for_block(&short, HEIGHT, &undo),
+            Err(UndoCodecError::BlockMismatch { .. })
+        ),
+        "a short transaction id slice must refuse instead of validating fewer transactions"
+    );
+
+    let mut extra_remove = shaped_undo(&block);
+    extra_remove.remove(OutPoint::new(block.txs[1].txid(), 0));
+    assert!(matches!(
+        validate_undo_for_block(&check, HEIGHT, &extra_remove),
+        Err(UndoCodecError::BlockMismatch { .. })
+    ));
+
+    let mut foreign_restore = shaped_undo(&block);
+    foreign_restore.restore(UtxoAdd::new(CREATED, coin(1), false, HEIGHT - 1));
+    assert!(matches!(
+        validate_undo_for_block(&check, HEIGHT, &foreign_restore),
+        Err(UndoCodecError::BlockMismatch { .. })
+    ));
+
+    let mut future_restore = shaped_undo(&block);
+    future_restore.restore(UtxoAdd::new(FUNDED, coin(90), false, HEIGHT));
+    assert!(matches!(
+        validate_undo_for_block(&check, HEIGHT, &future_restore),
+        Err(UndoCodecError::BlockMismatch { .. })
+    ));
+
+    let mut missing_restore = UndoBatch::empty();
+    missing_restore.remove(OutPoint::new(block.txs[0].txid(), 0));
+    missing_restore.remove(OutPoint::new(block.txs[1].txid(), 1));
+    missing_restore.remove(OutPoint::new(block.txs[2].txid(), 0));
+    assert!(matches!(
+        validate_undo_for_block(&check, HEIGHT, &missing_restore),
+        Err(UndoCodecError::BlockMismatch { .. })
+    ));
+
+    let mut overwritten = UndoBatch::empty();
+    overwritten.restore(UtxoAdd::new(FUNDED, coin(90), false, HEIGHT - 1));
+    overwritten.restore(UtxoAdd::new(
+        OutPoint::new(block.txs[1].txid(), 1),
+        coin(1),
+        false,
+        HEIGHT - 2,
+    ));
+    overwritten.remove(OutPoint::new(block.txs[0].txid(), 0));
+    overwritten.remove(OutPoint::new(block.txs[2].txid(), 0));
+    assert_eq!(
+        validate_undo_for_block(&check, HEIGHT, &overwritten),
+        Ok(()),
+        "a BIP30 overwrite restores the replaced output instead of removing it"
+    );
+    Ok(())
+}
+
+#[test]
+fn every_undo_truncation_and_flip_is_refused_or_canonical() -> TestResult {
+    let hash = Hash256::from_le_bytes(&[0x5A; 32]);
+    let mut batch = UndoBatch::empty();
+    batch.restore(UtxoAdd::new(FUNDED, coin(50_000), true, 11));
+    let second = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x32; 32])), 7);
+    batch.restore(UtxoAdd::new(
+        second,
+        TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: Script::from_bytes(vec![0x51; 129]),
+        },
+        false,
+        12,
+    ));
+    batch.remove(OutPoint::new(Txid(Hash256::from_le_bytes(&[0x33; 32])), 2));
+    let bytes = crate::undo_codec::encode(&batch, hash);
+    for cut in 0..bytes.len() {
+        assert!(
+            crate::undo_codec::decode(&bytes[..cut], hash).is_err(),
+            "truncation at {cut} decoded"
+        );
+    }
+    for (index, byte) in bytes.iter().enumerate() {
+        for bit in 0..8_u8 {
+            let mut mutated = bytes.clone();
+            mutated[index] = *byte ^ (1 << bit);
+            let Ok(decoded) = crate::undo_codec::decode(&mutated, hash) else {
+                continue;
+            };
+            assert_eq!(
+                crate::undo_codec::encode(&decoded, hash),
+                mutated,
+                "flip at byte {index} bit {bit} decoded to a non-canonical batch"
+            );
+        }
+    }
+    Ok(())
 }

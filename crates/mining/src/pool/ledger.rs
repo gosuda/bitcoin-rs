@@ -1,5 +1,3 @@
-//! Durable PPLNS accounting with an external wallet signer boundary.
-
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,7 +26,7 @@ pub const MAX_PAYOUT_OUTPUT_WEIGHT_WU: u64 = MAX_STANDARD_TX_WEIGHT_WU - PAYOUT_
 pub const MAX_CHANGE_OUTPUTS: usize = 1;
 pub const MAX_CHANGE_SCRIPTS: usize = 16;
 
-const OP_RETURN: u8 = 0x6a;
+use bitcoin_rs_script::opcode::OP_RETURN;
 const BATCH_ID_DOMAIN: &[u8] = b"btcrs.pool.payout-batch.v1";
 const REQUEST_MAGIC: &[u8; 4] = b"BRPR";
 const RECEIPT_MAGIC: &[u8; 4] = b"BRPT";
@@ -43,17 +41,6 @@ pub fn sha256(data: &[u8]) -> Hash32 {
 pub fn sha256d(data: &[u8]) -> Hash32 {
     let first = Sha256::digest(data);
     Sha256::digest(first).into()
-}
-
-#[must_use]
-pub fn to_hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        out.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    out
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -280,7 +267,6 @@ pub struct BlockRecorded {
     pub newly_recorded: bool,
 }
 
-/// Account balance. Invariant: `available + reserved + paid - deficit == credited allocations`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Balance {
     pub available_sat: u64,
@@ -299,7 +285,6 @@ pub struct RoundTransition {
     pub deficit_created_sat: u64,
 }
 
-/// Split a gross reward into `(pool_fee, net)`; the fee rounds down so miners get the remainder.
 pub fn split_pool_fee(gross_sat: u64, fee_bps: u16) -> Result<(u64, u64), LedgerError> {
     if fee_bps > 10_000 {
         return Err(LedgerError::InvalidInput("fee bps exceeds 10000"));
@@ -702,11 +687,10 @@ pub fn payout_output_weight_wu(script_len: usize) -> u64 {
         9u64
     };
     let len = u64::try_from(script_len).unwrap_or(u64::MAX);
-    let serialized = prefix
-        .checked_add(len)
-        .and_then(|sum| sum.checked_add(8))
-        .unwrap_or(u64::MAX);
-    serialized.checked_mul(4).unwrap_or(u64::MAX)
+    prefix
+        .saturating_add(len)
+        .saturating_add(8)
+        .saturating_mul(4)
 }
 
 fn check_outputs(outputs: &[PayoutOutput]) -> Result<u64, LedgerError> {
@@ -1088,8 +1072,6 @@ pub struct ConfirmedSpend {
     pub height: u32,
 }
 
-/// Authoritative observations of the ACTIVE chain. The ledger decides block, maturity, reorg and
-/// confirmation state only from these answers, never from job flags or submission receipts.
 pub trait ChainView {
     fn tip_height(&self) -> Result<u32, ChainViewError>;
 
@@ -1246,7 +1228,11 @@ impl fmt::Display for LedgerError {
             }
             Self::UnknownShare => write!(f, "unknown share"),
             Self::BlockConflict => write!(f, "block already recorded with a different claim"),
-            Self::UnknownBatch(id) => write!(f, "unknown batch {}", to_hex(id)),
+            Self::UnknownBatch(id) => write!(
+                f,
+                "unknown batch {}",
+                bitcoin_rs_primitives::hex::hex_encode(id)
+            ),
             Self::IllegalTransition {
                 batch,
                 from,
@@ -1255,11 +1241,15 @@ impl fmt::Display for LedgerError {
                 write!(
                     f,
                     "batch {} in state {from:?} cannot {action}",
-                    to_hex(batch)
+                    bitcoin_rs_primitives::hex::hex_encode(batch)
                 )
             }
             Self::Receipt(e) => write!(f, "receipt refused: {e:?}"),
-            Self::NotObserved(txid) => write!(f, "transaction {} not observed", to_hex(txid)),
+            Self::NotObserved(txid) => write!(
+                f,
+                "transaction {} not observed",
+                bitcoin_rs_primitives::hex::hex_encode(txid)
+            ),
             Self::Chain(e) => write!(f, "{e}"),
             Self::Signer(e) => write!(f, "{e}"),
             Self::Invariant(m) => write!(f, "invariant violated: {m}"),
@@ -1296,11 +1286,6 @@ impl From<bitcoin_rs_storage::StorageError> for LedgerError {
 }
 
 impl LedgerError {
-    /// True for share-crediting failures no retry can cure: the job is retired, the
-    /// header hash or secondary identity is already taken, or the block is already
-    /// recorded with a different claim.
-    ///
-    /// Protocol adapters must report these as rejected shares, never as a
     #[must_use]
     pub fn is_permanent_share_conflict(&self) -> bool {
         matches!(

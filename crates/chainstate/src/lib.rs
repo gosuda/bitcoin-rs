@@ -1,12 +1,10 @@
-//! Authoritative chainstate mutation: connect, disconnect, and window apply.
-
 pub use crate::error::{ApplyError, DisconnectError};
 use arc_swap::ArcSwapOption;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_chain::TransitionDomain;
 use bitcoin_rs_chain::{
-    BlockTree, BlockTreeReader, ChainError, ChainTxCount, TipReader, TipSnapshot,
-    TransitionAuthority, TransitionAuthorityGuard,
+    BlockTree, BlockTreeReader, ChainError, ChainTxCount, LatchReader, LatchWriter, TipReader,
+    TipSnapshot, TransitionAuthority, TransitionAuthorityGuard,
 };
 use bitcoin_rs_consensus::ScriptExecutionCache;
 use bitcoin_rs_consensus::UtxoView;
@@ -34,6 +32,9 @@ mod block_spends;
 mod connect;
 mod disconnect;
 mod durable;
+#[cfg(any(test, feature = "test-seam"))]
+#[doc(hidden)]
+pub mod fuzzing;
 mod prepare;
 mod tip_wait;
 mod window;
@@ -47,13 +48,15 @@ pub use assumeutxo::{
     HistoricalCheckpointRef,
 };
 
-mod checkpoint;
-use checkpoint::CheckpointError;
 mod assumeutxo_snapshot;
+mod checkpoint;
+pub use assumeutxo_snapshot::SnapshotArchiveError;
+pub use checkpoint::{CheckpointError, CheckpointSetupError};
 mod error;
 pub mod events;
 mod journal;
 mod maintenance;
+pub use maintenance::MaintenanceError;
 pub mod recovery;
 pub mod reorg;
 pub mod verify;
@@ -62,7 +65,6 @@ pub mod verify;
 pub enum ValidationMode {
     Full,
     AssumeValid,
-    Fast,
 }
 
 impl ValidationMode {
@@ -71,7 +73,6 @@ impl ValidationMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "full" => Some(Self::Full),
             "assume-valid" | "assume_valid" | "assumevalid" => Some(Self::AssumeValid),
-            "fast" => Some(Self::Fast),
             _ => None,
         }
     }
@@ -122,20 +123,20 @@ fn tx_count_delta_for(block: &Block) -> u64 {
 const LOCAL_OVERLAY_TXID_SET_THRESHOLD: usize = 8;
 
 pub(crate) struct ApplyAdmission {
-    closed: Arc<AtomicBool>,
+    closed: LatchWriter,
     barrier: RwLock<()>,
 }
 
 impl ApplyAdmission {
     pub(crate) fn new() -> Self {
         Self {
-            closed: Arc::new(AtomicBool::new(false)),
+            closed: LatchWriter::new(),
             barrier: RwLock::new(()),
         }
     }
 
     fn ensure_open(&self) -> Result<(), ApplyError> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.closed.reader().is_triggered() {
             return Err(ApplyError::Shutdown);
         }
         Ok(())
@@ -152,7 +153,7 @@ impl ApplyAdmission {
     }
 
     pub(crate) fn close(&self) -> RwLockWriteGuard<'_, ()> {
-        self.closed.store(true, Ordering::Release);
+        self.closed.trigger();
         self.barrier.write()
     }
 
@@ -161,7 +162,15 @@ impl ApplyAdmission {
     }
 
     pub(crate) fn close_permanently(&self) {
-        self.closed.store(true, Ordering::Release);
+        self.closed.trigger();
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.reader().is_triggered()
+    }
+
+    pub(crate) fn closed_reader(&self) -> LatchReader {
+        self.closed.reader()
     }
 }
 
@@ -257,8 +266,14 @@ impl AssumeValidGate {
         let anchor = network
             .assume_valid_anchor()
             .filter(|(height, _)| *height == configured_height);
+        if configured_height > 0 && anchor.is_none() {
+            tracing::warn!(
+                configured_height,
+                "assume-valid height has no matching network pin; scripts will not be skipped"
+            );
+        }
         Self {
-            trusted: AtomicBool::new(anchor.is_none()),
+            trusted: AtomicBool::new(false),
             warned: AtomicBool::new(false),
             anchor,
         }
@@ -268,10 +283,15 @@ impl AssumeValidGate {
     #[must_use]
     fn with_anchor(anchor: Option<(u32, Hash256)>) -> Self {
         Self {
-            trusted: AtomicBool::new(anchor.is_none()),
+            trusted: AtomicBool::new(false),
             warned: AtomicBool::new(false),
             anchor,
         }
+    }
+
+    #[must_use]
+    fn pin(&self) -> Option<(u32, Hash256)> {
+        self.anchor
     }
 
     #[must_use]
@@ -281,6 +301,7 @@ impl AssumeValidGate {
 
     fn evaluate(&self, tree: &BlockTree) {
         let Some((pinned_height, pinned_hash)) = self.anchor else {
+            self.trusted.store(false, Ordering::Relaxed);
             return;
         };
         let Some(tip) = tree.tip() else {
@@ -309,8 +330,6 @@ impl AssumeValidGate {
 pub(crate) enum BlockProvenance {
     Network,
     LocalReplay,
-    /// Rebuilding without an accepted checkpoint cannot inherit script trust
-    /// from durable commits that may have used Fast/AssumeValid.
     ColdReplay,
 }
 
@@ -320,7 +339,6 @@ pub struct ConnectOutcome {
     pub commit_id: u64,
     pub height: u32,
     pub hash: Hash256,
-    /// Transaction ids in block order.
     pub txids: Vec<Txid>,
     pub block_bytes: bytes::Bytes,
     pub raw_txs: Option<Vec<Vec<u8>>>,
@@ -385,7 +403,7 @@ pub struct Chainstate {
     /// before the tip publishes (`RCV-02`).
     pub(crate) durable_head: Arc<dyn DurableHeadStore>,
     pub(crate) admission: Arc<ApplyAdmission>,
-    pub(crate) shutdown: Arc<AtomicBool>,
+    pub(crate) shutdown: Arc<LatchWriter>,
     pub(crate) tip_notification: Arc<tip_wait::TipNotification>,
     pub(crate) chain_transition: TransitionAuthority,
     pub(crate) assume_valid_height: u32,
@@ -524,7 +542,6 @@ impl Chainstate {
             TipReader::new(Arc::clone(&applied_tip)),
             BlockTreeReader::new(Arc::clone(&block_tree)),
         ));
-        let shutdown = Arc::new(AtomicBool::new(false));
         Self {
             network: parts.network,
             chain_tip,
@@ -537,7 +554,7 @@ impl Chainstate {
             undo_store: parts.undo_store,
             durable_head: parts.durable_head,
             admission: Arc::new(ApplyAdmission::new()),
-            shutdown,
+            shutdown: Arc::new(LatchWriter::new()),
             tip_notification: Arc::default(),
             chain_transition: parts.chain_transition,
             assume_valid_height: parts.assume_valid_height,
@@ -724,7 +741,7 @@ impl Chainstate {
             undo_store: undo,
             durable_head: historical_head,
             admission: Arc::new(ApplyAdmission::new()),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(LatchWriter::new()),
             tip_notification: Arc::default(),
             chain_transition: bitcoin_rs_chain::TransitionDomain::new().authority(),
             assume_valid_height: 0,
@@ -751,12 +768,12 @@ impl Chainstate {
 
     #[must_use]
     pub fn shutdown_reader(&self) -> bitcoin_rs_chain::LatchReader {
-        bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.shutdown))
+        self.shutdown.reader()
     }
 
     pub fn request_shutdown(&self) {
+        self.shutdown.trigger();
         let _gate = self.tip_notification.gate.lock();
-        self.shutdown.store(true, Ordering::Release);
         self.tip_notification.changed.notify_all();
     }
 
@@ -767,12 +784,12 @@ impl Chainstate {
 
     #[must_use]
     pub fn is_closed_for_recovery(&self) -> bool {
-        self.admission.closed.load(Ordering::Acquire)
+        self.admission.is_closed()
     }
 
     #[must_use]
     pub fn closed_for_recovery_reader(&self) -> bitcoin_rs_chain::LatchReader {
-        bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.admission.closed))
+        self.admission.closed_reader()
     }
 
     #[must_use]
@@ -907,12 +924,6 @@ impl Chainstate {
         self.block_body_store.clone()
     }
 
-    #[cfg(any(test, feature = "test-seam"))]
-    #[must_use]
-    pub fn shutdown_handle(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.shutdown)
-    }
-
     pub fn admit_headers(
         &self,
         headers: &[Header],
@@ -980,16 +991,24 @@ impl Chainstate {
             BlockProvenance::Network => match self.validation_mode {
                 ValidationMode::Full => false,
                 ValidationMode::AssumeValid => {
-                    self.assume_valid_height > 0
-                        && height <= self.assume_valid_height
-                        && self.assume_valid_gate.trusted()
-                }
-                ValidationMode::Fast => {
+                    let Some((pinned_height, pinned_hash)) = self.assume_valid_gate.pin() else {
+                        return false;
+                    };
+                    if self.assume_valid_height == 0 || height > self.assume_valid_height {
+                        return false;
+                    }
+                    if height > pinned_height {
+                        return false;
+                    }
+                    if !self.assume_valid_gate.trusted() {
+                        return false;
+                    }
                     let tree = self.block_tree.read();
                     let Some(header_tip) = tree.tip() else {
                         return false;
                     };
-                    height < header_tip.height
+                    tree.node_at_height_from(header_tip.tip_id, pinned_height)
+                        .is_some_and(|pin_id| tree.lookup(pinned_hash) == Some(pin_id))
                         && tree
                             .node_at_height_from(header_tip.tip_id, height)
                             .is_some_and(|id| tree.lookup(hash) == Some(id))
@@ -1049,7 +1068,7 @@ impl Chainstate {
             undo_store: Arc::new(InMemoryUndoStore::default()),
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
             admission: Arc::new(ApplyAdmission::new()),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(LatchWriter::new()),
             tip_notification: Arc::default(),
             chain_transition: TransitionDomain::new().authority(),
             assume_valid_height: 0,
@@ -1099,13 +1118,12 @@ impl Chainstate {
         data_dir: &std::path::Path,
         durable_tip_height: Arc<std::sync::atomic::AtomicU32>,
         seed_offer: Option<bitcoin_rs_utxo::SeedOfferCell>,
-    ) -> anyhow::Result<()> {
-        let checkpoint_data_dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)
-            .map_err(anyhow::Error::new)?;
+    ) -> core::result::Result<(), CheckpointSetupError> {
+        let checkpoint_data_dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)?;
         let block_body_store = self
             .block_body_store
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("checkpointing requires a block body store"))?;
+            .ok_or(CheckpointSetupError::MissingBlockBodyStore)?;
         self.checkpoint_publisher = Some(Arc::new(
             crate::checkpoint::publisher::CheckpointPublisher {
                 admission: Arc::clone(&self.admission),
@@ -1508,6 +1526,12 @@ impl UtxoView for BlockLocalUtxoView<'_> {
         self.base.lookup(outpoint)
     }
 }
+
+#[cfg(any(test, verification))]
+pub(crate) mod admission_model;
+
+#[cfg(any(test, feature = "test-seam"))]
+pub(crate) mod test_support;
 
 #[cfg(test)]
 mod test_fixtures;

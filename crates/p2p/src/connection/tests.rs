@@ -14,6 +14,15 @@ fn standalone(max_messages: usize, max_bytes: usize, reserve: usize) -> Arc<Outb
         reserve,
     ))
 }
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+}
+
+type TestResult = Result<(), TestError>;
 
 fn charge(budget: &Arc<OutboundBudget>, bytes: usize) -> OutboundCredit {
     budget
@@ -46,13 +55,8 @@ fn shared_lease(shared: &Arc<SharedOutboundBudget>) -> (PeerLease, Receiver<Queu
     (PeerLease::new(tx).with_shared_budget(shared), rx)
 }
 
-fn peer_info(
-    addr: crate::PeerEndpoint,
-    conn_time: u64,
-) -> Result<crate::PeerInfo, Box<dyn std::error::Error>> {
-    let ip = addr
-        .as_ip()
-        .ok_or_else(|| std::io::Error::other("ip test peer"))?;
+fn peer_info(addr: crate::PeerEndpoint, conn_time: u64) -> Result<crate::PeerInfo, TestError> {
+    let ip = addr.as_ip().ok_or(TestError::Missing("ip test peer"))?;
     Ok(crate::PeerInfo {
         addr: addr.into(),
         endpoint: Some(addr),
@@ -118,7 +122,7 @@ fn direction_distinguishes_inbound_from_outbound_leases() {
 }
 
 #[test]
-fn stale_connection_cannot_publish_over_replacement() -> Result<(), Box<dyn std::error::Error>> {
+fn stale_connection_cannot_publish_over_replacement() -> TestResult {
     let table = crate::PeerTable::new();
     let addr = PeerEndpoint::from(([127, 0, 0, 1], 18_450));
     let (old_tx, _old_rx) = crossbeam_channel::unbounded();
@@ -150,7 +154,7 @@ fn stale_connection_cannot_publish_over_replacement() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn stale_disconnect_source_preserves_replacement() -> Result<(), Box<dyn std::error::Error>> {
+fn stale_disconnect_source_preserves_replacement() -> TestResult {
     let table = crate::PeerTable::new();
     let addr = PeerEndpoint::from(([127, 0, 0, 1], 18_451));
     let (old_tx, _old_rx) = crossbeam_channel::unbounded();
@@ -176,8 +180,7 @@ fn stale_disconnect_source_preserves_replacement() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn ready_snapshot_keeps_identity_across_same_address_replacement()
--> Result<(), Box<dyn std::error::Error>> {
+fn ready_snapshot_keeps_identity_across_same_address_replacement() -> TestResult {
     let table = crate::PeerTable::new();
     let addr = PeerEndpoint::from(([127, 0, 0, 1], 18_452));
     let (old_tx, _old_rx) = crossbeam_channel::unbounded();
@@ -185,7 +188,7 @@ fn ready_snapshot_keeps_identity_across_same_address_replacement()
     table.register(addr, old.clone());
     assert!(table.publish_info(addr, &old, peer_info(addr, 1)?));
     let Some(snapshot) = table.ready_peers().pop() else {
-        return Err(std::io::Error::other("ready peer snapshot missing").into());
+        return Err(TestError::Missing("ready peer snapshot missing"));
     };
 
     let (replacement_tx, _replacement_rx) = crossbeam_channel::unbounded();
@@ -273,7 +276,12 @@ fn may_charge_is_the_admit_condition_without_the_reserve() {
         budget.may_charge(10),
         "a short control message still fits below both caps"
     );
-    let second = charge(&budget, 2 * reserve_bytes);
+    assert_eq!(
+        budget.try_charge(2 * reserve_bytes).err(),
+        Some(Refusal::Local),
+        "a nonempty queue cannot overshoot the byte cap"
+    );
+    let second = charge(&budget, reserve_bytes / 2);
     assert!(
         !budget.may_charge(10),
         "the byte cap is reached: a charge would refuse"
@@ -383,6 +391,26 @@ fn oversized_single_message_admits_on_empty_local_queue() {
     assert_eq!(budget.try_charge(1).err(), Some(Refusal::Local));
     drop(oversized);
     let next = charge(&budget, 1);
+    drop(next);
+    assert_eq!(budget.pending(), (0, 0));
+}
+
+#[test]
+fn a_nonempty_local_queue_cannot_overshoot_its_byte_cap() {
+    let budget = standalone(10, 100, 0);
+    let first = charge(&budget, 90);
+    assert_eq!(
+        budget.try_charge(20).err(),
+        Some(Refusal::Local),
+        "90 + 20 exceeds the 100-byte cap: the quarter-share holds"
+    );
+    assert!(
+        !budget.may_charge(20),
+        "the admit probe rejects the same overshoot"
+    );
+    assert_eq!(budget.pending(), (1, 90), "a refusal charges nothing");
+    drop(first);
+    let next = charge(&budget, 20);
     drop(next);
     assert_eq!(budget.pending(), (0, 0));
 }
@@ -1036,7 +1064,7 @@ fn wait_times_out_without_a_wake() {
 fn a_release_that_leaves_the_queue_saturated_does_not_end_the_wait() {
     let reserve_bytes = 100;
     let budget = standalone(10, 2 * reserve_bytes, reserve_bytes);
-    let mut credits: Vec<_> = (0..3).map(|_| charge(&budget, 90)).collect();
+    let mut credits: Vec<_> = (0..3).map(|_| charge(&budget, 55)).collect();
     assert!(!budget.may_reserve_production());
     let (waiter, done) = spawn_waiter(&budget, Duration::from_secs(60), production_ready(&budget));
 

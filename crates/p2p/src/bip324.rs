@@ -1,4 +1,4 @@
-//! BIP324 v2 transport.
+#![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
 
 mod cipher;
 mod handshake;
@@ -7,16 +7,22 @@ pub(crate) mod msg_type;
 mod packet;
 mod reader;
 
-pub(crate) use handshake::{Established, Handshake, Step};
+pub use handshake::{Established, Handshake, Step};
+pub(crate) use packet::PACKET_OVERHEAD;
 #[cfg(test)]
 pub(crate) use packet::RecvCipher;
-pub(crate) use packet::{PACKET_OVERHEAD, SendCipher};
-pub(crate) use reader::{PacketReader, is_poll_timeout};
+pub use packet::SendCipher;
+#[cfg(feature = "fuzzing")]
+pub use packet::{PacketError, RecvCipher};
+pub use reader::PacketReader;
+pub use reader::is_poll_timeout;
 
-/// A BIP324 transport failed. A poll-timeout [`TransportError::Io`] is
+/// A BIP324 transport failure.
+///
+/// A poll-timeout [`TransportError::Io`] keeps the connection alive; every
+/// other variant is terminal and poisons the reader.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum TransportError {
-    /// No garbage terminator within the 4095 bytes of garbage BIP324 allows.
+pub enum TransportError {
     #[error("BIP324 garbage terminator not found within the garbage limit")]
     TerminatorNotFound,
     #[error("peer sent a v1 version header for another network")]
@@ -35,7 +41,6 @@ pub(crate) enum TransportError {
 
 #[cfg(test)]
 mod vector_tests {
-    use std::error::Error;
 
     use bitcoin::hex::FromHex as _;
     use bitcoin::p2p::Magic;
@@ -45,8 +50,31 @@ mod vector_tests {
     use super::cipher::{LENGTH_FIELD_LEN, TAG_LEN};
     use super::keys::{KeyMaterial, Role, Session, shared_secret};
     use super::packet::HEADER_LEN;
+    #[derive(Debug, thiserror::Error)]
+    enum TestError {
+        #[error(transparent)]
+        Io(#[from] std::io::Error),
+        #[error(transparent)]
+        Packet(#[from] super::packet::PacketError),
+        #[error(transparent)]
+        HexToArray(#[from] bitcoin::hex::HexToArrayError),
+        #[error(transparent)]
+        HexToBytes(#[from] bitcoin::hex::HexToBytesError),
+        #[error(transparent)]
+        Secp256k1(#[from] bitcoin::secp256k1::Error),
+        #[error(transparent)]
+        ParseInt(#[from] std::num::ParseIntError),
+        #[error(transparent)]
+        Hkdf(#[from] hkdf::InvalidLength),
+        #[error("empty vector file")]
+        EmptyVectorFile,
+        #[error("missing column: {0}")]
+        MissingColumn(String),
+        #[error("short row")]
+        ShortRow,
+    }
 
-    type TestResult = Result<(), Box<dyn Error>>;
+    type TestResult = Result<(), TestError>;
 
     #[test]
     fn block_admission_runs_before_v2_typed_decode() -> TestResult {
@@ -82,7 +110,7 @@ mod vector_tests {
     }
 
     impl Csv {
-        fn load(name: &str) -> Result<Self, Box<dyn Error>> {
+        fn load(name: &str) -> Result<Self, TestError> {
             let path = format!("{}/tests/data/bip324/{name}", env!("CARGO_MANIFEST_DIR"));
             let text = std::fs::read_to_string(path)?;
             let mut lines = text
@@ -90,20 +118,20 @@ mod vector_tests {
                 .map(|line| line.trim_end_matches('\r'))
                 .filter(|line| !line.is_empty())
                 .map(|line| line.split(',').map(str::to_owned).collect::<Vec<_>>());
-            let header = lines.next().ok_or("empty vector file")?;
+            let header = lines.next().ok_or(TestError::EmptyVectorFile)?;
             Ok(Self {
                 header,
                 rows: lines.collect(),
             })
         }
 
-        fn value<'a>(&self, row: &'a [String], name: &str) -> Result<&'a str, Box<dyn Error>> {
+        fn value<'a>(&self, row: &'a [String], name: &str) -> Result<&'a str, TestError> {
             let column = self
                 .header
                 .iter()
                 .position(|field| field == name)
-                .ok_or_else(|| format!("missing column {name}"))?;
-            Ok(row.get(column).ok_or("short row")?.as_str())
+                .ok_or_else(|| TestError::MissingColumn(name.to_owned()))?;
+            Ok(row.get(column).ok_or(TestError::ShortRow)?.as_str())
         }
     }
 
@@ -115,7 +143,7 @@ mod vector_tests {
         receiver: &mut Session,
         aad: &[u8],
         mut packet: Vec<u8>,
-    ) -> Result<(bool, Vec<u8>), Box<dyn Error>> {
+    ) -> Result<(bool, Vec<u8>), TestError> {
         let mut field = [0u8; LENGTH_FIELD_LEN];
         field.copy_from_slice(&packet[..LENGTH_FIELD_LEN]);
         let length = receiver.recv.decrypt_length(field);
@@ -146,10 +174,10 @@ mod vector_tests {
                 Vec::<u8>::from_hex(value("in_contents")?)?.repeat(value("in_multiply")?.parse()?);
             let aad = Vec::<u8>::from_hex(value("in_aad")?)?;
             let ignore = value("in_ignore")? == "1";
-            let hex32 = |name: &str| -> Result<[u8; 32], Box<dyn Error>> {
+            let hex32 = |name: &str| -> Result<[u8; 32], TestError> {
                 Ok(<[u8; 32]>::from_hex(value(name)?)?)
             };
-            let hex16 = |name: &str| -> Result<[u8; 16], Box<dyn Error>> {
+            let hex16 = |name: &str| -> Result<[u8; 16], TestError> {
                 Ok(<[u8; 16]>::from_hex(value(name)?)?)
             };
 

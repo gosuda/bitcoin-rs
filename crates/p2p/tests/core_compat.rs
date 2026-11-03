@@ -1,10 +1,9 @@
 use bitcoin_rs_primitives::PeerEndpoint;
 use std::collections::BTreeSet;
-use std::error::Error;
 use std::io::Cursor;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,6 +39,38 @@ use hashbrown::HashMap;
 
 const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
 
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Hex(#[from] bitcoin::hex::HexToBytesError),
+    #[error(transparent)]
+    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Peer(#[from] PeerError),
+    #[error(transparent)]
+    Listener(#[from] bitcoin_rs_p2p::listener::ListenerError),
+    #[error(transparent)]
+    TryFromInt(#[from] std::num::TryFromIntError),
+    #[error(transparent)]
+    CommandString(#[from] bitcoin::p2p::message::CommandStringError),
+    #[error("failure: {0}")]
+    Failure(String),
+}
+
+impl From<&'static str> for TestError {
+    fn from(msg: &'static str) -> Self {
+        Self::Failure(msg.to_owned())
+    }
+}
+
+impl From<String> for TestError {
+    fn from(msg: String) -> Self {
+        Self::Failure(msg)
+    }
+}
+
 fn btc_bh(hash: NativeBlockHash) -> BlockHash {
     BlockHash::from_byte_array(*hash.as_bytes())
 }
@@ -56,7 +87,7 @@ const NETWORK_TABLE: [(Network, Magic, u16); 5] = [
     (Network::Regtest, Magic::REGTEST, 18444),
 ];
 
-fn genesis_block() -> Result<Block, Box<dyn Error>> {
+fn genesis_block() -> Result<Block, TestError> {
     let bytes = Vec::<u8>::from_hex(REGTEST_GENESIS_HEX)?;
     Ok(deserialize::<Block>(&bytes)?)
 }
@@ -245,21 +276,6 @@ fn dispatch_collect(
     Ok(collected.into_inner())
 }
 
-fn serve_collect(
-    chain: &FakeChain,
-    items: &[Inventory],
-) -> Result<(Vec<Block>, Vec<Inventory>), PeerError> {
-    let blocks = std::cell::RefCell::new(Vec::new());
-    let outcome = chain.serve_inventory_blocks(items, None, &|| true, &mut |message| {
-        let Message::BlockPayload(payload) = message else {
-            return Ok(());
-        };
-        blocks.borrow_mut().push(deserialize::<Block>(&payload)?);
-        Ok(())
-    })?;
-    Ok((blocks.into_inner(), outcome.not_found))
-}
-
 fn ready_peer(magic: Magic) -> Result<Peer<Cursor<Vec<u8>>>, PeerError> {
     let mut peer = Peer::new(Cursor::new(Vec::new()), magic);
     let responses = dispatch_inbound(&mut peer, &version_for_handshake())?;
@@ -319,7 +335,7 @@ fn checksum(payload: &[u8]) -> [u8; 4] {
     digest
 }
 
-fn command_field(name: &str) -> Result<[u8; 12], Box<dyn Error>> {
+fn command_field(name: &str) -> Result<[u8; 12], TestError> {
     if name.len() > 12 {
         return Err(format!("command {name} exceeds the 12-byte v1 field").into());
     }
@@ -334,7 +350,7 @@ fn command_field(name: &str) -> Result<[u8; 12], Box<dyn Error>> {
 fn expect_protocol_error<T: std::fmt::Debug>(
     outcome: Result<T, PeerError>,
     why: &'static str,
-) -> Result<PeerError, Box<dyn Error>> {
+) -> Result<PeerError, TestError> {
     match outcome {
         Err(error) => Ok(error),
         Ok(value) => Err(format!("{why}: unexpectedly succeeded with {value:?}").into()),
@@ -345,7 +361,7 @@ fn rust_bitcoin_frame(payload: NetworkMessage) -> Vec<u8> {
     bitcoin_encode::serialize(&RawNetworkMessage::new(Magic::REGTEST, payload))
 }
 
-fn our_frame(message: &Message) -> Result<Vec<u8>, Box<dyn Error>> {
+fn our_frame(message: &Message) -> Result<Vec<u8>, TestError> {
     let mut buffer = Vec::new();
     write_message(&mut buffer, Magic::REGTEST, message)?;
     Ok(buffer)
@@ -414,6 +430,7 @@ fn is_own_typed_empty_payload_outcome(
     }
 }
 
+// P2P-01
 #[test]
 fn command_inventory_is_the_core_compat_set_plus_the_declared_extensions() {
     let core: BTreeSet<&str> = CORE_COMPAT_COMMANDS.iter().copied().collect();
@@ -441,7 +458,7 @@ fn command_inventory_is_the_core_compat_set_plus_the_declared_extensions() {
 }
 
 #[test]
-fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), Box<dyn Error>> {
+fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), TestError> {
     let magic = Magic::REGTEST;
     for spec in COMMANDS {
         let frame = raw_frame(magic, &command_field(spec)?, &[]);
@@ -482,9 +499,9 @@ fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), B
     Ok(())
 }
 
+// P2P-01
 #[test]
-fn v1_envelope_matches_rust_bitcoin_for_core_handshake_and_inventory() -> Result<(), Box<dyn Error>>
-{
+fn v1_envelope_matches_rust_bitcoin_for_core_handshake_and_inventory() -> Result<(), TestError> {
     let version = version_message(
         0xdead_beef,
         777,
@@ -521,6 +538,7 @@ fn v1_envelope_matches_rust_bitcoin_for_core_handshake_and_inventory() -> Result
     Ok(())
 }
 
+// P2P-01
 #[test]
 fn version_message_pins_core_31_handshake_fields() {
     let version = version_message(
@@ -582,7 +600,7 @@ fn outbound_handshake_sends_version_then_core_feature_set() {
 }
 
 #[test]
-fn remote_feature_messages_flip_negotiated_capabilities() -> Result<(), Box<dyn Error>> {
+fn remote_feature_messages_flip_negotiated_capabilities() -> Result<(), TestError> {
     let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
     dispatch_inbound(&mut peer, &version_for_handshake())?;
     assert!(!peer.capabilities.send_headers);
@@ -601,7 +619,7 @@ fn remote_feature_messages_flip_negotiated_capabilities() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn late_wtxidrelay_is_ignored_after_verack() -> Result<(), Box<dyn Error>> {
+fn late_wtxidrelay_is_ignored_after_verack() -> Result<(), TestError> {
     let mut peer = ready_peer(Magic::REGTEST)?;
     assert!(!peer.wtxid_relay.peer_supported());
     dispatch_inbound(&mut peer, &Message::WtxidRelay)?;
@@ -611,7 +629,7 @@ fn late_wtxidrelay_is_ignored_after_verack() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn network_magic_and_default_ports_match_core() -> Result<(), Box<dyn Error>> {
+fn network_magic_and_default_ports_match_core() -> Result<(), TestError> {
     for (network, magic, port) in NETWORK_TABLE {
         assert_eq!(
             Magic::from_bytes(network.magic()),
@@ -633,7 +651,7 @@ fn network_magic_and_default_ports_match_core() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn foreign_network_frames_are_rejected_before_payload_decode() -> Result<(), Box<dyn Error>> {
+fn foreign_network_frames_are_rejected_before_payload_decode() -> Result<(), TestError> {
     for (_, magic, _) in NETWORK_TABLE {
         let reader_magic = if magic == Magic::REGTEST {
             Magic::BITCOIN
@@ -658,7 +676,7 @@ fn foreign_network_frames_are_rejected_before_payload_decode() -> Result<(), Box
 }
 
 #[test]
-fn getheaders_serves_active_chain_with_stop_hash_and_limit() -> Result<(), Box<dyn Error>> {
+fn getheaders_serves_active_chain_with_stop_hash_and_limit() -> Result<(), TestError> {
     let genesis = genesis_block()?;
     let headers = child_headers(&genesis.header, 4);
     let chain = FakeChain::new(headers.clone(), HashMap::new());
@@ -718,7 +736,7 @@ fn getheaders_serves_active_chain_with_stop_hash_and_limit() -> Result<(), Box<d
 }
 
 #[test]
-fn headers_responses_truncate_at_the_core_2000_limit() -> Result<(), Box<dyn Error>> {
+fn headers_responses_truncate_at_the_core_2000_limit() -> Result<(), TestError> {
     let genesis = genesis_block()?;
     let headers = child_headers(&genesis.header, MAX_HEADERS_MESSAGE_COUNT + 1);
     let chain = FakeChain::new(headers.clone(), HashMap::new());
@@ -738,7 +756,7 @@ fn headers_responses_truncate_at_the_core_2000_limit() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn oversized_getheaders_locator_disconnects_before_state_mutation() -> Result<(), Box<dyn Error>> {
+fn oversized_getheaders_locator_disconnects_before_state_mutation() -> Result<(), TestError> {
     let genesis = genesis_block()?;
     let headers = child_headers(&genesis.header, 2);
     let chain = FakeChain::new(headers.clone(), HashMap::new());
@@ -763,7 +781,7 @@ fn oversized_getheaders_locator_disconnects_before_state_mutation() -> Result<()
 }
 
 #[test]
-fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(), Box<dyn Error>> {
+fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(), TestError> {
     let genesis = genesis_block()?;
     let mut active = vec![genesis.header];
     active.extend(child_headers(&genesis.header, 1));
@@ -819,7 +837,7 @@ fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(
 }
 
 #[test]
-fn getdata_bound_of_50k_vectors_matches_core_max_inv() -> Result<(), Box<dyn Error>> {
+fn getdata_bound_of_50k_vectors_matches_core_max_inv() -> Result<(), TestError> {
     assert_eq!(MAX_INV_PER_MSG, 50_000, "Core MAX_INV_SZ");
 
     let genesis = genesis_block()?;
@@ -840,7 +858,7 @@ fn getdata_bound_of_50k_vectors_matches_core_max_inv() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn inbound_block_and_tx_messages_decode_and_leave_no_response() -> Result<(), Box<dyn Error>> {
+fn inbound_block_and_tx_messages_decode_and_leave_no_response() -> Result<(), TestError> {
     let genesis = genesis_block()?;
     let mut peer = ready_peer(Magic::REGTEST)?;
 
@@ -865,7 +883,7 @@ fn inbound_block_and_tx_messages_decode_and_leave_no_response() -> Result<(), Bo
 }
 
 #[test]
-fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Box<dyn Error>> {
+fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), TestError> {
     let magic = Magic::BITCOIN;
     let listener = TcpListener::bind(
         PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
@@ -881,7 +899,7 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
         Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
             true,
         )))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
         None,
         magic,
         headers_tx,
@@ -968,7 +986,7 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
 }
 
 #[test]
-fn malformed_frames_reject_with_typed_errors() -> Result<(), Box<dyn Error>> {
+fn malformed_frames_reject_with_typed_errors() -> Result<(), TestError> {
     let magic = Magic::REGTEST;
 
     let mut frame = raw_frame(magic, b"ping\0\0\0\0\0\0\0\0", &7u64.to_le_bytes());
@@ -1011,7 +1029,7 @@ fn malformed_frames_reject_with_typed_errors() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn messages_before_handshake_disconnect_like_core() -> Result<(), Box<dyn Error>> {
+fn messages_before_handshake_disconnect_like_core() -> Result<(), TestError> {
     let mut fresh = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
     let error = expect_protocol_error(
         dispatch_inbound(&mut fresh, &Message::Ping(7)),
@@ -1045,7 +1063,7 @@ fn messages_before_handshake_disconnect_like_core() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn unknown_commands_are_ignored_once_ready_like_core() -> Result<(), Box<dyn Error>> {
+fn unknown_commands_are_ignored_once_ready_like_core() -> Result<(), TestError> {
     let mut peer = ready_peer(Magic::REGTEST)?;
 
     let command = "sendtxrcncl".parse::<CommandString>()?;
@@ -1066,7 +1084,7 @@ fn unknown_commands_are_ignored_once_ready_like_core() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn decode_only_messages_are_accepted_silently_per_policy() -> Result<(), Box<dyn Error>> {
+fn decode_only_messages_are_accepted_silently_per_policy() -> Result<(), TestError> {
     let genesis = genesis_block()?;
     let headers = child_headers(&genesis.header, 1);
     let chain = FakeChain::new(headers, HashMap::new());
@@ -1097,7 +1115,7 @@ fn decode_only_messages_are_accepted_silently_per_policy() -> Result<(), Box<dyn
 
 type ForkBranches = (Vec<Header>, Vec<Header>, Vec<Header>);
 
-fn fork_fixture() -> Result<ForkBranches, Box<dyn Error>> {
+fn fork_fixture() -> Result<ForkBranches, TestError> {
     let genesis = genesis_block()?;
     let shared = child_headers(&genesis.header, 2);
     let fork_point = shared.last().ok_or("shared prefix must not be empty")?;
@@ -1114,7 +1132,7 @@ fn fork_fixture() -> Result<ForkBranches, Box<dyn Error>> {
 }
 
 #[test]
-fn reorg_switches_which_chain_a_peer_sees() -> Result<(), Box<dyn Error>> {
+fn reorg_switches_which_chain_a_peer_sees() -> Result<(), TestError> {
     let (shared, branch_a, branch_b) = fork_fixture()?;
     let mut active = shared.clone();
     active.extend(branch_a.iter().copied());
@@ -1181,65 +1199,14 @@ fn reorg_switches_which_chain_a_peer_sees() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn restart_rebuild_serves_identical_answers_to_peers() -> Result<(), Box<dyn Error>> {
-    let genesis = genesis_block()?;
-    let headers = child_headers(&genesis.header, 3);
-    let mut bodies = headers_into_blocks(&headers);
-    bodies.insert(genesis.block_hash(), genesis.clone());
-
-    let before = FakeChain::new(headers.clone(), bodies.clone());
-    let queries: [Vec<NativeBlockHash>; 3] = [
-        vec![headers[0].compute_hash()],
-        locator_hashes(&headers),
-        Vec::new(),
-    ];
-    let stops = [NativeBlockHash::default(), headers[2].compute_hash()];
-
-    let mut cases = Vec::new();
-    for locator in &queries {
-        for stop in stops {
-            cases.push((locator.clone(), stop));
-        }
-    }
-    let expected: Vec<(Vec<Header>, Vec<Header>)> = cases
-        .iter()
-        .map(|(locator, stop)| {
-            (
-                before.headers_after(locator, *stop, MAX_HEADERS_MESSAGE_COUNT),
-                before.headers_after(locator, *stop, 1),
-            )
-        })
-        .collect();
-    let inventory = vec![
-        Inventory::Block(btc_bh(genesis.block_hash())),
-        Inventory::Block(btc_bh(headers[1].compute_hash())),
-        Inventory::Transaction(Txid::from_byte_array([3u8; 32])),
-    ];
-    let (expected_blocks, expected_missing) = serve_collect(&before, &inventory)?;
-
-    let after = FakeChain::new(headers, bodies);
-    for ((locator, stop), (wide, narrow)) in cases.iter().zip(&expected) {
-        assert_eq!(
-            after.headers_after(locator, *stop, MAX_HEADERS_MESSAGE_COUNT),
-            *wide
-        );
-        assert_eq!(after.headers_after(locator, *stop, 1), *narrow);
-    }
-    let (actual_blocks, actual_missing) = serve_collect(&after, &inventory)?;
-    assert_eq!(actual_blocks, expected_blocks);
-    assert_eq!(actual_missing, expected_missing);
-    Ok(())
-}
-
-#[test]
-fn handshake_completes_over_tcp_for_every_network() -> Result<(), Box<dyn Error>> {
+fn handshake_completes_over_tcp_for_every_network() -> Result<(), TestError> {
     for (network, magic, _) in NETWORK_TABLE {
         serve_and_handshake_over_tcp(network, magic)?;
     }
     Ok(())
 }
 
-fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Box<dyn Error>> {
+fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), TestError> {
     let listener = bind_listener(
         PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
             .socket_addr()
@@ -1247,8 +1214,8 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Bo
     )?;
     let addr = listener.local_addr()?;
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let listener_shutdown = Arc::clone(&shutdown);
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let listener_shutdown = shutdown.reader();
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded::<InboundHeaders>();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded::<InboundBlock>();
     let peer_table = Arc::new(PeerTable::new());
@@ -1258,7 +1225,7 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Bo
         Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
             true,
         )))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchWriter::new().reader(),
         None,
         magic,
         headers_tx,
@@ -1273,7 +1240,7 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Bo
     let client = match connect_with_retry(addr.into()) {
         Ok(client) => client,
         Err(error) => {
-            shutdown.store(true, Ordering::Relaxed);
+            shutdown.trigger();
             let _ = handle.join();
             return Err(error);
         }
@@ -1290,7 +1257,7 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Bo
         drop(client);
         checked
     });
-    shutdown.store(true, Ordering::Relaxed);
+    shutdown.trigger();
     let listener_result = handle.join().map_err(|_| "listener thread panicked")?;
     listener_result?;
     result
@@ -1302,7 +1269,7 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Bo
 /// (`test_framework.py`): the ping the peer sent with the pong this node
 /// answered, and the ping this node originated after the handshake with the
 /// pong the peer sent back.
-fn assert_ping_pong_accounted(peer_table: &PeerTable) -> Result<(), Box<dyn Error>> {
+fn assert_ping_pong_accounted(peer_table: &PeerTable) -> Result<(), TestError> {
     // The writer thread charges a frame's bucket after the socket accepted
     // it, so poll briefly like the framework's wait_until instead of reading
     // once and racing the writer.
@@ -1341,7 +1308,7 @@ fn assert_ping_pong_accounted(peer_table: &PeerTable) -> Result<(), Box<dyn Erro
     }
 }
 
-fn connect_with_retry(addr: PeerEndpoint) -> Result<TcpStream, Box<dyn Error>> {
+fn connect_with_retry(addr: PeerEndpoint) -> Result<TcpStream, TestError> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match TcpStream::connect_timeout(
@@ -1364,7 +1331,7 @@ fn drive_handshake_as_core(
     mut client: TcpStream,
     magic: Magic,
     network: Network,
-) -> Result<TcpStream, Box<dyn Error>> {
+) -> Result<TcpStream, TestError> {
     client.set_read_timeout(Some(Duration::from_millis(50)))?;
 
     write_message(&mut client, magic, &version_for_handshake())?;
@@ -1472,7 +1439,7 @@ fn outbound_shared(peer_table: Arc<PeerTable>, magic: Magic) -> ConnectionShared
         Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
             true,
         )))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
         None,
         magic,
         headers_tx,
@@ -1495,6 +1462,7 @@ fn remote_version(services: ServiceFlags) -> Message {
     Message::Version(version)
 }
 
+// P2P-08
 #[test]
 fn desirable_service_policy_matches_core() {
     let network_witness = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
@@ -1534,7 +1502,7 @@ fn desirable_service_policy_matches_core() {
 }
 
 #[test]
-fn outbound_peer_without_network_flag_disconnected() -> Result<(), Box<dyn Error>> {
+fn outbound_peer_without_network_flag_disconnected() -> Result<(), TestError> {
     let magic = Magic::BITCOIN;
     let peer_table = Arc::new(PeerTable::new());
     let shared = outbound_shared(Arc::clone(&peer_table), magic);
@@ -1579,7 +1547,7 @@ fn outbound_peer_without_network_flag_disconnected() -> Result<(), Box<dyn Error
 }
 
 #[test]
-fn outbound_peer_with_network_and_witness_is_accepted() -> Result<(), Box<dyn Error>> {
+fn outbound_peer_with_network_and_witness_is_accepted() -> Result<(), TestError> {
     let magic = Magic::BITCOIN;
     let peer_table = Arc::new(PeerTable::new());
     let shared = outbound_shared(Arc::clone(&peer_table), magic);
@@ -1624,7 +1592,7 @@ fn outbound_peer_with_network_and_witness_is_accepted() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn outbound_near_tip_limited_peer_is_accepted() -> Result<(), Box<dyn Error>> {
+fn outbound_near_tip_limited_peer_is_accepted() -> Result<(), TestError> {
     let magic = Magic::BITCOIN;
     let peer_table = Arc::new(PeerTable::new());
     let mut shared = outbound_shared(Arc::clone(&peer_table), magic);

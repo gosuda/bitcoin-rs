@@ -1,4 +1,3 @@
-//! Peer-eligibility and budget policy for the block download window.
 use std::time::Duration;
 
 use bitcoin::p2p::ServiceFlags;
@@ -22,12 +21,9 @@ pub(super) const NETWORK_LIMITED: u64 = 1_u64 << 10;
 pub(crate) const PENDING_BUDGET: usize = 256;
 pub(crate) const RECEIVED_BLOCK_TIMEOUT: Duration = Duration::from_mins(1);
 pub(crate) const RECEIVED_BLOCK_BUDGET: usize = 256;
-/// Mainnet-oriented block-size estimate for sizing the in-flight request window.
 pub(crate) const PENDING_BLOCK_BYTE_ESTIMATE: usize = 2 * 1024 * 1024;
 const PENDING_BYTE_BUDGET: usize = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIMATE;
 const RECEIVED_BLOCK_BYTE_BUDGET: usize = PENDING_BYTE_BUDGET;
-/// Consensus-maximum serialized block size in bytes: a witness-serialized
-/// block cannot exceed its 4,000,000 weight, so no valid block is larger.
 const MAX_SERIALIZED_BLOCK_SIZE: usize = crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
 const _: () = assert!(
     RECEIVED_BLOCK_BYTE_BUDGET >= RECEIVED_BLOCK_BUDGET / 2 * MAX_SERIALIZED_BLOCK_SIZE,

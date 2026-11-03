@@ -44,3 +44,82 @@ fn is_closed_for_recovery_tracks_the_fatal_close() {
         "the same closure still refuses every later transition"
     );
 }
+
+#[test]
+fn shutdown_reader_unblocks_select_on_request_shutdown() {
+    let chainstate = crate::test_fixtures::handles(
+        bitcoin_rs_primitives::Network::Regtest,
+        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+    );
+    let reader = chainstate.shutdown_reader();
+    let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let thread = std::thread::spawn(move || {
+        let _ = ready_tx.send(());
+        crossbeam_channel::select! {
+            recv(reader.closed()) -> _ => {
+                let _ = tx.send(true);
+            }
+        }
+    });
+    assert!(ready_rx.recv_timeout(Duration::from_secs(5)).is_ok());
+    chainstate.request_shutdown();
+    let unblocked = rx.recv_timeout(Duration::from_secs(5));
+    assert!(
+        unblocked.is_ok(),
+        "select did not unblock on request_shutdown"
+    );
+    let _ = thread.join();
+}
+
+#[test]
+fn closed_for_recovery_reader_unblocks_select_on_fail_closed() {
+    let chainstate = crate::test_fixtures::handles(
+        bitcoin_rs_primitives::Network::Regtest,
+        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+    );
+    let reader = chainstate.closed_for_recovery_reader();
+    let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let thread = std::thread::spawn(move || {
+        let _ = ready_tx.send(());
+        crossbeam_channel::select! {
+            recv(reader.closed()) -> _ => {
+                let _ = tx.send(true);
+            }
+        }
+    });
+    assert!(ready_rx.recv_timeout(Duration::from_secs(5)).is_ok());
+    chainstate.fail_closed_for_recovery();
+    let unblocked = rx.recv_timeout(Duration::from_secs(5));
+    assert!(
+        unblocked.is_ok(),
+        "select did not unblock on fail_closed_for_recovery"
+    );
+    let _ = thread.join();
+}
+
+// ARCH-09
+#[test]
+fn shutdown_hooks_run_without_the_tip_gate() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let chainstate = Arc::new(crate::test_fixtures::handles(
+        bitcoin_rs_primitives::Network::Regtest,
+        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+    ));
+    let gate_free = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&gate_free);
+    let owner = Arc::clone(&chainstate);
+    let _hook = chainstate.shutdown_reader().on_cancel(move || {
+        observed.store(
+            owner.tip_notification.gate.try_lock().is_some(),
+            Ordering::SeqCst,
+        );
+    });
+    chainstate.request_shutdown();
+    assert!(
+        gate_free.load(Ordering::SeqCst),
+        "cancellation hooks must run without the tip gate held"
+    );
+}

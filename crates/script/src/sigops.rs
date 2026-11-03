@@ -1,41 +1,28 @@
-//! Native sigop counting over scripts, transactions, and blocks.
-
-use bitcoin_rs_primitives::Tx;
+use bitcoin_rs_primitives::{Tx, Witness};
 
 use crate::script::{EarlyEndOfScript, Instruction, instructions, is_p2wpkh, is_p2wsh, opcode};
 
 fn count_legacy(script: &[u8]) -> u32 {
-    count_script(script, false)
-}
-
-pub fn count_accurate(script: &[u8]) -> u32 {
-    count_script(script, true)
-}
-
-pub fn count_segwit(script: &[u8], witness: &[Vec<u8>]) -> u32 {
-    if is_p2wpkh(script) {
-        return 1;
-    }
-    if !is_p2wsh(script) {
-        return 0;
-    }
-    witness
-        .last()
-        .map_or(0, |witness_script| count_accurate(witness_script))
-}
-
-pub fn count_tx_legacy(tx: &Tx) -> u32 {
     let mut count = 0_u32;
-    for input in &tx.inputs {
-        count = count.saturating_add(count_legacy(&input.script_sig));
-    }
-    for output in &tx.outputs {
-        count = count.saturating_add(count_legacy(&output.script_pubkey));
+    for instruction in instructions(script) {
+        match instruction {
+            Ok(Instruction::Op(op)) => match op {
+                opcode::OP_CHECKSIG | opcode::OP_CHECKSIGVERIFY => {
+                    count = count.saturating_add(1);
+                }
+                opcode::OP_CHECKMULTISIG | opcode::OP_CHECKMULTISIGVERIFY => {
+                    count = count.saturating_add(20);
+                }
+                _ => {}
+            },
+            Ok(Instruction::PushBytes(_)) => {}
+            Err(EarlyEndOfScript) => break,
+        }
     }
     count
 }
 
-fn count_script(script: &[u8], accurate: bool) -> u32 {
+pub fn count_accurate(script: &[u8]) -> u32 {
     let mut count = 0_u32;
     let mut pushnum_cache = None;
     for instruction in instructions(script) {
@@ -46,10 +33,8 @@ fn count_script(script: &[u8], accurate: bool) -> u32 {
                     pushnum_cache = None;
                 }
                 opcode::OP_CHECKMULTISIG | opcode::OP_CHECKMULTISIGVERIFY => {
-                    match (accurate, pushnum_cache) {
-                        (true, Some(keys)) => count = count.saturating_add(u32::from(keys)),
-                        _ => count = count.saturating_add(20),
-                    }
+                    let keys = pushnum_cache.map_or(20, u32::from);
+                    count = count.saturating_add(keys);
                     pushnum_cache = None;
                 }
                 other => pushnum_cache = opcode::decode_pushnum(other),
@@ -57,6 +42,27 @@ fn count_script(script: &[u8], accurate: bool) -> u32 {
             Ok(Instruction::PushBytes(_)) => pushnum_cache = None,
             Err(EarlyEndOfScript) => break,
         }
+    }
+    count
+}
+
+pub fn count_segwit(script: &[u8], witness: &Witness) -> u32 {
+    if is_p2wpkh(script) {
+        return 1;
+    }
+    if !is_p2wsh(script) {
+        return 0;
+    }
+    witness.last().map_or(0, count_accurate)
+}
+
+pub fn count_tx_legacy(tx: &Tx) -> u32 {
+    let mut count = 0_u32;
+    for input in &tx.inputs {
+        count = count.saturating_add(count_legacy(&input.script_sig));
+    }
+    for output in &tx.outputs {
+        count = count.saturating_add(count_legacy(&output.script_pubkey));
     }
     count
 }
@@ -142,12 +148,16 @@ mod tests {
             );
 
             let p2wsh: Vec<u8> = [vec![0x00, 0x20], vec![7; 32]].concat();
-            assert_eq!(count_segwit(&p2wsh, &[script]), accurate, "p2wsh: {name}");
+            assert_eq!(
+                count_segwit(&p2wsh, &Witness::from_stack(vec![script])),
+                accurate,
+                "p2wsh: {name}"
+            );
         }
 
         let p2wpkh: Vec<u8> = [vec![0x00, 0x14], vec![7; 20]].concat();
-        assert_eq!(count_segwit(&p2wpkh, &[]), 1);
-        assert_eq!(count_segwit(&[opcode::OP_DUP], &[]), 0);
+        assert_eq!(count_segwit(&p2wpkh, &Witness::new()), 1);
+        assert_eq!(count_segwit(&[opcode::OP_DUP], &Witness::new()), 0);
     }
 
     #[test]

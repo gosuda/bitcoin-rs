@@ -1,12 +1,13 @@
-//! Consumer-boundary tests, grouped into one integration binary.
-
+mod adversarial_consensus;
 mod block_facts_borrowed;
 mod coinbase_amount;
 mod kernel_block_parity;
+mod kernel_boundary_parity;
 mod kernel_vector_parity;
 mod overhaul_parse_parity;
 mod overhaul_prepared_inputs;
 mod shared_sighash;
+mod support;
 mod validation_engine;
 mod vectors;
 mod witness_commitment_rules;

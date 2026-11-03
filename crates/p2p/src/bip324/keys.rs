@@ -1,6 +1,3 @@
-//! The BIP324 key schedule: the `ElligatorSwift` ECDH secret, its HKDF-SHA256
-//! expansion, and the assignment of keys to one side of the connection.
-
 use bitcoin::p2p::Magic;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::secp256k1::ellswift::{ElligatorSwift, ElligatorSwiftParty};
@@ -9,7 +6,6 @@ use sha2::Sha256;
 
 use super::packet::{RecvCipher, SendCipher};
 
-/// Bytes in a garbage terminator.
 pub(crate) const GARBAGE_TERMINATOR_LEN: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,11 +42,6 @@ pub(crate) struct KeyMaterial {
 }
 
 impl KeyMaterial {
-    /// HKDF-SHA256 over `shared_secret`, salted with `"bitcoin_v2_shared_secret" ||
-    /// magic` and expanded once per BIP324 label.
-    ///
-    /// The magic binds the session to the network, custom magic included. Each output
-    /// is 32 bytes, far below HKDF-SHA256's 8160-byte limit.
     pub(crate) fn derive(
         shared_secret: &[u8; 32],
         magic: Magic,

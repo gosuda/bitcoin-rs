@@ -28,7 +28,7 @@ fn unproven_addresses_need_a_successful_outbound_handshake() {
     );
     assert!(!book.state.lock().stored.records[0].tried);
     book.queued(addr(1));
-    book.attempted(addr(1), true, 10_001);
+    book.attempt_failed(addr(1), 10_001);
     assert_eq!(book.select(&[], &[], 10_002, u64::MAX, |_| true), None);
     book.succeeded(addr(1), 9, 10_003);
     assert!(book.state.lock().stored.records[0].tried);
@@ -189,7 +189,7 @@ fn scoped_network_books_and_stale_temporary_files_are_independent() {
     assert_eq!(AddressBook::open(Some(base), [2; 4], false, None).len(), 1);
     let stale = path.with_extension(format!("tmp-{}", std::process::id()));
     fs::write(&stale, b"operator-owned stale temporary file").expect("fixture");
-    book.attempted(addr(1), true, 10_001);
+    book.attempt_failed(addr(1), 10_001);
     book.save();
     assert_ne!(fs::read(&path).expect("read"), original);
     assert_eq!(
@@ -580,7 +580,7 @@ fn pending_attempts_keep_endpoint_and_network_group_ownership_until_released() {
         })
         .expect("two same-group endpoints");
     book.queued(addr(1));
-    book.attempted(addr(1), true, 10_001);
+    book.attempt_failed(addr(1), 10_001);
     assert_eq!(book.pending_count_excluding(&[]), 1);
     assert_eq!(book.pending_count_excluding(&[addr(1)]), 0);
     assert_eq!(
@@ -708,20 +708,20 @@ fn placement_matches_68_unmodified_core_vectors() {
         assert_eq!(u64::try_from(new).expect("bucket"), row["new_bucket"]);
         assert_eq!(u64::try_from(tried).expect("bucket"), row["tried_bucket"]);
         assert_eq!(
-            u64::try_from(bucket_position(&secret, addr, true, new)).expect("position"),
+            u64::try_from(new_bucket_position(&secret, addr, new)).expect("position"),
             row["new_position"]
         );
         assert_eq!(
-            u64::try_from(bucket_position(&secret, addr, false, tried)).expect("position"),
+            u64::try_from(tried_bucket_position(&secret, addr, tried)).expect("position"),
             row["tried_position"]
         );
         for bucket in [0, 1, 17, 63] {
             assert_eq!(
-                u64::try_from(bucket_position(&secret, addr, true, bucket)).expect("position"),
+                u64::try_from(new_bucket_position(&secret, addr, bucket)).expect("position"),
                 row[format!("new_pos{bucket}").as_str()]
             );
             assert_eq!(
-                u64::try_from(bucket_position(&secret, addr, false, bucket)).expect("position"),
+                u64::try_from(tried_bucket_position(&secret, addr, bucket)).expect("position"),
                 row[format!("tried_pos{bucket}").as_str()]
             );
         }
@@ -831,13 +831,13 @@ fn global_good_epoch_limits_failures_and_good_keeps_advertised_time() {
             .lock()
             .learn(target(), Some(9), source(1), EPOCH - 1000, EPOCH, 0);
     }
-    book.attempted(target(), true, EPOCH);
+    book.attempt_failed(target(), EPOCH);
     book.unqueue(target());
-    book.attempted(target(), true, EPOCH + 1);
+    book.attempt_failed(target(), EPOCH + 1);
     book.unqueue(target());
     assert_eq!(book.state.lock().stored.records[0].failures, 1);
     book.succeeded(addr(77), 9, EPOCH + 10);
-    book.attempted(target(), true, EPOCH + 12);
+    book.attempt_failed(target(), EPOCH + 12);
     book.unqueue(target());
     assert_eq!(book.state.lock().stored.records[0].failures, 2);
     book.succeeded(target(), 9, EPOCH + 20);
@@ -993,7 +993,7 @@ fn same_layout_restart_retains_all_refs_and_resets_only_runtime_attempt_times() 
             }
         }
     }
-    book.attempted(target(), true, EPOCH);
+    book.attempt_failed(target(), EPOCH);
     book.unqueue(target());
     let (secret, refs) = {
         let manager = book.state.lock();
@@ -1116,7 +1116,7 @@ fn noncounted_manual_or_offline_attempt_updates_try_without_claim_or_failure() {
         .lock()
         .learn(target(), Some(9), source(1), EPOCH - 1000, EPOCH, 0);
     book.state.lock().stored.records[0].failures = 2;
-    book.attempted(target(), false, EPOCH);
+    book.attempted(target(), EPOCH);
     let manager = book.state.lock();
     let entry = &manager.stored.records[0];
     assert_eq!(entry.failures, 2);
@@ -1125,7 +1125,7 @@ fn noncounted_manual_or_offline_attempt_updates_try_without_claim_or_failure() {
     assert!(manager.pending.is_empty());
     assert!(!entry.terrible(EPOCH + 61));
     drop(manager);
-    book.attempted(target(), true, EPOCH + 62);
+    book.attempt_failed(target(), EPOCH + 62);
     assert_eq!(book.state.lock().stored.records[0].failures, 3);
 }
 
@@ -1279,22 +1279,22 @@ fn actual_core_attempt_good_sequence() {
             0,
         );
     }
-    book.attempted(target(), true, EPOCH);
+    book.attempt_failed(target(), EPOCH);
     assert_core_operation(&book.state.lock(), "first-attempt-counted", None);
-    book.attempted(target(), true, EPOCH + 1);
+    book.attempt_failed(target(), EPOCH + 1);
     assert_core_operation(
         &book.state.lock(),
         "repeat-same-good-epoch-not-counted",
         None,
     );
     book.succeeded(other, 0, EPOCH + 10);
-    book.attempted(target(), false, EPOCH + 11);
+    book.attempted(target(), EPOCH + 11);
     assert_core_operation(
         &book.state.lock(),
         "noncounted-attempt-updates-only-try",
         None,
     );
-    book.attempted(target(), true, EPOCH + 12);
+    book.attempt_failed(target(), EPOCH + 12);
     assert_core_operation(&book.state.lock(), "attempt-after-other-good-counted", None);
     book.succeeded(target(), 0, EPOCH + 20);
     assert_core_operation(
@@ -1473,7 +1473,7 @@ fn mapped_alias_manual_health_and_refresh_use_the_known_core_identity() {
     let book = oracle_book();
     book.learn_dns("seed", &[target()], EPOCH - 2000);
     book.state.lock().stored.records[0].failures = 2;
-    book.attempted(alias, false, EPOCH);
+    book.attempted(alias, EPOCH);
     {
         let manager = book.state.lock();
         let entry = &manager.stored.records[0];
@@ -1522,7 +1522,7 @@ fn mapped_alias_pending_claims_are_one_identity_and_release_in_either_form() {
     assert_eq!(book.pending_count_excluding(&[alias]), 0);
     assert_eq!(book.pending_count_excluding(&[target()]), 0);
     assert_eq!(book.select(&[], &[], EPOCH, u64::MAX, |_| true), None);
-    book.attempted(alias, false, EPOCH);
+    book.attempted(alias, EPOCH);
     book.succeeded(alias, 9, EPOCH + 1);
     assert_eq!(
         book.pending_count_excluding(&[]),

@@ -26,7 +26,22 @@ pub enum HeaderAdmission {
         demoted_tip: Option<Hash256>,
     },
     Rejected(ChainError),
-    Refused(Box<dyn core::error::Error + Send + Sync>),
+    Refused(HeaderRefusal),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{cause}")]
+pub struct HeaderRefusal {
+    cause: String,
+}
+
+impl HeaderRefusal {
+    #[must_use]
+    pub fn from_cause(cause: &dyn core::fmt::Display) -> Self {
+        Self {
+            cause: cause.to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -232,6 +247,11 @@ pub fn validate_pow(
     hash: Hash256,
     network: Network,
 ) -> Result<(), ChainError> {
+    if pow::compact_overflows(header.bits) {
+        return Err(ChainError::TargetBitsOverflow {
+            bits: header.bits.to_consensus(),
+        });
+    }
     let target = compact_to_target(header.bits);
     if target == ChainWork::ZERO {
         return Err(ChainError::ZeroTarget { hash });
@@ -351,7 +371,7 @@ fn pow_limit_bits(network: Network) -> CompactTarget {
 #[must_use]
 pub fn block_work(header: &BlockHeader) -> ChainWork {
     let target = pow::compact_to_target(header.bits);
-    if target == ChainWork::ZERO {
+    if target == ChainWork::ZERO || pow::compact_overflows(header.bits) {
         return ChainWork::ZERO;
     }
     (!target / (target + ChainWork::from(1u32))) + ChainWork::from(1u32)
@@ -413,6 +433,14 @@ pub mod pow {
         let negative = mantissa != 0 && bits & 0x0080_0000 != 0;
 
         DecodedCompact { target, negative }
+    }
+
+    #[must_use]
+    pub(crate) fn compact_overflows(bits: CompactTarget) -> bool {
+        let raw = bits.to_consensus();
+        let size = raw >> 24;
+        let word = raw & 0x007f_ffff;
+        word != 0 && (size > 34 || (word > 0xff && size > 33) || (word > 0xffff && size > 32))
     }
 
     #[must_use]
@@ -490,3 +518,9 @@ mod fixture {
 
 #[cfg(test)]
 mod contextual_header_tests;
+
+#[cfg(test)]
+mod compact_overflow_tests;
+
+#[cfg(test)]
+mod retarget_rule_tests;

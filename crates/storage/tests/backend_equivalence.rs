@@ -12,8 +12,6 @@ const RANGE_END_INDEX: usize = 1_500;
 const PREFIX: &[u8] = &[0];
 const SCRIPT_LIVE_KEY_LEN: usize = 43;
 
-/// `ScriptLive` rows are a 43-byte empty-value locator. Other families stay
-/// generic byte stores in this suite.
 fn cf_key(cf: ColumnFamily, counter: u32) -> Vec<u8> {
     if cf == ColumnFamily::ScriptLive {
         let mut key = vec![0_u8; SCRIPT_LIVE_KEY_LEN];
@@ -32,7 +30,7 @@ fn cf_value(cf: ColumnFamily, label: impl AsRef<[u8]>) -> Vec<u8> {
     }
 }
 
-type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+use crate::support::TestResult;
 
 fn run_equivalence_suite<S: KvStore>(store: S) -> Result<[u8; 32], StorageError> {
     insert_rows(&store)?;

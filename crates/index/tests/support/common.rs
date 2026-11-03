@@ -1,4 +1,3 @@
-//! Shared test support: a backend-free `KvStore` over `BTreeMap`.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -24,6 +23,10 @@ pub(crate) struct MemoryStore {
 impl MemoryStore {
     pub(crate) fn count(&self, cf: ColumnFamily) -> usize {
         self.cfs.read()[cf.index()].len()
+    }
+
+    pub(crate) fn arm_fenced_write_failure(&self) {
+        self.fail_next_fenced_write.store(true, Ordering::SeqCst);
     }
 
     pub(crate) fn rows(&self, cf: ColumnFamily) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -204,18 +207,15 @@ impl KvSnapshot for MemorySnapshot {
     }
 }
 
-/// little-endian key order, not watermark contiguity, use this instead of
-/// [`bitcoin_rs_index::IndexWriter::commit_block`].
 pub(crate) fn put_funding_row(
     store: &MemoryStore,
     scripthash: ScriptHash,
     height: u32,
 ) -> Result<(), StorageError> {
-    store.put(
-        ColumnFamily::Funding,
-        &ScriptHashRow::row(scripthash, height).to_db_row(),
-        &[],
-    )
+    let mut row = ScriptHashRow::row(scripthash, height).to_db_row();
+    let offset = bitcoin_rs_index::types::HASH_PREFIX_ROW_SIZE - 4;
+    row[offset..].copy_from_slice(&(!height).to_be_bytes());
+    store.put(ColumnFamily::Funding, &row, &[])
 }
 
 pub(crate) fn put_spending_row(

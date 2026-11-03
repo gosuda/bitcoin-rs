@@ -13,9 +13,8 @@ use crate::convert::typed_to_sonic_omitting_nulls;
 use crate::error::RpcError;
 
 pub(crate) fn getdeploymentinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let params = super::bind_named_params(params, &["blockhash"])?;
-    super::ensure_at_most_params(&params, 1)?;
-    let value = super::params_array(&params)?.first();
+    super::ensure_at_most_params(params, 1)?;
+    let value = super::params_array(params)?.first();
     let hash = match value.filter(|value| !value.is_null()) {
         None => ctx.chain.applied_view().hash(ctx.chain.chain_network),
         Some(value) => {
@@ -39,8 +38,6 @@ pub(crate) fn getdeploymentinfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     at_hash(ctx, hash)
 }
 
-/// One projection shared by RPC and REST; named headers need no block body.
-/// The caller selects its hash from one applied publication or an explicit query.
 pub(crate) fn at_hash(ctx: &Context, hash: Hash256) -> Result<Value, RpcError> {
     let network = ctx.chain.chain_network;
     let tree = ctx.chain.block_tree.read();
@@ -162,7 +159,7 @@ mod tests {
 
     #[test]
     fn native_deployments_share_the_pinned_schema_without_inventing_versionbits()
-    -> anyhow::Result<()> {
+    -> Result<(), crate::test_error::TestError> {
         let mut context = Context::new();
         context.chain.chain_network = Network::Regtest;
         let context = Arc::new(context);
@@ -187,7 +184,7 @@ mod tests {
         assert!(!sonic_rs::to_string(&value)?.contains("null"));
         assert_eq!(
             value,
-            getdeploymentinfo(&context, &json!({"blockhash": typed.hash}))?
+            handler.dispatch("getdeploymentinfo", &json!({"blockhash": typed.hash}))?
         );
         assert_eq!(value, getdeploymentinfo(&context, &json!([null]))?);
         let rest = crate::rest::route(&context, "/rest/deploymentinfo.json", "", true);

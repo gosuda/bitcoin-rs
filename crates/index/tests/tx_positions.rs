@@ -1,4 +1,3 @@
-//! Tests for the persisted transaction-position row values.
 #![allow(clippy::expect_used)]
 
 use crate::support::common;
@@ -6,15 +5,49 @@ use crate::support::common;
 use std::sync::Arc;
 
 use bitcoin_rs_index::types::{TX_POSITION_SIZE, TxPosition, TxPositionValue, U24_MAX};
-use bitcoin_rs_index::{IndexWriter, ScriptHash};
+use bitcoin_rs_index::{
+    IndexCapabilities, IndexWriter, PreparedBatch, PreparedBatchLimits, ScriptHash,
+    SpentCoinScripts,
+};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, consensus_bytes, deserialize,
+    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize,
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use proptest::prelude::*;
 
 use common::MemoryStore;
+
+struct FixtureScripts;
+
+static FIXTURE_SPENT_SCRIPT: [u8; 2] = [0x51, 0x01];
+
+impl SpentCoinScripts for FixtureScripts {
+    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
+        Some(FIXTURE_SPENT_SCRIPT.as_slice())
+    }
+}
+
+fn commit_block(store: &Arc<MemoryStore>, height: u32, body: &[u8]) {
+    let mut writer = IndexWriter::open(Arc::clone(store), 1).expect("open");
+    let header = body.get(..80).expect("header present");
+    let hash = bitcoin_rs_primitives::encode::double_sha256(header).to_le_bytes();
+    let prepared = writer
+        .prepare_block_with_spent_scripts(
+            IndexCapabilities::HISTORICAL,
+            height,
+            hash,
+            body,
+            &FixtureScripts,
+        )
+        .expect("prepare");
+    let mut batch = PreparedBatch::new(PreparedBatchLimits {
+        max_rows: usize::MAX,
+        max_bytes: usize::MAX,
+    });
+    assert!(batch.try_push(prepared).is_ok(), "one block is admitted");
+    writer.commit_forward(batch).expect("commit");
+}
 
 fn header() -> Header {
     Header {
@@ -33,7 +66,15 @@ fn script(tag: u8) -> Vec<u8> {
     bytes
 }
 
-fn tx(seed: u8, outputs: Vec<TxOut>, witness: bool) -> Tx {
+fn tx_legacy(seed: u8, outputs: Vec<TxOut>) -> Tx {
+    tx_with_witness(seed, outputs, Vec::new().into())
+}
+
+fn tx_witness(seed: u8, outputs: Vec<TxOut>) -> Tx {
+    tx_with_witness(seed, outputs, vec![vec![0xab; 71], vec![0xcd; 33]].into())
+}
+
+fn tx_with_witness(seed: u8, outputs: Vec<TxOut>, witness: Witness) -> Tx {
     Tx {
         version: 2,
         lock_time: LockTime::ZERO,
@@ -44,12 +85,7 @@ fn tx(seed: u8, outputs: Vec<TxOut>, witness: bool) -> Tx {
             },
             script_sig: Script::new(),
             sequence: Sequence::MAX,
-            witness: if witness {
-                vec![vec![0xab; 71], vec![0xcd; 33]]
-            } else {
-                Vec::new()
-            }
-            .into(),
+            witness,
         }],
         outputs,
     }
@@ -66,18 +102,10 @@ fn mixed_block() -> Block {
     Block {
         header: header(),
         txs: vec![
-            tx(1, vec![out(script(0x11), 1_000)], false),
-            tx(
-                2,
-                vec![out(script(0x22), 2_000), out(script(0x11), 3_000)],
-                true,
-            ),
-            tx(3, vec![out(script(0x33), 4_000)], true),
-            tx(
-                4,
-                vec![out(script(0x44), 5_000), out(vec![0x6a, 0x01], 0)],
-                false,
-            ),
+            tx_legacy(1, vec![out(script(0x11), 1_000)]),
+            tx_witness(2, vec![out(script(0x22), 2_000), out(script(0x11), 3_000)]),
+            tx_witness(3, vec![out(script(0x33), 4_000)]),
+            tx_legacy(4, vec![out(script(0x44), 5_000), out(vec![0x6a, 0x01], 0)]),
         ],
     }
 }
@@ -97,10 +125,7 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
     let bytes = consensus_bytes(&block);
 
     let store = Arc::new(MemoryStore::default());
-    IndexWriter::open(Arc::clone(&store), 1)
-        .expect("open")
-        .commit_block(0, &bytes)
-        .expect("commit");
+    commit_block(&store, 0, &bytes);
 
     let target = ScriptHash::from_script_bytes(&script(0x11));
 
@@ -110,14 +135,23 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
         .find(|(key, _)| key.starts_with(&target.prefix()))
         .expect("funding row for the target script");
 
-    let positions = TxPositionValue::decode(value).expect("row value decodes");
-    assert_eq!(positions.len(), 2, "two transactions funded this script");
+    let occurrences = bitcoin_rs_index::types::ScriptHistoryOccurrence::decode_all(value)
+        .expect("row value decodes");
+    let funded: Vec<_> = occurrences
+        .iter()
+        .filter(|occurrence| {
+            occurrence.flags & bitcoin_rs_index::types::ScriptHistoryOccurrence::FUNDING != 0
+        })
+        .collect();
+    assert_eq!(funded.len(), 2, "two transactions funded this script");
 
-    for position in positions {
+    for occurrence in funded {
+        let position = occurrence.position;
         let start = usize::try_from(position.offset()).expect("offset fits usize");
         let end = usize::try_from(position.end().expect("end fits u32")).expect("end fits usize");
         let decoded: Tx =
             deserialize(&bytes[start..end]).expect("position slices a whole transaction");
+        assert_eq!(decoded.txid().as_bytes(), &occurrence.txid);
         assert!(
             decoded
                 .outputs
@@ -134,10 +168,7 @@ fn txid_positions_address_their_own_transaction() {
     let bytes = consensus_bytes(&block);
 
     let store = Arc::new(MemoryStore::default());
-    IndexWriter::open(Arc::clone(&store), 1)
-        .expect("open")
-        .commit_block(0, &bytes)
-        .expect("commit");
+    commit_block(&store, 0, &bytes);
 
     let rows = rows_with_values(&store, ColumnFamily::TxConfirmed);
     assert_eq!(rows.len(), block.txs.len());
@@ -158,33 +189,73 @@ fn txid_positions_address_their_own_transaction() {
     }
 }
 
-#[test]
-fn a_partial_position_decodes_to_none() {
-    let value = TxPositionValue::encode(&[TxPosition::new(100, 200), TxPosition::new(300, 400)]);
-    for truncated in 1..value.len() {
-        if truncated % TX_POSITION_SIZE == 0 {
-            continue;
-        }
-        assert!(
-            TxPositionValue::decode(&value[..truncated]).is_none(),
-            "a {truncated}-byte value must not decode"
-        );
-    }
+fn arb_u24() -> impl Strategy<Value = u32> {
+    prop_oneof![
+        Just(0),
+        Just(1),
+        Just(2),
+        Just(U24_MAX - 1),
+        Just(U24_MAX),
+        0..=U24_MAX,
+    ]
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(1024),
+        ..ProptestConfig::default()
+    })]
     #[test]
     fn position_values_round_trip(
-        raw in proptest::collection::vec((0..=U24_MAX, 0..=U24_MAX), 1..32),
+        raw in proptest::collection::vec((arb_u24(), arb_u24()), 1..=32),
+        extra_len in 1_usize..TX_POSITION_SIZE,
+        extra_bytes in proptest::collection::vec(any::<u8>(), TX_POSITION_SIZE..=TX_POSITION_SIZE * 2),
+        flip_pos in any::<usize>(),
+        flip_mask in 1_u8..=255,
     ) {
         let positions = raw
             .iter()
             .map(|(offset, len)| TxPosition::new(*offset, *len))
             .collect::<Vec<_>>();
         let encoded = TxPositionValue::encode(&positions);
-        let decoded = TxPositionValue::decode(&encoded).expect("decodes");
-        prop_assert_eq!(decoded, positions.as_slice());
+        let decoded = TxPositionValue::decode(&encoded);
+        prop_assert_eq!(decoded, Some(positions.as_slice()));
+
+        prop_assert_eq!(TxPositionValue::decode(&[]), None);
+
+        for truncated in 1..encoded.len() {
+            if truncated % TX_POSITION_SIZE != 0 {
+                prop_assert_eq!(
+                    TxPositionValue::decode(&encoded[..truncated]),
+                    None,
+                    "truncated length {} must fail to decode",
+                    truncated
+                );
+            }
+        }
+
+        let mut extended = encoded.clone();
+        extended.extend_from_slice(&extra_bytes[..extra_len]);
+        prop_assert_eq!(
+            TxPositionValue::decode(&extended),
+            None,
+            "extended length {} must fail to decode",
+            extended.len()
+        );
+
+        let flip_idx = flip_pos % encoded.len();
+        let mut flipped = encoded.clone();
+        flipped[flip_idx] ^= flip_mask;
+        if flipped[flip_idx] != encoded[flip_idx] {
+            let res = TxPositionValue::decode(&flipped);
+            if let Some(other) = res {
+                prop_assert_ne!(
+                    other,
+                    positions.as_slice(),
+                    "mutated position bytes must not decode to identical positions"
+                );
+                prop_assert_eq!(other.len(), positions.len());
+            }
+        }
     }
-
-
 }

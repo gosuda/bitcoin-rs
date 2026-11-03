@@ -1,0 +1,13 @@
+# Block wire tokens for structure-aware generation and mutation.
+# Reference: Bitcoin transaction serialization (varint prefixes, BIP144
+# segwit marker/flag, and the 32-bit version and locktime fields).
+version_1="\x01\x00\x00\x00"
+version_2="\x02\x00\x00\x00"
+segwit_flag="\x00\x01"
+locktime_max="\xff\xff\xff\xff"
+sequence_max="\xff\xff\xff\xff"
+compact_1="\x01"
+compact_0="\x00"
+compact_16bit="\xfd\x00\x01"
+compact_32bit="\xfe\x00\x00\x00\x01"
+compact_64bit="\xff\x00\x00\x00\x00\x00\x00\x00\x01"

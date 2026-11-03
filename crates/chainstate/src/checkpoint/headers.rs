@@ -267,14 +267,11 @@ pub(crate) fn read_headers<R: Read + Seek>(
     })
 }
 
-/// Byte bounds resolved before any header is replayed.
 struct ResolvedArtifactSizes {
     active_end: u64,
     side_count: u64,
 }
 
-/// Checks the total length first, reading the side count only when the file
-/// is long enough to hold it, so truncation is a length error.
 fn resolve_artifact_sizes<R: Read + Seek>(
     reader: &mut R,
     expected: &HeaderCheckpointMetadata,

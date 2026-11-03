@@ -2,9 +2,13 @@ use std::io::{IoSlice, Read, Write};
 
 use bytes;
 
+use bitcoin::Transaction;
+use bitcoin::bip152::{
+    BlockTransactions, BlockTransactionsRequest, HeaderAndShortIds, PrefilledTransaction, ShortId,
+};
 use bitcoin::consensus::encode::{self, Decodable};
 use bitcoin::p2p::Magic;
-use bitcoin::p2p::address::AddrV2Message;
+use bitcoin::p2p::address::{AddrV2Message, Address};
 use bitcoin::p2p::message::{CommandString, NetworkMessage};
 use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
 use bitcoin::p2p::message_bloom::{FilterAdd, FilterLoad};
@@ -21,9 +25,6 @@ use thiserror::Error;
 
 use crate::inv::MAX_INV_PER_MSG;
 
-/// `getnetworkinfo.protocolversion`. It is at least the version at which BIP434
-/// `feature` negotiation starts, so a peer that honors our advertisement also
-/// honors the feature handshake.
 pub const PROTOCOL_VERSION: u32 = 70_017;
 
 const _: () = assert!(PROTOCOL_VERSION >= crate::feature::FEATURE_VERSION);
@@ -34,6 +35,14 @@ pub(crate) const MAX_WRITE_BURST: usize = 8;
 pub const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
 
 pub const MAX_LOCATOR_HASHES: usize = 101;
+
+pub const MAX_BLOCK_TX_COUNT: usize = 100_000;
+
+const MIN_TRANSACTION_WIRE_BYTES: usize = 10;
+
+const MIN_PREFILLED_WIRE_BYTES: usize = MIN_TRANSACTION_WIRE_BYTES + 1;
+
+const SHORT_ID_WIRE_BYTES: usize = 6;
 
 pub const MAX_ADDR_MESSAGE_COUNT: usize = 1_000;
 
@@ -80,25 +89,12 @@ pub enum Message {
     WtxidRelay,
     AddrV2(Vec<AddrV2Message>),
     SendAddrV2,
-    /// BIP434 `feature`
     Feature(crate::feature::FeatureAnnouncement),
-    /// BIP331 `sendpackages`
     SendPackages(crate::packages::SendPackages),
-    /// BIP331 `ancpkginfo`
     AncPkgInfo(crate::packages::AncPkgInfo),
-    /// BIP331 `getpkgtxns`
     GetPkgTxns(crate::packages::GetPkgTxns),
-    /// BIP331 `pkgtxns`, typed: the serving side's encode-only variant. The
-    /// decoder never produces it; decode a received frame explicitly with
-    /// [`crate::packages::PkgTxns::decode`].
     PkgTxns(crate::packages::PkgTxns),
-    /// BIP331 `pkgtxns` exactly as received or already serialized.
-    ///
-    /// The decoder produces this variant instead of parsing the transactions, so a
-    /// caller charges the frame against its ingress budget before any decoded `Vec<Tx>`
-    /// exists. Written as a `pkgtxns` command without re-encoding.
     PkgTxnsPayload(bytes::Bytes),
-    /// BIP332 `staletip`
     StaleTip(crate::staletip::StaleTipAnnouncement),
     Unknown {
         command: CommandString,
@@ -245,13 +241,10 @@ pub enum PeerError {
     Varint(#[from] bitcoin_rs_primitives::varint::VarintError),
     #[error("native consensus decode error: {0}")]
     NativeDecode(#[from] bitcoin_rs_primitives::DecodeError),
-    /// BIP434 feature announcement decoding or encoding failed.
     #[error("feature error: {0}")]
     Feature(#[from] crate::feature::FeatureError),
-    /// BIP331 package message decoding or encoding failed.
     #[error("package error: {0}")]
     Package(#[from] crate::packages::PackageError),
-    /// BIP332 stale-tip announcement decoding or encoding failed.
     #[error("staletip error: {0}")]
     StaleTip(#[from] crate::staletip::StaleTipError),
     #[error("invalid command `{0}`")]
@@ -272,22 +265,18 @@ pub enum PeerError {
     DiscouragedDestination(bitcoin_rs_primitives::PeerAddress),
     #[error("banned destination {0}")]
     BannedDestination(bitcoin_rs_primitives::PeerAddress),
-    /// The BIP324 transport failed: a malformed handshake, or a packet that
-    /// is oversized or fails authentication. BIP324 does not authenticate
-    /// peers, so this ends the connection without implicating the peer.
     #[error(transparent)]
     Transport(#[from] crate::transport::TransportFailure),
+    #[error("self-connection detected")]
+    SelfConnection,
 }
 
 impl PeerError {
-    /// Attributes a receive failure to the remote, except I/O, transport failures and a
-    /// frame under another network's magic.
-    ///
-    /// Core closes a transport on a wrong message start without `Misbehaving`, and a
-    /// BIP324 key read by a node with v2 off arrives exactly this way.
     pub(crate) fn inbound(error: Self) -> Self {
         match error {
-            Self::Io(_) | Self::Transport(_) | Self::WrongNetwork { .. } => error,
+            Self::Io(_) | Self::Transport(_) | Self::WrongNetwork { .. } | Self::SelfConnection => {
+                error
+            }
             _ => Self::Incoming(Box::new(error)),
         }
     }
@@ -351,12 +340,10 @@ pub(crate) struct FramedMessage {
 
 enum FrameWire {
     V1([u8; HEADER_LEN]),
-    /// A sealed BIP324 packet, written instead of the header and payload.
     V2(Vec<u8>),
 }
 
 impl FramedMessage {
-    /// A BIP324 packet carrying `payload`.
     pub(crate) const fn sealed(packet: Vec<u8>, payload: bytes::Bytes) -> Self {
         Self {
             wire: FrameWire::V2(packet),
@@ -490,8 +477,6 @@ struct PendingBody {
 }
 
 impl V1Receiver {
-    /// A receiver whose first header already holds `prefix`: the bytes a
-    /// BIP324 responder read before it recognized a v1 peer.
     pub(crate) fn with_prefix(prefix: &[u8]) -> Self {
         let mut receiver = Self::default();
         let len = prefix.len().min(HEADER_LEN);
@@ -702,7 +687,7 @@ pub(crate) fn decode_payload(command: &str, payload: &bytes::Bytes) -> Result<Me
     }
 
     let message = match command {
-        "version" => Message::Version(encode::deserialize::<VersionMessage>(payload)?),
+        "version" => Message::Version(decode_version(payload)?),
         "verack" => empty_payload(payload, Message::Verack)?,
         "addr" => Message::Addr(decode_addr(payload)?),
         "inv" => Message::Inv(decode_inventory(payload)?),
@@ -730,10 +715,10 @@ pub(crate) fn decode_payload(command: &str, payload: &bytes::Bytes) -> Result<Me
         "cfheaders" => Message::CFHeaders(encode::deserialize::<CFHeaders>(payload)?),
         "getcfcheckpt" => Message::GetCFCheckpt(encode::deserialize::<GetCFCheckpt>(payload)?),
         "cfcheckpt" => Message::CFCheckpt(encode::deserialize::<CFCheckpt>(payload)?),
-        "sendcmpct" => Message::SendCmpct(encode::deserialize::<SendCmpct>(payload)?),
-        "cmpctblock" => Message::CmpctBlock(encode::deserialize::<CmpctBlock>(payload)?),
-        "getblocktxn" => Message::GetBlockTxn(encode::deserialize::<GetBlockTxn>(payload)?),
-        "blocktxn" => Message::BlockTxn(encode::deserialize::<BlockTxn>(payload)?),
+        "sendcmpct" => Message::SendCmpct(decode_sendcmpct(payload)?),
+        "cmpctblock" => decode_cmpctblock(payload)?,
+        "getblocktxn" => decode_getblocktxn(payload)?,
+        "blocktxn" => decode_blocktxn(payload)?,
         "reject" => Message::Reject(encode::deserialize::<Reject>(payload)?),
         "alert" => Message::Alert(encode::deserialize::<Vec<u8>>(payload)?),
         "feefilter" => Message::FeeFilter(encode::deserialize::<i64>(payload)?),
@@ -752,7 +737,7 @@ pub(crate) fn decode_payload(command: &str, payload: &bytes::Bytes) -> Result<Me
             Ok(announcement) => Message::StaleTip(announcement),
             Err(error) if error.is_policy_limit() => Message::Unknown {
                 command: command_string(crate::staletip::STALETIP_COMMAND)?,
-                payload: Vec::new(),
+                payload: payload.to_vec(),
             },
             Err(error) => return Err(error.into()),
         },
@@ -910,6 +895,82 @@ fn empty_payload(payload: &[u8], message: Message) -> Result<Message, PeerError>
     }
 }
 
+fn decode_sendcmpct(payload: &[u8]) -> Result<SendCmpct, PeerError> {
+    if payload.len() < 9 {
+        return Err(
+            bitcoin::consensus::encode::Error::ParseFailed("sendcmpct payload too short").into(),
+        );
+    }
+    let mut version = [0_u8; 8];
+    version.copy_from_slice(&payload[1..9]);
+    Ok(SendCmpct {
+        send_compact: payload[0] != 0,
+        version: u64::from_le_bytes(version),
+    })
+}
+
+fn decode_version(payload: &[u8]) -> Result<VersionMessage, PeerError> {
+    let mut reader = payload;
+    let version = u32::consensus_decode(&mut reader)?;
+    let services = bitcoin::p2p::ServiceFlags::consensus_decode(&mut reader)?;
+    let timestamp = i64::consensus_decode(&mut reader)?;
+    let receiver = if reader.is_empty() {
+        unspecified_address()
+    } else {
+        Address::consensus_decode(&mut reader)?
+    };
+    let (sender, nonce) = if reader.is_empty() {
+        (unspecified_address(), 1)
+    } else {
+        let sender = Address::consensus_decode(&mut reader)?;
+        (sender, u64::consensus_decode(&mut reader)?)
+    };
+    let user_agent = if reader.is_empty() {
+        String::new()
+    } else {
+        let len = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+        let len = usize::try_from(len).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+        if len > reader.len() {
+            return Err(bitcoin::consensus::encode::Error::ParseFailed(
+                "version subversion exceeds the payload",
+            )
+            .into());
+        }
+        let (agent, rest) = reader.split_at(len);
+        reader = rest;
+        String::from_utf8_lossy(agent).into_owned()
+    };
+    let start_height = if reader.is_empty() {
+        -1
+    } else {
+        i32::consensus_decode(&mut reader)?
+    };
+    let relay = if reader.is_empty() {
+        true
+    } else {
+        bool::consensus_decode(&mut reader)?
+    };
+    Ok(VersionMessage {
+        version,
+        services,
+        timestamp,
+        receiver,
+        sender,
+        nonce,
+        user_agent,
+        start_height,
+        relay,
+    })
+}
+
+fn unspecified_address() -> Address {
+    Address {
+        services: bitcoin::p2p::ServiceFlags::NONE,
+        address: [0; 8],
+        port: 0,
+    }
+}
+
 fn encode_command(command: &CommandString) -> Result<[u8; COMMAND_LEN], PeerError> {
     let command = command.as_ref().as_bytes();
     if command.len() > COMMAND_LEN || command.contains(&0) {
@@ -922,8 +983,6 @@ fn encode_command(command: &CommandString) -> Result<[u8; COMMAND_LEN], PeerErro
     Ok(raw)
 }
 
-/// Parses a 12-byte command field: a UTF-8 name, then only zero padding. The
-/// v1 header and the BIP324 long message type share this encoding.
 pub(crate) fn read_command(raw: &[u8]) -> Result<String, PeerError> {
     let end = raw.iter().position(|byte| *byte == 0).unwrap_or(raw.len());
     if raw[end..].iter().any(|byte| *byte != 0) {
@@ -931,9 +990,122 @@ pub(crate) fn read_command(raw: &[u8]) -> Result<String, PeerError> {
             String::from_utf8_lossy(raw).into_owned(),
         ));
     }
-    std::str::from_utf8(&raw[..end])
+    let command_bytes = &raw[..end];
+    if !command_bytes
+        .iter()
+        .all(|byte| (0x20..=0x7e).contains(byte))
+    {
+        return Err(PeerError::InvalidCommand(
+            String::from_utf8_lossy(raw).into_owned(),
+        ));
+    }
+    std::str::from_utf8(command_bytes)
         .map(str::to_owned)
         .map_err(|_| PeerError::InvalidCommand(String::from_utf8_lossy(raw).into_owned()))
+}
+
+/// Core reads the whole struct and throws when the declared transaction count
+/// exceeds `uint16_t` or cannot fit the payload; `ProcessMessages` logs that
+/// failure and keeps the connection, so the message is dropped, not punished.
+fn decode_cmpctblock(payload: &bytes::Bytes) -> Result<Message, PeerError> {
+    let mut reader = payload.as_ref();
+    let header = bitcoin::block::Header::consensus_decode(&mut reader)?;
+    let nonce = u64::consensus_decode(&mut reader)?;
+    let short_ids_count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+    let short_ids_room = u64::try_from(reader.len() / SHORT_ID_WIRE_BYTES).unwrap_or(u64::MAX);
+    if short_ids_count > short_ids_room {
+        return dropped_message("cmpctblock", payload);
+    }
+    let mut short_ids = Vec::with_capacity(usize::try_from(short_ids_count).unwrap_or(0));
+    for _ in 0..short_ids_count {
+        short_ids.push(ShortId::consensus_decode(&mut reader)?);
+    }
+    let prefilled_count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+    if short_ids_count.saturating_add(prefilled_count) > u64::from(u16::MAX) {
+        return dropped_message("cmpctblock", payload);
+    }
+    let prefilled_room = u64::try_from(reader.len() / MIN_PREFILLED_WIRE_BYTES).unwrap_or(u64::MAX);
+    if prefilled_count > prefilled_room {
+        return dropped_message("cmpctblock", payload);
+    }
+    let mut prefilled_txs = Vec::with_capacity(usize::try_from(prefilled_count).unwrap_or(0));
+    for _ in 0..prefilled_count {
+        let index = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+        let Ok(idx) = u16::try_from(index) else {
+            return dropped_message("cmpctblock", payload);
+        };
+        let tx = decode_bounded_transaction(&mut reader)?;
+        prefilled_txs.push(PrefilledTransaction { idx, tx });
+    }
+    Ok(Message::CmpctBlock(CmpctBlock {
+        compact_block: HeaderAndShortIds {
+            header,
+            nonce,
+            short_ids,
+            prefilled_txs,
+        },
+    }))
+}
+
+fn decode_bounded_transaction(reader: &mut &[u8]) -> Result<Transaction, PeerError> {
+    let tx = Tx::consensus_decode(reader)?;
+    let raw = bitcoin_rs_primitives::consensus_bytes(&tx);
+    Transaction::consensus_decode(&mut raw.as_slice()).map_err(PeerError::from)
+}
+
+fn decode_blocktxn(payload: &bytes::Bytes) -> Result<Message, PeerError> {
+    let mut reader = payload.as_ref();
+    let block_hash = bitcoin::BlockHash::consensus_decode(&mut reader)?;
+    let count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+    let room = u64::try_from(reader.len() / MIN_TRANSACTION_WIRE_BYTES).unwrap_or(u64::MAX);
+    if count > room {
+        return dropped_message("blocktxn", payload);
+    }
+    let mut transactions = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+    for _ in 0..count {
+        transactions.push(decode_bounded_transaction(&mut reader)?);
+    }
+    Ok(Message::BlockTxn(BlockTxn {
+        transactions: BlockTransactions {
+            block_hash,
+            transactions,
+        },
+    }))
+}
+
+fn decode_getblocktxn(payload: &bytes::Bytes) -> Result<Message, PeerError> {
+    let mut reader = payload.as_ref();
+    let block_hash = bitcoin::BlockHash::consensus_decode(&mut reader)?;
+    let count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+    let room = u64::try_from(reader.len()).unwrap_or(u64::MAX);
+    if count > room {
+        return dropped_message("getblocktxn", payload);
+    }
+    let mut indexes = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+    let mut last_index: u64 = 0;
+    for _ in 0..count {
+        let differential = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+        last_index = last_index
+            .checked_add(differential)
+            .ok_or_else(|| PeerError::Misbehavior("getblocktxn index overflow"))?;
+        indexes.push(last_index);
+        last_index = last_index
+            .checked_add(1)
+            .ok_or_else(|| PeerError::Misbehavior("getblocktxn index overflow"))?;
+    }
+    Ok(Message::GetBlockTxn(GetBlockTxn {
+        txs_request: BlockTransactionsRequest {
+            block_hash,
+            indexes,
+        },
+    }))
+}
+
+fn dropped_message(command: &str, payload: &bytes::Bytes) -> Result<Message, PeerError> {
+    Ok(Message::Unknown {
+        command: command_string(command)?,
+        payload: payload.to_vec(),
+    })
 }
 
 fn command_string(command: &str) -> Result<CommandString, PeerError> {

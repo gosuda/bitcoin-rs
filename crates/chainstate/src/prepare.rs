@@ -1,5 +1,3 @@
-//! Payload parsing, transaction planning, and resolved prevout preparation.
-
 use super::SameBlockSpentSet;
 use super::{
     BlockLocalUtxoView, BlockProvenance, BlockTxPlan, BlockValidationContext, ByteEquality,
@@ -12,7 +10,6 @@ use hashbrown::HashSet;
 use rayon::prelude::*;
 use std::sync::Arc;
 
-/// Returns true iff `raw` is exactly the consensus serialization of `block`.
 pub fn bytes_are_block(raw: &[u8], block: &Block) -> bool {
     let mut sink = ByteEquality {
         expected: raw,
@@ -122,12 +119,7 @@ pub(super) fn plan_block_transactions(block: &Block, txids: &[Txid]) -> BlockTxP
                 needs_local_utxo_overlay |= spends_created_output || repeats_prior_spend;
             }
             saw_non_coinbase = true;
-            if tx.version >= 2 {
-                has_bip68_sequence_locks |= tx.inputs.iter().any(|input| {
-                    input.sequence & bitcoin_rs_consensus::bip68::SEQUENCE_LOCKTIME_DISABLE_FLAG
-                        == 0
-                });
-            }
+            has_bip68_sequence_locks |= tx_has_bip68_sequence_locks(tx);
             spent_input_count = spent_input_count.saturating_add(input_count);
             overlay_capacity =
                 overlay_capacity.saturating_add(output_count.saturating_add(input_count));
@@ -148,6 +140,13 @@ pub(super) fn plan_block_transactions(block: &Block, txids: &[Txid]) -> BlockTxP
         same_block_spent,
         same_block_spent_input_count,
     }
+}
+
+fn tx_has_bip68_sequence_locks(tx: &Tx) -> bool {
+    tx.version >= 2
+        && tx.inputs.iter().any(|input| {
+            input.sequence & bitcoin_rs_primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG == 0
+        })
 }
 
 pub(super) fn resolve_block_prevouts(
@@ -235,11 +234,16 @@ fn run_non_script_checks_only(
     Ok(())
 }
 
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_truncation
-)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ScriptsRan {
+    Executed,
+    Skipped,
+}
+
+fn seconds_as_micros(seconds: f64) -> u128 {
+    std::time::Duration::try_from_secs_f64(seconds).map_or(0_u128, |duration| duration.as_micros())
+}
+
 pub(super) fn verify_block_transactions(
     handles: &Chainstate,
     view: &mut bitcoin_rs_consensus::BlockView<'_>,
@@ -249,15 +253,14 @@ pub(super) fn verify_block_transactions(
     provenance: BlockProvenance,
     script_source: &bitcoin_rs_consensus::kernel::BlockScriptSource,
     script_cache: Option<&bitcoin_rs_consensus::ScriptExecutionCache>,
-) -> core::result::Result<(), ApplyError> {
+) -> core::result::Result<ScriptsRan, ApplyError> {
     debug_assert_eq!(view.txs().len(), view.txids().len());
     if tx_plan.only_coinbase {
-        // The shared block rules already checked every transaction's structure.
-        return Ok(());
+        return Ok(ScriptsRan::Executed);
     }
     let skip_scripts = handles.scripts_verified_upstream(provenance, context.height, context.hash);
     if skip_scripts {
-        return run_non_script_checks_only(
+        run_non_script_checks_only(
             view.txs(),
             tx_plan,
             resolved,
@@ -265,7 +268,8 @@ pub(super) fn verify_block_transactions(
             context.height,
             context.locktime_cutoff,
             context.flags,
-        );
+        )?;
+        return Ok(ScriptsRan::Skipped);
     }
     let resolution_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let resolution_result =
@@ -289,10 +293,10 @@ pub(super) fn verify_block_transactions(
     );
     tracing::debug!(
         height = context.height,
-        script_prepare_us = (script_timings.prepare_seconds * 1_000_000.0) as u64,
-        script_parallel_us = (script_timings.parallel_seconds * 1_000_000.0) as u64,
+        script_prepare_us = seconds_as_micros(script_timings.prepare_seconds),
+        script_parallel_us = seconds_as_micros(script_timings.parallel_seconds),
         "script_verify: profile"
     );
     script_input_result?;
-    Ok(())
+    Ok(ScriptsRan::Executed)
 }

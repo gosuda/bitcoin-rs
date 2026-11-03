@@ -2,7 +2,6 @@ use bitcoin_rs_primitives::PeerEndpoint;
 use std::io;
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -19,18 +18,51 @@ use bitcoin_rs_primitives::{
 };
 use parking_lot::RwLock;
 
-use super::getdata_pause_tests::{FAILSAFE, MAGIC, TestResult, wait_until, wire_len_of};
+use super::getdata_pause_tests::{FAILSAFE, MAGIC, wait_until, wire_len_of};
 use super::{
     ListenerError, bind_listener, configure_peer_stream, run_outbound_handshake, serve, test_shared,
 };
-use crate::connection::{Refusal, SHARED_OUTBOUND_QUEUE_MAX_BYTES, SharedOutboundBudget};
+use crate::connection::{
+    OUTBOUND_QUEUE_MAX_BYTES, Refusal, SHARED_OUTBOUND_QUEUE_MAX_BYTES, SharedOutboundBudget,
+};
 use crate::inv::{MAX_INV_PER_MSG, wire_block_hash};
 use crate::{
     ActiveChainQuery, ChainQuery, Message, Peer, PeerCounters, PeerError, PeerLease, PeerSession,
     PeerTable, RecentBlockSlot,
 };
 
-type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Peer(#[from] PeerError),
+    #[error(transparent)]
+    TryFromInt(#[from] std::num::TryFromIntError),
+    #[error(transparent)]
+    Chain(#[from] bitcoin_rs_chain::ChainError),
+    #[error(transparent)]
+    Primitives(#[from] bitcoin_rs_primitives::DecodeError),
+    #[error(transparent)]
+    Consensus(#[from] bitcoin::consensus::encode::Error),
+    #[error(transparent)]
+    Listener(#[from] ListenerError),
+    #[error(transparent)]
+    Pause(#[from] super::getdata_pause_tests::TestError),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+    #[error("failure: {0}")]
+    Failure(String),
+}
+
+type Fallible<T> = Result<T, TestError>;
+type TestResult = Result<(), TestError>;
+
+impl From<&'static str> for TestError {
+    fn from(msg: &'static str) -> Self {
+        Self::Missing(msg)
+    }
+}
 
 type Frame = (Message, bytes::Bytes);
 
@@ -92,7 +124,7 @@ fn registry_block(block: &Block) -> Result<RegistryBlock, bitcoin::consensus::en
 fn child_block(prev_blockhash: BlockHash, nonce: u32, txs: Vec<Tx>) -> Fallible<Block> {
     let mut leaves: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
     let root = bitcoin_rs_consensus::compute_merkle_root(&mut leaves)
-        .ok_or("a fixture block holds a transaction")?;
+        .ok_or(TestError::Missing("a fixture block holds a transaction"))?;
     let block = Block {
         header: Header {
             version: 1,
@@ -105,7 +137,9 @@ fn child_block(prev_blockhash: BlockHash, nonce: u32, txs: Vec<Tx>) -> Fallible<
         txs,
     };
     if !registry_block(&block)?.check_merkle_root() {
-        return Err("the fixture's merkle root is not the wire decoder's".into());
+        return Err(TestError::Missing(
+            "the fixture's merkle root is not the wire decoder's",
+        ));
     }
     Ok(block)
 }
@@ -154,7 +188,7 @@ struct Node {
     addr: PeerEndpoint,
     table: Arc<PeerTable>,
     aggregate: Arc<SharedOutboundBudget>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchWriter,
     listener: Option<JoinHandle<Result<(), ListenerError>>>,
 }
 
@@ -174,9 +208,9 @@ impl Node {
                 .unwrap_or_else(|| panic!("expected IP fixture")),
         )?;
         let addr = listener.local_addr()?;
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&shutdown);
-        let thread = std::thread::spawn(move || serve(listener, flag, shared));
+        let shutdown = bitcoin_rs_chain::LatchWriter::new();
+        let reader = shutdown.reader();
+        let thread = std::thread::spawn(move || serve(listener, reader, shared));
         Ok(Self {
             addr: addr.into(),
             table,
@@ -187,7 +221,7 @@ impl Node {
     }
 
     fn request_stop(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown.trigger();
         self.table.cancel_all();
     }
 
@@ -199,11 +233,15 @@ impl Node {
         while !thread.is_finished() {
             if Instant::now() >= deadline {
                 self.listener = Some(thread);
-                return Err("the listener did not stop within the failsafe".into());
+                return Err(TestError::Missing(
+                    "the listener did not stop within the failsafe",
+                ));
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        let served = thread.join().map_err(|_| "the listener thread panicked")?;
+        let served = thread
+            .join()
+            .map_err(|_| TestError::Missing("the listener thread panicked"))?;
         served?;
         Ok(())
     }
@@ -213,7 +251,8 @@ impl Node {
         self.join_listener()?;
         wait_until("every session to leave the peer table", || {
             self.table.sessions().is_empty()
-        })
+        })?;
+        Ok(())
     }
 }
 
@@ -331,7 +370,7 @@ fn session_of(node: &Node, client: &Client) -> Fallible<PeerSession> {
         });
         found.is_some()
     })?;
-    found.ok_or_else(|| "the client's session vanished".into())
+    found.ok_or(TestError::Missing("the client's session vanished"))
 }
 
 fn counters_of(session: &PeerSession) -> Fallible<Arc<PeerCounters>> {
@@ -339,7 +378,7 @@ fn counters_of(session: &PeerSession) -> Fallible<Arc<PeerCounters>> {
         &session
             .info
             .as_ref()
-            .ok_or("the session published no metadata")?
+            .ok_or(TestError::Missing("the session published no metadata"))?
             .counters,
     ))
 }
@@ -369,11 +408,10 @@ fn a_held_block_answers_a_negotiated_compact_getdata_over_a_real_socket() -> Tes
     let compact = Inventory::CompactBlock(wire_block_hash(held_hash));
     let messages = messages_of(client.request(vec![compact])?);
     let [Message::CmpctBlock(cmpct)] = messages.as_slice() else {
-        return Err(format!(
+        return Err(TestError::Failure(format!(
             "a negotiated compact getdata for the held block must yield one cmpctblock \
              before the pong and no notfound, got {messages:?}"
-        )
-        .into());
+        )));
     };
 
     let registry = registry_block(&held)?;
@@ -427,29 +465,41 @@ fn a_held_block_answers_a_negotiated_compact_getdata_over_a_real_socket() -> Tes
 
 fn saturate(
     node: &Node,
-    hog: &mut Client,
-    hog_session: &PeerSession,
+    hogs: &mut [Client],
+    hog_sessions: &[PeerSession],
     victim_session: &PeerSession,
     frame_len: usize,
     item: Inventory,
 ) -> Fallible<(usize, usize)> {
-    let requested = SHARED_OUTBOUND_QUEUE_MAX_BYTES.div_ceil(frame_len) * 2 + 1;
-    if requested > MAX_INV_PER_MSG {
-        return Err(format!("{requested} frames exceed one getdata").into());
+    let per_hog = OUTBOUND_QUEUE_MAX_BYTES.div_ceil(frame_len) * 2 + 1;
+    if per_hog > MAX_INV_PER_MSG {
+        return Err(TestError::Failure(format!(
+            "{per_hog} frames exceed one getdata"
+        )));
     }
-    let budget = hog_session.lease.budget_handle();
-    let counters = counters_of(hog_session)?;
-    hog.send(&Message::GetData(vec![item; requested]))?;
+    for hog in hogs.iter_mut() {
+        hog.send(&Message::GetData(vec![item; per_hog]))?;
+    }
 
     let mut last = None;
     let mut quiet = 0_u32;
     let mut queued = (0, 0);
-    wait_until("the hog's frames to saturate the node aggregate", || {
-        let (messages, bytes) = budget.pending();
-        let snapshot = (messages, bytes, counters.bytes_sent());
-        let saturated = messages > 0
-            && bytes == messages * frame_len
-            && node.aggregate.pending() == bytes
+    wait_until("the hogs' frames to saturate the node aggregate", || {
+        let mut total_messages = 0;
+        let mut total_bytes = 0;
+        let mut total_sent = 0;
+        for session in hog_sessions {
+            let (m, b) = session.lease.budget_handle().pending();
+            total_messages += m;
+            total_bytes += b;
+            if let Ok(counters) = counters_of(session) {
+                total_sent += counters.bytes_sent();
+            }
+        }
+        let snapshot = (total_messages, total_bytes, total_sent);
+        let saturated = total_messages > 0
+            && total_bytes == total_messages * frame_len
+            && node.aggregate.pending() == total_bytes
             && victim_session.lease.try_reserve_production().err() == Some(Refusal::Shared);
         quiet = if saturated && last == Some(snapshot) {
             quiet + 1
@@ -457,7 +507,7 @@ fn saturate(
             0
         };
         last = saturated.then_some(snapshot);
-        queued = (messages, bytes);
+        queued = (total_messages, total_bytes);
         quiet >= QUIET_POLLS
     })?;
     Ok(queued)
@@ -486,15 +536,21 @@ fn getblocktxn_survives_shared_saturation_without_resending() -> TestResult {
     let nonce = victim.ping()?;
     let baseline = victim.read_through_pong(nonce)?;
     assert!(matches!(baseline.as_slice(), [(Message::BlockTxn(_), _)]));
-    let mut hog = Client::connect(&node)?;
-    let hog_session = session_of(&node, &hog)?;
+    let mut hogs = Vec::new();
+    let mut hog_sessions = Vec::new();
+    for _ in 0..5 {
+        let hog = Client::connect(&node)?;
+        let session = session_of(&node, &hog)?;
+        hogs.push(hog);
+        hog_sessions.push(session);
+    }
     wait_until("handshake credits returned", || {
         node.aggregate.pending() == 0
     })?;
     let queued = saturate(
         &node,
-        &mut hog,
-        &hog_session,
+        &mut hogs,
+        &hog_sessions,
         &victim_session,
         frame_len,
         hog_item,
@@ -513,10 +569,8 @@ fn getblocktxn_survives_shared_saturation_without_resending() -> TestResult {
         budget.refusals(),
         started.elapsed().as_millis()
     );
-    drop(hog);
-    wait_until("hog credit returned", || {
-        hog_session.lease.budget_handle().pending() == (0, 0)
-    })?;
+    drop(hogs);
+    wait_until("hog credits returned", || node.aggregate.pending() == 0)?;
     let nonce = victim.ping()?;
     let received = victim.read_through_pong(nonce)?;
     println!(
@@ -551,16 +605,22 @@ fn the_saturated_aggregate_refuses_a_second_connection_until_the_first_closes() 
     let node = Node::start(chain)?;
     let mut victim = Client::connect(&node)?;
     let victim_session = session_of(&node, &victim)?;
-    let mut hog = Client::connect(&node)?;
-    let hog_session = session_of(&node, &hog)?;
+    let mut hogs = Vec::new();
+    let mut hog_sessions = Vec::new();
+    for _ in 0..5 {
+        let hog = Client::connect(&node)?;
+        let session = session_of(&node, &hog)?;
+        hogs.push(hog);
+        hog_sessions.push(session);
+    }
     wait_until("the handshakes' frames to release the aggregate", || {
         node.aggregate.pending() == 0
     })?;
 
     let (hog_messages, hog_bytes) = saturate(
         &node,
-        &mut hog,
-        &hog_session,
+        &mut hogs,
+        &hog_sessions,
         &victim_session,
         frame_len,
         hog_item,
@@ -601,25 +661,24 @@ fn the_saturated_aggregate_refuses_a_second_connection_until_the_first_closes() 
         "only the notfound was written to the victim: its body waits for the aggregate"
     );
     assert!(
-        !victim_session.lease.is_cancelled() && !hog_session.lease.is_cancelled(),
+        !victim_session.lease.is_cancelled()
+            && hog_sessions.iter().all(|s| !s.lease.is_cancelled()),
         "the aggregate's refusal never disconnects"
     );
 
     let nonce = victim.ping()?;
 
-    let hog_budget = hog_session.lease.budget_handle();
-    drop(hog);
-    wait_until("the closed hog's writer to end", || {
-        hog_budget.writer_dead()
-    })?;
-    wait_until("every frame credit of the closed hog to return", || {
-        hog_budget.pending() == (0, 0)
+    drop(hogs);
+    wait_until("every frame credit of the closed hogs to return", || {
+        node.aggregate.pending() == 0
     })?;
 
     let delivered = victim.read_through_pong(nonce)?;
     let [(Message::Block(block), raw)] = delivered.as_slice() else {
         let received: Vec<&Message> = delivered.iter().map(|(message, _)| message).collect();
-        return Err(format!("the victim's body must precede its pong, got {received:?}").into());
+        return Err(TestError::Failure(format!(
+            "the victim's body must precede its pong, got {received:?}"
+        )));
     };
     assert_eq!(block.block(), &blocks[2]);
     assert_eq!(&raw[..], victim_payload.as_slice());

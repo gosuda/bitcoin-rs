@@ -1,6 +1,6 @@
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_primitives::{Block, Header, Network, consensus_bytes};
-use sonic_rs::{Value, json};
+use sonic_rs::{JsonValueMutTrait as _, Value, json};
 
 use crate::tx_render::transaction_json;
 
@@ -34,9 +34,11 @@ pub(crate) fn block_json(
     let weight = block.weight();
     let stripped_size = block.stripped_size();
 
-    let _ = value.insert("strippedsize", json!(stripped_size));
-    let _ = value.insert("size", json!(size));
-    let _ = value.insert("weight", json!(weight));
+    if let Some(map) = value.as_object_mut() {
+        map.insert("strippedsize", json!(stripped_size));
+        map.insert("size", json!(size));
+        map.insert("weight", json!(weight));
+    }
     let tx_array = match tx_verbosity {
         BlockTxVerbosity::Ids => block
             .txs
@@ -49,7 +51,9 @@ pub(crate) fn block_json(
             .map(|tx| transaction_json(tx, network, None))
             .collect::<Vec<_>>(),
     };
-    let _ = value.insert("tx", json!(tx_array));
+    if let Some(map) = value.as_object_mut() {
+        map.insert("tx", json!(tx_array));
+    }
     value
 }
 
@@ -88,8 +92,10 @@ pub(crate) fn header_json(header: &Header, chain: &BlockChainContext) -> Value {
         "nTx": chain.n_tx,
         "previousblockhash": header.prev_blockhash.to_string()
     });
-    if let Some(next) = chain.next_block_hash {
-        let _ = value.insert("nextblockhash", json!(next.to_string()));
+    if let Some(next) = chain.next_block_hash
+        && let Some(map) = value.as_object_mut()
+    {
+        map.insert("nextblockhash", json!(next.to_string()));
     }
     value
 }

@@ -1,4 +1,4 @@
-//! Consumer-boundary tests, grouped into one integration binary.
+mod support;
 
 mod backend_equivalence;
 mod backend_metrics;

@@ -192,9 +192,7 @@ fn known_body_retires_both_identities_without_guessing_unknown_pairs() {
     assert_eq!(select(&mut policy, now).len(), 2);
     policy.forget(Identity::Txid(hash));
     policy.forget(Identity::from_inventory(item(1)).unwrap_or(Identity::Txid(hash)));
-    assert!(policy.requests.is_empty());
-    assert!(policy.counts.is_empty());
-    assert_eq!(policy.announcements, 0);
+    assert_eq!(select(&mut policy, now), []);
 }
 #[test]
 fn alternates_global_cap_and_delay_are_enforced() {
@@ -232,33 +230,33 @@ fn obsolete_connection_cannot_release_a_replacement() {
         Some(current)
     );
 }
+struct TestInventoryView(std::sync::atomic::AtomicBool);
+impl TxInventory for TestInventoryView {
+    fn have_tx(&self, _: Hash256, _: bool) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_primitives::Tx> {
+        None
+    }
+    fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_primitives::Tx> {
+        None
+    }
+    fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
+        None
+    }
+    fn resident_package(
+        &self,
+        _: &[Wtxid],
+    ) -> Option<Vec<std::sync::Arc<bitcoin_rs_primitives::Tx>>> {
+        None
+    }
+}
 #[test]
 fn known_state_and_external_arrival_retire_requests_before_another_send() {
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     };
-    struct InventoryView(AtomicBool);
-    impl TxInventory for InventoryView {
-        fn have_tx(&self, _: Hash256, _: bool) -> bool {
-            self.0.load(Ordering::Relaxed)
-        }
-        fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_primitives::Tx> {
-            None
-        }
-        fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_primitives::Tx> {
-            None
-        }
-        fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
-            None
-        }
-        fn resident_package(
-            &self,
-            _: &[Wtxid],
-        ) -> Option<Vec<std::sync::Arc<bitcoin_rs_primitives::Tx>>> {
-            None
-        }
-    }
     let table = Arc::new(PeerTable::new());
     let (sender, receiver) = crate::test_support::message_channel_bounded(4);
     let lease = crate::PeerLease::new(sender);
@@ -285,7 +283,7 @@ fn known_state_and_external_arrival_retire_requests_before_another_send() {
         ),
     );
     let mut poll_now = Instant::now() + Duration::from_secs(1);
-    let inventory = InventoryView(AtomicBool::new(false));
+    let inventory = TestInventoryView(AtomicBool::new(false));
     table.announce_transactions(lease.source(Some(addr)), &[item(1)]);
     table.poll_transaction_requests_at(&inventory, poll_now);
     assert!(matches!(receiver.try_recv(), Ok(Message::GetData(_))));

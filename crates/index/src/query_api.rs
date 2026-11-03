@@ -1,12 +1,8 @@
-//! Derived-index query contract: typed errors, progress info, and the
-//! object-safe read traits the RPC surface and node composition consume.
-
 use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, Txid};
 use compact_str::CompactString;
 
 use crate::{IndexCapability, ScriptHash};
 
-/// Optional BIP157/158 queries shared by RPC and P2P adapters.
 pub trait CompactFilterQuery: Send + Sync {
     fn block_filter(
         &self,
@@ -40,32 +36,23 @@ pub enum TxQueryError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TxUnavailableCause {
-    ScriptHashLimitExceeded {
-        limit: usize,
-    },
+    ScriptHashLimitExceeded { limit: usize },
     RowBudgetExhausted,
     RowBudgetExceeded,
     PrefixScanTruncated,
     LivePrefixScanTruncated,
     BodyReadBudgetExhausted,
     BodyBudgetExceeded,
-    PrunedPrefixUnproven {
-        family: &'static str,
-        floor: u32,
-    },
-    HistoryUnproven {
-        floor: u32,
-    },
+    PrunedPrefixUnproven { family: &'static str, floor: u32 },
+    HistoryUnproven { floor: u32 },
     CapabilityDisabled(IndexCapability),
     WorkerFailed(CompactString),
     WorkerStopped,
     CompactFilterFailed(CompactString),
-    /// Carries the stored worker reason verbatim; no new wire text beyond that reason.
     ScriptLiveUnavailable(CompactString),
+    ScriptHistoryUnavailable(CompactString),
     MissingAuthority(&'static str),
-    BlockBodyMissing {
-        height: u32,
-    },
+    BlockBodyMissing { height: u32 },
     FilterDataMissing,
     Other(CompactString),
 }
@@ -94,6 +81,7 @@ impl core::fmt::Display for TxUnavailableCause {
             Self::WorkerFailed(message)
             | Self::CompactFilterFailed(message)
             | Self::ScriptLiveUnavailable(message)
+            | Self::ScriptHistoryUnavailable(message)
             | Self::Other(message) => f.write_str(message),
             Self::WorkerStopped => f.write_str("txindex worker stopped"),
             Self::MissingAuthority(detail) => f.write_str(detail),
@@ -130,7 +118,6 @@ pub enum HistoricalQueryError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HistoricalUnavailableCause {
-    /// lifecycle, and pruned-prefix refusals keep their identical variant.
     Shared(TxUnavailableCause),
     NoCoveredPrefix {
         capability: IndexCapability,
@@ -192,6 +179,14 @@ pub struct ScriptHistoryRecord {
     pub height: u32,
 }
 
+pub const SCRIPT_HISTORY_PAGE_MAX: usize = 100;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ScriptHistoryPage {
+    pub records: Vec<ScriptHistoryRecord>,
+    pub cursor_found: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SpendingRecord {
     pub txid: Txid,
@@ -217,13 +212,9 @@ pub trait ScriptIndexQuery: Send + Sync {
         last: Option<Txid>,
         limit: usize,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
-        let mut history = self.confirmed_history(script_hash)?;
-        history.sort_by(|a, b| b.height.cmp(&a.height).then_with(|| b.txid.cmp(&a.txid)));
-        history.dedup_by_key(|record| record.txid);
-        let start = last
-            .and_then(|txid| history.iter().position(|r| r.txid == txid))
-            .map_or(0, |i| i + 1);
-        Ok(history.into_iter().skip(start).take(limit).collect())
+        Ok(self
+            .confirmed_history_page(script_hash, last, limit)?
+            .records)
     }
     fn unspent_outputs(
         &self,
@@ -238,6 +229,38 @@ pub trait ScriptIndexQuery: Send + Sync {
         script_hash: ScriptHash,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
         Ok(self.history_snapshot(script_hash)?.history)
+    }
+    fn confirmed_history_page(
+        &self,
+        script_hash: ScriptHash,
+        cursor: Option<Txid>,
+        limit: usize,
+    ) -> Result<ScriptHistoryPage, TxQueryError> {
+        let mut history = self.confirmed_history(script_hash)?;
+        history.sort_by(|left, right| {
+            right
+                .height
+                .cmp(&left.height)
+                .then_with(|| right.txid.cmp(&left.txid))
+        });
+        let mut listed: Vec<ScriptHistoryRecord> = Vec::with_capacity(history.len());
+        let mut seen = std::collections::BTreeSet::<Txid>::new();
+        for record in history {
+            if !seen.insert(record.txid) {
+                continue;
+            }
+            listed.push(record);
+        }
+        let start = cursor.and_then(|txid| listed.iter().position(|record| record.txid == txid));
+        let cursor_found = cursor.is_none() || start.is_some();
+        Ok(ScriptHistoryPage {
+            records: listed
+                .into_iter()
+                .skip(start.map_or(0, |index| index + 1))
+                .take(limit.min(SCRIPT_HISTORY_PAGE_MAX))
+                .collect(),
+            cursor_found,
+        })
     }
     fn spender(&self, outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError>;
 }

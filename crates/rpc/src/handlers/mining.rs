@@ -302,22 +302,17 @@ pub(crate) fn getprioritisedtransactions(
     for entry in ctx.mempool.gateway.prioritised_transactions() {
         let txid = entry.txid.to_string();
         let mut row = sonic_rs::Object::new();
-        let _ = row.insert("fee_delta", json!(entry.fee_delta));
-        let _ = row.insert("in_mempool", json!(entry.in_mempool));
+        row.insert("fee_delta", json!(entry.fee_delta));
+        row.insert("in_mempool", json!(entry.in_mempool));
         if let Some(modified_fee) = entry.modified_fee {
             let sats = signed_sat_to_i64(modified_fee);
-            let _ = row.insert("modified_fee", json!(sats));
+            row.insert("modified_fee", json!(sats));
         }
-        let _ = object.insert(&txid, Value::from(row));
+        object.insert(&txid, Value::from(row));
     }
     Ok(Value::from(object))
 }
 
-/// Bitcoin Core `getnetworkhashps(nblocks=120, height=-1)`: both arguments are
-/// optional, extra positionals are rejected, and omitted/`null` params use the
-/// defaults.
-///
-/// Invalid `nblocks`/`height` values are Core `-8`, not JSON-RPC `-32602`.
 fn parse_network_hash_ps_args(params: &Value) -> Result<(i64, i64), RpcError> {
     ensure_at_most_params(params, 2)?;
     let lookup = optional_i64(params, 0, 120)?;

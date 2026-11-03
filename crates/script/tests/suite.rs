@@ -1,5 +1,4 @@
-//! Consumer-boundary tests, grouped into one integration binary.
-
+mod adversarial_limits;
 mod core_vectors;
 mod ecdsa_encoding_order;
 mod proptest;

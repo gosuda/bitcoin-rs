@@ -11,7 +11,6 @@ const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
 pub const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
 
-/// Candidate assembly failure.
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum MiningError {
     #[error("coinbase value overflows satoshi range")]
@@ -44,7 +43,7 @@ pub(crate) fn build_coinbase(
     }];
 
     if let Some(commitment) = witness_commitment {
-        witness.push(WITNESS_RESERVED_VALUE.to_vec());
+        witness.push(&WITNESS_RESERVED_VALUE);
         outputs.push(TxOut {
             value: Amount::ZERO,
             script_pubkey: witness_commitment_script(commitment).into(),
@@ -92,9 +91,7 @@ pub fn update_uncommitted_block_structures(block: &mut Block, segwit_active: boo
     if !needs_witness_reserved_value(block, segwit_active) {
         return;
     }
-    block.txs[0].inputs[0]
-        .witness
-        .push(WITNESS_RESERVED_VALUE.to_vec());
+    block.txs[0].inputs[0].witness.push(&WITNESS_RESERVED_VALUE);
 }
 
 fn coinbase_has_witness_commitment(tx: &Tx) -> bool {
@@ -182,6 +179,11 @@ mod uncommitted_witness_tests {
             no_inputs.txs[0].inputs,
             Vec::<bitcoin_rs_primitives::TxIn>::new()
         );
+
+        let mut pre_segwit = commitment_block(Vec::new(), true);
+        assert!(!needs_witness_reserved_value(&pre_segwit, false));
+        update_uncommitted_block_structures(&mut pre_segwit, false);
+        assert!(pre_segwit.txs[0].inputs[0].witness.is_empty());
     }
 
     #[test]

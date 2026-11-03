@@ -6,7 +6,7 @@ use super::{
     CheckpointManifestV1, CurrentV1, MANIFEST_FILE, MANIFEST_FORMAT, MANIFEST_VERSION,
     MAX_CHECKPOINT_METADATA_BYTES, MAX_CHECKPOINT_PAYLOAD_BYTES,
 };
-use bitcoin_rs_primitives::encode::hex_encode;
+use bitcoin_rs_primitives::hex::hex_encode;
 use cap_std::fs::{Dir, File};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
@@ -150,7 +150,6 @@ pub(crate) fn open_regular_file(
     }
     Ok(file)
 }
-/// Verifies an artifact's exact length and SHA-256 digest before rewinding it.
 pub fn verify_artifact(
     dir: &Dir,
     name: &str,
@@ -196,7 +195,6 @@ pub fn require_filename(actual: &str, expected: &str) -> Result<(), CheckpointEr
     }
     Ok(())
 }
-/// Validates the fixed 820-byte `CoinStats` envelope and returns its payload.
 pub fn coinstats_artifact_payload(bytes: &[u8]) -> Result<&[u8], CheckpointError> {
     if u64::try_from(bytes.len()).ok() != Some(COINSTATS_ARTIFACT_LEN) {
         return Err(CheckpointError::Invalid(

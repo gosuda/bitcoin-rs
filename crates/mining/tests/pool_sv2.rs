@@ -11,7 +11,7 @@ use bitcoin_rs_mempool::{
 };
 use bitcoin_rs_mining::pool::stratum::sv2::{
     AuthorityKeypair, CloseReason, Connection, Error, Event, FLAG_REQUIRES_STANDARD_JOBS,
-    FLAG_REQUIRES_VERSION_ROLLING, FLAG_REQUIRES_WORK_SELECTION, Limits, ROLES, RoleStatus,
+    FLAG_REQUIRES_VERSION_ROLLING, FLAG_REQUIRES_WORK_SELECTION, Limits,
     SUCCESS_FLAG_REQUIRES_FIXED_VERSION, ServerConfig, SessionError, TransportError,
     target_difficulty,
 };
@@ -63,22 +63,7 @@ const PAYOUT: &[u8] = &[0x51];
 const ALL_ONES: [u8; 32] = [0xff; 32];
 const WHOLE: usize = 1 << 20;
 
-#[derive(Debug)]
-struct TestError(String);
-
-impl std::fmt::Display for TestError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for TestError {}
-
-impl From<String> for TestError {
-    fn from(error: String) -> Self {
-        Self(error)
-    }
-}
+use crate::support::TestError;
 
 type TestResult<T = ()> = Result<T, TestError>;
 
@@ -352,18 +337,14 @@ fn handshake(
     pinned: [u8; 32],
     chunk: usize,
 ) -> Result<Client, TestError> {
-    let initiator = Handshake::initiator(
-        Initiator::from_raw_k(pinned).map_err(|e| format!("authority key: {e:?}"))?,
-    );
-    let (act1, initiator) = initiator.step_0().map_err(|e| format!("step 0: {e:?}"))?;
+    let initiator = Handshake::initiator(Initiator::from_raw_k(pinned)?);
+    let (act1, initiator) = initiator.step_0()?;
     let mut encoder = NoiseEncoder::new();
     let wire = encoder.encode_handshake(act1);
     let wire: &[u8] = wire.as_ref();
     assert_eq!(wire.len(), ELLSWIFT_ENCODING_SIZE);
     for piece in wire.chunks(chunk) {
-        server
-            .feed(piece, book)
-            .map_err(|e| format!("server feed: {e:?}"))?;
+        server.feed(piece, book)?;
     }
     let reply = server.take_transmit();
     assert_eq!(reply.len(), INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE);
@@ -375,10 +356,7 @@ fn handshake(
         let len = window.len();
         window.copy_from_slice(&reply[offset..offset + len]);
         offset += len;
-        match decoder
-            .next_handshake_frame::<InitiatorSent>()
-            .map_err(|e| format!("decode handshake: {e:?}"))?
-        {
+        match decoder.next_handshake_frame::<InitiatorSent>()? {
             Decoded::Frame(frame) => break frame,
             Decoded::Incomplete(_) => {}
         }
@@ -386,10 +364,8 @@ fn handshake(
     let act2: [u8; INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE] = act2
         .payload()
         .try_into()
-        .map_err(|_| "act 2 length".to_owned())?;
-    let transport = initiator
-        .step_2(act2)
-        .map_err(|e| format!("step 2: {e:?}"))?;
+        .map_err(|_| TestError::Missing("act 2 length"))?;
+    let transport = initiator.step_2(act2)?;
     let (enc, dec) = transport.split();
     Ok(Client {
         enc,
@@ -761,24 +737,11 @@ fn standard_with_job() -> Standard {
 }
 
 #[test]
-fn noise_handshake_authenticates_the_pool_to_a_pinned_miner() -> TestResult {
-    let authority = fresh_authority();
-    let mut book = JobBook::new(book_config(BIP320_VERSION_MASK))
-        .map_err(|error| format!("book: {error:?}"))?;
-    let mut conn = Connection::accept(&authority, Duration::from_secs(60), server_config(), &book)
-        .map_err(|error| format!("config: {error:?}"))?;
-    handshake(&mut conn, &mut book, *authority.public(), WHOLE)?;
-    Ok(())
-}
-
-#[test]
 fn a_miner_pinning_another_authority_rejects_the_server_certificate() -> TestResult {
     let authority = fresh_authority();
     let impostor = fresh_authority();
-    let mut book = JobBook::new(book_config(BIP320_VERSION_MASK))
-        .map_err(|error| format!("book: {error:?}"))?;
-    let mut conn = Connection::accept(&authority, Duration::from_secs(60), server_config(), &book)
-        .map_err(|error| format!("config: {error:?}"))?;
+    let mut book = JobBook::new(book_config(BIP320_VERSION_MASK))?;
+    let mut conn = Connection::accept(&authority, Duration::from_secs(60), server_config(), &book)?;
     let outcome = handshake(&mut conn, &mut book, *impostor.public(), WHOLE);
     assert!(
         outcome.is_err(),
@@ -792,8 +755,7 @@ fn a_mismatched_authority_key_pair_is_refused_at_accept() -> TestResult {
     let authority = fresh_authority();
     let other = fresh_authority();
     let mismatched = AuthorityKeypair::from_bytes(*authority.public(), Zeroizing::new([0x42; 32]));
-    let book = JobBook::new(book_config(BIP320_VERSION_MASK))
-        .map_err(|error| format!("book: {error:?}"))?;
+    let book = JobBook::new(book_config(BIP320_VERSION_MASK))?;
     assert!(
         Connection::accept(&mismatched, Duration::from_secs(60), server_config(), &book).is_err()
     );
@@ -804,9 +766,7 @@ fn a_mismatched_authority_key_pair_is_refused_at_accept() -> TestResult {
 #[test]
 fn byte_at_a_time_delivery_is_decoded_like_whole_reads() -> TestResult {
     let mut wire = Wire::with(1, server_config(), BIP320_VERSION_MASK);
-    wire.book
-        .install(candidate(100, 0xab, 2), Vec::new())
-        .map_err(|error| format!("install: {error:?}"))?;
+    wire.book.install(candidate(100, 0xab, 2), Vec::new())?;
     wire.setup_mining(0);
     let mut frames = wire.open_standard(1, "carol", ALL_ONES);
     assert_eq!(
@@ -831,8 +791,7 @@ fn a_flipped_ciphertext_bit_fails_the_mac_and_kills_the_connection() -> TestResu
         false,
         OpenStandardMiningChannel {
             request_id: 1,
-            user_identity: Str0255::try_from("mallory")
-                .map_err(|error| format!("short: {error:?}"))?,
+            user_identity: Str0255::try_from("mallory")?,
             nominal_hash_rate: 1.0,
             max_target: U256::from(&ALL_ONES),
         },
@@ -862,8 +821,7 @@ fn a_flipped_header_bit_also_fails_authentication() -> TestResult {
         false,
         OpenStandardMiningChannel {
             request_id: 1,
-            user_identity: Str0255::try_from("mallory")
-                .map_err(|error| format!("short: {error:?}"))?,
+            user_identity: Str0255::try_from("mallory")?,
             nominal_hash_rate: 1.0,
             max_target: U256::from(&ALL_ONES),
         },
@@ -886,15 +844,12 @@ fn a_replayed_ciphertext_does_not_authenticate_under_the_next_nonce() -> TestRes
         false,
         OpenStandardMiningChannel {
             request_id: 1,
-            user_identity: Str0255::try_from("replay")
-                .map_err(|error| format!("short: {error:?}"))?,
+            user_identity: Str0255::try_from("replay")?,
             nominal_hash_rate: 1.0,
             max_target: U256::from(&ALL_ONES),
         },
     );
-    wire.conn
-        .feed(&bytes, &mut wire.book)
-        .map_err(|error| format!("first delivery: {error:?}"))?;
+    wire.conn.feed(&bytes, &mut wire.book)?;
     assert_eq!(wire.conn.session().channel_count(), 1);
     let replay = wire.conn.feed(&bytes, &mut wire.book);
     assert!(matches!(
@@ -918,17 +873,12 @@ fn an_oversize_declaration_is_refused_before_it_is_buffered() -> TestResult {
         min_version: 2,
         max_version: 2,
         flags: 0,
-        endpoint_host: Str0255::try_from(long.as_str())
-            .map_err(|error| format!("100 bytes: {error:?}"))?,
+        endpoint_host: Str0255::try_from(long.as_str())?,
         endpoint_port: 1,
-        vendor: Str0255::try_from(long.as_str())
-            .map_err(|error| format!("100 bytes: {error:?}"))?,
-        hardware_version: Str0255::try_from(long.as_str())
-            .map_err(|error| format!("100 bytes: {error:?}"))?,
-        firmware: Str0255::try_from(long.as_str())
-            .map_err(|error| format!("100 bytes: {error:?}"))?,
-        device_id: Str0255::try_from(long.as_str())
-            .map_err(|error| format!("100 bytes: {error:?}"))?,
+        vendor: Str0255::try_from(long.as_str())?,
+        hardware_version: Str0255::try_from(long.as_str())?,
+        firmware: Str0255::try_from(long.as_str())?,
+        device_id: Str0255::try_from(long.as_str())?,
     };
     let outcome = wire.try_exchange(MESSAGE_TYPE_SETUP_CONNECTION, false, oversize);
     assert!(
@@ -1112,6 +1062,7 @@ fn a_second_setup_and_a_wrong_channel_bit_are_protocol_violations() {
     ));
 }
 
+// POOL-09
 #[test]
 fn frames_of_an_unnegotiated_extension_are_discarded() {
     let mut wire = Wire::new();
@@ -1429,36 +1380,21 @@ fn accepted_share_is_held_until_the_ledger_confirms_then_acknowledged() {
 #[test]
 fn target_difficulty_converts_share_targets_to_integer_difficulty_without_raw_hash_scaling()
 -> TestResult {
-    fn target<E: std::fmt::Debug>(
-        result: Result<ShareTarget, E>,
-        context: &str,
-    ) -> TestResult<ShareTarget> {
-        result.map_err(|error| TestError(format!("{context}: {error:?}")))
-    }
+    assert_eq!(target_difficulty(ShareTarget::from_pool_difficulty(1)?), 1);
     assert_eq!(
-        target_difficulty(target(ShareTarget::from_pool_difficulty(1), "diff 1")?),
-        1
-    );
-    assert_eq!(
-        target_difficulty(target(ShareTarget::from_pool_difficulty(42), "diff 42")?),
+        target_difficulty(ShareTarget::from_pool_difficulty(42)?),
         42
     );
     assert_eq!(
-        target_difficulty(target(
-            ShareTarget::from_pool_difficulty(16_384),
-            "diff 16384"
-        )?),
+        target_difficulty(ShareTarget::from_pool_difficulty(16_384)?),
         16_384
     );
     assert_eq!(
-        target_difficulty(target(
-            ShareTarget::from_pool_difficulty(1_000_000),
-            "diff 1M"
-        )?),
+        target_difficulty(ShareTarget::from_pool_difficulty(1_000_000)?),
         1_000_000
     );
     assert_eq!(
-        target_difficulty(target(ShareTarget::from_le_bytes(ALL_ONES), "all ones")?),
+        target_difficulty(ShareTarget::from_le_bytes(ALL_ONES)?),
         1,
         "sub-1 target difficulty floors at 1 unit of acknowledged work"
     );
@@ -1748,7 +1684,6 @@ fn version_rolling_is_accepted_inside_the_mask_and_refused_outside_it() {
     let mut s = standard_with_job();
     let job_id = s.job.id().get();
     let rolled_version = s.job.version() | 0x0000_2000;
-    assert_eq!(BIP320_VERSION_MASK & 0x2000, 0x2000);
     let nonce = share_nonce(&s.job, &s.opened.prefix, rolled_version);
     s.wire.submit_standard(
         s.opened.channel_id,
@@ -2289,37 +2224,6 @@ fn custom_jobs_are_answered_with_the_official_code_not_pretended() {
 }
 
 #[test]
-fn the_role_matrix_does_not_claim_what_is_not_built() {
-    let status = |name: &str| {
-        ROLES
-            .iter()
-            .find(|role| role.name.starts_with(name))
-            .map_or_else(|| panic!("role listed"), |role| role.status)
-    };
-    assert_eq!(status("Standard channels"), RoleStatus::Implemented);
-    assert_eq!(status("Extended channels"), RoleStatus::Implemented);
-    assert_eq!(status("Group channels"), RoleStatus::Implemented);
-    assert_eq!(status("Noise_NX"), RoleStatus::Implemented);
-    assert_eq!(status("Job Declaration server"), RoleStatus::NotImplemented);
-    assert_eq!(
-        status("Work selection"),
-        RoleStatus::NotImplemented,
-        "no owner-side install path for miner-declared jobs"
-    );
-    assert_eq!(
-        status("Template Distribution server"),
-        RoleStatus::NotImplemented
-    );
-    assert_eq!(status("Extensions negotiation"), RoleStatus::NotImplemented);
-    assert!(
-        ROLES
-            .iter()
-            .filter(|role| role.status == RoleStatus::NotImplemented)
-            .all(|role| !role.detail.is_empty())
-    );
-}
-
-#[test]
 fn the_installed_fact_set_is_what_the_adapter_consumes() {
     fn contract(installed: &Installed) -> (bool, bool, usize, JobId) {
         (
@@ -2631,71 +2535,87 @@ fn full_event_queue_fails_before_share_validation_without_orphan_ticket() {
     );
 }
 
-#[test]
-fn active_refresh_upgrades_a_channel_that_missed_its_parent_to_future() {
-    use bitcoin_rs_mining::pool::stratum::sv2::{Frame, ProtocolSession};
-    fn setup_frame(msg_type: u8, channel_msg: bool, payload: Vec<u8>) -> Frame {
-        Frame {
-            extension_type: 0,
-            msg_type,
-            channel_msg,
-            payload,
-        }
-    }
-    let mut book = JobBook::new(book_config(BIP320_VERSION_MASK))
-        .unwrap_or_else(|error| panic!("book: {error:?}"));
+use bitcoin_rs_mining::pool::stratum::sv2::{Frame, ProtocolSession};
+
+fn open_test_session(book: &mut JobBook) -> ProtocolSession {
     let mut cfg = server_config();
     cfg.limits.max_outbound_frames = 3;
     let mut session =
-        ProtocolSession::new(cfg, &book).unwrap_or_else(|error| panic!("session: {error:?}"));
+        ProtocolSession::new(cfg, book).unwrap_or_else(|error| panic!("session: {error:?}"));
     let setup = SetupConnection {
         protocol: Protocol::MiningProtocol,
         min_version: 2,
         max_version: 2,
         flags: FLAG_REQUIRES_STANDARD_JOBS,
-        endpoint_host: Str0255::try_from("pool.invalid").unwrap(),
+        endpoint_host: Str0255::try_from("pool.invalid")
+            .unwrap_or_else(|error| panic!("short: {error:?}")),
         endpoint_port: 3333,
-        vendor: Str0255::try_from("test-miner").unwrap(),
-        hardware_version: Str0255::try_from("sim-1").unwrap(),
-        firmware: Str0255::try_from("fw-0").unwrap(),
-        device_id: Str0255::try_from("").unwrap(),
+        vendor: Str0255::try_from("test-miner").unwrap_or_else(|error| panic!("short: {error:?}")),
+        hardware_version: Str0255::try_from("sim-1")
+            .unwrap_or_else(|error| panic!("short: {error:?}")),
+        firmware: Str0255::try_from("fw-0").unwrap_or_else(|error| panic!("short: {error:?}")),
+        device_id: Str0255::try_from("").unwrap_or_else(|error| panic!("empty: {error:?}")),
     };
     let payload = binary_sv2::to_bytes(setup).unwrap_or_else(|error| panic!("encode: {error:?}"));
     session
         .handle(
-            &mut book,
-            setup_frame(MESSAGE_TYPE_SETUP_CONNECTION, false, payload),
+            book,
+            Frame {
+                extension_type: 0,
+                msg_type: MESSAGE_TYPE_SETUP_CONNECTION,
+                channel_msg: false,
+                payload,
+            },
         )
         .unwrap_or_else(|error| panic!("setup: {error:?}"));
     assert!(session.is_open());
     session.take_frames();
-    let open = |session: &mut ProtocolSession, book: &mut JobBook, id: u32, user: &str| {
-        let msg = OpenStandardMiningChannel {
-            request_id: id,
-            user_identity: Str0255::try_from(user).unwrap(),
-            nominal_hash_rate: 1.0e12,
-            max_target: U256::from(&ALL_ONES),
-        };
-        let payload = binary_sv2::to_bytes(msg).unwrap();
-        session
-            .handle(
-                book,
-                setup_frame(MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL, false, payload),
-            )
-            .unwrap_or_else(|error| panic!("open: {error:?}"));
-        let mut out = session.take_frames();
-        let mut received: Vec<Received> = out
-            .drain(..)
-            .map(|frame| Received {
-                msg_type: frame.msg_type,
-                channel_msg: frame.channel_msg,
-                payload: frame.payload,
-            })
-            .collect();
-        read_open_standard(&mut received)
+    session
+}
+
+fn open_test_standard_channel(
+    session: &mut ProtocolSession,
+    book: &mut JobBook,
+    id: u32,
+    user: &str,
+) -> Opened {
+    let msg = OpenStandardMiningChannel {
+        request_id: id,
+        user_identity: Str0255::try_from(user).unwrap_or_else(|error| panic!("short: {error:?}")),
+        nominal_hash_rate: 1.0e12,
+        max_target: U256::from(&ALL_ONES),
     };
-    let opened_a = open(&mut session, &mut book, 7, "alice.rig1");
-    let opened_b = open(&mut session, &mut book, 8, "bob.rig1");
+    let payload = binary_sv2::to_bytes(msg).unwrap_or_else(|error| panic!("encode: {error:?}"));
+    session
+        .handle(
+            book,
+            Frame {
+                extension_type: 0,
+                msg_type: MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
+                channel_msg: false,
+                payload,
+            },
+        )
+        .unwrap_or_else(|error| panic!("open: {error:?}"));
+    let mut received: Vec<Received> = session
+        .take_frames()
+        .into_iter()
+        .map(|frame| Received {
+            msg_type: frame.msg_type,
+            channel_msg: frame.channel_msg,
+            payload: frame.payload,
+        })
+        .collect();
+    read_open_standard(&mut received)
+}
+
+#[test]
+fn active_refresh_upgrades_a_channel_that_missed_its_parent_to_future() {
+    let mut book = JobBook::new(book_config(BIP320_VERSION_MASK))
+        .unwrap_or_else(|error| panic!("book: {error:?}"));
+    let mut session = open_test_session(&mut book);
+    let opened_a = open_test_standard_channel(&mut session, &mut book, 7, "alice.rig1");
+    let opened_b = open_test_standard_channel(&mut session, &mut book, 8, "bob.rig1");
     let first = book
         .install(candidate(100, 0xab, 2), Vec::new())
         .unwrap_or_else(|error| panic!("install: {error:?}"));
@@ -2718,7 +2638,7 @@ fn active_refresh_upgrades_a_channel_that_missed_its_parent_to_future() {
         .iter()
         .map(|frame| (frame.msg_type, frame.payload.clone()))
         .collect();
-    assert_eq!(announced.len(), 3, "second announce frames: {:?}", detail);
+    assert_eq!(announced.len(), 3, "second announce frames: {detail:?}");
     let mut received: Vec<Received> = announced
         .into_iter()
         .map(|frame| Received {

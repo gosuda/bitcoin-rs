@@ -1,10 +1,11 @@
 use super::*;
+use crate::test_support::TestError;
 use sonic_rs::JsonValueTrait as _;
 
 use bitcoin_rs_primitives::BlockPayload;
 
 #[test]
-fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result<()> {
+fn the_chain_transaction_count_survives_a_checkpoint_restart() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -43,7 +44,7 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result
 }
 
 #[test]
-fn clean_checkpoint_reopens_and_applies_the_next_block() -> anyhow::Result<()> {
+fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError> {
     fn stable_hash(
         view: &bitcoin_rs_utxo::UtxoSetView<'_>,
     ) -> Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
@@ -141,7 +142,7 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> anyhow::Result<()> {
 }
 
 #[test]
-fn clean_checkpoint_lifecycle_is_backend_neutral() -> anyhow::Result<()> {
+fn clean_checkpoint_lifecycle_is_backend_neutral() -> Result<(), TestError> {
     let backends: Vec<&str> = vec![
         #[cfg(feature = "fjall")]
         "fjall",
@@ -155,7 +156,16 @@ fn clean_checkpoint_lifecycle_is_backend_neutral() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join(backend);
-        config.storage.backend = backend.parse().map_err(anyhow::Error::msg)?;
+        config.storage.backend = match backend {
+            "fjall" => bitcoin_rs_storage::StorageBackend::Fjall,
+            "rocksdb" => bitcoin_rs_storage::StorageBackend::RocksDb,
+            "redb" => bitcoin_rs_storage::StorageBackend::Redb,
+            _ => {
+                return Err(TestError::ExpectationFailed(
+                    "a compiled-in storage backend",
+                ));
+            }
+        };
         config.p2p.listen.clear();
         let genesis =
             BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
@@ -174,7 +184,7 @@ fn clean_checkpoint_lifecycle_is_backend_neutral() -> anyhow::Result<()> {
 }
 
 #[test]
-fn rolling_coinstats_resume_continues_through_next_block() -> anyhow::Result<()> {
+fn rolling_coinstats_resume_continues_through_next_block() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node-g2");
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -211,7 +221,7 @@ fn rolling_coinstats_resume_continues_through_next_block() -> anyhow::Result<()>
 }
 
 #[test]
-fn journal_replay_restores_state_above_checkpoint() -> anyhow::Result<()> {
+fn journal_replay_restores_state_above_checkpoint() -> Result<(), TestError> {
     fn stable_hash(
         view: &bitcoin_rs_utxo::UtxoSetView<'_>,
     ) -> Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
@@ -266,7 +276,7 @@ fn journal_replay_restores_state_above_checkpoint() -> anyhow::Result<()> {
 }
 
 #[test]
-fn publish_checkpoint_returns_none_when_no_applied_tip() -> anyhow::Result<()> {
+fn publish_checkpoint_returns_none_when_no_applied_tip() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -281,7 +291,7 @@ fn publish_checkpoint_returns_none_when_no_applied_tip() -> anyhow::Result<()> {
 }
 
 #[test]
-fn publish_checkpoint_returns_generation_and_reopens() -> anyhow::Result<()> {
+fn publish_checkpoint_returns_generation_and_reopens() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);

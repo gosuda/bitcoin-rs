@@ -1,8 +1,8 @@
-//! Asynchronous, durable, node-owned transaction index runtime.
-
 use arc_swap::ArcSwap;
 
-use bitcoin_rs_chain::{BlockBodySource, BlockTree, BlockTreeReader, TipReader, TipSnapshot};
+use bitcoin_rs_chain::{
+    BlockBodySource, BlockTree, BlockTreeReader, LatchReader, LatchWriter, TipReader, TipSnapshot,
+};
 
 use crate::{
     IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWatermarks,
@@ -74,11 +74,13 @@ use query::{IndexProgress, map_historical_error};
 pub struct DerivedIndexRuntime {
     revision: AtomicU64,
     pub(super) shutdown: AtomicBool,
+    cancel: LatchWriter,
     pub(super) failed: AtomicBool,
     wake_tx: Sender<()>,
     failure_message: RwLock<Option<CompactString>>,
     compact_filter_failure: RwLock<Option<CompactString>>,
     script_live_failure: RwLock<Option<CompactString>>,
+    script_history_failure: RwLock<Option<CompactString>>,
     phase: arc_swap::ArcSwap<ReconcilePhase>,
 }
 
@@ -88,11 +90,13 @@ impl DerivedIndexRuntime {
         Self {
             revision: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
+            cancel: LatchWriter::new(),
             failed: AtomicBool::new(false),
             wake_tx,
             failure_message: RwLock::new(None),
             compact_filter_failure: RwLock::new(None),
             script_live_failure: RwLock::new(None),
+            script_history_failure: RwLock::new(None),
             phase: arc_swap::ArcSwap::from_pointee(ReconcilePhase::FORWARD),
         }
     }
@@ -114,7 +118,7 @@ impl DerivedIndexRuntime {
 
     pub fn wake(&self) {
         self.revision.fetch_add(1, Ordering::Release);
-        let _ = self.wake_tx.try_send(());
+        let _receiver_gone = self.wake_tx.try_send(());
     }
 
     pub(crate) fn publish_failed(&self, message: impl Into<CompactString>) {
@@ -122,18 +126,44 @@ impl DerivedIndexRuntime {
         self.failed.store(true, Ordering::Release);
     }
 
-    pub(crate) fn fail_compact_filters(&self, error: &DerivedIndexWorkerError) {
-        tracing::error!(%error, "compact filter index unavailable; other indexes continue");
-        *self.compact_filter_failure.write() = Some(error.to_string().into());
-        self.publish_leg(IndexCapabilities::COMPACT_FILTERS, ReconcileLeg::Forward);
+    fn fail_capability(
+        &self,
+        capability: IndexCapabilities,
+        failure: &RwLock<Option<CompactString>>,
+        error: &DerivedIndexWorkerError,
+        message: &str,
+    ) {
+        tracing::error!(%error, message);
+        *failure.write() = Some(error.to_string().into());
+        self.publish_leg(capability, ReconcileLeg::Forward);
         self.wake();
     }
 
+    pub(crate) fn fail_compact_filters(&self, error: &DerivedIndexWorkerError) {
+        self.fail_capability(
+            IndexCapabilities::COMPACT_FILTERS,
+            &self.compact_filter_failure,
+            error,
+            "compact filter index unavailable; other indexes continue",
+        );
+    }
+
     pub(crate) fn fail_script_live(&self, error: &DerivedIndexWorkerError) {
-        tracing::error!(%error, "ScriptLive index unavailable; other indexes continue");
-        *self.script_live_failure.write() = Some(error.to_string().into());
-        self.publish_leg(IndexCapabilities::SCRIPT_LIVE, ReconcileLeg::Forward);
-        self.wake();
+        self.fail_capability(
+            IndexCapabilities::SCRIPT_LIVE,
+            &self.script_live_failure,
+            error,
+            "ScriptLive index unavailable; other indexes continue",
+        );
+    }
+
+    pub(crate) fn fail_script_history(&self, error: &DerivedIndexWorkerError) {
+        self.fail_capability(
+            IndexCapabilities::SCRIPT_HISTORY,
+            &self.script_history_failure,
+            error,
+            "ScriptHistory index unavailable; other indexes continue",
+        );
     }
 
     pub(crate) fn clear_script_live(&self) {
@@ -158,7 +188,17 @@ impl DerivedIndexRuntime {
 
     pub fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
-        let _ = self.wake_tx.try_send(());
+        self.cancel();
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancel.trigger();
+        let _receiver_gone = self.wake_tx.try_send(());
+    }
+
+    #[must_use]
+    pub(crate) fn cancel_reader(&self) -> LatchReader {
+        self.cancel.reader()
     }
 
     #[must_use]
@@ -250,9 +290,18 @@ impl ScriptIndexQuery for DerivedIndexQueryAdapter {
         let engine = self.load_engine()?;
         engine.spender(outpoint)
     }
+
+    fn confirmed_history_page(
+        &self,
+        scripthash: ScriptHash,
+        cursor: Option<Txid>,
+        limit: usize,
+    ) -> Result<crate::ScriptHistoryPage, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.confirmed_history_page(scripthash, cursor, limit)
+    }
 }
 
-/// These are query-side safety limits, not the writer batch limits.
 const QUERY_SCAN_ROW_LIMIT: usize = 1_000_000;
 
 const QUERY_SCAN_BYTE_LIMIT: usize = 64 << 20;
@@ -275,8 +324,6 @@ pub const REDB_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_bytes: BATCH_BYTE_LIMIT,
 };
 
-/// selective reset + rebuild instead of a per-block rewind.
-/// Grounded in three measured runs of per-block forward-ingest versus rollback
 pub const DEFAULT_ROLLBACK_REBUILD_CUTOVER: u32 = 100_000;
 
 const IDENTITY_CHUNK_BLOCKS: u32 = 65_536;
@@ -292,6 +339,8 @@ const REVISION_QUIET_PERIOD: Duration = Duration::from_millis(100);
 const FORWARD_BATCH_DELAY: Duration = Duration::from_millis(100);
 
 const TXINDEX_OPEN_TIMEOUT: Duration = Duration::from_mins(30);
+
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub struct Generation {
@@ -396,7 +445,6 @@ pub struct DerivedIndexOpenSpec {
     pub open_store:
         Arc<dyn Fn(&Path) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> + Send + Sync>,
     pub seed_slot: Option<SeedOfferCell>,
-    /// Test-only open specs may leave this unset; live queries then fail closed.
     pub utxo: Option<bitcoin_rs_utxo::UtxoReader>,
     pub chain_transition: Option<bitcoin_rs_chain::StableRead>,
     pub bundle: crate::portable::IndexBundleDirective,
@@ -404,10 +452,10 @@ pub struct DerivedIndexOpenSpec {
 
 pub struct DerivedIndexWorker {
     runtime: Arc<DerivedIndexRuntime>,
-    join_handle: Option<JoinHandle<()>>,
+    pub(crate) join_handle: Option<JoinHandle<()>>,
     pub generation: Generation,
     namespace_key: Option<PathBuf>,
-    open_abandoned: Arc<AtomicBool>,
+    open_abandoned: LatchReader,
 }
 
 pub struct OpenDerivedIndex {
@@ -416,7 +464,12 @@ pub struct OpenDerivedIndex {
     pub(crate) batch_limits: PreparedBatchLimits,
 }
 
-/// Sink for index-ahead rollback evidence.
+#[derive(Debug, thiserror::Error)]
+pub enum IndexAheadError {
+    #[error(transparent)]
+    Evidence(#[from] bitcoin_rs_storage::recovery_evidence::EvidenceError),
+}
+
 pub trait IndexAheadSink: Send + Sync {
     fn report_index_ahead(
         &self,
@@ -427,7 +480,7 @@ pub trait IndexAheadSink: Send + Sync {
         index_hash_be: &str,
         depth: u32,
         unix_secs: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<(), IndexAheadError>;
 }
 
 pub(crate) struct UndoScripts {
@@ -498,7 +551,7 @@ impl IndexAheadSink for RecordedIndexAhead {
         index_hash_be: &str,
         depth: u32,
         unix_secs: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), IndexAheadError> {
         self.calls.lock().push((
             capability.to_owned(),
             index_height,
@@ -522,12 +575,11 @@ struct Worker {
     batch_limits: PreparedBatchLimits,
     enabled: IndexCapabilities,
     chain_events: Arc<dyn crate::reconcile::ChainCursorSource>,
-    /// Sink for the index-ahead rollback evidence (`chain-rollback-event`
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
+    shutdown: LatchReader,
     wake_rx: Receiver<()>,
     quiet_period: Duration,
     batch_delay: Duration,
-    /// and rebuild instead of a per-block rewind. `u32::MAX` means rewind
     rollback_rebuild_cutover: u32,
     seed_slot: Option<SeedOfferCell>,
     seed_bundle: parking_lot::Mutex<Option<SeedBundle>>,
@@ -629,9 +681,8 @@ pub enum DerivedIndexWorkerError {
     UndoUnavailable { height: u32, hash: Hash256 },
     #[error("txindex worker: target chain node missing at height {height}")]
     MissingTargetChain { height: u32 },
-    /// The rollback evidence sink failed to publish the index-ahead event.
     #[error("txindex worker: rollback evidence marker not written: {0}")]
-    RollbackEvidence(#[source] Box<dyn std::error::Error + Send + Sync>),
+    RollbackEvidence(#[from] IndexAheadError),
 }
 
 impl DerivedIndexWorkerError {

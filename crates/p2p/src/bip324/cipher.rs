@@ -1,23 +1,17 @@
-//! The BIP324 forward-secure ciphers: `FSChaCha20` encrypts the length field,
-//! `FSChaCha20Poly1305` seals the packet body.
+#![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
 
 use chacha20::ChaCha20;
 use chacha20::cipher::{KeyIvInit as _, StreamCipher as _, StreamCipherSeek as _};
 use chacha20poly1305::{AeadInOut as _, ChaCha20Poly1305, KeyInit as _};
 
-/// Length fields or packets each cipher handles before it rekeys.
 const REKEY_INTERVAL: u32 = 224;
 
-/// Bytes in the encrypted length field.
 pub(crate) const LENGTH_FIELD_LEN: usize = 3;
 
-/// Bytes in a Poly1305 authentication tag.
 pub(crate) const TAG_LEN: usize = 16;
 
-/// `ChaCha20` block 1, where `ChaCha20-Poly1305` starts its keystream.
 const FIRST_PAYLOAD_BLOCK_OFFSET: u64 = 64;
 
-/// The 96-bit `ChaCha20` nonce `LE32(prefix) || LE64(epoch)`.
 fn nonce(prefix: u32, epoch: u64) -> [u8; 12] {
     let mut nonce = [0u8; 12];
     nonce[..4].copy_from_slice(&prefix.to_le_bytes());
@@ -25,14 +19,6 @@ fn nonce(prefix: u32, epoch: u64) -> [u8; 12] {
     nonce
 }
 
-/// Each rekey epoch is one continuous `ChaCha20` keystream under nonce `LE32(0) ||
-/// LE64(epoch)`.
-///
-/// After [`REKEY_INTERVAL`] length fields the next 32 keystream bytes key the following
-/// epoch.
-///
-/// A field is always [`LENGTH_FIELD_LEN`] bytes, so an epoch consumes `224 * 3 + 32 =
-/// 704` bytes, exactly eleven `ChaCha20` blocks: no keystream outlives its key.
 pub(crate) struct FsChaCha20 {
     stream: ChaCha20,
     epoch: u64,
@@ -77,13 +63,8 @@ fn length_stream(key: [u8; 32], epoch: u64) -> ChaCha20 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("BIP324 packet failed authentication")]
-pub(crate) struct AuthFailed;
+pub struct AuthFailed;
 
-/// Packet `i` of epoch `e` is sealed under nonce `LE32(i) || LE64(e)`.
-///
-/// After the last packet of an epoch the key becomes the first 32 bytes of `ChaCha20`
-/// block 1 under nonce `0xffffffff || LE64(e)`. Every call advances the packet counter,
-/// including a failed authentication, as the reference does.
 pub(crate) struct FsChaCha20Poly1305 {
     key: [u8; 32],
     epoch: u64,
@@ -99,7 +80,6 @@ impl FsChaCha20Poly1305 {
         }
     }
 
-    /// `ChaCha20-Poly1305` refuses only plaintexts beyond 256 GiB.
     pub(crate) fn encrypt(
         &mut self,
         aad: &[u8],
@@ -171,9 +151,16 @@ mod tests {
             assert_eq!(field, [plain[0], plain[1], plain[2]]);
         }
     }
+    #[derive(Debug, thiserror::Error)]
+    enum TestError {
+        #[error(transparent)]
+        Cipher(#[from] chacha20poly1305::Error),
+        #[error(transparent)]
+        Auth(#[from] AuthFailed),
+    }
 
     #[test]
-    fn packet_cipher_round_trips_across_rekeys() -> Result<(), Box<dyn std::error::Error>> {
+    fn packet_cipher_round_trips_across_rekeys() -> Result<(), TestError> {
         let mut sender = FsChaCha20Poly1305::new([5; 32]);
         let mut receiver = FsChaCha20Poly1305::new([5; 32]);
         for value in 0..(2 * REKEY_INTERVAL + 3) {
@@ -188,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn packet_cipher_rejects_any_tampering() -> Result<(), Box<dyn std::error::Error>> {
+    fn packet_cipher_rejects_any_tampering() -> Result<(), TestError> {
         let plain = *b"contents";
         for tamper in 0..3 {
             let mut sender = FsChaCha20Poly1305::new([9; 32]);
@@ -203,6 +190,97 @@ mod tests {
             }
             assert_eq!(receiver.decrypt(&aad, &mut buffer, &tag), Err(AuthFailed));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn failed_decrypts_advance_the_counter_and_trigger_rekey() -> Result<(), TestError> {
+        let mut sender = FsChaCha20Poly1305::new([9; 32]);
+        let mut receiver = FsChaCha20Poly1305::new([9; 32]);
+        let junk_tag = [0u8; 16];
+
+        let plain0 = *b"packet made for counter zero   ";
+        let mut stale = plain0;
+        let stale_tag = FsChaCha20Poly1305::new([9; 32]).encrypt(b"aad", &mut stale)?;
+
+        let mut junk = [0u8; 32];
+        assert_eq!(
+            receiver.decrypt(b"aad", &mut junk, &junk_tag),
+            Err(AuthFailed)
+        );
+        let mut discard = [0u8; 1];
+        let _ = sender.encrypt(b"aad", &mut discard)?;
+        assert_eq!(
+            receiver.decrypt(b"aad", &mut stale, &stale_tag),
+            Err(AuthFailed),
+            "the receiver advanced past the consumed counter"
+        );
+        let _ = sender.encrypt(b"aad", &mut discard)?;
+
+        for _ in 2..REKEY_INTERVAL {
+            let mut scratch = [0u8; 1];
+            let _ = sender.encrypt(b"aad", &mut scratch)?;
+            let mut corrupted = [0u8; 1];
+            assert_eq!(
+                receiver.decrypt(b"aad", &mut corrupted, &junk_tag),
+                Err(AuthFailed)
+            );
+        }
+
+        let mut old_epoch = plain0;
+        let old_epoch_tag = FsChaCha20Poly1305::new([9; 32]).encrypt(b"aad", &mut old_epoch)?;
+        assert_eq!(
+            receiver.decrypt(b"aad", &mut old_epoch, &old_epoch_tag),
+            Err(AuthFailed),
+            "the receiver rekeyed after REKEY_INTERVAL consumed counters"
+        );
+
+        let mut scratch = [0u8; 1];
+        let _ = sender.encrypt(b"aad", &mut scratch)?;
+        let plain = *b"packet from the mirrored sender ";
+        let mut buffer = plain;
+        let tag = sender.encrypt(b"aad", &mut buffer)?;
+        receiver.decrypt(b"aad", &mut buffer, &tag)?;
+        assert_eq!(buffer, plain);
+        Ok(())
+    }
+
+    #[test]
+    fn packet_replay_is_rejected() -> Result<(), TestError> {
+        let mut sender = FsChaCha20Poly1305::new([7; 32]);
+        let mut receiver = FsChaCha20Poly1305::new([7; 32]);
+        let plain0 = *b"message 0 payload";
+        let mut buf0 = plain0;
+        let tag0 = sender.encrypt(b"aad", &mut buf0)?;
+        let plain1 = *b"message 1 payload";
+        let mut buf1 = plain1;
+        let tag1 = sender.encrypt(b"aad", &mut buf1)?;
+
+        let mut recv_buf0 = buf0;
+        receiver.decrypt(b"aad", &mut recv_buf0, &tag0)?;
+        assert_eq!(recv_buf0, plain0);
+
+        let mut replayed = buf0;
+        assert_eq!(
+            receiver.decrypt(b"aad", &mut replayed, &tag0),
+            Err(AuthFailed)
+        );
+
+        let mut recv_buf1 = buf1;
+        assert_eq!(
+            receiver.decrypt(b"aad", &mut recv_buf1, &tag1),
+            Err(AuthFailed),
+            "the replay consumed the counter of the next sender packet"
+        );
+        let mut discard = [0u8; 1];
+        let _ = sender.encrypt(b"aad", &mut discard)?;
+
+        let plain2 = *b"message 2 payload";
+        let mut buf2 = plain2;
+        let tag2 = sender.encrypt(b"aad", &mut buf2)?;
+        let mut recv_buf2 = buf2;
+        receiver.decrypt(b"aad", &mut recv_buf2, &tag2)?;
+        assert_eq!(recv_buf2, plain2);
         Ok(())
     }
 }

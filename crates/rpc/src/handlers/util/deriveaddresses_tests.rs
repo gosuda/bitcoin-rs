@@ -195,26 +195,10 @@ fn combo_compressed_derives_the_bip384_address_set() {
     let key = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     let combo = deriveaddresses(&ctx, &json!([checksummed(&format!("combo({key})"))]))
         .unwrap_or_else(|err| panic!("compressed combo must derive: {err}"));
-    let pkh = deriveaddresses(&ctx, &json!([checksummed(&format!("pkh({key})"))]))
-        .unwrap_or_else(|err| panic!("pkh: {err}"));
-    let wpkh = deriveaddresses(&ctx, &json!([checksummed(&format!("wpkh({key})"))]))
-        .unwrap_or_else(|err| panic!("wpkh: {err}"));
-    let sh_wpkh = deriveaddresses(&ctx, &json!([checksummed(&format!("sh(wpkh({key}))"))]))
-        .unwrap_or_else(|err| panic!("sh(wpkh): {err}"));
     let expected = json!([
-        pkh.as_array()
-            .and_then(|arr| arr.first())
-            .cloned()
-            .unwrap_or_else(|| panic!("pkh address")),
-        wpkh.as_array()
-            .and_then(|arr| arr.first())
-            .cloned()
-            .unwrap_or_else(|| panic!("wpkh address")),
-        sh_wpkh
-            .as_array()
-            .and_then(|arr| arr.first())
-            .cloned()
-            .unwrap_or_else(|| panic!("sh(wpkh) address")),
+        "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH",
+        "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+        "3JvL6Ymt8MVWiCNHC7oWU6nLeHNJKLZGLN",
     ]);
     assert_eq!(combo, expected);
 }
@@ -272,4 +256,33 @@ fn combo_does_not_derive_from_a_testnet_wif_on_mainnet() {
         .unwrap_or_else(|| panic!("a testnet WIF must not derive on mainnet"));
     assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
     assert!(error.to_string().contains("test network"), "got {error}");
+}
+#[test]
+#[expect(clippy::expect_used)]
+fn deriveaddresses_binds_named_parameters_and_rejects_excess() {
+    let ctx = Arc::new(Context::new());
+    let desc = checksummed(&format!("addr({ADDRESS})"));
+    let named = crate::Handler::new(Arc::clone(&ctx))
+        .dispatch("deriveaddresses", &json!({"descriptor": desc}))
+        .unwrap_or_else(|err| panic!("named params failed: {err}"));
+    assert_eq!(named, json!([ADDRESS]));
+
+    let excess = deriveaddresses(&ctx, &json!([desc, Value::new_null(), "extra"]))
+        .expect_err("excess parameters must be rejected");
+    assert!(matches!(excess, RpcError::InvalidParams(_)));
+}
+
+#[test]
+#[expect(clippy::expect_used)]
+fn getdescriptorinfo_binds_named_parameters_and_rejects_excess() {
+    let ctx = Arc::new(Context::new());
+    let desc = format!("addr({ADDRESS})");
+    let named = crate::Handler::new(Arc::clone(&ctx))
+        .dispatch("getdescriptorinfo", &json!({"descriptor": desc}))
+        .unwrap_or_else(|err| panic!("named params failed: {err}"));
+    assert!(named.get("descriptor").is_some());
+
+    let excess = getdescriptorinfo(&ctx, &json!([desc, "extra"]))
+        .expect_err("excess parameters must be rejected");
+    assert!(matches!(excess, RpcError::InvalidParams(_)));
 }

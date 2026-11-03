@@ -1,10 +1,10 @@
+use super::TestError;
 use bitcoin::hashes::Hash;
 use bitcoin::{Block, BlockHash, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
 use bitcoin_rs_e2e::ProcessNode;
 use sonic_rs::{JsonValueTrait as _, json};
-use std::error::Error;
 use std::time::{Duration, Instant};
-type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
+type Result<T = ()> = std::result::Result<T, TestError>;
 
 pub(crate) fn coinbase(height: u32, outputs: Vec<TxOut>) -> Transaction {
     Transaction {
@@ -35,9 +35,15 @@ pub(crate) fn block(prev: BlockHash, time: u32, txdata: Vec<Transaction>) -> Res
         },
         txdata,
     };
-    block.header.merkle_root = block.compute_merkle_root().ok_or("empty block")?;
+    block.header.merkle_root = block
+        .compute_merkle_root()
+        .ok_or(TestError::Missing("empty block"))?;
     while block.header.validate_pow(block.header.target()).is_err() {
-        block.header.nonce = block.header.nonce.checked_add(1).ok_or("nonce")?;
+        block.header.nonce = block
+            .header
+            .nonce
+            .checked_add(1)
+            .ok_or(TestError::Missing("nonce"))?;
     }
     Ok(block)
 }
@@ -48,11 +54,11 @@ pub(crate) fn submit(node: &ProcessNode, block: &Block) -> Result {
         ("parity", "parity"), Instant::now() + Duration::from_secs(60),
     )?;
     if result.get("error").is_some_and(|error| !error.is_null()) {
-        return Err(format!("RPC: {result}").into());
+        return Err(TestError::Rpc(format!("RPC: {result}")));
     }
     let result = &result["result"];
     if !result.is_null() {
-        return Err(format!("submitblock: {result}").into());
+        return Err(TestError::SubmitBlock(format!("submitblock: {result}")));
     }
     Ok(())
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_fixtures::{p2sh_true_script, true_redeem_script_sig};
 use crate::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, MempoolGateway, MempoolLimits,
     RbfError, ReplacementCandidate, SubmitError, SubmitOutcome,
@@ -10,7 +11,7 @@ use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, Script, Sequence, TxIn, TxOut, Txid, Witness, unix_time_secs,
 };
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult = Result<(), crate::test_error::TestError>;
 
 #[derive(Default)]
 struct Seen(parking_lot::Mutex<Vec<crate::MutationEnvelope>>);
@@ -39,7 +40,7 @@ fn native_package_aggregates_cpfp_atomically_and_ignores_input_order() -> TestRe
         coin(801),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     assert!(
@@ -113,6 +114,38 @@ fn native_package_aggregates_cpfp_atomically_and_ignores_input_order() -> TestRe
 }
 
 #[test]
+#[expect(clippy::expect_used, reason = "the refusal message is the assertion")]
+fn entirely_expired_package_projects_zero_memory_with_internal_links() {
+    let pool = Mempool::new(MempoolLimits {
+        min_relay_fee_sat_per_kvb: 0,
+        max_total_bytes: 1,
+        ..MempoolLimits::default()
+    });
+    let parent = spend(&[coin(900)], &[100_000], false);
+    let parent_entry = crate::MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7, 0);
+    let child = spend(&[OutPoint::new(parent_entry.txid, 0)], &[98_000], true);
+    let fresh = crate::policy::MEMPOOL_EXPIRY_SECS + 2;
+    let child_entry = crate::MempoolEntry::new(Arc::new(child), 100, 1_000, fresh, 7, 0);
+
+    let prepared = pool
+        .prepare_package(vec![parent_entry, child_entry], fresh)
+        .expect("commit_package removes both entries and their links at once, so the expiry projection must not charge them");
+    drop(prepared);
+
+    let living = spend(&[coin(901)], &[100_000], false);
+    let living_entry = crate::MempoolEntry::new(Arc::new(living), 100, 1_000, fresh, 7, 0);
+    assert!(
+        matches!(
+            pool.prepare_package(vec![living_entry], fresh),
+            Err(crate::standardness::AcceptanceRejectReason::Mempool(
+                crate::MempoolError::Full
+            ))
+        ),
+        "a living package is still bounded by the memory limit"
+    );
+}
+
+#[test]
 fn native_package_consensus_failures_match_single_submission() -> TestResult {
     for script_failure in [true, false] {
         let gateway = gateway();
@@ -131,7 +164,7 @@ fn native_package_consensus_failures_match_single_submission() -> TestResult {
             coin(810),
             TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )]);
         let before = (
@@ -210,7 +243,7 @@ fn native_package_revalidates_fee_metadata_and_bounds_unavailable_chain_retries(
             coin(806),
             TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )]),
         txid: child.txid(),
@@ -257,7 +290,7 @@ fn native_package_failure_keeps_membership_sequence_overlay_and_estimator() -> T
         coin(802),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     gateway.prioritise(parent.txid(), 0)?;
@@ -312,7 +345,7 @@ fn native_package_resident_parent_fees_do_not_subsidize_child() -> TestResult {
         coin(803),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     let now = unix_time_secs();
@@ -389,7 +422,7 @@ fn native_package_capacity_and_topology_refuse_before_mutation() {
         coin(804),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     assert_eq!(
@@ -429,7 +462,7 @@ fn native_package_combined_cluster_limit_is_checked_before_any_insert() -> TestR
         coin(808),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     let txs = vec![parent, child];
@@ -497,7 +530,11 @@ fn spend(inputs: &[OutPoint], outputs: &[u64], witness: bool) -> Tx {
             .map(|outpoint| TxIn {
                 previous_output: *outpoint,
                 sequence: Sequence::MAX,
-                script_sig: Script::new(),
+                script_sig: Script::from_bytes(if witness {
+                    Vec::new()
+                } else {
+                    true_redeem_script_sig()
+                }),
                 witness: if witness {
                     Witness::from_stack(vec![vec![0x51]])
                 } else {
@@ -507,6 +544,26 @@ fn spend(inputs: &[OutPoint], outputs: &[u64], witness: bool) -> Tx {
             .collect(),
         outputs: outputs.iter().copied().map(output).collect(),
     }
+}
+
+fn measured_package_memory(parent: &Tx, child: &Tx) -> Result<u64, crate::MempoolError> {
+    let mut pool = Mempool::new(MempoolLimits::default());
+    for tx in [parent, child] {
+        pool.insert_entry(crate::MempoolEntry::new(
+            Arc::new(tx.clone()),
+            100,
+            1_000,
+            0,
+            1,
+            0,
+        ))?;
+    }
+    assert_eq!(
+        pool.dynamic_memory_usage(),
+        pool.recount_memory_usage(),
+        "the incremental memory walk must agree with the from-scratch walk"
+    );
+    Ok(pool.recount_memory_usage())
 }
 
 struct Coins(Vec<(OutPoint, TxOut)>);
@@ -525,6 +582,7 @@ fn gateway() -> MempoolGateway {
     gateway_observed(None)
 }
 
+// POL-02
 #[test]
 fn rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview() -> TestResult {
     use crate::PackageTxResult;
@@ -538,7 +596,7 @@ fn rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview() -> Tes
         coin(830),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     let preview = gateway.preview_transactions(&txs, None, &chain)?;
@@ -605,6 +663,7 @@ fn rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview() -> Tes
     Ok(())
 }
 
+// POL-02
 #[test]
 fn rpc_package_keeps_independent_parent_but_never_uses_its_fees_twice() -> TestResult {
     use crate::PackageTxResult;
@@ -624,7 +683,7 @@ fn rpc_package_keeps_independent_parent_but_never_uses_its_fees_twice() -> TestR
             coin(831),
             TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )]);
         let expected = if invalid_script {
@@ -656,7 +715,7 @@ fn rpc_package_underpayment_priority_cap_and_unsupported_shapes_mutate_nothing()
         coin(832),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     let txs = [parent.clone(), child.clone()];
@@ -727,7 +786,7 @@ fn rpc_package_fee_cap_compares_signed_fees_without_rounding() -> TestResult {
             coin(840),
             TxOut {
                 value: Amount::from_sat(u64::try_from(outputs)? * 1_000 + fee),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )]);
         if outputs == 30 {
@@ -789,13 +848,15 @@ fn rpc_package_fee_failure_precedence_preserves_other_planner_errors() -> TestRe
         let parent = spend(&[coin(841)], &outputs, false);
         let child = spend(&[OutPoint::new(parent.txid(), 0)], &[99_999], true);
         if full {
-            gateway.pool.write().limits.max_total_bytes = parent.vsize() + child.vsize() - 1;
+            gateway.pool.write().limits.max_total_bytes = crate::pool::entry_memory_usage(&parent)
+                + crate::pool::entry_memory_usage(&child)
+                - 1;
         }
         let chain = Coins(vec![(
             coin(841),
             TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )]);
         let history = gateway.read().estimator_history();
@@ -839,7 +900,7 @@ fn rpc_package_retries_fee_revision_and_chain_fences_without_membership_leaks() 
             coin(833),
             TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )]),
         marker: coin(900).txid,
@@ -864,6 +925,55 @@ fn rpc_package_retries_fee_revision_and_chain_fences_without_membership_leaks() 
 }
 
 #[test]
+fn package_capacity_projection_counts_its_own_dependency_links() -> TestResult {
+    let gateway = gateway();
+    gateway.pool.write().limits.min_relay_fee_sat_per_kvb = 1_000;
+    let parent = spend(&[coin(850)], &[100_000], false);
+    let child = spend(&[OutPoint::new(parent.txid(), 0)], &[98_000], true);
+    let measured = measured_package_memory(&parent, &child)?;
+    let chain = Coins(vec![(
+        coin(850),
+        TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
+        },
+    )]);
+    gateway.pool.write().limits.max_total_bytes = measured - 1;
+    let refused = gateway.submit_rpc_package(
+        &[parent.clone(), child.clone()],
+        None,
+        unix_time_secs(),
+        &chain,
+    )?;
+    assert_eq!(
+        refused.package_error,
+        Some(AcceptanceRejectReason::Mempool(crate::MempoolError::Full)),
+        "a package one byte above the measured bound must be refused: {refused:?}"
+    );
+    assert!(
+        gateway.read().is_empty(),
+        "a refused package commits nothing"
+    );
+
+    gateway.pool.write().limits.max_total_bytes = measured;
+    let admitted = gateway.submit_rpc_package(&[parent, child], None, unix_time_secs(), &chain)?;
+    assert_eq!(admitted.package_error, None, "{admitted:?}");
+    let pool = gateway.read();
+    assert_eq!(
+        pool.recount_memory_usage(),
+        measured,
+        "the committed package must use exactly the measured memory"
+    );
+    assert!(
+        pool.recount_memory_usage() <= pool.limits.max_total_bytes,
+        "the independent walk must stay within max_total_bytes: {} > {}",
+        pool.recount_memory_usage(),
+        pool.limits.max_total_bytes
+    );
+    Ok(())
+}
+
+#[test]
 fn rpc_package_capacity_and_replacement_refusals_preserve_authoritative_state() -> TestResult {
     let gateway = gateway();
     gateway.pool.write().limits.min_relay_fee_sat_per_kvb = 1_000;
@@ -873,10 +983,11 @@ fn rpc_package_capacity_and_replacement_refusals_preserve_authoritative_state() 
         coin(834),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
-    gateway.pool.write().limits.max_total_bytes = parent.vsize() + child.vsize() - 1;
+    gateway.pool.write().limits.max_total_bytes =
+        crate::pool::entry_memory_usage(&parent) + crate::pool::entry_memory_usage(&child) - 1;
     let result = gateway.submit_rpc_package(&[parent, child], None, unix_time_secs(), &chain)?;
     assert_eq!(
         result.package_error,
@@ -974,7 +1085,7 @@ fn package_count_order_conflicts_and_weight_boundaries() -> TestResult {
         assert_eq!(oracle.weight().to_wu(), 202_000);
     }
     assert!(check_structure(&weighted).is_ok());
-    let mut padding = weighted[1].inputs[0].witness[0].clone();
+    let mut padding = weighted[1].inputs[0].witness[0].to_vec();
     padding.push(0);
     weighted[1].inputs[0].witness = Witness::from_stack(vec![padding]);
     assert_eq!(
@@ -991,7 +1102,7 @@ fn zero_fee_ephemeral_parent_requires_its_child_to_spend_dust() -> TestResult {
         coin(1),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     let parent = spend(&[coin(1)], &[100_000, 0], false);
@@ -1062,7 +1173,7 @@ fn ephemeral_fee_overlay_rejects_without_state_changes() -> TestResult {
         coin(1),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     gateway.prioritise(parent.txid(), 1)?;
@@ -1119,7 +1230,7 @@ fn package_children_cannot_jointly_cross_a_cluster_or_truc_limit() -> TestResult
         coin(1),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     let parent = spend(&[coin(1)], &[49_000, 49_000], false);
@@ -1164,7 +1275,7 @@ fn native_package_commit_expires_an_unrelated_stale_entry_in_its_own_envelope() 
         coin(821),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
 
@@ -1263,14 +1374,14 @@ fn native_package_commit_survives_its_stale_resident_expiring() -> TestResult {
             coin(824),
             TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         ),
         (
             coin(825),
             TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         ),
     ]);
@@ -1370,4 +1481,57 @@ fn single_tx_maxfeerate_gates_on_base_fee_not_modified_fee() -> TestResult {
     )?;
     assert_eq!(surcharged.read().len(), 1);
     Ok(())
+}
+
+#[test]
+fn missing_ephemeral_spends_candidate_lookup_scales_linearly_with_parent_count() {
+    let inputs: Vec<OutPoint> = (1..=2_400).map(coin).collect();
+    let large_tx = spend(&inputs, &[50_000], true);
+    let candidate = spend(&[coin(999_999)], &[10_000], false);
+    let txs = vec![candidate, large_tx];
+    let pool = Mempool::new(MempoolLimits::default());
+    let dust_rate = 3_000;
+
+    let start = std::time::Instant::now();
+    let actual = missing_ephemeral_spends(&pool, &txs, dust_rate);
+    let elapsed = start.elapsed();
+
+    let mut lookup = std::collections::HashMap::new();
+    for tx in &txs {
+        lookup.insert(tx.txid(), tx);
+    }
+    let reference_has_unspent_dust =
+        |parent: &Tx, spent: &std::collections::HashSet<OutPoint>, id: Txid| {
+            parent.outputs.iter().enumerate().any(|(vout, output)| {
+                crate::standardness::is_dust(output, dust_rate)
+                    && u32::try_from(vout).map_or(true, |v| !spent.contains(&OutPoint::new(id, v)))
+            })
+        };
+    let mut expected = None;
+    for (index, tx) in txs.iter().enumerate() {
+        let spent: std::collections::HashSet<_> =
+            tx.inputs.iter().map(|i| i.previous_output).collect();
+        let parents: std::collections::HashSet<_> =
+            tx.inputs.iter().map(|i| i.previous_output.txid).collect();
+        let missing = parents.into_iter().any(|id| {
+            let parent = lookup
+                .get(&id)
+                .copied()
+                .or_else(|| pool.entry_by_txid(&id).map(|entry| entry.tx.as_ref()));
+            parent.is_some_and(|p| reference_has_unspent_dust(p, &spent, id))
+        });
+        if missing {
+            expected = Some(index);
+            break;
+        }
+    }
+
+    assert_eq!(
+        actual, expected,
+        "oracle mismatch: missing_ephemeral_spends must match independent hashmap reference"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(250),
+        "quadratic candidate scan in missing_ephemeral_spends took {elapsed:?}, expected under 250ms for linear resolution"
+    );
 }

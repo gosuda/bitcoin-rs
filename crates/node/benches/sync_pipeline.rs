@@ -1,4 +1,3 @@
-//! Deterministic initial-sync proxy benchmark.
 #![expect(
     clippy::as_conversions,
     reason = "benchmark casts are intentionally lossy for perf measurement"
@@ -15,14 +14,10 @@
     clippy::cast_sign_loss,
     reason = "benchmark: sign loss is intentional for perf measurement"
 )]
-#![expect(
-    clippy::cast_precision_loss,
-    reason = "benchmark: precision loss is intentional for perf measurement"
-)]
 
 use std::hint::black_box;
 use std::io::Write as _;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -40,15 +35,17 @@ use bitcoin::{
     script::Builder as OracleBuilder, transaction,
 };
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
-use bitcoin_rs_consensus::compute_merkle_root;
+use bitcoin_rs_consensus::{MAX_BLOCK_SIGOPS_COST, compute_merkle_root};
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_script::push_int;
+use bitcoin_rs_script::{push_int, sigops::count_tx_legacy};
 pub mod evidence;
 
+#[path = "../../../tools/benchmark-support/disk_backed_tmpdir.rs"]
+mod disk_backed_tmpdir;
 #[path = "../../../tools/benchmark-support/measured_samples.rs"]
 mod measured_samples;
 
@@ -294,9 +291,14 @@ fn record_evidence(cell: &str, blocks: &[Block], sweeps: &[(Duration, Duration)]
 }
 
 fn bench_ledger_path(name: &str) -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/benchmarks")
-        .join(name)
+    std::env::var_os("BRS_BENCH_EVIDENCE_DIR").map_or_else(
+        || {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/benchmarks")
+                .join(name)
+        },
+        |dir| Path::new(&dir).join(name),
+    )
 }
 
 fn load_bench_ledger(path: &Path) -> Ledger {
@@ -1227,14 +1229,43 @@ fn install_synthetic_peers(
     peer_count: usize,
 ) -> Vec<crossbeam_channel::Receiver<bitcoin_rs_p2p::QueuedFrame>> {
     let mut outbound_rxs = Vec::with_capacity(peer_count);
+    let best_known_height = i32::try_from(SYNC_PROXY_HEADER_HEIGHT)
+        .unwrap_or_else(|error| panic!("invalid proxy header height: {error}"));
     for index in 0..peer_count {
         let port = u16::try_from(8_333_usize.saturating_add(index))
             .unwrap_or_else(|error| panic!("invalid synthetic peer port: {error}"));
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let endpoint = bitcoin_rs_p2p::PeerEndpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let addr = bitcoin_rs_p2p::PeerRemote::Endpoint(endpoint);
+        let socket = endpoint
+            .socket_addr()
+            .unwrap_or_else(|| panic!("synthetic peers use IP endpoints"));
         let (outbound_tx, outbound_rx) = unbounded::<bitcoin_rs_p2p::QueuedFrame>();
-        peer_table.register(
-            bitcoin_rs_primitives::PeerEndpoint::Ip(addr),
-            bitcoin_rs_p2p::PeerLease::new(outbound_tx),
+        let lease = bitcoin_rs_p2p::PeerLease::new(outbound_tx);
+        peer_table.register(addr, lease.clone());
+        peer_table.publish_info(
+            addr,
+            &lease,
+            bitcoin_rs_p2p::PeerInfo {
+                addr,
+                endpoint: Some(endpoint),
+                network: addr.network().into(),
+                version: 70_016,
+                wtxid_relay: false,
+                relay_transactions: true,
+                compact_block_relay: false,
+                send_headers: false,
+                services: bitcoin::p2p::ServiceFlags::NETWORK.to_u64()
+                    | bitcoin::p2p::ServiceFlags::WITNESS.to_u64(),
+                user_agent: String::from("/bitcoin-rs-bench/"),
+                start_height: best_known_height,
+                best_known_height,
+                conn_time: 0,
+                inbound: false,
+                addr_bind: bitcoin_rs_p2p::TransportRemote::new(socket),
+                time_offset: 0,
+                counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+                transport: bitcoin_rs_p2p::TransportProtocol::V1,
+            },
         );
         outbound_rxs.push(outbound_rx);
     }
@@ -1756,7 +1787,7 @@ fn build_signed_p2pkh_spend(
         }],
         output: vec![OracleTxOut {
             value: OracleAmount::from_sat(output_value),
-            script_pubkey: OracleScriptBuf::from_bytes(bench_multisig_output_script(keys)),
+            script_pubkey: OracleScriptBuf::from_bytes(bench_p2pkh_output_script(keys)),
         }],
     };
     let cache = SighashCache::new(&tx);
@@ -1804,7 +1835,7 @@ fn build_signed_p2wpkh_spend(
         }],
         output: vec![OracleTxOut {
             value: OracleAmount::from_sat(output_value),
-            script_pubkey: OracleScriptBuf::from_bytes(bench_multisig_output_script(keys)),
+            script_pubkey: OracleScriptBuf::from_bytes(bench_p2pkh_output_script(keys)),
         }],
     };
     let mut cache = SighashCache::new(&tx);
@@ -1851,7 +1882,7 @@ fn build_signed_p2wsh_spend(
         }],
         output: vec![OracleTxOut {
             value: OracleAmount::from_sat(output_value),
-            script_pubkey: OracleScriptBuf::from_bytes(bench_multisig_output_script(keys)),
+            script_pubkey: OracleScriptBuf::from_bytes(bench_p2pkh_output_script(keys)),
         }],
     };
     let mut cache = SighashCache::new(&tx);
@@ -1915,16 +1946,8 @@ fn print_signed_spend_proxy_summary(blocks: &[Block]) {
     );
 }
 
-fn bench_multisig_output_script(keys: &SigningKeys) -> Vec<u8> {
-    OracleBuilder::new()
-        .push_int(2)
-        .push_key(&keys.p2wsh[0])
-        .push_key(&keys.p2wsh[1])
-        .push_key(&keys.p2wsh[2])
-        .push_int(3)
-        .push_opcode(opcodes::all::OP_CHECKMULTISIG)
-        .into_script()
-        .to_bytes()
+fn bench_p2pkh_output_script(keys: &SigningKeys) -> Vec<u8> {
+    OracleScriptBuf::new_p2pkh(&keys.p2pkh[0].pubkey_hash()).to_bytes()
 }
 
 fn legacy_signed_spend_proxy_blocks() -> Vec<Block> {
@@ -2313,31 +2336,16 @@ fn run_counted_row(row: &str) {
 }
 
 fn print_percentiles(label: &str, samples: &[Duration]) {
-    if samples.is_empty() {
-        return;
-    }
-    let mut sorted: Vec<Duration> = samples.to_vec();
-    sorted.sort();
-    let n = sorted.len();
-    let percentile = |p: f64| -> Duration {
-        let rank = p * (n as f64 - 1.0) / 100.0;
-        let lower = rank.floor() as usize;
-        let upper = rank.ceil() as usize;
-        if lower == upper {
-            sorted[lower]
-        } else {
-            let frac = rank - lower as f64;
-            let lo = sorted[lower].as_nanos() as f64;
-            let hi = sorted[upper].as_nanos() as f64;
-            Duration::from_nanos((lo + (hi - lo) * frac) as u64)
-        }
-    };
+    let nanos: Vec<u64> = samples.iter().copied().map(duration_nanos).collect();
+    let quantiles =
+        evidence::Quantiles::of(&nanos).unwrap_or_else(|error| panic!("{label}: {error}"));
     println!(
-        "{label} samples={n} p50={:?} p95={:?} p99={:?} max={:?}",
-        percentile(50.0),
-        percentile(95.0),
-        percentile(99.0),
-        sorted[n - 1],
+        "{label} samples={} p50={:?} p95={:?} p99={:?} max={:?}",
+        quantiles.n,
+        Duration::from_nanos(quantiles.p50),
+        Duration::from_nanos(quantiles.p95),
+        Duration::from_nanos(quantiles.p99),
+        Duration::from_nanos(quantiles.max),
     );
 }
 
@@ -2501,6 +2509,15 @@ fn build_corpus_targets(
             block.txs.len(),
             BLOCK_TEMPLATE_TARGET_SPENDS.saturating_add(1),
             "target {run} must carry coinbase plus 2000 spends"
+        );
+        let legacy_cost: u32 = block
+            .txs
+            .iter()
+            .fold(0_u32, |total, tx| total.saturating_add(count_tx_legacy(tx)))
+            .saturating_mul(4);
+        assert!(
+            legacy_cost <= MAX_BLOCK_SIGOPS_COST,
+            "target {run} legacy sigop cost {legacy_cost} exceeds budget {MAX_BLOCK_SIGOPS_COST}"
         );
     }
     for (index, block) in target_blocks.iter().enumerate() {
@@ -4158,6 +4175,7 @@ struct WindowUnit {
     cpu_ticks: u64,
     rss_start_bytes: u64,
     rss_peak_bytes: u64,
+    rss_reset: bool,
     requested: usize,
     applied_height: u32,
     corpus_sha256: Sha256Hex,
@@ -4228,20 +4246,26 @@ fn process_cpu_ticks() -> u64 {
     user.saturating_add(system)
 }
 
-fn reset_peak_rss() -> u64 {
-    std::fs::OpenOptions::new()
+fn reset_peak_rss() -> (u64, bool) {
+    let reset = std::fs::OpenOptions::new()
         .write(true)
         .open("/proc/self/clear_refs")
-        .and_then(|mut file| file.write_all(b"5"))
-        .unwrap_or_else(|error| panic!("reset peak RSS through /proc/self/clear_refs: {error}"));
+        .and_then(|mut file| file.write_all(b"5"));
     let resident_kib = proc_kib("/proc/self/status", "VmRSS:");
+    if let Err(error) = reset {
+        eprintln!(
+            "window-attribution: peak RSS reset unavailable ({error}); \
+             rss_peak_bytes is the process-wide VmHWM"
+        );
+        return (resident_kib.saturating_mul(1024), false);
+    }
     let peak_kib = proc_kib("/proc/self/status", "VmHWM:");
     assert!(
         peak_kib.saturating_sub(resident_kib) <= 1024,
         "VmHWM is {peak_kib} KiB after the reset but VmRSS is {resident_kib} KiB: \
          this kernel did not reset the peak resident set"
     );
-    resident_kib.saturating_mul(1024)
+    (resident_kib.saturating_mul(1024), true)
 }
 
 fn window_toolchain_identity() -> sonic_rs::Value {
@@ -4277,37 +4301,17 @@ fn window_toolchain_identity() -> sonic_rs::Value {
 }
 
 fn window_host_identity() -> sonic_rs::Value {
-    let tmpdir = std::env::temp_dir()
-        .canonicalize()
-        .unwrap_or_else(|error| panic!("resolve the temporary directory: {error}"));
-    let mounts = read_proc_text("/proc/self/mounts");
-    let (device, mount_point, fstype) = mounts
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_ascii_whitespace();
-            let device = fields.next()?;
-            let mount_point = fields.next()?;
-            let fstype = fields.next()?;
-            tmpdir
-                .starts_with(mount_point)
-                .then_some((device, mount_point, fstype))
-        })
-        .max_by_key(|(_, mount_point, _)| mount_point.len())
-        .unwrap_or_else(|| panic!("no mount holds {}", tmpdir.display()));
-    assert!(
-        !matches!(fstype, "tmpfs" | "ramfs"),
-        "{} is on {fstype}: set TMPDIR to a disk-backed directory so group flushes are durable",
-        tmpdir.display()
-    );
+    let storage = disk_backed_tmpdir::require_disk_backed_temp_dir()
+        .unwrap_or_else(|error| panic!("{error}"));
     json!({
         "kernel": read_proc_text("/proc/sys/kernel/osrelease").trim(),
         "cpus_allowed_list": proc_field("/proc/self/status", "Cpus_allowed_list:"),
         "mem_total_kib": proc_kib("/proc/meminfo", "MemTotal:"),
         "storage": {
-            "tmpdir": tmpdir.display().to_string(),
-            "mount_point": mount_point,
-            "fstype": fstype,
-            "device": device,
+            "tmpdir": storage.temp_dir.display().to_string(),
+            "mount_point": storage.mount_point,
+            "fstype": storage.fstype,
+            "device": storage.device,
         },
     })
 }
@@ -4319,7 +4323,7 @@ fn run_window_unit(scenario: WindowScenario) -> WindowUnit {
     let corpus_sha256 = Sha256Hex::digest(&corpus_bytes);
     let recorder = WindowSeriesRecorder;
     WINDOW_SPANS.lock().clear();
-    let rss_start_bytes = reset_peak_rss();
+    let (rss_start_bytes, rss_reset) = reset_peak_rss();
     let cpu_before = process_cpu_ticks();
     let started = quanta::Instant::now();
     let mut apply_started = started;
@@ -4348,6 +4352,7 @@ fn run_window_unit(scenario: WindowScenario) -> WindowUnit {
         cpu_ticks: cpu_after.saturating_sub(cpu_before),
         rss_start_bytes,
         rss_peak_bytes,
+        rss_reset,
         requested: report.requested,
         applied_height: report.applied_height,
         corpus_sha256,
@@ -4401,18 +4406,17 @@ fn assert_window_unit(scenario: WindowScenario, unit: &WindowUnit) {
 }
 
 fn quantiles_json(values: &[u64]) -> sonic_rs::Value {
-    if let Some(quantiles) = evidence::Quantiles::of(values) {
-        json!({
-            "n": quantiles.n,
-            "p50": quantiles.p50,
-            "p95": quantiles.p95,
-            "p99": quantiles.p99,
-            "max": quantiles.max,
-            "p99_supported": quantiles.p99_supported(),
-        })
-    } else {
-        json!({ "n": 0, "observed": false })
-    }
+    let Ok(quantiles) = evidence::Quantiles::of(values) else {
+        return json!({ "n": 0, "observed": false });
+    };
+    json!({
+        "n": quantiles.n,
+        "p50": quantiles.p50,
+        "p95": quantiles.p95,
+        "p99": quantiles.p99,
+        "max": quantiles.max,
+        "p99_supported": quantiles.p99_supported(),
+    })
 }
 
 fn window_unit_json(index: usize, origin: quanta::Instant, unit: &WindowUnit) -> sonic_rs::Value {
@@ -4432,6 +4436,7 @@ fn window_unit_json(index: usize, origin: quanta::Instant, unit: &WindowUnit) ->
         "cpu_ns": unit.cpu_ns(),
         "rss_start_bytes": unit.rss_start_bytes,
         "rss_peak_bytes": unit.rss_peak_bytes,
+        "rss_reset": unit.rss_reset,
         "requested_blocks": unit.requested,
         "applied_height": unit.applied_height,
         "transition_held_us": micros(WindowSpanKind::TransitionHeld),
@@ -4621,6 +4626,7 @@ fn run_window_attribution(arm: WindowArm, scenario: WindowScenario) {
         "run_started_unix_ns": run_started_unix_ns.to_string(),
         "warmup_units": WINDOW_WARMUP_UNITS,
         "measured_units": WINDOW_MEASURED_UNITS,
+        "rss_reset": measured.first().is_some_and(|unit| unit.rss_reset),
         "identity": identity,
         "toolchain": toolchain,
         "host": host,

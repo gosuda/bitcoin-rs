@@ -21,6 +21,7 @@ pub(crate) struct Row {
     pub entry: Entry,
     pub handler: Option<Dispatch>,
     pub execution: Execution,
+    pub arg_names: Option<&'static [&'static str]>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -28,6 +29,8 @@ pub(crate) enum Execution {
     #[default]
     Immediate,
     Blocking,
+    /// Dispatched with the request latch without a blocking-quota slot.
+    Interruptible,
     Scan,
     LongPoll,
 }
@@ -36,7 +39,7 @@ impl Execution {
     pub(crate) fn is_blocking(self, params: &Value) -> bool {
         use sonic_rs::JsonValueTrait as _;
         match self {
-            Self::Immediate => false,
+            Self::Immediate | Self::Interruptible => false,
             Self::Blocking => true,
             Self::Scan => {
                 params
@@ -96,6 +99,9 @@ macro_rules! declare_rows {
     (@handler $handler:expr, Blocking) => {
         match $handler { Some(handler) => Some(Dispatch::Cancellable(handler)), None => None }
     };
+    (@handler $handler:expr, Interruptible) => {
+        match $handler { Some(handler) => Some(Dispatch::Cancellable(handler)), None => None }
+    };
     (@handler $handler:expr, Scan) => {
         match $handler { Some(handler) => Some(Dispatch::Cancellable(handler)), None => None }
     };
@@ -105,6 +111,8 @@ macro_rules! declare_rows {
     (@handler $handler:expr $(, $execution:ident)?) => {
         match $handler { Some(handler) => Some(Dispatch::Immediate(handler)), None => None }
     };
+    (@names) => { None };
+    (@names [$($names:literal),*]) => { Some(&[$($names),*]) };
     (
         $(
             $name:literal,
@@ -114,7 +122,7 @@ macro_rules! declare_rows {
             $core_version:expr,
             $notes:expr,
             $since:literal,
-            $handler:expr $(, $execution:ident)?;
+            $handler:expr $(, $execution:ident)? $(, [$( $arg_names:literal ),*])?;
         )*
     ) => {
         pub(crate) const REGISTRY: &[Row] = &[
@@ -130,6 +138,7 @@ macro_rules! declare_rows {
                 },
                 handler: declare_rows!(@handler $handler $(, $execution)?),
                 execution: declare_rows!(@execution $($execution)?),
+                arg_names: declare_rows!(@names $([$($arg_names),*])?),
             }),*
         ];
 
@@ -161,7 +170,7 @@ macro_rules! pool_handler {
 }
 
 declare_rows! {
-    "getblocktweaks", SurfaceKind::Rpc, Status::Extension, "silent-payments", "", "Experimental keyless BIP352 extension; requires --silent-payments. One applied-chain height or hash per call, certified retained inputs, final publication check, one in-flight projection, and shared block-render permits. Source read budgets can refuse valid blocks; use another complete source for those blocks. No draft HTTP/gRPC compatibility or wallet discovery claim. See docs/silent-payments.md.", "0.14.0", BLOCK_TWEAKS_HANDLER;
+    "getblocktweaks", SurfaceKind::Rpc, Status::Extension, "silent-payments", "", "Experimental keyless BIP352 extension; requires --silent-payments. One applied-chain height or hash per call, certified retained inputs, final publication check, one in-flight projection, and shared block-render permits. Source read budgets can refuse valid blocks; use another complete source for those blocks. No draft HTTP/gRPC compatibility or wallet discovery claim. See docs/silent-payments.md.", "0.14.0", BLOCK_TWEAKS_HANDLER, ["block"];
     "registerpoolaccount", SurfaceKind::Rpc, Status::Extension, "pool", "", "Authenticated management-only payout-script registration: [account_u64, script_hex]. Changes future batches only and enables public credit-routing login '<decimal account>[.rig]'; miner password is unused. Knowing a login permits contributing credit, not withdrawals or payout-script changes. No mining credential authentication or wallet custody. Requires enabled pool service.", "0.14.0", pool_handler!(registerpoolaccount);
     "preparepayoutbatch", SurfaceKind::Rpc, Status::Extension, "pool", "", "Management-only: [idempotency_key_hex32, min_payout_sat, max_outputs]. Caller minimum must meet configured payout minimum; output count must not exceed configured ceiling. Durably reserves eligible balances in immutable batch; returns batch status and canonical BRPR request hex, or null when none qualify. Never signs or broadcasts.", "0.14.0", pool_handler!(preparepayoutbatch);
     "getpayoutrequest", SurfaceKind::Rpc, Status::Extension, "pool", "", "Management-only: [batch_id_hex32]. Exports ledger BRPR v1 hex for external signing; terminal batches refuse export.", "0.14.0", pool_handler!(getpayoutrequest);
@@ -176,75 +185,75 @@ declare_rows! {
     "getchaintips", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getchaintips);
     "getchaintxstats", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getchaintxstats);
     "getblockcount", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockcount);
-    "getblockhash", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockhash);
+    "getblockhash", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockhash), ["height"];
     "getbestblockhash", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getbestblockhash);
-    "getblock", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Verbosity 2 fees and verbosity 3 prevouts use bounded certified undo. Older stale bodies whose receipt is no longer retained omit undo fields; transient history and explicit query budgets may refuse reads. Raw/txid shapes remain; stale block headers omit competing-branch successor links. See docs/contracts/external-api.md#retained-block-inputs.", "0.4.0", Some(chain::getblock);
-    "getblockheader", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockheader);
+    "getblockheader", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockheader), ["blockhash", "verbose"];
+    "getblock", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Verbosity 2 fees and verbosity 3 prevouts use bounded certified undo. Older stale bodies whose receipt is no longer retained omit undo fields; transient history and explicit query budgets may refuse reads. Raw/txid shapes remain; stale block headers omit competing-branch successor links. See docs/contracts/external-api.md#retained-block-inputs.", "0.4.0", Some(chain::getblock), ["blockhash", "verbosity"];
     "getblockstats", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockstats);
     "verifychain", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Level 0 reads and decodes every requested non-genesis body and confirms it is the block the header chain names; level 1 also checks proof of work and the consensus-owned context-free body rules (stripped size, coinbase/transaction structure, money ranges, legacy sigops); level 2 also decodes the undo record; levels 3 and 4 run the level-2 checks and do not replay disconnect or reconnect. The answer is false for any damaged block or undo record and for windows this node does not hold (pruned, snapshot-only, unreadable or missing bodies) or skips on process shutdown mid-walk, matching Core's boolean failure for missing history rather than an incomplete-verification error for that case. Cancellation and recovery closure are -1 errors, not false: a triggered request latch answers -1 Block verification interrupted and a chainstate closed for recovery answers -1 Chainstate is unavailable for verification, including a closure that lands mid-walk or over an empty window. One owner serves RPC and startup; startup checks the last six blocks one level stronger, including witness commitments (crates/chainstate/src/verify.rs). See docs/contracts/external-api.md#block-database-verification.", "0.4.0", Some(chain::verifychain), Blocking;
-    "gettxoutsetinfo", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::gettxoutsetinfo);
+    "gettxoutsetinfo", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::gettxoutsetinfo), Blocking, ["hash_type", "hash_or_height", "use_index"];
     "getindexinfo", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getindexinfo);
     "pruneblockchain", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::pruneblockchain);
     "invalidateblock", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::invalidateblock);
     "syncwithvalidationinterfacequeue", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Barrier null: Core waits for its validation-interface queue; this node delivers the equivalent chain-transition effects (mempool update, block log, ZMQ publication, mining signal) synchronously inside the commit (crates/node/src/chain_effects.rs), so the call takes the chain-transition mutex and answers once any in-flight transition's followers finish. It is a blocking request under bounded admission; the wait honors the cancellation latch and answers -1 when interrupted. Not fully synchronous: ZMQ effects hand off to the zeromq context's own I/O thread (zmq.publish_sequence enqueues with DONTWAIT), so delivery to subscribers is queued, not awaited. Core's queue also carries mempool TransactionAddedToMempool events, which this node has no queued equivalent for. The background derived-index reconcile loop is not awaited (index reads have their own catch-up fallback).", "0.14.0", Some(chain::syncwithvalidationinterfacequeue), Blocking;
-    "scantxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Fixed addr/raw and public pkh/wpkh/sh(wpkh)/key-only tr descriptors, including wildcard/multipath expansion. Ranges are inclusive, defaulting to [0,1000] per wildcard path; fixed descriptors validate and ignore ranges. At most 1024 aggregate script expansions before deduplication; private keys, secret-dependent derivation and other forms remain unsupported. Cancellable traversal holds chain-transition exclusion; ancestry and response projection use the retained tip after release. Input, traversal, result and 60-second limits apply (docs/contracts/external-api.md, API-35).", "0.4.0", Some(chain::scantxoutset), Scan;
+    "scantxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Fixed addr/raw and public pkh/wpkh/sh(wpkh)/key-only tr descriptors, including wildcard/multipath expansion. Ranges are inclusive, defaulting to [0,1000] per wildcard path; fixed descriptors validate and ignore ranges. At most 1024 aggregate script expansions before deduplication; private keys, secret-dependent derivation and other forms remain unsupported. Cancellable traversal holds chain-transition exclusion; ancestry and response projection use the retained tip after release. Input, traversal, result and 60-second limits apply (docs/contracts/external-api.md, API-35).", "0.4.0", Some(chain::scantxoutset), Scan, ["action", "scanobjects"];
     "getrawtransaction", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::getrawtransaction);
-    "gettxout", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxout);
-    "gettxoutproof", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxoutproof);
+    "gettxout", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxout), ["txid", "n", "include_mempool"];
+    "gettxoutproof", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxoutproof), Interruptible;
     "verifytxoutproof", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::verifytxoutproof);
-    "sendrawtransaction", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Core 31.1 replacement, modified-fee, cluster and TRUC cases are process-verified in overhaul_process_harness::policy_cases. Exact optimal graph ordering does not emulate Core transient SFL work-budget states. Capacity accounting and generic consensus error details retain the differences in docs/policies/mempool-policy.md; scoped package submission is exposed separately by submitpackage.", "0.4.0", Some(tx::sendrawtransaction);
-    "testmempoolaccept", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Single preview shares committed admission verification. Core 31.1 package shape, dependency, fail-fast and replacement-disallowed cases are process-verified in overhaul_process_harness::policy_cases. Exact graph ordering, capacity behavior and generic error details retain the differences in docs/policies/mempool-policy.md. Scoped package submission is exposed separately by submitpackage.", "0.4.0", Some(tx::testmempoolaccept);
-    "decoderawtransaction", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::decoderawtransaction);
-    "compressrawtransaction", SurfaceKind::Rpc, Status::Extension, "", "", "Optional BIP337 compressed-transaction encoding; disabled unless the node starts with --compressed-transactions, which answers -32603 (crates/rpc/src/compressed_tx.rs).", "0.14.0", Some(tx::compressrawtransaction), Blocking;
-    "decompressrawtransaction", SurfaceKind::Rpc, Status::Extension, "", "", "Optional BIP337 compressed-transaction decoding; disabled unless the node starts with --compressed-transactions, which answers -32603 (crates/rpc/src/compressed_tx.rs).", "0.14.0", Some(tx::decompressrawtransaction), Blocking;
-    "createrawtransaction", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Accepts inputs, outputs, locktime and replaceable only. Version is fixed at 2 and replaceable defaults to false. Named version is rejected with -8; a fifth positional or args-prefix entry is rejected with -32602 after named binding. See docs/contracts/external-api.md#api-02-json-rpc-mechanics-and-the-wallet-free-surface.", "0.4.0", Some(tx::createrawtransaction);
+    "sendrawtransaction", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Core 31.1 replacement, modified-fee, cluster and TRUC cases are process-verified in overhaul_process_harness::policy_cases. Exact optimal graph ordering does not emulate Core transient SFL work-budget states. Capacity accounting and generic consensus error details retain the differences in docs/policies/mempool-policy.md; scoped package submission is exposed separately by submitpackage.", "0.4.0", Some(tx::sendrawtransaction), ["hexstring", "maxfeerate", "maxburnamount"];
+    "testmempoolaccept", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Single preview shares committed admission verification. Core 31.1 package shape, dependency, fail-fast and replacement-disallowed cases are process-verified in overhaul_process_harness::policy_cases. Exact graph ordering, capacity behavior and generic error details retain the differences in docs/policies/mempool-policy.md. Scoped package submission is exposed separately by submitpackage.", "0.4.0", Some(tx::testmempoolaccept), ["rawtxs", "maxfeerate"];
+    "decoderawtransaction", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::decoderawtransaction), Interruptible, ["hexstring"];
+    "compressrawtransaction", SurfaceKind::Rpc, Status::Extension, "", "", "Optional BIP337 compressed-transaction encoding; disabled unless the node starts with --compressed-transactions, which answers -32603 (crates/rpc/src/compressed_tx.rs).", "0.14.0", Some(tx::compressrawtransaction), Blocking, ["hexstring", "compress_outpoints"];
+    "decompressrawtransaction", SurfaceKind::Rpc, Status::Extension, "", "", "Optional BIP337 compressed-transaction decoding; disabled unless the node starts with --compressed-transactions, which answers -32603 (crates/rpc/src/compressed_tx.rs).", "0.14.0", Some(tx::decompressrawtransaction), Blocking, ["hexstring"];
+    "createrawtransaction", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Accepts inputs, outputs, locktime and replaceable only. Version is fixed at 2 and replaceable defaults to false. Named version is rejected with -8; a fifth positional or args-prefix entry is rejected with -32602 after named binding. See docs/contracts/external-api.md#api-02-json-rpc-mechanics-and-the-wallet-free-surface.", "0.4.0", Some(tx::createrawtransaction), ["inputs", "outputs", "locktime", "replaceable"];
     "combinepsbt", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::combinepsbt);
-    "finalizepsbt", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::finalizepsbt);
-    "getmempoolinfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Policy fields project the enforced MempoolPolicySnapshot: fullrbf is true and cluster bounds are enforced. optimal is always true for exact graph ordering rather than Core background SFL state. usage estimates local structures; maxmempool bounds virtual size rather than allocator usage. The rolling minimum fee follows Core eviction/trim bumps and post-block decay, measured against total virtual size. See docs/policies/mempool-policy.md.", "0.4.0", Some(mempool::getmempoolinfo);
+    "finalizepsbt", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::finalizepsbt), ["psbt", "extract"];
+    "getmempoolinfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Policy fields project the enforced MempoolPolicySnapshot: fullrbf is true and cluster bounds are enforced. optimal is always true for exact graph ordering rather than Core background SFL state. usage estimates local structures; usage is the maintained estimate of live entries, and maxmempool bounds that usage as Core does. The rolling minimum fee follows Core eviction/trim bumps and post-block decay, measured against the same usage. See docs/policies/mempool-policy.md.", "0.4.0", Some(mempool::getmempoolinfo);
     "getmempoolentry", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(mempool::getmempoolentry);
     "gettxspendingprevout", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Mempool lookup and options follow Core 31.1 without txospenderindex. After named binding, missing outputs and excess positional arguments use local -32602 shape errors. Core uses -1 help for no arguments/excess arity but -3 for an outputs hole created by named options; explicit null matches Core -3. Name and collision errors retain Core precedence. See docs/contracts/external-api.md#api-32-gettxspendingprevout-mempool-snapshot.", "0.11.0", Some(mempool::gettxspendingprevout);
-    "getrawmempool", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(mempool::getrawmempool);
-    "getmempoolancestors", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(mempool::getmempoolancestors);
-    "getmempooldescendants", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(mempool::getmempooldescendants);
-    "estimatesmartfee", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "See docs/contracts/external-api.md#api-26-estimatesmartfee-parameters-and-esplora-fee-estimates for conf_target and estimate_mode validation. The estimate comes from this node's mempool confirmation-history estimator with a 25-block horizon; estimate_mode is accepted and ignored (no ECONOMICAL/CONSERVATIVE split), and insufficient history returns an `errors` array (crates/rpc/src/handlers/util.rs).", "0.4.0", Some(util::estimatesmartfee);
+    "getrawmempool", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(mempool::getrawmempool), ["verbose", "mempool_sequence"];
+    "getmempoolancestors", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(mempool::getmempoolancestors), ["txid", "verbose"];
+    "getmempooldescendants", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(mempool::getmempooldescendants), ["txid", "verbose"];
+    "estimatesmartfee", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "See docs/contracts/external-api.md#api-26-estimatesmartfee-parameters-and-esplora-fee-estimates for conf_target and estimate_mode validation. The estimate comes from this node's mempool confirmation-history estimator with a 25-block horizon; estimate_mode is accepted and ignored (no ECONOMICAL/CONSERVATIVE split), and insufficient history returns an `errors` array (crates/rpc/src/handlers/util.rs).", "0.4.0", Some(util::estimatesmartfee), ["conf_target", "estimate_mode"];
     "uptime", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(util::uptime);
     "getrpcinfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "active_commands lists calls executing through Handler::dispatch (method and elapsed microseconds, oldest first, including this call); unknown or quota-refused methods never register. logpath reports the configured debug log path (crates/rpc/src/handlers/util.rs).", "0.4.0", Some(util::getrpcinfo);
     "getmemoryinfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "mode=mallocinfo is rejected with an invalid-parameter error instead of returning allocator XML (crates/rpc/src/handlers/util.rs). The figures are resident set size read from the OS, not Core's locked-pool allocator accounting.", "0.4.0", Some(util::getmemoryinfo);
     "estimaterawfee", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "local_shape: the fee estimator does not expose Core decay/scale/pass/fail internals, so horizon objects carry feerate only and the no-estimate branch stays {} (crates/rpc/src/handlers/util.rs). All three horizons carry the same feerate where Core computes three independent estimates.", "0.4.0", Some(util::estimaterawfee);
     "getzmqnotifications", SurfaceKind::Rpc, Status::ImplementedUnverified, "zmq", CORE_VERSION, "Requires the zmq feature and --enablezmq* startup flags.", "0.4.0", ZMQ_NOTIFS_HANDLER;
     "validateaddress", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "local_shape (invalid branch): a malformed or wrong-network address is hand-built as Core's sparse {isvalid:false} object because corepc-types models the valid-only fields (address, scriptPubKey, isscript, iswitness) as required and cannot represent that wire shape; valid addresses round-trip the typed v31 contract (crates/rpc/src/handlers/util.rs).", "0.4.0", Some(util::validateaddress);
-    "getdescriptorinfo", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(util::getdescriptorinfo);
-    "deriveaddresses", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(util::deriveaddresses);
+    "getdescriptorinfo", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(util::getdescriptorinfo), ["descriptor"];
+    "deriveaddresses", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(util::deriveaddresses), ["descriptor", "range"];
     "getnetworkinfo", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(network::getnetworkinfo);
     "getpeerinfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Pinned v31 shape; aggregate byte totals, negotiated transaction-relay preference, and received minimum_fee_filter are measured, while per-message byte breakdowns report empty maps and last_transaction/last_block/last_inv_sequence report Core's zero-value defaults; unmeasured telemetry (ping times, addr relay stats, starting_height, address_local, mapped_as) is null-omitted; id is the connection's stable process-unique node id, not an array position, serialized at its full unsigned 64-bit width where the pinned v31 type narrows it to u32; anonymous inbound sessions render their tor-inbound-N:0 connection handle as addr (crates/rpc/src/handlers/network.rs).", "0.4.0", Some(network::getpeerinfo);
     "ping", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Answers immediately; Core schedules a P2P ping and reports the seen pong (crates/rpc/src/handlers/network.rs).", "0.4.0", Some(network::ping);
     "addnode", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Core's optional v2transport argument is advertised for named binding but carries no per-dial selection: an omitted or null value follows the node-wide v2_transport setting, an explicit value equal to it is accepted as a no-op confirmation (the dial's transport already matches the request), and a differing value is refused with -8 naming the conflict with this node's -v2transport setting rather than silently ignored — per-dial v1/v2 choice is not plumbed; manual dials follow the node-wide setting (v2 attempted with v1 fallback when enabled).", "0.4.0", Some(network::addnode);
-    "disconnectnode", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Targets handshake-complete sessions only; nodeid is the unsigned 64-bit getpeerinfo id, alone or with an empty address, and reaches anonymous inbound sessions; address alone also accepts the tor-inbound-N:0 handle; address with nodeid is accepted as a conjunction where Core rejects the pair; readiness and selection are atomic under the peer-table lock, so a same-address replacement is never disconnected in place of the named session (crates/rpc/src/handlers/network.rs).", "0.4.0", Some(network::disconnectnode);
+    "disconnectnode", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Targets handshake-complete sessions only; nodeid is the unsigned 64-bit getpeerinfo id, alone or with an empty address, and reaches anonymous inbound sessions; address alone also accepts the tor-inbound-N:0 handle; address with nodeid is accepted as a conjunction where Core rejects the pair; readiness and selection are atomic under the peer-table lock, so a same-address replacement is never disconnected in place of the named session (crates/rpc/src/handlers/network.rs).", "0.4.0", Some(network::disconnectnode), ["address", "nodeid"];
     "getconnectioncount", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(network::getconnectioncount);
     "getnettotals", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(network::getnettotals);
     "getaddednodeinfo", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(network::getaddednodeinfo);
     "listbanned", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Pinned v22 shape; the pre-v22 ban_reason field is replaced by ban_duration and time_remaining.", "0.4.0", Some(network::listbanned);
-    "setban", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(network::setban);
+    "setban", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(network::setban), ["subnet", "command", "bantime", "absolute"];
     "clearbanned", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(network::clearbanned);
     "setnetworkactive", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(network::setnetworkactive);
-    "getnodeaddresses", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(network::getnodeaddresses);
+    "getnodeaddresses", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(network::getnodeaddresses), ["count", "network"];
     "getblocktemplate", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "BIP22/BIP23 template: client must advertise segwit (and signet on signet); signet_challenge on signet, capabilities proposal+longpoll, coinbaseaux.flags empty hex.", "0.4.0", Some(mining::getblocktemplate), LongPoll;
     "getmininginfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Pinned v30 shape including bits/target and next-block facts. Unset currentblocktx, currentblockweight, and signet_challenge are omitted like Core.", "0.4.0", Some(mining::getmininginfo);
     "submitblock", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Decode failures are -22 (Block decode failed). Extra bytes after a complete block and BIP22's dummy second argument are ignored. A header already admitted by submitheader still accepts the body; a previously connected body (scripts-valid), including after a later reorg, is duplicate.", "0.4.0", Some(mining::submitblock);
     "submitheader", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "See API-13 in docs/contracts/external-api.md for submitheader behavior.", "0.4.0", Some(mining::submitheader);
     "prioritisetransaction", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Dummy (params[1]) must be 0 or null; fee_delta is params[2]. Non-zero dummy is Core -8. Pooled dust outputs are -8 except on regtest. See API-23 in docs/contracts/external-api.md for dummy and fee_delta compatibility.", "0.4.0", Some(mining::prioritisetransaction);
-    "generatetoaddress", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Assembles, solves, and submits n blocks paying the given address through the mining coordinator; positional and named (nblocks, address, maxtries) parameter forms are both accepted. Invalid-output behavior is defined in docs/contracts/external-api.md#api-29-generate-invalid-output-text.", "0.4.0", Some(mining::generatetoaddress);
-    "generateblock", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Assembles and solves one block paying an address or descriptor from the listed mempool txids or raw txs in that order. See the canonical contract: docs/contracts/external-api.md#api-31-generateblock-multipath-ranged-and-expand-errors.", "0.4.0", Some(mining::generateblock);
+    "generatetoaddress", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Assembles, solves, and submits n blocks paying the given address through the mining coordinator; positional and named (nblocks, address, maxtries) parameter forms are both accepted. Invalid-output behavior is defined in docs/contracts/external-api.md#api-29-generate-invalid-output-text.", "0.4.0", Some(mining::generatetoaddress), ["nblocks", "address", "maxtries"];
+    "generateblock", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Assembles and solves one block paying an address or descriptor from the listed mempool txids or raw txs in that order. See the canonical contract: docs/contracts/external-api.md#api-31-generateblock-multipath-ranged-and-expand-errors.", "0.4.0", Some(mining::generateblock), ["output", "transactions", "submit"];
     "getnetworkhashps", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Estimated hashes/s over a caller-chosen lookback ending at a caller-chosen height; default lookback 120, height the applied tip.", "0.4.0", Some(mining::getnetworkhashps);
     "getprioritisedtransactions", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Projects the mempool's signed fee-delta overlay, including txids not currently pooled. See docs/contracts/external-api.md#api-28-getprioritisedtransactions-modified_fee-is-satoshis for modified_fee units.", "0.4.0", Some(mining::getprioritisedtransactions);
 
     "getcapabilities", SurfaceKind::Rpc, Status::Extension, "", CORE_VERSION, "bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/rpc/src/handlers/chain.rs, crates/index/src/capabilities.rs).", "0.4.0", Some(chain::getcapabilities);
 
-    "dumptxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Writes an unmodified Core v2 snapshot of the applied tip's UTXO set. Only type latest is served: type is required to be \"latest\" as in Core 31.1, and rollback snapshots and the options object (rollback, in_memory) are not accepted. The encode holds chain-transition and stable-view exclusion for its whole duration, blocking block commits, and logs that time; it is cancellable through the request latch and node shutdown, answering -1 and publishing nothing. The output goes to a fsynced exclusive sibling temporary file and is renamed into place without replacement, then the directory is fsynced; an existing destination (including a named pipe), a destination under the assumeutxo recovery namespace, or a platform without atomic no-replace rename is refused. See API-33 in docs/contracts/external-api.md.", "0.14.0", Some(chain::dumptxoutset), Blocking;
-    "getblockfilter", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Optional basic BIP158 filters. Active-chain only; stale/pruned or missing history is unavailable. Disabled by default; enable --blockfilterindex on an unpruned node. See docs/contracts/indexing.md.", "0.14.0", Some(chain::getblockfilter);
+    "dumptxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Writes an unmodified Core v2 snapshot of the applied tip's UTXO set. Only type latest is served: type is required to be \"latest\" as in Core 31.1, and rollback snapshots and the options object (rollback, in_memory) are not accepted. The encode holds chain-transition and stable-view exclusion for its whole duration, blocking block commits, and logs that time; it is cancellable through the request latch and node shutdown, answering -1 and publishing nothing. The output goes to a fsynced exclusive sibling temporary file and is renamed into place without replacement, then the directory is fsynced; an existing destination (including a named pipe), a destination under the assumeutxo recovery namespace, or a platform without atomic no-replace rename is refused. See API-33 in docs/contracts/external-api.md.", "0.14.0", Some(chain::dumptxoutset), Blocking, ["path", "type"];
+    "getblockfilter", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Optional basic BIP158 filters. Active-chain only; stale/pruned or missing history is unavailable. Disabled by default; enable --blockfilterindex on an unpruned node. See docs/contracts/indexing.md.", "0.14.0", Some(chain::getblockfilter), ["blockhash", "filtertype"];
     "getblockfrompeer", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No on-demand block fetch from peers.", "n/a", None;
     "getchainstates", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Reports coherent active/historical lifecycle with transaction-based progress; omits Core cache/difficulty fields and unavailable progress. Returns -32603 instead of waiting when lifecycle work is busy; ordinary chain-transition reads may still wait. Historical role precedes active. See API-33, crates/node/src/snapshot.rs and crates/rpc/src/handlers/chain.rs.", "0.12.0", Some(chain::getchainstates);
-    "getdeploymentinfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Reports actual native activation: CSV/Segwit use historical BIP9 on mainnet/testnet3; Taproot is height-based and testdummy is absent. Native regtest heights and historical script flags differ from Core 31.1; off-header-chain queries have a 2,000,000-ancestor budget. See docs/contracts/external-api.md#native-deployment-reporting.", "0.12.0", Some(deployment::getdeploymentinfo);
+    "getdeploymentinfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Reports actual native activation: CSV/Segwit use historical BIP9 on mainnet/testnet3; Taproot is height-based and testdummy is absent. Native regtest heights and historical script flags differ from Core 31.1; off-header-chain queries have a 2,000,000-ancestor budget. See docs/contracts/external-api.md#native-deployment-reporting.", "0.12.0", Some(deployment::getdeploymentinfo), ["blockhash"];
     "getdescriptoractivity", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No wallet/scan index to serve it.", "n/a", None;
     "getmempoolcluster", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Cluster mempool tracking not implemented.", "n/a", None;
     "importmempool", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Mempool import not implemented.", "n/a", None;
@@ -253,9 +262,9 @@ declare_rows! {
     "reconsiderblock", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No manual reorg-control surface.", "n/a", None;
     "savemempool", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Mempool dump/reload persistence not implemented.", "n/a", None;
     "scanblocks", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Scanning is not implemented; optional basic filters are available through getblockfilter.", "n/a", None;
-    "waitforblock", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-34-active-tip-waits.", "0.13.0", Some(crate::handlers::wait::waitforblock), Blocking;
-    "waitforblockheight", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-34-active-tip-waits.", "0.13.0", Some(crate::handlers::wait::waitforblockheight), Blocking;
-    "waitfornewblock", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-34-active-tip-waits.", "0.13.0", Some(crate::handlers::wait::waitfornewblock), Blocking;
+    "waitforblock", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-34-active-tip-waits.", "0.13.0", Some(crate::handlers::wait::waitforblock), Blocking, ["blockhash", "timeout"];
+    "waitforblockheight", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-34-active-tip-waits.", "0.13.0", Some(crate::handlers::wait::waitforblockheight), Blocking, ["height", "timeout"];
+    "waitfornewblock", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-34-active-tip-waits.", "0.13.0", Some(crate::handlers::wait::waitfornewblock), Blocking, ["timeout", "current_tip"];
     "help", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No per-method help text renderer.", "n/a", None;
     "logging", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Log-category controls not exposed over RPC.", "n/a", None;
     "stop", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Answers this node's own status string \"bitcoin-rs stopping\" and trips the node's single graceful-shutdown latch, the same chainstate latch SIGTERM/SIGINT use. The latch is tripped before the reply is written and delivery is best-effort: the detached rpc connection thread normally writes the reply as teardown lets it finish, but a guaranteed pre-teardown write is not part of the API (docs/contracts/external-api.md API-36). The status string deliberately differs from Core's (\"Bitcoin Core stopping\", src/rpc/server.cpp): the functional framework discards the stop reply (test_node.py), so no test ever required Core-string equality. Core's hidden numeric wait argument is not honored: any argument is refused with the local parameter-shape error (crates/rpc/src/handlers/util.rs).", "0.14.0", Some(util::stop);
@@ -267,13 +276,13 @@ declare_rows! {
     "converttopsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT creation not implemented.", "n/a", None;
     "createpsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT creation not implemented.", "n/a", None;
     "decodepsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT analysis not implemented (combine/finalize only).", "n/a", None;
-    "decodescript", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Wallet-free Core script projection and wrapping. Invalid-curve keys inside complex Miniscript retain an address descriptor fallback instead of Core permissive wsh inference. Missing/extra arguments return compact usage rather than the full Core help body; direct calls enforce the existing 16 MiB RPC hex-input budget. Scoped Core process evidence covers script classes, descriptors, parameters, networks, and shared consumers (crates/rpc/src/handlers/util.rs and crates/rpc/src/tx_render.rs).", "0.12.0", Some(util::decodescript);
+    "decodescript", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Wallet-free Core script projection and wrapping. Invalid-curve keys inside complex Miniscript retain an address descriptor fallback instead of Core permissive wsh inference. Missing/extra arguments return compact usage rather than the full Core help body; direct calls enforce the existing 16 MiB RPC hex-input budget. Scoped Core process evidence covers script classes, descriptors, parameters, networks, and shared consumers (crates/rpc/src/handlers/util.rs and crates/rpc/src/tx_render.rs).", "0.12.0", Some(util::decodescript), ["hexstring"];
     "descriptorprocesspsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
     "fundrawtransaction", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
     "getprivatebroadcastinfo", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Private-broadcast store not implemented.", "n/a", None;
     "joinpsbts", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT merge not implemented (combine/finalize only).", "n/a", None;
     "signrawtransactionwithkey", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Signing requires key material this process never holds.", "n/a", None;
-    "submitpackage", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Scoped singleton and 1-parent-1-child CPFP submission through the existing atomic gateway, with Core individual-first partial acceptance and resident fee exclusion. Wider packages, replacement and capacity eviction are explicitly unsupported. Generic rejection details retain native differences; see docs/policies/mempool-policy.md.", "0.14.0", Some(tx::submit_package::submitpackage);
+    "submitpackage", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Scoped singleton and 1-parent-1-child CPFP submission through the existing atomic gateway, with Core individual-first partial acceptance and resident fee exclusion. Wider packages, replacement and capacity eviction are explicitly unsupported. Generic rejection details retain native differences; see docs/policies/mempool-policy.md.", "0.14.0", Some(tx::submit_package::submitpackage), ["package", "maxfeerate", "maxburnamount"];
     "utxoupdatepsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT update from the UTXO set not implemented.", "n/a", None;
     "enumeratesigners", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No external signer support.", "n/a", None;
     "createmultisig", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No key material (policy).", "n/a", None;
@@ -416,6 +425,36 @@ mod tests {
             assert!(
                 blocking_request(&json!({"method": method, "params": params})),
                 "{method} must be classified as a blocking request"
+            );
+        }
+    }
+
+    #[test]
+    fn transaction_inspection_keeps_the_latch_without_blocking_admission() {
+        for method in ["decoderawtransaction", "gettxoutproof"] {
+            assert!(
+                !blocking_request(&json!({"method": method, "params": []})),
+                "{method} must take no blocking slot and close no keep-alive"
+            );
+            let row = REGISTRY
+                .iter()
+                .find(|row| row.entry.name == method)
+                .unwrap_or_else(|| panic!("{method} is registered"));
+            assert!(
+                matches!(row.handler, Some(Dispatch::Cancellable(_))),
+                "{method} must keep latch dispatch"
+            );
+        }
+        for method in [
+            "verifychain",
+            "dumptxoutset",
+            "gettxoutsetinfo",
+            "compressrawtransaction",
+            "decompressrawtransaction",
+        ] {
+            assert!(
+                blocking_request(&json!({"method": method, "params": []})),
+                "{method} must stay blocking-classified"
             );
         }
     }

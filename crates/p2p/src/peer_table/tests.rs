@@ -440,6 +440,7 @@ fn try_register_inbound_refuses_at_zero_capacity() {
     assert!(table.is_empty(), "a refusal changes no table state");
 }
 
+// P2P-08
 #[test]
 fn try_register_inbound_admits_below_the_cap_only() {
     let table = PeerTable::new();
@@ -474,11 +475,13 @@ fn live_inbound_count_ignores_outbound_leases() {
 }
 
 #[test]
-fn removal_releases_inbound_capacity() -> Result<(), Box<dyn std::error::Error>> {
+fn removal_releases_inbound_capacity() -> crate::test_support::TestResult {
     let table = PeerTable::new();
     let registered = table
         .try_register_inbound(addr(1), inbound_lease(), &[], 1, 0, &active_network())
-        .ok_or("capacity must admit the first inbound lease")?;
+        .ok_or(crate::test_support::TestError::Missing(
+            "capacity must admit the first inbound lease",
+        ))?;
     assert!(table.remove_current(addr(1), &registered));
     assert_eq!(table.live_inbound_count(), 0);
     assert!(
@@ -1232,4 +1235,114 @@ fn overlay_identity_remote_never_uses_proxy_ip() {
         PeerRemote::Endpoint(i2p),
         "SAM-attested I2P keeps its typed endpoint"
     );
+}
+
+#[test]
+fn peer_table_inbound_capacity_boundaries_and_eviction_refusal() {
+    let table = PeerTable::new();
+    let activity = active_network();
+    let max_inbound = 3;
+
+    let p1 = inbound_lease().with_no_ban(true);
+    let p2 = inbound_lease().with_no_ban(true);
+    let p3 = inbound_lease().with_no_ban(true);
+    let p4 = inbound_lease().with_no_ban(true);
+
+    assert!(
+        table
+            .try_register_inbound(addr(1), p1, &[], max_inbound, 0, &activity)
+            .is_some()
+    );
+    assert_eq!(table.live_inbound_count(), 1);
+
+    assert!(
+        table
+            .try_register_inbound(addr(2), p2, &[], max_inbound, 0, &activity)
+            .is_some()
+    );
+    assert_eq!(table.live_inbound_count(), 2);
+
+    assert!(
+        table
+            .try_register_inbound(addr(3), p3, &[], max_inbound, 0, &activity)
+            .is_some()
+    );
+    assert_eq!(table.live_inbound_count(), 3);
+
+    assert!(
+        table
+            .try_register_inbound(addr(4), p4, &[], max_inbound, 0, &activity)
+            .is_none()
+    );
+    assert_eq!(table.live_inbound_count(), 3);
+
+    let zero_lease = inbound_lease();
+    assert!(
+        table
+            .try_register_inbound(addr(5), zero_lease, &[], 0, 0, &activity)
+            .is_none()
+    );
+}
+
+#[test]
+fn ban_list_policy_limits_and_expiry() -> crate::test_support::TestResult {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::SystemTime;
+    let now = SystemTime::now();
+    let subnet: crate::IpSubnet = "192.168.1.0/24".parse().map_err(|_| "subnet parse")?;
+    let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+    let outside_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 2, 100));
+
+    let permanent_ban = crate::BannedSubnet {
+        subnet,
+        banned_until: None,
+        ban_created: now,
+        reason: String::new(),
+    };
+    assert!(crate::subnet::is_banned(
+        std::slice::from_ref(&permanent_ban),
+        ip,
+        now
+    ));
+    assert!(!crate::subnet::is_banned(
+        std::slice::from_ref(&permanent_ban),
+        outside_ip,
+        now
+    ));
+
+    let expired_ban = crate::BannedSubnet {
+        subnet,
+        banned_until: Some(now - std::time::Duration::from_secs(10)),
+        ban_created: now - std::time::Duration::from_secs(100),
+        reason: String::new(),
+    };
+    assert!(!crate::subnet::is_banned(
+        std::slice::from_ref(&expired_ban),
+        ip,
+        now
+    ));
+
+    let active_ban = crate::BannedSubnet {
+        subnet,
+        banned_until: Some(now + std::time::Duration::from_secs(100)),
+        ban_created: now,
+        reason: String::new(),
+    };
+    assert!(crate::subnet::is_banned(
+        std::slice::from_ref(&active_ban),
+        ip,
+        now
+    ));
+    Ok(())
+}
+
+#[test]
+fn outbound_handshake_nonce_is_in_flight_only_while_its_guard_lives() {
+    let table = PeerTable::new();
+    let nonce = 0x5eed_0011_2233_4455;
+    assert!(!table.outbound_handshake_nonces().is_in_flight(nonce));
+    let guard = table.begin_outbound_handshake_nonce(nonce);
+    assert!(table.outbound_handshake_nonces().is_in_flight(nonce));
+    drop(guard);
+    assert!(!table.outbound_handshake_nonces().is_in_flight(nonce));
 }

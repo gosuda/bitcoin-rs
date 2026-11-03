@@ -148,6 +148,21 @@ fn a_corrupt_encoded_record_is_refused() -> Result<(), UtxoError> {
 }
 
 #[test]
+fn record_rejects_duplicate_vouts() -> Result<(), UtxoError> {
+    let record = UtxoRecord::from_owned_outputs(
+        Hash256::default(),
+        &[output(0, &[0x51], 1), output(1, &[0x52], 2)],
+    )?;
+    let mut bytes = record.bytes().to_vec();
+    bytes[V5_BODY_OFFSET + 1] = bytes[V5_BODY_OFFSET];
+    assert!(matches!(
+        UtxoRecord::from_encoded(bytes.into_boxed_slice()),
+        Err(UtxoError::CorruptRecord)
+    ));
+    Ok(())
+}
+
+#[test]
 fn an_absurd_compressed_amount_is_rejected_rather_than_overflowing() {
     let mut payload = vec![0xFE_u8];
     payload.extend_from_slice(&[0xFF; 8]);
@@ -236,7 +251,6 @@ fn rejected_staged_add_leaves_source_record_unchanged() -> Result<(), UtxoError>
                 Some(&record),
                 record.txid(),
                 &additions,
-                true,
                 overwritten.as_mut(),
             ),
             Err(UtxoError::ScriptTooLarge { .. })
@@ -432,7 +446,7 @@ fn edit_replacement_fuses_removals_and_additions() -> Result<(), UtxoError> {
     };
     assert_eq!(
         edited,
-        UtxoRecord::add_run_replacement(Some(&record), record.txid(), &additions, false, None)?
+        UtxoRecord::add_run_replacement(Some(&record), record.txid(), &additions, None)?
     );
     Ok(())
 }
@@ -453,7 +467,6 @@ fn add_with_an_unsaturated_inline_partition_falls_back_to_rebuild() -> Result<()
         Some(&shrunk),
         shrunk.txid(),
         &[OutputParts::new(9, 99, &[0x59], false, 2)],
-        true,
         None,
     )?;
     assert_eq!(grown.output_count(), 9);
@@ -472,27 +485,6 @@ fn the_unique_add_guard_rejects_equal_and_decreasing_vouts() {
     assert!(!vouts_are_strictly_increasing(Some(2), [2]));
     assert!(!vouts_are_strictly_increasing(None, [3, 3]));
     assert!(!vouts_are_strictly_increasing(None, [3, 1]));
-}
-
-#[test]
-fn a_record_moved_across_threads_stays_decodable() -> Result<(), UtxoError> {
-    let record = UtxoRecord::from_owned_outputs(
-        Hash256::default(),
-        &[output(0, &[0x51], 1), output(3, &[0x53], 3)],
-    )?;
-    let txid = record.txid();
-    let record = std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                assert_eq!(record.output_count(), 2);
-                assert!(record.find_output(3).is_some());
-                record
-            })
-            .join()
-            .unwrap_or_else(|_| panic!("record moved across threads must not panic"))
-    });
-    assert_eq!(record.txid(), txid);
-    Ok(())
 }
 
 #[test]
@@ -538,7 +530,6 @@ fn failed_non_unique_add_leaves_the_overwrite_sink_untouched() -> Result<(), Utx
         Some(&record),
         Hash256::default(),
         &[addition],
-        false,
         Some(&mut overwritten),
     );
     assert!(

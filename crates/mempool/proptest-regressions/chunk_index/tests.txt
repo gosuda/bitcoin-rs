@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7d20123e9f475b29109ffb835468c07a45011542f97eca63290014265af9a3a2 # shrinks to (a, b, c) = (ChunkKey { modified_fee: 0, charged_weight: 1, prefix_weight: 404000, max_txid: Txid(Hash256([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])), component: 0, ordinal: 1 }, ChunkKey { modified_fee: 0, charged_weight: 4, prefix_weight: 404000, max_txid: Txid(Hash256([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])), component: 0, ordinal: 1 }, ChunkKey { modified_fee: -100000000, charged_weight: 1, prefix_weight: 0, max_txid: Txid(Hash256([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])), component: 0, ordinal: 0 })

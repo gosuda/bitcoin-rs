@@ -11,6 +11,7 @@ use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, W
 use sonic_rs::{JsonValueTrait as _, Value, json};
 
 use crate::context::{AppliedView, Context};
+use crate::decimal::parse_ascii_decimal;
 use crate::error::RpcError;
 use crate::handlers::chain::getblockchaininfo;
 use crate::handlers::mempool::{getmempoolinfo, getrawmempool};
@@ -65,13 +66,13 @@ pub fn route(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Resp
         return route_tx(ctx, suffix);
     }
     if let Some(suffix) = path.strip_prefix("/rest/block/notxdetails/") {
-        return route_block(ctx, suffix, false);
+        return route_block(ctx, suffix, BlockTxVerbosity::Ids);
     }
     if let Some(suffix) = path.strip_prefix("/rest/blockpart/") {
         return route_block_part(ctx, suffix);
     }
     if let Some(suffix) = path.strip_prefix("/rest/block/") {
-        return route_block(ctx, suffix, true);
+        return route_block(ctx, suffix, BlockTxVerbosity::Full);
     }
     if path.starts_with("/rest/chaininfo") {
         return route_chaininfo(ctx, path);
@@ -154,7 +155,7 @@ fn route_tx(ctx: &Arc<Context>, suffix: &str) -> Response {
     }
 }
 
-fn route_block(ctx: &Arc<Context>, suffix: &str, with_details: bool) -> Response {
+fn route_block(ctx: &Arc<Context>, suffix: &str, verbosity: BlockTxVerbosity) -> Response {
     let (hash_text, format) = split_format(suffix);
     let Ok(hash) = Hash256::from_str(hash_text) else {
         return bad_request(format!("Invalid hash: {hash_text}"));
@@ -185,11 +186,6 @@ fn route_block(ctx: &Arc<Context>, suffix: &str, with_details: bool) -> Response
             };
             let view = ctx.chain.applied_view();
             let context = build_chain_context(ctx, &view, &record, &block.header);
-            let verbosity = if with_details {
-                BlockTxVerbosity::Full
-            } else {
-                BlockTxVerbosity::Ids
-            };
             let value =
                 crate::render::block_json(&block, &context, verbosity, ctx.chain.chain_network);
             text_response("application/json", sonic_bytes(&value))
@@ -512,7 +508,7 @@ fn route_deploymentinfo(ctx: &Arc<Context>, suffix: &str) -> Response {
 
 fn route_blockhash_by_height(ctx: &Arc<Context>, suffix: &str) -> Response {
     let (height_text, format) = split_format(suffix);
-    let Ok(height) = height_text.parse::<u32>() else {
+    let Some(height) = parse_ascii_decimal::<u32>(height_text) else {
         return bad_request(format!("Invalid height: {height_text}"));
     };
     let Some(format) = format else {
@@ -708,7 +704,7 @@ fn parse_count(query: &str) -> Result<u32, Response> {
     let Some(value) = count else {
         return Ok(DEFAULT_HEADER_COUNT);
     };
-    let Ok(parsed) = value.parse::<u64>() else {
+    let Some(parsed) = parse_ascii_decimal::<u64>(value) else {
         return Err(invalid_count(value));
     };
     if !(1..=u64::from(MAX_HEADER_COUNT)).contains(&parsed) {
@@ -787,7 +783,7 @@ fn parse_getutxos_outpoints(path: &str) -> Result<(bool, Vec<(Txid, u32)>), Resp
         let Ok(txid) = Txid::from_str(txid_text) else {
             return Err(bad_request("Parse error"));
         };
-        let Ok(vout) = vout_text.parse::<u32>() else {
+        let Some(vout) = parse_ascii_decimal::<u32>(vout_text) else {
             return Err(bad_request("Parse error"));
         };
         outpoints.push((txid, vout));

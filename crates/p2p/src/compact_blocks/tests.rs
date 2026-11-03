@@ -426,7 +426,6 @@ fn cmpctblock_missing_above_the_request_bound_falls_back() {
     assert_eq!(request.txs_request.indexes.len(), MAX_REQUESTED_MISSING);
 }
 
-/// wtxids collide on one BIP152 short ID under `native`'s header and
 fn colliding_hint_pair(native: &Block, nonce: u64) -> (Tx, Tx, ShortId) {
     let keys = ShortId::calculate_siphash_keys(&registry_block(native).header, nonce);
     let (first_payload, second_payload) = COLLIDING_PAYLOADS;
@@ -470,7 +469,11 @@ fn colliding_hint_requests_only_its_slot() {
     assert_eq!(request.txs_request.indexes, vec![1]);
     assert_eq!(
         reconstruction.retained_bytes(),
-        2 * 6 + native.txs[0].total_size() + native.txs[2].total_size()
+        2 * 6
+            + [&native.txs[0], &native.txs[2]]
+                .into_iter()
+                .map(|tx| core::mem::size_of::<Tx>() + tx.retained_heap_bytes())
+                .sum::<usize>()
     );
 
     let txn = BlockTxn {
@@ -831,6 +834,89 @@ fn failed_blocktxn_completion_releases_retained_byte_budget() {
     );
 }
 
+#[test]
+fn reconstruction_falls_back_on_oversized_block_tx_count_and_budget_overflow() {
+    let mut reconstruction = Reconstruction::new();
+    let hints = SetHints { txs: vec![] };
+    let (first_block, first_cmpct) =
+        sample_cmpct(vec![test_tx(1), test_tx(2)], COMPACT_BLOCK_VERSION, 0x11);
+    let outcome =
+        reconstruction.receive_cmpctblock(&first_cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+    assert!(matches!(outcome, Outcome::RequestMissing(_)));
+    drop(first_block);
+
+    let (_second_block, mut second_cmpct) =
+        sample_cmpct(vec![test_tx(3), test_tx(4)], COMPACT_BLOCK_VERSION, 0x22);
+    second_cmpct.compact_block.short_ids =
+        vec![bitcoin::bip152::ShortId::from([1u8; 6]); MAX_BLOCK_TX_COUNT + 1];
+    let outcome =
+        reconstruction.receive_cmpctblock(&second_cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+    assert!(
+        matches!(outcome, Outcome::Fallback(_)),
+        "oversized block tx count must fall back, got {outcome:?}"
+    );
+}
+
+#[test]
+fn blocktxn_wrong_counts_and_failures_release_retained_budget() {
+    for failure_case in 0..4 {
+        let mut prefill = test_tx(1);
+        prefill.outputs[0].script_pubkey = vec![1; 100_000].into();
+        let (_block, cmpct) = sample_cmpct(
+            vec![prefill, test_tx(2)],
+            COMPACT_BLOCK_VERSION,
+            0x30 + failure_case,
+        );
+        let hints = SetHints { txs: vec![] };
+        let mut reconstruction = Reconstruction::new();
+
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+        let Outcome::RequestMissing(request) = outcome else {
+            panic!("expected request missing, got {outcome:?}");
+        };
+        assert!(reconstruction.retained_bytes() > 0);
+
+        let txn = match failure_case {
+            0 => BlockTxn {
+                transactions: BlockTransactions {
+                    block_hash: request.txs_request.block_hash,
+                    transactions: vec![],
+                },
+            },
+            1 => BlockTxn {
+                transactions: BlockTransactions {
+                    block_hash: request.txs_request.block_hash,
+                    transactions: vec![registry_tx(&test_tx(2)), registry_tx(&test_tx(3))],
+                },
+            },
+            2 => BlockTxn {
+                transactions: BlockTransactions {
+                    block_hash: request.txs_request.block_hash,
+                    transactions: vec![registry_tx(&test_tx(99))],
+                },
+            },
+            _ => BlockTxn {
+                transactions: BlockTransactions {
+                    block_hash: request.txs_request.block_hash,
+                    transactions: vec![registry_tx(&sixty_four_byte_tx(2))],
+                },
+            },
+        };
+
+        let outcome = reconstruction.receive_blocktxn(&txn, now());
+        assert!(
+            matches!(outcome, Outcome::Fallback(_)),
+            "case {failure_case} must fall back, got {outcome:?}"
+        );
+        assert_eq!(
+            reconstruction.retained_bytes(),
+            0,
+            "case {failure_case} must release retained bytes"
+        );
+    }
+}
+
 struct MissingCoins;
 impl bitcoin_rs_mempool::AdmissionChain for MissingCoins {
     fn snapshot(&self, _: &Tx) -> Option<bitcoin_rs_mempool::ChainAdmissionSnapshot> {
@@ -889,6 +975,16 @@ fn orphan_tx(prev_byte: u8, witness_byte: u8) -> Tx {
     }
 }
 
+fn p2sh_true_output() -> Vec<u8> {
+    bitcoin::ScriptBuf::from_bytes(vec![0x51])
+        .to_p2sh()
+        .into_bytes()
+}
+
+fn p2sh_true_script_sig() -> Vec<u8> {
+    vec![0x01, 0x51]
+}
+
 fn p2p_parent() -> Tx {
     Tx {
         version: 2,
@@ -901,7 +997,7 @@ fn p2p_parent() -> Tx {
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(10_000),
-            script_pubkey: vec![0x51].into(),
+            script_pubkey: p2sh_true_output().into(),
         }],
     }
 }
@@ -915,7 +1011,7 @@ fn p2p_child(parent_txid: Txid, marker: u8) -> Tx {
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
-            script_sig: Vec::<u8>::new().into(),
+            script_sig: p2sh_true_script_sig().into(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
@@ -1186,4 +1282,36 @@ fn colliding_tx_bytes(branch: u8, payload: u32) -> Vec<u8> {
     bytes.extend_from_slice(&payload.to_le_bytes());
     bytes.extend_from_slice(&0_u32.to_le_bytes());
     bytes
+}
+
+fn blocks_with_prefilled_witness_items(items: usize) -> (Block, CmpctBlock) {
+    let mut heavy = test_coinbase(1);
+    heavy.inputs[0].witness = Witness::from_stack(vec![Vec::new(); items]);
+    let native = conforming_block(vec![heavy, test_tx(2)]);
+    let short_id = wtxid_short_id(&native, 7, &native.txs[1]);
+    let cmpct = cmpct_with_slots(&native, 7, vec![short_id]);
+    (native, cmpct)
+}
+
+#[test]
+fn prefilled_witness_heap_counts_against_the_pending_retention_cap() {
+    let hints = SetHints { txs: Vec::new() };
+
+    let (_, light) = blocks_with_prefilled_witness_items(100);
+    assert!(
+        matches!(
+            Reconstruction::new().receive_cmpctblock(&light, 2, &hints, now()),
+            Outcome::RequestMissing(_)
+        ),
+        "control: a small prefilled witness stays well under the 8 MiB cap"
+    );
+
+    let (_, heavy) = blocks_with_prefilled_witness_items(2_200_000);
+    assert!(
+        matches!(
+            Reconstruction::new().receive_cmpctblock(&heavy, 2, &hints, now()),
+            Outcome::Fallback(_)
+        ),
+        "decoded witness heap must be charged, not only the serialized length"
+    );
 }

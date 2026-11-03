@@ -1,6 +1,3 @@
-//! The opcode evaluator: a bounded stack machine mirroring Bitcoin Core's
-//! `EvalScript`.
-
 use std::borrow::Cow;
 
 use bitcoin_rs_primitives::{CODESEPARATOR_POSITION, Hash256};
@@ -71,6 +68,12 @@ impl ConditionStack {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CodeSeparator {
+    opcode_pos: u32,
+    byte_offset: Option<usize>,
+}
+
 fn script_num(bytes: &[u8], require_minimal: bool, max_size: usize) -> Result<i64, ScriptError> {
     if bytes.len() > max_size {
         return Err(ScriptError::Invalid {
@@ -80,7 +83,8 @@ fn script_num(bytes: &[u8], require_minimal: bool, max_size: usize) -> Result<i6
     if require_minimal && !bytes.is_empty() {
         let last = bytes.last().copied().unwrap_or(0);
         if last.trailing_zeros() >= 7 {
-            let second_to_last_significant = bytes.len() > 1 && bytes[bytes.len() - 2] & 0x80 != 0;
+            let second_to_last_significant =
+                bytes.len() > 1 && bytes.get(bytes.len() - 2).copied().unwrap_or(0) & 0x80 != 0;
             if bytes.len() == 1 || !second_to_last_significant {
                 return Err(ScriptError::Invalid {
                     code: ScriptErrCode::ScriptNum,
@@ -95,7 +99,7 @@ fn script_num(bytes: &[u8], require_minimal: bool, max_size: usize) -> Result<i6
     for (index, byte) in bytes.iter().enumerate() {
         value |= u64::from(*byte) << (8 * index);
     }
-    if bytes[bytes.len() - 1] & 0x80 != 0 {
+    if bytes.last().copied().unwrap_or(0) & 0x80 != 0 {
         let mask = !(0x80_u64 << (8 * (bytes.len() - 1)));
         let magnitude = value & mask;
         let magnitude = i64::try_from(magnitude).map_err(|_| ScriptError::Invalid {
@@ -195,9 +199,12 @@ pub(crate) fn eval_script(
     let mut conditions = ConditionStack::new();
     let mut altstack = Stack::new();
     let mut op_count: usize = 0;
-    let mut codeseparator_pos: u32 = CODESEPARATOR_POSITION;
+    let mut code_separator = CodeSeparator {
+        opcode_pos: CODESEPARATOR_POSITION,
+        byte_offset: None,
+    };
+    let mut opcode_pos: u32 = 0;
     let mut instruction_start: usize = 0;
-    let mut opcode_pos: usize = 0;
     let mut iter = instructions(script);
 
     while let Some(parsed) = iter.next() {
@@ -211,48 +218,13 @@ pub(crate) fn eval_script(
         };
         match instruction {
             Instruction::PushBytes(data) => {
-                let opcode_byte = script[instruction_start];
-                if data.len() > MAX_SCRIPT_ELEMENT_SIZE {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::PushSize,
-                    });
-                }
-                if conditions.all_true() {
-                    if flags.contains(VerifyFlags::MINIMALDATA) && !minimal_push(data, opcode_byte)
-                    {
-                        return Err(ScriptError::Invalid {
-                            code: ScriptErrCode::MinimalData,
-                        });
-                    }
-                    push_bytes(stack, data)?;
-                }
+                let opcode_byte = *script.get(instruction_start).ok_or(ScriptError::Invalid {
+                    code: ScriptErrCode::BadOpcode,
+                })?;
+                handle_push_bytes(data, opcode_byte, conditions.all_true(), flags, stack)?;
             }
             Instruction::Op(opcode_byte) => {
-                if sigversion == SigVersion::Base || sigversion == SigVersion::WitnessV0 {
-                    if opcode_byte > opcode::OP_PUSHNUM_16 {
-                        op_count += 1;
-                        if op_count > MAX_OPS_PER_SCRIPT {
-                            return Err(ScriptError::Invalid {
-                                code: ScriptErrCode::OpCount,
-                            });
-                        }
-                    }
-                }
-
-                if is_disabled(opcode_byte) {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::DisabledOpcode,
-                    });
-                }
-
-                if opcode_byte == OP_CODESEPARATOR
-                    && sigversion == SigVersion::Base
-                    && flags.contains(VerifyFlags::CONST_SCRIPTCODE)
-                {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::OpCodeSeparator,
-                    });
-                }
+                check_opcode_rules(opcode_byte, sigversion, flags, &mut op_count)?;
 
                 let f_exec = conditions.all_true();
                 if f_exec || (OP_IF..=OP_ENDIF).contains(&opcode_byte) {
@@ -268,9 +240,9 @@ pub(crate) fn eval_script(
                         checker,
                         sigversion,
                         validation_weight_left,
-                        &mut codeseparator_pos,
-                        instruction_start,
                         opcode_pos,
+                        &mut code_separator,
+                        instruction_start,
                         tapleaf_hash,
                         script,
                     )?;
@@ -278,21 +250,69 @@ pub(crate) fn eval_script(
             }
         }
 
-        if stack.len() + altstack.len() > MAX_STACK_SIZE {
-            return Err(ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            });
-        }
-
+        check_stack_depth(stack, &altstack)?;
         instruction_start = script.len() - iter.remaining.len();
-        // BIP342 counts every decoded instruction, including pushes and
-        // instructions in branches that were not executed.
-        opcode_pos += 1;
+        opcode_pos = opcode_pos.saturating_add(1);
     }
 
     if !conditions.is_empty() {
         return Err(ScriptError::Invalid {
             code: ScriptErrCode::UnbalancedConditional,
+        });
+    }
+    Ok(())
+}
+
+fn handle_push_bytes(
+    data: &[u8],
+    opcode_byte: u8,
+    conditions_true: bool,
+    flags: VerifyFlags,
+    stack: &mut Stack,
+) -> Result<(), ScriptError> {
+    if data.len() > MAX_SCRIPT_ELEMENT_SIZE {
+        return Err(ScriptError::Invalid {
+            code: ScriptErrCode::PushSize,
+        });
+    }
+    if conditions_true {
+        if flags.contains(VerifyFlags::MINIMALDATA) && !minimal_push(data, opcode_byte) {
+            return Err(ScriptError::Invalid {
+                code: ScriptErrCode::MinimalData,
+            });
+        }
+        push_bytes(stack, data)?;
+    }
+    Ok(())
+}
+
+fn check_opcode_rules(
+    opcode_byte: u8,
+    sigversion: SigVersion,
+    flags: VerifyFlags,
+    op_count: &mut usize,
+) -> Result<(), ScriptError> {
+    if (sigversion == SigVersion::Base || sigversion == SigVersion::WitnessV0)
+        && opcode_byte > opcode::OP_PUSHNUM_16
+    {
+        *op_count += 1;
+        if *op_count > MAX_OPS_PER_SCRIPT {
+            return Err(ScriptError::Invalid {
+                code: ScriptErrCode::OpCount,
+            });
+        }
+    }
+    if is_disabled(opcode_byte) {
+        return Err(ScriptError::Invalid {
+            code: ScriptErrCode::DisabledOpcode,
+        });
+    }
+    if opcode_byte == OP_CODESEPARATOR
+        && sigversion == SigVersion::Base
+        && flags.contains(VerifyFlags::CONST_SCRIPTCODE)
+    {
+        return Err(ScriptError::Invalid {
+            code: ScriptErrCode::OpCodeSeparator,
         });
     }
     Ok(())
@@ -304,6 +324,15 @@ fn push_bytes(stack: &mut Stack, data: &[u8]) -> Result<(), ScriptError> {
         .map_err(|_| ScriptError::Invalid {
             code: ScriptErrCode::StackSize,
         })
+}
+
+fn check_stack_depth(stack: &Stack, altstack: &Stack) -> Result<(), ScriptError> {
+    if stack.len() + altstack.len() > MAX_STACK_SIZE {
+        return Err(ScriptError::Invalid {
+            code: ScriptErrCode::StackSize,
+        });
+    }
+    Ok(())
 }
 
 const fn is_disabled(op: u8) -> bool {
@@ -350,9 +379,9 @@ fn dispatch(
     checker: &TxSignatureChecker<'_>,
     sigversion: SigVersion,
     validation_weight_left: &mut Option<i64>,
-    codeseparator_pos: &mut u32,
+    opcode_pos: u32,
+    code_separator: &mut CodeSeparator,
     instruction_start: usize,
-    opcode_pos: usize,
     tapleaf_hash: Option<&Hash256>,
     script: &[u8],
 ) -> Result<(), ScriptError> {
@@ -717,14 +746,8 @@ fn dispatch(
             push_bytes(stack, &digest)?;
         }
         OP_CODESEPARATOR => {
-            let position = if sigversion == SigVersion::Tapscript {
-                opcode_pos
-            } else {
-                instruction_start + 1
-            };
-            *codeseparator_pos = u32::try_from(position).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::ScriptSize,
-            })?;
+            code_separator.opcode_pos = opcode_pos;
+            code_separator.byte_offset = Some(instruction_start + 1);
         }
         OP_CHECKSIG | OP_CHECKSIGVERIFY => {
             let pubkey = stack.pop().map_err(|_| invalid_stack())?;
@@ -732,8 +755,7 @@ fn dispatch(
             let success = eval_checksig(
                 &item_bytes(&sig),
                 &item_bytes(&pubkey),
-                instruction_start,
-                *codeseparator_pos,
+                *code_separator,
                 script,
                 flags,
                 checker,
@@ -765,8 +787,7 @@ fn dispatch(
             let success = eval_checksig(
                 &item_bytes(&sig),
                 &item_bytes(&pubkey),
-                instruction_start,
-                *codeseparator_pos,
+                *code_separator,
                 script,
                 flags,
                 checker,
@@ -794,8 +815,7 @@ fn dispatch(
                 checker,
                 sigversion,
                 op_count,
-                *codeseparator_pos,
-                instruction_start,
+                *code_separator,
                 script,
                 op == OP_CHECKMULTISIGVERIFY,
             )?;
@@ -831,15 +851,11 @@ fn hash_bytes(op: u8, data: &[u8]) -> SmallVec<[u8; 32]> {
     }
 }
 
-fn script_code(codeseparator_pos: u32, instruction_start: usize, script: &[u8]) -> Vec<u8> {
-    if codeseparator_pos == CODESEPARATOR_POSITION {
-        return script.to_vec();
+fn script_code(byte_offset: Option<usize>, script: &[u8]) -> Vec<u8> {
+    match byte_offset {
+        None => script.to_vec(),
+        Some(start) => script.get(start..).unwrap_or_default().to_vec(),
     }
-    let start = usize::try_from(codeseparator_pos).unwrap_or(0);
-    if start >= script.len() || start > instruction_start {
-        return script.to_vec();
-    }
-    script.get(start..).unwrap_or_default().to_vec()
 }
 
 pub(crate) fn remove_all(haystack: &[u8], needle: &[u8]) -> (Vec<u8>, usize) {
@@ -869,8 +885,7 @@ pub(crate) fn remove_all(haystack: &[u8], needle: &[u8]) -> (Vec<u8>, usize) {
 fn eval_checksig(
     sig: &[u8],
     pubkey: &[u8],
-    instruction_start: usize,
-    codeseparator_pos: u32,
+    code_separator: CodeSeparator,
     script: &[u8],
     flags: VerifyFlags,
     checker: &TxSignatureChecker<'_>,
@@ -880,7 +895,7 @@ fn eval_checksig(
 ) -> Result<bool, ScriptError> {
     match sigversion {
         SigVersion::Base | SigVersion::WitnessV0 => {
-            let mut code = script_code(codeseparator_pos, instruction_start, script);
+            let mut code = script_code(code_separator.byte_offset, script);
             if sigversion == SigVersion::Base {
                 let needle = push_data(sig);
                 let (cleaned, found) = remove_all(&code, &needle);
@@ -922,7 +937,7 @@ fn eval_checksig(
                         sig,
                         pubkey,
                         tapleaf_hash,
-                        codeseparator_pos,
+                        code_separator.opcode_pos,
                     )?;
                 }
             } else if flags.contains(VerifyFlags::DISCOURAGE_UPGRADABLE_PUBKEYTYPE) {
@@ -942,8 +957,7 @@ fn check_multisig(
     checker: &TxSignatureChecker<'_>,
     sigversion: SigVersion,
     op_count: &mut usize,
-    codeseparator_pos: u32,
-    instruction_start: usize,
+    code_separator: CodeSeparator,
     script: &[u8],
     verify_only: bool,
 ) -> Result<(), ScriptError> {
@@ -994,7 +1008,7 @@ fn check_multisig(
         return Err(invalid_stack());
     }
 
-    let mut code = script_code(codeseparator_pos, instruction_start, script);
+    let mut code = script_code(code_separator.byte_offset, script);
     if sigversion == SigVersion::Base {
         for index in 0..sigs {
             let sig_item = stack
@@ -1072,3 +1086,6 @@ fn check_multisig(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod consensus_tests;

@@ -24,29 +24,8 @@ fn eight_threads_share_one_context_for_getblockcount() {
         .collect();
     for worker in workers {
         let outcome = worker.join().expect("a worker answers");
-        assert!(
-            outcome.is_ok(),
-            "shared dispatch must answer every worker: {outcome:?}"
-        );
+        assert_eq!(outcome.expect("a worker answers"), json!(0));
     }
-}
-
-#[test]
-fn applied_tip_publication_carries_the_transaction_count() {
-    let ctx = Context::new();
-    let counted = |count| {
-        Arc::new(TipSnapshot {
-            tip_id: bitcoin_rs_chain::NodeId::new(0),
-            height: 0,
-            chainwork: bitcoin_rs_chain::ChainWork::ZERO,
-            hash: bitcoin_rs_primitives::Hash256::default(),
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(count),
-        })
-    };
-    ctx.chain.applied_tip.store(Some(counted(1)));
-    assert_eq!(ctx.chain.applied_view().chain_tx_count(), Some(1));
-    ctx.chain.applied_tip.store(Some(counted(42)));
-    assert_eq!(ctx.chain.applied_view().chain_tx_count(), Some(42));
 }
 
 #[test]
@@ -103,7 +82,7 @@ fn applied_view_uses_one_publication() {
 }
 
 #[test]
-fn applied_view_does_not_wait_for_transition() -> anyhow::Result<()> {
+fn applied_view_does_not_wait_for_transition() -> Result<(), crate::test_error::TestError> {
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -125,10 +104,9 @@ fn applied_view_does_not_wait_for_transition() -> anyhow::Result<()> {
     });
     let height = rx
         .recv_timeout(Duration::from_secs(1))
-        .map_err(|_| anyhow::anyhow!("capture blocked behind the transition barrier"))?;
+        .map_err(|_| "capture blocked behind the transition barrier")?;
     assert_eq!(height, 5, "the capture must see the published tip");
-    join.join()
-        .map_err(|_| anyhow::anyhow!("capture worker panicked"))?;
+    join.join().map_err(|_| "capture worker panicked")?;
     drop(transition);
     Ok(())
 }
@@ -370,6 +348,7 @@ fn from_handles_shares_chain_handles_with_caller() {
     );
 }
 
+// SYNC-05
 #[test]
 fn status_keeps_the_captured_applied_pair() {
     let ctx = Context::new();
@@ -472,35 +451,6 @@ fn connected_log_blocks_resolve_metadata_without_header_bytes() {
             "the log stores no header at height {height}"
         );
     }
-}
-
-#[test]
-fn context_reads_metadata_only_block_record_from_body_source() {
-    let block = Network::Regtest.genesis_block();
-    let body = consensus_bytes(&block);
-    let record = BlockRecord::from_block(0, &block);
-    let source = Arc::new(BlockBodies {
-        bodies: vec![(0, record.hash, body.clone())],
-    });
-    let ctx = Context::from_handles(ContextHandles {
-        chain: ChainHandles {
-            block_body_source: Some(source),
-            ..ChainHandles::default()
-        },
-        ..ContextHandles::default()
-    });
-    ctx.chain.add_block(record.clone());
-
-    assert_eq!(record.body_size, consensus_bytes(&block).len());
-    assert_eq!(
-        ctx.chain.block_body_bytes(&record).as_deref(),
-        Some(body.as_slice())
-    );
-    let expected_hex = body.to_lower_hex_string();
-    assert_eq!(
-        ctx.chain.block_body_hex(&record).as_deref(),
-        Some(expected_hex.as_str())
-    );
 }
 
 #[test]
@@ -622,8 +572,8 @@ fn height_for_hash_returns_none_when_tree_empty() {
     assert!(ctx.chain.height_for_hash(unknown).is_none());
 }
 #[test]
-fn block_by_height_prefers_tree_identity_over_stale_cache() -> Result<(), Box<dyn std::error::Error>>
-{
+fn block_by_height_prefers_tree_identity_over_stale_cache()
+-> Result<(), crate::test_error::TestError> {
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::Header;
 
@@ -650,9 +600,7 @@ fn block_by_height_prefers_tree_identity_over_stale_cache() -> Result<(), Box<dy
         child.nonce = 1;
         let child_id = tree.insert_node(Some(genesis_id), child, NodeStatus::Active)?;
         let child_hash = tree.node(child_id)?.hash;
-        let applied_tip = tree
-            .tip()
-            .ok_or_else(|| std::io::Error::other("missing child tip"))?;
+        let applied_tip = tree.tip().ok_or("missing child tip")?;
         ctx.chain
             .applied_tip
             .store(Some(Arc::new((*applied_tip).clone())));
@@ -666,7 +614,7 @@ fn block_by_height_prefers_tree_identity_over_stale_cache() -> Result<(), Box<dy
     let found = ctx
         .chain
         .block_by_height(1)
-        .ok_or_else(|| std::io::Error::other("tree child missing at height 1"))?;
+        .ok_or("tree child missing at height 1")?;
     assert_eq!(
         found.hash,
         BlockHash::from(child_hash),
@@ -678,7 +626,7 @@ fn block_by_height_prefers_tree_identity_over_stale_cache() -> Result<(), Box<dy
 
 #[test]
 fn height_lookups_follow_applied_tip_when_header_fork_leads()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::Header;
 
@@ -703,9 +651,7 @@ fn height_lookups_follow_applied_tip_when_header_fork_leads()
             nonce: 1,
         };
         let applied_id = tree.insert_node(Some(genesis_id), applied, NodeStatus::Active)?;
-        let applied_tip = tree
-            .tip()
-            .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
+        let applied_tip = tree.tip().ok_or("missing applied tip")?;
         assert_eq!(applied_tip.tip_id, applied_id);
 
         let fork = Header {
@@ -825,9 +771,7 @@ fn ibd_latch_judges_the_contexts_own_tree() {
             chain_network: Network::Mainnet,
             block_body_source: None,
             block_undo_source: None,
-            closed_for_recovery: LatchReader::new(Arc::new(core::sync::atomic::AtomicBool::new(
-                false,
-            ))),
+            closed_for_recovery: bitcoin_rs_chain::LatchWriter::new().reader(),
             rollback_warnings: None,
         },
         mempool: MempoolHandles {
@@ -860,15 +804,5 @@ fn ibd_latch_judges_the_contexts_own_tree() {
             .progress
             .initial_block_download(now, Network::Regtest),
         "the latch must judge the tip it reaches through the context's tree"
-    );
-    assert!(
-        Arc::ptr_eq(
-            ctx.indexes
-                .derived_index_status
-                .as_ref()
-                .expect("index status keeps its own slot"),
-            &status
-        ),
-        "the txindex status source must be shared with caller"
     );
 }

@@ -2,8 +2,6 @@ use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
-
 use bitcoin_rs_chain::{BlockBodySource, LatchReader};
 use bitcoin_rs_chainstate::verify::{
     CheckLevel, VerifyError, VerifyOutcome, VerifyRequest, verify_recent_blocks,
@@ -19,9 +17,10 @@ use bitcoin_rs_rpc::{
 
 use crossbeam_channel::bounded;
 
-use crate::config::{NodeConfig, RuntimeInputs};
+use crate::config::{ConfigError, NodeConfig, RuntimeInputs};
 use crate::embed::Node;
 use crate::event_loop::EventLoop;
+use crate::run::RunError;
 use crate::state::NodeState;
 
 mod shutdown {
@@ -167,7 +166,7 @@ fn bind_rpc(
     state: &NodeState,
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
-) -> Result<RpcBindings> {
+) -> Result<RpcBindings, RunError> {
     bind_rpc_with_pool(
         state,
         mining_control,
@@ -176,20 +175,19 @@ fn bind_rpc(
     )
 }
 
-fn bind_rpc_with_pool(
+fn rpc_context_handles(
     state: &NodeState,
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
     pool: bitcoin_rs_rpc::context::PoolHandles,
-) -> Result<RpcBindings> {
+) -> ContextHandles {
     let config = state.config();
-    let rpc_auth = Arc::new(config.rpc.auth.to_rpc_auth(&config.data_dir)?);
     let chainstate = state.chainstate();
     let shutdown_request: Arc<dyn Fn() + Send + Sync> = {
         let chainstate = Arc::clone(&chainstate);
         Arc::new(move || chainstate.request_shutdown())
     };
-    let context = Context::from_handles(ContextHandles {
+    ContextHandles {
         silent_payments: config.rpc.silent_payments,
         compressed_transactions: config.rpc.compressed_transactions,
         shutdown_request: Some(shutdown_request),
@@ -233,12 +231,24 @@ fn bind_rpc_with_pool(
         pool,
         zmq_publisher: state.zmq_publisher(),
         debug_log_path: Some(state.data_dir().join("debug.log")),
-    })
-    .with_esplora_derived_index(state.esplora_derived_index_query())
-    .with_esplora_query_limit(
-        std::num::NonZeroUsize::new(config.rpc.esplora_max_queries)
-            .context("Esplora query limit must be positive")?,
-    );
+    }
+}
+
+fn bind_rpc_with_pool(
+    state: &NodeState,
+    mining_control: &Arc<dyn MiningControl>,
+    block_body_source: Arc<dyn BlockBodySource>,
+    pool: bitcoin_rs_rpc::context::PoolHandles,
+) -> Result<RpcBindings, RunError> {
+    let config = state.config();
+    let rpc_auth = Arc::new(config.rpc.auth.to_rpc_auth(&config.data_dir)?);
+    let handles = rpc_context_handles(state, mining_control, block_body_source, pool);
+    let context = Context::from_handles(handles)
+        .with_esplora_derived_index(state.esplora_derived_index_query())
+        .with_esplora_query_limit(
+            std::num::NonZeroUsize::new(config.rpc.esplora_max_queries)
+                .ok_or(ConfigError::EsploraMaxQueries)?,
+        );
     let context = Arc::new(context);
     let handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::clone(&context)));
     let server = RpcServer::bind(
@@ -249,7 +259,10 @@ fn bind_rpc_with_pool(
         RPC_IDLE_TIMEOUT,
         state.config().rpc.rest,
     )
-    .with_context(|| format!("failed to bind RPC listener at {}", config.rpc.bind))?;
+    .map_err(|source| RunError::RpcBind {
+        address: config.rpc.bind,
+        source,
+    })?;
     let mut servers = Vec::with_capacity(2);
     if let Some(address) = config.rpc.public_bind {
         let public = RpcServer::bind(
@@ -260,7 +273,7 @@ fn bind_rpc_with_pool(
             RPC_IDLE_TIMEOUT,
             config.rpc.rest,
         )
-        .with_context(|| format!("failed to bind public HTTP listener at {address}"))?;
+        .map_err(|source| RunError::PublicRpcBind { address, source })?;
         servers.push((server, RpcSurface::Management));
         servers.push((public, RpcSurface::Public));
     } else {
@@ -277,6 +290,8 @@ std::thread_local! {
     static BOOTSTRAP_DRAIN_REACHED: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
     static BEFORE_CLEAN_CHECKPOINT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    static BEFORE_RECOVERY_RECHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -312,6 +327,25 @@ fn run_before_clean_checkpoint_hook() {
 #[cfg(not(test))]
 const fn run_before_clean_checkpoint_hook() {}
 
+#[cfg(test)]
+fn inject_before_recovery_recheck(hook: impl FnOnce() + 'static) {
+    BEFORE_RECOVERY_RECHECK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_before_recovery_recheck_hook() {
+    BEFORE_RECOVERY_RECHECK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+const fn run_before_recovery_recheck_hook() {}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TeardownMode {
     StartupAbort,
@@ -323,9 +357,13 @@ pub(crate) struct NodeServices {
     #[cfg(feature = "pool")]
     pool: Option<crate::pool::PoolService>,
     event_loop: Option<std::thread::JoinHandle<()>>,
-    event_loop_signal: Option<crossbeam_channel::Sender<()>>,
+    shutdown_forwarder: Option<(
+        std::thread::JoinHandle<()>,
+        Arc<bitcoin_rs_chain::LatchWriter>,
+    )>,
     metrics: Option<crate::metrics::MetricsServer>,
     rpc_threads: Vec<std::thread::JoinHandle<std::io::Result<()>>>,
+    rpc_addresses: Vec<(RpcSurface, std::net::SocketAddr)>,
     maintenance_worker: Option<std::thread::JoinHandle<()>>,
     tx_ingress: Option<std::thread::JoinHandle<()>>,
     readiness_sampler: Option<std::thread::JoinHandle<()>>,
@@ -334,13 +372,20 @@ pub(crate) struct NodeServices {
     signal_handler: Option<crate::signal::ShutdownHandler>,
     teardown_started: bool,
 }
-
 impl NodeServices {
+    #[cfg(test)]
+    pub(crate) fn rpc_address(&self, surface: RpcSurface) -> Option<std::net::SocketAddr> {
+        self.rpc_addresses
+            .iter()
+            .find(|(bound, _)| *bound == surface)
+            .map(|(_, address)| *address)
+    }
+
     pub(crate) fn teardown(
         &mut self,
         state: Option<&mut NodeState>,
         mode: TeardownMode,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), RunError> {
         if self.teardown_started {
             return Ok(());
         }
@@ -348,7 +393,7 @@ impl NodeServices {
         let mut first_error = None;
         let state = state.map(|state| {
             if let Err(error) = state.bounded_index_shutdown(DRAIN_DEADLINE) {
-                set_first_error(&mut first_error, error);
+                set_first_error(&mut first_error, error.into());
             }
             &*state
         });
@@ -363,25 +408,29 @@ impl NodeServices {
             state.request_shutdown();
             state.p2p().shutdown();
         }
-        if let Some(tx) = self.event_loop_signal.take() {
-            let _ = tx.try_send(());
-        }
 
         self.join_core_services(state, &mut first_error);
         self.join_bootstrap_and_signal_workers(state, &mut first_error);
-        publish_clean_checkpoint_if_eligible(state, mode, &mut first_error);
+        run_before_recovery_recheck_hook();
+        let closed_for_recovery =
+            state.is_some_and(|state| state.chainstate().is_closed_for_recovery());
+        publish_clean_checkpoint_if_eligible(state, mode, closed_for_recovery, &mut first_error);
         if let Some(state) = state {
             let history = state.mempool_reader().read().estimator_history();
             bitcoin_rs_mempool::fee_history::save(state.data_dir(), &history);
             if state.config().persist_mempool
                 && matches!(mode, TeardownMode::CleanShutdown)
                 && first_error.is_none()
+                && !closed_for_recovery
             {
                 save_mempool_snapshot(state);
             }
         }
         if let Some(error) = first_error {
             return Err(error);
+        }
+        if closed_for_recovery {
+            return Err(RunError::ClosedForRecovery);
         }
         tracing::info!("bitcoin-rs node exited cleanly");
         Ok(())
@@ -390,11 +439,11 @@ impl NodeServices {
     fn join_core_services(
         &mut self,
         state: Option<&NodeState>,
-        first_error: &mut Option<anyhow::Error>,
+        first_error: &mut Option<RunError>,
     ) {
         if let Some(handle) = self.event_loop.take() {
             if handle.join().is_err() {
-                set_first_error(first_error, anyhow::anyhow!("event loop thread panicked"));
+                set_first_error(first_error, RunError::EventLoopPanicked);
             }
         }
         for handle in self.rpc_threads.drain(..) {
@@ -402,11 +451,11 @@ impl NodeServices {
                 Ok(Ok(())) => tracing::info!("rpc listener exited cleanly"),
                 Ok(Err(error)) => {
                     tracing::warn!(%error, "rpc listener exited with i/o error");
-                    set_first_error(first_error, anyhow::Error::new(error));
+                    set_first_error(first_error, error.into());
                 }
                 Err(_) => {
                     tracing::error!("rpc listener panicked");
-                    set_first_error(first_error, anyhow::anyhow!("rpc listener thread panicked"));
+                    set_first_error(first_error, RunError::RpcListenerPanicked);
                 }
             }
         }
@@ -418,7 +467,7 @@ impl NodeServices {
         if let Some(handle) = self.readiness_sampler.take() {
             if handle.join().is_err() {
                 tracing::error!("readiness sampler panicked");
-                set_first_error(first_error, anyhow::anyhow!("readiness sampler panicked"));
+                set_first_error(first_error, RunError::ReadinessSamplerPanicked);
             }
         }
         if let Some(state) = state {
@@ -431,7 +480,7 @@ impl NodeServices {
                 tracing::info!("tx ingress consumer exited cleanly");
             } else {
                 tracing::error!("tx ingress consumer panicked");
-                set_first_error(first_error, anyhow::anyhow!("tx ingress consumer panicked"));
+                set_first_error(first_error, RunError::TxIngressPanicked);
             }
         }
         if let Some(state) = state {
@@ -449,7 +498,7 @@ impl NodeServices {
                 tracing::info!("tx relay worker exited cleanly");
             } else {
                 tracing::error!("tx relay worker panicked");
-                set_first_error(first_error, anyhow::anyhow!("tx relay worker panicked"));
+                set_first_error(first_error, RunError::TxRelayPanicked);
             }
         }
         if let Some(handle) = self.block_announce.take() {
@@ -457,10 +506,7 @@ impl NodeServices {
                 tracing::info!("block announce worker exited cleanly");
             } else {
                 tracing::error!("block announce worker panicked");
-                set_first_error(
-                    first_error,
-                    anyhow::anyhow!("block announce worker panicked"),
-                );
+                set_first_error(first_error, RunError::BlockAnnouncePanicked);
             }
         }
     }
@@ -468,11 +514,11 @@ impl NodeServices {
     fn join_bootstrap_and_signal_workers(
         &mut self,
         state: Option<&NodeState>,
-        first_error: &mut Option<anyhow::Error>,
+        first_error: &mut Option<RunError>,
     ) {
         if let Some(state) = state {
             if let Err(error) = state.p2p().join_bootstrap_worker() {
-                set_first_error(first_error, anyhow::Error::new(error));
+                set_first_error(first_error, error.into());
             }
             mark_bootstrap_drain_reached();
         }
@@ -481,10 +527,16 @@ impl NodeServices {
                 tracing::info!("chainstate maintenance worker exited cleanly");
             } else {
                 tracing::error!("chainstate maintenance worker panicked");
-                set_first_error(
-                    first_error,
-                    anyhow::anyhow!("chainstate maintenance worker panicked"),
-                );
+                set_first_error(first_error, RunError::MaintenanceWorkerPanicked);
+            }
+        }
+        if let Some((handle, stop)) = self.shutdown_forwarder.take() {
+            stop.trigger();
+            if matches!(handle.join(), Ok(())) {
+                tracing::info!("shutdown forwarder exited cleanly");
+            } else {
+                tracing::error!("shutdown forwarder panicked");
+                set_first_error(first_error, RunError::ShutdownForwarderPanicked);
             }
         }
         if let Some(mut handler) = self.signal_handler.take() {
@@ -542,9 +594,12 @@ fn publish_mempool_snapshot(
 fn publish_clean_checkpoint_if_eligible(
     state: Option<&NodeState>,
     mode: TeardownMode,
-    first_error: &mut Option<anyhow::Error>,
+    closed_for_recovery: bool,
+    first_error: &mut Option<RunError>,
 ) {
-    if let (Some(state), TeardownMode::CleanShutdown, None) = (state, mode, first_error.as_ref()) {
+    if let (Some(state), TeardownMode::CleanShutdown, None) = (state, mode, first_error.as_ref())
+        && !closed_for_recovery
+    {
         run_before_clean_checkpoint_hook();
         match state.publish_checkpoint() {
             Ok(None) => {
@@ -555,15 +610,22 @@ fn publish_clean_checkpoint_if_eligible(
             }
             Err(error) => {
                 tracing::error!(%error, "clean checkpoint publication failed");
-                set_first_error(first_error, error);
+                set_first_error(first_error, error.into());
             }
         }
-    } else {
-        tracing::info!("clean checkpoint publication skipped: the node did not shut down cleanly");
+        return;
     }
+    let reason = if first_error.is_some() {
+        "an earlier shutdown error"
+    } else if closed_for_recovery {
+        "a chainstate closed for recovery"
+    } else {
+        "a startup abort or an unclean shutdown"
+    };
+    tracing::info!("clean checkpoint publication skipped: {reason}");
 }
 
-fn set_first_error(slot: &mut Option<anyhow::Error>, error: anyhow::Error) {
+fn set_first_error(slot: &mut Option<RunError>, error: RunError) {
     if slot.is_none() {
         *slot = Some(error);
     }
@@ -613,7 +675,7 @@ pub(crate) fn start_node(
     config: NodeConfig,
     runtime: RuntimeInputs,
     install_signals: bool,
-) -> Result<Node> {
+) -> Result<Node, RunError> {
     config.validate()?;
     bitcoin_rs_consensus::trace::register_probes();
     cap_global_thread_pool();
@@ -633,35 +695,39 @@ pub(crate) fn start_node(
         panic!("state recorded above");
     };
     tracing::info!(config = ?state.config(), "bitcoin-rs node booting");
-    guard.services.metrics = if let Some(bind) = state.config().observability.metrics_bind {
-        let identity = crate::metrics::EvidenceIdentity::of_process(state.config())?;
-        crate::metrics::start_metrics(Some(bind), state.shutdown_reader(), &identity)?
-    } else {
-        None
-    };
-    guard.services.readiness_sampler = if guard.services.metrics.is_some() {
-        Some(crate::metrics::spawn_readiness_sampler(
-            state.derived_index_status(),
-            state.shutdown_reader(),
-        )?)
-    } else {
-        None
-    };
+    init_metrics_services(state, &mut guard.services)?;
 
-    let (shutdown_rx, event_loop_signal) = if let Some(rx) = injected_shutdown {
-        (rx, None)
+    let injected_shutdown_forwarder = if let Some(rx) = injected_shutdown {
+        let state_shutdown = state.shutdown_writer();
+        let chainstate_for_signal = state.chainstate();
+        let forwarder_stop = Arc::new(state.shutdown_reader().child());
+        let forwarder_stop_reader = forwarder_stop.reader();
+        Some((
+            std::thread::Builder::new()
+                .name("bitcoin-rs-shutdown-forwarder".into())
+                .spawn(move || {
+                    crossbeam_channel::select! {
+                        recv(rx) -> _ => {}
+                        recv(forwarder_stop_reader.closed()) -> _ => {}
+                    }
+                    state_shutdown.trigger();
+                    chainstate_for_signal.request_shutdown();
+                })?,
+            forwarder_stop,
+        ))
     } else {
-        let (tx, rx) = bounded(1);
         if install_signals {
             let chainstate_for_signal = state.chainstate();
-            guard.services.signal_handler = Some(crate::signal::ShutdownHandler::install(
-                move || chainstate_for_signal.request_shutdown(),
-                tx.clone(),
-            )?);
+            let state_shutdown = state.shutdown_writer();
+            guard.services.signal_handler =
+                Some(crate::signal::ShutdownHandler::install(move || {
+                    state_shutdown.trigger();
+                    chainstate_for_signal.request_shutdown();
+                })?);
         }
-        (rx, Some(tx))
+        None
     };
-    guard.services.event_loop_signal = event_loop_signal;
+    guard.services.shutdown_forwarder = injected_shutdown_forwarder;
     let block_body_source = state.block_body_source()?;
     let chainstate = state.chainstate();
     let recent_block = bitcoin_rs_p2p::RecentBlockSlot::default();
@@ -675,10 +741,11 @@ pub(crate) fn start_node(
         .with_compact_filters(state.compact_filter_query())
         .with_recent_block(recent_block.clone()),
     );
+
     let (sync_wake_tx, sync_wake_rx) = bounded(1);
     let sync = state.sync();
     let peer_ready_sync = Arc::clone(&sync);
-    let loop_handle = EventLoop::with_sync_wake(shutdown_rx, sync, sync_wake_rx);
+    let loop_handle = EventLoop::with_sync_wake(sync, sync_wake_rx);
     let coordinator = Arc::new(crate::MiningCoordinator::new(
         state.mempool_reader(),
         Arc::clone(&chainstate),
@@ -711,7 +778,7 @@ pub(crate) fn start_node(
         });
     chainstate
         .set_pow_valid_block(pow_valid_hook)
-        .map_err(|_| anyhow::anyhow!("pow-valid hook already installed"))?;
+        .map_err(|_| RunError::PowValidHookInstalled)?;
     if let Some(announce_rx) = state.take_block_announce_receiver() {
         guard.services.block_announce = Some(bitcoin_rs_p2p::spawn_block_announce_worker(
             Arc::clone(&block_announcer),
@@ -739,7 +806,7 @@ pub(crate) fn start_node(
     )?);
     let inbound_tx_rx = state
         .take_inbound_tx_receiver()
-        .ok_or_else(|| anyhow::anyhow!("inbound tx receiver already taken"))?;
+        .ok_or(RunError::InboundTxReceiverTaken)?;
     guard.services.tx_ingress = Some(crate::tx_ingress::spawn_tx_ingress_consumer(
         state,
         Arc::clone(&gateway),
@@ -757,14 +824,16 @@ pub(crate) fn start_node(
             )),
             bitcoin_rs_mempool::BodyInterest::Metadata,
         )
-        .map_err(anyhow::Error::msg)?;
+        .map_err(RunError::GatewayObserverLeg)?;
 
-    crate::chain_effects::bootstrap_genesis(&chainstate, &state.chain_followers())
-        .map_err(|error| anyhow::Error::new(error).context("failed to bootstrap genesis"))?;
+    crate::chain_effects::bootstrap_genesis(&chainstate, &state.chain_followers()).map_err(
+        |source| RunError::BootstrapGenesis {
+            source: Box::new(source),
+        },
+    )?;
     #[cfg(feature = "pool")]
     {
-        guard.services.pool =
-            crate::pool::PoolService::prepare(state, Arc::clone(&mining_control))?;
+        guard.services.pool = crate::pool::PoolService::prepare(state, &mining_control)?;
     }
     #[cfg(feature = "pool")]
     let pool_handles = guard.services.pool.as_ref().map_or_else(
@@ -775,21 +844,7 @@ pub(crate) fn start_node(
     let pool_handles = bitcoin_rs_rpc::context::PoolHandles::default();
     let RpcBindings { context, listeners } =
         bind_rpc_with_pool(state, &mining_control, block_body_source, pool_handles)?;
-    for (rpc_server, surface) in listeners {
-        let rpc_local_addr = rpc_server.local_addr()?;
-        tracing::info!(addr = %rpc_local_addr, ?surface, "rpc listener bound");
-        let rpc_shutdown = state.shutdown_reader();
-        let worker = std::thread::Builder::new()
-            .name("bitcoin-rs-rpc".into())
-            .spawn(move || {
-                let result = rpc_server.serve_surface_with_shutdown(rpc_shutdown.clone(), surface);
-                if !rpc_shutdown.is_triggered() {
-                    tracing::error!(?surface, error = ?result.as_ref().err(), "rpc listener exited before shutdown");
-                }
-                result
-            })?;
-        guard.services.rpc_threads.push(worker);
-    }
+    start_rpc_listeners(state, listeners, &mut guard.services)?;
     #[cfg(feature = "pool")]
     if let Some(pool) = guard.services.pool.as_mut() {
         pool.start()?;
@@ -806,18 +861,63 @@ pub(crate) fn start_node(
             &peer_ready,
             listener_extras,
         )
-        .map_err(anyhow::Error::from)?;
+        .map_err(RunError::P2pStart)?;
     guard.services.maintenance_worker = Some(state.start_chainstate_maintenance()?);
     let loop_shutdown = state.shutdown_reader();
     let loop_chainstate = state.chainstate();
+    let state_shutdown = state.shutdown_writer();
     guard.services.event_loop = Some(
         std::thread::Builder::new()
             .name("bitcoin-rs-event-loop".into())
             .spawn(move || {
-                loop_handle.spin(&loop_shutdown, move || loop_chainstate.request_shutdown());
+                loop_handle.spin(&loop_shutdown, move || {
+                    state_shutdown.trigger();
+                    loop_chainstate.request_shutdown();
+                });
             })?,
     );
     Ok(guard.finish(context))
+}
+fn init_metrics_services(state: &NodeState, services: &mut NodeServices) -> Result<(), RunError> {
+    services.metrics = if let Some(bind) = state.config().observability.metrics_bind {
+        let identity = crate::metrics::EvidenceIdentity::of_process(state.config())?;
+        crate::metrics::start_metrics(Some(bind), state.shutdown_reader(), &identity)?
+    } else {
+        None
+    };
+    services.readiness_sampler = if services.metrics.is_some() {
+        Some(crate::metrics::spawn_readiness_sampler(
+            state.derived_index_status(),
+            state.shutdown_reader(),
+        )?)
+    } else {
+        None
+    };
+    Ok(())
+}
+
+fn start_rpc_listeners(
+    state: &NodeState,
+    listeners: Vec<(RpcServer, RpcSurface)>,
+    services: &mut NodeServices,
+) -> Result<(), RunError> {
+    for (rpc_server, surface) in listeners {
+        let rpc_local_addr = rpc_server.local_addr()?;
+        services.rpc_addresses.push((surface, rpc_local_addr));
+        tracing::info!(addr = %rpc_local_addr, ?surface, "rpc listener bound");
+        let rpc_shutdown = state.shutdown_reader();
+        let worker = std::thread::Builder::new()
+            .name("bitcoin-rs-rpc".into())
+            .spawn(move || {
+                let result = rpc_server.serve_surface_with_shutdown(rpc_shutdown.clone(), surface);
+                if !rpc_shutdown.is_triggered() {
+                    tracing::error!(?surface, error = ?result.as_ref().err(), "rpc listener exited before shutdown");
+                }
+                result
+            })?;
+        services.rpc_threads.push(worker);
+    }
+    Ok(())
 }
 
 fn final_payout_script(config: &NodeConfig) -> Vec<u8> {

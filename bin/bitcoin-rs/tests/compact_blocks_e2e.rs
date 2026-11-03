@@ -20,18 +20,12 @@ use wire_peer::Peer;
 
 use sonic_rs::{JsonValueTrait as _, json};
 
-/// Blocks applied before the serving probes: deep enough that a request 11
-/// below the tip exists on the active chain.
 const CHAIN_LEN: u32 = 13;
 const WRITE_BUDGET: Duration = Duration::from_secs(10);
 
-/// One raw BIP152 peer: negotiates compact blocks, serves bodies it knows,
-/// and records what the node asks for and answers with.
 struct CompactPeer {
     wire: Peer,
-    /// Servable bodies by hash.
     blocks: BTreeMap<BlockHash, Block>,
-    /// The header chain, so a `getheaders` probe is answered.
     headers: Vec<bitcoin::block::Header>,
 }
 
@@ -499,10 +493,6 @@ fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), Error> {
     )))
 }
 
-/// Hold a compact-block reconstruction across a real chain switch.
-///
-/// Core v31.1 GETBLOCKTXN resolves stored bodies by hash even after they leave the
-/// chain (9be056a8a72b624dae9623b2f7bded92c2a21c91, `net_processing.cpp`).
 #[test]
 fn stale_compact_block_finishes_reconstruction_after_reorg() -> Result<(), Error> {
     use NetworkMessage::{BlockTxn, NotFound};

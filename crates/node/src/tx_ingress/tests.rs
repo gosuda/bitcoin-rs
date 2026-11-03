@@ -43,7 +43,7 @@ fn spending_tx() -> Tx {
                 txid: parent_txid,
                 vout: 0,
             },
-            script_sig: Script::new(),
+            script_sig: Script::from_bytes(vec![0x01, 0x51]),
             sequence: Sequence::from_consensus(0xFFFF_FFFF),
             witness: Witness::new(),
         }],
@@ -82,7 +82,11 @@ fn make_consumer(
         },
         TxOut {
             value: Amount::from_sat(50_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(
+                bitcoin::ScriptBuf::from_bytes(vec![0x51])
+                    .to_p2sh()
+                    .into_bytes(),
+            ),
         },
         false,
         100,
@@ -713,4 +717,27 @@ fn closed_owner_solicitation_falls_back_to_live_supplier_parents() {
         orphan_spending(parent).wtxid(),
         "subject identity is stable across the fallback"
     );
+}
+
+#[test]
+fn tx_ingress_consumer_stops_promptly_on_cancellation() {
+    let gateway = zero_fee_gateway();
+    let mining = Arc::new(FakeMiningControl::default());
+    let consumer = make_consumer(&gateway, &mining);
+    let writer = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = writer.reader();
+    let (_tx, tx_rx) = crossbeam_channel::bounded(1);
+    let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+    let handle = std::thread::spawn(move || {
+        run_consumer_loop(&consumer, &shutdown, &tx_rx);
+        let _ = done_tx.send(());
+    });
+    std::thread::sleep(Duration::from_millis(5));
+    writer.trigger();
+    let res = done_rx.recv_timeout(Duration::from_millis(50));
+    assert!(
+        res.is_ok(),
+        "tx ingress consumer did not exit promptly: timed out waiting for trigger"
+    );
+    assert!(handle.join().is_ok(), "thread panicked");
 }

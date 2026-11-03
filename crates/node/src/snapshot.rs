@@ -18,7 +18,7 @@ use bitcoin_rs_rpc::context::{
 use bitcoin_rs_storage::checkpoint::fs::{HAS_ATOMIC_NOREPLACE_RENAME, rename_noreplace};
 use bitcoin_rs_storage::checkpoint::{create_file, open_data_dir, sync_dir};
 use bitcoin_rs_utxo::core_snapshot::{
-    CoreV2WriteReport, SnapshotError, SnapshotLimits, read_verified, write_core_v2,
+    CoreV2Base, CoreV2WriteReport, SnapshotError, SnapshotLimits, read_verified, write_core_v2,
 };
 use bitcoin_rs_utxo::{SeedOfferCell, SeedProvenance, V4Witness, VerifiedSnapshotArtifact};
 use parking_lot::Mutex;
@@ -160,7 +160,7 @@ struct Encoded {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SnapshotImportError {
+pub enum SnapshotImportError {
     #[error("could not read snapshot: {0}")]
     File(#[from] std::io::Error),
     #[error("snapshot input must be a regular file")]
@@ -183,7 +183,7 @@ pub(crate) enum SnapshotImportError {
     Settlement(#[from] bitcoin_rs_mempool::ChainChangeError),
     #[error("snapshot activation failed: {activation}; consumer settlement failed: {settlement}")]
     ActivationAndSettlement {
-        activation: AssumeUtxoError,
+        activation: Box<AssumeUtxoError>,
         settlement: bitcoin_rs_mempool::ChainChangeError,
     },
 }
@@ -423,7 +423,17 @@ impl SnapshotControl {
             .ok_or(SnapshotExportError::ChainTxCountUnknown)?;
         let coins = u64::try_from(view.len())
             .map_err(|error| SnapshotExportError::Write(std::io::Error::other(error)))?;
-        let report = write_core_v2(&view, self.network, tip.hash, tip.height, coins, sink, stop)?;
+        let report = write_core_v2(
+            &view,
+            &CoreV2Base {
+                network: self.network,
+                base_hash: tip.hash,
+                base_height: tip.height,
+                coins_count: coins,
+            },
+            sink,
+            stop,
+        )?;
         Ok(Encoded {
             report,
             base_hash: tip.hash,
@@ -536,7 +546,7 @@ impl SnapshotControl {
             self.drop_activation_witness();
             return match result {
                 Err(activation) => Err(SnapshotImportError::ActivationAndSettlement {
-                    activation,
+                    activation: Box::new(activation),
                     settlement,
                 }),
                 Ok(()) => Err(SnapshotImportError::Settlement(settlement)),

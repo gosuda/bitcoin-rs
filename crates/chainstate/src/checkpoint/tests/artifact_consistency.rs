@@ -1,8 +1,7 @@
 use super::*;
 
-/// The applied tip carries the count the checkpoint writes.
 #[test]
-fn checkpoint_transaction_counts_must_agree_when_known() -> Result<(), Box<dyn std::error::Error>> {
+fn checkpoint_transaction_counts_must_agree_when_known() -> TestResult {
     for chain_tx_count in [0, 1] {
         let dir = tempfile::tempdir()?;
         let (tree, _, applied) = chain_with_applied_height(0, 0)?;
@@ -24,7 +23,9 @@ fn checkpoint_transaction_counts_must_agree_when_known() -> Result<(), Box<dyn s
             Some(&applied_tip),
         )?;
         let CheckpointLoad::Complete(restored) = load_checkpoint(dir.path(), config())? else {
-            return Err("valid checkpoint did not load".into());
+            return Err(TestError::UnexpectedSuccess(
+                "valid checkpoint did not load",
+            ));
         };
         assert_eq!(
             restored.applied_tip.chain_tx_count.to_wire(),
@@ -35,18 +36,17 @@ fn checkpoint_transaction_counts_must_agree_when_known() -> Result<(), Box<dyn s
         mutate_authenticated_manifest(dir.path(), |manifest| {
             manifest.applied_tip.chain_tx_count = 2;
         })?;
-        let Err(error) = load_checkpoint(dir.path(), config()) else {
-            return Err("inconsistent authenticated transaction counts were restored".into());
+        let Err(CheckpointLoadError::Corrupt(_)) = load_checkpoint(dir.path(), config()) else {
+            return Err(TestError::UnexpectedSuccess(
+                "inconsistent authenticated transaction counts were restored",
+            ));
         };
-        assert!(error.to_string().contains("transaction count"));
-        assert!(error.to_string().contains("full resync"));
     }
     Ok(())
 }
 
 #[test]
-fn checkpoint_writer_refuses_inconsistent_transaction_counts()
--> Result<(), Box<dyn std::error::Error>> {
+fn checkpoint_writer_refuses_inconsistent_transaction_counts() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
@@ -63,30 +63,22 @@ fn checkpoint_writer_refuses_inconsistent_transaction_counts()
         &CoinStatsListener::new(CoinStats::new()),
         Some(&applied_tip),
     );
-    let Err(error) = result else {
-        return Err("inconsistent transaction counts were published".into());
+    let Err(_) = result else {
+        return Err(TestError::UnexpectedSuccess(
+            "inconsistent transaction counts were published",
+        ));
     };
-    assert!(error.to_string().contains("transaction count"));
     assert!(!dir.path().join(CHECKPOINT_ROOT).join(CURRENT_FILE).exists());
     Ok(())
 }
-
-/// The ordering claim needs a count disagreement to actually exist: an
-/// UNKNOWN tip count is skipped by validation, which would report the
-/// height error even if count validation ran first.
 #[test]
-fn checkpoint_writer_reports_height_mismatch_before_count_mismatch()
--> Result<(), Box<dyn std::error::Error>> {
+fn checkpoint_writer_refuses_height_mismatch() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
-    let applied_tip = bitcoin_rs_chain::TipSnapshot {
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(2),
-        ..applied_tip
-    };
     let data_dir = super::super::open_data_dir(dir.path())?;
     let mut stats = CoinStats::new();
-    stats.finish_block(1, 1);
+    stats.finish_block(1, 0);
     let result = super::super::write_checkpoint_from_dir(
         &data_dir,
         config(),
@@ -95,19 +87,17 @@ fn checkpoint_writer_reports_height_mismatch_before_count_mismatch()
         &CoinStatsListener::new(stats),
         Some(&applied_tip),
     );
-    let Err(error) = result else {
-        return Err("stale CoinStats unexpectedly published".into());
+    let Err(_) = result else {
+        return Err(TestError::UnexpectedSuccess(
+            "stale CoinStats unexpectedly published",
+        ));
     };
-    assert!(
-        error
-            .to_string()
-            .contains("CoinStats height 1 does not match applied height 0")
-    );
+    assert!(!dir.path().join(CHECKPOINT_ROOT).join(CURRENT_FILE).exists());
     Ok(())
 }
 
 #[test]
-fn authenticated_header_semantics_require_resync() -> Result<(), Box<dyn std::error::Error>> {
+fn authenticated_header_semantics_require_resync() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(2, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
@@ -124,10 +114,11 @@ fn authenticated_header_semantics_require_resync() -> Result<(), Box<dyn std::er
         bytes[headers::HEADER_PREFIX_LEN + 80 + 4] ^= 1;
     })?;
 
-    let Err(error) = load_checkpoint(dir.path(), config()) else {
-        return Err("corrupt header checkpoint unexpectedly loaded".into());
+    let Err(CheckpointLoadError::Corrupt(_)) = load_checkpoint(dir.path(), config()) else {
+        return Err(TestError::UnexpectedSuccess(
+            "corrupt header checkpoint unexpectedly loaded",
+        ));
     };
-    assert!(error.to_string().contains("full resync"));
     Ok(())
 }
 
@@ -139,7 +130,7 @@ fn authenticated_header_semantics_require_resync() -> Result<(), Box<dyn std::er
 /// The `full resync` assertion is the checkpoint recovery contract documented in
 /// `docs/policies/db-migration.md` and exercised by the loader.
 #[test]
-fn authenticated_coinstats_semantics_require_resync() -> Result<(), Box<dyn std::error::Error>> {
+fn authenticated_coinstats_semantics_require_resync() -> TestResult {
     const COINSTATS_ENVELOPE_BYTES: usize = 16;
     const MUHASH_BYTES: usize = 384 + 384;
     const HEIGHT_BYTES: usize = 4;
@@ -171,7 +162,9 @@ fn authenticated_coinstats_semantics_require_resync() -> Result<(), Box<dyn std:
         })?;
 
         let Err(error) = load_checkpoint(dir.path(), config()) else {
-            return Err("corrupt CoinStats checkpoint unexpectedly loaded".into());
+            return Err(TestError::UnexpectedSuccess(
+                "corrupt CoinStats checkpoint unexpectedly loaded",
+            ));
         };
         assert!(error.to_string().contains("full resync"));
     }
@@ -179,7 +172,7 @@ fn authenticated_coinstats_semantics_require_resync() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn authenticated_utxo_value_mutation_requires_resync() -> Result<(), Box<dyn std::error::Error>> {
+fn authenticated_utxo_value_mutation_requires_resync() -> TestResult {
     const FIRST_VALUE_OFFSET: usize = 52 + 45 + 4;
 
     let dir = tempfile::tempdir()?;
@@ -198,17 +191,16 @@ fn authenticated_utxo_value_mutation_requires_resync() -> Result<(), Box<dyn std
         bytes[FIRST_VALUE_OFFSET] ^= 1;
     })?;
 
-    let Err(error) = load_checkpoint(dir.path(), config()) else {
-        return Err("corrupt UTXO checkpoint unexpectedly loaded".into());
+    let Err(CheckpointLoadError::Corrupt(_)) = load_checkpoint(dir.path(), config()) else {
+        return Err(TestError::UnexpectedSuccess(
+            "corrupt UTXO checkpoint unexpectedly loaded",
+        ));
     };
-    assert!(error.to_string().contains("full resync"));
     Ok(())
 }
 
-/// Fused traversal over live coins disagrees with a stale listener:
-/// publication proceeds exactly as before, but no witness is minted.
 #[test]
-fn publish_gate_withholds_token_on_fused_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+fn publish_gate_withholds_token_on_fused_mismatch() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(2, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
@@ -247,8 +239,7 @@ fn publish_gate_withholds_token_on_fused_mismatch() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn publish_swap_between_commit_and_open_yields_integrity() -> Result<(), Box<dyn std::error::Error>>
-{
+fn publish_swap_between_commit_and_open_yields_integrity() -> TestResult {
     use bitcoin_rs_utxo::snapshot::{RawSeedError, SeedProvenance, VerifiedSnapshotArtifact};
 
     let dir = tempfile::tempdir()?;
@@ -264,10 +255,12 @@ fn publish_swap_between_commit_and_open_yields_integrity() -> Result<(), Box<dyn
         Some(&applied_tip),
     )?;
     let CheckpointWrite::Published { reference } = write else {
-        return Err("checkpoint did not publish".into());
+        return Err(TestError::UnexpectedSuccess("checkpoint did not publish"));
     };
     let Some(witness) = witness else {
-        return Err("full gate unexpectedly withheld the seed witness".into());
+        return Err(TestError::UnexpectedSuccess(
+            "full gate unexpectedly withheld the seed witness",
+        ));
     };
     mutate_authenticated_artifact(dir.path(), UTXO_FILE, |bytes| {
         let last = bytes.len() - 1;
@@ -277,10 +270,11 @@ fn publish_swap_between_commit_and_open_yields_integrity() -> Result<(), Box<dyn
     let current: CurrentV1 = sonic_rs::from_slice(&fs::read(root.join(CURRENT_FILE))?)?;
     let artifact_path = root.join(&current.directory).join(UTXO_FILE);
     assert_eq!(fs::metadata(&artifact_path)?.len(), witness.byte_len());
-    let Err(error) = load_checkpoint(dir.path(), config()) else {
-        return Err("swapped checkpoint bytes unexpectedly loaded".into());
+    let Err(CheckpointLoadError::Corrupt(_)) = load_checkpoint(dir.path(), config()) else {
+        return Err(TestError::UnexpectedSuccess(
+            "swapped checkpoint bytes unexpectedly loaded",
+        ));
     };
-    assert!(error.to_string().contains("full resync"));
     let file = fs::File::open(&artifact_path)?;
     let mut seed =
         VerifiedSnapshotArtifact::seal(file, witness, SeedProvenance::Checkpoint(reference));

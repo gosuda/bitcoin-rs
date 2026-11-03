@@ -27,6 +27,7 @@ fn asmap_path_uses_the_existing_configuration_precedence() {
     );
 }
 
+// FP-03
 #[test]
 fn measurement_options_are_not_node_options() {
     use clap::Parser as _;
@@ -50,6 +51,18 @@ use std::os::unix::ffi::OsStringExt;
 use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_node::{Auth, Network, ScriptIndexMode};
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TestError {
+    #[error(transparent)]
+    Bin(#[from] crate::config::BinError),
+    #[error(transparent)]
+    Clap(#[from] clap::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    AddrParse(#[from] std::net::AddrParseError),
+}
+
 fn resolved(args: &[&str], vars: &[(&str, &str)]) -> bitcoin_rs_node::NodeConfig {
     super::load(
         args.iter().copied(),
@@ -64,7 +77,7 @@ fn load_file(
     text: &str,
     args: &[&str],
     vars: impl Iterator<Item = (OsString, OsString)>,
-) -> anyhow::Result<bitcoin_rs_node::NodeConfig> {
+) -> Result<bitcoin_rs_node::NodeConfig, TestError> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("config");
     std::fs::write(&path, text)?;
@@ -86,7 +99,7 @@ fn bitcoin_conf_is_applied_before_environment_and_cli() {
 }
 
 #[test]
-fn mempool_persistence_resolves_toml_environment_and_cli() -> anyhow::Result<()> {
+fn mempool_persistence_resolves_toml_environment_and_cli() -> Result<(), TestError> {
     let config = load_file(
         "--config",
         "persist_mempool = false\n",
@@ -247,7 +260,7 @@ fn nonloopback_rpc_requires_explicit_auth_on_cli() {
 }
 
 #[test]
-fn public_listener_cli_overrides_environment_and_file() -> anyhow::Result<()> {
+fn public_listener_cli_overrides_environment_and_file() -> Result<(), TestError> {
     let config = load_file(
         "--config",
         "public_bind = '127.0.0.1:8080'\nrpc_max_connections = 4\npublic_max_connections = 32\n",
@@ -287,7 +300,7 @@ fn environment_parses_script_index() {
 }
 
 #[test]
-fn esplora_query_limit_resolves_and_rejects_zero() -> anyhow::Result<()> {
+fn esplora_query_limit_resolves_and_rejects_zero() -> Result<(), TestError> {
     assert_eq!(
         resolved(&["bitcoin-rs"], &[]).rpc.esplora_max_queries,
         bitcoin_rs_rpc::esplora::DEFAULT_MAX_QUERIES.get()
@@ -459,6 +472,7 @@ fn validation_engine_kernel_is_rejected_without_kernel_support() {
     );
 }
 
+// VAL-01
 #[test]
 fn validation_engine_defaults_to_native_and_layers_flag_over_environment() {
     use bitcoin_rs_node::ValidationEngine;
@@ -480,10 +494,15 @@ fn validation_mode_defaults_to_assume_valid_and_layers_flag_over_environment() {
 
     let config = resolved(
         &["bitcoin-rs", "--validation-mode", "full"],
-        &[("BITCOIN_RS_VALIDATION_MODE", "fast")],
+        &[("BITCOIN_RS_VALIDATION_MODE", "assume-valid")],
     );
     assert_eq!(config.validation.mode, ValidationMode::Full);
     assert_eq!(ValidationMode::parse("lenient"), None);
+    assert_eq!(
+        ValidationMode::parse("fast"),
+        None,
+        "the removed fast mode is refused"
+    );
 }
 
 #[test]
@@ -549,6 +568,7 @@ fn cli_network_profile_precedes_cli_explicit_p2p_overrides() {
     assert!(!config.p2p.dns_seeds_enabled);
 }
 
+// IDX-01
 #[test]
 fn cli_scriptindex_flag_enables_full_index() {
     let config = resolved(&["bitcoin-rs", "--txindex=false", "--scriptindex"], &[]);
@@ -557,6 +577,7 @@ fn cli_scriptindex_flag_enables_full_index() {
     assert_eq!(config.indexes.script_index, ScriptIndexMode::Full);
 }
 
+// IDX-01
 #[test]
 fn cli_scriptindex_utxo_enables_live_only_index() {
     let config = resolved(

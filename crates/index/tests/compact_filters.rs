@@ -1,5 +1,4 @@
-//! Atomic filter publication, selective reset, rollback and backend persistence.
-use crate::support::common;
+use crate::support::{common, error::TestError};
 
 use bitcoin::{Block, consensus::serialize, hashes::Hash as _};
 use bitcoin_rs_index::{
@@ -37,9 +36,10 @@ fn prepare<S: KvStore>(
     Ok(batch)
 }
 
+// IDX-04
 #[test]
-fn filter_rows_and_cursor_publish_atomically_and_reset_preserves_txindex()
--> Result<(), Box<dyn std::error::Error>> {
+fn filter_rows_and_cursor_publish_atomically_and_reset_preserves_txindex() -> Result<(), TestError>
+{
     let store = Arc::new(common::MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -134,7 +134,7 @@ fn filter_rows_and_cursor_publish_atomically_and_reset_preserves_txindex()
 
 #[cfg(feature = "redb")]
 #[test]
-fn compact_filters_survive_redb_index_reopen() -> Result<(), Box<dyn std::error::Error>> {
+fn compact_filters_survive_redb_index_reopen() -> Result<(), TestError> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("index.redb");
     let block = bitcoin::constants::genesis_block(bitcoin::Network::Testnet);

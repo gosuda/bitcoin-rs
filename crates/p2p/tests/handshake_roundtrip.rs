@@ -49,8 +49,7 @@ where
 }
 
 #[test]
-fn cursor_peers_reach_ready_after_version_verack_exchange() -> Result<(), Box<dyn std::error::Error>>
-{
+fn cursor_peers_reach_ready_after_version_verack_exchange() -> Result<(), PeerError> {
     let mut left = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
     let mut right = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
 
@@ -89,8 +88,7 @@ fn cursor_handshake_advertises_the_pinned_wire_protocol_version() {
 }
 
 #[test]
-fn cursor_handshake_records_the_remote_compact_block_advertisement()
--> Result<(), Box<dyn std::error::Error>> {
+fn cursor_handshake_records_the_remote_compact_block_advertisement() -> Result<(), PeerError> {
     let mut left = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
     let mut right = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
 

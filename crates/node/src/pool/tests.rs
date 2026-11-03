@@ -17,9 +17,11 @@ use bitcoin_rs_rpc::context::PoolOperator;
 use bitcoin_rs_storage::KvStore;
 
 use super::ledger::LedgerHost;
+use crate::run::RunError;
+use crate::test_support::TestError;
 
-type OpenStore = fn(&Path) -> Result<Arc<dyn KvStore>, Box<dyn std::error::Error>>;
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type OpenStore = fn(&Path) -> Result<Arc<dyn KvStore>, bitcoin_rs_storage::StorageError>;
+type TestResult = Result<(), TestError>;
 const EPOCH: u32 = 17;
 
 fn config() -> PoolConfig {
@@ -33,11 +35,7 @@ fn payout_policy() -> PayoutPolicy {
     }
 }
 
-fn registered_host(
-    open: OpenStore,
-    path: &Path,
-    epoch: u32,
-) -> Result<LedgerHost, Box<dyn std::error::Error>> {
+fn registered_host(open: OpenStore, path: &Path, epoch: u32) -> Result<LedgerHost, TestError> {
     let ledger = Arc::new(Ledger::create(open(path)?, config())?);
     ledger.set_payout_script(MinerId(42), &[0x51])?;
     Ok(LedgerHost::new(ledger, epoch, payout_policy()))
@@ -50,7 +48,7 @@ fn worker() -> WorkerIdentity {
     }
 }
 
-fn share() -> Result<AcceptedShare, Box<dyn std::error::Error>> {
+fn share() -> Result<AcceptedShare, TestError> {
     let header = Header {
         version: 4,
         nonce: 0x1234_5678,
@@ -85,7 +83,7 @@ fn expected_credit(share: &AcceptedShare, epoch: u32) -> ShareCredit {
     }
 }
 
-fn found_block() -> Result<FoundBlock, Box<dyn std::error::Error>> {
+fn found_block() -> Result<FoundBlock, TestError> {
     let mut share = share()?;
     share.class = ShareClass::Block;
     Ok(FoundBlock {
@@ -151,7 +149,7 @@ fn exact_share_survives_reopen(open: OpenStore) -> TestResult {
     assert_eq!(ledger.current_window()?, vec![(MinerId(42), 1)]);
     let (seq, work) = ledger
         .share_by_hash(&credit.header_hash)?
-        .ok_or("recorded share missing after reopen")?;
+        .ok_or(TestError::Missing("recorded share after reopen"))?;
     assert_eq!(work, credit.work);
     assert_eq!(
         ledger.record_share(&credit)?,
@@ -170,8 +168,7 @@ fn restart_epoch_separates_reused_wire_job(open: OpenStore) -> TestResult {
         ledger.set_payout_script(MinerId(42), &[0x51])?;
         first_epoch = ledger.allocate_run_epoch()?;
         let host = LedgerHost::new(ledger, first_epoch, payout_policy());
-        host.record_share(&worker(), &first)
-            .map_err(|_| "first-epoch share record unavailable")?;
+        host.record_share(&worker(), &first)?;
     }
     let ledger = Arc::new(Ledger::open(open(directory.path())?, config())?);
     let second_epoch = ledger.allocate_run_epoch()?;
@@ -202,8 +199,7 @@ fn failed_block_receipt_stays_pending(open: OpenStore) -> TestResult {
     {
         let host = registered_host(open, directory.path(), EPOCH)?;
         let receipt = Err(MiningControlError::Rejected("invalid candidate".into()));
-        host.record_block(&worker(), &found, &receipt)
-            .map_err(|_| "failed-submission block record unavailable")?;
+        host.record_block(&worker(), &found, &receipt)?;
         assert_eq!(host.ledger().share_count()?, 1);
     }
     let ledger = Ledger::open(open(directory.path())?, config())?;
@@ -211,7 +207,7 @@ fn failed_block_receipt_stays_pending(open: OpenStore) -> TestResult {
     assert_eq!(
         ledger
             .round_for_block(&hash)?
-            .ok_or("failed submission round missing")?
+            .ok_or(TestError::Missing("failed submission round"))?
             .state,
         RoundState::Pending
     );
@@ -236,14 +232,14 @@ fn rejected_block_receipt_stays_pending(open: OpenStore) -> TestResult {
             result: BlockValidationResult::DuplicateInvalid,
         };
         host.record_block(&worker(), &found, &Ok(receipt))
-            .map_err(|_| "rejected-receipt block record unavailable")?;
+            .map_err(|_| TestError::ExpectationFailed("block record available"))?;
     }
     let ledger = Ledger::open(open(directory.path())?, config())?;
     let credit = expected_credit(&found.share, EPOCH);
     assert_eq!(
         ledger
             .round_for_block(&credit.header_hash)?
-            .ok_or("rejected receipt round missing")?
+            .ok_or(TestError::Missing("rejected receipt round"))?
             .state,
         RoundState::Pending
     );
@@ -273,7 +269,7 @@ fn sv2_permanent_share_conflict_is_rejected(open: OpenStore) -> TestResult {
             .unwrap_or_else(|error| panic!("share conflict surfaced as unavailable: {error:?}")),
         RecordOutcome::Rejected
     );
-    let mut same_identity = first.clone();
+    let mut same_identity = first;
     same_identity.hash = BlockHash::from(Hash256::from_le_bytes(&[9; 32]));
     assert_eq!(
         host.record_accepted_share(account, &same_identity)
@@ -307,25 +303,27 @@ fn block_record_reservations_are_bounded_and_released(open: OpenStore) -> TestRe
     for _ in 0..8 {
         permits.push(
             host.try_reserve_block_slot()
-                .ok_or("slot refused below capacity")?,
+                .ok_or(TestError::Missing("slot below capacity"))?,
         );
     }
     assert!(host.try_reserve_block_slot().is_none());
     drop(
         permits
             .pop()
-            .ok_or("permit vector exhausted below capacity")?,
+            .ok_or(TestError::Missing("permit below capacity"))?,
     );
     permits.push(
         host.try_reserve_block_slot()
-            .ok_or("released slot not re-reservable")?,
+            .ok_or(TestError::Missing("released slot"))?,
     );
     assert!(host.try_reserve_block_slot().is_none());
     drop(permits);
     let permits: Vec<_> = (0..8)
         .map(|_| {
             host.try_reserve_block_slot()
-                .ok_or_else(|| std::io::Error::other("full release did not restore capacity"))
+                .ok_or(TestError::ExpectationFailed(
+                    "full release restores capacity",
+                ))
         })
         .collect::<Result<Vec<_>, _>>()?;
     assert!(host.try_reserve_block_slot().is_none());
@@ -342,7 +340,7 @@ fn durable_undetermined_keeps_reservation_until_waiter_removed(open: OpenStore) 
     let mut charges = Vec::new();
     for index in 0..8 {
         let mut found = found_block()?;
-        let lane = u32::try_from(index).map_err(|_| "lane exceeds u32")?;
+        let lane = u32::try_from(index)?;
         found.share.header.nonce = found.share.header.nonce.wrapping_add(lane);
         found.share.hash = found.share.header.compute_hash();
         found.block.header = found.share.header;
@@ -363,13 +361,13 @@ fn durable_undetermined_keeps_reservation_until_waiter_removed(open: OpenStore) 
         );
         let permit = host
             .try_reserve_block_slot()
-            .ok_or("slot refused below capacity")?;
+            .ok_or(TestError::Missing("slot below capacity"))?;
         let (outcome, charge) = permit.record_or_enqueue(MinerId(42), &found, &Ok(receipt));
         assert!(
             matches!(outcome, BlockRecordOutcome::Durable),
             "good block must record durably"
         );
-        let charge = charge.ok_or("durable Undetermined must retain its charge")?;
+        let charge = charge.ok_or(TestError::Missing("deferred charge"))?;
         assert!(
             matches!(charge, DeferredCharge::Permit(_)),
             "durable waiter must transfer its permit"
@@ -386,7 +384,7 @@ fn durable_undetermined_keeps_reservation_until_waiter_removed(open: OpenStore) 
         host.try_reserve_block_slot().is_none(),
         "eight deferred charges must exhaust shared capacity"
     );
-    let dropped = charges.pop().ok_or("eight charges expected")?;
+    let dropped = charges.pop().ok_or(TestError::Missing("deferred charge"))?;
     drop(dropped);
     assert!(
         host.try_reserve_block_slot().is_some(),
@@ -396,6 +394,7 @@ fn durable_undetermined_keeps_reservation_until_waiter_removed(open: OpenStore) 
     Ok(())
 }
 
+// POOL-03
 #[test]
 fn protocol_admissions_share_total_capacity_and_release_it_on_drop() -> TestResult {
     let shared = Arc::new(bitcoin_rs_mining::pool::stratum::sv1::ConnectionLimiter::new(1, 1)?);
@@ -403,16 +402,16 @@ fn protocol_admissions_share_total_capacity_and_release_it_on_drop() -> TestResu
     let sv2 = Arc::clone(&shared);
     let first = sv1
         .try_admit("192.0.2.1".parse()?)
-        .map_err(|reason| std::io::Error::other(format!("sv1 admission refused: {reason:?}")))?;
+        .map_err(|_| TestError::ExpectationFailed("sv1 admits"))?;
     assert!(matches!(
         sv2.try_admit("192.0.2.2".parse()?),
         Err(bitcoin_rs_mining::pool::stratum::sv1::RefusalReason::ConnectionLimit)
     ));
     assert_eq!(shared.active(), 1);
     drop(first);
-    let second = sv2.try_admit("192.0.2.2".parse()?).map_err(|reason| {
-        std::io::Error::other(format!("sv2 admission after release refused: {reason:?}"))
-    })?;
+    let second = sv2
+        .try_admit("192.0.2.2".parse()?)
+        .map_err(|_| TestError::ExpectationFailed("sv2 admits after release"))?;
     assert_eq!(shared.active(), 1);
     drop(second);
     assert_eq!(shared.active(), 0);
@@ -425,23 +424,21 @@ fn protocol_admissions_share_per_ip_capacity_without_consuming_refused_slots() -
     let sv1 = Arc::clone(&shared);
     let sv2 = Arc::clone(&shared);
     let same_ip = "192.0.2.1".parse()?;
-    let first = sv1.try_admit(same_ip).map_err(|reason| {
-        std::io::Error::other(format!("per-IP sv1 admission refused: {reason:?}"))
-    })?;
+    let first = sv1
+        .try_admit(same_ip)
+        .map_err(|_| TestError::ExpectationFailed("per-IP sv1 admits"))?;
     assert!(matches!(
         sv2.try_admit(same_ip),
         Err(bitcoin_rs_mining::pool::stratum::sv1::RefusalReason::PerIpLimit)
     ));
-    let other = sv2.try_admit("192.0.2.2".parse()?).map_err(|reason| {
-        std::io::Error::other(format!("second-IP admission refused: {reason:?}"))
-    })?;
+    let other = sv2
+        .try_admit("192.0.2.2".parse()?)
+        .map_err(|_| TestError::ExpectationFailed("second-IP sv2 admits"))?;
     assert_eq!(shared.active(), 2);
     drop(first);
-    let replacement = sv2.try_admit(same_ip).map_err(|reason| {
-        std::io::Error::other(format!(
-            "released per-IP slot not re-admittable: {reason:?}"
-        ))
-    })?;
+    let replacement = sv2
+        .try_admit(same_ip)
+        .map_err(|_| TestError::ExpectationFailed("released per-IP slot re-admits"))?;
     assert_eq!(shared.active(), 2);
     drop((replacement, other));
     assert_eq!(shared.active(), 0);
@@ -453,7 +450,7 @@ macro_rules! backend_tests {
         mod $module {
             use super::*;
 
-            fn open(path: &Path) -> Result<Arc<dyn KvStore>, Box<dyn std::error::Error>> {
+            fn open(path: &Path) -> Result<Arc<dyn KvStore>, bitcoin_rs_storage::StorageError> {
                 Ok(Arc::new(<$store>::open(path)?))
             }
 
@@ -511,6 +508,7 @@ backend_tests!(redb, bitcoin_rs_storage::RedbStore);
 #[cfg(feature = "fjall")]
 backend_tests!(fjall, bitcoin_rs_storage::FjallStore);
 
+// POOL-03
 #[test]
 fn composed_core_bounds_pin_the_contract_literals() -> TestResult {
     let composed = super::composed_core_config(128)?;
@@ -538,6 +536,7 @@ fn composed_core_bounds_pin_the_contract_literals() -> TestResult {
     Ok(())
 }
 
+// POOL-02
 #[test]
 fn pool_directory_lock_is_exclusive_while_prepare_resources_live() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -562,7 +561,7 @@ fn ledger_create_open_and_epoch_under_guard(
     let guard = crate::state::lock_pool_directory(&datadir)?;
     let ledger_path = datadir.join("ledger");
     let policy = || pool_ledger::PoolConfig::new(1_000, vec![0x51]);
-    let (_ledger, first): (pool_ledger::Ledger, u32) = crate::storage_backend::open_generic(
+    let (ledger, first): (pool_ledger::Ledger, u32) = crate::storage_backend::open_generic(
         "pool",
         backend,
         &ledger_path,
@@ -570,8 +569,8 @@ fn ledger_create_open_and_epoch_under_guard(
         &guard,
         super::LedgerComposer { config: policy() },
     )?;
-    drop(_ledger);
-    let (_ledger, second): (pool_ledger::Ledger, u32) = crate::storage_backend::open_generic(
+    drop(ledger);
+    let (ledger, second): (pool_ledger::Ledger, u32) = crate::storage_backend::open_generic(
         "pool",
         backend,
         &ledger_path,
@@ -583,7 +582,7 @@ fn ledger_create_open_and_epoch_under_guard(
         second > first,
         "run-epoch allocation must advance across restarts while the directory lock is held"
     );
-    drop(_ledger);
+    drop(ledger);
     let mismatch = pool_ledger::PoolConfig::new(2_000, vec![0x51]);
     let outcome = crate::storage_backend::open_generic(
         "pool",
@@ -594,23 +593,27 @@ fn ledger_create_open_and_epoch_under_guard(
         super::LedgerComposer { config: mismatch },
     )
     .map(|_: (pool_ledger::Ledger, u32)| ());
-    let error = outcome.unwrap_err();
+    let Err(error) = outcome else {
+        panic!("outcome must be error");
+    };
     assert!(
         matches!(
-            error.downcast_ref::<pool_ledger::LedgerError>(),
-            Some(pool_ledger::LedgerError::ConfigMismatch)
+            error,
+            RunError::PoolLedger(pool_ledger::LedgerError::ConfigMismatch)
         ),
         "a changed policy must fail rather than reinterpret history: {error:?}"
     );
     Ok(())
 }
 
+// POOL-02
 #[cfg(feature = "redb")]
 #[test]
 fn pool_prepare_create_open_and_epoch_run_under_the_directory_lock_redb() -> TestResult {
     ledger_create_open_and_epoch_under_guard(bitcoin_rs_storage::StorageBackend::Redb)
 }
 
+// POOL-02
 #[cfg(feature = "fjall")]
 #[test]
 fn pool_prepare_create_open_and_epoch_run_under_the_directory_lock_fjall() -> TestResult {
@@ -704,9 +707,11 @@ fn pool_prepare_holds_directory_lock_for_service_lifetime() -> TestResult {
         max_payout_outputs: 10,
     });
     let state = crate::state::NodeState::open(config, None)?;
-    let control = Arc::new(bitcoin_rs_mining::FakeMiningControl::default());
-    let service =
-        super::PoolService::prepare(&state, control)?.expect("enabled pool must prepare a service");
+    let control: Arc<dyn bitcoin_rs_mining::MiningControl> =
+        Arc::new(bitcoin_rs_mining::FakeMiningControl::default());
+    let Some(service) = super::PoolService::prepare(&state, &control)? else {
+        panic!("enabled pool must prepare a service");
+    };
     assert!(
         crate::state::lock_pool_directory(&pool_datadir).is_err(),
         "pool datadir must stay locked while the prepared service lives"

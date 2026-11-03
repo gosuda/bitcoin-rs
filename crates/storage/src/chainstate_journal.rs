@@ -3,11 +3,11 @@ mod record;
 mod replay;
 mod writer;
 
-pub use emit::{JournalEmit, SharedJournalWriter, shared_journal_writer};
+pub use emit::{CheckpointBase, JournalEmit, SharedJournalWriter, shared_journal_writer};
 pub(crate) use record::crc32c;
-pub use record::{Coin, JournalRecord, Mutation};
+pub use record::{Coin, JournalRecord, JournalRecordError, Mutation, decode_record, encode_record};
 pub use replay::{JournalReplayBase, JournalReplayError, ReplayedHead, replay_committed_range};
 pub use writer::{
     FULL_REVALIDATION_MARKER, JOURNAL_DIR_NAME, JournalPolicy, JournalWriter, JournalWriterError,
-    clear_full_revalidation_marker_at,
+    clear_full_revalidation_marker_at, mark_full_revalidation_at,
 };

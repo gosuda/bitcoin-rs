@@ -1,5 +1,3 @@
-//! BIP152 compact-block reconstruction.
-
 use crate::inv::{native_block_hash, wire_block_hash};
 
 use hashbrown::HashMap;
@@ -10,13 +8,14 @@ use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn};
 use bitcoin_rs_primitives::deserialize;
 use bitcoin_rs_primitives::{Block, BlockHash, Header, Tx, Txid, Wtxid};
 
+use crate::wire::MAX_BLOCK_TX_COUNT;
+
 pub use crate::peer::COMPACT_BLOCK_VERSION;
 
 const MAX_PENDING_RECONSTRUCTIONS: usize = 4;
 const MAX_PENDING_RETAINED_BYTES: usize = 8 * 1_024 * 1_024;
 const PENDING_DEADLINE: Duration = Duration::from_mins(1);
 const MAX_REQUESTED_MISSING: usize = 128;
-const MAX_BLOCK_TX_COUNT: usize = 100_000;
 const MAX_RECENT_COMPACT_BLOCKS: usize = crate::download_window::PEER_INFLIGHT_BUDGET;
 
 pub trait CompactBlockHints: Send + Sync {
@@ -27,7 +26,6 @@ pub trait CompactBlockHints: Send + Sync {
     fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx>;
 }
 
-/// What the listener must do after one receive-side BIP152 step.
 #[derive(Debug)]
 pub enum Outcome {
     Complete(Block),
@@ -60,7 +58,6 @@ impl Reconstruction {
         }
     }
 
-    /// `identity_version` is the BIP152 version the peer used to serialize
     pub fn receive_cmpctblock(
         &mut self,
         cmpct: &CmpctBlock,
@@ -81,7 +78,13 @@ impl Reconstruction {
             self.recent.remove(0);
         }
         self.recent.push((hash, now));
-        let total = compact.short_ids.len() + compact.prefilled_txs.len();
+        let Some(total) = compact
+            .short_ids
+            .len()
+            .checked_add(compact.prefilled_txs.len())
+        else {
+            return Outcome::Fallback(hash);
+        };
         if total > MAX_BLOCK_TX_COUNT {
             return Outcome::Fallback(hash);
         }
@@ -89,12 +92,15 @@ impl Reconstruction {
         let Some(mut filled) = place_prefills(compact, total) else {
             return Outcome::Fallback(hash);
         };
-        let mut retained_bytes = 6 * compact.short_ids.len()
-            + filled
-                .iter()
-                .flatten()
-                .map(|tx: &Tx| tx.total_size())
-                .sum::<usize>();
+        let mut retained_bytes = 6_usize
+            .saturating_mul(compact.short_ids.len())
+            .saturating_add(
+                filled
+                    .iter()
+                    .flatten()
+                    .map(retained_tx_bytes)
+                    .sum::<usize>(),
+            );
 
         if self.pending.len() >= MAX_PENDING_RECONSTRUCTIONS
             || self.retained_bytes().saturating_add(retained_bytes) > MAX_PENDING_RETAINED_BYTES
@@ -117,7 +123,7 @@ impl Reconstruction {
         }
 
         if self.pending.len() >= MAX_PENDING_RECONSTRUCTIONS
-            || self.retained_bytes() + retained_bytes > MAX_PENDING_RETAINED_BYTES
+            || self.retained_bytes().saturating_add(retained_bytes) > MAX_PENDING_RETAINED_BYTES
         {
             return Outcome::Fallback(hash);
         }
@@ -188,11 +194,17 @@ impl Reconstruction {
             .retain(|(_, received)| now.saturating_duration_since(*received) < PENDING_DEADLINE);
     }
 
-    fn retained_bytes(&self) -> usize {
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
         self.pending
             .values()
             .map(|entry| entry.retained_bytes)
             .sum()
+    }
+
+    #[must_use]
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
     }
 }
 
@@ -270,10 +282,14 @@ fn fill_from_hints(
         let Some(body) = body else {
             continue;
         };
-        *retained_bytes += body.total_size();
+        *retained_bytes = retained_bytes.saturating_add(retained_tx_bytes(&body));
         filled[slot] = Some(body);
     }
     Ok(())
+}
+
+fn retained_tx_bytes(tx: &Tx) -> usize {
+    core::mem::size_of::<Tx>().saturating_add(tx.retained_heap_bytes())
 }
 
 fn place_prefills(compact: &HeaderAndShortIds, total: usize) -> Option<Vec<Option<Tx>>> {

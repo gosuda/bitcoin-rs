@@ -2,20 +2,55 @@ use super::*;
 use crate::{Message, PeerError, PeerLease, PeerRole};
 use bitcoin_rs_primitives::USER_AGENT;
 
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    AddrParse(#[from] std::net::AddrParseError),
+    #[error(transparent)]
+    Peer(#[from] crate::PeerError),
+    #[error(transparent)]
+    TryFromInt(#[from] std::num::TryFromIntError),
+    #[error(transparent)]
+    Sonic(#[from] sonic_rs::Error),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+}
+
+impl From<&'static str> for TestError {
+    fn from(msg: &'static str) -> Self {
+        Self::Missing(msg)
+    }
+}
+
+type TestResult = Result<(), TestError>;
+
 fn shared() -> ConnectionShared {
     let (headers, _) = crossbeam_channel::unbounded();
     let (blocks, _) = crossbeam_channel::unbounded();
     test_shared(Arc::new(crate::PeerTable::new()), headers, blocks)
 }
 
-fn lease(manual: bool, noban: bool) -> PeerLease {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LeaseOrigin {
+    Automatic,
+    Manual,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BanProtection {
+    Protected,
+    Unprotected,
+}
+
+fn test_lease(origin: LeaseOrigin, protection: BanProtection) -> PeerLease {
     let (tx, _) = crossbeam_channel::unbounded();
-    let lease = if manual {
-        PeerLease::new_manual(tx, PeerRole::FullRelay)
-    } else {
-        PeerLease::new(tx)
+    let lease = match origin {
+        LeaseOrigin::Manual => PeerLease::new_manual(tx, PeerRole::FullRelay),
+        LeaseOrigin::Automatic => PeerLease::new(tx),
     };
-    lease.with_no_ban(noban)
+    lease.with_no_ban(protection == BanProtection::Protected)
 }
 
 struct ServiceUpdateScript {
@@ -47,8 +82,7 @@ impl std::io::Write for ServiceUpdateScript {
 }
 
 #[test]
-fn accepted_version_updates_once_without_replaying_on_later_steps()
--> Result<(), Box<dyn std::error::Error>> {
+fn accepted_version_updates_once_without_replaying_on_later_steps() -> TestResult {
     for (repeated_version, protected) in
         [(true, false), (true, true), (false, false), (false, true)]
     {
@@ -67,7 +101,14 @@ fn accepted_version_updates_once_without_replaying_on_later_steps()
             unix_time_secs(),
         );
         shared.address_book = Some(Arc::clone(&book));
-        let lease = lease(false, protected);
+        let lease = test_lease(
+            LeaseOrigin::Automatic,
+            if protected {
+                BanProtection::Protected
+            } else {
+                BanProtection::Unprotected
+            },
+        );
         shared.peer_table.register(address, lease.clone());
         let mut wire = Vec::new();
         if protected {
@@ -147,13 +188,12 @@ fn accepted_version_updates_once_without_replaying_on_later_steps()
 }
 
 #[test]
-fn only_current_remote_protocol_faults_change_automatic_avoidance()
--> Result<(), Box<dyn std::error::Error>> {
+fn invalid_wire_session_closes_and_refuses_the_link_with_reconnection_delay() -> TestResult {
     let shared = shared();
     let address: PeerEndpoint = "8.8.8.8:8333".parse()?;
-    let stale = lease(false, false);
+    let stale = test_lease(LeaseOrigin::Automatic, BanProtection::Unprotected);
     shared.peer_table.register(address, stale.clone());
-    let current = lease(false, false);
+    let current = test_lease(LeaseOrigin::Automatic, BanProtection::Unprotected);
     shared.peer_table.register(address, current.clone());
     let fault = PeerError::Incoming(Box::new(PeerError::BadChecksum));
     shared.note_misbehavior(address, &stale, &fault);
@@ -183,11 +223,11 @@ fn only_current_remote_protocol_faults_change_automatic_avoidance()
         "automatic avoidance must not become a manual ban"
     );
     assert!(matches!(
-        shared.check_destination(address, false),
+        shared.check_automatic_destination(address),
         Err(PeerError::DiscouragedDestination(_))
     ));
     assert!(
-        shared.check_destination(address, true).is_ok(),
+        shared.check_manual_destination(address).is_ok(),
         "manual dials bypass automatic avoidance"
     );
     assert!(
@@ -200,8 +240,7 @@ fn only_current_remote_protocol_faults_change_automatic_avoidance()
 }
 
 #[test]
-fn invalid_wire_session_closes_and_refuses_the_next_automatic_admission()
--> Result<(), Box<dyn std::error::Error>> {
+fn manual_and_protected_local_connections_never_discourage_an_ip() -> TestResult {
     for inbound in [false, true] {
         let shared = shared();
         let address: PeerEndpoint = "8.8.8.8:8333".parse()?;
@@ -240,13 +279,15 @@ fn invalid_wire_session_closes_and_refuses_the_next_automatic_admission()
         io::Write::write_all(&mut sender, &malformed)?;
         io::Write::write_all(&mut sender, &malformed)?;
         let Err(error) = run_connected_session(&mut peer, address, &shared, lease, rx, info) else {
-            return Err("malformed frames must close the session with an error".into());
+            return Err(TestError::Missing(
+                "malformed frames must close the session with an error",
+            ));
         };
         assert!(matches!(error, PeerError::Incoming(_)));
         assert!(probe.is_cancelled());
         assert!(shared.peer_table.sessions().is_empty());
         assert!(matches!(
-            shared.check_destination(address, false),
+            shared.check_automatic_destination(address),
             Err(PeerError::DiscouragedDestination(_))
         ));
         assert!(shared.banned.read().is_empty());
@@ -255,8 +296,7 @@ fn invalid_wire_session_closes_and_refuses_the_next_automatic_admission()
 }
 
 #[test]
-fn manual_protected_and_local_connections_never_discourage_an_ip()
--> Result<(), Box<dyn std::error::Error>> {
+fn protected_handshake_discards_bad_order_without_extending_deadline() -> TestResult {
     for (ip, manual, noban) in [
         ("8.8.8.8", true, false),
         ("8.8.4.4", false, true),
@@ -266,7 +306,17 @@ fn manual_protected_and_local_connections_never_discourage_an_ip()
     ] {
         let shared = shared();
         let address = PeerEndpoint::new(ip.parse::<std::net::IpAddr>()?, 8333);
-        let lease = lease(manual, noban);
+        let origin = if manual {
+            LeaseOrigin::Manual
+        } else {
+            LeaseOrigin::Automatic
+        };
+        let protection = if noban {
+            BanProtection::Protected
+        } else {
+            BanProtection::Unprotected
+        };
+        let lease = test_lease(origin, protection);
         shared.peer_table.register(address, lease.clone());
         let error = PeerError::Misbehavior("getheaders locator too large");
         shared.note_misbehavior(address, &lease, &error);
@@ -284,10 +334,19 @@ fn manual_protected_and_local_connections_never_discourage_an_ip()
 }
 
 #[test]
-fn protected_handshake_discards_bad_order_without_extending_deadline()
--> Result<(), Box<dyn std::error::Error>> {
+fn only_current_remote_protocol_faults_change_automatic_avoidance() -> TestResult {
     for manual in [false, true] {
-        let lease = lease(manual, !manual);
+        let origin = if manual {
+            LeaseOrigin::Manual
+        } else {
+            LeaseOrigin::Automatic
+        };
+        let protection = if manual {
+            BanProtection::Unprotected
+        } else {
+            BanProtection::Protected
+        };
+        let lease = test_lease(origin, protection);
         let mut bytes = Vec::new();
         crate::wire::write_message(&mut bytes, Magic::REGTEST, &Message::Verack)?;
         crate::wire::write_message(

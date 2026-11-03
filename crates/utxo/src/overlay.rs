@@ -1,5 +1,3 @@
-//! Prevout lookups for a window of consecutive blocks, before any of them commit.
-
 use bitcoin_rs_primitives::{Block, OutPoint, Txid};
 use hashbrown::{HashMap, HashSet};
 
@@ -104,7 +102,7 @@ mod tests {
 
     const MAX_SCRIPT_SIZE: usize = 64;
     const HEIGHT: u32 = 7;
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    use crate::test_support::TestResult;
 
     fn tx(previous_output: OutPoint, script_pubkey: Vec<u8>, value: u64) -> Tx {
         Tx {

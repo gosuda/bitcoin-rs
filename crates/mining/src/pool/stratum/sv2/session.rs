@@ -1,5 +1,3 @@
-//! Stratum V2 mining-protocol server state machine.
-
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
@@ -7,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::pool::{
     AcceptedShare, BlockReceipt, Extranonce, FoundBlock, Job, JobBook, JobError, JobId, Session,
-    SessionId, ShareError, ShareOutcome, ShareSubmission, ShareTarget,
+    SessionId, SessionOpenError, ShareError, ShareOutcome, ShareSubmission, ShareTarget,
 };
 use crate::{MiningControl, MiningControlError};
 use binary_sv2::{B032, B064K, Decodable, Encodable, GetSize, Seq0255, Str0255, Sv2Option, U256};
@@ -67,15 +65,12 @@ use thiserror::Error;
 
 use super::{ConfigError, Frame, MAX_EXTRANONCE_WIRE_LEN, PROTOCOL_VERSION, U24_MAX};
 
-/// `SetupConnection.flags` bit 0: the client can only process standard jobs.
 pub const FLAG_REQUIRES_STANDARD_JOBS: u32 = 1 << 0;
 pub const FLAG_REQUIRES_WORK_SELECTION: u32 = 1 << 1;
-/// `SetupConnection.flags` bit 2: the client requires version rolling.
 pub const FLAG_REQUIRES_VERSION_ROLLING: u32 = 1 << 2;
 pub const SUCCESS_FLAG_REQUIRES_FIXED_VERSION: u32 = 1 << 0;
 pub const SUCCESS_FLAG_REQUIRES_EXTENDED_CHANNELS: u32 = 1 << 1;
 
-/// Local error code: `sequence_number` did not increase on its channel.
 pub const ERROR_CODE_INVALID_SEQUENCE_NUMBER: &str = "invalid-sequence-number";
 pub const ERROR_CODE_POOL_BUSY: &str = "pool-busy";
 pub const ERROR_CODE_JOB_SHARE_CAPACITY: &str = "job-share-capacity";
@@ -90,7 +85,6 @@ pub enum AdmitError {
 
 pub type AdmitUser = Arc<dyn Fn(&[u8]) -> Result<(), AdmitError> + Send + Sync>;
 
-/// Hard bounds on everything a peer can make this session hold.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
     pub max_frame_payload: usize,
@@ -173,7 +167,6 @@ impl fmt::Debug for ServerConfig {
     }
 }
 
-/// Mining channel flavour.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChannelKind {
     Standard,
@@ -183,7 +176,6 @@ pub enum ChannelKind {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ShareTicket(pub u64);
 
-/// One accepted share, handed to the host to record before the miner is told.
 #[derive(Debug)]
 pub struct ShareEvent {
     pub ticket: ShareTicket,
@@ -192,7 +184,6 @@ pub struct ShareEvent {
     pub outcome: AcceptedShare,
 }
 
-/// A block candidate awaiting the host's authoritative [`MiningControl`] submission.
 #[derive(Debug)]
 pub struct PendingBlock {
     ticket: ShareTicket,
@@ -289,7 +280,6 @@ pub enum Event {
         channel_id: u32,
         reason: CloseReason,
     },
-    /// A share passed the owner's predicate; record it, then confirm.
     ShareAccepted(ShareEvent),
     BlockFound(PendingBlock),
     ShareRejected {
@@ -311,7 +301,6 @@ pub struct ChannelInfo {
     pub extranonce_prefix: Vec<u8>,
 }
 
-/// Fatal protocol violations; the connection must be dropped.
 #[derive(Debug, Error)]
 pub enum SessionError {
     #[error("message type {msg_type:#04x} before SetupConnection")]
@@ -327,7 +316,6 @@ pub enum SessionError {
         /// Offending message type.
         msg_type: u8,
     },
-    /// The peer is not draining output.
     #[error("{queue} backlog exceeds {limit}")]
     Backlog { queue: &'static str, limit: usize },
     #[error("cannot encode message {msg_type:#04x}: {detail}")]
@@ -492,7 +480,6 @@ fn code_str(code: &str) -> Result<Str0255<'_>, SessionError> {
     Str0255::try_from(code).map_err(|_| SessionError::BadErrorCode)
 }
 
-/// The integer pool difficulty (diff-1 basis, `0xffff << 208`) of `target`.
 pub fn target_difficulty(target: ShareTarget) -> u64 {
     let target_u256 = Uint::<256, 4>::from_le_bytes(target.to_le_bytes());
     if target_u256.is_zero() {
@@ -504,7 +491,6 @@ pub fn target_difficulty(target: ShareTarget) -> u64 {
     diff.max(1)
 }
 
-/// Maps the owner's rejection onto an official SV2 `SubmitShares.Error` code.
 fn share_error_code(error: &ShareError) -> &'static str {
     match error {
         ShareError::UnknownSession(_) => ERROR_CODE_SUBMIT_SHARES_INVALID_CHANNEL_ID,
@@ -529,7 +515,6 @@ fn share_error_code(error: &ShareError) -> &'static str {
     }
 }
 
-/// `NewMiningJob` for a standard channel: the merkle root is the owner's.
 fn standard_job_frame(
     channel_id: u32,
     job: &Job,
@@ -1045,26 +1030,22 @@ impl ProtocolSession {
         Ok(max_target)
     }
 
-    fn allocate_open(
-        &mut self,
-        book: &mut JobBook,
-    ) -> Result<Option<(u32, u32, Session)>, SessionError> {
+    fn allocate_open(&mut self, book: &mut JobBook) -> Option<(u32, u32, Session)> {
         let group_id = self.group_id.or_else(|| {
             let group = self.alloc_id();
             self.group_id = group;
             group
         });
         let (Some(group_channel_id), Some(channel_id)) = (group_id, self.alloc_id()) else {
-            return Ok(None);
+            return None;
         };
         let session = match book.open_session() {
             Ok(session) => session,
-            Err(JobError::SessionCapacity { .. } | JobError::SessionIdExhausted) => {
-                return Ok(None);
+            Err(SessionOpenError::Capacity { .. } | SessionOpenError::IdsExhausted) => {
+                return None;
             }
-            Err(other) => return Err(SessionError::Job(other)),
         };
-        Ok(Some((group_channel_id, channel_id, session)))
+        Some((group_channel_id, channel_id, session))
     }
 
     fn open_channel(
@@ -1079,7 +1060,7 @@ impl ProtocolSession {
             Err(code) => return self.reject_open(request.request_id, code),
         };
         let layout = book.config().extranonce;
-        let Some((group_channel_id, channel_id, session)) = self.allocate_open(book)? else {
+        let Some((group_channel_id, channel_id, session)) = self.allocate_open(book) else {
             return self.reject_open(
                 request.request_id,
                 ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED,
@@ -1549,59 +1530,71 @@ impl ProtocolSession {
             });
         }
         match book.validate(&submission, &prepared.target) {
-            Ok(outcome) => {
-                let difficulty = target_difficulty(prepared.target);
-                let ticket = ShareTicket(self.next_ticket);
-                self.next_ticket = self.next_ticket.wrapping_add(1);
-                let event = match outcome {
-                    ShareOutcome::Share(accepted) => {
-                        self.pending.insert(
-                            ticket.0,
-                            Pending {
-                                channel_id,
-                                sequence_number,
-                                difficulty,
-                                block_hash: None,
-                                hash: *accepted.hash.as_bytes(),
-                                submitted_at: Instant::now(),
-                                kind: PendingKind::Share,
-                            },
-                        );
-                        Event::ShareAccepted(ShareEvent {
-                            ticket,
-                            channel_id,
-                            sequence_number,
-                            outcome: *accepted,
-                        })
-                    }
-                    ShareOutcome::Block(found) => {
-                        self.pending.insert(
-                            ticket.0,
-                            Pending {
-                                channel_id,
-                                sequence_number,
-                                difficulty,
-                                block_hash: Some(*found.share.hash.as_bytes()),
-                                hash: *found.share.hash.as_bytes(),
-                                submitted_at: Instant::now(),
-                                kind: PendingKind::Block,
-                            },
-                        );
-                        Event::BlockFound(PendingBlock {
-                            ticket,
-                            channel_id,
-                            sequence_number,
-                            found,
-                        })
-                    }
-                };
-                self.push_event(event)
-            }
+            Ok(outcome) => self.record_outcome(
+                channel_id,
+                sequence_number,
+                target_difficulty(prepared.target),
+                outcome,
+            ),
             Err(error) => {
                 let code = share_error_code(&error);
                 self.refuse_share(channel_id, sequence_number, code, Some(error))
             }
         }
+    }
+
+    fn record_outcome(
+        &mut self,
+        channel_id: u32,
+        sequence_number: u32,
+        difficulty: u64,
+        outcome: ShareOutcome,
+    ) -> Result<(), SessionError> {
+        let ticket = ShareTicket(self.next_ticket);
+        self.next_ticket = self.next_ticket.wrapping_add(1);
+        let event = match outcome {
+            ShareOutcome::Share(accepted) => {
+                self.pending.insert(
+                    ticket.0,
+                    Pending {
+                        channel_id,
+                        sequence_number,
+                        difficulty,
+                        block_hash: None,
+                        hash: *accepted.hash.as_bytes(),
+                        submitted_at: Instant::now(),
+                        kind: PendingKind::Share,
+                    },
+                );
+                Event::ShareAccepted(ShareEvent {
+                    ticket,
+                    channel_id,
+                    sequence_number,
+                    outcome: *accepted,
+                })
+            }
+            ShareOutcome::Block(found) => {
+                self.pending.insert(
+                    ticket.0,
+                    Pending {
+                        channel_id,
+                        sequence_number,
+                        difficulty,
+                        block_hash: Some(*found.share.hash.as_bytes()),
+                        hash: *found.share.hash.as_bytes(),
+                        submitted_at: Instant::now(),
+                        kind: PendingKind::Block,
+                    },
+                );
+                Event::BlockFound(PendingBlock {
+                    ticket,
+                    channel_id,
+                    sequence_number,
+                    found,
+                })
+            }
+        };
+        self.push_event(event)
     }
 
     pub fn confirm_share(&mut self, ticket: ShareTicket) -> Result<bool, SessionError> {
@@ -1782,7 +1775,6 @@ impl ProtocolSession {
             .values()
             .filter(|pending| pending.channel_id == channel_id)
             .map(|pending| pending.hash)
-            .collect::<Vec<_>>()
         {
             unburn_hash(book, &hash);
         }
@@ -1833,10 +1825,6 @@ impl ProtocolSession {
         Ok(())
     }
 
-    /// Releases every owner session this connection holds.
-    ///
-    /// The host MUST call this when the connection ends, whatever the reason: the
-    /// owner's session table is bounded and a leaked session shrinks it. Idempotent.
     pub fn release(&mut self, book: &mut JobBook) {
         for (_, channel) in std::mem::take(&mut self.channels) {
             book.close_session(channel.session);

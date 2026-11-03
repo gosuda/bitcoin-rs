@@ -1,6 +1,4 @@
-//! `ScriptLive` behavior over the prepared/commit path (`IDX-01`, `IDX-07`, #225).
-
-use crate::support::common;
+use crate::support::{TestError, common};
 
 #[cfg(any(feature = "redb", feature = "fjall"))]
 use bitcoin_rs_index::IndexReader;
@@ -128,7 +126,7 @@ struct Chain {
 }
 
 impl Chain {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    fn new() -> Result<Self, TestError> {
         let store = Arc::new(MemoryStore::default());
         let writer = IndexWriter::open(store, 0)?;
         Ok(Self {
@@ -187,7 +185,7 @@ impl Chain {
 fn persistent_writer_live_roundtrip<S: KvStore>(
     open: impl Fn() -> Result<S, bitcoin_rs_storage::StorageError>,
     capabilities: IndexCapabilities,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), TestError> {
     let store = Arc::new(open()?);
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let empty = MapScripts::default();
@@ -297,7 +295,7 @@ fn tx_lookup_only_reopen<S: KvStore>(
     store: Arc<S>,
     writer: IndexWriter<S>,
     funding_tip: IndexWatermark,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), TestError> {
     assert_eq!(
         writer
             .indexer()
@@ -336,7 +334,7 @@ fn seed_live_and_reopen<S: KvStore>(
     mut writer: IndexWriter<S>,
     native: NativeOutPoint,
     scripthash: ScriptHash,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), TestError> {
     writer.reset_capabilities(IndexCapabilities::SCRIPT_LIVE)?;
     let (_, before_seed) = writer.fenced_watermarks()?;
     let seed_tip = IndexWatermark {
@@ -372,7 +370,7 @@ fn seed_live_and_reopen<S: KvStore>(
 
 #[cfg(feature = "redb")]
 #[test]
-fn dedicated_redb_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+fn dedicated_redb_writer_live_roundtrip() -> Result<(), TestError> {
     for capabilities in [
         IndexCapabilities::SCRIPT_LIVE,
         IndexCapabilities::TX_AND_SCRIPTS,
@@ -389,7 +387,7 @@ fn dedicated_redb_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Erro
 
 #[cfg(feature = "redb")]
 #[test]
-fn generic_redb_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+fn generic_redb_writer_live_roundtrip() -> Result<(), TestError> {
     for capabilities in [
         IndexCapabilities::SCRIPT_LIVE,
         IndexCapabilities::TX_AND_SCRIPTS,
@@ -406,7 +404,7 @@ fn generic_redb_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Error>
 
 #[cfg(feature = "fjall")]
 #[test]
-fn fjall_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+fn fjall_writer_live_roundtrip() -> Result<(), TestError> {
     for capabilities in [
         IndexCapabilities::SCRIPT_LIVE,
         IndexCapabilities::TX_AND_SCRIPTS,
@@ -422,7 +420,7 @@ fn fjall_writer_live_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn live_rows_follow_connect_spend_and_disconnect() -> Result<(), Box<dyn std::error::Error>> {
+fn live_rows_follow_connect_spend_and_disconnect() -> Result<(), TestError> {
     let mut chain = Chain::new()?;
     let empty = MapScripts::default();
 
@@ -492,10 +490,8 @@ fn live_rows_follow_connect_spend_and_disconnect() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-/// A BIP30-style outpoint overwrite removes the old script row on connect and
-/// restores it from the undo anchor on disconnect.
 #[test]
-fn live_rows_restore_a_replaced_outpoint() -> Result<(), Box<dyn std::error::Error>> {
+fn live_rows_restore_a_replaced_outpoint() -> Result<(), TestError> {
     let mut chain = Chain::new()?;
     chain.connect(vec![coinbase(0)], &MapScripts::default())?;
 
@@ -553,8 +549,7 @@ fn live_rows_restore_a_replaced_outpoint() -> Result<(), Box<dyn std::error::Err
 }
 
 #[test]
-fn same_block_create_and_spend_cancels_without_an_anchor() -> Result<(), Box<dyn std::error::Error>>
-{
+fn same_block_create_and_spend_cancels_without_an_anchor() -> Result<(), TestError> {
     let mut chain = Chain::new()?;
     let empty = MapScripts::default();
     chain.connect(vec![coinbase(0)], &empty)?;
@@ -617,7 +612,7 @@ fn same_block_create_and_spend_cancels_without_an_anchor() -> Result<(), Box<dyn
 }
 
 #[test]
-fn unresolvable_spends_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+fn unresolvable_spends_fail_closed() -> Result<(), TestError> {
     let mut chain = Chain::new()?;
     let empty = MapScripts::default();
     chain.connect(vec![coinbase(0)], &empty)?;
@@ -663,9 +658,8 @@ fn unresolvable_spends_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The live predicate is UTXO admission: `OP_RETURN` and oversized scripts never
 #[test]
-fn live_predicate_matches_utxo_admission_not_history() -> Result<(), Box<dyn std::error::Error>> {
+fn live_predicate_matches_utxo_admission_not_history() -> Result<(), TestError> {
     let mut chain = Chain::new()?;
     let empty = MapScripts::default();
     chain.connect(vec![coinbase(0)], &empty)?;
@@ -706,13 +700,27 @@ fn live_predicate_matches_utxo_admission_not_history() -> Result<(), Box<dyn std
     Ok(())
 }
 
+struct NoSpend;
+
+static NO_SPEND_SCRIPT: [u8; 2] = [0x51, 0x01];
+
+impl bitcoin_rs_index::SpentCoinScripts for NoSpend {
+    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
+        Some(NO_SPEND_SCRIPT.as_slice())
+    }
+}
+
 #[test]
-fn live_and_history_watermarks_advance_independently() -> Result<(), Box<dyn std::error::Error>> {
+fn live_and_history_watermarks_advance_independently() -> Result<(), TestError> {
     let mut chain = Chain::new()?;
     let (body, hash) = block_bytes(chain.tip, vec![coinbase(0)]);
-    let prepared = chain
-        .writer
-        .prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body)?;
+    let prepared = chain.writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::HISTORICAL,
+        0,
+        hash,
+        &body,
+        &NoSpend,
+    )?;
     let batch = common::batch_with_limits(
         prepared,
         PreparedBatchLimits {
@@ -732,7 +740,7 @@ fn live_and_history_watermarks_advance_independently() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn seeding_resets_partial_rows_and_stamps_once() -> Result<(), Box<dyn std::error::Error>> {
+fn seeding_resets_partial_rows_and_stamps_once() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 0)?;
 
@@ -806,8 +814,7 @@ fn seeding_resets_partial_rows_and_stamps_once() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn seed_stream_fenced_write_failure_does_not_publish_watermark()
--> Result<(), Box<dyn std::error::Error>> {
+fn seed_stream_fenced_write_failure_does_not_publish_watermark() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 0)?;
     store.fail_next_fenced_write.store(true, Ordering::SeqCst);
@@ -849,6 +856,7 @@ fn sorted(mut outpoints: Vec<OutPoint>) -> Vec<OutPoint> {
     outpoints
 }
 
+// IDX-04
 #[test]
 fn leftover_capabilities_are_persisted_families_outside_the_selection() {
     let cursor = IndexWatermark {

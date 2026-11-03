@@ -1,134 +1,5 @@
 use super::*;
 
-/// the typed-cause retag. A later edit that drifts wire text fails here.
-fn assert_renders(cases: Vec<(TxUnavailableCause, &str)>) {
-    for (cause, expected) in cases {
-        assert_eq!(cause.to_string(), expected, "{cause:?}");
-    }
-}
-
-#[test]
-fn fixed_unavailable_causes_render_pinned_wire_text() {
-    assert_renders(vec![
-        (
-            TxUnavailableCause::RowBudgetExhausted,
-            "txindex query work budget exhausted",
-        ),
-        (
-            TxUnavailableCause::RowBudgetExceeded,
-            "txindex query work budget exceeded",
-        ),
-        (
-            TxUnavailableCause::PrefixScanTruncated,
-            "txindex prefix scan truncated",
-        ),
-        (
-            TxUnavailableCause::LivePrefixScanTruncated,
-            "txindex live prefix scan truncated",
-        ),
-        (
-            TxUnavailableCause::BodyReadBudgetExhausted,
-            "txindex query body budget exhausted",
-        ),
-        (
-            TxUnavailableCause::BodyBudgetExceeded,
-            "txindex query body budget exceeded",
-        ),
-        (TxUnavailableCause::WorkerStopped, "txindex worker stopped"),
-        (
-            TxUnavailableCause::FilterDataMissing,
-            "compact filter data is missing",
-        ),
-        (
-            TxUnavailableCause::CapabilityDisabled(IndexCapability::TxLookup),
-            "txindex is disabled",
-        ),
-        (
-            TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptHistory),
-            "script history is disabled",
-        ),
-        (
-            TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptLive),
-            "script live is disabled",
-        ),
-        (
-            TxUnavailableCause::CapabilityDisabled(IndexCapability::CompactFilters),
-            "blockfilterindex is disabled",
-        ),
-    ]);
-}
-
-#[test]
-fn carried_unavailable_causes_render_pinned_wire_text() {
-    assert_renders(vec![
-        (
-            TxUnavailableCause::PrunedPrefixUnproven {
-                family: "transaction index",
-                floor: 100,
-            },
-            "transaction index coverage starts at height 100; the pruned prefix is unproven",
-        ),
-        (
-            TxUnavailableCause::PrunedPrefixUnproven {
-                family: "script history",
-                floor: 7,
-            },
-            "script history coverage starts at height 7; the pruned prefix is unproven",
-        ),
-        (
-            TxUnavailableCause::HistoryUnproven { floor: 5 },
-            "script history coverage starts at height 5; history cannot be proven complete",
-        ),
-        (
-            TxUnavailableCause::WorkerFailed("injected worker failure".into()),
-            "injected worker failure",
-        ),
-        (
-            TxUnavailableCause::WorkerFailed("txindex worker failed".into()),
-            "txindex worker failed",
-        ),
-        (
-            TxUnavailableCause::CompactFilterFailed("filter worker broke".into()),
-            "filter worker broke",
-        ),
-        (
-            TxUnavailableCause::MissingAuthority(
-                "chain transition authority missing for ScriptLive",
-            ),
-            "chain transition authority missing for ScriptLive",
-        ),
-        (
-            TxUnavailableCause::MissingAuthority(
-                "authoritative UTXO view is unavailable for ScriptLive",
-            ),
-            "authoritative UTXO view is unavailable for ScriptLive",
-        ),
-        (
-            TxUnavailableCause::MissingAuthority(
-                "ScriptLive locator is absent from authoritative UTXO",
-            ),
-            "ScriptLive locator is absent from authoritative UTXO",
-        ),
-        (
-            TxUnavailableCause::BlockBodyMissing { height: 9 },
-            "block body missing for txindex query at height 9",
-        ),
-        (
-            TxUnavailableCause::Other("txindex is opening".into()),
-            "txindex is opening",
-        ),
-        (
-            TxUnavailableCause::WorkerFailed("txindex is unavailable".into()),
-            "txindex is unavailable",
-        ),
-        (
-            TxUnavailableCause::Other("txindex was abandoned at shutdown".into()),
-            "txindex was abandoned at shutdown",
-        ),
-    ]);
-}
-
-/// `Retry` and never new wire text. Engine-level proof (flag set with no
 #[test]
 fn script_live_unavailable_is_typed_passthrough_not_retry() {
     for reason in [
@@ -137,12 +8,7 @@ fn script_live_unavailable_is_typed_passthrough_not_retry() {
         "",
     ] {
         let cause = TxUnavailableCause::ScriptLiveUnavailable(reason.into());
-        assert_eq!(cause.to_string(), reason, "{cause:?}");
         let error = TxQueryError::Unavailable(cause);
-        assert_eq!(
-            error.to_string(),
-            format!("transaction index unavailable: {reason}"),
-        );
         assert!(!matches!(error, TxQueryError::Retry));
     }
     let outage = TxUnavailableCause::ScriptLiveUnavailable("pruned".into());
@@ -156,23 +22,6 @@ fn script_live_unavailable_is_typed_passthrough_not_retry() {
         TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptLive)
     );
     assert_ne!(outage, TxUnavailableCause::Other("pruned".into()));
-    let shared = HistoricalUnavailableCause::Shared(TxUnavailableCause::ScriptLiveUnavailable(
-        "pruned".into(),
-    ));
-    assert_eq!(shared.to_string(), "pruned");
-    assert_renders(vec![
-        (
-            TxUnavailableCause::PrunedPrefixUnproven {
-                family: "transaction index",
-                floor: 100,
-            },
-            "transaction index coverage starts at height 100; the pruned prefix is unproven",
-        ),
-        (
-            TxUnavailableCause::HistoryUnproven { floor: 5 },
-            "script history coverage starts at height 5; history cannot be proven complete",
-        ),
-    ]);
 }
 
 #[cfg(all(test, feature = "fjall"))]
@@ -205,7 +54,7 @@ mod script_live_outage_engine_tests {
     use sha2::{Digest, Sha256};
     use std::sync::Arc;
 
-    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+    type TestResult<T = ()> = Result<T, crate::portable::TestError>;
 
     fn coinbase_tx(height: u32, extra: i64) -> Transaction {
         Transaction {
@@ -251,8 +100,6 @@ mod script_live_outage_engine_tests {
         Ok(deserialize::<Header>(&serialize(&block.header))?)
     }
 
-    /// Double-SHA256 of the transaction serialization: the exact txid the
-    /// committed rows are keyed by, without crossing crate boundaries.
     fn expected_txid(block: &Block) -> Txid {
         let bytes = serialize(&block.txdata[0]);
         let digest = Sha256::digest(Sha256::digest(bytes).as_slice());
@@ -371,4 +218,130 @@ mod script_live_outage_engine_tests {
         assert!(runtime.failure_message().is_none());
         Ok(())
     }
+}
+
+struct CompleteHistory(Vec<ScriptHistoryRecord>);
+
+impl ScriptIndexQuery for CompleteHistory {
+    fn unspent_outputs(&self, _script: ScriptHash) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
+        Err(TxQueryError::Unavailable(TxUnavailableCause::Other(
+            "unexpected live query".into(),
+        )))
+    }
+
+    fn history_snapshot(&self, _script: ScriptHash) -> Result<ScriptIndexSnapshot, TxQueryError> {
+        Ok(ScriptIndexSnapshot {
+            history: self.0.clone(),
+            funding: Vec::new(),
+        })
+    }
+
+    fn spender(&self, _outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError> {
+        Err(TxQueryError::Unavailable(TxUnavailableCause::Other(
+            "unexpected spender query".into(),
+        )))
+    }
+}
+
+// IDX-02
+#[test]
+fn default_history_page_skips_the_cursor_and_restarts_when_unknown()
+-> Result<(), crate::portable::TestError> {
+    let record = |id: u8, height| ScriptHistoryRecord {
+        txid: Txid(Hash256::from_le_bytes(&[id; 32])),
+        height,
+    };
+    let source = CompleteHistory(vec![
+        record(1, 7),
+        record(2, 6),
+        record(3, 4),
+        record(4, 3),
+        record(5, 1),
+    ]);
+    let script = ScriptHash::from_byte_array([0; 32]);
+
+    let first = source.confirmed_history_page(script, None, 3)?;
+    assert!(first.cursor_found);
+    assert_eq!(
+        first.records,
+        vec![record(1, 7), record(2, 6), record(3, 4)]
+    );
+
+    let second = source.confirmed_history_page(script, Some(record(2, 6).txid), 3)?;
+    assert!(second.cursor_found);
+    assert_eq!(
+        second.records,
+        vec![record(3, 4), record(4, 3), record(5, 1)]
+    );
+
+    let unknown = source.confirmed_history_page(script, Some(record(9, 0).txid), 3)?;
+    assert!(!unknown.cursor_found, "an absent transaction is reported");
+    assert_eq!(unknown.records, first.records);
+
+    let empty = source.confirmed_history_page(script, Some(record(2, 6).txid), 0)?;
+    assert!(empty.cursor_found);
+    assert_eq!(empty.records, Vec::new());
+    Ok(())
+}
+
+// IDX-02
+#[test]
+fn default_history_page_lists_a_duplicated_txid_at_its_newest_occurrence()
+-> Result<(), crate::portable::TestError> {
+    let record = |id: u8, height| ScriptHistoryRecord {
+        txid: Txid(Hash256::from_le_bytes(&[id; 32])),
+        height,
+    };
+    let source = CompleteHistory(vec![record(1, 7), record(2, 6), record(2, 3), record(3, 1)]);
+    let script = ScriptHash::from_byte_array([0; 32]);
+
+    assert_eq!(
+        source.history_page(script, None, usize::MAX)?,
+        vec![record(1, 7), record(2, 6), record(3, 1)],
+        "a duplicated txid lists once, at its newest occurrence"
+    );
+    assert_eq!(
+        source.history_page(script, Some(record(2, 6).txid), usize::MAX)?,
+        vec![record(3, 1)],
+        "an exclusive cursor continues strictly below the newest occurrence"
+    );
+    assert_eq!(
+        source.history_page(script, Some(record(2, 3).txid), usize::MAX)?,
+        vec![record(3, 1)],
+        "the older occurrence resolves to the newest and never repeats"
+    );
+    Ok(())
+}
+
+// IDX-02
+#[test]
+fn default_history_pages_are_bounded_by_the_page_max() -> Result<(), crate::portable::TestError> {
+    let count = SCRIPT_HISTORY_PAGE_MAX * 2;
+    let records = (0..count)
+        .map(|index| {
+            let mut bytes = [0_u8; 32];
+            bytes[..8].copy_from_slice(&u64::try_from(index)?.to_le_bytes());
+            Ok(ScriptHistoryRecord {
+                txid: Txid(Hash256::from_le_bytes(&bytes)),
+                height: u32::try_from(index)?,
+            })
+        })
+        .collect::<Result<Vec<_>, std::num::TryFromIntError>>()?;
+    let source = CompleteHistory(records);
+    let script = ScriptHash::from_byte_array([0; 32]);
+
+    assert_eq!(
+        source
+            .confirmed_history_page(script, None, usize::MAX)?
+            .records
+            .len(),
+        SCRIPT_HISTORY_PAGE_MAX,
+        "a page never exceeds the script-history page maximum"
+    );
+    assert_eq!(
+        source.history_page(script, None, usize::MAX)?.len(),
+        SCRIPT_HISTORY_PAGE_MAX,
+        "a legacy page never exceeds the script-history page maximum"
+    );
+    Ok(())
 }

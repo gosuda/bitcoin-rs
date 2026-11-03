@@ -1,5 +1,3 @@
-//! Network hash-rate estimation for `getnetworkhashps` and `getmininginfo`.
-
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
@@ -42,7 +40,6 @@ pub fn network_hash_ps(
     Ok(estimate_network_hashps(tree, start, lookup, network))
 }
 
-/// Estimates hashes/s over `lookup` blocks ending at an already-resolved start.
 pub fn estimate_network_hashps(
     tree: &BlockTree,
     start_id: NodeId,

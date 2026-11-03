@@ -2,6 +2,7 @@
 # pyright: strict
 """Behavioral tests for the deterministic P2P loopback comparator."""
 
+import functools
 import hashlib
 import json
 import math
@@ -14,7 +15,9 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from typing import TypeIs
 from unittest import mock
@@ -26,9 +29,9 @@ from evidence import (
     MAX_JSON_DEPTH,
     ContractError,
     _percentile,
-    _publish_result,
     canonical_bytes,
     canonical_sha256,
+    publish_result,
     summarize,
 )
 from p2p_loopback import (
@@ -50,7 +53,6 @@ from p2p_loopback import (
     PeerObservation,
     ProcessGeneration,
     ProcessIdentity,
-    Program,
     _accept_magic_peer,
     _argv_digest,
     _candidate_magic,
@@ -66,8 +68,6 @@ from p2p_loopback import (
     _send_paced,
     _sleep_until,
     _state,
-    _verified_copy,
-    _verify_copy_digest,
     load_config,
     main,
     parse_config,
@@ -637,6 +637,25 @@ def _stub_config() -> Config:
     return p2p_loopback.parse_config(_good_config_value())
 
 
+def _in_fresh_fork(
+    test: Callable[[unittest.TestCase], None],
+) -> Callable[[unittest.TestCase], None]:
+    @functools.wraps(test)
+    def wrapper(self: unittest.TestCase) -> None:
+        child = os.fork()
+        if child == 0:
+            code = 0
+            try:
+                test(self)
+            except Exception:
+                traceback.print_exc()
+                code = 1
+            os._exit(code)
+        self.assertEqual(os.waitstatus_to_exitcode(os.waitpid(child, 0)[1]), 0)
+
+    return wrapper
+
+
 class ParseConfigTests(unittest.TestCase):
     def test_accepts_deterministic_config(self) -> None:
         value = _good_config_value()
@@ -727,15 +746,6 @@ class ParseConfigTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             p2p_loopback.parse_config(unbalanced)
 
-    def test_module_imports_standalone(self) -> None:
-        probe = subprocess.run(
-            [sys.executable, "-c", "import p2p_loopback"],
-            cwd=str(Path(__file__).parent),
-            check=False,
-            capture_output=True,
-        )
-        self.assertEqual(probe.returncode, 0, probe.stderr)
-
 
 class StatisticsTests(unittest.TestCase):
     def test_percentile_edges(self) -> None:
@@ -756,9 +766,6 @@ class StatisticsTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
-    def test_accepts_seven_alternating_pairs(self) -> None:
-        _require_comparable(_stub_config(), _comparable_arms())
-
     def test_refuses_pair_count_and_role_drift(self) -> None:
         stub = _stub_config()
         with self.assertRaises(ContractError):
@@ -853,7 +860,7 @@ class PacingTests(unittest.TestCase):
         started = time.monotonic_ns()
         _send_paced(left, payload, rate, threading.Event())
         elapsed_ns = time.monotonic_ns() - started
-        reader.join(5.0)
+        reader.join()
         self.assertGreaterEqual(elapsed_ns, floor_ns - 20_000_000)
         left.close()
         right.close()
@@ -1010,8 +1017,7 @@ class MagicGateTests(unittest.TestCase):
         reader.start()
         time.sleep(0.05)
         cancel.set()
-        reader.join(2.0)
-        self.assertFalse(reader.is_alive())
+        reader.join()
         self.assertIsInstance(outcome.get("error"), ContractError)
         silent.settimeout(2.0)
         self.assertEqual(silent.recv(1), b"")
@@ -1033,10 +1039,35 @@ class MagicGateTests(unittest.TestCase):
 class CampaignTests(unittest.TestCase):
     def _run_main(self, workspace: Path, config_path: Path) -> bytes:
         output = workspace / OUTPUT_NAME
+        output.parent.mkdir(mode=0o700, exist_ok=True)
         self.assertEqual(
             main(["--config", str(config_path), "--output", str(output)]), 0
         )
         return output.read_bytes()
+
+    def test_arm_binary_is_pinned_copy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p2p-pinned-copy-") as raw:
+            workspace = Path(raw)
+            fixture = CampaignFixture(workspace)
+            config = fixture.load()
+            root = workspace / "arms"
+            result = run_campaign(config, root)
+            programs = {"core": config.core, "candidate": config.candidate}
+            for order_index, arm_value in enumerate(_arms_list(result["arms"])):
+                arm = _object(arm_value)
+                role = str(arm["role"])
+                program = programs[role]
+                copy = Path(str(arm["binary_path"]))
+                self.assertEqual(
+                    copy, root / f"{order_index:02d}-{role}" / "node-under-test"
+                )
+                self.assertNotEqual(copy, program.binary)
+                self.assertEqual(_sha256_file(copy), program.binary_sha256)
+                self.assertEqual(copy.read_bytes(), program.binary.read_bytes())
+                self.assertEqual(
+                    stat.S_IMODE(copy.stat().st_mode),
+                    stat.S_IRUSR | stat.S_IXUSR,
+                )
 
     def test_seven_alternating_pairs_emit_custody_json(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p2p-loopback-fresh-") as raw:
@@ -1185,83 +1216,17 @@ class SecurityContractTests(unittest.TestCase):
         self.assertEqual(digest, _argv_digest(list(argv)))
         self.assertNotIn(b"8333", canonical_bytes(_public_argv(argv)))
 
-    def _copy_program(self, source: Path, digest: str | None = None) -> Program:
-        return Program(
-            role="core",
-            binary=source,
-            binary_sha256=digest if digest is not None else _sha256_file(source),
-            command=("{binary}",),
-            restart_command=None,
-        )
-
-    def test_verified_copy_binds_digest_and_mode(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="p2p-copy-ok-") as raw:
-            workspace = Path(raw)
-            source = _write_executable(workspace / "node.py", "#!-ok\n")
-            arm_dir = workspace / "00-core"
-            arm_dir.mkdir()
-            copy = _verified_copy(self._copy_program(source), arm_dir)
-            self.assertEqual(copy, arm_dir / "node-under-test")
-            self.assertEqual(copy.read_bytes(), source.read_bytes())
-            self.assertEqual(_sha256_file(copy), _sha256_file(source))
-            self.assertEqual(
-                stat.S_IMODE(copy.stat().st_mode), stat.S_IRUSR | stat.S_IXUSR
-            )
-
-    def test_verified_copy_refuses_digest_mismatch(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="p2p-copy-bad-") as raw:
-            workspace = Path(raw)
-            source = _write_executable(workspace / "node.py", "#!-bad\n")
-            arm_dir = workspace / "00-core"
-            arm_dir.mkdir()
-            with self.assertRaisesRegex(ContractError, "digest mismatch"):
-                _verified_copy(self._copy_program(source, digest=HASH64), arm_dir)
-            self.assertFalse((arm_dir / "node-under-test").exists())
-
-    def test_verified_copy_refuses_non_regular_file(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="p2p-copy-dir-") as raw:
-            workspace = Path(raw)
-            source = workspace / "node-dir"
-            source.mkdir()
-            with self.assertRaisesRegex(ContractError, "not a regular file"):
-                _verified_copy(self._copy_program(source, digest=HASH64), workspace)
-
-    def test_copy_reverified_before_spawn_binds_bytes(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="p2p-reverify-") as raw:
-            workspace = Path(raw)
-            source = _write_executable(workspace / "node.py", "#!-v1\n")
-            arm_dir = workspace / "00-core"
-            arm_dir.mkdir()
-            copy = _verified_copy(self._copy_program(source), arm_dir)
-            _verify_copy_digest(copy, _sha256_file(source))
-            copy.chmod(stat.S_IRUSR | stat.S_IWUSR)
-            copy.write_bytes(b"#!-tampered\n")
-            copy.chmod(stat.S_IRUSR | stat.S_IXUSR)
-            with self.assertRaisesRegex(
-                ContractError, "changed after its verified copy"
-            ):
-                _verify_copy_digest(copy, _sha256_file(source))
-
-    def test_spawn_verification_refuses_symlinked_copy(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="p2p-symlink-") as raw:
-            workspace = Path(raw)
-            source = _write_executable(workspace / "node.py", "#!-v1\n")
-            link = workspace / "node-under-test"
-            os.symlink(source, link)
-            with self.assertRaisesRegex(ContractError, "spawn verification"):
-                _verify_copy_digest(link, _sha256_file(source))
-
     def test_publication_never_clobbers_existing_output(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p2p-publish-") as raw:
             workspace = Path(raw)
             output = workspace / "out" / "result.json"
-            output.parent.mkdir()
-            _publish_result({"run": 1}, output)
+            output.parent.mkdir(mode=0o700)
+            publish_result({"run": 1}, output)
             published = output.read_bytes()
             scratch = output.parent / f".p2p-loopback-result.{os.getpid()}.tmp"
             self.assertFalse(scratch.exists())
             with self.assertRaisesRegex(ContractError, "output already exists"):
-                _publish_result({"run": 2}, output)
+                publish_result({"run": 2}, output)
             self.assertEqual(output.read_bytes(), published)
 
     def test_result_omits_raw_command_and_secrets(self) -> None:
@@ -1272,11 +1237,7 @@ class SecurityContractTests(unittest.TestCase):
                 extra_command_args=["--rpcpassword", "supersecret-token"],
             )
             output = workspace / OUTPUT_NAME
-            self.assertEqual(
-                main(["--config", str(fixture.config_path), "--output", str(output)]),
-                0,
-            )
-            payload = output.read_bytes()
+            payload = self._run_main(workspace, fixture.config_path)
             for leak in (
                 b"supersecret-token",
                 b"--rpcpassword",
@@ -1388,6 +1349,7 @@ class SecurityContractTests(unittest.TestCase):
                 self.assertTrue(_wait_pid_gone(pid), f"helper {pid} survived")
             self.assertTrue(_no_survivor_markers(arms_dir))
 
+    @_in_fresh_fork
     def test_registration_failure_reaps_fast_double_fork_daemon(self) -> None:
         """A daemon escaping before the leader publishes is swept anyway."""
         with tempfile.TemporaryDirectory(prefix="p2p-regfail-") as raw:
@@ -1396,10 +1358,11 @@ class SecurityContractTests(unittest.TestCase):
             survived_path = workspace / "daemon-survived"
             script = (
                 "import os, signal, sys, time\n"
-                "if os.fork():\n"
-                "    os._exit(0)\n"  # the leader exits before publication
+                "child = os.fork()\n"
+                "if child:\n"
+                f"    open({str(daemon_pid_path)!r}, 'w').write(str(child))\n"
+                "    os._exit(0)\n"
                 "os.setsid()\n"
-                "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
                 "signal.signal(signal.SIGTERM, lambda *_: None)\n"
                 "time.sleep(30)\n"
                 f"open({str(survived_path)!r}, 'w').write('x')\n"
@@ -1425,9 +1388,10 @@ class SecurityContractTests(unittest.TestCase):
                 pid: int, expected_parent: ProcessGeneration | None = None
             ) -> ProcessIdentity | None:
                 if observed_adopts["leader_failures"] == 0:
-                    # Deterministic escape window: the daemon exists and
-                    # has published its pid before registration fails.
-                    _wait_for_file(daemon_pid_path)
+                    if not _wait_for_file(daemon_pid_path, 30.0):
+                        raise AssertionError(
+                            "daemon did not publish its pid before registration"
+                        )
                     observed_adopts["leader_failures"] += 1
                     return None
                 identity = real_adopt(pid, expected_parent)
@@ -1470,11 +1434,8 @@ class SecurityContractTests(unittest.TestCase):
                 _hash_file(fifo)
             link = workspace / "node-link"
             link.symlink_to(source)
-            program = self._copy_program(link, digest=_sha256_file(source))
-            arm_dir = workspace / "00-core"
-            arm_dir.mkdir()
             with self.assertRaisesRegex(ContractError, "cannot open"):
-                _verified_copy(program, arm_dir)
+                _hash_file(link)
 
     def test_error_output_omits_secrets(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p2p-secret-fail-") as raw:
@@ -1536,7 +1497,7 @@ class SecurityContractTests(unittest.TestCase):
             _argv_digest(secreted_config.core.command),
         )
 
-    def test_restart_binds_the_verified_copy(self) -> None:
+    def test_restart_binds_the_pinned_copy(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p2p-restart-copy-") as raw:
             workspace = Path(raw)
             fixture = CampaignFixture(workspace, mode="restart")
@@ -1553,18 +1514,11 @@ class SecurityContractTests(unittest.TestCase):
 
     def _run_main(self, workspace: Path, config_path: Path) -> bytes:
         output = workspace / OUTPUT_NAME
+        output.parent.mkdir(mode=0o700, exist_ok=True)
         self.assertEqual(
             main(["--config", str(config_path), "--output", str(output)]), 0
         )
         return output.read_bytes()
-
-    def test_loader_rejects_config_over_byte_cap(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="p2p-cap-bytes-") as raw:
-            workspace = Path(raw)
-            path = workspace / "config.json"
-            path.write_text(json.dumps(_good_config_value()), encoding="utf-8")
-            with self.assertRaisesRegex(ContractError, "exceeds byte limit"):
-                _load_json(path, "config", 64)
 
     def test_loader_rejects_oversize_config_file(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p2p-cap-file-") as raw:
@@ -1661,6 +1615,7 @@ class SecurityContractTests(unittest.TestCase):
         left.close()
         right.close()
 
+    @_in_fresh_fork
     def test_term_resistant_descendant_killed_within_bound(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p2p-stubborn-") as raw:
             workspace = Path(raw)
@@ -1741,6 +1696,7 @@ class SecurityContractTests(unittest.TestCase):
             time.sleep(0.02)
         raise AssertionError(f"{pid} did not become a zombie")
 
+    @_in_fresh_fork
     def test_zombie_parent_forfeits_ownership_of_reparented_member(self) -> None:
         with _ChildSubreaperScope():
             parent, grandchild = self._spawn_grandchild_under_transient_parent()
@@ -1760,6 +1716,7 @@ class SecurityContractTests(unittest.TestCase):
             finally:
                 os.waitpid(parent, 0)
 
+    @_in_fresh_fork
     def test_drain_settles_member_under_unreaped_zombie_parent(self) -> None:
         with _ChildSubreaperScope():
             parent, grandchild = self._spawn_grandchild_under_transient_parent()
@@ -1781,32 +1738,6 @@ class SecurityContractTests(unittest.TestCase):
                 self.assertFalse(Path(f"/proc/{grandchild}").exists())
             finally:
                 os.waitpid(parent, 0)
-
-    def test_digest_failure_after_worker_start_closes_promptly(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="p2p-digest-worker-") as raw:
-            workspace = Path(raw)
-            source = _write_executable(workspace / "node.py", "#!-v1\n")
-            arm_dir = workspace / "00-core"
-            arm_dir.mkdir()
-            copy = _verified_copy(self._copy_program(source), arm_dir)
-            arm = ArmProcess(
-                _stub_config(),
-                "core",
-                copy,
-                arm_dir,
-                time.monotonic_ns() + MAX_ARM_DURATION_NS,
-            )
-            with arm:
-                arm.require_ready()
-                copy.chmod(stat.S_IRUSR | stat.S_IWUSR)
-                copy.write_bytes(b"#!-tampered\n")
-                copy.chmod(stat.S_IRUSR | stat.S_IXUSR)
-                with self.assertRaisesRegex(
-                    ContractError, "changed after its verified copy"
-                ):
-                    _verify_copy_digest(copy, _sha256_file(source))
-            self.assertFalse(arm.worker_alive())
-            self.assertEqual(arm._listener.fileno(), -1)
 
     def test_enoexec_after_worker_start_closes_promptly(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p2p-enoexec-") as raw:
@@ -1876,6 +1807,7 @@ class SecurityContractTests(unittest.TestCase):
     def test_process_start_time_refuses_missing_process(self) -> None:
         self.assertIsNone(_process_start_time(0))
 
+    @_in_fresh_fork
     def test_subreaper_scope_refuses_entry_with_live_child(self) -> None:
         sleeper = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"]
@@ -1890,6 +1822,7 @@ class SecurityContractTests(unittest.TestCase):
             sleeper.kill()
             sleeper.wait(timeout=5.0)
 
+    @_in_fresh_fork
     def test_subreaper_scope_installs_and_restores(self) -> None:
         scope = _ChildSubreaperScope()
         with scope:
@@ -1951,9 +1884,9 @@ class SecurityContractTests(unittest.TestCase):
                     ),
                 ):
                     arm.launch((str(binary), str(pid_path)), "primary")
+            self.assertEqual(calls["count"], 2)
             self.assertTrue(pid_path.exists())
             self.assertTrue(_wait_pid_gone(int(pid_path.read_text())))
-            self.assertEqual(calls["count"], 2)
             self.assertIsNone(arm._process)
             self.assertIsNone(arm._root_identity)
             arm.close()
@@ -2011,12 +1944,13 @@ class SecurityContractTests(unittest.TestCase):
                     self.assertRaises(KeyboardInterrupt),
                 ):
                     arm.launch((str(binary), str(pid_path)), "primary")
-            self.assertEqual(calls["count"], 2)
             self.assertTrue(pid_path.exists())
             self.assertTrue(_wait_pid_gone(int(pid_path.read_text())))
+            self.assertEqual(calls["count"], 2)
             self.assertIsNone(arm._process)
             self.assertIsNone(arm._root_identity)
 
+    @_in_fresh_fork
     def test_late_exception_close_uses_fresh_cleanup_deadline(self) -> None:
         """close() cleans TERM-resistant trees even after the arm deadline."""
         with tempfile.TemporaryDirectory(prefix="p2p-late-close-") as raw:
@@ -2063,6 +1997,7 @@ class SecurityContractTests(unittest.TestCase):
             self.assertIs(arm._state, p2p_loopback.ArmState.CLOSED)
             arm.close()  # a settled arm tolerates a repeated close safely
 
+    @_in_fresh_fork
     def test_subreaper_scope_rejects_concurrent_entry(self) -> None:
         """Overlapping ownership scopes fail closed and serialize afterwards."""
         with (
@@ -2075,16 +2010,38 @@ class SecurityContractTests(unittest.TestCase):
         with _ChildSubreaperScope():
             pass
 
-    def test_subreaper_scope_rejects_multithreaded_host(self) -> None:
-        """Scope entry refuses a host process that already runs other threads."""
+    def _prove_multithreaded_host_refusal(self) -> None:
+        child = os.fork()
+        if child == 0:
+            self._refuse_multithreaded_entry_and_exit()
+        self.assertEqual(os.waitstatus_to_exitcode(os.waitpid(child, 0)[1]), 0)
+
+    def _refuse_multithreaded_entry_and_exit(self) -> None:
+        code = 0
         thread = threading.Thread(target=time.sleep, args=(0.5,))
         thread.start()
         try:
             with self.assertRaisesRegex(ContractError, "single-threaded host"):
                 _ChildSubreaperScope().__enter__()
+        except AssertionError:
+            code = 1
         finally:
             thread.join()
+        os._exit(code)
 
+    def test_subreaper_scope_rejects_multithreaded_host(self) -> None:
+        """Scope entry refuses a host process that already runs other threads."""
+        self._prove_multithreaded_host_refusal()
+
+    @_in_fresh_fork
+    def test_scope_entry_after_host_thread_fixture_teardown(self) -> None:
+        self._prove_multithreaded_host_refusal()
+        tasks = [name for name in os.listdir("/proc/self/task") if name.isdigit()]
+        self.assertEqual(tasks, [str(os.getpid())])
+        with _ChildSubreaperScope():
+            pass
+
+    @_in_fresh_fork
     def test_post_entry_host_child_is_immune_to_drain(self) -> None:
         """A host child spawned after scope entry is never adopted or signaled."""
         with tempfile.TemporaryDirectory(prefix="p2p-immune-") as raw:

@@ -1,5 +1,3 @@
-//! Deterministic regtest seed chain, mined through ordinary validation.
-
 use super::{GateResult, fail};
 use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
@@ -8,10 +6,7 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_script::push_int;
 
-/// Block the seed chain starts from; one minute after the genesis stamp, so
-/// mediantime arithmetic matches Core's regtest spacing.
 pub(crate) const SEED_BASE_TIME: u32 = 1_296_688_603;
-/// Seconds between seed blocks; Core's regtest spacing.
 pub(crate) const SEED_BLOCK_INTERVAL: u32 = 600;
 pub(crate) const REGTEST_SUBSIDY_SATS: u64 = 50 * 100_000_000;
 

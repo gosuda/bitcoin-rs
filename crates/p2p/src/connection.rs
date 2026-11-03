@@ -1,5 +1,3 @@
-//! Per-connection identity and cancellation.
-
 use bitcoin_rs_primitives::PeerEndpoint;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -208,9 +206,9 @@ impl From<bitcoin_rs_mempool::PeerToken> for PeerSource {
 
 const OUTBOUND_QUEUE_MAX_MESSAGES: usize = 4096;
 
-const OUTBOUND_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const SHARED_OUTBOUND_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
-pub(crate) const SHARED_OUTBOUND_QUEUE_MAX_BYTES: usize = OUTBOUND_QUEUE_MAX_BYTES;
+pub(crate) const OUTBOUND_QUEUE_MAX_BYTES: usize = SHARED_OUTBOUND_QUEUE_MAX_BYTES / 4;
 
 const SHARED_BULK_MARGIN_BYTES: usize = BLOCK_PRODUCTION_RESERVE_BYTES;
 
@@ -287,6 +285,12 @@ impl SharedOutboundBudget {
     #[must_use]
     pub(crate) fn pending(&self) -> usize {
         self.pending_bytes.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn max_bytes(&self) -> usize {
+        self.max_bytes
     }
 }
 
@@ -375,7 +379,9 @@ const BLOCK_SERIALIZED_SIZE: usize = crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZ
 
 const BLOCK_PRODUCTION_RESERVE_BYTES: usize = crate::wire::HEADER_LEN + BLOCK_SERIALIZED_SIZE;
 
-const _: () = assert!(OUTBOUND_QUEUE_MAX_BYTES > 15 * BLOCK_PRODUCTION_RESERVE_BYTES);
+const _: () = assert!(OUTBOUND_QUEUE_MAX_BYTES >= BLOCK_PRODUCTION_RESERVE_BYTES);
+
+const _: () = assert!(OUTBOUND_QUEUE_MAX_BYTES * 4 == SHARED_OUTBOUND_QUEUE_MAX_BYTES);
 
 pub(crate) const MAX_UNSOLICITED_BLOCK_FORWARDS: usize = 16;
 
@@ -455,7 +461,10 @@ impl OutboundBudget {
         }
         let messages = self.pending_messages.load(Ordering::Acquire);
         let bytes = self.pending_bytes.load(Ordering::Acquire);
-        if messages >= self.max_messages || bytes >= self.max_bytes {
+        let byte_cap_exceeded = bytes
+            .checked_add(wire_len)
+            .is_none_or(|total| total > self.max_bytes);
+        if messages >= self.max_messages || (byte_cap_exceeded && bytes > 0) {
             #[cfg(test)]
             self.refusals.fetch_add(1, Ordering::Relaxed);
             return Err(Refusal::Local);
@@ -669,6 +678,12 @@ impl OutboundBudget {
         self.refusals.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
     #[must_use]
     pub(crate) fn may_reserve_production(&self) -> bool {
         self.local_production_headroom()
@@ -680,7 +695,7 @@ impl OutboundBudget {
 
     #[must_use]
     pub(crate) fn may_charge(&self, bytes: usize) -> bool {
-        self.local_has_room()
+        self.local_has_room(bytes)
             && self
                 .shared
                 .as_ref()
@@ -698,10 +713,14 @@ impl OutboundBudget {
                     <= self.max_bytes)
     }
 
-    fn local_has_room(&self) -> bool {
+    fn local_has_room(&self, wire_len: usize) -> bool {
+        let bytes = self.pending_bytes.load(Ordering::Acquire);
         !self.writer_dead()
             && self.pending_messages.load(Ordering::Acquire) < self.max_messages
-            && self.pending_bytes.load(Ordering::Acquire) < self.max_bytes
+            && (bytes == 0
+                || bytes
+                    .checked_add(wire_len)
+                    .is_some_and(|total| total <= self.max_bytes))
     }
 }
 

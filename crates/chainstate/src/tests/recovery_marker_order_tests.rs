@@ -13,6 +13,7 @@ use crate::checkpoint::{CHECKPOINT_ROOT, CURRENT_FILE, MANIFEST_FILE};
 use crate::recovery::{ResumeSource, prepare_initial_chainstate};
 use crate::{ChainstateJournalConfig, checkpoint};
 
+use crate::test_fixtures::TestResult;
 const NETWORK: Network = Network::Regtest;
 
 fn arm_full_revalidation_marker(data_dir: &Path) {
@@ -22,7 +23,7 @@ fn arm_full_revalidation_marker(data_dir: &Path) {
         .unwrap_or_else(|e| panic!("arm marker: {e}"));
 }
 
-fn genesis_tip() -> Result<(RwLock<BlockTree>, TipSnapshot), Box<dyn std::error::Error>> {
+fn genesis_tip() -> TestResult<(RwLock<BlockTree>, TipSnapshot)> {
     let genesis = NETWORK.genesis_block().header;
     let mut tree = BlockTree::new();
     let accepted = accept_headers(
@@ -51,8 +52,9 @@ fn checkpoint_config() -> HeaderCheckpointConfig {
     }
 }
 
+// RCV-10
 #[test]
-fn corrupt_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn std::error::Error>> {
+fn corrupt_checkpoint_with_marker_selects_cold_replay() -> TestResult {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path();
     crate::events::initialize_data_dir(data_dir)?;
@@ -89,8 +91,9 @@ fn corrupt_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn st
     Ok(())
 }
 
+// RCV-10
 #[test]
-fn valid_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn std::error::Error>> {
+fn valid_checkpoint_with_marker_selects_cold_replay() -> TestResult {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path();
     crate::events::initialize_data_dir(data_dir)?;

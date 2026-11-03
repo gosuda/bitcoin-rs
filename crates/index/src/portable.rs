@@ -1,11 +1,3 @@
-//! Portable, versioned index bundles: export and restore of the `TxLookup` family.
-//!
-//! A bundle holds `txlookup-v1.dat` and, published last, `manifest.json`.
-//!
-//! Restore validates the whole bundle before mutating anything. Only `TxLookup`
-//! bundles: `ScriptHistory` is refused as unqualified; `ScriptLive` is reseeded from
-//! the UTXO set.
-
 mod artifact;
 mod chain;
 mod export;
@@ -67,7 +59,6 @@ pub enum IndexBundleError {
         name: &'static str,
         reason: &'static str,
     },
-    /// A record violates framing, bounds, or ascending order.
     #[error("artifact {name} record {record} invalid: {reason}")]
     ArtifactFraming {
         name: &'static str,
@@ -86,7 +77,6 @@ pub enum IndexBundleError {
     ExportTooLarge { limit_positions: usize },
     #[error("bundle omits transactions at height {height}: expected {expected}, found {actual}")]
     Incomplete {
-        /// First height where the bundle's count differs from the chain.
         height: u32,
         expected: u64,
         actual: u64,
@@ -188,26 +178,52 @@ fn sync_dir(_dir: &Path) -> Result<(), IndexBundleError> {
 }
 
 #[cfg(test)]
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TestError {
+    #[error(transparent)]
+    IndexBundle(#[from] IndexBundleError),
+    #[error(transparent)]
+    Index(#[from] crate::IndexError),
+    #[error(transparent)]
+    Storage(#[from] bitcoin_rs_storage::StorageError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    TryFromInt(#[from] std::num::TryFromIntError),
+    #[error(transparent)]
+    Chain(#[from] bitcoin_rs_chain::ChainError),
+    #[error(transparent)]
+    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    #[error(transparent)]
+    Sonic(#[from] sonic_rs::Error),
+    #[error(transparent)]
+    HexToBytes(#[from] bitcoin::hex::HexToBytesError),
+    #[error(transparent)]
+    HexToArray(#[from] bitcoin::hex::HexToArrayError),
+    #[error(transparent)]
+    ConsensusEncode(#[from] bitcoin::consensus::encode::Error),
+    #[error(transparent)]
+    Bip158(#[from] bitcoin::bip158::Error),
+    #[error(transparent)]
+    Query(#[from] crate::query_api::TxQueryError),
+    #[error(transparent)]
+    Historical(#[from] crate::query_api::HistoricalQueryError),
+    #[error("missing {0}")]
+    Missing(&'static str),
+}
+
+#[cfg(test)]
+impl From<&'static str> for TestError {
+    fn from(s: &'static str) -> Self {
+        Self::Missing(s)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::error::Error;
 
-    type TestResult = Result<(), Box<dyn Error>>;
-
-    /// An incomplete bundle names the first height whose count differs, so an
-    /// omitted record cannot silently receive the complete watermark.
-    #[test]
-    fn incomplete_reports_first_missing_height() {
-        let error = IndexBundleError::Incomplete {
-            height: 3,
-            expected: 5,
-            actual: 4,
-        };
-        let text = error.to_string();
-        assert!(text.contains('3'), "missing height in {text}");
-        assert!(text.contains('5'), "expected count in {text}");
-        assert!(text.contains('4'), "actual count in {text}");
-    }
+    type TestResult = Result<(), TestError>;
 
     #[test]
     fn sync_dir_flushes_an_existing_bundle_directory() -> TestResult {

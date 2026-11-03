@@ -14,6 +14,13 @@ use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Sequence, Tx, Txid,
     Witness, Wtxid, deserialize,
 };
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Peer(#[from] crate::PeerError),
+    #[error(transparent)]
+    Mempool(#[from] bitcoin_rs_mempool::MempoolError),
+}
 
 use super::{
     ChainQuery, FilterRequest, FilterServing, InventoryServing, MAX_LOCATOR_HASHES,
@@ -422,11 +429,13 @@ fn invalid_getblocktxn_indexes_disconnect() {
     assert_getblocktxn_refused(Vec::new());
     assert_getblocktxn_refused(vec![1, 1]);
     assert_getblocktxn_refused(vec![3, 2]);
+    assert_getblocktxn_refused(vec![0, 1, 1, 2]);
+    assert_getblocktxn_refused(vec![1, 3, 2]);
+    assert_getblocktxn_refused(vec![10, 10]);
 }
 
 #[test]
-fn getblocktxn_is_unanswered_while_the_production_gate_is_saturated()
--> Result<(), Box<dyn std::error::Error>> {
+fn getblocktxn_is_unanswered_while_the_production_gate_is_saturated() -> Result<(), TestError> {
     struct GatedChain {
         observed: AtomicUsize,
         loads: AtomicUsize,
@@ -1101,8 +1110,7 @@ fn dummy_tx(byte: u8) -> Tx {
 }
 
 #[test]
-fn getdata_completes_initial_broadcast_only_after_successful_send()
--> Result<(), Box<dyn std::error::Error>> {
+fn getdata_completes_initial_broadcast_only_after_successful_send() -> Result<(), TestError> {
     use super::serve_getdata;
     use bitcoin_rs_consensus::ValidationEngine;
     use bitcoin_rs_mempool::{
@@ -1196,12 +1204,12 @@ fn announced_transactions_request_witness_without_changing_hashes() {
                 Inventory::Transaction(txid)
             };
             let view: Option<&dyn TxInventory> = filtered.then_some(&inventory);
-            let (responses, announced) = dispatch_collect_announcements(
+            let (responses, announced) = dispatch_collect_announcements_gated(
                 &mut peer,
                 &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
                 None,
                 view,
-                true,
+                RelayGate::Open,
             );
             assert_eq!(
                 responses,
@@ -1222,12 +1230,12 @@ fn inv_tx_vectors_not_requested_while_tx_relay_closed() {
     let block = Inventory::Block(block_hash);
 
     let mut peer = ready_peer();
-    let (gated, announced) = dispatch_collect_announcements(
+    let (gated, announced) = dispatch_collect_announcements_gated(
         &mut peer,
         &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
         None,
         None,
-        false,
+        RelayGate::Closed,
     );
     assert!(
         gated.is_empty(),
@@ -1240,12 +1248,12 @@ fn inv_tx_vectors_not_requested_while_tx_relay_closed() {
     );
 
     let mut peer = ready_peer();
-    let (open, announced) = dispatch_collect_announcements(
+    let (open, announced) = dispatch_collect_announcements_gated(
         &mut peer,
         &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
         None,
         None,
-        true,
+        RelayGate::Open,
     );
     assert_eq!(
         open,
@@ -1264,12 +1272,12 @@ fn inv_wtx_vectors_not_requested_while_tx_relay_closed() {
     let block = Inventory::Block(block_hash);
 
     let mut peer = ready_peer();
-    let (responses, announced) = dispatch_collect_announcements(
+    let (responses, announced) = dispatch_collect_announcements_gated(
         &mut peer,
         &Message::Inv(vec![witness_txid, wtxid, block]),
         None,
         Some(&inventory),
-        false,
+        RelayGate::Closed,
     );
     assert!(
         responses.is_empty(),
@@ -1297,7 +1305,7 @@ fn inv_block_uses_headers_not_body_getdata() {
                 bitcoin::p2p::ServiceFlags::NETWORK
             };
             peer.remote_version = Some(version);
-            let (responses, announced) = dispatch_collect_announcements(
+            let (responses, announced) = dispatch_collect_announcements_gated(
                 &mut peer,
                 &Message::Inv(vec![
                     Inventory::Block(block_hash),
@@ -1305,7 +1313,11 @@ fn inv_block_uses_headers_not_body_getdata() {
                 ]),
                 None,
                 None,
-                relay_open,
+                if relay_open {
+                    RelayGate::Open
+                } else {
+                    RelayGate::Closed
+                },
             );
             assert!(
                 responses.is_empty(),
@@ -1636,35 +1648,41 @@ fn announced_hash(block_hash: bitcoin::BlockHash) -> Hash256 {
     Hash256::from_le_bytes(block_hash.as_byte_array())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RelayGate {
+    Open,
+    Closed,
+}
+
 fn dispatch_collect_full<S>(
     peer: &mut Peer<S>,
     message: &Message,
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
 ) -> Vec<Message> {
-    dispatch_collect_gated(peer, message, chain, tx_inventory, true)
+    dispatch_collect_announcements_gated(peer, message, chain, tx_inventory, RelayGate::Open).0
 }
 
-fn dispatch_collect_gated<S>(
+fn dispatch_collect_closed_relay<S>(
     peer: &mut Peer<S>,
     message: &Message,
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
-    relay_open: bool,
 ) -> Vec<Message> {
-    dispatch_collect_announcements(peer, message, chain, tx_inventory, relay_open).0
+    dispatch_collect_announcements_gated(peer, message, chain, tx_inventory, RelayGate::Closed).0
 }
 
 #[expect(clippy::expect_used)]
-fn dispatch_collect_announcements<S>(
+fn dispatch_collect_announcements_gated<S>(
     peer: &mut Peer<S>,
     message: &Message,
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
-    relay_open: bool,
+    gate: RelayGate,
 ) -> (Vec<Message>, Vec<Hash256>) {
     let collected = RefCell::new(Vec::new());
     let mut announced = Vec::new();
+    let relay_open = gate == RelayGate::Open;
     dispatch_inbound_full(
         peer,
         message,
@@ -1852,7 +1870,6 @@ fn version_at(version: u32) -> Message {
     })
 }
 
-/// below BIP434's version never receives a `feature` frame.
 #[test]
 fn version_reply_orders_features_between_feature_messages_and_verack() -> Result<(), PeerError> {
     for version in [FEATURE_VERSION - 1, PROTOCOL_VERSION] {
@@ -2384,14 +2401,13 @@ fn ancpkginfo_is_not_requested_while_transaction_relay_is_closed() -> Result<(),
     let wtxid = dummy_tx(1).wtxid();
     let mut peer = package_peer(BOTH_PACKAGE_BITS)?;
 
-    let responses = dispatch_collect_gated(
+    let responses = dispatch_collect_closed_relay(
         &mut peer,
         &Message::AncPkgInfo(AncPkgInfo {
             wtxids: vec![wtxid],
         }),
         None,
         None,
-        false,
     );
 
     assert_eq!(responses, []);

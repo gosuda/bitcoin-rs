@@ -1,5 +1,3 @@
-//! Consensus validation surfaces for bitcoin-rs.
-
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 /// Maximum consensus script size in bytes.
@@ -19,6 +17,8 @@ pub mod script_cache;
 mod sha256d64;
 pub mod signet;
 mod sigops;
+#[cfg(test)]
+pub(crate) mod test_error;
 pub mod trace;
 pub mod verify_block;
 pub mod verify_tx;
@@ -29,25 +29,46 @@ pub use bip9::{
 };
 pub const MEDIAN_TIME_PAST_WINDOW: usize = 11;
 
+/// The timestamp a block's locktime cutoff is measured against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocktimeRule {
+    /// BIP113 active: the cutoff is the previous median time past.
+    MedianTimePast,
+    /// BIP113 inactive: the cutoff is the candidate block time.
+    CandidateTime,
+}
+
+impl LocktimeRule {
+    #[must_use]
+    pub const fn from_csv_active(csv_active: bool) -> Self {
+        if csv_active {
+            Self::MedianTimePast
+        } else {
+            Self::CandidateTime
+        }
+    }
+}
+
 #[must_use]
 pub const fn locktime_cutoff(
-    csv_active: bool,
+    rule: LocktimeRule,
     prev_median_time_past: u32,
     candidate_time: u32,
 ) -> u32 {
-    if csv_active {
-        prev_median_time_past
-    } else {
-        candidate_time
+    match rule {
+        LocktimeRule::MedianTimePast => prev_median_time_past,
+        LocktimeRule::CandidateTime => candidate_time,
     }
 }
 
 #[cfg(test)]
 mod bip113_tests {
+    use super::{LocktimeRule, locktime_cutoff};
+
     #[test]
     fn locktime_cutoff_rule_switches_on_csv_activation() {
-        assert_eq!(super::locktime_cutoff(true, 500, 999), 500);
-        assert_eq!(super::locktime_cutoff(false, 500, 999), 999);
+        assert_eq!(locktime_cutoff(LocktimeRule::MedianTimePast, 500, 999), 500);
+        assert_eq!(locktime_cutoff(LocktimeRule::CandidateTime, 500, 999), 999);
     }
 }
 
@@ -57,8 +78,8 @@ pub use script_cache::{SCRIPT_EXECUTION_CACHE_ENTRIES, ScriptExecutionCache, Win
 pub use signet::check_signet_block_solution;
 pub use sigops::transaction_sigop_cost;
 pub use verify_block::{
-    BlockRuleContext, MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_WEIGHT, check_block_body_binding,
-    compute_merkle_root, is_sixty_four_byte_mutation, verify_block_rules,
+    BlockRuleContext, MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_WEIGHT, WITNESS_SCALE_FACTOR,
+    check_block_body_binding, compute_merkle_root, is_sixty_four_byte_mutation, verify_block_rules,
     verify_block_rules_precomputed, verify_flags, verify_merkle_root_with_txids,
 };
 pub use verify_tx::{

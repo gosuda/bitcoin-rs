@@ -1,5 +1,3 @@
-//! Block rule checks over shared parse-once facts.
-
 use bitcoin_rs_primitives::{Block, Hash256, Network, Tx, Txid, Wtxid, encode::double_sha256};
 
 use crate::ConsensusError;
@@ -18,6 +16,8 @@ pub const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
 pub const MAX_BLOCK_SERIALIZED_SIZE: u64 = 4_000_000;
 
 const MERKLE_NODE_SERIALIZED_SIZE: usize = 64;
+
+pub const WITNESS_SCALE_FACTOR: u64 = 4;
 
 #[must_use]
 pub fn is_sixty_four_byte_mutation(txs: &[Tx]) -> bool {
@@ -82,16 +82,81 @@ pub fn verify_block_rules_precomputed(
     context: BlockRuleContext,
     facts: &BlockFacts,
 ) -> Result<(), ConsensusError> {
-    verify_block_structure(block, facts)?;
+    verify_block_merkle_and_size(block, facts)?;
+    verify_coinbase_placement(&block.txs)?;
+    verify_block_transactions_and_legacy_sigops(&block.txs)?;
+    verify_block_witness_rules(block, context, facts)?;
+    verify_block_weight(facts)
+}
 
+fn verify_block_merkle_and_size(block: &Block, facts: &BlockFacts) -> Result<(), ConsensusError> {
+    if facts.tx_count() != block.txs.len() {
+        return Err(ConsensusError::MerkleRoot);
+    }
+    verify_merkle_root_and_mutation(block, facts)?;
+    let size = u64::try_from(block.stripped_size()).unwrap_or(u64::MAX);
+    let max = MAX_BLOCK_WEIGHT / WITNESS_SCALE_FACTOR;
+    if block.txs.is_empty() || size > max {
+        return Err(ConsensusError::BlockBaseSize { size, max });
+    }
+    Ok(())
+}
+
+fn verify_merkle_root_and_mutation(
+    block: &Block,
+    facts: &BlockFacts,
+) -> Result<(), ConsensusError> {
+    let (root, mutated): (Hash256, bool) = match facts.merkle_root() {
+        Some(root) => (root.into(), facts.merkle_mutated()),
+        None if block.txs.is_empty() => (Hash256::from_le_bytes(&[0; 32]), false),
+        None => return Err(ConsensusError::MerkleRoot),
+    };
+    if block.header.merkle_root != root {
+        return Err(ConsensusError::MerkleRoot);
+    }
+    if mutated {
+        return Err(ConsensusError::MerkleMutation);
+    }
+    Ok(())
+}
+
+fn verify_coinbase_placement(txs: &[Tx]) -> Result<(), ConsensusError> {
+    let Some((first, _)) = txs.split_first() else {
+        return Ok(());
+    };
+    if !first.is_coinbase() {
+        return Err(if is_sixty_four_byte_mutation(txs) {
+            ConsensusError::SixtyFourByteMutation
+        } else {
+            ConsensusError::MissingCoinbase
+        });
+    }
+    for (tx_index, tx) in txs.iter().enumerate().skip(1) {
+        if tx.is_coinbase() {
+            return Err(ConsensusError::ExtraCoinbase { tx_index });
+        }
+    }
+    Ok(())
+}
+
+fn verify_block_witness_rules(
+    block: &Block,
+    context: BlockRuleContext,
+    facts: &BlockFacts,
+) -> Result<(), ConsensusError> {
     if let Some(wtxids) = facts.wtxids() {
-        check_witness_malleation(block, context.segwit_active, wtxids)?;
-    } else if context.segwit_active && witness_commitment(block).is_some() {
+        return check_witness_malleation(block, context, wtxids);
+    }
+    if context.segwit_active && witness_commitment(block).is_some() {
         return Err(ConsensusError::WitnessNonceSize);
-    } else if facts.has_witness() {
+    }
+    if facts.has_witness() {
         return Err(ConsensusError::UnexpectedWitness);
     }
+    Ok(())
+}
 
+fn verify_block_weight(facts: &BlockFacts) -> Result<(), ConsensusError> {
     let weight = facts.weight();
     if weight > MAX_BLOCK_WEIGHT {
         return Err(ConsensusError::BlockWeight {
@@ -99,23 +164,17 @@ pub fn verify_block_rules_precomputed(
             max: MAX_BLOCK_WEIGHT,
         });
     }
-    verify_block_transaction_basics(&block.txs)
+    Ok(())
 }
 
 pub fn verify_block_non_contextual(block: &Block) -> Result<(), ConsensusError> {
     let facts = BlockFacts::from_txids(&block.txs, block.txids());
-    verify_block_structure(block, &facts)?;
-    let size = u64::try_from(block.stripped_size()).unwrap_or(u64::MAX);
-    let max = MAX_BLOCK_WEIGHT / 4;
-    if size > max {
-        return Err(ConsensusError::BlockBaseSize { size, max });
-    }
-    verify_block_transaction_basics(&block.txs)
+    verify_block_merkle_and_size(block, &facts)?;
+    verify_coinbase_placement(&block.txs)?;
+    verify_block_transactions_and_legacy_sigops(&block.txs)
 }
 
-// Shared by live admission and context-free revalidation. Script proofs and
-// execution-skip provenance cannot substitute for these CheckBlock checks.
-fn verify_block_transaction_basics(txs: &[Tx]) -> Result<(), ConsensusError> {
+fn verify_block_transactions_and_legacy_sigops(txs: &[Tx]) -> Result<(), ConsensusError> {
     let mut sigop_cost = 0_u32;
     for tx in txs {
         crate::verify_tx::verify_transaction_structure(tx)?;
@@ -128,40 +187,6 @@ fn verify_block_transaction_basics(txs: &[Tx]) -> Result<(), ConsensusError> {
             max: crate::MAX_BLOCK_SIGOPS_COST,
         });
     }
-    Ok(())
-}
-
-fn verify_block_structure(block: &Block, facts: &BlockFacts) -> Result<(), ConsensusError> {
-    let txdata = &block.txs;
-    if txdata.is_empty() {
-        return Err(ConsensusError::EmptyBlock);
-    }
-    if facts.tx_count() != txdata.len() {
-        return Err(ConsensusError::MerkleRoot);
-    }
-    if !txdata[0].is_coinbase() {
-        return Err(if is_sixty_four_byte_mutation(txdata) {
-            ConsensusError::SixtyFourByteMutation
-        } else {
-            ConsensusError::MissingCoinbase
-        });
-    }
-    for (tx_index, tx) in txdata.iter().enumerate().skip(1) {
-        if tx.is_coinbase() {
-            return Err(ConsensusError::ExtraCoinbase { tx_index });
-        }
-    }
-
-    let Some(root) = facts.merkle_root() else {
-        return Err(ConsensusError::MerkleRoot);
-    };
-    if block.header.merkle_root != root.into() {
-        return Err(ConsensusError::MerkleRoot);
-    }
-    if facts.merkle_mutated() {
-        return Err(ConsensusError::MerkleMutation);
-    }
-
     Ok(())
 }
 
@@ -341,10 +366,10 @@ fn witness_commitment(block: &Block) -> Option<&[u8]> {
 
 fn check_witness_malleation(
     block: &Block,
-    expect_commitment: bool,
+    context: BlockRuleContext,
     wtxids: &[Wtxid],
 ) -> Result<(), ConsensusError> {
-    if expect_commitment {
+    if context.segwit_active {
         if let Some(commitment) = witness_commitment(block) {
             let Some(input) = block.txs.first().and_then(|tx| tx.inputs.first()) else {
                 return Err(ConsensusError::WitnessNonceSize);
@@ -366,9 +391,19 @@ fn check_witness_malleation(
 
 #[must_use]
 pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool {
-    check_witness_malleation(block, true, wtxids).is_ok()
+    check_witness_malleation(
+        block,
+        BlockRuleContext {
+            segwit_active: true,
+        },
+        wtxids,
+    )
+    .is_ok()
 }
-pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<(), ConsensusError> {
+pub fn check_block_body_binding(
+    block: &Block,
+    context: BlockRuleContext,
+) -> Result<(), ConsensusError> {
     let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
     verify_merkle_root_with_txids(block, &txids)?;
     if is_sixty_four_byte_mutation(&block.txs) {
@@ -379,7 +414,7 @@ pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<()
     if commitment.is_none() && !block.txs.iter().any(Tx::has_witness) {
         return Ok(());
     }
-    if segwit_active && commitment.is_some() {
+    if context.segwit_active && commitment.is_some() {
         let Some(input) = block.txs.first().and_then(|tx| tx.inputs.first()) else {
             return Err(ConsensusError::WitnessNonceSize);
         };
@@ -388,7 +423,7 @@ pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<()
         }
     }
     let wtxids: Vec<Wtxid> = block.txs.iter().map(Tx::wtxid).collect();
-    check_witness_malleation(block, segwit_active, &wtxids)
+    check_witness_malleation(block, context, &wtxids)
 }
 
 fn witness_commitment_hash_matches(
@@ -418,7 +453,6 @@ fn witness_commitment_hash_matches(
     &double_sha256(&buffer).to_le_bytes()[..] == commitment
 }
 
-/// Bitcoin merkle root over raw 32-byte leaves.
 #[must_use]
 pub fn compute_merkle_root(leaves: &mut Vec<[u8; 32]>) -> Option<[u8; 32]> {
     if leaves.is_empty() {

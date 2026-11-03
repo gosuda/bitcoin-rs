@@ -19,17 +19,19 @@ const MAX_TX_BYTES: usize = 400_000;
 const MAX_AGE: u64 = 14 * 24 * 60 * 60;
 const MAX_SUBSET_ATTEMPTS: usize = 256;
 
-struct SavedTransaction {
-    tx: Arc<Tx>,
-    txid: Txid,
-    time: u64,
-    unbroadcast: bool,
-    sigop_cost: u32,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedTransaction {
+    pub tx: Arc<Tx>,
+    pub txid: Txid,
+    pub time: u64,
+    pub unbroadcast: bool,
+    pub sigop_cost: u32,
 }
 
-struct Snapshot {
-    transactions: Vec<SavedTransaction>,
-    deltas: Vec<(Txid, i64)>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    pub transactions: Vec<SavedTransaction>,
+    pub deltas: Vec<(Txid, i64)>,
 }
 
 #[derive(Debug)]
@@ -149,7 +151,12 @@ impl Snapshot {
         })
     }
 
-    fn encode(&self, network: Network, max_bytes: u64, deadline: Instant) -> io::Result<Vec<u8>> {
+    pub fn encode(
+        &self,
+        network: Network,
+        max_bytes: u64,
+        deadline: Instant,
+    ) -> io::Result<Vec<u8>> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&VERSION.to_le_bytes());
@@ -188,7 +195,7 @@ impl Snapshot {
         Ok(bytes)
     }
 
-    fn decode(
+    pub fn decode(
         bytes: &[u8],
         network: Network,
         max_bytes: u64,
@@ -222,47 +229,17 @@ impl Snapshot {
         let mut ids = hashbrown::HashSet::new();
         for _ in 0..count {
             check_deadline(deadline)?;
-            let time = u64::from_le_bytes(take(&mut input)?);
-            let unbroadcast = match take::<1>(&mut input)? {
-                [0] => false,
-                [1] => true,
-                _ => return Err(invalid("invalid initial broadcast flag")),
-            };
-            let sigop_cost = u32::from_le_bytes(take(&mut input)?);
-            if sigop_cost > crate::standardness::MAX_STANDARD_TX_SIGOPS_COST {
-                return Err(invalid("snapshot transaction exceeds standard sigop cost"));
-            }
-            let len = usize::try_from(u32::from_le_bytes(take(&mut input)?))
-                .map_err(|_| invalid("transaction size overflow"))?;
-            if len == 0 || len > MAX_TX_BYTES {
-                return Err(invalid("snapshot transaction exceeds its size bound"));
-            }
-            let (raw, rest) = input
-                .split_at_checked(len)
-                .ok_or_else(|| invalid("truncated transaction"))?;
-            input = rest;
-            let tx: Tx = deserialize(raw).map_err(|_| invalid("invalid snapshot transaction"))?;
-            if consensus_bytes(&tx) != raw {
-                return Err(invalid("noncanonical snapshot transaction"));
-            }
-            let txid = tx.txid();
-            if !ids.insert(txid) {
+            let saved = decode_saved_transaction(&mut input)?;
+            if !ids.insert(saved.txid) {
                 return Err(invalid("duplicate snapshot transaction"));
             }
-            transactions.push(SavedTransaction {
-                tx: Arc::new(tx),
-                txid,
-                time,
-                unbroadcast,
-                sigop_cost,
-            });
+            transactions.push(saved);
         }
         let mut deltas = Vec::new();
         let mut ids = hashbrown::HashSet::new();
         for _ in 0..delta_count {
             check_deadline(deadline)?;
-            let txid = Txid(Hash256::from_le_bytes(&take(&mut input)?));
-            let delta = i64::from_le_bytes(take(&mut input)?);
+            let (txid, delta) = decode_fee_delta(&mut input)?;
             if !ids.insert(txid) {
                 return Err(invalid("duplicate snapshot fee delta"));
             }
@@ -278,7 +255,7 @@ impl Snapshot {
         })
     }
 
-    fn order(&self) -> io::Result<Vec<usize>> {
+    pub fn order(&self) -> io::Result<Vec<usize>> {
         let positions: HashMap<_, _> = self
             .transactions
             .iter()
@@ -299,6 +276,45 @@ impl Snapshot {
         crate::fee_diagram::topological(&parents, &(0..self.transactions.len()).collect::<Vec<_>>())
             .map_err(|_| invalid("cyclic snapshot dependencies"))
     }
+}
+fn decode_saved_transaction(input: &mut &[u8]) -> io::Result<SavedTransaction> {
+    let time = u64::from_le_bytes(take(input)?);
+    let unbroadcast = match take::<1>(input)? {
+        [0] => false,
+        [1] => true,
+        _ => return Err(invalid("invalid initial broadcast flag")),
+    };
+    let sigop_cost = u32::from_le_bytes(take(input)?);
+    if sigop_cost > crate::standardness::MAX_STANDARD_TX_SIGOPS_COST {
+        return Err(invalid("snapshot transaction exceeds standard sigop cost"));
+    }
+    let len = usize::try_from(u32::from_le_bytes(take(input)?))
+        .map_err(|_| invalid("transaction size overflow"))?;
+    if len == 0 || len > MAX_TX_BYTES {
+        return Err(invalid("snapshot transaction exceeds its size bound"));
+    }
+    let (raw, rest) = input
+        .split_at_checked(len)
+        .ok_or_else(|| invalid("truncated transaction"))?;
+    *input = rest;
+    let tx: Tx = deserialize(raw).map_err(|_| invalid("invalid snapshot transaction"))?;
+    if consensus_bytes(&tx) != raw {
+        return Err(invalid("noncanonical snapshot transaction"));
+    }
+    let txid = tx.txid();
+    Ok(SavedTransaction {
+        tx: Arc::new(tx),
+        txid,
+        time,
+        unbroadcast,
+        sigop_cost,
+    })
+}
+
+fn decode_fee_delta(input: &mut &[u8]) -> io::Result<(Txid, i64)> {
+    let txid = Txid(Hash256::from_le_bytes(&take(input)?));
+    let delta = i64::from_le_bytes(take(input)?);
+    Ok((txid, delta))
 }
 
 pub struct PreparedSnapshot {
@@ -399,8 +415,6 @@ pub fn save(
     prepare(data_dir, gateway, network, max_bytes, deadline)?.publish()
 }
 
-/// No saved membership, base fee, height or admission token is trusted. A malformed artifact changes
-/// nothing; a budget-limited restore retains only successfully re-admitted rows.
 pub fn restore(
     data_dir: &Path,
     gateway: &MempoolGateway,

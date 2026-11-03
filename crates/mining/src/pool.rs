@@ -1,4 +1,3 @@
-//! Native mining pool jobs, protocols, and durable accounting.
 #![forbid(unsafe_code)]
 
 mod core;
@@ -13,6 +12,7 @@ pub use core::{
 pub use job::{
     AcceptedShare, BIP320_VERSION_MASK, BlockReceipt, BlockStatus, Extranonce, ExtranonceLayout,
     FoundBlock, Installed, Job, JobBook, JobBookConfig, JobError, JobId,
-    MAX_COINBASE_SCRIPT_SIG_LEN, MAX_NTIME_FORWARD_SECS, Session, SessionId, ShareClass,
-    ShareError, ShareOutcome, ShareSubmission, ShareTarget, ShareWork, StaleReason, fetch_template,
+    MAX_COINBASE_SCRIPT_SIG_LEN, MAX_NTIME_FORWARD_SECS, Session, SessionId, SessionOpenError,
+    ShareClass, ShareError, ShareOutcome, ShareSubmission, ShareTarget, ShareWork, StaleReason,
+    fetch_template,
 };

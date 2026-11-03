@@ -1,12 +1,7 @@
-//! submitpackage wire boundary; admission and all mutations stay in mempool.
-
 use super::*;
 use bitcoin_rs_mempool::{PackageSubmission, PackageTxResult};
 
 pub(crate) fn submitpackage(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound =
-        crate::handlers::bind_named_params(params, &["package", "maxfeerate", "maxburnamount"])?;
-    let params = bound.as_ref();
     crate::handlers::ensure_at_most_params(params, 3)?;
     let args = params_array(params)?;
     let raws = args

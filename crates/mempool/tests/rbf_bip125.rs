@@ -2,8 +2,8 @@
 
 extern crate alloc;
 
+use super::TestError;
 use alloc::sync::Arc;
-use std::error::Error;
 
 use bitcoin_rs_mempool::{
     Mempool, MempoolEntry, MempoolError, MempoolLimits, MempoolStats, PolicyError, RbfError,
@@ -184,7 +184,7 @@ const CASES: [Case; 9] = [
 ];
 
 #[test]
-fn retained_replacement_rules_are_enforced() -> Result<(), Box<dyn Error>> {
+fn retained_replacement_rules_are_enforced() -> Result<(), TestError> {
     for case in CASES {
         let has_parent = case.name == "accepts an original with an unconfirmed parent";
         let (pool, replacement_tx) =
@@ -203,7 +203,7 @@ fn retained_replacement_rules_are_enforced() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn replacements_accept_mixed_signaling_conflicts() -> Result<(), Box<dyn Error>> {
+fn replacements_accept_mixed_signaling_conflicts() -> Result<(), TestError> {
     const RBF_SEQUENCE: u32 = 0xffff_fffd;
     const FINAL_SEQUENCE: u32 = 0xffff_ffff;
     for second_sequence in [RBF_SEQUENCE, 0xffff_fffe, FINAL_SEQUENCE] {
@@ -239,7 +239,7 @@ fn pool_with_conflict(
     original: OriginalSpec,
     replacement: ReplacementSpec,
     has_parent: bool,
-) -> Result<(Mempool, Tx), Box<dyn Error>> {
+) -> Result<(Mempool, Tx), TestError> {
     let limits = if replacement.extra_descendants == 0 {
         MempoolLimits::default()
     } else {
@@ -326,7 +326,7 @@ fn outpoint(label: u8, vout: u32) -> OutPoint {
 }
 
 #[test]
-fn replace_transaction_leaves_only_the_replacement() -> Result<(), Box<dyn Error>> {
+fn replace_transaction_leaves_only_the_replacement() -> Result<(), TestError> {
     let (mut pool, replacement_tx) = pool_with_conflict(
         OriginalSpec {
             sequence: 0xFFFF_FFFD,
@@ -374,7 +374,7 @@ fn pool_fingerprint(pool: &Mempool) -> PoolFingerprint {
 }
 
 #[test]
-fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Error>> {
+fn replace_transaction_rejection_preserves_pool_state() -> Result<(), TestError> {
     {
         let mut pool = Mempool::new(MempoolLimits::default());
         let original = tx_from_inputs(20, &[(outpoint(1, 0), 0xFFFF_FFFD)], 1);
@@ -453,7 +453,7 @@ fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn replace_transaction_cluster_limits_use_post_eviction_projection() -> Result<(), Box<dyn Error>> {
+fn replace_transaction_cluster_limits_use_post_eviction_projection() -> Result<(), TestError> {
     let mut pool = Mempool::new(MempoolLimits {
         cluster_count: 25,
         ..MempoolLimits::default()

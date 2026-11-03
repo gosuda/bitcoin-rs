@@ -6,11 +6,14 @@ mod count;
 mod deployment;
 pub mod header_sync;
 mod ibd;
+mod latch;
 pub mod node;
 mod progress;
 #[cfg(feature = "test-seam")]
 pub mod regtest_fixture;
 mod reorg;
+#[cfg(test)]
+pub(crate) mod test_error;
 mod tip_wait;
 mod transition;
 mod tree;
@@ -28,9 +31,9 @@ pub use deployment::{
     softfork_state,
 };
 pub use header_sync::{
-    AcceptHeaders, HeaderAdmission, HeaderValidationMode, accept_headers, block_work,
-    compact_is_met_by, compact_to_target, current_unix_seconds, permitted_difficulty_transition,
-    validate_contextual_header, validate_pow,
+    AcceptHeaders, HeaderAdmission, HeaderRefusal, HeaderValidationMode, accept_headers,
+    block_work, compact_is_met_by, compact_to_target, current_unix_seconds,
+    permitted_difficulty_transition, validate_contextual_header, validate_pow,
 };
 pub use ibd::InitialBlockDownload;
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
@@ -45,12 +48,13 @@ pub struct TipSnapshot {
     pub chain_tx_count: ChainTxCount,
 }
 
+pub use latch::{HookGuard, LatchReader, LatchWriter};
 pub use tip_wait::{ActiveTipWait, TipWaitCondition};
 pub use transition::{
     StableRead, StableReadGuard, TransitionAuthority, TransitionAuthorityGuard, TransitionDomain,
 };
 pub use tree::{BlockTree, InvalidationOutcome};
-pub use view::{BlockTreeReader, LatchReader, TipReader};
+pub use view::{BlockTreeReader, TipReader};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("block ancestry read budget exhausted")]
@@ -98,6 +102,8 @@ pub enum ChainError {
         target: ChainWork,
         max_target: ChainWork,
     },
+    #[error("nBits {bits:08x} overflows the 256-bit proof-of-work target")]
+    TargetBitsOverflow { bits: u32 },
     #[error("header {hash} does not satisfy proof of work target {target}")]
     InvalidPow { hash: Hash256, target: ChainWork },
     #[error("nBits {actual:08x} does not match expected {expected:08x} at height {height}")]

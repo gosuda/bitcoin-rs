@@ -63,13 +63,18 @@ pub(crate) fn getmempoolentry(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     typed_to_sonic(&response)
 }
 
-/// Resolve all requested outpoints against one mempool generation. Copy only
-/// transaction references while locked; hex encoding and JSON serialization
-/// happen after the guard is released.
-pub(crate) fn gettxspendingprevout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = spending_prevout_arguments(params)?;
-    let array = super::params_array(bound.as_ref())?;
-    super::ensure_at_most_params(bound.as_ref(), 2)?;
+struct SpendingPrevoutQuery<'a> {
+    prevouts: Vec<(OutPoint, &'a str)>,
+    mempool_only: bool,
+    return_spending_tx: bool,
+}
+
+fn parse_spending_prevout_query<'a>(
+    bound: &'a Value,
+    params: &Value,
+) -> Result<SpendingPrevoutQuery<'a>, RpcError> {
+    let array = super::params_array(bound)?;
+    super::ensure_at_most_params(bound, 2)?;
     if params.is_object()
         && params.get("outputs").is_none()
         && params
@@ -136,9 +141,20 @@ pub(crate) fn gettxspendingprevout(ctx: &Arc<Context>, params: &Value) -> Result
             Ok((OutPoint::new(txid, vout), txid_text))
         })
         .collect::<Result<Vec<_>, RpcError>>()?;
+    Ok(SpendingPrevoutQuery {
+        prevouts,
+        mempool_only,
+        return_spending_tx,
+    })
+}
+
+pub(crate) fn gettxspendingprevout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let bound = spending_prevout_arguments(params)?;
+    let query = parse_spending_prevout_query(bound.as_ref(), params)?;
     let spenders = {
         let pool = ctx.mempool.gateway.read();
-        prevouts
+        query
+            .prevouts
             .iter()
             .map(|(outpoint, _)| {
                 pool.outpoint_spender(*outpoint)
@@ -149,27 +165,33 @@ pub(crate) fn gettxspendingprevout(ctx: &Arc<Context>, params: &Value) -> Result
             })
             .collect::<Result<Vec<_>, _>>()?
     };
-    let rows = prevouts.into_iter().zip(spenders).map(|((outpoint, txid), spender)| {
-        let vout = outpoint.vout;
-        if !mempool_only && spender.is_none() {
-            return Err(RpcError::Misc(format!(
-                "No spending tx for the outpoint {}:{} in mempool, and txospenderindex is unavailable.",
-                outpoint.txid, vout,
-            )));
-        }
-        Ok(v31::GetTxSpendingPrevoutItem {
-            txid: txid.to_owned(),
-            vout: outpoint.vout,
-            spending_txid: spender.as_ref().map(|(txid, _)| txid.to_string()),
-            spending_tx: spender.as_ref().filter(|_| return_spending_tx)
-                .map(|(_, tx)| consensus_bytes(tx.as_ref()).to_lower_hex_string()),
-            block_hash: None,
+    let rows = query
+        .prevouts
+        .into_iter()
+        .zip(spenders)
+        .map(|((outpoint, txid), spender)| {
+            let vout = outpoint.vout;
+            if !query.mempool_only && spender.is_none() {
+                return Err(RpcError::Misc(format!(
+                    "No spending tx for the outpoint {}:{} in mempool, and txospenderindex is unavailable.",
+                    outpoint.txid, vout,
+                )));
+            }
+            Ok(v31::GetTxSpendingPrevoutItem {
+                txid: txid.to_owned(),
+                vout: outpoint.vout,
+                spending_txid: spender.as_ref().map(|(txid, _)| txid.to_string()),
+                spending_tx: spender
+                    .as_ref()
+                    .filter(|_| query.return_spending_tx)
+                    .map(|(_, tx)| consensus_bytes(tx.as_ref()).to_lower_hex_string()),
+                block_hash: None,
+            })
         })
-    }).collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
     typed_to_sonic(&v31::GetTxSpendingPrevout(rows))
 }
 
-/// Core's strict object check validates declared fields before unknown keys.
 fn check_prevout_fields(
     value: &Value,
     fields: &[(&str, &str)],
@@ -202,7 +224,6 @@ fn check_prevout_fields(
     Ok(())
 }
 
-/// Fold this method's named-only option keys before ordinary argument binding.
 fn spending_prevout_arguments(params: &Value) -> Result<Cow<'_, Value>, RpcError> {
     let option_names = ["mempool_only", "return_spending_tx"];
     if !params.is_object() || !option_names.iter().any(|name| params.get(*name).is_some()) {
@@ -515,6 +536,7 @@ mod spentby_tests {
         }
     }
 
+    // API-32
     #[test]
     #[expect(
         clippy::expect_used,
@@ -567,6 +589,7 @@ mod spentby_tests {
         assert_eq!(after[3], outputs[3]);
     }
 
+    // API-32
     #[test]
     #[expect(
         clippy::expect_used,

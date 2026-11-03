@@ -10,10 +10,6 @@ use std::io::Write;
 use std::time::Instant;
 
 impl<S: KvStore> JournalWriter<S> {
-    /// §2.3 durability boundary, in one serialized step:
-    /// 1. storage flush (deferred undo rows become durable),
-    /// 2. log fsync,
-    /// 3. atomic `head.json` publish.
     pub(super) fn advance_durability(&mut self) -> Result<(), JournalWriterError> {
         self.advance_durability_upto(self.pending_records.len())
     }

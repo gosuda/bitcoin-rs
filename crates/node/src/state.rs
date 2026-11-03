@@ -1,7 +1,7 @@
 use crate::NodeConfig;
-use anyhow::Context as _;
-use anyhow::Result;
-use anyhow::bail;
+use crate::config::ConfigError;
+use crate::run::RunError;
+use crate::snapshot::SnapshotImportError;
 use bitcoin_rs_chain::BlockBodySource;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_chain::TipSnapshot;
@@ -35,14 +35,15 @@ mod data_dir_lock;
 #[cfg(feature = "pool")]
 pub(crate) fn lock_pool_directory(
     path: &std::path::Path,
-) -> Result<bitcoin_rs_storage::StoreGuard> {
+) -> core::result::Result<bitcoin_rs_storage::StoreGuard, DataDirLockError> {
     Ok(Arc::new(data_dir_lock::DataDirLock::acquire(path)?))
 }
 mod index;
-mod open;
+pub(crate) mod open;
 mod storage;
 
 pub use data_dir_lock::DataDirLockError;
+pub use index::IndexWorkerError;
 
 struct IndexChainCursorSource(Arc<ChainEventPublisher>);
 
@@ -63,6 +64,7 @@ pub(crate) const P2P_OUTBOUND_FULL_RELAY_SLOTS: usize = 8;
 pub(crate) const P2P_OUTBOUND_BLOCK_RELAY_SLOTS: usize = 2;
 
 pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 512;
+pub(crate) const TXINDEX_NAMESPACE: &str = "txindex";
 
 pub(crate) const INBOUND_TX_CHANNEL_LIMIT: usize = 1_024;
 
@@ -91,11 +93,24 @@ pub struct NodeState {
     recovery_reporter: Arc<storage::RecoveryReporter>,
     pub(crate) snapshots: Arc<crate::snapshot::SnapshotControl>,
     block_announce_rx: Mutex<Option<bitcoin_rs_p2p::BlockAnnounceReceiver>>,
+    shutdown: Arc<bitcoin_rs_chain::LatchWriter>,
 }
 
 impl Drop for NodeState {
     fn drop(&mut self) {
+        self.shutdown.trigger();
+        self.chainstate.request_shutdown();
         let _admission = self.chainstate.close();
+        self.p2p.shutdown();
+        if let Err(error) = self.p2p.join() {
+            tracing::warn!(%error, "failed to join p2p workers during node state drop");
+        }
+        if let Err(error) = self
+            .derived_index
+            .shutdown(core::time::Duration::from_secs(5))
+        {
+            tracing::warn!(%error, "failed to shut down derived index during node state drop");
+        }
         self.storage.retention().shutdown();
     }
 }
@@ -181,11 +196,13 @@ impl NodeState {
         self.followers.block_log_reader()
     }
 
-    pub(crate) fn block_body_source(&self) -> Result<Arc<dyn BlockBodySource>> {
+    pub(crate) fn block_body_source(
+        &self,
+    ) -> core::result::Result<Arc<dyn BlockBodySource>, RunError> {
         let store = self
             .chainstate
             .block_body_store_handle()
-            .context("running node has no block body store")?;
+            .ok_or(RunError::NoBlockBodyStore)?;
         Ok(Arc::new(StoredBlockBodySource::new(store)))
     }
 
@@ -240,10 +257,16 @@ impl NodeState {
 
     #[must_use]
     pub fn shutdown_reader(&self) -> bitcoin_rs_chain::LatchReader {
-        self.chainstate.shutdown_reader()
+        self.shutdown.reader()
+    }
+
+    #[must_use]
+    pub fn shutdown_writer(&self) -> Arc<bitcoin_rs_chain::LatchWriter> {
+        Arc::clone(&self.shutdown)
     }
 
     pub fn request_shutdown(&self) {
+        self.shutdown.trigger();
         self.chainstate.request_shutdown();
     }
 
@@ -271,11 +294,16 @@ impl NodeState {
         Ok(outcome.tip)
     }
 
-    pub fn publish_checkpoint(&self) -> Result<Option<u64>> {
-        Ok(self.chainstate.publish_checkpoint()?)
+    pub fn publish_checkpoint(
+        &self,
+    ) -> core::result::Result<Option<u64>, bitcoin_rs_chainstate::CheckpointError> {
+        self.chainstate.publish_checkpoint()
     }
 
-    pub fn start_chainstate_maintenance(&self) -> Result<std::thread::JoinHandle<()>> {
+    pub fn start_chainstate_maintenance(
+        &self,
+    ) -> core::result::Result<std::thread::JoinHandle<()>, bitcoin_rs_chainstate::MaintenanceError>
+    {
         self.chainstate.start_maintenance()
     }
 
@@ -289,9 +317,8 @@ impl NodeState {
     pub fn activate_assumeutxo_snapshot_file(
         &self,
         path: impl AsRef<std::path::Path>,
-    ) -> anyhow::Result<()> {
-        self.snapshots.import_native(path.as_ref())?;
-        Ok(())
+    ) -> core::result::Result<(), SnapshotImportError> {
+        self.snapshots.import_native(path.as_ref())
     }
 
     #[must_use]
@@ -342,7 +369,7 @@ impl NodeState {
         })
     }
 
-    pub fn start_index_workers(&mut self) -> anyhow::Result<()> {
+    pub fn start_index_workers(&mut self) -> core::result::Result<(), IndexWorkerError> {
         let history = self.storage.bounded_history();
         self.derived_index.start(&self.chainstate, history)
     }
@@ -352,7 +379,10 @@ impl NodeState {
         self.derived_index.status()
     }
 
-    pub(crate) fn bounded_index_shutdown(&mut self, deadline: Duration) -> Result<()> {
+    pub(crate) fn bounded_index_shutdown(
+        &mut self,
+        deadline: Duration,
+    ) -> core::result::Result<(), IndexWorkerError> {
         self.derived_index.shutdown(deadline)
     }
 
@@ -376,13 +406,13 @@ fn build_derived_index_open_spec(
     epoch: u64,
     guard: &bitcoin_rs_storage::StoreGuard,
     seed_slot: Option<bitcoin_rs_utxo::SeedOfferCell>,
-) -> Result<Option<bitcoin_rs_index::runtime::DerivedIndexOpenSpec>> {
+) -> core::result::Result<Option<bitcoin_rs_index::runtime::DerivedIndexOpenSpec>, ConfigError> {
     let enabled = derived_index_capabilities(config);
     if enabled.is_empty() {
         return Ok(None);
     }
     if config.storage.prune_target_mb > 0 {
-        bail!("transaction, script and compact-filter indexing are not compatible with -prune");
+        return Err(ConfigError::PruneWithIndexes);
     }
     let canonical_data_root = config
         .data_dir
@@ -394,7 +424,7 @@ fn build_derived_index_open_spec(
     Ok(Some(bitcoin_rs_index::runtime::DerivedIndexOpenSpec {
         scripthash_limit: config.indexes.scripthash_limit,
         data_dir: config.data_dir.clone(),
-        namespace: "txindex",
+        namespace: TXINDEX_NAMESPACE,
         storage_backend: config.storage.backend,
         epoch,
         enabled,
@@ -418,7 +448,7 @@ fn build_derived_index_open_spec(
 
 fn index_bundle_directive(
     config: &NodeConfig,
-) -> Result<bitcoin_rs_index::portable::IndexBundleDirective> {
+) -> core::result::Result<bitcoin_rs_index::portable::IndexBundleDirective, ConfigError> {
     use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
     let request = |dir: &std::path::PathBuf| IndexBundleRequest {
         dir: dir.clone(),
@@ -428,9 +458,7 @@ fn index_bundle_directive(
         (None, None) => Ok(IndexBundleDirective::None),
         (Some(dir), None) => Ok(IndexBundleDirective::Restore(request(dir))),
         (None, Some(dir)) => Ok(IndexBundleDirective::Export(request(dir))),
-        (Some(_), Some(_)) => {
-            bail!("--index-bundle-import and --index-bundle-export are mutually exclusive")
-        }
+        (Some(_), Some(_)) => Err(ConfigError::IndexBundleImportExportExclusive),
     }
 }
 

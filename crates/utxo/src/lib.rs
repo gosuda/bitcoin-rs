@@ -1,5 +1,3 @@
-//! In-memory UTXO set for bitcoin-rs.
-
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
@@ -12,12 +10,14 @@ mod key;
 pub(crate) use key::UtxoKey;
 mod listener;
 mod overlay;
-mod record;
+pub mod record;
 pub mod scan;
 pub mod set;
 mod shard;
 pub mod snapshot;
 pub mod stats;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod undo_codec;
 
 pub use overlay::{WindowOverlay, WindowOverlayError};

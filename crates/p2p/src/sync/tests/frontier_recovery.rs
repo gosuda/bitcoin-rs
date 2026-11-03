@@ -2,7 +2,7 @@ use super::*;
 
 fn next_getheaders(
     rx: &crate::test_support::MessageReceiver,
-) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, Box<dyn std::error::Error>> {
+) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, TestError> {
     while let Ok(message) = rx.try_recv() {
         if let Message::GetHeaders(request) = message {
             return Ok(request);
@@ -11,6 +11,7 @@ fn next_getheaders(
     Err(std::io::Error::other("expected getheaders").into())
 }
 
+// P2P-05
 #[test]
 fn applied_rewind_with_unchanged_headers_refetches_the_missing_prefix() -> TestResult {
     let (sync, peers, applied, blocks, incoming) = sync_with_mined_chain(3)?;
@@ -58,6 +59,7 @@ fn cancelled_ready_event_does_not_wait_for_an_unrelated_body_writer() -> TestRes
     Ok(())
 }
 
+// P2P-05
 #[test]
 fn empty_header_probe_is_paced_then_rotates_to_another_peer() -> TestResult {
     let (tree, _blocks) = mined_chain(1, 0)?;
@@ -195,7 +197,11 @@ fn frontier_probe_preserves_another_live_header_request() -> TestResult {
     let frontier = sync.observe_frontier(sync.observe_chain_frontier(), now);
     let probe_source = match frontier.plan().header_action {
         super::super::HeaderAction::Probe(source) => source,
-        action => return Err(format!("expected a frontier probe, got {action:?}").into()),
+        action => {
+            return Err(crate::test_support::TestError::Unexpected(format!(
+                "expected a frontier probe, got {action:?}"
+            )));
+        }
     };
     let (existing_source, existing_rx, probe_rx) = if probe_source == first_source {
         (second_source, &second_rx, &first_rx)

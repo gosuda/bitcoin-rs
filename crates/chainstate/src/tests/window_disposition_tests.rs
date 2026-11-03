@@ -2,9 +2,15 @@ use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_consensus::{ConsensusError, ScriptEngine, ValidationEngine};
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::StorageError;
+use bitcoin_rs_storage::chainstate_journal::JournalWriterError;
 
-use crate::{ApplyError, WindowApplyDisposition, classify_apply_error};
+use crate::{ApplyError, CheckpointError, WindowApplyDisposition, classify_apply_error};
+use ApplyError::{
+    BlockBodyPersistence, BlockOutputsExceedInputs, BlockValueOverflow, JournalBackpressure,
+    RecoveryPublication, UndoPersistence,
+};
 
+// SYNC-04
 #[test]
 fn apply_errors_classify_into_their_documented_dispositions() {
     use ApplyError::{Chain, Consensus, DurableHeadCommit, ProofOfWork};
@@ -42,7 +48,7 @@ fn apply_errors_classify_into_their_documented_dispositions() {
         ),
         (Consensus(PrevoutMismatch { input_index: 1 }), Operational),
         (Consensus(Kernel("parse failed".to_owned())), Operational),
-        (Consensus(script(ScriptEngine::Kernel)), Operational),
+        (Consensus(script(ScriptEngine::Kernel)), Permanent),
         (Consensus(script(ScriptEngine::Native)), Permanent),
         (Consensus(SignetSolution), Permanent),
         (
@@ -64,6 +70,35 @@ fn apply_errors_classify_into_their_documented_dispositions() {
         (Consensus(MissingCoinbase), Permanent),
         (
             DurableHeadCommit(StorageError::backend("head batch lost")),
+            Fatal,
+        ),
+        (
+            UndoPersistence(StorageError::backend("FjallError: Poisoned")),
+            Fatal,
+        ),
+        (
+            BlockBodyPersistence(StorageError::backend("block append failed")),
+            Fatal,
+        ),
+        (
+            JournalBackpressure(Box::new(JournalWriterError::RetentionLimit {
+                bytes: 1024,
+                limit: 512,
+            })),
+            Operational,
+        ),
+        (
+            JournalBackpressure(Box::new(JournalWriterError::Io(std::io::Error::other(
+                "journal device gone",
+            )))),
+            Fatal,
+        ),
+        (BlockValueOverflow, Permanent),
+        (BlockOutputsExceedInputs, Permanent),
+        (
+            RecoveryPublication(Box::new(CheckpointError::Storage(StorageError::backend(
+                "checkpoint write lost",
+            )))),
             Fatal,
         ),
     ];

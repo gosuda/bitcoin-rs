@@ -2,7 +2,6 @@
 
 use std::path::Path;
 
-use anyhow::{Context as _, Result};
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
@@ -15,8 +14,12 @@ use bitcoin_rs_e2e::helpers::{
 use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
+use crate::support::TestError;
+
 const OUTPUT_COUNT: usize = 3;
 const OUTPUT_KEY: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+type Result<T = ()> = std::result::Result<T, TestError>;
 
 fn expected_tweak(outpoint: OutPoint, prevout: &TxOut) -> Result<String> {
     let key: PublicKey =
@@ -72,7 +75,10 @@ fn signed_spend_survives_reorg_and_restart() -> Result<()> {
     );
     sign_p2pkh_inputs(&mut tx, &[prevout])?;
     let mined = node.rpc("generateblock", &json!(["raw(51)", [tx_hex(&tx)]]))?;
-    let hash = mined["hash"].as_str().context("mined hash")?.to_owned();
+    let hash = mined["hash"]
+        .as_str()
+        .ok_or(TestError::Missing("mined hash"))?
+        .to_owned();
     assert!(
         node.rpc(
             "gettxout",
@@ -86,11 +92,15 @@ fn signed_spend_survives_reorg_and_restart() -> Result<()> {
     assert_eq!(result["hash"], hash);
     assert_eq!(result["tip_hash"], hash);
     assert_eq!(result["taproot_active"], true);
-    let transactions = result["transactions"].as_array().context("transactions")?;
+    let transactions = result["transactions"]
+        .as_array()
+        .ok_or(TestError::Missing("transactions"))?;
     assert_eq!(transactions.len(), 1);
     assert_eq!(transactions[0]["txid"], tx.compute_txid().to_string());
     assert_eq!(transactions[0]["tweak"], expected);
-    let outputs = transactions[0]["outputs"].as_array().context("outputs")?;
+    let outputs = transactions[0]["outputs"]
+        .as_array()
+        .ok_or(TestError::Missing("outputs"))?;
     assert_eq!(outputs.len(), OUTPUT_COUNT);
     for (vout, output) in outputs.iter().enumerate() {
         assert_eq!(output, &json!({"vout":vout,"output_key":OUTPUT_KEY}));
@@ -100,7 +110,9 @@ fn signed_spend_survives_reorg_and_restart() -> Result<()> {
         node.rpc_raw(&json!({"jsonrpc":"2.0","id":1,"method":"getblocktweaks","params":[hash]}))?;
     assert_eq!(stale["error"]["code"], -8);
     let replacement = node.rpc("generateblock", &json!(["raw(52)", [tx_hex(&tx)]]))?;
-    let replacement_hash = replacement["hash"].as_str().context("replacement hash")?;
+    let replacement_hash = replacement["hash"]
+        .as_str()
+        .ok_or(TestError::Missing("replacement hash"))?;
     assert_ne!(replacement_hash, hash);
     let replaced = node.rpc("getblocktweaks", &json!({"block":replacement_hash}))?;
     assert_eq!(replaced["hash"], replacement_hash);

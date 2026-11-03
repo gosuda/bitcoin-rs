@@ -4,6 +4,7 @@ use bitcoin_rs_chain::{ChainError, ChainWork, NodeId};
 use bitcoin_rs_consensus::{ConsensusError, ScriptEngine};
 use bitcoin_rs_primitives::Hash256;
 
+// API-19
 #[test]
 fn consensus_failures_use_core_bip22_reasons() {
     let bip = |bip| ConsensusError::Bip {
@@ -95,6 +96,7 @@ fn consensus_failures_use_core_bip22_reasons() {
     }
 }
 
+// API-19
 #[test]
 fn header_failures_use_core_bip22_reasons() {
     let hash = Hash256::default();
@@ -103,6 +105,19 @@ fn header_failures_use_core_bip22_reasons() {
             ChainError::InvalidPow {
                 hash,
                 target: ChainWork::ZERO,
+            },
+            "high-hash",
+        ),
+        (
+            ChainError::TargetBitsOverflow { bits: 0x2300_0001 },
+            "high-hash",
+        ),
+        (ChainError::ZeroTarget { hash }, "high-hash"),
+        (
+            ChainError::TargetExceedsLimit {
+                hash,
+                target: ChainWork::from_be_bytes([0xff_u8; 32]),
+                max_target: ChainWork::ZERO,
             },
             "high-hash",
         ),

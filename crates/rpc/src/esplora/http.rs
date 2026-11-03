@@ -1,5 +1,3 @@
-//! HTTP response mapping for the Esplora surfaces.
-
 use bitcoin_rs_mempool::SubmitError;
 
 use crate::context::TxQueryError;
@@ -27,8 +25,6 @@ pub(super) fn query_error(e: TxQueryError) -> Response {
     }
 }
 
-/// API-10: transaction refusals are 400; an exhausted stale-state retry
-/// budget remains an unavailable response with the existing body text.
 pub(super) fn admission_error(error: SubmitError) -> Response {
     match error {
         SubmitError::Policy(reason) => {
@@ -47,7 +43,19 @@ pub(super) fn dispatch_error(e: crate::RpcError) -> Response {
         | crate::RpcError::Deserialization(_)
         | crate::RpcError::TxRejected(_)
         | crate::RpcError::TxVerifyError(_) => bad_request(e.to_string()),
-        _ => service_unavailable(e.to_string()),
+        crate::RpcError::Parse(_)
+        | crate::RpcError::InvalidRequest(_)
+        | crate::RpcError::TopLevelParse(_)
+        | crate::RpcError::MethodNotFound(_)
+        | crate::RpcError::MethodDisabled(_)
+        | crate::RpcError::InvalidParameter(_)
+        | crate::RpcError::ScanInProgress(_)
+        | crate::RpcError::InvalidAddressOrKey(_)
+        | crate::RpcError::ClientNotConnected(_)
+        | crate::RpcError::ClientInInitialDownload(_)
+        | crate::RpcError::Misc(_)
+        | crate::RpcError::CoreInternal(_)
+        | crate::RpcError::Internal(_) => service_unavailable(e.to_string()),
     }
 }
 
@@ -85,5 +93,13 @@ mod tests {
         let retry = admission_error(SubmitError::RetryExhausted);
         assert_eq!(retry.status, 503);
         assert_eq!(retry.body, b"internal error: admission retry exhausted: chain or mempool changed during submission");
+    }
+
+    #[test]
+    fn dispatch_error_maps_internal_variants_to_service_unavailable() {
+        let response = super::dispatch_error(crate::RpcError::Parse("bad input".into()));
+        assert_eq!(response.status, 503);
+        let nf = super::dispatch_error(crate::RpcError::NotFound("missing"));
+        assert_eq!(nf.status, 404);
     }
 }

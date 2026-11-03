@@ -1,6 +1,9 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+#[cfg(any(test, verification))]
+pub(crate) mod projection_model;
+
 pub mod block_log;
 pub use block_log::{BlockLog, BlockLogReader, BlockRecord};
 mod capabilities;
@@ -9,7 +12,6 @@ pub mod portable;
 pub mod query_api;
 pub mod reconcile;
 pub mod runtime;
-/// Experimental, keyless BIP352 public scan material (no durable index or HTTP routes).
 #[cfg(feature = "silent-payments")]
 pub mod silent_payments;
 pub mod types;
@@ -28,10 +30,12 @@ pub use index::{
 };
 pub use query_api::{
     CompactFilterQuery, DerivedIndexInfo, DerivedIndexQuery, RollbackWarningSource,
-    ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord,
-    TxQueryError, TxUnavailableCause,
+    SCRIPT_HISTORY_PAGE_MAX, ScriptHistoryPage, ScriptHistoryRecord, ScriptIndexQuery,
+    ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause,
 };
+pub use reconcile::{CURSOR_BYTE_LEN, ConsumerCursor, CursorDecodeError};
 pub use types::{
-    HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, HashPrefixRow, ScriptHash, ScriptHashRow, ScriptLiveRow,
-    SpendingPrefixRow,
+    HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, HashPrefixRow, ScriptHash, ScriptHashRow,
+    ScriptHistoryOccurrence, ScriptLiveRow, SpendingPrefixRow, TxPosition, TxPositionValue,
+    positions_are_valid,
 };

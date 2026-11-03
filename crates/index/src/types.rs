@@ -4,14 +4,11 @@ use sha2::{Digest as _, Sha256};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub(crate) const HASH_PREFIX_LEN: usize = 8;
-/// Number of bytes used for big-endian block heights in index rows.
-/// Big-endian makes lexicographic KV order match numeric height order within
 pub(crate) const HEIGHT_SIZE: usize = 4;
 pub const HASH_PREFIX_ROW_SIZE: usize = HASH_PREFIX_LEN + HEIGHT_SIZE;
 pub const HEADER_ROW_SIZE: usize = bitcoin_rs_primitives::Header::LEN;
 pub const U24_MAX: u32 = 0x00FF_FFFF;
 
-/// Encodes a block height so lexicographic byte order matches numeric order.
 #[must_use]
 pub(crate) const fn encode_height(height: u32) -> [u8; HEIGHT_SIZE] {
     height.to_be_bytes()
@@ -31,9 +28,23 @@ const fn decode_u24_le(bytes: [u8; 3]) -> u32 {
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0])
 }
 
+#[must_use]
+pub(crate) const fn encode_history_height(height: u32) -> [u8; HEIGHT_SIZE] {
+    (!height).to_be_bytes()
+}
+
+#[must_use]
+pub(crate) const fn decode_history_height(bytes: [u8; HEIGHT_SIZE]) -> u32 {
+    !u32::from_be_bytes(bytes)
+}
+
+#[must_use]
+pub(crate) const fn ascending_history_height(bytes: [u8; HEIGHT_SIZE]) -> [u8; HEIGHT_SIZE] {
+    encode_height(decode_history_height(bytes))
+}
+
 pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 
-/// A stable electrs hash-prefix row: eight prefix bytes followed by a big-endian height.
 #[derive(
     Copy,
     Clone,
@@ -53,12 +64,10 @@ pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 #[repr(C)]
 pub struct HashPrefixRow {
     pub prefix: HashPrefix,
-    /// The transaction-confirming block height, encoded big-endian.
     pub height: [u8; HEIGHT_SIZE],
 }
 
 impl HashPrefixRow {
-    /// Creates a row from its prefix and native-endian height.
     pub const fn new(prefix: HashPrefix, height: u32) -> Self {
         Self {
             prefix,
@@ -66,7 +75,6 @@ impl HashPrefixRow {
         }
     }
 
-    /// Returns the native-endian block height.
     pub const fn height(self) -> u32 {
         decode_height(self.height)
     }
@@ -181,11 +189,8 @@ impl TxidRow {
     }
 }
 
-/// Byte width of one live script-index row key: `scan-prefix || txid || vout_u24`.
 pub(crate) const SCRIPT_LIVE_ROW_SIZE: usize = HASH_PREFIX_LEN + 32 + 3;
 
-/// The key is the whole row -- `scan-prefix(8) || txid(32, little-endian) ||
-/// vout(3, little-endian u24)` -- and the value is empty. This is the full-outpoint
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 #[repr(C)]
 pub struct ScriptLiveRow {
@@ -202,7 +207,7 @@ impl ScriptLiveRow {
         Self { key }
     }
 
-    pub(crate) fn from_db_row(bytes: &[u8]) -> Option<Self> {
+    pub fn from_db_row(bytes: &[u8]) -> Option<Self> {
         let key: [u8; SCRIPT_LIVE_ROW_SIZE] = bytes.try_into().ok()?;
         Some(Self { key })
     }
@@ -220,10 +225,8 @@ impl ScriptLiveRow {
     }
 }
 
-/// Serialized byte length of one [`TxPosition`].
 pub const TX_POSITION_SIZE: usize = 6;
 
-/// Both fields are little-endian byte arrays rather than `u32` so the type has
 #[derive(
     Copy,
     Clone,
@@ -244,8 +247,6 @@ pub struct TxPosition {
     len: [u8; 3],
 }
 
-/// Deriving `Ord` would compare the little-endian byte arrays lexicographically,
-/// least-significant byte first — offset 256 would sort before offset 1. The
 impl Ord for TxPosition {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.offset()
@@ -261,7 +262,6 @@ impl PartialOrd for TxPosition {
 }
 
 impl TxPosition {
-    /// Creates a position from a native-endian offset and length.
     #[must_use]
     pub const fn new(offset: u32, byte_len: u32) -> Self {
         assert!(
@@ -274,13 +274,11 @@ impl TxPosition {
         }
     }
 
-    /// Returns the native-endian byte offset within the serialized block.
     #[must_use]
     pub const fn offset(self) -> u32 {
         decode_u24_le(self.offset)
     }
 
-    /// Returns the native-endian serialized transaction length.
     #[must_use]
     pub const fn byte_len(self) -> u32 {
         decode_u24_le(self.len)
@@ -292,12 +290,9 @@ impl TxPosition {
     }
 }
 
-/// the query engine and the portable bundle framing apply [`positions_are_valid`],
-/// so a row the writer admits is never corrupt to an exporter.
 pub(crate) const MAX_POSITION_END_BYTES: usize = 4_000_000;
 
-/// query engine and bundle framing apply before trusting a stored row.
-pub(crate) fn positions_are_valid(positions: &[TxPosition]) -> bool {
+pub fn positions_are_valid(positions: &[TxPosition]) -> bool {
     let mut previous: Option<TxPosition> = None;
     for &position in positions {
         let Some(end) = position.end() else {
@@ -317,8 +312,6 @@ pub(crate) fn positions_are_valid(positions: &[TxPosition]) -> bool {
     true
 }
 
-/// Layout: a packed `TxPosition[n]`, `n >= 1`. Writers emit a row only for
-/// a nonempty group of positioned transactions. An empty value is corrupt
 pub struct TxPositionValue;
 
 impl TxPositionValue {
@@ -327,7 +320,6 @@ impl TxPositionValue {
         positions.as_bytes().to_vec()
     }
 
-    /// rows before using the all-or-scan safety path for other invalid positions.
     #[must_use]
     pub fn decode(value: &[u8]) -> Option<&[TxPosition]> {
         if value.is_empty() {
@@ -348,6 +340,65 @@ fn spending_prefix(txid_bytes: &[u8], vout: u32) -> HashPrefix {
     prefix.copy_from_slice(&txid_bytes[..HASH_PREFIX_LEN]);
     let value = u64::from_be_bytes(prefix).wrapping_add(u64::from(vout));
     value.to_be_bytes()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScriptHistoryOccurrence {
+    pub scripthash: ScriptHash,
+    pub txid: [u8; 32],
+    pub position: TxPosition,
+    pub flags: u8,
+}
+
+impl ScriptHistoryOccurrence {
+    pub const FUNDING: u8 = 0b01;
+    pub const SPENDING: u8 = 0b10;
+    pub const SIZE: usize = 32 + 32 + TX_POSITION_SIZE + 1;
+
+    #[must_use]
+    pub fn txid(&self) -> Txid {
+        Txid(Hash256::from_le_bytes(&self.txid))
+    }
+
+    #[must_use]
+    pub fn encode_all(entries: &[Self]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(entries.len().saturating_mul(Self::SIZE));
+        for entry in entries {
+            out.extend_from_slice(&entry.scripthash.to_byte_array());
+            out.extend_from_slice(&entry.txid);
+            out.extend_from_slice(entry.position.as_bytes());
+            out.push(entry.flags);
+        }
+        out
+    }
+
+    #[must_use]
+    pub fn decode_all(value: &[u8]) -> Option<Vec<Self>> {
+        let (chunks, remainder) = value.as_chunks::<{ Self::SIZE }>();
+        if chunks.is_empty() || !remainder.is_empty() {
+            return None;
+        }
+        chunks
+            .iter()
+            .map(|chunk| {
+                let scripthash = ScriptHash::from_byte_array(chunk[..32].try_into().ok()?);
+                let txid = chunk[32..64].try_into().ok()?;
+                let position = TxPosition::read_from_bytes(&chunk[64..70]).ok()?;
+                let flags = chunk[70];
+                let is_valid_flag = flags != 0 && (flags & !(Self::FUNDING | Self::SPENDING) == 0);
+                let is_valid_pos = position.byte_len() > 0
+                    && position.end().is_some_and(|end| {
+                        usize::try_from(end).is_ok_and(|e| e <= MAX_POSITION_END_BYTES)
+                    });
+                (is_valid_flag && is_valid_pos).then_some(Self {
+                    scripthash,
+                    txid,
+                    position,
+                    flags,
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -381,7 +432,6 @@ mod tests {
             [31, 30, 29, 28, 27, 26, 26, 23]
         );
     }
-
     #[test]
     fn script_live_row_roundtrips_outpoint() {
         let scripthash = ScriptHash::from_byte_array([7_u8; 32]);
@@ -405,5 +455,49 @@ mod tests {
             ScriptLiveRow::from_db_row(row.as_bytes().as_slice()),
             Some(row)
         );
+    }
+
+    #[test]
+    fn tx_position_orders_by_offset_before_length() {
+        let first = super::TxPosition::new(81, 10);
+        let second = super::TxPosition::new(256, 20);
+        let third = super::TxPosition::new(256, 30);
+        assert!(first < second);
+        assert!(second < third);
+    }
+
+    #[test]
+    fn occurrence_decode_rejects_corrupted_and_truncated_values() {
+        use super::{MAX_POSITION_END_BYTES, ScriptHistoryOccurrence, TxPosition};
+        use zerocopy::IntoBytes;
+        let mut bytes = vec![0u8; ScriptHistoryOccurrence::SIZE];
+        bytes[70] = ScriptHistoryOccurrence::FUNDING;
+        assert_eq!(ScriptHistoryOccurrence::decode_all(&bytes), None);
+
+        let mut overflowing = vec![0u8; ScriptHistoryOccurrence::SIZE];
+        let pos = TxPosition::new(u32::try_from(MAX_POSITION_END_BYTES).unwrap_or(0), 1);
+        overflowing[64..70].copy_from_slice(pos.as_bytes());
+        overflowing[70] = ScriptHistoryOccurrence::FUNDING;
+        assert_eq!(ScriptHistoryOccurrence::decode_all(&overflowing), None);
+
+        let truncated = vec![0u8; ScriptHistoryOccurrence::SIZE - 1];
+        assert_eq!(ScriptHistoryOccurrence::decode_all(&truncated), None);
+
+        let trailing = vec![0u8; ScriptHistoryOccurrence::SIZE + 1];
+        assert_eq!(ScriptHistoryOccurrence::decode_all(&trailing), None);
+
+        let mut zero_flags = vec![0u8; ScriptHistoryOccurrence::SIZE];
+        let valid_pos = TxPosition::new(10, 100);
+        zero_flags[64..70].copy_from_slice(valid_pos.as_bytes());
+        zero_flags[70] = 0;
+        assert_eq!(ScriptHistoryOccurrence::decode_all(&zero_flags), None);
+
+        let mut bad_flags = zero_flags.clone();
+        bad_flags[70] = 0b100;
+        assert_eq!(ScriptHistoryOccurrence::decode_all(&bad_flags), None);
+
+        let mut valid = zero_flags;
+        valid[70] = ScriptHistoryOccurrence::FUNDING | ScriptHistoryOccurrence::SPENDING;
+        assert!(ScriptHistoryOccurrence::decode_all(&valid).is_some());
     }
 }

@@ -1,5 +1,3 @@
-//! Bounded body-reader sessions, parallel preparation, and ordered batch admission.
-
 use super::BlockIdentity;
 use super::ChunkAction;
 use super::DerivedIndexWorkerError;
@@ -84,21 +82,8 @@ impl Worker {
             return Ok(ForwardLeg::Settled(ReconcileAction::Stalled));
         }
 
-        let mut state = pending.take().unwrap_or_else(|| PendingForward {
-            fence,
-            watermarks,
-            capabilities,
-            durable: watermark,
-            batch: PreparedBatch::new(self.batch_limits),
-            deadline: Instant::now() + self.batch_delay,
-        });
-        if state.durable != watermark || state.capabilities != capabilities {
-            return Err(DerivedIndexWorkerError::PendingDurableChanged);
-        }
-        let start_height = state.batch.watermark().map_or_else(
-            || watermark.map_or(0, |w| w.height.saturating_add(1)),
-            |endpoint| endpoint.height.saturating_add(1),
-        );
+        let (mut state, start_height) =
+            self.init_catch_up_state(pending, fence, watermarks, watermark, capabilities)?;
         let seed_covering = seed_lease
             .as_ref()
             .is_some_and(|lease| lease.floor().is_some_and(|floor| floor <= start_height));
@@ -115,14 +100,7 @@ impl Worker {
         };
         let from_seed = seed_covering && seed_lease.is_none();
         if start_height > target.height {
-            return Ok(ForwardLeg::Settled(
-                if self.commit_forward(state, &pass_history)?.is_some() {
-                    ReconcileAction::CaughtUp
-                } else {
-                    Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
-                    ReconcileAction::Stalled
-                },
-            ));
+            return self.commit_past_target(state, pass_history, seed_lease, from_seed);
         }
 
         let chunk_end = start_height
@@ -139,52 +117,22 @@ impl Worker {
         let mut body_reader = body_store
             .reader()
             .map_err(DerivedIndexWorkerError::Storage)?;
-        let mut requests = Vec::with_capacity(POSITION_PREFETCH_BLOCKS);
-        for identities in identities.chunks(POSITION_PREFETCH_BLOCKS) {
-            if self.runtime.should_stop() {
-                Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
-                return Ok(ForwardLeg::Settled(ReconcileAction::Stalled));
-            }
-            requests.clear();
-            requests.extend(
-                identities
-                    .iter()
-                    .map(|identity| (identity.height, Hash256::from_le_bytes(&identity.hash))),
-            );
-            body_reader
-                .prefetch_positions(&requests)
-                .map_err(DerivedIndexWorkerError::Storage)?;
-
-            let mut remaining = identities;
-            while !remaining.is_empty() {
-                match self.prepare_and_admit_chunk(
-                    &mut remaining,
-                    &mut body_reader,
-                    capabilities,
-                    &mut state,
-                    &pass_history,
-                    pending,
-                )? {
-                    ChunkAction::Continue => {}
-                    ChunkAction::Stalled => {
-                        Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
-                        return Ok(ForwardLeg::Settled(ReconcileAction::Stalled));
-                    }
-                    ChunkAction::Progressed => {
-                        return Ok(ForwardLeg::Settled(ReconcileAction::Progressed));
-                    }
-                    ChunkAction::MissingBody if state.batch.is_empty() => {
-                        Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
-                        return Ok(ForwardLeg::BodyAbsent);
-                    }
-                    ChunkAction::MissingBody => {
-                        *pending = Some(state);
-                        Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
-                        return Ok(ForwardLeg::Settled(ReconcileAction::Buffered));
-                    }
-                }
-            }
-        }
+        let scope = PrefetchScope {
+            capabilities,
+            pass_history,
+            seed_lease,
+            from_seed,
+        };
+        let (state, pass_history) = match self.process_prefetch_chunks(
+            &identities,
+            &mut body_reader,
+            state,
+            pending,
+            scope,
+        )? {
+            PrefetchOutcome::Leg(leg) => return Ok(leg),
+            PrefetchOutcome::Finished(state, history) => (*state, history),
+        };
 
         let action = self.finish_catch_up(state, chunk_end, target, &pass_history, pending)?;
         if !matches!(
@@ -207,7 +155,6 @@ impl Worker {
             *seed_lease = Some(pass_history);
         }
     }
-
     fn grant_leg_history(
         &self,
         start_height: u32,
@@ -217,87 +164,16 @@ impl Worker {
         pending: &mut Option<PendingForward>,
         seed_lease: &mut Option<HistoryLease>,
     ) -> Result<ControlFlow<ForwardLeg, HistoryLease>, DerivedIndexWorkerError> {
-        if !capabilities.contains(IndexCapability::ScriptLive) {
-            let action = match self.history.request_history(start_height) {
-                Ok(lease) => return Ok(ControlFlow::Continue(lease)),
-                Err(HistoryUnavailable::Pruned { below }) => {
-                    tracing::warn!(
-                        below,
-                        start_height,
-                        "derived index needs history the pruning authority deleted"
-                    );
-                    *pending = None;
-                    if capabilities.contains(IndexCapability::CompactFilters) {
-                        self.runtime.fail_compact_filters(
-                            &DerivedIndexWorkerError::HistoryUnavailable(
-                                HistoryUnavailable::Pruned { below },
-                            ),
-                        );
-                        ReconcileAction::Progressed
-                    } else {
-                        self.rebuild_from_pruned(capabilities, below, target)?
-                    }
-                }
-                Err(error) => {
-                    if !state.batch.is_empty() {
-                        *pending = Some(state.take(self.batch_limits));
-                    }
-                    tracing::debug!(%error, "derived index history grant deferred");
-                    ReconcileAction::Stalled
-                }
+        if capabilities.contains(IndexCapability::ScriptLive) {
+            let mut grant_state = LiveGrantState {
+                state,
+                pending,
+                seed_lease,
             };
-            return Ok(ControlFlow::Break(ForwardLeg::Settled(action)));
+            self.grant_live_history(start_height, capabilities, target, &mut grant_state)
+        } else {
+            self.grant_non_live_history(start_height, capabilities, target, state, pending)
         }
-        let mut parked = None;
-        if let Some(lease) = seed_lease.take() {
-            if lease.floor().is_some_and(|floor| floor <= start_height) {
-                return Ok(ControlFlow::Continue(lease));
-            }
-            if lease.floor().is_some() {
-                parked = Some(lease);
-            }
-        }
-        let action = match self.history.request_history(start_height) {
-            Ok(lease) => {
-                drop(parked);
-                return Ok(ControlFlow::Continue(lease));
-            }
-            Err(HistoryUnavailable::Pruned { below }) => {
-                *seed_lease = parked;
-                tracing::warn!(
-                    below,
-                    start_height,
-                    "derived index needs history the pruning authority deleted"
-                );
-                *pending = None;
-                if capabilities.contains(IndexCapability::CompactFilters) {
-                    self.runtime.fail_compact_filters(
-                        &DerivedIndexWorkerError::HistoryUnavailable(HistoryUnavailable::Pruned {
-                            below,
-                        }),
-                    );
-                    ReconcileAction::Progressed
-                } else if capabilities.contains(IndexCapability::ScriptLive) {
-                    self.runtime
-                        .fail_script_live(&DerivedIndexWorkerError::ScriptLiveHistoryPruned);
-                    if let Some(slot) = self.seed_slot.as_ref() {
-                        slot.want();
-                    }
-                    ReconcileAction::Stalled
-                } else {
-                    self.rebuild_from_pruned(capabilities, below, target)?
-                }
-            }
-            Err(error) => {
-                *seed_lease = parked;
-                if !state.batch.is_empty() {
-                    *pending = Some(state.take(self.batch_limits));
-                }
-                tracing::debug!(%error, "derived index history grant deferred");
-                ReconcileAction::Stalled
-            }
-        };
-        Ok(ControlFlow::Break(ForwardLeg::Settled(action)))
     }
 
     pub(super) fn prepare_and_admit_chunk(
@@ -331,84 +207,18 @@ impl Worker {
         let loaded = bodies.len();
         let sub_chunk = &identities[..loaded];
 
-        let needs_anchor = capabilities.contains(IndexCapability::ScriptLive)
-            || capabilities.contains(IndexCapability::CompactFilters);
-
-        let outcomes: Vec<AnchoredPreparation> = sub_chunk
-            .par_iter()
-            .zip(bodies.par_iter())
-            .map(|(identity, body)| -> AnchoredPreparation {
-                let prepare = |spent: &dyn crate::SpentCoinScripts| {
-                    self.writer.prepare_block_with_spent_scripts(
-                        capabilities,
-                        identity.height,
-                        identity.hash,
-                        body.as_slice(),
-                        spent,
-                    )
-                };
-                if !needs_anchor {
-                    return Ok(prepare(&NoSpentScripts));
-                }
-                let anchor = self.live_anchor(identity.height, identity.hash)?;
-                Ok(prepare(&anchor))
-            })
-            .collect();
-        drop(bodies);
-
-        let prepared = match outcomes.into_iter().collect::<Result<Vec<_>, _>>() {
-            Ok(prepared) => prepared,
-            Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
-                *pending = None;
-                if capabilities.contains(IndexCapability::CompactFilters) {
-                    self.runtime.fail_compact_filters(&error);
-                    return Ok(ChunkAction::Progressed);
-                }
-                self.writer
-                    .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
-                    .map_err(DerivedIndexWorkerError::Index)?;
-                state.batch = PreparedBatch::new(self.batch_limits);
-                self.runtime.fail_script_live(&error);
-                if let Some(slot) = self.seed_slot.as_ref() {
-                    slot.want();
-                }
-                tracing::warn!(error = %error, "ScriptLive unavailable after missing undo; awaiting verified seed");
-                return Ok(ChunkAction::MissingBody);
-            }
-            Err(error) => return Err(error),
-        };
+        let prepared =
+            match self.prepare_subchunk(sub_chunk, &bodies, capabilities, state, pending)? {
+                ControlFlow::Break(action) => return Ok(action),
+                ControlFlow::Continue(prepared) => prepared,
+            };
 
         if self.runtime.should_stop() {
             return Ok(ChunkAction::Stalled);
         }
 
-        for (result, identity) in prepared.into_iter().zip(sub_chunk.iter()) {
-            let prepared = result.map_err(DerivedIndexWorkerError::Index)?;
-            if identity.height > 0 && prepared.parent_hash != identity.parent_hash {
-                return Err(DerivedIndexWorkerError::MissingTargetChain {
-                    height: identity.height,
-                });
-            }
-            if state.batch.try_push(prepared).is_err() {
-                return if self
-                    .commit_forward(state.take(self.batch_limits), history)?
-                    .is_some()
-                {
-                    Ok(ChunkAction::Progressed)
-                } else {
-                    Ok(ChunkAction::Stalled)
-                };
-            }
-            if state.batch.is_full() {
-                return if self
-                    .commit_forward(state.take(self.batch_limits), history)?
-                    .is_some()
-                {
-                    Ok(ChunkAction::Progressed)
-                } else {
-                    Ok(ChunkAction::Stalled)
-                };
-            }
+        if let Some(action) = self.admit_prepared(prepared, sub_chunk, state, history)? {
+            return Ok(action);
         }
         *identities = &identities[loaded..];
         if missing_body {
@@ -470,8 +280,6 @@ impl Worker {
         Ok(durable)
     }
 
-    /// `ScriptLive` needs no anchor: it reseeds from an immutable artifact or
-    /// retained history, so the reset alone sends it through that path.
     fn rebuild_from_pruned(
         &self,
         capabilities: IndexCapabilities,
@@ -538,25 +346,28 @@ impl Worker {
 
     pub(super) fn wait_for_revision_quiet(&self, mut seen_revision: u64) -> Option<u64> {
         loop {
-            if self.runtime.should_stop() {
+            if self.shutdown.is_triggered() || self.runtime.should_stop() {
                 return None;
             }
-            match self.wake_rx.recv_timeout(self.quiet_period) {
-                Ok(()) => seen_revision = self.runtime.revision(),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+            crossbeam_channel::select! {
+                recv(self.shutdown.closed()) -> _ => return None,
+                recv(self.wake_rx) -> msg => match msg {
+                    Ok(()) => seen_revision = self.runtime.revision(),
+                    Err(_) => return None,
+                },
+                recv(crossbeam_channel::after(self.quiet_period)) -> _ => {
                     let current = self.runtime.revision();
                     if current == seen_revision {
                         return Some(current);
                     }
                     seen_revision = current;
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return None,
             }
         }
     }
 
     pub(super) fn wait_for_batch_deadline(&self, deadline: Instant) -> BatchWait {
-        if self.runtime.should_stop() {
+        if self.shutdown.is_triggered() || self.runtime.should_stop() {
             return BatchWait::Stopped;
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
@@ -565,14 +376,25 @@ impl Worker {
         if remaining.is_zero() {
             return BatchWait::Deadline;
         }
-        match self.wake_rx.recv_timeout(remaining) {
-            Ok(()) if self.runtime.should_stop() => BatchWait::Stopped,
-            Ok(()) => BatchWait::Woken,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) if self.runtime.should_stop() => {
-                BatchWait::Stopped
+        crossbeam_channel::select! {
+            recv(self.shutdown.closed()) -> _ => BatchWait::Stopped,
+            recv(self.wake_rx) -> msg => match msg {
+                Ok(()) => {
+                    if self.shutdown.is_triggered() || self.runtime.should_stop() {
+                        BatchWait::Stopped
+                    } else {
+                        BatchWait::Woken
+                    }
+                }
+                Err(_) => BatchWait::Stopped,
+            },
+            recv(crossbeam_channel::after(remaining)) -> _ => {
+                if self.shutdown.is_triggered() || self.runtime.should_stop() {
+                    BatchWait::Stopped
+                } else {
+                    BatchWait::Deadline
+                }
             }
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => BatchWait::Deadline,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => BatchWait::Stopped,
         }
     }
 }
@@ -582,4 +404,337 @@ pub(super) enum BatchWait {
     Woken,
     Deadline,
     Stopped,
+}
+struct PrefetchScope<'a> {
+    capabilities: IndexCapabilities,
+    pass_history: HistoryLease,
+    seed_lease: &'a mut Option<HistoryLease>,
+    from_seed: bool,
+}
+
+enum PrefetchOutcome {
+    Leg(ForwardLeg),
+    Finished(Box<PendingForward>, HistoryLease),
+}
+
+struct LiveGrantState<'a, 'b> {
+    state: &'a mut PendingForward,
+    pending: &'b mut Option<PendingForward>,
+    seed_lease: &'b mut Option<HistoryLease>,
+}
+
+impl Worker {
+    fn process_prefetch_chunks(
+        &self,
+        identities: &[BlockIdentity],
+        body_reader: &mut Box<dyn BlockBodyReader + '_>,
+        mut state: PendingForward,
+        pending: &mut Option<PendingForward>,
+        scope: PrefetchScope<'_>,
+    ) -> Result<PrefetchOutcome, DerivedIndexWorkerError> {
+        let mut requests = Vec::with_capacity(POSITION_PREFETCH_BLOCKS);
+        for chunk in identities.chunks(POSITION_PREFETCH_BLOCKS) {
+            if self.runtime.should_stop() {
+                Self::park_unused_seed_lease(scope.seed_lease, scope.from_seed, scope.pass_history);
+                return Ok(PrefetchOutcome::Leg(ForwardLeg::Settled(
+                    ReconcileAction::Stalled,
+                )));
+            }
+            requests.clear();
+            requests.extend(
+                chunk
+                    .iter()
+                    .map(|identity| (identity.height, Hash256::from_le_bytes(&identity.hash))),
+            );
+            body_reader
+                .prefetch_positions(&requests)
+                .map_err(DerivedIndexWorkerError::Storage)?;
+
+            let mut remaining = chunk;
+            while !remaining.is_empty() {
+                match self.prepare_and_admit_chunk(
+                    &mut remaining,
+                    body_reader,
+                    scope.capabilities,
+                    &mut state,
+                    &scope.pass_history,
+                    pending,
+                )? {
+                    ChunkAction::Continue => {}
+                    ChunkAction::Stalled => {
+                        Self::park_unused_seed_lease(
+                            scope.seed_lease,
+                            scope.from_seed,
+                            scope.pass_history,
+                        );
+                        return Ok(PrefetchOutcome::Leg(ForwardLeg::Settled(
+                            ReconcileAction::Stalled,
+                        )));
+                    }
+                    ChunkAction::Progressed => {
+                        return Ok(PrefetchOutcome::Leg(ForwardLeg::Settled(
+                            ReconcileAction::Progressed,
+                        )));
+                    }
+                    ChunkAction::MissingBody if state.batch.is_empty() => {
+                        Self::park_unused_seed_lease(
+                            scope.seed_lease,
+                            scope.from_seed,
+                            scope.pass_history,
+                        );
+                        return Ok(PrefetchOutcome::Leg(ForwardLeg::BodyAbsent));
+                    }
+                    ChunkAction::MissingBody => {
+                        *pending = Some(state);
+                        Self::park_unused_seed_lease(
+                            scope.seed_lease,
+                            scope.from_seed,
+                            scope.pass_history,
+                        );
+                        return Ok(PrefetchOutcome::Leg(ForwardLeg::Settled(
+                            ReconcileAction::Buffered,
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(PrefetchOutcome::Finished(
+            Box::new(state),
+            scope.pass_history,
+        ))
+    }
+
+    fn grant_non_live_history(
+        &self,
+        start_height: u32,
+        capabilities: IndexCapabilities,
+        target: &TipSnapshot,
+        state: &mut PendingForward,
+        pending: &mut Option<PendingForward>,
+    ) -> Result<ControlFlow<ForwardLeg, HistoryLease>, DerivedIndexWorkerError> {
+        let action = match self.history.request_history(start_height) {
+            Ok(lease) => return Ok(ControlFlow::Continue(lease)),
+            Err(HistoryUnavailable::Pruned { below }) => {
+                tracing::warn!(
+                    below,
+                    start_height,
+                    "derived index needs history the pruning authority deleted"
+                );
+                *pending = None;
+                if capabilities.contains(IndexCapability::CompactFilters) {
+                    self.runtime.fail_compact_filters(
+                        &DerivedIndexWorkerError::HistoryUnavailable(HistoryUnavailable::Pruned {
+                            below,
+                        }),
+                    );
+                    ReconcileAction::Progressed
+                } else {
+                    self.rebuild_from_pruned(capabilities, below, target)?
+                }
+            }
+            Err(error) => {
+                if !state.batch.is_empty() {
+                    *pending = Some(state.take(self.batch_limits));
+                }
+                tracing::debug!(%error, "derived index history grant deferred");
+                ReconcileAction::Stalled
+            }
+        };
+        Ok(ControlFlow::Break(ForwardLeg::Settled(action)))
+    }
+
+    fn grant_live_history(
+        &self,
+        start_height: u32,
+        capabilities: IndexCapabilities,
+        target: &TipSnapshot,
+        s: &mut LiveGrantState<'_, '_>,
+    ) -> Result<ControlFlow<ForwardLeg, HistoryLease>, DerivedIndexWorkerError> {
+        let mut parked = None;
+        if let Some(lease) = s.seed_lease.take() {
+            if lease.floor().is_some_and(|floor| floor <= start_height) {
+                return Ok(ControlFlow::Continue(lease));
+            }
+            if lease.floor().is_some() {
+                parked = Some(lease);
+            }
+        }
+        let action = match self.history.request_history(start_height) {
+            Ok(lease) => {
+                drop(parked);
+                return Ok(ControlFlow::Continue(lease));
+            }
+            Err(HistoryUnavailable::Pruned { below }) => {
+                *s.seed_lease = parked;
+                tracing::warn!(
+                    below,
+                    start_height,
+                    "derived index needs history the pruning authority deleted"
+                );
+                *s.pending = None;
+                if capabilities.contains(IndexCapability::CompactFilters) {
+                    self.runtime.fail_compact_filters(
+                        &DerivedIndexWorkerError::HistoryUnavailable(HistoryUnavailable::Pruned {
+                            below,
+                        }),
+                    );
+                    ReconcileAction::Progressed
+                } else if capabilities.contains(IndexCapability::ScriptLive) {
+                    self.runtime
+                        .fail_script_live(&DerivedIndexWorkerError::ScriptLiveHistoryPruned);
+                    if let Some(slot) = self.seed_slot.as_ref() {
+                        slot.want();
+                    }
+                    ReconcileAction::Stalled
+                } else {
+                    self.rebuild_from_pruned(capabilities, below, target)?
+                }
+            }
+            Err(error) => {
+                *s.seed_lease = parked;
+                if !s.state.batch.is_empty() {
+                    *s.pending = Some(s.state.take(self.batch_limits));
+                }
+                tracing::debug!(%error, "derived index history grant deferred");
+                ReconcileAction::Stalled
+            }
+        };
+        Ok(ControlFlow::Break(ForwardLeg::Settled(action)))
+    }
+
+    fn prepare_subchunk(
+        &self,
+        sub_chunk: &[BlockIdentity],
+        bodies: &[Vec<u8>],
+        capabilities: IndexCapabilities,
+        state: &mut PendingForward,
+        pending: &mut Option<PendingForward>,
+    ) -> Result<
+        ControlFlow<ChunkAction, Vec<Result<PreparedBlock, IndexError>>>,
+        DerivedIndexWorkerError,
+    > {
+        let needs_anchor = capabilities.contains(IndexCapability::ScriptHistory)
+            || capabilities.contains(IndexCapability::ScriptLive)
+            || capabilities.contains(IndexCapability::CompactFilters);
+
+        let outcomes: Vec<AnchoredPreparation> = sub_chunk
+            .par_iter()
+            .zip(bodies.par_iter())
+            .map(|(identity, body)| -> AnchoredPreparation {
+                let prepare = |spent: &dyn crate::SpentCoinScripts| {
+                    self.writer.prepare_block_with_spent_scripts(
+                        capabilities,
+                        identity.height,
+                        identity.hash,
+                        body.as_slice(),
+                        spent,
+                    )
+                };
+                if !needs_anchor {
+                    return Ok(prepare(&NoSpentScripts));
+                }
+                let anchor = self.live_anchor(identity.height, identity.hash)?;
+                Ok(prepare(&anchor))
+            })
+            .collect();
+
+        match outcomes.into_iter().collect::<Result<Vec<_>, _>>() {
+            Ok(prepared) => Ok(ControlFlow::Continue(prepared)),
+            Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
+                *pending = None;
+                state.batch = PreparedBatch::new(self.batch_limits);
+                if capabilities.contains(IndexCapability::CompactFilters) {
+                    self.runtime.fail_compact_filters(&error);
+                }
+                if capabilities.contains(IndexCapability::ScriptHistory) {
+                    self.runtime.fail_script_history(&error);
+                }
+                if !capabilities.contains(IndexCapability::ScriptLive) {
+                    return Ok(ControlFlow::Break(ChunkAction::Progressed));
+                }
+                self.writer
+                    .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
+                    .map_err(DerivedIndexWorkerError::Index)?;
+                self.runtime.fail_script_live(&error);
+                if let Some(slot) = self.seed_slot.as_ref() {
+                    slot.want();
+                }
+                tracing::warn!(error = %error, "ScriptLive unavailable after missing undo; awaiting verified seed");
+                Ok(ControlFlow::Break(ChunkAction::MissingBody))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn admit_prepared(
+        &self,
+        prepared: Vec<Result<PreparedBlock, IndexError>>,
+        sub_chunk: &[BlockIdentity],
+        state: &mut PendingForward,
+        history: &HistoryLease,
+    ) -> Result<Option<ChunkAction>, DerivedIndexWorkerError> {
+        for (result, identity) in prepared.into_iter().zip(sub_chunk.iter()) {
+            let prepared = result.map_err(DerivedIndexWorkerError::Index)?;
+            if identity.height > 0 && prepared.parent_hash != identity.parent_hash {
+                return Err(DerivedIndexWorkerError::MissingTargetChain {
+                    height: identity.height,
+                });
+            }
+            if state.batch.try_push(prepared).is_err() || state.batch.is_full() {
+                let action = if self
+                    .commit_forward(state.take(self.batch_limits), history)?
+                    .is_some()
+                {
+                    ChunkAction::Progressed
+                } else {
+                    ChunkAction::Stalled
+                };
+                return Ok(Some(action));
+            }
+        }
+        Ok(None)
+    }
+}
+impl Worker {
+    fn init_catch_up_state(
+        &self,
+        pending: &mut Option<PendingForward>,
+        fence: IndexWriteFence,
+        watermarks: IndexWatermarks,
+        watermark: Option<IndexWatermark>,
+        capabilities: IndexCapabilities,
+    ) -> Result<(PendingForward, u32), DerivedIndexWorkerError> {
+        let state = pending.take().unwrap_or_else(|| PendingForward {
+            fence,
+            watermarks,
+            capabilities,
+            durable: watermark,
+            batch: PreparedBatch::new(self.batch_limits),
+            deadline: Instant::now() + self.batch_delay,
+        });
+        if state.durable != watermark || state.capabilities != capabilities {
+            return Err(DerivedIndexWorkerError::PendingDurableChanged);
+        }
+        let start_height = state.batch.watermark().map_or_else(
+            || watermark.map_or(0, |w| w.height.saturating_add(1)),
+            |endpoint| endpoint.height.saturating_add(1),
+        );
+        Ok((state, start_height))
+    }
+
+    fn commit_past_target(
+        &self,
+        state: PendingForward,
+        pass_history: HistoryLease,
+        seed_lease: &mut Option<HistoryLease>,
+        from_seed: bool,
+    ) -> Result<ForwardLeg, DerivedIndexWorkerError> {
+        let action = if self.commit_forward(state, &pass_history)?.is_some() {
+            ReconcileAction::CaughtUp
+        } else {
+            Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
+            ReconcileAction::Stalled
+        };
+        Ok(ForwardLeg::Settled(action))
+    }
 }

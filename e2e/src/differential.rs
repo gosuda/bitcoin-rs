@@ -1,5 +1,3 @@
-//! The differential lane: one pinned reference process and one candidate.
-
 use std::path::Path;
 
 use bitcoin::consensus::encode::deserialize_hex;
@@ -39,12 +37,6 @@ pub fn compare_reply(observation: &str, reference: &Value, candidate: &Value) ->
     }
 }
 
-/// Compares two replies for equivalence.
-///
-/// Integral JSON numbers compare exactly, because `f64` cannot separate them
-/// above 2^53. Floats compare within one ULP: Core prints doubles with 16
-/// significant digits, so a value at the edge of that grid parses back one ULP
-/// away from ours. Everything else compares strictly.
 fn equivalent(reference: &Value, candidate: &Value) -> bool {
     if reference.is_number() && candidate.is_number() {
         if let (Some(left), Some(right)) = (integral(reference), integral(candidate)) {
@@ -72,7 +64,6 @@ fn equivalent(reference: &Value, candidate: &Value) -> bool {
     reference == candidate
 }
 
-/// Returns the exact integer an integral JSON number carries.
 fn integral(value: &Value) -> Option<i128> {
     value
         .as_i64()

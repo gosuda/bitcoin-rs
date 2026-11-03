@@ -4,7 +4,7 @@ use bitcoin_rs_primitives::BlockPayload;
 
 fn next_getheaders(
     rx: &crate::test_support::MessageReceiver,
-) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, Box<dyn std::error::Error>> {
+) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, TestError> {
     while let Ok(message) = rx.try_recv() {
         if let Message::GetHeaders(request) = message {
             return Ok(request);
@@ -13,6 +13,7 @@ fn next_getheaders(
     Err(std::io::Error::other("expected getheaders").into())
 }
 
+// P2P-06
 #[test]
 fn body_delivered_without_headers_announcement_admits_and_applies() -> TestResult {
     let (tree, blocks) = mined_chain(1, 0)?;
@@ -46,6 +47,7 @@ fn body_delivered_without_headers_announcement_admits_and_applies() -> TestResul
     Ok(())
 }
 
+// P2P-06
 #[test]
 fn body_arriving_ahead_of_its_header_chain_requests_the_gap() -> TestResult {
     let (tree, blocks) = mined_chain(1, 0)?;
@@ -452,7 +454,7 @@ fn staged_body_whose_resolved_header_is_inadmissible_is_evicted() -> TestResult 
     let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
     let source = current_source(&peers, peer);
     assert!(
-        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
+        sync.send_getdata_for_pending_blocks(source, 100, &test_frontier(&sync))
             .sent,
         "the fixture must put requested bodies in flight"
     );
@@ -814,6 +816,7 @@ fn gate_pending_body_survives_a_pending_branch_switch() -> TestResult {
     Ok(())
 }
 
+// P2P-06
 #[test]
 fn body_carried_header_does_not_consume_a_pending_getheaders() -> TestResult {
     let mut tree = BlockTree::new();
@@ -910,6 +913,7 @@ fn staged_retry_acceptance_credits_the_delivering_peer() -> TestResult {
     Ok(())
 }
 
+// P2P-03
 #[test]
 fn fork_tip_attests_its_shared_active_ancestor() -> TestResult {
     let (tree, blocks) = mined_chain(3, 0)?;
@@ -987,6 +991,7 @@ fn fork_evidence_cannot_credit_a_tainted_ancestor_height() -> TestResult {
     Ok(())
 }
 
+// P2P-03
 #[test]
 fn retained_unresolved_tips_are_deduplicated_and_capped() -> TestResult {
     let (tree, blocks) = mined_chain(10, 0)?;
@@ -1060,6 +1065,7 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> TestResult {
     Ok(())
 }
 
+// P2P-03
 #[test]
 fn delivered_tip_evidence_is_compacted_to_the_max_resolving_tip() -> TestResult {
     let mut tree = BlockTree::new();
@@ -1146,7 +1152,7 @@ type CompactGateFixture = (
     crate::test_support::MessageReceiver,
 );
 
-fn compact_gate_fixture(port: usize) -> Result<CompactGateFixture, Box<dyn std::error::Error>> {
+fn compact_gate_fixture(port: usize) -> Result<CompactGateFixture, TestError> {
     let (tree, blocks) = mined_chain(2, 0)?;
     let harness = SyncHarness::new(tree);
     let peer = test_addr(port, 0)?;
@@ -1158,7 +1164,7 @@ fn compact_gate_fixture(port: usize) -> Result<CompactGateFixture, Box<dyn std::
 fn tip_child(
     tip: &Block,
     coinbase_height: u32,
-) -> Result<bitcoin_rs_primitives::Header, Box<dyn std::error::Error>> {
+) -> Result<bitcoin_rs_primitives::Header, TestError> {
     Ok(regtest_fixture::mined_block_with_prev_hash(
         tip.block_hash(),
         3,

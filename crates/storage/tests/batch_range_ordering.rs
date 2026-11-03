@@ -6,7 +6,7 @@ use bitcoin_rs_storage::{
     BufferedWriteBatch, ColumnFamily, KvPair, KvStore, PersistFault, StorageError, WriteCondition,
 };
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+use crate::support::TestResult;
 
 const CF: ColumnFamily = ColumnFamily::UtxoMeta;
 const OTHER_CF: ColumnFamily = ColumnFamily::BlockBodies;

@@ -1,5 +1,3 @@
-//! Process-level chain transition regressions against pinned Bitcoin Core.
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 

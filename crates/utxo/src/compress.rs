@@ -1,5 +1,3 @@
-//! Compact encodings for UTXO record fields.
-
 use core::cmp::Ordering;
 
 use crate::UtxoError;
@@ -65,7 +63,6 @@ pub(crate) fn read_varint(bytes: &[u8], offset: usize) -> Result<(u64, usize), U
     Err(UtxoError::CorruptRecord)
 }
 
-/// Largest amount the compression is defined for: 21,000,000 BTC in satoshis.
 pub(crate) const MAX_COMPRESSIBLE_AMOUNT: u64 = Amount::MAX_MONEY.to_sat();
 
 #[inline]
@@ -124,7 +121,6 @@ pub(crate) fn decompress_amount(compressed: u64) -> Option<u64> {
     (value <= MAX_COMPRESSIBLE_AMOUNT).then_some(value)
 }
 
-/// Writes `value` as Bitcoin Core's subtract-one MSB VARINT into `out`.
 pub(crate) fn write_core_varint(mut value: u64, out: &mut Vec<u8>) {
     let mut buf = [0_u8; 10];
     let mut len = 0;
@@ -170,10 +166,6 @@ pub(crate) fn cmp_core_varint_key(left: u32, right: u32) -> Ordering {
     left_bytes[..left_len].cmp(&right_bytes[..right_len])
 }
 
-/// Compresses a scriptPubKey into Bitcoin Core's snapshot format.
-///
-/// Returns `None` for any other script, or for uncompressed P2PK with an invalid curve
-/// point, prompting the caller to emit raw script length + 6.
 pub(crate) fn compress_script(script: &[u8]) -> Option<(u64, &[u8])> {
     if script.len() == 25
         && script[0] == 0x76
@@ -413,18 +405,113 @@ mod tests {
         );
     }
 
+    fn proptest_config(default_cases: u32) -> ProptestConfig {
+        let cases = std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|val| val.parse().ok())
+            .unwrap_or(default_cases);
+        ProptestConfig {
+            cases,
+            ..ProptestConfig::default()
+        }
+    }
+
+    fn boundary_varint_value_strategy() -> impl Strategy<Value = u64> {
+        let mut boundaries = vec![
+            0,
+            1,
+            2,
+            126,
+            127,
+            128,
+            129,
+            16_383,
+            16_384,
+            16_511,
+            16_512,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        for shift in 1..64u32 {
+            let val = 1u64 << shift;
+            boundaries.push(val);
+            boundaries.push(val.saturating_sub(1));
+            boundaries.push(val.saturating_add(1));
+        }
+        prop_oneof![
+            2 => prop::sample::select(boundaries),
+            3 => any::<u64>(),
+        ]
+    }
+
+    fn boundary_amount_strategy() -> impl Strategy<Value = u64> {
+        const COIN: u64 = 100_000_000;
+        let mut amounts = vec![
+            0,
+            1,
+            2,
+            9,
+            10,
+            11,
+            19,
+            20,
+            99,
+            100,
+            101,
+            MAX_COMPRESSIBLE_AMOUNT,
+            MAX_COMPRESSIBLE_AMOUNT.saturating_sub(1),
+            21_000_000 * COIN,
+            50 * COIN,
+            25 * COIN,
+            1_250_000_000,
+            625_000_000,
+            312_500_000,
+        ];
+        let mut pow = 1u64;
+        while let Some(next) = pow.checked_mul(10) {
+            if pow > MAX_COMPRESSIBLE_AMOUNT {
+                break;
+            }
+            amounts.push(pow);
+            amounts.push(pow.saturating_add(1));
+            amounts.push(pow.saturating_sub(1));
+            pow = next;
+        }
+        prop_oneof![
+            2 => prop::sample::select(amounts),
+            3 => 0..=MAX_COMPRESSIBLE_AMOUNT,
+        ]
+    }
+
     proptest! {
+        #![proptest_config(proptest_config(1024))]
+
         #[test]
-        fn varint_round_trips(value in any::<u64>()) {
-            let mut buf = [0_u8; VARINT_MAX_LEN];
-            let len = write_varint(value, &mut buf);
-            let (decoded, next) = read_varint(&buf, 0).expect("decodes");
+        fn varint_round_trips(
+            value in boundary_varint_value_strategy(),
+            offset in 0_usize..=32_usize,
+            mut noise in prop::collection::vec(any::<u8>(), 48..=64),
+        ) {
+            let original_noise = noise.clone();
+            let written_end = write_varint_at(value, &mut noise, offset);
+            let expected_len = varint_len(value);
+            prop_assert_eq!(written_end, Some(offset.saturating_add(expected_len)));
+            let end = written_end.expect("buffer has capacity");
+
+            prop_assert_eq!(&noise[..offset], &original_noise[..offset]);
+            prop_assert_eq!(&noise[end..], &original_noise[end..]);
+
+            let (decoded, next) = read_varint(&noise, offset).expect("decodes");
             prop_assert_eq!(decoded, value);
-            prop_assert_eq!(next, len);
+            prop_assert_eq!(next, end);
+
+            if expected_len > 1 {
+                prop_assert!(read_varint(&noise[..end.saturating_sub(1)], offset).is_err());
+            }
         }
 
         #[test]
-        fn compressed_amounts_round_trip(value in 0..=MAX_COMPRESSIBLE_AMOUNT) {
+        fn compressed_amounts_round_trip(value in boundary_amount_strategy()) {
             let compressed = compress_amount(value).expect("in range");
             prop_assert_eq!(decompress_amount(compressed), Some(value));
         }
@@ -438,13 +525,20 @@ mod tests {
         }
 
         #[test]
-        fn compression_is_injective(
-            a in 0..=MAX_COMPRESSIBLE_AMOUNT,
-            b in 0..=MAX_COMPRESSIBLE_AMOUNT,
+        fn compressed_amounts_out_of_range_and_injective(
+            a in boundary_amount_strategy(),
+            b in boundary_amount_strategy(),
+            delta in 1u64..=1_000_000_000u64,
         ) {
-            prop_assume!(a != b);
-            let (ca, cb) = (compress_amount(a).expect("in range"), compress_amount(b).expect("in range"));
-            prop_assert_ne!(ca, cb);
+            let out_of_range = MAX_COMPRESSIBLE_AMOUNT.saturating_add(delta);
+            prop_assert!(compress_amount(out_of_range).is_err());
+            prop_assert!(compress_amount(u64::MAX).is_err());
+
+            if a != b {
+                let ca = compress_amount(a).expect("in range");
+                let cb = compress_amount(b).expect("in range");
+                prop_assert_ne!(ca, cb);
+            }
         }
     }
 }

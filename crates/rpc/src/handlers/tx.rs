@@ -4,13 +4,14 @@ use hashbrown::HashSet;
 
 use bitcoin::consensus::encode::serialize as bitcoin_serialize;
 use bitcoin::hashes::Hash as _;
-use bitcoin::hex::{DisplayHex as _, FromHex as _};
+use bitcoin::hex::DisplayHex as _;
 use bitcoin::merkle_tree::MerkleBlock;
 use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
 use bitcoin_rs_mempool::{LocalOrigin, SubmitError};
 use bitcoin_rs_primitives::{
-    Amount, Block as NativeBlock, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, consensus_bytes, deserialize as native_deserialize, unix_time_secs,
+    Amount, Block as NativeBlock, Hash256, Header as NativeHeader, LockTime, OutPoint, Script,
+    Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize as native_deserialize,
+    unix_time_secs,
 };
 use bitcoin_rs_script::{opcode, push_data};
 use miniscript::psbt::PsbtExt as _;
@@ -19,27 +20,27 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, 
 use crate::context::{AppliedView, Context};
 use crate::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::error::RpcError;
-use crate::handlers::{optional_bool, params_array, parse_txid, required_str, required_u64};
+use crate::handlers::{
+    optional_bool, params_array, parse_txid, required_str, required_u64, wrong_type,
+    wrong_type_plain,
+};
 use bitcoin_rs_index::block_log::BlockRecord;
 use corepc_types::v31;
 
 pub(crate) mod submit_package;
 
-/// A non-hex string is a correctly typed but unacceptable value, so it
-/// answers Bitcoin Core's `RPC_INVALID_PARAMETER` (-8) class.
 fn hex_decode(hex: &str) -> Result<Vec<u8>, RpcError> {
-    Vec::<u8>::from_hex(hex).map_err(|error| match error {
-        bitcoin::hex::HexToBytesError::OddLengthString(_) => {
+    bitcoin_rs_primitives::hex::hex_decode(hex).map_err(|error| match error {
+        bitcoin_rs_primitives::hex::HexError::OddLength => {
             RpcError::InvalidParameter("hex string must have even length".to_owned())
         }
-        bitcoin::hex::HexToBytesError::InvalidChar(_) => {
+        bitcoin_rs_primitives::hex::HexError::InvalidDigit { .. }
+        | bitcoin_rs_primitives::hex::HexError::WrongLength { .. } => {
             RpcError::InvalidParameter("invalid hex character".to_owned())
         }
     })
 }
 
-/// Builds Bitcoin Core 31.1's `-8` message for a malformed block-hash
-/// parameter.
 fn block_hash_param_error(value: &str, label: &str) -> RpcError {
     if value.len() != 64 {
         return RpcError::InvalidParameter(format!(
@@ -133,13 +134,22 @@ fn raw_transaction_verbosity(params: &Value) -> Result<u64, RpcError> {
     if let Some(verbose) = value.as_bool() {
         return Ok(u64::from(verbose));
     }
-    match value.as_u64() {
-        Some(verbosity @ 0..=2) => Ok(verbosity),
-        Some(_) => Err(RpcError::InvalidParams("verbosity must be 0, 1, or 2")),
-        None => Err(RpcError::InvalidType(
-            "verbosity must be a boolean or integer".to_owned(),
-        )),
+    if let Some(verbosity) = value.as_i64() {
+        let Ok(verbosity) = i32::try_from(verbosity) else {
+            return Err(RpcError::Misc("JSON integer out of range".to_owned()));
+        };
+        return Ok(match verbosity {
+            ..=0 => 0,
+            1 => 1,
+            _ => 2,
+        });
     }
+    if value.is_number() {
+        return Err(RpcError::Misc("JSON integer out of range".to_owned()));
+    }
+    Err(RpcError::InvalidType(
+        "verbosity must be a boolean or integer".to_owned(),
+    ))
 }
 
 fn load_block(ctx: &Context, record: &BlockRecord) -> Result<NativeBlock, RpcError> {
@@ -280,143 +290,183 @@ fn txout_typed(
     })
 }
 
-pub(crate) fn gettxoutproof(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn gettxoutproof(
+    ctx: &Arc<Context>,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
     let array = params_array(params)?;
-    let txids_value = array
-        .first()
-        .and_then(|value| value.as_array())
-        .ok_or(RpcError::InvalidParams("txids must be an array"))?;
+    let Some(txids_value) = array.first() else {
+        return Err(RpcError::InvalidParams("txids must be an array"));
+    };
+    let Some(txids_value) = txids_value.as_array() else {
+        return Err(wrong_type(1, "txids", txids_value, "array"));
+    };
     if txids_value.is_empty() {
-        return Err(RpcError::InvalidParams("txids are required"));
+        return Err(RpcError::InvalidParameter(
+            "Parameter 'txids' cannot be empty".to_owned(),
+        ));
     }
 
     let mut wanted = hashbrown::HashSet::new();
-    for value in txids_value {
-        let Some(txid) = value.as_str() else {
-            return Err(RpcError::InvalidType(
-                "each txid must be a string".to_owned(),
-            ));
+    for value in txids_value.iter() {
+        let Some(txid_str) = value.as_str() else {
+            return Err(wrong_type_plain(value, "string"));
         };
-        wanted.insert(parse_txid(txid, "txid")?);
+        let txid = parse_txid(txid_str, "txid")?;
+        if !wanted.insert(txid) {
+            return Err(RpcError::InvalidParameter(format!(
+                "Invalid parameter, duplicated txid: {txid_str}"
+            )));
+        }
     }
 
-    if let Some(hash_str) = array.get(1).and_then(JsonValueTrait::as_str) {
+    if let Some(blockhash) = array.get(1).filter(|value| !value.is_null()) {
+        let Some(hash_str) = blockhash.as_str() else {
+            return Err(wrong_type(2, "blockhash", blockhash, "string"));
+        };
         let hash = Hash256::from_str(hash_str)
             .map_err(|_| block_hash_param_error(hash_str, "blockhash"))?;
         let Some(record) = ctx.chain.block_by_hash(hash) else {
-            return Err(RpcError::NotFound("block not found"));
+            return Err(RpcError::InvalidAddressOrKey("Block not found".to_owned()));
         };
-        return proof_from_single_record(ctx, &record, &wanted);
+        return proof_from_single_record(ctx, &record, &wanted, cancellation);
     }
 
-    if let Some(proof) = proof_via_index(ctx, &wanted) {
-        return Ok(proof);
+    let mut ordered: Vec<Txid> = wanted.iter().copied().collect();
+    ordered.sort_unstable();
+    if let Some(record) = ctx
+        .chain
+        .with_stable_chainstate(|| block_from_utxo(ctx, &ordered, cancellation))?
+    {
+        return proof_from_single_record(ctx, &record, &wanted, cancellation);
     }
-    proof_from_block_log(ctx, &wanted)
+    if txindex_usable(ctx)
+        && let Some(record) = block_via_index(ctx, ordered.first(), cancellation)?
+    {
+        return proof_from_single_record(ctx, &record, &wanted, cancellation);
+    }
+    Err(RpcError::InvalidAddressOrKey(
+        "Transaction not yet in block".to_owned(),
+    ))
 }
 
-fn proof_via_index(ctx: &Arc<Context>, wanted: &hashbrown::HashSet<Txid>) -> Option<Value> {
-    let derived_index = ctx.indexes.derived_index.as_ref()?;
-    for probe in wanted {
-        let height = match derived_index.transaction_height(probe) {
-            Ok(Some(height)) => height,
-            Ok(None) => continue,
-            Err(error) => {
-                tracing::warn!(
-                    txid = %probe,
-                    %error,
-                    "txindex lookup failed; answering from the block scan instead"
-                );
-                return None;
-            }
-        };
-        let Some(record) = ctx.chain.block_by_height(height) else {
+const MAX_OUTPUTS_PER_BLOCK: u32 = 111_111;
+
+fn block_from_utxo(
+    ctx: &Arc<Context>,
+    ordered: &[Txid],
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Option<BlockRecord>, RpcError> {
+    for txid in ordered {
+        if cancellation.is_triggered() {
+            return Err(proof_interrupted());
+        }
+        if !ctx
+            .chain
+            .utxo
+            .has_live_outputs_for_txid(&Hash256::from(*txid))
+        {
             continue;
-        };
-        if let Some(proof) = proof_from_record(ctx, &record, wanted) {
-            return Some(proof);
+        }
+        for vout in 0..MAX_OUTPUTS_PER_BLOCK {
+            let Some(coin) = ctx.chain.utxo.get_entry(&OutPoint::new(*txid, vout)) else {
+                continue;
+            };
+            return Ok(ctx.chain.block_by_height(coin.height));
         }
     }
-    None
+    Ok(None)
+}
+
+fn block_via_index(
+    ctx: &Arc<Context>,
+    txid: Option<&Txid>,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Option<BlockRecord>, RpcError> {
+    let Some(txid) = txid else {
+        return Ok(None);
+    };
+    if cancellation.is_triggered() {
+        return Err(proof_interrupted());
+    }
+    let Some(derived_index) = ctx.indexes.derived_index.as_ref() else {
+        return Ok(None);
+    };
+    match derived_index.transaction_height(txid) {
+        Ok(Some(height)) => ctx
+            .chain
+            .block_by_height(height)
+            .map(Some)
+            .ok_or_else(|| RpcError::CoreInternal("Transaction index corrupt".to_owned())),
+        Ok(None) => Ok(None),
+        Err(error) => {
+            tracing::warn!(
+                txid = %txid,
+                %error,
+                "txindex lookup failed; gettxoutproof cannot answer"
+            );
+            Err(error.into())
+        }
+    }
+}
+
+fn txindex_usable(ctx: &Context) -> bool {
+    if ctx.indexes.derived_index.is_none() {
+        return false;
+    }
+    ctx.indexes
+        .derived_index_status
+        .as_deref()
+        .is_none_or(|source| {
+            let capability = source.capability();
+            capability.enabled && capability.state == bitcoin_rs_index::CapabilityState::Ready
+        })
+}
+
+fn proof_interrupted() -> RpcError {
+    RpcError::Misc("gettxoutproof interrupted".to_owned())
 }
 
 fn proof_from_single_record(
     ctx: &Arc<Context>,
     record: &bitcoin_rs_index::block_log::BlockRecord,
     wanted: &hashbrown::HashSet<Txid>,
+    cancellation: &bitcoin_rs_chain::LatchReader,
 ) -> Result<Value, RpcError> {
+    if cancellation.is_triggered() {
+        return Err(proof_interrupted());
+    }
     let Some(bytes) = ctx.chain.block_body_bytes(record) else {
-        return Err(RpcError::NotFound("block data pruned"));
+        return Err(RpcError::Misc(block_unavailable_error(ctx)));
     };
     proof_from_body(&bytes, wanted)
-        .ok_or(RpcError::NotFound("no block contains all requested txids"))
 }
 
-fn proof_from_block_log(
-    ctx: &Arc<Context>,
-    wanted: &hashbrown::HashSet<Txid>,
-) -> Result<Value, RpcError> {
-    let len = ctx.chain.blocks.read().len();
-    let mut saw_pruned_block = false;
-    let mut records_scanned: u64 = 0;
-    let mut body_bytes_scanned: u64 = 0;
-    for index in 0..len {
-        let Some(record) = ctx.chain.blocks.read().get(index).cloned() else {
-            break;
-        };
-        records_scanned += 1;
-        let Some(bytes) = ctx.chain.block_body_bytes(&record) else {
-            saw_pruned_block = true;
-            continue;
-        };
-        body_bytes_scanned =
-            body_bytes_scanned.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-        if let Some(proof) = proof_from_body(&bytes, wanted) {
-            tracing::debug!(
-                records_scanned,
-                body_bytes_scanned,
-                found = true,
-                "gettxoutproof fallback scan"
-            );
-            return Ok(proof);
-        }
-    }
-    tracing::debug!(
-        records_scanned,
-        body_bytes_scanned,
-        found = false,
-        saw_pruned_block,
-        "gettxoutproof fallback scan"
-    );
-
-    if saw_pruned_block {
-        Err(RpcError::NotFound("block data pruned"))
+fn block_unavailable_error(ctx: &Context) -> String {
+    if ctx.chain.prune_status().pruned {
+        "Block not available (pruned data)".to_owned()
     } else {
-        Err(RpcError::NotFound("no block contains all requested txids"))
+        "Block not available (not fully downloaded)".to_owned()
     }
 }
 
-fn proof_from_record(
-    ctx: &Arc<Context>,
-    record: &bitcoin_rs_index::block_log::BlockRecord,
-    wanted: &hashbrown::HashSet<Txid>,
-) -> Option<Value> {
-    let bytes = ctx.chain.block_body_bytes(record)?;
-    proof_from_body(&bytes, wanted)
-}
-
-fn proof_from_body(bytes: &[u8], wanted: &hashbrown::HashSet<Txid>) -> Option<Value> {
-    let block = native_deserialize::<NativeBlock>(bytes).ok()?;
+fn proof_from_body(bytes: &[u8], wanted: &hashbrown::HashSet<Txid>) -> Result<Value, RpcError> {
+    let block = native_deserialize::<NativeBlock>(bytes)
+        .map_err(|_| RpcError::CoreInternal("Can't read block from disk".to_owned()))?;
     let block_txids = block
         .txs
         .iter()
         .map(Tx::txid)
         .collect::<hashbrown::HashSet<Txid>>();
     if !wanted.iter().all(|txid| block_txids.contains(txid)) {
-        return None;
+        return Err(RpcError::InvalidAddressOrKey(
+            "Not all transactions found in specified or retrieved block".to_owned(),
+        ));
     }
 
-    let bitcoin_block = bitcoin::consensus::encode::deserialize::<bitcoin::Block>(bytes).ok()?;
+    let bitcoin_block = bitcoin::consensus::encode::deserialize::<bitcoin::Block>(bytes)
+        .map_err(|_| RpcError::CoreInternal("Can't read block from disk".to_owned()))?;
     let bitcoin_wanted: hashbrown::HashSet<bitcoin::Txid> = wanted
         .iter()
         .map(|txid| bitcoin::Txid::from_byte_array(*txid.as_bytes()))
@@ -424,12 +474,12 @@ fn proof_from_body(bytes: &[u8], wanted: &hashbrown::HashSet<Txid>) -> Option<Va
     let merkle_block = MerkleBlock::from_block_with_predicate(&bitcoin_block, |txid| {
         bitcoin_wanted.contains(txid)
     });
-    Some(json!(
+    Ok(json!(
         bitcoin_serialize(&merkle_block).to_lower_hex_string()
     ))
 }
 
-pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn verifytxoutproof(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let proof_hex = required_str(params, 0, "proof is required")?;
 
     let bytes = hex_decode(proof_hex)?;
@@ -446,6 +496,26 @@ pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Va
         return typed_to_sonic(&v31::VerifyTxOutProof(Vec::new()));
     }
 
+    let header_bytes = bitcoin_serialize(&merkle_block.header);
+    let Ok(native_header) = native_deserialize::<NativeHeader>(&header_bytes) else {
+        return typed_to_sonic(&v31::VerifyTxOutProof(Vec::new()));
+    };
+    let header_hash = Hash256::from(native_header.compute_hash());
+    let Some(record) = ctx.chain.block_by_hash(header_hash) else {
+        return Err(RpcError::InvalidAddressOrKey(
+            "Block not found in chain".to_owned(),
+        ));
+    };
+    if ctx.chain.block_hash_at_height(record.height) != Some(header_hash) {
+        return Err(RpcError::InvalidAddressOrKey(
+            "Block not found in chain".to_owned(),
+        ));
+    }
+    let proof_tx_count = usize::try_from(merkle_block.txn.num_transactions()).unwrap_or(0);
+    if record.tx_count == 0 || record.tx_count != proof_tx_count {
+        return typed_to_sonic(&v31::VerifyTxOutProof(Vec::new()));
+    }
+
     let result = matched_txids
         .iter()
         .map(ToString::to_string)
@@ -453,13 +523,9 @@ pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Va
     typed_to_sonic(&v31::VerifyTxOutProof(result))
 }
 
-/// Fee rate above which `sendrawtransaction` refuses by default, in sat/kvB.
-/// Bitcoin Core's `DEFAULT_MAX_RAW_TX_FEE_RATE`, `COIN / 10` — 0.1 BTC per kvB.
 use crate::context::DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB;
 
 pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, &["hexstring", "maxfeerate", "maxburnamount"])?;
-    let params = bound.as_ref();
     super::ensure_at_most_params(params, 3)?;
     let raw = required_str(params, 0, "raw transaction is required")?;
     let max_feerate = send_max_feerate(params, 1)?;
@@ -519,6 +585,7 @@ enum AcceptanceRow {
 }
 
 pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    super::ensure_at_most_params(params, 2)?;
     let array = params_array(params)?;
     let raw_txs = array
         .first()
@@ -576,16 +643,27 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
             vsize: allowed.then(|| i64::from(fact.vsize)),
             fees,
             reject_reason: fact.reject_reason.map(reject_reason_to_frozen_string),
-            reject_details: None,
+            reject_details: fact
+                .reject_reason
+                .as_ref()
+                .and_then(|reason| oversize_reject_string(reason))
+                .map(str::to_owned),
         }));
     }
     typed_to_sonic_omitting_nulls(&rows)
 }
 
-pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, &["hexstring"])?;
-    let params = bound.as_ref();
+pub(crate) fn decoderawtransaction(
+    ctx: &Arc<Context>,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
     let raw = required_str(params, 0, "raw transaction is required")?;
+    if cancellation.is_triggered() {
+        return Err(RpcError::Misc(
+            "transaction decode request cancelled; retry".to_owned(),
+        ));
+    }
     let tx = decode_tx(raw, "TX decode failed".to_owned())?;
     let mut value = crate::tx_render::transaction_json(&tx, ctx.chain.chain_network, None);
     if let Some(object) = value.as_object_mut() {
@@ -594,8 +672,6 @@ pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
     Ok(value)
 }
 
-/// with one warning each. Disabled (`-32603`) unless the node started
-/// with `--compressed-transactions`.
 pub(crate) fn compressrawtransaction(
     ctx: &Arc<Context>,
     params: &Value,
@@ -606,8 +682,6 @@ pub(crate) fn compressrawtransaction(
             "compressrawtransaction is disabled; enable --compressed-transactions",
         ));
     }
-    let bound = super::bind_named_params(params, &["hexstring", "compress_outpoints"])?;
-    let params = bound.as_ref();
     let raw = required_str(params, 0, "raw transaction is required")?;
     if raw.len() > crate::compressed_tx::MAX_COMPRESSED_TX_BYTES * 2 {
         return Err(RpcError::InvalidParameter(
@@ -637,8 +711,6 @@ pub(crate) fn compressrawtransaction(
     })
 }
 
-/// Disabled (`-32603`) unless the node started with
-/// `--compressed-transactions`.
 pub(crate) fn decompressrawtransaction(
     ctx: &Arc<Context>,
     params: &Value,
@@ -649,8 +721,6 @@ pub(crate) fn decompressrawtransaction(
             "decompressrawtransaction is disabled; enable --compressed-transactions",
         ));
     }
-    let bound = super::bind_named_params(params, &["hexstring"])?;
-    let params = bound.as_ref();
     let raw = required_str(params, 0, "compressed transaction is required")?;
     if raw.len() > crate::compressed_tx::MAX_COMPRESSED_TX_BYTES * 2 {
         return Err(RpcError::InvalidParameter(
@@ -677,12 +747,10 @@ pub(crate) fn decompressrawtransaction(
     })
 }
 
-const CREATE_TRANSACTION_ARGUMENTS: &[&str] = &["inputs", "outputs", "locktime", "replaceable"];
+const CREATE_TRANSACTION_MAX_ARGUMENTS: usize = 4;
 
 pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, CREATE_TRANSACTION_ARGUMENTS)?;
-    let params = bound.as_ref();
-    super::ensure_at_most_params(params, CREATE_TRANSACTION_ARGUMENTS.len())?;
+    super::ensure_at_most_params(params, CREATE_TRANSACTION_MAX_ARGUMENTS)?;
     let array = params_array(params)?;
     let inputs = array
         .first()
@@ -710,6 +778,21 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
         0xFFFF_FFFF
     };
 
+    let tx_inputs = parse_create_tx_inputs(inputs, default_sequence)?;
+    let network = convert::bitcoin_network(ctx.chain.chain_network);
+    let tx_outputs = parse_create_tx_outputs(outputs, network)?;
+    let tx = Tx {
+        version: 2,
+        lock_time: LockTime::from_consensus(locktime),
+        inputs: tx_inputs,
+        outputs: tx_outputs,
+    };
+    typed_to_sonic(&v31::CreateRawTransaction(
+        consensus_bytes(&tx).to_lower_hex_string(),
+    ))
+}
+
+fn parse_create_tx_inputs(inputs: &[Value], default_sequence: u32) -> Result<Vec<TxIn>, RpcError> {
     let mut tx_inputs = Vec::with_capacity(inputs.len());
     let mut seen = HashSet::new();
     for input in inputs {
@@ -748,8 +831,13 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
             witness: Witness::new(),
         });
     }
+    Ok(tx_inputs)
+}
 
-    let network = convert::bitcoin_network(ctx.chain.chain_network);
+fn parse_create_tx_outputs(
+    outputs: &sonic_rs::Object,
+    network: bitcoin::Network,
+) -> Result<Vec<TxOut>, RpcError> {
     let mut tx_outputs = Vec::with_capacity(outputs.len());
     for (key, value) in outputs {
         if key == "data" {
@@ -775,29 +863,24 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
             script_pubkey: Script::from_bytes(address.script_pubkey().as_bytes().to_vec()),
         });
     }
-
-    let tx = Tx {
-        version: 2,
-        lock_time: LockTime::from_consensus(locktime),
-        inputs: tx_inputs,
-        outputs: tx_outputs,
-    };
-    typed_to_sonic(&v31::CreateRawTransaction(
-        consensus_bytes(&tx).to_lower_hex_string(),
-    ))
+    Ok(tx_outputs)
 }
 
-/// Deserialize a raw transaction hex string, reporting failures as Core's
-/// `RPC_DESERIALIZATION_ERROR` (-22) with the method-specific message.
 fn decode_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
     let bytes = hex_decode(raw).map_err(|_| RpcError::Deserialization(message.clone()))?;
     native_deserialize(&bytes).map_err(|_| RpcError::Deserialization(message))
 }
 
-/// Converts a BTC-denominated JSON value (number or string) to satoshis using exact
-/// decimal parsing, expanding e/E notation without floating point arithmetic and
-/// rejecting signs other than optional positive, non-digits, more than 8 fractional
-/// decimals, fractional satoshis, and overflow.
+const MAX_BROADCAST_HEX_CHARS: u64 = 2 * bitcoin_rs_mempool::standardness::MAX_STANDARD_TX_WEIGHT;
+const BROADCAST_HEX_LIMIT_ERROR: &str = "transaction hex exceeds the broadcast size limit";
+
+pub(crate) fn check_broadcast_hex_len(raw: &str) -> Result<(), &'static str> {
+    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > MAX_BROADCAST_HEX_CHARS {
+        return Err(BROADCAST_HEX_LIMIT_ERROR);
+    }
+    Ok(())
+}
+
 fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> {
     let text = if let Some(text) = value.as_str() {
         text.to_owned()
@@ -931,8 +1014,6 @@ fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> 
     Ok(sats)
 }
 
-/// `sendrawtransaction`'s fee argument: Core's `maxfeerate` amount, or the
-/// one pre-0.19 `allowhighfees` value that btcd's RPC client still emits.
 fn send_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, RpcError> {
     let legacy_default = params_array(params)?
         .get(index)
@@ -986,17 +1067,29 @@ fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
     sats_from_btc(value, "Invalid amount")
 }
 
-/// `MaxFeeExceeded` is a parameter error (`-32602`), pinned by the policy-contract
-/// integration test.
-///
-/// All other admission rejections are transaction rejections (`-26`), matching Bitcoin
-/// Core's `RPC_VERIFY_REJECTED` code. Both typed cluster-limit failures map to Core's
-/// public `too-large-cluster` reason.
+const CORE_TX_SIZE_REJECT: &str = "tx-size";
+const CORE_TX_OVERSIZE_REJECT: &str = "bad-txns-oversize";
+
+fn oversize_reject_string(reason: &AcceptanceRejectReason) -> Option<&'static str> {
+    match reason {
+        AcceptanceRejectReason::NonStandard(
+            bitcoin_rs_mempool::standardness::StandardnessError::Weight,
+        ) => Some(CORE_TX_SIZE_REJECT),
+        AcceptanceRejectReason::NonStandard(
+            bitcoin_rs_mempool::standardness::StandardnessError::Oversize,
+        ) => Some(CORE_TX_OVERSIZE_REJECT),
+        _ => None,
+    }
+}
+
 pub(crate) fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcError {
     match reason {
         AcceptanceRejectReason::MaxFeeExceeded => RpcError::InvalidParams("max-fee-exceeded"),
         AcceptanceRejectReason::MissingInputs => {
             RpcError::TxVerifyError("bad-txns-inputs-missingorspent".to_owned())
+        }
+        ref oversize if let Some(reject) = oversize_reject_string(oversize) => {
+            RpcError::TxRejected(reject.to_owned())
         }
         other => RpcError::TxRejected(reject_reason_to_frozen_string(other)),
     }
@@ -1010,14 +1103,13 @@ fn submit_error_to_rpc_error(error: SubmitError) -> RpcError {
     }
 }
 
-/// Cluster count and weight failures share Core's `too-large-cluster` reason;
-/// other variants use the mempool owner's public policy reason.
 fn reject_reason_to_frozen_string(reason: AcceptanceRejectReason) -> String {
     match reason {
         AcceptanceRejectReason::PackageLimit(
             bitcoin_rs_mempool::PolicyError::ClusterCountLimit
             | bitcoin_rs_mempool::PolicyError::ClusterSizeLimit,
         ) => "too-large-cluster".to_owned(),
+        ref oversize if let Some(reject) = oversize_reject_string(oversize) => reject.to_owned(),
         other => other.to_string(),
     }
 }

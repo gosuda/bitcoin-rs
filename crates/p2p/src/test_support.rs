@@ -26,7 +26,57 @@ impl<T> OrFail<T> for Option<T> {
     }
 }
 
-pub(crate) type TestResult = Result<(), Box<dyn std::error::Error>>;
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TestError {
+    #[error(transparent)]
+    TryFromInt(#[from] std::num::TryFromIntError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Peer(#[from] crate::PeerError),
+    #[error(transparent)]
+    Listener(#[from] crate::listener::ListenerError),
+    #[error(transparent)]
+    Chain(#[from] bitcoin_rs_chain::ChainError),
+    #[error(transparent)]
+    Primitives(#[from] bitcoin_rs_primitives::DecodeError),
+    #[error(transparent)]
+    Consensus(#[from] bitcoin::consensus::encode::Error),
+    #[error(transparent)]
+    Recv(#[from] crossbeam_channel::RecvError),
+    #[error(transparent)]
+    RecvTimeout(#[from] crossbeam_channel::RecvTimeoutError),
+    #[error(transparent)]
+    TryRecv(#[from] crossbeam_channel::TryRecvError),
+    #[error("channel send failed")]
+    ChannelSend,
+    #[error(transparent)]
+    RegtestFixture(#[from] bitcoin_rs_chain::regtest_fixture::RegtestFixtureError),
+    #[error("commit failed: {0}")]
+    Commit(String),
+    #[error("unexpected: {0}")]
+    Unexpected(String),
+    #[error("liveness failed: {0}")]
+    Liveness(String),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+    #[error("panic: {0}")]
+    Panicked(&'static str),
+}
+
+impl From<&'static str> for TestError {
+    fn from(msg: &'static str) -> Self {
+        Self::Missing(msg)
+    }
+}
+
+impl<T> From<crossbeam_channel::SendError<T>> for TestError {
+    fn from(_: crossbeam_channel::SendError<T>) -> Self {
+        Self::ChannelSend
+    }
+}
+
+pub(crate) type TestResult = Result<(), TestError>;
 
 pub(crate) trait QueuedMessages {
     fn try_message(&self) -> Result<crate::Message, crossbeam_channel::TryRecvError>;
@@ -177,7 +227,7 @@ pub(crate) fn synthetic_peer(addr: PeerRemote, start_height: i32) -> PeerInfo {
 pub(crate) fn test_addr(
     base_port: usize,
     idx: usize,
-) -> Result<PeerRemote, Box<dyn std::error::Error>> {
+) -> Result<PeerRemote, std::num::TryFromIntError> {
     Ok(PeerRemote::Endpoint(crate::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         u16::try_from(base_port + idx)?,

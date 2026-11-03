@@ -18,11 +18,10 @@ pub fn spawn_tx_ingress_consumer(
     state: &NodeState,
     gateway: Arc<MempoolGateway>,
     mining_control: Arc<dyn MiningControl>,
-    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+    shutdown: bitcoin_rs_chain::LatchReader,
     tx_rx: Receiver<bitcoin_rs_p2p::InboundBody>,
     relay: TxRelayQueue,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    let shutdown = shutdown.into();
     let chainstate = state.chainstate();
     let consumer = TxIngressConsumer {
         utxo: chainstate.utxo_reader(),
@@ -36,22 +35,33 @@ pub fn spawn_tx_ingress_consumer(
     };
     std::thread::Builder::new()
         .name("bitcoin-rs-tx-ingress".to_owned())
-        .spawn(move || {
-            while !shutdown.load() {
-                let made_progress = consumer.process_retries();
-                let timeout = if made_progress {
-                    Duration::ZERO
-                } else {
-                    TX_INGRESS_POLL
-                };
-                let recv = tx_rx.recv_timeout(timeout);
-                match recv {
-                    Ok(body) => consumer.process_body(body),
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                }
+        .spawn(move || run_consumer_loop(&consumer, &shutdown, &tx_rx))
+}
+
+fn run_consumer_loop(
+    consumer: &TxIngressConsumer,
+    shutdown: &bitcoin_rs_chain::LatchReader,
+    tx_rx: &Receiver<bitcoin_rs_p2p::InboundBody>,
+) {
+    while !shutdown.is_triggered() {
+        let made_progress = consumer.process_retries();
+        if made_progress {
+            match tx_rx.try_recv() {
+                Ok(body) => consumer.process_body(body),
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
             }
-        })
+        } else {
+            crossbeam_channel::select! {
+                recv(tx_rx) -> recv => match recv {
+                    Ok(body) => consumer.process_body(body),
+                    Err(_) => break,
+                },
+                recv(shutdown.closed()) -> _ => break,
+                recv(crossbeam_channel::after(TX_INGRESS_POLL)) -> _ => {}
+            }
+        }
+    }
 }
 
 struct TxIngressConsumer {
@@ -165,7 +175,7 @@ impl TxIngressConsumer {
         );
         self.peer_table
             .transaction_response_completed(inbound.source, txid, wtxid);
-        if self.dispatch_outcome(txid, wtxid, source, outcome, true) {
+        if self.dispatch_inbound_outcome(txid, wtxid, source, outcome) {
             self.peer_table.note_useful_transaction(inbound.source);
         }
         self.peer_table
@@ -185,18 +195,70 @@ impl TxIngressConsumer {
             .iter()
             .any(|retry| matches!(retry.result, Ok(SubmitOutcome::Committed(_))));
         for retry in retries {
-            self.dispatch_outcome(retry.txid, retry.wtxid, retry.source, retry.result, false);
+            self.dispatch_retry_outcome(retry.txid, retry.wtxid, retry.source, retry.result);
         }
         made_progress
     }
 
-    fn dispatch_outcome(
+    fn dispatch_inbound_outcome(
         &self,
         txid: Txid,
         wtxid: Wtxid,
         source: PeerToken,
         outcome: Result<SubmitOutcome, SubmitError>,
-        allow_package_request: bool,
+    ) -> bool {
+        match outcome {
+            Ok(SubmitOutcome::Held { missing_parents }) => {
+                let package_requested = self.peer_table.package_relay_versions(source)
+                    & bitcoin_rs_p2p::packages::PKG_RELAY_ANC
+                    != 0
+                    && bitcoin_rs_p2p::inv::request_package_info(
+                        &self.peer_table,
+                        source,
+                        wtxid,
+                        &missing_parents,
+                    );
+                if !package_requested && !self.peer_table.has_live_package_solicitation(wtxid) {
+                    bitcoin_rs_p2p::request_missing_parents(
+                        &self.peer_table,
+                        source,
+                        &missing_parents,
+                    );
+                }
+                false
+            }
+            other => self.dispatch_common_outcome(txid, wtxid, source, other),
+        }
+    }
+
+    fn dispatch_retry_outcome(
+        &self,
+        txid: Txid,
+        wtxid: Wtxid,
+        source: PeerToken,
+        outcome: Result<SubmitOutcome, SubmitError>,
+    ) -> bool {
+        match outcome {
+            Ok(SubmitOutcome::Held { missing_parents }) => {
+                if !self.peer_table.has_live_package_solicitation(wtxid) {
+                    bitcoin_rs_p2p::request_missing_parents(
+                        &self.peer_table,
+                        source,
+                        &missing_parents,
+                    );
+                }
+                false
+            }
+            other => self.dispatch_common_outcome(txid, wtxid, source, other),
+        }
+    }
+
+    fn dispatch_common_outcome(
+        &self,
+        txid: Txid,
+        wtxid: Wtxid,
+        source: PeerToken,
+        outcome: Result<SubmitOutcome, SubmitError>,
     ) -> bool {
         match outcome {
             Ok(SubmitOutcome::Committed(result)) => {
@@ -216,31 +278,11 @@ impl TxIngressConsumer {
                 }
                 true
             }
-            Ok(SubmitOutcome::Held { missing_parents }) => {
-                let package_requested = allow_package_request
-                    && self.peer_table.package_relay_versions(source)
-                        & bitcoin_rs_p2p::packages::PKG_RELAY_ANC
-                        != 0
-                    && bitcoin_rs_p2p::inv::request_package_info(
-                        &self.peer_table,
-                        source,
-                        wtxid,
-                        &missing_parents,
-                    );
-                if !package_requested && !self.peer_table.has_live_package_solicitation(wtxid) {
-                    bitcoin_rs_p2p::request_missing_parents(
-                        &self.peer_table,
-                        source,
-                        &missing_parents,
-                    );
-                }
-                false
-            }
+            Ok(SubmitOutcome::Held { .. } | SubmitOutcome::AlreadyKnown) => false,
             Ok(SubmitOutcome::AlreadyConfirmed) => {
                 self.peer_table.forget_known_transaction(txid, wtxid);
                 false
             }
-            Ok(SubmitOutcome::AlreadyKnown) => false,
             Err(error) => {
                 tracing::debug!(%txid, ?error, "peer transaction not admitted");
                 false

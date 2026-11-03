@@ -1,4 +1,3 @@
-//! Typed mining candidate to SV2 wire projection. Mining policy stays in the node.
 use bitcoin_rs_mining::Candidate;
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, Tx, consensus_bytes, deserialize, encode::double_sha256,

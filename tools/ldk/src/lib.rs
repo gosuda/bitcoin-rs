@@ -1,5 +1,3 @@
-//! Experimental LDK adapter over the production public Node surface.
-
 use bitcoin::{BlockHash, Transaction, consensus, hashes::Hash};
 use bitcoin_rs_node::{Node, NodeError};
 use bitcoin_rs_primitives::{BlockHash as NativeBlockHash, Hash256, Tx, deserialize};

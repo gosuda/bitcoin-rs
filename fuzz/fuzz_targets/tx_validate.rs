@@ -1,4 +1,3 @@
-//! rust-bitcoin parses tx/witness; bitcoin-rs runs consensus and policy.
 #![no_main]
 
 use std::sync::Arc;
@@ -51,7 +50,8 @@ fn cycled(seed: &[u8], len: usize) -> Vec<u8> {
 }
 
 fn witness_aware_prevout(input: &TxIn) -> TxOut {
-    let stack: &[Vec<u8>] = &input.witness;
+    let items: Vec<&[u8]> = input.witness.iter().collect();
+    let stack = items.as_slice();
     let script_pubkey = match stack {
         [item] => [vec![0x51, 0x20], cycled(item, 32)].concat(),
         [_, second] => [vec![0x00, 0x14], cycled(second, 20)].concat(),
@@ -81,9 +81,16 @@ fn validate_native(tx: Tx) {
     let view = SpendingView {
         prevouts: &prevouts,
     };
-    let _ =
+    let ns1 =
         verify_transaction_non_script(&tx, &view, HEIGHT, LOCKTIME_CUTOFF, VerifyFlags::STANDARD);
-    let _ = verify_transaction(
+    let ns2 =
+        verify_transaction_non_script(&tx, &view, HEIGHT, LOCKTIME_CUTOFF, VerifyFlags::STANDARD);
+    assert_eq!(
+        format!("{ns1:?}"),
+        format!("{ns2:?}"),
+        "verify_transaction_non_script determinism"
+    );
+    let v1 = verify_transaction(
         &tx,
         &view,
         HEIGHT.saturating_add(1),
@@ -92,7 +99,27 @@ fn validate_native(tx: Tx) {
         ValidationEngine::Native,
         None,
     );
-    let _ = is_standard_tx(&tx, &StandardnessPolicy::default());
+    let v2 = verify_transaction(
+        &tx,
+        &view,
+        HEIGHT.saturating_add(1),
+        LOCKTIME_CUTOFF,
+        VerifyFlags::STANDARD,
+        ValidationEngine::Native,
+        None,
+    );
+    assert_eq!(
+        format!("{v1:?}"),
+        format!("{v2:?}"),
+        "verify_transaction determinism"
+    );
+    let s1 = is_standard_tx(&tx, &StandardnessPolicy::default());
+    let s2 = is_standard_tx(&tx, &StandardnessPolicy::default());
+    assert_eq!(
+        format!("{s1:?}"),
+        format!("{s2:?}"),
+        "is_standard_tx determinism"
+    );
 }
 
 fn validate_tx(data: &[u8]) {
@@ -101,6 +128,17 @@ fn validate_tx(data: &[u8]) {
         let Ok(tx) = native_deserialize::<Tx>(&encoded) else {
             return;
         };
+        let consensus = bitcoin_rs_primitives::consensus_bytes(&tx);
+        assert_eq!(
+            consensus,
+            encoded,
+            "native decode must re-encode to the rust-bitcoin serialization"
+        );
+        let re_decoded = native_deserialize::<Tx>(&consensus)
+            .expect("native re-decode must succeed on consensus_bytes");
+        assert_eq!(re_decoded, tx, "round-trip tx equality");
+        let re_consensus = bitcoin_rs_primitives::consensus_bytes(&re_decoded);
+        assert_eq!(re_consensus, consensus, "canonical tx bytes idempotent");
         validate_native(tx);
         return;
     }
@@ -122,6 +160,10 @@ fn validate_tx(data: &[u8]) {
         }],
         lock_time: LockTime::ZERO,
     };
+    let consensus = bitcoin_rs_primitives::consensus_bytes(&tx);
+    let re_decoded = native_deserialize::<Tx>(&consensus)
+        .expect("synthetic tx deserialize");
+    assert_eq!(re_decoded, tx, "round-trip synthetic tx equality");
     validate_native(tx);
 }
 

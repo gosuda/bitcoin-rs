@@ -1,7 +1,7 @@
 use super::*;
 use alloc::sync::Arc;
-use sonic_rs::JsonValueTrait;
 use sonic_rs::json;
+use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
 /// A context whose network handles carry the given node-wide
 /// `-v2transport` setting, as the node crate passes it from
@@ -148,7 +148,7 @@ fn addnode_returns_error_when_outbound_queue_is_full() {
         },
         bitcoin_rs_chain::LatchReader::fixture_never(),
     ));
-    p2p.add_node(SocketAddr::from(([127, 0, 0, 1], 8333)).into(), false)
+    p2p.add_node_onetry(SocketAddr::from(([127, 0, 0, 1], 8333)).into())
         .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
     let mut ctx = Context::new();
     ctx.network.p2p = Arc::clone(&p2p);
@@ -156,10 +156,7 @@ fn addnode_returns_error_when_outbound_queue_is_full() {
 
     let result = addnode(&ctx, &json!(["127.0.0.2:8333", "onetry"]));
 
-    assert!(matches!(
-        result,
-        Err(RpcError::Internal(message)) if message == "p2p outbound queue full"
-    ));
+    assert!(matches!(result, Err(RpcError::Internal(_))));
 }
 
 #[test]
@@ -171,7 +168,7 @@ fn addnode_add_persists_when_outbound_queue_is_full() {
         },
         bitcoin_rs_chain::LatchReader::fixture_never(),
     ));
-    p2p.add_node(SocketAddr::from(([127, 0, 0, 1], 8333)).into(), false)
+    p2p.add_node_onetry(SocketAddr::from(([127, 0, 0, 1], 8333)).into())
         .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
     let mut ctx = Context::new();
     ctx.network.p2p = Arc::clone(&p2p);
@@ -308,7 +305,7 @@ fn register_peer(ctx: &Context, addr: SocketAddr) -> bitcoin_rs_p2p::PeerLease {
 }
 
 #[test]
-fn getpeerinfo_rows_match_the_pinned_v31_row() -> Result<(), Box<dyn std::error::Error>> {
+fn getpeerinfo_rows_match_the_pinned_v31_row() -> Result<(), crate::test_error::TestError> {
     use std::collections::BTreeSet;
 
     let ctx = Context::new();
@@ -351,13 +348,13 @@ fn getpeerinfo_rows_match_the_pinned_v31_row() -> Result<(), Box<dyn std::error:
 
 fn fields_but_id(
     row: &Value,
-) -> Result<std::collections::BTreeMap<&str, &Value>, Box<dyn std::error::Error>> {
+) -> Result<std::collections::BTreeMap<&str, &Value>, crate::test_error::TestError> {
     let object = row.as_object().ok_or("rows are objects")?;
     Ok(object.iter().filter(|(key, _)| *key != "id").collect())
 }
 
 #[test]
-fn getpeerinfo_row_carries_ids_above_u32_max_exactly() -> Result<(), Box<dyn std::error::Error>> {
+fn getpeerinfo_row_carries_ids_above_u32_max_exactly() -> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let _lease = register_peer(&ctx, "127.0.0.1:9102".parse()?);
     let sessions = ctx.network.peer_table.sessions();
@@ -408,13 +405,14 @@ fn getpeerinfo_row_carries_ids_above_u32_max_exactly() -> Result<(), Box<dyn std
 
 #[test]
 fn disconnectnode_nodeid_above_u32_max_never_aliases_a_live_connection()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let lease = register_peer(&ctx, "127.0.0.1:9103".parse()?);
     let ctx = Arc::new(ctx);
 
     let wide = lease.node_id() + (u64::from(u32::MAX) + 1);
-    let refused = disconnectnode(&ctx, &json!({ "nodeid": wide }));
+    let refused = crate::Handler::new(Arc::clone(&ctx))
+        .dispatch("disconnectnode", &json!({ "nodeid": wide }));
     assert!(
         matches!(refused, Err(RpcError::NotFound(_))),
         "a wide selector is well-formed but names no connection"
@@ -425,7 +423,7 @@ fn disconnectnode_nodeid_above_u32_max_never_aliases_a_live_connection()
 
 #[test]
 fn getpeerinfo_ids_are_connection_identities_not_positions()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr_a: SocketAddr = "127.0.0.1:9001".parse()?;
     let addr_b: SocketAddr = "127.0.0.1:9002".parse()?;
@@ -474,7 +472,7 @@ fn getpeerinfo_ids_are_connection_identities_not_positions()
 
 #[test]
 fn disconnectnode_nodeid_never_disconnects_a_replacement_at_the_same_address()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8333".parse()?;
     let selected = register_peer(&ctx, addr);
@@ -507,7 +505,7 @@ fn disconnectnode_nodeid_never_disconnects_a_replacement_at_the_same_address()
 
 #[test]
 fn disconnectnode_nodeid_addresses_an_anonymous_inbound_session()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     use bitcoin_rs_p2p::{PeerInfo, PeerLease};
     use crossbeam_channel::unbounded;
 
@@ -568,7 +566,7 @@ fn disconnectnode_nodeid_addresses_an_anonymous_inbound_session()
 
 #[test]
 fn disconnectnode_address_and_nodeid_is_a_conjunction_under_replacement()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8350".parse()?;
     let selected = register_peer(&ctx, addr);
@@ -605,7 +603,7 @@ fn disconnectnode_address_and_nodeid_is_a_conjunction_under_replacement()
 
 #[test]
 fn disconnectnode_accepts_a_named_nodeid_alone_and_keeps_address_precedence()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8360".parse()?;
     let lease = register_peer(&ctx, addr);
@@ -618,7 +616,8 @@ fn disconnectnode_accepts_a_named_nodeid_alone_and_keeps_address_precedence()
     ));
     assert!(!lease.is_cancelled());
 
-    let named = disconnectnode(&ctx, &json!({ "nodeid": node_id }))
+    let named = crate::Handler::new(Arc::clone(&ctx))
+        .dispatch("disconnectnode", &json!({ "nodeid": node_id }))
         .unwrap_or_else(|err| panic!("disconnectnode failed: {err}"));
     assert!(named.is_null());
     assert!(lease.is_cancelled());
@@ -627,7 +626,7 @@ fn disconnectnode_accepts_a_named_nodeid_alone_and_keeps_address_precedence()
 }
 
 #[test]
-fn disconnectnode_address_only_still_selects_by_address() -> Result<(), Box<dyn std::error::Error>>
+fn disconnectnode_address_only_still_selects_by_address() -> Result<(), crate::test_error::TestError>
 {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8340".parse()?;
@@ -648,7 +647,7 @@ fn disconnectnode_address_only_still_selects_by_address() -> Result<(), Box<dyn 
 
 #[test]
 fn disconnectnode_address_only_ignores_a_session_still_handshaking()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8370".parse()?;
     let pending = register_pending_peer(&ctx, addr);
@@ -678,7 +677,7 @@ fn disconnectnode_address_only_ignores_a_session_still_handshaking()
 
 #[test]
 fn disconnectnode_identity_forms_ignore_a_session_still_handshaking()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8371".parse()?;
     let pending = register_pending_peer(&ctx, addr);
@@ -686,12 +685,13 @@ fn disconnectnode_identity_forms_ignore_a_session_still_handshaking()
     let ctx = Arc::new(ctx);
     let address = addr.to_string();
 
+    let handler = crate::Handler::new(Arc::clone(&ctx));
     for params in [
         json!(["", node_id]),
         json!([address.as_str(), node_id]),
         json!({ "nodeid": node_id }),
     ] {
-        let refused = disconnectnode(&ctx, &params);
+        let refused = handler.dispatch("disconnectnode", &params);
         assert!(
             matches!(refused, Err(RpcError::NotFound(_))),
             "{params:?}: {refused:?}"

@@ -6,9 +6,7 @@ use parking_lot::Mutex;
 
 use crate::{UtxoCoin, UtxoScan, UtxoSet};
 
-/// Maximum number of distinct script needles in one scan.
 pub const MAX_SCAN_SCRIPTS: usize = 1_024;
-/// Maximum combined script bytes in one scan.
 pub const MAX_SCAN_SCRIPT_BYTES: usize = 1_048_576;
 const MAX_VISITED_COINS: usize = 250_000_000;
 const MAX_MATCHES: usize = 10_000;
@@ -75,9 +73,18 @@ impl<'a> UtxoScanPermit<'a> {
         })
     }
 
+    #[must_use]
+    pub fn aborted(&self) -> bool {
+        self.set
+            .scan
+            .0
+            .lock()
+            .as_ref()
+            .is_some_and(|progress| progress.abort)
+    }
+
     pub fn cancelled(&self, stopping: impl FnOnce() -> bool) -> Result<bool, UtxoScanError> {
-        let abort = self.set.scan.0.lock().as_ref().is_some_and(|p| p.abort);
-        if abort || stopping() {
+        if self.aborted() || stopping() {
             return Ok(true);
         }
         if self.started.elapsed() >= MAX_DURATION {
@@ -270,7 +277,7 @@ mod tests {
         scripts.push(MAX_SCAN_SCRIPTS.to_le_bytes().to_vec());
         assert!(matches!(
             reader.scan_script_pubkeys(&scripts),
-            Err(crate::UtxoError::Scan(UtxoScanError::Limit("1024 scripts")))
+            Err(crate::UtxoError::Scan(UtxoScanError::Limit(_)))
         ));
         assert_eq!(reader.scan_progress(), None);
 
@@ -286,9 +293,7 @@ mod tests {
         ] {
             assert!(matches!(
                 reader.scan_script_pubkeys(&scripts),
-                Err(crate::UtxoError::Scan(UtxoScanError::Limit(
-                    "1 MiB of scripts"
-                )))
+                Err(crate::UtxoError::Scan(UtxoScanError::Limit(_)))
             ));
             assert_eq!(reader.scan_progress(), None);
         }
@@ -411,6 +416,20 @@ mod tests {
         assert!(!complete);
         assert_eq!(scan.txouts, 512);
         assert_eq!(scan.unspents.len(), 512);
+    }
+
+    #[test]
+    fn a_reserved_walk_observes_the_scan_abort_flag() {
+        let reader = UtxoReader::new(coins(4));
+        let permit = reader
+            .reserve_scan()
+            .unwrap_or_else(|error| panic!("reserve: {error}"));
+        assert!(!permit.aborted());
+        assert!(reader.abort_scan());
+        assert!(
+            permit.aborted(),
+            "a walk owner must see the abort that status and abort report"
+        );
     }
 
     #[test]

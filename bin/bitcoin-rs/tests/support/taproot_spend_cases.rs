@@ -1,4 +1,3 @@
-//! Actual unmodified Core and native daemon block-validation comparisons.
 use bitcoin_rs_e2e::helpers::taproot as fixture;
 
 use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};

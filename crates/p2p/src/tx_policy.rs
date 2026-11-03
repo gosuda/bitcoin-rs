@@ -1,6 +1,3 @@
-//! Connection-bound transaction download policy. Mempool remains the authority
-//! for accepted, orphan and rejected bodies; this owner retains identities only.
-
 mod ingress;
 mod relay;
 
@@ -1134,7 +1131,7 @@ impl PeerTable {
                 .copied()
                 .collect();
             for source in gone {
-                let _ = policy.disconnected(source, now);
+                let _disconnected_keys = policy.disconnected(source, now);
             }
             policy.known_batch()
         };

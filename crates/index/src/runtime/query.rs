@@ -1,5 +1,3 @@
-//! One snapshot gate for transaction, history, and live-view queries.
-
 use super::{
     Arc, AtPrefix, Block, BlockBodySource, BlockTree, DerivedIndexInfo, DerivedIndexQuery,
     DerivedIndexRuntime, Hash256, HistoricalQueryError, IndexCapabilities, IndexCapability,
@@ -9,7 +7,7 @@ use super::{
     ScriptLiveScan, SpendingRecord, TipSnapshot, Tx, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
     TxPosition, TxPositionValue, TxQueryError, TxUnavailableCause, Txid, deserialize,
 };
-use crate::query_api::{CoveredPrefix, HistoricalUnavailableCause};
+use crate::query_api::{CoveredPrefix, HistoricalUnavailableCause, ScriptHistoryPage};
 use bitcoin_rs_chain::{AncestryBudgetExceeded, NodeId};
 
 mod filters;
@@ -48,6 +46,26 @@ impl QueryBudget {
             max_rows: self.remaining_rows,
             max_bytes: self.remaining_bytes,
         })
+    }
+
+    pub(super) fn next_page_scan_limit(
+        &mut self,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<PrefixScanLimit, TxQueryError> {
+        let limit = self.next_scan_limit()?;
+        Ok(PrefixScanLimit {
+            max_rows: limit.max_rows.min(max_rows),
+            max_bytes: limit.max_bytes.min(max_bytes),
+        })
+    }
+
+    pub(super) fn accept_page_scan(
+        &mut self,
+        scan: TxIndexScan,
+    ) -> Result<(Vec<TxIndexScanRow>, bool), TxQueryError> {
+        self.charge_scan(scan.rows.len(), scan.encoded_bytes)?;
+        Ok((scan.rows, scan.complete))
     }
 
     pub(super) fn accept_scan(
@@ -154,7 +172,6 @@ pub(crate) struct CapabilityFloors {
 }
 
 impl CapabilityFloors {
-    /// floor. It reseeds from an immutable artifact or retained history, so it stores nothing.
     pub(crate) fn set(&mut self, capability: IndexCapability, floor: u32) {
         match capability {
             IndexCapability::TxLookup => self.tx_lookup = floor,
@@ -166,7 +183,6 @@ impl CapabilityFloors {
 
 pub(super) const HISTORICAL_ANCESTRY_BUDGET: usize = 256;
 
-/// above-anchor/below-floor skip, pruned-prefix refusals on positive floors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PrefixBound {
     ExactTip,
@@ -250,10 +266,31 @@ impl DerivedIndexQueryEngine {
     }
 
     fn script_budget(&self, budget: &mut QueryBudget) {
-        // One funding read, one spender read and their fallbacks per entry.
-        // The shared row/byte bounds still apply to the entire request.
         budget.remaining_body_reads = self.scripthash_limit.saturating_mul(4).saturating_add(1);
         budget.remaining_scans = self.scripthash_limit.saturating_mul(2).saturating_add(2);
+    }
+
+    fn script_page_requirements(&self, cursor: Option<Txid>) -> IndexCapabilities {
+        if cursor.is_some() && self.enabled.contains(IndexCapability::TxLookup) {
+            IndexCapabilities::SCRIPT_HISTORY.insert(IndexCapability::TxLookup)
+        } else {
+            IndexCapabilities::SCRIPT_HISTORY
+        }
+    }
+
+    fn require_cursor_tx_lookup_coverage(
+        cursor: Option<Txid>,
+        floors: &CapabilityFloors,
+    ) -> Result<(), TxQueryError> {
+        if cursor.is_some() && floors.tx_lookup > floors.script_history {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::PrunedPrefixUnproven {
+                    family: "transaction index",
+                    floor: floors.tx_lookup,
+                },
+            ));
+        }
+        Ok(())
     }
 
     fn query_health(&self) -> Result<(), TxQueryError> {
@@ -292,20 +329,7 @@ impl DerivedIndexQueryEngine {
     {
         self.query_health()?;
         self.require_enabled(required)?;
-        if required.contains(IndexCapability::CompactFilters)
-            && let Some(reason) = self.runtime.compact_filter_failure.read().clone()
-        {
-            return Err(TxQueryError::Unavailable(
-                TxUnavailableCause::CompactFilterFailed(reason),
-            ));
-        }
-        if required.contains(IndexCapability::ScriptLive)
-            && let Some(reason) = self.runtime.script_live_failure.read().clone()
-        {
-            return Err(TxQueryError::Unavailable(
-                TxUnavailableCause::ScriptLiveUnavailable(reason),
-            ));
-        }
+        self.check_capability_failures(required)?;
 
         let _chain_transition = if required.contains(IndexCapability::ScriptLive) {
             Some(
@@ -330,52 +354,14 @@ impl DerivedIndexQueryEngine {
             .snapshot()
             .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
 
-        let mut floors = CapabilityFloors::default();
-        for capability in [IndexCapability::TxLookup, IndexCapability::ScriptHistory] {
-            if !required.contains(capability) {
-                continue;
-            }
-            let floor = snapshot
-                .capability_floor(capability)
-                .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
-            floors.set(capability, floor);
-        }
-
-        for capability in IndexCapability::ALL {
-            if !required.contains(capability) {
-                continue;
-            }
-            let watermark = snapshot
-                .capability_watermark(capability)
-                .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
-            let Some(watermark) = watermark else {
-                return Err(TxQueryError::Retry);
-            };
-            if watermark.height != tip_before.height
-                || watermark.hash != *tip_before.hash.as_byte_array()
-            {
-                return Err(TxQueryError::Retry);
-            }
-        }
+        let floors =
+            Self::load_snapshot_floors_and_watermarks(snapshot.as_ref(), required, &tip_before)?;
 
         let mut budget = QueryBudget::new();
         let result = f(snapshot.as_ref(), &tip_before, &mut budget, floors);
 
         self.query_health()?;
-        if required.contains(IndexCapability::CompactFilters)
-            && let Some(reason) = self.runtime.compact_filter_failure.read().clone()
-        {
-            return Err(TxQueryError::Unavailable(
-                TxUnavailableCause::CompactFilterFailed(reason),
-            ));
-        }
-        if required.contains(IndexCapability::ScriptLive)
-            && let Some(reason) = self.runtime.script_live_failure.read().clone()
-        {
-            return Err(TxQueryError::Unavailable(
-                TxUnavailableCause::ScriptLiveUnavailable(reason),
-            ));
-        }
+        self.check_capability_failures(required)?;
         let tip_after = self.applied_tip.load_full();
         let revision_after = self.runtime.revision();
         if revision_before != revision_after
@@ -518,23 +504,7 @@ impl DerivedIndexQueryEngine {
         let snapshot = reader
             .snapshot()
             .map_err(|e| HistoricalQueryError::Storage(e.to_string().into()))?;
-        let mut floor: u32 = 0;
-        let mut watermarks = Vec::new();
-        for capability in required.iter() {
-            let capability_floor = snapshot
-                .capability_floor(capability)
-                .map_err(|e| HistoricalQueryError::Storage(e.to_string().into()))?;
-            floor = floor.max(capability_floor);
-            let watermark = snapshot
-                .capability_watermark(capability)
-                .map_err(|e| HistoricalQueryError::Storage(e.to_string().into()))?;
-            let Some(watermark) = watermark else {
-                return Err(HistoricalQueryError::Unavailable(
-                    HistoricalUnavailableCause::NoCoveredPrefix { capability },
-                ));
-            };
-            watermarks.push((capability, watermark));
-        }
+        let (floor, watermarks) = Self::load_prefix_watermarks(snapshot.as_ref(), required)?;
         let mut remaining = HISTORICAL_ANCESTRY_BUDGET;
         let (anchor_id, anchor_height, anchor_hash) =
             self.covered_anchor(tip_before.tip_id, &watermarks, &mut remaining)?;
@@ -732,20 +702,19 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         last: Option<Txid>,
         limit: usize,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
-        self.with_snapshot(
-            IndexCapabilities::SCRIPT_HISTORY,
-            |snapshot, tip, budget, floors| {
-                self.script_budget(budget);
-                let prefix = ReadPrefix {
-                    anchor_id: tip.tip_id,
-                    height: tip.height,
-                    hash: tip.hash,
-                    floor: floors.script_history,
-                    bound: PrefixBound::ExactTip,
-                };
-                self.history_page_for(snapshot, &prefix, budget, script, last, limit)
-            },
-        )
+        let required = self.script_page_requirements(last);
+        self.with_snapshot(required, |snapshot, tip, budget, floors| {
+            self.script_budget(budget);
+            Self::require_cursor_tx_lookup_coverage(last, &floors)?;
+            let prefix = ReadPrefix {
+                anchor_id: tip.tip_id,
+                height: tip.height,
+                hash: tip.hash,
+                floor: floors.script_history,
+                bound: PrefixBound::ExactTip,
+            };
+            Self::history_page_for(snapshot, &prefix, budget, script, last, limit)
+        })
     }
     fn history_snapshot(
         &self,
@@ -787,6 +756,26 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         )
     }
 
+    fn confirmed_history_page(
+        &self,
+        scripthash: ScriptHash,
+        cursor: Option<Txid>,
+        limit: usize,
+    ) -> Result<ScriptHistoryPage, TxQueryError> {
+        let required = self.script_page_requirements(cursor);
+        self.with_snapshot(required, |snapshot, tip, budget, floors| {
+            Self::require_cursor_tx_lookup_coverage(cursor, &floors)?;
+            let prefix = ReadPrefix {
+                anchor_id: tip.tip_id,
+                height: tip.height,
+                hash: tip.hash,
+                floor: floors.script_history,
+                bound: PrefixBound::ExactTip,
+            };
+            Self::confirmed_history_page_for(snapshot, &prefix, budget, scripthash, cursor, limit)
+        })
+    }
+
     fn unspent_outputs(
         &self,
         scripthash: ScriptHash,
@@ -816,6 +805,89 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
     }
 }
 
+impl DerivedIndexQueryEngine {
+    fn check_capability_failures(&self, required: IndexCapabilities) -> Result<(), TxQueryError> {
+        if required.contains(IndexCapability::CompactFilters)
+            && let Some(reason) = self.runtime.compact_filter_failure.read().clone()
+        {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::CompactFilterFailed(reason),
+            ));
+        }
+        if required.contains(IndexCapability::ScriptLive)
+            && let Some(reason) = self.runtime.script_live_failure.read().clone()
+        {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::ScriptLiveUnavailable(reason),
+            ));
+        }
+        if required.contains(IndexCapability::ScriptHistory)
+            && let Some(reason) = self.runtime.script_history_failure.read().clone()
+        {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::ScriptHistoryUnavailable(reason),
+            ));
+        }
+        Ok(())
+    }
+
+    fn load_snapshot_floors_and_watermarks(
+        snapshot: &dyn TxIndexSnapshot,
+        required: IndexCapabilities,
+        tip: &TipSnapshot,
+    ) -> Result<CapabilityFloors, TxQueryError> {
+        let mut floors = CapabilityFloors::default();
+        for capability in [IndexCapability::TxLookup, IndexCapability::ScriptHistory] {
+            if !required.contains(capability) {
+                continue;
+            }
+            let floor = snapshot
+                .capability_floor(capability)
+                .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
+            floors.set(capability, floor);
+        }
+
+        for capability in IndexCapability::ALL {
+            if !required.contains(capability) {
+                continue;
+            }
+            let watermark = snapshot
+                .capability_watermark(capability)
+                .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
+            let Some(watermark) = watermark else {
+                return Err(TxQueryError::Retry);
+            };
+            if watermark.height != tip.height || watermark.hash != *tip.hash.as_byte_array() {
+                return Err(TxQueryError::Retry);
+            }
+        }
+        Ok(floors)
+    }
+
+    fn load_prefix_watermarks(
+        snapshot: &dyn TxIndexSnapshot,
+        required: IndexCapabilities,
+    ) -> Result<(u32, Vec<(IndexCapability, IndexWatermark)>), HistoricalQueryError> {
+        let mut floor: u32 = 0;
+        let mut watermarks = Vec::new();
+        for capability in required.iter() {
+            let capability_floor = snapshot
+                .capability_floor(capability)
+                .map_err(|e| HistoricalQueryError::Storage(e.to_string().into()))?;
+            floor = floor.max(capability_floor);
+            let watermark = snapshot
+                .capability_watermark(capability)
+                .map_err(|e| HistoricalQueryError::Storage(e.to_string().into()))?;
+            let Some(watermark) = watermark else {
+                return Err(HistoricalQueryError::Unavailable(
+                    HistoricalUnavailableCause::NoCoveredPrefix { capability },
+                ));
+            };
+            watermarks.push((capability, watermark));
+        }
+        Ok((floor, watermarks))
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

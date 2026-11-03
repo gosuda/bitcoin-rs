@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::time::Instant;
 
+use super::TestError;
 use super::settlement_faults::deliver_headers;
 use super::settlement_faults::next_locator;
 use bitcoin_rs_primitives::Hash256;
@@ -63,7 +64,7 @@ type PresyncFixture = (
     Arc<PeerTable>,
 );
 
-fn presync_fixture(minimum_work: ChainWork) -> Result<PresyncFixture, Box<dyn std::error::Error>> {
+fn presync_fixture(minimum_work: ChainWork) -> Result<PresyncFixture, TestError> {
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -397,6 +398,7 @@ fn late_or_foreign_receipts_do_not_redeem_silent_header_sources() -> TestResult 
     Ok(())
 }
 
+// P2P-10
 #[test]
 fn low_work_headers_do_not_reach_block_tree() -> TestResult {
     let floor = ChainWork::from(WORK_PER_HEADER * u64::try_from(4 * PAGE).unwrap_or(u64::MAX));
@@ -458,6 +460,7 @@ fn low_work_headers_do_not_reach_block_tree() -> TestResult {
     Ok(())
 }
 
+// P2P-10
 #[test]
 fn sufficient_work_chain_syncs_presync_then_redownload() -> TestResult {
     let chain = chain_on(&genesis_header(), 0, PAGE + 500);
@@ -483,8 +486,6 @@ fn sufficient_work_chain_syncs_presync_then_redownload() -> TestResult {
         "presync must request the continuation from the collected tip",
     );
 
-    // A queued response must not consume its request or advance the live
-    // presync cursor until the next tick actually admits that whole page.
     for _ in 0..super::super::headers::MAX_HEADER_BATCHES_PER_TICK {
         inbound_headers_tx.send(InboundHeaders {
             headers: Vec::new(),
@@ -571,6 +572,7 @@ fn sufficient_work_chain_syncs_presync_then_redownload() -> TestResult {
     Ok(())
 }
 
+// P2P-10
 #[test]
 fn a_substituted_redownload_header_disconnects_the_connection() -> TestResult {
     let chain = chain_on(&genesis_header(), 0, PAGE + 500);
@@ -1065,9 +1067,7 @@ fn a_forwarded_body_header_leaves_the_live_sync_state_alone() -> TestResult {
     Ok(())
 }
 
-fn presync_fixture_refusing(
-    minimum_work: ChainWork,
-) -> Result<PresyncFixture, Box<dyn std::error::Error>> {
+fn presync_fixture_refusing(minimum_work: ChainWork) -> Result<PresyncFixture, TestError> {
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;

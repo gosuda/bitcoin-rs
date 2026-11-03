@@ -1,12 +1,11 @@
 use std::fmt::Write as _;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow, bail};
+use bitcoin_rs_node::test_support::TestError;
+
+type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin::hex::FromHex;
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_mempool::{AdmissionOrigin, BodyInterest, MempoolEntry, SubmitOutcome};
@@ -101,7 +100,7 @@ pub(crate) fn advance_mempool_sequence(state: &NodeState) -> Result<()> {
             7,
             0,
         ))
-        .map_err(|error| anyhow::anyhow!("seed insert failed: {error}"))?;
+        .map_err(|error| TestError::message(format!("seed insert failed: {error}")))?;
     guard.clear();
     Ok(())
 }
@@ -146,12 +145,8 @@ pub(crate) fn is_witness_commitment(script_pubkey: &[u8]) -> bool {
 
 pub(crate) fn solved_template_block(mining: &MiningCoordinator) -> Result<Block> {
     let template = expect_template(mining.get_block_template(template_request(None))?);
-    let mut block = template
-        .candidate
-        .into_unsolved_block()
-        .map_err(|error| anyhow::anyhow!("assemble template candidate: {error}"))?;
-    solve_block(&mut block, 1_000_000)
-        .map_err(|error| anyhow::anyhow!("solve template candidate: {error}"))?;
+    let mut block = template.candidate.into_unsolved_block()?;
+    solve_block(&mut block, 1_000_000)?;
     Ok(block)
 }
 
@@ -212,7 +207,7 @@ pub(crate) fn excess_coinbase_child(prev: BlockHash) -> Result<Block> {
     };
     output.value = output.value.saturating_add(Amount::from_sat(1));
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-        .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
+        .ok_or_else(|| TestError::message("test block has no merkle root"))?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
     Ok(block)
 }
@@ -259,7 +254,7 @@ pub(crate) fn disconnect_applied(state: &NodeState, block: &Block) -> Result<()>
         .block_tree_reader()
         .read()
         .lookup(Hash256::from(genesis.block_hash()))
-        .ok_or_else(|| anyhow::anyhow!("missing genesis node"))?;
+        .ok_or_else(|| TestError::message("missing genesis node"))?;
     let block_hash = Hash256::from(block.block_hash());
     let body = block.clone();
     bitcoin_rs_node::reorg::switch_to_branch(
@@ -272,7 +267,7 @@ pub(crate) fn disconnect_applied(state: &NodeState, block: &Block) -> Result<()>
         },
         |_| {},
     )
-    .map_err(|error| anyhow::anyhow!("{error}"))
+    .map_err(|error| TestError::message(error.to_string()))
 }
 
 pub(crate) fn open_regtest() -> Result<(NodeState, tempfile::TempDir)> {
@@ -303,7 +298,7 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
             }],
             outputs: vec![TxOut {
                 value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: p2sh_true_output(),
             }],
             lock_time: LockTime::ZERO,
         };
@@ -319,7 +314,7 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
             txs: vec![coinbase],
         };
         block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-            .ok_or_else(|| anyhow::anyhow!("seed block must have a merkle root"))?;
+            .ok_or_else(|| TestError::message("seed block must have a merkle root"))?;
         regtest_fixture::mine_block_to_declared_target(&mut block)?;
         state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block))?;
         tip = current_tip(state)?;
@@ -330,7 +325,7 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
 
 pub(crate) fn current_tip(state: &NodeState) -> Result<bitcoin_rs_chain::TipSnapshot> {
     let Some(tip) = state.chainstate().applied_tip_snapshot() else {
-        bail!("applied tip must exist");
+        return Err(TestError::message("applied tip must exist"));
     };
     Ok((*tip).clone())
 }
@@ -357,7 +352,7 @@ pub(crate) fn assemble_from_template(
         let data = entry
             .get("data")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| anyhow::anyhow!("template transaction missing data hex"))?;
+            .ok_or_else(|| TestError::message("template transaction missing data hex"))?;
         txs.push(native_deserialize::<Tx>(&Vec::<u8>::from_hex(data)?)?);
     }
 
@@ -392,7 +387,7 @@ pub(crate) fn seed_coinbase_spend_at(height: u32, fee_sats: u64) -> Tx {
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         }],
         lock_time: LockTime::ZERO,
     };
@@ -400,7 +395,7 @@ pub(crate) fn seed_coinbase_spend_at(height: u32, fee_sats: u64) -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(seed_coinbase.txid(), 0),
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
@@ -412,14 +407,7 @@ pub(crate) fn seed_coinbase_spend_at(height: u32, fee_sats: u64) -> Tx {
     }
 }
 
-pub(crate) fn p2sh_true_output() -> Script {
-    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
-    Script::from_bytes(redeem.to_p2sh().into_bytes())
-}
-
-pub(crate) fn p2sh_true_spend_script_sig() -> Script {
-    Script::from_bytes(vec![0x01, 0x51])
-}
+pub(crate) use crate::support::{p2sh_true_output, p2sh_true_spend_script_sig};
 
 pub(crate) fn assemble_regtest_block(prev: Hash256, height: u32, txs: Vec<Tx>) -> Result<Block> {
     let coinbase = Tx {
@@ -448,7 +436,7 @@ pub(crate) fn assemble_regtest_block(prev: Hash256, height: u32, txs: Vec<Tx>) -
         txs: std::iter::once(coinbase).chain(txs).collect(),
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-        .ok_or_else(|| anyhow::anyhow!("regtest block must have a merkle root"))?;
+        .ok_or_else(|| TestError::message("regtest block must have a merkle root"))?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
     Ok(block)
 }
@@ -504,7 +492,7 @@ pub(crate) fn mine_regtest_block(
         txs: std::iter::once(coinbase).chain(txs).collect(),
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-        .ok_or_else(|| anyhow::anyhow!("mined block must have a merkle root"))?;
+        .ok_or_else(|| TestError::message("mined block must have a merkle root"))?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
     state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
         block.clone(),
@@ -593,7 +581,7 @@ pub(crate) fn assemble_block(
             version,
             prev_blockhash: prev_hex
                 .parse::<BlockHash>()
-                .map_err(|err| anyhow::anyhow!("invalid previousblockhash: {err}"))?,
+                .map_err(|err| TestError::message(format!("invalid previousblockhash: {err}")))?,
             merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
             time: curtime,
             bits: CompactTarget::from_consensus(bits),
@@ -602,7 +590,7 @@ pub(crate) fn assemble_block(
         txs: block_txs,
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-        .ok_or_else(|| anyhow::anyhow!("block must have a merkle root"))?;
+        .ok_or_else(|| TestError::message("block must have a merkle root"))?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
     Ok(block)
 }
@@ -611,7 +599,9 @@ pub(crate) fn required_str(value: &sonic_rs::Value, key: &str) -> Result<String>
     let text = value
         .get(key)
         .and_then(|text| text.as_str())
-        .ok_or_else(|| anyhow::anyhow!("template field {key} missing or not a string"))?;
+        .ok_or_else(|| {
+            TestError::message(format!("template field {key} missing or not a string"))
+        })?;
     Ok(text.to_owned())
 }
 
@@ -620,7 +610,7 @@ pub(crate) fn required_u64(value: &sonic_rs::Value, key: &str) -> Result<u64> {
         .get(key)
         .and_then(sonic_rs::JsonValueTrait::as_i64)
         .and_then(|number| u64::try_from(number).ok())
-        .ok_or_else(|| anyhow::anyhow!("template field {key} missing or not a number"))
+        .ok_or_else(|| TestError::message(format!("template field {key} missing or not a number")))
 }
 
 pub(crate) fn compute_witness_merkle_root(txs: &[Tx]) -> Option<Hash256> {
@@ -664,11 +654,13 @@ pub(crate) struct LongPollId {
 
 impl LongPollId {
     pub(crate) fn parse(id: &str) -> Result<Self> {
-        let (tip, counters) = id
-            .split_at_checked(64)
-            .ok_or_else(|| anyhow!("longpollid {id:?} is shorter than a tip hash"))?;
+        let (tip, counters) = id.split_at_checked(64).ok_or_else(|| {
+            TestError::message(format!("longpollid {id:?} is shorter than a tip hash"))
+        })?;
         if !tip.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            bail!("longpollid {id:?} does not start with a hex tip hash");
+            return Err(TestError::message(format!(
+                "longpollid {id:?} does not start with a hex tip hash"
+            )));
         }
         let (mempool, fee_delta_sequence) = match counters.split_once(':') {
             Some((mempool, fee)) => (mempool.parse()?, fee.parse()?),
@@ -713,7 +705,7 @@ pub(crate) fn template_view(template: &sonic_rs::Value) -> Result<TemplateView> 
     let entries = template
         .get("transactions")
         .and_then(|value| value.as_array())
-        .ok_or_else(|| anyhow!("template has no transactions array"))?
+        .ok_or_else(|| TestError::message("template has no transactions array"))?
         .as_slice();
     let mut txids = Vec::with_capacity(entries.len());
     let mut fees = Vec::with_capacity(entries.len());
@@ -741,11 +733,14 @@ pub(crate) fn gbt_view(handler: &Handler, long_poll_id: Option<&str>) -> Result<
 pub(crate) struct PendingPoll<T> {
     done: Receiver<T>,
     thread: Option<JoinHandle<()>>,
-    release: Arc<AtomicBool>,
+    release: Box<dyn Fn() + Send>,
 }
 
 impl<T> PendingPoll<T> {
-    pub(crate) fn spawn(release: Arc<AtomicBool>, call: impl FnOnce() -> T + Send + 'static) -> Self
+    pub(crate) fn spawn(
+        release: impl Fn() + Send + 'static,
+        call: impl FnOnce() -> T + Send + 'static,
+    ) -> Self
     where
         T: Send + 'static,
     {
@@ -756,7 +751,7 @@ impl<T> PendingPoll<T> {
         Self {
             done,
             thread: Some(thread),
-            release,
+            release: Box::new(release),
         }
     }
 
@@ -765,14 +760,15 @@ impl<T> PendingPoll<T> {
     }
 
     pub(crate) fn collect(mut self, within: Duration) -> Result<T> {
-        let value = self
-            .done
-            .recv_timeout(within)
-            .map_err(|error| anyhow!("the call did not return within {within:?}: {error}"))?;
+        let value = self.done.recv_timeout(within).map_err(|error| {
+            TestError::message(format!(
+                "the call did not return within {within:?}: {error}"
+            ))
+        })?;
         if let Some(thread) = self.thread.take() {
             thread
                 .join()
-                .map_err(|_| anyhow!("the call's thread panicked"))?;
+                .map_err(|_| TestError::message("the call's thread panicked"))?;
         }
         Ok(value)
     }
@@ -783,7 +779,7 @@ impl<T> Drop for PendingPoll<T> {
         let Some(thread) = self.thread.take() else {
             return;
         };
-        self.release.store(true, Ordering::Release);
+        (self.release)();
         let _ = thread.join();
     }
 }
@@ -795,10 +791,14 @@ pub(crate) fn await_parked<T>(mining: &MiningCoordinator, poll: &PendingPoll<T>)
             return Ok(());
         }
         if poll.is_finished() {
-            bail!("the long poll returned without ever waiting");
+            return Err(TestError::message(
+                "the long poll returned without ever waiting",
+            ));
         }
         if Instant::now() >= deadline {
-            bail!("the long poll did not register as a waiter within {PARK_DEADLINE:?}");
+            return Err(TestError::message(format!(
+                "the long poll did not register as a waiter within {PARK_DEADLINE:?}"
+            )));
         }
         thread::sleep(Duration::from_millis(1));
     }
@@ -819,7 +819,7 @@ pub(crate) fn wire_mining(state: &NodeState) -> Result<WiredMining> {
     state
         .mempool_gateway()
         .attach_observer_leg("mining-test", signal, BodyInterest::Metadata)
-        .map_err(anyhow::Error::msg)?;
+        .map_err(TestError::message)?;
     let handler = Arc::new(rpc_handler(state, control));
     Ok(WiredMining { mining, handler })
 }
@@ -871,7 +871,9 @@ impl PriorityFixture {
             &json!([tx.txid().to_string(), 0, delta]),
         )?;
         if accepted.as_bool() != Some(true) {
-            bail!("prioritisetransaction answered {accepted}");
+            return Err(TestError::message(format!(
+                "prioritisetransaction answered {accepted}"
+            )));
         }
         Ok(())
     }
@@ -887,7 +889,9 @@ impl PriorityFixture {
         let poll = self.poll(&current.long_poll_id);
         await_parked(self.mining(), &poll)?;
         if poll.is_finished() {
-            bail!("the long poll returned before anything was published");
+            return Err(TestError::message(
+                "the long poll returned before anything was published",
+            ));
         }
         Ok((current, poll))
     }
@@ -895,8 +899,10 @@ impl PriorityFixture {
     pub(crate) fn poll(&self, id: &str) -> Poll {
         let handler = Arc::clone(&self.wired.handler);
         let id = id.to_owned();
-        PendingPoll::spawn(self.state.chainstate().shutdown_handle(), move || {
-            gbt_view(&handler, Some(&id))
-        })
+        let chainstate = self.state.chainstate();
+        PendingPoll::spawn(
+            move || chainstate.request_shutdown(),
+            move || gbt_view(&handler, Some(&id)),
+        )
     }
 }

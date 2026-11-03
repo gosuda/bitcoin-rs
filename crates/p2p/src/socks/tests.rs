@@ -10,6 +10,22 @@ fn fake_socks_no_auth(connect_reply: u8) -> io::Result<(SocketAddr, mpsc::Receiv
     fake_socks(false, connect_reply)
 }
 
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    AddrParse(#[from] std::net::AddrParseError),
+    #[error(transparent)]
+    Recv(#[from] std::sync::mpsc::RecvError),
+    #[error(transparent)]
+    Dial(#[from] crate::endpoint::DialFailure),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+}
+
+type TestResult = Result<(), TestError>;
+
 fn fake_socks(
     auth_required: bool,
     connect_reply: u8,
@@ -84,14 +100,13 @@ fn fake_socks(
 }
 
 #[test]
-fn tor_dial_uses_exact_domain_transcript() -> Result<(), Box<dyn std::error::Error>> {
+fn tor_dial_uses_exact_domain_transcript() -> TestResult {
     let (proxy, rx) = fake_socks_auth(0x00)?;
     let onion = format!("{}.onion", "a".repeat(56));
     assert_eq!(onion.len(), 62);
-    let stream = socks_connect(
+    let stream = socks_connect_isolated(
         proxy,
         &SocksTarget::Domain(onion.clone(), 8333),
-        true,
         Duration::from_secs(5),
     )?;
     assert_eq!(stream.read_timeout()?, None);
@@ -106,8 +121,7 @@ fn tor_dial_uses_exact_domain_transcript() -> Result<(), Box<dyn std::error::Err
 }
 
 #[test]
-fn isolation_dial_refuses_no_auth_selection_and_sends_no_connect()
--> Result<(), Box<dyn std::error::Error>> {
+fn isolation_dial_refuses_no_auth_selection_and_sends_no_connect() -> TestResult {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let proxy = listener.local_addr()?;
     let (tx, rx) = mpsc::channel();
@@ -126,13 +140,14 @@ fn isolation_dial_refuses_no_auth_selection_and_sends_no_connect()
         Ok(())
     });
     let onion = format!("{}.onion", "a".repeat(56));
-    let Err(error) = socks_connect(
+    let Err(error) = socks_connect_isolated(
         proxy,
         &SocksTarget::Domain(onion, 8333),
-        true,
         Duration::from_secs(5),
     ) else {
-        return Err("no-auth selection must fail an isolation dial".into());
+        return Err(TestError::Missing(
+            "no-auth selection must fail an isolation dial",
+        ));
     };
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     assert_eq!(rx.recv()?, 0, "no CONNECT may be sent");
@@ -140,15 +155,10 @@ fn isolation_dial_refuses_no_auth_selection_and_sends_no_connect()
 }
 
 #[test]
-fn ip_dial_uses_literal_address_without_auth() -> Result<(), Box<dyn std::error::Error>> {
+fn ip_dial_uses_literal_address_without_auth() -> TestResult {
     let (proxy, rx) = fake_socks_no_auth(0x00)?;
     let target: SocketAddr = "203.0.113.7:8333".parse()?;
-    let stream = socks_connect(
-        proxy,
-        &SocksTarget::Ip(target),
-        false,
-        Duration::from_secs(5),
-    )?;
+    let stream = socks_connect(proxy, &SocksTarget::Ip(target), Duration::from_secs(5))?;
     drop(stream);
     let request = rx.recv()?;
     assert_eq!(
@@ -159,47 +169,63 @@ fn ip_dial_uses_literal_address_without_auth() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn dead_proxy_is_a_transport_error() -> Result<(), Box<dyn std::error::Error>> {
+fn a_failed_nodelay_does_not_fail_the_dial() -> TestResult {
+    let (proxy, rx) = fake_socks_no_auth(0x00)?;
+    let target: SocketAddr = "203.0.113.7:8333".parse()?;
+    let stream = socks_connect_with(
+        proxy,
+        &SocksTarget::Ip(target),
+        SocksDial {
+            isolate: false,
+            timeout: Duration::from_secs(5),
+            set_nodelay: &|_| Err(io::Error::other("test-injected nodelay failure")),
+        },
+    )?;
+    drop(stream);
+    let request = rx.recv()?;
+    assert_eq!(
+        request,
+        vec![0x05, 0x01, 0x00, 0x01, 203, 0, 113, 7, 0x20, 0x8d],
+        "the SOCKS exchange must complete when only the optional socket option fails"
+    );
+    Ok(())
+}
+
+#[test]
+fn dead_proxy_is_a_transport_error() -> TestResult {
     let target: SocketAddr = "203.0.113.7:8333".parse()?;
     let Err(error) = socks_connect(
         "127.0.0.1:1".parse()?,
         &SocksTarget::Ip(target),
-        false,
         Duration::from_secs(2),
     ) else {
-        return Err("dead proxy must fail".into());
+        return Err(TestError::Missing("dead proxy must fail"));
     };
     assert_ne!(error.kind(), io::ErrorKind::Unsupported);
     Ok(())
 }
 
 #[test]
-fn refused_connect_is_a_transport_error() -> Result<(), Box<dyn std::error::Error>> {
+fn refused_connect_is_a_transport_error() -> TestResult {
     let (proxy, _rx) = fake_socks_no_auth(0x05)?;
     let target: SocketAddr = "203.0.113.7:8333".parse()?;
-    let Err(error) = socks_connect(
-        proxy,
-        &SocksTarget::Ip(target),
-        false,
-        Duration::from_secs(5),
-    ) else {
-        return Err("refused connect must fail".into());
+    let Err(error) = socks_connect(proxy, &SocksTarget::Ip(target), Duration::from_secs(5)) else {
+        return Err(TestError::Missing("refused connect must fail"));
     };
     assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
     Ok(())
 }
 
 #[test]
-fn unresolvable_onion_never_falls_back_to_direct_tcp() -> Result<(), Box<dyn std::error::Error>> {
+fn unresolvable_onion_never_falls_back_to_direct_tcp() -> TestResult {
     let (proxy, _rx) = fake_socks_auth(0x05)?;
     let onion = format!("{}.onion", "z".repeat(56));
-    let Err(error) = socks_connect(
+    let Err(error) = socks_connect_isolated(
         proxy,
         &SocksTarget::Domain(onion, 8333),
-        true,
         Duration::from_secs(5),
     ) else {
-        return Err("must fail".into());
+        return Err(TestError::Missing("must fail"));
     };
     assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
     assert!(error.counts_as_peer_failure());
@@ -207,7 +233,7 @@ fn unresolvable_onion_never_falls_back_to_direct_tcp() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn nonzero_rsv_is_rejected_as_invalid_data() -> Result<(), Box<dyn std::error::Error>> {
+fn nonzero_rsv_is_rejected_as_invalid_data() -> TestResult {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let proxy = listener.local_addr()?;
     std::thread::spawn(move || -> io::Result<()> {
@@ -223,13 +249,8 @@ fn nonzero_rsv_is_rejected_as_invalid_data() -> Result<(), Box<dyn std::error::E
         Ok(())
     });
     let target: SocketAddr = "127.0.0.1:8333".parse()?;
-    let Err(error) = socks_connect(
-        proxy,
-        &SocksTarget::Ip(target),
-        false,
-        Duration::from_secs(5),
-    ) else {
-        return Err("nonzero RSV must fail".into());
+    let Err(error) = socks_connect(proxy, &SocksTarget::Ip(target), Duration::from_secs(5)) else {
+        return Err(TestError::Missing("nonzero RSV must fail"));
     };
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     assert!(!error.counts_as_peer_failure());
@@ -237,18 +258,13 @@ fn nonzero_rsv_is_rejected_as_invalid_data() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn network_unreachable_and_ttl_expired_are_transport_not_peer_unreachable()
--> Result<(), Box<dyn std::error::Error>> {
+fn network_unreachable_and_ttl_expired_are_transport_not_peer_unreachable() -> TestResult {
     for reply_code in [0x03, 0x04, 0x06] {
         let (proxy, _rx) = fake_socks_no_auth(reply_code)?;
         let target: SocketAddr = "203.0.113.7:8333".parse()?;
-        let Err(error) = socks_connect(
-            proxy,
-            &SocksTarget::Ip(target),
-            false,
-            Duration::from_secs(5),
-        ) else {
-            return Err("must fail".into());
+        let Err(error) = socks_connect(proxy, &SocksTarget::Ip(target), Duration::from_secs(5))
+        else {
+            return Err(TestError::Missing("must fail"));
         };
         assert!(
             !error.counts_as_peer_failure(),
@@ -259,7 +275,7 @@ fn network_unreachable_and_ttl_expired_are_transport_not_peer_unreachable()
 }
 
 #[test]
-fn slow_trickle_handshake_exceeds_absolute_deadline() -> Result<(), Box<dyn std::error::Error>> {
+fn slow_trickle_handshake_exceeds_absolute_deadline() -> TestResult {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let proxy = listener.local_addr()?;
     std::thread::spawn(move || -> io::Result<()> {
@@ -278,13 +294,9 @@ fn slow_trickle_handshake_exceeds_absolute_deadline() -> Result<(), Box<dyn std:
     });
     let target: SocketAddr = "127.0.0.1:8333".parse()?;
     let started = Instant::now();
-    let Err(error) = socks_connect(
-        proxy,
-        &SocksTarget::Ip(target),
-        false,
-        Duration::from_millis(200),
-    ) else {
-        return Err("slow trickle must exceed deadline".into());
+    let Err(error) = socks_connect(proxy, &SocksTarget::Ip(target), Duration::from_millis(200))
+    else {
+        return Err(TestError::Missing("slow trickle must exceed deadline"));
     };
     let elapsed = started.elapsed();
     assert!(
@@ -308,7 +320,7 @@ fn slow_trickle_handshake_exceeds_absolute_deadline() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn partial_byte_trickle_does_not_extend_deadline() -> Result<(), Box<dyn std::error::Error>> {
+fn partial_byte_trickle_does_not_extend_deadline() -> TestResult {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let proxy = listener.local_addr()?;
     std::thread::spawn(move || -> io::Result<()> {
@@ -330,13 +342,11 @@ fn partial_byte_trickle_does_not_extend_deadline() -> Result<(), Box<dyn std::er
     });
     let target: SocketAddr = "127.0.0.1:8333".parse()?;
     let started = Instant::now();
-    let Err(error) = socks_connect(
-        proxy,
-        &SocksTarget::Ip(target),
-        false,
-        Duration::from_millis(200),
-    ) else {
-        return Err("partial byte trickle must not extend absolute deadline".into());
+    let Err(error) = socks_connect(proxy, &SocksTarget::Ip(target), Duration::from_millis(200))
+    else {
+        return Err(TestError::Missing(
+            "partial byte trickle must not extend absolute deadline",
+        ));
     };
     let elapsed = started.elapsed();
     assert!(
@@ -356,5 +366,110 @@ fn partial_byte_trickle_does_not_extend_deadline() -> Result<(), Box<dyn std::er
         error.kind()
     );
     assert!(!error.counts_as_peer_failure());
+    Ok(())
+}
+
+#[test]
+fn empty_domain_name_is_rejected() -> TestResult {
+    let (proxy, _rx) = fake_socks_no_auth(0x00)?;
+    let Err(error) = socks_connect(
+        proxy,
+        &SocksTarget::Domain(String::new(), 8333),
+        Duration::from_secs(5),
+    ) else {
+        return Err(TestError::Missing("empty domain must fail"));
+    };
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    Ok(())
+}
+
+#[test]
+fn oversize_domain_name_is_rejected() -> TestResult {
+    let (proxy, _rx) = fake_socks_no_auth(0x00)?;
+    let over_domain = "a".repeat(256);
+    let Err(error) = socks_connect(
+        proxy,
+        &SocksTarget::Domain(over_domain, 8333),
+        Duration::from_secs(5),
+    ) else {
+        return Err(TestError::Missing("oversize domain must fail"));
+    };
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    Ok(())
+}
+
+#[test]
+fn truncated_socks_handshakes_fail_with_unexpected_eof() -> TestResult {
+    for stage in 0..4 {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let proxy = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut greeting = [0u8; 3];
+            let _ = stream.read_exact(&mut greeting);
+            if stage == 0 {
+                return Ok(());
+            }
+            let _ = stream.write_all(&[0x05, 0x00]);
+            let mut head = [0u8; 4];
+            let _ = stream.read_exact(&mut head);
+            let mut rest = [0u8; 6];
+            let _ = stream.read_exact(&mut rest);
+            if stage == 1 {
+                return Ok(());
+            }
+            if stage == 2 {
+                let _ = stream.write_all(&[0x05, 0x00]);
+                return Ok(());
+            }
+            let _ = stream.write_all(&[0x05, 0x00, 0x00, 0x01, 127]);
+            Ok(())
+        });
+
+        let target: SocketAddr = "127.0.0.1:8333".parse()?;
+        let Err(error) = socks_connect(proxy, &SocksTarget::Ip(target), Duration::from_secs(2))
+        else {
+            return Err(TestError::Missing("truncated handshake must fail"));
+        };
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::UnexpectedEof,
+            "stage {stage} must fail with unexpected eof"
+        );
+        let _server_res = server
+            .join()
+            .map_err(|_| TestError::Missing("server panicked"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn malformed_connect_replies_fail() -> TestResult {
+    for (atyp, rsv, ver) in [(0x02, 0x00, 0x05), (0x01, 0x01, 0x05), (0x01, 0x00, 0x04)] {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let proxy = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut greeting = [0u8; 3];
+            let _ = stream.read_exact(&mut greeting);
+            let _ = stream.write_all(&[0x05, 0x00]);
+            let mut head = [0u8; 4];
+            let _ = stream.read_exact(&mut head);
+            let mut rest = [0u8; 6];
+            let _ = stream.read_exact(&mut rest);
+            let _ = stream.write_all(&[ver, 0x00, rsv, atyp, 127, 0, 0, 1, 0x20, 0x8d]);
+            Ok(())
+        });
+
+        let target: SocketAddr = "127.0.0.1:8333".parse()?;
+        let Err(error) = socks_connect(proxy, &SocksTarget::Ip(target), Duration::from_secs(2))
+        else {
+            return Err(TestError::Missing("malformed connect reply must fail"));
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let _server_res = server
+            .join()
+            .map_err(|_| TestError::Missing("server panicked"))?;
+    }
     Ok(())
 }

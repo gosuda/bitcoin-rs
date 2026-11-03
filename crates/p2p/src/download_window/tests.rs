@@ -2408,9 +2408,17 @@ fn cold_front_distinct_hedge_cap_blocks_another_probe() {
         super::MAX_COLD_FRONT_HEDGES
     );
 }
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    TryFromInt(#[from] std::num::TryFromIntError),
+}
+type TestResult = Result<(), TestError>;
 
 #[test]
-fn mixed_prefix_sources_do_not_elect_a_winner() -> Result<(), Box<dyn std::error::Error>> {
+fn mixed_prefix_sources_do_not_elect_a_winner() -> TestResult {
     let now = Instant::now();
     let owner = test_source(staller_addr());
     let first = test_source(healthy_addr());
@@ -2438,7 +2446,7 @@ fn mixed_prefix_sources_do_not_elect_a_winner() -> Result<(), Box<dyn std::error
 }
 
 #[test]
-fn prefix_probe_respects_estimated_byte_cutoff() -> Result<(), Box<dyn std::error::Error>> {
+fn prefix_probe_respects_estimated_byte_cutoff() -> TestResult {
     let now = Instant::now();
     let owner = test_source(staller_addr());
     let mut window = DownloadWindow::new(stall_budget());
@@ -2457,7 +2465,7 @@ fn prefix_probe_respects_estimated_byte_cutoff() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn fanout_cancels_prefix_probe_without_rearming_it() -> Result<(), Box<dyn std::error::Error>> {
+fn fanout_cancels_prefix_probe_without_rearming_it() -> TestResult {
     let now = Instant::now();
     let owner = test_source(staller_addr());
     let alternate = test_source(healthy_addr());
@@ -2487,8 +2495,7 @@ fn fanout_cancels_prefix_probe_without_rearming_it() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn fanout_threshold_during_fresh_probe_defers_engagement() -> Result<(), Box<dyn std::error::Error>>
-{
+fn fanout_threshold_during_fresh_probe_defers_engagement() -> TestResult {
     let now = Instant::now();
     let owner = test_source(staller_addr());
     let alternate = test_source(healthy_addr());
@@ -2519,8 +2526,7 @@ fn fanout_threshold_during_fresh_probe_defers_engagement() -> Result<(), Box<dyn
 }
 
 #[test]
-fn probe_resolution_before_deadline_allows_fanout_immediately()
--> Result<(), Box<dyn std::error::Error>> {
+fn probe_resolution_before_deadline_allows_fanout_immediately() -> TestResult {
     let now = Instant::now();
     let owner = test_source(staller_addr());
     let alternate = test_source(healthy_addr());
@@ -2563,8 +2569,7 @@ fn probe_resolution_before_deadline_allows_fanout_immediately()
 }
 
 #[test]
-fn disconnected_prefix_racer_queued_deliveries_cannot_win() -> Result<(), Box<dyn std::error::Error>>
-{
+fn disconnected_prefix_racer_queued_deliveries_cannot_win() -> TestResult {
     let now = Instant::now();
     let owner = test_source(staller_addr());
     let disconnected = test_source(healthy_addr());
@@ -2589,8 +2594,7 @@ fn disconnected_prefix_racer_queued_deliveries_cannot_win() -> Result<(), Box<dy
 }
 
 #[test]
-fn dead_owner_prefix_probe_is_released_even_with_live_alternates()
--> Result<(), Box<dyn std::error::Error>> {
+fn dead_owner_prefix_probe_is_released_even_with_live_alternates() -> TestResult {
     let now = Instant::now();
     let owner = test_source(staller_addr());
     let alternate_a = test_source(healthy_addr());
@@ -2618,7 +2622,7 @@ fn dead_owner_prefix_probe_is_released_even_with_live_alternates()
 }
 
 #[test]
-fn late_prefix_loser_cannot_replace_winner() -> Result<(), Box<dyn std::error::Error>> {
+fn late_prefix_loser_cannot_replace_winner() -> TestResult {
     let now = Instant::now();
     let owner = test_source(staller_addr());
     let winner = test_source(healthy_addr());
@@ -2644,7 +2648,7 @@ fn late_prefix_loser_cannot_replace_winner() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn prefix_owner_win_keeps_unrelated_peer_requests() -> Result<(), Box<dyn std::error::Error>> {
+fn prefix_owner_win_keeps_unrelated_peer_requests() -> TestResult {
     let now = Instant::now();
     let owner = test_source(staller_addr());
     let loser = test_source(healthy_addr());
@@ -2675,7 +2679,7 @@ fn prefix_owner_win_keeps_unrelated_peer_requests() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn prefix_alternate_win_releases_only_probe_losers() -> Result<(), Box<dyn std::error::Error>> {
+fn prefix_alternate_win_releases_only_probe_losers() -> TestResult {
     let now = Instant::now();
     let owner = test_source(staller_addr());
     let winner = test_source(healthy_addr());
@@ -2732,8 +2736,7 @@ fn stale_cold_hedge_confirmation_after_release_does_not_blame_replacement() {
 }
 
 #[test]
-fn stale_prefix_confirmation_after_release_does_not_install_probe_or_gate()
--> Result<(), Box<dyn std::error::Error>> {
+fn stale_prefix_confirmation_after_release_does_not_install_probe_or_gate() -> TestResult {
     let now = Instant::now();
     let owner = test_source(staller_addr());
     let mut window = DownloadWindow::new(test_budget());

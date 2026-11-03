@@ -123,10 +123,16 @@ impl MiningCoordinator {
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "tree.node cannot fail after successful tree.lookup under the same read guard"
+    )]
     fn known_block_result(&self, block_hash: Hash256) -> Option<BlockValidationResult> {
         let tree = self.block_tree.read();
         let node_id = tree.lookup(block_hash)?;
-        let node = tree.node(node_id).ok()?;
+        let node = tree
+            .node(node_id)
+            .expect("node exists for looked-up id under block_tree read guard");
         if node.status == NodeStatus::Invalid {
             return Some(BlockValidationResult::DuplicateInvalid);
         }
@@ -428,6 +434,10 @@ impl MiningControl for MiningCoordinator {
         )
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "tree.node cannot fail after successful tree.lookup under the same read guard"
+    )]
     fn submit_block(
         &self,
         payload: BlockPayload,
@@ -435,15 +445,17 @@ impl MiningControl for MiningCoordinator {
         let segwit_active = {
             let tree = self.block_tree.read();
             tree.lookup(payload.block().header.prev_blockhash.into())
-                .and_then(|prev_id| tree.node(prev_id).ok())
+                .map(|prev_id| {
+                    tree.node(prev_id)
+                        .expect("node exists for looked-up id under block_tree read guard")
+                })
                 .map(|prev| {
                     self.chainstate
                         .network()
                         .is_segwit_active(prev.height.saturating_add(1))
                 })
         };
-        if segwit_active.is_some_and(|active| needs_witness_reserved_value(payload.block(), active))
-        {
+        if needs_witness_reserved_value(payload.block(), segwit_active == Some(true)) {
             let mut trial = payload.block().clone();
             if self.fill_uncommitted_witness(&mut trial) {
                 let filled = BlockPayload::from_local(trial);
@@ -526,7 +538,7 @@ impl MiningControl for MiningCoordinator {
             let hash = block.block_hash();
             if request.submit {
                 let payload = BlockPayload::from_local(block);
-                let hex = bitcoin_rs_primitives::encode::hex_encode(payload.bytes());
+                let hex = bitcoin_rs_primitives::hex::hex_encode(payload.bytes());
                 match self.submit(&payload)? {
                     BlockValidationResult::Accepted => {}
                     other => {
@@ -544,7 +556,7 @@ impl MiningControl for MiningCoordinator {
                         "generated block failed validation: {validation:?}"
                     ))));
                 }
-                let hex = bitcoin_rs_primitives::encode::hex_encode(payload.bytes());
+                let hex = bitcoin_rs_primitives::hex::hex_encode(payload.bytes());
                 generated.push(GeneratedBlock { hash, hex });
             }
         }
@@ -582,7 +594,6 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
         ApplyError::PrevHashMismatch { .. } => {
             CompactString::from(bitcoin_rs_mining::STALE_PARENT_REASON)
         }
-        ApplyError::TargetAboveLimit => CompactString::from("bad-diffbits"),
         ApplyError::BlockOutputsExceedInputs | ApplyError::BlockValueOverflow => {
             CompactString::from("bad-cb-amount")
         }
@@ -605,6 +616,7 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             | ChainError::NonContinuousHeader { .. }
             | ChainError::ZeroTarget { .. }
             | ChainError::TargetExceedsLimit { .. }
+            | ChainError::TargetBitsOverflow { .. }
             | ChainError::InvalidPow { .. }
             | ChainError::NbitsMismatch { .. }
             | ChainError::TimestampTooEarly { .. }

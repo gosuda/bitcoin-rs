@@ -1,9 +1,10 @@
 use super::*;
 
+use crate::test_support::TestError;
 use bitcoin_rs_primitives::BlockPayload;
 
 #[test]
-fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> anyhow::Result<()> {
+fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -28,7 +29,7 @@ fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> anyhow
         state
             .chainstate()
             .block_body_store()
-            .ok_or_else(|| anyhow::anyhow!("running node has no body store"))?
+            .ok_or_else(|| TestError::message("running node has no body store"))?
             .load_block_body(0, hash)?
             .as_deref(),
         Some(payload.bytes().as_ref())
@@ -37,11 +38,11 @@ fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> anyhow
 }
 
 #[test]
-fn preserved_bytes_apply_matches_lazy_serialization() -> anyhow::Result<()> {
+fn preserved_bytes_apply_matches_lazy_serialization() -> Result<(), TestError> {
     let local = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
     let hash = Hash256::from_le_bytes(local.block().block_hash().as_bytes());
     let preserved = BlockPayload::from_raw(local.bytes().clone())
-        .map_err(|error| anyhow::anyhow!("genesis bytes are canonical: {error}"))?;
+        .map_err(|error| TestError::message(format!("genesis bytes are canonical: {error}")))?;
 
     let dir_a = tempfile::tempdir()?;
     let mut config_a = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -62,21 +63,21 @@ fn preserved_bytes_apply_matches_lazy_serialization() -> anyhow::Result<()> {
     let body_a = state_a
         .chainstate()
         .block_body_store()
-        .ok_or_else(|| anyhow::anyhow!("running node has no body store"))?
+        .ok_or_else(|| TestError::message("running node has no body store"))?
         .load_block_body(0, hash)?
-        .ok_or_else(|| anyhow::anyhow!("apply_block body missing"))?;
+        .ok_or_else(|| TestError::message("apply_block body missing"))?;
     let body_b = state_b
         .chainstate()
         .block_body_store()
-        .ok_or_else(|| anyhow::anyhow!("running node has no body store"))?
+        .ok_or_else(|| TestError::message("running node has no body store"))?
         .load_block_body(0, hash)?
-        .ok_or_else(|| anyhow::anyhow!("preserved-byte apply body missing"))?;
+        .ok_or_else(|| TestError::message("preserved-byte apply body missing"))?;
     assert_eq!(body_a, body_b);
     Ok(())
 }
 
 #[test]
-fn prune_waits_for_chain_transition_and_revalidates_applied_tip() -> anyhow::Result<()> {
+fn prune_waits_for_chain_transition_and_revalidates_applied_tip() -> Result<(), TestError> {
     use std::time::Duration;
 
     let dir = tempfile::tempdir()?;
@@ -87,7 +88,9 @@ fn prune_waits_for_chain_transition_and_revalidates_applied_tip() -> anyhow::Res
     let state = NodeState::open(config.clone(), None)?;
     publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
     let Some(service) = state.prune_service() else {
-        anyhow::bail!("prune service should exist when prune_target_mb > 0");
+        return Err(TestError::message(
+            "prune service should exist when prune_target_mb > 0",
+        ));
     };
 
     let handles = state.chainstate();
@@ -95,7 +98,7 @@ fn prune_waits_for_chain_transition_and_revalidates_applied_tip() -> anyhow::Res
     let transition = barrier.lock();
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
-    let (done_while_locked, result) = std::thread::scope(|scope| -> anyhow::Result<_> {
+    let (done_while_locked, result) = std::thread::scope(|scope| -> Result<_, TestError> {
         let service = Arc::clone(&service);
         let worker = scope.spawn(move || {
             let _ = started_tx.send(());
@@ -109,7 +112,7 @@ fn prune_waits_for_chain_transition_and_revalidates_applied_tip() -> anyhow::Res
         drop(transition);
         let result = worker
             .join()
-            .map_err(|_| anyhow::anyhow!("prune worker panicked"))?;
+            .map_err(|_| TestError::message("prune worker panicked"))?;
         Ok((done_while_locked, result))
     })?;
     let status_after = service.status();
@@ -118,7 +121,9 @@ fn prune_waits_for_chain_transition_and_revalidates_applied_tip() -> anyhow::Res
     drop(state);
     let reopened = NodeState::open(config, None)?;
     let Some(reopened_service) = reopened.prune_service() else {
-        anyhow::bail!("prune service should exist after reopen");
+        return Err(TestError::message(
+            "prune service should exist after reopen",
+        ));
     };
 
     assert!(
@@ -142,7 +147,7 @@ fn prune_waits_for_chain_transition_and_revalidates_applied_tip() -> anyhow::Res
 }
 
 #[test]
-fn prune_refuses_after_apply_admission_closes() -> anyhow::Result<()> {
+fn prune_refuses_after_apply_admission_closes() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -151,7 +156,9 @@ fn prune_refuses_after_apply_admission_closes() -> anyhow::Result<()> {
     let state = NodeState::open(config, None)?;
     publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
     let Some(service) = state.prune_service() else {
-        anyhow::bail!("prune service should exist when prune_target_mb > 0");
+        return Err(TestError::message(
+            "prune service should exist when prune_target_mb > 0",
+        ));
     };
 
     state.chainstate().fail_closed_for_recovery();
@@ -171,7 +178,7 @@ fn prune_refuses_after_apply_admission_closes() -> anyhow::Result<()> {
 
 #[cfg(feature = "fjall")]
 #[test]
-fn prune_to_height_advances_published_height() -> anyhow::Result<()> {
+fn prune_to_height_advances_published_height() -> Result<(), TestError> {
     use bitcoin_rs_rpc::context::PruneService;
     use bitcoin_rs_storage::FlatFileBlockStore;
     use bitcoin_rs_storage::KvStore;
@@ -218,10 +225,10 @@ fn prune_to_height_advances_published_height() -> anyhow::Result<()> {
 
     let lower_result = service
         .prune_to_height(11)
-        .map_err(|err| anyhow::anyhow!("lower prune failed: {err}"))?;
+        .map_err(|err| TestError::message(format!("lower prune failed: {err}")))?;
     let higher_result = service
         .prune_to_height(12)
-        .map_err(|err| anyhow::anyhow!("higher prune failed: {err}"))?;
+        .map_err(|err| TestError::message(format!("higher prune failed: {err}")))?;
     assert_eq!(lower_result.pruneheight, 11);
     assert_eq!(higher_result.pruneheight, 12);
 
@@ -232,7 +239,7 @@ fn prune_to_height_advances_published_height() -> anyhow::Result<()> {
 
 #[cfg(feature = "fjall")]
 #[test]
-fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> anyhow::Result<()> {
+fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> Result<(), TestError> {
     use bitcoin_rs_chainstate::AssumeUtxoManager;
     use bitcoin_rs_primitives::Network;
     use bitcoin_rs_rpc::context::PruneService;
@@ -253,7 +260,7 @@ fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> anyho
 
     let pinned = Network::Regtest
         .assume_utxo_for_height(110)
-        .ok_or_else(|| anyhow::anyhow!("pinned 110 missing"))?;
+        .ok_or_else(|| TestError::message("pinned 110 missing"))?;
     let status = bitcoin_rs_chainstate::AssumeUtxoDiskStatus::Validating {
         base_height: pinned.height,
         base_hash: pinned.block_hash,
@@ -269,7 +276,7 @@ fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> anyho
     let tip = state
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| anyhow::anyhow!("missing fixture tip"))?;
+        .ok_or_else(|| TestError::message("missing fixture tip"))?;
     head_store.commit(
         prior.as_ref(),
         &bitcoin_rs_storage::DurableHead {
@@ -299,7 +306,9 @@ fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> anyho
 
     for height in [100, 110, 111, 200] {
         let Err(error) = service.prune_to_height(height) else {
-            anyhow::bail!("expected prune failure at height {height}");
+            return Err(TestError::message(format!(
+                "expected prune failure at height {height}"
+            )));
         };
         assert!(
             error

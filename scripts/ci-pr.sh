@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-  echo "usage: $0 {fmt|clippy|test-crates|test-binary|test-workspace|test|deny|deep|all}" >&2
+  echo "usage: $0 {fmt|clippy|test-crates|test-binary|test-workspace|test|deny|contracts|book|deep|all|proofs}" >&2
   exit 2
 }
 
@@ -146,6 +146,201 @@ test_rpc_reorg_notifications() {
     cargo_test -p bitcoin-rs-rpc --features zmq
 }
 
+# Proof lanes. `all` does not call this stage: CI runners carry no Kani,
+# Lean, or Aeneas toolchain. AGENTS.md requires it for proof-owning changes.
+proofs_stage() {
+  local log_dir
+  log_dir="$PWD/target/proofs-logs"
+  mkdir -p "$log_dir"
+
+  local -a kani_crates=()
+  if [[ -n "${PROOFS_CRATES:-}" ]]; then
+    read -r -a kani_crates <<< "${PROOFS_CRATES}"
+  else
+    while IFS= read -r crate; do
+      [[ -n "$crate" ]] && kani_crates+=("$crate")
+    done < <(find crates bin tools -path '*/src/*' -name proofs.rs -type f \
+      | sed 's|/src/.*||' | sort -u)
+  fi
+
+  local nproc_val
+  nproc_val=$(nproc 2>/dev/null || echo 1)
+  local num_crates
+  num_crates="${#kani_crates[@]}"
+  local default_jobs
+  default_jobs=$(( num_crates < nproc_val ? num_crates : nproc_val ))
+  if (( default_jobs < 1 )); then
+    default_jobs=1
+  fi
+  local kani_jobs
+  kani_jobs="${PROOFS_JOBS:-$default_jobs}"
+  if ! [[ "$kani_jobs" =~ ^[0-9]+$ ]] || (( kani_jobs < 1 )); then
+    kani_jobs=1
+  fi
+
+  local -a pending_pids=()
+  local -A job_labels=()
+  local -A job_logs=()
+  local -A job_starts=()
+  local stage_failed=0
+
+  report_job() {
+    local pid="$1"
+    local rc=0
+    wait "$pid" || rc=$?
+    local label
+    label="${job_labels[$pid]}"
+    local log
+    log="${job_logs[$pid]}"
+    local start
+    start="${job_starts[$pid]}"
+    local duration
+    duration=$((SECONDS - start))
+
+    if (( rc == 0 )); then
+      echo "==> ok: ${label} (${duration}s)"
+      if [[ "${PROOFS_VERBOSE:-0}" == "1" ]]; then
+        cat "${log}"
+      fi
+    else
+      echo "==> FAILED: ${label} (${duration}s)" >&2
+      echo "--- Log: ${log} ---" >&2
+      cat "${log}" >&2
+      echo "--- End log: ${log} ---" >&2
+      stage_failed=$((stage_failed + 1))
+    fi
+  }
+
+  reap() {
+    local -n pool="$1"
+    local allow_fallback="$2"
+    local fin=""
+    local process
+    wait -n -p fin "${pool[@]}" || true
+    if [[ -z "$fin" ]]; then
+      for process in "${pool[@]}"; do
+        if ! kill -0 "$process" 2>/dev/null; then
+          fin="$process"
+          break
+        fi
+      done
+      if [[ -z "$fin" && "$allow_fallback" == "1" && ${#pool[@]} -gt 0 ]]; then
+        fin="${pool[0]}"
+      fi
+    fi
+    report_job "$fin"
+    local -a survivors=()
+    for process in "${pool[@]}"; do
+      [[ "$process" == "$fin" ]] || survivors+=("$process")
+    done
+    pool=("${survivors[@]}")
+    survivors=()
+    for process in "${pending_pids[@]}"; do
+      [[ "$process" == "$fin" ]] || survivors+=("$process")
+    done
+    pending_pids=("${survivors[@]}")
+  }
+
+  local lean_log
+  lean_log="$log_dir/lean.log"
+  local lean_start
+  lean_start=$SECONDS
+  echo "==> lean: pipeline"
+  (
+    set -euo pipefail
+    if [[ ! -x scripts/extract_lean.sh ]]; then
+      echo "scripts/extract_lean.sh is missing" >&2
+      exit 1
+    fi
+    local -a extract_cmd=(./scripts/extract_lean.sh --check)
+    if [[ -n "${PROOFS_EXTRACT_LEAN_CMD:-}" ]]; then
+      read -r -a extract_cmd <<< "${PROOFS_EXTRACT_LEAN_CMD}"
+    fi
+    "${extract_cmd[@]}"
+    env -C docs/lean lake build
+    local scan_rc=0
+    rg -n '\bsorry\b|\badmit\b|\baxiom\b|\bnative_decide\b' docs/lean \
+      --glob '!**/Extracted/**' || scan_rc=$?
+    case "$scan_rc" in
+      0) echo "unfinished Lean proof found in docs/lean" >&2; exit 1 ;;
+      1) ;;
+      *) echo "Lean proof scan failed with exit code ${scan_rc}" >&2; exit 1 ;;
+    esac
+  ) > "$lean_log" 2>&1 &
+  local lean_pid
+  lean_pid=$!
+  pending_pids+=("$lean_pid")
+  job_labels[$lean_pid]="lean: pipeline"
+  job_logs[$lean_pid]="$lean_log"
+  job_starts[$lean_pid]=$lean_start
+
+  if [[ -f scripts/check_models.py ]]; then
+    if [[ "${PROOFS_MODELS:-1}" == "0" ]]; then
+      echo "==> models: skipped (PROOFS_MODELS=0)"
+    else
+      local models_log
+      models_log="$log_dir/models.log"
+      local models_start
+      models_start=$SECONDS
+      echo "==> models: check_models"
+      python3 scripts/check_models.py > "$models_log" 2>&1 &
+      local models_pid
+      models_pid=$!
+      pending_pids+=("$models_pid")
+      job_labels[$models_pid]="models: check_models"
+      job_logs[$models_pid]="$models_log"
+      job_starts[$models_pid]=$models_start
+    fi
+  fi
+
+  local -a running_kani=()
+  local crate
+  for crate in "${kani_crates[@]}"; do
+    local crate_name
+    crate_name="${crate##*/}"
+    local kani_target_dir
+    kani_target_dir="$PWD/target/kani/${crate_name}"
+    mkdir -p "$kani_target_dir"
+    local kani_log
+    kani_log="$log_dir/kani-${crate_name}.log"
+    local kani_label
+    kani_label="kani: ${crate}"
+    local kani_start
+    kani_start=$SECONDS
+
+    echo "==> ${kani_label}"
+    (
+      set -euo pipefail
+      local -a cmd=(cargo kani --tests)
+      if [[ -n "${PROOFS_KANI_CMD:-}" ]]; then
+        read -r -a cmd <<< "${PROOFS_KANI_CMD}"
+      fi
+      env -C "${crate}" CARGO_TARGET_DIR="${kani_target_dir}" "${cmd[@]}"
+    ) > "$kani_log" 2>&1 &
+    local kani_pid
+    kani_pid=$!
+
+    pending_pids+=("$kani_pid")
+    running_kani+=("$kani_pid")
+    job_labels[$kani_pid]="$kani_label"
+    job_logs[$kani_pid]="$kani_log"
+    job_starts[$kani_pid]=$kani_start
+
+    if (( ${#running_kani[@]} >= kani_jobs )); then
+      reap running_kani 0
+    fi
+  done
+
+  while (( ${#pending_pids[@]} > 0 )); do
+    reap pending_pids 1
+  done
+
+  if (( stage_failed > 0 )); then
+    failures=$((failures + stage_failed))
+    return 1
+  fi
+}
+
 case "$1" in
   fmt)
     cargo fmt --all -- --check
@@ -184,6 +379,25 @@ case "$1" in
       check
     ;;
 
+  contracts)
+    cargo run --locked -p contract-index -- --check
+    ;;
+
+  book)
+    # CI installs the pinned binary (.github/workflows/main.yml); the
+    # build lands in target/book per docs/book/book.toml.
+    if ! command -v mdbook >/dev/null 2>&1; then
+      echo "mdbook is missing; install it with: cargo install mdbook --locked --version 0.5.4" >&2
+      exit 1
+    fi
+    profile "book: mdbook build" mdbook build docs/book
+    profile "book: link check" python3 scripts/check_book_links.py docs/book
+    ;;
+
+  proofs)
+    proofs_stage
+    ;;
+
   deep)
     collect_failures=true
     clippy_profiles
@@ -197,6 +411,7 @@ case "$1" in
     "$0" fmt || failures=$((failures + 1))
     "$0" deep || failures=$((failures + 1))
     "$0" deny || failures=$((failures + 1))
+    "$0" contracts || failures=$((failures + 1))
     finish
     ;;
 

@@ -112,6 +112,7 @@ fn fee_estimates_omits_every_target_without_history() {
     assert_eq!(parsed, rpc_estimates(&ctx));
 }
 
+// API-26
 #[test]
 fn fee_estimates_projects_confirmed_history_to_sat_per_vbyte() {
     let ctx = confirmed_history(HIGH_FEE_SATS, 1);

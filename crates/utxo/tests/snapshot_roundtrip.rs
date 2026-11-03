@@ -1,5 +1,6 @@
 use std::io::{Cursor, Seek};
 
+use crate::support::{TestError, TestResult};
 use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_utxo::{
@@ -25,8 +26,7 @@ fn txout(seed: u64) -> TxOut {
 }
 
 #[test]
-fn snapshot_roundtrip_preserves_vout_and_metadata_boundaries()
--> Result<(), Box<dyn std::error::Error>> {
+fn snapshot_roundtrip_preserves_vout_and_metadata_boundaries() -> TestResult {
     let set = UtxoSet::new();
     let live_txid = txid(42_000);
     let low = OutPoint::new(live_txid.into(), 63);
@@ -63,21 +63,21 @@ fn snapshot_roundtrip_preserves_vout_and_metadata_boundaries()
         !loaded
             .set
             .get_entry(&low)
-            .ok_or("missing low entry")?
+            .ok_or(TestError::Missing("missing low entry"))?
             .coinbase
     );
     assert!(
         loaded
             .set
             .get_entry(&high)
-            .ok_or("missing high entry")?
+            .ok_or(TestError::Missing("missing high entry"))?
             .coinbase
     );
     assert_eq!(
         loaded
             .set
             .get_entry(&max)
-            .ok_or("missing max entry")?
+            .ok_or(TestError::Missing("missing max entry"))?
             .height,
         u32::MAX
     );
@@ -85,7 +85,7 @@ fn snapshot_roundtrip_preserves_vout_and_metadata_boundaries()
 }
 
 #[test]
-fn strict_v4_snapshot_requires_complete_exact_input() -> Result<(), Box<dyn std::error::Error>> {
+fn strict_v4_snapshot_requires_complete_exact_input() -> TestResult {
     let mut snapshot = Vec::new();
     write_snapshot_observed(&UtxoSet::new(), &txid(64_100), 64, &mut snapshot, ())?;
 
@@ -139,8 +139,7 @@ impl SnapshotCoinObserver for RecordingSnapshotObserver {
 }
 
 #[test]
-fn observed_snapshot_traversal_matches_the_current_reader() -> Result<(), Box<dyn std::error::Error>>
-{
+fn observed_snapshot_traversal_matches_the_current_reader() -> TestResult {
     let set = UtxoSet::new();
     let first_txid = txid(200_000);
     let second_txid = txid(200_001);
@@ -196,7 +195,7 @@ fn observed_snapshot_traversal_matches_the_current_reader() -> Result<(), Box<dy
 }
 
 #[test]
-fn snapshot_trailer_round_trips_without_a_listener() -> Result<(), Box<dyn std::error::Error>> {
+fn snapshot_trailer_round_trips_without_a_listener() -> TestResult {
     let set = UtxoSet::new();
 
     let op = OutPoint::new(txid(130_000).into(), 0);
@@ -352,4 +351,145 @@ fn append_snapshot_output(
     bytes.push(u8::from(coinbase));
     bytes.extend_from_slice(&script_len.to_le_bytes());
     bytes.extend_from_slice(script_pubkey);
+}
+
+#[test]
+fn rejects_snapshot_record_with_zero_outputs() {
+    let mut data = Vec::new();
+    data.extend_from_slice(&0x55_54_58_4f_u32.to_le_bytes());
+    data.extend_from_slice(&4_u32.to_le_bytes());
+    data.extend_from_slice(&[0x11; 32]);
+    data.extend_from_slice(&100_u32.to_le_bytes());
+    data.extend_from_slice(&1_u64.to_le_bytes());
+    let txid = [0x22; 32];
+    data.push(txid[0]);
+    data.extend_from_slice(&txid[..8]);
+    data.extend_from_slice(&txid);
+    data.extend_from_slice(&0_u32.to_le_bytes());
+    data.extend_from_slice(&[0_u8; 384]);
+
+    let result = read_snapshot_strict_v4(&mut Cursor::new(&data));
+    assert!(matches!(
+        &result,
+        Err(UtxoError::SnapshotRecordCountMismatch {
+            declared: 1,
+            actual: 0
+        })
+    ));
+}
+
+#[test]
+fn rejects_snapshot_record_with_too_many_outputs() {
+    let mut data = Vec::new();
+    data.extend_from_slice(&0x55_54_58_4f_u32.to_le_bytes());
+    data.extend_from_slice(&4_u32.to_le_bytes());
+    data.extend_from_slice(&[0x11; 32]);
+    data.extend_from_slice(&100_u32.to_le_bytes());
+    data.extend_from_slice(&1_u64.to_le_bytes());
+    let txid = [0x22; 32];
+    data.push(txid[0]);
+    data.extend_from_slice(&txid[..8]);
+    data.extend_from_slice(&txid);
+    data.extend_from_slice(&2_000_000_u32.to_le_bytes());
+    data.extend_from_slice(&[0_u8; 384]);
+
+    let result = read_snapshot_strict_v4(&mut Cursor::new(&data));
+    assert!(matches!(
+        &result,
+        Err(UtxoError::SnapshotOutputCountTooLarge { count: 2_000_000 })
+    ));
+}
+
+#[test]
+fn rejects_snapshot_with_record_count_exceeding_budget() {
+    let mut data = Vec::new();
+    data.extend_from_slice(&0x55_54_58_4f_u32.to_le_bytes());
+    data.extend_from_slice(&4_u32.to_le_bytes());
+    data.extend_from_slice(&[0x11; 32]);
+    data.extend_from_slice(&100_u32.to_le_bytes());
+    data.extend_from_slice(&300_000_000_u64.to_le_bytes());
+    data.extend_from_slice(&[0_u8; 384]);
+
+    let result = read_snapshot_strict_v4(&mut Cursor::new(&data));
+    assert!(matches!(
+        &result,
+        Err(UtxoError::SnapshotRecordCountTooLarge { count: 300_000_000 })
+    ));
+}
+
+fn valid_two_output_snapshot(record_txid: Hash256, height: u32) -> Vec<u8> {
+    let mut bytes = v4_header(txid(190_001), height, 1);
+    bytes.extend_from_slice(&v4_record_body(&record_txid.to_le_bytes(), 2));
+    append_snapshot_output(&mut bytes, 0, 1_000, height, false, &[0x51]);
+    append_snapshot_output(&mut bytes, 1, 2_000, height, true, &[0x51, 0x52]);
+    bytes.extend_from_slice(&[0_u8; 384]);
+    bytes
+}
+
+#[test]
+fn strict_v4_refuses_every_truncation_length() -> TestResult {
+    let bytes = valid_two_output_snapshot(txid(190_000), 1900);
+    read_snapshot_strict_v4(&mut Cursor::new(&bytes))?;
+    for cut in 0..bytes.len() {
+        assert!(
+            read_snapshot_strict_v4(&mut Cursor::new(&bytes[..cut])).is_err(),
+            "truncation at {cut} decoded"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn strict_v4_refuses_a_duplicated_record() {
+    let record_txid = txid(191_000);
+    let mut bytes = v4_header(txid(191_001), 1910, 2);
+    for vout in [0_u32, 1] {
+        bytes.extend_from_slice(&v4_record_body(&record_txid.to_le_bytes(), 1));
+        append_snapshot_output(&mut bytes, vout, 1_000, 1910, false, &[0x51]);
+    }
+    bytes.extend_from_slice(&[0_u8; 384]);
+    let result = read_snapshot_strict_v4(&mut Cursor::new(bytes));
+    assert!(matches!(
+        result,
+        Err(UtxoError::SnapshotRecordCountMismatch {
+            declared: 2,
+            actual: 1
+        })
+    ));
+}
+
+#[test]
+fn strict_v4_coin_hash_ignores_output_order() -> TestResult {
+    fn ordered_snapshot(vouts: [u32; 2]) -> Vec<u8> {
+        let record_txid = txid(192_000);
+        let mut bytes = v4_header(txid(192_001), 1920, 1);
+        bytes.extend_from_slice(&v4_record_body(&record_txid.to_le_bytes(), 2));
+        for vout in vouts {
+            append_snapshot_output(
+                &mut bytes,
+                vout,
+                1_000 + u64::from(vout),
+                1920,
+                false,
+                &[0x51],
+            );
+        }
+        bytes.extend_from_slice(&[0_u8; 384]);
+        bytes
+    }
+    let forward = read_snapshot_strict_v4(&mut Cursor::new(ordered_snapshot([3, 9])))?;
+    let reverse = read_snapshot_strict_v4(&mut Cursor::new(ordered_snapshot([9, 3])))?;
+    assert_eq!(
+        forward.set.lock_stable_view().hash_serialized_3()?,
+        reverse.set.lock_stable_view().hash_serialized_3()?,
+        "an unordered record must hash to the same coin commitment"
+    );
+    for vout in [3_u32, 9] {
+        let outpoint = OutPoint::new(txid(192_000).into(), vout);
+        assert!(
+            reverse.set.get_entry(&outpoint).is_some(),
+            "unordered record lost vout {vout}"
+        );
+    }
+    Ok(())
 }

@@ -82,12 +82,12 @@ fn asmap_placement_matches_224_actual_core_vectors() {
             "{row}"
         );
         assert_eq!(
-            u64::try_from(bucket_position(&secret, addr, true, new)).expect("position"),
+            u64::try_from(new_bucket_position(&secret, addr, new)).expect("position"),
             row["new_position"],
             "{row}"
         );
         assert_eq!(
-            u64::try_from(bucket_position(&secret, addr, false, tried)).expect("position"),
+            u64::try_from(tried_bucket_position(&secret, addr, tried)).expect("position"),
             row["tried_position"],
             "{row}"
         );

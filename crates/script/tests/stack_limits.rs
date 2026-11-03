@@ -21,13 +21,32 @@ const SPENDS: [Spend; 4] = [
     Spend::WitnessV0,
     Spend::Tapscript,
 ];
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Secp256k1(#[from] bitcoin::secp256k1::Error),
+    #[error(transparent)]
+    TaprootBuilder(#[from] bitcoin::taproot::TaprootBuilderError),
+    #[error(transparent)]
+    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    #[error(transparent)]
+    Prevout(#[from] bitcoin_rs_script::PrevoutError),
+    #[cfg(feature = "kernel")]
+    #[error(transparent)]
+    Consensus(#[from] bitcoin_rs_consensus::ConsensusError),
+    #[error("{0}")]
+    Message(&'static str),
+}
 
-fn fixture(
-    spend: Spend,
-    initial: usize,
-    script: Vec<u8>,
-) -> Result<(Tx, TxOut), Box<dyn std::error::Error>> {
+impl From<&'static str> for TestError {
+    fn from(s: &'static str) -> Self {
+        Self::Message(s)
+    }
+}
+
+type TestResult = Result<(), TestError>;
+
+fn fixture(spend: Spend, initial: usize, script: Vec<u8>) -> Result<(Tx, TxOut), TestError> {
     let script = ScriptBuf::from_bytes(script);
     let mut script_sig = vec![opcode::OP_0; initial];
     let mut witness = vec![Vec::new(); initial];
@@ -125,7 +144,7 @@ fn check(
         match result {
             Ok(()) => assert!(expected.is_ok(), "{spend:?}: kernel accepted"),
             Err(ConsensusError::Script { .. }) => {
-                assert!(expected.is_err(), "{spend:?}: kernel rejected")
+                assert!(expected.is_err(), "{spend:?}: kernel rejected");
             }
             Err(error) => return Err(error.into()),
         }

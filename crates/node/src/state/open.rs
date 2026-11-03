@@ -10,18 +10,20 @@ use super::derived_index_capabilities;
 use super::storage::NodeStorage;
 use super::storage::StoredBlockBodySource;
 use crate::NodeConfig;
-use anyhow::Context as _;
-use anyhow::Result;
+use crate::config::ConfigError;
 
 use bitcoin_rs_chain::BlockBodySource;
 use bitcoin_rs_chainstate::ChainstateParts;
-use bitcoin_rs_chainstate::events::{ChainEventPublisher, ChainSnapshot, initialize_data_dir};
+use bitcoin_rs_chainstate::events::{
+    ChainEventPublisher, ChainSnapshot, DataDirError, initialize_data_dir,
+};
 use bitcoin_rs_chainstate::recovery::{
-    InitialChainstate, ResumeSource, STALE_RESTORE_ERROR_THRESHOLD, open_journal_dir,
-    prepare_initial_chainstate,
+    InitialChainstate, RecoveryError, ResumeSource, STALE_RESTORE_ERROR_THRESHOLD,
+    open_journal_dir, prepare_initial_chainstate,
 };
 use bitcoin_rs_chainstate::verify::{
-    CheckLevel, STARTUP_VERIFY_DEPTH, VerifyOutcome, VerifyRequest, verify_recent_blocks,
+    CheckLevel, STARTUP_VERIFY_DEPTH, VerifyError, VerifyOutcome, VerifyRequest,
+    verify_recent_blocks,
 };
 use bitcoin_rs_consensus::{ScriptExecutionCache, ValidationEngine};
 use bitcoin_rs_index::block_log::BlockLog;
@@ -32,13 +34,111 @@ use bitcoin_rs_p2p::download_window::FAST_OUTBOUND_PEER_TARGET;
 use bitcoin_rs_p2p::download_window::fast_sync_budget;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StartupVerificationPaths {
+    pub blocks: PathBuf,
+    pub chainstate_dir: PathBuf,
+    pub checkpoints: PathBuf,
+    pub txindex: PathBuf,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum NodeOpenError {
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error(transparent)]
+    DataDirLock(#[from] crate::state::DataDirLockError),
+    #[error(transparent)]
+    DataDir(#[from] DataDirError),
+    #[error(transparent)]
+    Recovery(Box<RecoveryError>),
+    #[error(transparent)]
+    Storage(#[from] bitcoin_rs_storage::StorageError),
+    #[error(transparent)]
+    CheckpointSetup(#[from] bitcoin_rs_chainstate::CheckpointSetupError),
+    #[error(transparent)]
+    JournalWriter(#[from] bitcoin_rs_storage::chainstate_journal::JournalWriterError),
+    #[cfg(feature = "zmq")]
+    #[error(transparent)]
+    ZmqBind(#[from] bitcoin_rs_rpc::zmq::ZmqBindError),
+    #[error(transparent)]
+    Apply(Box<bitcoin_rs_chainstate::ApplyError>),
+    #[error("create data_dir {path}")]
+    CreateDataDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("create chainstate_dir {path}")]
+    CreateChainstateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("write checkpoint-fallback event marker")]
+    CheckpointFallbackMarker {
+        #[source]
+        source: bitcoin_rs_storage::recovery_evidence::EvidenceError,
+    },
+    #[error("inbound headers receiver already taken")]
+    InboundHeadersReceiverTaken,
+    #[error("inbound blocks receiver already taken")]
+    InboundBlocksReceiverTaken,
+    #[error("staged-tip preparation hook already installed")]
+    TipStagedHookInstalled,
+    #[error(
+        "The node cannot repair this in place. Remove or quarantine {chainstate}, {checkpoints}, and {txindex}, then resync."
+    )]
+    UnrecoverableDurableHeadGap {
+        chainstate: PathBuf,
+        checkpoints: PathBuf,
+        txindex: PathBuf,
+        #[source]
+        source: Box<bitcoin_rs_chainstate::ApplyError>,
+    },
+    #[error("mempool snapshot restore timeout exceeds the platform clock range")]
+    MempoolRestoreClockRange,
+    #[error("{0}")]
+    GatewayObserverLeg(&'static str),
+    #[error("assumeutxo open failed: {error}")]
+    AssumeUtxoOpen {
+        error: Box<bitcoin_rs_chainstate::AssumeUtxoError>,
+    },
+    #[error(
+        "startup verification of the last {depth} applied blocks failed. Verification repairs nothing, but recovery earlier in this startup may already have changed the data directory. Restore it from a backup, or remove or quarantine {}, {}, {}, and {}, then resync.",
+        paths.blocks.display(),
+        paths.chainstate_dir.display(),
+        paths.checkpoints.display(),
+        paths.txindex.display()
+    )]
+    StartupVerification {
+        depth: core::num::NonZeroU32,
+        paths: Box<StartupVerificationPaths>,
+        #[source]
+        source: VerifyError,
+    },
+}
+
+impl From<RecoveryError> for NodeOpenError {
+    fn from(error: RecoveryError) -> Self {
+        Self::Recovery(Box::new(error))
+    }
+}
+
+impl From<bitcoin_rs_chainstate::ApplyError> for NodeOpenError {
+    fn from(error: bitcoin_rs_chainstate::ApplyError) -> Self {
+        Self::Apply(Box::new(error))
+    }
+}
 
 fn verify_startup_window(
     chainstate: &bitcoin_rs_chainstate::Chainstate,
     data_dir: &std::path::Path,
-) -> Result<()> {
+) -> Result<(), NodeOpenError> {
     let request = VerifyRequest {
         level: CheckLevel::CheckUndoAndCommitments,
         depth: Some(STARTUP_VERIFY_DEPTH),
@@ -56,16 +156,16 @@ fn verify_startup_window(
             );
             Ok(())
         }
-        Err(error) => Err(anyhow::Error::new(error).context(format!(
-            "startup verification of the last {STARTUP_VERIFY_DEPTH} applied blocks failed. \
-             Verification repairs nothing, but recovery earlier in this startup may already \
-             have changed the data directory. Restore it from a backup, or remove or quarantine \
-             {}, {}, {}, and {}, then resync.",
-            data_dir.join("blocks").display(),
-            data_dir.join("chainstate").display(),
-            data_dir.join("chainstate-checkpoints").display(),
-            data_dir.join("txindex").display(),
-        ))),
+        Err(source) => Err(NodeOpenError::StartupVerification {
+            depth: STARTUP_VERIFY_DEPTH,
+            paths: Box::new(StartupVerificationPaths {
+                blocks: data_dir.join("blocks"),
+                chainstate_dir: data_dir.join("chainstate"),
+                checkpoints: data_dir.join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT),
+                txindex: data_dir.join(crate::state::TXINDEX_NAMESPACE),
+            }),
+            source,
+        }),
     }
 }
 
@@ -73,7 +173,7 @@ impl NodeState {
     pub fn open(
         config: NodeConfig,
         mempool_observer: Option<&Arc<dyn bitcoin_rs_mempool::MempoolObserver>>,
-    ) -> Result<Self> {
+    ) -> Result<Self, NodeOpenError> {
         Self::open_inner(config, mempool_observer, |store| store)
     }
 
@@ -82,7 +182,7 @@ impl NodeState {
         config: NodeConfig,
         mempool_observer: Option<&Arc<dyn bitcoin_rs_mempool::MempoolObserver>>,
         wrap: W,
-    ) -> Result<Self>
+    ) -> Result<Self, NodeOpenError>
     where
         W: FnOnce(
             Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
@@ -95,25 +195,30 @@ impl NodeState {
         config: NodeConfig,
         mempool_observer: Option<&Arc<dyn bitcoin_rs_mempool::MempoolObserver>>,
         wrap: W,
-    ) -> Result<Self>
+    ) -> Result<Self, NodeOpenError>
     where
         W: FnOnce(
             Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
         ) -> Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     {
         config.validate()?;
-        std::fs::create_dir_all(&config.data_dir)
-            .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
+        std::fs::create_dir_all(&config.data_dir).map_err(|source| {
+            NodeOpenError::CreateDataDir {
+                path: config.data_dir.clone(),
+                source,
+            }
+        })?;
         let data_dir_guard: bitcoin_rs_storage::StoreGuard = Arc::new(
             super::data_dir_lock::DataDirLock::acquire(&config.data_dir)?,
         );
         let epoch = initialize_data_dir(&config.data_dir)?;
 
         let cache_budget = bitcoin_rs_storage::clamp_dbcache_bytes(config.storage.dbcache_mb);
-        let cache_shares = bitcoin_rs_storage::split_cache_budget(
-            cache_budget,
-            !derived_index_capabilities(&config).is_empty(),
-        );
+        let cache_shares = if derived_index_capabilities(&config).is_empty() {
+            bitcoin_rs_storage::split_cache_budget_without_txindex(cache_budget)
+        } else {
+            bitcoin_rs_storage::split_cache_budget_with_txindex(cache_budget)
+        };
         let chainstate_cache_bytes = cache_shares[0].bytes;
         let txindex_cache_bytes = cache_shares[1].bytes;
         let (storage, block_files) =
@@ -143,12 +248,24 @@ impl NodeState {
             resume_source,
             journal_bootstrap,
             script_live_seed,
-        } = prepare_initial_chainstate(
-            &config.data_dir,
-            config.network,
-            config.chainstate_journal,
-            durable_head.load()?.as_ref(),
-        )?;
+        } = {
+            let head = durable_head.load()?;
+            bitcoin_rs_chainstate::recovery::require_full_script_attestation(
+                &config.data_dir,
+                config.validation.mode,
+                head.as_ref(),
+                durable_head.as_ref(),
+                storage
+                    .stored_prune_height()
+                    .is_some_and(|height| height > 0),
+            )?;
+            prepare_initial_chainstate(
+                &config.data_dir,
+                config.network,
+                config.chainstate_journal,
+                head.as_ref(),
+            )?
+        };
         if resume_source == ResumeSource::Checkpoint {
             tracing::info!(
                 height = restored_applied_tip.as_ref().map_or(0, |tip| tip.height),
@@ -198,7 +315,9 @@ impl NodeState {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| d.as_secs()),
                     )
-                    .context("write checkpoint-fallback event marker")?;
+                    .map_err(|error_source| NodeOpenError::CheckpointFallbackMarker {
+                        source: error_source,
+                    })?;
                 let gap = witness_height.saturating_sub(restored_height);
                 if gap > STALE_RESTORE_ERROR_THRESHOLD {
                     tracing::error!(
@@ -382,10 +501,10 @@ impl NodeState {
         let peer_table = p2p.table();
         let inbound_headers_rx = p2p
             .take_inbound_headers_receiver()
-            .ok_or_else(|| anyhow::anyhow!("inbound headers receiver already taken"))?;
+            .ok_or(NodeOpenError::InboundHeadersReceiverTaken)?;
         let inbound_blocks_rx = p2p
             .take_inbound_blocks_receiver()
-            .ok_or_else(|| anyhow::anyhow!("inbound blocks receiver already taken"))?;
+            .ok_or(NodeOpenError::InboundBlocksReceiverTaken)?;
         let (inbound_tx_tx, inbound_tx_rx_raw) =
             crossbeam_channel::bounded::<bitcoin_rs_p2p::InboundBody>(INBOUND_TX_CHANNEL_LIMIT);
         let inbound_tx_rx = Mutex::new(Some(inbound_tx_rx_raw));
@@ -400,7 +519,7 @@ impl NodeState {
                     staged_mining.stage_tip(tip, block);
                 }
             }))
-            .map_err(|_| anyhow::anyhow!("staged-tip preparation hook already installed"))?;
+            .map_err(|_| NodeOpenError::TipStagedHookInstalled)?;
         let mempool_gateway = {
             let cloned_mining = Arc::clone(&mining_generation);
             let mining_leg: Arc<dyn bitcoin_rs_mempool::MempoolObserver> = cloned_mining;
@@ -438,14 +557,16 @@ impl NodeState {
         match bitcoin_rs_chainstate::recover_disconnect_marker(&chainstate) {
             Ok(()) => {}
             Err(error @ bitcoin_rs_chainstate::ApplyError::DurableHeadGapUnrecoverable { .. }) => {
-                return Err(anyhow::Error::new(error).context(format!(
-                    "The node cannot repair this in place. Remove or quarantine {}, {}, and {}, then resync.",
-                    config.data_dir.join("chainstate").display(),
-                    config.data_dir.join("chainstate-checkpoints").display(),
-                    config.data_dir.join("txindex").display(),
-                )));
+                return Err(NodeOpenError::UnrecoverableDurableHeadGap {
+                    chainstate: config.data_dir.join("chainstate"),
+                    checkpoints: config
+                        .data_dir
+                        .join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT),
+                    txindex: config.data_dir.join(crate::state::TXINDEX_NAMESPACE),
+                    source: Box::new(error),
+                });
             }
-            Err(error) => return Err(anyhow::Error::new(error)),
+            Err(error) => return Err(NodeOpenError::Apply(Box::new(error))),
         }
         let chainstate = Arc::new(chainstate);
         if config.persist_mempool {
@@ -454,11 +575,7 @@ impl NodeState {
                 .checked_add(std::time::Duration::from_secs(
                     config.mempool_snapshot_restore_timeout_secs,
                 ))
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "mempool snapshot restore timeout exceeds the platform clock range"
-                    )
-                })?;
+                .ok_or(NodeOpenError::MempoolRestoreClockRange)?;
             let chain = bitcoin_rs_rpc::context::ChainAdmissionView::new(
                 chainstate.utxo_reader(),
                 chainstate.applied_tip_reader(),
@@ -534,11 +651,11 @@ impl NodeState {
                     )),
                     interest,
                 )
-                .map_err(anyhow::Error::msg)?;
+                .map_err(NodeOpenError::GatewayObserverLeg)?;
         } else if let Some(observer) = mempool_observer.cloned() {
             mempool_gateway
                 .attach_observer_leg("test", observer, BodyInterest::Bodies)
-                .map_err(anyhow::Error::msg)?;
+                .map_err(NodeOpenError::GatewayObserverLeg)?;
         }
         let ibd = chainstate.ibd_latch();
         let assumeutxo = Arc::new(
@@ -547,7 +664,9 @@ impl NodeState {
                 Arc::clone(&chainstate),
                 config.data_dir.clone(),
             )
-            .map_err(|err| anyhow::anyhow!("assumeutxo open failed: {err}"))?,
+            .map_err(|error| NodeOpenError::AssumeUtxoOpen {
+                error: Box::new(error),
+            })?,
         );
         let sync = Arc::new(crate::sync::block_sync(
             Arc::clone(&chainstate),
@@ -588,6 +707,7 @@ impl NodeState {
             seed_offer,
         ));
         verify_startup_window(&chainstate, &config.data_dir)?;
+        let shutdown = Arc::new(chainstate.shutdown_reader().child());
         Ok(Self {
             config,
             #[cfg(test)]
@@ -610,6 +730,7 @@ impl NodeState {
             recovery_reporter,
             snapshots,
             block_announce_rx: Mutex::new(Some(block_announce_rx)),
+            shutdown,
         })
     }
 }

@@ -1,10 +1,8 @@
-//! Native transaction types and txid/wtxid computation.
-
 use sha2::{Digest, Sha256};
 
 use crate::{
     Amount, LockTime, OutPoint, Script, Sequence, Txid, Witness, Wtxid,
-    encode::{ConsensusEncode, Sha256Sink, encode_tx, finalize_double_sha256, tx_base_size},
+    encode::{ConsensusEncode, Sha256Sink, encode_tx_base, finalize_double_sha256, tx_base_size},
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -30,7 +28,6 @@ pub struct Tx {
 }
 
 impl Tx {
-    /// Returns true for exactly one input spending the null outpoint.
     #[must_use]
     pub fn is_coinbase(&self) -> bool {
         self.inputs.len() == 1 && self.inputs[0].previous_output.is_null()
@@ -46,7 +43,7 @@ impl Tx {
     pub fn txid(&self) -> Txid {
         let mut engine: Sha256 = Sha256::new();
         let mut writer = Sha256Sink(&mut engine);
-        encode_tx(self, &mut writer, false);
+        encode_tx_base(self, &mut writer);
         Txid(finalize_double_sha256(engine))
     }
 
@@ -91,8 +88,6 @@ impl Tx {
         Self::vsize_from_weight(self.weight())
     }
 
-    /// Returns the heap bytes allocated for this transaction's inputs, outputs,
-    /// scripts, and witness stacks, including spare capacity.
     #[must_use]
     pub fn retained_heap_bytes(&self) -> usize {
         let mut total = self
@@ -125,7 +120,9 @@ mod tests {
     use crate::deserialize;
     use crate::{DecodeError, Hash256, OutPoint, TxIn, TxOut, Txid, encode::consensus_bytes};
 
-    type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
+    use crate::test_error::TestError;
+
+    type Result<T, E = TestError> = std::result::Result<T, E>;
 
     fn native_tx() -> Tx {
         Tx {
@@ -228,16 +225,14 @@ mod tests {
         let mut inputs = Vec::with_capacity(3);
         let mut script_bytes = Vec::with_capacity(50);
         script_bytes.extend_from_slice(&[0x04; 20]);
-        let mut wit_item = Vec::with_capacity(100);
-        wit_item.extend_from_slice(&[0x05; 32]);
-        let mut wit_stack = Vec::with_capacity(4);
-        wit_stack.push(wit_item);
+        let mut witness = crate::Witness::with_capacity(4, 100);
+        witness.push(&[0x05; 32]);
 
         inputs.push(TxIn {
             previous_output: OutPoint::default(),
             script_sig: crate::Script::from_bytes(script_bytes),
             sequence: crate::Sequence::MAX,
-            witness: crate::Witness::from_stack(wit_stack),
+            witness,
         });
 
         let mut outputs = Vec::with_capacity(5);
@@ -257,7 +252,7 @@ mod tests {
 
         let expected = 3 * core::mem::size_of::<TxIn>()
             + 50
-            + 4 * core::mem::size_of::<Vec<u8>>()
+            + 4 * core::mem::size_of::<u32>()
             + 100
             + 5 * core::mem::size_of::<TxOut>()
             + 70;

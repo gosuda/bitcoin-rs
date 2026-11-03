@@ -18,21 +18,58 @@ use crate::connection::QueuedFrame;
 use crate::transport::{Negotiated, SendTransport, TransportProtocol, establish};
 use crate::{Message, Peer, PeerError, PeerLease, PeerRole, PeerTable, wire};
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Peer(#[from] PeerError),
+    #[error(transparent)]
+    RecvTimeout(#[from] crossbeam_channel::RecvTimeoutError),
+    #[error(transparent)]
+    Listener(#[from] crate::listener::ListenerError),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+    #[error("failure: {0}")]
+    Failure(String),
+}
+
+impl From<&'static str> for TestError {
+    fn from(msg: &'static str) -> Self {
+        Self::Failure(msg.to_string())
+    }
+}
+
+impl From<String> for TestError {
+    fn from(msg: String) -> Self {
+        Self::Failure(msg)
+    }
+}
+
+type TestResult = Result<(), TestError>;
 
 const MAGIC: Magic = Magic::BITCOIN;
 
-fn shared(v2_transport: bool) -> (ConnectionShared, Arc<PeerTable>) {
+fn v1_shared() -> (ConnectionShared, Arc<PeerTable>) {
     let table = Arc::new(PeerTable::new());
     let mut shared = test_shared(
         Arc::clone(&table),
         crossbeam_channel::unbounded().0,
         crossbeam_channel::unbounded().0,
     );
-    shared.v2_transport = v2_transport;
-    if v2_transport {
-        shared.local_services |= ServiceFlags::P2P_V2;
-    }
+    shared.v2_transport = false;
+    (shared, table)
+}
+
+fn v2_shared() -> (ConnectionShared, Arc<PeerTable>) {
+    let table = Arc::new(PeerTable::new());
+    let mut shared = test_shared(
+        Arc::clone(&table),
+        crossbeam_channel::unbounded().0,
+        crossbeam_channel::unbounded().0,
+    );
+    shared.v2_transport = true;
+    shared.local_services |= ServiceFlags::P2P_V2;
     (shared, table)
 }
 
@@ -49,24 +86,28 @@ fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(20)
 }
 
-type Listening = (PeerEndpoint, Arc<AtomicBool>, std::thread::JoinHandle<()>);
+type Listening = (
+    PeerEndpoint,
+    bitcoin_rs_chain::LatchWriter,
+    std::thread::JoinHandle<()>,
+);
 
-fn listen(shared: ConnectionShared) -> Result<Listening, Box<dyn std::error::Error>> {
+fn listen(shared: ConnectionShared) -> Result<Listening, TestError> {
     let listener = bind_listener(
         PeerEndpoint::from(([127, 0, 0, 1], 0))
             .socket_addr()
             .unwrap_or_else(|| panic!("expected IP fixture")),
     )?;
     let addr = listener.local_addr()?;
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&shutdown);
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let reader = shutdown.reader();
     let handle = std::thread::spawn(move || {
-        let _ = serve(listener, flag, shared);
+        let _ = serve(listener, reader, shared);
     });
     Ok((addr.into(), shutdown, handle))
 }
 
-fn connect(addr: PeerEndpoint) -> Result<TcpStream, Box<dyn std::error::Error>> {
+fn connect(addr: PeerEndpoint) -> Result<TcpStream, TestError> {
     let stream = TcpStream::connect(
         addr.socket_addr()
             .unwrap_or_else(|| panic!("expected IP fixture")),
@@ -75,10 +116,7 @@ fn connect(addr: PeerEndpoint) -> Result<TcpStream, Box<dyn std::error::Error>> 
     Ok(stream)
 }
 
-fn read_until(
-    peer: &mut Peer<TcpStream>,
-    wanted: &Message,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn read_until(peer: &mut Peer<TcpStream>, wanted: &Message) -> Result<(), TestError> {
     let deadline = deadline();
     while Instant::now() < deadline {
         match peer.read_message() {
@@ -92,11 +130,11 @@ fn read_until(
             Err(error) => return Err(error.into()),
         }
     }
-    Err(format!("{wanted:?} never arrived").into())
+    Err(TestError::Missing("the wanted message never arrived"))
 }
 
 fn handshake_and_ping(addr: PeerEndpoint, stream: TcpStream, negotiated: Negotiated) -> TestResult {
-    let (client, _) = shared(false);
+    let (client, _) = v1_shared();
     let lease = lease();
     let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
     run_outbound_handshake(&mut peer, 7, 0, &lease, deadline(), addr, &client)?;
@@ -110,7 +148,7 @@ fn bip434_windows_preserve_bip332_and_package_negotiation_on_v1_and_v2() -> Test
     use crate::packages::{PKG_RELAY_ANC, PKG_RELAY_PKGTXNS, SendPackages};
     for v2 in [false, true] {
         for version in [FEATURE_VERSION - 1, FEATURE_VERSION] {
-            let (mut listener_shared, table) = shared(v2);
+            let (mut listener_shared, table) = if v2 { v2_shared() } else { v1_shared() };
             listener_shared.relay_offers = super::RelayOffers {
                 package_relay: true,
                 stale_tip_relay: true,
@@ -182,7 +220,7 @@ fn bip434_windows_preserve_bip332_and_package_negotiation_on_v1_and_v2() -> Test
                 Ok(())
             })();
             table.cancel_all();
-            shutdown.store(true, Ordering::Relaxed);
+            shutdown.trigger();
             handle.join().map_err(|_| "listener panicked")?;
             result?;
         }
@@ -190,9 +228,10 @@ fn bip434_windows_preserve_bip332_and_package_negotiation_on_v1_and_v2() -> Test
     Ok(())
 }
 
+// P2P-11
 #[test]
 fn a_v2_listener_negotiates_bip324_with_a_v2_initiator() -> TestResult {
-    let (listener_shared, _) = shared(true);
+    let (listener_shared, _) = v2_shared();
     let (addr, shutdown, handle) = listen(listener_shared)?;
 
     let mut stream = connect(addr)?;
@@ -201,19 +240,19 @@ fn a_v2_listener_negotiates_bip324_with_a_v2_initiator() -> TestResult {
     assert!(matches!(negotiated.protocol, TransportProtocol::V2 { .. }));
     handshake_and_ping(addr, stream, negotiated)?;
 
-    shutdown.store(true, Ordering::Relaxed);
+    shutdown.trigger();
     handle.join().map_err(|_| "listener panicked")?;
     Ok(())
 }
 
 #[test]
 fn a_v2_listener_still_serves_a_v1_peer() -> TestResult {
-    let (listener_shared, _) = shared(true);
+    let (listener_shared, _) = v2_shared();
     let (addr, shutdown, handle) = listen(listener_shared)?;
 
     handshake_and_ping(addr, connect(addr)?, Negotiated::v1(MAGIC))?;
 
-    shutdown.store(true, Ordering::Relaxed);
+    shutdown.trigger();
     handle.join().map_err(|_| "listener panicked")?;
     Ok(())
 }
@@ -251,7 +290,7 @@ fn an_outbound_v2_dial_negotiates_bip324() -> TestResult {
         Ok(peer.transport())
     });
 
-    let (dialer, dialer_table) = shared(true);
+    let (dialer, dialer_table) = v2_shared();
     let dial = spawn_pinned_outbound_connection(addr.into(), dialer, PeerRole::FullRelay);
     let protocol = responder.join().map_err(|_| "responder panicked")??;
     assert!(matches!(protocol, TransportProtocol::V2 { .. }));
@@ -261,12 +300,13 @@ fn an_outbound_v2_dial_negotiates_bip324() -> TestResult {
     Ok(())
 }
 
+// P2P-11
 #[test]
 fn both_ends_publish_the_negotiated_v2_session() -> TestResult {
-    let (listener_shared, listener_table) = shared(true);
+    let (listener_shared, listener_table) = v2_shared();
     let (addr, shutdown, handle) = listen(listener_shared)?;
 
-    let (dialer, dialer_table) = shared(true);
+    let (dialer, dialer_table) = v2_shared();
     let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
     let deadline = deadline();
     let published = loop {
@@ -284,7 +324,7 @@ fn both_ends_publish_the_negotiated_v2_session() -> TestResult {
 
     dialer_table.cancel_all();
     let _ = dial.join().map_err(|_| "dialer panicked")?;
-    shutdown.store(true, Ordering::Relaxed);
+    shutdown.trigger();
     handle.join().map_err(|_| "listener panicked")?;
 
     let (outbound, inbound) = published.ok_or("the v2 connection never published both ends")?;
@@ -299,12 +339,13 @@ fn both_ends_publish_the_negotiated_v2_session() -> TestResult {
     Ok(())
 }
 
+// P2P-11
 #[test]
 fn an_unanswered_v2_dial_retries_once_over_v1() -> TestResult {
-    let (listener_shared, listener_table) = shared(false);
+    let (listener_shared, listener_table) = v1_shared();
     let (addr, shutdown, handle) = listen(listener_shared)?;
 
-    let (dialer, dialer_table) = shared(true);
+    let (dialer, dialer_table) = v2_shared();
     let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
     let deadline = deadline();
     let dialed = loop {
@@ -321,7 +362,7 @@ fn an_unanswered_v2_dial_retries_once_over_v1() -> TestResult {
 
     dialer_table.cancel_all();
     let _ = dial.join().map_err(|_| "dialer panicked")?;
-    shutdown.store(true, Ordering::Relaxed);
+    shutdown.trigger();
     handle.join().map_err(|_| "listener panicked")?;
 
     let dialed = dialed.ok_or("the v1 retry never completed its handshake")?;
@@ -471,7 +512,7 @@ fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
     let writer =
         spawn_decoy_then_ping_writer(server, Arc::clone(&stop), writer_lease.clone(), done);
 
-    let result = (|| -> Result<(Result<(), PeerError>, Duration), Box<dyn std::error::Error>> {
+    let result = (|| -> Result<(Result<(), PeerError>, Duration), TestError> {
         let mut stream = connect(addr.into())?;
         let mut handshake = Handshake::responder(MAGIC, &mut StdRng::seed_from_u64(5));
         let negotiated = establish(&mut stream, &mut handshake, MAGIC, &lease(), deadline())?;
@@ -479,7 +520,7 @@ fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
             return Err("expected a v2 transport".into());
         }
 
-        let (client, _) = shared(false);
+        let (client, _) = v1_shared();
         let (lease, replies) = lease_with_replies();
         let cancel_handle = lease.clone();
         let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
@@ -521,7 +562,7 @@ fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
         cancel_handle.cancel();
         let outcome = loop_handle
             .join()
-            .map_err(|_| -> Box<dyn std::error::Error> { "loop panicked".into() })?;
+            .map_err(|_| TestError::Missing("loop panicked"))?;
         if started.elapsed() >= Duration::from_secs(2) {
             return Err("lease cancel must end a decoy-only session promptly".into());
         }
@@ -532,13 +573,13 @@ fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
     wait_for_writer_done(&done_wait);
     let writer_failure = writer
         .join()
-        .map_err(|_| -> Box<dyn std::error::Error> { "decoy writer panicked".into() });
+        .map_err(|_| TestError::Missing("decoy writer panicked"));
     let (outcome, elapsed) = result?;
     assert!(outcome.is_ok(), "{outcome:?}");
     assert!(
         elapsed < Duration::from_secs(2),
         "lease cancel must end a decoy-only session promptly"
     );
-    writer_failure?.map_err(|error| format!("decoy writer failed: {error}"))?;
+    writer_failure?.map_err(TestError::Failure)?;
     Ok(())
 }

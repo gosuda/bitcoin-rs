@@ -10,7 +10,7 @@ fn shared(owner: &Arc<OverlayTransport>) -> crate::listener::ConnectionShared {
         Arc::new(crate::NetworkActivity::from_shared(Arc::new(
             AtomicBool::new(true),
         ))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
         None,
         bitcoin::p2p::Magic::REGTEST,
         crossbeam_channel::unbounded().0,
@@ -30,12 +30,6 @@ fn until(predicate: impl Fn() -> bool) {
     }
 }
 
-/// Reads one SAM line, waiting through idle read timeouts.
-///
-/// Returns false at end of stream or after the test stops the fixture. An idle
-/// read is not a client that went away, and a listener on a reused port can
-/// accept a stray connection from another test, so the fixture decides what a
-/// line means instead of panicking on the first one it does not expect.
 fn read_sam_line(reader: &mut impl std::io::BufRead, line: &mut String, stop: &AtomicBool) -> bool {
     loop {
         line.clear();
@@ -82,7 +76,7 @@ fn socks_routes_onion_as_a_domain_and_preserves_stream_bytes() {
         }
         stream.write_all(b"bitcoin").expect("P2P bytes");
     });
-    let mut stream = socks(proxy, endpoint, false, &|| false).expect("SOCKS stream");
+    let mut stream = socks_unauthenticated(proxy, endpoint, &|| false).expect("SOCKS stream");
     let mut bytes = [0; 7];
     stream.read_exact(&mut bytes).expect("unconsumed P2P bytes");
     assert_eq!(&bytes, b"bitcoin");
@@ -102,11 +96,10 @@ fn socks_requires_the_selected_auth_policy_and_refuses_bad_replies() {
             stream.write_all(&response).expect("reply");
         });
         assert!(
-            socks(
+            socks_isolated(
                 address,
                 PeerEndpoint::new(PeerAddress::Onion([1; 32]), 8333),
-                true,
-                &|| false
+                &|| false,
             )
             .is_err()
         );
@@ -138,13 +131,9 @@ fn socks_destination_refusals_are_distinct_from_local_and_malformed_failures() {
             stream.read_exact(&mut [0; 10]).expect("IP request");
             stream.write_all(&reply).expect("refusal");
         });
-        let error = socks(
-            address,
-            PeerEndpoint::from(([8, 8, 8, 8], 8333)),
-            false,
-            &|| false,
-        )
-        .expect_err("refused connection");
+        let error =
+            socks_unauthenticated(address, PeerEndpoint::from(([8, 8, 8, 8], 8333)), &|| false)
+                .expect_err("refused connection");
         assert_eq!(
             remote_connect_failed(&error),
             matches!(reply, [5, 3..=6, 0, 1])
@@ -250,6 +239,23 @@ fn application_identity_is_create_once_and_corruption_is_explicit() {
     assert!(identity::read(&path, identity::Kind::Tor).is_err());
     assert_eq!(std::fs::read_to_string(path).expect("preserved"), "damaged");
 }
+#[test]
+fn application_identity_create_cleans_temporary_file() {
+    use base64::Engine as _;
+    let dir = tempfile::tempdir().expect("directory");
+    let path = dir.path().join("onion.key");
+    let key = format!(
+        "ED25519-V3:{}",
+        base64::engine::general_purpose::STANDARD.encode([7; 64])
+    );
+    identity::create(&path, &key, identity::Kind::Tor).expect("create identity");
+    let entries = std::fs::read_dir(dir.path())
+        .expect("read_dir")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0], "onion.key");
+}
 
 #[cfg(unix)]
 #[test]
@@ -299,20 +305,136 @@ fn sam_public_destination_validates_certificate_structure() {
     assert!(identity::public_destination(&encode(&public)).is_err());
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SamRecoveryMode {
+    InvalidId,
+    ControlLoss,
+}
+
 #[test]
 fn sam_control_loss_revokes_stream_epoch_and_reconnects_without_direct_fallback() {
-    sam_session_recovery(false);
+    sam_session_recovery(SamRecoveryMode::ControlLoss);
 }
 
 #[test]
 fn sam_invalid_id_revokes_stream_epoch_and_reconnects_while_control_responds() {
-    sam_session_recovery(true);
+    sam_session_recovery(SamRecoveryMode::InvalidId);
 }
 
-fn sam_session_recovery(invalid_id: bool) {
+fn handle_sam_recovery_connection(
+    mut stream: TcpStream,
+    stop: &Arc<AtomicBool>,
+    controls: &std::sync::atomic::AtomicUsize,
+    break_control: &Arc<AtomicBool>,
+    public: &str,
+    mode: SamRecoveryMode,
+) {
+    use std::io::BufReader;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .expect("timeout");
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+    let mut line = String::new();
+    if !read_sam_line(&mut reader, &mut line, stop) || line != "HELLO VERSION MIN=3.1 MAX=3.3\n" {
+        return;
+    }
+    stream
+        .write_all(b"HELLO REPLY RESULT=OK VERSION=3.3\n")
+        .expect("hello reply");
+    let mut epoch = 0;
+    while !stop.load(Ordering::Acquire) {
+        if !read_sam_line(&mut reader, &mut line, stop) {
+            break;
+        }
+        if line.starts_with("SESSION CREATE STYLE=STREAM ") {
+            assert!(line.contains("DESTINATION=TRANSIENT"));
+            epoch = controls.fetch_add(1, Ordering::AcqRel) + 1;
+            stream
+                .write_all(b"SESSION STATUS RESULT=OK\n")
+                .expect("session");
+        } else if line.starts_with("NAMING LOOKUP NAME=") {
+            stream
+                .write_all(format!("NAMING REPLY RESULT=OK NAME=ME VALUE={public}\n").as_bytes())
+                .expect("local destination");
+        } else if line.starts_with("STREAM CONNECT ") {
+            if mode == SamRecoveryMode::InvalidId
+                && break_control.load(Ordering::Acquire)
+                && controls.load(Ordering::Acquire) == 1
+            {
+                stream
+                    .write_all(b"STREAM STATUS RESULT=INVALID_ID\n")
+                    .expect("invalid session");
+                break;
+            }
+            assert!(line.contains(&format!("DESTINATION={public}")));
+            assert!(line.contains("TO_PORT=18444 SILENT=false"));
+            stream
+                .write_all(b"STREAM STATUS RESULT=OK\nbitcoin")
+                .expect("stream");
+            while !stop.load(Ordering::Acquire) {
+                std::thread::sleep(POLL);
+            }
+            break;
+        } else if line == "PING bitcoin-rs\n" {
+            if mode == SamRecoveryMode::ControlLoss
+                && epoch == 1
+                && break_control.load(Ordering::Acquire)
+            {
+                break;
+            }
+            stream.write_all(b"PONG bitcoin-rs\n").expect("heartbeat");
+        } else {
+            panic!("unexpected SAM command");
+        }
+    }
+}
+
+fn spawn_sam_recovery_fixture(
+    listener: TcpListener,
+    stop: Arc<AtomicBool>,
+    controls: Arc<std::sync::atomic::AtomicUsize>,
+    break_control: Arc<AtomicBool>,
+    public: String,
+    mode: SamRecoveryMode,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut connections = Vec::new();
+        while !stop.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream
+                        .set_nonblocking(false)
+                        .expect("blocking fixture stream");
+                    let stop = Arc::clone(&stop);
+                    let controls = Arc::clone(&controls);
+                    let break_control = Arc::clone(&break_control);
+                    let public = public.clone();
+                    connections.push(std::thread::spawn(move || {
+                        handle_sam_recovery_connection(
+                            stream,
+                            &stop,
+                            &controls,
+                            &break_control,
+                            &public,
+                            mode,
+                        );
+                    }));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept: {error}"),
+            }
+        }
+        for connection in connections {
+            connection.join().expect("connection fixture");
+        }
+    })
+}
+
+fn sam_session_recovery(mode: SamRecoveryMode) {
     use base64::Engine as _;
     use sha2::{Digest as _, Sha256};
-    use std::io::BufReader;
     use std::sync::atomic::AtomicUsize;
     let listener = TcpListener::bind("127.0.0.1:0").expect("SAM fixture");
     listener.set_nonblocking(true).expect("nonblocking");
@@ -324,106 +446,22 @@ fn sam_session_recovery(invalid_id: bool) {
     })));
     let shared = shared(&owner);
     let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_latch = bitcoin_rs_chain::LatchWriter::new();
     let controls = Arc::new(AtomicUsize::new(0));
     let break_control = Arc::new(AtomicBool::new(false));
     let public = identity::i2p_base64().encode([0; 387]);
     let endpoint = PeerEndpoint::new(PeerAddress::I2p(Sha256::digest([0; 387]).into()), 18444);
-    let fixture = {
-        let stop = Arc::clone(&shutdown);
-        let controls = Arc::clone(&controls);
-        let break_control = Arc::clone(&break_control);
-        std::thread::spawn(move || {
-            let mut connections = Vec::new();
-            while !stop.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        stream
-                            .set_nonblocking(false)
-                            .expect("blocking fixture stream");
-                        let stop = Arc::clone(&stop);
-                        let controls = Arc::clone(&controls);
-                        let break_control = Arc::clone(&break_control);
-                        let public = public.clone();
-                        connections.push(std::thread::spawn(move || {
-                            stream
-                                .set_read_timeout(Some(Duration::from_secs(3)))
-                                .expect("timeout");
-                            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
-                            let mut line = String::new();
-                            if !read_sam_line(&mut reader, &mut line, &stop)
-                                || line != "HELLO VERSION MIN=3.1 MAX=3.3\n"
-                            {
-                                return;
-                            }
-                            stream
-                                .write_all(b"HELLO REPLY RESULT=OK VERSION=3.3\n")
-                                .expect("hello reply");
-                            let mut epoch = 0;
-                            while !stop.load(Ordering::Acquire) {
-                                if !read_sam_line(&mut reader, &mut line, &stop) {
-                                    break;
-                                }
-
-                                if line.starts_with("SESSION CREATE STYLE=STREAM ") {
-                                    assert!(line.contains("DESTINATION=TRANSIENT"));
-                                    epoch = controls.fetch_add(1, Ordering::AcqRel) + 1;
-                                    stream
-                                        .write_all(b"SESSION STATUS RESULT=OK\n")
-                                        .expect("session");
-                                } else if line.starts_with("NAMING LOOKUP NAME=") {
-                                    stream
-                                        .write_all(
-                                            format!(
-                                                "NAMING REPLY RESULT=OK NAME=ME VALUE={public}\n"
-                                            )
-                                            .as_bytes(),
-                                        )
-                                        .expect("local destination");
-                                } else if line.starts_with("STREAM CONNECT ") {
-                                    if invalid_id
-                                        && break_control.load(Ordering::Acquire)
-                                        && controls.load(Ordering::Acquire) == 1
-                                    {
-                                        stream
-                                            .write_all(b"STREAM STATUS RESULT=INVALID_ID\n")
-                                            .expect("invalid session");
-                                        break;
-                                    }
-                                    assert!(line.contains(&format!("DESTINATION={public}")));
-                                    assert!(line.contains("TO_PORT=18444 SILENT=false"));
-                                    stream
-                                        .write_all(b"STREAM STATUS RESULT=OK\nbitcoin")
-                                        .expect("stream");
-                                    while !stop.load(Ordering::Acquire) {
-                                        std::thread::sleep(POLL);
-                                    }
-                                    break;
-                                } else if line == "PING bitcoin-rs\n" {
-                                    if !invalid_id
-                                        && epoch == 1
-                                        && break_control.load(Ordering::Acquire)
-                                    {
-                                        break;
-                                    }
-                                    stream.write_all(b"PONG bitcoin-rs\n").expect("heartbeat");
-                                } else {
-                                    panic!("unexpected SAM command");
-                                }
-                            }
-                        }));
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(error) => panic!("accept: {error}"),
-                }
-            }
-            for connection in connections {
-                connection.join().expect("connection fixture");
-            }
-        })
-    };
-    let workers = owner.start(&shared, &shutdown).expect("backend worker");
+    let fixture = spawn_sam_recovery_fixture(
+        listener,
+        Arc::clone(&shutdown),
+        Arc::clone(&controls),
+        Arc::clone(&break_control),
+        public,
+        mode,
+    );
+    let workers = owner
+        .start(&shared, &shutdown_latch.reader())
+        .expect("backend worker");
     until(|| owner.sam.read().is_some());
     let mut connected = owner.connect(endpoint, &|| false).expect("SAM stream");
     let mut bytes = [0; 7];
@@ -441,7 +479,7 @@ fn sam_session_recovery(invalid_id: bool) {
         .peer_table
         .register(other_endpoint, independent.clone());
     break_control.store(true, Ordering::Release);
-    if invalid_id {
+    if mode == SamRecoveryMode::InvalidId {
         assert!(owner.connect(endpoint, &|| false).is_err());
     }
     until(|| lease.is_cancelled());
@@ -487,7 +525,26 @@ fn sam_session_recovery(invalid_id: bool) {
         !shared.banned.is_discouraged(endpoint.address()),
         "local router loss is not remote misbehavior"
     );
+    stop_sam_workers(
+        workers,
+        &shutdown,
+        &shutdown_latch,
+        &replacement,
+        &independent,
+        fixture,
+    );
+}
+
+fn stop_sam_workers(
+    workers: Vec<std::thread::JoinHandle<Result<(), crate::listener::ListenerError>>>,
+    shutdown: &AtomicBool,
+    latch: &bitcoin_rs_chain::LatchWriter,
+    replacement: &crate::PeerLease,
+    independent: &crate::PeerLease,
+    fixture: std::thread::JoinHandle<()>,
+) {
     shutdown.store(true, Ordering::Release);
+    latch.trigger();
     for worker in workers {
         worker.join().expect("worker").expect("backend");
     }
