@@ -86,8 +86,16 @@ impl Handler {
         else {
             return Err(RpcError::MethodNotFound(method.to_owned()));
         };
+        let bound = row
+            .arg_names
+            .map(|names| bind_named_params(params, names))
+            .transpose()?;
+        let params = bound.as_ref().map_or(params, |bound| bound.as_ref());
+        let scan_abort = matches!(row.execution, crate::registry::Execution::Scan)
+            && crate::registry::scan_action(params) == Some("abort");
         let admitted = || {
             !self.ctx.quarantined()
+                || scan_abort
                 || matches!(
                     method,
                     "getrpcinfo"
@@ -107,11 +115,6 @@ impl Handler {
         if !admitted() {
             return Err(RpcError::Quarantined);
         }
-        let bound = row
-            .arg_names
-            .map(|names| bind_named_params(params, names))
-            .transpose()?;
-        let params = bound.as_ref().map_or(params, |bound| bound.as_ref());
         let _blocking = row
             .execution
             .is_blocking(params)
@@ -129,6 +132,9 @@ impl Handler {
                 })
             })
             .transpose()?;
+        if matches!(row.execution, crate::registry::Execution::Bounded) && self.is_stopping() {
+            return Err(RpcError::Misc("RPC server is stopping".to_owned()));
+        }
         let _active = self.ctx.active_calls.begin(method);
         let cancellation = self.stop.reader();
         let mut result = match handler {
@@ -140,9 +146,7 @@ impl Handler {
         if self.ctx.quarantined() {
             let receipt = row.completes_with_receipt
                 && !(method == "generateblock"
-                    && params.get(2).and_then(Value::as_bool) == Some(false))
-                || matches!(row.execution, crate::registry::Execution::Scan)
-                    && params.get(0).and_then(Value::as_str) == Some("abort");
+                    && params.get(2).and_then(Value::as_bool) == Some(false));
             if !admitted() && !receipt {
                 return Err(RpcError::Quarantined);
             }

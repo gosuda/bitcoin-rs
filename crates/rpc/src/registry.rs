@@ -37,20 +37,22 @@ pub(crate) enum Execution {
     LongPoll,
 }
 
+pub(crate) fn scan_action(params: &Value) -> Option<&str> {
+    use sonic_rs::JsonValueTrait as _;
+    params
+        .get(0)
+        .or_else(|| params.get("action"))
+        .or_else(|| params.get("args").and_then(|args| args.get(0)))
+        .and_then(Value::as_str)
+}
+
 impl Execution {
     pub(crate) fn is_blocking(self, params: &Value) -> bool {
         use sonic_rs::JsonValueTrait as _;
         match self {
             Self::Immediate | Self::Interruptible => false,
             Self::Blocking | Self::Bounded => true,
-            Self::Scan => {
-                params
-                    .get(0)
-                    .or_else(|| params.get("action"))
-                    .or_else(|| params.get("args").and_then(|args| args.get(0)))
-                    .and_then(Value::as_str)
-                    == Some("start")
-            }
+            Self::Scan => scan_action(params) == Some("start"),
             Self::LongPoll => {
                 let Some(options) = params.get(0) else {
                     return false;
