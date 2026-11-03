@@ -9,8 +9,9 @@ use bitcoin::merkle_tree::MerkleBlock;
 use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
 use bitcoin_rs_mempool::{LocalOrigin, SubmitError};
 use bitcoin_rs_primitives::{
-    Amount, Block as NativeBlock, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, consensus_bytes, deserialize as native_deserialize, unix_time_secs,
+    Amount, Block as NativeBlock, Hash256, Header as NativeHeader, LockTime, OutPoint, Script,
+    Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize as native_deserialize,
+    unix_time_secs,
 };
 use bitcoin_rs_script::{opcode, push_data};
 use miniscript::psbt::PsbtExt as _;
@@ -19,7 +20,10 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, 
 use crate::context::{AppliedView, Context};
 use crate::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::error::RpcError;
-use crate::handlers::{optional_bool, params_array, parse_txid, required_str, required_u64};
+use crate::handlers::{
+    optional_bool, params_array, parse_txid, required_str, required_u64, wrong_type,
+    wrong_type_plain,
+};
 use bitcoin_rs_index::block_log::BlockRecord;
 use corepc_types::v31;
 
@@ -292,10 +296,12 @@ pub(crate) fn gettxoutproof(
     cancellation: &bitcoin_rs_chain::LatchReader,
 ) -> Result<Value, RpcError> {
     let array = params_array(params)?;
-    let txids_value = array
-        .first()
-        .and_then(|value| value.as_array())
-        .ok_or(RpcError::InvalidParams("txids must be an array"))?;
+    let Some(txids_value) = array.first() else {
+        return Err(RpcError::InvalidParams("txids must be an array"));
+    };
+    let Some(txids_value) = txids_value.as_array() else {
+        return Err(wrong_type(1, "txids", txids_value, "array"));
+    };
     if txids_value.is_empty() {
         return Err(RpcError::InvalidParameter(
             "Parameter 'txids' cannot be empty".to_owned(),
@@ -305,9 +311,7 @@ pub(crate) fn gettxoutproof(
     let mut wanted = hashbrown::HashSet::new();
     for value in txids_value.iter() {
         let Some(txid_str) = value.as_str() else {
-            return Err(RpcError::InvalidType(
-                "each txid must be a string".to_owned(),
-            ));
+            return Err(wrong_type_plain(value, "string"));
         };
         let txid = parse_txid(txid_str, "txid")?;
         if !wanted.insert(txid) {
@@ -319,9 +323,7 @@ pub(crate) fn gettxoutproof(
 
     if let Some(blockhash) = array.get(1).filter(|value| !value.is_null()) {
         let Some(hash_str) = blockhash.as_str() else {
-            return Err(RpcError::InvalidType(
-                "blockhash must be a string".to_owned(),
-            ));
+            return Err(wrong_type(2, "blockhash", blockhash, "string"));
         };
         let hash = Hash256::from_str(hash_str)
             .map_err(|_| block_hash_param_error(hash_str, "blockhash"))?;
@@ -392,7 +394,11 @@ fn block_via_index(
         return Ok(None);
     };
     match derived_index.transaction_height(txid) {
-        Ok(Some(height)) => Ok(ctx.chain.block_by_height(height)),
+        Ok(Some(height)) => ctx
+            .chain
+            .block_by_height(height)
+            .map(Some)
+            .ok_or_else(|| RpcError::CoreInternal("Transaction index corrupt".to_owned())),
         Ok(None) => Ok(None),
         Err(error) => {
             tracing::warn!(
@@ -473,7 +479,7 @@ fn proof_from_body(bytes: &[u8], wanted: &hashbrown::HashSet<Txid>) -> Result<Va
     ))
 }
 
-pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn verifytxoutproof(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let proof_hex = required_str(params, 0, "proof is required")?;
 
     let bytes = hex_decode(proof_hex)?;
@@ -487,6 +493,26 @@ pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Va
         .extract_matches(&mut matched_txids, &mut indexes)
         .is_err()
     {
+        return typed_to_sonic(&v31::VerifyTxOutProof(Vec::new()));
+    }
+
+    let header_bytes = bitcoin_serialize(&merkle_block.header);
+    let Ok(native_header) = native_deserialize::<NativeHeader>(&header_bytes) else {
+        return typed_to_sonic(&v31::VerifyTxOutProof(Vec::new()));
+    };
+    let header_hash = Hash256::from(native_header.compute_hash());
+    let Some(record) = ctx.chain.block_by_hash(header_hash) else {
+        return Err(RpcError::InvalidAddressOrKey(
+            "Block not found in chain".to_owned(),
+        ));
+    };
+    if ctx.chain.block_hash_at_height(record.height) != Some(header_hash) {
+        return Err(RpcError::InvalidAddressOrKey(
+            "Block not found in chain".to_owned(),
+        ));
+    }
+    let proof_tx_count = usize::try_from(merkle_block.txn.num_transactions()).unwrap_or(0);
+    if record.tx_count == 0 || record.tx_count != proof_tx_count {
         return typed_to_sonic(&v31::VerifyTxOutProof(Vec::new()));
     }
 

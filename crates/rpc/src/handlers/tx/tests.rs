@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use bitcoin_rs_chain::{LatchReader, NodeStatus};
+use bitcoin_rs_chain::{LatchReader, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, arm_admission_park, reset_admission_park};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
@@ -799,7 +799,7 @@ fn gettxoutproof_finds_genesis_coinbase_through_the_index() {
     let txid = coinbase.txid();
     let mut ctx = Context::new();
     ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
-    install_blocks(&mut ctx, std::slice::from_ref(&genesis));
+    install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
     let ctx = Arc::new(ctx);
     let handler = Handler::new(Arc::clone(&ctx));
     let result = handler
@@ -905,7 +905,7 @@ fn gettxoutproof_without_blockhash_answers_from_the_utxo_set() {
         &Hash256::default(),
     )
     .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
-    install_blocks(&mut ctx, std::slice::from_ref(&genesis));
+    install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
     let ctx = Arc::new(ctx);
     let handler = Handler::new(Arc::clone(&ctx));
 
@@ -1135,6 +1135,30 @@ fn install_blocks(ctx: &mut Context, blocks: &[Block]) {
     }
 }
 
+fn install_chain_blocks(ctx: &mut Context, blocks: &[Block]) {
+    install_blocks(ctx, blocks);
+    let tip = {
+        let mut tree = ctx.chain.block_tree.write();
+        let mut parent: Option<NodeId> = None;
+        for block in blocks {
+            parent = Some(
+                tree.insert_node(parent, block.header, NodeStatus::Active)
+                    .unwrap_or_else(|err| panic!("insert chain header: {err}")),
+            );
+        }
+        let tip_id = parent.expect("chain blocks produce a tip");
+        let node = tree.node(tip_id).expect("tip node");
+        Arc::new(TipSnapshot {
+            tip_id,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+            chain_tx_count: node.chain_tx_count,
+        })
+    };
+    ctx.chain.applied_tip.store(Some(tip));
+}
+
 fn attach_body_for_block(ctx: &mut Context, block: &Block, height: u32) {
     let record = BlockRecord::from_block(height, block);
     ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
@@ -1209,23 +1233,15 @@ fn gettxoutproof_keeps_its_error_when_no_block_holds_every_txid() {
 
 #[test]
 fn gettxoutproof_index_path_answers_for_several_txids_in_one_block() {
-    let block = block_with_two_txs(11);
+    let genesis = fixture_genesis();
+    let mut block = block_with_two_txs(11);
+    block.header.prev_blockhash = genesis.block_hash();
     let wanted = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
     let resolvable = wanted.iter().map(|txid| (*txid, 1)).collect::<Vec<_>>();
 
     let mut ctx = Context::new();
     ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(resolvable))));
-    let indexed = BlockRecord::from_block(1, &block);
-    ctx.chain.block_body_source = Some(Arc::new(PanicUnlessBodySource {
-        height: indexed.height,
-        hash: indexed.hash,
-        body: consensus_bytes(&block),
-    }));
-    ctx.chain.add_block(BlockRecord::synthetic(
-        0,
-        BlockHash::from(Hash256::from_le_bytes(&[5_u8; 32])),
-    ));
-    ctx.chain.add_block(indexed);
+    install_chain_blocks(&mut ctx, &[genesis, block]);
     let ctx = Arc::new(ctx);
 
     let proof = proof_for(&ctx, &wanted).expect("proof generation must succeed");
@@ -1437,9 +1453,81 @@ fn gettxoutproof_answers_a_type_error_for_a_non_string_blockhash() {
 
     let result = handler.dispatch("gettxoutproof", &json!([[txid.to_string()], 123]));
 
-    assert!(
-        matches!(result, Err(RpcError::InvalidType(_))),
-        "Core v31.1 answers a -3 type error for a numeric blockhash"
+    let message = match result {
+        Err(RpcError::InvalidType(message)) => message,
+        other => panic!("Core v31.1 answers a -3 type error for a numeric blockhash: {other:?}"),
+    };
+    assert_eq!(
+        message,
+        "Wrong type passed:\n{\n    \"Position 2 (blockhash)\": \"JSON value of type number is not of expected type string\"\n}",
+        "Core v31.1 answers the RPCHelpMan wrong type shape for a numeric blockhash"
+    );
+}
+
+// API-02
+#[test]
+fn gettxoutproof_answers_core_wrong_type_for_a_non_array_txid_list() {
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let result = handler.dispatch("gettxoutproof", &json!([42]));
+
+    let message = match result {
+        Err(RpcError::InvalidType(message)) => message,
+        other => {
+            panic!(
+                "Core v31.1 answers the RPCHelpMan wrong type shape for a non array txids: {other:?}"
+            )
+        }
+    };
+    assert_eq!(
+        message,
+        "Wrong type passed:\n{\n    \"Position 1 (txids)\": \"JSON value of type number is not of expected type array\"\n}",
+        "Core v31.1 names Position 1 for a non array txids argument"
+    );
+}
+
+// API-02
+#[test]
+fn gettxoutproof_answers_core_type_error_for_a_non_string_txid_element() {
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let result = handler.dispatch("gettxoutproof", &json!([[42]]));
+
+    let message = match result {
+        Err(RpcError::InvalidType(message)) => message,
+        other => {
+            panic!("Core v31.1 answers the univalue type error shape for a numeric txid: {other:?}")
+        }
+    };
+    assert_eq!(
+        message, "JSON value of type number is not of expected type string",
+        "Core v31.1 keeps the plain type error for an inner array element"
+    );
+}
+
+// API-02
+#[test]
+fn gettxoutproof_answers_index_corrupt_when_the_index_names_an_absent_block() {
+    let block = distinct_block(13);
+    let Some(txid) = block.txs.first().map(Tx::txid) else {
+        panic!("block has no transactions");
+    };
+    let mut ctx = Context::new();
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(3)))));
+    ctx.chain.add_block(BlockRecord::from_block(0, &block));
+    let ctx = Arc::new(ctx);
+
+    let result = proof_for(&ctx, &[txid]);
+
+    let reason = match result {
+        Err(RpcError::CoreInternal(reason)) => reason,
+        other => panic!(
+            "Core v31.1 answers -32603 when the index names a block the chain lacks: {other:?}"
+        ),
+    };
+    assert_eq!(
+        reason, "Transaction index corrupt",
+        "Core v31.1 keeps the index corrupt text instead of the not yet in block answer"
     );
 }
 
@@ -1746,4 +1834,113 @@ fn sendrawtransaction_rebuilds_admission_context_after_transient_rejection() {
         ctx.mempool.gateway.read().contains_txid(&parent_txid),
         "the parent must remain pooled"
     );
+}
+
+// API-02
+#[test]
+fn verifytxoutproof_refuses_a_header_outside_the_active_chain()
+-> Result<(), crate::test_error::TestError> {
+    let genesis = fixture_genesis();
+    let Some(txid) = genesis.txs.first().map(Tx::txid) else {
+        panic!("genesis has no transactions");
+    };
+    let mut ctx = Context::new();
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
+    install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
+    let ctx = Arc::new(ctx);
+
+    let proof = proof_for(&ctx, &[txid])?;
+    let proof_hex = proof.as_str().expect("proof hex string");
+    let bytes = bitcoin_rs_primitives::hex::hex_decode(proof_hex).expect("proof hex");
+    let mut merkle_block =
+        bitcoin::consensus::encode::deserialize::<bitcoin::merkle_tree::MerkleBlock>(&bytes)
+            .expect("proof decodes");
+    merkle_block.header.nonce = merkle_block.header.nonce.wrapping_add(1);
+    let tampered = bitcoin::consensus::encode::serialize(&merkle_block).to_lower_hex_string();
+
+    let refusal = match super::verifytxoutproof(&ctx, &json!([tampered])) {
+        Err(RpcError::InvalidAddressOrKey(reason)) => reason,
+        other => {
+            panic!("Core v31.1 answers -5 for a header the active chain does not name: {other:?}")
+        }
+    };
+    assert_eq!(
+        refusal, "Block not found in chain",
+        "Core v31.1 names the missing chain entry"
+    );
+    Ok(())
+}
+
+// API-02
+#[test]
+fn verifytxoutproof_answers_an_empty_list_when_the_transaction_count_differs()
+-> Result<(), crate::test_error::TestError> {
+    let genesis = fixture_genesis();
+    let Some(txid) = genesis.txs.first().map(Tx::txid) else {
+        panic!("genesis has no transactions");
+    };
+    let proof_hex = {
+        let mut ctx = Context::new();
+        ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
+        install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
+        let proof = proof_for(&Arc::new(ctx), &[txid])?;
+        proof.as_str().expect("proof hex string").to_owned()
+    };
+
+    let matching = {
+        let mut ctx = Context::new();
+        install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
+        Arc::new(ctx)
+    };
+    let listed = super::verifytxoutproof(&matching, &json!([proof_hex]))?;
+    assert_eq!(
+        listed.as_array().map(|items| items.len()),
+        Some(1),
+        "the same proof lists its transaction when the recorded count matches"
+    );
+
+    let mismatching = {
+        let mut ctx = Context::new();
+        let mut stale = BlockRecord::from_block(0, &genesis);
+        stale.tx_count = 2;
+        let hash = stale.hash;
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
+            bodies: vec![(0, hash, consensus_bytes(&genesis))],
+        }));
+        ctx.chain.add_block(stale);
+        {
+            let mut tree = ctx.chain.block_tree.write();
+            tree.insert_node(None, genesis.header, NodeStatus::Active)
+                .expect("genesis header");
+        }
+        let tip = ctx.chain.block_tree.read().tip().expect("chain tip");
+        ctx.chain.applied_tip.store(Some(Arc::new((*tip).clone())));
+        Arc::new(ctx)
+    };
+    let mismatched = super::verifytxoutproof(&mismatching, &json!([proof_hex]))?;
+    assert_eq!(
+        mismatched.as_array().map(|items| items.len()),
+        Some(0),
+        "Core v31.1 lists nothing when the recorded transaction count differs"
+    );
+
+    let ctx = Context::new();
+    {
+        let mut tree = ctx.chain.block_tree.write();
+        tree.insert_node(None, genesis.header, NodeStatus::Active)
+            .expect("genesis header");
+    }
+    let header_only = Arc::new(ctx);
+    let uncounted = super::verifytxoutproof(&header_only, &json!([proof_hex]));
+    let uncounted_message = match uncounted {
+        Err(RpcError::InvalidAddressOrKey(reason)) => reason,
+        other => panic!(
+            "Core v31.1 answers -5 while the chain entry records no transaction count: {other:?}"
+        ),
+    };
+    assert_eq!(
+        uncounted_message, "Block not found in chain",
+        "Core v31.1 names the missing chain entry"
+    );
+    Ok(())
 }
