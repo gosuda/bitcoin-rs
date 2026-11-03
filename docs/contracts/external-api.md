@@ -104,8 +104,8 @@ wallet interoperability remain unverified.
 - With neither source, it answers Core `-5` (`Transaction not yet in block`) and reads no block body.
 - A resolved block that does not hold every txid answers Core `-5` (`Not all transactions found in specified or retrieved block`).
 - With `blockhash`, it reads only that block.
-- Both forms hold one blocking-quota slot (`API-34`) and poll the request latch.
-- The registry declares `Blocking`.
+- Both forms take the request latch and poll it. Neither holds a blocking-quota slot (`API-34`).
+- The registry declares `Interruptible`.
 
 #### Retained block inputs
 

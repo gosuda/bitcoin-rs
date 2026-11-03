@@ -125,9 +125,9 @@ Owners:
 - Same-height ties, exclusive cursors, compact-prefix verification, and fallback reads retain their existing semantics.
 - This is not an O(page-size) history index.
 - Proof:
-  - `crates/index/src/runtime/query_tests.rs`:
-    - `high_activity_history_is_exact_and_shared_spenders_are_read_once`
-    - `history_pages_include_recent_spends_of_old_funding_and_skip_old_spender_bodies`
+  - `crates/index/src/runtime/query/scripts.rs`:
+    - `duplicated_txid_cursor_pages_cover_the_full_history`
+    - `duplicated_txid_cursor_pages_terminate_for_every_limit`
 - Ready invariant: `ready` holds if and only if `cursor == applied_tip` on the active chain.
 - `DerivedIndexQueryEngine::with_snapshot` and `index_info` MUST gate every read with three conditions:
   - 1: The worker runtime MUST be healthy (neither `failed` nor `shutdown`).
