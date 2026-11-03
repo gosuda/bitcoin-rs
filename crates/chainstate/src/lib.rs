@@ -125,8 +125,6 @@ const LOCAL_OVERLAY_TXID_SET_THRESHOLD: usize = 8;
 pub(crate) struct ApplyAdmission {
     closed: LatchWriter,
     barrier: RwLock<()>,
-    // Acquire after the apply barrier when both are needed. Recovery closure
-    // takes only this lock, including when its caller holds an apply permit.
     publication: Mutex<()>,
     #[cfg(test)]
     close_attempted: AtomicBool,
@@ -172,8 +170,11 @@ impl ApplyAdmission {
     pub(crate) fn close_permanently(&self) {
         #[cfg(test)]
         self.close_attempted.store(true, Ordering::Release);
-        let _publication = self.publication.lock();
-        self.closed.trigger();
+        let hooks = {
+            let _publication = self.publication.lock();
+            self.closed.trigger_deferred()
+        };
+        hooks();
     }
 
     pub(crate) fn is_closed(&self) -> bool {
