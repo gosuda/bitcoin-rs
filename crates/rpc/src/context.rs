@@ -442,6 +442,7 @@ pub struct Context {
     pub debug_log_path: Option<PathBuf>,
     server_bound_at: Mutex<Option<Instant>>,
     block_render_budget: Arc<BlockRenderBudget>,
+    quarantine: Option<LatchReader>,
     pub(crate) esplora_admission: crate::esplora::admission::Admission,
     pub(crate) active_calls: ActiveCalls,
 }
@@ -676,8 +677,21 @@ impl Context {
             esplora_admission: crate::esplora::admission::Admission::new(
                 crate::esplora::DEFAULT_MAX_QUERIES,
             ),
+            quarantine: None,
             active_calls: ActiveCalls::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_quarantine(mut self, quarantine: LatchReader) -> Self {
+        self.quarantine = Some(quarantine);
+        self
+    }
+
+    pub(crate) fn quarantined(&self) -> bool {
+        self.quarantine
+            .as_ref()
+            .is_some_and(LatchReader::is_triggered)
     }
 
     pub(crate) fn mark_server_bound(&self) {

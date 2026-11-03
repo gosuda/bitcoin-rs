@@ -59,6 +59,10 @@ struct HeaderRecord {
 
 #[must_use]
 pub fn route(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Response {
+    economic_response(ctx, || route_get(ctx, path, query, enabled))
+}
+
+fn route_get(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Response {
     if !enabled {
         return not_found();
     }
@@ -105,6 +109,20 @@ pub(crate) fn getutxos_suffix(path: &str) -> Option<&str> {
 
 #[must_use]
 pub fn route_post(ctx: &Arc<Context>, path: &str, body: &[u8], enabled: bool) -> Response {
+    economic_response(ctx, || post_getutxos(ctx, path, body, enabled))
+}
+
+pub(crate) fn economic_response(ctx: &Context, produce: impl FnOnce() -> Response) -> Response {
+    if !ctx.quarantined() {
+        let response = produce();
+        if !ctx.quarantined() {
+            return response;
+        }
+    }
+    service_unavailable(RpcError::Quarantined.to_string())
+}
+
+fn post_getutxos(ctx: &Arc<Context>, path: &str, body: &[u8], enabled: bool) -> Response {
     if !enabled {
         return not_found();
     }

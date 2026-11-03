@@ -172,6 +172,7 @@ fn bind_rpc(
         mining_control,
         block_body_source,
         bitcoin_rs_rpc::context::PoolHandles::default(),
+        bitcoin_rs_chain::LatchWriter::new().reader(),
     )
 }
 
@@ -239,11 +240,13 @@ fn bind_rpc_with_pool(
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
     pool: bitcoin_rs_rpc::context::PoolHandles,
+    quarantine: bitcoin_rs_chain::LatchReader,
 ) -> Result<RpcBindings, RunError> {
     let config = state.config();
     let rpc_auth = Arc::new(config.rpc.auth.to_rpc_auth(&config.data_dir)?);
     let handles = rpc_context_handles(state, mining_control, block_body_source, pool);
     let context = Context::from_handles(handles)
+        .with_quarantine(quarantine)
         .with_esplora_derived_index(state.esplora_derived_index_query())
         .with_esplora_query_limit(
             std::num::NonZeroUsize::new(config.rpc.esplora_max_queries)
@@ -354,6 +357,7 @@ pub(crate) enum TeardownMode {
 
 #[derive(Default)]
 pub(crate) struct NodeServices {
+    divergence: Option<crate::divergence::DivergenceWatch>,
     #[cfg(feature = "pool")]
     pool: Option<crate::pool::PoolService>,
     event_loop: Option<std::thread::JoinHandle<()>>,
@@ -746,12 +750,18 @@ pub(crate) fn start_node(
     let sync = state.sync();
     let peer_ready_sync = Arc::clone(&sync);
     let loop_handle = EventLoop::with_sync_wake(sync, sync_wake_rx);
-    let coordinator = Arc::new(crate::MiningCoordinator::new(
+    let watch =
+        crate::divergence::DivergenceWatch::start(state.data_dir(), &state.shutdown_reader())?;
+    let quarantine = watch.quarantine.clone();
+    let mining_stop = watch.mining_stop.clone();
+    guard.services.divergence = Some(watch);
+    let coordinator = Arc::new(crate::MiningCoordinator::with_stop(
         state.mempool_reader(),
         Arc::clone(&chainstate),
         state.stable_read(),
         state.chain_followers(),
         final_payout_script(state.config()),
+        mining_stop,
     ));
     let sequence_wake: Arc<dyn bitcoin_rs_mining::MempoolSequenceWake> = coordinator.clone();
     let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator;
@@ -833,7 +843,10 @@ pub(crate) fn start_node(
     )?;
     #[cfg(feature = "pool")]
     {
-        guard.services.pool = crate::pool::PoolService::prepare(state, &mining_control)?;
+        if !quarantine.is_triggered() {
+            guard.services.pool =
+                crate::pool::PoolService::prepare(state, &mining_control, &quarantine)?;
+        }
     }
     #[cfg(feature = "pool")]
     let pool_handles = guard.services.pool.as_ref().map_or_else(
@@ -842,8 +855,13 @@ pub(crate) fn start_node(
     );
     #[cfg(not(feature = "pool"))]
     let pool_handles = bitcoin_rs_rpc::context::PoolHandles::default();
-    let RpcBindings { context, listeners } =
-        bind_rpc_with_pool(state, &mining_control, block_body_source, pool_handles)?;
+    let RpcBindings { context, listeners } = bind_rpc_with_pool(
+        state,
+        &mining_control,
+        block_body_source,
+        pool_handles,
+        quarantine,
+    )?;
     start_rpc_listeners(state, listeners, &mut guard.services)?;
     #[cfg(feature = "pool")]
     if let Some(pool) = guard.services.pool.as_mut() {

@@ -28,6 +28,7 @@ pub(crate) struct PoolService {
     control: Arc<dyn MiningControl>,
     chain: Arc<ledger::NodeChainView>,
     cancel: bitcoin_rs_chain::LatchWriter,
+    _invalidate: bitcoin_rs_chain::HookGuard,
     worker: Option<JoinHandle<()>>,
     v1: Option<Server>,
     #[cfg(feature = "pool-sv2")]
@@ -93,6 +94,7 @@ impl PoolService {
     pub(crate) fn prepare(
         state: &crate::state::NodeState,
         control: &Arc<dyn MiningControl>,
+        quarantine: &bitcoin_rs_chain::LatchReader,
     ) -> Result<Option<Self>, RunError> {
         let Some(config) = state.config().pool.as_ref() else {
             return Ok(None);
@@ -118,8 +120,10 @@ impl PoolService {
             },
         ));
         let composed = composed_core_config(config.max_connections)?;
+        let cancel = quarantine.child();
         let core = Arc::new(
             PoolCore::new(composed.book, Arc::clone(control), host.clone())?
+                .with_work_stop(cancel.reader())
                 .with_ledger_retry(1, Duration::ZERO)
                 .with_outbox(composed.outbox_items, composed.outbox_bytes),
         );
@@ -130,6 +134,10 @@ impl PoolService {
             state.derived_index_query(),
             state.script_index_query(),
         )?);
+        let invalidate_core = Arc::clone(&core);
+        let invalidate = cancel.reader().on_cancel(move || {
+            invalidate_core.invalidate_active();
+        });
         Ok(Some(Self {
             config: config.clone(),
             host,
@@ -137,7 +145,8 @@ impl PoolService {
             #[cfg(feature = "pool-sv2")]
             control: Arc::clone(control),
             chain,
-            cancel: bitcoin_rs_chain::LatchWriter::new(),
+            cancel,
+            _invalidate: invalidate,
             worker: None,
             v1: None,
             #[cfg(feature = "pool-sv2")]
@@ -152,9 +161,15 @@ impl PoolService {
     }
 
     pub(crate) fn start(&mut self) -> Result<(), RunError> {
-        self.core
-            .refresh(None, Vec::new())
-            .map_err(|source| RunError::PoolInitialTemplate { source })?;
+        if self.cancel.reader().is_triggered() {
+            return Ok(());
+        }
+        if let Err(source) = self.core.refresh(None, Vec::new()) {
+            if self.cancel.reader().is_triggered() {
+                return Ok(());
+            }
+            return Err(RunError::PoolInitialTemplate { source });
+        }
         let limiter = Arc::new(ConnectionLimiter::new(
             usize::try_from(self.config.max_connections)?,
             usize::try_from(self.config.max_connections_per_ip)?,
@@ -172,7 +187,7 @@ impl PoolService {
             let mut config = ServerConfig::new(difficulty_debug);
             config.max_connections = usize::try_from(self.config.max_connections)?;
             config.max_connections_per_ip = usize::try_from(self.config.max_connections_per_ip)?;
-            self.v1 = Some(Server::bind_with_limiter(
+            self.v1 = Some(Server::bind_with_cancel(
                 bind,
                 config,
                 ServerDeps {
@@ -181,6 +196,7 @@ impl PoolService {
                     observer: None,
                 },
                 Arc::clone(&limiter),
+                self.cancel.reader().child(),
             )?);
         }
         #[cfg(feature = "pool-sv2")]

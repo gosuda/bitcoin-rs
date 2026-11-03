@@ -709,7 +709,12 @@ fn pool_prepare_holds_directory_lock_for_service_lifetime() -> TestResult {
     let state = crate::state::NodeState::open(config, None)?;
     let control: Arc<dyn bitcoin_rs_mining::MiningControl> =
         Arc::new(bitcoin_rs_mining::FakeMiningControl::default());
-    let Some(service) = super::PoolService::prepare(&state, &control)? else {
+    let Some(service) = super::PoolService::prepare(
+        &state,
+        &control,
+        &bitcoin_rs_chain::LatchWriter::new().reader(),
+    )?
+    else {
         panic!("enabled pool must prepare a service");
     };
     assert!(

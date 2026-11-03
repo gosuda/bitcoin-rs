@@ -1224,13 +1224,22 @@ impl Server {
         deps: ServerDeps,
         limiter: Arc<ConnectionLimiter>,
     ) -> io::Result<Self> {
+        Self::bind_with_cancel(addr, config, deps, limiter, LatchWriter::new())
+    }
+
+    pub fn bind_with_cancel<A: ToSocketAddrs>(
+        addr: A,
+        config: ServerConfig,
+        deps: ServerDeps,
+        limiter: Arc<ConnectionLimiter>,
+        cancel: LatchWriter,
+    ) -> io::Result<Self> {
         config
             .validate()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let listener = TcpListener::bind(addr)?;
         listener.set_nonblocking(false)?;
         let local_addr = listener.local_addr()?;
-        let cancel = LatchWriter::new();
         let shared = Arc::new(Shared {
             config,
             pool: deps.pool,

@@ -69,10 +69,28 @@ impl MiningCoordinator {
         followers: ChainFollowers,
         coinbase_script: Vec<u8>,
     ) -> Self {
+        let stop = chainstate.shutdown_reader();
+        Self::with_stop(
+            mempool,
+            chainstate,
+            stable,
+            followers,
+            coinbase_script,
+            stop,
+        )
+    }
+
+    pub(crate) fn with_stop(
+        mempool: MempoolReader,
+        chainstate: Arc<Chainstate>,
+        stable: StableRead,
+        followers: ChainFollowers,
+        coinbase_script: Vec<u8>,
+        shutdown: bitcoin_rs_chain::LatchReader,
+    ) -> Self {
         let network = chainstate.network();
         let applied_tip = chainstate.applied_tip_reader();
         let block_tree = chainstate.block_tree_reader();
-        let shutdown = chainstate.shutdown_reader();
         let service = MiningService::new(
             network,
             Arc::new(AppliedTipAdapter { tip: applied_tip }),
@@ -171,12 +189,22 @@ impl MiningCoordinator {
                 .map(|input| input.witness.len())
     }
 
+    fn ensure_work_open(&self) -> Result<(), MiningControlError> {
+        if self.shutdown.is_triggered() {
+            return Err(MiningControlError::Unavailable(
+                "mining is suspended".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn submit(&self, payload: &BlockPayload) -> Result<BlockValidationResult, MiningControlError> {
         let block_hash: Hash256 = payload.block().block_hash().into();
         let lock = match self.chainstate.lock_transition() {
             Ok(lock) => lock,
             Err(error) => return map_apply_error(error),
         };
+        self.ensure_work_open()?;
         if matches!(
             self.known_block_result(block_hash),
             Some(BlockValidationResult::Duplicate)
@@ -388,6 +416,34 @@ impl MempoolSequenceWake for MiningCoordinator {
 }
 
 impl MiningControl for MiningCoordinator {
+    fn check_block(
+        &self,
+        payload: &BlockPayload,
+    ) -> Result<BlockValidationResult, MiningControlError> {
+        use bitcoin_rs_chainstate::WindowApplyDisposition::{BodyMutated, Permanent};
+        match self.chainstate.validate_block(payload) {
+            Ok(()) => Ok(BlockValidationResult::Accepted),
+            Err(
+                ApplyError::PrevHashMismatch { .. }
+                | ApplyError::ConcurrentChainChange
+                | ApplyError::Chain(
+                    ChainError::KnownInvalidHeader { .. }
+                    | ChainError::InvalidParent { .. }
+                    | ChainError::MissingParent { .. },
+                ),
+            ) => Ok(BlockValidationResult::Inconclusive),
+            Err(error)
+                if matches!(
+                    bitcoin_rs_chainstate::classify_apply_error(&error),
+                    Permanent | BodyMutated
+                ) =>
+            {
+                map_apply_error(error)
+            }
+            Err(error) => Err(MiningControlError::Failed(error.to_string().into())),
+        }
+    }
+
     fn get_block_template(
         &self,
         request: BlockTemplateRequest,
@@ -397,10 +453,14 @@ impl MiningControl for MiningCoordinator {
                 let payload = BlockPayload::from_local(block);
                 Ok(BlockTemplateResult::Proposal(self.propose(&payload)?))
             }
-            BlockTemplateMode::Template => Ok(BlockTemplateResult::Template(
-                self.service
-                    .get_block_template(request.long_poll_id.as_deref(), request.coinbase_budget)?,
-            )),
+            BlockTemplateMode::Template => {
+                self.ensure_work_open()?;
+                let template = self
+                    .service
+                    .get_block_template(request.long_poll_id.as_deref(), request.coinbase_budget)?;
+                self.ensure_work_open()?;
+                Ok(BlockTemplateResult::Template(template))
+            }
         }
     }
 
@@ -560,6 +620,7 @@ impl MiningControl for MiningCoordinator {
                 generated.push(GeneratedBlock { hash, hex });
             }
         }
+        self.ensure_work_open()?;
         Ok(generated)
     }
 }

@@ -145,6 +145,10 @@ fn describe_node_metrics() {
         "block sync wakeups from inbound p2p data"
     );
     metrics::describe_gauge!(
+        "node.consensus_quarantine",
+        "whether consensus incident containment is active"
+    );
+    metrics::describe_gauge!(
         "node.shutdown.requested",
         "whether shutdown has been requested"
     );

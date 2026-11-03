@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use core::str::FromStr as _;
 
 use bitcoin_rs_primitives::Txid;
-use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value};
+use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value};
 
 use crate::context::Context;
 use crate::error::RpcError;
@@ -86,6 +86,25 @@ impl Handler {
         else {
             return Err(RpcError::MethodNotFound(method.to_owned()));
         };
+        let admitted = || {
+            !self.ctx.quarantined()
+                || matches!(
+                    method,
+                    "getrpcinfo"
+                        | "getblockchaininfo"
+                        | "getblockheader"
+                        | "getblock"
+                        | "getblockverdict"
+                        | "getpeerinfo"
+                        | "getnetworkinfo"
+                        | "stop"
+                        | "help"
+                        | "uptime"
+                )
+        };
+        if !admitted() {
+            return Err(RpcError::Quarantined);
+        }
         let bound = row
             .arg_names
             .map(|names| bind_named_params(params, names))
@@ -110,12 +129,23 @@ impl Handler {
             .transpose()?;
         let _active = self.ctx.active_calls.begin(method);
         let cancellation = self.stop.reader();
-        match handler {
+        let mut result = match handler {
             crate::registry::Dispatch::Immediate(handler) => handler(&self.ctx, params),
             crate::registry::Dispatch::Cancellable(handler) => {
                 handler(&self.ctx, params, &cancellation)
             }
+        }?;
+        if self.ctx.quarantined() {
+            if !admitted() {
+                return Err(RpcError::Quarantined);
+            }
+            if matches!(method, "getrpcinfo" | "getblockchaininfo")
+                && let Some(object) = result.as_object_mut()
+            {
+                object.insert("consensus_quarantine", sonic_rs::json!(true));
+            }
         }
+        Ok(result)
     }
 }
 

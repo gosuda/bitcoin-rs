@@ -55,6 +55,7 @@ pub(super) fn dispatch_error(e: crate::RpcError) -> Response {
         | crate::RpcError::ClientInInitialDownload(_)
         | crate::RpcError::Misc(_)
         | crate::RpcError::CoreInternal(_)
+        | crate::RpcError::Quarantined
         | crate::RpcError::Internal(_) => service_unavailable(e.to_string()),
     }
 }

@@ -172,6 +172,15 @@ impl GenerateRequest {
 }
 
 pub trait MiningControl: Send + Sync {
+    fn check_block(
+        &self,
+        _payload: &BlockPayload,
+    ) -> Result<BlockValidationResult, MiningControlError> {
+        Err(MiningControlError::Unavailable(
+            "block validation unavailable".into(),
+        ))
+    }
+
     fn get_block_template(
         &self,
         request: BlockTemplateRequest,
