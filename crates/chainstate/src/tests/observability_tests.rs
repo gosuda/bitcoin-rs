@@ -259,7 +259,6 @@ fn proposal_emits_completed_validation_timings() -> TestResult {
     capture_profile(&fields, || handles.validate_block(&payload))?;
     for field in [
         "contextual_header_us",
-        "pow_self_us",
         "script_verify_us",
         "coinbase_maturity_us",
         "bip68_us",
@@ -271,6 +270,7 @@ fn proposal_emits_completed_validation_timings() -> TestResult {
         );
     }
     assert!(!fields.0.lock().contains("utxo_commit_us"));
+    assert!(!fields.0.lock().contains("pow_self_us"));
     Ok(())
 }
 

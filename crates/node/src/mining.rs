@@ -594,7 +594,6 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
         ApplyError::PrevHashMismatch { .. } => {
             CompactString::from(bitcoin_rs_mining::STALE_PARENT_REASON)
         }
-        ApplyError::TargetAboveLimit => CompactString::from("bad-diffbits"),
         ApplyError::BlockOutputsExceedInputs | ApplyError::BlockValueOverflow => {
             CompactString::from("bad-cb-amount")
         }

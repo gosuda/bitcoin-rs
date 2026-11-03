@@ -69,7 +69,7 @@ A reorg is a planned disconnect-then-connect. `plan_reorg` (`crates/chain/src/re
 
 | Disposition | Cause class | What the node does |
 |---|---|---|
-| `Permanent` | consensus-invalid block: bad merkle root, `SigopsLimit`, `CoinbaseAmount`, `ProofOfWork`, `TargetAboveLimit`, `NbitsMismatch` | invalidate the block's subtree (`invalidate_permanent_failure`, `window.rs:317`) and return the list of invalidated hashes |
+| `Permanent` | consensus-invalid block: bad merkle root, `SigopsLimit`, `CoinbaseAmount`, `ProofOfWork`, `NbitsMismatch` | invalidate the block's subtree (`invalidate_permanent_failure`, `window.rs:317`) and return the list of invalidated hashes |
 | `BodyMutated` | witness or merkle mutation of a staged body | same as `Operational` for the window; the peer that sent the mutated body is at fault |
 | `Operational` | transient or local: journal backpressure (`ApplyError::JournalBackpressure(error) if error.is_backpressure()`), `Shutdown`, `ConcurrentChainChange`, disconnect mismatches, missing bodies | stop the window, keep already-committed blocks, let the caller retry |
 | `Fatal` | storage engine failures: `UtxoCommit`, `DurableHeadCommit`, `BlockBodyPersistence`, `UndoPersistence`, non-backpressure journal errors, group flush failure | abandon the group, latch recovery, no retry |

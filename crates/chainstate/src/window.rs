@@ -353,7 +353,6 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
         ApplyError::JournalBackpressure(error) if error.is_backpressure() => Operational,
         ApplyError::JournalBackpressure(_) => Fatal,
         ApplyError::ProofOfWork { .. }
-        | ApplyError::TargetAboveLimit
         | ApplyError::BlockValueOverflow
         | ApplyError::BlockOutputsExceedInputs => Permanent,
         ApplyError::Chain(error) => classify_chain_error(error),

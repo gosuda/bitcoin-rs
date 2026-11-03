@@ -60,11 +60,11 @@ pub fn consensus_reject_reason(error: &ConsensusError) -> CompactString {
 
 pub fn chain_reject_reason(error: &ChainError) -> CompactString {
     CompactString::from(match error {
-        ChainError::InvalidPow { .. } => "high-hash",
-        ChainError::ZeroTarget { .. }
+        ChainError::InvalidPow { .. }
+        | ChainError::ZeroTarget { .. }
         | ChainError::TargetExceedsLimit { .. }
-        | ChainError::TargetBitsOverflow { .. }
-        | ChainError::NbitsMismatch { .. } => "bad-diffbits",
+        | ChainError::TargetBitsOverflow { .. } => "high-hash",
+        ChainError::NbitsMismatch { .. } => "bad-diffbits",
         ChainError::TimestampTooEarly { .. } => "time-too-old",
         ChainError::TimestampTooFarAhead { .. } => "time-too-new",
         ChainError::MissingParent { .. } => "prev-blk-not-found",

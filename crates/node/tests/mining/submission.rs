@@ -582,6 +582,27 @@ fn submit_header_rejects_bad_diffbits() -> Result<()> {
 }
 
 #[test]
+fn overflowed_nbits_answers_high_hash_on_submitheader_and_submitblock() -> Result<()> {
+    let (_state, mining) = regtest_mining()?;
+    let genesis = Network::Regtest.genesis_block();
+    let mut child = mined_child(genesis.block_hash())?;
+    child.header.bits = CompactTarget::from_consensus(0x2300_0001);
+    match mining.submit_header(child.header) {
+        Err(MiningControlError::Rejected(reason)) => {
+            assert_eq!(reason.as_str(), "high-hash");
+        }
+        other => panic!("expected submitheader high-hash, got {other:?}"),
+    }
+    match mining.submit_block(BlockPayload::from_local(child))? {
+        BlockValidationResult::Rejected(reason) => {
+            assert_eq!(reason.as_str(), "high-hash");
+        }
+        other => panic!("expected submitblock high-hash, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
 fn submit_header_rejects_time_too_new() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
     let genesis = Network::Regtest.genesis_block();

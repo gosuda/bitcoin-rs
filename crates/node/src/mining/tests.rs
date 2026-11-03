@@ -137,7 +137,7 @@ fn apply_errors_delegate_consensus_and_chain_reasons() {
         rejected(ApplyError::Chain(ChainError::TargetBitsOverflow {
             bits: 0x2300_0001,
         })),
-        "bad-diffbits"
+        "high-hash"
     );
     assert_eq!(
         rejected(ApplyError::Chain(ChainError::KnownInvalidHeader {

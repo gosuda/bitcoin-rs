@@ -38,7 +38,7 @@ fn compact_overflow_bits_are_rejected_like_core_derive_target() {
             bits: header.bits.to_consensus(),
         }),
         "Bitcoin Core's SetCompact marks nBits 0x22000101 as overflowed (nSize 34 and nWord \
-         0x0101 > 0xff) and CheckProofOfWork rejects every overflowed encoding as bad-diffbits; \
+         0x0101 > 0xff) and CheckProofOfWork rejects every overflowed encoding as high-hash; \
          an all-zero hash below the wrapped target must not pass validation"
     );
 }
@@ -120,7 +120,7 @@ fn every_core_overflow_clause_and_its_boundary_matches_set_compact() {
                 bits: header.bits.to_consensus(),
             }),
             "Bitcoin Core v31.1 SetCompact (src/arith_uint256.cpp) marks nBits {bits:08x} as \
-             overflowed under {clause}, so CheckProofOfWork answers bad-diffbits"
+             overflowed under {clause}, so CheckProofOfWork answers high-hash"
         );
     }
     for (bits, boundary) in [

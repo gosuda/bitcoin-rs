@@ -150,6 +150,9 @@ fn check_self_pow(
     height: u32,
     intent: ApplyIntent,
 ) -> core::result::Result<(), ApplyError> {
+    if intent != ApplyIntent::Commit {
+        return Ok(());
+    }
     let pow_self_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let pow_self_result =
         bitcoin_rs_chain::header_sync::validate_pow(&block.header, block_hash, handles.network);
@@ -159,16 +162,7 @@ fn check_self_pow(
         pow_self_us = pow_self_started.map(|start| start.elapsed().as_micros()),
         "apply_block: profile"
     );
-    match pow_self_result {
-        Err(bitcoin_rs_chain::ChainError::TargetExceedsLimit { .. })
-        | Err(bitcoin_rs_chain::ChainError::TargetBitsOverflow { .. }) => {
-            Err(ApplyError::TargetAboveLimit)
-        }
-        Err(_) if intent == ApplyIntent::Commit => {
-            Err(ApplyError::ProofOfWork { hash: block_hash })
-        }
-        _ => Ok(()),
-    }
+    pow_self_result.map_err(|_| ApplyError::ProofOfWork { hash: block_hash })
 }
 
 struct ValidationContexts {
@@ -982,11 +976,11 @@ pub(super) fn apply_block_admitted<'b>(
     let prev_hash = block.header.prev_blockhash.0;
     let (prior, height) = application_predecessor(handles, block_hash, prev_hash, &publication)?;
     check_historical_target(handles, height, block_hash)?;
+    check_self_pow(handles, block, block_hash, height, intent)?;
     if !matches!(publication, PublishMode::Replay { .. }) {
         check_contextual_header(handles, block, height, prior.as_deref(), block_hash)?;
     }
     prepare_journal_for_apply(handles, height, intent)?;
-    check_self_pow(handles, block, block_hash, height, intent)?;
 
     let ValidationContexts {
         validation,

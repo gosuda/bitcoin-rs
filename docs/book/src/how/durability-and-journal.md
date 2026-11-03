@@ -93,7 +93,7 @@ An append failure is a third case, and it is not backpressure. The failed append
 |---|---|---|
 | Fatal | `DurableHeadCommit`, `DurableHeadLineage`, `DurableHeadGapUnrecoverable`, `BlockBodyPersistence`, `UndoPersistence`, `UtxoCommit`, `RecoveryPublication`, any `JournalBackpressure` except `RetentionLimit` | Admission closes permanently, shutdown is requested, no retry is scheduled |
 | Operational | `Shutdown`, `ConcurrentChainChange`, `PrevHashMismatch`, `UndoLoad`, `DisconnectNotTip`, `PruneDuringHistoricalValidation`, `JournalBackpressure(RetentionLimit)` | The caller sees an error; the node keeps running or retries under its owning mechanism |
-| Permanent | `ProofOfWork`, `TargetAboveLimit`, invalid chain or consensus outcomes | The block and its descendants are invalid; storage is untouched |
+| Permanent | `ProofOfWork`, invalid chain or consensus outcomes | The block and its descendants are invalid; storage is untouched |
 
 The full mapping is `classify_apply_error` (`crates/chainstate/src/window.rs:343`); [`SYNC-04`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/synchronization.md#sync-04-failure-classification-and-recovery-semantics) owns the classification rule. A failed disconnect after mutation began is separate: `DisconnectError::Fatal` and `MarkerStuck` also call `fail_closed_for_recovery` (`crates/chainstate/src/lib.rs:486-499`).
 
