@@ -10,6 +10,13 @@ pub(crate) mod manifest_check;
 
 use std::fmt;
 
+use bitcoin_rs_primitives::{Hash256, OutPoint, Txid};
+
+/// An outpoint whose txid is the byte `label` repeated, at `vout` 0.
+pub(crate) fn outpoint(label: u8) -> OutPoint {
+    OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0)
+}
+
 #[derive(Debug)]
 pub(crate) struct Failure(pub(crate) String);
 

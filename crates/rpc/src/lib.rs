@@ -17,6 +17,8 @@ pub(crate) mod registry;
 mod render;
 pub mod rest;
 mod server;
+#[cfg(test)]
+mod test_support;
 mod tx_render;
 pub mod zmq;
 

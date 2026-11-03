@@ -195,15 +195,6 @@ impl ZmqPublisher for NoOpZmqPublisher {
     fn publish_rawtx(&self, _bytes: &[u8]) {}
 }
 
-pub fn publish_admitted_hashtx(
-    publisher: &dyn ZmqPublisher,
-    txids: impl IntoIterator<Item = Txid>,
-) {
-    for txid in txids {
-        publisher.publish_hashtx(txid);
-    }
-}
-
 #[cfg(feature = "zmq")]
 struct EndpointSocket {
     endpoint: String,

@@ -99,10 +99,7 @@ fn getrawtransaction_checks_mempool_before_failing_txindex()
         }
 
         fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
-            Ok(crate::context::DerivedIndexInfo {
-                synced: false,
-                best_block_height: 0,
-            })
+            Ok(crate::test_support::derived_index_info(false, 0))
         }
     }
 
@@ -448,10 +445,7 @@ fn getrawtransaction_resolves_confirmed_transaction_from_txindex_without_cache()
         }
 
         fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
-            Ok(crate::context::DerivedIndexInfo {
-                synced: true,
-                best_block_height: 1,
-            })
+            Ok(crate::test_support::derived_index_info(true, 1))
         }
     }
 
@@ -760,10 +754,7 @@ where
     }
 
     fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
-        Ok(crate::context::DerivedIndexInfo {
-            synced: true,
-            best_block_height: 0,
-        })
+        Ok(crate::test_support::derived_index_info(true, 0))
     }
 
     fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {

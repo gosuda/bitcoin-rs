@@ -26,6 +26,7 @@ use crate::context::{
 };
 use crate::handlers::Handler;
 use crate::rest::Response;
+use crate::test_support::{derived_index_info, outpoint};
 
 fn route(handler: &Handler, path: &str, query: &str) -> Response {
     dispatch(handler, &api(path), query)
@@ -186,10 +187,7 @@ impl crate::context::DerivedIndexQuery for StaticTxIndex {
     }
 
     fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
-        Ok(crate::context::DerivedIndexInfo {
-            synced: true,
-            best_block_height: 0,
-        })
+        Ok(derived_index_info(true, 0))
     }
 }
 
@@ -221,10 +219,7 @@ impl crate::context::DerivedIndexQuery for CountingTxIndex {
     }
 
     fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
-        Ok(crate::context::DerivedIndexInfo {
-            synced: true,
-            best_block_height: 0,
-        })
+        Ok(derived_index_info(true, 0))
     }
 }
 
@@ -262,10 +257,10 @@ impl crate::context::DerivedIndexQuery for FixtureTxIndex {
     }
 
     fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
-        Ok(crate::context::DerivedIndexInfo {
-            synced: true,
-            best_block_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
-        })
+        Ok(derived_index_info(
+            true,
+            self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
+        ))
     }
 }
 
@@ -1970,10 +1965,7 @@ fn script_activity_retries_when_pool_changes_between_views() {
         value: 125,
         vout: 0,
     };
-    let funder = Arc::new(paying_transaction(
-        &[unconfirmed_outpoint(1)],
-        &[(200, target.clone())],
-    ));
+    let funder = Arc::new(paying_transaction(&[outpoint(1)], &[(200, target.clone())]));
     let spender = paying_transaction(
         &[OutPoint::new(confirmed.txid, confirmed.vout)],
         &[(100, vec![0x52])],
@@ -2452,10 +2444,7 @@ fn block_parent_reuse_checks_readiness_only_when_needed() {
         }
         fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
             self.checks.fetch_add(1, Ordering::Relaxed);
-            Ok(crate::context::DerivedIndexInfo {
-                synced: self.synced,
-                best_block_height: 0,
-            })
+            Ok(derived_index_info(self.synced, 0))
         }
     }
     let parent = paying_transaction(&[OutPoint::null()], &[(125, vec![0x51])]);
@@ -2878,8 +2867,23 @@ thread_local! {
 
 const GATE_TIMEOUT: Duration = Duration::from_secs(30);
 
+type GateSlot = std::thread::LocalKey<RefCell<Option<(Sender<()>, Receiver<()>)>>>;
+
+fn arm_gate(slot: &'static GateSlot, entered: Sender<()>, release: Receiver<()>) {
+    slot.with(|slot| *slot.borrow_mut() = Some((entered, release)));
+}
+
+fn run_gate(slot: &'static GateSlot) {
+    let armed = slot.with(|slot| slot.borrow_mut().take());
+    let Some((entered, release)) = armed else {
+        return;
+    };
+    let _ = entered.send(());
+    let _ = release.recv_timeout(GATE_TIMEOUT);
+}
+
 fn arm_mempool_summary_gate(entered: Sender<()>, release: Receiver<()>) {
-    MEMPOOL_SUMMARY_GATE.with(|slot| *slot.borrow_mut() = Some((entered, release)));
+    arm_gate(&MEMPOOL_SUMMARY_GATE, entered, release);
 }
 
 struct SwapperGuard {
@@ -2897,24 +2901,14 @@ impl Drop for SwapperGuard {
 }
 
 pub(crate) fn gate_mempool_summary_for_tests() {
-    let armed = MEMPOOL_SUMMARY_GATE.with(|slot| slot.borrow_mut().take());
-    let Some((entered, release)) = armed else {
-        return;
-    };
-    let _ = entered.send(());
-    let _ = release.recv_timeout(GATE_TIMEOUT);
+    run_gate(&MEMPOOL_SUMMARY_GATE);
 }
 fn arm_mempool_activity_gate(entered: Sender<()>, release: Receiver<()>) {
-    MEMPOOL_ACTIVITY_GATE.with(|slot| *slot.borrow_mut() = Some((entered, release)));
+    arm_gate(&MEMPOOL_ACTIVITY_GATE, entered, release);
 }
 
 pub(crate) fn gate_mempool_activity_for_tests() {
-    let armed = MEMPOOL_ACTIVITY_GATE.with(|slot| slot.borrow_mut().take());
-    let Some((entered, release)) = armed else {
-        return;
-    };
-    let _ = entered.send(());
-    let _ = release.recv_timeout(GATE_TIMEOUT);
+    run_gate(&MEMPOOL_ACTIVITY_GATE);
 }
 
 fn paying_transaction(inputs: &[OutPoint], outputs: &[(u64, Vec<u8>)]) -> Tx {
@@ -2939,10 +2933,6 @@ fn paying_transaction(inputs: &[OutPoint], outputs: &[(u64, Vec<u8>)]) -> Tx {
             .collect(),
         lock_time: LockTime::ZERO,
     }
-}
-
-fn unconfirmed_outpoint(marker: u8) -> OutPoint {
-    OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0)
 }
 
 #[derive(Clone)]
@@ -2989,19 +2979,19 @@ fn mempool_projection_releases_read_guard_before_encoding() {
     let target = vec![0x51_u8];
     let seeds = [
         Seed {
-            transaction: paying_transaction(&[unconfirmed_outpoint(1)], &[(1_000, target.clone())]),
+            transaction: paying_transaction(&[outpoint(1)], &[(1_000, target.clone())]),
             vsize: 100,
             fee: 1_000,
             time: 1,
         },
         Seed {
-            transaction: paying_transaction(&[unconfirmed_outpoint(2)], &[(1_000, target.clone())]),
+            transaction: paying_transaction(&[outpoint(2)], &[(1_000, target.clone())]),
             vsize: 100,
             fee: 2_000,
             time: 2,
         },
         Seed {
-            transaction: paying_transaction(&[unconfirmed_outpoint(3)], &[(1_000, target)]),
+            transaction: paying_transaction(&[outpoint(3)], &[(1_000, target)]),
             vsize: 200,
             fee: 2_000,
             time: 3,
@@ -3056,7 +3046,7 @@ fn parity_fixture() -> ParityFixture {
     let target = vec![0x51_u8];
     let unrelated = vec![0x52_u8];
     let funder = paying_transaction(
-        &[unconfirmed_outpoint(1)],
+        &[outpoint(1)],
         &[
             (1_000, target.clone()),
             (2_000, target.clone()),
@@ -3081,10 +3071,7 @@ fn parity_fixture() -> ParityFixture {
     for index in 0..10_u8 {
         let vsize = 100 + u32::from(index) * 10;
         seeds.push(Seed {
-            transaction: paying_transaction(
-                &[unconfirmed_outpoint(10 + index)],
-                &[(500, unrelated.clone())],
-            ),
+            transaction: paying_transaction(&[outpoint(10 + index)], &[(500, unrelated.clone())]),
             vsize,
             fee: u64::from(vsize) * if index < 4 { 10 } else { 5 },
             time: TOP - u64::from(index / 2),

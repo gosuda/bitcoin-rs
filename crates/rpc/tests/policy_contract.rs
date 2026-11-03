@@ -38,6 +38,8 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 use bitcoin::hex::DisplayHex;
 use std::error::Error;
 
+use crate::support::outpoint;
+
 fn p2wpkh_script() -> Vec<u8> {
     [vec![0x00, 0x14], vec![0x11; 20]].concat()
 }
@@ -74,7 +76,7 @@ fn raw_tx_hex(tx: &Tx) -> String {
 fn fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(
-        OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
+        outpoint(label),
         TxOut {
             value: Amount::from_sat(value),
             script_pubkey: Script::from_bytes(op_true_script()),
@@ -88,17 +90,7 @@ fn fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
         &Hash256::from_le_bytes(&[0xaa; 32]),
     )
     .unwrap_or_else(|error| panic!("commit_block failed: {error}"));
-    OutPoint {
-        txid: Txid(Hash256::from_le_bytes(&[label; 32])),
-        vout: 0,
-    }
-}
-
-fn confirmed_outpoint(label: u8) -> OutPoint {
-    OutPoint {
-        txid: Txid(Hash256::from_le_bytes(&[label; 32])),
-        vout: 0,
-    }
+    outpoint(label)
 }
 
 fn reject_message(error: &RpcError) -> String {
@@ -332,13 +324,6 @@ fn seeded_entry(tx: Arc<Tx>, vsize: u32, fee: u64) -> MempoolEntry {
     MempoolEntry::new(tx, vsize, fee, unix_time_secs(), 1, 0)
 }
 
-fn staged_outpoint(label: u8) -> OutPoint {
-    OutPoint {
-        txid: Txid(Hash256::from_le_bytes(&[label; 32])),
-        vout: 0,
-    }
-}
-
 /// `(mempoolminfee, minrelaytxfee)` as `getmempoolinfo` quotes them, in
 /// BTC/kvB.
 fn quoted_floors(handler: &Handler) -> Result<(f64, f64), Box<dyn Error>> {
@@ -382,15 +367,15 @@ fn preview_verdict(
 #[test]
 fn rpc_outlets_enforce_the_floor_a_capacity_eviction_left_behind() -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
-    let cheap = tx(staged_outpoint(0x85), 1_000, 0xffff_ffff);
+    let cheap = tx(outpoint(0x85), 1_000, 0xffff_ffff);
     let cheap_txid = rpc_txid(&cheap);
     {
         let mut pool = ctx.mempool.gateway.pool().write();
         pool.limits.max_total_bytes = 500;
         pool.insert_entry(seeded_entry(Arc::new(cheap), 300, 300))?;
-        let middle = tx(staged_outpoint(0x86), 1_000, 0xffff_ffff);
+        let middle = tx(outpoint(0x86), 1_000, 0xffff_ffff);
         pool.insert_entry(seeded_entry(Arc::new(middle), 100, 200))?;
-        let dear = tx(staged_outpoint(0x89), 1_000, 0xffff_ffff);
+        let dear = tx(outpoint(0x89), 1_000, 0xffff_ffff);
         pool.insert_entry(seeded_entry(Arc::new(dear), 100, 400))?;
         assert_eq!(pool.total_vsize(), 500);
     }
@@ -552,7 +537,7 @@ fn sendrawtransaction_applies_an_rbf_replacement_and_sweeps_the_conflicts()
 -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
     let original = insert_original(&ctx, 0x60, 0xffff_fffd, 4_000, 8_000)?;
-    let replacement = tx(confirmed_outpoint(0x60), 90_000, 0xffff_ffff);
+    let replacement = tx(outpoint(0x60), 90_000, 0xffff_ffff);
     let handler = Handler::new(Arc::clone(&ctx));
 
     let result = handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&replacement)]))?;
@@ -631,7 +616,7 @@ fn sendrawtransaction_publishes_admission_through_gateway() -> Result<(), Box<dy
         ))?;
     observer.changes.lock().clear();
 
-    let replacement = tx(confirmed_outpoint(0x52), 88_000, 0xffff_ffff);
+    let replacement = tx(outpoint(0x52), 88_000, 0xffff_ffff);
     let replacement_txid = rpc_txid(&replacement);
     handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&replacement)]))?;
 
@@ -673,7 +658,7 @@ fn new_unconfirmed_inputs_are_allowed_on_both_rpcs() -> Result<(), Box<dyn Error
         .insert_entry(seeded_entry(Arc::new(unrelated.clone()), 100, 1_000))?;
     let replacement = tx_spending(
         &[
-            (confirmed_outpoint(0x98), 0xffff_ffff),
+            (outpoint(0x98), 0xffff_ffff),
             (OutPoint::new(rpc_txid(&unrelated), 0), 0xffff_ffff),
         ],
         100_000,
@@ -703,7 +688,7 @@ fn sendrawtransaction_rejects_rule3_replacements_that_underpay_evicted_fees()
 -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
     let original = insert_original(&ctx, 0x9a, 0xffff_fffd, 4_000, 8_000)?;
-    let replacement = tx(confirmed_outpoint(0x9a), 96_000, 0xffff_ffff);
+    let replacement = tx(outpoint(0x9a), 96_000, 0xffff_ffff);
     let handler = Handler::new(Arc::clone(&ctx));
     let message = reject_message(
         &handler
@@ -756,7 +741,7 @@ fn sendrawtransaction_rejects_a_crossing_replacement_diagram() -> Result<(), Box
     let (replacement, fee) = {
         let mut found = None;
         for count in 320_usize..=400 {
-            let candidate = many_output_tx(confirmed_outpoint(0x9b), 500, count);
+            let candidate = many_output_tx(outpoint(0x9b), 500, count);
             let vsize = u64::from(u32::try_from(candidate.vsize()).unwrap_or(u32::MAX));
             let candidate_fee = 200_000 - 500 * u64::try_from(count).unwrap_or(u64::MAX);
             let rate = candidate_fee * 1_000 / vsize;
@@ -869,7 +854,7 @@ fn assert_both_rpcs_agree_on_replacement_rejection(
 fn nonsignaling_replacements_agree_on_both_rpcs() -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
     let original = insert_original(&ctx, 0xa1, 0xffff_ffff, 4_000, 8_000)?;
-    let replacement = tx(confirmed_outpoint(0xa1), 90_000, 0xffff_ffff);
+    let replacement = tx(outpoint(0xa1), 90_000, 0xffff_ffff);
     let handler = Handler::new(Arc::clone(&ctx));
 
     let sequence = ctx.mempool.gateway.read().sequence_number();
@@ -904,7 +889,7 @@ fn bip125_rule4_replacement_must_pay_incremental_relay_fee_on_both_rpcs()
 -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
     let _original = insert_original(&ctx, 0xa4, 0xffff_fffd, 4_000, 8_000)?;
-    let replacement = tx(confirmed_outpoint(0xa4), 92_000, 0xffff_ffff);
+    let replacement = tx(outpoint(0xa4), 92_000, 0xffff_ffff);
     let handler = Handler::new(Arc::clone(&ctx));
 
     let _row = assert_both_rpcs_agree_on_replacement_rejection(
@@ -937,7 +922,7 @@ fn replacement_counts_conflicting_clusters_instead_of_descendants() -> Result<()
             pool.insert_entry(seeded_entry(Arc::new(child), 50, 100))?;
         }
     }
-    let replacement = tx(confirmed_outpoint(0xa5), 80_000, 0xffff_ffff);
+    let replacement = tx(outpoint(0xa5), 80_000, 0xffff_ffff);
     let handler = Handler::new(Arc::clone(&ctx));
 
     let rows = handler.dispatch("testmempoolaccept", &json!([[raw_tx_hex(&replacement)]]))?;
@@ -957,10 +942,7 @@ fn replacement_counts_conflicting_clusters_instead_of_descendants() -> Result<()
 fn chain_pool(ctx: &Context) -> Result<Vec<Tx>, Box<dyn Error>> {
     let mut pool = ctx.mempool.gateway.pool().write();
     let mut txs = Vec::new();
-    let mut previous = OutPoint {
-        txid: Txid(Hash256::from_le_bytes(&[0x62; 32])),
-        vout: 0,
-    };
+    let mut previous = outpoint(0x62);
     for _ in 0..25 {
         let mut next = tx(previous, 1_000, 0xffff_ffff);
         next.outputs[0].script_pubkey = Script::from_bytes(op_true_script());
@@ -1017,14 +999,7 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_count_limits()
     let root = {
         let mut pool = ctx.mempool.gateway.pool().write();
         pool.limits.cluster_count = 1;
-        let root = tx(
-            OutPoint {
-                txid: Txid(Hash256::from_le_bytes(&[0xc1; 32])),
-                vout: 0,
-            },
-            50_000,
-            0xffff_ffff,
-        );
+        let root = tx(outpoint(0xc1), 50_000, 0xffff_ffff);
         pool.insert_entry(seeded_entry(Arc::new(root.clone()), 100, 10_000))?;
         root
     };
@@ -1086,14 +1061,7 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_size_limits()
         let mut pool = ctx.mempool.gateway.pool().write();
         pool.limits.cluster_count = 100;
         pool.limits.cluster_size_vbytes = 250;
-        let root = tx(
-            OutPoint {
-                txid: Txid(Hash256::from_le_bytes(&[0xc3; 32])),
-                vout: 0,
-            },
-            50_000,
-            0xffff_ffff,
-        );
+        let root = tx(outpoint(0xc3), 50_000, 0xffff_ffff);
         pool.insert_entry(seeded_entry(Arc::new(root.clone()), 200, 10_000))?;
         root
     };
@@ -1145,14 +1113,7 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_replacement_into_a_full_clu
                 value: Amount::from_sat(50_000),
                 script_pubkey: Script::from_bytes(op_true_script()),
             }],
-            ..tx(
-                OutPoint {
-                    txid: Txid(Hash256::from_le_bytes(&[0xc5; 32])),
-                    vout: 0,
-                },
-                50_000,
-                0xffff_ffff,
-            )
+            ..tx(outpoint(0xc5), 50_000, 0xffff_ffff)
         };
         let original = tx(OutPoint::new(rpc_txid(&root), 0), 40_000, 0xffff_fffd);
         pool.insert_entry(seeded_entry(Arc::new(root.clone()), 100, 10_000))?;
@@ -1241,10 +1202,7 @@ fn many_output_tx(prevout: OutPoint, value_each: u64, count: usize) -> Tx {
 fn sendrawtransaction_admission_evicts_the_lowest_fee_packages_under_size_pressure()
 -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
-    let root = |label: u8| OutPoint {
-        txid: Txid(Hash256::from_le_bytes(&[label; 32])),
-        vout: 0,
-    };
+    let root = outpoint;
     let (high_txid, low_txid, mid_txid) = {
         let mut pool = ctx.mempool.gateway.pool().write();
         let high = tx(root(0x90), 1_000, 0xffff_ffff);
@@ -1621,7 +1579,7 @@ fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_t
 fn fund_coinbase_utxo(ctx: &Context, label: u8, value: u64, height: u32) -> OutPoint {
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(
-        OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
+        outpoint(label),
         TxOut {
             value: Amount::from_sat(value),
             script_pubkey: Script::from_bytes(op_true_script()),
@@ -1635,10 +1593,7 @@ fn fund_coinbase_utxo(ctx: &Context, label: u8, value: u64, height: u32) -> OutP
         &Hash256::from_le_bytes(&[0xaa; 32]),
     )
     .unwrap_or_else(|error| panic!("commit_block failed: {error}"));
-    OutPoint {
-        txid: Txid(Hash256::from_le_bytes(&[label; 32])),
-        vout: 0,
-    }
+    outpoint(label)
 }
 
 #[test]

@@ -3,7 +3,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 
 use bitcoin::hex::DisplayHex as _;
-use bitcoin_rs_mempool::MempoolEntry;
+use bitcoin_rs_mempool::{EntryId, MempoolEntry};
 use bitcoin_rs_primitives::{OutPoint, consensus_bytes};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
@@ -267,58 +267,54 @@ pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     typed_to_sonic(&v31::GetRawMempool(txids))
 }
 
-pub(crate) fn getmempoolancestors(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+enum MempoolRelatives {
+    Verbose(BTreeMap<String, v31::MempoolEntry>),
+    Ids(Vec<String>),
+}
+
+fn mempool_relatives(
+    ctx: &Arc<Context>,
+    params: &Value,
+    related_ids: impl Fn(&bitcoin_rs_mempool::Mempool, EntryId) -> Vec<EntryId>,
+) -> Result<MempoolRelatives, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?, "txid")?;
     let verbose = optional_bool(params, 1, false)?;
-    let txids = {
-        let pool = ctx.mempool.gateway.read();
-        let Some(id) = pool.entry_id_by_txid(&txid) else {
-            return Err(RpcError::NotFound("transaction not in mempool"));
-        };
-        let related_ids = pool.ancestor_ids_for_entry(id);
-        if verbose {
-            let response = v31::GetMempoolAncestorsVerbose(mempool_entries_typed(
-                related_ids.iter().filter_map(|id| pool.entry(*id)),
-                &pool,
-            ));
-            drop(pool);
-            return typed_to_sonic(&response);
-        }
+    let pool = ctx.mempool.gateway.read();
+    let Some(id) = pool.entry_id_by_txid(&txid) else {
+        return Err(RpcError::NotFound("transaction not in mempool"));
+    };
+    let related_ids = related_ids(&pool, id);
+    if verbose {
+        return Ok(MempoolRelatives::Verbose(mempool_entries_typed(
+            related_ids.iter().filter_map(|id| pool.entry(*id)),
+            &pool,
+        )));
+    }
+    Ok(MempoolRelatives::Ids(
         related_ids
             .iter()
             .filter_map(|id| pool.entry(*id))
-            .map(|entry| entry.txid)
-            .collect::<Vec<_>>()
-    };
-    let names = txids.into_iter().map(|txid| txid.to_string()).collect();
-    typed_to_sonic(&v31::GetMempoolAncestors(names))
+            .map(|entry| entry.txid.to_string())
+            .collect(),
+    ))
+}
+
+pub(crate) fn getmempoolancestors(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    match mempool_relatives(ctx, params, |pool, id| pool.ancestor_ids_for_entry(id))? {
+        MempoolRelatives::Verbose(entries) => {
+            typed_to_sonic(&v31::GetMempoolAncestorsVerbose(entries))
+        }
+        MempoolRelatives::Ids(names) => typed_to_sonic(&v31::GetMempoolAncestors(names)),
+    }
 }
 
 pub(crate) fn getmempooldescendants(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let txid = parse_txid(required_str(params, 0, "txid is required")?, "txid")?;
-    let verbose = optional_bool(params, 1, false)?;
-    let txids = {
-        let pool = ctx.mempool.gateway.read();
-        let Some(id) = pool.entry_id_by_txid(&txid) else {
-            return Err(RpcError::NotFound("transaction not in mempool"));
-        };
-        let related_ids = pool.descendant_ids_for_entry(id);
-        if verbose {
-            let response = v31::GetMempoolDescendantsVerbose(mempool_entries_typed(
-                related_ids.iter().filter_map(|id| pool.entry(*id)),
-                &pool,
-            ));
-            drop(pool);
-            return typed_to_sonic(&response);
+    match mempool_relatives(ctx, params, |pool, id| pool.descendant_ids_for_entry(id))? {
+        MempoolRelatives::Verbose(entries) => {
+            typed_to_sonic(&v31::GetMempoolDescendantsVerbose(entries))
         }
-        related_ids
-            .iter()
-            .filter_map(|id| pool.entry(*id))
-            .map(|entry| entry.txid)
-            .collect::<Vec<_>>()
-    };
-    let names = txids.into_iter().map(|txid| txid.to_string()).collect();
-    typed_to_sonic(&v31::GetMempoolDescendants(names))
+        MempoolRelatives::Ids(names) => typed_to_sonic(&v31::GetMempoolDescendants(names)),
+    }
 }
 
 fn mempool_entry_typed(

@@ -3,8 +3,8 @@ use alloc::sync::Arc;
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_chain::{BlockHeader, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_primitives::{
-    Amount, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
-    TxOut, Txid, Witness, consensus_bytes,
+    Amount, BlockHash, CompactTarget, Hash256, LockTime, Script, Sequence, Tx, TxIn, TxOut,
+    Witness, consensus_bytes,
 };
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
@@ -13,9 +13,7 @@ use super::{getrawtransaction, sendrawtransaction, testmempoolaccept};
 use crate::context::Context;
 use crate::error::RpcError;
 
-fn fixture_outpoint(tag: u8) -> OutPoint {
-    OutPoint::new(Txid(Hash256::from_le_bytes(&[tag; 32])), 0)
-}
+use crate::test_support::outpoint as fixture_outpoint;
 
 fn seed_utxo(ctx: &Context, tag: u8, value: u64) {
     let mut changes = BlockChanges::default();

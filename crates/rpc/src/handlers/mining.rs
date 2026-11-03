@@ -335,7 +335,12 @@ fn parse_network_hash_ps_args(params: &Value) -> Result<(i64, i64), RpcError> {
     Ok((lookup, height))
 }
 
-fn optional_i64(params: &Value, index: usize, default: i64) -> Result<i64, RpcError> {
+fn optional_num<T>(
+    params: &Value,
+    index: usize,
+    default: T,
+    extract: impl Fn(&Value) -> Option<T>,
+) -> Result<T, RpcError> {
     if params.is_null() {
         return Ok(default);
     }
@@ -346,9 +351,11 @@ fn optional_i64(params: &Value, index: usize, default: i64) -> Result<i64, RpcEr
     if value.is_null() {
         return Ok(default);
     }
-    value
-        .as_i64()
-        .ok_or_else(|| RpcError::InvalidType("parameter must be an integer".to_owned()))
+    extract(value).ok_or_else(|| RpcError::InvalidType("parameter must be an integer".to_owned()))
+}
+
+fn optional_i64(params: &Value, index: usize, default: i64) -> Result<i64, RpcError> {
+    optional_num(params, index, default, |value| value.as_i64())
 }
 
 fn required_u32(params: &Value, index: usize, name: &'static str) -> Result<u32, RpcError> {
@@ -357,19 +364,7 @@ fn required_u32(params: &Value, index: usize, name: &'static str) -> Result<u32,
 }
 
 fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcError> {
-    if params.is_null() {
-        return Ok(default);
-    }
-    let array = params_array(params)?;
-    let Some(value) = array.get(index) else {
-        return Ok(default);
-    };
-    if value.is_null() {
-        return Ok(default);
-    }
-    value
-        .as_u64()
-        .ok_or_else(|| RpcError::InvalidType("parameter must be an integer".to_owned()))
+    optional_num(params, index, default, |value| value.as_u64())
 }
 
 fn parse_generateblock_transactions(

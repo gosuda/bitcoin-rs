@@ -1086,10 +1086,7 @@ fn production_resolver_resolves_through_block_bodies() {
         fn index_info(
             &self,
         ) -> Result<bitcoin_rs_index::DerivedIndexInfo, bitcoin_rs_index::TxQueryError> {
-            Ok(bitcoin_rs_index::DerivedIndexInfo {
-                synced: true,
-                best_block_height: 100,
-            })
+            Ok(crate::test_support::derived_index_info(true, 100))
         }
     }
 
@@ -1610,10 +1607,7 @@ fn production_resolver_clones_only_the_requested_output() {
         fn index_info(
             &self,
         ) -> Result<bitcoin_rs_index::DerivedIndexInfo, bitcoin_rs_index::TxQueryError> {
-            Ok(bitcoin_rs_index::DerivedIndexInfo {
-                synced: true,
-                best_block_height: 100,
-            })
+            Ok(crate::test_support::derived_index_info(true, 100))
         }
     }
 

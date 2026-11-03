@@ -145,16 +145,19 @@ impl Connection {
             .ok_or(HttpError::DeadlineExceeded)
     }
 
+    fn rearm(
+        &self,
+        set: fn(&TcpStream, Option<Duration>) -> std::io::Result<()>,
+    ) -> Result<(), HttpError> {
+        set(&self.stream, Some(self.remaining()?)).map_err(HttpError::Io)
+    }
+
     fn rearm_write(&self) -> Result<(), HttpError> {
-        self.stream
-            .set_write_timeout(Some(self.remaining()?))
-            .map_err(HttpError::Io)
+        self.rearm(TcpStream::set_write_timeout)
     }
 
     fn rearm_read(&self) -> Result<(), HttpError> {
-        self.stream
-            .set_read_timeout(Some(self.remaining()?))
-            .map_err(HttpError::Io)
+        self.rearm(TcpStream::set_read_timeout)
     }
 
     fn fill(&mut self) -> Result<(), HttpError> {

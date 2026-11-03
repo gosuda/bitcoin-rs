@@ -22,6 +22,7 @@ use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
 use crate::mining_fixture;
+use crate::support::outpoint;
 
 #[test]
 fn required_handlers_report_the_fixture_chain_mempool_and_network_facts()
@@ -1105,9 +1106,6 @@ fn tx(label: u8, script_pubkey: Vec<u8>) -> Tx {
             script_pubkey: script_pubkey.into(),
         }],
     }
-}
-fn outpoint(label: u8) -> OutPoint {
-    OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0)
 }
 
 fn build_valid_base64_psbt(tx: &Tx) -> Result<String, Box<dyn std::error::Error>> {

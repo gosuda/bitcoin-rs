@@ -954,31 +954,25 @@ fn binary_response(content_type: &'static str, body: &[u8]) -> Response {
     text_response(content_type, body.to_vec())
 }
 
-pub(crate) fn service_unavailable(message: impl Into<String>) -> Response {
+fn text_error(status: u16, reason: &'static str, message: impl Into<String>) -> Response {
     Response {
-        status: 503,
-        reason: "Service Unavailable",
+        status,
+        reason,
         content_type: "text/plain",
         body: message.into().into_bytes(),
     }
+}
+
+pub(crate) fn service_unavailable(message: impl Into<String>) -> Response {
+    text_error(503, "Service Unavailable", message)
 }
 
 pub(crate) fn internal_error(message: impl Into<String>) -> Response {
-    Response {
-        status: 500,
-        reason: "Internal Server Error",
-        content_type: "text/plain",
-        body: message.into().into_bytes(),
-    }
+    text_error(500, "Internal Server Error", message)
 }
 
 pub(crate) fn bad_request(message: impl Into<String>) -> Response {
-    Response {
-        status: 400,
-        reason: "Bad Request",
-        content_type: "text/plain",
-        body: message.into().into_bytes(),
-    }
+    text_error(400, "Bad Request", message)
 }
 
 pub(crate) fn not_found() -> Response {
@@ -986,12 +980,7 @@ pub(crate) fn not_found() -> Response {
 }
 
 fn not_found_with(message: impl Into<String>) -> Response {
-    Response {
-        status: 404,
-        reason: "Not Found",
-        content_type: "text/plain",
-        body: message.into().into_bytes(),
-    }
+    text_error(404, "Not Found", message)
 }
 
 #[cfg(test)]

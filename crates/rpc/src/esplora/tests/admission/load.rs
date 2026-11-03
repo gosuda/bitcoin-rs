@@ -24,10 +24,7 @@ impl crate::context::DerivedIndexQuery for LoadTxIndex {
     }
 
     fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
-        Ok(crate::context::DerivedIndexInfo {
-            synced: true,
-            best_block_height: 0,
-        })
+        Ok(crate::test_support::derived_index_info(true, 0))
     }
 }
 

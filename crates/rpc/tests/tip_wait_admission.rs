@@ -86,7 +86,7 @@ fn context() -> (Arc<Context>, Arc<Chainstate>, Arc<ObservableTipWait>) {
     (Arc::new(ctx), chainstate, observable)
 }
 
-fn send(address: SocketAddr, body: &Value) -> TcpStream {
+fn send_with(address: SocketAddr, body: &Value, connection: &str) -> TcpStream {
     let body = sonic_rs::to_string(body).expect("JSON");
     let mut stream = TcpStream::connect(address).expect("connect");
     stream
@@ -94,11 +94,15 @@ fn send(address: SocketAddr, body: &Value) -> TcpStream {
         .expect("deadline");
     write!(
         stream,
-        "POST / HTTP/1.1\r\nHost: {address}\r\nAuthorization: Basic cGFyaXR5OnBhcml0eQ==\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
+        "POST / HTTP/1.1\r\nHost: {address}\r\nAuthorization: Basic cGFyaXR5OnBhcml0eQ==\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n{body}",
         body.len()
     )
     .expect("send");
     stream
+}
+
+fn send(address: SocketAddr, body: &Value) -> TcpStream {
+    send_with(address, body, "keep-alive")
 }
 
 fn read(mut stream: TcpStream) -> (String, Value) {
@@ -184,18 +188,7 @@ fn wait_quota_preserves_ordinary_http_and_server_only_shutdown_returns_tip() {
 #[test]
 fn gbt_long_poll_counts_toward_the_blocking_quota() {
     fn send_close(address: SocketAddr, body: &Value) -> TcpStream {
-        let body = sonic_rs::to_string(body).expect("JSON");
-        let mut stream = TcpStream::connect(address).expect("connect");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("deadline");
-        write!(
-            stream,
-            "POST / HTTP/1.1\r\nHost: {address}\r\nAuthorization: Basic cGFyaXR5OnBhcml0eQ==\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )
-        .expect("send");
-        stream
+        send_with(address, body, "close")
     }
 
     let (ctx, _, observable) = context();
