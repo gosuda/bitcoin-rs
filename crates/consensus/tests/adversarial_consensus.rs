@@ -151,7 +151,8 @@ fn bip68_relative_locktime_block_based_boundaries() {
 
     assert!(matches!(
         check_sequence_lock(2, sequence, 100, 0, 109, 0),
-        Err(ConsensusError::Bip { bip: "BIP68", .. })
+        Err(ConsensusError::Bip { bip: "BIP68", reason })
+            if reason.starts_with("input sequence height-based lock unmet")
     ));
     assert_eq!(check_sequence_lock(2, sequence, 100, 0, 110, 0), Ok(()));
 }

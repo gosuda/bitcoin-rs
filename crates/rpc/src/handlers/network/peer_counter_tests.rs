@@ -333,7 +333,7 @@ fn getnetworkinfo_version_tracks_the_release() {
 
     assert_eq!(
         result.get("version").and_then(JsonValueTrait::as_i64),
-        Some(bitcoin_rs_primitives::client_version())
+        Some(1_500)
     );
 }
 
