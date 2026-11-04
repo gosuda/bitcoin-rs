@@ -125,6 +125,7 @@ Queue accounting:
 - BIP434 features never enter the post-handshake queue.
 - Version reply sends offered sendpackages once pre-verack.
 - BIP434 windows preserve BIP332 and BIP331 on v1 and v2.
+- A `version` below `MIN_PEER_PROTO_VERSION` (31800) or above `i32::MAX` disconnects the peer before the FSM stores the version. It is not misbehavior, so the peer gets no discouragement score.
 - Local and loopback proofs apply, not live Core evidence.
 - Proof: `crates/primitives/src/version.rs` (`sub_version_composes_comments_in_cores_shape`, `ua_comment_safety_matches_cores_bip14_subset`) for the BIP-0014 formatter; `crates/node/src/config/tests.rs` (`ua_comments_are_validated_and_resolved_in_cores_shape`) for startup validation and resolution into the advertised subversion; `crates/p2p/src/listener.rs` handshake regressions (`ordinary_handshake_still_requires_services_and_verack`, `rejected_ordinary_version_updates_services_without_good`) drive `run_outbound_handshake`, which writes the version frame from the configured `shared.user_agent` through `handshake::version_message`.
 
