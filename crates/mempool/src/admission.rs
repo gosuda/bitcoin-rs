@@ -682,6 +682,13 @@ impl MempoolGateway {
 
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
+    pub fn held_orphan(&self, wtxid: Wtxid) -> Option<Tx> {
+        let lifecycle = self.lifecycle.lock();
+        lifecycle.orphans.get(wtxid).map(|held| (*held.tx).clone())
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
     pub fn recent_rejects_count(&self) -> usize {
         self.lifecycle.lock().rejects_len()
     }

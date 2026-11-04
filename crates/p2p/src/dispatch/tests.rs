@@ -1514,6 +1514,7 @@ fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
     }
 }
 
+// P2P-01
 #[test]
 fn getdata_serves_mempool_bodies_but_never_held_orphans() {
     for orphan in [false, true] {

@@ -89,6 +89,7 @@ Queue accounting:
 - Compact block responses draw a fresh BIP152 serving nonce for each block.
 - v1 handshake and inventory frames are byte-identical to rust-bitcoin `RawNetworkMessage`.
 - `getdata` validates the stored body.
+- `getdata` answers a loose transaction from the mempool only. A held orphan answers `notfound`.
 - `MSG_WITNESS_BLOCK` answers exact stored consensus bytes (`Message::BlockPayload`).
 - `MSG_BLOCK` copies checked header, tx count, and stripped spans (BIP144).
 - Neither format materializes scripts or witnesses.
