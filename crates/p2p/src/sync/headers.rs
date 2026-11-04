@@ -1096,12 +1096,12 @@ impl BlockSync {
         let first = headers.first()?;
         let network = self.chain.network();
         let tree = self.chain.block_tree();
-        let minimum_work = self.anti_dos_work_threshold(&tree);
         let fork_id = tree.lookup(Hash256::from(first.prev_blockhash))?;
         let fork = tree.node(fork_id).ok()?;
         if fork.status == NodeStatus::Invalid {
             return None;
         }
+        let minimum_work = self.anti_dos_work_threshold(&tree);
         let page_self_valid = headers.iter().all(|header| {
             let hash = Hash256::from(header.compute_hash());
             validate_pow(header, hash, network).is_ok()
