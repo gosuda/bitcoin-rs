@@ -69,7 +69,8 @@ A version label alone is never custody: a reference MUST carry source and binary
 - A cell MUST NOT close on a guessed or recalled UTXO total.
 - `manifest_sha256` is optional until the archive exists (C150 exported 2026-09-07, Cmodern 2026-09-09).
 - `corpus_custody()` reports a missing manifest digest as `Blocked { missing: "manifest_sha256" }`, never an invented digest.
-- Each archive uses the Core-framed format with an export-time manifest digest.
+- Each archive uses the Core-framed format with an export-time manifest digest: `manifest_sha256` is the field the exporter embeds inside the manifest, not the SHA-256 of the manifest file.
+- The repository no longer carries a corpus exporter; archives are staged externally and verified against the pinned digests.
 - A length-prefixed diagnostic file is not a product corpus.
 
 ### `REF-06`: Formal tool identity
