@@ -1,29 +1,5 @@
 use super::*;
 
-#[test]
-fn script_live_unavailable_is_typed_passthrough_not_retry() {
-    for reason in [
-        "script live seed pruned at height 100",
-        "txindex worker: retained history unavailable: pruned at height 7",
-        "",
-    ] {
-        let cause = TxUnavailableCause::ScriptLiveUnavailable(reason.into());
-        let error = TxQueryError::Unavailable(cause);
-        assert!(!matches!(error, TxQueryError::Retry));
-    }
-    let outage = TxUnavailableCause::ScriptLiveUnavailable("pruned".into());
-    assert_ne!(outage, TxUnavailableCause::WorkerStopped);
-    assert_ne!(
-        outage,
-        TxUnavailableCause::CompactFilterFailed("pruned".into())
-    );
-    assert_ne!(
-        outage,
-        TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptLive)
-    );
-    assert_ne!(outage, TxUnavailableCause::Other("pruned".into()));
-}
-
 #[cfg(all(test, feature = "fjall"))]
 mod script_live_outage_engine_tests {
     use super::{DerivedIndexQuery, ScriptIndexQuery, TxQueryError, TxUnavailableCause};

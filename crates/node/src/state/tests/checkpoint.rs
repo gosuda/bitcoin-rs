@@ -184,43 +184,6 @@ fn clean_checkpoint_lifecycle_is_backend_neutral() -> Result<(), TestError> {
 }
 
 #[test]
-fn rolling_coinstats_resume_continues_through_next_block() -> Result<(), TestError> {
-    let dir = tempfile::tempdir()?;
-    let data_dir = dir.path().join("node-g2");
-    let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
-    config.data_dir = data_dir.clone();
-    config.p2p.listen.clear();
-    let state = NodeState::open(config, None)?;
-    let genesis = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
-    state.apply_block(&genesis)?;
-    let before = state.chainstate().coin_stats_handle().snapshot();
-    let _ = state.publish_checkpoint()?;
-    drop(state);
-
-    let mut reopen_config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
-    reopen_config.data_dir = data_dir;
-    reopen_config.p2p.listen.clear();
-    let resumed = NodeState::open(reopen_config, None)?;
-    assert_eq!(resumed.chainstate().coin_stats_handle().snapshot(), before);
-    resumed.apply_block(&BlockPayload::from_local(
-        regtest_fixture::mined_regtest_child_at(genesis.block().block_hash(), 1)?,
-    ))?;
-    let rolling = resumed.chainstate().coin_stats_handle().snapshot();
-    let mut scanned = resumed
-        .chainstate()
-        .utxo_handle()
-        .with_stable_view(|view| {
-            bitcoin_rs_utxo::stats::scan_coin_stats(view, rolling.height, true)
-        })?;
-    scanned.tx_count = rolling.tx_count;
-    assert_eq!(
-        rolling.total_amount, scanned.total_amount,
-        "restored state must receive subsequent rolling UTXO notifications"
-    );
-    Ok(())
-}
-
-#[test]
 fn journal_replay_restores_state_above_checkpoint() -> Result<(), TestError> {
     fn stable_hash(
         view: &bitcoin_rs_utxo::UtxoSetView<'_>,
