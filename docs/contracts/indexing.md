@@ -176,7 +176,7 @@ Owners:
 - The store MUST never perform an in-place migration.
 - `IndexWriter::open` (`crates/index/src/index/write.rs`) accepts row-format 6 as the current durability marker only.
 - This format provides newest-first history-occurrence rows with inverted heights, 43-byte live rows, and 6-byte positions.
-- The format is owned by `docs/benchmarks/scriptindex-format.md`.
+- The row format is owned by this clause; any format change requires a new durability marker.
 - Every older marker returns `IndexError::UnsupportedTxIndexFormatVersion`.
 - In that case, `open_writer` in `crates/index/src/runtime/startup.rs` full-resets the derived store for rebuild without an in-place upgrade path.
 - Selective reset under `IDX-04` covers corrupt watermarks, not versions.
@@ -236,7 +236,6 @@ Owners:
 - Proof: `crates/index/src/runtime/recovery_tests.rs`:
   - `index_ahead_of_restored_tip_is_reported_once_and_rewound`
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
-  - and `docs/benchmarks/index-rollback-rebuild-cutover.md` for the cutover value.
 - Connect walk: the worker loads bodies from `BlockBodyStore`.
 - It constructs bounded forward batches (`PreparedBatchLimits`).
 - It commits row mutations and updated watermarks in a single atomic store batch per block or block chunk.

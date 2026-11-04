@@ -71,7 +71,7 @@ Error: --corpus, --manifest, and --state must be given together
 
 The import validates the archive under full validation, publishes the production checkpoint, verifies the stop identity, and writes certified state to `--state`. It refuses a nonzero assume-valid height and refuses any auxiliary index. It is a benchmark and evidence path, not a normal operator sync mode.
 
-This chapter shows no import transcript because an import needs a pinned archive and manifest. The acceptance rules and the exact certification fields are in [Offline full validation](https://github.com/gosuda/bitcoin-rs/blob/main/docs/benchmarks/offline-full-validation.md).
+This chapter shows no import transcript because an import needs a pinned archive and manifest. Corpus identities and custody rules live in `docs/contracts/reference-set.md`.
 
 > **Warning** A node reporting `is_apply_halted: true` has stopped applying blocks and is asking to exit. Restarting replays durable state with a clean engine; retrying the same RPC is not a recovery step.
 

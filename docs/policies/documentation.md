@@ -11,7 +11,7 @@ owner instead of maintaining a second description.
 | Operator configuration and commands | The relevant operator guide under `docs/`. |
 | Public API usage | Rustdoc at the API; a crate README introduces the crate and links to detailed owners. |
 | Dependency version | `Cargo.toml` and `Cargo.lock`; external reference releases use the reference-set owner. |
-| Executed verification and measurements | CI artifacts, the PR discussion, or a pinned benchmark record with its limitations. |
+| Executed verification and measurements | CI artifacts or the PR discussion, with limitations stated. |
 
 Comments explain why a non-obvious rule holds or what a caller must guarantee.
 Do not narrate implementation history, incidents, former behavior, or another
@@ -25,8 +25,7 @@ must not weaken a guarantee or turn an unverified claim into a verified one.
 
 Use repository paths plus symbol names, not `file.rs:LINE` references. For an
 external implementation, cite a pinned revision and a file/function; keep the
-release identity at its existing reference owner. Dated benchmark records may
-refer to a file at their recorded revision even if that file has since moved.
+release identity at its existing reference owner.
 
 Contracts name proof boundaries and remaining gaps, not inventories of test
 function names. Test names and owner-local placement provide discovery; use

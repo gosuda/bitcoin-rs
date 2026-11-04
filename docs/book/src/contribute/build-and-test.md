@@ -55,7 +55,7 @@ For a formatting-only change, run `./scripts/ci-pr.sh fmt`. For a contract or ev
 
 ## What CI runs
 
-Pull requests run `fmt`, `deny`, `contracts`, `clippy`, and `test-crates` in parallel jobs. Merge-group requests add `book`, `test-binary`, and `test-workspace`, plus the kernel-consensus and full-node-compile lanes. Main pushes and manual dispatches add the full-node feature set with the C++ kernel and `--include-ignored` consensus vectors. They also run the kernel oracle, benchmark-smoke compilation, Python comparator tests, the Core differential lane, and native-script evidence.
+Pull requests run `fmt`, `deny`, `contracts`, `clippy`, and `test-crates` in parallel jobs. Merge-group requests add `book`, `test-binary`, and `test-workspace`, plus the kernel-consensus and full-node-compile lanes. Main pushes and manual dispatches add the full-node feature set with the C++ kernel and `--include-ignored` consensus vectors. They also run the kernel oracle, the Core differential lane, and native-script evidence.
 
 The compatibility campaign runs MSRV, dependency-range, and feature-matrix lanes. The model-check workflow is manual. The documented lane list is in [`CONCEPTS.md`](https://github.com/gosuda/bitcoin-rs/blob/main/CONCEPTS.md) under CI lane parity, and [`CONTRIBUTING.md`](https://github.com/gosuda/bitcoin-rs/blob/main/CONTRIBUTING.md) owns the pull-request verification rules.
 

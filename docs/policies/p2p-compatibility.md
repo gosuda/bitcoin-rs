@@ -18,7 +18,7 @@ The decoded command inventory is owned by `crates/p2p/src/compat.rs` (`COMMANDS`
 
 ### 2.1 Version-Bump Rules
 
-Re-pinning to a newer Core version requires all of the following. (1) A passing run of `scripts/run-p2p-core-interop.sh` against the new version, with evidence stored under `docs/benchmarks/`. (2) A diff of the message set below against the new version's `net_processing`, with every delta implemented or added to the deviation ledger (§7). (3) An update to this document's pin, `crates/p2p/src/compat.rs::COMMANDS`, and the deterministic fixtures in the same change-set. No intermediate state may exist where the table and the code disagree (anti-shim rule, `docs/policies/source-compatibility.md` §5). The fuzz target `p2p_message` consumes `COMMANDS` directly.
+Re-pinning to a newer Core version requires all of the following. (1) A passing run of `scripts/run-p2p-core-interop.sh` against the new version, with the run recorded in this document's deviation ledger (§7) and, where a differential claim is made, in `docs/contracts/core-differential.md`. (2) A diff of the message set below against the new version's `net_processing`, with every delta implemented or added to the deviation ledger (§7). (3) An update to this document's pin, `crates/p2p/src/compat.rs::COMMANDS`, and the deterministic fixtures in the same change-set. No intermediate state may exist where the table and the code disagree (anti-shim rule, `docs/policies/source-compatibility.md` §5). The fuzz target `p2p_message` consumes `COMMANDS` directly.
 
 ## 3. Transport and Envelope
 

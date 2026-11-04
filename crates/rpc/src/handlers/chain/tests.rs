@@ -696,7 +696,7 @@ fn gettxoutsetinfo_refuses_unsupported_arguments() {
     }
 }
 
-// MRPC-01
+// API-37
 #[test]
 fn gettxoutsetinfo_rejects_trailing_parameters() {
     let ctx = Arc::new(Context::new());

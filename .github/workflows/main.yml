@@ -136,34 +136,6 @@ jobs:
           cargo test --locked -p bitcoin-rs-consensus \
             --no-default-features --features kernel \
             --test suite -- witness_sigop_activation:: validation_engine::
-      # The `--no-run` passes below are compile-and-link gates only --
-      # measured executions remain release evidence outside CI. They build
-      # under the `quickstart` profile (opt-level 3, no fat LTO, 16
-      # codegen-units) rather than `bench` (fat LTO, codegen-units 1): the
-      # fat-LTO merge serializes the whole full-node graph and alone cost
-      # ~14 minutes, while `--profile dev` would not catch optimization-level
-      # build errors. `cargo bench` accepts any named profile.
-      - run: |
-          cargo bench --locked -p bitcoin-rs --no-run --profile quickstart \
-            --no-default-features --features "${FULL_NODE_FEATURES}"
-      # Crate-level UTXO bench target is unreachable from -p bitcoin-rs; compile
-      # the production-allocator benchmark so bench breakage is visible to CI.
-      - run: cargo bench --locked -p bitcoin-rs-utxo --no-run --profile quickstart
-      # The chainstate replay gate is an explicit harness: compile it on every
-      # main push, while measured executions remain release evidence.
-      - run: |
-          cargo bench --locked -p bitcoin-rs-node --no-run --profile quickstart \
-            --no-default-features --features fjall --bench chainstate_journal
-      - name: Benchmark evidence validation
-        run: cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --bench evidence
-      # Retained crate-level benchmarks without kernel (this job's previous
-      # whole content): merkle, utxo_commit under fjall, sync_pipeline, and
-      # the mining candidate are not covered by the compiles above.
-      - run: |
-          cargo bench --locked -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle --profile quickstart
-          cargo bench --locked -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit --profile quickstart
-          cargo bench --locked -p bitcoin-rs-mining   --no-run --no-default-features --bench candidate --profile quickstart
-          cargo bench --locked -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline --profile quickstart
 
       # Native script tests do not compile this feature-gated oracle. Exercise
       # it on `main`, with separate build output and retained diagnostics.
@@ -265,24 +237,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # Comparator campaign behavioral tests and the C150/Cmodern corpus freeze.
-  # Pure Python, self-contained -- no bitcoind, no external services. The
-  # comparator tests use typing.TypeIs (Python 3.13+); actions/setup-python
-  # downloads the runtime from GitHub's release hosting, which is a
-  # first-party action but network-dependent.
-  comparator-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.13"
-      - run: |
-          cd tools/benchmark-campaign
-          for f in test_*.py; do python3 "$f" || exit 1; done
-      - run: python3 tools/campaign-corpus/test_corpus.py
 
   # Kernel oracle differential: with `--features kernel`, replay the committed
   # fixture corpus through libbitcoinkernel AND the Rust path and hard-fail on

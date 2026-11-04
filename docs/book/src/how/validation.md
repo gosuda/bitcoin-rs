@@ -96,7 +96,7 @@ Core's script vectors pin zero native mismatches on runnable rows:
 
 The counts are constants in [`crates/script/tests/core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/script/tests/core_vectors.rs); the vectors themselves are the pinned Core corpus, so they do not run without it. Kernel builds also run the same catalog through the kernel column and the parity test `kernel_verdict_matches_mandatory_core_catalogs`.
 
-The kernel is an oracle, not a second production default. The dated benchmark artifact [`docs/benchmarks/native-validation-default.md`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/benchmarks/native-validation-default.md) records native at 50.014 ms apply p50 against kernel at 45.784 ms, a ratio of 1.092, with the verdict `KeepKernel`. Native is 9.2 percent slower on that proxy. Full-mainnet replay is blocked on issue #34 and is not measured here. The signed-spend proxy is engine diagnostics, not a daemon throughput result.
+The kernel is an oracle, not a second production default. A recorded proxy comparison (signed-spend apply p50) measured native about 9.2 percent slower than the kernel lane, and the recorded verdict kept the native default. Full-mainnet replay is blocked on issue #34 and is not measured here. The signed-spend proxy is engine diagnostics, not a daemon throughput result.
 
 Do not read "zero mismatches" as blanket consensus parity. The claim covers the runnable rows of those three catalogs with the listed skip reasons. Kernel-versus-interpreter parity outside those rows is not proven.
 

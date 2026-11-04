@@ -145,7 +145,7 @@ surface = "Observability via bpftrace/BCC and bitcoin-dev-tools"
 core_reference = "Bitcoin Core tracing/benchmark tooling conventions"
 status = "implemented"
 representative_consumer = "planned: bitcoin-dev-tools/usdt-dash or benchkit against bitcoin-rs (issue #1122 follow-up)"
-evidence = "no external tool has been run against bitcoin-rs in the recorded evidence (issue #1122 follow-up work). Benchmark story is owned by docs/benchmarks/ and docs/contracts/hot-path-attribution.md; those are internal evidence."
+evidence = "no external tool has been run against bitcoin-rs in the recorded evidence (issue #1122 follow-up work)."
 
 [[row]]
 surface = "Core IPC component interfaces"
