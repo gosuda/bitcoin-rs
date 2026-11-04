@@ -192,6 +192,15 @@ impl PreparedAdmission {
         self.rejection = Some((error, scope));
     }
 
+    fn reject_script_failure(&mut self, error: &ConsensusError, default_scope: RejectScope) {
+        let scope = if witness_strippable_failure(error, &self.prevouts) {
+            RejectScope::Witness
+        } else {
+            default_scope
+        };
+        self.reject(AdmitError::Consensus, scope);
+    }
+
     pub(crate) fn verify(
         &mut self,
         request: &AdmissionRequest,
@@ -296,15 +305,7 @@ impl PreparedAdmission {
                 self.refused_bump = None;
                 return;
             }
-            let possibly_stripped = witness_strippable_failure(&error, &self.prevouts);
-            self.reject(
-                AdmitError::Consensus,
-                if possibly_stripped {
-                    RejectScope::Witness
-                } else {
-                    default_scope
-                },
-            );
+            self.reject_script_failure(&error, default_scope);
             return;
         }
         let fee_for_max = self.fact.base_fee.unwrap_or(0);
@@ -343,13 +344,13 @@ impl PreparedAdmission {
             Some(&signature_cache),
         );
         if let Err(error) = next_block_pass {
-            tracing::error!(
+            tracing::debug!(
                 txid = %request.tx.txid(),
                 flags = flags.bits(),
                 error = %error,
-                "next-block script flags failed after a STANDARD pass; rejecting",
+                "transaction failed the next-block script flags after a STANDARD pass",
             );
-            self.reject(AdmitError::Consensus, default_scope);
+            self.reject_script_failure(&error, default_scope);
             return;
         }
         if caching {

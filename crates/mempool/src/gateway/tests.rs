@@ -2847,9 +2847,32 @@ fn failed_next_block_flag_pass_rejects_with_or_without_a_script_cache() {
         let mut prepared = prepare(&admit_request(&gateway, &candidate, AdmissionOrigin::Rpc));
         prepared.verify_scripts(&request, gateway.script_cache());
         assert!(
-            matches!(prepared.rejection, Some((AdmitError::Consensus, _))),
+            matches!(
+                prepared.rejection,
+                Some((AdmitError::Consensus, RejectScope::Transaction))
+            ),
             "a failed next-block flag pass must reject, caching={caching}"
         );
         assert!(prepared.script_cache_key.is_none());
+
+        let mut p2sh = vec![0xa9, 0x14];
+        p2sh.extend_from_slice(&[0; 20]);
+        p2sh.push(0x87);
+        let mut stripped = prepare(&admit_request(&gateway, &candidate, AdmissionOrigin::Rpc));
+        stripped.prevouts.push((
+            OutPoint::new(candidate.txid(), 7),
+            TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::from_bytes(p2sh),
+            },
+        ));
+        stripped.verify_scripts(&request, gateway.script_cache());
+        assert!(
+            matches!(
+                stripped.rejection,
+                Some((AdmitError::Consensus, RejectScope::Witness))
+            ),
+            "a script failure that stripping may explain keeps the txid out of the reject filter, caching={caching}"
+        );
     }
 }
