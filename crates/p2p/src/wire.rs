@@ -278,9 +278,11 @@ pub enum PeerError {
 impl PeerError {
     pub(crate) fn inbound(error: Self) -> Self {
         match error {
-            Self::Io(_) | Self::Transport(_) | Self::WrongNetwork { .. } | Self::SelfConnection => {
-                error
-            }
+            Self::Io(_)
+            | Self::Transport(_)
+            | Self::WrongNetwork { .. }
+            | Self::SelfConnection
+            | Self::ObsoleteVersion(_) => error,
             _ => Self::Incoming(Box::new(error)),
         }
     }

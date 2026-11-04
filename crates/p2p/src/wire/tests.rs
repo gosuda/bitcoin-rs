@@ -748,3 +748,11 @@ fn sendcmpct_payload_shorter_than_nine_bytes_fails_to_parse() -> Result<(), Peer
     );
     Ok(())
 }
+
+// P2P-01
+#[test]
+fn inbound_wrapping_keeps_an_obsolete_version_out_of_misbehavior() {
+    let error = PeerError::inbound(PeerError::ObsoleteVersion(31_799));
+    assert!(matches!(error, PeerError::ObsoleteVersion(31_799)));
+    assert!(!error.is_misbehavior());
+}

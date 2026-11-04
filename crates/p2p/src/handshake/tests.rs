@@ -600,3 +600,41 @@ fn self_connection_nonce_is_rejected() -> Result<(), PeerError> {
     assert!(matches!(outcome, Err(PeerError::SelfConnection)));
     Ok(())
 }
+
+// P2P-01
+#[test]
+fn obsolete_remote_version_ends_the_inbound_handshake_without_misbehavior() -> Result<(), PeerError>
+{
+    let magic = Magic::BITCOIN;
+    let our_nonce = 0x1234_5678_9abc_def0;
+    let mut remote_version_bytes = Vec::new();
+    write_message(
+        &mut remote_version_bytes,
+        magic,
+        &Message::Version(VersionMessage {
+            version: 31_799,
+            ..version_message(0x1111, 0, PeerRole::FullRelay, services(), USER_AGENT)
+        }),
+    )?;
+
+    let mut peer = Peer::new(ScriptedStream::new(remote_version_bytes), magic);
+    let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
+    let lease = crate::PeerLease::new_inbound(lease_tx);
+
+    let outcome = run_inbound_handshake(
+        &mut peer,
+        our_nonce,
+        0,
+        services(),
+        USER_AGENT,
+        &lease,
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    );
+
+    let error = outcome.err().ok_or(PeerError::Misbehavior(
+        "an obsolete version must end the handshake",
+    ))?;
+    assert!(matches!(error, PeerError::ObsoleteVersion(31_799)));
+    assert!(!error.is_misbehavior());
+    Ok(())
+}
