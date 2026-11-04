@@ -344,11 +344,11 @@ impl PreparedAdmission {
             Some(&signature_cache),
         );
         if let Err(error) = next_block_pass {
-            tracing::debug!(
+            tracing::warn!(
                 txid = %request.tx.txid(),
                 flags = flags.bits(),
                 error = %error,
-                "transaction failed the next-block script flags after a STANDARD pass",
+                "transaction passed STANDARD but failed the next-block script flags; rejecting",
             );
             self.reject_script_failure(&error, default_scope);
             return;
