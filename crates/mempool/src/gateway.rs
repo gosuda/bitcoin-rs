@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::mpsc;
 
+static NEXT_BLOCK_FAILURE_WARNED: AtomicBool = AtomicBool::new(false);
+
 struct PrevoutMap<'a> {
     index: HashMap<OutPoint, &'a TxOut>,
 }
@@ -344,12 +346,21 @@ impl PreparedAdmission {
             Some(&signature_cache),
         );
         if let Err(error) = next_block_pass {
-            tracing::warn!(
-                txid = %request.tx.txid(),
-                flags = flags.bits(),
-                error = %error,
-                "transaction passed STANDARD but failed the next-block script flags; rejecting",
-            );
+            if NEXT_BLOCK_FAILURE_WARNED.swap(true, Ordering::Relaxed) {
+                tracing::debug!(
+                    txid = %request.tx.txid(),
+                    flags = flags.bits(),
+                    error = %error,
+                    "transaction passed STANDARD but failed the next-block script flags; rejecting",
+                );
+            } else {
+                tracing::warn!(
+                    txid = %request.tx.txid(),
+                    flags = flags.bits(),
+                    error = %error,
+                    "transaction passed STANDARD but failed the next-block script flags; rejecting, and later failures log at debug",
+                );
+            }
             self.reject_script_failure(&error, default_scope);
             return;
         }
