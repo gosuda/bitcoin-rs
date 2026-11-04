@@ -6,6 +6,39 @@ use bitcoin_rs_primitives::{ConsensusDecode, Hash256, SighashCache, Tx, deserial
 use sonic_rs::Value;
 
 #[test]
+fn script_tests_vectors_load_and_flags_parse() {
+    let root = read_json("script_tests.json");
+    let rows = root
+        .as_array()
+        .unwrap_or_else(|| panic!("script_tests root must be array"));
+    let mut total = 0usize;
+    let mut parsed_flags = 0usize;
+    for row in rows {
+        let Some(row) = row.as_array() else {
+            continue;
+        };
+        if row.len() < 4 {
+            continue;
+        }
+        total = total.saturating_add(1);
+        let flags_index = if row.first().is_some_and(Value::is_array) {
+            3
+        } else {
+            2
+        };
+        let Some(flags) = row.get(flags_index).and_then(Value::as_str) else {
+            continue;
+        };
+        if bitcoin_rs_script::VerifyFlags::from_core_names(flags).is_ok() {
+            parsed_flags = parsed_flags.saturating_add(1);
+        }
+    }
+    println!("script_tests.json: parsed flags for {parsed_flags}/{total} runnable script vectors");
+    assert!(total > 0);
+    assert_eq!(parsed_flags, total);
+}
+
+#[test]
 fn sighash_vectors_match_bitcoin_cache() {
     let root = read_json("sighash.json");
     let rows = root
