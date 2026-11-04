@@ -33,11 +33,10 @@ fn quarantine_permits_scan_abort_and_stopping_refuses_new_diagnostic_validation(
         handler.dispatch("generateblock", &json!({"unknown":"field"})),
         Err(crate::RpcError::Quarantined)
     ));
-    assert!(
-        handler
-            .dispatch("scantxoutset", &json!({"action":"abort","args":["start"]}))
-            .is_err()
-    );
+    assert!(matches!(
+        handler.dispatch("scantxoutset", &json!({"action":"abort","args":["start"]})),
+        Err(crate::RpcError::InvalidParameter(_))
+    ));
     handler.stop();
     assert!(
         matches!(handler.dispatch("getblockverdict", &json!([])), Err(crate::RpcError::Misc(message)) if message == "RPC server is stopping")
