@@ -336,11 +336,16 @@ fn getnetworkinfo_version_tracks_the_release() {
         .and_then(|value| value.split(':').nth(1))
         .and_then(|value| value.strip_suffix('/'))
         .unwrap_or_else(|| panic!("unexpected subversion: {subversion:?}"));
-    let mut parts = release.split('.').map(|part| part.parse::<i64>());
-    let expected = parts.next().and_then(Result::ok).unwrap_or(-1) * 10_000
-        + parts.next().and_then(Result::ok).unwrap_or(-1) * 100
-        + parts.next().and_then(Result::ok).unwrap_or(-1);
-    assert_ne!(expected, -13_300, "subversion must encode a release");
+    let mut parts = release.split('.').map(|part| {
+        part.parse::<i64>()
+            .unwrap_or_else(|_| panic!("release component {part} is not a number"))
+    });
+    let mut take = |name| {
+        parts
+            .next()
+            .unwrap_or_else(|| panic!("subversion {subversion:?} has no {name} field"))
+    };
+    let expected = take("major") * 10_000 + take("minor") * 100 + take("patch");
     assert_eq!(
         result.get("version").and_then(JsonValueTrait::as_i64),
         Some(expected)
