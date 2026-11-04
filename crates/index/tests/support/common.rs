@@ -4,9 +4,7 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use bitcoin_rs_index::{
-    PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptHash, ScriptHashRow, SpendingPrefixRow,
-};
+use bitcoin_rs_index::{PreparedBatch, PreparedBatchLimits, PreparedBlock, SpendingPrefixRow};
 use bitcoin_rs_primitives::OutPoint;
 use bitcoin_rs_storage::{
     BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, PrefixScan,
@@ -205,17 +203,6 @@ impl KvSnapshot for MemorySnapshot {
             limit,
         ))
     }
-}
-
-pub(crate) fn put_funding_row(
-    store: &MemoryStore,
-    scripthash: ScriptHash,
-    height: u32,
-) -> Result<(), StorageError> {
-    let mut row = ScriptHashRow::row(scripthash, height).to_db_row();
-    let offset = bitcoin_rs_index::types::HASH_PREFIX_ROW_SIZE - 4;
-    row[offset..].copy_from_slice(&(!height).to_be_bytes());
-    store.put(ColumnFamily::Funding, &row, &[])
 }
 
 pub(crate) fn put_spending_row(
