@@ -27,7 +27,6 @@ use crate::inv::MAX_INV_PER_MSG;
 
 pub const PROTOCOL_VERSION: u32 = 70_017;
 
-/// Core's `MIN_PEER_PROTO_VERSION`: peers announcing an older version are disconnected.
 pub const MIN_PEER_PROTO_VERSION: u32 = 31_800;
 
 const _: () = assert!(PROTOCOL_VERSION >= crate::feature::FEATURE_VERSION);
