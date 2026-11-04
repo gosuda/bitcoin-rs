@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::mpsc;
 
+static NEXT_BLOCK_FAILURE_WARNED: AtomicBool = AtomicBool::new(false);
+
 struct PrevoutMap<'a> {
     index: HashMap<OutPoint, &'a TxOut>,
 }
@@ -192,6 +194,15 @@ impl PreparedAdmission {
         self.rejection = Some((error, scope));
     }
 
+    fn reject_script_failure(&mut self, error: &ConsensusError, default_scope: RejectScope) {
+        let scope = if witness_strippable_failure(error, &self.prevouts) {
+            RejectScope::Witness
+        } else {
+            default_scope
+        };
+        self.reject(AdmitError::Consensus, scope);
+    }
+
     pub(crate) fn verify(
         &mut self,
         request: &AdmissionRequest,
@@ -296,15 +307,7 @@ impl PreparedAdmission {
                 self.refused_bump = None;
                 return;
             }
-            let possibly_stripped = witness_strippable_failure(&error, &self.prevouts);
-            self.reject(
-                AdmitError::Consensus,
-                if possibly_stripped {
-                    RejectScope::Witness
-                } else {
-                    default_scope
-                },
-            );
+            self.reject_script_failure(&error, default_scope);
             return;
         }
         let fee_for_max = self.fact.base_fee.unwrap_or(0);
@@ -328,11 +331,12 @@ impl PreparedAdmission {
         if self.rejection.is_some() {
             return;
         }
-        let Some(_) = script_cache.filter(|_| self.engine == ValidationEngine::Native) else {
-            return;
-        };
+        let caching = script_cache.is_some() && self.engine == ValidationEngine::Native;
         let flags = request.next_block_script_flags;
-        if let Err(error) = verify_transaction(
+        if !caching && VerifyFlags::STANDARD.contains(flags) {
+            return;
+        }
+        let next_block_pass = verify_transaction(
             &request.tx,
             &PrevoutMap::new(&self.prevouts),
             height,
@@ -340,16 +344,29 @@ impl PreparedAdmission {
             flags,
             self.engine,
             Some(&signature_cache),
-        ) {
-            tracing::warn!(
-                txid = %request.tx.txid(),
-                flags = flags.bits(),
-                error = %error,
-                "script cache second pass failed after a STANDARD pass; not caching",
-            );
+        );
+        if let Err(error) = next_block_pass {
+            if NEXT_BLOCK_FAILURE_WARNED.swap(true, Ordering::Relaxed) {
+                tracing::debug!(
+                    txid = %request.tx.txid(),
+                    flags = flags.bits(),
+                    error = %error,
+                    "transaction passed STANDARD but failed the next-block script flags; rejecting",
+                );
+            } else {
+                tracing::warn!(
+                    txid = %request.tx.txid(),
+                    flags = flags.bits(),
+                    error = %error,
+                    "transaction passed STANDARD but failed the next-block script flags; rejecting, and later failures log at debug",
+                );
+            }
+            self.reject_script_failure(&error, default_scope);
             return;
         }
-        self.script_cache_key = Some((request.tx.wtxid(), flags));
+        if caching {
+            self.script_cache_key = Some((request.tx.wtxid(), flags));
+        }
     }
 }
 
