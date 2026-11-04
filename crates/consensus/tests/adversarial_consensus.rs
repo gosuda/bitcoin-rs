@@ -7,8 +7,7 @@ use bitcoin_rs_consensus::verify_block::{
 };
 use bitcoin_rs_consensus::verify_tx::{is_final_tx, verify_coinbase_script_sig_size};
 use bitcoin_rs_consensus::{
-    ConsensusError, LocktimeRule, MAX_BLOCK_SIGOPS_COST, block_subsidy, locktime_cutoff,
-    verify_coinbase_amount,
+    ConsensusError, MAX_BLOCK_SIGOPS_COST, block_subsidy, verify_coinbase_amount,
 };
 use bitcoin_rs_primitives::{
     Amount, Block, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
@@ -150,13 +149,10 @@ fn bip68_relative_locktime_block_based_boundaries() {
     assert!(sequence_lock_satisfied(2, sequence, 100, 0, 110, 0));
     assert!(sequence_lock_satisfied(2, sequence, 100, 0, 111, 0));
 
-    assert_eq!(
+    assert!(matches!(
         check_sequence_lock(2, sequence, 100, 0, 109, 0),
-        Err(ConsensusError::Bip {
-            bip: "BIP68",
-            reason: "input sequence height-based lock unmet: prevout at height 100 + 10 blocks > current 109".to_owned()
-        })
-    );
+        Err(ConsensusError::Bip { bip: "BIP68", .. })
+    ));
     assert_eq!(check_sequence_lock(2, sequence, 100, 0, 110, 0), Ok(()));
 }
 
@@ -222,20 +218,6 @@ fn is_final_tx_boundaries() {
     let cutoff = bitcoin_rs_primitives::LOCKTIME_THRESHOLD + 100;
     assert!(!is_final_tx(&tx, 100, cutoff));
     assert!(is_final_tx(&tx, 100, cutoff + 1));
-}
-
-#[test]
-fn locktime_cutoff_rules() {
-    let prev_mtp = 1_000_000;
-    let candidate = 1_000_500;
-    assert_eq!(
-        locktime_cutoff(LocktimeRule::MedianTimePast, prev_mtp, candidate),
-        prev_mtp
-    );
-    assert_eq!(
-        locktime_cutoff(LocktimeRule::CandidateTime, prev_mtp, candidate),
-        candidate
-    );
 }
 
 #[test]

@@ -70,7 +70,10 @@ fn zero_fee_gateway() -> Arc<MempoolGateway> {
 fn make_consumer(
     gateway: &Arc<MempoolGateway>,
     mining: &Arc<FakeMiningControl>,
-) -> TxIngressConsumer {
+) -> (
+    TxIngressConsumer,
+    crossbeam_channel::Receiver<bitcoin_rs_p2p::RelayRequest>,
+) {
     use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
     let utxo = Arc::new(UtxoSet::new());
     let parent_txid = Txid::from(Hash256::from_le_bytes(&[0xAA; 32]));
@@ -97,8 +100,8 @@ fn make_consumer(
         &Hash256::from_le_bytes(&[0xBB; 32]),
     )
     .expect("utxo commit must succeed");
-    let (relay, _relay_rx) = TxRelayQueue::new(DEFAULT_TX_RELAY_QUEUE_CAPACITY);
-    TxIngressConsumer {
+    let (relay, relay_rx) = TxRelayQueue::new(DEFAULT_TX_RELAY_QUEUE_CAPACITY);
+    let consumer = TxIngressConsumer {
         utxo: bitcoin_rs_utxo::UtxoReader::new(utxo),
         applied_tip: TipReader::new(Arc::new(ArcSwapOption::empty())),
         block_tree: BlockTreeReader::new(Arc::new(RwLock::new(BlockTree::new()))),
@@ -107,7 +110,8 @@ fn make_consumer(
         mempool_gateway: Arc::clone(gateway),
         mining_control: mining.clone(),
         relay,
-    }
+    };
+    (consumer, relay_rx)
 }
 
 fn test_source() -> bitcoin_rs_p2p::PeerSource {
@@ -159,7 +163,7 @@ fn consumer_preserves_exact_connection_id() {
     let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
 
     let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
+    let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
 
     consumer.process_one(inbound);
 
@@ -190,11 +194,14 @@ fn rejected_tx_does_not_relay_or_wake_mining() {
     let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
 
     let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
+    let (consumer, relay_rx) = make_consumer(&gateway, &mining);
 
     consumer.process_one(inbound);
-
     assert_eq!(mining.publish_count(), 0);
+    assert!(
+        relay_rx.try_recv().is_err(),
+        "a rejected tx must not be announced for relay"
+    );
 }
 
 #[test]
@@ -210,11 +217,14 @@ fn duplicate_tx_does_not_relay_or_wake_mining() {
     let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
 
     let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
+    let (consumer, relay_rx) = make_consumer(&gateway, &mining);
 
     consumer.process_one(inbound);
-
     assert_eq!(mining.publish_count(), 0);
+    assert!(
+        relay_rx.try_recv().is_err(),
+        "a duplicate tx must not be re-announced for relay"
+    );
     assert!(gateway.read().contains_txid(&txid));
 }
 
@@ -224,21 +234,26 @@ fn accepted_tx_relays_and_wakes_mining() {
 
     let source = test_source();
     let tx = spending_tx();
+    let txid = tx.txid();
     let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
 
     let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
+    let (consumer, relay_rx) = make_consumer(&gateway, &mining);
 
     consumer.process_one(inbound);
 
     assert_eq!(mining.publish_count(), 1);
+    let announced = relay_rx
+        .try_recv()
+        .expect("an accepted tx must be announced for relay");
+    assert_eq!(announced.txid, txid);
 }
 
 #[test]
 fn held_orphan_uses_ancestor_package_only_for_negotiated_peers() {
     let gateway = zero_fee_gateway();
     let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
+    let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
     let table = Arc::clone(&consumer.peer_table);
 
     let anc_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_334);
@@ -306,7 +321,7 @@ fn coinbase_is_rejected_not_orphaned() {
         None,
     ));
     let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
+    let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
     let coinbase = coinbase_tx(50_000);
     let txid = coinbase.txid();
     consumer.process_one(bitcoin_rs_p2p::InboundTx::new(coinbase, test_source()));
@@ -318,7 +333,7 @@ fn coinbase_is_rejected_not_orphaned() {
 fn non_final_tx_is_rejected_not_admitted() {
     let gateway = zero_fee_gateway();
     let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
+    let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
     let mut tx = spending_tx();
     tx.lock_time = LockTime::from_consensus(100);
     tx.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE);
@@ -337,7 +352,7 @@ fn oversized_missing_input_tx_is_rejected_not_orphaned() {
         None,
     ));
     let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
+    let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
     let parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
     let tx = Tx {
         version: 2,
@@ -374,7 +389,7 @@ fn retry_poll_evicts_an_orphan_after_its_connection_is_gone() {
         None,
     ));
     let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
+    let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
     let mut orphan = spending_tx();
     orphan.inputs[0].previous_output =
         OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0xEE; 32])), 0);
@@ -404,7 +419,7 @@ fn consumer_processes_admitted_package_and_publishes_generation() {
         None,
     ));
     let mining = Arc::new(FakeMiningControl::default());
-    let consumer = make_consumer(&gateway, &mining);
+    let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
     let table = Arc::clone(&consumer.peer_table);
 
     let mut parent = spending_tx();
@@ -572,7 +587,7 @@ fn parent_witness_getdata(parent: Txid) -> bitcoin_rs_p2p::Message {
 fn refused_solicitation_at_in_flight_cap_queues_parents_for_retry() {
     let gateway = zero_fee_gateway();
     let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
+    let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
     let table = Arc::clone(&consumer.peer_table);
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_336);
     let (sender, receiver) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
@@ -632,7 +647,7 @@ fn refused_solicitation_at_in_flight_cap_queues_parents_for_retry() {
 fn unanswered_solicitation_suppresses_duplicate_parent_requests() {
     let gateway = zero_fee_gateway();
     let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
+    let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
     let table = Arc::clone(&consumer.peer_table);
     let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_337);
     let (sender_a, receiver_a) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
@@ -672,7 +687,7 @@ fn unanswered_solicitation_suppresses_duplicate_parent_requests() {
 fn closed_owner_solicitation_falls_back_to_live_supplier_parents() {
     let gateway = zero_fee_gateway();
     let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
+    let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
     let table = Arc::clone(&consumer.peer_table);
     let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_339);
     let (sender_a, receiver_a) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
@@ -723,7 +738,7 @@ fn closed_owner_solicitation_falls_back_to_live_supplier_parents() {
 fn tx_ingress_consumer_stops_promptly_on_cancellation() {
     let gateway = zero_fee_gateway();
     let mining = Arc::new(FakeMiningControl::default());
-    let consumer = make_consumer(&gateway, &mining);
+    let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
     let writer = bitcoin_rs_chain::LatchWriter::new();
     let shutdown = writer.reader();
     let (_tx, tx_rx) = crossbeam_channel::bounded(1);

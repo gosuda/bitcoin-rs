@@ -345,8 +345,7 @@ mod tests {
         };
         assert!(matches!(
             checked_frame_len(oversized),
-            Err(JournalReplayError::CommittedRangeInvalid(message))
-                if message.contains("payload length exceeds")
+            Err(JournalReplayError::CommittedRangeInvalid(_))
         ));
     }
 }

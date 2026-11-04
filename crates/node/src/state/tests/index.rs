@@ -342,9 +342,10 @@ fn open_rejects_txindex_with_pruning() -> Result<(), TestError> {
         Err(error) => error,
     };
     assert!(
-        error
-            .to_string()
-            .contains("indexing are not compatible with -prune"),
+        matches!(
+            error,
+            crate::state::open::NodeOpenError::Config(crate::config::ConfigError::PruneWithIndexes)
+        ),
         "unexpected error: {error:#}"
     );
     Ok(())
