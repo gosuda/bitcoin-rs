@@ -2855,17 +2855,36 @@ fn failed_next_block_flag_pass_rejects_with_or_without_a_script_cache() {
         );
         assert!(prepared.script_cache_key.is_none());
 
-        let mut p2sh = vec![0xa9, 0x14];
-        p2sh.extend_from_slice(&[0; 20]);
-        p2sh.push(0x87);
-        let mut stripped = prepare(&admit_request(&gateway, &candidate, AdmissionOrigin::Rpc));
-        stripped.prevouts.push((
-            OutPoint::new(candidate.txid(), 7),
-            TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: Script::from_bytes(p2sh),
-            },
-        ));
+        let p2sh_outpoint = OutPoint::new(candidate.txid(), 7);
+        let mut spends_p2sh = (*violating).clone();
+        spends_p2sh.inputs.push(TxIn {
+            previous_output: p2sh_outpoint,
+            script_sig: Script::from_bytes(true_redeem_script_sig()),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        });
+        request.tx = Arc::new(spends_p2sh);
+        let prepare_with_p2sh = || {
+            let mut prepared = prepare(&admit_request(&gateway, &candidate, AdmissionOrigin::Rpc));
+            prepared.prevouts.push((
+                p2sh_outpoint,
+                TxOut {
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: Script::from_bytes(p2sh_true_script()),
+                },
+            ));
+            prepared
+        };
+        let next_block_flags = request.next_block_script_flags;
+        request.next_block_script_flags = VerifyFlags::STANDARD;
+        let mut accepted = prepare_with_p2sh();
+        accepted.verify_scripts(&request, gateway.script_cache());
+        assert!(
+            accepted.rejection.is_none(),
+            "both inputs are valid spends under STANDARD, caching={caching}"
+        );
+        request.next_block_script_flags = next_block_flags;
+        let mut stripped = prepare_with_p2sh();
         stripped.verify_scripts(&request, gateway.script_cache());
         assert!(
             matches!(
