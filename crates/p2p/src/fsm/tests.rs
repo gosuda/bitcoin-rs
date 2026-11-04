@@ -509,3 +509,37 @@ fn inbound_version_matching_an_in_flight_outbound_nonce_is_a_self_connection()
     assert!(peer.remote_version.is_some());
     Ok(())
 }
+
+// P2P-01
+#[test]
+fn versions_below_the_minimum_peer_protocol_are_refused_without_state() -> Result<(), PeerError> {
+    let mut peer = fresh_peer();
+
+    for refused_version in [31_799, 0, 2_147_483_648, u32::MAX] {
+        let refused = step(
+            &mut peer,
+            &Message::Version(VersionMessage {
+                version: refused_version,
+                ..version_message()
+            }),
+        );
+        assert!(
+            matches!(refused, Err(PeerError::ObsoleteVersion(version)) if version == refused_version)
+        );
+        assert!(peer.remote_version.is_none());
+        assert!(!PeerError::ObsoleteVersion(refused_version).is_misbehavior());
+    }
+
+    for accepted_version in [31_800, 2_147_483_647] {
+        let mut peer = fresh_peer();
+        step(
+            &mut peer,
+            &Message::Version(VersionMessage {
+                version: accepted_version,
+                ..version_message()
+            }),
+        )?;
+        assert!(peer.remote_version.is_some());
+    }
+    Ok(())
+}

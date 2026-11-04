@@ -27,6 +27,8 @@ use crate::inv::MAX_INV_PER_MSG;
 
 pub const PROTOCOL_VERSION: u32 = 70_017;
 
+pub const MIN_PEER_PROTO_VERSION: u32 = 31_800;
+
 const _: () = assert!(PROTOCOL_VERSION >= crate::feature::FEATURE_VERSION);
 
 pub const MAX_MESSAGE_PAYLOAD: usize = 4_000_000;
@@ -269,14 +271,18 @@ pub enum PeerError {
     Transport(#[from] crate::transport::TransportFailure),
     #[error("self-connection detected")]
     SelfConnection,
+    #[error("obsolete peer protocol version {0}")]
+    ObsoleteVersion(u32),
 }
 
 impl PeerError {
     pub(crate) fn inbound(error: Self) -> Self {
         match error {
-            Self::Io(_) | Self::Transport(_) | Self::WrongNetwork { .. } | Self::SelfConnection => {
-                error
-            }
+            Self::Io(_)
+            | Self::Transport(_)
+            | Self::WrongNetwork { .. }
+            | Self::SelfConnection
+            | Self::ObsoleteVersion(_) => error,
             _ => Self::Incoming(Box::new(error)),
         }
     }
