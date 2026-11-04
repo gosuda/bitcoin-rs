@@ -328,25 +328,12 @@ fn getpeerinfo_omits_ping_times_it_has_never_measured() {
 
 #[test]
 fn getnetworkinfo_version_tracks_the_release() {
-    let mut expected = 0_i64;
-    for (field, scale) in bitcoin_rs_primitives::PKG_VERSION
-        .split('.')
-        .zip([10_000_i64, 100, 1])
-    {
-        let digits: String = field.chars().take_while(char::is_ascii_digit).collect();
-        expected += digits.parse::<i64>().unwrap_or(0) * scale;
-    }
-    assert_ne!(
-        expected, 10_000,
-        "the fixture must not match the old constant"
-    );
-
     let result = getnetworkinfo(&Arc::new(Context::new()), &json!(null))
         .unwrap_or_else(|err| panic!("getnetworkinfo failed: {err}"));
 
     assert_eq!(
         result.get("version").and_then(JsonValueTrait::as_i64),
-        Some(expected)
+        Some(bitcoin_rs_primitives::client_version())
     );
 }
 

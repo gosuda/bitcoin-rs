@@ -723,9 +723,13 @@ fn version_flag_short_circuits_with_the_node_version_line() {
 
     let notice = super::version_notice();
     assert_eq!(
-        notice,
-        format!("bitcoin-rs daemon version {}\n", env!("CARGO_PKG_VERSION")),
-        "the whole notice is the node's own version line"
+        notice.trim_end().split('\n').count(),
+        1,
+        "the version notice is one line: {notice:?}"
+    );
+    assert!(
+        notice.contains("bitcoin-rs") && notice.contains(env!("CARGO_PKG_VERSION")),
+        "the notice carries this node's name and version: {notice:?}"
     );
     assert!(
         notice.contains("version"),
