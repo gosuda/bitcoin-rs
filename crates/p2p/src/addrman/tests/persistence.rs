@@ -370,17 +370,13 @@ fn old_v8_shape() -> sonic_rs::Value {
 // RCV-11
 #[test]
 fn synthetic_old_shapes_are_preserved_without_decoding() {
-    for version in [1, 8] {
+    for (version, shape) in [(1, old_v1_shape()), (8, old_v8_shape())] {
         for scoped in [false, true] {
             let dir = tempfile::tempdir().expect("directory");
             let base = dir.path().join("peers.dat");
             let path = network_path(&base, [1; 4]);
             let source = if scoped { &path } else { &base };
-            let bytes = fixture_bytes(&if version == 1 {
-                old_v1_shape()
-            } else {
-                old_v8_shape()
-            });
+            let bytes = fixture_bytes(&shape);
             fs::write(source, &bytes).expect("old snapshot");
             let fresh = AddressBook::open(Some(base.clone()), [1; 4], false, None);
             assert!(fresh.state.lock().writable, "version {version}");

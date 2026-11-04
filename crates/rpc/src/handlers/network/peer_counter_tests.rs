@@ -331,9 +331,19 @@ fn getnetworkinfo_version_tracks_the_release() {
     let result = getnetworkinfo(&Arc::new(Context::new()), &json!(null))
         .unwrap_or_else(|err| panic!("getnetworkinfo failed: {err}"));
 
+    let subversion = result.get("subversion").and_then(JsonValueTrait::as_str);
+    let release = subversion
+        .and_then(|value| value.split(':').nth(1))
+        .and_then(|value| value.strip_suffix('/'))
+        .unwrap_or_else(|| panic!("unexpected subversion: {subversion:?}"));
+    let mut parts = release.split('.').map(|part| part.parse::<i64>());
+    let expected = parts.next().and_then(Result::ok).unwrap_or(-1) * 10_000
+        + parts.next().and_then(Result::ok).unwrap_or(-1) * 100
+        + parts.next().and_then(Result::ok).unwrap_or(-1);
+    assert_ne!(expected, -13_300, "subversion must encode a release");
     assert_eq!(
         result.get("version").and_then(JsonValueTrait::as_i64),
-        Some(1_500)
+        Some(expected)
     );
 }
 
