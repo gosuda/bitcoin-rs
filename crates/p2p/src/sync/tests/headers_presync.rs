@@ -1397,9 +1397,10 @@ fn body_carried_low_work_valid_header_stays_deferred() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn forks_below_the_applied_tip_work_window_are_presynced_not_stored() -> TestResult {
-    let floor = ChainWork::from(WORK_PER_HEADER * 10);
+fn harness_with_applied_main_chain(
+    length: u32,
+    floor: ChainWork,
+) -> Result<(SyncHarness, Vec<Header>), TestError> {
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -1413,7 +1414,7 @@ fn forks_below_the_applied_tip_work_window_are_presynced_not_stored() -> TestRes
     );
     let mut main = Vec::new();
     let mut prev = genesis.compute_hash();
-    for height in 1..=400_u32 {
+    for height in 1..=length {
         let header = test_header(prev, height);
         prev = header.compute_hash();
         main.push(header);
@@ -1435,6 +1436,14 @@ fn forks_below_the_applied_tip_work_window_are_presynced_not_stored() -> TestRes
         }
     };
     harness.applied_tip.store(Some(Arc::new(applied)));
+    Ok((harness, main))
+}
+
+// P2P-10
+#[test]
+fn forks_below_the_applied_tip_work_window_are_presynced_not_stored() -> TestResult {
+    let floor = ChainWork::from(WORK_PER_HEADER * 10);
+    let (harness, main) = harness_with_applied_main_chain(400, floor)?;
 
     let before = tree_node_count(&harness.sync);
     let (addr, _lease, _rx) = connect(&harness.peers, 9799, 100_000);
@@ -1459,6 +1468,109 @@ fn forks_below_the_applied_tip_work_window_are_presynced_not_stored() -> TestRes
         tree_node_count(&harness.sync),
         before + 3,
         "a fork inside the 144-block work window is admitted directly"
+    );
+    Ok(())
+}
+
+// P2P-10
+#[test]
+fn the_presync_gate_sits_144_blocks_of_work_below_the_applied_tip() -> TestResult {
+    let floor = ChainWork::from(WORK_PER_HEADER * 10);
+    let (harness, main) = harness_with_applied_main_chain(400, floor)?;
+    let tip_work = harness
+        .sync
+        .chain
+        .applied_tip()
+        .ok_or("missing applied tip")?
+        .chainwork;
+    let gate = tip_work.saturating_sub(ChainWork::from(WORK_PER_HEADER * 144));
+    let claimed_work = |parent: usize| -> Result<ChainWork, TestError> {
+        let tree = harness.block_tree.read();
+        let id = tree
+            .lookup(Hash256::from(main[parent].compute_hash()))
+            .ok_or("missing fork parent")?;
+        Ok(tree
+            .node(id)?
+            .chainwork
+            .saturating_add(ChainWork::from(WORK_PER_HEADER * 3)))
+    };
+    let mut edge = 1;
+    while claimed_work(edge)? < gate {
+        edge += 1;
+    }
+    assert_eq!(
+        claimed_work(edge)?,
+        gate,
+        "the fixture reaches the gate exactly"
+    );
+
+    let before = tree_node_count(&harness.sync);
+    let (below_addr, _below_lease, below_rx) = connect(&harness.peers, 9801, 100_000);
+    let below_source = current_source(&harness.peers, below_addr);
+    harness.sync.tick();
+    assert!(matches!(below_rx.try_recv()?, Message::GetHeaders(_)));
+    let below = chain_on(&main[edge - 1], u32::try_from(edge)?, 3);
+    deliver_headers(&harness.inbound_headers_tx, below, below_source)?;
+    harness.sync.tick();
+    assert_eq!(
+        tree_node_count(&harness.sync),
+        before,
+        "a fork one header of work below the gate is presynced"
+    );
+    assert_eq!(
+        sync_phase(&harness.sync, below_source),
+        None,
+        "a page that ends below the gate finishes presync without a re-download"
+    );
+
+    let (at_addr, _at_lease, _at_rx) = connect(&harness.peers, 9802, 100_000);
+    let at_source = current_source(&harness.peers, at_addr);
+    let at = chain_on(&main[edge], u32::try_from(edge + 1)?, 3);
+    deliver_headers(&harness.inbound_headers_tx, at, at_source)?;
+    harness.sync.tick();
+    assert_eq!(
+        tree_node_count(&harness.sync),
+        before + 3,
+        "a fork whose work equals the gate is stored directly"
+    );
+    Ok(())
+}
+
+// P2P-10
+#[test]
+fn an_applied_tip_missing_from_the_tree_requires_the_full_tip_work() -> TestResult {
+    let floor = ChainWork::from(WORK_PER_HEADER * 10);
+    let (harness, main) = harness_with_applied_main_chain(30, floor)?;
+    let applied = harness
+        .sync
+        .chain
+        .applied_tip()
+        .ok_or("missing applied tip")?;
+    harness.applied_tip.store(Some(Arc::new(TipSnapshot {
+        tip_id: bitcoin_rs_chain::NodeId::new(u32::MAX),
+        chain_tx_count: applied.chain_tx_count,
+        height: applied.height,
+        chainwork: applied.chainwork,
+        hash: applied.hash,
+    })));
+
+    let before = tree_node_count(&harness.sync);
+    let (addr, _lease, rx) = connect(&harness.peers, 9803, 100_000);
+    let source = current_source(&harness.peers, addr);
+    harness.sync.tick();
+    assert!(matches!(rx.try_recv()?, Message::GetHeaders(_)));
+    let fork = chain_on(&main[9], 10, 3);
+    deliver_headers(&harness.inbound_headers_tx, fork, source)?;
+    harness.sync.tick();
+    assert_eq!(
+        tree_node_count(&harness.sync),
+        before,
+        "a fork above the floor but below the tip work is presynced, not stored"
+    );
+    assert_eq!(
+        sync_phase(&harness.sync, source),
+        None,
+        "a page that ends below the tip work finishes presync without a re-download"
     );
     Ok(())
 }

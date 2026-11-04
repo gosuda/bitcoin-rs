@@ -33,8 +33,6 @@ use std::vec::Vec;
 
 const MAX_UNRESOLVED_DEMONSTRATED_TIPS: usize = 8;
 
-/// Core's `GetAntiDoSWorkThreshold` buffer: a fork must reach the applied tip's work minus this many
-/// blocks of work before its headers are stored.
 const NEAR_TIP_WORK_BLOCKS: u64 = 144;
 
 pub(super) const MAX_HEADER_BATCHES_PER_TICK: usize = 32;
@@ -942,10 +940,9 @@ impl BlockSync {
             let mut state = if let Some(state) = parked {
                 state
             } else {
-                let Some(anchor) = self.presync_anchor(headers) else {
+                let Some((anchor, minimum_work)) = self.presync_anchor(headers) else {
                     return Some(self.chain.admit_headers(headers));
                 };
-                let minimum_work = self.anti_dos_work_threshold(&self.chain.block_tree());
                 let params = anchor.network.headers_sync_params();
                 HeadersSyncState::new(anchor, minimum_work, params, presync_salt())
             };
@@ -1084,14 +1081,18 @@ impl BlockSync {
             return minimum_work;
         };
         let Ok(node) = tree.node(tip.tip_id) else {
-            return minimum_work;
+            tracing::error!(
+                tip_id = ?tip.tip_id,
+                "applied tip is missing from the block tree; fork headers need the full tip work",
+            );
+            return minimum_work.max(tip.chainwork);
         };
         let buffer = bitcoin_rs_chain::block_work(&node.header)
             .saturating_mul(ChainWork::from(NEAR_TIP_WORK_BLOCKS));
-        minimum_work.max(node.chainwork.saturating_sub(buffer))
+        minimum_work.max(tip.chainwork.saturating_sub(buffer))
     }
 
-    fn presync_anchor(&self, headers: &[Header]) -> Option<HeaderAnchor> {
+    fn presync_anchor(&self, headers: &[Header]) -> Option<(HeaderAnchor, ChainWork)> {
         let first = headers.first()?;
         let network = self.chain.network();
         let tree = self.chain.block_tree();
@@ -1116,7 +1117,7 @@ impl BlockSync {
             }
         }
         let median_time_past = tree.median_time_past_at(fork_id)?;
-        Some(HeaderAnchor {
+        let anchor = HeaderAnchor {
             network,
             height: fork.height,
             hash: fork.hash,
@@ -1124,7 +1125,8 @@ impl BlockSync {
             chain_work: fork.chainwork,
             median_time_past,
             locator: tree.block_locator(fork_id, LOCATOR_MAX_ENTRIES),
-        })
+        };
+        Some((anchor, minimum_work))
     }
 
     fn send_presync_getheaders(
