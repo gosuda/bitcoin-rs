@@ -26,6 +26,8 @@ it requests an L0-to-L1 merge through the engine. This work takes no store
 write lock and needs no new writes or memtable flush events. A concurrent
 engine compaction can defer the merge. The next pass checks again.
 Compaction errors are logged, and later passes retry.
+A worker panic is logged as the worker exits. It stops maintenance;
+the store does not restart the worker or retry poisoned engine locks.
 
 The merge uses a zero MVCC garbage-collection watermark to retain versions
 for all open snapshots. The store joins maintenance before it closes the
@@ -37,6 +39,11 @@ handle. The direct dependency pins that API version. A dependency update
 must check these calls and run the owner-local maintenance tests.
 The database format and the stored keyspace settings do not change.
 These tests cover small stores, not sustained mainnet compaction throughput.
+`PullDown` merges all L0 and physical-L1 tables with a 64 MB target table
+size. It uses canonical level 6 for output table settings, including block
+size and index pinning. Normal Leveled compaction can then move these tables
+to deeper levels. This can cause extra I/O. The tests do not measure that
+cost on a mainnet store.
 
 ## Pruning
 

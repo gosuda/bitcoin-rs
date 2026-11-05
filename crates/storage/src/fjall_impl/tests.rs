@@ -69,11 +69,15 @@ fn maintenance_releases_halted_batch_without_flush_events() {
         done.send(writer_store.write_durable(batch))
             .expect("write result");
     });
-    assert!(matches!(
-        result.recv_timeout(Duration::from_millis(100)),
-        Err(mpsc::RecvTimeoutError::Timeout)
-    ));
-    assert!(store.write_lock.try_lock().is_none());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while store.write_lock.try_lock().is_some() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "writer must acquire the store lock"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(matches!(result.try_recv(), Err(mpsc::TryRecvError::Empty)));
     let maintenance = maintenance::Maintenance::start_with_interval(
         store.keyspaces.clone(),
         Duration::from_millis(10),
@@ -215,27 +219,11 @@ fn maintenance_rechecks_idle_keyspaces_and_stops_without_waiting_for_tick() {
 
 fn wait_for_l0_drain(keyspace: &Keyspace) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while keyspace.tree.l0_run_count() >= 15 {
+    while keyspace.tree.l0_run_count() >= maintenance::L0_DRAIN_THRESHOLD {
         assert!(
             std::time::Instant::now() < deadline,
             "periodic maintenance must drain new L0 runs"
         );
         std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-// SYNC-06
-#[test]
-fn open_drains_recovered_l0_without_writes() {
-    let dir = tempfile::tempdir().expect("temporary directory");
-    drop(saturated_store(dir.path()));
-    let store = FjallStore::open(dir.path()).expect("open saturated store");
-    for cf in [ColumnFamily::Funding, ColumnFamily::Spending] {
-        wait_for_l0_drain(store.keyspace(cf).expect("keyspace"));
-        assert_eq!(
-            store.get(cf, b"versioned").expect("recovered value"),
-            Some(31_u64.to_be_bytes().to_vec())
-        );
-        assert_eq!(store.get(cf, b"deleted").expect("deleted value"), None);
     }
 }

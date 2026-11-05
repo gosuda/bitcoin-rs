@@ -5,7 +5,17 @@ use std::time::Duration;
 use fjall::{AbstractTree, Keyspace};
 
 const INTERVAL: Duration = Duration::from_secs(10);
-const L0_DRAIN_THRESHOLD: usize = 15;
+pub(super) const L0_DRAIN_THRESHOLD: usize = 15;
+
+struct ReportWorkerPanic;
+
+impl Drop for ReportWorkerPanic {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            tracing::error!("Fjall L0 maintenance worker panicked; maintenance stopped");
+        }
+    }
+}
 
 /// Joins before the store closes its engine and releases its directory guard.
 pub(super) struct Maintenance {
@@ -26,6 +36,7 @@ impl Maintenance {
         let worker = thread::Builder::new()
             .name("bitcoin-rs-fjall-maintenance".into())
             .spawn(move || {
+                let _panic_report = ReportWorkerPanic;
                 loop {
                     for keyspace in &keyspaces {
                         match receiver.try_recv() {
@@ -53,9 +64,7 @@ impl Drop for Maintenance {
     fn drop(&mut self) {
         let _ = self.stop.send(());
         if let Some(worker) = self.worker.take() {
-            if worker.join().is_err() {
-                tracing::error!("Fjall L0 maintenance worker panicked");
-            }
+            let _ = worker.join();
         }
     }
 }
