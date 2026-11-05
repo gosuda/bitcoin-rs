@@ -1,7 +1,7 @@
 name: ci-main
 
-# Post-merge production and reference evidence: full-node tests, benchmark
-# builds, native-script checks, comparator corpus, kernel oracle, and Core
+# Post-merge production and reference evidence: full-node tests,
+# native-script checks, kernel oracle, and Core
 # differential. Portable PR/merge-queue checks live in ci.yml, the production
 # Clippy merge gate in ci-merge-gate.yml, fuzz execution in daily-fuzz.yml,
 # and compatibility campaigns in compatibility-campaign.yml.
