@@ -2200,9 +2200,14 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             getaddr_answerable(lease, shared, answered_getaddr),
             Instant::now(),
         ) {
-            DeferredStep::NoneHeld => {
-                step_parked_getdata(peer, shared, lease, &mut keepalive, &mut parked_since)?
-            }
+            DeferredStep::NoneHeld => step_parked_getdata(
+                peer,
+                shared,
+                lease,
+                lease.source(peer_addr.endpoint()),
+                &mut keepalive,
+                &mut parked_since,
+            )?,
             DeferredStep::Waiting => ParkedStep::StillParked,
             DeferredStep::Ended => ParkedStep::Ended,
             DeferredStep::Ready(message, reply) => {
@@ -2315,6 +2320,13 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             &message,
             shared.chain_query.as_deref(),
             shared.tx_inventory.as_deref(),
+            &|sequence, wtxid| {
+                shared.peer_table.transaction_getdata_allowed(
+                    lease.source(peer_addr.endpoint()),
+                    sequence,
+                    wtxid,
+                )
+            },
             &tx_relay_open,
             &|| sink.headroom(),
             &mut |response| sink.send(response),
@@ -2571,6 +2583,7 @@ fn step_parked_getdata<S>(
     peer: &mut Peer<S>,
     shared: &ConnectionShared,
     lease: &crate::PeerLease,
+    source: crate::PeerSource,
     keepalive: &mut Keepalive,
     parked_since: &mut Option<Instant>,
 ) -> Result<ParkedStep, crate::wire::PeerError> {
@@ -2600,7 +2613,7 @@ fn step_parked_getdata<S>(
             }
         };
     }
-    match advance_parked_getdata(peer, shared, lease, keepalive, &budget) {
+    match advance_parked_getdata(peer, shared, lease, source, keepalive, &budget) {
         Err(_) if lease.is_cancelled() => Ok(ParkedStep::Ended),
         advanced => advanced.map(|()| ParkedStep::StillParked),
     }
@@ -2610,13 +2623,14 @@ fn advance_parked_getdata<S>(
     peer: &mut Peer<S>,
     shared: &ConnectionShared,
     lease: &crate::PeerLease,
+    source: crate::PeerSource,
     keepalive: &mut Keepalive,
     budget: &Arc<crate::connection::OutboundBudget>,
 ) -> Result<(), crate::wire::PeerError> {
     if !report_parked_misses(peer, lease, keepalive, budget)? {
         return Ok(());
     }
-    resume_parked_getdata(peer, shared, lease, keepalive, budget)
+    resume_parked_getdata(peer, shared, lease, source, keepalive, budget)
 }
 
 fn notfound_wire_bound(items: usize) -> usize {
@@ -2657,6 +2671,7 @@ fn resume_parked_getdata<S>(
     peer: &mut Peer<S>,
     shared: &ConnectionShared,
     lease: &crate::PeerLease,
+    source: crate::PeerSource,
     keepalive: &mut Keepalive,
     budget: &Arc<crate::connection::OutboundBudget>,
 ) -> Result<(), crate::wire::PeerError> {
@@ -2667,6 +2682,11 @@ fn resume_parked_getdata<S>(
     let tail = crate::dispatch::serve_getdata(
         shared.chain_query.as_deref(),
         shared.tx_inventory.as_deref(),
+        &|sequence, wtxid| {
+            shared
+                .peer_table
+                .transaction_getdata_allowed(source, sequence, wtxid)
+        },
         compact_version,
         &peer.pending_getdata,
         &mut not_found,
@@ -3027,13 +3047,16 @@ mod transaction_poll_tests {
             self.0.fetch_add(1, Ordering::Relaxed);
             false
         }
-        fn get_tx(&self, _: bitcoin_rs_primitives::Txid) -> Option<bitcoin_rs_primitives::Tx> {
+        fn get_tx(
+            &self,
+            _: bitcoin_rs_primitives::Txid,
+        ) -> Option<(bitcoin_rs_primitives::Tx, u64)> {
             None
         }
         fn get_tx_by_wtxid(
             &self,
             _: bitcoin_rs_primitives::Wtxid,
-        ) -> Option<bitcoin_rs_primitives::Tx> {
+        ) -> Option<(bitcoin_rs_primitives::Tx, u64)> {
             None
         }
         fn resident_ancestor_package(

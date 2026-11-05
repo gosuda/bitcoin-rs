@@ -128,9 +128,9 @@ pub trait ChainQuery: Send + Sync {
 pub trait TxInventory: Send + Sync {
     fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool;
 
-    fn get_tx(&self, txid: Txid) -> Option<Tx>;
+    fn get_tx(&self, txid: Txid) -> Option<(Tx, u64)>;
 
-    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx>;
+    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<(Tx, u64)>;
 
     fn transaction_sent(&self, _wtxid: Wtxid) {}
 
@@ -168,12 +168,17 @@ impl TxInventory for bitcoin_rs_mempool::MempoolGateway {
         Self::have_tx(self, hash, hash_is_wtxid)
     }
 
-    fn get_tx(&self, txid: Txid) -> Option<Tx> {
-        Self::get_tx(self, txid)
+    fn get_tx(&self, txid: Txid) -> Option<(Tx, u64)> {
+        let pool = self.read();
+        let (entry, sequence) = pool.entry_with_admission_sequence(&txid)?;
+        Some(((*entry.tx).clone(), sequence))
     }
 
-    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
-        Self::get_tx_by_wtxid(self, wtxid)
+    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<(Tx, u64)> {
+        let pool = self.read();
+        let txid = pool.entry_by_wtxid(&wtxid)?.txid;
+        let (entry, sequence) = pool.entry_with_admission_sequence(&txid)?;
+        Some(((*entry.tx).clone(), sequence))
     }
 }
 
@@ -200,6 +205,7 @@ pub fn dispatch_inbound<S>(
         message,
         None,
         None,
+        &|_, _| false,
         &|| true,
         &|| true,
         &mut |response| {
@@ -217,6 +223,7 @@ pub fn dispatch_inbound_full<S>(
     message: &Message,
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
+    tx_allowed: &dyn Fn(u64, Wtxid) -> bool,
     tx_relay_open: &dyn Fn() -> bool,
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
@@ -282,7 +289,7 @@ pub fn dispatch_inbound_full<S>(
             ensure_inventory_request_within_bounds(items)?;
             step(peer, message)?;
             ensure_getdata_package_types_negotiated(peer, items)?;
-            serve_inbound_getdata(peer, chain, tx_inventory, items, headroom, send)?;
+            serve_inbound_getdata(peer, chain, tx_inventory, tx_allowed, items, headroom, send)?;
         }
         Message::AncPkgInfo(_)
         | Message::GetPkgTxns(_)
@@ -590,6 +597,7 @@ fn serve_inbound_getdata<S>(
     peer: &mut Peer<S>,
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
+    tx_allowed: &dyn Fn(u64, Wtxid) -> bool,
     items: &[Inventory],
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
@@ -604,6 +612,7 @@ fn serve_inbound_getdata<S>(
     let tail = serve_getdata(
         chain,
         tx_inventory,
+        tx_allowed,
         compact_version,
         items,
         &mut not_found,
@@ -618,6 +627,7 @@ fn serve_inbound_getdata<S>(
 pub(crate) fn serve_getdata(
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
+    tx_allowed: &dyn Fn(u64, Wtxid) -> bool,
     compact_version: Option<u64>,
     items: &[Inventory],
     not_found: &mut Vec<Inventory>,
@@ -642,7 +652,7 @@ pub(crate) fn serve_getdata(
                 let subject = Wtxid::from(Hash256::from_le_bytes(hash));
                 serve_ancpkginfo_item(tx_inventory, item, subject, headroom, send, not_found)?
             }
-            (_, Some(inv)) => serve_tx_item(inv, item, headroom, send, not_found)?,
+            (_, Some(inv)) => serve_tx_item(inv, item, tx_allowed, headroom, send, not_found)?,
             (_, None) => serve_block_item(chain, compact_version, item, headroom, send, not_found)?,
         };
         if !served {
@@ -662,6 +672,7 @@ pub(crate) fn serve_getdata(
 fn serve_tx_item(
     inv: &dyn TxInventory,
     item: &Inventory,
+    tx_allowed: &dyn Fn(u64, Wtxid) -> bool,
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
     not_found: &mut Vec<Inventory>,
@@ -672,19 +683,23 @@ fn serve_tx_item(
     let found = match item {
         Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
             let native = Txid::from(Hash256::from_le_bytes(txid.as_byte_array()));
-            inv.get_tx(native).map(|mut tx| {
-                let wtxid = tx.wtxid();
-                if matches!(item, Inventory::Transaction(_)) {
-                    for input in &mut tx.inputs {
-                        input.witness.clear();
+            inv.get_tx(native)
+                .filter(|(tx, sequence)| tx_allowed(*sequence, tx.wtxid()))
+                .map(|(mut tx, _)| {
+                    let wtxid = tx.wtxid();
+                    if matches!(item, Inventory::Transaction(_)) {
+                        for input in &mut tx.inputs {
+                            input.witness.clear();
+                        }
                     }
-                }
-                (wtxid, tx)
-            })
+                    (wtxid, tx)
+                })
         }
         Inventory::WTx(wtxid) => {
             let native = Wtxid::from(Hash256::from_le_bytes(wtxid.as_byte_array()));
-            inv.get_tx_by_wtxid(native).map(|tx| (native, tx))
+            inv.get_tx_by_wtxid(native)
+                .filter(|(_, sequence)| tx_allowed(*sequence, native))
+                .map(|(tx, _)| (native, tx))
         }
         _ => None,
     };

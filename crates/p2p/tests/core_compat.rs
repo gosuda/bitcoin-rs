@@ -264,6 +264,7 @@ fn dispatch_collect(
         message,
         chain,
         None,
+        &|_, _| true,
         &|| true,
         &|| true,
         &mut |response| {

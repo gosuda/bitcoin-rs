@@ -93,6 +93,7 @@ fn parked_misses_reserved_before_build() -> TestResult {
         &mut peer,
         &shared,
         &lease,
+        lease.source(None),
         &mut keepalive,
         &mut parked_since,
     )?;
@@ -116,6 +117,7 @@ fn parked_misses_reserved_before_build() -> TestResult {
         &mut peer,
         &shared,
         &lease,
+        lease.source(None),
         &mut keepalive,
         &mut parked_since,
     )?;

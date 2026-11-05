@@ -1071,6 +1071,12 @@ impl Mempool {
     }
 
     #[must_use]
+    pub fn entry_with_admission_sequence(&self, txid: &Txid) -> Option<(&MempoolEntry, u64)> {
+        let indexed = self.derived.by_txid.get(txid)?;
+        Some((self.entry(indexed.id)?, indexed.admitted_sequence))
+    }
+
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -1330,7 +1336,7 @@ impl Mempool {
     }
 
     #[must_use]
-    pub(crate) fn entry_by_wtxid(&self, wtxid: &Wtxid) -> Option<&MempoolEntry> {
+    pub fn entry_by_wtxid(&self, wtxid: &Wtxid) -> Option<&MempoolEntry> {
         let id = *self.derived.by_wtxid.get(wtxid)?;
         self.entry(id)
     }
