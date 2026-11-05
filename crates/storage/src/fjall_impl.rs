@@ -9,9 +9,14 @@ use fjall::{CompressionType, Database, Keyspace, KeyspaceCreateOptions, PersistM
 
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
 
+mod maintenance;
+#[cfg(test)]
+mod tests;
+
 pub const FJALL_DEFAULT_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 
 pub struct FjallStore {
+    _maintenance: maintenance::Maintenance,
     db: Database,
     keyspaces: Vec<Keyspace>,
     write_lock: parking_lot::Mutex<()>,
@@ -62,7 +67,9 @@ impl FjallStore {
                     .map_err(StorageError::backend)?,
             );
         }
+        let maintenance = maintenance::Maintenance::start(keyspaces.clone())?;
         Ok(Self {
+            _maintenance: maintenance,
             db,
             keyspaces,
             write_lock: parking_lot::Mutex::new(()),

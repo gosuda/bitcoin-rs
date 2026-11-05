@@ -18,6 +18,33 @@ write boundary. Competing writers therefore cannot both observe the same
 pre-image. No backend releases its lock or transaction between condition
 evaluation and commit.
 
+## Fjall compaction
+
+Each `FjallStore` owns one maintenance thread. At open and then after each
+10-second wait, this thread checks every keyspace. With 15 or more L0 runs,
+it requests an L0-to-L1 merge through the engine. This work takes no store
+write lock and needs no new writes or memtable flush events. A concurrent
+engine compaction can defer the merge. The next pass checks again.
+Compaction errors are logged, and later passes retry.
+A worker panic is logged as the worker exits. It stops maintenance;
+the store does not restart the worker or retry poisoned engine locks.
+
+The merge uses a zero MVCC garbage-collection watermark to retain versions
+for all open snapshots. The store joins maintenance before it closes the
+engine or releases its directory guard. Shutdown wakes an idle thread;
+an active merge must finish before the join returns.
+
+This path uses the hidden `lsm-tree` 3.1.10 `PullDown` API and the Fjall tree
+handle. The direct dependency pins that API version. A dependency update
+must check these calls and run the owner-local maintenance tests.
+The database format and the stored keyspace settings do not change.
+These tests cover small stores, not sustained mainnet compaction throughput.
+`PullDown` merges all L0 and physical-L1 tables with a 64 MB target table
+size. It uses canonical level 6 for output table settings, including block
+size and index pinning. Normal Leveled compaction can then move these tables
+to deeper levels. This can cause extra I/O. The tests do not measure that
+cost on a mainnet store.
+
 ## Pruning
 
 `pruning` deletes historical block bodies and undo records once the active chain no longer needs them. It lives here rather than in a crate of its own, because it is a retention policy over rows this crate already owns.

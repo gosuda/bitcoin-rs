@@ -408,6 +408,7 @@ dependencies = [
  "cap-std",
  "fjall",
  "hashbrown 0.17.1",
+ "lsm-tree",
  "metrics",
  "parking_lot",
  "rustix",
