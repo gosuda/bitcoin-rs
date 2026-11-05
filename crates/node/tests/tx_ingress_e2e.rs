@@ -361,6 +361,7 @@ fn serve_connection(
                     &message,
                     None,
                     Some(gateway.as_ref()),
+                    &|_, _| false,
                     &|| true,
                     &|| true,
                     &mut send,
