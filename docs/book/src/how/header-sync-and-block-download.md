@@ -35,7 +35,7 @@ $ cargo test --offline --locked -p bitcoin-rs-p2p \
 test sync::tests::headers_presync::sufficient_work_chain_syncs_presync_then_redownload ... ok
 ```
 
-`minimum_chain_work` comes from the network parameters (`SyncChain::minimum_chain_work`, `crates/p2p/src/sync/chain.rs:91`). Chains below the floor are collected, not admitted; this is what makes the download-twice rule cheaper than the fake chain.
+`minimum_chain_work` comes from the network parameters (`SyncChain::minimum_chain_work`, `crates/p2p/src/sync/chain.rs:91`). Chains below the anti-DoS work threshold are collected, not admitted. The threshold is that floor or, once a tip is applied, the applied tip's work minus 144 blocks of the tip's work, whichever is larger (`BlockSync::anti_dos_work_threshold`). This is what makes the download-twice rule cheaper than the fake chain.
 
 ## Difficulty, deployments, and progress
 
