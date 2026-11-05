@@ -15,7 +15,7 @@ workspace = true
 [features]
 default = ["fjall"]
 rocksdb = ["dep:rust-rocksdb"]
-fjall = ["dep:fjall"]
+fjall = ["dep:fjall", "dep:lsm-tree"]
 redb = ["dep:redb"]
 # Explicit fixture/fault-injection surface; never a production default.
 test-seam = []
@@ -37,6 +37,7 @@ tracing.workspace = true
 
 rust-rocksdb = { workspace = true, optional = true }
 fjall = { workspace = true, optional = true }
+lsm-tree = { workspace = true, optional = true }
 redb = { workspace = true, optional = true }
 
 [target.'cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", target_os = "redox"))'.dependencies]

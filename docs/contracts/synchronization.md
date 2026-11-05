@@ -155,6 +155,11 @@ Distinguish, and never conflate:
 - Index worker work: the worker has its own wake/timeout reconciliation loop (`crates/index/src/runtime/reconciliation.rs`, with revision-coalesced quiet wait, 1 s `recv_timeout` tick, and `IDX-08`).
 - Committed chain effects send its wakes (`crates/node/src/chain_effects.rs::wake_index`).
 - Sync tick and index wakes are separate drivers.
+- Fjall storage maintenance has a separate thread in `crates/storage/src/fjall_impl/maintenance.rs`.
+- It checks L0 at open and after each ten-second wait, without the store write lock or a new flush event.
+- A keyspace with at least 15 L0 runs gets an L0-to-L1 merge attempt; later passes retry deferred or failed attempts.
+- An active merge can extend the interval and the store close time.
+- This mechanism does not prove a mainnet throughput bound or a maximum write-stall duration.
 - Post-commit mining/announce: committed chain effects drive them in commit order (`EVT-02` step 7).
 - **Liveness distinction** (observability and assumptions, not a proof):
 - **Safety**: invalid or uncommitted states are never promoted, and stale cross-domain views are refused; unconditional.
@@ -197,6 +202,7 @@ Change-class review aid (not a demand for new tests):
 | Recovery closure | A peer loss/timeout/failed delivery ends in retry, handover, or terminal outcome without restart | `P2P-05` strike/expiry and peer handover; startup dialing on persisted AddrMan recovery (not `RCV-08`, which covers chainstate reorg disconnect/reconnect) | `crates/p2p/src/sync/tests/` expiry strikes; `bin/bitcoin-rs/tests/addrman_restart_e2e.rs` restart reconnection | Live reorg + expiry combined lane is main-only |
 | Non-starvation | A foreground commit lands while optional work runs, on paths the fences bound | Apply fences (`EVT-02`) and immutable artifact/replay seeding | `EVT-02` fencing tests; paused-seed concurrent-apply proof | No live-UTXO seed lock; scoped `ScriptLive` unavailability is isolated from other work |
 | Index delay/failure | Queries refuse honestly during index worker failure | `IDX-07` supervision + `SYNC-01` authorities | `unusable_worker_makes_queries_unavailable` (marks the worker failed, asserts `TxQueryError::Unavailable`) | **Not proven for delay or apply isolation:** no test covers queries during index delay/rebuild or applies a block while the index is unusable, so "index failure never blocks apply" is an unproven obligation resting on the `SYNC-03` fences and `EVT-02` evidence |
+| Storage maintenance | A halted index batch resumes without new flush events | Independent `FjallStore` L0 maintenance | `crates/storage/src/fjall_impl/tests.rs::maintenance_releases_halted_batch_without_flush_events` | Small-store evidence only; no sustained mainnet throughput or concurrent node-apply proof |
 | Durable convergence | A successful apply survives restart at the published tip | Durable head + checkpoint (`RCV-01`–`RCV-04`) | `crates/node/tests/crash_recovery.rs` `RCV-04` matrix | Formal temporal runs are not completed proofs |
 
 ## Formal models
