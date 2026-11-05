@@ -1,6 +1,6 @@
 # Concepts
 
-Shared domain vocabulary for this project: entities, named processes, and status concepts with project-specific meaning. Glossary only, not a spec, changelog, or benchmark ledger; measured numbers belong in the PR that produced them.
+Shared domain vocabulary for this project: entities, named processes, and status concepts with project-specific meaning. Glossary only, not a spec or changelog; measured numbers belong in the PR that produced them.
 
 ## Node interfaces
 
@@ -360,7 +360,7 @@ The node accepts only complete native version-4 snapshots: exact magic and versi
 `KvStore::write_deferred` (`crates/storage/src/trait_.rs`) writes a batch without its own fsync and leaves durability to the next successful durable write or explicit flush on the same store. Block-body index rows use it because a lost row is rebuilt from the block file. Correctness rests on ordering: body bytes are durable before the index row pointing at them is published. Weaker durability is opt-in per call site, never backend-wide.
 
 ### Directory-layout record
-`UtxoRecord` v5 is `txid || output_count || inline_len || widths || vout_dir || len_dir || payloads`. Per-item keys and lengths sit in fixed-width arrays ahead of the items. `find_output(vout)` therefore touches about two bytes per output instead of walking every earlier script. Each directory entry uses the narrowest width the record needs. The script is whatever remains of its payload, so no length is stored twice. The v5 cost trade is in [utxo-memory.md](docs/benchmarks/utxo-memory.md#when-to-revert-v5).
+`UtxoRecord` v5 is `txid || output_count || inline_len || widths || vout_dir || len_dir || payloads`. Per-item keys and lengths sit in fixed-width arrays ahead of the items. `find_output(vout)` therefore touches about two bytes per output instead of walking every earlier script. Each directory entry uses the narrowest width the record needs. The script is whatever remains of its payload, so no length is stored twice. The v5 layout was adopted as a measured cost trade.
 
 ### Canonical record spelling
 One logical record has exactly one byte string; `UtxoRecord` compares and hashes by bytes. v5 enforces it with three rules: minimal varints, narrowest directory width, and compact/escape amount forms that are exact complements. The last is a safety rule: `decompress_amount` multiplies by up to a billion, so an unbounded input panics in debug and wraps in release. `decompress_accepts_exactly_the_encoder_image` states the whole rule as one property.
@@ -448,39 +448,11 @@ exposes the candidate only after commit.
 
 ## Measurement
 
-### Product performance cell
-One coordinate of the frozen 36-cell denominator: one product domain
-(`offline`, `p2p`, `muhash`), one corpus (`c150` or `cmodern`), one native
-architecture (`x86_64` or `arm64`), and one backend (`fjall`, `rocksdb`,
-or `redb`). Diagnostics are not cells. See
-`docs/contracts/hot-path-attribution.md`.
-
-### Hot-path attribution ledger
-The single inventory of product hot paths, overlap groups, and
-dispositions. Nested stage histograms are diagnostics. A cell residual
-stays `unmeasured` until seven valid bitcoin-rs walls exist and the
-exclusive union is subtracted from whole-run wall. Owner:
-`docs/benchmarks/hot-path-ledger.toml`.
-
-### Retained benchmark contract
-Permanent benchmarks call the shipped production path, use a product-shaped workload, and protect a regression that still matters. A/B refactor harnesses, synthetic microbenchmarks, and future-work measuring tools are not retained. The retained Criterion targets are the `benches/` directories of the owning crates. These currently cover consensus Merkle, UTXO commit, node sync pipeline and chainstate journal replay, mempool priority index, real-file index resolver, and P2P message write. Which targets CI compiles is owned by the `bench-smoke` job in `.github/workflows/main.yml`, not by this glossary.
-
 ### C150
-The historical product corpus: mainnet genesis through height 150,000. Pre-P2SH, pre-SegWit, pre-Taproot. Identities, census, and state are owned by `docs/contracts/campaign-corpora.md`.
+The historical product corpus: mainnet genesis through height 150,000. Pre-P2SH, pre-SegWit, pre-Taproot. Identity and custody are owned by `docs/contracts/reference-set.md` (`REF-04`).
 
 ### Cmodern
-The modern product corpus: mainnet genesis through height 709,635, the first height with executed examples of every required post-P2SH script class. Identities, census, and oracle are owned by `docs/contracts/campaign-corpora.md`.
-
-### Matched-harness comparison
-A cross-node benchmark matches every input that is not the thing under test before any ratio is quoted. These inputs include block source, validation posture, allocator, CPU pinning, and time of measurement. Interleave both nodes back-to-back on an idle host and quote paired medians.
-
-### Offline full-validation comparator
-The processing-bound cross-node oracle: Bitcoin Core 31.1 and bitcoin-rs both
-build chainstate from one hash-pinned Core-framed archive under full
-validation, matched index posture, and production durability. Wall time is
-process start through durable clean exit. The harness lives in
-`tools/benchmark-campaign/offline_full_validation.py`; see
-`docs/benchmarks/offline-full-validation.md`.
+The modern product corpus: mainnet genesis through height 709,635, the first height with executed examples of every required post-P2SH script class. Identity and oracle are owned by `docs/contracts/reference-set.md` (`REF-04`).
 
 ### CPU-seconds as a first-class metric
 A throughput change is measured against CPU time as well as wall time, because an idle many-core host lets wall-clock tuning spend cores for free. Sampling `utime+stime` from `/proc/<pid>/stat` while polling height is enough; per-thread attribution comes from `/proc/<pid>/task/*/stat`.
@@ -489,4 +461,4 @@ A throughput change is measured against CPU time as well as wall time, because a
 A parallelism constant tuned while the harness competes with the node for CPU, so the optimum measures the contention. Never tune a parallelism constant against a harness sharing CPU with the node, and never on wall alone.
 
 ### CI lane parity
-A branch is green only against [`scripts/ci-pr.sh`](scripts/ci-pr.sh), which [`.github/workflows/ci.yml`](.github/workflows/ci.yml) invokes. A local approximation never counts. Pull requests run the fast `fmt`, `deny`, `contracts`, `clippy`, and `test-crates` jobs. Merge-group requests add `book`, `test-binary`, and `test-workspace` (backed by the pinned Core fixture) alongside [`ci-merge-gate.yml`](.github/workflows/ci-merge-gate.yml) (`kernel-consensus` and `full-node-compile`). [`.github/workflows/main.yml`](.github/workflows/main.yml) runs on `main` pushes and manual dispatch. It covers the full-node feature set with the C++ kernel and `--include-ignored` consensus vectors. It also runs `kernel-oracle` parity tests, `bench-smoke` compilation, Python comparator tests, `core-differential`, and `native-script` evidence. Those parity tests are not `#[ignore]`, and they are skipped if `--ignored` is passed. MSRV, dependency-range, and feature-matrix lanes run in [`.github/workflows/compatibility-campaign.yml`](.github/workflows/compatibility-campaign.yml). Apalache model checks run in [`.github/workflows/model-check-manual.yml`](.github/workflows/model-check-manual.yml). `cargo deny` failures are bug reports, not lint noise. See [`CONTRIBUTING.md`](CONTRIBUTING.md#pull-request-verification).
+A branch is green only against [`scripts/ci-pr.sh`](scripts/ci-pr.sh), which [`.github/workflows/ci.yml`](.github/workflows/ci.yml) invokes. A local approximation never counts. Pull requests run the fast `fmt`, `deny`, `contracts`, `clippy`, and `test-crates` jobs. Merge-group requests add `book`, `test-binary`, and `test-workspace` (backed by the pinned Core fixture) alongside [`ci-merge-gate.yml`](.github/workflows/ci-merge-gate.yml) (`kernel-consensus` and `full-node-compile`). [`.github/workflows/main.yml`](.github/workflows/main.yml) runs on `main` pushes and manual dispatch. It covers the full-node feature set with the C++ kernel and `--include-ignored` consensus vectors. It also runs `kernel-oracle` parity tests, `core-differential`, and `native-script` evidence. Those parity tests are not `#[ignore]`, and they are skipped if `--ignored` is passed. MSRV, dependency-range, and feature-matrix lanes run in [`.github/workflows/compatibility-campaign.yml`](.github/workflows/compatibility-campaign.yml). Apalache model checks run in [`.github/workflows/model-check-manual.yml`](.github/workflows/model-check-manual.yml). `cargo deny` failures are bug reports, not lint noise. See [`CONTRIBUTING.md`](CONTRIBUTING.md#pull-request-verification).

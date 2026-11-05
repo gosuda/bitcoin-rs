@@ -242,10 +242,6 @@ zmq       = { version = ">=0.10, <0.11", default-features = false }
 proptest        = { version = ">=1.11, <1.12", default-features = false, features = ["std"] }
 proptest-state-machine = "=0.8.0"
 tempfile        = { version = ">=3.20.0, <4" }
-# criterion 0.8 line.
-criterion       = { version = ">=0.8.2, <0.9", default-features = false, features = [
-    "cargo_bench_support", "html_reports", "plotters", "rayon",
-] }
 
 # ============================================================================
 # Lints

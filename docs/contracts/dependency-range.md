@@ -57,10 +57,9 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 ### `DEP-03`: One JSON stack and one time stack
 - **Owner**: `deny.toml` `[bans]`.
 - First-party code MUST serialize JSON with `sonic-rs`.
-- `serde_json` is denied with exactly six third-party `wrappers`.
+- `serde_json` is denied with exactly four third-party `wrappers`.
 - The wrappers are `corepc-types` for Bitcoin Core v31 RPC result models.
 - The wrappers include `tracing-subscriber` for the node JSON log format.
-- The wrappers include `criterion` with `tinytemplate` for the bench harness.
 - The wrappers include `usdt-impl` with `dof` for the optional USDT probe path.
 - A direct dependent outside that list fails `cargo deny check bans` with `error[banned]`.
 - This restriction applies to all workspace crates.

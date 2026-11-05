@@ -24,9 +24,9 @@ Use the node covers the public surfaces. How it works explains the mechanisms be
 
 bitcoin-rs is not Bitcoin Core. It tracks Core 31.1 as a reference where a contract says so, and it records the exact external runs that exist. A surface without a recorded external run is described as implemented in this tree, not as compatible.
 
-The book does not own any rule. Contracts under `docs/contracts/`, policies under `docs/policies/`, the generated RPC reference, and the benchmark pages keep their authority. Where a rule matters, this book cites its clause id and links the owner.
+The book does not own any rule. Contracts under `docs/contracts/`, policies under `docs/policies/`, and the generated RPC reference keep their authority. Where a rule matters, this book cites its clause id and links the owner.
 
-Performance claims need a benchmark page with a complete evidence sample. A page marked `planned_not_executed` has run no end-state measurement, and `BLOCKED` means a required identity is missing. Neither is a result.
+A performance claim is a result only with a recorded end-state measurement and complete evidence identities. A lane that never ran, or is blocked on a missing identity, is not a result.
 
 ## Commands and outputs
 

@@ -1,6 +1,6 @@
 # External API contract
 
-`API-01`–`API-36` govern RPC, REST, Esplora and ZMQ under the
+`API-01`–`API-37` govern RPC, REST, Esplora and ZMQ under the
 [contracts precedence rule](README.md). The clauses below own each behavior.
 [Verification boundaries](#verification-boundaries) distinguish current coverage from unverified comparisons.
 
@@ -161,7 +161,6 @@ wallet interoperability remain unverified.
 - Both budget failures are explicit resource limits, not throughput claims.
 - A txindex hit for non-coinbase verbosity-2 still decodes the complete body plus retained undo.
 - It then searches the block for its row under the shared render permit.
-- Performance qualification (bytes, decode cost, latency, permit refusals, single or concurrent load) follows `docs/benchmarks/README.md`.
 - No measurement claim is established here.
 - Storage boundaries provide bounded reads with safe unsupported defaults, never an unbounded fallback.
 - These include Fjall value checks, redb read guards, and RocksDB pinned values before the owned copy.
@@ -856,6 +855,12 @@ wallet interoperability remain unverified.
 - The reply is this node's own status string (`bitcoin-rs stopping`); the latch is tripped before the reply is written, and teardown normally lets the reply finish before the process exits 0. The string deliberately differs from Core's (`Bitcoin Core stopping`, `src/rpc/server.cpp`): the functional framework discards the stop reply (`test_node.py` `stop` never reads it), so no test required Core-string equality, and this node does not imitate Core's identity elsewhere (`--version`). A context without attached node control (embedded/test use) answers `-32603`.
 - Declared deviation: Core's hidden numeric `wait` argument is not honored — any argument is refused with the local `-32602` shape error — and the node does not wait for other in-flight RPC connections to drain before exiting.
 - Proof: `handlers::util::stop` unit tests (status string, shutdown trigger, missing control, argument refusal) and `e2e/tests/lifecycle.rs::stop_rpc_answers_the_node_status_and_exits_zero` (real binary, node-shaped reply, exit code 0 within a bounded wait).
+
+### `API-37`: `gettxoutsetinfo` parameter arity
+
+- `gettxoutsetinfo` accepts at most three parameters.
+- The measured call is `["muhash", null, false]`.
+- A fourth positional argument MUST return `InvalidParams`.
 
 ## RPC differential testing and in-process embedding status
 

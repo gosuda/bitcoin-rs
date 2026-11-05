@@ -21,8 +21,7 @@ const README_PATH: &str = "docs/contracts/README.md";
         every tag names a clause defined by a heading or a bold requirement in docs/contracts. \
         Verify also that every backticked code path under crates, bin, e2e, fuzz or tools \
         resolves, and that every path::symbol citation under those roots names a symbol in the \
-        cited file. Dated records under docs/benchmarks/data cite the tree at their measurement \
-        date and are not resolved. Directory references and document paths are not file \
+        cited file. Directory references and document paths are not file \
         citations; document paths are checked as Markdown links."
 )]
 struct Args {

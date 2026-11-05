@@ -32,11 +32,6 @@ pub(crate) fn check(root: &Path, problems: &mut Vec<String>) {
         }
     }
 }
-impl Citation<'_> {
-    fn is_dated_record(&self) -> bool {
-        self.document.starts_with("docs/benchmarks/data/")
-    }
-}
 
 fn check_relative_links(
     parent: &Path,
@@ -136,7 +131,6 @@ fn check_citation(root: &Path, citation: &Citation<'_>, problems: &mut Vec<Strin
     let target = root.join(path);
     match symbol {
         Some(symbol) => check_symbol(&target, path, citation, symbol, problems),
-        None if citation.is_dated_record() => {}
         None => check_path(&target, path, citation, problems),
     }
 }

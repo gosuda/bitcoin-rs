@@ -9,7 +9,6 @@ target
 crash-*
 perf.data*
 flamegraph.svg
-docs/benchmarks/data
 data
 backups
 bitcoin-core/
