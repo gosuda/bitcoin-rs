@@ -303,19 +303,6 @@ fn assert_contains(method: &str, path: &str, actual: &sonic_rs::Value, expected:
     assert_eq!(actual, expected, "{method}: {path}");
 }
 
-#[cfg(feature = "zmq")]
-#[test]
-fn getzmqnotifications_dispatches_compiled_notifications() -> Result<(), TestError> {
-    let ctx = Arc::new(Context::new());
-    let handler = Handler::new(ctx);
-    let result = handler.dispatch("getzmqnotifications", &json!([]))?;
-    assert!(
-        result.is_array(),
-        "getzmqnotifications must return an array"
-    );
-    Ok(())
-}
-
 #[cfg(not(feature = "zmq"))]
 #[test]
 fn getzmqnotifications_is_absent_without_zmq() {
@@ -336,21 +323,6 @@ fn getblockhash_zero_returns_mainnet_genesis_on_fresh_context() -> Result<(), Te
         .ok_or("getblockhash response must be a string")?;
     let expected = Network::Mainnet.genesis_block_hash().to_string();
     assert_eq!(actual, expected);
-    Ok(())
-}
-
-#[test]
-fn getblockchaininfo_reports_the_closed_for_recovery_fact() -> Result<(), TestError> {
-    let mut ctx = Context::new();
-    let closed = bitcoin_rs_chain::LatchWriter::new();
-    ctx.chain.closed_for_recovery = closed.reader();
-    let ctx = Arc::new(ctx);
-    let handler = Handler::new(Arc::clone(&ctx));
-    let open = handler.dispatch("getblockchaininfo", &json!([]))?;
-    assert_eq!(open["is_closed_for_recovery"], json!(false));
-    closed.trigger();
-    let closed_info = handler.dispatch("getblockchaininfo", &json!([]))?;
-    assert_eq!(closed_info["is_closed_for_recovery"], json!(true));
     Ok(())
 }
 

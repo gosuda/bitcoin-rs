@@ -11,7 +11,7 @@ use bitcoin_rs_primitives::{BlockHash, Hash256};
 
 use bitcoin_rs_storage::block_body::{BlockBodyStore, IndexedBlockBodyStore};
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_FORMAT_VERSION, DURABLE_HEAD_KEY};
-use bitcoin_rs_storage::pruning::{block_body_key, block_undo_key};
+use bitcoin_rs_storage::pruning::block_undo_key;
 use bitcoin_rs_storage::undo::UndoStore;
 use bitcoin_rs_storage::{
     ColumnFamily, CommitRecords, DurableHead, DurableHeadStore, FlatFileBlockStore,
@@ -153,12 +153,6 @@ fn connect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
         drop(family);
 
         let _ = outcome;
-        let family = open_family(&data_dir)?;
-        let locator_present = family
-            .store
-            .get(ColumnFamily::BlockBodies, &block_body_key(2, hash_of(2)))?
-            .is_some();
-        drop(family);
         assert_whole_state(
             &data_dir,
             &old_head,
@@ -169,17 +163,6 @@ fn connect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
             )],
             &format!("fault {fault:?}"),
         )?;
-        if locator_present {
-            let family = open_family(&data_dir)?;
-            let head = family
-                .head
-                .load()?
-                .ok_or_else(|| TestError::message("head vanished"))?;
-            assert!(
-                head == new_head || locator_present,
-                "a present locator with no batch must be an orphan, not a fresh head"
-            );
-        }
     }
     Ok(())
 }

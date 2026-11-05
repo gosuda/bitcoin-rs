@@ -85,7 +85,7 @@ fn entry(tx: Tx, vsize: u32, fee: u64) -> MempoolEntry {
 }
 
 #[test]
-fn below_min_relay_fee_rejects_on_both_surfaces_at_the_same_floor() -> Result<(), TestError> {
+fn below_min_relay_fee_rejects_at_the_same_floor() -> Result<(), TestError> {
     let mut pool = Mempool::new(MempoolLimits::default());
     let low = tx(outpoint(1, 0), 1_000, 0xFF_FF_FF_FF);
     let err = pool
@@ -293,7 +293,7 @@ fn cluster_count_limit_rejects_a_sibling_that_ancestors_would_admit() -> Result<
 }
 
 #[test]
-fn cluster_size_limit_rejects_on_both_surfaces() -> Result<(), TestError> {
+fn cluster_size_limit_rejects() -> Result<(), TestError> {
     let limits = MempoolLimits {
         cluster_count: 100,
         cluster_size_vbytes: 250,
@@ -313,7 +313,7 @@ fn cluster_size_limit_rejects_on_both_surfaces() -> Result<(), TestError> {
 }
 
 #[test]
-fn replacement_into_a_full_cluster_is_allowed_on_both_surfaces() -> Result<(), TestError> {
+fn replacement_into_a_full_cluster_is_allowed() -> Result<(), TestError> {
     let limits = MempoolLimits {
         cluster_count: 2,
         ..MempoolLimits::default()
@@ -335,7 +335,7 @@ fn replacement_into_a_full_cluster_is_allowed_on_both_surfaces() -> Result<(), T
 }
 
 #[test]
-fn oversized_weight_is_not_standard_on_both_surfaces() {
+fn oversized_weight_is_not_standard() {
     let mut oversized = tx(outpoint(1, 0), 1_000, 0xFF_FF_FF_FF);
     oversized.outputs = (0..3_400)
         .map(|_| TxOut {
@@ -351,7 +351,7 @@ fn oversized_weight_is_not_standard_on_both_surfaces() {
 }
 
 #[test]
-fn nonstandard_output_script_is_not_standard_on_both_surfaces() {
+fn nonstandard_output_script_is_not_standard() {
     let weird = tx_multi(&[(outpoint(1, 0), 0xFF_FF_FF_FF)], 5_000, op_true_script());
     assert_eq!(
         is_standard_tx(&weird, &policy()).err(),
