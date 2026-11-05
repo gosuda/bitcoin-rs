@@ -17,9 +17,7 @@ use bitcoin::p2p::message_filter::{
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::{Address, Magic, ServiceFlags};
 use bitcoin::{BlockHash, FilterHash, Txid, merkle_tree::MerkleBlock};
-use bitcoin_rs_p2p::wire::{
-    MAX_MESSAGE_PAYLOAD, Message, encode_payload, read_message, write_message,
-};
+use bitcoin_rs_p2p::wire::{MAX_MESSAGE_PAYLOAD, Message, read_message, write_message};
 use bitcoin_rs_primitives::layout::decode_reservation;
 use bitcoin_rs_primitives::{BlockPayload, CompactTarget, Header, Network};
 use libfuzzer_sys::arbitrary::{self, Unstructured};
@@ -298,11 +296,13 @@ fuzz_target!(|data: &[u8]| {
             "payload decode exceeded reservation bound"
         );
 
-        if let Ok(re_encoded) = encode_payload(&message) {
+        let mut framed = Vec::new();
+        if write_message(&mut framed, magic, &message).is_ok() {
+            let (re_decoded, _) = read_message(&mut Cursor::new(framed.as_slice()), magic)
+                .expect("the canonical encoding of a decoded message decodes");
             assert_eq!(
-                re_encoded.as_slice(),
-                raw_payload.as_ref(),
-                "message re-encode must match decoded payload"
+                re_decoded, message,
+                "canonical re-encoding must decode to the same message"
             );
         }
     }

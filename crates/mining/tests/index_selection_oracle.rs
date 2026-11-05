@@ -3,12 +3,13 @@
     reason = "integration fixtures fail loudly on a broken precondition"
 )]
 
+use crate::support::TestError;
 use crate::support::fixtures as common;
 
 use std::collections::HashSet;
 use std::ops::Range;
 
-use bitcoin_rs_mempool::{Mempool, SnapshotEntry};
+use bitcoin_rs_mempool::{Mempool, MempoolError, PolicyError, SnapshotEntry};
 use bitcoin_rs_mining::{Candidate, CandidateContext, assemble_candidate};
 use bitcoin_rs_primitives::{Amount, Hash256, LockTime, OutPoint, Sequence, Tx, Txid};
 use common::{
@@ -341,15 +342,14 @@ fn spec_tx(label: u8, parent: Option<Txid>, spec: &Spec) -> Tx {
 
 fn build_pool(specs: &[Spec]) -> Mempool {
     let mut pool = zero_fee_pool();
-    let mut txids: Vec<Txid> = Vec::new();
+    let mut admitted: Vec<(Txid, i64)> = Vec::new();
     for (index, spec) in specs.iter().enumerate() {
         let label = u8::try_from(index).expect("at most 24 specs");
         let parent = spec
             .parent
-            .filter(|_| index > 0)
-            .map(|choice| txids[choice % index]);
+            .filter(|_| !admitted.is_empty())
+            .map(|choice| admitted[choice % admitted.len()].0);
         let transaction = spec_tx(label, parent, spec);
-        txids.push(transaction.txid());
         let forged = Forged::new(spec.fee, spec.weight, spec.size).with_sigops(spec.sigops);
         let forged = if spec.exact_vsize {
             let vsize = u32::try_from(spec.weight.div_ceil(4)).expect("weight fits vsize");
@@ -357,12 +357,18 @@ fn build_pool(specs: &[Spec]) -> Mempool {
         } else {
             forged
         };
-        insert_forged(&mut pool, transaction, forged)
-            .expect("generated entries stay inside admission limits");
+        let txid = transaction.txid();
+        match insert_forged(&mut pool, transaction, forged) {
+            Ok(()) => admitted.push((txid, spec.delta)),
+            Err(TestError::Mempool(MempoolError::Policy(
+                PolicyError::ClusterCountLimit | PolicyError::ClusterSizeLimit,
+            ))) => {}
+            Err(error) => panic!("generated entries stay inside admission limits: {error}"),
+        }
     }
-    for (txid, spec) in txids.iter().zip(specs) {
-        if spec.delta != 0 {
-            pool.prioritise(*txid, spec.delta)
+    for (txid, delta) in admitted {
+        if delta != 0 {
+            pool.prioritise(txid, delta)
                 .expect("overlay stays inside i64");
         }
     }

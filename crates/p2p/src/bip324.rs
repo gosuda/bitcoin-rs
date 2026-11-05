@@ -9,11 +9,11 @@ mod reader;
 
 pub use handshake::{Established, Handshake, Step};
 pub(crate) use packet::PACKET_OVERHEAD;
-#[cfg(test)]
-pub(crate) use packet::RecvCipher;
-pub use packet::SendCipher;
 #[cfg(feature = "fuzzing")]
-pub use packet::{PacketError, RecvCipher};
+pub use packet::PacketError;
+#[cfg(any(test, feature = "fuzzing"))]
+pub use packet::RecvCipher;
+pub use packet::SendCipher;
 pub use reader::PacketReader;
 pub use reader::is_poll_timeout;
 
