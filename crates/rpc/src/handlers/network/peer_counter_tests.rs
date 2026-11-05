@@ -326,6 +326,20 @@ fn getpeerinfo_omits_ping_times_it_has_never_measured() {
     assert!(entry.get("pingwait").is_none(), "{entry:?}");
 }
 
+fn release_version(release: &str) -> i64 {
+    release
+        .split('.')
+        .take(3)
+        .map(|part| {
+            part.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+        })
+        .zip([10_000_i64, 100, 1])
+        .map(|(digits, scale)| digits.parse().unwrap_or(0) * scale)
+        .sum()
+}
+
 #[test]
 fn getnetworkinfo_version_tracks_the_release() {
     let result = getnetworkinfo(&Arc::new(Context::new()), &json!(null))
@@ -336,20 +350,17 @@ fn getnetworkinfo_version_tracks_the_release() {
         .and_then(|value| value.split(':').nth(1))
         .and_then(|value| value.strip_suffix('/'))
         .unwrap_or_else(|| panic!("unexpected subversion: {subversion:?}"));
-    let mut parts = release.split('.').map(|part| {
-        part.parse::<i64>()
-            .unwrap_or_else(|_| panic!("release component {part} is not a number"))
-    });
-    let mut take = |name| {
-        parts
-            .next()
-            .unwrap_or_else(|| panic!("subversion {subversion:?} has no {name} field"))
-    };
-    let expected = take("major") * 10_000 + take("minor") * 100 + take("patch");
     assert_eq!(
         result.get("version").and_then(JsonValueTrait::as_i64),
-        Some(expected)
+        Some(release_version(release))
     );
+}
+
+#[test]
+fn release_version_matches_client_version_prerelease_rules() {
+    assert_eq!(release_version("0.15.0"), 1_500);
+    assert_eq!(release_version("0.16.0-rc.1"), 1_600);
+    assert_eq!(release_version("0.16"), 1_600);
 }
 
 #[test]
