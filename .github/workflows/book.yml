@@ -6,6 +6,7 @@ on:
     paths:
       - 'docs/book/**'
       - 'scripts/check_book_links.py'
+      - 'scripts/ci-pr.sh'
       - '.github/workflows/book.yml'
   workflow_dispatch:
 
