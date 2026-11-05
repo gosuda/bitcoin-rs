@@ -115,10 +115,8 @@ fn parent_commit_without_observers_retries_orphan_with_original_source() {
         assert!(!gateway.have_tx(Hash256::from(child.txid()), false));
         assert!(gateway.have_tx(Hash256::from(child.wtxid()), true));
         assert_eq!(gateway.get_tx(child.txid()), None);
-        assert_eq!(
-            gateway.get_tx_by_wtxid(child.wtxid()),
-            Some((*child).clone())
-        );
+        assert_eq!(gateway.held_orphan(child.wtxid()), Some((*child).clone()));
+        assert_eq!(gateway.get_tx_by_wtxid(child.wtxid()), None);
         insert_parent(&gateway, parent, origin);
         let retried = gateway.retry_orphans(&Coins(vec![]), unix_time_secs());
         assert_eq!(retried.len(), 1);
@@ -852,7 +850,7 @@ fn stale_invalid_outpoint_claim_cannot_reject_a_refreshed_orphan() {
         Ok(SubmitOutcome::AlreadyKnown)
     );
     assert_eq!(
-        gateway.get_tx_by_wtxid(refreshed.wtxid()),
+        gateway.held_orphan(refreshed.wtxid()),
         Some((*refreshed).clone())
     );
     assert_eq!(gateway.orphan_count(), 1);
@@ -1328,7 +1326,7 @@ fn refreshed_or_evicted_retry_claim_cannot_commit_hold_reject_or_requeue() {
             assert_eq!(gateway.read().sequence_number(), sequence);
             assert_eq!(gateway.orphan_count(), 1);
             assert_eq!(
-                gateway.get_tx_by_wtxid(replacement.wtxid()),
+                gateway.held_orphan(replacement.wtxid()),
                 Some((*replacement).clone())
             );
             let mut new_source = source();
@@ -1813,10 +1811,7 @@ fn fresh_invalid_witness_preserves_a_different_resident_orphan_variant() {
         gateway.submit_transaction(invalid, AdmissionOrigin::Peer(attacker), None, 2, &chain),
         Err(SubmitError::Consensus)
     );
-    assert_eq!(
-        gateway.get_tx_by_wtxid(valid.wtxid()),
-        Some((*valid).clone())
-    );
+    assert_eq!(gateway.held_orphan(valid.wtxid()), Some((*valid).clone()));
     assert!(
         gateway
             .lifecycle
@@ -1881,7 +1876,7 @@ fn orphan_txid_does_not_suppress_txid_inventory_but_wtxid_does() {
     assert!(!gateway.have_tx(Hash256::from(held.txid()), false));
     assert!(gateway.have_tx(Hash256::from(held.wtxid()), true));
     assert_eq!(gateway.get_tx(held.txid()), None);
-    assert_eq!(gateway.get_tx_by_wtxid(held.wtxid()), Some((*held).clone()));
+    assert_eq!(gateway.held_orphan(held.wtxid()), Some((*held).clone()));
 }
 
 #[test]
@@ -1907,14 +1902,8 @@ fn same_txid_different_witnesses_both_survive_and_retry_after_parent() {
         ));
     }
     assert_eq!(gateway.orphan_count(), 2);
-    assert_eq!(
-        gateway.get_tx_by_wtxid(first.wtxid()),
-        Some((*first).clone())
-    );
-    assert_eq!(
-        gateway.get_tx_by_wtxid(second.wtxid()),
-        Some((*second).clone())
-    );
+    assert_eq!(gateway.held_orphan(first.wtxid()), Some((*first).clone()));
+    assert_eq!(gateway.held_orphan(second.wtxid()), Some((*second).clone()));
 
     insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
     let results = gateway.retry_orphans(&Coins(vec![]), unix_time_secs());

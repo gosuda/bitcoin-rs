@@ -98,6 +98,7 @@ impl CheckpointPublisher {
         retirement: DisconnectRetirement,
     ) -> core::result::Result<CheckpointWrite, CheckpointError> {
         let _exclusive_apply = self.admission.pause();
+        let _publication = self.admission.publication.lock();
         if self.admission.is_closed() {
             return Err(CheckpointError::ClosedForRecovery);
         }
