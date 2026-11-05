@@ -194,6 +194,7 @@ fn dispatch_collect<S>(
         message,
         chain,
         None,
+        &|_, _| true,
         &|| true,
         &|| true,
         &mut |response| {
@@ -504,6 +505,7 @@ fn getblocktxn_is_unanswered_while_the_production_gate_is_saturated() -> Result<
         &message,
         Some(&chain),
         None,
+        &|_, _| true,
         &|| true,
         &|| false,
         &mut |response| {
@@ -665,6 +667,7 @@ fn headroom_false_before_first_load_parks_without_loading() {
         &Message::GetData(vec![known]),
         Some(&chain),
         None,
+        &|_, _| true,
         &|| true,
         &|| false,
         &mut |response| {
@@ -720,6 +723,7 @@ fn hostile_50000_item_getdata_parks_the_tail() {
         &Message::GetData(vec![known; MAX_INV_PER_MSG]),
         Some(&chain),
         None,
+        &|_, _| true,
         &|| true,
         &|| budget.may_reserve_production(),
         &mut |message| {
@@ -774,6 +778,7 @@ fn halted_mixed_getdata_parks_ordered_tail_and_unsent_misses() -> Result<(), Pee
         &Message::GetData(vec![tx_miss, inv_a, tx_hit, inv_b, unknown_block]),
         Some(&chain),
         Some(&inventory),
+        &|_, _| true,
         &|| true,
         &|| {
             consulted.set(consulted.get() + 1);
@@ -799,6 +804,7 @@ fn halted_mixed_getdata_parks_ordered_tail_and_unsent_misses() -> Result<(), Pee
     let rest = serve_getdata(
         Some(&chain),
         Some(&inventory),
+        &|_, _| true,
         None,
         &peer.pending_getdata,
         &mut misses,
@@ -851,6 +857,7 @@ fn gate_closed_at_the_trailing_report_parks_the_misses() -> Result<(), PeerError
     let tail = serve_getdata(
         Some(&chain),
         Some(&inventory),
+        &|_, _| true,
         None,
         &[miss, served],
         &mut not_found,
@@ -892,6 +899,7 @@ fn getdata_while_one_is_parked_is_refused_and_keeps_the_tail() {
         )]),
         None,
         None,
+        &|_, _| true,
         &|| true,
         &|| true,
         &mut |response| {
@@ -938,6 +946,7 @@ fn send_refusal_mid_stream_aborts_production() {
         &Message::GetData(vec![known; 4]),
         Some(&chain),
         None,
+        &|_, _| true,
         &|| true,
         &|| true,
         &mut |message| {
@@ -1061,14 +1070,14 @@ impl TxInventory for FakeTxInventory {
         self.have_hashes.contains(hash.as_byte_array())
     }
 
-    fn get_tx(&self, txid: Txid) -> Option<Tx> {
+    fn get_tx(&self, txid: Txid) -> Option<(Tx, u64)> {
         let btid = bitcoin::Txid::from_byte_array(*txid.as_bytes());
-        self.txs_by_txid.get(&btid).cloned()
+        self.txs_by_txid.get(&btid).cloned().map(|tx| (tx, 1))
     }
 
-    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<(Tx, u64)> {
         let bwid = bitcoin::Wtxid::from_byte_array(*wtxid.as_bytes());
-        self.txs_by_wtxid.get(&bwid).cloned()
+        self.txs_by_wtxid.get(&bwid).cloned().map(|tx| (tx, 1))
     }
 
     fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>> {
@@ -1146,6 +1155,7 @@ fn getdata_completes_initial_broadcast_only_after_successful_send() -> Result<()
             serve_getdata(
                 None,
                 Some(&gateway),
+                &|_, _| true,
                 None,
                 &[item],
                 &mut not_found,
@@ -1159,6 +1169,7 @@ fn getdata_completes_initial_broadcast_only_after_successful_send() -> Result<()
         serve_getdata(
             None,
             Some(&gateway),
+            &|_, _| true,
             None,
             &[item],
             &mut not_found,
@@ -1708,6 +1719,7 @@ fn dispatch_collect_announcements_gated<S>(
         message,
         chain,
         tx_inventory,
+        &|_, _| true,
         &|| relay_open,
         &|| true,
         &mut |response| {
@@ -1762,6 +1774,7 @@ fn deferred_filter_request_keeps_ping_responsive_and_bounds_pending_work() -> Re
             &request,
             Some(&chain),
             None,
+            &|_, _| true,
             &|| true,
             &|| true,
             &mut |_| panic!("index not published"),
@@ -1848,6 +1861,7 @@ fn filter_remainder_is_the_parked_requests_only_cursor() -> Result<(), PeerError
         &request,
         Some(&NarrowingChain),
         None,
+        &|_, _| true,
         &|| true,
         &|| true,
         &mut |message| {
@@ -2002,6 +2016,7 @@ fn dispatch_over<S>(
         message,
         None,
         Some(inventory),
+        &|_, _| true,
         &|| true,
         &|| true,
         &mut |response| {
@@ -2287,6 +2302,7 @@ fn getpkgtxns_is_left_unanswered_while_the_production_gate_is_closed() -> Result
         }),
         None,
         Some(&counting),
+        &|_, _| true,
         &|| true,
         &|| false,
         &mut |response| panic!("a closed gate queued {response:?}"),
@@ -2308,11 +2324,11 @@ impl TxInventory for CountingResident<'_> {
         self.inner.have_tx(hash, hash_is_wtxid)
     }
 
-    fn get_tx(&self, txid: Txid) -> Option<Tx> {
+    fn get_tx(&self, txid: Txid) -> Option<(Tx, u64)> {
         self.inner.get_tx(txid)
     }
 
-    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<(Tx, u64)> {
         self.inner.get_tx_by_wtxid(wtxid)
     }
 

@@ -163,18 +163,20 @@ impl TxInventory for ScriptedTxs {
         })
     }
 
-    fn get_tx(&self, txid: Txid) -> Option<Tx> {
+    fn get_tx(&self, txid: Txid) -> Option<(Tx, u64)> {
         self.txs
             .iter()
             .find(|tx| tx.txid().as_bytes() == txid.as_bytes())
             .cloned()
+            .map(|tx| (tx, 1))
     }
 
-    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<(Tx, u64)> {
         self.txs
             .iter()
             .find(|tx| tx.wtxid().as_bytes() == wtxid.as_bytes())
             .cloned()
+            .map(|tx| (tx, 1))
     }
 
     fn resident_ancestor_package(&self, _wtxid: Wtxid) -> Option<Vec<Wtxid>> {
@@ -208,6 +210,65 @@ fn tiny_tx(byte: u8) -> Tx {
 
 fn tx_inventory_of(tx: &Tx) -> Inventory {
     Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array(*tx.txid().as_bytes()))
+}
+
+// P2P-01
+#[test]
+fn parked_getdata_refuses_unannounced_local_transactions_after_headroom_returns() -> TestResult {
+    use bitcoin_rs_mempool::{
+        AdmissionOrigin, Mempool, MempoolEntry, MempoolGateway, MempoolLimits,
+    };
+    let gateway = Arc::new(MempoolGateway::new(
+        Arc::new(parking_lot::RwLock::new(Mempool::new(
+            MempoolLimits::default(),
+        ))),
+        None,
+        bitcoin_rs_consensus::ValidationEngine::Native,
+        None,
+    ));
+    let tx = tiny_tx(175);
+    gateway
+        .insert_entry(
+            AdmissionOrigin::Rpc,
+            MempoolEntry::new(Arc::new(tx.clone()), 100, 10_000, 1, 0, 0),
+        )
+        .map_err(|error| TestError::Failure(error.to_string()))?;
+    let item = tx_inventory_of(&tx);
+    let mut shared = shared_with(ScriptedChain { blocks: Vec::new() });
+    shared.tx_inventory = Some(gateway.clone());
+    let (sender, receiver) = crate::test_support::message_channel();
+    let lease = PeerLease::new_with_budget(
+        sender,
+        true,
+        OutboundBudget::with_block_reserve(1, 1 << 20, 1_000),
+    );
+    lease
+        .send(Message::Ping(1750))
+        .map_err(|_| "initial frame")?;
+    let mut peer = parked_peer(vec![item]);
+    let mut keepalive = Keepalive::starting(Instant::now());
+    super::resume_parked_getdata(
+        &mut peer,
+        &shared,
+        &lease,
+        lease.source(None),
+        &mut keepalive,
+        &lease.budget_handle(),
+    )?;
+    assert_eq!(peer.pending_getdata, vec![item]);
+    assert_eq!(receiver.try_recv(), Ok(Message::Ping(1750)));
+    super::resume_parked_getdata(
+        &mut peer,
+        &shared,
+        &lease,
+        lease.source(None),
+        &mut keepalive,
+        &lease.budget_handle(),
+    )?;
+    assert!(peer.pending_getdata.is_empty());
+    assert_eq!(receiver.try_recv(), Ok(Message::NotFound(vec![item])));
+    assert_eq!(gateway.read().unbroadcast_transactions().count(), 1);
+    Ok(())
 }
 
 pub(super) fn shared_with(chain: ScriptedChain) -> ConnectionShared {
@@ -270,11 +331,30 @@ impl Served {
         Self::start_on(shared, budget, None, writer)
     }
 
+    fn start_announced(
+        shared: ConnectionShared,
+        budget: OutboundBudget,
+        writer: &WriterKind,
+        transactions: &[Tx],
+    ) -> Result<Self, TestError> {
+        Self::start_with_announcements(shared, budget, None, writer, transactions)
+    }
+
     pub(super) fn start_on(
         shared: ConnectionShared,
         budget: OutboundBudget,
         aggregate: Option<&Arc<SharedOutboundBudget>>,
         writer: &WriterKind,
+    ) -> Result<Self, TestError> {
+        Self::start_with_announcements(shared, budget, aggregate, writer, &[])
+    }
+
+    fn start_with_announcements(
+        shared: ConnectionShared,
+        budget: OutboundBudget,
+        aggregate: Option<&Arc<SharedOutboundBudget>>,
+        writer: &WriterKind,
+        announced: &[Tx],
     ) -> Result<Self, TestError> {
         let listener = TcpListener::bind(
             PeerEndpoint::from(([127, 0, 0, 1], 0))
@@ -297,6 +377,66 @@ impl Served {
         }
         let handle = lease.budget_handle();
         let close = lease.close_signal();
+
+        if !announced.is_empty() {
+            use bitcoin::secp256k1::rand::SeedableRng as _;
+            use bitcoin_rs_mempool::{
+                AdmissionOrigin, Mempool, MempoolEntry, MempoolGateway, MempoolLimits,
+            };
+            let gateway = MempoolGateway::new(
+                Arc::new(parking_lot::RwLock::new(Mempool::new(
+                    MempoolLimits::default(),
+                ))),
+                None,
+                bitcoin_rs_consensus::ValidationEngine::Native,
+                None,
+            );
+            let endpoint = crate::accepted_ip_identity(addr);
+            shared.peer_table.register(endpoint, lease.clone());
+            let version = crate::handshake::version_message(
+                1,
+                0,
+                crate::PeerRole::FullRelay,
+                bitcoin::p2p::ServiceFlags::NETWORK,
+                bitcoin_rs_primitives::USER_AGENT,
+            );
+            let info = crate::PeerInfo::outbound_from_version(
+                endpoint,
+                server_stream.local_addr()?,
+                &version,
+                0,
+                0,
+                Arc::new(crate::PeerCounters::default()),
+            );
+            shared.peer_table.publish_info(endpoint, &lease, info);
+            let mut rng = bitcoin::secp256k1::rand::rngs::StdRng::seed_from_u64(1750);
+            let now = Instant::now();
+            for tx in announced {
+                let result = gateway
+                    .insert_entry(
+                        AdmissionOrigin::Rpc,
+                        MempoolEntry::new(Arc::new(tx.clone()), 100, 10_000, 1, 0, 0),
+                    )
+                    .map_err(|error| TestError::Failure(error.to_string()))?;
+                let sequence = result.sequence_of(0).ok_or("admission sequence")?;
+                shared.peer_table.queue_transaction_relay(
+                    crate::RelayRequest::new(tx.txid(), tx.wtxid(), None, sequence),
+                    now,
+                    &mut rng,
+                );
+            }
+            shared.peer_table.poll_transaction_relay(
+                &gateway,
+                now + Duration::from_secs(31),
+                false,
+                &mut rng,
+            );
+            assert!(
+                outbound_rx
+                    .try_iter()
+                    .any(|frame| matches!(frame.message(), Message::Inv(_)))
+            );
+        }
 
         let (gate, writer_thread) = match writer {
             WriterKind::Gated => {
@@ -566,7 +706,7 @@ fn tiny_item_flood_pauses_at_the_item_cap_and_drains_in_order() -> TestResult {
         ScriptedChain { blocks: Vec::new() },
         ScriptedTxs { txs: txs.clone() },
     );
-    let mut served = Served::start(shared, budget, &WriterKind::Gated)?;
+    let mut served = Served::start_announced(shared, budget, &WriterKind::Gated, &txs)?;
     let unknown = Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array([9; 32]));
     let mut items = vec![unknown];
     items.extend(txs.iter().map(tx_inventory_of));
@@ -640,7 +780,7 @@ fn a_getdata_that_fills_the_last_slot_parks_its_trailing_notfound_and_the_next_p
         ScriptedChain { blocks: Vec::new() },
         ScriptedTxs { txs: txs.clone() },
     );
-    let mut served = Served::start(shared, budget, &WriterKind::Gated)?;
+    let mut served = Served::start_announced(shared, budget, &WriterKind::Gated, &txs)?;
     let unknown = Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array([9; 32]));
 
     served.client.send(&Message::GetData(vec![
@@ -717,6 +857,7 @@ fn a_drained_getdata_holds_reads_until_the_queue_can_take_a_reply() -> TestResul
         &mut peer,
         &shared,
         &lease,
+        lease.source(None),
         &mut keepalive,
         &mut parked_since,
     )?;
@@ -734,6 +875,7 @@ fn a_drained_getdata_holds_reads_until_the_queue_can_take_a_reply() -> TestResul
         &mut peer,
         &shared,
         &lease,
+        lease.source(None),
         &mut keepalive,
         &mut parked_since,
     )?;
@@ -800,6 +942,7 @@ fn a_full_queue_keeps_the_misses_and_sends_nothing() -> TestResult {
         &mut peer,
         &shared,
         &lease,
+        lease.source(None),
         &mut keepalive,
         &mut parked_since,
     )?;
@@ -835,6 +978,7 @@ fn nothing_parked_clears_the_marker_and_reads_on() -> TestResult {
         &mut peer,
         &shared,
         &lease,
+        lease.source(None),
         &mut keepalive,
         &mut parked_since,
     )?;
@@ -861,6 +1005,7 @@ fn a_dead_writer_ends_a_parked_step_without_waiting() -> TestResult {
         &mut peer,
         &shared,
         &lease,
+        lease.source(None),
         &mut keepalive,
         &mut parked_since,
     )?;
@@ -913,6 +1058,7 @@ fn an_open_queue_resumes_notfound_first_and_reparks_what_the_gate_stops() -> Tes
         &mut peer,
         &shared,
         &lease,
+        lease.source(None),
         &mut keepalive,
         &mut parked_since,
     )?;

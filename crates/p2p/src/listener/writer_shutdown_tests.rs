@@ -882,15 +882,18 @@ impl crate::TxInventory for RelayDuringInventoryLookup {
         self.gateway.have_tx(hash, witness)
     }
 
-    fn get_tx(&self, txid: bitcoin_rs_primitives::Txid) -> Option<bitcoin_rs_primitives::Tx> {
-        self.gateway.get_tx(txid)
+    fn get_tx(
+        &self,
+        txid: bitcoin_rs_primitives::Txid,
+    ) -> Option<(bitcoin_rs_primitives::Tx, u64)> {
+        crate::TxInventory::get_tx(self.gateway.as_ref(), txid)
     }
 
     fn get_tx_by_wtxid(
         &self,
         wtxid: bitcoin_rs_primitives::Wtxid,
-    ) -> Option<bitcoin_rs_primitives::Tx> {
-        self.gateway.get_tx_by_wtxid(wtxid)
+    ) -> Option<(bitcoin_rs_primitives::Tx, u64)> {
+        crate::TxInventory::get_tx_by_wtxid(self.gateway.as_ref(), wtxid)
     }
 
     fn resident_ancestor_package(

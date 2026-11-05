@@ -44,13 +44,20 @@ impl InboundClockKey {
 #[derive(Debug)]
 pub(super) struct RelayPeer {
     pending: HashMap<Wtxid, RelayRequest>,
-    known: HashSet<Identity>,
+    known: HashMap<Identity, TransactionKnowledge>,
     known_order: VecDeque<Identity>,
+    last_inv_sequence: Option<u64>,
     fee_filter: u64,
     next_inv: Instant,
     next_filter: Instant,
     last_filter: Option<u64>,
     sent_ibd_filter: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransactionKnowledge {
+    Received,
+    Announced,
 }
 
 fn next_inbound_inv(now: Instant, rng: &mut impl RngCore) -> Instant {
@@ -153,8 +160,9 @@ impl RelayPeer {
         };
         Self {
             pending: HashMap::new(),
-            known: HashSet::new(),
+            known: HashMap::new(),
             known_order: VecDeque::new(),
+            last_inv_sequence: None,
             fee_filter: 0,
             next_inv,
             next_filter: now,
@@ -164,7 +172,8 @@ impl RelayPeer {
     }
 
     fn note_known(&mut self, identity: Identity) {
-        if self.known.insert(identity) {
+        if !self.known.contains_key(&identity) {
+            self.known.insert(identity, TransactionKnowledge::Received);
             self.known_order.push_back(identity);
             if self.known_order.len() > MAX_KNOWN {
                 if let Some(old) = self.known_order.pop_front() {
@@ -207,6 +216,21 @@ impl RelayPeer {
 }
 
 impl PeerTable {
+    pub(crate) fn transaction_getdata_allowed(
+        &self,
+        source: PeerSource,
+        sequence: u64,
+        wtxid: Wtxid,
+    ) -> bool {
+        let policy = self.tx_policy.lock();
+        let Some(peer) = policy.relay.get(&source) else {
+            return false;
+        };
+        peer.last_inv_sequence
+            .is_some_and(|cutoff| sequence <= cutoff)
+            || peer.known.get(&Identity::Wtxid(wtxid.0)) == Some(&TransactionKnowledge::Announced)
+    }
+
     #[must_use]
     pub fn transaction_fee_filter(&self, source: PeerSource) -> u64 {
         self.tx_policy
@@ -268,7 +292,7 @@ impl PeerTable {
             } else {
                 Identity::Txid(request.txid.0)
             };
-            if peer.known.contains(&identity) {
+            if peer.known.contains_key(&identity) {
                 continue;
             }
             if let Some(current) = peer.pending.get_mut(&request.wtxid) {
@@ -505,9 +529,9 @@ impl PeerTable {
             return;
         }
         let target = (INVENTORY_TARGET + (requests.len() / 1000) * 5).min(MAX_BATCH);
-        let candidates = {
+        let (candidates, sequence) = {
             let pool = gateway.read();
-            requests
+            let candidates = requests
                 .into_iter()
                 .filter_map(|request| {
                     let entry = pool.entry_by_txid_at_sequence(&request.txid, request.sequence)?;
@@ -524,7 +548,8 @@ impl PeerTable {
                             .collect(),
                     })
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (candidates, pool.sequence_number())
         };
         let candidates = dependency_order(candidates);
         let mut policy = self.tx_policy.lock();
@@ -547,7 +572,7 @@ impl PeerTable {
             };
             let fee_allowed = bitcoin_rs_mempool::required_fee(peer.fee_filter, candidate.vsize)
                 .is_ok_and(|required| i128::from(candidate.fee) >= required);
-            if peer.known.contains(&identity) || !fee_allowed {
+            if peer.known.contains_key(&identity) || !fee_allowed {
                 continue;
             }
             if items.len() >= target {
@@ -576,8 +601,17 @@ impl PeerTable {
         }
         match self.send(source, Message::Inv(items)) {
             Ok(()) => {
+                peer.last_inv_sequence = Some(
+                    peer.last_inv_sequence
+                        .map_or(sequence, |prior| prior.max(sequence)),
+                );
                 for identity in identities {
                     peer.note_known(identity);
+                }
+                for request in offered {
+                    let identity = Identity::Wtxid(request.wtxid.0);
+                    peer.note_known(identity);
+                    peer.known.insert(identity, TransactionKnowledge::Announced);
                 }
             }
             Err(crate::OutboundRefusal::Saturated(_)) => {

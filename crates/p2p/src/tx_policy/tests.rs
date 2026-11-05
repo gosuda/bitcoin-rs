@@ -235,10 +235,10 @@ impl TxInventory for TestInventoryView {
     fn have_tx(&self, _: Hash256, _: bool) -> bool {
         self.0.load(std::sync::atomic::Ordering::Relaxed)
     }
-    fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_primitives::Tx> {
+    fn get_tx(&self, _: Txid) -> Option<(bitcoin_rs_primitives::Tx, u64)> {
         None
     }
-    fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_primitives::Tx> {
+    fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<(bitcoin_rs_primitives::Tx, u64)> {
         None
     }
     fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
@@ -392,10 +392,10 @@ impl TxInventory for CountingInventory {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(&key)
     }
-    fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_primitives::Tx> {
+    fn get_tx(&self, _: Txid) -> Option<(bitcoin_rs_primitives::Tx, u64)> {
         None
     }
-    fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_primitives::Tx> {
+    fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<(bitcoin_rs_primitives::Tx, u64)> {
         None
     }
     fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
@@ -607,10 +607,10 @@ fn inventory_callbacks_never_observe_an_unsent_owner_reservation() {
             }
             false
         }
-        fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_primitives::Tx> {
+        fn get_tx(&self, _: Txid) -> Option<(bitcoin_rs_primitives::Tx, u64)> {
             None
         }
-        fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_primitives::Tx> {
+        fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<(bitcoin_rs_primitives::Tx, u64)> {
             None
         }
         fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
@@ -645,10 +645,10 @@ fn request_lifetime_starts_after_inventory_checks_and_commit_lock() {
             self.0.store(61, Ordering::Relaxed);
             false
         }
-        fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_primitives::Tx> {
+        fn get_tx(&self, _: Txid) -> Option<(bitcoin_rs_primitives::Tx, u64)> {
             None
         }
-        fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_primitives::Tx> {
+        fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<(bitcoin_rs_primitives::Tx, u64)> {
             None
         }
         fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {

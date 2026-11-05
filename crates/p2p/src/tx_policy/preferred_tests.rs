@@ -338,10 +338,10 @@ impl TxInventory for EvictDuringRead<'_> {
         }
         false
     }
-    fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_primitives::Tx> {
+    fn get_tx(&self, _: Txid) -> Option<(bitcoin_rs_primitives::Tx, u64)> {
         None
     }
-    fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_primitives::Tx> {
+    fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<(bitcoin_rs_primitives::Tx, u64)> {
         None
     }
     fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
