@@ -180,10 +180,10 @@ bytes    = { version = ">=1.11, <2", default-features = false }
 zerocopy = { version = "0.8.57", default-features = false, features = ["derive", "std"] }
 
 # --- Storage backends ---------------------------------------------------------
-# rust-rocksdb 0.53 line.
+# rust-rocksdb 0.54 line.
 # `default = [snappy, lz4, zstd, zlib, bzip2, bindgen-runtime]` — disable to
 # pick only what the explicit rocksdb feature uses.
-rust-rocksdb = { version = ">=0.53, <0.54", default-features = false, features = [
+rust-rocksdb = { version = ">=0.54, <0.55", default-features = false, features = [
     "mt_static", "snappy", "lz4", "zstd",
 ] }
 
