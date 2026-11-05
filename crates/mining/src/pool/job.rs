@@ -193,6 +193,8 @@ fn slot_prefix(slot: u64, len: usize) -> Vec<u8> {
 
 #[derive(Debug, Eq, Error, PartialEq)]
 pub enum JobError {
+    #[error("mining work is suspended")]
+    Suspended,
     #[error("invalid job book configuration: {0}")]
     InvalidConfig(&'static str),
     #[error("candidate cannot admit the declared coinbase budget: {0}")]

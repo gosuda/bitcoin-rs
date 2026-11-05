@@ -137,6 +137,9 @@ pub(super) fn get(ctx: &Context, path: &str) -> Response {
 pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Response {
     match path {
         "/tx" => {
+            if handler.context().quarantined() {
+                return service_unavailable(crate::RpcError::Quarantined.to_string());
+            }
             let Ok(hex) = core::str::from_utf8(body) else {
                 return bad_request("transaction body must be UTF-8 hex");
             };

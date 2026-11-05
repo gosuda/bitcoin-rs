@@ -36,6 +36,27 @@ fn publish_active_chain(ctx: &Context, headers: &[Header]) -> Vec<Hash256> {
     hashes
 }
 
+// DIV-03
+#[test]
+fn disabled_rest_stays_not_found_during_quarantine() {
+    let stop = bitcoin_rs_chain::LatchWriter::new();
+    let ctx = Arc::new(Context::from_handles(crate::context::ContextHandles {
+        quarantine: stop.reader(),
+        ..Default::default()
+    }));
+    stop.trigger();
+    assert_eq!(route(&ctx, "/rest/chaininfo.json", "", false).status, 404);
+    assert_eq!(
+        route_post(&ctx, "/rest/getutxos.bin", &[], false).status,
+        404
+    );
+    assert_eq!(route(&ctx, "/rest/chaininfo.json", "", true).status, 503);
+    assert_eq!(
+        route_post(&ctx, "/rest/getutxos.bin", &[], true).status,
+        503
+    );
+}
+
 struct PanicBlockSource;
 
 impl bitcoin_rs_chain::BlockBodySource for PanicBlockSource {

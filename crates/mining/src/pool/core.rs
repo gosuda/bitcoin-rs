@@ -255,6 +255,7 @@ pub(super) struct ShareRequest<'a> {
 }
 
 pub struct PoolCore {
+    work_stop: Option<bitcoin_rs_chain::LatchReader>,
     book: Mutex<JobBook>,
     published: Mutex<Published>,
     control: Arc<dyn MiningControl>,
@@ -306,6 +307,7 @@ impl PoolCore {
         let budget = config.budget;
         let book = JobBook::new(config)?;
         Ok(Self {
+            work_stop: None,
             book: Mutex::new(book),
             published: Mutex::new(Published::default()),
             control,
@@ -321,6 +323,12 @@ impl PoolCore {
             pending_count: AtomicUsize::new(0),
             draining: AtomicBool::new(false),
         })
+    }
+
+    #[must_use]
+    pub fn with_work_stop(mut self, stop: bitcoin_rs_chain::LatchReader) -> Self {
+        self.work_stop = Some(stop);
+        self
     }
 
     #[must_use]
@@ -360,6 +368,16 @@ impl PoolCore {
     pub fn with_job_book<R>(&self, operation: impl FnOnce(&mut JobBook) -> R) -> R {
         let mut book = locked(&self.book);
         operation(&mut book)
+    }
+
+    fn work_stopped(&self) -> bool {
+        self.work_stop
+            .as_ref()
+            .is_some_and(bitcoin_rs_chain::LatchReader::is_triggered)
+    }
+
+    pub fn with_active_job_book<R>(&self, operation: impl FnOnce(&mut JobBook) -> R) -> Option<R> {
+        self.with_job_book(|book| (!self.work_stopped()).then(|| operation(book)))
     }
 
     #[must_use]
@@ -414,6 +432,9 @@ impl PoolCore {
         extra_outputs: Vec<TxOut>,
     ) -> Result<Installed, JobError> {
         let mut book = locked(&self.book);
+        if self.work_stopped() {
+            return Err(JobError::Suspended);
+        }
         if invalidate && !book.invalidate_active().is_empty() {
             locked(&self.published).job = None;
         }
@@ -617,6 +638,12 @@ impl PoolCore {
 
         let outcome = {
             let mut book = locked(&self.book);
+            if self.work_stopped() {
+                return Err(SubmitFailure::Share(ShareError::Stale {
+                    job: request.job,
+                    reason: StaleReason::Invalidated,
+                }));
+            }
             let submission = ShareSubmission {
                 session: request.session,
                 job: request.job,
@@ -629,6 +656,12 @@ impl PoolCore {
                 .map_err(SubmitFailure::Share)?
         };
 
+        if self.work_stopped() {
+            return Err(SubmitFailure::Share(ShareError::Stale {
+                job: request.job,
+                reason: StaleReason::Invalidated,
+            }));
+        }
         match outcome {
             ShareOutcome::Share(accepted) => self.credit_share(worker, accepted, &mut reservation),
             ShareOutcome::Block(found) => self.credit_block(worker, found, &mut reservation),

@@ -2,6 +2,7 @@ mod addrman_restart_e2e;
 mod block_inputs;
 mod cli_process;
 mod compact_blocks_e2e;
+mod consensus_divergence;
 #[path = "gates/g17_dependency_direction.rs"]
 mod g17_dependency_direction;
 mod head_sync_e2e;

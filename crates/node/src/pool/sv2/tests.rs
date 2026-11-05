@@ -147,6 +147,27 @@ fn pool_core(
     Ok(PoolCore::new(config, control, ledger)?)
 }
 
+// DIV-03
+#[test]
+fn stopped_pool_refuses_to_reinstall_a_cached_candidate() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let ledger = ledger_host(directory.path())?;
+    let control = Arc::new(FakeMiningControl::default());
+    let stop = bitcoin_rs_chain::LatchWriter::new();
+    let core = pool_core(&control, &ledger)?.with_work_stop(stop.reader());
+    let cached = candidate(100, 0xab)?;
+    let _ = core.install(Arc::clone(&cached), Vec::new())?;
+    stop.trigger();
+    assert!(core.with_active_job_book(|_| ()).is_none());
+    assert_eq!(core.invalidate_active().len(), 1);
+    assert!(matches!(
+        core.install(cached, Vec::new()),
+        Err(bitcoin_rs_mining::pool::JobError::Suspended)
+    ));
+    assert!(core.current_job().is_none());
+    Ok(())
+}
+
 fn server_config(ledger: &Arc<LedgerHost>) -> Result<ServerConfig, FixtureError> {
     let mut config = ServerConfig::new(ShareTarget::from_le_bytes([0xff; 32])?);
     config.limits = Limits {

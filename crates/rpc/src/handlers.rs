@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use core::str::FromStr as _;
 
 use bitcoin_rs_primitives::Txid;
-use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value};
+use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value};
 
 use crate::context::Context;
 use crate::error::RpcError;
@@ -86,6 +86,30 @@ impl Handler {
         else {
             return Err(RpcError::MethodNotFound(method.to_owned()));
         };
+        let scan_abort = matches!(row.execution, crate::registry::Execution::Scan)
+            && crate::registry::scan_action(params) == Some("abort");
+        let admitted = || {
+            !self.ctx.quarantined()
+                || scan_abort
+                || matches!(
+                    method,
+                    "getrpcinfo"
+                        | "getblockchaininfo"
+                        | "getchainstates"
+                        | "getdeploymentinfo"
+                        | "getblockheader"
+                        | "getblock"
+                        | "getblockverdict"
+                        | "getpeerinfo"
+                        | "getnetworkinfo"
+                        | "stop"
+                        | "help"
+                        | "uptime"
+                )
+        };
+        if !admitted() {
+            return Err(RpcError::Quarantined);
+        }
         let bound = row
             .arg_names
             .map(|names| bind_named_params(params, names))
@@ -108,14 +132,29 @@ impl Handler {
                 })
             })
             .transpose()?;
+        if matches!(row.execution, crate::registry::Execution::Bounded) && self.is_stopping() {
+            return Err(RpcError::Misc("RPC server is stopping".to_owned()));
+        }
         let _active = self.ctx.active_calls.begin(method);
         let cancellation = self.stop.reader();
-        match handler {
+        let mut result = match handler {
             crate::registry::Dispatch::Immediate(handler) => handler(&self.ctx, params),
             crate::registry::Dispatch::Cancellable(handler) => {
                 handler(&self.ctx, params, &cancellation)
             }
+        }?;
+        if self.ctx.quarantined() {
+            let receipt = row.completes_with_receipt
+                && !(method == "generateblock"
+                    && params.get(2).and_then(Value::as_bool) == Some(false));
+            if !admitted() && !receipt {
+                return Err(RpcError::Quarantined);
+            }
+            if let Some(object) = result.as_object_mut() {
+                object.insert("consensus_quarantine", sonic_rs::json!(true));
+            }
         }
+        Ok(result)
     }
 }
 

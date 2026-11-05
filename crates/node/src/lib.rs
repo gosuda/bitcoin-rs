@@ -4,6 +4,7 @@ extern crate alloc;
 
 mod chain_effects;
 pub mod config;
+mod divergence;
 mod embed;
 mod event_loop;
 pub mod options;

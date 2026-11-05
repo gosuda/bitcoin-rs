@@ -450,11 +450,13 @@ fn primitive_responses_stay_primitives() -> Result<(), crate::support::TestError
     Ok(())
 }
 
+// DIV-03
 #[test]
 fn submitblock_truncates_trailing_bytes_to_consumed_prefix() -> Result<(), crate::support::TestError>
 {
     #[derive(Default)]
     struct RecordingSubmit {
+        quarantine: bitcoin_rs_chain::LatchWriter,
         submitted: std::sync::Mutex<Option<Vec<u8>>>,
     }
 
@@ -479,6 +481,7 @@ fn submitblock_truncates_trailing_bytes_to_consumed_prefix() -> Result<(), crate
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 Some(payload.bytes().to_vec());
+            self.quarantine.trigger();
             Ok(BlockValidationResult::Accepted)
         }
 
@@ -515,8 +518,14 @@ fn submitblock_truncates_trailing_bytes_to_consumed_prefix() -> Result<(), crate
 
     let control: Arc<RecordingSubmit> = Arc::new(RecordingSubmit::default());
     let handler = Handler::new(Arc::new(
-        Context::new().with_mining_control(control.clone()),
+        Context::from_handles(bitcoin_rs_rpc::context::ContextHandles {
+            quarantine: control.quarantine.reader(),
+            ..Default::default()
+        })
+        .with_mining_control(control.clone()),
     ));
+    let result = handler.dispatch("submitblock", &json!(["zz"]));
+    assert_eq!(result.err().map(|error| error.code()), Some(-22));
     let result = handler.dispatch("submitblock", &json!([hex]))?;
     assert!(
         result.is_null(),
@@ -531,10 +540,7 @@ fn submitblock_truncates_trailing_bytes_to_consumed_prefix() -> Result<(), crate
         "the submitted payload must retain exactly the consumed prefix"
     );
 
-    let error = match handler.dispatch("submitblock", &json!(["zz"])) {
-        Err(error) => error,
-        Ok(_) => return Err("undecodable hex was accepted".into()),
-    };
-    assert_eq!(error.code(), -22);
+    let result = handler.dispatch("submitblock", &json!([hex]));
+    assert_eq!(result.err().map(|error| error.code()), Some(-32001));
     Ok(())
 }

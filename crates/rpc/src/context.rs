@@ -262,6 +262,7 @@ pub use bitcoin_rs_index::{
 };
 
 pub struct ContextHandles {
+    pub quarantine: LatchReader,
     pub silent_payments: bool,
     pub compressed_transactions: bool,
     pub shutdown_request: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -442,6 +443,7 @@ pub struct Context {
     pub debug_log_path: Option<PathBuf>,
     server_bound_at: Mutex<Option<Instant>>,
     block_render_budget: Arc<BlockRenderBudget>,
+    quarantine: LatchReader,
     pub(crate) esplora_admission: crate::esplora::admission::Admission,
     pub(crate) active_calls: ActiveCalls,
 }
@@ -596,6 +598,7 @@ impl Default for NetworkHandles {
 impl Default for ContextHandles {
     fn default() -> Self {
         Self {
+            quarantine: bitcoin_rs_chain::LatchWriter::new().reader(),
             silent_payments: false,
             compressed_transactions: false,
             shutdown_request: None,
@@ -644,6 +647,7 @@ impl Context {
     #[must_use]
     pub fn from_handles(handles: ContextHandles) -> Self {
         let ContextHandles {
+            quarantine,
             silent_payments,
             compressed_transactions,
             shutdown_request,
@@ -676,8 +680,14 @@ impl Context {
             esplora_admission: crate::esplora::admission::Admission::new(
                 crate::esplora::DEFAULT_MAX_QUERIES,
             ),
+            quarantine,
             active_calls: ActiveCalls::new(),
         }
+    }
+
+    #[must_use]
+    pub fn quarantined(&self) -> bool {
+        self.quarantine.is_triggered()
     }
 
     pub(crate) fn mark_server_bound(&self) {

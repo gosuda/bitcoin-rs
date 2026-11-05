@@ -31,6 +31,28 @@ pub enum Surface {
 #[must_use]
 pub fn route(handler: &Handler, surface: Surface, path: &str, query: &str) -> Response {
     let ctx = handler.context();
+    if path == "/health" {
+        let unhealthy = ctx.quarantined();
+        return Response {
+            status: if unhealthy { 503 } else { 200 },
+            reason: if unhealthy {
+                "Service Unavailable"
+            } else {
+                "OK"
+            },
+            content_type: "application/json",
+            body: if unhealthy {
+                br#"{"consensus_quarantine":true}"#.to_vec()
+            } else {
+                br#"{"consensus_quarantine":false}"#.to_vec()
+            },
+        };
+    }
+    crate::rest::economic_response(ctx, || route_query(handler, surface, path, query))
+}
+
+fn route_query(handler: &Handler, surface: Surface, path: &str, query: &str) -> Response {
+    let ctx = handler.context();
     // Admission precedes even chain-view capture. Keep the permit until all
     // projection and generation checks finish, including error returns.
     let _permit = if admission::is_expensive(path) {
@@ -69,16 +91,19 @@ fn dispatch_get(
 
 #[must_use]
 pub(crate) fn route_post(handler: &Handler, surface: Surface, path: &str, body: &[u8]) -> Response {
-    if surface == Surface::Backend {
+    if surface == Surface::Backend
+        && let Some(read) = backend::post_route(path)
+    {
         let ctx = handler.context();
-        let projection = Projection::new(&ctx);
-        let chain_view = projection.capture_chain_view();
-        if let Some(response) = backend::post(handler, path, body) {
-            return match projection.ensure_chain_view(chain_view.as_ref()) {
+        return crate::rest::economic_response(ctx, || {
+            let projection = Projection::new(ctx);
+            let chain_view = projection.capture_chain_view();
+            let response = read(ctx, body);
+            match projection.ensure_chain_view(chain_view.as_ref()) {
                 Ok(()) => response,
-                Err(response) => response,
-            };
-        }
+                Err(error) => error,
+            }
+        });
     }
     public::post(handler, path, body)
 }

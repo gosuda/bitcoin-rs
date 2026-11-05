@@ -495,7 +495,7 @@ That document gives consumer usage and defers to this clause for every consisten
   - `CoveredPrefix { floor: u32, height: u32, hash: Hash256 }`
   - `AtPrefix<T> { prefix: CoveredPrefix, answer: T }`
   - `HistoricalQueryError { Retry, Unavailable(HistoricalUnavailableCause), Storage(CompactString) }`
-  - `HistoricalUnavailableCause { Shared(TxUnavailableCause), NoCoveredPrefix { capability: IndexCapability }, AncestryBudgetExhausted { capability: IndexCapability, watermark_height: u32 }, PrefixBelowFloor { floor: u32 } }`
+  - `HistoricalUnavailableCause { ConsensusQuarantine, Shared(TxUnavailableCause), NoCoveredPrefix { capability: IndexCapability }, AncestryBudgetExhausted { capability: IndexCapability, watermark_height: u32 }, PrefixBelowFloor { floor: u32 } }`
 - `CoveredPrefix.hash` is the full chain hash at `height`.
 - `floor` is the lowest provable height (`0` means genesis, positive means a pruned prefix).
 - `Txid`, `Tx`, and `OutPoint` are `bitcoin_rs_primitives` types.

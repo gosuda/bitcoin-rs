@@ -2,6 +2,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RpcError {
+    #[error("consensus-divergence quarantine: economic services suspended")]
+    Quarantined,
     #[error("parse error: {0}")]
     Parse(String),
     #[error("{0}")]
@@ -60,6 +62,7 @@ impl RpcError {
     #[must_use]
     pub const fn code(&self) -> i64 {
         match self {
+            Self::Quarantined => -32_001,
             Self::Parse(_) | Self::TopLevelParse(_) => Self::PARSE_ERROR,
             Self::Misc(_) => -1,
             Self::InvalidRequest(_) => Self::INVALID_REQUEST,

@@ -7,6 +7,42 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::context::Context;
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 
+// DIV-03
+#[test]
+fn quarantine_permits_scan_abort_and_stopping_refuses_new_diagnostic_validation() {
+    use sonic_rs::json;
+    let stop = LatchWriter::new();
+    let ctx = Arc::new(Context::from_handles(crate::context::ContextHandles {
+        quarantine: stop.reader(),
+        ..Default::default()
+    }));
+    let handler = Handler::new(Arc::clone(&ctx));
+    let _scan = ctx.chain.utxo.reserve_scan().expect("running scan");
+    stop.trigger();
+    assert_eq!(
+        handler
+            .dispatch("scantxoutset", &json!({"action":"abort"}))
+            .expect("cancel scan"),
+        json!(true)
+    );
+    assert!(matches!(
+        handler.dispatch("scantxoutset", &json!(["start"])),
+        Err(crate::RpcError::Quarantined)
+    ));
+    assert!(matches!(
+        handler.dispatch("generateblock", &json!({"unknown":"field"})),
+        Err(crate::RpcError::Quarantined)
+    ));
+    assert!(matches!(
+        handler.dispatch("scantxoutset", &json!({"action":"abort","args":["start"]})),
+        Err(crate::RpcError::InvalidParameter(_))
+    ));
+    handler.stop();
+    assert!(
+        matches!(handler.dispatch("getblockverdict", &json!([])), Err(crate::RpcError::Misc(message)) if message == "RPC server is stopping")
+    );
+}
+
 fn rest_wire_request(request: &[u8], enabled: bool) -> std::io::Result<Vec<u8>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let mut client = TcpStream::connect(listener.local_addr()?)?;

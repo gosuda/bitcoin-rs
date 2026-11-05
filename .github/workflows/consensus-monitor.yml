@@ -1,0 +1,37 @@
+name: consensus-monitor
+
+on:
+  pull_request:
+    paths:
+      - scripts/consensus_monitor.py
+      - crates/node/src/divergence.rs
+      - bin/bitcoin-rs/tests/consensus_divergence.rs
+      - bin/bitcoin-rs/tests/support/divergence_witness.py
+      - .github/workflows/consensus-monitor.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: consensus-monitor-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-regtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - run: bash scripts/provision-ci-reference-fixtures.sh core
+      - run: >-
+          cargo test --locked -p bitcoin-rs --no-default-features --features fjall,pool-sv2
+          --test suite consensus_divergence::

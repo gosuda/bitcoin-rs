@@ -62,6 +62,10 @@ pub fn route(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Resp
     if !enabled {
         return not_found();
     }
+    economic_response(ctx, || route_get(ctx, path, query))
+}
+
+fn route_get(ctx: &Arc<Context>, path: &str, query: &str) -> Response {
     if let Some(suffix) = path.strip_prefix("/rest/tx/") {
         return route_tx(ctx, suffix);
     }
@@ -108,6 +112,20 @@ pub fn route_post(ctx: &Arc<Context>, path: &str, body: &[u8], enabled: bool) ->
     if !enabled {
         return not_found();
     }
+    economic_response(ctx, || post_getutxos(ctx, path, body))
+}
+
+pub(crate) fn economic_response(ctx: &Context, produce: impl FnOnce() -> Response) -> Response {
+    if !ctx.quarantined() {
+        let response = produce();
+        if !ctx.quarantined() {
+            return response;
+        }
+    }
+    service_unavailable(RpcError::Quarantined.to_string())
+}
+
+fn post_getutxos(ctx: &Arc<Context>, path: &str, body: &[u8]) -> Response {
     let Some(suffix) = getutxos_suffix(path) else {
         return not_found();
     };

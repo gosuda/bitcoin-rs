@@ -21,6 +21,8 @@ use bitcoin_rs_chainstate::events::ChainSnapshot;
 
 #[derive(Debug, Error)]
 pub enum NodeError {
+    #[error("consensus-divergence quarantine")]
+    Quarantined,
     #[error("node startup failed: {0}")]
     Startup(String),
     #[error("node shutdown failed: {0}")]
@@ -53,11 +55,19 @@ impl Node {
     }
 
     #[must_use]
+    pub fn consensus_quarantined(&self) -> bool {
+        self.context.quarantined()
+    }
+
+    #[must_use]
     pub fn snapshot(&self) -> ChainSnapshot {
         self.state.chainstate().chain_snapshot()
     }
 
     pub fn mining_control(&self) -> Result<&dyn bitcoin_rs_mining::MiningControl, NodeError> {
+        if self.consensus_quarantined() {
+            return Err(NodeError::Quarantined);
+        }
         self.context
             .mining
             .mining_control
@@ -77,6 +87,9 @@ impl Node {
         &self,
         path: impl AsRef<std::path::Path>,
     ) -> Result<(), NodeError> {
+        if self.consensus_quarantined() {
+            return Err(NodeError::Quarantined);
+        }
         self.state
             .activate_assumeutxo_snapshot_file(path)
             .map_err(|error| NodeError::Snapshot(error.to_string()))
@@ -113,10 +126,20 @@ impl Node {
         Ok(Some(block))
     }
 
+    fn check_historical_admission(&self) -> Result<(), HistoricalQueryError> {
+        if self.consensus_quarantined() {
+            return Err(HistoricalQueryError::Unavailable(
+                HistoricalUnavailableCause::ConsensusQuarantine,
+            ));
+        }
+        Ok(())
+    }
+
     pub fn transaction_at_prefix(
         &self,
         txid: &Txid,
     ) -> Result<AtPrefix<Option<(u32, Tx)>>, HistoricalQueryError> {
+        self.check_historical_admission()?;
         let Some(adapter) = self.state.historical_index_adapter() else {
             return Err(HistoricalQueryError::Unavailable(
                 HistoricalUnavailableCause::Shared(TxUnavailableCause::CapabilityDisabled(
@@ -124,13 +147,16 @@ impl Node {
                 )),
             ));
         };
-        adapter.transaction_at_prefix(txid)
+        let answer = adapter.transaction_at_prefix(txid)?;
+        self.check_historical_admission()?;
+        Ok(answer)
     }
 
     pub fn script_history_at_prefix(
         &self,
         script: ScriptHash,
     ) -> Result<AtPrefix<ScriptIndexSnapshot>, HistoricalQueryError> {
+        self.check_historical_admission()?;
         let Some(adapter) = self.state.historical_index_adapter() else {
             return Err(HistoricalQueryError::Unavailable(
                 HistoricalUnavailableCause::Shared(TxUnavailableCause::CapabilityDisabled(
@@ -138,13 +164,16 @@ impl Node {
                 )),
             ));
         };
-        adapter.script_history_at_prefix(script)
+        let answer = adapter.script_history_at_prefix(script)?;
+        self.check_historical_admission()?;
+        Ok(answer)
     }
 
     pub fn spender_at_prefix(
         &self,
         outpoint: OutPoint,
     ) -> Result<AtPrefix<Option<SpendingRecord>>, HistoricalQueryError> {
+        self.check_historical_admission()?;
         let Some(adapter) = self.state.historical_index_adapter() else {
             return Err(HistoricalQueryError::Unavailable(
                 HistoricalUnavailableCause::Shared(TxUnavailableCause::CapabilityDisabled(
@@ -152,7 +181,9 @@ impl Node {
                 )),
             ));
         };
-        adapter.spender_at_prefix(outpoint)
+        let answer = adapter.spender_at_prefix(outpoint)?;
+        self.check_historical_admission()?;
+        Ok(answer)
     }
 
     pub async fn tx_by_id(&self, txid: Txid) -> Result<Tx, NodeError> {
@@ -183,13 +214,21 @@ impl Node {
 
     #[must_use]
     pub fn fee_estimate(&self, confirmation_target_blocks: u32) -> Option<FeeRate> {
-        self.state
+        if self.consensus_quarantined() {
+            return None;
+        }
+        let estimate = self
+            .state
             .mempool_reader()
             .read()
-            .estimate_fee_rate(confirmation_target_blocks)
+            .estimate_fee_rate(confirmation_target_blocks);
+        estimate.filter(|_| !self.consensus_quarantined())
     }
 
     pub async fn broadcast(&self, tx: Tx) -> Result<MutationResult, NodeError> {
+        if self.consensus_quarantined() {
+            return Err(NodeError::Quarantined);
+        }
         let chainstate = self.state.chainstate();
         let chain = ChainAdmissionView::new(
             chainstate.utxo_reader(),
@@ -210,6 +249,9 @@ impl Node {
     }
 
     pub async fn broadcast_package(&self, txs: Vec<Tx>) -> Result<MutationResult, NodeError> {
+        if self.consensus_quarantined() {
+            return Err(NodeError::Quarantined);
+        }
         let chainstate = self.state.chainstate();
         let chain = ChainAdmissionView::new(
             chainstate.utxo_reader(),
@@ -337,6 +379,41 @@ mod tests {
         config.rpc.bind = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
         config.observability.metrics_bind = None;
         config
+    }
+
+    // DIV-03
+    #[test]
+    fn quarantined_embedder_refuses_broadcast_before_mempool_admission() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let initial = block_on(Node::start(
+            embedded_config(dir.path()),
+            crate::RuntimeInputs::default(),
+        ))
+        .expect("initial node");
+        block_on(initial.shutdown()).expect("initial shutdown");
+        std::fs::write(dir.path().join("consensus-divergence.json"), b"{}").expect("marker");
+        let node = block_on(Node::start(
+            embedded_config(dir.path()),
+            crate::RuntimeInputs::default(),
+        ))
+        .expect("diagnostic node starts");
+        assert!(node.consensus_quarantined());
+        assert!(matches!(node.mining_control(), Err(NodeError::Quarantined)));
+        let tx = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![],
+            outputs: vec![],
+        };
+        assert!(matches!(
+            block_on(node.broadcast(tx.clone())),
+            Err(NodeError::Quarantined)
+        ));
+        assert!(matches!(
+            block_on(node.broadcast_package(vec![tx])),
+            Err(NodeError::Quarantined)
+        ));
+        block_on(node.shutdown()).expect("shutdown");
     }
 
     // EMB-05

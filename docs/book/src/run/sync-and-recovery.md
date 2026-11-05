@@ -75,6 +75,8 @@ This chapter shows no import transcript because an import needs a pinned archive
 
 > **Warning** A node reporting `is_apply_halted: true` has stopped applying blocks and is asking to exit. Restarting replays durable state with a clean engine; retrying the same RPC is not a recovery step.
 
+For conflicting consensus verdicts, follow the [incident runbook](https://github.com/gosuda/bitcoin-rs/blob/main/docs/consensus-divergence.md).
+
 ## Next
 
 Stop and upgrade it safely: [Shutdown and upgrades](shutdown-and-upgrade.md).

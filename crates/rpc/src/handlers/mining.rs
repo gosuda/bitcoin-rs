@@ -70,6 +70,38 @@ pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     render_mining_info(&info)
 }
 
+pub(crate) fn getblockverdict(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    ensure_at_most_params(params, 1)?;
+    let hex = required_str(params, 0, "block hex is required")?;
+    if hex.len() > 8_000_000 {
+        return Err(block_decode_failed());
+    }
+    let (payload, consumed) = decode_submitted_block(hex)?;
+    if consumed.checked_mul(2) != Some(hex.len()) {
+        return Err(block_decode_failed());
+    }
+    let control = ctx
+        .mining
+        .mining_control
+        .as_ref()
+        .ok_or(RpcError::MethodDisabled("block validation unavailable"))?;
+    use bitcoin::hashes::{Hash as _, sha256};
+    let (verdict, reason) = match control.check_block(&payload) {
+        Ok(BlockValidationResult::Accepted) => (
+            "pending",
+            Some("proposal passed; active-chain acceptance not established".to_owned()),
+        ),
+        Ok(BlockValidationResult::Rejected(reason)) => {
+            ("consensus-invalid", Some(reason.to_string()))
+        }
+        Ok(_) => ("pending", None),
+        Err(error) => ("operational-failure", Some(error.to_string())),
+    };
+    Ok(json!({"hash": payload.block().block_hash().to_string(),
+        "parent": payload.block().header.prev_blockhash.to_string(),
+        "sha256": sha256::Hash::hash(payload.bytes()).as_byte_array().as_hex().to_string(), "verdict": verdict, "reason": reason}))
+}
+
 pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let control = ctx
         .mining

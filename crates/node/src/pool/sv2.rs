@@ -386,9 +386,13 @@ fn process_connection_turn(
     pipeline: BlockPipeline<'_>,
     input: &[u8],
 ) -> Result<bool, RunError> {
-    services
+    let Some(turn) = services
         .core
-        .with_job_book(|book| connection.feed(input, book))?;
+        .with_active_job_book(|book| connection.feed(input, book))
+    else {
+        return Ok(false);
+    };
+    turn?;
     let events_before = connection.session().pending_acks();
     handle_events(
         connection,

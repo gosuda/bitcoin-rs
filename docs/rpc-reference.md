@@ -121,6 +121,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getpoolbalances` | 0.14.0 | Management-only: [account_u64]. Reads one account's available, reserved, paid and deficit satoshis plus payout script. No wallet balance or custody. |
 | `compressrawtransaction` | 0.14.0 | Optional BIP337 compressed-transaction encoding; disabled unless the node starts with --compressed-transactions, which answers -32603 (crates/rpc/src/compressed_tx.rs). |
 | `decompressrawtransaction` | 0.14.0 | Optional BIP337 compressed-transaction decoding; disabled unless the node starts with --compressed-transactions, which answers -32603 (crates/rpc/src/compressed_tx.rs). |
+| `getblockverdict` | 0.15.0 | Check exact encoded block bytes against the applied parent without committing or substituting a known hash. For incident diagnostics. |
 | `getcapabilities` | 0.4.0 | bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/rpc/src/handlers/chain.rs, crates/index/src/capabilities.rs). |
 
 ### Unimplemented
@@ -252,4 +253,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Supported 0, Deviation 37, Implemented (unverified) 55, Extension 14, Disabled 0, Unimplemented 82 - total 188.
+Row counts: Supported 0, Deviation 37, Implemented (unverified) 55, Extension 15, Disabled 0, Unimplemented 82 - total 189.

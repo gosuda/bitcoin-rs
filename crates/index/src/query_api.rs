@@ -118,6 +118,7 @@ pub enum HistoricalQueryError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HistoricalUnavailableCause {
+    ConsensusQuarantine,
     Shared(TxUnavailableCause),
     NoCoveredPrefix {
         capability: IndexCapability,
@@ -134,6 +135,7 @@ pub enum HistoricalUnavailableCause {
 impl core::fmt::Display for HistoricalUnavailableCause {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::ConsensusQuarantine => f.write_str("consensus-divergence quarantine"),
             Self::Shared(cause) => core::fmt::Display::fmt(cause, f),
             Self::NoCoveredPrefix { capability } => write!(
                 f,

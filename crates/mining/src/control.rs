@@ -172,6 +172,15 @@ impl GenerateRequest {
 }
 
 pub trait MiningControl: Send + Sync {
+    fn check_block(
+        &self,
+        _payload: &BlockPayload,
+    ) -> Result<BlockValidationResult, MiningControlError> {
+        Err(MiningControlError::Unavailable(
+            "block validation unavailable".into(),
+        ))
+    }
+
     fn get_block_template(
         &self,
         request: BlockTemplateRequest,
@@ -283,6 +292,13 @@ impl FakeMiningControl {
 
 #[cfg(any(test, feature = "test-seam"))]
 impl MiningControl for FakeMiningControl {
+    fn check_block(
+        &self,
+        _payload: &BlockPayload,
+    ) -> Result<BlockValidationResult, MiningControlError> {
+        Ok(self.proposal.lock().clone())
+    }
+
     fn get_block_template(
         &self,
         request: BlockTemplateRequest,

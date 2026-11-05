@@ -54,6 +54,25 @@ fn dispatch_post(handler: &Handler, full: &str, body: &[u8]) -> Response {
     super::route_post(handler, surface, path, body)
 }
 
+// DIV-03
+#[test]
+fn quarantined_posts_refuse_known_routes_and_preserve_not_found() {
+    let stop = bitcoin_rs_chain::LatchWriter::new();
+    let handler = Handler::new(Arc::new(Context::from_handles(
+        crate::context::ContextHandles {
+            quarantine: stop.reader(),
+            ..Default::default()
+        },
+    )));
+    stop.trigger();
+    for path in ["/esplora/internal/txs", "/api/tx", "/esplora/tx"] {
+        assert_eq!(dispatch_post(&handler, path, b"").status, 503, "{path}");
+    }
+    for path in ["/api/unknown", "/esplora/unknown"] {
+        assert_eq!(dispatch_post(&handler, path, b"").status, 404, "{path}");
+    }
+}
+
 fn api(path: &str) -> String {
     prefixed("/api", path)
 }
