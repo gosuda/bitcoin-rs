@@ -1,6 +1,6 @@
 # Formal verification contract
 
-This file owns the formal toolchain pins, the run rules, and the per-module Apalache table. Machine-readable hashes live in `crates/rpc/core-compat.toml`.
+This file owns the formal toolchain pins, the run rules, and the per-module Apalache table. Apalache archive and JAR hashes are also recorded in `crates/rpc/core-compat.toml`.
 
 ## Toolchain pins
 
@@ -65,6 +65,7 @@ The chainstate admission model step implements the state machine verified in `do
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | ChainAdmission/Commit | f7507483e986095ecc1b4314dd60b8bdf1062ce27b7d31edba6758e029197669 | 139dfe3312a4363c2b0a8f48fb41fd60b97f3e06dda010e03dfbbcdb17bd471a | MaxAttempts=4, CounterBound=1024, FrameBound=72 | 128 | TLC 1.8.0 Safety at depth 16 with CounterBound=8 and FrameBound=3 found no error; Apalache run pending | - | - |
 | ChainAdmission/Frontier | 711d4d86314f2098eccc235e726f10dd84a5d6423e5a45388cbc8d4243157db3 | 1495f0d4223a7c40ba955736066a59689a4e018998f6fd36f00804102e6662ce | JobSlots=12, ReqSlots=12, EventBudget=12 | 128 | TLC 1.8.0 Safety at depth 16 with 3 slots found no error; Apalache run pending | - | - |
+| DatadirSchema/Marker | 441097ec432b5cd506b4f7d46bf8e7f424ca3fb59dbb0fed26e1ec87ecf36c11 | 0c79f0462da0d1e70ed7b24594478108ae80de8aa32dc87485fdd2c96c5863ab | CellBound=4, ContentBound=2 | 128 | Safety passed; temporal property is TRUE (no liveness claim). Bypassed verification and premature success each produced a counterexample. Design model only; no implementation refinement claim | 0 | 0 |
 | PeerLeases/Lease | de734ebefb70a8532c4103eb519170e171cf8d405c59b36c9d95c43dc03ce2de | 4adabd58221c2ce894e092d198d3cfd6f5df26c402c97b01053a4e80a817284c | R0="R0", R1="R1", F0="F0", F1="F1" | 128 | TLC 1.8.0 Safety at depth 16 found no error; Apalache run pending | - | - |
 | PeerLeases/Session | 84952eb83bfe66978ba54afcbbeba7dbe41620674241fb627fb8bfd1425d1c4c | 1d5e4c42b59427a1f80984449fec537e8f6bc6bae2beb0c3cf177b2f8d2d6c76 | S0="S0", S1="S1", ExternalBudget=12 | 128 | TLC 1.8.0 Safety at depth 16 with ExternalBudget=3 found no error; Apalache run pending | - | - |
 | ProjectionMining/Mining | cb8c2e36bf5cc89027c195c157e1925bcee06040b5b597e3f4817afe5f75521a | 10194af480821b515b499250bf76b117481632637589d50460b0d704bc848dc0 | TipGen=4, ShareCap=2 | 128 | TLC 1.8.0 Safety at depth 16 with TipGen=3 found no error; Apalache run pending | - | - |
@@ -86,3 +87,6 @@ This table shows the status of each Kani harness and each property that moved to
 | mempool fee_diagram | `fee_weight_rate_cmp_is_transitive` | Moved to Lean (>1800 s) | `docs/lean/Mempool/FeeDiagram.lean::rateCmp_total_preorder` |
 | utxo compress | `compressed_amounts_round_trip_inside_the_money_supply` | Moved to Lean (>1800 s) | `docs/lean/Utxo/Compress.lean::dec_enc` |
 | storage lease | `refusal_line_never_passes_a_mandatory_floor` | Moved to Lean (>1800 s) | `docs/lean/Storage/Lease.lean::refusal_line_never_passes_floor` |
+| storage schema | 7 lifecycle harnesses (`RCV-09`) | Kani verified; independent Lean model compiled | `docs/lean/Storage/Schema.lean::invariant_step` |
+
+The storage schema models specify the target Epoch 3 admission and offline conversion design. The current node uses Epoch 2, and `tools/storage-convert` is not implemented. These models MUST NOT be reported as implementation refinement proofs. Lean phase constructors encode required-file and scratch ordering. Source contents and final directory sync observations are independent state fields; they do not establish physical durability.

@@ -128,5 +128,7 @@ mod rocksdb_impl;
 
 pub mod chainstate_journal;
 pub mod checkpoint;
+#[cfg(any(test, verification, kani))]
+pub mod schema_model;
 #[cfg(test)]
 pub(crate) mod test_support;
