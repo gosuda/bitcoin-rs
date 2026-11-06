@@ -443,6 +443,7 @@ pub struct Context {
     server_bound_at: Mutex<Option<Instant>>,
     block_render_budget: Arc<BlockRenderBudget>,
     pub(crate) esplora_admission: crate::esplora::admission::Admission,
+    pub(crate) tx_decode_admission: crate::tx_decode::Admission,
     pub(crate) active_calls: ActiveCalls,
 }
 
@@ -677,6 +678,7 @@ impl Context {
                 crate::esplora::DEFAULT_MAX_QUERIES,
             ),
             active_calls: ActiveCalls::new(),
+            tx_decode_admission: crate::tx_decode::Admission::default(),
         }
     }
 

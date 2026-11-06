@@ -540,10 +540,10 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
             "maxburnamount is out of range".to_owned(),
         ));
     }
-    let tx = decode_tx(
-        raw,
-        "TX decode failed. Make sure the tx has at least one input.".to_owned(),
-    )?;
+    let _decode = ctx.tx_decode_admission.reserve([raw])?;
+    let tx = decode_tx(raw, || {
+        "TX decode failed. Make sure the tx has at least one input.".to_owned()
+    })?;
     for output in &tx.outputs {
         let script = output.script_pubkey.as_bytes();
         if (script.len() > bitcoin_rs_script::MAX_SCRIPT_SIZE
@@ -598,6 +598,9 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
     }
     let max_feerate = optional_max_feerate(params, 1)?;
 
+    let _decode = ctx
+        .tx_decode_admission
+        .reserve(raw_txs.iter().filter_map(JsonValueTrait::as_str))?;
     let mut txs = Vec::with_capacity(raw_txs.len());
     for raw in raw_txs {
         let Some(raw) = raw.as_str() else {
@@ -605,10 +608,9 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
                 "raw transaction must be a string".to_owned(),
             ));
         };
-        txs.push(decode_tx(
-            raw,
-            format!("TX decode failed: {raw} Make sure the tx has at least one input."),
-        )?);
+        txs.push(decode_tx(raw, || {
+            format!("TX decode failed: {raw} Make sure the tx has at least one input.")
+        })?);
     }
 
     let facts = ctx
@@ -664,7 +666,8 @@ pub(crate) fn decoderawtransaction(
             "transaction decode request cancelled; retry".to_owned(),
         ));
     }
-    let tx = decode_tx(raw, "TX decode failed".to_owned())?;
+    let _decode = ctx.tx_decode_admission.reserve([raw])?;
+    let tx = decode_tx(raw, || "TX decode failed".to_owned())?;
     let mut value = crate::tx_render::transaction_json(&tx, ctx.chain.chain_network, None);
     if let Some(object) = value.as_object_mut() {
         object.remove(&"hex");
@@ -689,7 +692,8 @@ pub(crate) fn compressrawtransaction(
         ));
     }
     let compress_outpoints = optional_bool(params, 1, true)?;
-    let tx = decode_tx(raw, "TX decode failed".to_owned())?;
+    let _decode = ctx.tx_decode_admission.reserve([raw])?;
+    let tx = decode_tx(raw, || "TX decode failed".to_owned())?;
     ctx.chain.with_stable_chainstate(|| {
         let mut resolver = crate::context::RpcPrevoutResolver::new(ctx, cancellation.clone())?;
         let (compressed, warnings) = crate::compressed_tx::compress_transaction(
@@ -866,9 +870,12 @@ fn parse_create_tx_outputs(
     Ok(tx_outputs)
 }
 
-fn decode_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
-    let bytes = hex_decode(raw).map_err(|_| RpcError::Deserialization(message.clone()))?;
-    native_deserialize(&bytes).map_err(|_| RpcError::Deserialization(message))
+fn decode_tx(raw: &str, message: impl FnOnce() -> String) -> Result<Tx, RpcError> {
+    crate::tx_decode::wire_bytes(raw)?;
+    hex_decode(raw)
+        .ok()
+        .and_then(|bytes| native_deserialize(&bytes).ok())
+        .ok_or_else(|| RpcError::Deserialization(message()))
 }
 
 const MAX_BROADCAST_HEX_CHARS: u64 = 2 * bitcoin_rs_mempool::standardness::MAX_STANDARD_TX_WEIGHT;

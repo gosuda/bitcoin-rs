@@ -1,5 +1,55 @@
 use super::*;
 
+#[test]
+fn raw_transaction_budget_is_shared_across_public_and_authenticated_listeners() -> io::Result<()> {
+    let ctx = Arc::new(Context::new());
+    let public = RunningServer::start(&ctx, RpcSurface::Public, 32)?;
+    let rpc = RunningServer::start(&ctx, RpcSurface::Shared, 32)?;
+    let permits = (0..8)
+        .map(|_| {
+            ctx.tx_decode_admission
+                .reserve(["00"])
+                .expect("reserve decode")
+        })
+        .collect::<Vec<_>>();
+    std::thread::scope(|scope| {
+        let tasks = (0..8).map(|_| {
+            let public = &public;
+            scope.spawn(move || {
+                let response = public.request(b"POST /api/tx HTTP/1.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n00").expect("public request");
+                assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+            })
+        }).collect::<Vec<_>>();
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"decoderawtransaction","params":["00"]}"#;
+        let request = format!(
+            "POST / HTTP/1.1\r\nAuthorization: Basic {GOOD_TOKEN}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let response = rpc
+            .request(request.as_bytes())
+            .expect("authenticated request");
+        assert!(
+            response.contains("raw transaction decode budget exhausted; retry"),
+            "{response}"
+        );
+        for task in tasks {
+            task.join().expect("public worker");
+        }
+    });
+    // The public listener still hides JSON-RPC without exposing its auth surface.
+    let response =
+        public.request(b"POST / HTTP/1.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")?;
+    assert!(response.starts_with("HTTP/1.1 404"));
+    drop(permits);
+    let response = public
+        .request(b"POST /api/tx HTTP/1.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n00")?;
+    assert!(
+        response.starts_with("HTTP/1.1 400"),
+        "decode resumes: {response}"
+    );
+    Ok(())
+}
+
 struct RunningServer {
     address: SocketAddr,
     shutdown: bitcoin_rs_chain::LatchWriter,

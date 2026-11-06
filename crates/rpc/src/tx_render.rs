@@ -52,12 +52,12 @@ pub(crate) fn transaction_json(
     let weight = tx.weight();
     let vsize = tx.vsize();
     let coinbase = tx.is_coinbase();
-    let vin: Vec<Value> = if coinbase {
+    let vin: sonic_rs::Array = if coinbase {
         tx.inputs.iter().map(coinbase_input_json).collect()
     } else {
         tx.inputs.iter().map(regular_input_json).collect()
     };
-    let vout: Vec<Value> = tx
+    let vout: sonic_rs::Array = tx
         .outputs
         .iter()
         .enumerate()
@@ -72,10 +72,14 @@ pub(crate) fn transaction_json(
         "vsize": vsize,
         "weight": weight,
         "locktime": tx.lock_time.to_consensus(),
-        "vin": vin,
-        "vout": vout,
+        "vin": null,
+        "vout": null,
         "hex": consensus_bytes(tx).to_lower_hex_string()
     });
+    // Move the already-rendered arrays into the response. Serializing them
+    // through json! duplicates every witness element before dropping the source.
+    let _ = value.insert("vin", Value::from(vin));
+    let _ = value.insert("vout", Value::from(vout));
     if let Some(chain) = chain {
         let _ = value.insert("blockhash", json!(chain.block_hash.to_string()));
         let _ = value.insert("confirmations", json!(chain.confirmations));
@@ -196,12 +200,12 @@ fn coinbase_input_json(input: &TxIn) -> Value {
         "sequence": input.sequence.to_consensus()
     });
     if !input.witness.is_empty() {
-        let witness: Vec<String> = input
+        let witness: sonic_rs::Array = input
             .witness
             .iter()
-            .map(DisplayHex::to_lower_hex_string)
+            .map(|item| Value::from(item.to_lower_hex_string().as_str()))
             .collect();
-        let _ = value.insert("txinwitness", json!(witness));
+        let _ = value.insert("txinwitness", Value::from(witness));
     }
     value
 }
@@ -219,12 +223,12 @@ fn regular_input_json(input: &TxIn) -> Value {
         "sequence": input.sequence.to_consensus()
     });
     if !input.witness.is_empty() {
-        let witness: Vec<String> = input
+        let witness: sonic_rs::Array = input
             .witness
             .iter()
-            .map(DisplayHex::to_lower_hex_string)
+            .map(|item| Value::from(item.to_lower_hex_string().as_str()))
             .collect();
-        let _ = value.insert("txinwitness", json!(witness));
+        let _ = value.insert("txinwitness", Value::from(witness));
     }
     value
 }
