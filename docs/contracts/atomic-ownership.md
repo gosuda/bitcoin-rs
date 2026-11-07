@@ -225,3 +225,103 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 - Projection repair must rebuild from the nearest valid generation.
 - Unaffected index capabilities must continue to serve their valid declared coverage.
+
+### `QRY-01`: Serving view capture
+
+- Every read must capture one immutable serving view.
+- The view must name the chain identity, projection generation, coverage range, verification provenance, immutable segment references, and recent-tail snapshot.
+
+### `QRY-02`: Mutation-isolated query traversal
+
+- A query must traverse its serving view without observing concurrent mutations in progress.
+
+### `QRY-03`: Extension stability for historical queries
+
+- An ordinary chain extension must not invalidate a coherent historical query answer.
+- An endpoint that requires current-tip data must verify that condition explicitly.
+
+### `QRY-04`: Provenance metadata in query responses
+
+- Each query answer must report the block hash, height, coverage range, and verification state of its serving view.
+
+### `QRY-05`: Explicit coverage and unavailable status
+
+- Absence has meaning only within complete declared coverage.
+- Missing data outside declared coverage must return an unavailable status.
+- Missing data must not return an empty answer.
+
+### `QRY-06`: View-qualified pagination cursor
+
+- Pagination must use an occurrence cursor qualified by the serving view.
+- A query that presents a retired or expired view must return an explicit expired view result.
+
+### `QRY-07`: Bounded view lifetimes
+
+- A long-running reader must not pin an unlimited number of obsolete generations.
+- Each serving view must have one owner and one bounded lifetime.
+
+### `QRY-08`: Post-access serialization
+
+- HTTP and JSON serialization must run after state access finishes.
+- Network backpressure must buffer serialized responses; network backpressure must not hold chain locks or mempool locks.
+
+### `PRJ-11`: Self-contained live output projection
+
+- The live-output projection (`ScriptLive`) must hold sufficient data to answer queries at a named projection epoch.
+- `ScriptLive` must not acquire the chain-transition authority.
+- `ScriptLive` must not resolve output locators through the consensus coin store.
+
+### `SNP-01`: Core AssumeUTXO format reuse
+
+- The node must reuse Bitcoin Core AssumeUTXO formats and compiled trust anchors as the sole UTXO bootstrap mechanism.
+- The node must not create a secondary UTXO snapshot system.
+
+### `SNP-02`: Snapshot manifest contents
+
+- The snapshot manifest must declare: the network and genesis hash, base block identity, schema versions, UTXO commitment, logical commitments for each index capability, coverage ranges, artifact sizes, hashes, and validation provenance.
+
+### `SNP-03`: Independent artifact authentication
+
+- The UTXO artifact and each index artifact share one base block identity.
+- Each artifact must maintain independent cryptographic authentication.
+- A UTXO hash does not authenticate transaction history, script history, or compact filters.
+
+### `SNP-04`: Manifest agreement versus trusted activation
+
+- A file checksum proves agreement with the manifest.
+- A file checksum does not prove consensus trust.
+- Activation requires an independently trusted commitment compiled into the node software.
+
+### `SNP-05`: Direct index segment attachment
+
+- An immutable index artifact must attach directly as a serving segment after verification.
+- The node must not decode an index artifact and rewrite it row by row.
+
+### `SNP-06`: Unified streaming decode for coin store and live index
+
+- The live-output projection base must be constructed during the same streaming snapshot decode that populates the coin store.
+- The node must not traverse snapshot coins a second time.
+
+### `SNP-07`: Atomically gated snapshot publication
+
+- Neither the coin store nor the index base can be published before the UTXO commitment is verified.
+- The node must discard temporary data from an invalid snapshot.
+
+### `SNP-08`: Single historical block interpreter
+
+- Historical indexes (`TxLookup`, `ScriptHistory`, `CompactFilters`) must be built from facts produced during background historical validation.
+- The node must not implement a second historical block interpreter.
+
+### `SNP-09`: Three independent reported positions
+
+- The node must report three independent positions: active-chain application, historical verification progress, and complete coverage for each projection.
+
+### `SNP-10`: Isolated failure domain for index commitments
+
+- A failed index commitment invalidates that projection only.
+- A failed UTXO assumption closes the affected chainstate.
+
+### `SNP-11`: Absence of historical transaction bodies
+
+- A snapshot does not claim that historical transaction bodies are available.
+- Trusted index records cannot supply a missing raw transaction body.

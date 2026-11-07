@@ -13,3 +13,5 @@ import Storage.Schema
 import IndexOpen.Safety
 import ProjectionIndex.HandoffSafety
 import ProjectionIndex.GenerationsSafety
+import ServingView.Safety
+import SnapshotBootstrap.Safety
