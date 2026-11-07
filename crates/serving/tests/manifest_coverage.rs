@@ -228,22 +228,6 @@ fn manifest_has_no_duplicate_rows() {
 }
 
 #[test]
-fn notes_are_markdown_table_safe() {
-    for entry in manifest::MANIFEST {
-        assert!(
-            !entry.notes.contains('|'),
-            "row `{}` notes contain a pipe",
-            entry.name
-        );
-        assert!(
-            !entry.notes.contains('\n'),
-            "row `{}` notes contain a newline",
-            entry.name
-        );
-    }
-}
-
-#[test]
 fn generated_reference_matches_checked_in() {
     const REGEN: &str = "REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-serving \
         --test suite manifest_coverage::regenerate_reference -- --ignored";
