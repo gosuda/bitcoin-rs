@@ -30,7 +30,7 @@ Errors classify into peer faults and not: `is_peer_fault` (`presync.rs:66`) is f
 Running the phase-transition test at this tree:
 
 ```
-$ cargo test --offline --locked -p bitcoin-rs-p2p \
+$ cargo test --offline --locked -p bitcoin-rs-node \
     sufficient_work_chain_syncs_presync_then_redownload -- --nocapture
 test sync::tests::headers_presync::sufficient_work_chain_syncs_presync_then_redownload ... ok
 ```

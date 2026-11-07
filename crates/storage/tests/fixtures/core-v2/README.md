@@ -23,13 +23,13 @@ hash_serialized_3 as bitcoin-rs.
 From the repository root, generate a new isolated directory and compare:
 
 ~~~sh
-python3 crates/utxo/tests/fixtures/core-v2/generate.py \
+python3 crates/storage/tests/fixtures/core-v2/generate.py \
   --bitcoind "$(scripts/install-bitcoind.sh --print-path)" \
   --output /tmp/core-v2-reproduction
 cmp /tmp/core-v2-reproduction/core200.dat \
-  crates/utxo/tests/fixtures/core-v2/core200.dat
+  crates/storage/tests/fixtures/core-v2/core200.dat
 cmp /tmp/core-v2-reproduction/blocks200.json \
-  crates/utxo/tests/fixtures/core-v2/blocks200.json
+  crates/storage/tests/fixtures/core-v2/blocks200.json
 ~~~
 
 The generator retains all integrity checks under python -O or PYTHONOPTIMIZE.

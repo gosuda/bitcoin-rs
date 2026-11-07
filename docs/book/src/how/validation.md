@@ -23,8 +23,8 @@ The five layers map to crate directories:
 
 | Layer | Directory | Owns |
 | --- | --- | --- |
-| primitives | [`crates/primitives/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/primitives/src) | `Tx`, `TxIn`, `TxOut`, `Block`, `Header`, `OutPoint`, `Hash256`, `Amount`, sighash types and cache keys; no execution |
-| script | [`crates/script/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/script/src) | `Interpreter`, `VerifyFlags`, `PreparedTransaction`, Taproot, sigop counting, signature cache |
+| primitives | [`crates/consensus/src/primitives`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/consensus/src/primitives) | `Tx`, `TxIn`, `TxOut`, `Block`, `Header`, `OutPoint`, `Hash256`, `Amount`, sighash types and cache keys; no execution |
+| script | [`crates/consensus/src/script`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/consensus/src/script) | `Interpreter`, `VerifyFlags`, `PreparedTransaction`, Taproot, sigop counting, signature cache |
 | consensus | [`crates/consensus/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/consensus/src) | `ValidationEngine`, transaction rules, block rules, kernel dispatch |
 | chainstate | [`crates/execution/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/execution/src) | Validation mode, assume-valid gate, apply path and its skip decision |
 | mempool | [`crates/mempool/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/mempool/src) | Admission-time script checks, standardness, sigop policy |

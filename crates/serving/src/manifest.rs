@@ -95,7 +95,7 @@ impl Entry {
 pub(crate) const CORE_VERSION: &str = "31.x";
 
 pub(crate) const NO_WALLET: &str =
-    "No wallet: this process holds no private-key material (crates/rpc/src/lib.rs).";
+    "No wallet: this process holds no private-key material (crates/serving/src/lib.rs).";
 
 pub use crate::registry::MANIFEST;
 

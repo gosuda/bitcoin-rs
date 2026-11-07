@@ -2,7 +2,7 @@
 
 `bitcoin-rs-snapshot` reads existing Bitcoin Core `dumptxoutset` portable v2
 files without starting a node. It shares the production reader and UTXO
-commitment implementation in `bitcoin-rs-utxo::core_snapshot`.
+commitment implementation in `bitcoin-rs-storage::utxo::core_snapshot`.
 
 ```sh
 cargo run --locked -p bitcoin-rs-snapshot -- --help
@@ -73,7 +73,7 @@ compiled bases. Listing a pin does not establish that a matching portable
 snapshot is hosted or has been successfully verified here.
 
 The process tests use the unmodified Core-produced regtest-200 artifact in
-[`crates/utxo/tests/fixtures/core-v2`](../../crates/storage/tests/fixtures/core-v2).
+[`crates/storage/tests/fixtures/core-v2`](../../crates/storage/tests/fixtures/core-v2).
 Its provenance and generator live beside the shared fixture. The expected
 block hash is `385901ccbd69dff6bbd00065d01fb8a9e464dede7cfe0372443884f9b1dcf6b9`,
 with commitment
@@ -104,7 +104,7 @@ Linux with GNU time:
 ```sh
 cargo build --locked -p bitcoin-rs-snapshot
 /usr/bin/time -v target/debug/bitcoin-rs-snapshot verify \
-  --network regtest crates/utxo/tests/fixtures/core-v2/core200.dat
+  --network regtest crates/storage/tests/fixtures/core-v2/core200.dat
 ```
 
 Record source SHA, binary/feature identity, input SHA-256 and file size, host,

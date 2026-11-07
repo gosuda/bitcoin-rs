@@ -67,7 +67,7 @@ fn reader_rejects_wrong_network_and_genesis() -> TestResult {
 }
 
 /// Regression coverage for the header-artifact wire contract in
-/// `crates/chainstate/src/checkpoint/headers.rs`: `prefix`/`parse_prefix` define the
+/// `crates/execution/src/checkpoint/headers.rs`: `prefix`/`parse_prefix` define the
 /// magic at bytes 0..8, version at 8..12, and count at 48..56; `read_headers` requires
 /// the encoded length to contain exactly the prefix, the 80-byte active headers, and
 /// the side section.
@@ -189,7 +189,7 @@ fn unsupported_utxo_codec_requires_explicit_resync() -> TestResult {
         Some(&applied_tip),
     )?;
     mutate_authenticated_manifest(dir.path(), |manifest| {
-        manifest.utxo.codec = "bitcoin-rs-utxo".to_owned();
+        manifest.utxo.codec = "unsupported-codec".to_owned();
     })?;
 
     let Err(error) = load_checkpoint(dir.path(), config()) else {

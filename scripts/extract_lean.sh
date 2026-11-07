@@ -119,9 +119,11 @@ if [ -n "${EXTRACT_CRATES:-}" ]; then
     extract "$crate"
   done
 else
-  extract primitives crate::layout::decode_reservation crate::varint::encode_into \
-    crate::varint::decode
-  extract utxo crate::compress::compress_amount crate::compress::decompress_amount
+  extract consensus crate::primitives::layout::decode_reservation \
+    crate::primitives::varint::encode_into \
+    crate::primitives::varint::decode
+  extract storage crate::utxo::compress::compress_amount \
+    crate::utxo::compress::decompress_amount
   extract mempool crate::fee_diagram::FeeWeight::rate_cmp
 fi
 

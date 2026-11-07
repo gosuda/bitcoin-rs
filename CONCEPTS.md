@@ -115,7 +115,7 @@ The unserved remainder of one `getdata` that stopped because the session could n
 
 ### Authoritative peer table
 The single owner of live peer connections and their published handshake
-metadata (`bitcoin_rs_p2p::PeerTable`). It enforces one connection per remote
+metadata (`bitcoin_rs_wire::PeerTable`). It enforces one connection per remote
 address, cancels predecessors atomically on replacement, prevents stale
 connection handles from evicting newer sessions via connection-identity checks,
 and ties handshake metadata strictly to the live connection identity.
@@ -298,7 +298,7 @@ Downstream consumers (ZMQ publisher, metrics) can therefore distinguish relay
 from reorg re-admission without inspecting call sites.
 
 ### Chainstate facade
-The in-process owner of applied-tip mutation (`bitcoin_rs_chainstate::Chainstate`).
+The in-process owner of applied-tip mutation (`bitcoin_rs_execution::Chainstate`).
 Callers copy a `ChainstateSnapshot` or obtain a `ChainTransition`; they do
 not hold the raw UTXO, tip, and lock cells and reproduce a partial
 transition. `chain` still plans the branch. Node-level reorg still sequences

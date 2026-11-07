@@ -24,9 +24,9 @@ The binary parses the CLI, resolves config, opens the data directory under a loc
 5. `require_full_script_attestation` then `prepare_initial_chainstate` (`open.rs`): restore from checkpoint or journal, or start cold. The chosen source logs one line from `crates/execution/src/recovery.rs:339`, `:354`, or `:464`:
 
    ```
-   INFO bitcoin_rs_chainstate::recovery: chainstate restore selected restore_source="checkpoint" checkpoint_generation=2 checkpoint_height=5 height=5 hash="0ef5cd..."
-   INFO bitcoin_rs_chainstate::recovery: chainstate restore selected restore_source="journal" checkpoint_generation=1 checkpoint_height=0 height=3 hash=7ae5b4e2... replayed_records=3 chain_tx_count=4 replay_seconds=0.0003619
-   INFO bitcoin_rs_chainstate::recovery: chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
+   INFO bitcoin_rs_execution::recovery: chainstate restore selected restore_source="checkpoint" checkpoint_generation=2 checkpoint_height=5 height=5 hash="0ef5cd..."
+   INFO bitcoin_rs_execution::recovery: chainstate restore selected restore_source="journal" checkpoint_generation=1 checkpoint_height=0 height=3 hash=7ae5b4e2... replayed_records=3 chain_tx_count=4 replay_seconds=0.0003619
+   INFO bitcoin_rs_execution::recovery: chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
    ```
 
    The journal variant is the replay path: `replayed_records=3` journal records were re-applied on top of the checkpoint, and `replay_seconds` times that work (`recovery.rs:464`). A checkpoint fallback with a gap above `STALE_RESTORE_ERROR_THRESHOLD` logs the `stale checkpoint restore` error (`open.rs`).
@@ -40,7 +40,7 @@ The binary parses the CLI, resolves config, opens the data directory under a loc
 One real cold start, trimmed (timestamps and LSM-tree table recovery removed; `$DATA` is the data directory):
 
 ```
-INFO bitcoin_rs_chainstate::recovery: chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
+INFO bitcoin_rs_execution::recovery: chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
 INFO bitcoin_rs_node::state::open: no mempool snapshot; starting with an empty pool status="missing"
 INFO bitcoin_rs_node::state::open: opened storage backend with effective cache capacities backend="rocksdb" chainstate_cache_bytes=471859200 txindex_cache_bytes=0 total_cache_bytes=471859200
 INFO bitcoin_rs_node::lifecycle: bitcoin-rs node booting config=NodeConfig { network: Regtest, data_dir: "$DATA", ... }
@@ -57,7 +57,7 @@ The bind order is:
    `INFO bitcoin_rs_node::lifecycle: rpc listener bound addr=127.0.0.1:46733 surface=Shared`
 2. Pool (feature-gated), after RPC.
 3. P2P: `P2pService::start` (`lifecycle.rs`) binds the listener:
-   `INFO bitcoin_rs_p2p::service: p2p listener bound addr=127.0.0.1:0` (port `:0` on regtest; the log shows the requested value, the actual socket appears in `ss`/metrics).
+   `INFO bitcoin_rs_wire::service: p2p listener bound addr=127.0.0.1:0` (port `:0` on regtest; the log shows the requested value, the actual socket appears in `ss`/metrics).
 4. Chainstate maintenance worker, then the event loop thread (`lifecycle.rs`).
 
 `bind 127.0.0.1:0` in the booting config line is what was requested; use the `rpc listener bound` line for the real RPC address, or `--rpc-bind 127.0.0.1:8332` style fixed ports to make it predictable.

@@ -217,7 +217,7 @@ $ ./target/release/bitcoin-rs --network regtest --data-dir $DATA/idx \
     --dns-seeds-enabled=false --txindex true \
     --index-bundle-export $DATA/bundle1
 {"level":"INFO","fields":{"message":"exported portable txindex bundle",
- "height":20,"records":21,"bytes":976},"target":"bitcoin_rs_index::runtime::startup"}
+ "height":20,"records":21,"bytes":976},"target":"bitcoin_rs_projection::runtime::startup"}
 ```
 
 The manifest carries the identity the importer will re-check:
@@ -256,7 +256,7 @@ $ ./target/release/bitcoin-rs --network regtest --data-dir $DATA/idx2 \
     --index-bundle-import $DATA/bundle1
 {"level":"INFO","fields":{"message":"restored portable txindex bundle; ordinary
  reconciliation continues from its base","height":20,"records":21,"rows":21},
- "target":"bitcoin_rs_index::runtime::startup"}
+ "target":"bitcoin_rs_projection::runtime::startup"}
 ```
 
 Run the same request again against the now-populated index and freshness refuses it:
@@ -264,7 +264,7 @@ Run the same request again against the now-populated index and freshness refuses
 ```text
 {"level":"ERROR","fields":{"message":"portable txindex bundle request refused;
  ordinary reconciliation proceeds","error":"the txindex already has a watermark;
- restore needs a fresh capability"},"target":"bitcoin_rs_index::runtime::startup"}
+ restore needs a fresh capability"},"target":"bitcoin_rs_projection::runtime::startup"}
 ```
 
 The read differs from the first run: `records` counts artifact records, `rows` counts stored rows after 8-byte-prefix folding. Reconciliation then starts at base height plus one, exactly as it would for any capability with a watermark.

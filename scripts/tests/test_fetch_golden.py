@@ -74,7 +74,7 @@ class FetchGoldenTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.output = self.root / "crates/primitives/tests/testdata"
+        self.output = self.root / "crates/consensus/tests/testdata"
         self.output.mkdir(parents=True)
         self.block_path = self.output / f"{HEIGHTS[0]}.bin"
         self.txids_path = self.output / f"{HEIGHTS[0]}.txids.txt"

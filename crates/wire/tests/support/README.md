@@ -10,7 +10,7 @@ real FastRandomContext seeds to arrange accepted/refused reference draws.
 An optional Linux-only reproduction command is:
 
 ```sh
-bash crates/p2p/tests/support/regenerate-core-addrman.sh /path/to/pinned-bitcoin /path/to/disposable-output
+bash crates/wire/tests/support/regenerate-core-addrman.sh /path/to/pinned-bitcoin /path/to/disposable-output
 ```
 
 It requires CMake and a C++20 compiler, writes only the supplied output directory,

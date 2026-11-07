@@ -34,9 +34,9 @@ The project's shared vocabulary is [`CONCEPTS.md`](https://github.com/gosuda/bit
 
 **Mempool expiry.** Removal of transactions strictly older than 336 hours along with their in-pool descendants. Expiry runs after each committed admission and during reorg trim; a read-only preview never expires an entry.
 
-**Native protocol primitives.** The owned Bitcoin vocabulary in `crates/primitives`: `Tx`, `Block`, `Header`, `OutPoint`, `Amount`, `LockTime`, `Script`, `Witness`, hashes, sighash, and network constants. These are native types, not `rust-bitcoin` aliases; RPC rendering may use `rust-bitcoin` only at its boundary.
+**Native protocol primitives.** The owned Bitcoin vocabulary in `crates/consensus/src/primitives`: `Tx`, `Block`, `Header`, `OutPoint`, `Amount`, `LockTime`, `Script`, `Witness`, hashes, sighash, and network constants. These are native types, not `rust-bitcoin` aliases; RPC rendering may use `rust-bitcoin` only at its boundary.
 
-**Native Rust interpreter.** The pure-Rust script path in `crates/script`, and the default `validation.engine` in every build. It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends, and the Core script and transaction vectors pin zero native mismatches on runnable rows ([`VAL-02`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/validation-default.md)).
+**Native Rust interpreter.** The pure-Rust script path in `crates/consensus/src/script`, and the default `validation.engine` in every build. It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends, and the Core script and transaction vectors pin zero native mismatches on runnable rows ([`VAL-02`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/validation-default.md)).
 
 **One-shot block parse.** Parsing each block once on the apply path and reusing that parse for txids. On the kernel arm it also reuses the borrowed transaction references that script preparation needs; `kernel::BlockParse` follows the selected engine.
 

@@ -51,7 +51,7 @@ class MapperTests(unittest.TestCase):
         self.asm = self.corpora / "bitcoin_script_bytes_to_asm_fmt"
         self.fuzz = self.root / "fuzz"
         self.output = self.fuzz / "corpus"
-        self.inventory = self.root / "crates/p2p/src/compat.rs"
+        self.inventory = self.root / "crates/wire/src/compat.rs"
         self.script_target = self.fuzz / "fuzz_targets/script_eval.rs"
         for path in (self.p2p, self.scripts, self.asm, self.inventory.parent, self.script_target.parent):
             path.mkdir(parents=True, exist_ok=True)
@@ -96,7 +96,7 @@ pub const CORE_UNTYPED_COMMANDS: &[&str] = &["outside"];
         self.assert_seed("p2p_message", b"\x01payload")
 
     def test_missing_or_ambiguous_inventory_fails_closed(self):
-        for inventory in ("let x = bitcoin_rs_p2p::COMMANDS;", "pub const COMMANDS: &[&str] = &[];",
+        for inventory in ("let x = bitcoin_rs_wire::COMMANDS;", "pub const COMMANDS: &[&str] = &[];",
                           'pub const COMMANDS: &[&str] = &["ping", "ping"];'):
             with self.subTest(inventory=inventory):
                 self.inventory.write_text(inventory)

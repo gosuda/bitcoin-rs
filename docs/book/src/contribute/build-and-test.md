@@ -29,7 +29,7 @@ The default build is kernel-free. `cargo build -p bitcoin-rs` uses the native Ru
 
 `all` deliberately omits `proofs`. CI runners carry no Kani, Lean, or Aeneas toolchain. Run `proofs` yourself when you change a module with a `proofs.rs` file, a `*_model.rs` model, or a Lean file.
 
-The clippy profiles are not one command. The script checks the workspace with `silent-payments` but excludes `bitcoin-rs-consensus`, `bitcoin-rs-chainstate`, and `bitcoin-rs-node`. It then checks each of those three with its own feature set, and adds a production `check` of the `bitcoin-rs` binary. A clippy run over only the workspace misses those per-crate feature sets.
+The clippy profiles are not one command. The script checks the workspace with `silent-payments` but excludes `bitcoin-rs-consensus`, `bitcoin-rs-execution`, and `bitcoin-rs-node`. It then checks each of those three with its own feature set, and adds a production `check` of the `bitcoin-rs` binary. A clippy run over only the workspace misses those per-crate feature sets.
 
 The test lanes use `cargo nextest` when it is installed. Without nextest they fall back to `cargo test --no-fail-fast`. The two runners execute the same tests because the tree has no doctests.
 
@@ -40,13 +40,13 @@ The test lanes use `cargo nextest` when it is installed. Without nextest they fa
 For a change in one crate, start with the narrow test target:
 
 ```
-cargo test --locked -p bitcoin-rs-primitives --lib
+cargo test --locked -p bitcoin-rs-consensus --lib
 ```
 
 Replace the package and target with the owner you changed. A single test name narrows it further:
 
 ```
-cargo test --locked -p bitcoin-rs-primitives --lib superfluous_segwit_marker_is_rejected
+cargo test --locked -p bitcoin-rs-consensus --lib superfluous_segwit_marker_is_rejected
 ```
 
 That second command ran in this checkout and passed. The exact filter is useful when a contract test names the behavior.

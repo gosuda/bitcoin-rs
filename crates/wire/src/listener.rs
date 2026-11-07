@@ -866,7 +866,7 @@ fn spawn_dial(
     origin: ConnectionOrigin,
     failure_accounting: FailureAccounting,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
-    let thread_name = format!("bitcoin-rs-p2p-outbound-{addr}");
+    let thread_name = format!("bitcoin-rs-wire-outbound-{addr}");
     let result = std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || run_outbound_connection(addr, &shared, role, origin, failure_accounting));
@@ -1248,7 +1248,7 @@ fn spawn_handshake_thread(
     outbound_rx: crossbeam_channel::Receiver<crate::QueuedFrame>,
 ) {
     let peer_addr = peer_addr.into();
-    let thread_name = format!("bitcoin-rs-p2p-handshake-{peer_addr}");
+    let thread_name = format!("bitcoin-rs-wire-handshake-{peer_addr}");
     let reservation = lease.clone();
     let spawn_shared = shared.clone();
     let spawn_result = std::thread::Builder::new()
@@ -2887,7 +2887,7 @@ fn spawn_connection_writer(
     let peer_addr = peer_addr.into();
     let counters = std::sync::Arc::clone(stream.counters());
     std::thread::Builder::new()
-        .name(format!("bitcoin-rs-p2p-writer-{peer_addr}"))
+        .name(format!("bitcoin-rs-wire-writer-{peer_addr}"))
         .spawn(move || {
             let _exit = WriterExit {
                 budget: Arc::clone(&budget),

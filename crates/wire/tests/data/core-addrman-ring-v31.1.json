@@ -38,8 +38,8 @@
     "compile_flags": "-std=c++20 -O1 -g0 -ffunction-sections -fdata-sections -Wl,--gc-sections",
     "configuration": "Generated from the pinned cmake/bitcoin-build-config.h.in using pinned31.1 metadata and already measured Linux platform feature flags. Full upstream CMake configure was blocked by absent Boost package; standalone drivers compile actual unmodified Core sources. No candidate or replacement addrman algorithm is linked.",
     "generated_config_sha256": "e795caf911f1ac025a338cf35620a7015d36423ef2c065aa73b17b52afea5ef4",
-    "build_script": "crates/p2p/tests/support/regenerate-core-addrman.sh",
-    "configure_script": "crates/p2p/tests/support/core-addrman-configure.cmake"
+    "build_script": "crates/wire/tests/support/regenerate-core-addrman.sh",
+    "configure_script": "crates/wire/tests/support/core-addrman-configure.cmake"
   },
   "method": "Scan ports1..65535 in ascending order; direct actual AddrInfo::GetNewBucket and GetBucketPosition calls for8.8.8.8/source1.1.1.1. First match at each requested position retained. No candidate algorithm or Python placement formula.",
   "rows": [
@@ -81,11 +81,11 @@
       "position_32": "1/2"
     }
   },
-  "driver": "crates/p2p/tests/support/core-addrman-ring-driver.cpp",
+  "driver": "crates/wire/tests/support/core-addrman-ring-driver.cpp",
   "driver_sha256": "669335027d154001ec979251e66de638f863d8eaf0c36c58744902f313ff982b",
   "oracle_sha256": "3629e633561ece67dc0d3489f09fae5eae1ca11ef6ba1a91e3f323778f5ae851",
   "raw_output_sha256": "e6574df91ae8e8e51965e21bed1cc2e60af0ac3887781d1cef768350d13be846",
-  "build_script": "crates/p2p/tests/support/regenerate-core-addrman.sh",
-  "support_configuration_script": "crates/p2p/tests/support/core-addrman-configure.cmake",
+  "build_script": "crates/wire/tests/support/regenerate-core-addrman.sh",
+  "support_configuration_script": "crates/wire/tests/support/core-addrman-configure.cmake",
   "generated_configuration_header": "OUTPUT_DIRECTORY/src/bitcoin-build-config.h"
 }

@@ -8,7 +8,7 @@ The HEAD build used for this book was compiled without the `pool` feature, so no
 
 ## What the ledger stores
 
-`crates/mining/src/pool/ledger` keeps 17 data tables plus two metadata tables under a schema version of 1 (`crates/node/src/pool/ledger/store.rs:42`):
+`crates/node/src/pool/ledger` keeps 17 data tables plus two metadata tables under a schema version of 1 (`crates/node/src/pool/ledger/store.rs:42`):
 
 | Purpose | Tables |
 | :--- | :--- |

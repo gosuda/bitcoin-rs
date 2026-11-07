@@ -93,7 +93,7 @@ An assumeutxo snapshot whose background validation fails is also settled closed:
 The daemon log for a clean regtest start and `SIGTERM` shows both ends of the lifecycle:
 
 ```text
-{"timestamp":"2026-11-01T16:44:24.414833Z","level":"INFO","fields":{"message":"chainstate restore selected","restore_source":"cold","reason":"no_complete_checkpoint"},"target":"bitcoin_rs_chainstate::recovery"}
+{"timestamp":"2026-11-01T16:44:24.414833Z","level":"INFO","fields":{"message":"chainstate restore selected","restore_source":"cold","reason":"no_complete_checkpoint"},"target":"bitcoin_rs_execution::recovery"}
 {"timestamp":"2026-11-01T16:44:24.418584Z","level":"INFO","fields":{"message":"rpc listener bound","addr":"127.0.0.1:44089","surface":"Shared"},"target":"bitcoin_rs_node::lifecycle"}
 {"timestamp":"2026-11-01T16:44:25.821454Z","level":"INFO","fields":{"message":"published clean chainstate checkpoint","generation":1},"target":"bitcoin_rs_node::lifecycle"}
 {"timestamp":"2026-11-01T16:44:25.822383Z","level":"INFO","fields":{"message":"bitcoin-rs node exited cleanly"},"target":"bitcoin_rs_node::lifecycle"}

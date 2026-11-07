@@ -490,15 +490,15 @@ That document gives consumer usage and defers to this clause for every consisten
   - `transaction_at_prefix(&self, txid: &Txid) -> Result<AtPrefix<Option<(u32, Tx)>>, HistoricalQueryError>`
   - `script_history_at_prefix(&self, script: ScriptHash) -> Result<AtPrefix<ScriptIndexSnapshot>, HistoricalQueryError>`
   - `spender_at_prefix(&self, outpoint: OutPoint) -> Result<AtPrefix<Option<SpendingRecord>>, HistoricalQueryError>`
-- New public types live in `bitcoin_rs_index::query_api` (already public; no re-export is added):
+- New public types live in `bitcoin_rs_projection::query_api` (already public; no re-export is added):
   - `CoveredPrefix { floor: u32, height: u32, hash: Hash256 }`
   - `AtPrefix<T> { prefix: CoveredPrefix, answer: T }`
   - `HistoricalQueryError { Retry, Unavailable(HistoricalUnavailableCause), Storage(CompactString) }`
   - `HistoricalUnavailableCause { Shared(TxUnavailableCause), NoCoveredPrefix { capability: IndexCapability }, AncestryBudgetExhausted { capability: IndexCapability, watermark_height: u32 }, PrefixBelowFloor { floor: u32 } }`
 - `CoveredPrefix.hash` is the full chain hash at `height`.
 - `floor` is the lowest provable height (`0` means genesis, positive means a pruned prefix).
-- `Txid`, `Tx`, and `OutPoint` are `bitcoin_rs_primitives` types.
-- `Hash256` is `bitcoin_rs_primitives::Hash256`.
+- `Txid`, `Tx`, and `OutPoint` are `bitcoin_rs_consensus::primitives` types.
+- `Hash256` is `bitcoin_rs_consensus::primitives::Hash256`.
 - `CompactString` is `compact_str::CompactString`.
 - `ScriptHash`, `IndexCapability`, `ScriptIndexSnapshot`, and `SpendingRecord` keep their existing paths.
 - `TxQueryError` and `TxUnavailableCause` are byte-for-byte unchanged:

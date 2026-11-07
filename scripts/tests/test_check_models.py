@@ -53,7 +53,7 @@ class ModelEvidenceTests(unittest.TestCase):
         jar.write_bytes(b"synthetic tool, not a prover")
         archive = self.home / "apalache-0.62.4.zip"
         archive.write_bytes(b"synthetic archive, not the prover")
-        api = self.root / "crates/rpc"
+        api = self.root / "crates/serving"
         api.mkdir(parents=True)
         (api / "core-compat.toml").write_text(
             '[reference.formal_tool]\nname = "apalache-mc"\nversion = "0.62.4"\n'
@@ -182,7 +182,7 @@ class ModelEvidenceTests(unittest.TestCase):
             self.assertEqual(check_models.main(), 11)
 
     def test_malformed_tool_pin_missing_version_is_a_tool_identity_failure(self) -> None:
-        pin = self.root / "crates/rpc/core-compat.toml"
+        pin = self.root / "crates/serving/core-compat.toml"
         text = pin.read_text(encoding="utf-8")
         pin.write_text(text.replace('version = "0.62.4"\n', ""), encoding="utf-8")
         with (

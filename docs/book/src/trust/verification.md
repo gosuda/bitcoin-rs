@@ -54,7 +54,7 @@ Fuzz builds enable AddressSanitizer, value profiling, debug assertions, and inte
 The corpus verdict gate is separate from a live campaign:
 
 ```
-BITCOIN_RS_FUZZ_CORPUS=../bitcoin-rs-fuzz-corpus/corpus cargo test --locked -p bitcoin-rs-primitives --test suite differential::
+BITCOIN_RS_FUZZ_CORPUS=../bitcoin-rs-fuzz-corpus/corpus cargo test --locked -p bitcoin-rs-consensus --test suite differential::
 ```
 
 When the corpus directory is absent the gate skips with a notice. When `verdicts.json` is absent it degrades to the verdict-shape check and reports the downgrade. A seed that decodes to neither `accepted` nor `rejected:<kind>` fails the gate.
@@ -108,7 +108,7 @@ cargo test --locked -p bitcoin-rs-consensus --features kernel --test suite -- ke
 The live Core lane is a process comparison, not an in-process oracle. Its evidence test is:
 
 ```
-P2P_CORE_INTEROP_EVIDENCE=target/core-differential/evidence.json cargo test --locked -p bitcoin-rs-p2p --test suite core_interop_live:: -- --ignored
+P2P_CORE_INTEROP_EVIDENCE=target/core-differential/evidence.json cargo test --locked -p bitcoin-rs-wire --test suite core_interop_live:: -- --ignored
 ```
 
 That test reads the evidence document produced by `scripts/run-p2p-core-interop.sh`. It does not run Core by itself. [Compatibility with Bitcoin Core](core-compatibility.md) owns the lane scopes and the main-only limits.

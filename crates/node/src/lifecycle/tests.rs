@@ -466,7 +466,7 @@ fn teardown_joins_bootstrap_worker_beyond_former_deadline() -> Result<(), TestEr
     let (_gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
     let (exited_tx, exited_rx) = std::sync::mpsc::channel();
     let worker = std::thread::Builder::new()
-        .name("bitcoin-rs-p2p-bootstrap".to_owned())
+        .name("bitcoin-rs-wire-bootstrap".to_owned())
         .spawn(move || {
             let _ = gate_rx.recv_timeout(std::time::Duration::from_secs(2));
             let _ = exited_tx.send(());

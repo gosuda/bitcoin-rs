@@ -912,7 +912,7 @@ pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 /// of parking the connection. Declared deviations: ZMQ delivery to
 /// subscribers is queued by the zeromq context's own I/O thread
 /// (`zmq.publish_sequence` enqueues with DONTWAIT), and the background
-/// derived-index reconcile loop (crates/index/src/runtime.rs) is woken
+/// derived-index reconcile loop (crates/projection/src/runtime.rs) is woken
 /// asynchronously — neither is awaited; index-backed reads have their own
 /// catch-up fallback rather than relying on this call.
 pub(crate) fn syncwithvalidationinterfacequeue(

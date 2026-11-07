@@ -91,10 +91,10 @@ test_crates_profiles() {
   # Per-crate profiles may use checked-in fixtures but need no pinned Core
   # daemon. Tests launching that daemon run in the workspace lane below.
   # Smallest first.
-  # primitives owns the QAC-05 corpus-decoder gate (BITCOIN_RS_FUZZ_CORPUS);
+  # consensus owns the QAC-05 corpus-decoder gate (BITCOIN_RS_FUZZ_CORPUS);
   # it must run in the PR lane, not only the merge-only workspace lane.
-  profile "test: bitcoin-rs-primitives" \
-    cargo_test -p bitcoin-rs-primitives
+  profile "test: bitcoin-rs-consensus" \
+    cargo_test -p bitcoin-rs-consensus
   # The offline CLI uses the checked-in Core snapshot, not a running daemon.
   profile "test: bitcoin-rs-snapshot" \
     cargo_test -p bitcoin-rs-snapshot
@@ -134,7 +134,7 @@ test_workspace_profiles() {
       --exclude bitcoin-rs-wire \
       --exclude bitcoin-rs-node --exclude bitcoin-rs-serving \
       --exclude bitcoin-rs-snapshot
-  # The RPC package owns libzmq. Its feature-gated process subscriber must
+  # The serving package owns libzmq. Its feature-gated process subscriber must
   # run explicitly so feature resolution cannot turn it into a zero-test
   # binary. Build and identify the daemon with the same default zmq profile.
   profile "test: bitcoin-rs-serving (zmq, process notifications)" test_rpc_reorg_notifications

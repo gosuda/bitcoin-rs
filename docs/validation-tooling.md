@@ -21,7 +21,7 @@ Tier: externally verified. Contract: [core-differential](contracts/core-differen
 ```sh
 scripts/install-bitcoind.sh --print-path && cargo build --locked -p bitcoin-rs --profile quickstart --no-default-features --features zmq
 scripts/run-p2p-core-interop.sh --bitcoind-command "$(scripts/install-bitcoind.sh --print-path)" --bitcoin-rs-command target/quickstart/bitcoin-rs --workdir target/core-differential/run --evidence target/core-differential/evidence.json
-P2P_CORE_INTEROP_EVIDENCE=target/core-differential/evidence.json cargo test --locked -p bitcoin-rs-p2p --test suite core_interop_live:: -- --ignored
+P2P_CORE_INTEROP_EVIDENCE=target/core-differential/evidence.json cargo test --locked -p bitcoin-rs-wire --test suite core_interop_live:: -- --ignored
 ```
 Artifacts: CI retains `target/core-differential/*.log`, `evidence.json` in `core-differential-<run_attempt>` for 7 days.
 ## 2. Live Core block and transaction acceptance differential
@@ -34,13 +34,13 @@ Artifacts: `acceptance-*.json` under the test process evidence directory.
 ## 3. Bitcoin Core script and transaction vectors
 Tier: in-tree reference vector evidence. Owners: `crates/consensus/tests/script_core_vectors.rs` (`script_tests.json`, `tx_valid.json`, `tx_invalid.json` script-verification columns). Its runnable rows are pinned as executed/skipped/mismatch. Its tx columns check script verification only, and `BADTX` non-script rows are skipped. The second owner is `crates/consensus/tests/vectors.rs`: vector loading/deserialization, script flag parsing, and legacy sighash, with no accept/reject comparison against expected validity.
 ```sh
-cargo test --locked -p bitcoin-rs-script --test suite core_vectors:: && cargo test --locked -p bitcoin-rs-consensus --test suite vectors::
+cargo test --locked -p bitcoin-rs-consensus --test suite core_vectors:: && cargo test --locked -p bitcoin-rs-consensus --test suite vectors::
 ```
 ## 4. Native sighash checks against independent implementation
 Tier: in-tree differential evidence. Owners: `crates/consensus/tests/shared_sighash.rs` (native vs `rust-bitcoin` `sighash::SighashCache`), `crates/consensus/tests/script_proptest.rs` (`rust-bitcoin` sighash/Schnorr oracle), `crates/consensus/tests/primitives_differential.rs` (`sighash.json` legacy vectors), `crates/consensus/tests/primitives_bip_vectors.rs` (BIP143/BIP341; provenance `crates/consensus/tests/vectors/sighash-vector-provenance.md`). Verifies exact digest equality for `SIGHASH_ALL/NONE/SINGLE/ANYONECANPAY/DEFAULT` across legacy, BIP143, BIP341.
 ```sh
-cargo test --locked -p bitcoin-rs-consensus --test suite shared_sighash:: && cargo test --locked -p bitcoin-rs-script --test suite proptest::
-cargo test --locked -p bitcoin-rs-primitives --test suite differential:: && cargo test --locked -p bitcoin-rs-primitives --test suite bip_vectors::
+cargo test --locked -p bitcoin-rs-consensus --test suite shared_sighash:: && cargo test --locked -p bitcoin-rs-consensus --test suite proptest::
+cargo test --locked -p bitcoin-rs-consensus --test suite differential:: && cargo test --locked -p bitcoin-rs-consensus --test suite bip_vectors::
 ```
 ## 5. libbitcoinkernel oracle and scoped native parity
 Tier: in-tree oracle and differential evidence. Related: [validation-default](contracts/validation-default.md) (`VAL-02` proof boundaries). Owners: `crates/consensus/tests/kernel_vector_parity.rs` (Core vectors via `verify_tx_scripts`; `BADTX` excluded; kernel-vs-vector oracle, not native-vs-kernel over the full corpus). Second owner: `crates/consensus/tests/kernel_block_parity.rs` (kernel vs native accept/reject on six mainnet fixtures `legacy_p2pk/p2pkh`, `p2sh_spend`, `segwit_v0_spend`, `taproot_keypath/scriptpath_spend`, all `interpreter_parity: true`, plus Taproot script-path non-vacuity; provenance `crates/consensus/tests/vectors/scripts/README.md`). Third owner: `crates/consensus/tests/kernel_boundary_parity.rs` (native vs kernel on synthetic consensus-limit boundaries: 10000-byte script, 201 ops, 520-byte push, 1000-deep stack, 20-key multisig, taproot control-block size and annex shapes, nonstandard-but-valid NOP1, OP_CODESEPARATOR). Prerequisites: `libboost-dev`, `cmake`, C++ toolchain.
@@ -50,22 +50,22 @@ cargo test --locked -p bitcoin-rs-consensus --features kernel --test suite -- ke
 ## 6. Contextual consensus-rule tests
 Tier: in-tree consensus verification. Owners: `crates/execution/src/chain/header_sync.rs` (`contextual_header_tests`: nBits, MTP, BIP94 timewarp, version floors), `crates/consensus/src/verify_block.rs` (BIP30 duplicate txids, BIP34 coinbase height, BIP68 locktimes, BIP141 commitments, weight limits). Third owner: `crates/execution/src/tests/persistence_tests.rs` (mutation failure boundaries, undo atomicity, BIP30 overwrite undo-coin restoration).
 ```sh
-cargo test --locked -p bitcoin-rs-chain header_sync::contextual_header_tests && cargo test --locked -p bitcoin-rs-consensus verify_block::tests
-cargo test --locked -p bitcoin-rs-chainstate --lib persistence_tests
+cargo test --locked -p bitcoin-rs-execution header_sync::contextual_header_tests && cargo test --locked -p bitcoin-rs-consensus verify_block::tests
+cargo test --locked -p bitcoin-rs-execution --lib persistence_tests
 ```
 ## 7. Daily fuzz targets and QA-assets corpus provenance
 Tier: in-tree fuzzing and corpus regression. Contract: [qa-corpus](contracts/qa-corpus.md) (`QAC-01`..`QAC-05`). Provenance: [fuzz/CORPUS_PROVENANCE.md](../fuzz/CORPUS_PROVENANCE.md). bitcoinfuzz-module integration ([bitcoinfuzz/bitcoinfuzz#662](https://github.com/bitcoinfuzz/bitcoinfuzz/issues/662)) is in progress, not completed verification. Prerequisites: `jq`, `sha1sum`, `cargo-fuzz`, nightly Rust + `llvm-tools-preview`; writable companion corpus checkout on the same filesystem. Owners: `scripts/import-qa-assets.sh`, `scripts/import-reference-corpora.sh`, `scripts/validate-corpus-seeds.sh` (filesystem only: non-symlink regular files named by own SHA-1, no larger than `FUZZ_MAX_SEED_BYTES`, positive count, modes `0644`; no codec/verdict check; nonzero on first refusal). Additional owners: `scripts/run-fuzz-campaign.sh`, `crates/consensus/tests/primitives_differential.rs` (`QAC-05`: every seed vs pinned verdicts `accepted` byte-identical / `rejected:<kind>`; absent corpus skips loudly, absent `verdicts.json` degrades to shape check). Seeds from `rust-bitcoin/qa-assets`, `bitcoin/bitcoin`, `btcsuite/btcd` feed `p2p_message`, `block_validate`, `tx_validate`, `script_eval`, `utxo_snapshot`.
 ```sh
 # Native codec roundtrip check over corpus seeds:
-BITCOIN_RS_FUZZ_CORPUS=../bitcoin-rs-fuzz-corpus/corpus cargo test --locked -p bitcoin-rs-primitives --test suite differential::
+BITCOIN_RS_FUZZ_CORPUS=../bitcoin-rs-fuzz-corpus/corpus cargo test --locked -p bitcoin-rs-consensus --test suite differential::
 # Run a bounded fuzz campaign with target, seconds, corpus, and output paths:
 ./scripts/run-fuzz-campaign.sh p2p_message 60 ../bitcoin-rs-fuzz-corpus/corpus/p2p_message target/fuzz-campaign/p2p_message
 ```
 ## 8. Chainstate crash recovery and reorg evidence
 Tier: in-tree durability and recovery verification. Contract: [recovery](contracts/recovery.md). Owners: `crates/execution/src/tests/recovery_marker_order_tests.rs`, `crates/execution/src/durable/tests.rs`, `crates/execution/src/assumeutxo/tests/recovery.rs` (SIGKILL mid-import/mid-activation/mid-validation; failure-receipt retention, durable-head checkpoint recovery, below-base reorgs; Core v2 fixture provenance `crates/storage/tests/fixtures/core-v2/README.md`; offline CLI [tools/snapshot/README.md](../tools/snapshot/README.md)). Additional owners: `crates/storage/tests/durable_head_store.rs`, `crates/storage/src/checkpoint/tests.rs`, `e2e/tests/reorg.rs`, `e2e/tests/reorg_state.rs` (mapping [e2e/REORG-COVERAGE.md](../e2e/REORG-COVERAGE.md)). AssumeUTXO recovery module runs against RocksDB. Host prerequisite: `e2e/tests/assumeutxo.rs::invalid_core_snapshots_fail_without_activating` needs byte-capable `/tmp`. It owns `core-\xff.dat` under `/tmp`, symlinks UTF-8 `core200.dat` in datadir, copies instead of cross-filesystem rename, and cleans up. The former `EILSEQ` (92) failure was not JSON serialization. Node datadir and global `TMPDIR` stay on configured disk-backed filesystems. Record an incapable lane as `BLOCKED`.
 ```sh
-cargo test --locked -p bitcoin-rs-chainstate --lib recovery_marker_order_tests && cargo test --locked -p bitcoin-rs-chainstate --lib durable::tests
-cargo test --locked -p bitcoin-rs-chainstate --lib assumeutxo::tests::recovery && cargo test --locked -p bitcoin-rs-storage --test suite durable_head_store::
+cargo test --locked -p bitcoin-rs-execution --lib recovery_marker_order_tests && cargo test --locked -p bitcoin-rs-execution --lib durable::tests
+cargo test --locked -p bitcoin-rs-execution --lib assumeutxo::tests::recovery && cargo test --locked -p bitcoin-rs-storage --test suite durable_head_store::
 cargo test --locked -p bitcoin-rs-e2e --test suite reorg::
 ```
 ## 9. External ecosystem compatibility matrix

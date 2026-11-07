@@ -1,4 +1,4 @@
-# bitcoin-rs-p2p
+# bitcoin-rs-wire
 
 This crate owns the Bitcoin peer-to-peer surface. It covers the wire codec, the peer lifecycle and handshaking, inbound dispatch, connection management, and block-download policy (`DownloadWindow` and `BlockStager`).
 

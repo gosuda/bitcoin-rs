@@ -92,7 +92,7 @@ The window treats them asymmetrically (`apply_window_admitted`, `window.rs:189`)
 Running the window test at this tree:
 
 ```
-$ cargo test --offline --locked -p bitcoin-rs-chainstate \
+$ cargo test --offline --locked -p bitcoin-rs-execution \
     a_window_commits_every_block_in_order -- --nocapture
 test tests::window_pipeline_tests::a_window_commits_every_block_in_order ... ok
 ```

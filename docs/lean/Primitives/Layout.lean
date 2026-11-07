@@ -50,7 +50,7 @@ theorem decodeReservation_linear {expansion wire : Nat} (he : expansion ≤ 18) 
   omega
 
 /-- A four-million-byte maximum block reserves at most 76 MB, inside the 512 MiB block-ingress
-budget of `crates/p2p/src/inbound/block_memory.rs`. -/
+budget of `crates/wire/src/inbound/block_memory.rs`. -/
 theorem decodeReservation_block_clamp {expansion : Nat} (he : expansion ≤ 18) :
     decodeReservation expansion 4_000_000 ≤ 512 * 1024 * 1024 := by
   have hlin := decodeReservation_linear (wire := 4_000_000) he

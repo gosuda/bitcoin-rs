@@ -177,7 +177,7 @@ def modules(root: Path) -> tuple[Module, ...]:
     return tuple(inventory[name] for name in sorted(inventory))
 
 def tool(root: Path) -> Toolchain:
-    with (root / "crates/rpc/core-compat.toml").open("rb") as stream:
+    with (root / "crates/serving/core-compat.toml").open("rb") as stream:
         identity = tomllib.load(stream)["reference"]["formal_tool"]
     keys = ("name", "version", "archive_sha256", "jar_sha256")
     if any(key not in identity for key in keys):
@@ -443,7 +443,7 @@ def run_tlc_module(
         "generated_cfg_sha256": gen_cfg_hash,
         "generated_cfg": str(gen_cfg_file),
         "constants": cfg_constants(module.config(root)),
-        "reference_manifest_sha256": sha256(root / "crates/rpc/core-compat.toml"),
+        "reference_manifest_sha256": sha256(root / "crates/serving/core-compat.toml"),
         "jvm_args": os.environ.get("JVM_ARGS", "-Xmx4096m"),
         "k": None,
         "properties": ["TypeOK", "Safety", "ConditionalProgress"],
@@ -533,7 +533,7 @@ def run_once(root: Path, toolchain: Toolchain, module: Module, property_arg: str
     metadata = {
         "argv": argv, "tla_sha256": module.tla_sha256, "cfg_sha256": module.cfg_sha256,
         "constants": cfg_constants(module.config(root)),
-        "reference_manifest_sha256": sha256(root / "crates/rpc/core-compat.toml"),
+        "reference_manifest_sha256": sha256(root / "crates/serving/core-compat.toml"),
         "jvm_args": env["JVM_ARGS"], "solver": env["SMT_SOLVER"], "k": bound,
     }
     (run_dir / "identity.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")

@@ -371,9 +371,8 @@ impl WorkspaceGraph {
     }
 
     fn validate_backend_forwarding_allowlist(&self, violations: &mut Vec<String>) -> usize {
-        const ALLOWED: [&str; 7] = [
+        const ALLOWED: [&str; 6] = [
             STORAGE_CRATE,
-            "bitcoin-rs-utxo",
             CHAINSTATE_CRATE,
             "bitcoin-rs-projection",
             NODE_CRATE,

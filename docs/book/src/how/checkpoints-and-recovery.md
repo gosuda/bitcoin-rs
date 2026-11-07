@@ -118,7 +118,7 @@ Restarting on the same data directory restores from the checkpoint with zero rep
 ```
 {"message":"chainstate restore selected","restore_source":"checkpoint","checkpoint_generation":1,
  "checkpoint_height":205,"height":205,"hash":"474cb06e...37fa7e","replayed_records":0,
- "chain_tx_count":206,"replay_seconds":0.000131045},"target":"bitcoin_rs_chainstate::recovery"}
+ "chain_tx_count":206,"replay_seconds":0.000131045},"target":"bitcoin_rs_execution::recovery"}
 ```
 
 The matching live IBD case (checkpoint plus journal replay) is documented with verified output in [First start](../run/first-start.md).

@@ -26,7 +26,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 |---|---|---|
 | `getblockchaininfo` | 0.4.0 | Unavailable optional fields are omitted. Pruning mode/target and signet challenge are not reported (automatic_pruning, prune_target_size, signet_challenge); pruneheight reflects the backing prune service (crates/serving/src/handlers/chain.rs). |
 | `getblock` | 0.4.0 | Verbosity 2 fees and verbosity 3 prevouts use bounded certified undo. Older stale bodies whose receipt is no longer retained omit undo fields; transient history and explicit query budgets may refuse reads. Raw/txid shapes remain; stale block headers omit competing-branch successor links. See docs/contracts/external-api.md#retained-block-inputs. |
-| `verifychain` | 0.4.0 | Level 0 reads and decodes every requested non-genesis body and confirms it is the block the header chain names; level 1 also checks proof of work and the consensus-owned context-free body rules (stripped size, coinbase/transaction structure, money ranges, legacy sigops); level 2 also decodes the undo record; levels 3 and 4 run the level-2 checks and do not replay disconnect or reconnect. The answer is false for any damaged block or undo record and for windows this node does not hold (pruned, snapshot-only, unreadable or missing bodies) or skips on process shutdown mid-walk, matching Core's boolean failure for missing history rather than an incomplete-verification error for that case. Cancellation and recovery closure are -1 errors, not false: a triggered request latch answers -1 Block verification interrupted and a chainstate closed for recovery answers -1 Chainstate is unavailable for verification, including a closure that lands mid-walk or over an empty window. One owner serves RPC and startup; startup checks the last six blocks one level stronger, including witness commitments (crates/chainstate/src/verify.rs). See docs/contracts/external-api.md#block-database-verification. |
+| `verifychain` | 0.4.0 | Level 0 reads and decodes every requested non-genesis body and confirms it is the block the header chain names; level 1 also checks proof of work and the consensus-owned context-free body rules (stripped size, coinbase/transaction structure, money ranges, legacy sigops); level 2 also decodes the undo record; levels 3 and 4 run the level-2 checks and do not replay disconnect or reconnect. The answer is false for any damaged block or undo record and for windows this node does not hold (pruned, snapshot-only, unreadable or missing bodies) or skips on process shutdown mid-walk, matching Core's boolean failure for missing history rather than an incomplete-verification error for that case. Cancellation and recovery closure are -1 errors, not false: a triggered request latch answers -1 Block verification interrupted and a chainstate closed for recovery answers -1 Chainstate is unavailable for verification, including a closure that lands mid-walk or over an empty window. One owner serves RPC and startup; startup checks the last six blocks one level stronger, including witness commitments (crates/execution/src/verify.rs). See docs/contracts/external-api.md#block-database-verification. |
 | `syncwithvalidationinterfacequeue` | 0.14.0 | Barrier null: Core waits for its validation-interface queue; this node delivers the equivalent chain-transition effects (mempool update, block log, ZMQ publication, mining signal) synchronously inside the commit (crates/node/src/chain_effects.rs), so the call takes the chain-transition mutex and answers once any in-flight transition's followers finish. It is a blocking request under bounded admission; the wait honors the cancellation latch and answers -1 when interrupted. Not fully synchronous: ZMQ effects hand off to the zeromq context's own I/O thread (zmq.publish_sequence enqueues with DONTWAIT), so delivery to subscribers is queued, not awaited. Core's queue also carries mempool TransactionAddedToMempool events, which this node has no queued equivalent for. The background derived-index reconcile loop is not awaited (index reads have their own catch-up fallback). |
 | `scantxoutset` | 0.4.0 | Fixed addr/raw and public pkh/wpkh/sh(wpkh)/key-only tr descriptors, including wildcard/multipath expansion. Ranges are inclusive, defaulting to [0,1000] per wildcard path; fixed descriptors validate and ignore ranges. At most 1024 aggregate script expansions before deduplication; private keys, secret-dependent derivation and other forms remain unsupported. Cancellable traversal holds chain-transition exclusion; ancestry and response projection use the retained tip after release. Input, traversal, result and 60-second limits apply (docs/contracts/external-api.md, API-35). |
 | `sendrawtransaction` | 0.4.0 | Core 31.1 replacement, modified-fee, cluster and TRUC cases are process-verified in overhaul_process_harness::policy_cases. Exact optimal graph ordering does not emulate Core transient SFL work-budget states. Capacity accounting and generic consensus error details retain the differences in docs/policies/mempool-policy.md; scoped package submission is exposed separately by submitpackage. |
@@ -53,7 +53,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `waitforblockheight` | 0.13.0 | Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-34-active-tip-waits. |
 | `waitfornewblock` | 0.13.0 | Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-34-active-tip-waits. |
 | `stop` | 0.14.0 | Answers this node's own status string "bitcoin-rs stopping" and trips the node's single graceful-shutdown latch, the same chainstate latch SIGTERM/SIGINT use. The latch is tripped before the reply is written and delivery is best-effort: the detached rpc connection thread normally writes the reply as teardown lets it finish, but a guaranteed pre-teardown write is not part of the API (docs/contracts/external-api.md API-36). The status string deliberately differs from Core's ("Bitcoin Core stopping", src/rpc/server.cpp): the functional framework discards the stop reply (test_node.py), so no test ever required Core-string equality. Core's hidden numeric wait argument is not honored: any argument is refused with the local parameter-shape error (crates/serving/src/handlers/util.rs). |
-| `decodescript` | 0.12.0 | Wallet-free Core script projection and wrapping. Invalid-curve keys inside complex Miniscript retain an address descriptor fallback instead of Core permissive wsh inference. Missing/extra arguments return compact usage rather than the full Core help body; direct calls enforce the existing 16 MiB RPC hex-input budget. Scoped Core process evidence covers script classes, descriptors, parameters, networks, and shared consumers (crates/serving/src/handlers/util.rs and crates/rpc/src/tx_render.rs). |
+| `decodescript` | 0.12.0 | Wallet-free Core script projection and wrapping. Invalid-curve keys inside complex Miniscript retain an address descriptor fallback instead of Core permissive wsh inference. Missing/extra arguments return compact usage rather than the full Core help body; direct calls enforce the existing 16 MiB RPC hex-input budget. Scoped Core process evidence covers script classes, descriptors, parameters, networks, and shared consumers (crates/serving/src/handlers/util.rs and crates/serving/src/tx_render.rs). |
 | `submitpackage` | 0.14.0 | Scoped singleton and 1-parent-1-child CPFP submission through the existing atomic gateway, with Core individual-first partial acceptance and resident fee exclusion. Wider packages, replacement and capacity eviction are explicitly unsupported. Generic rejection details retain native differences; see docs/policies/mempool-policy.md. |
 
 ### Implemented (unverified)
@@ -121,7 +121,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getpoolbalances` | 0.14.0 | Management-only: [account_u64]. Reads one account's available, reserved, paid and deficit satoshis plus payout script. No wallet balance or custody. |
 | `compressrawtransaction` | 0.14.0 | Optional BIP337 compressed-transaction encoding; disabled unless the node starts with --compressed-transactions, which answers -32603 (crates/serving/src/compressed_tx.rs). |
 | `decompressrawtransaction` | 0.14.0 | Optional BIP337 compressed-transaction decoding; disabled unless the node starts with --compressed-transactions, which answers -32603 (crates/serving/src/compressed_tx.rs). |
-| `getcapabilities` | 0.4.0 | bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/serving/src/handlers/chain.rs, crates/index/src/capabilities.rs). |
+| `getcapabilities` | 0.4.0 | bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/serving/src/handlers/chain.rs, crates/projection/src/capabilities.rs). |
 
 ### Unimplemented
 
@@ -144,8 +144,8 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `converttopsbt` | n/a | PSBT creation not implemented. |
 | `createpsbt` | n/a | PSBT creation not implemented. |
 | `decodepsbt` | n/a | PSBT analysis not implemented (combine/finalize only). |
-| `descriptorprocesspsbt` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `fundrawtransaction` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
+| `descriptorprocesspsbt` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `fundrawtransaction` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
 | `getprivatebroadcastinfo` | n/a | Private-broadcast store not implemented. |
 | `joinpsbts` | n/a | PSBT merge not implemented (combine/finalize only). |
 | `signrawtransactionwithkey` | n/a | Signing requires key material this process never holds. |
@@ -154,61 +154,61 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `createmultisig` | n/a | No key material (policy). |
 | `signmessagewithprivkey` | n/a | Signing requires key material this process never holds. |
 | `verifymessage` | n/a | Message-signature verification not implemented. |
-| `abandontransaction` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `abortrescan` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `backupwallet` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `bumpfee` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `createwallet` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `createwalletdescriptor` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `encryptwallet` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `getaddressesbylabel` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `getaddressinfo` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `getbalance` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `getbalances` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `gethdkeys` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `getnewaddress` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `getrawchangeaddress` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `getreceivedbyaddress` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `getreceivedbylabel` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `gettransaction` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `getwalletinfo` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `importdescriptors` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `importprunedfunds` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `keypoolrefill` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `listaddressgroupings` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `listdescriptors` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `listlabels` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `listlockunspent` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `listreceivedbyaddress` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `listreceivedbylabel` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `listsinceblock` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `listtransactions` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `listunspent` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `listwalletdir` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `listwallets` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `loadwallet` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `lockunspent` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `migratewallet` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `psbtbumpfee` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `removeprunedfunds` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `rescanblockchain` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `restorewallet` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `send` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `sendall` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `sendmany` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `sendtoaddress` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `setlabel` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `setwalletflag` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `signmessage` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `signrawtransactionwithwallet` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `simulaterawtransaction` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `unloadwallet` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `walletcreatefundedpsbt` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `walletdisplayaddress` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `walletlock` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `walletpassphrase` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `walletpassphrasechange` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
-| `walletprocesspsbt` | n/a | No wallet: this process holds no private-key material (crates/rpc/src/lib.rs). |
+| `abandontransaction` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `abortrescan` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `backupwallet` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `bumpfee` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `createwallet` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `createwalletdescriptor` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `encryptwallet` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `getaddressesbylabel` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `getaddressinfo` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `getbalance` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `getbalances` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `gethdkeys` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `getnewaddress` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `getrawchangeaddress` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `getreceivedbyaddress` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `getreceivedbylabel` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `gettransaction` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `getwalletinfo` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `importdescriptors` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `importprunedfunds` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `keypoolrefill` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `listaddressgroupings` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `listdescriptors` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `listlabels` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `listlockunspent` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `listreceivedbyaddress` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `listreceivedbylabel` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `listsinceblock` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `listtransactions` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `listunspent` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `listwalletdir` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `listwallets` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `loadwallet` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `lockunspent` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `migratewallet` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `psbtbumpfee` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `removeprunedfunds` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `rescanblockchain` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `restorewallet` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `send` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `sendall` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `sendmany` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `sendtoaddress` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `setlabel` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `setwalletflag` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `signmessage` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `signrawtransactionwithwallet` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `simulaterawtransaction` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `unloadwallet` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `walletcreatefundedpsbt` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `walletdisplayaddress` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `walletlock` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `walletpassphrase` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `walletpassphrasechange` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
+| `walletprocesspsbt` | n/a | No wallet: this process holds no private-key material (crates/serving/src/lib.rs). |
 
 ## REST endpoints
 

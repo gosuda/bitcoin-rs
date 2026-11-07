@@ -1,4 +1,4 @@
-# bitcoin-rs-index
+# bitcoin-rs-projection
 
 Owns the confirmed-transaction index: compact rows over the workspace key-value
 store and versioned `TxLookup`/`ScriptHistory`/`ScriptLive` watermarks that pin

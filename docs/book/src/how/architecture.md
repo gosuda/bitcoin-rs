@@ -15,7 +15,7 @@ BlockSync::tick (crates/node/src/p2p/sync.rs)
 BlockStager::insert (crates/node/src/p2p/block_stager.rs)
   |  dedupe by hash, byte budgets, expected-prefix order
   v
-apply_buffered_blocks (crates/p2p/src/sync/commit.rs)
+apply_buffered_blocks (crates/node/src/p2p/sync/commit.rs)
   |  p2p::sync::chain::commit_window trait seam
   v
 node commit_window (crates/node/src/sync.rs)
@@ -31,7 +31,7 @@ publish_applied (crates/execution/src/lib.rs)
 node ChainFollowers::on_connect (crates/node/src/chain_effects.rs)
   |  block log, ZMQ, index wake, sequence, mining generation, mempool
   v
-index worker (crates/index/src/runtime) and RPC/ZMQ consumers
+index worker (crates/projection/src/runtime) and RPC/ZMQ consumers
 ```
 
 ## Header sync
@@ -91,11 +91,11 @@ A reorg takes the same transition lock in the other direction. `ChainTransition:
 The trace below is verbatim from a regtest node started with `--log-level debug`. The block entered through `generatetoaddress`, not a peer, so the P2P stages are absent. The chainstate, publication, and follower stages are the same code path a peer-delivered block takes.
 
 ```text
-{"timestamp":"2026-11-01T16:44:33.923132Z","level":"DEBUG","fields":{"message":"apply_block: profile","height":1,"input.block_hash":"5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24","tx_count":1,"block_rules_us":"8","bip30_bip34_us":"5","script_verify_us":"0","utxo_commit_us":"53","block_body_persist_us":"62","block_tree_insert_us":"16","coin_stats_us":"0","total_us":"482"},"target":"bitcoin_rs_chainstate::connect"}
-{"timestamp":"2026-11-01T16:44:33.923168Z","level":"DEBUG","fields":{"message":"apply_block: tail begin","height":1,"outcome.hash":"5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24"},"target":"bitcoin_rs_chainstate::connect"}
-{"timestamp":"2026-11-01T16:44:33.923258Z","level":"DEBUG","fields":{"message":"apply_block: publish profile","height":1,"outcome.hash":"5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24","durable_sync_us":"4","durable_commit_us":"67"},"target":"bitcoin_rs_chainstate::connect"}
+{"timestamp":"2026-11-01T16:44:33.923132Z","level":"DEBUG","fields":{"message":"apply_block: profile","height":1,"input.block_hash":"5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24","tx_count":1,"block_rules_us":"8","bip30_bip34_us":"5","script_verify_us":"0","utxo_commit_us":"53","block_body_persist_us":"62","block_tree_insert_us":"16","coin_stats_us":"0","total_us":"482"},"target":"bitcoin_rs_execution::connect"}
+{"timestamp":"2026-11-01T16:44:33.923168Z","level":"DEBUG","fields":{"message":"apply_block: tail begin","height":1,"outcome.hash":"5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24"},"target":"bitcoin_rs_execution::connect"}
+{"timestamp":"2026-11-01T16:44:33.923258Z","level":"DEBUG","fields":{"message":"apply_block: publish profile","height":1,"outcome.hash":"5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24","durable_sync_us":"4","durable_commit_us":"67"},"target":"bitcoin_rs_execution::connect"}
 {"timestamp":"2026-11-01T16:44:33.923435Z","level":"DEBUG","fields":{"message":"chain_effects: on_connect profile","height":1,"tip_hash":"5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24","on_connect_us":"59"},"target":"bitcoin_rs_node::chain_effects"}
-{"timestamp":"2026-11-01T16:44:33.923453Z","level":"DEBUG","fields":{"message":"chainstate: transition held","transition_held_us":"807"},"target":"bitcoin_rs_chainstate"}
+{"timestamp":"2026-11-01T16:44:33.923453Z","level":"DEBUG","fields":{"message":"chainstate: transition held","transition_held_us":"807"},"target":"bitcoin_rs_execution"}
 ```
 
 The order is the contract: apply profile, durable commit receipt, tip publication, follower dispatch, then the transition drops. The block held only a coinbase, so no input scripts ran; `script_dispatch=coinbase_only` records that, not a disabled check.

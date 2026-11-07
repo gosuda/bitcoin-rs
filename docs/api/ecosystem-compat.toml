@@ -89,14 +89,14 @@ surface = "JSON-RPC"
 core_reference = "Bitcoin Core 31.1 RPC schema (crates/serving/core-compat.toml reference pins)"
 status = "implemented"
 representative_consumer = "planned: an existing Core-compatible RPC client (issue #1122 follow-up)"
-evidence = "in-tree only: dispatch, handler, and pinned-shape suites (crates/rpc/tests/*), per-method schema status in crates/serving/src/registry.rs. A scripted in-repo client does not upgrade this row; see ECO-08."
+evidence = "in-tree only: dispatch, handler, and pinned-shape suites (crates/serving/tests/*), per-method schema status in crates/serving/src/registry.rs. A scripted in-repo client does not upgrade this row; see ECO-08."
 
 [[row]]
 surface = "REST"
 core_reference = "Bitcoin Core REST interface (twelve Core route prefixes, crates/serving/src/rest.rs)"
 status = "implemented"
 representative_consumer = "planned: an existing REST client (issue #1122 follow-up)"
-evidence = "in-tree only: crates/rpc/tests/rest_routes.rs and manifest coverage; per-route status in crates/serving/src/registry.rs."
+evidence = "in-tree only: crates/serving/tests/rest_routes.rs and manifest coverage; per-route status in crates/serving/src/registry.rs."
 
 [[row]]
 surface = "ZMQ notifications"
@@ -110,14 +110,14 @@ surface = "Esplora-compatible HTTP API"
 core_reference = "Blockstream Esplora API (bitcoin-rs-specific surface, no Core counterpart)"
 status = "implemented"
 representative_consumer = "planned: an existing Esplora client (issue #1122 follow-up)"
-evidence = "in-tree only: crates/serving/src/esplora.rs projection and handler tests (crates/rpc/tests/*). Extension surface per crates/serving/src/registry.rs (docs/contracts/wallet-facing.md WF-01)."
+evidence = "in-tree only: crates/serving/src/esplora.rs projection and handler tests (crates/serving/tests/*). Extension surface per crates/serving/src/registry.rs (docs/contracts/wallet-facing.md WF-01)."
 
 [[row]]
 surface = "GetBlockTemplate (BIP22/BIP23)"
 core_reference = "Bitcoin Core mining RPC"
 status = "implemented"
 representative_consumer = "planned: an existing mining consumer via GBT (issue #1122 follow-up)"
-evidence = "in-tree only: template-shape and mining fixture suites (crates/mining/tests/*, crates/rpc/tests/mining_fixture). The in-repo external-miner harness (bin/bitcoin-rs/tests/overhaul_external_miner.rs) exercises the public HTTP surface but is a self-authored harness, not a real external consumer."
+evidence = "in-tree only: template-shape and mining fixture suites (crates/serving/tests/*, crates/serving/tests/mining_fixture). The in-repo external-miner harness (bin/bitcoin-rs/tests/overhaul_external_miner.rs) exercises the public HTTP surface but is a self-authored harness, not a real external consumer."
 
 [[row]]
 surface = "Block submission and proposal (submitblock, BIP22 proposal mode)"

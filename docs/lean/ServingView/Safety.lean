@@ -1,6 +1,6 @@
 /-
 Safety invariants of the ServingView query lifecycle machine
-(Rust owners `crates/serving` and `crates/index`).
+(Rust owners `crates/serving` and `crates/projection`).
 
 Anchors: Tony Hoare, Claude Shannon
 

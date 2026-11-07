@@ -534,7 +534,7 @@ fn occurrence_flags(store: &MemoryStore) -> (usize, usize) {
 
 fn read_fixture(height: u32) -> Result<Vec<u8>, std::io::Error> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../primitives/tests/testdata")
+        .join("../consensus/tests/testdata")
         .join(format!("{height}.bin"));
     std::fs::read(path)
 }

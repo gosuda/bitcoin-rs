@@ -18,7 +18,7 @@ fn spawn_chainstate_maintenance_worker(
     shutdown: crate::chain::LatchReader,
 ) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
-        .name("bitcoin-rs-chainstate-maintenance".into())
+        .name("bitcoin-rs-execution-maintenance".into())
         .spawn(move || maintenance_loop(&publisher, &shutdown))
 }
 

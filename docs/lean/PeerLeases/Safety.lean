@@ -1,6 +1,6 @@
 /-
 Safety invariants of the peer-lease machine (Rust owner
-`crates/p2p/src/lease_model.rs`): session-generation ordering, the single
+`crates/wire/src/lease_model.rs`): session-generation ordering, the single
 current session, and the ticket allocation, issuance, release and free chain.
 This file proves an abstract session-and-ticket machine. `docs/models/PeerLeases/*.tla`
 own the liveness checks and the buffer, tag and custody detail. Field and action names

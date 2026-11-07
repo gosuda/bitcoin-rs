@@ -123,7 +123,7 @@ fn authenticated_header_semantics_require_resync() -> TestResult {
 }
 
 /// The offsets below are the checkpoint envelope (16 bytes) followed by the stable
-/// `CoinStats::to_bytes` layout defined in `crates/utxo/src/stats/coin_stats.rs`:
+/// `CoinStats::to_bytes` layout defined in `crates/storage/src/utxo/stats/coin_stats.rs`:
 /// `MuHash` numerator/denominator, then height, total amount, bogo size, transaction
 /// count, and UTXO count.
 ///

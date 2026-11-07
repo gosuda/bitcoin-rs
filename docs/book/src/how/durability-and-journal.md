@@ -123,8 +123,8 @@ After three such calls, `getblockchaininfo` reported `blocks: 3`, `headers: 3`, 
 `offset: 771` equals the byte length of `segment-0000000000.log`, `record_count: 3` counts the three records, and `chain_tx_count: 4` counts genesis plus three coinbases. `block_hash` is the little-endian byte array of the same tip the RPC reported. `SIGKILL` then removed the process with no clean checkpoint, and the restart on the same directory logged:
 
 ```text
-INFO bitcoin_rs_chainstate::recovery chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
-INFO bitcoin_rs_chainstate::durable replayed the committed-but-unpublished gap; the node resumes on the stored head head_height=3 head_tip=05cd0c0a...fe7b blocks=4 commit_id=4
+INFO bitcoin_rs_execution::recovery chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
+INFO bitcoin_rs_execution::durable replayed the committed-but-unpublished gap; the node resumes on the stored head head_height=3 head_tip=05cd0c0a...fe7b blocks=4 commit_id=4
 ```
 
 A clean shutdown after 300 regtest blocks also shows compaction. `SIGTERM` published generation 1, and the journal marker became:

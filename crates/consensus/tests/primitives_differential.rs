@@ -283,7 +283,7 @@ fn enforce_corpus_verdicts(target: &str) {
             Value::from(
                 "QAC-05 (docs/contracts/qa-corpus.md): expected decoder verdict per seed; \
                  regenerate with BITCOIN_RS_FUZZ_CORPUS=<corpus> \
-                 CORPUS_VERDICTS_WRITE=1 cargo test -p bitcoin-rs-primitives",
+                 CORPUS_VERDICTS_WRITE=1 cargo test -p bitcoin-rs-consensus",
             ),
         );
         let mut section = sonic_rs::Object::with_capacity(observed.len());

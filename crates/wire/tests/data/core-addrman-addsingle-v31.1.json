@@ -38,8 +38,8 @@
     "compile_flags": "-std=c++20 -O1 -g0 -ffunction-sections -fdata-sections -Wl,--gc-sections",
     "configuration": "Generated from the pinned cmake/bitcoin-build-config.h.in using pinned31.1 metadata and already measured Linux platform feature flags. Full upstream CMake configure was blocked by absent Boost package; standalone drivers compile actual unmodified Core sources. No candidate or replacement addrman algorithm is linked.",
     "generated_config_sha256": "e795caf911f1ac025a338cf35620a7015d36423ef2c065aa73b17b52afea5ef4",
-    "build_script": "crates/p2p/tests/support/regenerate-core-addrman.sh",
-    "configure_script": "crates/p2p/tests/support/core-addrman-configure.cmake"
+    "build_script": "crates/wire/tests/support/regenerate-core-addrman.sh",
+    "configure_script": "crates/wire/tests/support/core-addrman-configure.cmake"
   },
   "oracle_sha256": "eed1748f74771f212248cfc2b6f41aef33ecc514171f9027346aa54409a2b978",
   "driver_sha256": "e6f6b820312a7d4a9c65a408ccf45cd81d2336092c9232cfd9ce60fcd865a338",

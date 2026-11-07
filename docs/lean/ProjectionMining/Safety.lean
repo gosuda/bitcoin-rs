@@ -1,7 +1,7 @@
 /-
 Safety invariants of the projection and mining machine (Rust owners
 `crates/projection/src/projection_model.rs` and
-`crates/mining/src/projection_model.rs`): the projection never leads the
+`crates/serving/src/mining/projection_model.rs`): the projection never leads the
 applied chain, committed rows never exceed the watermark, the template
 generation never leads the tip, and pending shares stay bounded.
 This file proves an abstract projection-and-mining machine. `docs/models/ProjectionMining/*.tla`

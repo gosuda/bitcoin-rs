@@ -570,7 +570,7 @@ impl P2pService {
             let shutdown = workers.shutdown.reader();
             let shared = shared.clone();
             let handle = thread::Builder::new()
-                .name(format!("bitcoin-rs-p2p-{listener_addr}"))
+                .name(format!("bitcoin-rs-wire-{listener_addr}"))
                 .spawn(move || crate::listener::serve(listener, shutdown, shared))?;
             workers.listeners.push(handle);
         }
@@ -609,7 +609,7 @@ impl P2pService {
         let max_peer_connections = self.config.max_peer_connections;
         let allow_feelers = self.config.fixed_peers.is_empty() && active_limit > 0;
         thread::Builder::new()
-            .name("bitcoin-rs-p2p-outbound-drain".to_owned())
+            .name("bitcoin-rs-wire-outbound-drain".to_owned())
             .spawn(move || {
                 let mut active: HashMap<PeerEndpoint, ActiveOutbound> = HashMap::new();
                 let mut parked: VecDeque<OutboundDial> = VecDeque::new();

@@ -133,27 +133,27 @@ $ ./target/release/bitcoin-rs --network regtest --data-dir $DATA/b --p2p-listen 
 The dialing node logs its outbound session, the listening node the inbound one, both v2:
 
 ```text
-{"level":"INFO","fields":{"message":"p2p handshake complete; entering message loop","peer_addr":"127.0.0.1:38437","inbound":false,"transport":"v2"},"target":"bitcoin_rs_p2p::listener"}
-{"level":"INFO","fields":{"message":"p2p handshake complete; entering message loop","peer_addr":"127.0.0.1:44582","inbound":true,"transport":"v2"},"target":"bitcoin_rs_p2p::listener"}
+{"level":"INFO","fields":{"message":"p2p handshake complete; entering message loop","peer_addr":"127.0.0.1:38437","inbound":false,"transport":"v2"},"target":"bitcoin_rs_wire::listener"}
+{"level":"INFO","fields":{"message":"p2p handshake complete; entering message loop","peer_addr":"127.0.0.1:44582","inbound":true,"transport":"v2"},"target":"bitcoin_rs_wire::listener"}
 ```
 
 Repeating the second command with `--v2transport=false` on the dialing node leaves the listening node untouched. The listening node still sniffs per connection and accepts the v1 starter:
 
 ```text
-{"level":"INFO","fields":{"message":"p2p handshake complete; entering message loop","peer_addr":"127.0.0.1:38437","inbound":false,"transport":"v1"},"target":"bitcoin_rs_p2p::listener"}
-{"level":"INFO","fields":{"message":"p2p handshake complete; entering message loop","peer_addr":"127.0.0.1:38002","inbound":true,"transport":"v1"},"target":"bitcoin_rs_p2p::listener"}
+{"level":"INFO","fields":{"message":"p2p handshake complete; entering message loop","peer_addr":"127.0.0.1:38437","inbound":false,"transport":"v1"},"target":"bitcoin_rs_wire::listener"}
+{"level":"INFO","fields":{"message":"p2p handshake complete; entering message loop","peer_addr":"127.0.0.1:38002","inbound":true,"transport":"v1"},"target":"bitcoin_rs_wire::listener"}
 ```
 
 A peer that connects and closes before answering produces the inbound failure line with no discouragement:
 
 ```text
-{"level":"WARN","fields":{"message":"p2p inbound handshake failed","peer_addr":"127.0.0.1:52216","error":"io error: unexpected end of file"},"target":"bitcoin_rs_p2p::listener"}
+{"level":"WARN","fields":{"message":"p2p inbound handshake failed","peer_addr":"127.0.0.1:52216","error":"io error: unexpected end of file"},"target":"bitcoin_rs_wire::listener"}
 ```
 
 The decoder behind the v2 half runs under cargo. This test seals one decoy packet with the ignore bit, then a real packet, and asserts the reader yields `None` for the decoy and the payload for the real one:
 
 ```console
-$ cargo test -p bitcoin-rs-p2p a_decoy_packet_yields_none_and_the_next_packet_still_arrives -- --nocapture
+$ cargo test -p bitcoin-rs-wire a_decoy_packet_yields_none_and_the_next_packet_still_arrives -- --nocapture
 test bip324::reader::tests::a_decoy_packet_yields_none_and_the_next_packet_still_arrives ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1308 filtered out; finished in 0.00s

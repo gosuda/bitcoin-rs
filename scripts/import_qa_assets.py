@@ -331,7 +331,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for source in [p2p, *scripts, *(args.corpora / name for name, _ in direct)]:
             if not source.is_dir():
                 raise ValueError(f"Expected corpus directory: {source}")
-        map_p2p(p2p, args.repo_root / "crates/p2p/src/compat.rs",
+        map_p2p(p2p, args.repo_root / "crates/wire/src/compat.rs",
                 args.out_base / "p2p_message", args.max_seed_bytes)
         map_script(scripts, args.repo_root / "fuzz/fuzz_targets/script_eval.rs",
                    args.out_base / "script_eval", args.max_seed_bytes)
