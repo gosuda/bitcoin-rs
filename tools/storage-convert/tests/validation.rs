@@ -1,3 +1,4 @@
+#[cfg(feature = "mdbx")]
 use bitcoin_rs_storage::KvStore;
 use std::fs;
 use tempfile::tempdir;
@@ -643,6 +644,52 @@ fn bare_relative_destination_path_succeeds() -> TestResult<()> {
         return Err(TestError::Assertion(
             "destination CURRENT_SCHEMA was not created for bare relative destination path".into(),
         ));
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_final_component_trailing_slash_rejected() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let dest_temp = tempdir()?;
+    let link_temp = tempdir()?;
+
+    let from_path = source_temp.path();
+    let to_path = dest_temp.path().join("converted");
+
+    write_schema_marker(from_path, 3)?;
+
+    let symlink_from = link_temp.path().join("symlink_from");
+    std::os::unix::fs::symlink(from_path, &symlink_from)?;
+
+    let symlink_from_trailing = format!("{}/", symlink_from.display());
+
+    let output = run_converter(&[
+        "--from",
+        &symlink_from_trailing,
+        "--to",
+        to_path.to_str().expect("valid utf8 path"),
+    ])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded with trailing slash on symlink final component for --from".into(),
+        ));
+    }
+
+    if to_path.join("CURRENT_SCHEMA").exists() {
+        return Err(TestError::Assertion(
+            "destination CURRENT_SCHEMA was published on trailing slash symlink rejection".into(),
+        ));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.contains("symlink final component") {
+        return Err(TestError::Assertion(format!(
+            "stderr did not mention symlink final component: {stderr}"
+        )));
     }
 
     Ok(())

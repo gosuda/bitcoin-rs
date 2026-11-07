@@ -18,7 +18,8 @@ pub(crate) struct OpenedRoots {
 }
 
 pub(crate) fn check_symlink_final_component(path: &Path) -> Result<(), ConvertError> {
-    match fs::symlink_metadata(path) {
+    let clean_path = path.components().as_path();
+    match fs::symlink_metadata(clean_path) {
         Ok(meta) => {
             if meta.file_type().is_symlink() {
                 return Err(ConvertError::InvalidOperation(format!(
