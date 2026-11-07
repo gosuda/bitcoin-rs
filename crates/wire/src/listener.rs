@@ -555,8 +555,7 @@ impl ConnectionShared {
     ) {
         let peer_addr = peer_addr.into();
         let source = lease.source(peer_addr.endpoint());
-        let header = payload.header();
-        let hash = bitcoin_rs_consensus::primitives::Hash256::from(header.compute_hash());
+        let hash = bitcoin_rs_consensus::primitives::Hash256::from(payload.block_hash());
         let requested = self
             .block_sync
             .as_ref()
@@ -565,6 +564,7 @@ impl ConnectionShared {
             metrics::counter!("node.sync.dropped_unsolicited_blocks").increment(1);
             return;
         };
+        let header = payload.header();
         if self.forward_block(payload, source, Some(credit), memory_credit) {
             self.send_embedded_headers(lease, source, vec![header]);
         }

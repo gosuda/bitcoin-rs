@@ -64,29 +64,37 @@ pub struct BlockImage {
     bytes: Bytes,
     layout: BlockLayout,
     identities: Box<[TxIdentity]>,
+    hash: BlockHash,
 }
 
 impl BlockImage {
     pub fn from_raw(raw: Bytes) -> Result<Self, DecodeError> {
         let (layout, identities) = BlockLayout::parse_exact(&raw)?;
+        let header_span = layout.header();
+        let header_slice = bytes_at(&raw, header_span);
+        let hash = BlockHash(double_sha256(header_slice));
         Ok(Self {
             bytes: raw,
             layout,
             identities,
+            hash,
         })
     }
-
     pub fn from_prefix(raw: Bytes) -> Result<(Self, usize), DecodeError> {
         let mut cursor = 0_u64;
         let (layout, identities) = BlockLayout::parse_at(&raw, &mut cursor)?;
         let consumed =
             usize::try_from(cursor).map_err(|_| DecodeError::TrailingBytes { remaining: 0 })?;
         let bytes = Bytes::copy_from_slice(&raw[..consumed]);
+        let header_span = layout.header();
+        let header_slice = bytes_at(&bytes, header_span);
+        let hash = BlockHash(double_sha256(header_slice));
         Ok((
             Self {
                 bytes,
                 layout,
                 identities,
+                hash,
             },
             consumed,
         ))
@@ -122,7 +130,7 @@ impl BlockImage {
 
     #[must_use]
     pub fn block_hash(&self) -> BlockHash {
-        BlockHash(double_sha256(&self.header_bytes()))
+        self.hash
     }
 
     #[must_use]
