@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -535,12 +535,27 @@ fn hash_finish(engine: Sha256) -> [u8; 32] {
     engine.finalize().into()
 }
 
-fn tag_engine(tag: &[u8]) -> Sha256 {
+fn init_tag_engine(tag: &[u8]) -> Sha256 {
     let tag_hash = hash_digest(tag);
     let mut engine = Sha256::new();
     hash_feed(&mut engine, &tag_hash);
     hash_feed(&mut engine, &tag_hash);
     engine
+}
+
+static TAPLEAF_ENGINE: LazyLock<Sha256> = LazyLock::new(|| init_tag_engine(b"TapLeaf"));
+static TAPBRANCH_ENGINE: LazyLock<Sha256> = LazyLock::new(|| init_tag_engine(b"TapBranch"));
+static TAPTWEAK_ENGINE: LazyLock<Sha256> = LazyLock::new(|| init_tag_engine(b"TapTweak"));
+static TAPSIGHASH_ENGINE: LazyLock<Sha256> = LazyLock::new(|| init_tag_engine(b"TapSighash"));
+
+fn tag_engine(tag: &[u8]) -> Sha256 {
+    match tag {
+        b"TapLeaf" => TAPLEAF_ENGINE.clone(),
+        b"TapBranch" => TAPBRANCH_ENGINE.clone(),
+        b"TapTweak" => TAPTWEAK_ENGINE.clone(),
+        b"TapSighash" => TAPSIGHASH_ENGINE.clone(),
+        _ => init_tag_engine(tag),
+    }
 }
 
 // SCR-03
