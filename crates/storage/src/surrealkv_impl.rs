@@ -1154,7 +1154,7 @@ const fn cf_to_u8(cf: ColumnFamily) -> u8 {
         ColumnFamily::BlockBodies => 8,
         ColumnFamily::UndoData => 9,
         ColumnFamily::ScriptLive => 10,
-        ColumnFamily::CoinRecords => 11,
+        ColumnFamily::Coins => 11,
         ColumnFamily::PoolLedger => 12,
     }
 }
