@@ -104,9 +104,34 @@ fn harness_mining_template_matched_pair() {
 fn harness_template_never_has_confirmed_tx() {
     let s = any_settlement_state();
     kani::assume(settlement_safety(&s));
-    if s.template_active {
-        assert!(!s.template_has_confirmed);
+    let a = any_action();
+    let mut s_next = step(&s, a);
+    if s_next.template_active {
+        assert!(!s_next.template_has_confirmed);
     }
+    let res = s_next.assemble_template(s_next.applied_epoch, s_next.mempool_gen);
+    if res.is_ok() {
+        assert!(s_next.template_active);
+        assert!(!s_next.template_has_confirmed);
+    }
+}
+
+// MPS-03
+#[kani::proof]
+#[kani::should_panic]
+fn harness_negative_control_template_never_has_confirmed_tx() {
+    let s = any_settlement_state();
+    kani::assume(settlement_safety(&s));
+    let s_committed = step(&s, Action::CommitBlock);
+    let s_next = step_mutant_unsettled_assembly(
+        &s_committed,
+        Action::AssembleTemplate {
+            req_epoch: s_committed.applied_epoch,
+            req_gen: s_committed.mempool_gen,
+        },
+    );
+    assert!(s_next.template_active);
+    assert!(!s_next.template_has_confirmed);
 }
 
 // MPS-01, MPS-03
