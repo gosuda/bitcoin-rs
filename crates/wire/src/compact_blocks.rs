@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use bitcoin::bip152::{BlockTransactionsRequest, HeaderAndShortIds, ShortId};
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn};
 use bitcoin_rs_consensus::primitives::deserialize;
-use bitcoin_rs_consensus::primitives::{Block, BlockHash, Header, Tx, Txid, Wtxid};
+use bitcoin_rs_consensus::primitives::{Block, BlockHash, BlockImage, Header, Tx, Txid, Wtxid};
 
 pub use crate::wire::MAX_BLOCK_TX_COUNT;
 
@@ -28,7 +28,7 @@ pub trait CompactBlockHints: Send + Sync {
 
 #[derive(Debug)]
 pub enum Outcome {
-    Complete(Block),
+    Complete(BlockImage),
     RequestMissing(GetBlockTxn),
     Fallback(BlockHash),
     Idle,
@@ -232,7 +232,7 @@ impl Reconstruction {
     }
 }
 
-fn complete_block(header: Header, filled: Vec<Option<Tx>>) -> Result<Block, ()> {
+fn complete_block(header: Header, filled: Vec<Option<Tx>>) -> Result<BlockImage, ()> {
     if filled.iter().any(Option::is_none) {
         return Err(());
     }
@@ -243,7 +243,20 @@ fn complete_block(header: Header, filled: Vec<Option<Tx>>) -> Result<Block, ()> 
     if bitcoin_rs_consensus::is_sixty_four_byte_mutation(&block.txs) {
         return Err(());
     }
-    Ok(block)
+
+    let payload_len: usize = block.txs.iter().map(Tx::total_size).sum();
+    let total_capacity = 80 + 9 + payload_len;
+    let mut raw = Vec::with_capacity(total_capacity);
+    bitcoin_rs_consensus::primitives::encode::ConsensusEncode::consensus_encode(
+        &block.header,
+        &mut raw,
+    );
+    let tx_count = u64::try_from(block.txs.len()).map_err(|_| ())?;
+    raw.extend_from_slice(bitcoin_rs_consensus::primitives::varint::encode(tx_count).as_slice());
+    for tx in &block.txs {
+        bitcoin_rs_consensus::primitives::encode::ConsensusEncode::consensus_encode(tx, &mut raw);
+    }
+    BlockImage::from_raw(bytes::Bytes::from(raw)).map_err(|_| ())
 }
 
 fn fill_from_hints(
@@ -333,7 +346,6 @@ fn place_prefills(compact: &HeaderAndShortIds, total: usize) -> Option<Vec<Optio
 pub(crate) fn native_header(reg: &bitcoin::blockdata::block::Header) -> Option<Header> {
     deserialize(&bitcoin::consensus::encode::serialize(reg)).ok()
 }
-
 fn native_tx(reg: &bitcoin::Transaction) -> Option<Tx> {
     deserialize(&bitcoin::consensus::encode::serialize(reg)).ok()
 }

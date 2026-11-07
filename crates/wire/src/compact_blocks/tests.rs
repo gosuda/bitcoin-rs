@@ -251,9 +251,10 @@ fn v2_compact_block_with_all_txs_hinted_reconstructs_completely() {
 
     let outcome = reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, now());
 
-    let Outcome::Complete(block) = outcome else {
+    let Outcome::Complete(image) = outcome else {
         panic!("expected complete reconstruction, got {outcome:?}");
     };
+    let block = image.materialize();
     assert_eq!(block.block_hash(), native.block_hash());
     assert_eq!(block.txs, native.txs);
 }
@@ -268,9 +269,10 @@ fn v1_compact_block_matches_by_txid() {
 
     let outcome = reconstruction.receive_cmpctblock(&cmpct, 1, &hints, now());
 
-    let Outcome::Complete(block) = outcome else {
+    let Outcome::Complete(image) = outcome else {
         panic!("expected complete reconstruction, got {outcome:?}");
     };
+    let block = image.materialize();
     assert_eq!(
         block.txs.iter().map(Tx::txid).collect::<Vec<_>>(),
         native.txs.iter().map(Tx::txid).collect::<Vec<_>>()
@@ -302,9 +304,10 @@ fn missing_tx_requests_getblocktxn_and_completes_on_blocktxn() {
         },
     };
     let outcome = reconstruction.receive_blocktxn(&txn, now());
-    let Outcome::Complete(block) = outcome else {
+    let Outcome::Complete(image) = outcome else {
         panic!("expected complete reconstruction, got {outcome:?}");
     };
+    let block = image.materialize();
     assert_eq!(block.txs, native.txs);
 }
 
@@ -329,9 +332,10 @@ fn missing_txs_request_ordered_getblocktxn_and_complete_on_blocktxn() {
         },
     };
     let outcome = reconstruction.receive_blocktxn(&txn, now());
-    let Outcome::Complete(block) = outcome else {
+    let Outcome::Complete(image) = outcome else {
         panic!("expected complete reconstruction, got {outcome:?}");
     };
+    let block = image.materialize();
     assert_eq!(block.txs, native.txs);
 }
 
@@ -500,9 +504,10 @@ fn colliding_hint_requests_only_its_slot() {
         },
     };
     let outcome = reconstruction.receive_blocktxn(&txn, now());
-    let Outcome::Complete(block) = outcome else {
+    let Outcome::Complete(image) = outcome else {
         panic!("expected the collided slot's blocktxn to complete, got {outcome:?}");
     };
+    let block = image.materialize();
     assert_eq!(block.txs, native.txs);
 }
 
@@ -721,9 +726,10 @@ fn sixty_four_byte_transaction_beside_a_coinbase_completes() {
 
     let outcome = reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, now());
 
-    let Outcome::Complete(block) = outcome else {
+    let Outcome::Complete(image) = outcome else {
         panic!("a body with a coinbase is not a mutation, got {outcome:?}");
     };
+    let block = image.materialize();
     assert_eq!(block.txs, native.txs);
 }
 

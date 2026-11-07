@@ -2827,14 +2827,9 @@ fn handle_compact_outcome(
     let peer_addr = peer_addr.into();
     let lease = sink.lease;
     match outcome {
-        crate::compact_blocks::Outcome::Complete(block) => {
-            tracing::info!(peer_addr = %peer_addr, hash = %block.block_hash(), "p2p compact block reconstructed");
-            shared.send_block(
-                lease,
-                peer_addr,
-                bitcoin_rs_consensus::primitives::BlockImage::from_local(block),
-                None,
-            );
+        crate::compact_blocks::Outcome::Complete(image) => {
+            tracing::info!(peer_addr = %peer_addr, hash = %image.block_hash(), "p2p compact block reconstructed");
+            shared.send_block(lease, peer_addr, image, None);
             None
         }
         crate::compact_blocks::Outcome::RequestMissing(request) => {

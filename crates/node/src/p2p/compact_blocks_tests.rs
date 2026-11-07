@@ -304,7 +304,7 @@ fn extra_ring_orphan_only_hint_completes_reconstruction() {
         panic!("a ring-only hint must complete the block, got {outcome:?}");
     };
     assert_eq!(block.block_hash(), native.block_hash());
-    assert_eq!(block.txs, native.txs);
+    assert_eq!(block.materialize().txs, native.txs);
     assert!(
         !gateway.read().contains_txid(&orphan.txid()),
         "reconstruction must never admit a hinted body"
@@ -348,7 +348,7 @@ fn pool_and_ring_share_identity_without_false_collision() {
     let Outcome::Complete(block) = outcome else {
         panic!("a pool+ring duplicate identity must complete, got {outcome:?}");
     };
-    assert_eq!(block.txs, native.txs);
+    assert_eq!(block.materialize().txs, native.txs);
 }
 
 #[test]
@@ -377,7 +377,7 @@ fn v2_witness_variants_stay_distinct() {
     let Outcome::Complete(block) = outcome else {
         panic!("v2 must resolve the first variant, got {outcome:?}");
     };
-    assert_eq!(block.txs, native_first.txs);
+    assert_eq!(block.materialize().txs, native_first.txs);
 
     let native_second = conforming_block(vec![test_tx(0xC2), (*second).clone()]);
     let cmpct_second = compact_of(&native_second, COMPACT_BLOCK_VERSION, 0x66);
@@ -391,7 +391,7 @@ fn v2_witness_variants_stay_distinct() {
     let Outcome::Complete(block) = outcome else {
         panic!("v2 must resolve the second variant, got {outcome:?}");
     };
-    assert_eq!(block.txs, native_second.txs);
+    assert_eq!(block.materialize().txs, native_second.txs);
 }
 
 #[test]
@@ -432,7 +432,7 @@ fn v1_shared_txid_ambiguity_requests_missing() {
     let Outcome::Complete(block) = outcome else {
         panic!("v2 must resolve the same variants, got {outcome:?}");
     };
-    assert_eq!(block.txs, native.txs);
+    assert_eq!(block.materialize().txs, native.txs);
 }
 
 struct EvictAfterWalk<'a> {
@@ -477,7 +477,7 @@ fn eviction_between_walk_and_fetch_requests_missing() {
         panic!("the held victim must complete before eviction, got {outcome:?}");
     };
     assert_eq!(block.block_hash(), native.block_hash());
-    assert_eq!(block.txs, native.txs);
+    assert_eq!(block.materialize().txs, native.txs);
 
     let evict: Vec<Tx> = (0..100_u8).map(|i| orphan_tx(0x10 + i, 0x20 + i)).collect();
     let racing = EvictAfterWalk {
@@ -680,7 +680,7 @@ fn metadata_inclusive_budget_is_reusable_after_pending_release() {
                 let Outcome::Complete(block) = result else {
                     panic!("expected complete block, got {result:?}");
                 };
-                assert_eq!(block.txs, native.txs);
+                assert_eq!(block.materialize().txs, native.txs);
             } else {
                 assert!(matches!(result, Outcome::Fallback(_)));
             }
