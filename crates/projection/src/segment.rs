@@ -123,6 +123,41 @@ pub fn meta_gen_key(capability: IndexCapability) -> Vec<u8> {
     key
 }
 
+// REO-04, REO-05
+pub fn retire_generation<S: bitcoin_rs_storage::KvStore>(
+    store: &S,
+    capability: IndexCapability,
+    gen_id: u64,
+) -> Result<(), crate::IndexError> {
+    let start = format::gen_prefix_start(gen_id);
+    let end = format::gen_prefix_end(gen_id);
+
+    let cfs: &'static [bitcoin_rs_storage::ColumnFamily] = match capability {
+        IndexCapability::TxLookup => &[bitcoin_rs_storage::ColumnFamily::TxDir],
+        IndexCapability::ScriptHistory => &[
+            bitcoin_rs_storage::ColumnFamily::ScriptDict,
+            bitcoin_rs_storage::ColumnFamily::ScriptPost,
+            bitcoin_rs_storage::ColumnFamily::SpendDir,
+            bitcoin_rs_storage::ColumnFamily::ScriptStats,
+        ],
+        IndexCapability::ScriptLive => &[bitcoin_rs_storage::ColumnFamily::ScriptLive],
+        IndexCapability::CompactFilters => &[bitcoin_rs_storage::ColumnFamily::Filters],
+    };
+
+    for &cf in cfs {
+        store.delete_range(cf, &start, &end)?;
+    }
+
+    let mut batch = store.new_batch();
+    batch.delete(
+        bitcoin_rs_storage::ColumnFamily::IdxMeta,
+        &meta_gen_key(capability),
+    );
+    store.write_durable(batch)?;
+
+    Ok(())
+}
+
 #[derive(Default)]
 pub struct TailWriterState {
     pub current_ordinal: u32,
