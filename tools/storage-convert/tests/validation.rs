@@ -1,9 +1,10 @@
+use bitcoin_rs_storage::KvStore;
 use std::fs;
 use tempfile::tempdir;
 
 use super::support::error::{TestError, TestResult};
 use super::support::harness::{recursive_dir_digest, run_converter};
-use super::support::oracle::write_schema_marker;
+use super::support::oracle::{write_rocksdb_namespace, write_schema_marker};
 
 #[test]
 fn nonempty_destination_is_rejected_without_modifying_source_or_destination() -> TestResult<()> {
@@ -522,6 +523,81 @@ fn uncompiled_surrealkv_fails_with_missing_feature() -> TestResult<()> {
     if !stderr.contains("surrealkv") {
         return Err(TestError::Assertion(format!(
             "stderr did not mention missing feature surrealkv: {stderr}"
+        )));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn overlaid_recognized_engines_in_epoch_3_namespace_is_rejected() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let dest_temp = tempdir()?;
+    let from_path = source_temp.path();
+    let to_path = dest_temp.path().join("converted");
+
+    write_schema_marker(from_path, 3)?;
+
+    let chainstate_dir = from_path.join("chainstate");
+    let rocks_data = vec![(
+        bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+        vec![(b"meta:key".to_vec(), b"val".to_vec())],
+    )];
+    write_rocksdb_namespace(&chainstate_dir, &rocks_data)?;
+
+    let standalone_mdbx_dir = tempdir()?;
+    #[cfg(feature = "mdbx")]
+    {
+        let store = bitcoin_rs_storage::MdbxStore::open(standalone_mdbx_dir.path())?;
+        store.put(bitcoin_rs_storage::ColumnFamily::UtxoMeta, b"k", b"v")?;
+        fs::copy(
+            standalone_mdbx_dir.path().join("mdbx.dat"),
+            chainstate_dir.join("mdbx.dat"),
+        )?;
+    }
+    #[cfg(not(feature = "mdbx"))]
+    {
+        fs::write(standalone_mdbx_dir.path().join("mdbx.dat"), b"fake_mdbx")?;
+        fs::copy(
+            standalone_mdbx_dir.path().join("mdbx.dat"),
+            chainstate_dir.join("mdbx.dat"),
+        )?;
+    }
+
+    let source_digest_before = recursive_dir_digest(from_path)?;
+
+    let from_str = from_path
+        .to_str()
+        .ok_or_else(|| TestError::Assertion("invalid utf-8 path".into()))?;
+    let to_str = to_path
+        .to_str()
+        .ok_or_else(|| TestError::Assertion("invalid utf-8 path".into()))?;
+
+    let output = run_converter(&["--from", from_str, "--to", to_str])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded when multiple recognized engines were overlaid in epoch 3 namespace".into(),
+        ));
+    }
+
+    let source_digest_after = recursive_dir_digest(from_path)?;
+    if source_digest_before != source_digest_after {
+        return Err(TestError::Assertion(
+            "source directory was modified on overlaid engine rejection in epoch 3".into(),
+        ));
+    }
+
+    if to_path.join("CURRENT_SCHEMA").exists() {
+        return Err(TestError::Assertion(
+            "CURRENT_SCHEMA was created on overlaid engine rejection in epoch 3".into(),
+        ));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.contains("multiple recognized storage engines detected") {
+        return Err(TestError::Assertion(format!(
+            "stderr did not mention multiple recognized storage engines: {stderr}"
         )));
     }
 

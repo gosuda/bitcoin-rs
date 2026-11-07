@@ -26,7 +26,13 @@ pub(crate) fn detect_engine(
     source_epoch: u32,
 ) -> Result<Option<DetectedEngine>, ConvertError> {
     if source_epoch != 2 {
-        let detected = bitcoin_rs_storage::detect_engine(scratch_path)?;
+        let detected =
+            bitcoin_rs_storage::detect_engine(scratch_path).map_err(|err| match err {
+                bitcoin_rs_storage::StorageError::IncompatibleData(msg) => {
+                    ConvertError::IncompatibleData(msg)
+                }
+                other => ConvertError::Storage(other),
+            })?;
         return match detected {
             None => Ok(None),
             Some(StorageBackend::RocksDb) => Ok(Some(DetectedEngine::RocksDb)),

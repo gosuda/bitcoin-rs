@@ -26,24 +26,42 @@ pub fn detect_engine(dir: &Path) -> Result<Option<StorageBackend>, StorageError>
         return Ok(None);
     }
 
-    if entries.iter().any(|name| name == "mdbx.dat") {
-        return Ok(Some(StorageBackend::Mdbx));
-    }
+    let has_mdbx = entries.iter().any(|name| name == "mdbx.dat");
 
     let has_current = entries.iter().any(|name| name == "CURRENT");
     let has_options = entries.iter().any(|name| name.starts_with("OPTIONS-"));
-    if has_current && has_options {
-        return Ok(Some(StorageBackend::RocksDb));
-    }
+    let has_rocksdb = has_current && has_options;
 
     let has_surreal_marker = entries.iter().any(|name| name == SURREALKV_MARKER);
     let has_surreal_engine = entries.iter().any(|name| name == "ENGINE")
         && std::fs::read_to_string(dir.join("ENGINE"))
             .is_ok_and(|content| content.trim() == "surrealkv");
-    if has_surreal_marker || has_surreal_engine {
-        return Ok(Some(StorageBackend::SurrealKv));
+    let has_surrealkv = has_surreal_marker || has_surreal_engine;
+
+    let mut detected = None;
+    let mut count = 0usize;
+    if has_mdbx {
+        detected = Some(StorageBackend::Mdbx);
+        count = count.saturating_add(1);
+    }
+    if has_rocksdb {
+        detected = Some(StorageBackend::RocksDb);
+        count = count.saturating_add(1);
+    }
+    if has_surrealkv {
+        detected = Some(StorageBackend::SurrealKv);
+        count = count.saturating_add(1);
     }
 
+    if count > 1 {
+        return Err(StorageError::IncompatibleData(
+            "multiple recognized storage engines detected in directory".to_owned(),
+        ));
+    }
+
+    if let Some(backend) = detected {
+        return Ok(Some(backend));
+    }
     Err(StorageError::IncompatibleData(
         "unknown engine files".to_owned(),
     ))
