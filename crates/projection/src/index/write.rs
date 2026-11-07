@@ -790,7 +790,6 @@ fn remove_compact_filter_rows<S: KvStore>(store: &S) -> Result<(), IndexError> {
     store.delete_range(ColumnFamily::Filters, &[0; 8], &[0, 0, 0, 0, 0, 0, 0, 1])?;
     Ok(())
 }
-
 impl<S: KvStore> IndexWriter<S> {
     fn initial_filter_header(
         &self,

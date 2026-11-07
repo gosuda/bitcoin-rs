@@ -78,6 +78,7 @@ fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
         let candidate = sample_candidate(hash, seq, seq, false, false);
         let key = CandidateKey::ordinary(GenerationKey {
             tip_hash: hash,
+            commit_id: 0,
             mempool_sequence: seq,
             fee_delta_sequence: seq,
         });
@@ -192,6 +193,7 @@ fn long_poll_round_trips_template_id() {
     let tip = Hash256::from_le_bytes(&[0x11; 32]);
     let key = GenerationKey {
         tip_hash: tip,
+        commit_id: 0,
         mempool_sequence: 7,
         fee_delta_sequence: 0,
     };
@@ -258,23 +260,44 @@ fn template_generation_race_classification_excludes_other_failures() {
     }
 }
 
-struct StaticTip(Mutex<Option<TipSnapshot>>);
+struct StaticTip {
+    tip: Mutex<Option<TipSnapshot>>,
+    commit: Mutex<u64>,
+}
 
 impl StaticTip {
+    fn new(tip: Option<TipSnapshot>) -> Self {
+        Self {
+            tip: Mutex::new(tip),
+            commit: Mutex::new(0),
+        }
+    }
+
     fn set(&self, tip: Option<TipSnapshot>) {
-        *self.0.lock() = tip;
+        *self.tip.lock() = tip;
+    }
+
+    fn set_epoch(&self, tip: Option<TipSnapshot>, commit: u64) {
+        *self.tip.lock() = tip;
+        *self.commit.lock() = commit;
     }
 }
 
 impl AppliedTipSource for StaticTip {
     fn applied_tip(&self) -> Option<TipSnapshot> {
-        self.0.lock().clone()
+        self.tip.lock().clone()
+    }
+
+    fn applied_epoch(&self) -> Option<bitcoin_rs_execution::chain::AppliedEpoch> {
+        self.applied_tip()
+            .map(|tip| bitcoin_rs_execution::chain::AppliedEpoch::new(tip, *self.commit.lock()))
     }
 }
 
 struct StaticPool {
     counters: Mutex<(u64, u64)>,
     pool_reads: AtomicUsize,
+    settled_commit: Mutex<u64>,
 }
 
 impl StaticPool {
@@ -282,11 +305,16 @@ impl StaticPool {
         Self {
             counters: Mutex::new((sequence, fee_delta_sequence)),
             pool_reads: AtomicUsize::new(0),
+            settled_commit: Mutex::new(0),
         }
     }
 
     fn set(&self, sequence: u64, fee_delta_sequence: u64) {
         *self.counters.lock() = (sequence, fee_delta_sequence);
+    }
+
+    fn set_settled_commit(&self, commit: u64) {
+        *self.settled_commit.lock() = commit;
     }
 }
 
@@ -294,6 +322,10 @@ impl MempoolSnapshotSource for StaticPool {
     fn current_revisions(&self) -> (u64, u64) {
         self.pool_reads.fetch_add(1, Ordering::Relaxed);
         *self.counters.lock()
+    }
+    fn settled_generation(&self) -> (u64, u64, u64) {
+        let (seq, fee) = self.current_revisions();
+        (*self.settled_commit.lock(), seq, fee)
     }
 
     fn select_template(
@@ -452,7 +484,7 @@ fn service_with_source(
 ) -> MiningService {
     MiningService::new(
         Network::Regtest,
-        Arc::new(StaticTip(Mutex::new(tip))),
+        Arc::new(StaticTip::new(tip)),
         pool,
         chain,
         Vec::new(),
@@ -509,6 +541,7 @@ fn publish_fee_delta_generation_wakes_a_registered_waiter() {
         published,
         Some(GenerationKey {
             tip_hash: tip,
+            commit_id: 0,
             mempool_sequence: 5,
             fee_delta_sequence: 9,
         })
@@ -522,6 +555,7 @@ fn publish_fee_delta_generation_drops_a_stale_fee_revision() {
     let service = service_with(Some(tip_snapshot(tip)), Arc::new(StaticPool::new(5, 2)));
     let newer = GenerationKey {
         tip_hash: tip,
+        commit_id: 0,
         mempool_sequence: 5,
         fee_delta_sequence: 9,
     };
@@ -575,6 +609,7 @@ fn fee_publication_preserves_the_published_membership_sequence() {
         published_key(&service),
         Some(GenerationKey {
             tip_hash: tip,
+            commit_id: 0,
             mempool_sequence: 5,
             fee_delta_sequence: 9,
         })
@@ -592,6 +627,7 @@ fn membership_publication_invalidates_without_inventing_a_fee_revision() {
         published_key(&service),
         Some(GenerationKey {
             tip_hash: tip,
+            commit_id: 0,
             mempool_sequence: 5,
             fee_delta_sequence: 9,
         })
@@ -601,6 +637,7 @@ fn membership_publication_invalidates_without_inventing_a_fee_revision() {
         published_key(&service),
         Some(GenerationKey {
             tip_hash: tip,
+            commit_id: 0,
             mempool_sequence: 5,
             fee_delta_sequence: 9,
         })
@@ -617,6 +654,7 @@ fn first_sequence_publication_seeds_from_the_construction_pool_state() {
         published_key(&service),
         Some(GenerationKey {
             tip_hash: Network::Regtest.genesis_block_hash(),
+            commit_id: 0,
             mempool_sequence: 5,
             fee_delta_sequence: 4,
         })
@@ -634,6 +672,7 @@ fn assemble_refuses_when_either_pool_counter_moves() {
     );
     let key = GenerationKey {
         tip_hash: tip,
+        commit_id: 0,
         mempool_sequence: 5,
         fee_delta_sequence: 2,
     };
@@ -921,6 +960,7 @@ fn publish_block_generation_retains_receipt_and_publishes() {
         published_key(&service),
         Some(GenerationKey {
             tip_hash,
+            commit_id: 0,
             mempool_sequence: 5,
             fee_delta_sequence: 2,
         }),
@@ -957,6 +997,7 @@ fn empty_preparation_installs_against_matching_receipt() {
     service.publish_block_generation(tip_hash, &MutationResult::empty());
     let key = GenerationKey {
         tip_hash,
+        commit_id: 0,
         mempool_sequence: 5,
         fee_delta_sequence: 2,
     };
@@ -1020,6 +1061,7 @@ fn empty_preparation_cannot_install_against_nonempty_receipt() {
     );
     let key = GenerationKey {
         tip_hash,
+        commit_id: 0,
         mempool_sequence: 5,
         fee_delta_sequence: 2,
     };
@@ -1063,6 +1105,7 @@ fn fee_moved_preparation_discards_and_serves_live() {
     service.publish_block_generation(tip_hash, &MutationResult::empty());
     let key = GenerationKey {
         tip_hash,
+        commit_id: 0,
         mempool_sequence: 5,
         fee_delta_sequence: 9,
     };
@@ -1099,6 +1142,7 @@ fn matching_foreground_joins_running_preparation_without_duplicate_finish() {
     service.publish_block_generation(tip_hash, &MutationResult::empty());
     let key = GenerationKey {
         tip_hash,
+        commit_id: 0,
         mempool_sequence: 5,
         fee_delta_sequence: 2,
     };
@@ -1147,6 +1191,7 @@ fn shutdown_releases_a_preparation_waiter() {
     wait_until_entered(&pool);
     let key = GenerationKey {
         tip_hash,
+        commit_id: 0,
         mempool_sequence: 5,
         fee_delta_sequence: 2,
     };
@@ -1173,7 +1218,7 @@ fn pending_stage_foreground_joins_without_duplicate_finish() {
     let first_hash = Hash256::from_le_bytes(&[0x71; 32]);
     let second_hash = Hash256::from_le_bytes(&[0x72; 32]);
     let pool = Arc::new(GatedPool::new(5, 2));
-    let tip_source = Arc::new(StaticTip(Mutex::new(Some(tip_snapshot(first_hash)))));
+    let tip_source = Arc::new(StaticTip::new(Some(tip_snapshot(first_hash))));
     let service = Arc::new(MiningService::new(
         Network::Regtest,
         tip_source.clone(),
@@ -1195,6 +1240,7 @@ fn pending_stage_foreground_joins_without_duplicate_finish() {
     service.publish_block_generation(second_hash, &MutationResult::empty());
     let key = GenerationKey {
         tip_hash: second_hash,
+        commit_id: 0,
         mempool_sequence: 5,
         fee_delta_sequence: 2,
     };
@@ -1243,6 +1289,7 @@ fn worker_panic_releases_joined_waiter_to_lazy_fallback() {
     wait_until_entered(&pool);
     let key = GenerationKey {
         tip_hash,
+        commit_id: 0,
         mempool_sequence: 5,
         fee_delta_sequence: 2,
     };
@@ -1294,6 +1341,7 @@ fn ready_preparation_parks_until_the_receipt_and_serves_the_prepared_arc() {
     let prepared = ready_candidate(&service, tip_hash);
     let key = GenerationKey {
         tip_hash,
+        commit_id: 0,
         mempool_sequence: 5,
         fee_delta_sequence: 2,
     };
@@ -1346,6 +1394,7 @@ fn stale_ready_without_a_receipt_serves_lazily_instead_of_parking() {
     *pool.counters.lock() = (5, 9);
     let key = GenerationKey {
         tip_hash,
+        commit_id: 0,
         mempool_sequence: 5,
         fee_delta_sequence: 9,
     };
@@ -1412,6 +1461,7 @@ fn nonempty_preparation_installs_against_matching_receipt() {
     );
     let key = GenerationKey {
         tip_hash,
+        commit_id: 0,
         mempool_sequence: 7,
         fee_delta_sequence: 3,
     };
@@ -1433,8 +1483,8 @@ fn signalling_rules_resolve_once_per_tip_and_height() -> TestResult {
     let chain = Arc::new(CountingChain {
         rules_calls: AtomicUsize::new(0),
     });
-    let tip_source = Arc::new(StaticTip(Mutex::new(Some(tip_snapshot(
-        Hash256::from_le_bytes(&[0x6a; 32]),
+    let tip_source = Arc::new(StaticTip::new(Some(tip_snapshot(Hash256::from_le_bytes(
+        &[0x6a; 32],
     )))));
     let service = MiningService::new(
         Network::Regtest,
@@ -1464,4 +1514,51 @@ fn signalling_rules_resolve_once_per_tip_and_height() -> TestResult {
         "a moved tip resolves its own rules once"
     );
     Ok(())
+}
+
+// MPS-03
+#[test]
+fn mining_template_never_references_unsettled_transaction() {
+    let tip_a = tip_snapshot(Hash256::from_le_bytes(&[0x11; 32]));
+    let tip_source = Arc::new(StaticTip::new(Some(tip_a.clone())));
+    tip_source.set_epoch(Some(tip_a.clone()), 1);
+    let pool = Arc::new(StaticPool::new(1, 0));
+    pool.set_settled_commit(1);
+
+    let service = MiningService::new(
+        Network::Regtest,
+        tip_source.clone(),
+        pool.clone(),
+        Arc::new(ResolvedChain),
+        Vec::new(),
+        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
+    );
+
+    let key_epoch_1 = GenerationKey {
+        tip_hash: tip_a.hash,
+        commit_id: 1,
+        mempool_sequence: 1,
+        fee_delta_sequence: 0,
+    };
+    let candidate = service.candidate_for_key(key_epoch_1);
+    assert!(candidate.is_ok());
+
+    let tip_b = tip_snapshot(Hash256::from_le_bytes(&[0x22; 32]));
+    tip_source.set_epoch(Some(tip_b.clone()), 2);
+
+    let key_epoch_2 = GenerationKey {
+        tip_hash: tip_b.hash,
+        commit_id: 2,
+        mempool_sequence: 1,
+        fee_delta_sequence: 0,
+    };
+    let unsettled_candidate = service.candidate_for_key(key_epoch_2);
+    assert!(matches!(
+        &unsettled_candidate,
+        Err(e) if e.is_template_generation_race()
+    ));
+
+    pool.set_settled_commit(2);
+    let settled_candidate = service.candidate_for_key(key_epoch_2);
+    assert!(settled_candidate.is_ok());
 }

@@ -24,6 +24,38 @@ pub enum ConnectMutationError {
         source: bitcoin_rs_execution::ApplyError,
     },
 }
+#[derive(Clone, Debug)]
+pub struct EpochCell {
+    inner: Arc<parking_lot::RwLock<Option<bitcoin_rs_execution::chain::AppliedEpoch>>>,
+}
+
+impl Default for EpochCell {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(parking_lot::RwLock::new(None)),
+        }
+    }
+}
+
+impl EpochCell {
+    #[must_use]
+    pub fn new(initial: Option<bitcoin_rs_execution::chain::AppliedEpoch>) -> Self {
+        Self {
+            inner: Arc::new(parking_lot::RwLock::new(initial)),
+        }
+    }
+
+    #[must_use]
+    pub fn current(&self) -> Option<bitcoin_rs_execution::chain::AppliedEpoch> {
+        self.inner.read().clone()
+    }
+
+    pub fn advance(&self, tip: bitcoin_rs_execution::chain::TipSnapshot, commit_id: u64) {
+        *self.inner.write() = Some(bitcoin_rs_execution::chain::AppliedEpoch::new(
+            tip, commit_id,
+        ));
+    }
+}
 
 #[derive(Clone)]
 pub struct ChainFollowers {
@@ -34,6 +66,7 @@ pub struct ChainFollowers {
     mining: Arc<crate::mining::MiningGenerationSignal>,
     mempool: Option<Arc<MempoolGateway>>,
     block_announcer: Option<crate::p2p::block_announce::BlockAnnounceQueue>,
+    epoch: EpochCell,
 }
 
 impl ChainFollowers {
@@ -54,6 +87,7 @@ impl ChainFollowers {
             mining,
             mempool,
             block_announcer: None,
+            epoch: EpochCell::default(),
         }
     }
 
@@ -81,6 +115,11 @@ impl ChainFollowers {
         self.derived_index = derived_index;
         self
     }
+    #[must_use]
+    pub fn epoch(&self) -> EpochCell {
+        self.epoch.clone()
+    }
+
     #[must_use]
     pub fn with_facts_queue(mut self, facts_queue: Option<Arc<FactsQueue>>) -> Self {
         self.facts_queue = facts_queue;
@@ -177,15 +216,17 @@ impl ChainFollowers {
         let on_connect_started = quanta::Instant::now();
         let block_removals = if let Some(gateway) = &self.mempool {
             let facts = bitcoin_rs_mempool::TransitionFacts::from_block(payload);
-            gateway.remove_for_block(
+            gateway.settle_block_facts(
                 AdmissionOrigin::Block,
                 &facts,
+                outcome.commit_id,
                 outcome.height,
                 bitcoin_rs_consensus::primitives::unix_time_secs(),
             )
         } else {
             MutationResult::empty()
         };
+        self.epoch.advance(outcome.tip.clone(), outcome.commit_id);
         self.blocks
             .write()
             .push(BlockRecord::from_image(outcome.height, payload));

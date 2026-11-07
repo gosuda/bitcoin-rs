@@ -918,6 +918,15 @@ impl Chainstate {
         self.applied_tip.load_full()
     }
 
+    #[must_use]
+    pub fn durable_commit_id(&self) -> u64 {
+        self.durable_head
+            .load()
+            .ok()
+            .flatten()
+            .map_or(0, |head| head.commit_id)
+    }
+
     pub fn set_pow_valid_block(&self, hook: PowValidBlockHook) -> Result<(), PowValidBlockHook> {
         self.pow_valid_block.set(hook)
     }

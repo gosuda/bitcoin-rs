@@ -316,7 +316,6 @@ impl ServingView {
         })
     }
 }
-
 impl core::fmt::Debug for DerivedIndexQueryEngine {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DerivedIndexQueryEngine")

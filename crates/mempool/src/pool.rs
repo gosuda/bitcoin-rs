@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::{Bound, RangeInclusive};
 
-use bitcoin_rs_consensus::primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
 
 #[cfg(test)]
 use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
@@ -123,6 +123,7 @@ pub struct Mempool {
     pub(crate) accepted_capture: Option<Vec<(Txid, Arc<Tx>)>>,
     rolling_min_fee: parking_lot::Mutex<crate::rolling_min_fee::RollingMinFee>,
     rolling_epoch: u64,
+    settled_at_commit: u64,
 }
 
 #[derive(Debug, Default)]
@@ -474,6 +475,7 @@ impl Mempool {
                 crate::rolling_min_fee::RollingMinFee::default(),
             ),
             rolling_epoch: 0,
+            settled_at_commit: 0,
         }
     }
 
@@ -519,6 +521,20 @@ impl Mempool {
     #[must_use]
     pub const fn fee_delta_sequence_number(&self) -> u64 {
         self.fee_delta_sequence
+    }
+
+    #[must_use]
+    pub const fn settled_at_commit(&self) -> u64 {
+        self.settled_at_commit
+    }
+
+    #[must_use]
+    pub const fn settled_generation(&self) -> (u64, u64, u64) {
+        (
+            self.settled_at_commit,
+            self.mempool_sequence,
+            self.fee_delta_sequence,
+        )
     }
 
     #[must_use]
@@ -1663,6 +1679,17 @@ impl Mempool {
         self.finish_mutation(changes)
     }
 
+    pub fn settle_for_block(
+        &mut self,
+        facts: &crate::settlement::TransitionFacts,
+        commit_id: u64,
+        height: u32,
+        now: u64,
+    ) -> MutationResult {
+        self.settled_at_commit = commit_id;
+        self.remove_for_block(facts, height, now)
+    }
+
     #[must_use]
     pub fn has_expired_entries(&self, now: u64) -> bool {
         let cutoff = now.saturating_sub(MEMPOOL_EXPIRY_SECS);
@@ -1726,6 +1753,11 @@ impl Mempool {
             }
         }
         self.finish_mutation(changes)
+    }
+
+    pub fn settle_for_reorg(&mut self, txids: &[Txid], commit_id: u64) -> MutationResult {
+        self.settled_at_commit = commit_id;
+        self.remove_for_reorg(txids)
     }
 
     #[cfg(any(test, feature = "test-seam"))]

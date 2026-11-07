@@ -268,6 +268,7 @@ fn unsatisfiable_budget_fails_typed_and_leaves_the_slot_free() -> TestResult {
 fn long_poll_accepts_a_budget_qualified_id_and_rejects_malformed_qualifiers() {
     let key = GenerationKey {
         tip_hash: Hash256::from_le_bytes(&[0x33; 32]),
+        commit_id: 0,
         mempool_sequence: 9,
         fee_delta_sequence: 4,
     };
@@ -485,6 +486,7 @@ fn gated_service() -> (
     ));
     let generation = GenerationKey {
         tip_hash: tip,
+        commit_id: 0,
         mempool_sequence: 5,
         fee_delta_sequence: 2,
     };

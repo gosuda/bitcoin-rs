@@ -24,10 +24,18 @@ pub trait MempoolSequenceWake: Send + Sync {
 
 pub trait AppliedTipSource: Send + Sync {
     fn applied_tip(&self) -> Option<TipSnapshot>;
+    fn applied_epoch(&self) -> Option<bitcoin_rs_execution::chain::AppliedEpoch> {
+        self.applied_tip()
+            .map(|tip| bitcoin_rs_execution::chain::AppliedEpoch::new(tip, 0))
+    }
 }
 
 pub trait MempoolSnapshotSource: Send + Sync {
     fn current_revisions(&self) -> (u64, u64);
+    fn settled_generation(&self) -> (u64, u64, u64) {
+        let (sequence, fee_delta_sequence) = self.current_revisions();
+        (0, sequence, fee_delta_sequence)
+    }
     fn select_template(
         &self,
         expected_sequences: Option<(u64, u64)>,

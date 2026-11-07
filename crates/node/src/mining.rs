@@ -76,7 +76,10 @@ impl MiningCoordinator {
         let shutdown = chainstate.shutdown_reader();
         let service = MiningService::new(
             network,
-            Arc::new(AppliedTipAdapter { tip: applied_tip }),
+            Arc::new(AppliedTipAdapter {
+                tip: applied_tip,
+                epoch: followers.epoch(),
+            }),
             Arc::new(MempoolAdapter {
                 mempool,
                 chainstate: Arc::clone(&chainstate),
@@ -212,11 +215,19 @@ impl MiningCoordinator {
 
 struct AppliedTipAdapter {
     tip: TipReader,
+    epoch: crate::chain_effects::EpochCell,
 }
 
 impl AppliedTipSource for AppliedTipAdapter {
     fn applied_tip(&self) -> Option<TipSnapshot> {
         self.tip.load_full().map(|snapshot| (*snapshot).clone())
+    }
+
+    fn applied_epoch(&self) -> Option<bitcoin_rs_execution::chain::AppliedEpoch> {
+        self.epoch.current().or_else(|| {
+            self.applied_tip()
+                .map(|tip| bitcoin_rs_execution::chain::AppliedEpoch::new(tip, 0))
+        })
     }
 }
 
@@ -230,6 +241,15 @@ impl MempoolSnapshotSource for MempoolAdapter {
     fn current_revisions(&self) -> (u64, u64) {
         let mempool = self.mempool.read();
         (
+            mempool.sequence_number(),
+            mempool.fee_delta_sequence_number(),
+        )
+    }
+
+    fn settled_generation(&self) -> (u64, u64, u64) {
+        let mempool = self.mempool.read();
+        (
+            mempool.settled_at_commit(),
             mempool.sequence_number(),
             mempool.fee_delta_sequence_number(),
         )

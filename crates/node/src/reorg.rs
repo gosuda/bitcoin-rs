@@ -123,10 +123,17 @@ fn settle_node_reorg(
                     observer.disconnected.drain(..),
                 );
             }
-            if gateway.remove_for_reorg(change, &chain).is_err()
-                || (reconsidered && trim_after_reorg(gateway).is_err())
+            let commit_id = handles.durable_commit_id();
+            if gateway.remove_for_reorg(change, &chain, commit_id).is_err()
+                || (reconsidered && trim_after_reorg(gateway.as_ref()).is_err())
             {
                 settle_failed = true;
+            } else if let Some(tip) = handles.applied_tip_snapshot() {
+                observer
+                    .followers
+                    .epoch()
+                    .advance((*tip).clone(), commit_id);
+                observer.followers.mining().publish_generation();
             }
         }
         settle_failed

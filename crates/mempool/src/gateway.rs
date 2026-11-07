@@ -1140,6 +1140,7 @@ impl MempoolGateway {
         &self,
         change: &ChainChangeGuard,
         chain: &dyn crate::admission::AdmissionChain,
+        commit_id: u64,
     ) -> Result<MutationResult, ChainChangeError> {
         if !change.owns(self) {
             return Err(ChainChangeError::ForeignGuard);
@@ -1207,7 +1208,7 @@ impl MempoolGateway {
                 if fence.current(self) != Some(change.odd_generation()) {
                     return Err(ChainChangeError::GenerationMoved);
                 }
-                Ok(pool.remove_for_reorg(&failing))
+                Ok(pool.settle_for_reorg(&failing, commit_id))
             },
             |result| Some(result),
         )
@@ -1221,6 +1222,29 @@ impl MempoolGateway {
         now: u64,
     ) -> MutationResult {
         self.commit_infallible(origin, |pool| pool.remove_for_block(facts, height, now))
+    }
+
+    pub fn settle_block_facts(
+        &self,
+        origin: AdmissionOrigin,
+        facts: &crate::settlement::TransitionFacts,
+        commit_id: u64,
+        height: u32,
+        now: u64,
+    ) -> MutationResult {
+        self.commit_infallible(origin, |pool| {
+            pool.settle_for_block(facts, commit_id, height, now)
+        })
+    }
+
+    #[must_use]
+    pub fn settled_at_commit(&self) -> u64 {
+        self.pool.read().settled_at_commit()
+    }
+
+    #[must_use]
+    pub fn settled_generation(&self) -> (u64, u64, u64) {
+        self.pool.read().settled_generation()
     }
 
     pub fn expire(&self, origin: AdmissionOrigin, now: u64) -> Option<MutationResult> {

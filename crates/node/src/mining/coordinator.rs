@@ -26,7 +26,7 @@ use bitcoin_rs_serving::mining::{
     ChainContextSource, CoinbaseBudget, GenerateSelection, GenerateTx, LastCandidateInfo,
     MempoolSnapshotSource, MiningCapability, MiningControlError, MiningInfo, MiningRule,
     SignetMiningInfo, TemplateId, TemplateMutation, assemble_ordered_candidate,
-    difficulty_for_bits, finish_candidate, ordered_assembly_error,
+    difficulty_for_bits, finish_candidate,
 };
 use compact_str::CompactString;
 use core::time::Duration;
@@ -43,6 +43,7 @@ const LONG_POLL_SLICE: Duration = Duration::from_secs(1);
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 struct GenerationKey {
     tip_hash: Hash256,
+    commit_id: u64,
     mempool_sequence: u64,
     fee_delta_sequence: u64,
 }
@@ -55,6 +56,13 @@ impl GenerationKey {
             self.mempool_sequence,
             self.fee_delta_sequence,
         )
+    }
+
+    #[must_use]
+    fn matches_template(self, other: Self) -> bool {
+        self.tip_hash == other.tip_hash
+            && self.mempool_sequence == other.mempool_sequence
+            && self.fee_delta_sequence == other.fee_delta_sequence
     }
 }
 
@@ -289,8 +297,13 @@ impl MiningService {
 
     pub fn publish_fee_delta_generation(&self, fee_delta_sequence: u64) {
         let mut state = self.state.lock();
+        let commit_id = self
+            .applied_tip
+            .applied_epoch()
+            .map_or(0, |epoch| epoch.commit_id);
         let key = GenerationKey {
             tip_hash: self.live_tip_hash(),
+            commit_id,
             mempool_sequence: state.retained_mempool_sequence(),
             fee_delta_sequence,
         };
@@ -317,10 +330,21 @@ impl MiningService {
     }
 
     fn live_generation_key(&self) -> GenerationKey {
-        let tip_hash = self.live_tip_hash();
-        let (mempool_sequence, fee_delta_sequence) = self.mempool.current_revisions();
+        let (tip_hash, epoch_commit) = self
+            .applied_tip
+            .applied_epoch()
+            .map(|epoch| (epoch.tip.hash, epoch.commit_id))
+            .unwrap_or_else(|| (self.live_tip_hash(), 0));
+        let (settled_commit, mempool_sequence, fee_delta_sequence) =
+            self.mempool.settled_generation();
+        let commit_id = if epoch_commit != 0 {
+            epoch_commit
+        } else {
+            settled_commit
+        };
         GenerationKey {
             tip_hash,
+            commit_id,
             mempool_sequence,
             fee_delta_sequence,
         }
@@ -361,7 +385,7 @@ impl MiningService {
                 )));
             }
             let live = self.ensure_published(&mut state);
-            if live != waited {
+            if !live.matches_template(waited) {
                 return Ok(live);
             }
             #[cfg(any(test, feature = "test-seam"))]
@@ -389,7 +413,7 @@ impl MiningService {
                 let mut state = self.state.lock();
                 self.ensure_published(&mut state)
             };
-            if live == waited {
+            if live.matches_template(waited) {
                 self.wait_for_generation_change(waited)?;
             }
             Some(waited)
@@ -744,13 +768,20 @@ impl MiningService {
 
     fn assemble_for_key(&self, key: CandidateKey) -> Result<Arc<Candidate>, MiningControlError> {
         let generation = key.generation;
-        let tip = self.applied_tip.applied_tip().ok_or_else(|| {
+        let epoch = self.applied_tip.applied_epoch().ok_or_else(|| {
             MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
         })?;
-        if tip.hash != generation.tip_hash {
+        if epoch.tip.hash != generation.tip_hash {
             return Err(generation_race());
         }
-        let context = self.candidate_context(&tip)?;
+        let (settled_commit, _mempool_seq, _fee_delta_seq) = self.mempool.settled_generation();
+        if (generation.commit_id != 0
+            && (epoch.commit_id != generation.commit_id || settled_commit != generation.commit_id))
+            || (epoch.commit_id != 0 && settled_commit != 0 && epoch.commit_id != settled_commit)
+        {
+            return Err(generation_race());
+        }
+        let context = self.candidate_context(&epoch.tip)?;
         let Some(body) = self.mempool.select_template(
             Some((generation.mempool_sequence, generation.fee_delta_sequence)),
             &context,
@@ -895,7 +926,9 @@ impl MiningService {
             }
         }
         .map_err(|error| match selection {
-            GenerateSelection::Ordered(_) => ordered_assembly_error(&error),
+            GenerateSelection::Ordered(_) => {
+                bitcoin_rs_serving::mining::ordered_assembly_error(&error)
+            }
             GenerateSelection::Mempool => {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
             }
@@ -1452,6 +1485,7 @@ fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
     let fee_delta_sequence = fee_revision.parse().ok()?;
     Some(GenerationKey {
         tip_hash,
+        commit_id: 0,
         mempool_sequence,
         fee_delta_sequence,
     })

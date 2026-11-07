@@ -2386,7 +2386,7 @@ fn reconsider_disconnected_admits_below_floor_then_trims_once() {
         "no size trim may run during the walk"
     );
 
-    let swept = gateway.remove_for_reorg(&change, &chain).expect("sweep");
+    let swept = gateway.remove_for_reorg(&change, &chain, 1).expect("sweep");
     assert!(swept.is_empty(), "the funded family stays supported");
 
     let trimmed = gateway
@@ -2554,7 +2554,7 @@ fn remove_for_reorg_sweeps_only_unsupported_residents() {
     let change = gateway.begin_chain_change().expect("fence");
 
     let result = gateway
-        .remove_for_reorg(&change, &chain)
+        .remove_for_reorg(&change, &chain, 1)
         .expect("generation held");
     change.finish().expect("finish");
 
@@ -2590,7 +2590,7 @@ fn remove_for_reorg_refuses_a_moved_generation() {
     gateway.force_chain_generation(2);
 
     assert_eq!(
-        gateway.remove_for_reorg(&change, &Coins(vec![])),
+        gateway.remove_for_reorg(&change, &Coins(vec![]), 1),
         Err(crate::ChainChangeError::GenerationMoved)
     );
     assert!(gateway.read().contains_txid(&parent_txid));
@@ -2675,7 +2675,7 @@ fn reorg_methods_refuse_a_guard_from_another_gateway() {
     let guard_b = gateway_b.begin_chain_change().expect("fence on b");
 
     assert_eq!(
-        gateway_a.remove_for_reorg(&guard_b, &Coins(vec![])),
+        gateway_a.remove_for_reorg(&guard_b, &Coins(vec![]), 1),
         Err(crate::ChainChangeError::ForeignGuard),
         "a foreign guard cannot sweep this gateway's pool"
     );

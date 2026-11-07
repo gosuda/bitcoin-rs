@@ -45,6 +45,19 @@ pub struct TipSnapshot {
     pub chain_tx_count: ChainTxCount,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedEpoch {
+    pub tip: TipSnapshot,
+    pub commit_id: u64,
+}
+
+impl AppliedEpoch {
+    #[must_use]
+    pub const fn new(tip: TipSnapshot, commit_id: u64) -> Self {
+        Self { tip, commit_id }
+    }
+}
+
 pub use latch::{HookGuard, LatchReader, LatchWriter};
 pub use tip_wait::{ActiveTipWait, TipWaitCondition};
 pub use transition::{
