@@ -1,8 +1,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "surrealkv")]
+use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvStore, RocksDbStore, WriteCondition};
 
+use crate::support::TestResult;
+
+fn map_err(e: impl std::fmt::Display) -> crate::support::error::TestError {
+    crate::support::error::TestError::Io(std::io::Error::other(e.to_string()))
+}
+
+fn thread_err(_: Box<dyn std::any::Any + Send>) -> crate::support::error::TestError {
+    crate::support::error::TestError::Io(std::io::Error::other("thread panicked"))
+}
 struct PausingIter {
     items: Vec<(Vec<u8>, Vec<u8>)>,
     idx: usize,
@@ -32,18 +43,18 @@ impl Iterator for PausingIter {
 }
 
 #[test]
-fn eng_01_concurrent_ingest_and_write_durable_if() {
-    let temp = tempfile::TempDir::new().unwrap();
+fn eng_01_concurrent_ingest_and_write_durable_if() -> TestResult<()> {
+    let temp = tempfile::TempDir::new()?;
     let db_path = temp.path().join("db");
     let scratch_path = temp.path().join("scratch");
-    std::fs::create_dir_all(&scratch_path).unwrap();
+    std::fs::create_dir_all(&scratch_path)?;
 
-    let store = Arc::new(RocksDbStore::open(&db_path).unwrap());
+    let store = Arc::new(RocksDbStore::open(&db_path)?);
     let cf = ColumnFamily::CoinRecords;
 
     let mut batch = BufferedWriteBatch::default();
     batch.put(cf, b"k", b"v0");
-    store.write_durable(batch).unwrap();
+    store.write_durable(batch)?;
 
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel::<()>(1);
     let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel::<()>(1);
@@ -63,7 +74,7 @@ fn eng_01_concurrent_ingest_and_write_durable_if() {
 
     started_rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("ingest thread failed to start");
+        .map_err(map_err)?;
 
     let store_clone2 = Arc::clone(&store);
     let (cond_done_tx, cond_done_rx) = std::sync::mpsc::sync_channel::<()>(1);
@@ -87,13 +98,13 @@ fn eng_01_concurrent_ingest_and_write_durable_if() {
     );
 
     let _ = resume_tx.send(());
-    let ingest_res = ingest_handle.join().unwrap();
+    let ingest_res = ingest_handle.join().map_err(thread_err)?;
     assert!(ingest_res.is_ok());
-    let cond_res = cond_handle.join().unwrap();
+    let cond_res = cond_handle.join().map_err(thread_err)?;
     assert!(cond_res.is_ok());
 
     let scratch_shared = temp.path().join("scratch_shared");
-    std::fs::create_dir_all(&scratch_shared).unwrap();
+    std::fs::create_dir_all(&scratch_shared)?;
 
     let (t1_started_tx, t1_started_rx) = std::sync::mpsc::sync_channel::<()>(1);
     let (t1_resume_tx, t1_resume_rx) = std::sync::mpsc::sync_channel::<()>(1);
@@ -116,7 +127,7 @@ fn eng_01_concurrent_ingest_and_write_durable_if() {
 
     t1_started_rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("t1 failed to start");
+        .map_err(map_err)?;
 
     let store_c2 = Arc::clone(&store);
     let scratch_c2 = scratch_shared.clone();
@@ -126,58 +137,104 @@ fn eng_01_concurrent_ingest_and_write_durable_if() {
     });
 
     let _ = t1_resume_tx.send(());
-    let res1 = h1.join().unwrap();
-    let res2 = h2.join().unwrap();
-    assert!(res1.is_ok(), "t1 ingest failed: {:?}", res1);
-    assert!(res2.is_ok(), "t2 ingest failed: {:?}", res2);
+    let res1 = h1.join().map_err(thread_err)?;
+    let res2 = h2.join().map_err(thread_err)?;
+    assert!(res1.is_ok(), "t1 ingest failed: {res1:?}");
+    assert!(res2.is_ok(), "t2 ingest failed: {res2:?}");
+    Ok(())
 }
 
 #[cfg(feature = "surrealkv")]
 #[test]
-fn eng_02_surrealkv_iter_prefix_paged_streaming() {
+fn eng_02_surrealkv_iter_prefix_paged_streaming() -> TestResult<()> {
     use bitcoin_rs_storage::SurrealKvStore;
     use std::collections::BTreeMap;
 
-    let temp = tempfile::TempDir::new().unwrap();
+    let temp = tempfile::TempDir::new()?;
     let db_path = temp.path().join("db");
 
-    let store = SurrealKvStore::open_with_cache(&db_path, 64 * 1024 * 1024).unwrap();
+    let store = SurrealKvStore::open_with_cache(&db_path, 64 * 1024 * 1024)?;
     let cf = ColumnFamily::CoinRecords;
 
     let mut oracle = BTreeMap::new();
     let mut batch = BufferedWriteBatch::default();
 
     for i in 0..200 {
-        let key = format!("pfx:{:05}", i).into_bytes();
-        let value = format!("val:{:05}", i).into_bytes();
+        let key = format!("pfx:{i:05}").into_bytes();
+        let value = format!("val:{i:05}").into_bytes();
         oracle.insert(key.clone(), value.clone());
         batch.put(cf, &key, &value);
     }
 
     for i in 0..50 {
-        let key = format!("other:{:05}", i).into_bytes();
-        let value = format!("oval:{:05}", i).into_bytes();
+        let key = format!("other:{i:05}").into_bytes();
+        let value = format!("oval:{i:05}").into_bytes();
         batch.put(cf, &key, &value);
     }
     batch.put(cf, b"pfy:00000", b"val:pfy");
 
-    store.write_durable(batch).unwrap();
+    store.write_durable(batch)?;
 
-    let iter = store.iter_prefix(cf, b"pfx:").unwrap();
-    let rows: Vec<(Vec<u8>, Vec<u8>)> = iter.map(|r| r.unwrap()).collect();
+    let iter = store.iter_prefix(cf, b"pfx:")?;
+    let rows: Vec<(Vec<u8>, Vec<u8>)> = iter.collect::<Result<_, _>>()?;
     let expected: Vec<(Vec<u8>, Vec<u8>)> =
         oracle.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     assert_eq!(rows.len(), 200);
     assert_eq!(rows, expected);
 
-    let snapshot = store.snapshot().unwrap();
-    let snap_iter = snapshot.iter_prefix(cf, b"pfx:").unwrap();
-    let snap_rows: Vec<(Vec<u8>, Vec<u8>)> = snap_iter.map(|r| r.unwrap()).collect();
+    let snapshot = store.snapshot()?;
+    let snap_iter = snapshot.iter_prefix(cf, b"pfx:")?;
+    let snap_rows: Vec<(Vec<u8>, Vec<u8>)> = snap_iter.collect::<Result<_, _>>()?;
     assert_eq!(snap_rows.len(), 200);
     assert_eq!(snap_rows, expected);
 
-    let mut early_iter = store.iter_prefix(cf, b"pfx:").unwrap();
-    let first_ten: Vec<_> = early_iter.by_ref().take(10).map(|r| r.unwrap()).collect();
+    let mut early_iter = store.iter_prefix(cf, b"pfx:")?;
+    let first_ten: Vec<_> = early_iter.by_ref().take(10).collect::<Result<_, _>>()?;
     assert_eq!(first_ten.len(), 10);
     drop(early_iter);
+    Ok(())
+}
+
+#[cfg(feature = "surrealkv")]
+#[test]
+fn eng_03_surrealkv_concurrent_close_barrier() -> TestResult<()> {
+    use bitcoin_rs_storage::SurrealKvStore;
+
+    for i in 0..20 {
+        let temp = tempfile::TempDir::new()?;
+        let db_path = temp.path().join("db");
+
+        let store = SurrealKvStore::open_with_cache(&db_path, 64 * 1024 * 1024)?;
+        let cf = ColumnFamily::CoinRecords;
+
+        let mut batch = BufferedWriteBatch::default();
+        let key = format!("close_key_{i}").into_bytes();
+        let val = format!("close_val_{i}").into_bytes();
+        batch.put(cf, &key, &val);
+        store.write_durable(batch)?;
+
+        let store = Arc::new(store);
+
+        let (t2_done_tx, t2_done_rx) = std::sync::mpsc::sync_channel::<Result<(), StorageError>>(1);
+        let s1 = Arc::clone(&store);
+        let h1 = std::thread::spawn(move || s1.close());
+
+        let s2 = Arc::clone(&store);
+        let h2 = std::thread::spawn(move || {
+            let res = s2.close();
+            let _ = t2_done_tx.send(res);
+        });
+
+        let res2 = t2_done_rx.recv().map_err(map_err)?;
+        assert!(res2.is_ok(), "closer 2 failed: {res2:?}");
+
+        let reopened = SurrealKvStore::open_with_cache(&db_path, 64 * 1024 * 1024)?;
+        let read_val = reopened.get(cf, &key)?;
+        assert_eq!(read_val, Some(val));
+
+        let res1 = h1.join().map_err(thread_err)?;
+        let _ = h2.join();
+        assert!(res1.is_ok(), "closer 1 failed: {res1:?}");
+    }
+    Ok(())
 }

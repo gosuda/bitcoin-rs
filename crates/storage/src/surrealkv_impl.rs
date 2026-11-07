@@ -98,9 +98,18 @@ impl BridgeQueue {
 
 pub(crate) const ITER_PREFIX_PAGE_SIZE: usize = 64;
 
+#[derive(Clone)]
+enum CloseState {
+    Open,
+    Closing,
+    Closed(Result<(), String>),
+}
+
 struct BridgeHandle {
     queue: Arc<BridgeQueue>,
     worker_thread: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
+    close_state: parking_lot::Mutex<CloseState>,
+    close_cond: parking_lot::Condvar,
     rt_handle: tokio::runtime::Handle,
 }
 
@@ -204,6 +213,8 @@ impl BridgeHandle {
         let handle = Self {
             queue,
             worker_thread: parking_lot::Mutex::new(Some(thread_handle)),
+            close_state: parking_lot::Mutex::new(CloseState::Open),
+            close_cond: parking_lot::Condvar::new(),
             rt_handle,
         };
 
@@ -226,9 +237,35 @@ impl BridgeHandle {
     }
 
     fn close(&self) -> Result<(), StorageError> {
-        if self.queue.closed.swap(true, Ordering::SeqCst) {
-            return Ok(());
+        let mut state = self.close_state.lock();
+        loop {
+            match &*state {
+                CloseState::Closed(Ok(())) => return Ok(()),
+                CloseState::Closed(Err(msg)) => return Err(StorageError::Backend(msg.clone())),
+                CloseState::Closing => {
+                    self.close_cond.wait(&mut state);
+                }
+                CloseState::Open => {
+                    *state = CloseState::Closing;
+                    break;
+                }
+            }
         }
+        drop(state);
+
+        let res = self.execute_close();
+
+        let mut state = self.close_state.lock();
+        *state = match &res {
+            Ok(()) => CloseState::Closed(Ok(())),
+            Err(e) => CloseState::Closed(Err(e.to_string())),
+        };
+        self.close_cond.notify_all();
+        res
+    }
+
+    fn execute_close(&self) -> Result<(), StorageError> {
+        self.queue.closed.store(true, Ordering::SeqCst);
         let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         {
             let mut guard = self.queue.queue.lock();
@@ -238,7 +275,8 @@ impl BridgeHandle {
         self.queue.notify.notify_one();
         let res = reply_rx
             .recv()
-            .map_err(|_| StorageError::Backend("surrealkv runtime worker hung up".to_string()));
+            .map_err(|_| StorageError::Backend("surrealkv runtime worker hung up".to_string()))
+            .and_then(|r| r);
 
         let handle = self.worker_thread.lock().take();
         if let Some(h) = handle {
@@ -248,7 +286,7 @@ impl BridgeHandle {
                 ));
             }
         }
-        res?
+        res
     }
 
     pub(crate) fn stream_prefix(
