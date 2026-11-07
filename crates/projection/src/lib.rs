@@ -12,6 +12,7 @@ pub mod portable;
 pub mod query_api;
 pub mod reconcile;
 pub mod runtime;
+pub mod segment;
 #[cfg(feature = "silent-payments")]
 pub mod silent_payments;
 pub mod types;

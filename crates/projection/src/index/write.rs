@@ -24,10 +24,17 @@ impl<S: KvStore> IndexWriter<S> {
 
     pub fn open(store: std::sync::Arc<S>, generation: u64) -> Result<Self, IndexError> {
         let indexer = Indexer::new(store);
-        match indexer
+        let format_opt = indexer
             .store
-            .get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)?
-        {
+            .get(ColumnFamily::IdxMeta, FORMAT_VERSION_KEY)?
+            .or_else(|| {
+                indexer
+                    .store
+                    .get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)
+                    .ok()
+                    .flatten()
+            });
+        match format_opt {
             Some(value) if value.as_slice() == FORMAT_VERSION_VALUE => {}
             Some(value) => {
                 let version = value

@@ -14,6 +14,13 @@ pub enum ColumnFamily {
     ScriptLive = 10,
     Coins = 11,
     PoolLedger = 12,
+    IdxMeta = 13,
+    TxDir = 14,
+    ScriptDict = 15,
+    ScriptPost = 16,
+    SpendDir = 17,
+    ScriptStats = 18,
+    Filters = 19,
 }
 
 impl ColumnFamily {
@@ -31,6 +38,13 @@ impl ColumnFamily {
         Self::ScriptLive,
         Self::Coins,
         Self::PoolLedger,
+        Self::IdxMeta,
+        Self::TxDir,
+        Self::ScriptDict,
+        Self::ScriptPost,
+        Self::SpendDir,
+        Self::ScriptStats,
+        Self::Filters,
     ];
     pub const fn name(self) -> &'static str {
         match self {
@@ -47,6 +61,13 @@ impl ColumnFamily {
             Self::ScriptLive => "script_live",
             Self::Coins => "coins",
             Self::PoolLedger => "pool_ledger",
+            Self::IdxMeta => "idx_meta",
+            Self::TxDir => "tx_dir",
+            Self::ScriptDict => "script_dict",
+            Self::ScriptPost => "script_post",
+            Self::SpendDir => "spend_dir",
+            Self::ScriptStats => "script_stats",
+            Self::Filters => "filters",
         }
     }
 
@@ -65,6 +86,13 @@ impl ColumnFamily {
             Self::ScriptLive => 10,
             Self::Coins => 11,
             Self::PoolLedger => 12,
+            Self::IdxMeta => 13,
+            Self::TxDir => 14,
+            Self::ScriptDict => 15,
+            Self::ScriptPost => 16,
+            Self::SpendDir => 17,
+            Self::ScriptStats => 18,
+            Self::Filters => 19,
         }
     }
 }

@@ -161,7 +161,7 @@ fn commit_test_chain<S: KvStore + 'static>(
 
 #[test]
 fn wrong_format_version_refuses_open() -> Result<(), TestError> {
-    for wrong_version in [0_u32, 1, 5, 7, u32::MAX] {
+    for wrong_version in [0_u32, 1, 5, 6, 8, u32::MAX] {
         let store = Arc::new(MemoryStore::default());
         store.put(
             ColumnFamily::UtxoMeta,

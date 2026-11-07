@@ -563,7 +563,7 @@ fn watermark_bytes_round_trip_and_truncation_is_rejected() -> Result<(), TestErr
     ));
 
     let store = Arc::new(MemoryStore::default());
-    store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], &[6, 0, 0, 0])?;
+    store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], &[7, 0, 0, 0])?;
     store.put(ColumnFamily::UtxoMeta, &[0x00, b'T'], &[0_u8; 2])?;
     assert!(matches!(
         IndexWriter::open(store, 1)?.watermark(),
@@ -1735,7 +1735,7 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), TestError> {
 
     assert_eq!(
         store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.as_deref(),
-        Some(6u32.to_le_bytes().as_slice()),
+        Some(7u32.to_le_bytes().as_slice()),
         "the row-format gate survives reset and rebuild"
     );
     assert!(
@@ -1813,7 +1813,7 @@ fn commit_forward_accepts_terminal_height() -> Result<(), TestError> {
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[6, 0, 0, 0],
+        &[7, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -1854,7 +1854,7 @@ fn commit_forward_rejects_height_overflow() -> Result<(), TestError> {
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[6, 0, 0, 0],
+        &[7, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,

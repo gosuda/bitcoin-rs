@@ -40,7 +40,7 @@ pub enum IndexCapability {
 impl IndexCapability {
     /// INVARIANT: this order is load-bearing; the query-refusal text and the
     /// index-ahead capability label follow it.
-    pub(crate) const ALL: [Self; 4] = [
+    pub const ALL: [Self; 4] = [
         Self::TxLookup,
         Self::ScriptHistory,
         Self::ScriptLive,
