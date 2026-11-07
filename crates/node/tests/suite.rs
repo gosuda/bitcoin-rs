@@ -1,6 +1,8 @@
 mod chainstate_journal;
 mod config_layered;
 mod embed;
+#[cfg(feature = "mdbx")]
+mod engine_mismatch;
 mod lease_registration_215;
 mod mining;
 mod overhaul_durable_head;

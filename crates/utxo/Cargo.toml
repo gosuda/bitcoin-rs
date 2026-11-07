@@ -17,6 +17,8 @@ default = []
 # Exposes `UtxoReader::fixture_set` so a test fixture can commit through
 # `utxo::contract`. Production readers never reach the set.
 test-seam = []
+surrealkv = ["bitcoin-rs-storage/surrealkv"]
+mdbx = ["bitcoin-rs-storage/mdbx"]
 
 [dependencies]
 bitcoin-rs-primitives.workspace = true

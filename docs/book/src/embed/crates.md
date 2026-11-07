@@ -47,7 +47,7 @@ Edges that are easy to misread:
 - `bitcoin-rs-chainstate` does not depend on mempool, P2P, index, mining, RPC, node, or the binary. It composes protocol, chain, UTXO, and storage capabilities only.
 - `bitcoin-rs-p2p` depends on mempool for the inventory view and the committed-mutation relay consumer. Mempool never depends on P2P, RPC, node, or the binary.
 - `bitcoin-rs-rpc` has no dependency on `bitcoin-rs-storage` (`ARCH-04`). It reads storage-backed facts through node-supplied capabilities, never through a database handle.
-- `bitcoin-rs-storage` is the only crate allowed to name `rust-rocksdb` (`ARCH-02`); only `bitcoin-rs-storage-convert` may name `fjall` and `redb`, to read retired datadirs. Every other crate reaches state through `KvStore`.
+- `bitcoin-rs-storage` is the only crate allowed to name storage engine crates (`rust-rocksdb`, `surrealkv`, `signet-libmdbx`, and `tokio` for the SurrealKV bridge only) (`ARCH-02`); only `bitcoin-rs-storage-convert` may name `fjall` and `redb`, to read retired datadirs. Every other crate reaches state through `KvStore`.
 
 Changing a layer assignment, adding a workspace crate, or adding a cross-crate edge requires the three steps in `ARCH-06`: update the gate table, update the architecture contract, and pass `g17_dependency_direction`.
 

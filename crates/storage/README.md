@@ -18,6 +18,16 @@ write boundary. Competing writers therefore cannot both observe the same
 pre-image. No backend releases its lock or transaction between condition
 evaluation and commit.
 
+## Storage engines
+
+`bitcoin-rs-storage` supports three storage engines behind the unified `KvStore` facade:
+
+- `rocksdb`: The mandatory default storage engine, always compiled and exported as `RocksDbStore`. Backed by RocksDB 11.12 via `rust-rocksdb`.
+- `surrealkv`: Optional storage engine adapter exported as `SurrealKvStore`, enabled via the `surrealkv` cargo feature. Backed by SurrealKV 1.x.
+- `mdbx`: Optional storage engine adapter exported as `MdbxStore`, enabled via the `mdbx` cargo feature. Backed by libmdbx via `signet-libmdbx`.
+
+The storage engine is selected at runtime with `--storage-backend`, `BITCOIN_RS_STORAGE_BACKEND`, or TOML `storage_backend`, which accepts `rocksdb`, `surrealkv`, or `mdbx`.
+
 ## Pruning
 
 `pruning` deletes historical block bodies and undo records once the active chain no longer needs them. It lives here rather than in a crate of its own, because it is a retention policy over rows this crate already owns.
@@ -70,6 +80,8 @@ and has no dependency on this crate.
 
 ## Features
 
+- `surrealkv`: enables the optional SurrealKV storage backend.
+- `mdbx`: enables the optional libmdbx storage backend.
 - `test-seam`: exposes fixture persistence injection; not a production default.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the

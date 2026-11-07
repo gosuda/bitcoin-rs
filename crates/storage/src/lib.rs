@@ -50,10 +50,20 @@ pub use durable_head::{
 };
 
 pub use rocksdb_impl::{ROCKSDB_DEFAULT_CACHE_BYTES, RocksDbStore};
+#[cfg(feature = "surrealkv")]
+pub use surrealkv_impl::{SURREALKV_DEFAULT_CACHE_BYTES, SurrealKvStore};
+
+#[cfg(feature = "mdbx")]
+pub use mdbx_impl::{MAX_KEY_SIZE, MAX_VAL_SIZE, MdbxStore};
+
+pub mod engine_detect;
+pub use engine_detect::detect_engine;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum StorageBackend {
     RocksDb,
+    SurrealKv,
+    Mdbx,
 }
 
 impl StorageBackend {
@@ -61,6 +71,8 @@ impl StorageBackend {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RocksDb => "rocksdb",
+            Self::SurrealKv => "surrealkv",
+            Self::Mdbx => "mdbx",
         }
     }
 
@@ -68,6 +80,8 @@ impl StorageBackend {
     pub const fn is_compiled_in(self) -> bool {
         match self {
             Self::RocksDb => true,
+            Self::SurrealKv => cfg!(feature = "surrealkv"),
+            Self::Mdbx => cfg!(feature = "mdbx"),
         }
     }
 }
@@ -78,6 +92,8 @@ impl FromStr for StorageBackend {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
             "rocksdb" => Ok(Self::RocksDb),
+            "surrealkv" => Ok(Self::SurrealKv),
+            "mdbx" => Ok(Self::Mdbx),
             _ => Err(format!("unsupported storage backend {value}")),
         }
     }
@@ -102,7 +118,11 @@ pub mod recovery_evidence;
 mod trait_;
 pub mod undo;
 
+#[cfg(feature = "mdbx")]
+mod mdbx_impl;
 mod rocksdb_impl;
+#[cfg(feature = "surrealkv")]
+mod surrealkv_impl;
 
 pub mod chainstate_journal;
 pub mod checkpoint;

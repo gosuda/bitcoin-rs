@@ -100,6 +100,8 @@ test_crates_profiles() {
     cargo_test -p bitcoin-rs-snapshot
   profile "test: bitcoin-rs-storage-convert" \
     cargo_test -p bitcoin-rs-storage-convert
+  profile "test: bitcoin-rs-storage (surrealkv, mdbx)" \
+    cargo_test -p bitcoin-rs-storage --features surrealkv,mdbx --test suite
   profile "test: bitcoin-rs-consensus (native)" \
     cargo_test -p bitcoin-rs-consensus --no-default-features
   profile "test: bitcoin-rs-chainstate (native)" \

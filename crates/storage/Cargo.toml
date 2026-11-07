@@ -16,6 +16,8 @@ workspace = true
 default = []
 # Explicit fixture/fault-injection surface; never a production default.
 test-seam = []
+surrealkv = ["dep:surrealkv", "dep:tokio"]
+mdbx = ["dep:signet-libmdbx"]
 
 [dependencies]
 arc-swap.workspace = true
@@ -33,6 +35,10 @@ thiserror.workspace = true
 tracing.workspace = true
 
 rust-rocksdb.workspace = true
+
+signet-libmdbx = { workspace = true, optional = true }
+surrealkv = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 
 [target.'cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", target_os = "redox"))'.dependencies]
 rustix.workspace = true

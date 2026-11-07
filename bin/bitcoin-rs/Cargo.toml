@@ -48,6 +48,16 @@ zmq = ["bitcoin-rs-node/zmq"]
 silent-payments = ["bitcoin-rs-node/silent-payments"]
 pool = ["bitcoin-rs-node/pool"]
 pool-sv2 = ["bitcoin-rs-node/pool-sv2"]
+surrealkv = [
+    "bitcoin-rs-node/surrealkv",
+    "bitcoin-rs-chainstate/surrealkv",
+    "bitcoin-rs-storage/surrealkv",
+]
+mdbx = [
+    "bitcoin-rs-node/mdbx",
+    "bitcoin-rs-chainstate/mdbx",
+    "bitcoin-rs-storage/mdbx",
+]
 
 [[test]]
 name = "suite"

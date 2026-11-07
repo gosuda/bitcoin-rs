@@ -33,6 +33,8 @@ Environment booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `of
 | `dbcache_mb` | `BITCOIN_RS_DBCACHE_MB` | `dbcache` | `450` |
 | `prune_target_mb` | `BITCOIN_RS_PRUNE_TARGET_MB` | `prune` | `0` |
 
+`storage_backend` selects the underlying key-value engine. It accepts `rocksdb` (the default, always compiled), `surrealkv` (when compiled with cargo feature `surrealkv`), and `mdbx` (when compiled with cargo feature `mdbx`).
+
 ### Peer-to-peer
 
 | TOML key | Environment | `bitcoin.conf` | Default |

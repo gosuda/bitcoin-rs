@@ -658,6 +658,177 @@ macro_rules! engine_tests {
             use super::*;
 
             #[test]
+            fn get_and_put() -> TestResult<()> {
+                let temp = tempfile::TempDir::new()?;
+                let store = ($open)(temp.path())?;
+
+                let cf = ColumnFamily::TxConfirmed;
+                assert_eq!(store.get(cf, b"missing")?, None);
+
+                store.put(cf, b"k1", b"v1")?;
+                assert_eq!(store.get(cf, b"k1")?, Some(b"v1".to_vec()));
+
+                store.put(cf, b"k1", b"v1_updated")?;
+                assert_eq!(store.get(cf, b"k1")?, Some(b"v1_updated".to_vec()));
+
+                let cf2 = ColumnFamily::BlockHeaders;
+                assert_eq!(store.get(cf2, b"k1")?, None);
+                store.put(cf2, b"k1", b"v2")?;
+                assert_eq!(store.get(cf2, b"k1")?, Some(b"v2".to_vec()));
+                assert_eq!(store.get(cf, b"k1")?, Some(b"v1_updated".to_vec()));
+                Ok(())
+            }
+
+            #[test]
+            fn prefix_and_bounded_scans() -> TestResult<()> {
+                let temp = tempfile::TempDir::new()?;
+                let store = ($open)(temp.path())?;
+                let cf = ColumnFamily::Funding;
+
+                for i in 0..10u8 {
+                    let key = format!("prefix/{i:02}").into_bytes();
+                    let val = format!("val/{i:02}").into_bytes();
+                    store.put(cf, &key, &val)?;
+                }
+                store.put(cf, b"other/00", b"other_val")?;
+
+                let all_iter: Vec<_> = store
+                    .iter_prefix(cf, b"prefix/")?
+                    .collect::<Result<Vec<_>, _>>()?;
+                assert_eq!(all_iter.len(), 10);
+                assert_eq!(all_iter[0].0, b"prefix/00".to_vec());
+                assert_eq!(all_iter[9].0, b"prefix/09".to_vec());
+
+                let scan_limit_rows = store.scan_prefix_bounded(
+                    cf,
+                    b"prefix/",
+                    bitcoin_rs_storage::PrefixScanLimit {
+                        max_rows: 5,
+                        max_bytes: usize::MAX,
+                    },
+                )?;
+                assert_eq!(scan_limit_rows.rows.len(), 5);
+                assert!(!scan_limit_rows.complete);
+                assert_eq!(scan_limit_rows.rows[0].0, b"prefix/00".to_vec());
+                assert_eq!(scan_limit_rows.rows[4].0, b"prefix/04".to_vec());
+
+                let scan_limit_bytes = store.scan_prefix_bounded(
+                    cf,
+                    b"prefix/",
+                    bitcoin_rs_storage::PrefixScanLimit {
+                        max_rows: 100,
+                        max_bytes: 40,
+                    },
+                )?;
+                assert!(scan_limit_bytes.rows.len() < 10);
+                assert!(!scan_limit_bytes.complete);
+
+                let scan_from = store.scan_prefix_from_bounded(
+                    cf,
+                    b"prefix/",
+                    b"prefix/05",
+                    bitcoin_rs_storage::PrefixScanLimit {
+                        max_rows: 100,
+                        max_bytes: usize::MAX,
+                    },
+                )?;
+                assert_eq!(scan_from.rows.len(), 5);
+                assert!(scan_from.complete);
+                assert_eq!(scan_from.rows[0].0, b"prefix/05".to_vec());
+                assert_eq!(scan_from.rows[4].0, b"prefix/09".to_vec());
+
+                let scan_past = store.scan_prefix_from_bounded(
+                    cf,
+                    b"prefix/",
+                    b"prefix/99",
+                    bitcoin_rs_storage::PrefixScanLimit {
+                        max_rows: 100,
+                        max_bytes: usize::MAX,
+                    },
+                )?;
+                assert!(scan_past.rows.is_empty());
+                assert!(scan_past.complete);
+                Ok(())
+            }
+
+            #[test]
+            fn snapshot_isolation() -> TestResult<()> {
+                let temp = tempfile::TempDir::new()?;
+                let store = ($open)(temp.path())?;
+                let cf = ColumnFamily::TxConfirmed;
+
+                store.put(cf, b"k_snap", b"v_initial")?;
+                let snap = store.snapshot()?;
+
+                store.put(cf, b"k_snap", b"v_mutated")?;
+                store.put(cf, b"k_new", b"v_new")?;
+
+                assert_eq!(snap.get(cf, b"k_snap")?, Some(b"v_initial".to_vec()));
+                assert_eq!(snap.get(cf, b"k_new")?, None);
+
+                assert_eq!(store.get(cf, b"k_snap")?, Some(b"v_mutated".to_vec()));
+                assert_eq!(store.get(cf, b"k_new")?, Some(b"v_new".to_vec()));
+
+                let sorted_keys: &[&[u8]] = &[b"k_new", b"k_snap"];
+                let snap_multi = snap.get_many_sorted(cf, sorted_keys)?;
+                assert_eq!(snap_multi[0], None);
+                assert_eq!(snap_multi[1], Some(b"v_initial".to_vec()));
+
+                let unsorted_keys: &[&[u8]] = &[b"k_snap", b"k_new"];
+                let unsorted_err = snap.get_many_sorted(cf, unsorted_keys);
+                assert!(matches!(
+                    unsorted_err,
+                    Err(StorageError::InvalidOperation(_))
+                ));
+                Ok(())
+            }
+
+            #[test]
+            fn conditional_write_success_and_mismatch() -> TestResult<()> {
+                let temp = tempfile::TempDir::new()?;
+                let store = ($open)(temp.path())?;
+                let cf = ColumnFamily::TxConfirmed;
+
+                store.put(cf, b"k_cond", b"v_base")?;
+
+                let mut success_batch = store.new_batch();
+                success_batch.put(cf, b"k_result", b"v_result");
+                let cond_success = [
+                    WriteCondition::Equals {
+                        cf,
+                        key: b"k_cond",
+                        expected: b"v_base",
+                    },
+                    WriteCondition::Absent {
+                        cf,
+                        key: b"k_absent",
+                    },
+                ];
+                let ok = store.write_durable_if(&cond_success, success_batch)?;
+                assert!(ok);
+                assert_eq!(store.get(cf, b"k_result")?, Some(b"v_result".to_vec()));
+
+                let mut fail_batch1 = store.new_batch();
+                fail_batch1.put(cf, b"k_unapplied1", b"val");
+                let cond_mismatch = [WriteCondition::Equals {
+                    cf,
+                    key: b"k_cond",
+                    expected: b"wrong_val",
+                }];
+                let rejected1 = store.write_durable_if(&cond_mismatch, fail_batch1)?;
+                assert!(!rejected1);
+                assert_eq!(store.get(cf, b"k_unapplied1")?, None);
+
+                let mut fail_batch2 = store.new_batch();
+                fail_batch2.put(cf, b"k_unapplied2", b"val");
+                let cond_absent_fails = [WriteCondition::Absent { cf, key: b"k_cond" }];
+                let rejected2 = store.write_durable_if(&cond_absent_fails, fail_batch2)?;
+                assert!(!rejected2);
+                assert_eq!(store.get(cf, b"k_unapplied2")?, None);
+                Ok(())
+            }
+
+            #[test]
             fn multi_get_ordering_and_absence() -> TestResult<()> {
                 let temp = tempfile::TempDir::new()?;
                 let store = ($open)(temp.path())?;
@@ -776,12 +947,21 @@ macro_rules! engine_tests {
                     StorageError::InvalidOperation("keys not strictly ascending")
                 ));
 
-                let scratch_files: Vec<_> = std::fs::read_dir(&scratch_path)?
-                    .filter_map(Result::ok)
-                    .collect();
+                let scratch_files: Vec<_> = if scratch_path.exists() {
+                    std::fs::read_dir(&scratch_path)?
+                        .filter_map(Result::ok)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 assert!(scratch_files.is_empty());
 
-                let large_val = vec![0xaa; 256 * 1024 * 1024];
+                let oversize_target = if stringify!($engine) == "rocksdb" {
+                    256 * 1024 * 1024
+                } else {
+                    65 * 1024 * 1024
+                };
+                let large_val = vec![0xaa; oversize_target];
                 let mut oversize_stream = vec![
                     (b"row1".to_vec(), b"val1".to_vec()),
                     (b"row2".to_vec(), large_val),
@@ -801,7 +981,7 @@ macro_rules! engine_tests {
                 let r2 = store
                     .get(ColumnFamily::CoinRecords, b"row2")?
                     .expect("oversize row must be present");
-                assert_eq!(r2.len(), 256 * 1024 * 1024);
+                assert_eq!(r2.len(), oversize_target);
                 assert_eq!(r2[0], 0xaa);
                 assert_eq!(
                     store.get(ColumnFamily::CoinRecords, b"row3")?,
@@ -884,3 +1064,79 @@ macro_rules! engine_tests {
 engine_tests!(rocksdb, |path: &std::path::Path| {
     bitcoin_rs_storage::RocksDbStore::open(path)
 });
+
+#[cfg(feature = "surrealkv")]
+engine_tests!(surrealkv, |path: &std::path::Path| {
+    bitcoin_rs_storage::SurrealKvStore::open(path)
+});
+
+#[cfg(feature = "mdbx")]
+engine_tests!(mdbx, |path: &std::path::Path| {
+    bitcoin_rs_storage::MdbxStore::open(path)
+});
+
+#[test]
+fn detect_engine_rocksdb() -> TestResult<()> {
+    let temp = tempfile::TempDir::new()?;
+    let store = bitcoin_rs_storage::RocksDbStore::open(temp.path())?;
+    store.put(ColumnFamily::TxConfirmed, b"k", b"v")?;
+    store.flush()?;
+    drop(store);
+
+    let detected = bitcoin_rs_storage::detect_engine(temp.path())?;
+    assert_eq!(detected, Some(bitcoin_rs_storage::StorageBackend::RocksDb));
+    Ok(())
+}
+
+#[cfg(feature = "surrealkv")]
+#[test]
+fn detect_engine_surrealkv() -> TestResult<()> {
+    let temp = tempfile::TempDir::new()?;
+    let store = bitcoin_rs_storage::SurrealKvStore::open(temp.path())?;
+    store.put(ColumnFamily::TxConfirmed, b"k", b"v")?;
+    store.flush()?;
+    drop(store);
+
+    let detected = bitcoin_rs_storage::detect_engine(temp.path())?;
+    assert_eq!(
+        detected,
+        Some(bitcoin_rs_storage::StorageBackend::SurrealKv)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "mdbx")]
+#[test]
+fn detect_engine_mdbx() -> TestResult<()> {
+    let temp = tempfile::TempDir::new()?;
+    let store = bitcoin_rs_storage::MdbxStore::open(temp.path())?;
+    store.put(ColumnFamily::TxConfirmed, b"k", b"v")?;
+    store.flush()?;
+    drop(store);
+
+    let detected = bitcoin_rs_storage::detect_engine(temp.path())?;
+    assert_eq!(detected, Some(bitcoin_rs_storage::StorageBackend::Mdbx));
+    Ok(())
+}
+
+#[test]
+fn detect_engine_empty_or_absent_dir_is_none() -> TestResult<()> {
+    let temp = tempfile::TempDir::new()?;
+    let empty_dir = temp.path().join("empty");
+    std::fs::create_dir_all(&empty_dir)?;
+    assert_eq!(bitcoin_rs_storage::detect_engine(&empty_dir)?, None);
+
+    let absent_dir = temp.path().join("absent");
+    assert_eq!(bitcoin_rs_storage::detect_engine(&absent_dir)?, None);
+    Ok(())
+}
+
+#[test]
+fn detect_engine_junk_file_is_incompatible_data() -> TestResult<()> {
+    let temp = tempfile::TempDir::new()?;
+    std::fs::write(temp.path().join("random_junk.txt"), b"corrupted")?;
+
+    let res = bitcoin_rs_storage::detect_engine(temp.path());
+    assert!(matches!(res, Err(StorageError::IncompatibleData(_))));
+    Ok(())
+}

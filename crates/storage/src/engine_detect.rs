@@ -1,0 +1,50 @@
+use std::path::Path;
+
+use crate::{StorageBackend, StorageError};
+
+/// Marker file name for SurrealKV detection.
+pub const SURREALKV_MARKER: &str = "manifest";
+
+/// Detects the storage engine present in `dir`.
+pub fn detect_engine(dir: &Path) -> Result<Option<StorageBackend>, StorageError> {
+    if !dir.exists() {
+        return Ok(None);
+    }
+
+    let read_dir = std::fs::read_dir(dir).map_err(StorageError::Io)?;
+    let mut entries = Vec::new();
+
+    for entry in read_dir {
+        let entry = entry.map_err(StorageError::Io)?;
+        let file_name = entry.file_name();
+        if let Ok(name) = file_name.into_string() {
+            entries.push(name);
+        }
+    }
+
+    if entries.is_empty() {
+        return Ok(None);
+    }
+
+    if entries.iter().any(|name| name == "mdbx.dat") {
+        return Ok(Some(StorageBackend::Mdbx));
+    }
+
+    let has_current = entries.iter().any(|name| name == "CURRENT");
+    let has_options = entries.iter().any(|name| name.starts_with("OPTIONS-"));
+    if has_current && has_options {
+        return Ok(Some(StorageBackend::RocksDb));
+    }
+
+    let has_surreal_marker = entries.iter().any(|name| name == SURREALKV_MARKER);
+    let has_surreal_engine = entries.iter().any(|name| name == "ENGINE")
+        && std::fs::read_to_string(dir.join("ENGINE"))
+            .is_ok_and(|content| content.trim() == "surrealkv");
+    if has_surreal_marker || has_surreal_engine {
+        return Ok(Some(StorageBackend::SurrealKv));
+    }
+
+    Err(StorageError::IncompatibleData(
+        "unknown engine files".to_owned(),
+    ))
+}

@@ -10,7 +10,14 @@ use std::process::Command;
 #[path = "dependency_graph_tests.rs"]
 mod tests;
 
-pub(crate) const ENGINE_CRATES: [&str; 3] = ["fjall", "redb", "rust-rocksdb"];
+pub(crate) const ENGINE_CRATES: [&str; 6] = [
+    "fjall",
+    "redb",
+    "rust-rocksdb",
+    "surrealkv",
+    "signet-libmdbx",
+    "tokio",
+];
 pub(crate) const ZMQ_CRATE: &str = "zmq";
 
 pub(crate) const STORAGE_CRATE: &str = "bitcoin-rs-storage";
@@ -219,11 +226,11 @@ impl WorkspaceGraph {
             for engine in engines {
                 checked_engine_edges += 1;
                 match (name.as_str(), engine.as_str()) {
-                    (STORAGE_CRATE, "rust-rocksdb") => {}
+                    (STORAGE_CRATE, "rust-rocksdb" | "surrealkv" | "signet-libmdbx" | "tokio") => {}
                     (CONVERTER_CRATE, "fjall" | "redb") => {}
                     (STORAGE_CRATE, other) => {
                         violations.push(format!(
-                            "`{STORAGE_CRATE}` may only name `rust-rocksdb` as an engine; found `{other}`"
+                            "`{STORAGE_CRATE}` may only name `rust-rocksdb`, `surrealkv`, `signet-libmdbx`, or `tokio` as an engine; found `{other}`"
                         ));
                     }
                     (CONVERTER_CRATE, other) => {
@@ -268,8 +275,8 @@ impl WorkspaceGraph {
         }
 
         let mut checked_features = 0_usize;
+        checked_features += self.validate_backend_features(&mut violations);
         checked_features += self.validate_zmq_surface(&mut violations);
-
         checked_features += self.validate_test_seam_isolation(&mut violations);
 
         if violations.is_empty() {
@@ -328,6 +335,58 @@ impl WorkspaceGraph {
             _ => violations.push(
                 "the node `zmq` feature must not enable a direct external dependency".to_owned(),
             ),
+        }
+        checked
+    }
+
+    fn validate_backend_features(&self, violations: &mut Vec<String>) -> usize {
+        let mut checked = 0_usize;
+        checked += self.validate_storage_tokio_feature(violations);
+        checked += self.validate_backend_forwarding_allowlist(violations);
+        checked
+    }
+
+    fn validate_storage_tokio_feature(&self, violations: &mut Vec<String>) -> usize {
+        let Some(features) = self.features.get(STORAGE_CRATE) else {
+            return 0;
+        };
+        for (feature, implies) in features {
+            let enables_tokio = implies.iter().any(|entry| entry == "dep:tokio");
+            if enables_tokio && feature != "surrealkv" {
+                violations.push(format!(
+                    "`{STORAGE_CRATE}` feature `{feature}` must not enable `dep:tokio`; only `surrealkv` may enable tokio"
+                ));
+            }
+        }
+        features.len()
+    }
+
+    fn validate_backend_forwarding_allowlist(&self, violations: &mut Vec<String>) -> usize {
+        const ALLOWED: [&str; 7] = [
+            STORAGE_CRATE,
+            "bitcoin-rs-utxo",
+            CHAINSTATE_CRATE,
+            "bitcoin-rs-index",
+            NODE_CRATE,
+            BIN_CRATE,
+            CONVERTER_CRATE,
+        ];
+        let mut checked = 0;
+        for (crate_name, feature_map) in &self.features {
+            let crate_allowed = ALLOWED.contains(&crate_name.as_str());
+            for (feature, implies) in feature_map {
+                checked += 1;
+                let forwards = feature == "surrealkv"
+                    || feature == "mdbx"
+                    || implies
+                        .iter()
+                        .any(|entry| entry.ends_with("/surrealkv") || entry.ends_with("/mdbx"));
+                if forwards && !crate_allowed {
+                    violations.push(format!(
+                        "`{crate_name}` must not define or forward backend feature `{feature}`"
+                    ));
+                }
+            }
         }
         checked
     }

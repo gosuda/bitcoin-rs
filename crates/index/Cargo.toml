@@ -16,6 +16,14 @@ workspace = true
 default = []
 test-seam = []
 silent-payments = ["dep:secp256k1"]
+surrealkv = [
+    "bitcoin-rs-storage/surrealkv",
+    "bitcoin-rs-utxo/surrealkv",
+]
+mdbx = [
+    "bitcoin-rs-storage/mdbx",
+    "bitcoin-rs-utxo/mdbx",
+]
 
 [dependencies]
 bitcoin-rs-primitives.workspace = true

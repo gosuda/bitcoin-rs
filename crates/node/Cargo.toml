@@ -37,6 +37,18 @@ zmq = ["bitcoin-rs-rpc/zmq"]
 silent-payments = ["bitcoin-rs-rpc/silent-payments"]
 pool = ["bitcoin-rs-rpc/pool", "bitcoin-rs-mining/pool"]
 pool-sv2 = ["pool", "bitcoin-rs-mining/pool-sv2", "dep:zeroize"]
+surrealkv = [
+    "bitcoin-rs-storage/surrealkv",
+    "bitcoin-rs-utxo/surrealkv",
+    "bitcoin-rs-chainstate/surrealkv",
+    "bitcoin-rs-index/surrealkv",
+]
+mdbx = [
+    "bitcoin-rs-storage/mdbx",
+    "bitcoin-rs-utxo/mdbx",
+    "bitcoin-rs-chainstate/mdbx",
+    "bitcoin-rs-index/mdbx",
+]
 
 [dependencies]
 hashbrown.workspace = true

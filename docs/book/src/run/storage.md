@@ -12,13 +12,15 @@ $ timeout 5 ./target/release/bitcoin-rs --network regtest --data-dir $DATA \
 
 It starts and names `"backend":"rocksdb"` in the storage line.
 
-The accepted value is `rocksdb`. An unknown name is rejected before startup:
+The accepted values are `rocksdb` (the default, always compiled), `surrealkv` (when compiled with cargo feature `surrealkv`), and `mdbx` (when compiled with cargo feature `mdbx`). An unknown name is rejected before startup:
 
 ```sh
 $ ./target/release/bitcoin-rs --storage-backend bogus --network regtest --data-dir $DATA
 error: invalid value 'bogus' for '--storage-backend <STORAGE_BACKEND>': unsupported storage backend bogus
 ```
 Retired backends `fjall` and `redb` are rejected before startup with the same `unsupported storage backend <value>` error.
+
+If a data directory was initialized by one engine and reopened with another, the node detects the engine mismatch and refuses startup with `<namespace> was created by <found>; start with --storage-backend <found> or convert with bitcoin-rs-storage-convert` (use `tools/storage-convert --from <old> --to <new> --to-engine <engine>` to migrate between engines).
 
 In prior builds where `rocksdb` was an optional feature, running without `--features rocksdb` produced:
 
