@@ -115,7 +115,7 @@ chacha20poly1305 = { version = ">=0.11, <0.12", default-features = false }
 hkdf = { version = ">=0.13, <0.14", default-features = false }
 cap-std = "=4.0.3"
 cap-fs-ext = "=4.0.3"
-rustix = { version = "=1.1.5", features = ["fs"] }
+rustix = { version = "=1.1.6", features = ["fs"] }
 # windows-sys: the console-control and process APIs the e2e harness uses to
 # signal (CTRL_BREAK_EVENT) and reap spawned nodes on Windows.
 windows-sys = { version = "=0.61.2", features = [
