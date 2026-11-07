@@ -174,27 +174,49 @@ impl<S: KvStore> IndexWriter<S> {
         Ok(written)
     }
 
-    pub(crate) fn import_tx_lookup_stream<F>(
+    pub fn attach_tx_lookup_rows(
         &self,
-        mut produce: F,
-        base: IndexWatermark,
-        floor: u32,
-    ) -> Result<usize, IndexError>
-    where
-        F: FnMut(
-            &mut dyn FnMut(PortableImportRow<'_>) -> Result<(), IndexError>,
-        ) -> Result<(), IndexError>,
-    {
+        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        attachment: &crate::writer::TxLookupAttachment<'_>,
+    ) -> Result<u64, IndexError> {
         let existing = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
         refuse_tx_lookup_populated(&existing)?;
         self.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
         let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
         refuse_tx_lookup_populated(&fence)?;
-
-        let mut importer =
-            TxLookupStreamImporter::new(self.indexer.store.as_ref(), self.generation, fence);
-        produce(&mut |row| importer.add_row(&row))?;
-        importer.finish(base, floor)
+        let count = self.indexer.store.ingest_sorted(
+            ColumnFamily::TxConfirmed,
+            rows,
+            attachment.scratch,
+        )?;
+        let mut batch = self.indexer.store.new_batch();
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            FORMAT_VERSION_KEY,
+            &FORMAT_VERSION_VALUE,
+        );
+        for header in attachment.headers {
+            if self
+                .indexer
+                .store
+                .get(ColumnFamily::BlockHeaders, *header)?
+                .is_none()
+            {
+                batch.put(ColumnFamily::BlockHeaders, *header, &[]);
+            }
+        }
+        put_selected_watermarks(
+            &mut batch,
+            IndexCapabilities::TX_LOOKUP,
+            Some(attachment.base),
+        );
+        crate::index::capability::put_selected_floors(
+            &mut batch,
+            IndexCapabilities::TX_LOOKUP,
+            attachment.floor,
+        );
+        commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, batch)?;
+        Ok(count)
     }
 
     pub fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
@@ -514,16 +536,6 @@ impl<S: KvStore> IndexWriter<S> {
     }
 }
 
-pub(crate) enum PortableImportRow<'a> {
-    /// The 80-byte header identity of an active-chain block at or below the
-    /// bundle base, so ordinary rollback can unseat the base later.
-    Header(&'a [u8; crate::types::HEADER_ROW_SIZE]),
-    TxLookup {
-        row: crate::types::HashPrefixRow,
-        value: &'a [u8],
-    },
-}
-
 pub(crate) const fn index_format_version() -> u32 {
     u32::from_le_bytes(FORMAT_VERSION_VALUE)
 }
@@ -595,91 +607,6 @@ fn refuse_tx_lookup_populated(fence: &IndexWriteFence) -> Result<(), IndexError>
             actual: Some(actual),
         }),
         None => Ok(()),
-    }
-}
-
-struct TxLookupStreamImporter<'a, S: KvStore> {
-    store: &'a S,
-    generation: u64,
-    fence: IndexWriteFence,
-    batch: BufferedWriteBatch,
-    written: usize,
-    in_batch: usize,
-    in_bytes: usize,
-}
-
-impl<'a, S: KvStore> TxLookupStreamImporter<'a, S> {
-    const IMPORT_BATCH_ROWS: usize = 65_536;
-    const IMPORT_BATCH_BYTES: usize = 8 << 20;
-
-    fn new(store: &'a S, generation: u64, fence: IndexWriteFence) -> Self {
-        let mut batch = store.new_batch();
-        batch.put(
-            ColumnFamily::UtxoMeta,
-            FORMAT_VERSION_KEY,
-            &FORMAT_VERSION_VALUE,
-        );
-        Self {
-            store,
-            generation,
-            fence,
-            batch,
-            written: 0,
-            in_batch: 0,
-            in_bytes: 0,
-        }
-    }
-
-    fn add_row(&mut self, row: &PortableImportRow<'_>) -> Result<(), IndexError> {
-        match *row {
-            PortableImportRow::Header(header) => {
-                if self
-                    .store
-                    .get(ColumnFamily::BlockHeaders, header)?
-                    .is_some()
-                {
-                    return Ok(());
-                }
-                self.batch.put(ColumnFamily::BlockHeaders, header, &[]);
-                self.in_bytes = self.in_bytes.saturating_add(header.len());
-            }
-            PortableImportRow::TxLookup { row, value } => {
-                self.batch
-                    .put(ColumnFamily::TxConfirmed, &row.to_db_row(), value);
-                self.in_bytes = self
-                    .in_bytes
-                    .saturating_add(crate::HASH_PREFIX_ROW_SIZE)
-                    .saturating_add(value.len());
-                self.written += 1;
-            }
-        }
-        self.in_batch += 1;
-        if self.in_batch >= Self::IMPORT_BATCH_ROWS || self.in_bytes >= Self::IMPORT_BATCH_BYTES {
-            let next = self.store.new_batch();
-            let old = std::mem::replace(&mut self.batch, next);
-            commit_ordinary(self.store, self.generation, &self.fence, old)?;
-            self.fence = capture_write_fence(self.store, self.generation)?;
-            refuse_tx_lookup_populated(&self.fence)?;
-            self.batch.put(
-                ColumnFamily::UtxoMeta,
-                FORMAT_VERSION_KEY,
-                &FORMAT_VERSION_VALUE,
-            );
-            self.in_batch = 0;
-            self.in_bytes = 0;
-        }
-        Ok(())
-    }
-
-    fn finish(mut self, base: IndexWatermark, floor: u32) -> Result<usize, IndexError> {
-        put_selected_watermarks(&mut self.batch, IndexCapabilities::TX_LOOKUP, Some(base));
-        crate::index::capability::put_selected_floors(
-            &mut self.batch,
-            IndexCapabilities::TX_LOOKUP,
-            floor,
-        );
-        commit_ordinary(self.store, self.generation, &self.fence, self.batch)?;
-        Ok(self.written)
     }
 }
 

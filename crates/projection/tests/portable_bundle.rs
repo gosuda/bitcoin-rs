@@ -475,7 +475,12 @@ impl KvStore for CrashAfterBulkImport {
         rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
         scratch: &std::path::Path,
     ) -> Result<u64, StorageError> {
-        self.inner.ingest_sorted(cf, rows, scratch)
+        if self.crashed.load(Ordering::Acquire) {
+            return Err(StorageError::backend("injected post-bulk crash"));
+        }
+        let count = self.inner.ingest_sorted(cf, rows, scratch)?;
+        self.crashed.store(true, Ordering::Release);
+        Ok(count)
     }
 
     fn delete_range(&self, cf: ColumnFamily, start: &[u8], end: &[u8]) -> Result<(), StorageError> {
@@ -1229,11 +1234,9 @@ fn interrupted_import_is_cleared_on_restart_and_restore_retries() {
     );
     node.stop();
     let interrupted = durable(&receiver);
-    let headers = usize::try_from(blocks + 1).expect("header count fits usize");
-    assert_eq!(
-        interrupted.tx_confirmed.len(),
-        IMPORT_BATCH_ROWS - headers,
-        "the injected crash must leave exactly the first import batch on disk"
+    assert!(
+        !interrupted.tx_confirmed.is_empty(),
+        "the injected crash must leave unwatermarked generation rows on disk"
     );
     let source_rows: HashSet<_> = source_state.tx_confirmed.iter().collect();
     assert!(

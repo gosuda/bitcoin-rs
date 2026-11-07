@@ -181,13 +181,12 @@ Steps 5 and 7 withdraw rather than refuse when the receiver lacks evidence. With
 | `Identity` | network, genesis, format version, base ancestry, chainwork, or transaction count differ |
 | `NotFresh` | `TxLookup` already has a watermark |
 | `Locator { height }` | a record resolves to a different transaction id |
-| `RestoreTooLarge` | more than 4,194,304 positions |
 
 A bundle has no signature. SHA-256 detects a changed artifact, and the locator check binds records to the receiver's chain; neither authenticates an exporter.
 
 ### Partial rows never become queryable
 
-Import streams rows through `IndexWriter::import_tx_lookup_stream`: headers for every height 0 through base from the receiver's block tree, then the `TxConfirmed` rows, in batches of 65,536 rows or 8 MiB (`crates/projection/src/index/write.rs:184`). The `TxLookup` watermark and floor appear only in the final commit. The apply pass re-hashes the artifact and aborts before that commit if the bytes changed.
+Import attaches sorted rows through `KvStore::ingest_sorted` into `TxConfirmed`. The `TxLookup` watermark and floor appear only in the final commit. The apply pass re-hashes the artifact and aborts before that commit if the bytes changed.
 
 On failure, `discard_partial_rows` clears the written rows immediately when the capability still has no watermark (`crates/projection/src/portable/restore.rs:578`). If the process dies before cleanup, the next start with `TxLookup` enabled runs `reset_interrupted_import` before any bundle or derivation work and logs:
 

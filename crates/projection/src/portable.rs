@@ -72,10 +72,6 @@ pub enum IndexBundleError {
     NotFresh,
     #[error("a recorded locator at height {height} does not resolve to its transaction id")]
     Locator { height: u32 },
-    #[error("restore refused: bundle carries more than {limit_positions} positions")]
-    RestoreTooLarge { limit_positions: usize },
-    #[error("export refused: bundle would carry more than {limit_positions} positions")]
-    ExportTooLarge { limit_positions: usize },
     #[error("bundle omits transactions at height {height}: expected {expected}, found {actual}")]
     Incomplete {
         height: u32,
@@ -100,8 +96,6 @@ pub(crate) enum BundleOutcome {
     Restored(RestoreReport),
     RestoreWithheld(Withheld),
 }
-
-pub(crate) const MAX_RESTORE_POSITIONS: usize = 4_194_304;
 
 #[derive(Debug)]
 pub(crate) struct ExportReport {

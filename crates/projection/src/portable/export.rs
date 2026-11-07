@@ -6,10 +6,7 @@ use super::chain::{BodyReader, ChainBase, Located};
 use super::manifest::{
     BundleFamily, BundleIdentity, IndexBundleManifestV1, IndexMode, MANIFEST_FILE, TxLookupArtifact,
 };
-use super::{
-    BundleHost, ExportReport, IndexBundleError, IndexBundleRequest, MAX_RESTORE_POSITIONS,
-    io_error, sync_dir,
-};
+use super::{BundleHost, ExportReport, IndexBundleError, IndexBundleRequest, io_error, sync_dir};
 #[cfg(test)]
 use crate::TxIndexSnapshot;
 use crate::types::{
@@ -602,11 +599,6 @@ impl RowExporter<'_> {
                 reason: "row carries no valid position list",
             })?;
         let total = total.saturating_add(u64::try_from(positions.len()).unwrap_or(u64::MAX));
-        if total > u64::try_from(MAX_RESTORE_POSITIONS).unwrap_or(u64::MAX) {
-            return Err(IndexBundleError::ExportTooLarge {
-                limit_positions: MAX_RESTORE_POSITIONS,
-            });
-        }
         Ok(total)
     }
 
@@ -720,11 +712,6 @@ impl RowExporter<'_> {
             self.locate(row, value)?;
             positions =
                 positions.saturating_add(u64::try_from(self.located.len()).unwrap_or(u64::MAX));
-            if positions > u64::try_from(MAX_RESTORE_POSITIONS).unwrap_or(u64::MAX) {
-                return Err(IndexBundleError::ExportTooLarge {
-                    limit_positions: MAX_RESTORE_POSITIONS,
-                });
-            }
             let mut sequence_key = [0_u8; RESOLVED_SORT_KEY_LEN];
             sequence_key.copy_from_slice(&sequence.to_be_bytes());
             write_framed(
@@ -827,13 +814,6 @@ impl RowExporter<'_> {
                     .map(|(_, position)| *position),
             );
             let added = u64::try_from(run).unwrap_or(u64::MAX);
-            if self.positions_written.saturating_add(added)
-                > u64::try_from(MAX_RESTORE_POSITIONS).unwrap_or(u64::MAX)
-            {
-                return Err(IndexBundleError::ExportTooLarge {
-                    limit_positions: MAX_RESTORE_POSITIONS,
-                });
-            }
             self.positions_written += added;
             bytes += write_record(out, &txid, height, &self.positions)
                 .map_err(|error| io_error(self.path, error))?;

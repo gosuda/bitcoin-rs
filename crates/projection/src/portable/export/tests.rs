@@ -166,15 +166,6 @@ fn external_sort_aborts_when_cancelled() -> TestResult {
 #[test]
 fn enumeration_charges_positions_before_staging() -> TestResult {
     let valid = TxPositionValue::encode(&[TxPosition::new(0, 1), TxPosition::new(1, 1)]);
-    let ceiling = u64::try_from(MAX_RESTORE_POSITIONS).unwrap_or(u64::MAX);
-    let almost_full = ceiling.saturating_sub(1);
-    assert!(
-        matches!(
-            RowExporter::charge_row(&valid, 7, almost_full),
-            Err(IndexBundleError::ExportTooLarge { .. })
-        ),
-        "over-limit positions must fail before staging"
-    );
     let charged = RowExporter::charge_row(&valid, 7, 0)?;
     assert_eq!(charged, 2, "valid positions charge their exact count");
     assert!(

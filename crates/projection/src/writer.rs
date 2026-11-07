@@ -1,14 +1,18 @@
-use bitcoin_rs_consensus::primitives::OutPoint;
 use parking_lot::RwLock;
+
+use std::path::Path;
 
 use crate::{
     ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexWatermark, IndexWatermarks,
     IndexWriteFence, IndexWriter, PreparedBatch, PreparedBlock, SpentCoins,
-    index::PortableImportRow,
 };
 
-pub(crate) type PortableImportProduce<'a> = dyn FnMut(&mut dyn FnMut(PortableImportRow<'_>) -> Result<(), IndexError>) -> Result<(), IndexError>
-    + 'a;
+pub struct TxLookupAttachment<'a> {
+    pub headers: &'a [&'a [u8; crate::types::HEADER_ROW_SIZE]],
+    pub base: IndexWatermark,
+    pub floor: u32,
+    pub scratch: &'a Path,
+}
 
 pub(crate) trait TxIndexWriter: Send + Sync {
     fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError>;
@@ -30,12 +34,11 @@ pub(crate) trait TxIndexWriter: Send + Sync {
         rows: &mut dyn Iterator<Item = Vec<u8>>,
     ) -> Result<usize, IndexError>;
     fn publish_script_live_seed(&self, seed_tip: IndexWatermark) -> Result<(), IndexError>;
-    fn import_tx_lookup_stream(
+    fn attach_tx_lookup_rows(
         &self,
-        produce: &mut PortableImportProduce<'_>,
-        base: IndexWatermark,
-        floor: u32,
-    ) -> Result<usize, IndexError>;
+        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        attachment: &TxLookupAttachment<'_>,
+    ) -> Result<u64, IndexError>;
     fn commit_forward_with_cursor(
         &self,
         fence: IndexWriteFence,
@@ -122,13 +125,12 @@ where
         self.write().publish_script_live_seed(seed_tip)
     }
 
-    fn import_tx_lookup_stream(
+    fn attach_tx_lookup_rows(
         &self,
-        produce: &mut PortableImportProduce<'_>,
-        base: IndexWatermark,
-        floor: u32,
-    ) -> Result<usize, IndexError> {
-        self.write().import_tx_lookup_stream(produce, base, floor)
+        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        attachment: &TxLookupAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        self.write().attach_tx_lookup_rows(rows, attachment)
     }
 
     fn commit_rollback_one_for_with_cursor_with_spent_scripts(

@@ -127,7 +127,7 @@ fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), crate::p
     let scripthash = ScriptHash::from_script_bytes(&script);
     let dir = tempfile::tempdir()?;
     let store = Arc::new(RocksDbStore::open(dir.path())?);
-    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
 
     let outpoint = spent_outpoint(5, 0);
     let row = crate::types::ScriptLiveRow::new(scripthash, &outpoint);

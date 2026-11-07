@@ -10,7 +10,6 @@ use super::{
     BundleHost, BundleOutcome, IndexBundleError, IndexBundleRequest, RestoreReport, Withheld,
     io_error,
 };
-use crate::index::PortableImportRow;
 use crate::types::TxPosition;
 use crate::writer::TxIndexWriter;
 use crate::{
@@ -208,11 +207,6 @@ impl LocatorCheck<'_> {
             )
         })?;
         let added = record.positions.len();
-        if self.pending_positions.saturating_add(added) > super::MAX_RESTORE_POSITIONS {
-            return Err(IndexBundleError::RestoreTooLarge {
-                limit_positions: super::MAX_RESTORE_POSITIONS,
-            });
-        }
         self.pending.entry(height).or_default().extend(
             record
                 .positions
@@ -481,45 +475,6 @@ impl ImportPlan<'_> {
             height: self.manifest.identity.base_height,
             hash: self.manifest.identity.base_hash,
         };
-        let mut failure: Option<IndexBundleError> = None;
-        let imported = self.host.writer.import_tx_lookup_stream(
-            &mut |emit| match self.stream_import(emit) {
-                Ok(()) => Ok(()),
-                Err(IndexBundleError::Index(error)) => Err(error),
-                Err(error) => {
-                    failure = Some(error);
-                    Err(IndexError::Storage(
-                        bitcoin_rs_storage::StorageError::InvalidOperation(
-                            "portable index import aborted by its source",
-                        ),
-                    ))
-                }
-            },
-            base,
-            self.manifest.tx_lookup.floor,
-        );
-        let index_error = match imported {
-            Ok(rows) => return Ok(rows),
-            Err(error) => error,
-        };
-        let error = failure.unwrap_or(IndexBundleError::Index(index_error));
-        let watermarks = self
-            .host
-            .writer
-            .fenced_watermarks()
-            .map(|(_, watermarks)| watermarks);
-        let reset = || {
-            self.host
-                .writer
-                .reset_capabilities(IndexCapabilities::TX_LOOKUP)
-        };
-        Err(discard_partial_rows(error, watermarks, reset))
-    }
-
-    fn stream_import(
-        &self,
-        emit: &mut dyn FnMut(PortableImportRow<'_>) -> Result<(), IndexError>,
-    ) -> Result<(), IndexBundleError> {
         let name = BundleFamily::TxLookup.file_name();
         let mut hashed = open_hashed(self.path).map_err(|error| io_error(self.path, error))?;
         let mut header_bytes = [0_u8; HEADER_LEN];
@@ -529,6 +484,9 @@ impl ImportPlan<'_> {
         if ArtifactHeader::decode(&header_bytes) != Ok(self.header) {
             return Err(IndexBundleError::ArtifactHash { name });
         }
+        let count =
+            usize::try_from(self.manifest.identity.base_height.saturating_add(1)).unwrap_or(0);
+        let mut headers = Vec::with_capacity(count);
         for height in 0..=self.manifest.identity.base_height {
             if u64::from(height) % CANCEL_POLL_RECORDS == 0 && (self.host.cancelled)() {
                 return Err(IndexBundleError::Cancelled);
@@ -541,18 +499,23 @@ impl ImportPlan<'_> {
                         "the receiver chain has no header at a covered height".to_owned(),
                     )
                 })?;
-            emit(PortableImportRow::Header(&header))?;
+            headers.push(header);
         }
         let mut records =
             RecordReader::new(&mut hashed, &self.header, self.manifest.tx_lookup.floor);
-        let mut rows = RowAssembler::default();
+        let mut rows = Vec::new();
+        let mut assembler = RowAssembler::default();
         read_records(&mut records, self.host, self.path, |record| {
-            rows.push(record, &mut |row, value| {
-                emit(PortableImportRow::TxLookup { row, value })
+            assembler.push(record, &mut |row, value| {
+                rows.push((row.to_db_row().to_vec(), value.to_vec()));
+                Ok(())
             })?;
             Ok(ControlFlow::Continue(()))
         })?;
-        rows.flush(&mut |row, value| emit(PortableImportRow::TxLookup { row, value }))?;
+        assembler.flush::<IndexError>(&mut |row, value| {
+            rows.push((row.to_db_row().to_vec(), value.to_vec()));
+            Ok(())
+        })?;
         if into_digest(hashed) != self.manifest.tx_lookup.sha256 {
             return Err(IndexBundleError::ArtifactHash { name });
         }
@@ -571,7 +534,38 @@ impl ImportPlan<'_> {
                 "the bundle base is not on the receiver's active chain".to_owned(),
             ));
         }
-        Ok(())
+
+        let scratch = self.path.parent().unwrap_or(self.path);
+        let header_refs: Vec<&[u8; crate::types::HEADER_ROW_SIZE]> = headers.iter().collect();
+        let attachment = crate::writer::TxLookupAttachment {
+            headers: &header_refs,
+            base,
+            floor: self.manifest.tx_lookup.floor,
+            scratch,
+        };
+        let imported = self
+            .host
+            .writer
+            .attach_tx_lookup_rows(&mut rows.into_iter(), &attachment);
+        let count = match imported {
+            Ok(count) => return Ok(usize::try_from(count).unwrap_or(usize::MAX)),
+            Err(error) => error,
+        };
+        let watermarks = self
+            .host
+            .writer
+            .fenced_watermarks()
+            .map(|(_, watermarks)| watermarks);
+        let reset = || {
+            self.host
+                .writer
+                .reset_capabilities(IndexCapabilities::TX_LOOKUP)
+        };
+        Err(discard_partial_rows(
+            IndexBundleError::Index(count),
+            watermarks,
+            reset,
+        ))
     }
 }
 

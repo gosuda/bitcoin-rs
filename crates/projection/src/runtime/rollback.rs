@@ -14,7 +14,6 @@ use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_execution::chain::TipSnapshot;
 use bitcoin_rs_storage::pruning::HistoryLease;
 use bitcoin_rs_storage::pruning::HistoryUnavailable;
-use crossbeam_channel::Receiver;
 use std::sync::Arc;
 
 pub(super) fn index_ahead_capability_label(capabilities: IndexCapabilities) -> Option<String> {
@@ -90,6 +89,17 @@ impl Worker {
         if !self.enabled.contains(IndexCapability::ScriptLive) {
             return Ok(SeedPass::Idle);
         }
+        if self.runtime.script_live_failure.read().is_some() && watermarks.script_live.is_some() {
+            self.writer
+                .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
+                .map_err(DerivedIndexWorkerError::Index)?;
+            let (next_fence, next_watermarks) = self
+                .writer
+                .fenced_watermarks()
+                .map_err(DerivedIndexWorkerError::Index)?;
+            *fence = next_fence;
+            *watermarks = next_watermarks;
+        }
         let seed = self.runtime.script_live_seed();
         match seed.phase() {
             ScriptLiveSeedPhase::Seeding => self.seed_pass_stage_rows(),
@@ -136,6 +146,7 @@ impl Worker {
         self.writer
             .publish_script_live_seed(tip)
             .map_err(DerivedIndexWorkerError::Index)?;
+        self.runtime.clear_script_live();
         seed.complete_publish();
         let (next_fence, next_watermarks) = self
             .writer
@@ -360,16 +371,4 @@ impl Worker {
         UndoScripts::from_undo_bytes(&bytes, hash)
             .map_err(|_| DerivedIndexWorkerError::UndoUnavailable { height, hash })
     }
-}
-
-fn collect_seed_batch(receiver: &Receiver<Vec<u8>>) -> Vec<Vec<u8>> {
-    let mut rows = Vec::new();
-    while rows.len() < SEED_DRAIN_BATCH_ROWS {
-        match receiver.try_recv() {
-            Ok(row) => rows.push(row),
-            Err(crossbeam_channel::TryRecvError::Empty) => break,
-            Err(crossbeam_channel::TryRecvError::Disconnected) => break,
-        }
-    }
-    rows
 }
