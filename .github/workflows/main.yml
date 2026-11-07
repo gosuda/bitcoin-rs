@@ -49,7 +49,7 @@ jobs:
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # The kernel engine is built from C++ and rocksdb's bindgen needs
@@ -111,7 +111,7 @@ jobs:
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -196,7 +196,7 @@ jobs:
     env:
       CARGO_TARGET_DIR: target/script-native
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -252,13 +252,13 @@ jobs:
   kernel-oracle:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/native-deps
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - run: cargo test --locked -p bitcoin-rs-consensus --features kernel --test suite -- kernel_block_parity:: kernel_boundary_parity:: kernel_vector_parity:: --nocapture
+      - run: 'cargo test --locked -p bitcoin-rs-consensus --features kernel --test suite -- kernel_block_parity:: kernel_boundary_parity:: kernel_vector_parity:: --nocapture'
 
   # Main-only (issues #174 / #1389 / #1503; CORE-02/CORE-03/CORE-05/CORE-06): a running Bitcoin Core 31.1 node vs
   # bitcoin-rs on regtest. Complements kernel-oracle (in-process C++ engine)
@@ -273,7 +273,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@fb523f40495206854c36b250850817ae0f83e3d1 # 1.99.0
