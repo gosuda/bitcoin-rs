@@ -1471,48 +1471,43 @@ impl Mempool {
         self.remove_entry_and_descendants_into(id, reason, changes);
     }
 
-    #[must_use]
-    pub fn plan_block_removals(&self, block: &Block) -> BlockRemovalPlan {
-        let txids = block.txids();
-        let txs: Vec<&Tx> = block.txs.iter().collect();
-        self.plan_block_removals_from_txs(&txs, &txids)
-    }
-
-    fn plan_block_removals_from_txs(
+    pub fn plan_block_removals(
         &self,
-        block_txs: &[&Tx],
-        block_txids: &[Txid],
+        facts: &crate::settlement::TransitionFacts,
     ) -> BlockRemovalPlan {
-        assert_eq!(
-            block_txs.len(),
-            block_txids.len(),
-            "block transactions and validated txids must stay aligned"
-        );
         let mut planned: HashSet<EntryId> = HashSet::new();
         let mut removals: Vec<(EntryId, RemovalReason)> = Vec::new();
-        for (tx, txid) in block_txs.iter().zip(block_txids) {
+        let mut subtree = Vec::new();
+        for (txid, spent) in facts.confirmed.iter().zip(&facts.spent) {
             if let Some(id) = self.entry_id_by_txid(txid) {
                 if planned.insert(id) {
                     removals.push((id, RemovalReason::BlockInclusion));
                 }
             }
-            for root in self.conflicts_for(tx) {
-                if planned.contains(&root) {
-                    continue;
-                }
-                let mut subtree = Vec::new();
-                self.collect_unplanned_descendants(root, &planned, &mut subtree);
-                subtree.sort_unstable();
-                for id in subtree {
-                    if planned.insert(id) {
-                        removals.push((id, RemovalReason::Conflict));
+            for previous_output in spent {
+                for (_, id) in self
+                    .derived
+                    .spending
+                    .range(outpoint_range(*previous_output))
+                {
+                    let root = *id;
+                    if planned.contains(&root) {
+                        continue;
+                    }
+                    subtree.clear();
+                    self.collect_unplanned_descendants(root, &planned, &mut subtree);
+                    subtree.sort_unstable();
+                    for id in subtree.drain(..) {
+                        if planned.insert(id) {
+                            removals.push((id, RemovalReason::Conflict));
+                        }
                     }
                 }
             }
         }
         let mut seen_txids: HashSet<Txid> = HashSet::new();
         let mut fee_deltas_cleared = 0_u64;
-        for txid in block_txids {
+        for txid in &facts.confirmed {
             if seen_txids.insert(*txid) && self.fee_deltas.contains_key(txid) {
                 fee_deltas_cleared += 1;
             }
@@ -1650,22 +1645,16 @@ impl Mempool {
 
     pub fn remove_for_block(
         &mut self,
-        block_txs: &[&Tx],
-        block_txids: &[Txid],
+        facts: &crate::settlement::TransitionFacts,
         height: u32,
         now: u64,
     ) -> MutationResult {
-        assert_eq!(
-            block_txs.len(),
-            block_txids.len(),
-            "block transactions and validated txids must stay aligned"
-        );
-        self.estimator.block_connected(block_txids, height);
+        self.estimator.block_connected(&facts.confirmed, height);
 
-        let plan = self.plan_block_removals_from_txs(block_txs, block_txids);
+        let plan = self.plan_block_removals(facts);
         let mut changes = Vec::with_capacity(plan.removals.len());
         self.remove_entries_with_reasons(&plan.removals, &mut changes);
-        for txid in block_txids {
+        for txid in &facts.confirmed {
             if self.fee_deltas.remove(txid).is_some() {
                 self.fee_delta_sequence = MutationSequence::advance(self.fee_delta_sequence);
             }

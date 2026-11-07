@@ -475,7 +475,11 @@ fn block_inclusion_removes_root_but_leaves_descendants() {
     };
     let root_tx = root.tx.clone();
     let before = pool.len();
-    let removed = pool.remove_for_block(&[&root_tx], &[root_txid], 8, 1);
+    let removed = pool.remove_for_block(
+        &crate::settlement::TransitionFacts::from_txs(&[&root_tx]),
+        8,
+        1,
+    );
     assert_ne!(removed.len(), 0);
     assert!(pool.entry_id_by_txid(&root_txid).is_none());
     assert_eq!(pool.len(), before - 1);

@@ -1615,8 +1615,7 @@ fn preview_matches_submission_and_has_no_side_effects() -> Result<(), crate::tes
     assert_eq!(preview_gateway.read().estimator_last_decayed_height(), None);
     preview_gateway.remove_for_block(
         AdmissionOrigin::Block,
-        &[valid.as_ref(), &second],
-        &[valid.txid(), second.txid()],
+        &crate::settlement::TransitionFacts::from_txs(&[valid.as_ref(), &second]),
         2,
         0,
     );
@@ -2186,8 +2185,12 @@ fn seed_rolling_floor_via_capacity_eviction(gateway: &Arc<MempoolGateway>, now: 
         .collect();
     if !residents.is_empty() {
         let refs: Vec<&Tx> = residents.iter().map(AsRef::as_ref).collect();
-        let ids: Vec<Txid> = residents.iter().map(|tx| tx.txid()).collect();
-        gateway.remove_for_block(AdmissionOrigin::Rpc, &refs, &ids, 2, now);
+        gateway.remove_for_block(
+            AdmissionOrigin::Rpc,
+            &crate::settlement::TransitionFacts::from_txs(&refs),
+            2,
+            now,
+        );
     }
     assert!(
         gateway.read().is_empty(),

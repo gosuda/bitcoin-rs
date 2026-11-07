@@ -1216,14 +1216,11 @@ impl MempoolGateway {
     pub fn remove_for_block(
         &self,
         origin: AdmissionOrigin,
-        block_txs: &[&Tx],
-        block_txids: &[Txid],
+        facts: &crate::settlement::TransitionFacts,
         height: u32,
         now: u64,
     ) -> MutationResult {
-        self.commit_infallible(origin, |pool| {
-            pool.remove_for_block(block_txs, block_txids, height, now)
-        })
+        self.commit_infallible(origin, |pool| pool.remove_for_block(facts, height, now))
     }
 
     pub fn expire(&self, origin: AdmissionOrigin, now: u64) -> Option<MutationResult> {

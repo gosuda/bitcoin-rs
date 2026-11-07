@@ -145,8 +145,7 @@ fn pending_broadcast_batches_resume_by_key_after_completion_and_removal() {
         .expect("live cursor entry");
     gateway.remove_for_block(
         AdmissionOrigin::Block,
-        &[removed.as_ref()],
-        &[removed_id],
+        &bitcoin_rs_mempool::TransitionFacts::from_txs(&[removed.as_ref()]),
         2,
         2,
     );
@@ -368,8 +367,7 @@ fn relay_worker_announces_only_live_transactions() {
 
     gateway.remove_for_block(
         AdmissionOrigin::Block,
-        &[&*confirmed],
-        &[confirmed.txid()],
+        &bitcoin_rs_mempool::TransitionFacts::from_txs(&[&*confirmed]),
         1,
         1,
     );

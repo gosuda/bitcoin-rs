@@ -2046,7 +2046,11 @@ fn script_activity_retries_when_pool_changes_between_views() {
     );
     {
         let mut pool = context.mempool.gateway.pool().write();
-        pool.remove_for_block(&[funder.as_ref()], &[funder_txid], 42, 1);
+        pool.remove_for_block(
+            &bitcoin_rs_mempool::TransitionFacts::from_txs(&[funder.as_ref()]),
+            42,
+            1,
+        );
         assert!(!pool.contains_txid(&funder_txid));
         pool.insert_entry(MempoolEntry::new(Arc::new(spender), 100, 1_000, 2, 0, 0))
             .expect("seed spender");

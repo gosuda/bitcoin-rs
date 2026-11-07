@@ -404,7 +404,12 @@ fn accepted_and_block_inclusion_events_arrive_in_commit_order() {
     gateway
         .insert_entry(AdmissionOrigin::Rpc, entry(&child))
         .expect("child in");
-    gateway.remove_for_block(AdmissionOrigin::Rpc, &[&parent], &[parent_txid], 8, 1);
+    gateway.remove_for_block(
+        AdmissionOrigin::Rpc,
+        &crate::settlement::TransitionFacts::from_txs(&[&parent]),
+        8,
+        1,
+    );
 
     let seen = observer.seen.lock();
     assert_eq!(
@@ -446,7 +451,12 @@ fn remove_for_block_leaves_unmined_child_and_publishes_only_the_parent() {
         .expect("child in");
     observer.seen.lock().clear();
 
-    let result = gateway.remove_for_block(AdmissionOrigin::Rpc, &[&parent], &[parent_txid], 8, 1);
+    let result = gateway.remove_for_block(
+        AdmissionOrigin::Rpc,
+        &crate::settlement::TransitionFacts::from_txs(&[&parent]),
+        8,
+        1,
+    );
 
     assert_eq!(result.changes.len(), 1);
     assert_eq!(
@@ -466,8 +476,12 @@ fn failed_insert_and_noop_remove_publish_nothing() {
     let poor = MempoolEntry::new(Arc::new(tx(4)), 100, 50, 1, 7, 0);
     assert!(gateway.insert_entry(AdmissionOrigin::Rpc, poor).is_err());
     let stranger = tx(5);
-    let stranger_txid = stranger.txid();
-    gateway.remove_for_block(AdmissionOrigin::Rpc, &[&stranger], &[stranger_txid], 8, 1);
+    gateway.remove_for_block(
+        AdmissionOrigin::Rpc,
+        &crate::settlement::TransitionFacts::from_txs(&[&stranger]),
+        8,
+        1,
+    );
     gateway.clear(AdmissionOrigin::Rpc);
 
     assert!(observer.seen.lock().is_empty());
@@ -579,7 +593,12 @@ fn sequence_base_matches_per_change_assignment() {
     gateway
         .insert_entry(AdmissionOrigin::Rpc, entry(&child))
         .expect("in");
-    let removed = gateway.remove_for_block(AdmissionOrigin::Rpc, &[&parent], &[parent_txid], 8, 1);
+    let removed = gateway.remove_for_block(
+        AdmissionOrigin::Rpc,
+        &crate::settlement::TransitionFacts::from_txs(&[&parent]),
+        8,
+        1,
+    );
 
     assert_eq!(removed.changes.len(), 1);
     assert_eq!(removed.sequence_base, 3);
@@ -993,13 +1012,11 @@ fn concurrent_mutations_publish_in_sequence_order() {
             let gateway = Arc::clone(&gateway);
             std::thread::spawn(move || {
                 let member = tx(label);
-                let member_txid = member.txid();
                 for _ in 0..CYCLES {
                     insert_contended(&gateway, &member);
                     gateway.remove_for_block(
                         AdmissionOrigin::Rpc,
-                        &[&member],
-                        &[member_txid],
+                        &crate::settlement::TransitionFacts::from_txs(&[&member]),
                         8,
                         1,
                     );
@@ -1317,8 +1334,12 @@ fn stale_mempool_sequence_rejects_without_mutation_or_publication() {
     let mut request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
     let captured_sequence = request.expected_sequence;
 
-    let other_txid = other.txid();
-    gateway.remove_for_block(AdmissionOrigin::Rpc, &[&other], &[other_txid], 8, 1);
+    gateway.remove_for_block(
+        AdmissionOrigin::Rpc,
+        &crate::settlement::TransitionFacts::from_txs(&[&other]),
+        8,
+        1,
+    );
 
     request.expected_sequence = captured_sequence;
 
@@ -1813,7 +1834,12 @@ fn block_and_size_limit_removals_are_not_retained() {
             .insert_entry(AdmissionOrigin::Rpc, entry(resident))
             .expect("resident admitted");
     }
-    gateway.remove_for_block(AdmissionOrigin::Rpc, &[&mined], &[mined.txid()], 8, 1);
+    gateway.remove_for_block(
+        AdmissionOrigin::Rpc,
+        &crate::settlement::TransitionFacts::from_txs(&[&mined]),
+        8,
+        1,
+    );
     assert_eq!(gateway.reconstruction_tx_by_wtxid(mined.wtxid()), None);
 
     let trimmed = gateway
@@ -2085,13 +2111,10 @@ fn remove_for_block_distinguishes_mined_from_conflicts() {
         sequence: Sequence::MAX,
         witness: Witness::new(),
     };
-    let double_spend_txid = double_spend.txid();
-
     observer.seen.lock().clear();
     gateway.remove_for_block(
         AdmissionOrigin::Block,
-        &[&mined, &double_spend],
-        &[mined_txid, double_spend_txid],
+        &crate::settlement::TransitionFacts::from_txs(&[&mined, &double_spend]),
         8,
         1,
     );
@@ -2729,7 +2752,12 @@ fn remove_for_block_stamps_the_floor_for_decay() {
         .enforce_size_limit(AdmissionOrigin::Rpc, unit())
         .expect("eviction");
     assert_eq!(gateway.read().min_fee_sat_per_kvb(1_000), 3_000);
-    gateway.remove_for_block(AdmissionOrigin::Rpc, &[], &[], 8, 1_000);
+    gateway.remove_for_block(
+        AdmissionOrigin::Rpc,
+        &crate::settlement::TransitionFacts::from_txs(&[]),
+        8,
+        1_000,
+    );
     assert_eq!(
         gateway.read().min_fee_sat_per_kvb(1_000 + 12 * 60 * 60),
         1_500

@@ -176,12 +176,10 @@ impl ChainFollowers {
     pub(crate) fn on_connect(&self, payload: &BlockImage, outcome: &ConnectOutcome) {
         let on_connect_started = quanta::Instant::now();
         let block_removals = if let Some(gateway) = &self.mempool {
-            let block = payload.materialize();
-            let block_txs: Vec<&bitcoin_rs_consensus::primitives::Tx> = block.txs.iter().collect();
+            let facts = bitcoin_rs_mempool::TransitionFacts::from_block(payload);
             gateway.remove_for_block(
                 AdmissionOrigin::Block,
-                &block_txs,
-                &outcome.txids,
+                &facts,
                 outcome.height,
                 bitcoin_rs_consensus::primitives::unix_time_secs(),
             )

@@ -831,11 +831,17 @@ fn projected_selection_treats_staged_parent_as_confirmed_for_bip68() -> Result<(
         header: Header::default(),
         txs: vec![parent_tx],
     };
-    let plan = pool.plan_block_removals(&block);
+    let plan = pool.plan_block_removals(&bitcoin_rs_mempool::TransitionFacts::from_block(
+        &bitcoin_rs_consensus::primitives::BlockImage::from_local(block.clone()),
+    ));
     assert_eq!(plan.removals.len(), 1, "staged block must plan the parent");
     let projected = select_template_body_after(&pool, &plan, &ctx, PAYOUT)?;
 
-    pool.remove_for_block(&[&block.txs[0]], &[parent_txid], ctx.height, 0);
+    pool.remove_for_block(
+        &bitcoin_rs_mempool::TransitionFacts::from_txs(&[&block.txs[0]]),
+        ctx.height,
+        0,
+    );
     let actual = select_template_body(&pool, &ctx, PAYOUT, None)?;
 
     let projected_txids: Vec<Txid> = projected
