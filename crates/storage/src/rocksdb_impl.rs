@@ -1,6 +1,4 @@
 use crate::batch::{BatchOp, BufferedWriteBatch};
-use std::path::Path;
-
 use bytes::Bytes;
 use rust_rocksdb::checkpoint::Checkpoint;
 use rust_rocksdb::{
@@ -8,6 +6,8 @@ use rust_rocksdb::{
     IngestExternalFileOptions, IteratorMode, Options, PrefixRange, ReadOptions, SstFileWriter,
     WriteBatch as RocksWriteBatch, WriteOptions,
 };
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
 
@@ -371,6 +371,7 @@ impl KvStore for RocksDbStore {
     ) -> Result<u64, StorageError> {
         const TARGET_BYTES: u64 = 256 * 1024 * 1024;
 
+        let _guard = self.write_lock.lock();
         let cf_handle = self.cf_handle(cf)?;
         std::fs::create_dir_all(scratch).map_err(StorageError::Io)?;
 
@@ -378,6 +379,7 @@ impl KvStore for RocksDbStore {
         writer_opts.set_compression_type(DBCompressionType::Lz4);
 
         let mut sst_paths: Vec<std::path::PathBuf> = Vec::new();
+        let call_id = NEXT_INGEST_ID.fetch_add(1, Ordering::SeqCst);
         let mut file_idx = 0usize;
         let mut current_writer: Option<SstFileWriter<'_>> = None;
         let mut writer_rows = 0u64;
@@ -407,13 +409,14 @@ impl KvStore for RocksDbStore {
                     writer_rows = 0;
                 }
 
-                let (mut solo_writer, path) = create_sst_writer(scratch, file_idx, &writer_opts)
-                    .inspect_err(|_| {
-                        remove_scratch_files(&sst_paths);
-                    })?;
-                file_idx += 1;
+                let (mut solo_writer, path) =
+                    create_sst_writer(scratch, call_id, file_idx, &writer_opts).inspect_err(
+                        |_| {
+                            remove_scratch_files(&sst_paths);
+                        },
+                    )?;
                 sst_paths.push(path);
-
+                file_idx += 1;
                 solo_writer.put(&k, &v).map_err(|e| {
                     let _ = solo_writer.finish();
                     remove_scratch_files(&sst_paths);
@@ -437,12 +440,12 @@ impl KvStore for RocksDbStore {
                 }
 
                 if current_writer.is_none() {
-                    let (w, path) = create_sst_writer(scratch, file_idx, &writer_opts)
+                    let (w, path) = create_sst_writer(scratch, call_id, file_idx, &writer_opts)
                         .inspect_err(|_| {
                             remove_scratch_files(&sst_paths);
                         })?;
-                    file_idx += 1;
                     sst_paths.push(path);
+                    file_idx += 1;
                     current_writer = Some(w);
                     writer_rows = 0;
                 }
@@ -536,13 +539,15 @@ impl KvStore for RocksDbStore {
         block_cache.saturating_add(memtables)
     }
 }
+static NEXT_INGEST_ID: AtomicU64 = AtomicU64::new(1);
 
 fn create_sst_writer<'opts>(
     scratch: &Path,
+    call_id: u64,
     index: usize,
     opts: &'opts Options,
 ) -> Result<(SstFileWriter<'opts>, std::path::PathBuf), StorageError> {
-    let path = scratch.join(format!("ingest-{index}.sst"));
+    let path = scratch.join(format!("ingest-{call_id}-{index}.sst"));
     let mut writer = SstFileWriter::create(opts);
     writer.open(&path).map_err(StorageError::backend)?;
     Ok((writer, path))

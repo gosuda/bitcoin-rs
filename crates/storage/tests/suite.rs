@@ -7,6 +7,7 @@ mod bounded_prefix_scan;
 mod bounded_value_read;
 mod cache_budget;
 mod durable_head_store;
+mod engine_findings;
 mod kv_store_object_safety;
 mod overhaul_atomic_durability;
 mod prune_then_reorg;
