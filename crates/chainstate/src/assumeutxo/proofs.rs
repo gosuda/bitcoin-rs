@@ -265,22 +265,52 @@ impl NodeBootstrapController {
     }
 
     #[must_use]
-    pub(crate) const fn execute(&self) -> BootstrapOutcome {
-        if !self.utxo_valid {
-            BootstrapOutcome {
-                chainstate_closed: true,
-                chainstate_active: false,
-                index_invalidated: false,
-                index_attached: false,
-            }
+    pub(crate) fn execute(&self) -> BootstrapOutcome {
+        let mut state = State::init();
+        state = step(
+            &state,
+            &Action::StreamSnapshot,
+            HistoricalBodiesMode::Pruned,
+        );
+        state = step(
+            &state,
+            &Action::VerifyCommitments {
+                utxo_ok: self.utxo_valid,
+                index_ok: self.index_valid,
+            },
+            HistoricalBodiesMode::Pruned,
+        );
+        if self.utxo_valid {
+            state = step(
+                &state,
+                &Action::PublishValidSnapshot,
+                HistoricalBodiesMode::Pruned,
+            );
         } else {
-            BootstrapOutcome {
-                chainstate_closed: false,
-                chainstate_active: true,
-                index_invalidated: !self.index_valid,
-                index_attached: self.index_valid,
-            }
+            state = step(
+                &state,
+                &Action::RejectInvalidUtxo,
+                HistoricalBodiesMode::Pruned,
+            );
         }
+        BootstrapOutcome {
+            chainstate_closed: state.chainstate_closed,
+            chainstate_active: state.bootstrap_phase == BootstrapPhase::Ready
+                && !state.chainstate_closed,
+            index_invalidated: state.index_invalidated,
+            index_attached: state.index_attached,
+        }
+    }
+
+    // SNP-10
+    #[must_use]
+    pub(crate) fn execute_mutant_index_failure_closes_chainstate(&self) -> BootstrapOutcome {
+        let mut outcome = self.execute();
+        if !self.index_valid {
+            outcome.chainstate_closed = true;
+            outcome.chainstate_active = false;
+        }
+        outcome
     }
 }
 
@@ -334,6 +364,12 @@ impl NodeProgressStatus {
 
     pub(crate) fn advance_projection_coverage(&mut self, step: u32) {
         self.projection_coverage += step;
+    }
+
+    // SNP-09
+    pub(crate) fn step_historical_validation_mutant_couples_active_chain(&mut self, step: u32) {
+        self.historical_validation += step;
+        self.active_chain = self.historical_validation;
     }
 }
 
@@ -750,12 +786,27 @@ pub fn check_index_failure_isolated_from_chainstate() {
     }
 }
 
+// SNP-10
+#[cfg(kani)]
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::should_panic]
+pub fn check_negative_control_index_failure_isolated() {
+    let utxo_valid = true;
+    let index_valid = false;
+    let node_bootstrap = NodeBootstrapController::new(utxo_valid, index_valid);
+    let outcome = node_bootstrap.execute_mutant_index_failure_closes_chainstate();
+    assert!(!outcome.chainstate_closed);
+    assert!(outcome.chainstate_active);
+}
+
 // SNP-09
 #[cfg(kani)]
 #[kani::proof]
 #[kani::unwind(4)]
 pub fn check_three_positions_independent() {
-    let base_height: u32 = 840_000;
+    let base_height: u32 = kani::any();
+    kani::assume(base_height >= 1 && base_height <= 1_000_000);
     let mut status = NodeProgressStatus::from_bootstrap(base_height);
 
     assert_eq!(status.active_chain_height(), base_height);
@@ -767,11 +818,30 @@ pub fn check_three_positions_independent() {
     assert_eq!(status.historical_validation_height(), 0);
     assert_eq!(status.projection_coverage_height(), base_height);
 
-    status.step_historical_validation(10);
+    let hist_step: u32 = kani::any();
+    kani::assume(hist_step > 0 && hist_step <= base_height);
+    status.step_historical_validation(hist_step);
     assert_eq!(status.active_chain_height(), base_height + 1);
-    assert_eq!(status.historical_validation_height(), 10);
+    assert_eq!(status.historical_validation_height(), hist_step);
     assert_eq!(status.projection_coverage_height(), base_height);
 
+    assert_ne!(
+        status.active_chain_height(),
+        status.historical_validation_height()
+    );
+}
+
+// SNP-09
+#[cfg(kani)]
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::should_panic]
+pub fn check_negative_control_three_positions_independent() {
+    let base_height: u32 = kani::any();
+    kani::assume(base_height >= 1 && base_height <= 1_000_000);
+    let mut status = NodeProgressStatus::from_bootstrap(base_height);
+    status.connect_block_above_tip();
+    status.step_historical_validation_mutant_couples_active_chain(10);
     assert_ne!(
         status.active_chain_height(),
         status.historical_validation_height()
@@ -956,6 +1026,27 @@ mod tests {
         let bad_outcome = bad_utxo.execute();
         assert!(bad_outcome.chainstate_closed);
         assert!(!bad_outcome.chainstate_active);
+    }
+
+    // SNP-10
+    #[test]
+    fn test_negative_control_index_failure_closes_chainstate() {
+        let node_bootstrap = NodeBootstrapController::new(true, false);
+        let outcome = node_bootstrap.execute_mutant_index_failure_closes_chainstate();
+        assert!(outcome.chainstate_closed);
+        assert!(!outcome.chainstate_active);
+    }
+
+    // SNP-09
+    #[test]
+    fn test_negative_control_three_positions_coupled() {
+        let mut status = NodeProgressStatus::from_bootstrap(100);
+        status.connect_block_above_tip();
+        status.step_historical_validation_mutant_couples_active_chain(10);
+        assert_eq!(
+            status.active_chain_height(),
+            status.historical_validation_height()
+        );
     }
 
     #[test]

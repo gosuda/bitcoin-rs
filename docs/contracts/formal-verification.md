@@ -128,7 +128,7 @@ This table shows the status of each Kani harness and each property that moved to
 | projection handoff | 8 lifecycle harnesses (PRJ-01, PRJ-02, PRJ-04, PRJ-13, IDX-08) | Kani verified; independent Lean model compiled | docs/lean/ProjectionIndex/HandoffSafety.lean::safety_inductive |
 | projection generations | 7 lifecycle harnesses (PRJ-05, PRJ-07, PRJ-09, REO-04, REO-05) | Kani verified; independent Lean model compiled | docs/lean/ProjectionIndex/GenerationsSafety.lean::safety_inductive |
 | serving view | 7 lifecycle harnesses (`QRY-01..08`, `PRJ-11`) | Kani verified; independent Lean model compiled | `docs/lean/ServingView/Safety.lean::safety_inductive` |
-| snapshot bootstrap | 6 lifecycle harnesses (`SNP-01..11`) | Kani verified; independent Lean model compiled | `docs/lean/SnapshotBootstrap/Safety.lean::safety_inductive` |
+| snapshot bootstrap | 8 lifecycle harnesses (`SNP-01..11`) | Kani verified; independent Lean model compiled | `docs/lean/SnapshotBootstrap/Safety.lean::safety_inductive` |
 | node budget | 8 lifecycle harnesses (`BUD-01..07`) | Kani verified; independent Lean model compiled | `docs/lean/NodeBudget/Safety.lean::safety_inductive` |
 | mempool settlement | 8 lifecycle harnesses (`MPS-01`, `MPS-03`) | Kani verified; independent Lean model compiled | `docs/lean/MempoolSettlement/Safety.lean::safety_inductive` |
 
