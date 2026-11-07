@@ -153,6 +153,13 @@ fn validate_pre_creation_disjointness(args: &CliArgs) -> Result<(), ConvertError
     Ok(())
 }
 
+fn path_parent_or_dot(p: &Path) -> &Path {
+    match p.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
 fn check_dest_candidate_against_sources(
     dest: &Path,
     from_canon: &Path,
@@ -161,7 +168,7 @@ fn check_dest_candidate_against_sources(
     let dest_canon = if dest.exists() {
         fs::canonicalize(dest)?
     } else {
-        let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+        let parent = path_parent_or_dot(dest);
         let parent_canon = fs::canonicalize(parent).map_err(|err| {
             ConvertError::Io(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -225,7 +232,7 @@ fn check_two_dest_candidates(d1: &Path, d2: &Path) -> Result<(), ConvertError> {
         if p.exists() {
             Ok(fs::canonicalize(p)?)
         } else {
-            let parent = p.parent().unwrap_or_else(|| Path::new("."));
+            let parent = path_parent_or_dot(p);
             let parent_canon = fs::canonicalize(parent)?;
             let file_name = p.file_name().ok_or_else(|| {
                 ConvertError::InvalidOperation(format!("invalid path '{}'", p.display()))
@@ -263,7 +270,7 @@ fn prepare_destination_dir(dest: &Path) -> Result<(), ConvertError> {
             return Err(ConvertError::DestinationNotEmpty(dest.to_path_buf()));
         }
     } else {
-        let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+        let parent = path_parent_or_dot(dest);
         if !parent.exists() {
             return Err(ConvertError::Io(io::Error::new(
                 io::ErrorKind::NotFound,

@@ -603,3 +603,47 @@ fn overlaid_recognized_engines_in_epoch_3_namespace_is_rejected() -> TestResult<
 
     Ok(())
 }
+
+#[test]
+fn bare_relative_destination_path_succeeds() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let run_temp = tempdir()?;
+    let from_path = source_temp.path();
+
+    write_schema_marker(from_path, 3)?;
+
+    let chainstate_dir = from_path.join("chainstate");
+    let rocks_data = vec![(
+        bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+        vec![(b"meta:key".to_vec(), b"val".to_vec())],
+    )];
+    write_rocksdb_namespace(&chainstate_dir, &rocks_data)?;
+
+    let from_str = from_path
+        .to_str()
+        .ok_or_else(|| TestError::Assertion("invalid utf-8 path".into()))?;
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_bitcoin-rs-storage-convert"))
+        .args(["--from", from_str, "--to", "bare_converted_dest"])
+        .current_dir(run_temp.path())
+        .output()?;
+
+    if !output.status.success() {
+        return Err(TestError::Assertion(format!(
+            "converter unexpectedly failed on bare relative destination path: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    let dest_schema = run_temp
+        .path()
+        .join("bare_converted_dest")
+        .join("CURRENT_SCHEMA");
+    if !dest_schema.exists() {
+        return Err(TestError::Assertion(
+            "destination CURRENT_SCHEMA was not created for bare relative destination path".into(),
+        ));
+    }
+
+    Ok(())
+}
