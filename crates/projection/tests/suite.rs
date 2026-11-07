@@ -1,6 +1,7 @@
 mod adversarial_index;
 mod be_order;
 mod compact_filters;
+mod generation_parity;
 mod index_roundtrip;
 mod live_handoff;
 mod portable_bundle;
