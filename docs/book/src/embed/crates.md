@@ -24,7 +24,7 @@ The gate checks two rules on the resolved graph: every edge goes to the same or 
 | [`bitcoin-rs-primitives`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/primitives/README.md) | 0 | Fixed-layout consensus types: hashes, outpoints, amounts, transaction, block, header, txid and wtxid | none |
 | [`bitcoin-rs-script`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/script/README.md) | 0 | Native script interpreter, `VerifyFlags`, Taproot, sigop counting, signature cache | primitives |
 | [`bitcoin-rs-consensus`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/consensus/README.md) | 0 | Transaction and block rule checks; native engine plus the optional bitcoinkernel capability | primitives, script |
-| [`bitcoin-rs-storage`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/storage/README.md) | 1 | `KvStore` facade, fjall/redb/RocksDB backends, flat block files, durable head, snapshots, checkpoints | primitives |
+| [`bitcoin-rs-storage`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/storage/README.md) | 1 | `KvStore` facade, RocksDB backend (Fjall and redb retired to `tools/storage-convert`), flat block files, durable head, snapshots, checkpoints | primitives |
 | [`bitcoin-rs-utxo`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/utxo/README.md) | 2 | Live UTXO set, narrow apply/commit/disconnect contract, snapshot format, undo codec | primitives, storage |
 | [`bitcoin-rs-chain`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chain/README.md) | 2 | In-memory block tree, header acceptance with proof of work, best-tip selection, reorg planning | consensus, primitives |
 | [`bitcoin-rs-chainstate`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/chainstate) | 2 | Authoritative applied-chain mutation, recovery, branch switching, checkpoint publication | chain, consensus, primitives, script, storage, utxo |
@@ -47,7 +47,7 @@ Edges that are easy to misread:
 - `bitcoin-rs-chainstate` does not depend on mempool, P2P, index, mining, RPC, node, or the binary. It composes protocol, chain, UTXO, and storage capabilities only.
 - `bitcoin-rs-p2p` depends on mempool for the inventory view and the committed-mutation relay consumer. Mempool never depends on P2P, RPC, node, or the binary.
 - `bitcoin-rs-rpc` has no dependency on `bitcoin-rs-storage` (`ARCH-04`). It reads storage-backed facts through node-supplied capabilities, never through a database handle.
-- `bitcoin-rs-storage` is the only crate allowed to name `fjall`, `redb`, or `rust-rocksdb` (`ARCH-02`). Every other crate reaches state through `KvStore`.
+- `bitcoin-rs-storage` is the only crate allowed to name `rust-rocksdb` (`ARCH-02`); only `bitcoin-rs-storage-convert` may name `fjall` and `redb`, to read retired datadirs. Every other crate reaches state through `KvStore`.
 
 Changing a layer assignment, adding a workspace crate, or adding a cross-crate edge requires the three steps in `ARCH-06`: update the gate table, update the architecture contract, and pass `g17_dependency_direction`.
 

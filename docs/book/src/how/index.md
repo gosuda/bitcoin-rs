@@ -77,7 +77,7 @@ A regtest node started with `--txindex true --scriptindex=full` logs index store
 $ bitcoin-rs --network regtest --data-dir $DATA \
     --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 \
     --txindex true --scriptindex=full
-{"timestamp":"2026-11-01T17:01:17.243411Z","level":"INFO","fields":{"message":"index store recovery in progress","capability":"txindex","namespace":"txindex","backend":"fjall","elapsed_secs":0},"target":"bitcoin_rs_index::runtime::startup"}
+{"timestamp":"2026-11-01T17:01:17.243411Z","level":"INFO","fields":{"message":"index store recovery in progress","capability":"txindex","namespace":"txindex","backend":"rocksdb","elapsed_secs":0},"target":"bitcoin_rs_index::runtime::startup"}
 ```
 
 The `txindex` namespace exists only because the index was enabled. With all indexes off, the node starts no worker and creates no index namespace (`IDX-01`).

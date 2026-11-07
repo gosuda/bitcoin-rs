@@ -30,7 +30,7 @@ Boolean flags come in two forms. Some require an explicit true or false value. O
 
 | Flag | Value | Default | Purpose |
 | --- | --- | --- | --- |
-| `--storage-backend` | `rocksdb`, `fjall`, `redb` | `fjall` | Selects a backend compiled into the binary. |
+| `--storage-backend` | `rocksdb` | `rocksdb` | Selects the storage backend. `rocksdb` is the only backend compiled in today; `fjall` and `redb` fail at startup with `unsupported storage backend <value>`. |
 | `--dbcache-mb` | MiB | `450` | Splits the storage cache between chainstate and index storage. |
 | `--prune-target-mb` | MiB | `0` | Prunes block history to the target; `0` keeps everything. Indexes refuse pruning. |
 

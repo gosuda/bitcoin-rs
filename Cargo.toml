@@ -191,10 +191,11 @@ rust-rocksdb = { version = ">=0.54, <0.55", default-features = false, features =
 # Retired storage engines: retained in workspace dependencies ONLY for the
 # offline converter (tools/storage-convert, ARCH-02). The node itself keeps
 # RocksDB as the sole engine in epoch 3.
-# fjall 3.x line.
+# fjall: converter-only. bitcoin-rs-storage-convert reads retired Fjall
+# datadirs through this pin; the node never links it.
 fjall = { version = ">=3.1.4, <4", default-features = false, features = ["lz4"] }
 
-# redb 4.x line. No defaults.
+# redb: converter-only, same rule as fjall above.
 redb = { version = ">=4.1, <5", default-features = false }
 
 # --- Serialization / config ---------------------------------------------------

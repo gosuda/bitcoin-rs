@@ -9,7 +9,7 @@ The storage contract is owned by [`crates/storage`](https://github.com/gosuda/bi
 ```text
 data-dir/
   .lock                     exclusive data-directory lock
-  chainstate/               key-value namespace (fjall, redb, or RocksDB)
+  chainstate/               key-value namespace (RocksDB)
     UtxoMeta                durable head, script attestation, snapshot status
     ...                     coin shards, undo rows, index rows
   blocks/                   append-only block files
@@ -21,7 +21,7 @@ data-dir/
 
 `.lock` holds a POSIX record lock (`F_SETLK`), which does not conflict with the `flock` that binaries from before this change take. Stop the old process before starting the new one during an upgrade or downgrade; overlapping binaries can otherwise open the same data directory.
 
-The key-value layer is one trait, `KvStore`, with `get`, ordered `iter_prefix`, bounded prefix scans, point-in-time `snapshot`, and one buffered write batch applied by `write`, `write_deferred`, or `write_durable`. `bitcoin-rs-storage` is the only crate allowed to depend on an engine crate (`ARCH-02`). The engine is selected at runtime by `storage.backend` (`fjall` by default, `redb` and `rocksdb` as compiled alternatives). A build that lacks the selected engine refuses to start.
+The key-value layer is one trait, `KvStore`, with `get`, ordered `iter_prefix`, bounded prefix scans, point-in-time `snapshot`, and one buffered write batch applied by `write`, `write_deferred`, or `write_durable`. `bitcoin-rs-storage` is the only crate allowed to depend on an engine crate (`ARCH-02`). The engine is selected at runtime by `storage.backend`; `rocksdb` is the only value accepted today, and `fjall` or `redb` fail at startup with `unsupported storage backend <value>`. Datadirs from retired engines convert offline with `bitcoin-rs-storage-convert --from <old> --to <new>`.
 
 Block bodies do not go through the key-value store. `FlatFileBlockStore` appends them to flat files and addresses them by `BlockFilePosition`; the key-value row holds only the locator.
 
@@ -107,13 +107,13 @@ A regtest start and one mined block produce these storage and commit lines. `$DA
 
 ```text
 INFO bitcoin_rs_chainstate::recovery chainstate restore selected restore_source=cold reason=no_complete_checkpoint
-INFO bitcoin_rs_node::state::open opened storage backend with effective cache capacities backend=fjall chainstate_dir=$DATA/chainstate chainstate_cache_bytes=471859200 txindex_cache_bytes=0 total_cache_bytes=471859200
+INFO bitcoin_rs_node::state::open opened storage backend with effective cache capacities backend="rocksdb" chainstate_dir=$DATA/chainstate chainstate_cache_bytes=471859200 txindex_cache_bytes=0 total_cache_bytes=471859200
 DEBUG bitcoin_rs_chainstate::connect apply_block: tail begin height=1 outcome.hash=5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24
 DEBUG bitcoin_rs_chainstate::connect apply_block: publish profile height=1 durable_sync_us=4 durable_commit_us=67
 INFO bitcoin_rs_node::lifecycle published clean chainstate checkpoint generation=1
 ```
 
-`restore_source=cold` means no complete checkpoint was available and the node restored from the durable state. `fjall` is the compiled default backend. The publish line follows the durable commit, not the other way around.
+`restore_source=cold` means no complete checkpoint was available and the node restored from the durable state. `rocksdb` is the compiled default backend. The publish line follows the durable commit, not the other way around.
 
 ## Tests that pin storage
 

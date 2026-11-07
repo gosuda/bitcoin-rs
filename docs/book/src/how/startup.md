@@ -42,7 +42,7 @@ One real cold start, trimmed (timestamps and LSM-tree table recovery removed; `$
 ```
 INFO bitcoin_rs_chainstate::recovery: chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
 INFO bitcoin_rs_node::state::open: no mempool snapshot; starting with an empty pool status="missing"
-INFO bitcoin_rs_node::state::open: opened storage backend with effective cache capacities backend="fjall" chainstate_cache_bytes=471859200 txindex_cache_bytes=0 total_cache_bytes=471859200
+INFO bitcoin_rs_node::state::open: opened storage backend with effective cache capacities backend="rocksdb" chainstate_cache_bytes=471859200 txindex_cache_bytes=0 total_cache_bytes=471859200
 INFO bitcoin_rs_node::lifecycle: bitcoin-rs node booting config=NodeConfig { network: Regtest, data_dir: "$DATA", ... }
 DEBUG bitcoin_rs_node::state::open: startup verification passed blocks=0
 ```

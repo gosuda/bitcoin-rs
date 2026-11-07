@@ -33,7 +33,7 @@ Historical prefix reads are blocking and take no live UTXO or chain-transition l
 
 ## Feature flags
 
-The node crate's default features are `["zmq"]`. RocksDB is always compiled as the mandatory default storage engine; runtime storage backend features (`fjall`, `redb`, `rocksdb`) have been removed.
+The node crate's default features are `["zmq"]`. RocksDB is always compiled as the mandatory default storage engine; no runtime backend features exist.
 
 | Feature | Effect | Use |
 | --- | --- | --- |

@@ -193,13 +193,13 @@ print("case 5: BITCOIN_RS_EXTRA_ARGS appended verbatim")
 datadir = fresh_datadir("node4")
 env_extra = dict(os.environ)
 env_extra["BITCOIN_RS_BIN"] = str(FAKE_BIN)
-env_extra["BITCOIN_RS_EXTRA_ARGS"] = "--log-level=debug --storage-backend=fjall"
+env_extra["BITCOIN_RS_EXTRA_ARGS"] = "--log-level=debug --storage-backend=rocksdb"
 (datadir / "bitcoin.conf").write_text(FRAMEWORK_CONF)
 proc = subprocess.run([str(WRAPPER), "-datadir=" + str(datadir), "-regtest"],
                       env=env_extra, capture_output=True, text=True)
 assert proc.returncode == 0, proc.stderr
 argv = (SCRATCH / "argv.txt").read_text().splitlines()
-check("extra args appended last", argv[-2:] == ["--log-level=debug", "--storage-backend=fjall"], argv)
+check("extra args appended last", argv[-2:] == ["--log-level=debug", "--storage-backend=rocksdb"], argv)
 
 print("case 6: missing BITCOIN_RS_BIN fails loudly, exits 127")
 env_bad = dict(os.environ)
@@ -241,7 +241,7 @@ check("datadir root itself not chmodded (mainnet chain dir is \"\")",
       stat.S_IMODE(os.lstat(datadir).st_mode) == 0o755,
       oct(stat.S_IMODE(os.lstat(datadir).st_mode)))
 check("printtoconsole=0 -> fully silent console",
-      "--log-level=off,fjall=off,rocksdb=off" in argv, argv)
+      "--log-level=off,rocksdb=off" in argv, argv)
 check("node data dir still the fresh subdir",
       f"--data-dir={datadir}/bitcoin-rs-data" in argv, argv)
 
@@ -284,7 +284,7 @@ check("conf uacomment suppressed when CLI set it",
       "uacomment=fromconf" not in (datadir / "bitcoin-rs-derived.conf").read_text())
 check("suppression logged", any(d["token"] == "uacomment=fromconf" for d in drops(datadir)))
 check("argv printtoconsole=0 -> fully silent console",
-      "--log-level=off,fjall=off,rocksdb=off" in argv, argv)
+      "--log-level=off,rocksdb=off" in argv, argv)
 datadir = fresh_datadir("node12")
 argv = run_wrapper(datadir, ["-datadir=" + str(datadir), "-regtest"],
                    FRAMEWORK_CONF + "uacomment=fromconf\n")

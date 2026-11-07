@@ -47,7 +47,7 @@ class Node:
         if core:
             self.args += ["-regtest", "-datadir=" + str(directory), "-server=1", "-listen=1", "-bind=127.0.0.1", "-port=" + str(self.p2p), "-rpcbind=127.0.0.1", "-rpcport=" + str(self.rpcport), "-rpcuser=probe", "-rpcpassword=local-regtest-only", "-connect=0", "-dnsseed=0", "-discover=0", "-blockfilterindex=1", "-peerblockfilters=1", "-v2transport=0"]
         else:
-            self.args += ["--network=regtest", "--data-dir=" + str(directory), "--storage-backend=fjall", "--dbcache-mb=64", "--p2p-listen=127.0.0.1:" + str(self.p2p), "--rpc-bind=127.0.0.1:" + str(self.rpcport), "--rpc-user=probe", "--rpc-password=local-regtest-only", "--dns-seeds-enabled=false", "--v2transport=false"]
+            self.args += ["--network=regtest", "--data-dir=" + str(directory), "--storage-backend=rocksdb", "--dbcache-mb=64", "--p2p-listen=127.0.0.1:" + str(self.p2p), "--rpc-bind=127.0.0.1:" + str(self.rpcport), "--rpc-user=probe", "--rpc-password=local-regtest-only", "--dns-seeds-enabled=false", "--v2transport=false"]
             if filters:
                 self.args += ["--blockfilterindex"]
             if prune:

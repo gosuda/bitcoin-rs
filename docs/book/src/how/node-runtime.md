@@ -69,8 +69,8 @@ node_capability_txindex_readiness{state="Opening"} 0   (and seven other states)
 node_shutdown_requested ...
 node_package_charge_overrun ...
 node_sync_pending_blocks_high_water ... staged_* and inbound_* queue depths
-storage_writes_total{backend="fjall",durability="durable"} 105
-storage_writes_total{backend="fjall",durability="default"} 204
+storage_writes_total{backend="rocksdb",durability="durable"} 105
+storage_writes_total{backend="rocksdb",durability="default"} 204
 storage_flushes_total ... storage_write_bytes ... storage_cache_capacity_bytes
 index_family_planned_write_bytes ...
 rpc_connections_active{surface="shared"} ...
@@ -140,7 +140,7 @@ From the same run, the lines that show the runtime working, with boot noise remo
 
 ```text
 20:17:06.449480 INFO chainstate restore selected restore_source=cold reason=no_complete_checkpoint
-20:17:06.477694 INFO opened storage backend with effective cache capacities backend=fjall
+20:17:06.477694 INFO opened storage backend with effective cache capacities backend="rocksdb"
     chainstate_cache_bytes=377487360 txindex_cache_bytes=94371840
 20:17:06.477874 INFO bitcoin-rs node booting config=NodeConfig { ... esplora_max_queries: 2,
     rest: true, max_connections: 128, chainstate_journal: { blocks: 500, seconds: 5 } }

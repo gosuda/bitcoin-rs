@@ -61,7 +61,7 @@ $ bitcoin-rs --network regtest --data-dir $DATA \
 Error: validation engine `kernel` is not supported by this build: bitcoinkernel support is not compiled in (enable the `kernel` feature)
 ```
 
-The process exits with status 1. The default `bitcoin-rs` binary is kernel-free (`VAL-03`). The shipped Docker image builds `fjall,kernel` and selects kernel in its config file, so a bare container runs kernel while a bare binary runs native.
+The process exits with status 1. The default `bitcoin-rs` binary is kernel-free (`VAL-03`). The shipped Docker image builds `kernel` and selects kernel in its config file, so a bare container runs kernel while a bare binary runs native.
 
 With `Kernel` selected, block parsing uses `bitcoinkernel::Block::new` and script verification calls the kernel engine after native prevout validation. The kernel path ignores the signature cache; the cache is a native optimization, and the kernel engine does not use it.
 

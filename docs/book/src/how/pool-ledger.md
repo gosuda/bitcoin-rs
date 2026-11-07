@@ -138,7 +138,7 @@ The audit table is a hash chain. `append_audit` hashes `"btcrs.pool.audit.v1" ||
 | restart | balances, audit, and sequence continue byte for byte | `state_survives_a_restart_byte_for_byte` |
 | tampering | audit chain detects it | `the_audit_chain_is_deterministic_and_detects_tampering` |
 
-All four live in `crates/mining/tests/support/pool_ledger_cases.rs`, which is compiled once for the `redb` backend and once for `fjall`.
+All four live in `crates/mining/tests/support/pool_ledger_cases.rs`, which is compiled once per backend; the current suite runs it against RocksDB (`crates/mining/tests/pool_ledger.rs`).
 
 ## Retirement after an applied block
 
@@ -163,10 +163,10 @@ Both commands ran in this tree with the pool and test-seam features. The HEAD bi
 $ env -u CARGO_BUILD_BUILD_DIR RUSTC_WRAPPER= \
     cargo test --offline --locked -p bitcoin-rs-mining \
     --features pool,test-seam --test pool_ledger \
-    redb::retiring_a_job_bounds -- --nocapture
+    rocksdb::retiring_a_job_bounds -- --nocapture
 
 running 1 test
-test redb::retiring_a_job_bounds_the_index_and_refuses_late_shares ... ok
+test rocksdb::retiring_a_job_bounds_the_index_and_refuses_late_shares ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 143 filtered out; finished in 0.01s
 ```

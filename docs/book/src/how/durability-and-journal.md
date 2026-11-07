@@ -160,7 +160,7 @@ The retained segment was gone; `chainstate-journal/` held only `head.json`. The 
 ```text
 test durable::tests::committed_gap_replays_to_head_without_recommitting_it ... ok
 test result: ok. 1 passed; 0 failed; 225 filtered out
-test overhaul_atomic_durability::fjall_injected_faults_never_mix_families ... ok
+test overhaul_atomic_durability::rocksdb_injected_faults_never_mix_families ... ok
 test result: ok. 2 passed; 0 failed; 52 filtered out
 ```
 

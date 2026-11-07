@@ -116,11 +116,11 @@ Empty backend markers on non-storage crates are not combinations.
 - Owner: `scripts/feature-matrix.tsv`.
 - Scope: operator `bitcoin-rs` and `bitcoin-rs-node` backend and kernel flags plus reached storage and consensus crates.
 - Each row is one combination CI MUST `cargo check` independently.
-- `lane=pure` carries fjall, redb, zmq, and optional `silent-payments` with the native interpreter.
+- The `pure` lane covers engine-free crates such as `bitcoin-rs-consensus` (`--no-default-features`, and `--features usdt`).
 - `lane=native` requires cmake, libboost (kernel), or C storage engines.
 - Kernel rows (`portable-kernel`, `full-node`, `consensus-kernel`) are capability builds with `kernel` compiled in.
 - Engine selection stays runtime via `validation.engine`.
-- The `bitcoin-rs-node` crate default (`fjall,zmq`) is a pure row.
+- The `bitcoin-rs-node` crate default (`zmq`) is a native row.
 - The checker selects the repository-root workspace from nested workspaces such as `fuzz/`.
 - Adding a Cargo feature is not enough.
 - Add a row here in the same commit, or do not add the feature.

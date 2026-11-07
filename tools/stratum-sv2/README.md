@@ -26,7 +26,7 @@ docker compose -f tools/stratum-sv2/compose.yaml down --timeout 30
 ```
 
 The provider builds from the repository root with Rust 1.99 and the standalone
-lockfile. It uses native validation and Fjall, and stores its regtest node in
+lockfile. It uses native validation and RocksDB, and stores its regtest node in
 the existing `bitcoin-rs-data` volume. Do not run the previous separate node
 against that volume concurrently. No volume is reset by startup or shutdown.
 The optional SV1 translator listens on host loopback port 3333. Pool
