@@ -323,19 +323,20 @@ impl<'t> SighashCache<'t> {
         }
         let is_anyone_can_pay = ty_byte & 0x80 != 0;
 
-        let mut msg = Vec::with_capacity(64 + total * 40 + self.tx.outputs.len() * 16);
-        msg.push(0x00);
-        msg.push(ty_byte);
-        msg.extend_from_slice(&self.tx.version.to_le_bytes());
-        msg.extend_from_slice(&self.tx.lock_time.to_le_bytes());
+        let mut engine = tag_engine(b"TapSighash");
+        let writer = &mut Sha256Sink(&mut engine);
+        writer.write_all(&[0x00]);
+        writer.write_all(&[ty_byte]);
+        writer.write_all(&self.tx.version.to_le_bytes());
+        writer.write_all(&self.tx.lock_time.to_le_bytes());
         if !is_anyone_can_pay {
-            msg.extend_from_slice(&self.prevouts().to_le_bytes());
-            msg.extend_from_slice(&self.taproot_amounts(prevouts).to_le_bytes());
-            msg.extend_from_slice(&self.taproot_scriptpubkeys(prevouts).to_le_bytes());
-            msg.extend_from_slice(&self.sequences().to_le_bytes());
+            writer.write_all(&self.prevouts().to_le_bytes());
+            writer.write_all(&self.taproot_amounts(prevouts).to_le_bytes());
+            writer.write_all(&self.taproot_scriptpubkeys(prevouts).to_le_bytes());
+            writer.write_all(&self.sequences().to_le_bytes());
         }
         if base != 0x02 && base != 0x03 {
-            msg.extend_from_slice(&self.outputs().to_le_bytes());
+            writer.write_all(&self.outputs().to_le_bytes());
         }
         let mut spend_type = 0_u8;
         if annex.is_some() {
@@ -344,37 +345,36 @@ impl<'t> SighashCache<'t> {
         if leaf_hash_code_separator.is_some() {
             spend_type |= 2;
         }
-        msg.push(spend_type);
+        writer.write_all(&[spend_type]);
         if is_anyone_can_pay {
-            input.previous_output.consensus_encode(&mut msg);
+            input.previous_output.consensus_encode(writer);
             let prevout = prevouts
                 .get(input_index)
                 .ok_or(SighashError::PrevoutsIndex { index: input_index })?;
-            msg.extend_from_slice(&prevout.value.to_le_bytes());
-            write_script(&mut msg, &prevout.script_pubkey);
-            msg.extend_from_slice(&input.sequence.to_le_bytes());
+            writer.write_all(&prevout.value.to_le_bytes());
+            write_script(writer, &prevout.script_pubkey);
+            writer.write_all(&input.sequence.to_le_bytes());
         } else {
             let input_index =
                 u32::try_from(input_index).unwrap_or_else(|_| unreachable!("input index fits u32"));
-            msg.extend_from_slice(&input_index.to_le_bytes());
+            writer.write_all(&input_index.to_le_bytes());
         }
         if let Some(annex) = annex {
             let annex_len = varint::encode(compact_len(annex.len()));
-            msg.extend_from_slice(&sha256_parts(&[annex_len.as_slice(), annex]));
+            writer.write_all(&sha256_parts(&[annex_len.as_slice(), annex]));
         }
         if base == 0x03 {
             let output = &self.tx.outputs[input_index];
-            msg.extend_from_slice(&sha256_parts(&[
-                &crate::primitives::encode::consensus_bytes(output),
-            ]));
+            let output_hash = sha256_over(|w| output.consensus_encode(w));
+            writer.write_all(&output_hash.to_le_bytes());
         }
         if let Some((leaf_hash, code_separator_position)) = leaf_hash_code_separator {
-            msg.extend_from_slice(leaf_hash.as_byte_array());
-            msg.push(0x00);
-            msg.extend_from_slice(&code_separator_position.to_le_bytes());
+            writer.write_all(leaf_hash.as_byte_array());
+            writer.write_all(&[0x00]);
+            writer.write_all(&code_separator_position.to_le_bytes());
         }
 
-        Ok(tagged_hash(b"TapSighash", &msg))
+        Ok(Hash256::from_le_bytes(&engine.finalize().into()))
     }
 
     fn prevouts(&self) -> Hash256 {
@@ -567,6 +567,7 @@ fn tagged_hash_parts(tag: &[u8], parts: &[&[u8]]) -> Hash256 {
     Hash256::from_le_bytes(&hash_finish(engine))
 }
 
+#[cfg(any(test, kani))]
 fn tagged_hash(tag: &[u8], msg: &[u8]) -> Hash256 {
     tagged_hash_parts(tag, &[msg])
 }
