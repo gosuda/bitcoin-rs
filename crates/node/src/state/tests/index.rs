@@ -213,7 +213,7 @@ fn script_index_builds_without_advertising_core_txindex() -> Result<(), TestErro
 #[test]
 fn script_index_modes_give_concrete_unspent_outputs_answers() -> Result<(), TestError> {
     use bitcoin_rs_projection::{IndexCapability, ScriptHash};
-    use bitcoin_rs_rpc::context::{TxQueryError, TxUnavailableCause};
+    use bitcoin_rs_serving::context::{TxQueryError, TxUnavailableCause};
 
     let scripthash = ScriptHash::from_script_bytes(&[0x51, 0x01]);
 

@@ -27,7 +27,7 @@ Step 8 is the load-bearing check: steps 1 through 7 bound resource use and rejec
 
 ## Activation
 
-The RPC path is `loadtxoutset` (`crates/rpc/src/handlers/chain.rs`), which routes through `crates/node/src/snapshot.rs:473`: `read_verified`, then `AssumeUtxoManager::activate_verified_snapshot` (`crates/execution/src/assumeutxo.rs:561`). The sequence:
+The RPC path is `loadtxoutset` (`crates/serving/src/handlers/chain.rs`), which routes through `crates/node/src/snapshot.rs:473`: `read_verified`, then `AssumeUtxoManager::activate_verified_snapshot` (`crates/execution/src/assumeutxo.rs:561`). The sequence:
 
 1. The manager refuses unless disk status is `Uninitialized` (`require_unactivated`) and no full-revalidation marker exists (`AssumeUtxoError::AlreadyActive`, `FullRevalidationRequired`).
 2. `install_snapshot` (`crates/execution/src/lib.rs:590`) takes admission and the chain-transition lock and checks the tip is settled: the durable head and the applied tip must name the same `(hash, height, tx count)`. A mismatch fails closed and returns `SnapshotTipNotSettled`; this is the "validating head refusal" in reverse, refusing activation while a head transition is unsettled.
@@ -35,7 +35,7 @@ The RPC path is `loadtxoutset` (`crates/rpc/src/handlers/chain.rs`), which route
 4. Height, base hash, and commitment are rechecked against the pin inside the same transition exclusion, then the coins replace the live UTXO set, CoinStats is reset with the pinned tx count, and the durable head commits a new row carrying `AssumeUtxoDiskStatus::Validating` and attestation `AssumeValid` (`crates/execution/src/assumeutxo.rs:606-660`).
 5. The manager creates the `Historical` counterpart chainstate at genesis and the node continues.
 
-The node now serves the chain from the snapshot while the historical chainstate revalidates from genesis. The RPC `getchainstates` projects this lifecycle: it reports the active and historical chainstates, their roles, heights, and validation progress as one coherent view (`crates/rpc/src/registry.rs`, `API-33`). When history reaches the base height, the reconstructed `hash_serialized` and cumulative tx count must match the pinned metadata; the manager then marks the disk status `Finalized`, attests the durable head `Full`, and the active role decays from `AssumedActive` to `Ordinary` (`assumeutxo.rs:802-850`). On any historical failure the node marks itself `Failed` and refuses subsequent startups rather than serving an unverified base: `trusted_anchor` maps `Failed` to `SnapshotArchiveError::PreviouslyFailed` (`crates/execution/src/assumeutxo_snapshot.rs:315-333`).
+The node now serves the chain from the snapshot while the historical chainstate revalidates from genesis. The RPC `getchainstates` projects this lifecycle: it reports the active and historical chainstates, their roles, heights, and validation progress as one coherent view (`crates/serving/src/registry.rs`, `API-33`). When history reaches the base height, the reconstructed `hash_serialized` and cumulative tx count must match the pinned metadata; the manager then marks the disk status `Finalized`, attests the durable head `Full`, and the active role decays from `AssumedActive` to `Ordinary` (`assumeutxo.rs:802-850`). On any historical failure the node marks itself `Failed` and refuses subsequent startups rather than serving an unverified base: `trusted_anchor` maps `Failed` to `SnapshotArchiveError::PreviouslyFailed` (`crates/execution/src/assumeutxo_snapshot.rs:315-333`).
 
 ## The on-disk snapshot archive
 

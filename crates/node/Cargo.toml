@@ -22,7 +22,7 @@ test-seam = [
     "bitcoin-rs-execution/test-seam",
     "bitcoin-rs-mempool/test-seam",
     "bitcoin-rs-projection/test-seam",
-    "bitcoin-rs-mining/test-seam",
+    "bitcoin-rs-serving/test-seam",
     "dep:toml",
 ]
 
@@ -33,10 +33,10 @@ default = ["zmq"]
 # chainstate's kernel feature is the kernel-capability propagator for the
 # chain stack and already forwards to `bitcoin-rs-consensus/kernel`.
 kernel = ["bitcoin-rs-execution/kernel"]
-zmq = ["bitcoin-rs-rpc/zmq"]
-silent-payments = ["bitcoin-rs-rpc/silent-payments"]
-pool = ["bitcoin-rs-rpc/pool", "bitcoin-rs-mining/pool"]
-pool-sv2 = ["pool", "bitcoin-rs-mining/pool-sv2", "dep:zeroize"]
+zmq = ["bitcoin-rs-serving/zmq"]
+silent-payments = ["bitcoin-rs-serving/silent-payments"]
+pool = ["bitcoin-rs-serving/pool"]
+pool-sv2 = ["pool", "bitcoin-rs-serving/pool-sv2", "dep:zeroize"]
 surrealkv = [
     "bitcoin-rs-storage/surrealkv",
     "bitcoin-rs-execution/surrealkv",
@@ -58,8 +58,7 @@ bitcoin-rs-projection.workspace = true
 bitcoin-rs-wire.workspace = true
 
 bitcoin-rs-mempool.workspace = true
-bitcoin-rs-mining.workspace = true
-bitcoin-rs-rpc.workspace = true
+bitcoin-rs-serving.workspace = true
 zeroize = { workspace = true, optional = true }
 
 bitcoin.workspace = true
@@ -88,7 +87,7 @@ rustix.workspace = true
 
 [dev-dependencies]
 bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
-bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-serving = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-wire = { workspace = true, features = ["test-seam"] }
 tempfile.workspace = true
 proptest.workspace = true
@@ -100,7 +99,6 @@ sonic-rs.workspace = true
 toml.workspace = true
 rustix.workspace = true
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
-bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
 # Miner side of the SV2 host-path regression in `pool/sv2.rs`: the same pinned
 # SRI release family the pool adapter links, never a second wire version.
 binary_sv2.workspace = true
@@ -118,3 +116,8 @@ path = "tests/suite.rs"
 [[test]]
 name = "crash_recovery"
 path = "tests/crash_recovery.rs"
+
+[[test]]
+name = "pool_ledger"
+path = "tests/pool_ledger.rs"
+required-features = ["pool", "test-seam"]

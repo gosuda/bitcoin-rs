@@ -5,11 +5,11 @@ use bitcoin_rs_consensus::primitives::{
     Amount, BlockPayload, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
     Witness,
 };
-use bitcoin_rs_mining::{
+use bitcoin_rs_node::{MiningCoordinator, Network};
+use bitcoin_rs_serving::mining::{
     BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx, MiningControl,
     MiningControlError,
 };
-use bitcoin_rs_node::{MiningCoordinator, Network};
 
 use super::support::{open_at_genesis, regtest_mining, solved_template_block};
 

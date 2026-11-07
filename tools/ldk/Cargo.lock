@@ -156,31 +156,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitcoin-rs-chain"
+name = "bitcoin-rs-consensus"
 version = "0.15.0"
 dependencies = [
- "arc-swap",
- "bitcoin-rs-consensus",
- "bitcoin-rs-primitives",
- "crossbeam-channel",
+ "bitcoin_hashes",
+ "bytemuck",
+ "bytes",
  "hashbrown 0.17.1",
  "parking_lot",
+ "rayon",
  "ruint",
- "slab",
+ "secp256k1",
+ "serde",
+ "sha2",
+ "sha3",
+ "smallvec",
  "thiserror",
+ "tinyvec",
+ "zerocopy",
 ]
 
 [[package]]
-name = "bitcoin-rs-chainstate"
+name = "bitcoin-rs-execution"
 version = "0.15.0"
 dependencies = [
  "arc-swap",
- "bitcoin-rs-chain",
  "bitcoin-rs-consensus",
- "bitcoin-rs-primitives",
- "bitcoin-rs-script",
  "bitcoin-rs-storage",
- "bitcoin-rs-utxo",
  "bytes",
  "cap-fs-ext",
  "cap-std",
@@ -190,37 +192,90 @@ dependencies = [
  "parking_lot",
  "quanta 0.13.0",
  "rayon",
+ "ruint",
  "serde",
  "sha2",
+ "slab",
  "sonic-rs",
  "thiserror",
  "tracing",
 ]
 
 [[package]]
-name = "bitcoin-rs-consensus"
-version = "0.15.0"
+name = "bitcoin-rs-ldk-spike"
+version = "0.1.0"
 dependencies = [
- "bitcoin-rs-primitives",
- "bitcoin-rs-script",
- "hashbrown 0.17.1",
- "parking_lot",
- "rayon",
- "sha2",
+ "bitcoin",
+ "bitcoin-rs-consensus",
+ "bitcoin-rs-node",
+ "futures-executor",
+ "lightning",
+ "lightning-block-sync",
+ "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
-name = "bitcoin-rs-index"
+name = "bitcoin-rs-mempool"
+version = "0.15.0"
+dependencies = [
+ "bitcoin-rs-consensus",
+ "bytemuck",
+ "hashbrown 0.17.1",
+ "metrics",
+ "parking_lot",
+ "sha2",
+ "smallvec",
+ "tempfile",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "bitcoin-rs-node"
 version = "0.15.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
- "bitcoin-rs-chain",
- "bitcoin-rs-primitives",
- "bitcoin-rs-script",
+ "bitcoin-rs-consensus",
+ "bitcoin-rs-execution",
+ "bitcoin-rs-mempool",
+ "bitcoin-rs-projection",
+ "bitcoin-rs-serving",
  "bitcoin-rs-storage",
- "bitcoin-rs-utxo",
+ "bitcoin-rs-wire",
+ "bytes",
+ "cap-fs-ext",
+ "cap-std",
+ "compact_str",
+ "crossbeam-channel",
+ "hashbrown 0.17.1",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "parking_lot",
+ "quanta 0.13.0",
+ "rayon",
+ "rustix",
+ "serde",
+ "sha2",
+ "signal-hook",
+ "smallvec",
+ "sonic-rs",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "bitcoin-rs-projection"
+version = "0.15.0"
+dependencies = [
+ "arc-swap",
+ "bitcoin",
+ "bitcoin-rs-consensus",
+ "bitcoin-rs-execution",
+ "bitcoin-rs-storage",
  "bitcoin_hashes",
  "compact_str",
  "crossbeam-channel",
@@ -238,153 +293,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitcoin-rs-ldk-spike"
-version = "0.1.0"
-dependencies = [
- "bitcoin",
- "bitcoin-rs-node",
- "bitcoin-rs-primitives",
- "futures-executor",
- "lightning",
- "lightning-block-sync",
- "tempfile",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "bitcoin-rs-mempool"
-version = "0.15.0"
-dependencies = [
- "bitcoin-rs-consensus",
- "bitcoin-rs-primitives",
- "bitcoin-rs-script",
- "bytemuck",
- "hashbrown 0.17.1",
- "metrics",
- "parking_lot",
- "sha2",
- "smallvec",
- "tempfile",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "bitcoin-rs-mining"
-version = "0.15.0"
-dependencies = [
- "bitcoin-rs-chain",
- "bitcoin-rs-consensus",
- "bitcoin-rs-mempool",
- "bitcoin-rs-primitives",
- "bitcoin-rs-script",
- "compact_str",
- "hashbrown 0.17.1",
- "parking_lot",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "bitcoin-rs-node"
+name = "bitcoin-rs-serving"
 version = "0.15.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
- "bitcoin-rs-chain",
- "bitcoin-rs-chainstate",
  "bitcoin-rs-consensus",
- "bitcoin-rs-index",
+ "bitcoin-rs-execution",
  "bitcoin-rs-mempool",
- "bitcoin-rs-mining",
- "bitcoin-rs-p2p",
- "bitcoin-rs-primitives",
- "bitcoin-rs-rpc",
+ "bitcoin-rs-projection",
  "bitcoin-rs-storage",
- "bitcoin-rs-utxo",
- "bytes",
- "cap-fs-ext",
- "cap-std",
- "compact_str",
- "crossbeam-channel",
- "hashbrown 0.17.1",
- "metrics",
- "metrics-exporter-prometheus",
- "parking_lot",
- "quanta 0.13.0",
- "rayon",
- "rustix",
- "serde",
- "sha2",
- "signal-hook",
- "sonic-rs",
- "thiserror",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "bitcoin-rs-p2p"
-version = "0.15.0"
-dependencies = [
- "arc-swap",
- "base64 0.22.1",
- "bitcoin",
- "bitcoin-rs-chain",
- "bitcoin-rs-chainstate",
- "bitcoin-rs-consensus",
- "bitcoin-rs-index",
- "bitcoin-rs-mempool",
- "bitcoin-rs-primitives",
- "bitcoin-rs-storage",
- "bytes",
- "chacha20",
- "chacha20poly1305",
- "crossbeam-channel",
- "hashbrown 0.17.1",
- "hkdf",
- "metrics",
- "parking_lot",
- "rustix",
- "serde",
- "sha2",
- "smallvec",
- "sonic-rs",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "bitcoin-rs-primitives"
-version = "0.15.0"
-dependencies = [
- "bytemuck",
- "bytes",
- "ruint",
- "serde",
- "sha2",
- "sha3",
- "thiserror",
- "tinyvec",
- "zerocopy",
-]
-
-[[package]]
-name = "bitcoin-rs-rpc"
-version = "0.15.0"
-dependencies = [
- "arc-swap",
- "bitcoin",
- "bitcoin-rs-chain",
- "bitcoin-rs-consensus",
- "bitcoin-rs-index",
- "bitcoin-rs-mempool",
- "bitcoin-rs-mining",
- "bitcoin-rs-p2p",
- "bitcoin-rs-primitives",
- "bitcoin-rs-script",
- "bitcoin-rs-utxo",
+ "bitcoin-rs-wire",
  "bytes",
  "compact_str",
  "corepc-types",
@@ -402,57 +321,57 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitcoin-rs-script"
-version = "0.15.0"
-dependencies = [
- "bitcoin-rs-primitives",
- "bitcoin_hashes",
- "secp256k1",
- "sha2",
- "smallvec",
- "thiserror",
- "tinyvec",
-]
-
-[[package]]
 name = "bitcoin-rs-storage"
 version = "0.15.0"
 dependencies = [
  "arc-swap",
- "bitcoin-rs-primitives",
+ "bitcoin-rs-consensus",
  "bytes",
  "cap-fs-ext",
  "cap-std",
- "hashbrown 0.17.1",
- "metrics",
- "parking_lot",
- "rust-rocksdb",
- "rustix",
- "serde",
- "sha2",
- "sonic-rs",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "bitcoin-rs-utxo"
-version = "0.15.0"
-dependencies = [
- "bitcoin-rs-primitives",
- "bitcoin-rs-storage",
  "crossbeam-utils",
  "hashbrown 0.17.1",
+ "metrics",
  "nohash-hasher",
  "parking_lot",
  "rayon",
  "ruint",
+ "rust-rocksdb",
+ "rustix",
  "secp256k1",
+ "serde",
  "sha2",
  "smallvec",
+ "sonic-rs",
  "thiserror",
  "tracing",
  "zerocopy",
+]
+
+[[package]]
+name = "bitcoin-rs-wire"
+version = "0.15.0"
+dependencies = [
+ "arc-swap",
+ "base64 0.22.1",
+ "bitcoin",
+ "bitcoin-rs-consensus",
+ "bitcoin-rs-storage",
+ "bytes",
+ "chacha20",
+ "chacha20poly1305",
+ "crossbeam-channel",
+ "hashbrown 0.17.1",
+ "hkdf",
+ "metrics",
+ "parking_lot",
+ "rustix",
+ "serde",
+ "sha2",
+ "smallvec",
+ "sonic-rs",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

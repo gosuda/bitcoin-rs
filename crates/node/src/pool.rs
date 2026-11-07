@@ -2,19 +2,19 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_mining::pool::ledger as pool_ledger;
-use bitcoin_rs_mining::pool::stratum::sv1::{
+use bitcoin_rs_serving::mining::pool::ledger as pool_ledger;
+use bitcoin_rs_serving::mining::pool::stratum::sv1::{
     ConnectionLimiter, DifficultyPolicy, Server, ServerConfig, ServerDeps,
 };
-use bitcoin_rs_mining::pool::{ExtranonceLayout, JobBookConfig, PoolCore};
-use bitcoin_rs_mining::{CoinbaseBudget, MiningControl};
+use bitcoin_rs_serving::mining::pool::{ExtranonceLayout, JobBookConfig, PoolCore};
+use bitcoin_rs_serving::mining::{CoinbaseBudget, MiningControl};
 use bitcoin_rs_storage::KvStore;
 
 use crate::run::RunError;
 
 #[cfg(feature = "pool-sv2")]
 pub(crate) mod authority;
-mod ledger;
+pub mod ledger;
 #[cfg(feature = "pool-sv2")]
 mod sv2;
 #[cfg(test)]
@@ -38,14 +38,14 @@ struct LedgerComposer {
     config: pool_ledger::PoolConfig,
 }
 impl crate::storage_backend::StoreConsumer for LedgerComposer {
-    type Output = (pool_ledger::Ledger, u32);
+    type Output = (ledger::store::Ledger, u32);
     type Error = RunError;
     fn consume<S: KvStore>(self, store: Arc<S>) -> Result<Self::Output, Self::Error> {
         let store: Arc<dyn KvStore> = store;
-        let ledger = match pool_ledger::Ledger::create(Arc::clone(&store), self.config.clone()) {
+        let ledger = match ledger::store::Ledger::create(Arc::clone(&store), self.config.clone()) {
             Ok(ledger) => ledger,
             Err(pool_ledger::LedgerError::PathExists) => {
-                pool_ledger::Ledger::open(Arc::clone(&store), self.config)?
+                ledger::store::Ledger::open(Arc::clone(&store), self.config)?
             }
             Err(error) => return Err(error.into()),
         };
@@ -78,8 +78,8 @@ fn composed_core_config(max_connections: u32) -> Result<ComposedCore, RunError> 
             },
             extranonce: ExtranonceLayout::new(4, 4),
             coinbase_tag: b"/btcrs/".to_vec(),
-            version_mask: bitcoin_rs_mining::pool::BIP320_VERSION_MASK,
-            ntime_forward_secs: bitcoin_rs_mining::pool::MAX_NTIME_FORWARD_SECS,
+            version_mask: bitcoin_rs_serving::mining::pool::BIP320_VERSION_MASK,
+            ntime_forward_secs: bitcoin_rs_serving::mining::pool::MAX_NTIME_FORWARD_SECS,
             max_jobs: MAX_RETAINED_JOBS,
             max_sessions: sessions,
             max_shares_per_job: MAX_SHARES_PER_JOB,
@@ -145,8 +145,8 @@ impl PoolService {
         }))
     }
 
-    pub(crate) fn handles(&self) -> bitcoin_rs_rpc::context::PoolHandles {
-        bitcoin_rs_rpc::context::PoolHandles {
+    pub(crate) fn handles(&self) -> bitcoin_rs_serving::context::PoolHandles {
+        bitcoin_rs_serving::context::PoolHandles {
             operator: Some(self.host.clone()),
         }
     }

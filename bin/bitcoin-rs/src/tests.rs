@@ -303,7 +303,7 @@ fn environment_parses_script_index() {
 fn esplora_query_limit_resolves_and_rejects_zero() -> Result<(), TestError> {
     assert_eq!(
         resolved(&["bitcoin-rs"], &[]).rpc.esplora_max_queries,
-        bitcoin_rs_rpc::esplora::DEFAULT_MAX_QUERIES.get()
+        bitcoin_rs_serving::esplora::DEFAULT_MAX_QUERIES.get()
     );
     let config = load_file(
         "--config",

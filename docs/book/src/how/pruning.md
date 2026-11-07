@@ -20,7 +20,7 @@ The unit is the locator row, not the byte range. The same line prunes undo rows 
 
 ## The line is bounded twice
 
-The RPC bound comes first. `pruneblockchain` refuses when pruning is disabled with `pruning is disabled`, refuses a height above the applied tip with `prune height cannot exceed applied tip`, and refuses a height above `applied - 288` with `prune height is within reorg safety margin` (`crates/rpc/src/handlers/chain.rs`). The constant is `CORE_REORG_SAFETY_MARGIN = 288` (`crates/consensus/src/primitives.rs`).
+The RPC bound comes first. `pruneblockchain` refuses when pruning is disabled with `pruning is disabled`, refuses a height above the applied tip with `prune height cannot exceed applied tip`, and refuses a height above `applied - 288` with `prune height is within reorg safety margin` (`crates/serving/src/handlers/chain.rs`). The constant is `CORE_REORG_SAFETY_MARGIN = 288` (`crates/consensus/src/primitives.rs`).
 
 The storage bound is separate and can be tighter. `prune_to_height` recomputes `safe_prune_height = applied_tip_height - 288` and refuses again, then builds the policy line (`crates/storage/src/pruning.rs:146-160`):
 
@@ -44,7 +44,7 @@ node:prune_executed first retained height, big-endian u32, authoritative
 node:prune_batch    pass receipt, big-endian u64, monotonic per pass
 ```
 
-`NodePruneService` loads `node:pruneheight` at open, returns it from `pruneblockchain`, and reports it as `pruneheight` in `getblockchaininfo` (`crates/node/src/state/storage.rs:304-318`, `crates/rpc/src/handlers/chain.rs`). It is the request, not proof of deletion.
+`NodePruneService` loads `node:pruneheight` at open, returns it from `pruneblockchain`, and reports it as `pruneheight` in `getblockchaininfo` (`crates/node/src/state/storage.rs:304-318`, `crates/serving/src/handlers/chain.rs`). It is the request, not proof of deletion.
 
 `node:prune_executed` is the executed frontier: the first height that the pruning authority has not removed. `ExecutedFrontier::reconstruct` reads it, falls back to `NONE` only when no prune metadata exists at all, and otherwise fails closed (`crates/storage/src/pruning.rs:95-127`). A store that has a prune height or a batch receipt but no executed frontier returns `missing executed prune frontier; preserve this store and replay into a separately named datadir`. `NodeStorage` seeds the retention registry from this value at open, so a restart never re-admits history a previous pass removed (`crates/node/src/state/storage.rs:51-53`).
 
@@ -71,12 +71,12 @@ The node refuses two cases before any deletion:
 
 ## What a pruned node advertises and refuses
 
-`--prune-target-mb` greater than zero turns on pruned mode. The node advertises `WITNESS | NETWORK_LIMITED` instead of `WITNESS | NETWORK`, adding `P2P_V2` when v2 transport is on (`crates/node/src/state/open.rs`). Outside IBD, its download policy lets a `NETWORK_LIMITED` peer serve a height only when that height is within the last 288 blocks of the peer's tip (`crates/node/src/p2p/download_window/policy.rs:18-20`, `90-140`). `getblockchaininfo` reports `"pruned": true`, the stored `pruneheight`, and `prune_target_size: None` (`crates/rpc/src/handlers/chain.rs`).
+`--prune-target-mb` greater than zero turns on pruned mode. The node advertises `WITNESS | NETWORK_LIMITED` instead of `WITNESS | NETWORK`, adding `P2P_V2` when v2 transport is on (`crates/node/src/state/open.rs`). Outside IBD, its download policy lets a `NETWORK_LIMITED` peer serve a height only when that height is within the last 288 blocks of the peer's tip (`crates/node/src/p2p/download_window/policy.rs:18-20`, `90-140`). `getblockchaininfo` reports `"pruned": true`, the stored `pruneheight`, and `prune_target_size: None` (`crates/serving/src/handlers/chain.rs`).
 
 The node refuses reads that need a deleted body with distinct messages:
 
-- `getblock` with verbosity 0 returns `not found: block data pruned` (`crates/rpc/src/handlers/chain.rs`).
-- `getblock` with verbosity 2 returns `Block not available (pruned data)` when the undo-backed spend list is requested (`crates/rpc/src/handlers/chain.rs`). A pruned spend list alone degrades to no `spent` list while the block still renders.
+- `getblock` with verbosity 0 returns `not found: block data pruned` (`crates/serving/src/handlers/chain.rs`).
+- `getblock` with verbosity 2 returns `Block not available (pruned data)` when the undo-backed spend list is requested (`crates/serving/src/handlers/chain.rs`). A pruned spend list alone degrades to no `spent` list while the block still renders.
 - The embedding API returns `block body pruned for {hash}` (`crates/node/src/embed.rs:94-101`).
 - Historical reads return `HistoryUnavailable::Pruned { below }`, displayed as `history below height {below} is pruned`.
 

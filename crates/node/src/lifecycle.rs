@@ -6,8 +6,8 @@ use bitcoin_rs_execution::chain::LatchReader;
 use bitcoin_rs_execution::verify::{
     CheckLevel, VerifyError, VerifyOutcome, VerifyRequest, verify_recent_blocks,
 };
-use bitcoin_rs_mining::MiningControl;
-use bitcoin_rs_rpc::{
+use bitcoin_rs_serving::mining::MiningControl;
+use bitcoin_rs_serving::{
     RpcServer, RpcSurface,
     context::{
         ChainControl, ChainControlError, ChainHandles, Context, ContextHandles, IndexHandles,
@@ -72,8 +72,8 @@ impl ChainControl for RpcChainControl {
         &self,
         path: &std::path::Path,
     ) -> core::result::Result<
-        bitcoin_rs_rpc::context::SnapshotImport,
-        bitcoin_rs_rpc::context::SnapshotControlError,
+        bitcoin_rs_serving::context::SnapshotImport,
+        bitcoin_rs_serving::context::SnapshotControlError,
     > {
         self.snapshots.import(path).map_err(Into::into)
     }
@@ -83,8 +83,8 @@ impl ChainControl for RpcChainControl {
         path: &std::path::Path,
         cancellation: &LatchReader,
     ) -> core::result::Result<
-        bitcoin_rs_rpc::context::SnapshotExport,
-        bitcoin_rs_rpc::context::SnapshotControlError,
+        bitcoin_rs_serving::context::SnapshotExport,
+        bitcoin_rs_serving::context::SnapshotControlError,
     > {
         self.snapshots
             .export(path, cancellation)
@@ -94,8 +94,8 @@ impl ChainControl for RpcChainControl {
     fn chainstates(
         &self,
     ) -> core::result::Result<
-        bitcoin_rs_rpc::context::ChainstatesInfo,
-        bitcoin_rs_rpc::context::SnapshotControlError,
+        bitcoin_rs_serving::context::ChainstatesInfo,
+        bitcoin_rs_serving::context::SnapshotControlError,
     > {
         self.snapshots.chainstates()
     }
@@ -172,7 +172,7 @@ fn bind_rpc(
         state,
         mining_control,
         block_body_source,
-        bitcoin_rs_rpc::context::PoolHandles::default(),
+        bitcoin_rs_serving::context::PoolHandles::default(),
     )
 }
 
@@ -180,7 +180,7 @@ fn rpc_context_handles(
     state: &NodeState,
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
-    pool: bitcoin_rs_rpc::context::PoolHandles,
+    pool: bitcoin_rs_serving::context::PoolHandles,
 ) -> ContextHandles {
     let config = state.config();
     let chainstate = state.chainstate();
@@ -239,7 +239,7 @@ fn bind_rpc_with_pool(
     state: &NodeState,
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
-    pool: bitcoin_rs_rpc::context::PoolHandles,
+    pool: bitcoin_rs_serving::context::PoolHandles,
 ) -> Result<RpcBindings, RunError> {
     let config = state.config();
     let rpc_auth = Arc::new(config.rpc.auth.to_rpc_auth(&config.data_dir)?);
@@ -251,7 +251,7 @@ fn bind_rpc_with_pool(
                 .ok_or(ConfigError::EsploraMaxQueries)?,
         );
     let context = Arc::new(context);
-    let handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::clone(&context)));
+    let handler = Arc::new(bitcoin_rs_serving::Handler::new(Arc::clone(&context)));
     let server = RpcServer::bind(
         state.config().rpc.bind,
         Arc::clone(&rpc_auth),
@@ -646,7 +646,7 @@ struct StartupGuard {
 }
 
 impl StartupGuard {
-    fn finish(mut self, context: Arc<bitcoin_rs_rpc::context::Context>) -> crate::embed::Node {
+    fn finish(mut self, context: Arc<bitcoin_rs_serving::context::Context>) -> crate::embed::Node {
         let Some(state) = self.state.take() else {
             panic!("completed startup owns state");
         };
@@ -754,8 +754,9 @@ pub(crate) fn start_node(
         state.chain_followers(),
         final_payout_script(state.config()),
     ));
-    let sequence_wake: Arc<dyn bitcoin_rs_mining::MempoolSequenceWake> = coordinator.clone();
-    let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator;
+    let sequence_wake: Arc<dyn bitcoin_rs_serving::mining::MempoolSequenceWake> =
+        coordinator.clone();
+    let mining_control: Arc<dyn bitcoin_rs_serving::mining::MiningControl> = coordinator;
     let signal = state.mining_generation_signal();
     signal.attach(&mining_control);
     signal.attach_sequence_wake(&sequence_wake);
@@ -854,11 +855,11 @@ pub(crate) fn start_node(
     }
     #[cfg(feature = "pool")]
     let pool_handles = guard.services.pool.as_ref().map_or_else(
-        bitcoin_rs_rpc::context::PoolHandles::default,
+        bitcoin_rs_serving::context::PoolHandles::default,
         crate::pool::PoolService::handles,
     );
     #[cfg(not(feature = "pool"))]
-    let pool_handles = bitcoin_rs_rpc::context::PoolHandles::default();
+    let pool_handles = bitcoin_rs_serving::context::PoolHandles::default();
     let RpcBindings { context, listeners } =
         bind_rpc_with_pool(state, &mining_control, block_body_source, pool_handles)?;
     start_rpc_listeners(state, listeners, &mut guard.services)?;
@@ -924,7 +925,7 @@ fn start_rpc_listeners(
         tracing::info!(addr = %rpc_local_addr, ?surface, "rpc listener bound");
         let rpc_shutdown = state.shutdown_reader();
         let worker = std::thread::Builder::new()
-            .name("bitcoin-rs-rpc".into())
+            .name("bitcoin-rs-serving".into())
             .spawn(move || {
                 let result = rpc_server.serve_surface_with_shutdown(rpc_shutdown.clone(), surface);
                 if !rpc_shutdown.is_triggered() {

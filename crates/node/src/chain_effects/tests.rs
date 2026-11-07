@@ -9,7 +9,7 @@ use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolLimits,
     MutationOutcome, PeerToken, SubmitError, SubmitOutcome,
 };
-use bitcoin_rs_mining::{BlockValidationResult, MiningControl};
+use bitcoin_rs_serving::mining::{BlockValidationResult, MiningControl};
 use parking_lot::Mutex;
 
 #[derive(Debug, Default)]
@@ -178,7 +178,7 @@ struct ReceiptWake {
     receipts: Mutex<Vec<(Hash256, usize)>>,
 }
 
-impl bitcoin_rs_mining::MempoolSequenceWake for ReceiptWake {
+impl bitcoin_rs_serving::mining::MempoolSequenceWake for ReceiptWake {
     fn publish_generation_from(&self, _: u64) {}
 
     fn stage_tip(&self, _: &TipSnapshot, _: &Block) {}
@@ -195,7 +195,7 @@ fn gatewayless_connect_publishes_an_empty_receipt_for_the_tip() -> Result<(), Te
     let genesis = Network::Regtest.genesis_block();
     let tip = genesis_tip(&genesis)?;
     let wake = Arc::new(ReceiptWake::default());
-    let wake_handle: Arc<dyn bitcoin_rs_mining::MempoolSequenceWake> = wake.clone();
+    let wake_handle: Arc<dyn bitcoin_rs_serving::mining::MempoolSequenceWake> = wake.clone();
     let followers = ChainFollowers::noop();
     followers.mining().attach_sequence_wake(&wake_handle);
     assert!(followers.mempool_gateway().is_none());

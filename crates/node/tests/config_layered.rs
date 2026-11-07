@@ -8,7 +8,7 @@ use bitcoin_rs_node::{
     NetworkSelection, NodeConfig, NotificationConfig, P2pOverrides, ScriptIndexMode, UserConfig,
     ValidationOverrides, ZmqEndpointConfig, resolve,
 };
-use bitcoin_rs_rpc::zmq::ZmqTopic;
+use bitcoin_rs_serving::zmq::ZmqTopic;
 
 #[test]
 fn public_listener_is_opt_in_and_budgets_resolve_independently() -> Result<()> {

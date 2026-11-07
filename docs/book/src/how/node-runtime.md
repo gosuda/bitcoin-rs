@@ -17,13 +17,13 @@ The operator view of startup, recovery, and shutdown is in [Shutdown and upgrade
 | block announce worker | `lifecycle.rs` | p2p-owned thread | `join_core_services` (`lifecycle.rs`) |
 | tx relay worker | `lifecycle.rs` | p2p-owned thread | `join_core_services` (`lifecycle.rs`) |
 | tx ingress consumer | `lifecycle.rs` | `bitcoin-rs-tx-ingress` | `join_core_services` (`lifecycle.rs`) |
-| RPC listeners | `lifecycle.rs` | `bitcoin-rs-rpc` per listener, plus `rpc-connection` per request | `serve_surface_with_shutdown` drain, then join |
+| RPC listeners | `lifecycle.rs` | `bitcoin-rs-serving` per listener, plus `rpc-connection` per request | `serve_surface_with_shutdown` drain, then join |
 | pool service, if `--pool` | `lifecycle.rs` | SV1/SV2 listeners plus `pool-reconcile` | `pool.shutdown` (`lifecycle.rs`) |
 | P2P service | `lifecycle.rs` | peer workers | `state.p2p().shutdown()` then joins |
 | chainstate maintenance | `lifecycle.rs` | worker thread | joined after the P2P bootstrap drain (`lifecycle.rs`) |
 | event loop | `lifecycle.rs` | `bitcoin-rs-event-loop` | joined first among core services (`lifecycle.rs`) |
 
-The listener spawns the per-connection RPC threads itself, `rpc-connection` with a 2 MiB stack (`crates/rpc/src/server.rs`). The global rayon pool is capped at 4 threads at boot (`cap_global_thread_pool`, `lifecycle.rs`).
+The listener spawns the per-connection RPC threads itself, `rpc-connection` with a 2 MiB stack (`crates/serving/src/server.rs`). The global rayon pool is capped at 4 threads at boot (`cap_global_thread_pool`, `lifecycle.rs`).
 
 ## Event loop ticks
 
@@ -39,9 +39,9 @@ On top of that primitive: `subscribe_chain` records a cursor snapshot, `poll_cha
 
 ## Transaction ingress: RPC and P2P into the mempool
 
-Every mutation enters through one gateway, `MempoolGateway`. The RPC and embedded paths call it directly: `sendrawtransaction` submits with `LocalOrigin::Rpc` (`crates/rpc/src/handlers/tx.rs:501-506`) and `Node::broadcast` submits through the same call with the same default fee-rate cap (`crates/node/src/embed.rs:158-176`); [EMB-05](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/embedding.md#invariants) states that no production path mutates the pool outside the gateway.
+Every mutation enters through one gateway, `MempoolGateway`. The RPC and embedded paths call it directly: `sendrawtransaction` submits with `LocalOrigin::Rpc` (`crates/serving/src/handlers/tx.rs:501-506`) and `Node::broadcast` submits through the same call with the same default fee-rate cap (`crates/node/src/embed.rs:158-176`); [EMB-05](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/embedding.md#invariants) states that no production path mutates the pool outside the gateway.
 
-The P2P path is asynchronous. The peer listener hands each inbound transaction or package to a bounded channel (`state.inbound_tx_sender`, `crates/node/src/state.rs:229`), and one consumer thread, `bitcoin-rs-tx-ingress`, drains it (`spawn_tx_ingress_consumer`, `crates/node/src/tx_ingress.rs:17-39`). The loop (`run_consumer_loop`, `tx_ingress.rs:41-62`) alternates between draining the channel and a 100 ms retry pass that runs `maintain_orphans` and `retry_orphans` (`tx_ingress.rs:185-194`), so an orphan whose parents arrive later is retried without any peer round trip. After a commit, three things happen in order (`dispatch_common_outcome`, `tx_ingress.rs:256-291`): the relay queue announces the txid to other peers, `mining_control.publish_generation()` wakes the template coordinator, and the peer table records the response. Package relay follows the same spine with a charge-overrun counter, `node.package_charge_overrun`, when a decoded package's measured heap exceeds its planned charge (`process_package`, `tx_ingress.rs:95-129`). ZMQ publication is not wired here; it is a gateway observer leg (`MempoolSequenceObserver`, `crates/rpc/src/zmq.rs:493`), so the RPC, P2P, and embedded paths all publish identically.
+The P2P path is asynchronous. The peer listener hands each inbound transaction or package to a bounded channel (`state.inbound_tx_sender`, `crates/node/src/state.rs:229`), and one consumer thread, `bitcoin-rs-tx-ingress`, drains it (`spawn_tx_ingress_consumer`, `crates/node/src/tx_ingress.rs:17-39`). The loop (`run_consumer_loop`, `tx_ingress.rs:41-62`) alternates between draining the channel and a 100 ms retry pass that runs `maintain_orphans` and `retry_orphans` (`tx_ingress.rs:185-194`), so an orphan whose parents arrive later is retried without any peer round trip. After a commit, three things happen in order (`dispatch_common_outcome`, `tx_ingress.rs:256-291`): the relay queue announces the txid to other peers, `mining_control.publish_generation()` wakes the template coordinator, and the peer table records the response. Package relay follows the same spine with a charge-overrun counter, `node.package_charge_overrun`, when a decoded package's measured heap exceeds its planned charge (`process_package`, `tx_ingress.rs:95-129`). ZMQ publication is not wired here; it is a gateway observer leg (`MempoolSequenceObserver`, `crates/serving/src/zmq.rs:493`), so the RPC, P2P, and embedded paths all publish identically.
 
 A worked refusal from the trace node: a well-formed transaction spending an unknown prevout is rejected at the gateway with the consensus reason string,
 

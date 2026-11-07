@@ -223,7 +223,7 @@ Commit details:
 - Proof: `crates/node/tests/mining/coordination.rs` (staged preparation, commit-time install, stale-race discard).
 - Proof: `crates/execution/src/tests/` (grouped-window staging).
 - Proof: `durable_replay_tests.rs` (gap replay never fires the staged-tip hook).
-- Proof: `crates/mining/src/coordinator/tests.rs` (receipt install, mismatch fallback, waiter release).
+- Proof: `crates/node/src/mining/coordinator/tests.rs` (receipt install, mismatch fallback, waiter release).
 - Proof: `crates/node/src/chain_effects.rs` (gatewayless empty receipt).
 
 Replay validation rules:

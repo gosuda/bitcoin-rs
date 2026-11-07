@@ -26,7 +26,7 @@ fn fixture() -> Value {
             "features": {"default": [], "test-seam": []},
         },
         {
-            "name": "bitcoin-rs-rpc",
+            "name": "bitcoin-rs-serving",
             "dependencies": [dependency("zmq", None, &[])],
             "features": {"zmq": ["dep:zmq"]},
         },
@@ -34,9 +34,9 @@ fn fixture() -> Value {
             "name": "bitcoin-rs-node",
             "dependencies": [
                 dependency("bitcoin-rs-execution", None, &[]),
-                dependency("bitcoin-rs-rpc", None, &[]),
+                dependency("bitcoin-rs-serving", None, &[]),
             ],
-            "features": {"default": [], "zmq": ["bitcoin-rs-rpc/zmq"]},
+            "features": {"default": [], "zmq": ["bitcoin-rs-serving/zmq"]},
         },
     ]})
 }

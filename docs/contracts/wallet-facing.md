@@ -9,7 +9,7 @@ Wallet keys, coin selection, and signing stay in the external process.
 ### `WF-01`: Public transports only
 
 - An external wallet talks to a running node through native Esplora HTTP at `/api`.
-- It also uses the wallet-free JSON-RPC methods declared in `MANIFEST` (`crates/rpc/src/manifest.rs`).
+- It also uses the wallet-free JSON-RPC methods declared in `MANIFEST` (`crates/serving/src/manifest.rs`).
 - The embeddable `Node` API (`crates/node/src/embed.rs`) is the in-process equivalent of the same facts, not a second surface.
 - The consumer gets no datadir access.
 - The consumer imports no `NodeState`, `UtxoSet`, index types, or other crate-internal handles.
@@ -28,8 +28,8 @@ Wallet keys, coin selection, and signing stay in the external process.
 - Key material never crosses to the node.
 - Signing MUST happen inside the consumer process.
 - Owners:
-  - Esplora router `crates/rpc/src/esplora.rs`
-  - JSON-RPC dispatch `crates/rpc/src/handlers.rs`
+  - Esplora router `crates/serving/src/esplora.rs`
+  - JSON-RPC dispatch `crates/serving/src/handlers.rs`
   - Embedding `crates/node/src/embed.rs`
 
 ### `WF-02`: Operations a wallet actually issues
@@ -73,7 +73,7 @@ Wallet keys, coin selection, and signing stay in the external process.
 - Proof:
   - `esplora::tests::backend_mempool_get_bounds_prevouts_without_limiting_rows`
   - `backend_mempool_get_keeps_captured_parents_across_batches`
-  - `crates/rpc/src/esplora.rs` tests:
+  - `crates/serving/src/esplora.rs` tests:
     - `history_resolves_shared_parents_once_per_page`
     - `batch_reuses_selected_transactions_and_mempool_parents`
     - `block_page_reuses_parent_outside_the_selected_page`

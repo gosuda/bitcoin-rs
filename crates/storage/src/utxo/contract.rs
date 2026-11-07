@@ -213,44 +213,20 @@ pub enum UndoLoadError {
     },
 }
 
-pub use crate::{BoundedReadError, pruning::HistoryUnavailable};
+pub use bitcoin_rs_consensus::{
+    BlockSpends, BlockSpendsError, BlockUndoSource, BoundedReadError, HistoryUnavailable,
+};
 
-pub trait BlockUndoSource: Send + Sync {
-    fn block_spends(
-        &self,
-        hash: Hash256,
-        expected_applied_hash: Hash256,
-    ) -> Result<BlockSpends, BlockSpendsError>;
+impl From<UndoLoadError> for BlockSpendsError {
+    fn from(error: UndoLoadError) -> Self {
+        Self::Undo(error.to_string())
+    }
 }
 
-#[derive(Debug)]
-pub struct BlockSpends {
-    pub block: Block,
-    pub spent: Result<Vec<Vec<UtxoCoin>>, HistoryUnavailable>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum BlockSpendsError {
-    #[error("Block not found")]
-    UnknownBlock,
-    #[error(transparent)]
-    History(#[from] HistoryUnavailable),
-    #[error(transparent)]
-    Undo(#[from] UndoLoadError),
-    #[error(transparent)]
-    Storage(#[from] StorageError),
-    #[error("block body read: {0}")]
-    BodyRead(#[source] crate::BoundedReadError),
-    #[error(transparent)]
-    BoundedRead(#[from] crate::BoundedReadError),
-    #[error("inconsistent retained block/undo: {0}")]
-    Corrupt(&'static str),
-    #[error("chain history changed during the query; retry")]
-    Retry,
-    #[error("chain history is unavailable while the node is closed for recovery")]
-    Closed,
-    #[error("block undo query exceeds its read budget")]
-    ResourceLimit,
+impl From<StorageError> for BlockSpendsError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error.to_string())
+    }
 }
 
 pub fn decode_undo_record_for_block(

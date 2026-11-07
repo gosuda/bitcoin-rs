@@ -78,7 +78,7 @@ These contracts remain authoritative. This page adds no second source of truth f
 - Publication uses `commit_block` for selected capabilities, and `seed_script_live_stream` with bounded batch commits for `ScriptLive`.
 - Serving-visible readiness projections are RPC reads of those watermarks, not a second publication.
 - No consumer may derive "fully synchronized", "validated", or "ready" from a different frontier.
-- `sync_progress` reports blocks and headers separately for this reason (`crates/rpc/src/context.rs`).
+- `sync_progress` reports blocks and headers separately for this reason (`crates/serving/src/context.rs`).
 - A `blocks == headers` projection is not validation progress when an AssumeUTXO historical role is still replaying.
 
 ### `SYNC-02`: Canonical applied progress; transient work is a hint

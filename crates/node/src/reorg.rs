@@ -109,7 +109,7 @@ fn settle_node_reorg(
             mempool_change.as_ref(),
             observer.followers.mempool_gateway(),
         ) {
-            let chain = bitcoin_rs_rpc::context::ChainAdmissionView::new(
+            let chain = bitcoin_rs_serving::context::ChainAdmissionView::new(
                 handles.utxo_reader(),
                 handles.applied_tip_reader(),
                 handles.block_tree_reader(),

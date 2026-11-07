@@ -26,14 +26,12 @@ impl StorageError {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum BoundedReadError {
-    #[error("bounded value reads are unavailable for this store")]
-    Unsupported,
-    #[error("stored value has {size} bytes, exceeding the {limit}-byte read limit")]
-    Limit { size: usize, limit: usize },
-    #[error(transparent)]
-    Storage(#[from] StorageError),
+pub use bitcoin_rs_consensus::BoundedReadError;
+
+impl From<StorageError> for BoundedReadError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error.to_string())
+    }
 }
 
 pub(crate) fn copy_bounded(bytes: &[u8], limit: usize) -> Result<Vec<u8>, BoundedReadError> {

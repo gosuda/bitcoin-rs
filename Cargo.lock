@@ -341,7 +341,7 @@ dependencies = [
  "bitcoin-rs-e2e",
  "bitcoin-rs-execution",
  "bitcoin-rs-node",
- "bitcoin-rs-rpc",
+ "bitcoin-rs-serving",
  "bitcoin-rs-storage",
  "bitcoin-rs-wire",
  "clap",
@@ -388,7 +388,7 @@ name = "bitcoin-rs-e2e"
 version = "0.15.0"
 dependencies = [
  "bitcoin",
- "bitcoin-rs-rpc",
+ "bitcoin-rs-serving",
  "sonic-rs",
  "tempfile",
  "thiserror",
@@ -446,38 +446,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitcoin-rs-mining"
-version = "0.15.0"
-dependencies = [
- "binary_sv2",
- "bitcoin",
- "bitcoin-rs-consensus",
- "bitcoin-rs-execution",
- "bitcoin-rs-mempool",
- "bitcoin-rs-mining",
- "bitcoin-rs-storage",
- "codec_sv2",
- "common_messages_sv2",
- "compact_str",
- "framing_sv2",
- "hashbrown 0.17.1",
- "mining_sv2",
- "noise_sv2",
- "parking_lot",
- "proptest",
- "proptest-state-machine",
- "rand 0.8.8",
- "ruint",
- "secp256k1 0.28.2",
- "sha2",
- "sonic-rs",
- "tempfile",
- "thiserror",
- "tracing",
- "zeroize",
-]
-
-[[package]]
 name = "bitcoin-rs-node"
 version = "0.15.0"
 dependencies = [
@@ -487,10 +455,9 @@ dependencies = [
  "bitcoin-rs-consensus",
  "bitcoin-rs-execution",
  "bitcoin-rs-mempool",
- "bitcoin-rs-mining",
  "bitcoin-rs-node",
  "bitcoin-rs-projection",
- "bitcoin-rs-rpc",
+ "bitcoin-rs-serving",
  "bitcoin-rs-storage",
  "bitcoin-rs-wire",
  "bytes",
@@ -565,33 +532,43 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitcoin-rs-rpc"
+name = "bitcoin-rs-serving"
 version = "0.15.0"
 dependencies = [
  "arc-swap",
+ "binary_sv2",
  "bitcoin",
  "bitcoin-rs-consensus",
  "bitcoin-rs-e2e",
  "bitcoin-rs-execution",
  "bitcoin-rs-mempool",
- "bitcoin-rs-mining",
  "bitcoin-rs-node",
  "bitcoin-rs-projection",
- "bitcoin-rs-rpc",
+ "bitcoin-rs-serving",
  "bitcoin-rs-storage",
  "bitcoin-rs-wire",
  "bytes",
  "cap-fs-ext",
  "cap-std",
+ "codec_sv2",
+ "common_messages_sv2",
  "compact_str",
  "corepc-types",
  "crossbeam-channel",
+ "framing_sv2",
  "hashbrown 0.17.1",
  "metrics",
+ "mining_sv2",
  "miniscript",
  "mio",
+ "noise_sv2",
  "parking_lot",
+ "proptest",
+ "proptest-state-machine",
+ "rand 0.8.8",
+ "ruint",
  "rustix",
+ "secp256k1 0.28.2",
  "serde",
  "sha2",
  "sonic-rs",
@@ -599,6 +576,7 @@ dependencies = [
  "thiserror",
  "toml 1.2.1+spec-1.1.0",
  "tracing",
+ "zeroize",
  "zmq",
 ]
 

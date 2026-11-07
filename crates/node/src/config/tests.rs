@@ -139,7 +139,7 @@ fn pool_layers_preserve_explicit_fields_and_override_policy() -> Result<(), Test
     share_target_bytes[27] = 0x66;
     assert_eq!(
         pool.share_target,
-        bitcoin_rs_mining::pool::ShareTarget::from_le_bytes(share_target_bytes)?
+        bitcoin_rs_serving::mining::pool::ShareTarget::from_le_bytes(share_target_bytes)?
     );
     assert_eq!(pool.ledger_config().window_work, 1000);
     assert_eq!(pool.ledger_config().pool_fee_bps, 125);

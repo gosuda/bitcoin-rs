@@ -9,11 +9,11 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_execution::chain::regtest_fixture;
 use bitcoin_rs_execution::chain::{NodeStatus, compact_is_met_by};
-use bitcoin_rs_mining::{
+use bitcoin_rs_node::Network;
+use bitcoin_rs_serving::mining::{
     BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult,
     MiningControl, MiningControlError,
 };
-use bitcoin_rs_node::Network;
 
 use super::support::{
     WITNESS_COMMITMENT_PREFIX, WITNESS_RESERVED, coordinator, disconnect_applied,

@@ -48,26 +48,26 @@ pub enum TestError {
     #[error(transparent)]
     Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
-    MiningControl(#[from] bitcoin_rs_mining::MiningControlError),
+    MiningControl(#[from] bitcoin_rs_serving::mining::MiningControlError),
     #[error(transparent)]
-    Mining(#[from] bitcoin_rs_mining::MiningError),
+    Mining(#[from] bitcoin_rs_serving::mining::MiningError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    Job(#[from] bitcoin_rs_mining::pool::JobError),
+    Job(#[from] bitcoin_rs_serving::mining::pool::JobError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    Ledger(#[from] bitcoin_rs_mining::pool::ledger::LedgerError),
+    Ledger(#[from] bitcoin_rs_serving::mining::pool::ledger::LedgerError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    ChainView(#[from] bitcoin_rs_mining::pool::ledger::ChainViewError),
+    ChainView(#[from] bitcoin_rs_serving::mining::pool::ledger::ChainViewError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    Sv1Config(#[from] bitcoin_rs_mining::pool::stratum::sv1::ConfigError),
+    Sv1Config(#[from] bitcoin_rs_serving::mining::pool::stratum::sv1::ConfigError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    LedgerUnavailable(#[from] bitcoin_rs_mining::pool::LedgerUnavailable),
+    LedgerUnavailable(#[from] bitcoin_rs_serving::mining::pool::LedgerUnavailable),
     #[error(transparent)]
-    PruneService(#[from] bitcoin_rs_rpc::context::PruneServiceError),
+    PruneService(#[from] bitcoin_rs_serving::context::PruneServiceError),
     #[error(transparent)]
     HistoricalQuery(#[from] bitcoin_rs_projection::query_api::HistoricalQueryError),
     #[error(transparent)]
@@ -81,7 +81,7 @@ pub enum TestError {
     #[error(transparent)]
     Node(#[from] crate::embed::NodeError),
     #[error(transparent)]
-    Rpc(#[from] bitcoin_rs_rpc::RpcError),
+    Rpc(#[from] bitcoin_rs_serving::RpcError),
     #[error(transparent)]
     ChainChange(#[from] bitcoin_rs_mempool::ChainChangeError),
     #[error(transparent)]

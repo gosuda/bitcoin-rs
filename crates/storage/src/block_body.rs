@@ -584,9 +584,7 @@ mod body_position_prefetch_tests {
             ));
             assert!(matches!(
                 store.load_block_body_for_verification_bounded(1, hash, 16),
-                Err(BoundedReadError::Storage(StorageError::CorruptBlockFrame(
-                    _
-                )))
+                Err(BoundedReadError::Storage(msg)) if msg.contains("corrupt")
             ));
             assert_eq!(store.load_block_body(1, hash)?, None);
             assert_eq!(store.load_block_body_range(1, hash, 0, 1)?, None);

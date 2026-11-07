@@ -12,7 +12,7 @@ use bitcoin_rs_execution::{
     ApplyError, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, Chainstate,
     ChainstateRole,
 };
-use bitcoin_rs_rpc::context::{
+use bitcoin_rs_serving::context::{
     ChainstateInfo, ChainstatesInfo, SnapshotControlError, SnapshotExport, SnapshotImport,
 };
 use bitcoin_rs_storage::checkpoint::fs::{HAS_ATOMIC_NOREPLACE_RENAME, rename_noreplace};

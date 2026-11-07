@@ -75,7 +75,7 @@ Owners:
 - `getindexinfo` and service flags report filter status.
 - Proof:
   - `crates/projection/src/runtime/query_tests.rs` (`filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries`)
-  - `crates/rpc/tests/handler_smoke.rs` (`compact_filter_rpc_exposes_only_enabled_ready_data`)
+  - `crates/serving/tests/handler_smoke.rs` (`compact_filter_rpc_exposes_only_enabled_ready_data`)
   - `crates/wire/src/listener.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
 - `ScriptLive` is not a duplicate coin table.
 - Its empty-valued key is `script-hash-prefix || full-outpoint`.
@@ -156,7 +156,7 @@ Owners:
   - `crates/projection/src/runtime/query/scripts.rs`:
     - `first_page_scan_work_is_constant_at_100_1000_and_10000_entries`
     - `cursor_page_continues_without_skipping_or_repeating`
-  - `crates/rpc/src/esplora/http.rs`: `script_work_limits_are_explicit_but_unavailable_indexes_remain_503`
+  - `crates/serving/src/esplora/http.rs`: `script_work_limits_are_explicit_but_unavailable_indexes_remain_503`
 
 ### `IDX-04`: Selective reset preserves sibling readiness
 

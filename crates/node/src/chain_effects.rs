@@ -10,7 +10,7 @@ use bitcoin_rs_mempool::ChainChangeGuard;
 use bitcoin_rs_mempool::MempoolGateway;
 use bitcoin_rs_mempool::MutationResult;
 use bitcoin_rs_projection::runtime::DerivedIndexRuntime;
-use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
+use bitcoin_rs_serving::zmq::{SequenceEvent, ZmqPublisher};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectMutationError {

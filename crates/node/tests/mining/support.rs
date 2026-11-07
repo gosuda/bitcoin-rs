@@ -14,13 +14,13 @@ use bitcoin_rs_consensus::primitives::{
 use bitcoin_rs_consensus::script::push_int;
 use bitcoin_rs_execution::chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_mempool::{AdmissionOrigin, BodyInterest, MempoolEntry, SubmitOutcome};
-use bitcoin_rs_mining::{
+use bitcoin_rs_node::{MiningCoordinator, Network, NodeConfig, state::NodeState};
+use bitcoin_rs_serving::mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
     BlockValidationResult, CoinbaseBudget, MempoolSequenceWake, MiningControl,
     MiningGenerationSignal, solve_block,
 };
-use bitcoin_rs_node::{MiningCoordinator, Network, NodeConfig, state::NodeState};
-use bitcoin_rs_rpc::{
+use bitcoin_rs_serving::{
     Handler,
     context::{
         ChainAdmissionView, ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles,

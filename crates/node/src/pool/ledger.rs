@@ -4,22 +4,25 @@ use std::sync::{
     atomic::{AtomicU8, Ordering},
 };
 
+pub mod kv;
+pub mod store;
+pub use store::*;
+
 use bitcoin_rs_consensus::primitives::encode::deserialize;
 use bitcoin_rs_consensus::primitives::{Block, Hash256, OutPoint as NodeOutPoint, Txid};
 use bitcoin_rs_execution::Chainstate;
 use bitcoin_rs_mempool::MempoolReader;
-use bitcoin_rs_mining::pool::ledger as pool_ledger;
-use bitcoin_rs_mining::pool::ledger::{
+use bitcoin_rs_projection::{DerivedIndexQuery, ScriptIndexQuery};
+use bitcoin_rs_serving::mining::pool::ledger as pool_ledger;
+use bitcoin_rs_serving::mining::pool::ledger::{
     BlockFound as LedgerBlockFound, BlockLocation, ChainView, ChainViewError, ConfirmedSpend,
-    Ledger, MinerId, ObservedCoinbase, ShareCredit, ShareReceipt, TxOut, TxStatus,
-    work_from_le_bytes,
+    MinerId, ObservedCoinbase, ShareCredit, ShareReceipt, TxOut, TxStatus, work_from_le_bytes,
 };
-use bitcoin_rs_mining::pool::stratum::sv1::{AccountResolver, AuthDenied, Password};
-use bitcoin_rs_mining::pool::{
+use bitcoin_rs_serving::mining::pool::stratum::sv1::{AccountResolver, AuthDenied, Password};
+use bitcoin_rs_serving::mining::pool::{
     AcceptedShare, BlockReceipt, FoundBlock, LedgerUnavailable, RecordOutcome, ShareLedger,
     WorkerIdentity,
 };
-use bitcoin_rs_projection::{DerivedIndexQuery, ScriptIndexQuery};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 
 pub(crate) struct NodeChainView {
@@ -378,9 +381,9 @@ impl BlockRecordPermit {
         mut self,
         account: MinerId,
         block: &FoundBlock,
-        submission: &Result<BlockReceipt, bitcoin_rs_mining::MiningControlError>,
+        submission: &Result<BlockReceipt, bitcoin_rs_serving::mining::MiningControlError>,
     ) -> (BlockRecordOutcome, Option<DeferredCharge>) {
-        use bitcoin_rs_mining::pool::BlockStatus;
+        use bitcoin_rs_serving::mining::pool::BlockStatus;
         let host = Arc::clone(&self.host);
         self.armed = false;
         let bytes = self.bytes;
@@ -515,6 +518,10 @@ pub(crate) struct LedgerHost {
 }
 
 impl LedgerHost {
+    pub(crate) fn ledger_store(&self) -> &Ledger {
+        &self.ledger
+    }
+
     pub(crate) fn new(
         ledger: Arc<Ledger>,
         run_epoch: u32,
@@ -669,14 +676,14 @@ impl LedgerHost {
                     let (_, round_more, round_next) = self.ledger.reconcile_rounds_checked_limit(
                         &observation,
                         &aborted,
-                        pool_ledger::RECONCILE_ROUND_BATCH_LIMIT,
+                        store::RECONCILE_ROUND_BATCH_LIMIT,
                         round_after,
                     )?;
                     let (_, payout_more, payout_next) =
                         self.ledger.reconcile_payouts_checked_limit(
                             &observation,
                             &aborted,
-                            pool_ledger::RECONCILE_PAYOUT_BATCH_LIMIT,
+                            store::RECONCILE_PAYOUT_BATCH_LIMIT,
                             payout_after,
                         )?;
                     Ok((round_more, payout_more, round_next, payout_next))
@@ -738,7 +745,7 @@ impl LedgerHost {
         &self,
         account: MinerId,
         block: &FoundBlock,
-        _receipt: &Result<BlockReceipt, bitcoin_rs_mining::MiningControlError>,
+        _receipt: &Result<BlockReceipt, bitcoin_rs_serving::mining::MiningControlError>,
     ) -> Result<(), LedgerUnavailable> {
         self.record_found_block(account, block)
     }
@@ -834,7 +841,7 @@ impl ShareLedger for LedgerHost {
         &self,
         worker: &WorkerIdentity,
         block: &FoundBlock,
-        _submission: &Result<BlockReceipt, bitcoin_rs_mining::MiningControlError>,
+        _submission: &Result<BlockReceipt, bitcoin_rs_serving::mining::MiningControlError>,
     ) -> Result<(), LedgerUnavailable> {
         let account = self.account(&worker.account).ok_or(LedgerUnavailable)?;
         let found = ledger_block(self.run_epoch, account, block)?;
@@ -846,11 +853,10 @@ impl ShareLedger for LedgerHost {
     }
 }
 
-impl bitcoin_rs_rpc::context::PoolOperator for LedgerHost {
-    fn ledger(&self) -> &Ledger {
-        &self.ledger
+impl bitcoin_rs_serving::context::PoolOperator for LedgerHost {
+    fn ledger(&self) -> &dyn pool_ledger::PoolLedgerStore {
+        self.ledger.as_ref()
     }
-
     fn payout_policy(&self) -> pool_ledger::PayoutPolicy {
         self.payout_policy
     }

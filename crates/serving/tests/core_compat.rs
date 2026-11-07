@@ -1,0 +1,542 @@
+extern crate alloc;
+
+use crate::support;
+
+use crate::mining_fixture;
+
+use alloc::sync::Arc;
+
+use bitcoin_rs_consensus::primitives::{
+    BlockPayload, Hash256, Network, client_version, consensus_bytes,
+};
+use bitcoin_rs_execution::chain::{ChainWork, NodeId, TipSnapshot};
+use bitcoin_rs_serving::Handler;
+use bitcoin_rs_serving::context::Context;
+use bitcoin_rs_serving::mining::{
+    BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, MiningCapability,
+    MiningControl, MiningControlError, MiningInfo, TemplateMutation,
+};
+use bitcoin_rs_wire::FEATURE_VERSION;
+use bitcoin_rs_wire::wire::PROTOCOL_VERSION;
+use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait as _, json};
+
+fn typed<T: serde::de::DeserializeOwned>(
+    value: &sonic_rs::Value,
+) -> Result<T, crate::support::TestError> {
+    let text = sonic_rs::to_string(value)?;
+    Ok(sonic_rs::from_str(&text)?)
+}
+
+fn tipped_context() -> Arc<Context> {
+    let ctx = Arc::new(Context::new());
+    let tip = TipSnapshot {
+        tip_id: NodeId::new(0),
+        height: 42,
+        chainwork: ChainWork::ZERO,
+        hash: Hash256::from_le_bytes(&[42_u8; 32]),
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
+    };
+    ctx.chain.chain_tip.store(Some(Arc::new(tip.clone())));
+    ctx.chain.applied_tip.store(Some(Arc::new(tip)));
+    ctx
+}
+
+#[test]
+fn chain_state_responses_deserialize_into_pinned_types() -> Result<(), crate::support::TestError> {
+    let handler = Handler::new(tipped_context());
+
+    let info = support::compare::typed_getblockchain_info(
+        sonic_rs::to_string(&handler.dispatch("getblockchaininfo", &json!([]))?)?.as_bytes(),
+    )?;
+    assert_eq!(info.chain, "main");
+    assert_eq!(info.blocks, 42);
+    assert_eq!(info.headers, 42);
+    assert_ne!(info.best_block_hash, "");
+    assert_ne!(info.bits, "");
+    assert_ne!(info.target, "");
+    assert_ne!(info.chain_work, "");
+    assert_eq!(info.warnings, Vec::<String>::new());
+
+    let difficulty: corepc_types::v31::GetDifficulty =
+        typed(&handler.dispatch("getdifficulty", &json!([]))?)?;
+    assert!((difficulty.0 - 0.0).abs() < f64::EPSILON);
+
+    let count: corepc_types::v31::GetBlockCount =
+        typed(&handler.dispatch("getblockcount", &json!([]))?)?;
+    assert_eq!(count.0, 42);
+
+    let best: corepc_types::v31::GetBestBlockHash =
+        typed(&handler.dispatch("getbestblockhash", &json!([]))?)?;
+    assert_eq!(best.0, info.best_block_hash);
+
+    let tips: corepc_types::v31::GetChainTips =
+        typed(&handler.dispatch("getchaintips", &json!([]))?)?;
+    assert!(
+        tips.0
+            .iter()
+            .any(|tip| tip.status == corepc_types::v31::ChainTipsStatus::Active)
+    );
+
+    let stats: corepc_types::v31::GetChainTxStats =
+        typed(&handler.dispatch("getchaintxstats", &json!([]))?)?;
+    assert_eq!(stats.window_final_block_height, 42);
+
+    let empty = Handler::new(Arc::new(Context::new()));
+    let verify: corepc_types::v31::VerifyChain =
+        typed(&empty.dispatch("verifychain", &json!([0, 6]))?)?;
+    assert!(verify.0);
+
+    let verify: corepc_types::v31::VerifyChain =
+        typed(&handler.dispatch("verifychain", &json!([0, 6]))?)?;
+    assert!(!verify.0);
+
+    let at_tip: corepc_types::v31::GetBlockHash =
+        typed(&handler.dispatch("getblockhash", &json!([42]))?)?;
+    assert_eq!(at_tip.0, best.0);
+    assert!(handler.dispatch("pruneblockchain", &json!([1])).is_err());
+
+    Ok(())
+}
+
+#[test]
+fn chaininfo_projection_rejects_unknown_fields() -> Result<(), crate::support::TestError> {
+    let handler = Handler::new(tipped_context());
+    let mut response = handler.dispatch("getblockchaininfo", &json!([]))?;
+    response
+        .as_object_mut()
+        .ok_or(crate::support::TestError::Missing(
+            "getblockchaininfo must return an object",
+        ))?
+        .insert("unexpected", json!(true));
+    let body = sonic_rs::to_string(&response)?;
+    let error = match support::compare::typed_getblockchain_info(body.as_bytes()) {
+        Err(error) => error,
+        Ok(_) => {
+            return Err(crate::support::TestError::Missing(
+                "the unknown chaininfo field was accepted",
+            ));
+        }
+    };
+    assert!(
+        error.to_string().contains("unexpected"),
+        "strict decode error did not name the unknown field: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn mempool_responses_deserialize_into_pinned_types() -> Result<(), crate::support::TestError> {
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let info: corepc_types::v31::GetMempoolInfo =
+        typed(&handler.dispatch("getmempoolinfo", &json!([]))?)?;
+    assert!(info.loaded);
+    assert_eq!(info.size, 0);
+    assert!(info.permit_bare_multisig);
+    assert!(info.optimal);
+    assert_eq!(info.max_data_carrier_size, 83);
+    assert_eq!(info.limit_cluster_count, 64);
+    assert_eq!(info.limit_cluster_size, 101_000);
+    assert_eq!(info.max_mempool, 300_000_000);
+    assert!(info.full_rbf);
+
+    let raw: corepc_types::v31::GetRawMempool =
+        typed(&handler.dispatch("getrawmempool", &json!([]))?)?;
+    assert_eq!(raw.0, Vec::<String>::new());
+
+    let sequenced: corepc_types::v31::GetRawMempoolSequence =
+        typed(&handler.dispatch("getrawmempool", &json!([false, true]))?)?;
+    assert_eq!(sequenced.txids, Vec::<String>::new());
+    assert_eq!(sequenced.mempool_sequence, 0);
+
+    let verbose: corepc_types::v31::GetRawMempoolVerbose =
+        typed(&handler.dispatch("getrawmempool", &json!([true]))?)?;
+    assert!(verbose.0.is_empty());
+
+    let indexes: corepc_types::v31::GetIndexInfo =
+        typed(&handler.dispatch("getindexinfo", &json!([]))?)?;
+    assert!(indexes.0.is_empty());
+
+    Ok(())
+}
+
+const CORE_31_1_PROTOCOL_VERSION: u32 = 70_016;
+
+#[test]
+fn network_responses_deserialize_into_pinned_types() -> Result<(), crate::support::TestError> {
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let network: corepc_types::v31::GetNetworkInfo =
+        typed(&handler.dispatch("getnetworkinfo", &json!([]))?)?;
+    assert_eq!(
+        network.version,
+        usize::try_from(client_version()).unwrap_or(usize::MAX)
+    );
+    assert_eq!(
+        network.protocol_version,
+        usize::try_from(PROTOCOL_VERSION).unwrap_or(usize::MAX),
+        "getnetworkinfo reports the advertised wire protocol version"
+    );
+    assert_eq!(
+        PROTOCOL_VERSION, FEATURE_VERSION,
+        "documented deviation from Core 31.1's 70016: the BIP434 feature-negotiation threshold"
+    );
+    assert_eq!(
+        PROTOCOL_VERSION,
+        CORE_31_1_PROTOCOL_VERSION + 1,
+        "the one protocol version above Core 31.1's, and only that"
+    );
+    assert_eq!(network.connections, 0);
+    assert_eq!(
+        network
+            .networks
+            .iter()
+            .map(|row| row.name.as_str())
+            .collect::<Vec<_>>(),
+        ["ipv4", "ipv6", "onion", "i2p"]
+    );
+    for row in &network.networks[2..] {
+        assert!(row.limited);
+        assert!(!row.reachable);
+        assert_eq!(row.proxy, "");
+    }
+    assert_eq!(network.warnings, Vec::<String>::new());
+
+    let peers: corepc_types::v31::GetPeerInfo =
+        typed(&handler.dispatch("getpeerinfo", &json!([]))?)?;
+    assert_eq!(peers.0, []);
+
+    let totals: corepc_types::v31::GetNetTotals =
+        typed(&handler.dispatch("getnettotals", &json!([]))?)?;
+    assert_eq!(totals.total_bytes_received, 0);
+    assert!(totals.upload_target.target_reached);
+
+    let connections: corepc_types::v31::GetConnectionCount =
+        typed(&handler.dispatch("getconnectioncount", &json!([]))?)?;
+    assert_eq!(connections.0, 0);
+
+    let added: corepc_types::v31::GetAddedNodeInfo =
+        typed(&handler.dispatch("getaddednodeinfo", &json!([]))?)?;
+    assert_eq!(added.0, []);
+
+    let banned: corepc_types::v31::ListBanned =
+        typed(&handler.dispatch("listbanned", &json!([]))?)?;
+    assert_eq!(banned.0, []);
+
+    let addresses: corepc_types::v31::GetNodeAddresses =
+        typed(&handler.dispatch("getnodeaddresses", &json!([0]))?)?;
+    assert_eq!(addresses.0, []);
+
+    Ok(())
+}
+
+fn assert_sparse_invalid(value: &sonic_rs::Value) {
+    let object = value
+        .as_object()
+        .unwrap_or_else(|| panic!("validateaddress: not an object: {value:?}"));
+    assert_eq!(object.len(), 1, "expected exactly one key: {value:?}");
+    assert_eq!(
+        value
+            .get("isvalid")
+            .and_then(sonic_rs::JsonValueTrait::as_bool),
+        Some(false),
+        "isvalid must be false: {value:?}"
+    );
+    for field in [
+        "address",
+        "scriptPubKey",
+        "isscript",
+        "iswitness",
+        "witness_version",
+        "witness_program",
+    ] {
+        assert!(
+            value.get(field).is_none(),
+            "{field} must be absent: {value:?}"
+        );
+    }
+}
+
+#[test]
+fn util_responses_deserialize_into_pinned_types() -> Result<(), crate::support::TestError> {
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let estimate: corepc_types::v31::EstimateSmartFee =
+        typed(&handler.dispatch("estimatesmartfee", &json!([2]))?)?;
+    assert!(estimate.fee_rate.is_none());
+    assert_eq!(estimate.blocks, 2);
+
+    let valid: corepc_types::v31::ValidateAddress =
+        typed(&handler.dispatch("validateaddress", &json!(["1111111111111111111114oLvT2"]))?)?;
+    assert!(valid.is_valid);
+    assert_ne!(valid.script_pubkey, "");
+
+    assert_sparse_invalid(&handler.dispatch("validateaddress", &json!(["not a real address"]))?);
+    assert_sparse_invalid(&handler.dispatch(
+        "validateaddress",
+        &json!(["tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"]),
+    )?);
+    let descriptor: corepc_types::v31::GetDescriptorInfo = typed(&handler.dispatch(
+        "getdescriptorinfo",
+        &json!(["addr(1111111111111111111114oLvT2)"]),
+    )?)?;
+    assert!(!descriptor.is_range);
+    assert!(!descriptor.is_solvable);
+    assert_eq!(descriptor.checksum.len(), 8);
+
+    let memory: corepc_types::v31::GetMemoryInfoStats =
+        typed(&handler.dispatch("getmemoryinfo", &json!(["stats"]))?)?;
+    assert!(memory.0.contains_key("locked"));
+
+    Ok(())
+}
+
+#[test]
+fn mining_responses_error_without_a_control() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    assert!(handler.dispatch("getblocktemplate", &json!([{}])).is_err());
+    assert!(handler.dispatch("getmininginfo", &json!([])).is_err());
+}
+
+struct CompatMiningControl;
+
+impl MiningControl for CompatMiningControl {
+    fn get_block_template(
+        &self,
+        _request: BlockTemplateRequest,
+    ) -> Result<BlockTemplateResult, MiningControlError> {
+        Ok(BlockTemplateResult::Template(
+            mining_fixture::canned_template(
+                vec![MiningCapability::new("coinbasetxn")],
+                vec![
+                    TemplateMutation::Time,
+                    TemplateMutation::Transactions,
+                    TemplateMutation::PreviousBlock,
+                ],
+            ),
+        ))
+    }
+
+    fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
+        Ok(mining_fixture::canned_info())
+    }
+
+    fn submit_block(
+        &self,
+        _payload: BlockPayload,
+    ) -> Result<BlockValidationResult, MiningControlError> {
+        Ok(BlockValidationResult::Accepted)
+    }
+
+    fn submit_header(
+        &self,
+        _header: bitcoin_rs_consensus::primitives::Header,
+    ) -> Result<(), MiningControlError> {
+        Ok(())
+    }
+
+    fn publish_generation(&self) {}
+
+    fn publish_fee_delta_generation(&self, _fee_delta_sequence: u64) {}
+
+    fn generate(
+        &self,
+        _request: bitcoin_rs_serving::mining::GenerateRequest,
+    ) -> Result<Vec<bitcoin_rs_serving::mining::GeneratedBlock>, MiningControlError> {
+        Err(MiningControlError::Unavailable("not wired".into()))
+    }
+
+    fn network_hash_ps(&self, _lookup: i64, _height: i64) -> Result<f64, MiningControlError> {
+        Ok(self.mining_info()?.network_hashes_per_second)
+    }
+}
+
+#[test]
+fn mining_responses_deserialize_into_pinned_types() -> Result<(), crate::support::TestError> {
+    let mut ctx = Context::new();
+    ctx.chain.chain_network = Network::Regtest;
+    let handler = Handler::new(Arc::new(
+        ctx.with_mining_control(Arc::new(CompatMiningControl)),
+    ));
+
+    let template: corepc_types::v31::GetBlockTemplate =
+        typed(&handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?)?;
+    assert_eq!(template.version, 0x2000_0000);
+    assert_eq!(template.height, 0);
+    assert_eq!(template.bits, "1d00ffff");
+    assert_eq!(
+        template.target,
+        "00000000ffff0000000000000000000000000000000000000000000000000000"
+    );
+    assert_eq!(template.previous_block_hash, "0".repeat(64));
+    assert_eq!(template.nonce_range, "00000000ffffffff");
+    assert_eq!(template.capabilities, ["coinbasetxn"]);
+    assert_eq!(template.mutable, ["time", "transactions", "prevblock"]);
+    assert_eq!(template.sigop_limit, 80_000);
+    assert_eq!(template.size_limit, 4_000_000);
+    assert_eq!(template.weight_limit, 4_000_000);
+    assert_eq!(template.coinbase_value, 0);
+    assert_eq!(
+        template.coinbase_aux.get("flags").map(String::as_str),
+        Some("")
+    );
+    assert_eq!(template.transactions, []);
+    assert_eq!(template.rules, Vec::<String>::new());
+    assert!(template.version_bits_available.is_empty());
+    assert_eq!(template.version_bits_required, 0);
+    assert_eq!(template.min_time, 0);
+    assert_eq!(template.current_time, 0);
+    assert!(
+        template
+            .long_poll_id
+            .as_ref()
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert!(template.default_witness_commitment.is_none());
+    assert!(template.signet_challenge.is_none());
+    let mining: corepc_types::v31::GetMiningInfo =
+        typed(&handler.dispatch("getmininginfo", &json!([]))?)?;
+    assert!((mining.difficulty - 1.0).abs() < f64::EPSILON);
+    assert!(mining.current_block_weight.is_none());
+    assert!(mining.current_block_tx.is_none());
+    assert_eq!(mining.bits, "207fffff");
+    assert_eq!(
+        mining.target,
+        "7fffff0000000000000000000000000000000000000000000000000000000000"
+    );
+    assert!((mining.network_hash_ps - 0.0).abs() < f64::EPSILON);
+    assert_eq!(mining.pooled_tx, 0);
+    assert!((mining.block_min_tx_fee - 1e-5).abs() < f64::EPSILON);
+    assert!((mining.next.difficulty - 1.0).abs() < f64::EPSILON);
+    assert!(mining.signet_challenge.is_none());
+    assert_eq!(mining.warnings, Vec::<String>::new());
+    assert_eq!(mining.next.height, 1);
+    assert_eq!(mining.next.bits, "207fffff");
+    assert_eq!(mining.next.target, mining.target);
+
+    let rate: f64 = typed(&handler.dispatch("getnetworkhashps", &json!([]))?)?;
+    assert!((rate - 0.0).abs() < f64::EPSILON);
+    let prioritised: std::collections::BTreeMap<String, sonic_rs::Value> =
+        typed(&handler.dispatch("getprioritisedtransactions", &json!([]))?)?;
+    assert!(prioritised.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn primitive_responses_stay_primitives() -> Result<(), crate::support::TestError> {
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let uptime = handler.dispatch("uptime", &json!([]))?;
+    assert!(uptime.as_u64().is_some());
+
+    assert!(handler.dispatch("ping", &json!([]))?.is_null());
+    assert!(
+        handler
+            .dispatch("addnode", &json!(["127.0.0.1:1", "onetry"]))
+            .is_ok()
+    );
+    assert!(
+        handler
+            .dispatch("setban", &json!(["127.0.0.0/8", "add"]))?
+            .is_null()
+    );
+    assert!(handler.dispatch("clearbanned", &json!([]))?.is_null());
+    assert_eq!(
+        handler.dispatch(
+            "prioritisetransaction",
+            &json!([Hash256::default().to_string(), 0, 0])
+        )?,
+        json!(true)
+    );
+    Ok(())
+}
+
+#[test]
+fn submitblock_truncates_trailing_bytes_to_consumed_prefix() -> Result<(), crate::support::TestError>
+{
+    #[derive(Default)]
+    struct RecordingSubmit {
+        submitted: std::sync::Mutex<Option<Vec<u8>>>,
+    }
+
+    impl MiningControl for RecordingSubmit {
+        fn get_block_template(
+            &self,
+            _request: BlockTemplateRequest,
+        ) -> Result<BlockTemplateResult, MiningControlError> {
+            Err(MiningControlError::Unavailable("not wired".into()))
+        }
+
+        fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
+            Err(MiningControlError::Unavailable("not wired".into()))
+        }
+
+        fn submit_block(
+            &self,
+            payload: BlockPayload,
+        ) -> Result<BlockValidationResult, MiningControlError> {
+            *self
+                .submitted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(payload.bytes().to_vec());
+            Ok(BlockValidationResult::Accepted)
+        }
+
+        fn submit_header(
+            &self,
+            _header: bitcoin_rs_consensus::primitives::Header,
+        ) -> Result<(), MiningControlError> {
+            Err(MiningControlError::Unavailable("not wired".into()))
+        }
+
+        fn publish_generation(&self) {}
+
+        fn publish_fee_delta_generation(&self, _fee_delta_sequence: u64) {}
+
+        fn generate(
+            &self,
+            _request: bitcoin_rs_serving::mining::GenerateRequest,
+        ) -> Result<Vec<bitcoin_rs_serving::mining::GeneratedBlock>, MiningControlError> {
+            Err(MiningControlError::Unavailable("not wired".into()))
+        }
+
+        fn network_hash_ps(&self, _lookup: i64, _height: i64) -> Result<f64, MiningControlError> {
+            Err(MiningControlError::Unavailable("not wired".into()))
+        }
+    }
+
+    let genesis = Network::Regtest.genesis_block();
+    let canonical = consensus_bytes(&genesis);
+    let mut hex = String::with_capacity(canonical.len() * 2 + 4);
+    for byte in &canonical {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex.push_str("ffff");
+
+    let control: Arc<RecordingSubmit> = Arc::new(RecordingSubmit::default());
+    let handler = Handler::new(Arc::new(
+        Context::new().with_mining_control(control.clone()),
+    ));
+    let result = handler.dispatch("submitblock", &json!([hex]))?;
+    assert!(
+        result.is_null(),
+        "trailing bytes after the block must be accepted as Accepted: {result:?}"
+    );
+    assert_eq!(
+        control
+            .submitted
+            .lock()
+            .map_or(None, |guard| (*guard).clone()),
+        Some(canonical),
+        "the submitted payload must retain exactly the consumed prefix"
+    );
+
+    let error = match handler.dispatch("submitblock", &json!(["zz"])) {
+        Err(error) => error,
+        Ok(_) => return Err("undecodable hex was accepted".into()),
+    };
+    assert_eq!(error.code(), -22);
+    Ok(())
+}

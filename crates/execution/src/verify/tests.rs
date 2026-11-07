@@ -98,7 +98,7 @@ impl BlockBodyStore for Bodies {
             hook();
         }
         if self.corrupt.lock().contains(&(height, hash)) {
-            return Err(BoundedReadError::Storage(StorageError::CorruptBlockFrame(
+            return Err(BoundedReadError::from(StorageError::CorruptBlockFrame(
                 "fixture corrupt frame",
             )));
         }

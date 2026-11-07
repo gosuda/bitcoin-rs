@@ -16,7 +16,7 @@ use bitcoin_rs_execution::chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_mempool::{AdmissionOrigin, FeeEstimator, SubmitOutcome};
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, NodeConfig};
-use bitcoin_rs_rpc::context::ChainAdmissionView;
+use bitcoin_rs_serving::context::ChainAdmissionView;
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 
 const BASE_TIME: u32 = 1_296_688_603;

@@ -310,7 +310,7 @@ management JSON-RPC only. The CLI option takes an explicit boolean; bare
 
 ### ZMQ
 
-ZMQ endpoint groups are configured with `[[notifications.zmq]]` (`endpoint`, `topics`, optional `hwm`). `getzmqnotifications` reports the live configuration. `bitcoin_rs_rpc::zmq` owns topic framing and transport compatibility.
+ZMQ endpoint groups are configured with `[[notifications.zmq]]` (`endpoint`, `topics`, optional `hwm`). `getzmqnotifications` reports the live configuration. `bitcoin_rs_serving::zmq` owns topic framing and transport compatibility.
 
 ## Datadir compatibility
 

@@ -1,6 +1,6 @@
 use crate::NodeConfig;
 use bitcoin_rs_consensus::primitives::BlockBodyMetadata;
-use bitcoin_rs_rpc::context::{PruneResult, PruneService, PruneServiceError, PruneStatus};
+use bitcoin_rs_serving::context::{PruneResult, PruneService, PruneServiceError, PruneStatus};
 use bitcoin_rs_storage::DurableHeadStore as _;
 use bitcoin_rs_storage::FlatFileBlockStore;
 use bitcoin_rs_storage::KvStore;

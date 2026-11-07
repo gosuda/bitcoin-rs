@@ -16,10 +16,6 @@ use bitcoin_rs_consensus::primitives::{
     Witness,
 };
 use bitcoin_rs_mempool::MempoolGateway;
-use bitcoin_rs_mining::{
-    BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, FakeMiningControl,
-    MiningControl, MiningControlError, MiningInfo,
-};
 use bitcoin_rs_node::p2p::{
     DEFAULT_TX_RELAY_QUEUE_CAPACITY, InboundBody, PeerRelaySink, TxRelayQueue,
     spawn_tx_relay_worker,
@@ -27,6 +23,10 @@ use bitcoin_rs_node::p2p::{
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::tx_ingress::spawn_tx_ingress_consumer;
 use bitcoin_rs_node::{Network, NodeConfig};
+use bitcoin_rs_serving::mining::{
+    BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, FakeMiningControl,
+    MiningControl, MiningControlError, MiningInfo,
+};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_wire::PeerRole;
 use bitcoin_rs_wire::dispatch::dispatch_inbound_full;
@@ -167,8 +167,8 @@ impl MiningControl for RecordingMining {
 
     fn generate(
         &self,
-        _request: bitcoin_rs_mining::GenerateRequest,
-    ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
+        _request: bitcoin_rs_serving::mining::GenerateRequest,
+    ) -> Result<Vec<bitcoin_rs_serving::mining::GeneratedBlock>, MiningControlError> {
         Err(MiningControlError::Failed(
             "not implemented".to_owned().into(),
         ))

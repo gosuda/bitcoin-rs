@@ -5,8 +5,8 @@ use crate::p2p::TxRelayQueue;
 use bitcoin_rs_consensus::primitives::{Hash256, Network, Txid, Wtxid};
 use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolGateway, PeerToken, SubmitError, SubmitOutcome};
-use bitcoin_rs_mining::MiningControl;
-use bitcoin_rs_rpc::context::ChainAdmissionView;
+use bitcoin_rs_serving::context::ChainAdmissionView;
+use bitcoin_rs_serving::mining::MiningControl;
 use bitcoin_rs_storage::utxo::UtxoReader;
 use crossbeam_channel::Receiver;
 

@@ -1,4 +1,4 @@
-use bitcoin_rs_mining::Candidate;
+use bitcoin_rs_serving::mining::Candidate;
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, Hash256, Header, Tx, consensus_bytes, deserialize, encode::double_sha256,
 };

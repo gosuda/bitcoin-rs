@@ -1,6 +1,6 @@
 # Reference set contract
 
-This page provides a readable projection of the `[reference]` record in `crates/rpc/core-compat.toml`.
+This page provides a readable projection of the `[reference]` record in `crates/serving/core-compat.toml`.
 It projects the typed validation in `e2e/src/reference_set.rs`.
 `ReferenceSet` is the parsed identity record used by test and formal gates.
 It is not a separate registry or new public type.
@@ -30,7 +30,7 @@ A version label alone is never custody: a reference MUST carry source and binary
   - `version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"`
 - Extra `[[reference.release.platforms]]` rows of the same shape (`arm64-apple-darwin`, `win64`) run the same release on other hosts.
 - Captures keep their own `core_source_commit`, `core_binary_sha256`, version, regtest inputs, and allowed differences.
-- `crates/rpc/tests/support/fixture.rs` compares these fields.
+- `crates/serving/tests/support/fixture.rs` compares these fields.
 - Changing the reference stales old captures.
 - The gate fails and never relabels.
 - The harness hashes the live executable.

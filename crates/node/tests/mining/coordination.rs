@@ -12,10 +12,12 @@ type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_mining::{BlockTemplate, MempoolSequenceWake, MiningControl, MiningControlError};
 use bitcoin_rs_node::{
     MiningCoordinator, MiningOverrides, Network, NetworkSelection, UserConfig, resolve,
     state::NodeState,
+};
+use bitcoin_rs_serving::mining::{
+    BlockTemplate, MempoolSequenceWake, MiningControl, MiningControlError,
 };
 use compact_str::CompactString;
 use crossbeam_channel::bounded;
@@ -545,7 +547,7 @@ fn priority_change_replaces_the_cached_candidate_for_an_unchanged_pool() -> Resu
         Arc::ptr_eq(&first.candidate, &again.candidate),
         "precondition: an unchanged generation is served from the cache"
     );
-    let ranked = |template: &bitcoin_rs_mining::BlockTemplate| {
+    let ranked = |template: &bitcoin_rs_serving::mining::BlockTemplate| {
         template
             .candidate
             .transactions

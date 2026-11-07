@@ -110,22 +110,22 @@ pub enum RunError {
     PoolDirLock(#[from] crate::state::DataDirLockError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    PoolLedger(#[from] bitcoin_rs_mining::pool::ledger::LedgerError),
+    PoolLedger(#[from] bitcoin_rs_serving::mining::pool::ledger::LedgerError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    PoolCore(#[from] bitcoin_rs_mining::pool::JobError),
+    PoolCore(#[from] bitcoin_rs_serving::mining::pool::JobError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    PoolChainView(#[from] bitcoin_rs_mining::pool::ledger::ChainViewError),
+    PoolChainView(#[from] bitcoin_rs_serving::mining::pool::ledger::ChainViewError),
     #[cfg(feature = "pool")]
     #[error("initial pool template")]
     PoolInitialTemplate {
         #[source]
-        source: bitcoin_rs_mining::pool::RefreshError,
+        source: bitcoin_rs_serving::mining::pool::RefreshError,
     },
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    PoolLimiter(#[from] bitcoin_rs_mining::pool::stratum::sv1::ConfigError),
+    PoolLimiter(#[from] bitcoin_rs_serving::mining::pool::stratum::sv1::ConfigError),
     #[cfg(feature = "pool")]
     #[error("invalid pool difficulty: {difficulty_debug}")]
     PoolDifficulty { difficulty_debug: String },
@@ -180,12 +180,12 @@ pub enum RunError {
     PoolSv2BufferedInputMissing,
     #[cfg(feature = "pool-sv2")]
     #[error(transparent)]
-    PoolSv2Protocol(#[from] bitcoin_rs_mining::pool::stratum::sv2::Error),
+    PoolSv2Protocol(#[from] bitcoin_rs_serving::mining::pool::stratum::sv2::Error),
     #[cfg(feature = "pool-sv2")]
     #[error("creating authenticated SV2 connection")]
     PoolSv2ConnectionAccept {
         #[source]
-        source: bitcoin_rs_mining::pool::stratum::sv2::ConfigError,
+        source: bitcoin_rs_serving::mining::pool::stratum::sv2::ConfigError,
     },
     #[cfg(feature = "pool")]
     #[error("SV2 block channel has no admitted ledger account")]
@@ -209,7 +209,7 @@ pub enum RunError {
     #[error("SV2 block submission failed")]
     PoolSv2BlockSubmissionFailed {
         #[source]
-        source: bitcoin_rs_mining::MiningControlError,
+        source: bitcoin_rs_serving::mining::MiningControlError,
     },
     #[cfg(feature = "pool")]
     #[error("SV2 Undetermined block lost its reservation")]

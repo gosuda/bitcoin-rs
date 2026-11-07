@@ -13,7 +13,7 @@ use bitcoin_rs_storage::utxo::contract::{
     UndoCodecError, decode_undo_record_for_block, undo_record_size_limit,
 };
 use bitcoin_rs_storage::{
-    BoundedReadError, StorageError,
+    BoundedReadError,
     block_body::BlockBodyStore,
     pruning::{HistoryLease, HistoryUnavailable},
 };
@@ -326,11 +326,15 @@ impl Walk<'_> {
         ) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Err(self.absent(height, VerifyError::BodyMissing { height, hash })),
-            Err(BoundedReadError::Storage(StorageError::CorruptBlockFrame(evidence))) => {
+            Err(BoundedReadError::Storage(msg))
+                if msg.contains("corrupt")
+                    || msg.contains("truncated")
+                    || msg.contains("frame") =>
+            {
                 return Err(Stop::Failed(VerifyError::BodyCorrupt {
                     height,
                     hash,
-                    evidence,
+                    evidence: "corrupt block frame",
                 }));
             }
             Err(source) => {

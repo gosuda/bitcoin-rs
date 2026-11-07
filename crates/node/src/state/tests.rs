@@ -13,7 +13,7 @@ use bitcoin_rs_execution::chain::{TipSnapshot, regtest_fixture};
 
 use bitcoin_rs_consensus::primitives::{Hash256, chain_constants::CORE_REORG_SAFETY_MARGIN};
 
-use bitcoin_rs_rpc::context::PruneServiceError;
+use bitcoin_rs_serving::context::PruneServiceError;
 
 use core::mem::size_of;
 

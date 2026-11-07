@@ -13,7 +13,7 @@ signer can drive a PSBT workflow without giving key custody to the node.
 ### Authentication before body
 The JSON-RPC listener checks the `Authorization` header as soon as it parses
 the request head. It does this before it reads any body byte
-(`crates/rpc/src/server.rs`). A missing header gets Core's 401 tuple at once.
+(`crates/serving/src/server.rs`). A missing header gets Core's 401 tuple at once.
 Present but wrong credentials are slowed by 250 ms first. A 16 MiB declared
 body therefore costs the attacker the connection, not the server. Core differs.
 Core reads the whole body (up to 32 MiB) before it checks credentials, and it
@@ -80,7 +80,7 @@ event covers it, matching Core. Every event concludes with a topic-local
 little-endian `u32` sequence counter frame. Reorg disconnects are emitted
 tip-first before connects on the replacement branch. Each socket owns
 `DEFAULT_ZMQ_HWM = 1_000`.
-`bitcoin_rs_rpc::zmq` owns the compatibility payload and transport;
+`bitcoin_rs_serving::zmq` owns the compatibility payload and transport;
 `ChainFollowers` owns emission timing relative to committed
 chain transitions.
 
@@ -234,7 +234,7 @@ the two makes every network report difficulty `1.0` at its easiest target.
 Equal IEEE-754 values versus equal serialized spellings. Core's UniValue uses
 `%.16g`; the RPC path's sonic-rs serializer uses shortest round-trip. Compatibility
 means preserving value and operation order, not forcing JSON text to match.
-Owners: `crates/rpc/tests/support/compare.rs` (bitwise numeric comparison) and `crates/rpc/tests/policy_contract.rs`.
+Owners: `crates/serving/tests/support/compare.rs` (bitwise numeric comparison) and `crates/serving/tests/policy_contract.rs`.
 
 ### Provably unspendable outputs (UTXO admission)
 Outputs the UTXO set never admits: a `scriptPubKey` starting with `OP_RETURN`, or longer than `MAX_SCRIPT_SIZE`. Excluding them changes no consensus outcome, so the snapshot codec carries the version tag `bitcoin-rs-utxo-spendable-v1`; a change to admission semantics is a codec change.

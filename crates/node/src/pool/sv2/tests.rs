@@ -10,19 +10,19 @@ use bitcoin::secp256k1::{Keypair, Secp256k1};
 use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Network};
 use bitcoin_rs_execution::chain::compact_is_met_by;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-use bitcoin_rs_mining::pool::ledger::{Ledger, MinerId, PayoutPolicy, PoolConfig};
-use bitcoin_rs_mining::pool::stratum::sv2::{
+use bitcoin_rs_serving::context::PoolOperator as _;
+use bitcoin_rs_serving::mining::pool::ledger::{Ledger, MinerId, PayoutPolicy, PoolConfig};
+use bitcoin_rs_serving::mining::pool::stratum::sv2::{
     AdmitError, AuthorityKeypair, Connection, FLAG_REQUIRES_STANDARD_JOBS, Limits, ServerConfig,
 };
-use bitcoin_rs_mining::pool::{
+use bitcoin_rs_serving::mining::pool::{
     BIP320_VERSION_MASK, Extranonce, ExtranonceLayout, Job, JobBookConfig, MAX_NTIME_FORWARD_SECS,
     PoolCore, ShareLedger, ShareTarget,
 };
-use bitcoin_rs_mining::{
+use bitcoin_rs_serving::mining::{
     Candidate, CandidateContext, CoinbaseBudget, FakeMiningControl, MiningControl,
     assemble_candidate,
 };
-use bitcoin_rs_rpc::context::PoolOperator as _;
 use bitcoin_rs_storage::KvStore;
 use codec_sv2::{
     Decoded, Decrypted, Handshake, InitiatorSent, MessageFrame, NoiseDecoder, NoiseEncoder,
@@ -47,7 +47,10 @@ type TestResult = Result<(), FixtureError>;
 #[derive(Debug, thiserror::Error)]
 enum FixtureError {
     #[error("SV2 {stage} failed: {detail}")]
-    Sv2 { stage: &'static str, detail: String },
+    Sv2 {
+        stage: &'static str,
+        detail: String,
+    },
     #[error("miner fixture is missing {0}")]
     Missing(&'static str),
     #[error("no received frame has type {0:#04x}")]
@@ -59,17 +62,14 @@ enum FixtureError {
     #[error(transparent)]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(transparent)]
-    Ledger(#[from] bitcoin_rs_mining::pool::ledger::LedgerError),
-    #[error(transparent)]
-    Mining(#[from] bitcoin_rs_mining::MiningError),
-    #[error(transparent)]
-    Job(#[from] bitcoin_rs_mining::pool::JobError),
+    Ledger(#[from] bitcoin_rs_serving::mining::pool::ledger::LedgerError),
+    Mining(#[from] bitcoin_rs_serving::mining::MiningError),
+    Job(#[from] bitcoin_rs_serving::mining::pool::JobError),
     #[error(transparent)]
     Secp(#[from] bitcoin::secp256k1::Error),
     #[error(transparent)]
-    Sv2Config(#[from] bitcoin_rs_mining::pool::stratum::sv2::ConfigError),
-    #[error(transparent)]
-    Transport(#[from] bitcoin_rs_mining::pool::stratum::sv2::Error),
+    Sv2Config(#[from] bitcoin_rs_serving::mining::pool::stratum::sv2::ConfigError),
+    Transport(#[from] bitcoin_rs_serving::mining::pool::stratum::sv2::Error),
     #[error(transparent)]
     Run(#[from] crate::run::RunError),
 }
@@ -561,7 +561,7 @@ fn undetermined_sv2_block_withholds_success_and_retries_authoritative_state() ->
         .pop()
         .ok_or(FixtureError::NonceSpace(1))?;
 
-    *host.control.submit.lock() = bitcoin_rs_mining::BlockValidationResult::Inconclusive;
+    *host.control.submit.lock() = bitcoin_rs_serving::mining::BlockValidationResult::Inconclusive;
     let pending = host.submit(&channel, 1, &job, winner)?;
     assert!(
         !has(&pending, MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS),
@@ -572,7 +572,7 @@ fn undetermined_sv2_block_withholds_success_and_retries_authoritative_state() ->
     assert_eq!(host.deferred.len(), 1, "Undetermined work is retained");
     assert_eq!(host.node_submissions(), 1);
 
-    *host.control.submit.lock() = bitcoin_rs_mining::BlockValidationResult::Accepted;
+    *host.control.submit.lock() = bitcoin_rs_serving::mining::BlockValidationResult::Accepted;
     let entry = host
         .deferred
         .pop()

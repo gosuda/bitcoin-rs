@@ -182,7 +182,7 @@ fn prune_refuses_after_apply_admission_closes() -> Result<(), TestError> {
 
 #[test]
 fn prune_to_height_advances_published_height() -> Result<(), TestError> {
-    use bitcoin_rs_rpc::context::PruneService;
+    use bitcoin_rs_serving::context::PruneService;
     use bitcoin_rs_storage::FlatFileBlockStore;
     use bitcoin_rs_storage::KvStore;
     use bitcoin_rs_storage::pruning::load_pruneheight;
@@ -245,7 +245,7 @@ fn prune_to_height_advances_published_height() -> Result<(), TestError> {
 fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> Result<(), TestError> {
     use bitcoin_rs_consensus::primitives::Network;
     use bitcoin_rs_execution::AssumeUtxoManager;
-    use bitcoin_rs_rpc::context::PruneService;
+    use bitcoin_rs_serving::context::PruneService;
     use bitcoin_rs_storage::FlatFileBlockStore;
     use std::sync::atomic::AtomicU32;
 

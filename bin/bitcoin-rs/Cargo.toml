@@ -33,7 +33,7 @@ rustix.workspace = true
 sonic-rs.workspace = true
 tempfile.workspace = true
 bitcoin.workspace = true
-bitcoin-rs-rpc = { workspace = true }
+bitcoin-rs-serving = { workspace = true }
 bitcoin-rs-e2e.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]

@@ -6,8 +6,8 @@
 # `surface | core_reference | status | representative_consumer | evidence`
 # from issue #1122.
 #
-# This matrix is a different axis from `crates/rpc/core-compat.toml` (Core
-# reference identity pins) and `crates/rpc/src/registry.rs` (per-method
+# This matrix is a different axis from `crates/serving/core-compat.toml` (Core
+# reference identity pins) and `crates/serving/src/registry.rs` (per-method
 # Core-schema status). Those own what the API shape claims against Core;
 # this file owns which real external consumers have exercised the surface.
 # Neither substitutes for the other.
@@ -61,14 +61,14 @@ surface = "BIP324 / P2P v2 transport"
 core_reference = "BIP324"
 status = "externally verified"
 representative_consumer = "unmodified Bitcoin Core 31.1 bitcoind in both connection directions (scripts/run-p2p-core-interop.sh, docs/contracts/core-differential.md CORE-06)"
-evidence = "Recorded regtest run: https://github.com/gosuda/bitcoin-rs/pull/1612 (commands, pinned Core, binary identity and results). Black-box outcomes only: a bitcoin-rs node dialing Core and Core dialing a bitcoin-rs node both negotiated v2, both ends' getpeerinfo reported the same session id, each v2 connection answered Core's ping and carried a full header and block sync to Core's tip, and a v2-off bitcoin-rs node synced over v1 from v2 Core (assert_transports in crates/p2p/tests/core_interop_live.rs). No claim is made from the live run for bitcoin-rs's v1 retry after an unanswered v2 dial, decoy packets or rekeying; those rest on in-tree vectors and listener/v2_transport_tests.rs."
+evidence = "Recorded regtest run: https://github.com/gosuda/bitcoin-rs/pull/1612 (commands, pinned Core, binary identity and results). Black-box outcomes only: a bitcoin-rs node dialing Core and Core dialing a bitcoin-rs node both negotiated v2, both ends' getpeerinfo reported the same session id, each v2 connection answered Core's ping and carried a full header and block sync to Core's tip, and a v2-off bitcoin-rs node synced over v1 from v2 Core (assert_transports in crates/wire/tests/core_interop_live.rs). No claim is made from the live run for bitcoin-rs's v1 retry after an unanswered v2 dial, decoy packets or rekeying; those rest on in-tree vectors and listener/v2_transport_tests.rs."
 
 [[row]]
 surface = "Compact block relay (BIP152)"
 core_reference = "Bitcoin Core 31.1 BIP152"
 status = "externally verified"
 representative_consumer = "unmodified Bitcoin Core 31.1 bitcoind + scripted wire probe (scripts/run-p2p-core-interop.sh phases A-C)"
-evidence = "black-box request/response and relay outcomes only: Core serving responses for compact-block fetches and the raw MSG_CMPCT_BLOCK wire probe (docs/contracts/core-differential.md CORE-03; assert_bip152_relay in crates/p2p/tests/core_interop_live.rs). Reconstruction and getblocktxn-recovery counts are log-derived and excluded from this claim per ECO-09; they remain diagnostic only."
+evidence = "black-box request/response and relay outcomes only: Core serving responses for compact-block fetches and the raw MSG_CMPCT_BLOCK wire probe (docs/contracts/core-differential.md CORE-03; assert_bip152_relay in crates/wire/tests/core_interop_live.rs). Reconstruction and getblocktxn-recovery counts are log-derived and excluded from this claim per ECO-09; they remain diagnostic only."
 
 [[row]]
 surface = "Compact block filters (BIP157/BIP158)"
@@ -86,31 +86,31 @@ evidence = "externally observed: handshake, relay, serving, disconnect behavior 
 
 [[row]]
 surface = "JSON-RPC"
-core_reference = "Bitcoin Core 31.1 RPC schema (crates/rpc/core-compat.toml reference pins)"
+core_reference = "Bitcoin Core 31.1 RPC schema (crates/serving/core-compat.toml reference pins)"
 status = "implemented"
 representative_consumer = "planned: an existing Core-compatible RPC client (issue #1122 follow-up)"
-evidence = "in-tree only: dispatch, handler, and pinned-shape suites (crates/rpc/tests/*), per-method schema status in crates/rpc/src/registry.rs. A scripted in-repo client does not upgrade this row; see ECO-08."
+evidence = "in-tree only: dispatch, handler, and pinned-shape suites (crates/rpc/tests/*), per-method schema status in crates/serving/src/registry.rs. A scripted in-repo client does not upgrade this row; see ECO-08."
 
 [[row]]
 surface = "REST"
-core_reference = "Bitcoin Core REST interface (twelve Core route prefixes, crates/rpc/src/rest.rs)"
+core_reference = "Bitcoin Core REST interface (twelve Core route prefixes, crates/serving/src/rest.rs)"
 status = "implemented"
 representative_consumer = "planned: an existing REST client (issue #1122 follow-up)"
-evidence = "in-tree only: crates/rpc/tests/rest_routes.rs and manifest coverage; per-route status in crates/rpc/src/registry.rs."
+evidence = "in-tree only: crates/rpc/tests/rest_routes.rs and manifest coverage; per-route status in crates/serving/src/registry.rs."
 
 [[row]]
 surface = "ZMQ notifications"
 core_reference = "Bitcoin Core ZMQ notifications (hashblock/hashtx/rawblock/rawtx/sequence)"
 status = "implemented"
 representative_consumer = "planned: an existing ZMQ indexer or subscriber (issue #1122 follow-up)"
-evidence = "in-tree only: crates/rpc/tests/reorg_notifications.rs and manifest coverage; per-topic status in crates/rpc/src/registry.rs, payload mapping in crates/rpc/src/zmq.rs."
+evidence = "in-tree only: crates/serving/tests/reorg_notifications.rs and manifest coverage; per-topic status in crates/serving/src/registry.rs, payload mapping in crates/serving/src/zmq.rs."
 
 [[row]]
 surface = "Esplora-compatible HTTP API"
 core_reference = "Blockstream Esplora API (bitcoin-rs-specific surface, no Core counterpart)"
 status = "implemented"
 representative_consumer = "planned: an existing Esplora client (issue #1122 follow-up)"
-evidence = "in-tree only: crates/rpc/src/esplora.rs projection and handler tests (crates/rpc/tests/*). Extension surface per crates/rpc/src/registry.rs (docs/contracts/wallet-facing.md WF-01)."
+evidence = "in-tree only: crates/serving/src/esplora.rs projection and handler tests (crates/rpc/tests/*). Extension surface per crates/serving/src/registry.rs (docs/contracts/wallet-facing.md WF-01)."
 
 [[row]]
 surface = "GetBlockTemplate (BIP22/BIP23)"
@@ -124,7 +124,7 @@ surface = "Block submission and proposal (submitblock, BIP22 proposal mode)"
 core_reference = "Bitcoin Core mining RPC"
 status = "implemented"
 representative_consumer = "planned: an existing mining consumer (issue #1122 follow-up)"
-evidence = "in-tree only: crates/mining/src/control.rs proposal/solved-block vocabulary and mining suites; external-miner harness as above (implemented evidence only)."
+evidence = "in-tree only: crates/serving/src/mining/control.rs proposal/solved-block vocabulary and mining suites; external-miner harness as above (implemented evidence only)."
 
 [[row]]
 surface = "Stratum V2 Template Distribution adapter (regtest example)"

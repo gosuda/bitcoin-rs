@@ -58,22 +58,22 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 
 | BIP | Capability | Support | External evidence | Notes |
 | :-- | :-- | :--: | :--: | :-- |
-| 22 | [GetBlockTemplate](../crates/mining/tests/template_shape.rs) | ✅ | - | Template contract; [mining evidence](api/ecosystem-compat.toml) in-tree only |
-| 23 | [GBT extensions](../crates/mining/src/coordinator.rs) | ◐ | - | Proposal mode, long-poll and version bits; no submitold/workid |
-| 141 | [Template witness commitment](../crates/mining/tests/coinbase_template.rs) | ✅ | - | Coinbase commitment and rules |
+| 22 | [GetBlockTemplate](../crates/serving/tests/mining_template_shape.rs) | ✅ | - | Template contract; [mining evidence](api/ecosystem-compat.toml) in-tree only |
+| 23 | [GBT extensions](../crates/node/src/mining/coordinator.rs) | ◐ | - | Proposal mode, long-poll and version bits; no submitold/workid |
+| 141 | [Template witness commitment](../crates/serving/tests/mining_coinbase_template.rs) | ✅ | - | Coinbase commitment and rules |
 
 ## Wallet, index, and application
 
 | BIP | Capability | Support | External evidence | Notes |
 | :-- | :-- | :--: | :--: | :-- |
-| 32 | [BIP32 derivation](../crates/rpc/src/handlers/util.rs) | ✅ | - | Ranged descriptor addresses; no key custody |
-| 173/350 | [Segwit addresses](../crates/rpc/src/convert.rs) | ✅ | - | Wallet-free script address rendering |
-| 380 | [Output descriptors](../crates/rpc/src/handlers/util.rs) | ✅ | - | getdescriptorinfo/deriveaddresses |
-| 380 | [scantxoutset public-descriptor scans](../crates/rpc/src/handlers/chain.rs) | ◐ | - | Bounded public `pkh`/`wpkh`/`sh(wpkh)`/key-only `tr` scans with ranges; private keys, Taproot trees and other descriptors refused ([API-35](contracts/external-api.md#api-35-bounded-public-descriptor-utxo-scans)) |
-| 389 | [Multipath descriptors](../crates/rpc/src/handlers/util.rs) | ✅ | - | Multipath key expressions in getdescriptorinfo/deriveaddresses |
-| 389 | [scantxoutset public multipath scans](../crates/rpc/src/handlers/chain.rs) | ◐ | - | Bounded wildcard and multipath expansion with inclusive ranges ([API-35](contracts/external-api.md#api-35-bounded-public-descriptor-utxo-scans)) |
+| 32 | [BIP32 derivation](../crates/serving/src/handlers/util.rs) | ✅ | - | Ranged descriptor addresses; no key custody |
+| 173/350 | [Segwit addresses](../crates/serving/src/convert.rs) | ✅ | - | Wallet-free script address rendering |
+| 380 | [Output descriptors](../crates/serving/src/handlers/util.rs) | ✅ | - | getdescriptorinfo/deriveaddresses |
+| 380 | [scantxoutset public-descriptor scans](../crates/serving/src/handlers/chain.rs) | ◐ | - | Bounded public `pkh`/`wpkh`/`sh(wpkh)`/key-only `tr` scans with ranges; private keys, Taproot trees and other descriptors refused ([API-35](contracts/external-api.md#api-35-bounded-public-descriptor-utxo-scans)) |
+| 389 | [Multipath descriptors](../crates/serving/src/handlers/util.rs) | ✅ | - | Multipath key expressions in getdescriptorinfo/deriveaddresses |
+| 389 | [scantxoutset public multipath scans](../crates/serving/src/handlers/chain.rs) | ◐ | - | Bounded wildcard and multipath expansion with inclusive ranges ([API-35](contracts/external-api.md#api-35-bounded-public-descriptor-utxo-scans)) |
 | 352 | [Silent Payments](../crates/projection/src/silent_payments.rs) | 🧪 | - | Opt-in keyless codec and authenticated `getblocktweaks` extension; external wallet interoperability unverified; [docs](silent-payments.md) |
-| 337 | [Compressed transactions](../crates/rpc/src/compressed_tx.rs) | 🧪 | - | Default-off `--compressed-transactions` extension (`compressrawtransaction`/`decompressrawtransaction`, `-32603` while disabled); no consensus, relay, or mempool surface. Reference readings recorded in the codec docs: carry-aware Core VARINT over the 7-bit prose (`a608` = 5000). The six-bit input metadata carries the public-key-hash bit the prose table omits. Compressed signatures cover only P2TR key-path/P2PKH/P2WPKH/P2SH-P2WPKH with the uncompressed VARINT scriptSig/witness envelope for everything else. Minimum height follows the reference `locktime - 1` / `coin.height - 1` rule with the `u32::MAX` sentinel encoded as zero. A compressed outpoint is emitted only for a prevout with a confirmed height and a resolvable flat output index. Otherwise the raw outpoint is emitted with one `UTXO(i): <reason>` warning, and no outpoint is ever fabricated |
+| 337 | [Compressed transactions](../crates/serving/src/compressed_tx.rs) | 🧪 | - | Default-off `--compressed-transactions` extension (`compressrawtransaction`/`decompressrawtransaction`, `-32603` while disabled); no consensus, relay, or mempool surface. Reference readings recorded in the codec docs: carry-aware Core VARINT over the 7-bit prose (`a608` = 5000). The six-bit input metadata carries the public-key-hash bit the prose table omits. Compressed signatures cover only P2TR key-path/P2PKH/P2WPKH/P2SH-P2WPKH with the uncompressed VARINT scriptSig/witness envelope for everything else. Minimum height follows the reference `locktime - 1` / `coin.height - 1` rule with the `u32::MAX` sentinel encoded as zero. A compressed outpoint is emitted only for a prevout with a confirmed height and a resolvable flat output index. Otherwise the raw outpoint is emitted with one `UTXO(i): <reason>` warning, and no outpoint is ever fabricated |
 
 ## Out of scope by policy
 

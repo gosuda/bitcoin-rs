@@ -9,8 +9,8 @@ use bitcoin_rs_projection::query_api::{
     AtPrefix, HistoricalQueryError, HistoricalUnavailableCause, ScriptIndexSnapshot,
     SpendingRecord, TxUnavailableCause,
 };
-pub(crate) use bitcoin_rs_rpc::context::SyncProgress;
-use bitcoin_rs_rpc::context::{ChainAdmissionView, DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB};
+pub(crate) use bitcoin_rs_serving::context::SyncProgress;
+use bitcoin_rs_serving::context::{ChainAdmissionView, DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -40,7 +40,7 @@ pub enum NodeError {
 pub struct Node {
     pub(crate) state: NodeState,
     pub(crate) services: Option<NodeServices>,
-    pub(crate) context: Arc<bitcoin_rs_rpc::context::Context>,
+    pub(crate) context: Arc<bitcoin_rs_serving::context::Context>,
 }
 
 // Synchronous embedding work is deferred until the returned future is polled.
@@ -57,7 +57,9 @@ impl Node {
         self.state.chainstate().chain_snapshot()
     }
 
-    pub fn mining_control(&self) -> Result<&dyn bitcoin_rs_mining::MiningControl, NodeError> {
+    pub fn mining_control(
+        &self,
+    ) -> Result<&dyn bitcoin_rs_serving::mining::MiningControl, NodeError> {
         self.context
             .mining
             .mining_control
@@ -276,8 +278,8 @@ mod tests {
     use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
     use parking_lot::Mutex;
 
-    use bitcoin_rs_rpc::zmq::MempoolSequenceObserver;
-    use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
+    use bitcoin_rs_serving::zmq::MempoolSequenceObserver;
+    use bitcoin_rs_serving::zmq::{SequenceEvent, ZmqPublisher};
 
     fn block_on<F: Future>(future: F) -> F::Output {
         use std::task::{Context, Poll, Waker};
@@ -344,7 +346,7 @@ mod tests {
     fn broadcast_publishes_one_ordered_a_event_through_the_shared_gateway() {
         let dir = tempfile::tempdir().expect("tempdir");
         let publisher = Arc::new(RecordingSequencePublisher::default());
-        let recording: Arc<dyn bitcoin_rs_rpc::zmq::ZmqPublisher> = publisher.clone();
+        let recording: Arc<dyn bitcoin_rs_serving::zmq::ZmqPublisher> = publisher.clone();
         let observer: Arc<dyn MempoolObserver> = Arc::new(MempoolSequenceObserver::new(recording));
         let config = embedded_config(&dir.path().join("node"));
 

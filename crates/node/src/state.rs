@@ -12,7 +12,7 @@ use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_projection::runtime::DEFAULT_BATCH_LIMITS;
 use bitcoin_rs_projection::runtime::OpenDerivedIndex;
 use bitcoin_rs_projection::runtime::open_derived_index_store_on_worker;
-use bitcoin_rs_rpc::context::PruneService;
+use bitcoin_rs_serving::context::PruneService;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_storage::StorageBackend;
 use bitcoin_rs_storage::block_body::BlockBodySource;
@@ -186,9 +186,9 @@ impl NodeState {
     #[cfg(any(test, feature = "test-seam"))]
     pub fn attach_mining_coordinator(&self, coordinator: &Arc<crate::MiningCoordinator>) {
         let signal = self.mining_generation_signal();
-        let control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator.clone();
+        let control: Arc<dyn bitcoin_rs_serving::mining::MiningControl> = coordinator.clone();
         signal.attach(&control);
-        let wake: Arc<dyn bitcoin_rs_mining::MempoolSequenceWake> = coordinator.clone();
+        let wake: Arc<dyn bitcoin_rs_serving::mining::MempoolSequenceWake> = coordinator.clone();
         signal.attach_sequence_wake(&wake);
     }
 
@@ -325,7 +325,7 @@ impl NodeState {
     #[must_use]
     pub fn derived_index_query(
         &self,
-    ) -> Option<Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery>> {
+    ) -> Option<Arc<dyn bitcoin_rs_serving::context::DerivedIndexQuery>> {
         if !self.config.indexes.txindex {
             return None;
         }
@@ -335,9 +335,9 @@ impl NodeState {
     #[must_use]
     pub(crate) fn esplora_derived_index_query(
         &self,
-    ) -> Option<Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery>> {
+    ) -> Option<Arc<dyn bitcoin_rs_serving::context::DerivedIndexQuery>> {
         self.derived_index.adapter().map(|adapter| {
-            let q: Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery> = adapter.clone();
+            let q: Arc<dyn bitcoin_rs_serving::context::DerivedIndexQuery> = adapter.clone();
             q
         })
     }
@@ -362,12 +362,14 @@ impl NodeState {
     }
 
     #[must_use]
-    pub fn script_index_query(&self) -> Option<Arc<dyn bitcoin_rs_rpc::context::ScriptIndexQuery>> {
+    pub fn script_index_query(
+        &self,
+    ) -> Option<Arc<dyn bitcoin_rs_serving::context::ScriptIndexQuery>> {
         if !self.config.indexes.script_index.is_enabled() {
             return None;
         }
         self.derived_index.adapter().map(|adapter| {
-            let q: Arc<dyn bitcoin_rs_rpc::context::ScriptIndexQuery> = adapter.clone();
+            let q: Arc<dyn bitcoin_rs_serving::context::ScriptIndexQuery> = adapter.clone();
             q
         })
     }

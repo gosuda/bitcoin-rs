@@ -64,7 +64,7 @@ pub enum NodeOpenError {
     JournalWriter(#[from] bitcoin_rs_storage::chainstate_journal::JournalWriterError),
     #[cfg(feature = "zmq")]
     #[error(transparent)]
-    ZmqBind(#[from] bitcoin_rs_rpc::zmq::ZmqBindError),
+    ZmqBind(#[from] bitcoin_rs_serving::zmq::ZmqBindError),
     #[error(transparent)]
     Apply(Box<bitcoin_rs_execution::ApplyError>),
     #[error("create data_dir {path}")]
@@ -594,7 +594,7 @@ impl NodeState {
                     config.mempool_snapshot_restore_timeout_secs,
                 ))
                 .ok_or(NodeOpenError::MempoolRestoreClockRange)?;
-            let chain = bitcoin_rs_rpc::context::ChainAdmissionView::new(
+            let chain = bitcoin_rs_serving::context::ChainAdmissionView::new(
                 chainstate.utxo_reader(),
                 chainstate.applied_tip_reader(),
                 chainstate.block_tree_reader(),
@@ -664,7 +664,7 @@ impl NodeState {
             mempool_gateway
                 .attach_observer_leg(
                     "sequence",
-                    Arc::new(bitcoin_rs_rpc::zmq::MempoolSequenceObserver::new(
+                    Arc::new(bitcoin_rs_serving::zmq::MempoolSequenceObserver::new(
                         Arc::clone(&zmq_publisher),
                     )),
                     interest,

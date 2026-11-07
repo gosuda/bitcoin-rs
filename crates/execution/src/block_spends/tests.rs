@@ -9,7 +9,7 @@ use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::{HistoryAccess, HistoryUnavailable, RetentionBudget};
 use bitcoin_rs_storage::utxo::{
     UtxoSet,
-    contract::{BlockSpendsError, BlockUndoSource, UndoLoadError},
+    contract::{BlockSpendsError, BlockUndoSource},
 };
 use bitcoin_rs_storage::{CommitRecords, InMemoryUndoStore, StorageError, UndoStore};
 use parking_lot::Mutex;
@@ -252,12 +252,12 @@ fn missing_and_corrupt_expected_undo_are_not_empty_success() -> TestResult {
     f.undo.remove_archived(1, queried);
     assert!(matches!(
         f.chain.block_spends(queried, tip(&f.chain)?),
-        Err(BlockSpendsError::Undo(UndoLoadError::Missing { .. }))
+        Err(BlockSpendsError::Undo(msg)) if msg.contains("missing")
     ));
     f.undo.persist_undo(1, queried, b"bad")?;
     assert!(matches!(
         f.chain.block_spends(queried, tip(&f.chain)?),
-        Err(BlockSpendsError::Undo(UndoLoadError::Unreadable { .. }))
+        Err(BlockSpendsError::Undo(msg)) if msg.contains("unreadable")
     ));
     f.chain.fail_closed_for_recovery();
     assert!(matches!(

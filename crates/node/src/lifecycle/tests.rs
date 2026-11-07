@@ -41,10 +41,10 @@ fn split_rpc_listeners_start_and_join_through_node_services() -> Result<(), Test
         .ok_or(TestError::Missing("node services"))?;
     assert_eq!(services.rpc_threads.len(), 2);
     let management_address = services
-        .rpc_address(bitcoin_rs_rpc::RpcSurface::Management)
+        .rpc_address(bitcoin_rs_serving::RpcSurface::Management)
         .ok_or(TestError::Missing("management address"))?;
     let public_address = services
-        .rpc_address(bitcoin_rs_rpc::RpcSurface::Public)
+        .rpc_address(bitcoin_rs_serving::RpcSurface::Public)
         .ok_or(TestError::Missing("public address"))?;
     for (address, request, expected) in [
         (
@@ -230,7 +230,7 @@ fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> Re
 
 #[test]
 fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> Result<(), TestError> {
-    use bitcoin_rs_rpc::context::ChainControlError;
+    use bitcoin_rs_serving::context::ChainControlError;
 
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
@@ -270,7 +270,7 @@ fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> Resul
 
 #[test]
 fn verify_chain_reports_cancellation_and_recovery_closure() -> Result<(), TestError> {
-    use bitcoin_rs_rpc::context::ChainControlError;
+    use bitcoin_rs_serving::context::ChainControlError;
 
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
@@ -1183,7 +1183,7 @@ fn bind_test_rpc(state: &NodeState) -> Result<RpcServer, TestError> {
         state.chain_followers(),
         super::final_payout_script(state.config()),
     ));
-    let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator;
+    let mining_control: Arc<dyn bitcoin_rs_serving::mining::MiningControl> = coordinator;
     let mut bindings = bind_rpc(state, &mining_control, state.block_body_source()?)?;
     assert_eq!(bindings.listeners.len(), 1);
     Ok(bindings.listeners.remove(0).0)
@@ -1204,8 +1204,10 @@ fn final_payout_script_prefers_pool_when_values_differ() {
         max_connections: 1,
         max_connections_per_ip: 1,
         share_difficulty: String::from("1"),
-        share_target: bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal("1")
-            .unwrap_or_else(|error| panic!("fixed test difficulty parses: {error}")),
+        share_target: bitcoin_rs_serving::mining::pool::ShareTarget::from_pool_difficulty_decimal(
+            "1",
+        )
+        .unwrap_or_else(|error| panic!("fixed test difficulty parses: {error}")),
         window_work: 1,
         fee_bps: 0,
         reward_script: vec![0x52],

@@ -98,6 +98,7 @@ pub fn permitted_difficulty_transition(
 pub fn pow_limit_bits(network: Network) -> CompactTarget {
     pow::target_to_compact(network.max_target())
 }
+pub use pow::compact_is_met_by;
 
 pub mod pow {
     use super::ChainWork;

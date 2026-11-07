@@ -37,10 +37,10 @@ The typed in-process surface provides `Node::start`, gateway broadcast, and cons
   - Embedders MUST use operation-oriented `Node` methods only.
 - **EMB-04: Typed reads mirror the RPC facts.**
   - `snapshot()` returns the coherent `ChainSnapshot`.
-  - `sync_progress()` runs the identical `getblockchaininfo` projection via `ChainHandles::sync_progress` (`crates/rpc/src/context.rs`) over `ChainProgressReader` (`crates/execution/src/chain/progress.rs`).
+  - `sync_progress()` runs the identical `getblockchaininfo` projection via `ChainHandles::sync_progress` (`crates/serving/src/context.rs`) over `ChainProgressReader` (`crates/execution/src/chain/progress.rs`).
   - `capabilities()` returns `CapabilitySnapshot` (`crates/projection/src/capabilities.rs`).
 - **EMB-05: Broadcast is the shared admission.**
-  - `Node::broadcast`, `sendrawtransaction` (`crates/rpc/src/handlers/tx.rs`), and Esplora broadcasts all call `MempoolGateway::submit_local_transaction`.
+  - `Node::broadcast`, `sendrawtransaction` (`crates/serving/src/handlers/tx.rs`), and Esplora broadcasts all call `MempoolGateway::submit_local_transaction`.
   - `Node::broadcast` passes the default fee-rate cap of `sendrawtransaction`.
   - Calls run under the node's one write-lock interval.
   - Block-connect eviction (`remove_for_block`) commits through the same gateway.
@@ -62,7 +62,7 @@ The typed in-process surface provides `Node::start`, gateway broadcast, and cons
   - Each store carries the `.lock` guard.
   - That lock reports as typed `DataDirLockError::InUse`, mapped to `NodeError::Startup`.
 - **EMB-08: Mutations wake the template coordinator.**
-  - The node-constructed `MiningGenerationSignal` (`crates/mining/src/generation_signal.rs`) fires on every committed gateway mutation.
+  - The node-constructed `MiningGenerationSignal` (`crates/serving/src/mining/generation_signal.rs`) fires on every committed gateway mutation.
   - It fires on every applied-tip connect/disconnect to the attached coordinator.
   - Before attach it is a no-op.
 - **EMB-09: Shutdown wake cannot block teardown.**

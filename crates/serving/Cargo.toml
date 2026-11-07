@@ -1,0 +1,89 @@
+[package]
+autotests = false
+name = "bitcoin-rs-serving"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "bitcoin-rs :: serving (RPC, REST, Esplora, ZMQ, Mining & Pool)"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+pool = ["dep:ruint"]
+pool-sv2 = [
+    "pool",
+    "dep:binary_sv2",
+    "dep:framing_sv2",
+    "dep:codec_sv2",
+    "dep:noise_sv2",
+    "dep:mining_sv2",
+    "dep:common_messages_sv2",
+    "dep:zeroize",
+]
+silent-payments = ["bitcoin-rs-projection/silent-payments"]
+# Synthetic capability worlds for tests, not production composition.
+test-seam = ["bitcoin-rs-projection/test-seam"]
+zmq = ["dep:zmq"]
+
+[dependencies]
+bitcoin-rs-consensus.workspace = true
+bitcoin-rs-storage.workspace = true
+bitcoin-rs-execution.workspace = true
+bitcoin-rs-projection.workspace = true
+bitcoin-rs-mempool.workspace = true
+bitcoin-rs-wire.workspace = true
+bitcoin.workspace = true
+miniscript.workspace = true
+sonic-rs.workspace = true
+serde.workspace = true
+parking_lot.workspace = true
+arc-swap.workspace = true
+crossbeam-channel.workspace = true
+compact_str.workspace = true
+hashbrown.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+sha2.workspace = true
+corepc-types.workspace = true
+bytes.workspace = true
+mio.workspace = true
+zmq = { workspace = true, optional = true }
+ruint = { workspace = true, optional = true }
+binary_sv2 = { workspace = true, optional = true }
+framing_sv2 = { workspace = true, optional = true }
+codec_sv2 = { workspace = true, features = ["noise_sv2"], optional = true }
+noise_sv2 = { workspace = true, optional = true }
+mining_sv2 = { workspace = true, optional = true }
+common_messages_sv2 = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+
+[dev-dependencies]
+bitcoin-rs-serving = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-wire = { workspace = true, features = ["test-seam"] }
+toml.workspace = true
+bitcoin-rs-e2e.workspace = true
+bitcoin-rs-execution = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-node = { workspace = true, default-features = false, features = ["test-seam"] }
+bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
+tempfile.workspace = true
+proptest.workspace = true
+proptest-state-machine.workspace = true
+secp256k1 = { version = "=0.28.2", default-features = false, features = ["std", "rand-std"] }
+rand = { version = "0.8.8", default-features = false, features = ["std", "std_rng"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+rustix.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+cap-std.workspace = true
+cap-fs-ext.workspace = true
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

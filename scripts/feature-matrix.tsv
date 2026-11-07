@@ -18,8 +18,8 @@ consensus-kernel	bitcoin-rs-consensus	native	--features kernel --all-targets
 storage-default	bitcoin-rs-storage	native	--no-default-features --all-targets
 storage-surrealkv	bitcoin-rs-storage	native	--features surrealkv --all-targets
 storage-mdbx	bitcoin-rs-storage	native	--features mdbx --all-targets
-rpc-default	bitcoin-rs-rpc	native	--all-targets
-rpc-no-defaults	bitcoin-rs-rpc	native	--no-default-features --all-targets
+serving-default	bitcoin-rs-serving	native	--all-targets
+serving-no-defaults	bitcoin-rs-serving	native	--no-default-features --all-targets
 node-no-zmq	bitcoin-rs-node	native	--no-default-features --all-targets
 node-zmq	bitcoin-rs-node	native	--no-default-features --features zmq --all-targets
 node-default	bitcoin-rs-node	native	--all-targets

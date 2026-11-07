@@ -8,8 +8,7 @@ members = [
 
     "crates/mempool",
     "crates/wire",
-    "crates/mining",
-    "crates/rpc",
+    "crates/serving",
     "crates/node",
     "bin/bitcoin-rs",
     "e2e",
@@ -45,8 +44,7 @@ bitcoin-rs-projection      = { path = "crates/projection",      version = "0.15.
 
 bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.15.0" }
 bitcoin-rs-wire        = { path = "crates/wire",        version = "0.15.0" }
-bitcoin-rs-mining     = { path = "crates/mining",     version = "0.15.0" }
-bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.15.0" }
+bitcoin-rs-serving     = { path = "crates/serving",     version = "0.15.0" }
 bitcoin-rs-node       = { path = "crates/node",       version = "0.15.0", default-features = false }
 bitcoin-rs-e2e        = { path = "e2e",               version = "0.15.0" }
 

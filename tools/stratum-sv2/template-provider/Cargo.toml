@@ -11,7 +11,7 @@ description = "Embedded bitcoin-rs mining adapter for an external Stratum V2 poo
 
 [dependencies]
 bitcoin-rs-node = { path = "../../../crates/node", default-features = false }
-bitcoin-rs-mining = { path = "../../../crates/mining" }
+bitcoin-rs-serving = { path = "../../../crates/serving" }
 bitcoin-rs-consensus = { path = "../../../crates/consensus", default-features = false }
 crossbeam-channel = "0.5"
 futures-executor = "=0.3.32"

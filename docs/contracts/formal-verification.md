@@ -1,6 +1,6 @@
 # Formal verification contract
 
-This file owns the formal toolchain pins, the run rules, and the per-module checker table. Apalache archive and JAR hashes are also recorded in `crates/rpc/core-compat.toml`.
+This file owns the formal toolchain pins, the run rules, and the per-module checker table. Apalache archive and JAR hashes are also recorded in `crates/serving/core-compat.toml`.
 
 ## Toolchain pins
 

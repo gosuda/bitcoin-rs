@@ -11,7 +11,7 @@ use bitcoin_rs_mempool::{
     BodyInterest, Mempool, MempoolEntry, MempoolLimits, MempoolObserver, MutationEnvelope,
     MutationOutcome,
 };
-use bitcoin_rs_mining::FakeMiningControl;
+use bitcoin_rs_serving::mining::FakeMiningControl;
 use bitcoin_rs_storage::utxo::UtxoSet;
 use parking_lot::{Mutex, RwLock};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

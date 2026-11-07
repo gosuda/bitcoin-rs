@@ -23,7 +23,7 @@ pub(crate) const ZMQ_CRATE: &str = "zmq";
 pub(crate) const STORAGE_CRATE: &str = "bitcoin-rs-storage";
 pub(crate) const CONVERTER_CRATE: &str = "bitcoin-rs-storage-convert";
 
-pub(crate) const RPC_CRATE: &str = "bitcoin-rs-rpc";
+pub(crate) const SERVING_CRATE: &str = "bitcoin-rs-serving";
 
 pub(crate) const NODE_CRATE: &str = "bitcoin-rs-node";
 
@@ -32,18 +32,14 @@ pub(crate) const MEMPOOL_CRATE: &str = "bitcoin-rs-mempool";
 pub(crate) const CHAINSTATE_CRATE: &str = "bitcoin-rs-execution";
 
 pub(crate) const MEMPOOL_CONSUMER_CRATES: [&str; 4] =
-    ["bitcoin-rs-wire", RPC_CRATE, NODE_CRATE, BIN_CRATE];
+    ["bitcoin-rs-wire", SERVING_CRATE, NODE_CRATE, BIN_CRATE];
 
 pub(crate) fn approved_layer(crate_name: &str) -> u8 {
     match crate_name {
         "bitcoin-rs-consensus" => 0,
         STORAGE_CRATE => 1,
-        CHAINSTATE_CRATE
-        | "bitcoin-rs-wire"
-        | "bitcoin-rs-mempool"
-        | "bitcoin-rs-projection"
-        | "bitcoin-rs-mining" => 2,
-        RPC_CRATE => 3,
+        CHAINSTATE_CRATE | "bitcoin-rs-wire" | "bitcoin-rs-mempool" | "bitcoin-rs-projection" => 2,
+        SERVING_CRATE => 3,
         NODE_CRATE
         | BIN_CRATE
         | "bitcoin-rs-e2e"
@@ -222,6 +218,28 @@ impl WorkspaceGraph {
             }
         }
 
+        let execution_present = self.normal_deps.contains_key("bitcoin-rs-execution")
+            || self
+                .normal_deps
+                .values()
+                .any(|edges| edges.iter().any(|d| d == "bitcoin-rs-execution"));
+        if execution_present {
+            for (name, edges) in &self.normal_deps {
+                let layer = approved_layer(name);
+                for dep in edges {
+                    let dep_layer = approved_layer(dep);
+                    if dep_layer == layer
+                        && layer < 4
+                        && !(name == "bitcoin-rs-projection" && dep == "bitcoin-rs-execution")
+                    {
+                        violations.push(format!(
+                            "same-layer edge violation: `{name}` (layer {layer}) depends on `{dep}` (layer {dep_layer}); only projection -> execution is permitted"
+                        ));
+                    }
+                }
+            }
+        }
+
         let cycle_checked_crates = self.detect_cycles(&mut violations);
 
         let mut checked_engine_edges = 0_usize;
@@ -250,10 +268,12 @@ impl WorkspaceGraph {
             }
         }
 
-        if let Some(rpc_edges) = self.normal_deps.get(RPC_CRATE) {
-            for dep in rpc_edges {
+        if let Some(serving_edges) = self.normal_deps.get(SERVING_CRATE) {
+            for dep in serving_edges {
                 if ENGINE_CRATES.contains(&dep.as_str()) {
-                    violations.push(format!("rpc must not name the engine dependency `{dep}`"));
+                    violations.push(format!(
+                        "serving must not name the engine dependency `{dep}`"
+                    ));
                 }
             }
         }
@@ -283,34 +303,39 @@ impl WorkspaceGraph {
     fn validate_zmq_surface(&self, violations: &mut Vec<String>) -> usize {
         let mut checked = 0_usize;
         for (name, dependencies) in &self.zmq_deps {
-            if name != RPC_CRATE && !dependencies.is_empty() {
+            if name != SERVING_CRATE && !dependencies.is_empty() {
                 violations.push(format!(
-                    "the external ZMQ dependency must be owned by `{RPC_CRATE}`; found on `{name}`"
+                    "the external ZMQ dependency must be owned by `{SERVING_CRATE}`; found on `{name}`"
                 ));
             }
             checked += dependencies.len();
         }
         match self
             .features
-            .get(RPC_CRATE)
+            .get(SERVING_CRATE)
             .and_then(|feature_map| feature_map.get("zmq"))
         {
             Some(implies) if implies.iter().any(|entry| entry == "dep:zmq") => {
                 checked += 1;
             }
-            _ => violations
-                .push("the RPC `zmq` feature must enable its owned external dependency".to_owned()),
+            _ => violations.push(
+                "the serving `zmq` feature must enable its owned external dependency".to_owned(),
+            ),
         }
         let node_zmq = self
             .features
             .get(NODE_CRATE)
             .and_then(|feature_map| feature_map.get("zmq"));
         match node_zmq {
-            Some(implies) if implies.iter().any(|entry| entry == "bitcoin-rs-rpc/zmq") => {
+            Some(implies)
+                if implies
+                    .iter()
+                    .any(|entry| entry == "bitcoin-rs-serving/zmq") =>
+            {
                 checked += 1;
             }
             _ => violations
-                .push("the node `zmq` feature must forward the RPC surface feature".to_owned()),
+                .push("the node `zmq` feature must forward the serving surface feature".to_owned()),
         }
         match node_zmq {
             Some(implies) if implies.iter().all(|entry| entry != "dep:zmq") => {

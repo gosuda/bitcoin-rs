@@ -120,7 +120,7 @@ fn fixture_owners_expose_no_production_injection_or_synthetic_constructors() -> 
         .canonicalize()?;
     let consumer = capability_compile::ProductionConsumer::with_fixture_owners(&root)?;
     consumer.allow_reads(&format!(
-        "{READ_CONTROL}\npub fn compose(handles: bitcoin_rs_rpc::context::ContextHandles) -> bitcoin_rs_rpc::context::Context {{ bitcoin_rs_rpc::context::Context::from_handles(handles) }}"
+        "{READ_CONTROL}\npub fn compose(handles: bitcoin_rs_serving::context::ContextHandles) -> bitcoin_rs_serving::context::Context {{ bitcoin_rs_serving::context::Context::from_handles(handles) }}"
     ))?;
     for (source, codes, member) in [
         (
@@ -149,12 +149,12 @@ fn fixture_owners_expose_no_production_injection_or_synthetic_constructors() -> 
             "new",
         ),
         (
-            "pub fn denied() { let _ = bitcoin_rs_rpc::context::Context::new; }",
+            "pub fn denied() { let _ = bitcoin_rs_serving::context::Context::new; }",
             &["E0599"][..],
             "new",
         ),
         (
-            "pub fn denied() { let _ = bitcoin_rs_rpc::context::ContextHandles::default; }",
+            "pub fn denied() { let _ = bitcoin_rs_serving::context::ContextHandles::default; }",
             &["E0599"][..],
             "default",
         ),

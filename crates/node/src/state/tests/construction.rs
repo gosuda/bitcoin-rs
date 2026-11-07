@@ -39,19 +39,19 @@ fn zmq_publisher_handle_reports_active_metadata() -> Result<(), TestError> {
     config.data_dir = dir.path().join("node");
     config.p2p.listen.clear();
     config.notifications.zmq = vec![
-        bitcoin_rs_rpc::zmq::ZmqEndpointConfig {
+        bitcoin_rs_serving::zmq::ZmqEndpointConfig {
             endpoint: "inproc://state-zmq-block".to_owned(),
             topics: vec![
-                bitcoin_rs_rpc::zmq::ZmqTopic::HashBlock,
-                bitcoin_rs_rpc::zmq::ZmqTopic::RawBlock,
+                bitcoin_rs_serving::zmq::ZmqTopic::HashBlock,
+                bitcoin_rs_serving::zmq::ZmqTopic::RawBlock,
             ],
             hwm: Some(17),
         },
-        bitcoin_rs_rpc::zmq::ZmqEndpointConfig {
+        bitcoin_rs_serving::zmq::ZmqEndpointConfig {
             endpoint: "inproc://state-zmq-tx".to_owned(),
             topics: vec![
-                bitcoin_rs_rpc::zmq::ZmqTopic::HashTx,
-                bitcoin_rs_rpc::zmq::ZmqTopic::RawTx,
+                bitcoin_rs_serving::zmq::ZmqTopic::HashTx,
+                bitcoin_rs_serving::zmq::ZmqTopic::RawTx,
             ],
             hwm: Some(20),
         },

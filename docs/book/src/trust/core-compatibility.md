@@ -4,7 +4,7 @@ bitcoin-rs claims compatibility one surface at a time. Consensus validity, the R
 
 ## What a compatibility claim contains
 
-A claim names three things: the reference identity, the evidence type, and the scope it covers. The released reference is Bitcoin Core 31.1. The file [`crates/rpc/core-compat.toml`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/rpc/core-compat.toml) pins its `bitcoind -version` line and artifact SHA-256. The development kernel oracle is a different identity in the same file and is never treated as the release.
+A claim names three things: the reference identity, the evidence type, and the scope it covers. The released reference is Bitcoin Core 31.1. The file [`crates/serving/core-compat.toml`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/serving/core-compat.toml) pins its `bitcoind -version` line and artifact SHA-256. The development kernel oracle is a different identity in the same file and is never treated as the release.
 
 Two evidence axes exist. In-tree differential evidence compares native code with Core vectors, `libbitcoinkernel`, or a pinned Core process. External evidence means an unmodified program used the public P2P, RPC, REST, or ZMQ surface, and the matrix records the run in [`docs/api/ecosystem-compat.toml`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/api/ecosystem-compat.toml). Contracts own the rules: [`CORE-01` to `CORE-07`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/core-differential.md) for live Core comparison and [`ECO-08`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/ecosystem-compatibility.md) for the external matrix.
 
@@ -48,9 +48,9 @@ Read [`VAL-02`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/va
 
 The API surface makes no differentially verified Core method claim at this commit. Read a row's status as the claim it is, not as external proof.
 
-[`REGISTRY`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/rpc/src/registry.rs) owns one status per surface: `Supported`, `Deviation`, `Implemented (unverified)`, `Extension`, `Disabled`, or `Unimplemented`. The generated [`docs/rpc-reference.md`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/rpc-reference.md) renders that table. `Supported` requires `reference.differential_harness = true` in `crates/rpc/core-compat.toml`. The flag is `false` at this commit, so the reference contains no `Supported` row.
+[`REGISTRY`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/serving/src/registry.rs) owns one status per surface: `Supported`, `Deviation`, `Implemented (unverified)`, `Extension`, `Disabled`, or `Unimplemented`. The generated [`docs/rpc-reference.md`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/rpc-reference.md) renders that table. `Supported` requires `reference.differential_harness = true` in `crates/serving/core-compat.toml`. The flag is `false` at this commit, so the reference contains no `Supported` row.
 
-External evidence is a separate axis. In [`docs/api/ecosystem-compat.toml`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/api/ecosystem-compat.toml), JSON-RPC, REST, ZMQ, and Esplora are `implemented`, which means in-tree tests only. The externally verified rows are P2P surfaces, not the application APIs. `crates/rpc/core-compat.toml` pins the Core identity; the registry states the API shape; the ecosystem matrix records which real consumers ran. None substitutes for another.
+External evidence is a separate axis. In [`docs/api/ecosystem-compat.toml`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/api/ecosystem-compat.toml), JSON-RPC, REST, ZMQ, and Esplora are `implemented`, which means in-tree tests only. The externally verified rows are P2P surfaces, not the application APIs. `crates/serving/core-compat.toml` pins the Core identity; the registry states the API shape; the ecosystem matrix records which real consumers ran. None substitutes for another.
 
 The chapters [RPC](../use/rpc.md) and [REST and Esplora](../use/rest-esplora.md) describe the surface. They do not upgrade its status.
 

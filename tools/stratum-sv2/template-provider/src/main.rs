@@ -1,7 +1,7 @@
 mod server;
 mod template;
 
-use bitcoin_rs_mining::{
+use bitcoin_rs_serving::mining::{
     BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, Candidate, MiningControlError,
     TemplateId,
 };

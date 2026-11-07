@@ -80,8 +80,8 @@ clippy_profiles() {
 }
 
 test_crates_profiles() {
-  profile "test: bitcoin-rs-rpc (silent-payments adapter)" \
-    cargo_test -p bitcoin-rs-rpc --features silent-payments --lib handlers::silent_payments
+  profile "test: bitcoin-rs-serving (silent-payments adapter)" \
+    cargo_test -p bitcoin-rs-serving --features silent-payments --lib handlers::silent_payments
   profile "test: bitcoin-rs (silent-payments process)" \
     cargo_test -p bitcoin-rs --no-default-features --features silent-payments --test suite silent_payments::
   profile "test: bitcoin-rs (certified inputs process)" \
@@ -114,8 +114,8 @@ test_crates_profiles() {
     cargo_test -p bitcoin-rs-node \
       --no-default-features --features zmq
   # Isolated so node's default zmq feature cannot unify this package on.
-  profile "test: bitcoin-rs-rpc (no default features)" \
-    cargo_test -p bitcoin-rs-rpc --no-default-features
+  profile "test: bitcoin-rs-serving (no default features)" \
+    cargo_test -p bitcoin-rs-serving --no-default-features
 }
 
 test_binary_profiles() {
@@ -132,12 +132,12 @@ test_workspace_profiles() {
     cargo_test --workspace \
       --exclude bitcoin-rs-consensus --exclude bitcoin-rs-execution \
       --exclude bitcoin-rs-wire \
-      --exclude bitcoin-rs-node --exclude bitcoin-rs-rpc \
+      --exclude bitcoin-rs-node --exclude bitcoin-rs-serving \
       --exclude bitcoin-rs-snapshot
   # The RPC package owns libzmq. Its feature-gated process subscriber must
   # run explicitly so feature resolution cannot turn it into a zero-test
   # binary. Build and identify the daemon with the same default zmq profile.
-  profile "test: bitcoin-rs-rpc (zmq, process notifications)" test_rpc_reorg_notifications
+  profile "test: bitcoin-rs-serving (zmq, process notifications)" test_rpc_reorg_notifications
 }
 
 test_rpc_reorg_notifications() {
@@ -147,7 +147,7 @@ test_rpc_reorg_notifications() {
     target_dir="$PWD/$target_dir"
   fi
   BITCOIN_RS_NODE="$target_dir/debug/bitcoin-rs" \
-    cargo_test -p bitcoin-rs-rpc --features zmq
+    cargo_test -p bitcoin-rs-serving --features zmq
 }
 
 # Proof lanes. `all` does not call this stage: CI runners carry no Kani,

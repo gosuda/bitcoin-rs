@@ -6,8 +6,8 @@ use bitcoin_rs_execution::ApplyError;
 use bitcoin_rs_execution::chain::ChainError;
 use bitcoin_rs_execution::chain::ChainWork;
 use bitcoin_rs_execution::chain::NodeId;
-use bitcoin_rs_mining::BlockValidationResult;
-use bitcoin_rs_mining::MiningControlError;
+use bitcoin_rs_serving::mining::BlockValidationResult;
+use bitcoin_rs_serving::mining::MiningControlError;
 use compact_str::CompactString;
 
 #[test]

@@ -57,13 +57,7 @@ std::thread_local! {
     pub(crate) static SNAPSHOT_INSERTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UtxoCoin {
-    pub outpoint: OutPoint,
-    pub txout: TxOut,
-    pub coinbase: bool,
-    pub height: u32,
-}
+pub use bitcoin_rs_consensus::UtxoCoin;
 
 #[derive(Debug, Default)]
 pub struct UtxoScan {
@@ -538,6 +532,21 @@ impl UtxoReader {
     #[must_use]
     pub fn fixture_set(&self) -> Arc<UtxoSet> {
         Arc::clone(&self.set)
+    }
+}
+
+impl bitcoin_rs_consensus::CoinRead for UtxoReader {
+    fn get_entry(&self, op: &OutPoint) -> Option<UtxoCoin> {
+        self.get_entry(op)
+    }
+    fn has_live_outputs_for_txid(&self, txid: &Hash256) -> bool {
+        self.has_live_outputs_for_txid(txid)
+    }
+    fn scan_progress(&self) -> Option<u8> {
+        self.scan_progress()
+    }
+    fn abort_scan(&self) -> bool {
+        self.abort_scan()
     }
 }
 
