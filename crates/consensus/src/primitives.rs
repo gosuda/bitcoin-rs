@@ -25,13 +25,16 @@ pub mod units;
 pub mod varint;
 pub mod version;
 
-pub use block::{Block, BlockBodyMetadata, BlockPayload};
+pub use block::{Block, BlockBodyMetadata, BlockImage, BlockPayload, TransactionView};
 pub use encode::{
     ConsensusDecode, ConsensusEncode, DecodeError, Sink, consensus_bytes, deserialize,
 };
 pub use hash::{Hash256, HashError};
 pub use header::Header;
 pub use ids::{BlockHash, Txid, Wtxid};
+pub use layout::{
+    BlockLayout, ByteSpan, InputLayout, OutputLayout, TxIdentity, TxLayout, WitnessItemLayout,
+};
 pub use network::{AssumeUtxoData, ChainTxData, HeadersSyncParams, Network};
 pub use outpoint::OutPoint;
 pub use script::{Script, Witness, WitnessItems};

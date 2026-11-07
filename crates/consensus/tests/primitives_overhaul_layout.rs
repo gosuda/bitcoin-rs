@@ -127,10 +127,10 @@ fn segwit_flag_rules_hold() {
     let golden = read_fixture(481_824);
     let parsed = ParsedBlock::parse_exact(&golden).expect("segwit golden block parses");
     assert!(
-        parsed
-            .transactions()
+        parsed.transactions().iter().any(|tx| tx
+            .inputs()
             .iter()
-            .any(|tx| tx.inputs().iter().any(|input| input.witness_items() > 0)),
+            .any(|input| input.witness_item_count() > 0)),
         "height 481824 carries witness data"
     );
 

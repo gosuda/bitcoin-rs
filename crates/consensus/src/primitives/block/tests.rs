@@ -459,3 +459,104 @@ fn payload_witness_identity_is_byte_exact_not_txid_only() {
     assert_eq!(left_payload.block(), &left);
     assert_eq!(right_payload.block(), &right);
 }
+
+// BLK-02, BLK-03
+#[test]
+fn block_image_from_raw_rejects_malformed_and_truncated_bytes() -> Result<()> {
+    use super::BlockImage;
+
+    assert!(matches!(
+        BlockImage::from_raw(bytes::Bytes::new()),
+        Err(DecodeError::EndOfData { .. })
+    ));
+
+    assert!(matches!(
+        BlockImage::from_raw(bytes::Bytes::from(vec![0u8; 79])),
+        Err(DecodeError::EndOfData { .. })
+    ));
+
+    let mut trailing = read_test_fixture("0.bin")?;
+    trailing.push(0xEE);
+    assert!(matches!(
+        BlockImage::from_raw(bytes::Bytes::from(trailing)),
+        Err(DecodeError::TrailingBytes { remaining: 1 })
+    ));
+
+    let golden = read_test_fixture("481824.bin")?;
+    let mut corrupted_flag = golden.clone();
+    let mut replaced = false;
+    let mut cursor = 81;
+    while cursor + 1 < corrupted_flag.len() {
+        if corrupted_flag[cursor] == 0x00 && corrupted_flag[cursor + 1] == 0x01 {
+            corrupted_flag[cursor + 1] = 0x02;
+            replaced = true;
+            break;
+        }
+        cursor += 1;
+    }
+    assert!(replaced);
+    assert!(matches!(
+        BlockImage::from_raw(bytes::Bytes::from(corrupted_flag)),
+        Err(DecodeError::InvalidSegwitFlag { got: 2 })
+    ));
+
+    Ok(())
+}
+
+// BLK-02, BLK-03
+#[test]
+fn block_image_from_prefix_consumes_exact_prefix() -> Result<()> {
+    use super::BlockImage;
+
+    let mut bytes = read_test_fixture("0.bin")?;
+    let expected_len = bytes.len();
+    bytes.extend_from_slice(&[0x11, 0x22, 0x33]);
+
+    let (image, consumed) = BlockImage::from_prefix(bytes::Bytes::from(bytes.clone()))?;
+    assert_eq!(consumed, expected_len);
+    assert_eq!(image.bytes().len(), expected_len);
+    assert_eq!(image.bytes().as_ref(), &bytes[..expected_len]);
+    Ok(())
+}
+
+// BLK-02, BLK-05
+#[test]
+fn block_image_from_local_roundtrips_cleanly() -> Result<()> {
+    use super::BlockImage;
+
+    let block = block_with_tx(witness_tx(
+        vec![vec![0x21_u8; 64], vec![0x03_u8; 33]].into(),
+    ));
+    let image = BlockImage::from_local(block.clone());
+
+    let expected_bytes = crate::primitives::encode::consensus_bytes(&block);
+    assert_eq!(image.bytes().as_ref(), expected_bytes.as_slice());
+    assert_eq!(image.block_hash(), block.block_hash());
+    assert_eq!(image.tx_count(), 1);
+    assert_eq!(image.materialize(), block);
+    assert!(image.has_witness());
+    Ok(())
+}
+
+// BLK-05, BLK-06
+#[test]
+fn block_image_identities_and_views_distinct_domains() -> Result<()> {
+    use super::BlockImage;
+
+    let legacy_block = block_with_tx(witness_tx(crate::primitives::Witness::new()));
+    let legacy_image = BlockImage::from_local(legacy_block.clone());
+    assert!(!legacy_image.has_witness());
+    assert_eq!(legacy_image.identity(0).wtxid(), None);
+    assert_eq!(legacy_image.tx(0).wtxid().0, legacy_image.tx(0).txid().0);
+
+    let segwit_block = block_with_tx(witness_tx(vec![vec![0xaa_u8; 32]].into()));
+    let segwit_image = BlockImage::from_local(segwit_block.clone());
+    assert!(segwit_image.has_witness());
+    assert!(segwit_image.identity(0).wtxid().is_some());
+    assert_eq!(
+        segwit_image.identity(0).wtxid(),
+        Some(segwit_image.tx(0).wtxid())
+    );
+    assert_ne!(segwit_image.tx(0).wtxid().0, segwit_image.tx(0).txid().0);
+    Ok(())
+}

@@ -19,6 +19,8 @@ pub(crate) enum TestError {
     },
     #[error("missing expected value: {0}")]
     Missing(&'static str),
+    #[error("integer conversion: {0}")]
+    TryFromInt(#[from] std::num::TryFromIntError),
 }
 
 impl From<&'static str> for TestError {

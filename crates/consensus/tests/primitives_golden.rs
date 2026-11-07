@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use crate::support::primitives::TestError;
 use bitcoin_rs_consensus::primitives::{
-    Block as PrimitiveBlock, BlockHash, Txid, Wtxid, deserialize,
+    Block as PrimitiveBlock, BlockHash, BlockImage, Txid, Wtxid, deserialize,
 };
 const HEIGHTS: &[(u32, &str)] = &[
     (
@@ -119,6 +119,184 @@ fn golden_blocks_decode_and_hash_to_blockstream_txids() -> Result<(), TestError>
             bitcoin_rs_consensus::primitives::consensus_bytes(&block),
             block_bytes,
             "height {height} re-encode"
+        );
+    }
+    Ok(())
+}
+// BLK-02, BLK-03, BLK-05, BLK-06
+#[test]
+fn golden_blocks_image_identities_and_views_match_core_vectors() -> Result<(), TestError> {
+    for (height, expected_hash) in HEIGHTS {
+        let block_bytes = read_fixture(*height, "bin")?;
+        let txid_text = String::from_utf8(read_fixture(*height, "txids.txt")?)?;
+        let expected_txids = parse_txids(&txid_text)?;
+        let wtxid_text = String::from_utf8(read_fixture(*height, "wtxids.txt")?)?;
+        let expected_wtxids = parse_wtxids(&wtxid_text)?;
+        let expected_block_hash = expected_hash.parse::<BlockHash>()?;
+
+        let raw = bytes::Bytes::from(block_bytes.clone());
+        let image = BlockImage::from_raw(raw)?;
+
+        assert_eq!(
+            image.block_hash(),
+            expected_block_hash,
+            "height {height} block hash"
+        );
+        assert_eq!(
+            image.tx_count(),
+            expected_txids.len(),
+            "height {height} tx count"
+        );
+        assert_eq!(
+            image.identities().len(),
+            expected_txids.len(),
+            "height {height} identities count"
+        );
+
+        let decoded = deserialize::<PrimitiveBlock>(&block_bytes)?;
+        for index in 0..image.tx_count() {
+            let identity = image.identity(index);
+            let tx_view = image.tx(index);
+            let expected_txid = expected_txids[index];
+            let expected_wtxid = expected_wtxids[index];
+            let decoded_tx = &decoded.txs[index];
+
+            assert_eq!(
+                identity.txid(),
+                expected_txid,
+                "height {height} tx index {index}: identity txid"
+            );
+            assert_eq!(
+                tx_view.txid(),
+                expected_txid,
+                "height {height} tx index {index}: tx_view txid"
+            );
+
+            if !tx_view.has_witness() {
+                assert_eq!(
+                    identity.wtxid(),
+                    None,
+                    "height {height} tx index {index}: legacy identity wtxid must be None"
+                );
+                assert_eq!(
+                    tx_view.wtxid().0,
+                    tx_view.txid().0,
+                    "height {height} tx index {index}: legacy tx_view wtxid must equal txid"
+                );
+            } else {
+                assert_eq!(
+                    identity.wtxid(),
+                    Some(expected_wtxid),
+                    "height {height} tx index {index}: segwit identity wtxid"
+                );
+            }
+            assert_eq!(
+                tx_view.wtxid(),
+                expected_wtxid,
+                "height {height} tx index {index}: tx_view wtxid"
+            );
+
+            assert_eq!(
+                usize::try_from(identity.total_size())?,
+                decoded_tx.total_size(),
+                "height {height} tx index {index}: total size"
+            );
+            assert_eq!(
+                usize::try_from(identity.base_size())?,
+                decoded_tx.base_size(),
+                "height {height} tx index {index}: base size"
+            );
+            assert_eq!(
+                tx_view.total_size(),
+                decoded_tx.total_size(),
+                "height {height} tx index {index}: view total size"
+            );
+            assert_eq!(
+                tx_view.base_size(),
+                decoded_tx.base_size(),
+                "height {height} tx index {index}: view base size"
+            );
+
+            assert_eq!(
+                tx_view.version(),
+                decoded_tx.version,
+                "height {height} tx index {index}: version"
+            );
+            assert_eq!(
+                tx_view.lock_time(),
+                decoded_tx.lock_time,
+                "height {height} tx index {index}: lock_time"
+            );
+            assert_eq!(
+                tx_view.is_coinbase(),
+                decoded_tx.is_coinbase(),
+                "height {height} tx index {index}: is_coinbase"
+            );
+            assert_eq!(
+                tx_view.input_count(),
+                decoded_tx.inputs.len(),
+                "height {height} tx index {index}: input_count"
+            );
+            assert_eq!(
+                tx_view.output_count(),
+                decoded_tx.outputs.len(),
+                "height {height} tx index {index}: output_count"
+            );
+
+            for (in_idx, expected_in) in decoded_tx.inputs.iter().enumerate() {
+                assert_eq!(
+                    tx_view.input_outpoint(in_idx),
+                    expected_in.previous_output,
+                    "height {height} tx {index} input {in_idx}: outpoint"
+                );
+                assert_eq!(
+                    tx_view.input_script_sig(in_idx),
+                    expected_in.script_sig.as_bytes(),
+                    "height {height} tx {index} input {in_idx}: script_sig"
+                );
+                assert_eq!(
+                    tx_view.input_sequence(in_idx),
+                    expected_in.sequence,
+                    "height {height} tx {index} input {in_idx}: sequence"
+                );
+                assert_eq!(
+                    tx_view.witness_item_count(in_idx),
+                    expected_in.witness.len(),
+                    "height {height} tx {index} input {in_idx}: witness count"
+                );
+                for (item_idx, expected_item) in expected_in.witness.iter().enumerate() {
+                    assert_eq!(
+                        tx_view.witness_item(in_idx, item_idx),
+                        expected_item,
+                        "height {height} tx {index} input {in_idx} item {item_idx}"
+                    );
+                }
+            }
+
+            for (out_idx, expected_out) in decoded_tx.outputs.iter().enumerate() {
+                assert_eq!(
+                    tx_view.output_value(out_idx),
+                    expected_out.value,
+                    "height {height} tx {index} output {out_idx}: value"
+                );
+                assert_eq!(
+                    tx_view.output_script(out_idx),
+                    expected_out.script_pubkey.as_bytes(),
+                    "height {height} tx {index} output {out_idx}: script"
+                );
+            }
+
+            let materialized_tx = tx_view.materialize();
+            assert_eq!(
+                &materialized_tx, decoded_tx,
+                "height {height} tx {index}: materialized tx"
+            );
+        }
+
+        let materialized_block = image.materialize();
+        assert_eq!(
+            materialized_block, decoded,
+            "height {height} materialized block"
         );
     }
     Ok(())
