@@ -13,5 +13,6 @@ mod full_revalidation;
 mod historical_checkpoint;
 mod large_row;
 mod pool_ledger;
+mod rebuild_index_test;
 mod suffix_checkpoint;
 mod validation;

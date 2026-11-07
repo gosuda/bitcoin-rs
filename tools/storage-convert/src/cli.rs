@@ -1,23 +1,26 @@
 use bitcoin_rs_storage::StorageBackend;
 use clap::Parser;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::ConvertError;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "bitcoin-rs-storage-convert",
-    about = "Offline datadir storage migration and format conversion tool"
+    about = "Offline datadir storage migration and format conversion tool",
+    subcommand_negates_reqs = true
 )]
 pub(crate) struct CliArgs {
+    #[command(subcommand)]
+    pub(crate) command: Option<Command>,
+
     /// Path to the source datadir.
-    #[arg(long = "from", value_name = "DIR")]
-    pub(crate) from: PathBuf,
+    #[arg(long = "from", value_name = "DIR", required = true)]
+    pub(crate) from: Option<PathBuf>,
 
     /// Path to the destination datadir.
-    #[arg(long = "to", value_name = "DIR")]
-    pub(crate) to: PathBuf,
-
+    #[arg(long = "to", value_name = "DIR", required = true)]
+    pub(crate) to: Option<PathBuf>,
     /// Target storage engine (rocksdb, surrealkv, mdbx).
     #[arg(long = "to-engine", value_name = "ENGINE", default_value = "rocksdb")]
     pub(crate) to_engine: String,
@@ -31,6 +34,14 @@ pub(crate) struct CliArgs {
     pub(crate) pool_to: Option<PathBuf>,
 }
 
+#[derive(clap::Subcommand, Debug)]
+pub(crate) enum Command {
+    /// Rebuild index into an unpublished generation and publish.
+    RebuildIndex {
+        #[arg(long = "datadir", value_name = "DIR")]
+        datadir: PathBuf,
+    },
+}
 impl CliArgs {
     pub(crate) fn target_backend(&self) -> Result<StorageBackend, ConvertError> {
         let backend = match self.to_engine.trim().to_ascii_lowercase().as_str() {
@@ -96,5 +107,17 @@ impl CliArgs {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn source_path(&self) -> Result<&Path, ConvertError> {
+        self.from.as_deref().ok_or_else(|| {
+            ConvertError::InvalidOperation("missing required argument --from".into())
+        })
+    }
+
+    pub(crate) fn destination_path(&self) -> Result<&Path, ConvertError> {
+        self.to
+            .as_deref()
+            .ok_or_else(|| ConvertError::InvalidOperation("missing required argument --to".into()))
     }
 }

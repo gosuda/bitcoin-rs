@@ -80,9 +80,10 @@ pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertE
     let mut namespaces_report = Vec::new();
 
     let node_namespaces = [("chainstate", "chainstate"), ("txindex", "txindex")];
+    let to_path = args.destination_path()?;
     for &(ns_name, rel_path) in &node_namespaces {
-        let dst_path = args.to.join(rel_path);
-        let scratch_base = args.to.join(".convert-src");
+        let dst_path = to_path.join(rel_path);
+        let scratch_base = to_path.join(".convert-src");
         let scratch_path = scratch_base.join(rel_path);
 
         let paths = NamespacePaths {
@@ -1164,13 +1165,14 @@ fn run_step_3_to_4(
     target_engine: StorageBackend,
 ) -> Result<ConversionReport, ConvertError> {
     let (checkpoint_dir, _reference, manifest) = check_complete_checkpoint(&roots.from_dir)?;
+    let to_path = args.destination_path()?;
 
     let mut namespaces_report = Vec::new();
 
     let node_namespaces = [("chainstate", "chainstate"), ("txindex", "txindex")];
     for &(ns_name, rel_path) in &node_namespaces {
-        let dst_path = args.to.join(rel_path);
-        let scratch_base = args.to.join(".convert-src");
+        let dst_path = to_path.join(rel_path);
+        let scratch_base = to_path.join(".convert-src");
         let scratch_path = scratch_base.join(rel_path);
 
         let paths = NamespacePaths {
@@ -1216,9 +1218,9 @@ fn run_step_3_to_4(
         false,
     )?;
 
-    convert_historical_checkpoints(&roots.from_dir, &args.to, target_engine)?;
+    convert_historical_checkpoints(&roots.from_dir, to_path, target_engine)?;
 
-    let cs_dst_path = args.to.join("chainstate");
+    let cs_dst_path = to_path.join("chainstate");
     let dest_store = open_destination_store(&cs_dst_path, target_engine)?;
 
     let utxo_file_obj =
@@ -1258,7 +1260,7 @@ fn run_step_3_to_4(
     }
     sorted_rows.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let scratch_ingest_path = args.to.join(".convert-scratch");
+    let scratch_ingest_path = to_path.join(".convert-scratch");
     std::fs::create_dir_all(&scratch_ingest_path)?;
     dest_store.ingest_sorted(
         ColumnFamily::Coins,
@@ -1286,7 +1288,7 @@ fn run_step_3_to_4(
         )));
     }
 
-    let flat_blocks_store = FlatFileBlockStore::open(&args.to)?;
+    let flat_blocks_store = FlatFileBlockStore::open(to_path)?;
 
     let checkpoint_hash = checkpoint_tip_hash(&manifest)?;
     let mut chain: Vec<(u32, Hash256)> = Vec::new();
@@ -1353,13 +1355,13 @@ fn run_step_3_to_4(
         durable_head.height == checkpoint_height && durable_head.tip == checkpoint_hash;
     let engine = open_destination_store(&cs_dst_path, target_engine)?;
     if equal_head {
-        publish_epoch4_checkpoint(&checkpoint_dir, &manifest, &args.to, engine.as_ref())?;
+        publish_epoch4_checkpoint(&checkpoint_dir, &manifest, to_path, engine.as_ref())?;
     } else {
         final_stats.tx_count = durable_head.chain_tx_count;
         publish_converted_checkpoint(
             &roots.from_dir,
             &roots.to_dir,
-            &args.to,
+            to_path,
             checkpoint_network(&manifest.network)?,
             ConvertedCheckpoint {
                 headers: &suffix_headers,

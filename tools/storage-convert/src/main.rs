@@ -2,6 +2,7 @@ mod cli;
 mod convert;
 mod error;
 mod fs_util;
+mod rebuild_index;
 mod report;
 mod source;
 mod target;
@@ -15,6 +16,16 @@ use convert::run_conversion;
 
 fn main() -> ExitCode {
     let args = CliArgs::parse();
+
+    if let Some(cli::Command::RebuildIndex { datadir }) = &args.command {
+        match rebuild_index::rebuild_index_subcommand(datadir) {
+            Ok(()) => return ExitCode::SUCCESS,
+            Err(err) => {
+                let _ = writeln!(io::stderr().lock(), "bitcoin-rs-storage-convert: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
 
     match run_conversion(args) {
         Ok(report) => match sonic_rs::to_string_pretty(&report) {
