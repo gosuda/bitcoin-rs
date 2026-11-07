@@ -617,7 +617,7 @@ fn journal_is_never_copied(state: &State) -> bool {
 }
 
 fn is_terminal_coherent(state: &State) -> bool {
-    (state.phase == Phase::Terminal) == (state.outcome != Outcome::Pending)
+    (state.phase == Phase::Terminal) == !matches!(state.outcome, Outcome::Pending)
 }
 
 fn is_verified_prefix(dest: &[u8; NUM_CELLS], src: &[u8; NUM_CELLS], verify_cursor: u8) -> bool {
@@ -827,8 +827,8 @@ fn is_conversion_coherent(state: &State) -> bool {
             && !state.observed_final_sync;
         return clean_dest
             && match state.phase {
-                Phase::Admission => state.outcome == Outcome::Pending,
-                Phase::Terminal => state.outcome == Outcome::Refused,
+                Phase::Admission => matches!(state.outcome, Outcome::Pending),
+                Phase::Terminal => matches!(state.outcome, Outcome::Refused),
                 _ => false,
             };
     }

@@ -249,7 +249,7 @@ fn success_implies_final_sync() {
     kani::assume(safety(&state));
     let action = any_action();
     let next = step(&state, action);
-    if next.outcome == Outcome::Success {
+    if matches!(next.outcome, Outcome::Success) {
         match next.inputs.mode {
             Mode::OfflineConversion => {
                 assert_eq!(next.dest_marker, Some(MarkerClassification::CurrentEpoch4));
@@ -278,7 +278,7 @@ fn refusal_destination_safety() {
     kani::assume(safety(&state));
     let action = any_action();
     let next = step(&state, action);
-    if next.outcome == Outcome::Refused {
+    if matches!(next.outcome, Outcome::Refused) {
         assert_eq!(next.source_marker, next.inputs.source_marker);
         assert!(next.dest_marker.is_none());
         assert_eq!(next.copy_cursor, 0);
@@ -295,7 +295,7 @@ fn missing_checkpoint_fails_closed_before_writes() {
     kani::assume(safety(&state));
     let action = any_action();
     let next = step(&state, action);
-    if next.outcome == Outcome::RefusedNoCheckpoint {
+    if matches!(next.outcome, Outcome::RefusedNoCheckpoint) {
         assert!(!next.inputs.checkpoint_complete);
         assert!(next.source_marker.is_convertible());
         assert!(next.dest_marker.is_none());
