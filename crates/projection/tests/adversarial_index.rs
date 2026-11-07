@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bitcoin_rs_consensus::primitives::{Hash256, encode};
-use bitcoin_rs_index::types::{ScriptHash, ScriptHashRow, TxPosition};
-use bitcoin_rs_index::{
+use bitcoin_rs_projection::types::{ScriptHash, ScriptHashRow, TxPosition};
+use bitcoin_rs_projection::{
     ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexReader, IndexWatermark, IndexWriter,
     Indexer, PreparedBatch, PreparedBatchLimits, SpentCoinScripts,
 };

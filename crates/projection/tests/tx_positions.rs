@@ -8,8 +8,8 @@ use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize,
 };
-use bitcoin_rs_index::types::{TX_POSITION_SIZE, TxPosition, TxPositionValue, U24_MAX};
-use bitcoin_rs_index::{
+use bitcoin_rs_projection::types::{TX_POSITION_SIZE, TxPosition, TxPositionValue, U24_MAX};
+use bitcoin_rs_projection::{
     IndexCapabilities, IndexWriter, PreparedBatch, PreparedBatchLimits, ScriptHash,
     SpentCoinScripts,
 };
@@ -135,12 +135,12 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
         .find(|(key, _)| key.starts_with(&target.prefix()))
         .expect("funding row for the target script");
 
-    let occurrences = bitcoin_rs_index::types::ScriptHistoryOccurrence::decode_all(value)
+    let occurrences = bitcoin_rs_projection::types::ScriptHistoryOccurrence::decode_all(value)
         .expect("row value decodes");
     let funded: Vec<_> = occurrences
         .iter()
         .filter(|occurrence| {
-            occurrence.flags & bitcoin_rs_index::types::ScriptHistoryOccurrence::FUNDING != 0
+            occurrence.flags & bitcoin_rs_projection::types::ScriptHistoryOccurrence::FUNDING != 0
         })
         .collect();
     assert_eq!(funded.len(), 2, "two transactions funded this script");

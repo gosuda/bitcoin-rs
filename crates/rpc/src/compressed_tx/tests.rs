@@ -1069,26 +1069,30 @@ fn production_resolver_resolves_through_block_bodies() {
     }
 
     struct StubTxIndex(Txid);
-    impl bitcoin_rs_index::DerivedIndexQuery for StubTxIndex {
-        fn transaction(&self, _txid: &Txid) -> Result<Option<Tx>, bitcoin_rs_index::TxQueryError> {
+    impl bitcoin_rs_projection::DerivedIndexQuery for StubTxIndex {
+        fn transaction(
+            &self,
+            _txid: &Txid,
+        ) -> Result<Option<Tx>, bitcoin_rs_projection::TxQueryError> {
             Ok(None)
         }
         fn outpoint_value(
             &self,
             _outpoint: &OutPoint,
-        ) -> Result<Option<u64>, bitcoin_rs_index::TxQueryError> {
+        ) -> Result<Option<u64>, bitcoin_rs_projection::TxQueryError> {
             Ok(None)
         }
         fn transaction_height(
             &self,
             txid: &Txid,
-        ) -> Result<Option<u32>, bitcoin_rs_index::TxQueryError> {
+        ) -> Result<Option<u32>, bitcoin_rs_projection::TxQueryError> {
             Ok((self.0 == *txid).then_some(100))
         }
         fn index_info(
             &self,
-        ) -> Result<bitcoin_rs_index::DerivedIndexInfo, bitcoin_rs_index::TxQueryError> {
-            Ok(bitcoin_rs_index::DerivedIndexInfo {
+        ) -> Result<bitcoin_rs_projection::DerivedIndexInfo, bitcoin_rs_projection::TxQueryError>
+        {
+            Ok(bitcoin_rs_projection::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 100,
             })
@@ -1124,7 +1128,7 @@ fn production_resolver_resolves_through_block_bodies() {
     ctx.chain.block_body_source = Some(Arc::new(StubBody(body)));
     ctx.indexes.derived_index = Some(Arc::new(StubTxIndex(prev_tx.txid())));
     ctx.chain
-        .add_block(bitcoin_rs_index::block_log::BlockRecord {
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord {
             hash: bitcoin_rs_consensus::primitives::BlockHash::from(
                 bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[9_u8; 32]),
             ),
@@ -1585,26 +1589,30 @@ fn production_resolver_clones_only_the_requested_output() {
     }
 
     struct StubTxIndex(Txid);
-    impl bitcoin_rs_index::DerivedIndexQuery for StubTxIndex {
-        fn transaction(&self, _txid: &Txid) -> Result<Option<Tx>, bitcoin_rs_index::TxQueryError> {
+    impl bitcoin_rs_projection::DerivedIndexQuery for StubTxIndex {
+        fn transaction(
+            &self,
+            _txid: &Txid,
+        ) -> Result<Option<Tx>, bitcoin_rs_projection::TxQueryError> {
             Ok(None)
         }
         fn outpoint_value(
             &self,
             _outpoint: &OutPoint,
-        ) -> Result<Option<u64>, bitcoin_rs_index::TxQueryError> {
+        ) -> Result<Option<u64>, bitcoin_rs_projection::TxQueryError> {
             Ok(None)
         }
         fn transaction_height(
             &self,
             txid: &Txid,
-        ) -> Result<Option<u32>, bitcoin_rs_index::TxQueryError> {
+        ) -> Result<Option<u32>, bitcoin_rs_projection::TxQueryError> {
             Ok((self.0 == *txid).then_some(100))
         }
         fn index_info(
             &self,
-        ) -> Result<bitcoin_rs_index::DerivedIndexInfo, bitcoin_rs_index::TxQueryError> {
-            Ok(bitcoin_rs_index::DerivedIndexInfo {
+        ) -> Result<bitcoin_rs_projection::DerivedIndexInfo, bitcoin_rs_projection::TxQueryError>
+        {
+            Ok(bitcoin_rs_projection::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 100,
             })
@@ -1645,7 +1653,7 @@ fn production_resolver_clones_only_the_requested_output() {
     ctx.chain.block_body_source = Some(Arc::new(StubBody(body)));
     ctx.indexes.derived_index = Some(Arc::new(StubTxIndex(txid)));
     ctx.chain
-        .add_block(bitcoin_rs_index::block_log::BlockRecord {
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord {
             hash: bitcoin_rs_consensus::primitives::BlockHash::from(
                 bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[9_u8; 32]),
             ),
@@ -1741,7 +1749,7 @@ fn cycling_fixture(
             height,
         ));
         ctx.chain
-            .add_block(bitcoin_rs_index::block_log::BlockRecord {
+            .add_block(bitcoin_rs_projection::block_log::BlockRecord {
                 hash: bitcoin_rs_consensus::primitives::BlockHash::from(
                     bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
                         &[u8::try_from(height).unwrap(); 32],

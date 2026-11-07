@@ -1,6 +1,6 @@
 /-
 Safety invariants of the index open helper ownership and lifecycle machine
-(Rust owner `crates/index/src/runtime/startup/open_model.rs`).
+(Rust owner `crates/projection/src/runtime/startup/open_model.rs`).
 
 Anchors: Tony Hoare, Edsger W. Dijkstra
 

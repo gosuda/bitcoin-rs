@@ -1,6 +1,6 @@
 use crate::support::{TestError, common};
 
-use bitcoin_rs_index::IndexReader;
+use bitcoin_rs_projection::IndexReader;
 use common::MemoryStore;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -15,7 +15,7 @@ use bitcoin::{
     TxMerkleNode, TxOut, Txid, Witness,
 };
 use bitcoin_rs_consensus::primitives::{Hash256, OutPoint as NativeOutPoint, Txid as NativeTxid};
-use bitcoin_rs_index::{
+use bitcoin_rs_projection::{
     ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexWatermark,
     IndexWatermarks, IndexWriter, MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits,
     ScriptHash, ScriptLiveRow, SpentCoinScripts,
@@ -665,7 +665,7 @@ struct NoSpend;
 
 static NO_SPEND_SCRIPT: [u8; 2] = [0x51, 0x01];
 
-impl bitcoin_rs_index::SpentCoinScripts for NoSpend {
+impl bitcoin_rs_projection::SpentCoinScripts for NoSpend {
     fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
         Some(NO_SPEND_SCRIPT.as_slice())
     }

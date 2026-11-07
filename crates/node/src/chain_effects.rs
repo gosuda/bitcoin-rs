@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use bitcoin_rs_consensus::primitives::{Block, BlockHash, BlockPayload, Hash256};
-use bitcoin_rs_index::block_log::{BlockLog, BlockRecord};
+use bitcoin_rs_projection::block_log::{BlockLog, BlockRecord};
 use parking_lot::RwLock;
 
 use bitcoin_rs_execution::{ConnectOutcome, DisconnectOutcome};
-use bitcoin_rs_index::runtime::DerivedIndexRuntime;
 use bitcoin_rs_mempool::AdmissionOrigin;
 use bitcoin_rs_mempool::ChainChangeGuard;
 use bitcoin_rs_mempool::MempoolGateway;
 use bitcoin_rs_mempool::MutationResult;
+use bitcoin_rs_projection::runtime::DerivedIndexRuntime;
 use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
 
 #[derive(Debug, thiserror::Error)]
@@ -97,8 +97,8 @@ impl ChainFollowers {
     }
 
     #[must_use]
-    pub fn block_log_reader(&self) -> bitcoin_rs_index::BlockLogReader {
-        bitcoin_rs_index::BlockLogReader::new(Arc::clone(&self.blocks))
+    pub fn block_log_reader(&self) -> bitcoin_rs_projection::BlockLogReader {
+        bitcoin_rs_projection::BlockLogReader::new(Arc::clone(&self.blocks))
     }
 
     #[cfg(test)]

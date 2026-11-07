@@ -290,7 +290,7 @@ fn scriptindex_utxo_mode_is_live_only() -> Result<()> {
             .indexes
             .script_index
             .enabled_capabilities(config.indexes.txindex),
-        bitcoin_rs_index::IndexCapabilities::SCRIPT_LIVE
+        bitcoin_rs_projection::IndexCapabilities::SCRIPT_LIVE
     );
     Ok(())
 }

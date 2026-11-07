@@ -8,8 +8,8 @@ use bitcoin_rs_consensus::primitives::{
 use bitcoin_rs_consensus::script::{instructions, is_p2sh, is_p2wsh};
 use bitcoin_rs_consensus::{BlockRuleContext, check_block_body_binding};
 use bitcoin_rs_execution::chain::{TipSnapshot, softfork_state};
-use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
+use bitcoin_rs_projection::ScriptHash;
 
 use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
 use crate::convert::{self};
@@ -373,7 +373,7 @@ impl<'a> Projection<'a> {
 
     pub(super) fn block_value(
         &self,
-        record: &bitcoin_rs_index::block_log::BlockRecord,
+        record: &bitcoin_rs_projection::block_log::BlockRecord,
     ) -> Result<BlockValue, Response> {
         let header = record
             .header_bytes()
@@ -410,8 +410,8 @@ impl<'a> Projection<'a> {
 
     pub(super) fn block_from_record(
         &self,
-        record: bitcoin_rs_index::block_log::BlockRecord,
-    ) -> Result<(bitcoin_rs_index::block_log::BlockRecord, Block), Response> {
+        record: bitcoin_rs_projection::block_log::BlockRecord,
+    ) -> Result<(bitcoin_rs_projection::block_log::BlockRecord, Block), Response> {
         let bytes = self
             .ctx
             .chain
@@ -438,7 +438,7 @@ impl<'a> Projection<'a> {
     pub(super) fn required_block_record(
         &self,
         text_hash: &str,
-    ) -> Result<bitcoin_rs_index::block_log::BlockRecord, Response> {
+    ) -> Result<bitcoin_rs_projection::block_log::BlockRecord, Response> {
         let hash = bitcoin_rs_consensus::primitives::Hash256::from_str(text_hash)
             .map_err(|_| bad_request("block hash must be 64 hex characters"))?;
         self.ctx.chain.block_by_hash(hash).ok_or_else(not_found)

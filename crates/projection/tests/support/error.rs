@@ -1,7 +1,7 @@
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TestError {
     #[error(transparent)]
-    Index(#[from] bitcoin_rs_index::IndexError),
+    Index(#[from] bitcoin_rs_projection::IndexError),
     #[error(transparent)]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(transparent)]
@@ -22,7 +22,7 @@ pub(crate) enum TestError {
     HistoryUnavailable(#[from] bitcoin_rs_storage::utxo::contract::HistoryUnavailable),
     #[cfg(feature = "silent-payments")]
     #[error(transparent)]
-    Tweak(#[from] bitcoin_rs_index::silent_payments::TweakError),
+    Tweak(#[from] bitcoin_rs_projection::silent_payments::TweakError),
     #[error(transparent)]
     ConsensusEncode(#[from] bitcoin::consensus::encode::Error),
     #[error(transparent)]

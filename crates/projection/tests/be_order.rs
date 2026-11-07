@@ -3,7 +3,7 @@ use crate::support::{TestError, common};
 use std::sync::Arc;
 
 use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
-use bitcoin_rs_index::{Indexer, ScriptHash};
+use bitcoin_rs_projection::{Indexer, ScriptHash};
 
 use common::{MemoryStore, put_funding_row, put_spending_row};
 

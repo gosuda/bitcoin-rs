@@ -1,7 +1,7 @@
 use super::*;
 use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxIn};
 use bitcoin_rs_execution::chain::{NodeStatus, TipSnapshot};
-use bitcoin_rs_index::block_log::BlockRecord;
+use bitcoin_rs_projection::block_log::BlockRecord;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait};
 
 fn publish_active_chain(ctx: &Context, headers: &[Header]) -> Vec<Hash256> {

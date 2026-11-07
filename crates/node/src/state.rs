@@ -7,11 +7,11 @@ use bitcoin_rs_execution::chain::TipSnapshot;
 use bitcoin_rs_execution::events::ChainEventPublisher;
 #[cfg(test)]
 pub(crate) use bitcoin_rs_execution::recovery::ResumeSource;
-use bitcoin_rs_index::runtime::DEFAULT_BATCH_LIMITS;
-use bitcoin_rs_index::runtime::OpenDerivedIndex;
-use bitcoin_rs_index::runtime::open_derived_index_store_on_worker;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_mempool::Mempool;
+use bitcoin_rs_projection::runtime::DEFAULT_BATCH_LIMITS;
+use bitcoin_rs_projection::runtime::OpenDerivedIndex;
+use bitcoin_rs_projection::runtime::open_derived_index_store_on_worker;
 use bitcoin_rs_rpc::context::PruneService;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_storage::StorageBackend;
@@ -46,10 +46,10 @@ pub use index::IndexWorkerError;
 
 struct IndexChainCursorSource(Arc<ChainEventPublisher>);
 
-impl bitcoin_rs_index::reconcile::ChainCursorSource for IndexChainCursorSource {
-    fn cursor(&self) -> bitcoin_rs_index::reconcile::ConsumerCursor {
+impl bitcoin_rs_projection::reconcile::ChainCursorSource for IndexChainCursorSource {
+    fn cursor(&self) -> bitcoin_rs_projection::reconcile::ConsumerCursor {
         let snapshot = self.0.snapshot();
-        bitcoin_rs_index::reconcile::ConsumerCursor {
+        bitcoin_rs_projection::reconcile::ConsumerCursor {
             epoch: snapshot.epoch,
             sequence: snapshot.sequence,
             height: snapshot.tip_height,
@@ -191,7 +191,7 @@ impl NodeState {
     }
 
     #[must_use]
-    pub fn block_log_reader(&self) -> bitcoin_rs_index::BlockLogReader {
+    pub fn block_log_reader(&self) -> bitcoin_rs_projection::BlockLogReader {
         self.followers.block_log_reader()
     }
 
@@ -342,17 +342,19 @@ impl NodeState {
 
     pub(crate) fn historical_index_adapter(
         &self,
-    ) -> Option<Arc<bitcoin_rs_index::runtime::DerivedIndexQueryAdapter>> {
+    ) -> Option<Arc<bitcoin_rs_projection::runtime::DerivedIndexQueryAdapter>> {
         self.derived_index.adapter().cloned()
     }
 
     #[must_use]
-    pub fn compact_filter_query(&self) -> Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>> {
+    pub fn compact_filter_query(
+        &self,
+    ) -> Option<Arc<dyn bitcoin_rs_projection::CompactFilterQuery>> {
         if !self.config.indexes.blockfilterindex {
             return None;
         }
         self.derived_index.adapter().map(|adapter| {
-            let query: Arc<dyn bitcoin_rs_index::CompactFilterQuery> = adapter.clone();
+            let query: Arc<dyn bitcoin_rs_projection::CompactFilterQuery> = adapter.clone();
             query
         })
     }
@@ -374,7 +376,9 @@ impl NodeState {
     }
 
     #[must_use]
-    pub fn derived_index_status(&self) -> Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> {
+    pub fn derived_index_status(
+        &self,
+    ) -> Arc<dyn bitcoin_rs_projection::DerivedIndexCapabilitySource> {
         self.derived_index.status()
     }
 
@@ -391,7 +395,7 @@ impl NodeState {
     }
 }
 
-fn derived_index_capabilities(config: &NodeConfig) -> bitcoin_rs_index::IndexCapabilities {
+fn derived_index_capabilities(config: &NodeConfig) -> bitcoin_rs_projection::IndexCapabilities {
     config
         .indexes
         .script_index
@@ -405,7 +409,8 @@ fn build_derived_index_open_spec(
     epoch: u64,
     guard: &bitcoin_rs_storage::StoreGuard,
     seed_slot: Option<bitcoin_rs_storage::utxo::SeedOfferCell>,
-) -> core::result::Result<Option<bitcoin_rs_index::runtime::DerivedIndexOpenSpec>, ConfigError> {
+) -> core::result::Result<Option<bitcoin_rs_projection::runtime::DerivedIndexOpenSpec>, ConfigError>
+{
     let enabled = derived_index_capabilities(config);
     if enabled.is_empty() {
         return Ok(None);
@@ -420,14 +425,14 @@ fn build_derived_index_open_spec(
     let backend = config.storage.backend;
     let cache_bytes = txindex_cache_bytes;
     let guard = Arc::clone(guard);
-    Ok(Some(bitcoin_rs_index::runtime::DerivedIndexOpenSpec {
+    Ok(Some(bitcoin_rs_projection::runtime::DerivedIndexOpenSpec {
         scripthash_limit: config.indexes.scripthash_limit,
         data_dir: config.data_dir.clone(),
         namespace: TXINDEX_NAMESPACE,
         storage_backend: config.storage.backend,
         epoch,
         enabled,
-        rollback_rebuild_cutover: bitcoin_rs_index::runtime::DEFAULT_ROLLBACK_REBUILD_CUTOVER,
+        rollback_rebuild_cutover: bitcoin_rs_projection::runtime::DEFAULT_ROLLBACK_REBUILD_CUTOVER,
         canonical_data_root,
         open_store: Arc::new(move |dir| {
             crate::storage_backend::open_txindex(
@@ -447,8 +452,8 @@ fn build_derived_index_open_spec(
 
 fn index_bundle_directive(
     config: &NodeConfig,
-) -> core::result::Result<bitcoin_rs_index::portable::IndexBundleDirective, ConfigError> {
-    use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
+) -> core::result::Result<bitcoin_rs_projection::portable::IndexBundleDirective, ConfigError> {
+    use bitcoin_rs_projection::portable::{IndexBundleDirective, IndexBundleRequest};
     let request = |dir: &std::path::PathBuf| IndexBundleRequest {
         dir: dir.clone(),
         network: config.network,
@@ -468,7 +473,7 @@ struct DerivedIndexComposer {
 
 impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
     type Output = OpenDerivedIndex;
-    type Error = bitcoin_rs_index::runtime::DerivedIndexWorkerError;
+    type Error = bitcoin_rs_projection::runtime::DerivedIndexWorkerError;
 
     fn consume<S>(self, store: Arc<S>) -> Result<Self::Output, Self::Error>
     where
@@ -481,8 +486,8 @@ impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
 }
 
 struct TxIndexSpawn {
-    spec: bitcoin_rs_index::runtime::DerivedIndexOpenSpec,
-    generation: bitcoin_rs_index::runtime::Generation,
+    spec: bitcoin_rs_projection::runtime::DerivedIndexOpenSpec,
+    generation: bitcoin_rs_projection::runtime::Generation,
     body_source: Arc<dyn BlockBodySource>,
     wake_rx: Receiver<()>,
     recovery_reporter: Arc<storage::RecoveryReporter>,

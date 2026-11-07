@@ -426,34 +426,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitcoin-rs-index"
-version = "0.15.0"
-dependencies = [
- "arc-swap",
- "bitcoin",
- "bitcoin-rs-consensus",
- "bitcoin-rs-execution",
- "bitcoin-rs-storage",
- "bitcoin_hashes 0.14.101",
- "compact_str",
- "crossbeam-channel",
- "hashbrown 0.17.1",
- "metrics",
- "parking_lot",
- "proptest",
- "proptest-state-machine",
- "rayon",
- "secp256k1 0.29.1",
- "serde",
- "sha2",
- "sonic-rs",
- "tempfile",
- "thiserror",
- "tracing",
- "zerocopy",
-]
-
-[[package]]
 name = "bitcoin-rs-mempool"
 version = "0.15.0"
 dependencies = [
@@ -513,11 +485,11 @@ dependencies = [
  "bitcoin",
  "bitcoin-rs-consensus",
  "bitcoin-rs-execution",
- "bitcoin-rs-index",
  "bitcoin-rs-mempool",
  "bitcoin-rs-mining",
  "bitcoin-rs-node",
  "bitcoin-rs-p2p",
+ "bitcoin-rs-projection",
  "bitcoin-rs-rpc",
  "bitcoin-rs-storage",
  "bytes",
@@ -557,8 +529,8 @@ dependencies = [
  "bitcoin",
  "bitcoin-rs-consensus",
  "bitcoin-rs-execution",
- "bitcoin-rs-index",
  "bitcoin-rs-mempool",
+ "bitcoin-rs-projection",
  "bitcoin-rs-storage",
  "bytes",
  "chacha20 0.10.2",
@@ -594,6 +566,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin-rs-projection"
+version = "0.15.0"
+dependencies = [
+ "arc-swap",
+ "bitcoin",
+ "bitcoin-rs-consensus",
+ "bitcoin-rs-execution",
+ "bitcoin-rs-storage",
+ "bitcoin_hashes 0.14.101",
+ "compact_str",
+ "crossbeam-channel",
+ "hashbrown 0.17.1",
+ "metrics",
+ "parking_lot",
+ "proptest",
+ "proptest-state-machine",
+ "rayon",
+ "secp256k1 0.29.1",
+ "serde",
+ "sha2",
+ "sonic-rs",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "zerocopy",
+]
+
+[[package]]
 name = "bitcoin-rs-rpc"
 version = "0.15.0"
 dependencies = [
@@ -602,11 +602,11 @@ dependencies = [
  "bitcoin-rs-consensus",
  "bitcoin-rs-e2e",
  "bitcoin-rs-execution",
- "bitcoin-rs-index",
  "bitcoin-rs-mempool",
  "bitcoin-rs-mining",
  "bitcoin-rs-node",
  "bitcoin-rs-p2p",
+ "bitcoin-rs-projection",
  "bitcoin-rs-rpc",
  "bitcoin-rs-storage",
  "bytes",

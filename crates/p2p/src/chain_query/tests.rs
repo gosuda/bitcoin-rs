@@ -91,8 +91,8 @@ fn serve_collect(
     Ok((outcome, blocks.into_inner()))
 }
 
-fn canned_filter() -> bitcoin_rs_index::BasicFilter {
-    bitcoin_rs_index::BasicFilter {
+fn canned_filter() -> bitcoin_rs_projection::BasicFilter {
+    bitcoin_rs_projection::BasicFilter {
         filter: vec![0],
         hash: [1; 32],
         header: [2; 32],
@@ -174,7 +174,7 @@ fn assert_complete_filter_range(request: &Message, responses: &[Message]) {
 #[test]
 fn invalid_compact_filter_requests_are_ignored_without_querying_the_index() -> TestResult {
     use bitcoin::p2p::message_filter::{GetCFCheckpt, GetCFHeaders, GetCFilters};
-    use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
+    use bitcoin_rs_projection::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
 
     struct Filters;
     impl CompactFilterQuery for Filters {
@@ -239,7 +239,7 @@ fn invalid_compact_filter_requests_are_ignored_without_querying_the_index() -> T
 
 #[test]
 fn compact_filters_wait_for_publication_without_replaying_sent_payloads() -> TestResult {
-    use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
+    use bitcoin_rs_projection::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct Filters {
@@ -323,7 +323,7 @@ fn compact_filters_wait_for_publication_without_replaying_sent_payloads() -> Tes
 #[test]
 fn filter_backpressure_defers_unsent_responses_and_parks_the_remainder_of_a_partial_stream()
 -> TestResult {
-    use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
+    use bitcoin_rs_projection::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
     use std::cell::Cell;
 
     struct Filters;
@@ -406,7 +406,7 @@ fn filter_backpressure_defers_unsent_responses_and_parks_the_remainder_of_a_part
 
 #[test]
 fn compact_filters_follow_applied_chain_when_competing_headers_lead() -> TestResult {
-    use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
+    use bitcoin_rs_projection::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
 
     struct Filters(Hash256);
     impl CompactFilterQuery for Filters {
@@ -484,7 +484,7 @@ fn compact_filters_follow_applied_chain_when_competing_headers_lead() -> TestRes
 #[test]
 fn compact_filter_interruptions_that_are_not_backpressure_stay_errors() -> TestResult {
     use bitcoin::p2p::message_filter::GetCFilters;
-    use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
+    use bitcoin_rs_projection::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
 
     struct ShortIndex;
     impl CompactFilterQuery for ShortIndex {
@@ -568,7 +568,7 @@ fn compact_filter_interruptions_that_are_not_backpressure_stay_errors() -> TestR
 #[test]
 fn a_resumed_filter_range_that_stops_before_its_first_filter_is_interrupted() -> TestResult {
     use bitcoin::p2p::message_filter::GetCFilters;
-    use bitcoin_rs_index::{
+    use bitcoin_rs_projection::{
         BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError, TxUnavailableCause,
     };
 

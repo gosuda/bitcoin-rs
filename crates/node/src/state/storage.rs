@@ -376,7 +376,7 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
 
 pub(crate) struct RecoveryReporter(pub(crate) RecoveryEvidencePublisher);
 
-impl bitcoin_rs_index::runtime::IndexAheadSink for RecoveryReporter {
+impl bitcoin_rs_projection::runtime::IndexAheadSink for RecoveryReporter {
     fn report_index_ahead(
         &self,
         capability: &str,
@@ -386,7 +386,7 @@ impl bitcoin_rs_index::runtime::IndexAheadSink for RecoveryReporter {
         index_hash_be: &str,
         depth: u32,
         unix_secs: u64,
-    ) -> Result<(), bitcoin_rs_index::runtime::IndexAheadError> {
+    ) -> Result<(), bitcoin_rs_projection::runtime::IndexAheadError> {
         self.0
             .publish_index_ahead(
                 capability,
@@ -401,7 +401,7 @@ impl bitcoin_rs_index::runtime::IndexAheadSink for RecoveryReporter {
     }
 }
 
-impl bitcoin_rs_index::RollbackWarningSource for RecoveryReporter {
+impl bitcoin_rs_projection::RollbackWarningSource for RecoveryReporter {
     fn rollback_warnings(&self) -> Vec<String> {
         self.0.warnings()
     }

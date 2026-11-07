@@ -15,7 +15,7 @@ use crate::Handler;
 use crate::context::{Context, DerivedIndexQuery, TxQueryError};
 use crate::error::RpcError;
 use bitcoin::hex::DisplayHex as _;
-use bitcoin_rs_index::block_log::BlockRecord;
+use bitcoin_rs_projection::block_log::BlockRecord;
 
 fn fixture_genesis() -> Block {
     use bitcoin_rs_consensus::primitives::{

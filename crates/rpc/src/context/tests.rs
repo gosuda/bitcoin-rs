@@ -2,9 +2,12 @@ use super::*;
 
 struct ReadySource;
 
-impl bitcoin_rs_index::DerivedIndexCapabilitySource for ReadySource {
-    fn capability(&self) -> bitcoin_rs_index::CapabilityStatus {
-        bitcoin_rs_index::derived_index_status(true, bitcoin_rs_index::CapabilityState::Ready)
+impl bitcoin_rs_projection::DerivedIndexCapabilitySource for ReadySource {
+    fn capability(&self) -> bitcoin_rs_projection::CapabilityStatus {
+        bitcoin_rs_projection::derived_index_status(
+            true,
+            bitcoin_rs_projection::CapabilityState::Ready,
+        )
     }
 }
 
@@ -755,7 +758,8 @@ fn ibd_latch_judges_the_contexts_own_tree() {
     let applied_tip = Arc::new(ArcSwapOption::empty());
 
     let block_tree = Arc::new(RwLock::new(bitcoin_rs_execution::chain::BlockTree::new()));
-    let status: Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> = Arc::new(ReadySource);
+    let status: Arc<dyn bitcoin_rs_projection::DerivedIndexCapabilitySource> =
+        Arc::new(ReadySource);
     let ctx = Context::from_handles(ContextHandles {
         chain: ChainHandles {
             chain_tip: chain_tip.clone(),

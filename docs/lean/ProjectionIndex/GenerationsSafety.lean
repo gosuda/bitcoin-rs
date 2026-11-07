@@ -1,6 +1,6 @@
 /-
 Safety invariants of the index generations and lifecycle machine
-(Rust owners `crates/index/src/segment/mod.rs` and `crates/index/src/runtime/query.rs`).
+(Rust owners `crates/projection/src/segment/mod.rs` and `crates/projection/src/runtime/query.rs`).
 
 Anchors: David Parnas, Claude Shannon, Dieter Rams
 

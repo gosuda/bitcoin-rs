@@ -39,7 +39,7 @@ fn applied_chain_tx_count(state: &NodeState) -> bitcoin_rs_execution::chain::Cha
         })
 }
 
-use bitcoin_rs_index::IndexCapabilities;
+use bitcoin_rs_projection::IndexCapabilities;
 
 use bitcoin_rs_consensus::primitives::BlockHash;
 

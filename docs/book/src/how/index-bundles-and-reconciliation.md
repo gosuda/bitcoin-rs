@@ -6,7 +6,7 @@ The operator surface is [transaction and script-hash indexes](../use/indexes.md)
 
 ## What a watermark pins
 
-Four capabilities share one store namespace at `<data-dir>/txindex`: `TxLookup`, `ScriptHistory`, `ScriptLive`, and `CompactFilters` (`crates/index/src/index/capability.rs:33`). Each has its own watermark key in the `UtxoMeta` column family:
+Four capabilities share one store namespace at `<data-dir>/txindex`: `TxLookup`, `ScriptHistory`, `ScriptLive`, and `CompactFilters` (`crates/projection/src/index/capability.rs:33`). Each has its own watermark key in the `UtxoMeta` column family:
 
 | Capability | Key | Rows it covers |
 | :--- | :--- | :--- |
@@ -15,21 +15,21 @@ Four capabilities share one store namespace at `<data-dir>/txindex`: `TxLookup`,
 | `ScriptLive` | `[0x00, b'L']` | `ScriptLive` |
 | `CompactFilters` | `[0x00, b'F']` | filter rows under prefix `[1, b'F']` |
 
-A watermark is 36 bytes: the height little-endian, then the 32-byte block hash (`IndexWatermark::to_bytes`, `crates/index/src/index/capability.rs:247`). The little-endian height is deliberate. History row heights are stored inverted big-endian for newest-first scans, but the watermark stays comparable as an integer.
+A watermark is 36 bytes: the height little-endian, then the 32-byte block hash (`IndexWatermark::to_bytes`, `crates/projection/src/index/capability.rs:247`). The little-endian height is deliberate. History row heights are stored inverted big-endian for newest-first scans, but the watermark stays comparable as an integer.
 
-Compact filter rows are keyed by block hash under prefix `[1, b'F']` and store `hash || header || filter`. `BasicFilter::decode` recomputes the filter hash and rejects a mismatch, and `chain` hashes `filter_hash || previous_header` to extend the BIP157 header chain (`crates/index/src/index/filters.rs:22`, `:50`). `build` adds every non-empty output script except `OP_RETURN` and every spent script, and derives the BIP158 hash keys from the first 16 bytes of the block hash (`filters.rs:68`).
+Compact filter rows are keyed by block hash under prefix `[1, b'F']` and store `hash || header || filter`. `BasicFilter::decode` recomputes the filter hash and rejects a mismatch, and `chain` hashes `filter_hash || previous_header` to extend the BIP157 header chain (`crates/projection/src/index/filters.rs:22`, `:50`). `build` adds every non-empty output script except `OP_RETURN` and every spent script, and derives the BIP158 hash keys from the first 16 bytes of the block hash (`filters.rs:68`).
 
-The row format is version 6, written under key `[0x00, b'V']` with value `06 00 00 00` (`crates/index/src/index/state.rs:14`). `IndexWriter::open` accepts that value only. Any other stored value returns `UnsupportedTxIndexFormatVersion`; rows with no version marker at all return `LegacyCursorlessIndex` (`crates/index/src/index/write.rs:25`). The runtime treats both as a rebuild request: it logs `resetting incompatible derived transaction index for rebuild` and calls `IndexWriter::reset_index` (`crates/index/src/runtime/startup.rs:32`). There is no in-place migration.
+The row format is version 6, written under key `[0x00, b'V']` with value `06 00 00 00` (`crates/projection/src/index/state.rs:14`). `IndexWriter::open` accepts that value only. Any other stored value returns `UnsupportedTxIndexFormatVersion`; rows with no version marker at all return `LegacyCursorlessIndex` (`crates/projection/src/index/write.rs:25`). The runtime treats both as a rebuild request: it logs `resetting incompatible derived transaction index for rebuild` and calls `IndexWriter::reset_index` (`crates/projection/src/runtime/startup.rs:32`). There is no in-place migration.
 
 ## The write path is one conditioned batch
 
 `IndexWriter` is the only type allowed to mutate index column families (`IDX-10`). Every block mutation follows the same shape.
 
-1. `prepare_block_with_spent_scripts` parses the block, builds every row, checks that the header hashes to the identity the caller named, sorts the rows, and returns a `PreparedBlock` (`crates/index/src/index/write.rs:266`). Nothing is written yet.
-2. `commit_forward_with_cursor` reads the fence, requires that the next height is `watermark.height + 1` and that the first block's parent is the watermark hash, then merges the prepared rows into one `BufferedWriteBatch` with the new watermark, the format marker, and any consumer-cursor update (`crates/index/src/index/write.rs:332`).
-3. `commit_ordinary` adds the next state revision and calls `store.write_durable_if` with six compare conditions: the reset marker, the state revision, and one condition per capability watermark (`crates/index/src/index/state.rs:345`).
+1. `prepare_block_with_spent_scripts` parses the block, builds every row, checks that the header hashes to the identity the caller named, sorts the rows, and returns a `PreparedBlock` (`crates/projection/src/index/write.rs:266`). Nothing is written yet.
+2. `commit_forward_with_cursor` reads the fence, requires that the next height is `watermark.height + 1` and that the first block's parent is the watermark hash, then merges the prepared rows into one `BufferedWriteBatch` with the new watermark, the format marker, and any consumer-cursor update (`crates/projection/src/index/write.rs:332`).
+3. `commit_ordinary` adds the next state revision and calls `store.write_durable_if` with six compare conditions: the reset marker, the state revision, and one condition per capability watermark (`crates/projection/src/index/state.rs:345`).
 
-The conditions are the fence. If another writer moved the reset marker, bumped the revision, or changed any watermark after the fence was captured, the conditional write fails and the commit returns `IndexError::StaleIndexState`. The worker maps that error to `ReconcileAction::Stalled`, drops its pending batch, and re-reads the durable state on the next pass (`crates/index/src/runtime/reconciliation.rs:33`). A failed commit therefore cannot publish rows under a stale watermark.
+The conditions are the fence. If another writer moved the reset marker, bumped the revision, or changed any watermark after the fence was captured, the conditional write fails and the commit returns `IndexError::StaleIndexState`. The worker maps that error to `ReconcileAction::Stalled`, drops its pending batch, and re-reads the durable state on the next pass (`crates/projection/src/runtime/reconciliation.rs:33`). A failed commit therefore cannot publish rows under a stale watermark.
 
 The state revision is an ordinary counter under key `[0x00, b'O']`. It exists so two writers in different processes cannot both succeed: the reset marker alone only guards reset cycles, while the revision detects any interleaved ordinary commit.
 
@@ -37,28 +37,28 @@ The state revision is an ordinary counter under key `[0x00, b'O']`. It exists so
 
 A selective reset deletes rows across several column families. That takes more than one batch, so the store needs a visible claim that a reset is in progress.
 
-The marker under `[0x00, b'R']` has two shapes (`crates/index/src/index/state.rs:43`):
+The marker under `[0x00, b'R']` has two shapes (`crates/projection/src/index/state.rs:43`):
 
 ```text
 Idle  (9 bytes):  0xFF | version u64
 Claim (17 bytes): mask u8 | process_epoch u64 | base_version u64
 ```
 
-`mask` uses one bit per capability (`TxLookup` 0b001, `ScriptHistory` 0b010, `ScriptLive` 0b100, `CompactFilters` 0b1000). `acquire_capability_reset` replaces Idle with Claim in a conditioned batch, records the watermarks and floors to delete in that batch, then `resume_capability_reset` scans and purges the selected families in bounded chunks, and finally writes Idle with `version + 1` and the next state revision (`crates/index/src/index/state.rs:417`, `:485`, `:580`). Idle versions only increase. A stale process that observed an older Idle value cannot complete a reset against the newer one, which prevents an ABA race.
+`mask` uses one bit per capability (`TxLookup` 0b001, `ScriptHistory` 0b010, `ScriptLive` 0b100, `CompactFilters` 0b1000). `acquire_capability_reset` replaces Idle with Claim in a conditioned batch, records the watermarks and floors to delete in that batch, then `resume_capability_reset` scans and purges the selected families in bounded chunks, and finally writes Idle with `version + 1` and the next state revision (`crates/projection/src/index/state.rs:417`, `:485`, `:580`). Idle versions only increase. A stale process that observed an older Idle value cannot complete a reset against the newer one, which prevents an ABA race.
 
-If a process dies mid-reset, the next `capture_write_fence` sees a Claim, calls `resume_capability_reset`, and returns `IndexError::ResetInProgress` (`crates/index/src/index/state.rs:152`). The worker retries. No query runs against the half-purged capability because its watermark was deleted in the claim batch.
+If a process dies mid-reset, the next `capture_write_fence` sees a Claim, calls `resume_capability_reset`, and returns `IndexError::ResetInProgress` (`crates/projection/src/index/state.rs:152`). The worker retries. No query runs against the half-purged capability because its watermark was deleted in the claim batch.
 
 ## Reconciliation after a restart or a reorg
 
-The worker loop is one `reconcile_once` call per wake or deadline (`crates/index/src/runtime/reconciliation.rs:28`). Each pass captures the applied tip and a fresh fence, then works through four steps in order.
+The worker loop is one `reconcile_once` call per wake or deadline (`crates/projection/src/runtime/reconciliation.rs:28`). Each pass captures the applied tip and a fresh fence, then works through four steps in order.
 
 ### 1. Drop leftover capabilities
 
-If a capability is no longer enabled but still has a watermark, `reconcile_pass` resets it and returns `Progressed` (`crates/index/src/runtime/reconciliation.rs:130`). This is the `full` to `utxo` switch and the drop of `TxLookup` when `--txindex` is off (`IDX-04`). Sibling capabilities keep their rows.
+If a capability is no longer enabled but still has a watermark, `reconcile_pass` resets it and returns `Progressed` (`crates/projection/src/runtime/reconciliation.rs:130`). This is the `full` to `utxo` switch and the drop of `TxLookup` when `--txindex` is off (`IDX-04`). Sibling capabilities keep their rows.
 
 ### 2. Roll back off-chain watermarks
 
-`rollback_selection` picks the enabled watermark with the greatest height that is not on the ancestry of the applied tip (`crates/index/src/runtime/reconciliation.rs:299`). Every capability whose watermark equals that exact `(height, hash)` joins the same reset or rollback group. For each selection, `drain_rollbacks` computes the depth to the common ancestor and compares it with `rollback_rebuild_cutover`, which is 100,000 by default (`crates/index/src/runtime.rs:327`). A deeper divergence logs:
+`rollback_selection` picks the enabled watermark with the greatest height that is not on the ancestry of the applied tip (`crates/projection/src/runtime/reconciliation.rs:299`). Every capability whose watermark equals that exact `(height, hash)` joins the same reset or rollback group. For each selection, `drain_rollbacks` computes the depth to the common ancestor and compares it with `rollback_rebuild_cutover`, which is 100,000 by default (`crates/projection/src/runtime.rs:327`). A deeper divergence logs:
 
 ```text
 stale index watermark exceeds the rollback cutover; rebuilding selected capabilities
@@ -66,16 +66,16 @@ stale index watermark exceeds the rollback cutover; rebuilding selected capabili
 
 and resets those capabilities instead of walking back block by block (`IDX-06`).
 
-Otherwise `rollback_one` loads the body at the watermark height, derives the same rows a forward commit would have written, and asks `commit_rollback_one_for_with_cursor_with_spent_scripts` to delete exactly those rows and set the watermark to the previous block (`crates/index/src/runtime/rollback.rs:262`, `crates/index/src/index/write.rs:408`). Two details matter:
+Otherwise `rollback_one` loads the body at the watermark height, derives the same rows a forward commit would have written, and asks `commit_rollback_one_for_with_cursor_with_spent_scripts` to delete exactly those rows and set the watermark to the previous block (`crates/projection/src/runtime/rollback.rs:262`, `crates/projection/src/index/write.rs:408`). Two details matter:
 
-- Header rows are deleted only when no unselected capability still needs an identity at that height. `unselected_keeps_identity` checks sibling watermarks; when a sibling is also at or above the height, only the selected family's rows are deleted (`crates/index/src/index/write.rs:446`).
-- `ScriptLive` and `CompactFilters` need spent-output scripts to rebuild their rows. Those come from the block's undo record (`live_anchor`, `crates/index/src/runtime/rollback.rs:342`). A missing undo record raises `UndoUnavailable`; `ScriptHistory` and `CompactFilters` become unavailable for the run, and when `ScriptLive` was part of the selection it is reset for a fresh seed (`crates/index/src/runtime/reconciliation.rs:465`).
+- Header rows are deleted only when no unselected capability still needs an identity at that height. `unselected_keeps_identity` checks sibling watermarks; when a sibling is also at or above the height, only the selected family's rows are deleted (`crates/projection/src/index/write.rs:446`).
+- `ScriptLive` and `CompactFilters` need spent-output scripts to rebuild their rows. Those come from the block's undo record (`live_anchor`, `crates/projection/src/runtime/rollback.rs:342`). A missing undo record raises `UndoUnavailable`; `ScriptHistory` and `CompactFilters` become unavailable for the run, and when `ScriptLive` was part of the selection it is reset for a fresh seed (`crates/projection/src/runtime/reconciliation.rs:465`).
 
-The consumer cursor is recomputed, not replayed: `cursor_for_result` rebuilds it from the previous watermark and the capabilities that remain (`crates/index/src/runtime/cursor.rs:104`).
+The consumer cursor is recomputed, not replayed: `cursor_for_result` rebuilds it from the previous watermark and the capabilities that remain (`crates/projection/src/runtime/cursor.rs:104`).
 
 ### 3. Catch up forward
 
-`forward_selection` takes the smallest next height among enabled capabilities, `watermark.height + 1` or 0 for a capability with no watermark (`crates/index/src/runtime/reconciliation.rs:330`). `catch_up_to` then walks the target chain in bounded chunks (`crates/index/src/runtime/catch_up.rs:71`):
+`forward_selection` takes the smallest next height among enabled capabilities, `watermark.height + 1` or 0 for a capability with no watermark (`crates/projection/src/runtime/reconciliation.rs:330`). `catch_up_to` then walks the target chain in bounded chunks (`crates/projection/src/runtime/catch_up.rs:71`):
 
 | Bound | Value | Constant |
 | :--- | :--- | :--- |
@@ -88,15 +88,15 @@ The consumer cursor is recomputed, not replayed: `cursor_for_result` rebuilds it
 
 Prepared batches accumulate until one of the row or byte limits is reached. When the batch endpoint is still behind the tip, the worker stores it as `PendingForward` and continues; when the endpoint reaches the tip, it waits up to 100 ms for more work, then commits one atomic batch. That commit is the point where every row and the advanced watermark become durable together.
 
-A block body that is absent stops forward progress for that sub-chunk without inventing rows: `ForwardLeg::BodyAbsent` advances `after_start` past the missing height and the pass returns `Stalled` (`crates/index/src/runtime/reconciliation.rs:575`). This is how a pruned node with an index that needs an old body reports a stall instead of a partial claim.
+A block body that is absent stops forward progress for that sub-chunk without inventing rows: `ForwardLeg::BodyAbsent` advances `after_start` past the missing height and the pass returns `Stalled` (`crates/projection/src/runtime/reconciliation.rs:575`). This is how a pruned node with an index that needs an old body reports a stall instead of a partial claim.
 
 ### 4. Settle the cursor
 
-When nothing is left to roll back or replay, `reconcile_once` publishes the `Forward` phase and returns `CaughtUp` (`crates/index/src/runtime/reconciliation.rs:126`). The outer loop persists the chain-consumer cursor and waits on the wake channel. A wake during that wait starts the next pass; a wake that arrives while a pass is running is coalesced by the runtime revision counter (`IDX-08`).
+When nothing is left to roll back or replay, `reconcile_once` publishes the `Forward` phase and returns `CaughtUp` (`crates/projection/src/runtime/reconciliation.rs:126`). The outer loop persists the chain-consumer cursor and waits on the wake channel. A wake during that wait starts the next pass; a wake that arrives while a pass is running is coalesced by the runtime revision counter (`IDX-08`).
 
 ## Capability states you can observe
 
-`getcapabilities` exposes one `txindex` row built by `DerivedIndexCapability::report` (`crates/index/src/runtime/capability.rs:34`). The mapping, in evaluation order, is:
+`getcapabilities` exposes one `txindex` row built by `DerivedIndexCapability::report` (`crates/projection/src/runtime/capability.rs:34`). The mapping, in evaluation order, is:
 
 1. Worker failure message, or lifecycle `Opening`, `Failed`, `ShutdownAbandoned` map to the same state.
 2. A rolling-back leg maps to `RollingBack { from_height, to_height }`.
@@ -121,17 +121,17 @@ Once the worker catches up:
 
 The same moment shows in `getindexinfo` as `{"best_block_height":20,"synced":true}`.
 
-A panic inside the worker is caught in the thread wrapper, logged as `txindex worker panicked`, and published as `Failed` through `fail_worker` (`crates/index/src/runtime/lifecycle.rs:45`). Block validation and UTXO commits do not wait for the index.
+A panic inside the worker is caught in the thread wrapper, logged as `txindex worker panicked`, and published as `Failed` through `fail_worker` (`crates/projection/src/runtime/lifecycle.rs:45`). Block validation and UTXO commits do not wait for the index.
 
 ## The portable bundle
 
-A bundle moves `TxLookup` rows only. It is a request, not a mode: the worker runs it once after the store opens and before the first reconcile pass (`crates/index/src/runtime/startup.rs:256`). The node does not exit, does not clear the option, and runs the request again on the next start if the option is still present (`IDX-11`).
+A bundle moves `TxLookup` rows only. It is a request, not a mode: the worker runs it once after the store opens and before the first reconcile pass (`crates/projection/src/runtime/startup.rs:256`). The node does not exit, does not clear the option, and runs the request again on the next start if the option is still present (`IDX-11`).
 
 ### Format
 
-A bundle directory contains `txlookup-v1.dat` and `manifest.json`. Export writes the artifact first, fsyncs it, fsyncs the directory, then publishes the manifest with create-new and its own fsync (`crates/index/src/portable/export.rs:161`, `:209`). Files are created with `create_new`, so an existing `manifest.json` is refused as `ExistingBundle` and never overwritten.
+A bundle directory contains `txlookup-v1.dat` and `manifest.json`. Export writes the artifact first, fsyncs it, fsyncs the directory, then publishes the manifest with create-new and its own fsync (`crates/projection/src/portable/export.rs:161`, `:209`). Files are created with `create_new`, so an existing `manifest.json` is refused as `ExistingBundle` and never overwritten.
 
-The artifact starts with a 73-byte `BRSIXART` header (`crates/index/src/portable/artifact.rs:35`):
+The artifact starts with a 73-byte `BRSIXART` header (`crates/projection/src/portable/artifact.rs:35`):
 
 ```text
  0..8    magic "BRSIXART"
@@ -145,7 +145,7 @@ The artifact starts with a 73-byte `BRSIXART` header (`crates/index/src/portable
 65..73   payload bytes, u64 LE
 ```
 
-Each record is `txid[32] || height u32 BE || count u8 || count * 6-byte TxPosition`. Records are sorted by `(txid[..8], height, txid[8..])`, never by raw key. Transaction ids that share an 8-byte prefix inside one block fold into one stored row during restore (`RowAssembler`, `crates/index/src/portable/artifact.rs:303`).
+Each record is `txid[32] || height u32 BE || count u8 || count * 6-byte TxPosition`. Records are sorted by `(txid[..8], height, txid[8..])`, never by raw key. Transaction ids that share an 8-byte prefix inside one block fold into one stored row during restore (`RowAssembler`, `crates/projection/src/portable/artifact.rs:303`).
 
 Real header from a 20-block regtest export:
 
@@ -158,14 +158,14 @@ Real header from a 20-block regtest export:
 
 ### What import checks, and in what order
 
-`restore` validates before it writes (`crates/index/src/portable/restore.rs:29`). The order is fixed by `IDX-11` because the first failure a caller sees should be the cheapest one to explain:
+`restore` validates before it writes (`crates/projection/src/portable/restore.rs:29`). The order is fixed by `IDX-11` because the first failure a caller sees should be the cheapest one to explain:
 
-1. The manifest: format string, version, exactly one `tx_lookup` capability, exactly one artifact named `txlookup-v1.dat`, base marked `validated: true`, floor at or below base plus one, and no `script_history` capability (`crates/index/src/portable/manifest.rs:166`). Unknown JSON fields are denied. A manifest over 1 MiB is refused unread.
+1. The manifest: format string, version, exactly one `tx_lookup` capability, exactly one artifact named `txlookup-v1.dat`, base marked `validated: true`, floor at or below base plus one, and no `script_history` capability (`crates/projection/src/portable/manifest.rs:166`). Unknown JSON fields are denied. A manifest over 1 MiB is refused unread.
 2. Artifact length against the manifest.
-3. SHA-256 and the artifact header (`check_header`, `crates/index/src/portable/restore.rs:385`). The header must repeat the family, artifact version, index format, network magic, base, record count, and payload length.
+3. SHA-256 and the artifact header (`check_header`, `crates/projection/src/portable/restore.rs:385`). The header must repeat the family, artifact version, index format, network magic, base, record count, and payload length.
 4. Record framing: declared count and payload length, no trailing bytes, 1 to 255 positions per record, heights inside `[floor, base]`, strictly ascending non-overlapping positions inside one serialized block of at most 4,000,000 bytes.
-5. Chain identity (`check_identity`, `crates/index/src/portable/restore.rs:128`): same network, same index format version, a receiver tip exists, same genesis, the base hash at that height on the tip's ancestry, equal chainwork, base not invalid, and equal cumulative transaction count at the base. `ChainBase::capture` walks the ancestry from the applied tip to the base and refuses a base above the tip (`crates/index/src/portable/chain.rs:29`). The count comes from the receiver's block tree and bodies, never from the manifest.
-6. Freshness: `TxLookup` must have no watermark (`ensure_fresh`, `crates/index/src/portable/restore.rs:174`). A ready index is never reset by an import.
+5. Chain identity (`check_identity`, `crates/projection/src/portable/restore.rs:128`): same network, same index format version, a receiver tip exists, same genesis, the base hash at that height on the tip's ancestry, equal chainwork, base not invalid, and equal cumulative transaction count at the base. `ChainBase::capture` walks the ancestry from the applied tip to the base and refuses a base above the tip (`crates/projection/src/portable/chain.rs:29`). The count comes from the receiver's block tree and bodies, never from the manifest.
+6. Freshness: `TxLookup` must have no watermark (`ensure_fresh`, `crates/projection/src/portable/restore.rs:174`). A ready index is never reset by an import.
 7. Locators: every record must resolve through the receiver's block body at that position to a transaction whose full 32-byte id matches. A prefix match never resolves a locator.
 
 Steps 5 and 7 withdraw rather than refuse when the receiver lacks evidence. With no block body source, or with a body a locator needs missing or pruned, restore writes nothing, returns `RestoreWithheld`, logs a warning, and lets ordinary backfill run. Identity refusals reported before a withhold win, and the first terminal locator outcome in record order decides: a mismatch found first is `Locator`, an unavailable body found first withholds.
@@ -187,15 +187,15 @@ A bundle has no signature. SHA-256 detects a changed artifact, and the locator c
 
 ### Partial rows never become queryable
 
-Import streams rows through `IndexWriter::import_tx_lookup_stream`: headers for every height 0 through base from the receiver's block tree, then the `TxConfirmed` rows, in batches of 65,536 rows or 8 MiB (`crates/index/src/index/write.rs:184`). The `TxLookup` watermark and floor appear only in the final commit. The apply pass re-hashes the artifact and aborts before that commit if the bytes changed.
+Import streams rows through `IndexWriter::import_tx_lookup_stream`: headers for every height 0 through base from the receiver's block tree, then the `TxConfirmed` rows, in batches of 65,536 rows or 8 MiB (`crates/projection/src/index/write.rs:184`). The `TxLookup` watermark and floor appear only in the final commit. The apply pass re-hashes the artifact and aborts before that commit if the bytes changed.
 
-On failure, `discard_partial_rows` clears the written rows immediately when the capability still has no watermark (`crates/index/src/portable/restore.rs:578`). If the process dies before cleanup, the next start with `TxLookup` enabled runs `reset_interrupted_import` before any bundle or derivation work and logs:
+On failure, `discard_partial_rows` clears the written rows immediately when the capability still has no watermark (`crates/projection/src/portable/restore.rs:578`). If the process dies before cleanup, the next start with `TxLookup` enabled runs `reset_interrupted_import` before any bundle or derivation work and logs:
 
 ```text
 cleared rows left by an interrupted portable index import
 ```
 
-(`crates/index/src/runtime/startup.rs:256`). That is why a crash mid-import costs the import, not the index.
+(`crates/projection/src/runtime/startup.rs:256`). That is why a crash mid-import costs the import, not the index.
 
 ## Worked trace: export, restore, refuse
 
@@ -300,20 +300,20 @@ Tests that pin the behavior, all verified in the tree:
 
 | Invariant | Test | File |
 | :--- | :--- | :--- |
-| rollback removes exactly the committed rows | `rollback_removes_every_row_a_matching_commit_wrote` | `crates/index/src/index/tests.rs` |
-| a stale body does not delete a replacement's rows | `a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone` | `crates/index/src/index/tests.rs` |
-| index ahead of the tip is rewound once | `index_ahead_of_restored_tip_is_reported_once_and_rewound` | `crates/index/src/runtime/recovery_tests.rs` |
-| deep rollback rebuilds until caught up | `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up` | `crates/index/src/runtime/recovery_tests.rs` |
-| export then restore answers equal queries | `export_then_restore_serves_the_same_queries_as_backfill` | `crates/index/tests/portable_bundle.rs` |
-| damaged bundles are refused before writes | `damaged_bundles_are_refused_before_any_write_or_reset` | `crates/index/tests/portable_bundle.rs` |
-| a cancelled restore writes nothing | `cancelled_restore_writes_nothing_and_restart_completes` | `crates/index/tests/portable_bundle.rs` |
-| an interrupted import is cleared on restart | `interrupted_import_is_cleared_on_restart_and_restore_retries` | `crates/index/tests/portable_bundle.rs` |
-| missing bodies withhold, then backfill | `missing_bodies_withhold_readiness_until_ordinary_backfill` | `crates/index/tests/portable_bundle.rs` |
-| manifest round-trips and denies unknown fields | `manifest_round_trips_through_json_and_validates`, `unknown_fields_are_denied_at_every_level` | `crates/index/src/portable/manifest.rs` |
-| history is never a bundle capability | `script_live_is_never_a_capability_and_script_history_is_refused` | `crates/index/src/portable/manifest.rs` |
-| artifact framing refuses each violation | `framing_refuses_each_violation` | `crates/index/src/portable/artifact.rs` |
+| rollback removes exactly the committed rows | `rollback_removes_every_row_a_matching_commit_wrote` | `crates/projection/src/index/tests.rs` |
+| a stale body does not delete a replacement's rows | `a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone` | `crates/projection/src/index/tests.rs` |
+| index ahead of the tip is rewound once | `index_ahead_of_restored_tip_is_reported_once_and_rewound` | `crates/projection/src/runtime/recovery_tests.rs` |
+| deep rollback rebuilds until caught up | `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up` | `crates/projection/src/runtime/recovery_tests.rs` |
+| export then restore answers equal queries | `export_then_restore_serves_the_same_queries_as_backfill` | `crates/projection/tests/portable_bundle.rs` |
+| damaged bundles are refused before writes | `damaged_bundles_are_refused_before_any_write_or_reset` | `crates/projection/tests/portable_bundle.rs` |
+| a cancelled restore writes nothing | `cancelled_restore_writes_nothing_and_restart_completes` | `crates/projection/tests/portable_bundle.rs` |
+| an interrupted import is cleared on restart | `interrupted_import_is_cleared_on_restart_and_restore_retries` | `crates/projection/tests/portable_bundle.rs` |
+| missing bodies withhold, then backfill | `missing_bodies_withhold_readiness_until_ordinary_backfill` | `crates/projection/tests/portable_bundle.rs` |
+| manifest round-trips and denies unknown fields | `manifest_round_trips_through_json_and_validates`, `unknown_fields_are_denied_at_every_level` | `crates/projection/src/portable/manifest.rs` |
+| history is never a bundle capability | `script_live_is_never_a_capability_and_script_history_is_refused` | `crates/projection/src/portable/manifest.rs` |
+| artifact framing refuses each violation | `framing_refuses_each_violation` | `crates/projection/src/portable/artifact.rs` |
 
-The direct query surface, including the covered prefix carried by `AtPrefix` and the historical-prefix error set, is in [use/indexes.md](../use/indexes.md). `CoveredPrefix`, `AtPrefix`, and `HistoricalQueryError` are defined in `crates/index/src/query_api.rs:97`. Server-side history paging semantics are owned by `IDX-03` and `IDX-12` and are not restated here.
+The direct query surface, including the covered prefix carried by `AtPrefix` and the historical-prefix error set, is in [use/indexes.md](../use/indexes.md). `CoveredPrefix`, `AtPrefix`, and `HistoricalQueryError` are defined in `crates/projection/src/query_api.rs:97`. Server-side history paging semantics are owned by `IDX-03` and `IDX-12` and are not restated here.
 
 ## What is stricter than Core
 

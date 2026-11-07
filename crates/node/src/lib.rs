@@ -86,7 +86,7 @@ pub use run::{RunError, run};
 
 pub use sync::BlockSync;
 
-pub use bitcoin_rs_index::runtime::DerivedIndexRuntime;
+pub use bitcoin_rs_projection::runtime::DerivedIndexRuntime;
 
 #[cfg(feature = "zmq")]
 pub(crate) use bitcoin_rs_rpc::zmq::SocketZmqPublisher;

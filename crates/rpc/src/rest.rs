@@ -20,7 +20,7 @@ use crate::handlers::mempool::{getmempoolinfo, getrawmempool};
 use crate::handlers::tx::getrawtransaction;
 use crate::render::{BlockChainContext, BlockTxVerbosity};
 use crate::tx_render;
-use bitcoin_rs_index::block_log::BlockRecord;
+use bitcoin_rs_projection::block_log::BlockRecord;
 
 const DEFAULT_HEADER_COUNT: u32 = 5;
 const MAX_HEADER_COUNT: u32 = 2_000;

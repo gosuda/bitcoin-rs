@@ -26,7 +26,7 @@ Owners:
 - Crash and lost-write fault tests (`crates/node/tests/crash_recovery.rs`).
 - Reorg and disconnect (`crates/execution/src/reorg.rs`, `disconnect.rs`).
 - Checkpoint publication and recovery (`crates/execution/src/checkpoint.rs` and companions, `crates/storage/src/checkpoint/`).
-- Index worker recovery (`crates/index/src/runtime/recovery_tests.rs`).
+- Index worker recovery (`crates/projection/src/runtime/recovery_tests.rs`).
 - Policy (`docs/policies/db-migration.md`).
 
 ## Durable root

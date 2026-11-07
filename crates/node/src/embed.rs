@@ -1,14 +1,14 @@
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, Hash256, OutPoint, Tx, Txid, deserialize, unix_time_secs,
 };
-use bitcoin_rs_index::CapabilitySnapshot;
-use bitcoin_rs_index::IndexCapability;
-use bitcoin_rs_index::ScriptHash;
-use bitcoin_rs_index::query_api::{
+use bitcoin_rs_mempool::{FeeRate, LocalOrigin, MempoolStats, MutationResult};
+use bitcoin_rs_projection::CapabilitySnapshot;
+use bitcoin_rs_projection::IndexCapability;
+use bitcoin_rs_projection::ScriptHash;
+use bitcoin_rs_projection::query_api::{
     AtPrefix, HistoricalQueryError, HistoricalUnavailableCause, ScriptIndexSnapshot,
     SpendingRecord, TxUnavailableCause,
 };
-use bitcoin_rs_mempool::{FeeRate, LocalOrigin, MempoolStats, MutationResult};
 pub(crate) use bitcoin_rs_rpc::context::SyncProgress;
 use bitcoin_rs_rpc::context::{ChainAdmissionView, DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB};
 use std::sync::Arc;
@@ -84,7 +84,7 @@ impl Node {
 
     #[must_use]
     pub fn capabilities(&self) -> CapabilitySnapshot {
-        bitcoin_rs_index::txindex_snapshot(Some(self.state.derived_index_status().as_ref()))
+        bitcoin_rs_projection::txindex_snapshot(Some(self.state.derived_index_status().as_ref()))
     }
 
     #[must_use]

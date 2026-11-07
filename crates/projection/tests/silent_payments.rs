@@ -6,7 +6,7 @@ use bitcoin_hashes::{Hash as _, hash160};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, OutPoint, Script, Tx, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_index::silent_payments::{
+use bitcoin_rs_projection::silent_payments::{
     MAX_BODY_BYTES, MAX_PREVOUT_BYTES, TransactionTweak, TweakError, block_tweaks,
     transaction_tweak,
 };

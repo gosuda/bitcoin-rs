@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use crate::support::{TestError, common::MemoryStore};
 use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid, encode};
-use bitcoin_rs_index::types::ScriptHistoryOccurrence;
-use bitcoin_rs_index::{
+use bitcoin_rs_projection::types::ScriptHistoryOccurrence;
+use bitcoin_rs_projection::{
     IndexCapabilities, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer, ScriptHash,
     ScriptHashRow, SpendingPrefixRow, SpentCoinScripts,
 };
@@ -146,7 +146,7 @@ where
             &chain.scripts,
         )?;
         let mut batch =
-            bitcoin_rs_index::PreparedBatch::new(bitcoin_rs_index::PreparedBatchLimits {
+            bitcoin_rs_projection::PreparedBatch::new(bitcoin_rs_projection::PreparedBatchLimits {
                 max_rows: usize::MAX,
                 max_bytes: usize::MAX,
             });
@@ -160,7 +160,7 @@ where
 }
 
 fn occurred(
-    rows: &[bitcoin_rs_index::TxIndexScanRow],
+    rows: &[bitcoin_rs_projection::TxIndexScanRow],
     scripthash: ScriptHash,
 ) -> Vec<(u32, [u8; 32], u8)> {
     let mut found = Vec::new();
@@ -233,7 +233,7 @@ fn rollback_removes_exactly_the_disconnected_block_rows() -> Result<(), TestErro
             .blocks
             .last()
             .ok_or("fixture needs at least one block")?,
-        bitcoin_rs_index::ConsumerCursorUpdate::Keep,
+        bitcoin_rs_projection::ConsumerCursorUpdate::Keep,
         &chain.scripts,
     )?;
 
@@ -342,10 +342,11 @@ fn failed_fenced_write_publishes_no_watermark_and_no_rows() -> Result<(), TestEr
         &chain.blocks[0],
         &chain.scripts,
     )?;
-    let mut batch = bitcoin_rs_index::PreparedBatch::new(bitcoin_rs_index::PreparedBatchLimits {
-        max_rows: usize::MAX,
-        max_bytes: usize::MAX,
-    });
+    let mut batch =
+        bitcoin_rs_projection::PreparedBatch::new(bitcoin_rs_projection::PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
     assert!(batch.try_push(first).is_ok(), "first block is admitted");
     writer.commit_forward(batch)?;
     let committed_rows = store.count(ColumnFamily::Funding);
@@ -357,10 +358,11 @@ fn failed_fenced_write_publishes_no_watermark_and_no_rows() -> Result<(), TestEr
         &chain.blocks[1],
         &chain.scripts,
     )?;
-    let mut batch = bitcoin_rs_index::PreparedBatch::new(bitcoin_rs_index::PreparedBatchLimits {
-        max_rows: usize::MAX,
-        max_bytes: usize::MAX,
-    });
+    let mut batch =
+        bitcoin_rs_projection::PreparedBatch::new(bitcoin_rs_projection::PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
     assert!(batch.try_push(second).is_ok(), "second block is admitted");
     store.arm_fenced_write_failure();
     assert!(

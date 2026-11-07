@@ -69,7 +69,7 @@ pub enum TestError {
     #[error(transparent)]
     PruneService(#[from] bitcoin_rs_rpc::context::PruneServiceError),
     #[error(transparent)]
-    HistoricalQuery(#[from] bitcoin_rs_index::query_api::HistoricalQueryError),
+    HistoricalQuery(#[from] bitcoin_rs_projection::query_api::HistoricalQueryError),
     #[error(transparent)]
     AddrParse(#[from] std::net::AddrParseError),
     #[error(transparent)]
@@ -115,7 +115,7 @@ pub enum TestError {
     #[error(transparent)]
     SnapshotUtxo(#[from] bitcoin_rs_storage::utxo::core_snapshot::SnapshotError),
     #[error(transparent)]
-    DerivedIndexWorker(#[from] bitcoin_rs_index::runtime::DerivedIndexWorkerError),
+    DerivedIndexWorker(#[from] bitcoin_rs_projection::runtime::DerivedIndexWorkerError),
     #[error(transparent)]
     Prioritise(#[from] bitcoin_rs_mempool::PrioritiseError),
     #[error(transparent)]

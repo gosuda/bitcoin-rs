@@ -33,7 +33,7 @@ tiny regtest measurements are not a mainnet benchmark; mainnet overhead remains
 unqualified.
 
 The pinned Core v31.1 fixture lives at
-`crates/index/tests/data/blockfilters-core-31.1.json`. Run it with
+`crates/projection/tests/data/blockfilters-core-31.1.json`. Run it with
 `cargo test -p bitcoin-rs-index basic_filters_match_pinned_core_vectors`.
 
 Enable serving with `--blockfilterindex` (boolean; default false). Only basic

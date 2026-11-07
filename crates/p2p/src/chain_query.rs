@@ -62,7 +62,7 @@ pub struct ActiveChainQuery {
     applied_tip: TipReader,
     block_body_source: Option<Arc<dyn BlockBodySource>>,
     network: Network,
-    compact_filters: Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>>,
+    compact_filters: Option<Arc<dyn bitcoin_rs_projection::CompactFilterQuery>>,
     recent: RecentBlockSlot,
 }
 
@@ -88,7 +88,7 @@ impl ActiveChainQuery {
     #[must_use]
     pub fn with_compact_filters(
         mut self,
-        filters: Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>>,
+        filters: Option<Arc<dyn bitcoin_rs_projection::CompactFilterQuery>>,
     ) -> Self {
         self.compact_filters = filters;
         self
@@ -436,7 +436,7 @@ impl ChainQuery for ActiveChainQuery {
         let progress = StreamProgress {
             emitted,
             halted,
-            retry: matches!(result, Err(bitcoin_rs_index::TxQueryError::Retry)),
+            retry: matches!(result, Err(bitcoin_rs_projection::TxQueryError::Retry)),
         };
         if let Some(serving) = evaluate_stream_progress(pending, &bounds, end, progress)? {
             return Ok(serving);

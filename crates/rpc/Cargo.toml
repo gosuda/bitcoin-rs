@@ -15,16 +15,16 @@ workspace = true
 [features]
 default = []
 pool = ["bitcoin-rs-mining/pool"]
-silent-payments = ["bitcoin-rs-index/silent-payments"]
+silent-payments = ["bitcoin-rs-projection/silent-payments"]
 # Synthetic capability worlds for tests, not production composition.
-test-seam = ["bitcoin-rs-index/test-seam"]
+test-seam = ["bitcoin-rs-projection/test-seam"]
 zmq = ["dep:zmq"]
 
 [dependencies]
 bitcoin-rs-consensus.workspace = true
 bitcoin-rs-execution.workspace = true
 bitcoin-rs-storage.workspace = true
-bitcoin-rs-index.workspace = true
+bitcoin-rs-projection.workspace = true
 bitcoin-rs-mempool.workspace = true
 bitcoin-rs-p2p.workspace = true
 bitcoin-rs-mining.workspace = true

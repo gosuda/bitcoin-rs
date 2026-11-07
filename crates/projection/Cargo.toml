@@ -1,13 +1,13 @@
 [package]
 autotests = false
-name = "bitcoin-rs-index"
+name = "bitcoin-rs-projection"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 version.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "bitcoin-rs :: index"
+description = "bitcoin-rs :: projection"
 
 [lints]
 workspace = true

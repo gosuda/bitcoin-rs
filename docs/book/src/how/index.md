@@ -105,10 +105,10 @@ The worker's catch-up and row writes do not log at `info` in this build, so the 
 
 | Invariant | Test | File |
 | --- | --- | --- |
-| A positive floor scopes absence and refuses a low anchor | `historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor` | [`crates/index/src/runtime/query_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/index/src/runtime/query_tests.rs) |
-| Full history above a positive floor is unproven | `historical_full_history_positive_floor_is_unproven` | [`crates/index/src/runtime/query_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/index/src/runtime/query_tests.rs) |
-| A coverage floor is stamped and cleared on reset | `anchor_watermark_stamps_a_coverage_floor_that_reset_clears` | [`crates/index/src/index/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/index/src/index/tests.rs) |
-| Cursor paging neither skips nor repeats | `cursor_page_continues_without_skipping_or_repeating` | [`crates/index/src/runtime/query/scripts.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/index/src/runtime/query/scripts.rs) |
+| A positive floor scopes absence and refuses a low anchor | `historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor` | [`crates/projection/src/runtime/query_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/runtime/query_tests.rs) |
+| Full history above a positive floor is unproven | `historical_full_history_positive_floor_is_unproven` | [`crates/projection/src/runtime/query_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/runtime/query_tests.rs) |
+| A coverage floor is stamped and cleared on reset | `anchor_watermark_stamps_a_coverage_floor_that_reset_clears` | [`crates/projection/src/index/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/index/tests.rs) |
+| Cursor paging neither skips nor repeats | `cursor_page_continues_without_skipping_or_repeating` | [`crates/projection/src/runtime/query/scripts.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/runtime/query/scripts.rs) |
 | Starting workers twice is idempotent | `start_index_workers_twice_is_idempotent` | [`crates/node/src/state/tests/index.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state/tests/index.rs) |
 
 The [state and storage](state-and-storage.md) chapter covers the durable records the worker reads, and the [architecture](architecture.md) chapter covers the wake call site.

@@ -68,7 +68,7 @@ fn large_script_projection_load() {
         .collect::<Vec<_>>();
     let mut ctx = Context::new().with_esplora_query_limit(limit);
     ctx.chain
-        .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord::synthetic(
             0,
             BlockHash::default(),
         ));

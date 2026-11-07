@@ -11,8 +11,8 @@ use bitcoin_rs_consensus::primitives::{
     Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_execution::chain::{NodeStatus, regtest_fixture::merkle_root};
-use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, MempoolObserver, MutationEnvelope};
+use bitcoin_rs_projection::ScriptHash;
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
@@ -429,7 +429,7 @@ fn contract_fixture() -> Result<(Handler, Tx, Block, String), TestError> {
         txs: vec![transaction.clone()],
     };
     block.header.merkle_root = merkle_root(&block.txs).expect("fixture block has transactions");
-    let record = bitcoin_rs_index::block_log::BlockRecord::from_block(0, &block);
+    let record = bitcoin_rs_projection::block_log::BlockRecord::from_block(0, &block);
     let txid = transaction.txid();
     let mut context = Context::new();
     context.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Regtest;
@@ -934,7 +934,7 @@ fn composed_response_retries_when_the_applied_tip_identity_changes() {
     let mut context = Context::new();
     context
         .chain
-        .add_block(bitcoin_rs_index::block_log::BlockRecord::from_block(
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
             0, &block,
         ));
     let tip = {
@@ -1022,7 +1022,7 @@ fn block_status_and_block_list_never_straddle_two_applied_branches() -> Result<(
     let mut bodies = Vec::new();
     for (height, block_header) in [(0, genesis_header), (1, a1), (1, b1), (2, b2)] {
         let block = block_at(block_header);
-        let record = bitcoin_rs_index::block_log::BlockRecord::from_block(height, &block);
+        let record = bitcoin_rs_projection::block_log::BlockRecord::from_block(height, &block);
         bodies.push((record.height, record.hash, consensus_bytes(&block)));
         context.chain.add_block(record);
     }
@@ -1490,7 +1490,7 @@ fn history_hydrates_only_the_requested_chain_page() {
     let mut ctx = Context::new();
     for record in &records {
         ctx.chain
-            .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+            .add_block(bitcoin_rs_projection::block_log::BlockRecord::synthetic(
                 record.height,
                 BlockHash::default(),
             ));
@@ -1581,7 +1581,7 @@ fn chain_history_does_not_enumerate_script_live_or_poll_mempool() {
     let mut ctx = Context::new();
     for record in &history_records {
         ctx.chain
-            .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+            .add_block(bitcoin_rs_projection::block_log::BlockRecord::synthetic(
                 record.height,
                 BlockHash::default(),
             ));
@@ -1692,7 +1692,7 @@ fn chain_history_pagination_traversal_multi_page_and_pruned_blocks() {
 
     for height in 12_u32..=20 {
         ctx.chain
-            .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+            .add_block(bitcoin_rs_projection::block_log::BlockRecord::synthetic(
                 height,
                 BlockHash::default(),
             ));
@@ -1723,7 +1723,7 @@ fn chain_history_pagination_traversal_multi_page_and_pruned_blocks() {
     ctx.chain.blocks.write().clear();
     for height in 1_u32..=20 {
         ctx.chain
-            .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+            .add_block(bitcoin_rs_projection::block_log::BlockRecord::synthetic(
                 height,
                 BlockHash::default(),
             ));
@@ -1834,7 +1834,7 @@ fn chain_history_deduplicates_multiple_outputs_in_same_transaction() {
     ];
     let mut ctx = Context::new();
     ctx.chain
-        .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord::synthetic(
             10,
             BlockHash::default(),
         ));
@@ -1892,7 +1892,7 @@ fn address_statistics_read_no_transactions_beyond_the_script_index() {
     let mut ctx = Context::new();
     for record in &history {
         ctx.chain
-            .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+            .add_block(bitcoin_rs_projection::block_log::BlockRecord::synthetic(
                 record.height,
                 BlockHash::default(),
             ));
@@ -2116,7 +2116,7 @@ fn history_resolves_shared_parents_once_per_page() {
     let mut ctx = Context::new();
     for record in &records {
         ctx.chain
-            .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+            .add_block(bitcoin_rs_projection::block_log::BlockRecord::synthetic(
                 record.height,
                 BlockHash::default(),
             ));
@@ -2271,7 +2271,7 @@ fn block_page_reuses_parent_outside_the_selected_page() {
     let child = paying_transaction(&[OutPoint::new(parent.txid(), 0)], &[(100, vec![0x51])]);
     block.txs.push(child.clone());
     block.header.merkle_root = merkle_root(&block.txs).expect("fixture block has transactions");
-    let record = bitcoin_rs_index::block_log::BlockRecord::from_block(0, &block);
+    let record = bitcoin_rs_projection::block_log::BlockRecord::from_block(0, &block);
     let calls = Arc::new(AtomicUsize::new(0));
     let mut ctx = Context::new();
     ctx.chain.add_block(record.clone());
@@ -2308,7 +2308,8 @@ fn block_page_reuses_parent_outside_the_selected_page() {
     ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
         bodies: vec![(0, record.hash, consensus_bytes(&block))],
     }));
-    let stale_record = bitcoin_rs_index::block_log::BlockRecord::synthetic(0, BlockHash::default());
+    let stale_record =
+        bitcoin_rs_projection::block_log::BlockRecord::synthetic(0, BlockHash::default());
     ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
         transactions: vec![],
         calls,
@@ -2358,7 +2359,7 @@ fn block_transactions_reject_corrupt_witness_commitments() {
     });
     block.txs.push(child);
     block.header.merkle_root = merkle_root(&block.txs).expect("merkle root");
-    let record = bitcoin_rs_index::block_log::BlockRecord::from_block(0, &block);
+    let record = bitcoin_rs_projection::block_log::BlockRecord::from_block(0, &block);
     let mut ctx = Context::new();
     ctx.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Regtest;
     ctx.chain.add_block(record.clone());
@@ -2402,7 +2403,7 @@ fn block_witness_binding_observes_activation() {
             .into(),
     });
     block.header.merkle_root = merkle_root(&block.txs).expect("merkle root");
-    let record = bitcoin_rs_index::block_log::BlockRecord::from_block(0, &block);
+    let record = bitcoin_rs_projection::block_log::BlockRecord::from_block(0, &block);
     let mut ctx = Context::new();
     ctx.chain.add_block(record.clone());
     ctx.chain
@@ -2674,7 +2675,7 @@ fn backend_transaction_batches_share_duplicate_bodies_and_preserve_rows() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut ctx = Context::new();
     ctx.chain
-        .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord::synthetic(
             0,
             BlockHash::default(),
         ));
@@ -2755,7 +2756,7 @@ fn parent_query_errors_and_republication_never_yield_a_cached_success() {
     let child = paying_transaction(&[OutPoint::new(parent.txid(), 0)], &[(100, vec![0x51])]);
     let mut ctx = Context::new();
     ctx.chain
-        .add_block(bitcoin_rs_index::block_log::BlockRecord::from_block(
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
             0, &block,
         ));
     let tip = {
@@ -2835,7 +2836,7 @@ fn stale_block_transactions_do_not_inherit_active_chain_status() -> Result<(), T
         },
         txs: vec![transaction.clone()],
     };
-    let stale_record = bitcoin_rs_index::block_log::BlockRecord::from_block(1, &stale_block);
+    let stale_record = bitcoin_rs_projection::block_log::BlockRecord::from_block(1, &stale_block);
     let mut ctx = Context::new();
     ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
         bodies: vec![(1, stale_record.hash, consensus_bytes(&stale_block))],

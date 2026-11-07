@@ -9,8 +9,8 @@ use bitcoin_rs_consensus::primitives::encode::double_sha256;
 use bitcoin_rs_consensus::primitives::{
     Block, Hash256, OutPoint, Tx, Txid, consensus_bytes, deserialize, unix_time_secs,
 };
-use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::LocalOrigin;
+use bitcoin_rs_projection::ScriptHash;
 use sonic_rs::json;
 
 use super::http::{admission_error, query_error};
@@ -252,7 +252,7 @@ fn confirmed_block(
     id: &str,
 ) -> Result<
     (
-        bitcoin_rs_index::block_log::BlockRecord,
+        bitcoin_rs_projection::block_log::BlockRecord,
         Vec<u8>,
         Txid,
         crate::context::BlockRenderPermit,
@@ -463,7 +463,7 @@ pub(super) fn block_txs(ctx: &Context, h: &str, start: usize) -> Response {
 
 pub(super) fn block_transaction_values(
     ctx: &Context,
-    record: &bitcoin_rs_index::block_log::BlockRecord,
+    record: &bitcoin_rs_projection::block_log::BlockRecord,
     block: &Block,
     start: usize,
     limit: usize,

@@ -38,7 +38,10 @@ pub(crate) fn approved_layer(crate_name: &str) -> u8 {
     match crate_name {
         "bitcoin-rs-consensus" => 0,
         STORAGE_CRATE => 1,
-        CHAINSTATE_CRATE | "bitcoin-rs-p2p" | "bitcoin-rs-mempool" | "bitcoin-rs-index"
+        CHAINSTATE_CRATE
+        | "bitcoin-rs-p2p"
+        | "bitcoin-rs-mempool"
+        | "bitcoin-rs-projection"
         | "bitcoin-rs-mining" => 2,
         RPC_CRATE => 3,
         NODE_CRATE
@@ -347,7 +350,7 @@ impl WorkspaceGraph {
             STORAGE_CRATE,
             "bitcoin-rs-utxo",
             CHAINSTATE_CRATE,
-            "bitcoin-rs-index",
+            "bitcoin-rs-projection",
             NODE_CRATE,
             BIN_CRATE,
             CONVERTER_CRATE,

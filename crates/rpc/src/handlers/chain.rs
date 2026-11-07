@@ -28,7 +28,7 @@ use crate::error::RpcError;
 use crate::handlers::{
     ensure_no_params, optional_bool, params_array, required_i64, required_str, required_u64,
 };
-use bitcoin_rs_index::block_log::{BlockLog, BlockRecord, cumulative_tx_count_through};
+use bitcoin_rs_projection::block_log::{BlockLog, BlockRecord, cumulative_tx_count_through};
 
 pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
@@ -1222,7 +1222,7 @@ pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value
         .as_ref()
         .ok_or_else(|| RpcError::Misc("Index is not enabled for filtertype basic".into()))?;
     let filter = index.block_filter(hash).map_err(|error| {
-        use bitcoin_rs_index::TxQueryError;
+        use bitcoin_rs_projection::TxQueryError;
         match error {
             TxQueryError::Retry => RpcError::Misc("Block filter index is still catching up; retry later".into()),
             TxQueryError::Unavailable(cause) =>
@@ -1294,7 +1294,8 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 
 pub(crate) fn getcapabilities(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let snapshot = bitcoin_rs_index::txindex_snapshot(ctx.indexes.derived_index_status.as_deref());
+    let snapshot =
+        bitcoin_rs_projection::txindex_snapshot(ctx.indexes.derived_index_status.as_deref());
     Ok(json!({ "capabilities": snapshot.capabilities }))
 }
 

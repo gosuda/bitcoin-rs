@@ -92,10 +92,10 @@ impl Drop for BlockRenderPermit {
     }
 }
 
-use bitcoin_rs_index::block_log::{
+use bitcoin_rs_projection::block_log::{
     BlockLogReader, BlockRecord, record_at_height, record_at_height_hash,
 };
-use bitcoin_rs_index::query_api::RollbackWarningSource;
+use bitcoin_rs_projection::query_api::RollbackWarningSource;
 
 #[derive(Debug)]
 pub struct SyncProgress {
@@ -256,7 +256,7 @@ pub enum ChainControlError {
     Unavailable,
 }
 
-pub use bitcoin_rs_index::{
+pub use bitcoin_rs_projection::{
     DerivedIndexInfo, DerivedIndexQuery, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
     ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause,
 };
@@ -392,9 +392,9 @@ pub struct MempoolHandles {
 pub struct IndexHandles {
     pub derived_index: Option<Arc<dyn DerivedIndexQuery>>,
     pub script_index: Option<Arc<dyn ScriptIndexQuery>>,
-    pub compact_filters: Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>>,
+    pub compact_filters: Option<Arc<dyn bitcoin_rs_projection::CompactFilterQuery>>,
     pub esplora_tx_index: Option<Arc<dyn DerivedIndexQuery>>,
-    pub derived_index_status: Option<Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource>>,
+    pub derived_index_status: Option<Arc<dyn bitcoin_rs_projection::DerivedIndexCapabilitySource>>,
 }
 
 pub struct NetworkHandles {

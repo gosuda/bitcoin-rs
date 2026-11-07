@@ -5,7 +5,7 @@ use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitcoin_rs_consensus::primitives::OutPoint;
-use bitcoin_rs_index::{
+use bitcoin_rs_projection::{
     PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptHash, ScriptHashRow, SpendingPrefixRow,
 };
 use bitcoin_rs_storage::{
@@ -273,7 +273,7 @@ pub(crate) fn put_funding_row(
     height: u32,
 ) -> Result<(), StorageError> {
     let mut row = ScriptHashRow::row(scripthash, height).to_db_row();
-    let offset = bitcoin_rs_index::types::HASH_PREFIX_ROW_SIZE - 4;
+    let offset = bitcoin_rs_projection::types::HASH_PREFIX_ROW_SIZE - 4;
     row[offset..].copy_from_slice(&(!height).to_be_bytes());
     store.put(ColumnFamily::Funding, &row, &[])
 }

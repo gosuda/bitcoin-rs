@@ -7,7 +7,6 @@ use std::sync::{
 use bitcoin_rs_consensus::primitives::encode::deserialize;
 use bitcoin_rs_consensus::primitives::{Block, Hash256, OutPoint as NodeOutPoint, Txid};
 use bitcoin_rs_execution::Chainstate;
-use bitcoin_rs_index::{DerivedIndexQuery, ScriptIndexQuery};
 use bitcoin_rs_mempool::MempoolReader;
 use bitcoin_rs_mining::pool::ledger as pool_ledger;
 use bitcoin_rs_mining::pool::ledger::{
@@ -20,6 +19,7 @@ use bitcoin_rs_mining::pool::{
     AcceptedShare, BlockReceipt, FoundBlock, LedgerUnavailable, RecordOutcome, ShareLedger,
     WorkerIdentity,
 };
+use bitcoin_rs_projection::{DerivedIndexQuery, ScriptIndexQuery};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 
 pub(crate) struct NodeChainView {

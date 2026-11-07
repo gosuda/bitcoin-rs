@@ -163,7 +163,9 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         None,
     ));
     let followers = crate::chain_effects::ChainFollowers::new(
-        Arc::new(RwLock::new(bitcoin_rs_index::block_log::BlockLog::new())),
+        Arc::new(RwLock::new(
+            bitcoin_rs_projection::block_log::BlockLog::new(),
+        )),
         Arc::new(crate::NoOpZmqPublisher),
         None,
         Arc::new(crate::mining::MiningGenerationSignal::new()),

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_index::{
+use bitcoin_rs_projection::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
 };
 use parking_lot::{Mutex, const_mutex};

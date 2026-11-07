@@ -1,7 +1,7 @@
 use crate::support::{common, error::TestError};
 
 use bitcoin::{Block, consensus::serialize, hashes::Hash as _};
-use bitcoin_rs_index::{
+use bitcoin_rs_projection::{
     ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexReader, IndexWatermark, IndexWriter,
     PreparedBatch, PreparedBatchLimits, SpentCoinScripts,
 };

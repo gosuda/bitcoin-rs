@@ -1,6 +1,6 @@
 /-
 Safety invariants of the projection and mining machine (Rust owners
-`crates/index/src/projection_model.rs` and
+`crates/projection/src/projection_model.rs` and
 `crates/mining/src/projection_model.rs`): the projection never leads the
 applied chain, committed rows never exceed the watermark, the template
 generation never leads the tip, and pending shares stay bounded.

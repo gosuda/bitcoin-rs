@@ -5,11 +5,11 @@ use crate::options::{
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_execution::{ChainstateJournalConfig, ValidationMode};
-use bitcoin_rs_index::IndexCapabilities;
 #[cfg(feature = "pool")]
 use bitcoin_rs_mining::pool::ledger as pool_ledger;
 use bitcoin_rs_p2p::PeerNetwork;
 use bitcoin_rs_p2p::endpoint::{ClassifiedEndpoint, classify_endpoint};
+use bitcoin_rs_projection::IndexCapabilities;
 use bitcoin_rs_storage::StorageBackend;
 use core::fmt;
 use crossbeam_channel::Receiver;
@@ -636,7 +636,7 @@ impl NodeConfig {
                 scripthash_limit: settings
                     .indexes
                     .scripthash_limit
-                    .unwrap_or(bitcoin_rs_index::runtime::DEFAULT_SCRIPTHASH_LIMIT),
+                    .unwrap_or(bitcoin_rs_projection::runtime::DEFAULT_SCRIPTHASH_LIMIT),
                 txindex: settings.indexes.txindex.unwrap_or(false),
                 blockfilterindex: settings.indexes.blockfilterindex.unwrap_or(false),
                 script_index: settings

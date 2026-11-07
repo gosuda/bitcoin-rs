@@ -604,7 +604,7 @@ fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> Result<(), 
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while matches!(
         node.state.derived_index_status().capability().state,
-        bitcoin_rs_index::CapabilityState::Opening
+        bitcoin_rs_projection::CapabilityState::Opening
     ) {
         assert!(
             std::time::Instant::now() < deadline,

@@ -25,12 +25,12 @@ use bitcoin_rs_execution::verify::{
     CheckLevel, STARTUP_VERIFY_DEPTH, VerifyError, VerifyOutcome, VerifyRequest,
     verify_recent_blocks,
 };
-use bitcoin_rs_index::block_log::BlockLog;
 use bitcoin_rs_mempool::BodyInterest;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolLimits;
 use bitcoin_rs_p2p::download_window::FAST_OUTBOUND_PEER_TARGET;
 use bitcoin_rs_p2p::download_window::fast_sync_budget;
+use bitcoin_rs_projection::block_log::BlockLog;
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
@@ -412,19 +412,22 @@ impl NodeState {
                 spec.utxo = Some(bitcoin_rs_storage::utxo::UtxoReader::new(Arc::clone(&utxo)));
                 spec.chain_transition = Some(transition.stable_read());
                 let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-                let runtime =
-                    Arc::new(bitcoin_rs_index::runtime::DerivedIndexRuntime::new(wake_tx));
+                let runtime = Arc::new(bitcoin_rs_projection::runtime::DerivedIndexRuntime::new(
+                    wake_tx,
+                ));
                 let body_source: Arc<dyn BlockBodySource> =
                     Arc::new(StoredBlockBodySource::new(Arc::clone(&block_body_store)));
                 let lifecycle: Arc<
-                    arc_swap::ArcSwap<bitcoin_rs_index::runtime::DerivedIndexLifecycle>,
+                    arc_swap::ArcSwap<bitcoin_rs_projection::runtime::DerivedIndexLifecycle>,
                 > = Arc::new(arc_swap::ArcSwap::from_pointee(
-                    bitcoin_rs_index::runtime::DerivedIndexLifecycle::Opening,
+                    bitcoin_rs_projection::runtime::DerivedIndexLifecycle::Opening,
                 ));
-                let adapter = Arc::new(bitcoin_rs_index::runtime::DerivedIndexQueryAdapter::new(
-                    Arc::clone(&lifecycle),
-                ));
-                let generation = bitcoin_rs_index::runtime::Generation::new(spec.epoch);
+                let adapter = Arc::new(
+                    bitcoin_rs_projection::runtime::DerivedIndexQueryAdapter::new(Arc::clone(
+                        &lifecycle,
+                    )),
+                );
+                let generation = bitcoin_rs_projection::runtime::Generation::new(spec.epoch);
                 Some((
                     runtime,
                     TxIndexSpawn {
@@ -441,7 +444,7 @@ impl NodeState {
             None => None,
         };
         let derived_index_status =
-            Arc::new(bitcoin_rs_index::runtime::DerivedIndexCapability::new(
+            Arc::new(bitcoin_rs_projection::runtime::DerivedIndexCapability::new(
                 derived_index_parts
                     .as_ref()
                     .map(|(_, _, lifecycle, _)| Arc::clone(lifecycle)),

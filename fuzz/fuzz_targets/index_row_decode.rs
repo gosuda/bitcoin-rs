@@ -1,7 +1,7 @@
 #![no_main]
 
-use bitcoin_rs_index::block_log::{BlockLog, BlockRecord, cumulative_tx_count_through};
-use bitcoin_rs_index::{
+use bitcoin_rs_projection::block_log::{BlockLog, BlockRecord, cumulative_tx_count_through};
+use bitcoin_rs_projection::{
     ConsumerCursor, ScriptHistoryOccurrence, ScriptLiveRow, TxPositionValue, positions_are_valid,
 };
 use bitcoin_rs_consensus::primitives::{BlockHash, Hash256};

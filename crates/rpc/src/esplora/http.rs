@@ -13,7 +13,7 @@ pub(super) fn query_limit(query: &str, name: &str) -> Option<usize> {
 pub(super) fn query_error(e: TxQueryError) -> Response {
     match e {
         TxQueryError::Unavailable(
-            bitcoin_rs_index::TxUnavailableCause::ScriptHashLimitExceeded { .. },
+            bitcoin_rs_projection::TxUnavailableCause::ScriptHashLimitExceeded { .. },
         ) => Response {
             status: 422,
             reason: "Unprocessable Entity",
@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn script_work_limits_are_explicit_but_unavailable_indexes_remain_503() {
-        use bitcoin_rs_index::{TxQueryError, TxUnavailableCause};
+        use bitcoin_rs_projection::{TxQueryError, TxUnavailableCause};
         let response = super::query_error(TxQueryError::Unavailable(
             TxUnavailableCause::ScriptHashLimitExceeded { limit: 25_000 },
         ));

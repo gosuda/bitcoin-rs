@@ -15,11 +15,11 @@ use bitcoin_rs_consensus::primitives::{
 };
 use parking_lot::{Mutex, RwLock};
 
-use bitcoin_rs_index::ScriptHash;
-use bitcoin_rs_index::types::{
+use bitcoin_rs_projection::ScriptHash;
+use bitcoin_rs_projection::types::{
     HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, TX_POSITION_SIZE, TxPosition, TxPositionValue,
 };
-use bitcoin_rs_index::{
+use bitcoin_rs_projection::{
     ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexReader, IndexWatermark,
     IndexWatermarks, IndexWriter, PreparedBatch, PreparedBatchLimits, PreparedBlock,
     SpentCoinScripts,
@@ -458,7 +458,8 @@ fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), TestError> 
                     continue;
                 }
                 funding_prefixes.insert(
-                    bitcoin_rs_index::ScriptHash::new(output.script_pubkey.as_bytes()).prefix(),
+                    bitcoin_rs_projection::ScriptHash::new(output.script_pubkey.as_bytes())
+                        .prefix(),
                 );
                 scripts.insert(output.script_pubkey.as_bytes().to_vec());
             }
@@ -513,13 +514,17 @@ fn occurrence_flags(store: &MemoryStore) -> (usize, usize) {
     let mut funding = 0;
     let mut spending = 0;
     for (_key, value) in store.rows(ColumnFamily::Funding) {
-        for occurrence in
-            bitcoin_rs_index::types::ScriptHistoryOccurrence::decode_all(&value).unwrap_or_default()
+        for occurrence in bitcoin_rs_projection::types::ScriptHistoryOccurrence::decode_all(&value)
+            .unwrap_or_default()
         {
-            if occurrence.flags & bitcoin_rs_index::types::ScriptHistoryOccurrence::FUNDING != 0 {
+            if occurrence.flags & bitcoin_rs_projection::types::ScriptHistoryOccurrence::FUNDING
+                != 0
+            {
                 funding += 1;
             }
-            if occurrence.flags & bitcoin_rs_index::types::ScriptHistoryOccurrence::SPENDING != 0 {
+            if occurrence.flags & bitcoin_rs_projection::types::ScriptHistoryOccurrence::SPENDING
+                != 0
+            {
                 spending += 1;
             }
         }
@@ -664,7 +669,7 @@ fn prepare_block_verifies_header_identity_and_parent() -> Result<(), TestError> 
         block.encoded_bytes,
         HEADER_ROW_SIZE
             + (HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE)
-            + (HASH_PREFIX_ROW_SIZE + bitcoin_rs_index::types::ScriptHistoryOccurrence::SIZE)
+            + (HASH_PREFIX_ROW_SIZE + bitcoin_rs_projection::types::ScriptHistoryOccurrence::SIZE)
     );
 
     let wrong_hash = [0x42u8; 32];
@@ -928,7 +933,7 @@ fn capability_commits_own_only_their_rows_and_watermarks() -> Result<(), TestErr
     let watermark = IndexWatermark { height: 0, hash };
     assert_eq!(
         writer.watermarks()?,
-        bitcoin_rs_index::IndexWatermarks {
+        bitcoin_rs_projection::IndexWatermarks {
             compact_filters: None,
             tx_lookup: Some(watermark),
             script_history: None,
@@ -952,7 +957,7 @@ fn capability_commits_own_only_their_rows_and_watermarks() -> Result<(), TestErr
 
     assert_eq!(
         writer.watermarks()?,
-        bitcoin_rs_index::IndexWatermarks {
+        bitcoin_rs_projection::IndexWatermarks {
             compact_filters: None,
             tx_lookup: Some(watermark),
             script_history: Some(watermark),
@@ -981,7 +986,7 @@ fn aligned_capabilities_share_one_atomic_commit() -> Result<(), TestError> {
     let watermark = IndexWatermark { height: 0, hash };
     assert_eq!(
         writer.watermarks()?,
-        bitcoin_rs_index::IndexWatermarks {
+        bitcoin_rs_projection::IndexWatermarks {
             compact_filters: None,
             tx_lookup: Some(watermark),
             script_history: Some(watermark),
@@ -1005,7 +1010,7 @@ fn script_index_reset_preserves_tx_lookup_and_shared_identity() -> Result<(), Te
 
     assert_eq!(
         writer.watermarks()?,
-        bitcoin_rs_index::IndexWatermarks {
+        bitcoin_rs_projection::IndexWatermarks {
             compact_filters: None,
             tx_lookup: Some(IndexWatermark { height: 0, hash }),
             script_history: None,
@@ -1784,7 +1789,7 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), TestError> {
         batch.encoded_bytes(),
         HEADER_ROW_SIZE
             + (HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE)
-            + (HASH_PREFIX_ROW_SIZE + bitcoin_rs_index::types::ScriptHistoryOccurrence::SIZE)
+            + (HASH_PREFIX_ROW_SIZE + bitcoin_rs_projection::types::ScriptHistoryOccurrence::SIZE)
     );
     assert!(batch.is_full());
     assert_eq!(
@@ -1925,16 +1930,17 @@ fn rocksdb_snapshot_preserves_position_values() -> Result<(), TestError> {
     let positions = TxPositionValue::decode(&transaction_rows.rows[0].value)
         .ok_or("transaction rows carry positions")?;
     assert_eq!(positions.len(), 1);
-    let occurrences =
-        bitcoin_rs_index::types::ScriptHistoryOccurrence::decode_all(&funding_rows.rows[0].value)
-            .ok_or("funding rows carry occurrences")?;
+    let occurrences = bitcoin_rs_projection::types::ScriptHistoryOccurrence::decode_all(
+        &funding_rows.rows[0].value,
+    )
+    .ok_or("funding rows carry occurrences")?;
     assert_eq!(occurrences.len(), 1, "one transaction occurrence per row");
     assert_eq!(occurrences[0].scripthash, scripthash);
     assert_eq!(occurrences[0].txid, *txid.as_bytes());
     assert_eq!(occurrences[0].position, positions[0]);
     assert_eq!(
         occurrences[0].flags,
-        bitcoin_rs_index::types::ScriptHistoryOccurrence::FUNDING
+        bitcoin_rs_projection::types::ScriptHistoryOccurrence::FUNDING
     );
     Ok(())
 }

@@ -5,7 +5,7 @@ use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxIn, Txid};
 
 use super::*;
 use bitcoin_rs_execution::chain::{ChainWork, LatchReader, NodeId, TipSnapshot};
-use bitcoin_rs_index::block_log::BlockLog;
+use bitcoin_rs_projection::block_log::BlockLog;
 
 struct SingleBlockSource {
     height: u32,

@@ -8,12 +8,12 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_consensus::script::push_int;
 use bitcoin_rs_execution::chain::regtest_fixture::{self, REGTEST_BITS};
-use bitcoin_rs_index::ScriptHash;
-use bitcoin_rs_index::query_api::HistoricalQueryError;
 use bitcoin_rs_mempool::MutationOutcome;
 use bitcoin_rs_node::ScriptIndexMode;
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, Node, NodeConfig, NodeError};
+use bitcoin_rs_projection::ScriptHash;
+use bitcoin_rs_projection::query_api::HistoricalQueryError;
 
 const SEED_BLOCKS: u32 = 100;
 const SEED_BASE_TIME: u32 = 1_296_688_603;
@@ -243,7 +243,7 @@ fn historical_config(data_dir: &std::path::Path) -> Result<NodeConfig> {
 fn wait_historical_transaction(
     node: &Node,
     txid: &Txid,
-) -> Result<bitcoin_rs_index::query_api::AtPrefix<Option<(u32, Tx)>>> {
+) -> Result<bitcoin_rs_projection::query_api::AtPrefix<Option<(u32, Tx)>>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         match node.transaction_at_prefix(txid) {

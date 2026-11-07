@@ -24,14 +24,14 @@ use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Network, Txid};
 use bitcoin_rs_execution::chain::{
     BlockTree, BlockTreeReader, ChainTxCount, LatchWriter, NodeStatus, TipReader, TipSnapshot,
 };
-use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
-use bitcoin_rs_index::reconcile::{ChainCursorSource, ConsumerCursor};
-use bitcoin_rs_index::runtime::{
+use bitcoin_rs_projection::portable::{IndexBundleDirective, IndexBundleRequest};
+use bitcoin_rs_projection::reconcile::{ChainCursorSource, ConsumerCursor};
+use bitcoin_rs_projection::runtime::{
     DEFAULT_BATCH_LIMITS, DerivedIndexLifecycle, DerivedIndexOpenSpec, DerivedIndexQueryAdapter,
     DerivedIndexRuntime, DerivedIndexWorker, Generation, IndexAheadError, IndexAheadSink,
     open_derived_index_store_on_worker,
 };
-use bitcoin_rs_index::{
+use bitcoin_rs_projection::{
     DerivedIndexQuery, IndexCapabilities, IndexCapability, IndexReader, IndexWatermark, Indexer,
 };
 use bitcoin_rs_storage::block_body::BlockBodyStore;
@@ -544,7 +544,7 @@ impl Node {
         let shutdown = Arc::new(LatchWriter::new());
         let crash = start.crash_after_bulk_import;
         let spec = DerivedIndexOpenSpec {
-            scripthash_limit: bitcoin_rs_index::runtime::DEFAULT_SCRIPTHASH_LIMIT,
+            scripthash_limit: bitcoin_rs_projection::runtime::DEFAULT_SCRIPTHASH_LIMIT,
             data_dir: data_dir.to_path_buf(),
             namespace: "txindex",
             storage_backend: StorageBackend::RocksDb,
@@ -554,7 +554,7 @@ impl Node {
             canonical_data_root: data_dir.to_path_buf(),
             open_store: Arc::new(move |dir| {
                 let inner = RocksDbStore::open_with_cache(dir, STORE_CACHE_BYTES)
-                    .map_err(bitcoin_rs_index::runtime::DerivedIndexWorkerError::Storage)?;
+                    .map_err(bitcoin_rs_projection::runtime::DerivedIndexWorkerError::Storage)?;
                 if crash {
                     let store = Arc::new(CrashAfterBulkImport {
                         inner,

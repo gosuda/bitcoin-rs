@@ -112,12 +112,12 @@ filters}`. The families are the transaction-id lookup rows, the script funding
 and spending rows, the live-view mutations, the block header identity rows, and
 the basic compact-filter rows. A forward batch commit records one observation
 for each family whose planned bytes are non-zero, after the store commit
-succeeds (`commit_forward_with_cursor` in `crates/index/src/index/write.rs`;
+succeeds (`commit_forward_with_cursor` in `crates/projection/src/index/write.rs`;
 `commit_forward` and `commit_block` use it). A failed commit records nothing,
 and no other commit path records this metric. The value is the sum, over the
 blocks of the batch, of the bytes each block planned for that family under the
 rule in the next table (`PendingRows::encoded_bytes_by_family` in
-`crates/index/src/index/rows.rs`). The sum is fixed as blocks join the batch,
+`crates/projection/src/index/rows.rs`). The sum is fixed as blocks join the batch,
 before the commit merges, sorts, and de-duplicates the batch rows. The value is
 row-size arithmetic over the prepared rows. It does not read the store, so it
 does not include write-ahead-log, storage-engine, or device write volume, and
@@ -260,7 +260,7 @@ if verification runs. Consumers must not require every field on a single event.
   valid-block fixture.
 - `composite_isolates_a_panicking_leg` exercises the real observer failure
   path and requires the operator counter to have no leg label.
-- `family_byte_histograms_recording` (`crates/index/src/index/rows.rs`) drives
+- `family_byte_histograms_recording` (`crates/projection/src/index/rows.rs`) drives
   `record_family_byte_histograms` against a local recorder. It checks the five
   `family` label values with their byte values, and that a family with zero
   planned bytes records nothing. It does not drive a commit.

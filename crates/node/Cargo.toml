@@ -21,7 +21,7 @@ workspace = true
 test-seam = [
     "bitcoin-rs-execution/test-seam",
     "bitcoin-rs-mempool/test-seam",
-    "bitcoin-rs-index/test-seam",
+    "bitcoin-rs-projection/test-seam",
     "bitcoin-rs-mining/test-seam",
     "dep:toml",
 ]
@@ -40,12 +40,12 @@ pool-sv2 = ["pool", "bitcoin-rs-mining/pool-sv2", "dep:zeroize"]
 surrealkv = [
     "bitcoin-rs-storage/surrealkv",
     "bitcoin-rs-execution/surrealkv",
-    "bitcoin-rs-index/surrealkv",
+    "bitcoin-rs-projection/surrealkv",
 ]
 mdbx = [
     "bitcoin-rs-storage/mdbx",
     "bitcoin-rs-execution/mdbx",
-    "bitcoin-rs-index/mdbx",
+    "bitcoin-rs-projection/mdbx",
 ]
 
 [dependencies]
@@ -53,7 +53,7 @@ hashbrown.workspace = true
 bitcoin-rs-consensus.workspace = true
 bitcoin-rs-storage.workspace = true
 bitcoin-rs-execution.workspace = true
-bitcoin-rs-index.workspace = true
+bitcoin-rs-projection.workspace = true
 
 bitcoin-rs-mempool.workspace = true
 bitcoin-rs-p2p.workspace = true

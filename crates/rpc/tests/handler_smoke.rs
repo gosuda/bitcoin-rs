@@ -12,10 +12,10 @@ use bitcoin_rs_consensus::primitives::{
     Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_execution::chain::{ChainWork, NodeId, NodeStatus, TipSnapshot};
-use bitcoin_rs_index::block_log::BlockRecord;
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_mining::FakeMiningControl;
 use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable, wire::PROTOCOL_VERSION};
+use bitcoin_rs_projection::block_log::BlockRecord;
 use bitcoin_rs_rpc::context::{ChainControl, ChainControlError, Context};
 use bitcoin_rs_rpc::{Handler, RpcError};
 use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
@@ -49,7 +49,7 @@ type Expectation = (&'static str, sonic_rs::Value, sonic_rs::Value);
 
 #[test]
 fn compact_filter_rpc_exposes_only_enabled_ready_data() -> Result<(), TestError> {
-    use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
+    use bitcoin_rs_projection::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
     struct Filters(AtomicBool);
     impl CompactFilterQuery for Filters {
         fn block_filter(&self, _: Hash256) -> Result<Option<BasicFilter>, TxQueryError> {
@@ -600,11 +600,12 @@ fn getindexinfo_returns_txindex_when_indexer_is_available() -> Result<(), TestEr
 #[test]
 fn getindexinfo_named_request_returns_only_that_index() -> Result<(), TestError> {
     struct UnavailableFilters;
-    impl bitcoin_rs_index::CompactFilterQuery for UnavailableFilters {
+    impl bitcoin_rs_projection::CompactFilterQuery for UnavailableFilters {
         fn block_filter(
             &self,
             _: Hash256,
-        ) -> Result<Option<bitcoin_rs_index::BasicFilter>, bitcoin_rs_index::TxQueryError> {
+        ) -> Result<Option<bitcoin_rs_projection::BasicFilter>, bitcoin_rs_projection::TxQueryError>
+        {
             unreachable!("status only")
         }
         fn for_each_filter(
@@ -612,15 +613,16 @@ fn getindexinfo_named_request_returns_only_that_index() -> Result<(), TestError>
             _: u32,
             _: Hash256,
             _: u32,
-            _: &mut dyn FnMut(Hash256, bitcoin_rs_index::BasicFilter) -> bool,
-        ) -> Result<Option<[u8; 32]>, bitcoin_rs_index::TxQueryError> {
+            _: &mut dyn FnMut(Hash256, bitcoin_rs_projection::BasicFilter) -> bool,
+        ) -> Result<Option<[u8; 32]>, bitcoin_rs_projection::TxQueryError> {
             unreachable!("status only")
         }
         fn filter_index_info(
             &self,
-        ) -> Result<bitcoin_rs_index::DerivedIndexInfo, bitcoin_rs_index::TxQueryError> {
-            Err(bitcoin_rs_index::TxQueryError::Unavailable(
-                bitcoin_rs_index::TxUnavailableCause::Other("history unavailable".into()),
+        ) -> Result<bitcoin_rs_projection::DerivedIndexInfo, bitcoin_rs_projection::TxQueryError>
+        {
+            Err(bitcoin_rs_projection::TxQueryError::Unavailable(
+                bitcoin_rs_projection::TxUnavailableCause::Other("history unavailable".into()),
             ))
         }
     }

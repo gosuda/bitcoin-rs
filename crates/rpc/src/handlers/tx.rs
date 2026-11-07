@@ -24,7 +24,7 @@ use crate::handlers::{
     optional_bool, params_array, parse_txid, required_str, required_u64, wrong_type,
     wrong_type_plain,
 };
-use bitcoin_rs_index::block_log::BlockRecord;
+use bitcoin_rs_projection::block_log::BlockRecord;
 use corepc_types::v31;
 
 pub(crate) mod submit_package;
@@ -420,7 +420,7 @@ fn txindex_usable(ctx: &Context) -> bool {
         .as_deref()
         .is_none_or(|source| {
             let capability = source.capability();
-            capability.enabled && capability.state == bitcoin_rs_index::CapabilityState::Ready
+            capability.enabled && capability.state == bitcoin_rs_projection::CapabilityState::Ready
         })
 }
 
@@ -430,7 +430,7 @@ fn proof_interrupted() -> RpcError {
 
 fn proof_from_single_record(
     ctx: &Arc<Context>,
-    record: &bitcoin_rs_index::block_log::BlockRecord,
+    record: &bitcoin_rs_projection::block_log::BlockRecord,
     wanted: &hashbrown::HashSet<Txid>,
     cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<Value, RpcError> {
