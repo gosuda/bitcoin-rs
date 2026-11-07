@@ -99,7 +99,7 @@ jobs:
             --no-default-features --features "${FULL_NODE_FEATURES}"
       - name: Preserve public process compatibility evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: process-compatibility-full-node-${{ github.run_attempt }}
           path: target/process-harness/**
@@ -179,7 +179,7 @@ jobs:
             2>&1 | tee target/script-kernel-evidence/clippy.log
       - name: Preserve kernel script evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: script-kernel-${{ github.run_attempt }}
           path: target/script-kernel-evidence/
@@ -229,7 +229,7 @@ jobs:
             --all-targets -- -D warnings 2>&1 | tee target/script-native-evidence/clippy.log
       - name: Preserve native script evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: script-native-${{ github.run_attempt }}
           path: target/script-native-evidence/
@@ -299,7 +299,7 @@ jobs:
             2>&1 | tee target/core-differential/driver.log
       - name: Preserve Core differential evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: core-differential-${{ github.run_attempt }}
           path: |
