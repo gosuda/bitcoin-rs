@@ -213,6 +213,16 @@ impl NodeState {
         let epoch = initialize_data_dir(&config.data_dir)?;
 
         let cache_budget = bitcoin_rs_storage::clamp_dbcache_bytes(config.storage.dbcache_mb);
+        let budget = Arc::new(crate::budget::NodeBudget::from_dbcache_bytes(
+            cache_budget,
+            crate::lifecycle::worker_shares(),
+        ));
+        budget.set_engine_cache_source(Some(Box::new(move || cache_budget)));
+        budget.sample_engine_cache();
+        let window_limits_source: bitcoin_rs_execution::WindowLimitsSource = {
+            let budget = Arc::clone(&budget);
+            Arc::new(move || budget.window_limits())
+        };
         let cache_shares = if derived_index_capabilities(&config).is_empty() {
             bitcoin_rs_storage::split_cache_budget_without_txindex(cache_budget)
         } else {
@@ -381,6 +391,7 @@ impl NodeState {
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: storage.mandatory_retention(),
+            window_limits: window_limits_source,
             history: storage.bounded_history(),
             role: bitcoin_rs_execution::ChainstateRole::Ordinary,
         });
@@ -684,15 +695,16 @@ impl NodeState {
                 error: Box::new(error),
             })?,
         );
-        let sync = Arc::new(crate::sync::block_sync(
-            Arc::clone(&chainstate),
-            followers.clone(),
-            Arc::clone(&peer_table),
+        let sync = Arc::new(crate::sync::block_sync(crate::sync::BlockSyncInputs {
+            handles: Arc::clone(&chainstate),
+            followers: followers.clone(),
+            peer_table: Arc::clone(&peer_table),
             inbound_headers_rx,
             inbound_blocks_rx,
-            Arc::clone(&ibd),
-            Some(Arc::clone(&assumeutxo)),
-        ));
+            ibd: Arc::clone(&ibd),
+            assumeutxo: Some(Arc::clone(&assumeutxo)),
+            budget: Arc::clone(&budget),
+        }));
         if config.p2p.fast_sync {
             sync.install_budget(fast_sync_budget(config.network));
         }

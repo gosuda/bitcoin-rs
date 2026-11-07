@@ -410,7 +410,7 @@ fn durable_head_at_or_below_restored_tip_is_not_a_replay_gap() -> TestResult {
 #[test]
 fn wide_authenticated_gap_replays_to_durable_head() -> TestResult {
     let (mut handles, first) = restored_chainstate()?;
-    let width = crate::window::DURABLE_HEAD_GROUP_BLOCKS + 1;
+    let width = crate::window_limits::DURABLE_HEAD_GROUP_BLOCKS + 1;
     let bodies = Arc::new(MemoryBodies::default());
     let mut tip_hash = Hash256::from(first.block_hash());
     bodies.persist_block_body(1, tip_hash, &consensus_bytes(&first))?;

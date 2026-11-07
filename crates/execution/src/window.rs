@@ -11,10 +11,6 @@ use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Txid};
 use rayon::prelude::*;
 use std::sync::Arc;
 
-pub(super) const DURABLE_HEAD_GROUP_BLOCKS: usize = 64;
-
-const DURABLE_HEAD_GROUP_MAX_BYTES: usize = 8 << 20;
-
 pub(super) enum PublishMode<'a> {
     Now,
     Grouped(&'a mut WindowGroup),
@@ -31,13 +27,21 @@ pub(super) struct PendingBlockCommit {
     pub attestation: Option<bitcoin_rs_storage::ScriptAttestation>,
 }
 
-#[derive(Default)]
 pub(super) struct WindowGroup {
+    limits: crate::window_limits::WindowLimits,
     pending: Vec<PendingBlockCommit>,
     staged_bytes: usize,
 }
 
 impl WindowGroup {
+    pub(super) fn new(limits: crate::window_limits::WindowLimits) -> Self {
+        Self {
+            limits,
+            pending: Vec::new(),
+            staged_bytes: 0,
+        }
+    }
+
     pub(super) fn predecessor(
         &self,
         prev_hash: Hash256,
@@ -65,8 +69,7 @@ impl WindowGroup {
     }
 
     fn should_flush(&self) -> bool {
-        self.pending.len() >= DURABLE_HEAD_GROUP_BLOCKS
-            || self.staged_bytes >= DURABLE_HEAD_GROUP_MAX_BYTES
+        self.pending.len() >= self.limits.max_blocks || self.staged_bytes >= self.limits.max_bytes
     }
 
     fn flush(
@@ -284,7 +287,7 @@ pub(super) fn apply_window_admitted(
     let mut takes = window.takes;
     let take_starts = window.take_starts;
     let mut workspace = window.workspace;
-    let mut group = WindowGroup::default();
+    let mut group = WindowGroup::new((handles.window_limits)());
     let mut committed: Vec<ConnectOutcome> = Vec::with_capacity(payloads.len());
     for (index, &payload) in payloads.iter().enumerate() {
         if workspace.is_some() && index >= covered {
@@ -996,7 +999,7 @@ mod workspace_guard_tests {
         )
         .expect("header tip");
 
-        let mut group = WindowGroup::default();
+        let mut group = WindowGroup::new(crate::window_limits::default_window_limits_source()());
         group.stage(PendingBlockCommit {
             outcome: ConnectOutcome {
                 tip: tip.clone(),

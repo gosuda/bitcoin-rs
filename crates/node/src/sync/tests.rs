@@ -53,6 +53,7 @@ fn window_failure_keeps_committed_followers_and_native_retry_policy()
         handles: Arc::clone(&handles),
         followers: followers.clone(),
         assumeutxo: None,
+        budget: Arc::new(crate::budget::NodeBudget::from_dbcache_bytes(16, 1)),
     };
     adapter.bootstrap_genesis();
     let mut mutated = invalid.clone();

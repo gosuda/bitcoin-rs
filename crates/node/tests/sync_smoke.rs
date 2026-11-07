@@ -37,15 +37,18 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), TestErr
     );
     let handles = Arc::new(handles);
     let ibd = handles.ibd_latch();
-    let sync = bitcoin_rs_node::sync::block_sync(
-        Arc::clone(&handles),
-        bitcoin_rs_node::ChainFollowers::noop(),
-        Arc::clone(&peer_table),
+    let sync = bitcoin_rs_node::sync::block_sync(bitcoin_rs_node::sync::BlockSyncInputs {
+        handles: Arc::clone(&handles),
+        followers: bitcoin_rs_node::ChainFollowers::noop(),
+        peer_table,
         inbound_headers_rx,
         inbound_blocks_rx,
-        Arc::clone(&ibd),
-        None,
-    );
+        ibd,
+        assumeutxo: None,
+        budget: Arc::new(bitcoin_rs_node::budget::NodeBudget::from_dbcache_bytes(
+            16, 1,
+        )),
+    });
 
     inbound_headers_tx
         .send(bitcoin_rs_wire::InboundHeaders {
@@ -98,15 +101,18 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
     let handles = Arc::new(handles);
     let followers = bitcoin_rs_node::ChainFollowers::noop();
     let block_log = followers.block_log_reader();
-    let sync = bitcoin_rs_node::sync::block_sync(
-        Arc::clone(&handles),
+    let sync = bitcoin_rs_node::sync::block_sync(bitcoin_rs_node::sync::BlockSyncInputs {
+        handles: Arc::clone(&handles),
         followers,
-        Arc::new(bitcoin_rs_wire::PeerTable::new()),
+        peer_table: Arc::new(bitcoin_rs_wire::PeerTable::new()),
         inbound_headers_rx,
         inbound_blocks_rx,
-        handles.ibd_latch(),
-        None,
-    );
+        ibd: handles.ibd_latch(),
+        assumeutxo: None,
+        budget: Arc::new(bitcoin_rs_node::budget::NodeBudget::from_dbcache_bytes(
+            16, 1,
+        )),
+    });
     sync.tick();
     let before = handles.chain_snapshot();
     assert_eq!(
@@ -237,15 +243,18 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats() -> Result<()
     );
     let handles = Arc::new(handles);
     let ibd = handles.ibd_latch();
-    let sync = bitcoin_rs_node::sync::block_sync(
-        Arc::clone(&handles),
-        bitcoin_rs_node::ChainFollowers::noop(),
-        Arc::clone(&peer_table),
+    let sync = bitcoin_rs_node::sync::block_sync(bitcoin_rs_node::sync::BlockSyncInputs {
+        handles: Arc::clone(&handles),
+        followers: bitcoin_rs_node::ChainFollowers::noop(),
+        peer_table,
         inbound_headers_rx,
         inbound_blocks_rx,
-        Arc::clone(&ibd),
-        None,
-    );
+        ibd,
+        assumeutxo: None,
+        budget: Arc::new(bitcoin_rs_node::budget::NodeBudget::from_dbcache_bytes(
+            16, 1,
+        )),
+    });
 
     inbound_headers_tx
         .send(bitcoin_rs_wire::InboundHeaders {

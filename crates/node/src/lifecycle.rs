@@ -951,11 +951,15 @@ fn final_payout_script(config: &NodeConfig) -> Vec<u8> {
 }
 const GLOBAL_RAYON_THREADS: usize = 4;
 
-fn cap_global_thread_pool() {
+pub(crate) fn worker_shares() -> u32 {
     let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    let threads = available.min(GLOBAL_RAYON_THREADS);
+    u32::try_from(available.min(GLOBAL_RAYON_THREADS)).unwrap_or(1)
+}
+
+fn cap_global_thread_pool() {
+    let threads = worker_shares().max(1);
     if let Err(error) = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
+        .num_threads(usize::try_from(threads).unwrap_or(GLOBAL_RAYON_THREADS))
         .build_global()
     {
         tracing::debug!(%error, "global rayon pool already configured, keeping it");

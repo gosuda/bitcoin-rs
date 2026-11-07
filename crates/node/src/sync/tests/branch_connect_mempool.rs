@@ -283,6 +283,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             capture_rawtx: false,
             capture_block_bytes: true,
             retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
+            window_limits: bitcoin_rs_execution::default_window_limits_source(),
             history: bitcoin_rs_storage::pruning::HistoryAccess::new(
                 retention,
                 bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(288),
@@ -402,6 +403,7 @@ fn admit_headers_reports_the_tip_a_heavier_fork_displaced()
         handles: Arc::clone(&handles),
         followers: crate::chain_effects::ChainFollowers::noop(),
         assumeutxo: None,
+        budget: Arc::new(crate::budget::NodeBudget::from_dbcache_bytes(16, 1)),
     };
     let headers = |heights: std::ops::RangeInclusive<u32>| -> Vec<Header> {
         let mut prev = genesis.block_hash();

@@ -16,30 +16,36 @@ struct NodeSyncChain {
     handles: Arc<bitcoin_rs_execution::Chainstate>,
     block_tree: bitcoin_rs_execution::chain::BlockTreeReader,
     followers: crate::chain_effects::ChainFollowers,
+    budget: Arc<crate::budget::NodeBudget>,
 }
 
 #[must_use]
-pub fn block_sync(
-    handles: Arc<bitcoin_rs_execution::Chainstate>,
-    followers: crate::chain_effects::ChainFollowers,
-    peer_table: Arc<PeerTable>,
-    inbound_headers_rx: Receiver<InboundHeaders>,
-    inbound_blocks_rx: Receiver<bitcoin_rs_wire::InboundBlock>,
-    ibd: Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
-    assumeutxo: Option<Arc<bitcoin_rs_execution::AssumeUtxoManager>>,
-) -> BlockSync {
-    let block_tree = handles.block_tree_reader();
+pub struct BlockSyncInputs {
+    pub handles: Arc<bitcoin_rs_execution::Chainstate>,
+    pub followers: crate::chain_effects::ChainFollowers,
+    pub peer_table: Arc<PeerTable>,
+    pub inbound_headers_rx: Receiver<InboundHeaders>,
+    pub inbound_blocks_rx: Receiver<bitcoin_rs_wire::InboundBlock>,
+    pub ibd: Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
+    pub assumeutxo: Option<Arc<bitcoin_rs_execution::AssumeUtxoManager>>,
+    pub budget: Arc<crate::budget::NodeBudget>,
+}
+
+#[must_use]
+pub fn block_sync(inputs: BlockSyncInputs) -> BlockSync {
+    let block_tree = inputs.handles.block_tree_reader();
     BlockSync::new(
         Arc::new(NodeSyncChain {
-            assumeutxo,
-            handles,
+            assumeutxo: inputs.assumeutxo,
+            handles: Arc::clone(&inputs.handles),
             block_tree,
-            followers,
+            followers: inputs.followers,
+            budget: inputs.budget,
         }),
-        peer_table,
-        inbound_headers_rx,
-        inbound_blocks_rx,
-        ibd,
+        inputs.peer_table,
+        inputs.inbound_headers_rx,
+        inputs.inbound_blocks_rx,
+        inputs.ibd,
     )
 }
 
@@ -212,7 +218,7 @@ impl SyncChain for NodeSyncChain {
     }
 
     fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize {
-        bitcoin_rs_execution::window_len(serialized_sizes)
+        bitcoin_rs_execution::window_len_within(serialized_sizes, self.budget.script_batch_limits())
     }
 
     fn commit_window(&self, payloads: &[&BlockImage]) -> Result<usize, WindowCommitError> {

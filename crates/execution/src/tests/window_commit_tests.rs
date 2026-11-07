@@ -873,7 +873,8 @@ fn gap_replay_token_keeps_the_duplicate_exemption() -> TestResult {
     apply_headers(&chain, &[&b2])?;
     let b2_payload = BlockImage::from_local(b2);
 
-    let mut group = crate::window::WindowGroup::default();
+    let mut group =
+        crate::window::WindowGroup::new(crate::window_limits::default_window_limits_source()());
     let outcome = crate::connect::apply_block_admitted(
         &chain,
         &b2_payload,

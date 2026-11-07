@@ -70,6 +70,7 @@ pub(crate) fn handles_with_store<S: bitcoin_rs_storage::KvStore>(
             ),
         ),
         role: crate::ChainstateRole::Ordinary,
+        window_limits: crate::window_limits::default_window_limits_source(),
     })
 }
 

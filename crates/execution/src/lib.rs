@@ -37,6 +37,7 @@ pub mod fuzzing;
 mod prepare;
 mod tip_wait;
 mod window;
+pub mod window_limits;
 mod workspace;
 pub use prepare::bytes_are_block;
 pub use window::classify_apply_error;
@@ -398,6 +399,7 @@ pub struct Chainstate {
     pub(crate) capture_rawtx: bool,
     pub(crate) capture_block_bytes: bool,
     pub(crate) retention: bitcoin_rs_storage::MandatoryRetention,
+    pub(crate) window_limits: crate::window_limits::WindowLimitsSource,
     pub(crate) history: bitcoin_rs_storage::pruning::HistoryAccess,
     ibd: Arc<crate::chain::InitialBlockDownload>,
     pub(crate) role: Arc<RwLock<ChainstateRole>>,
@@ -423,6 +425,7 @@ pub struct ChainstateParts {
     pub capture_rawtx: bool,
     pub capture_block_bytes: bool,
     pub retention: bitcoin_rs_storage::MandatoryRetention,
+    pub window_limits: crate::window_limits::WindowLimitsSource,
     pub history: bitcoin_rs_storage::pruning::HistoryAccess,
     pub role: ChainstateRole,
 }
@@ -549,6 +552,7 @@ impl Chainstate {
             capture_rawtx: parts.capture_rawtx,
             capture_block_bytes: parts.capture_block_bytes,
             retention: parts.retention,
+            window_limits: parts.window_limits,
             history: parts.history,
             ibd,
             role: Arc::new(RwLock::new(parts.role)),
@@ -838,6 +842,7 @@ impl Chainstate {
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: self.retention.clone(),
+            window_limits: crate::window_limits::default_window_limits_source(),
             history: self.history.clone(),
             ibd,
             role: Arc::new(RwLock::new(ChainstateRole::Historical {
@@ -1202,6 +1207,7 @@ impl Chainstate {
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
+            window_limits: crate::window_limits::default_window_limits_source(),
             history: bitcoin_rs_storage::pruning::HistoryAccess::new(
                 retention,
                 bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(
@@ -1370,26 +1376,9 @@ struct DisconnectPlan {
     tx_count_delta: u64,
 }
 
-const SCRIPT_BATCH_WINDOW: usize = 1024;
-
-const SCRIPT_BATCH_MAX_BYTES: usize = 64 << 20;
-
-pub fn window_len(sizes: impl IntoIterator<Item = usize>) -> usize {
-    let mut count = 0_usize;
-    let mut bytes = 0_usize;
-    for size in sizes {
-        if count == SCRIPT_BATCH_WINDOW {
-            break;
-        }
-        let next = bytes.saturating_add(size);
-        if count > 0 && next > SCRIPT_BATCH_MAX_BYTES {
-            break;
-        }
-        bytes = next;
-        count = count.saturating_add(1);
-    }
-    count
-}
+pub use crate::window_limits::{
+    WindowLimits, WindowLimitsSource, default_window_limits_source, window_len_within,
+};
 
 #[derive(Debug)]
 pub struct WindowApplyError {
