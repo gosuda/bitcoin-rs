@@ -11,6 +11,8 @@ use crate::query_api::{CoveredPrefix, HistoricalUnavailableCause, ScriptHistoryP
 use bitcoin_rs_chain::{AncestryBudgetExceeded, NodeId};
 
 mod filters;
+#[cfg(any(test, verification, kani))]
+pub(crate) mod proofs;
 mod scripts;
 mod transactions;
 
