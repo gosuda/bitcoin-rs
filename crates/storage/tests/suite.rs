@@ -4,6 +4,7 @@ mod backend_equivalence;
 mod backend_metrics;
 mod batch_range_ordering;
 mod bounded_prefix_scan;
+mod coins;
 mod bounded_value_read;
 mod cache_budget;
 mod durable_head_store;

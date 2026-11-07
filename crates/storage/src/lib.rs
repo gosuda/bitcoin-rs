@@ -19,6 +19,7 @@ pub use cache_budget::{
 
 pub use column_families::ColumnFamily;
 
+pub use coins::{COIN_KEY_LEN, CoinCache, CoinKey, CoinStore, WindowDelta};
 pub use bytes::Bytes;
 pub use error::{BoundedReadError, StorageError};
 
@@ -110,6 +111,7 @@ mod batch;
 pub mod block_body;
 mod block_file;
 pub mod cache_budget;
+pub mod coins;
 mod column_families;
 pub mod durable_head;
 mod error;
