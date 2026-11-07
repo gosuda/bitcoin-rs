@@ -77,11 +77,11 @@ Owners:
   - `crates/projection/src/runtime/query_tests.rs` (`filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries`)
   - `crates/serving/tests/handler_smoke.rs` (`compact_filter_rpc_exposes_only_enabled_ready_data`)
   - `crates/wire/src/listener.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
-- `ScriptLive` is not a duplicate coin table.
-- Its empty-valued key is `script-hash-prefix || full-outpoint`.
-- The prefix is only a scan accelerator.
-- Readers resolve each locator against the authoritative UTXO set and exact-check the full script.
-- Deletes are exact point deletes, so a prefix collision cannot remove another script's output.
+- `ScriptLive` is self-contained under format 8 (PRJ-11).
+- Its 43-byte key is `script-hash-prefix || full-outpoint`.
+- Its value stores `script_hash` followed by the compact varint coin payload `varint(compress_amount(value)) || varint((height << 1) | coinbase)` with Core's `CompressAmount` and minimal varints; decoding refuses truncated input, malformed varints, amount overflow, height overflow, and trailing bytes.
+- Readers exact-check the full script hash directly from the stored coin without requiring a live UTXO read or chain-transition lock.
+- Deletes are exact point deletes carrying the undo coin pre-image, so a prefix collision cannot remove another script's output.
 - `ScriptHistory` persists one occurrence family in `ColumnFamily::Funding`.
 - It is keyed by `(script_hash_prefix, inverted big-endian height)`.
 - The value holds one 71-byte occurrence per transaction:
@@ -487,14 +487,13 @@ That document gives consumer usage and defers to this clause for every consisten
 
 - Additive surface: three synchronous `Node` operations read confirmed history at a server-selected covered prefix.
 - Each operation returns its answer qualified by the prefix it was proven against:
-  - `transaction_at_prefix(&self, txid: &Txid) -> Result<AtPrefix<Option<(u32, Tx)>>, HistoricalQueryError>`
-  - `script_history_at_prefix(&self, script: ScriptHash) -> Result<AtPrefix<ScriptIndexSnapshot>, HistoricalQueryError>`
-  - `spender_at_prefix(&self, outpoint: OutPoint) -> Result<AtPrefix<Option<SpendingRecord>>, HistoricalQueryError>`
+  - `transaction_at_prefix(&self, txid: &Txid) -> Result<Answer<Option<(u32, Tx)>>, TxQueryError>`
+  - `script_history_at_prefix(&self, script: ScriptHash) -> Result<Answer<ScriptIndexSnapshot>, TxQueryError>`
+  - `spender_at_prefix(&self, outpoint: OutPoint) -> Result<Answer<Option<SpendingRecord>>, TxQueryError>`
 - New public types live in `bitcoin_rs_projection::query_api` (already public; no re-export is added):
   - `CoveredPrefix { floor: u32, height: u32, hash: Hash256 }`
-  - `AtPrefix<T> { prefix: CoveredPrefix, answer: T }`
-  - `HistoricalQueryError { Retry, Unavailable(HistoricalUnavailableCause), Storage(CompactString) }`
-  - `HistoricalUnavailableCause { Shared(TxUnavailableCause), NoCoveredPrefix { capability: IndexCapability }, AncestryBudgetExhausted { capability: IndexCapability, watermark_height: u32 }, PrefixBelowFloor { floor: u32 } }`
+  - `Answer<T> { value: T, block_hash: Hash256, height: u32, coverage: CoveredPrefix, verification_state: VerificationState }`
+  - `TxQueryError { Retry(RetryReason), Unavailable(TxUnavailableCause), ExpiredView, Storage(CompactString) }`
 - `CoveredPrefix.hash` is the full chain hash at `height`.
 - `floor` is the lowest provable height (`0` means genesis, positive means a pruned prefix).
 - `Txid`, `Tx`, and `OutPoint` are `bitcoin_rs_consensus::primitives` types.
