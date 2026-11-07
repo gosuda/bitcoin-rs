@@ -1,6 +1,6 @@
 use bitcoin_rs_storage::StorageBackend;
-use clap::Parser;
-use std::path::{Path, PathBuf};
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 use crate::error::ConvertError;
 
@@ -15,11 +15,11 @@ pub(crate) struct CliArgs {
     pub(crate) command: Option<Command>,
 
     /// Path to the source datadir.
-    #[arg(long = "from", value_name = "DIR", required = true)]
+    #[arg(long = "from", value_name = "DIR")]
     pub(crate) from: Option<PathBuf>,
 
     /// Path to the destination datadir.
-    #[arg(long = "to", value_name = "DIR", required = true)]
+    #[arg(long = "to", value_name = "DIR")]
     pub(crate) to: Option<PathBuf>,
     /// Target storage engine (rocksdb, surrealkv, mdbx).
     #[arg(long = "to-engine", value_name = "ENGINE", default_value = "rocksdb")]
@@ -34,14 +34,35 @@ pub(crate) struct CliArgs {
     pub(crate) pool_to: Option<PathBuf>,
 }
 
-#[derive(clap::Subcommand, Debug)]
+#[derive(Subcommand, Debug)]
 pub(crate) enum Command {
-    /// Rebuild index into an unpublished generation and publish.
+    /// Reset the derived-index projection in a datadir so the node rebuilds
+    /// it from retained chainstate on its next start.
     RebuildIndex {
+        /// Datadir whose `txindex` namespace is reset in place.
         #[arg(long = "datadir", value_name = "DIR")]
         datadir: PathBuf,
     },
 }
+
+impl CliArgs {
+    /// The convert-mode roots; `None` when the invoked subcommand replaces
+    /// the default conversion flow.
+    pub(crate) fn convert_roots(&self) -> Result<(&PathBuf, &PathBuf), ConvertError> {
+        let Some(from) = self.from.as_ref() else {
+            return Err(ConvertError::InvalidOperation(
+                "--from is required for datadir conversion".into(),
+            ));
+        };
+        let Some(to) = self.to.as_ref() else {
+            return Err(ConvertError::InvalidOperation(
+                "--to is required for datadir conversion".into(),
+            ));
+        };
+        Ok((from, to))
+    }
+}
+
 impl CliArgs {
     pub(crate) fn target_backend(&self) -> Result<StorageBackend, ConvertError> {
         let backend = match self.to_engine.trim().to_ascii_lowercase().as_str() {
@@ -107,17 +128,5 @@ impl CliArgs {
         }
 
         Ok(())
-    }
-
-    pub(crate) fn source_path(&self) -> Result<&Path, ConvertError> {
-        self.from.as_deref().ok_or_else(|| {
-            ConvertError::InvalidOperation("missing required argument --from".into())
-        })
-    }
-
-    pub(crate) fn destination_path(&self) -> Result<&Path, ConvertError> {
-        self.to
-            .as_deref()
-            .ok_or_else(|| ConvertError::InvalidOperation("missing required argument --to".into()))
     }
 }

@@ -1524,7 +1524,7 @@ fn import_finalize_remove_archive_seed_completes() -> TestResult {
     assert!(expected > 0, "the fixture must hold live coins");
     let mut seen = 0_u64;
     seed.for_each_coin_raw(
-        &mut |_, _| {
+        &mut |_, _, _, _, _| {
             seen += 1;
             Ok::<(), std::convert::Infallible>(())
         },

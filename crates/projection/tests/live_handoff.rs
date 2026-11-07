@@ -228,6 +228,8 @@ fn block_to_facts(
                     vout: prev_vout,
                     value,
                     script,
+                    height: 0,
+                    coinbase: false,
                 });
             }
         }
@@ -358,13 +360,13 @@ fn live_index_path_reads_zero_block_bodies() {
                 .map_err(bitcoin_rs_projection::runtime::DerivedIndexWorkerError::Storage)?;
             open_derived_index_store_on_worker(Arc::new(inner), DEFAULT_BATCH_LIMITS, 1)
         }),
-        seed_slot: None,
-        utxo: None,
-        chain_transition: None,
         bundle: IndexBundleDirective::None,
         facts_rx: Some(facts_rx),
         facts_bytes: Some(facts_bytes),
         facts_gap: Some(facts_gap),
+        seed_slot: None,
+        utxo: None,
+        chain_transition: None,
     };
 
     let worker = DerivedIndexWorker::spawn_with_open(

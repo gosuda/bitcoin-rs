@@ -18,6 +18,9 @@ pub mod stats;
 pub(crate) mod test_support;
 mod undo_codec;
 
+pub use compress::{
+    compress_amount, decompress_amount, read_varint, varint_len, write_varint_into,
+};
 pub use record::UtxoRecord;
 pub use set::{UtxoCoin, UtxoError, UtxoMemoryReport, UtxoReader, UtxoScan, UtxoSet, UtxoSetView};
 pub use snapshot::{

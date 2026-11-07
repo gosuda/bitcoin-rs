@@ -101,7 +101,7 @@ impl BulkSegmentBuilder {
     }
 
     // PRJ-09
-    pub fn build_and_ingest<S: KvStore>(
+    pub fn build_and_ingest<S: KvStore + ?Sized>(
         &self,
         store: &S,
         gen_id: u64,

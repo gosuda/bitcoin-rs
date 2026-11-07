@@ -484,7 +484,15 @@ pub trait IndexAheadSink: Send + Sync {
 }
 
 pub(crate) struct UndoScripts {
-    scripts: hashbrown::HashMap<([u8; 32], u32), Vec<u8>>,
+    coins: hashbrown::HashMap<([u8; 32], u32), UndoCoin>,
+}
+
+#[derive(Clone)]
+pub(crate) struct UndoCoin {
+    script: Vec<u8>,
+    value: u64,
+    height: u32,
+    coinbase: bool,
 }
 
 impl UndoScripts {
@@ -493,20 +501,30 @@ impl UndoScripts {
         hash: Hash256,
     ) -> Result<Self, bitcoin_rs_storage::utxo::contract::UndoCodecError> {
         let batch = bitcoin_rs_storage::utxo::contract::decode_undo_record(bytes, hash)?;
-        let mut scripts = hashbrown::HashMap::with_capacity(batch.restores().len());
+        let mut coins = hashbrown::HashMap::with_capacity(batch.restores().len());
         for add in batch.restores() {
-            scripts.insert(
+            coins.insert(
                 (add.outpoint.txid.0.to_le_bytes(), add.outpoint.vout),
-                add.txout.script_pubkey.as_bytes().to_vec(),
+                UndoCoin {
+                    script: add.txout.script_pubkey.as_bytes().to_vec(),
+                    value: add.txout.value.to_sat(),
+                    height: add.height,
+                    coinbase: add.coinbase,
+                },
             );
         }
-        Ok(Self { scripts })
+        Ok(Self { coins })
     }
 }
 
-impl crate::SpentCoinScripts for UndoScripts {
-    fn script_bytes(&self, txid: &[u8; 32], vout: u32) -> Option<&[u8]> {
-        self.scripts.get(&(*txid, vout)).map(Vec::as_slice)
+impl crate::SpentCoins for UndoScripts {
+    fn spent_coin(&self, txid: &[u8; 32], vout: u32) -> Option<crate::SpentCoin<'_>> {
+        self.coins.get(&(*txid, vout)).map(|coin| crate::SpentCoin {
+            script: &coin.script[..],
+            value: coin.value,
+            height: coin.height,
+            coinbase: coin.coinbase,
+        })
     }
 }
 

@@ -44,6 +44,7 @@ pub struct TxIndexPage {
 #[derive(Debug)]
 pub struct ScriptLiveScan {
     pub rows: Vec<crate::ScriptLiveRow>,
+    pub coins: Vec<crate::ScriptLiveCoin>,
     pub encoded_bytes: usize,
     pub complete: bool,
 }
@@ -259,17 +260,20 @@ impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
         )?;
         let encoded_bytes = encoded_bytes(&scan);
         let mut rows = Vec::with_capacity(scan.rows.len());
+        let mut coins = Vec::with_capacity(scan.rows.len());
         for (key, value) in scan.rows {
-            if !value.is_empty() {
-                return Err(IndexError::InvalidLiveRowValue { len: value.len() });
-            }
             rows.push(
                 crate::ScriptLiveRow::from_db_row(&key)
                     .ok_or(IndexError::InvalidPrefixRowLength { len: key.len() })?,
             );
+            coins.push(
+                crate::ScriptLiveCoin::decode_value(&value)
+                    .map_err(|_| IndexError::InvalidLiveRowValue { len: value.len() })?,
+            );
         }
         Ok(ScriptLiveScan {
             rows,
+            coins,
             encoded_bytes,
             complete: scan.complete,
         })

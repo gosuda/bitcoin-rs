@@ -11,10 +11,20 @@ use tracing::debug;
 
 /// Reserved `UtxoMeta` metadata keys: the `0x00` prefix is reserved for `TxIndex` metadata;
 /// data row keys begin with ASCII letters and can never collide.
-pub(super) const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
+pub(super) const FORMAT_VERSION_KEY: &[u8] = crate::types::INDEX_FORMAT_VERSION_KEY;
 
-/// On-disk format 7: immutable sorted segments and bounded mutable tail.
-pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = [0x07, 0x00, 0x00, 0x00];
+/// On-disk format 8: newest-first exact `ScriptHistory` occurrences, 43-byte
+/// `ScriptLive` keys with u24 `vout`, 6-byte `TxPosition` locators, and
+/// self-contained `ScriptLive` rows whose column value carries the full
+/// script hash followed by the compact varint payload
+/// `varint(compress_amount(value)) || varint((height << 1) | coinbase)`
+/// (`PRJ-11`). Version 7 is reserved for the index-generation layout
+/// (PRJ-05..09). Any older marker refuses start
+/// (`UnsupportedTxIndexFormatVersion`), so `open_writer` resets the derived
+/// store and rebuilds it from chainstate; no in-place upgrade or dual-read
+/// path exists. `bitcoin-rs-storage-convert rebuild-index` performs the same
+/// reset offline.
+pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = crate::types::INDEX_FORMAT_VERSION_VALUE;
 
 const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
 

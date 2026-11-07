@@ -3,14 +3,14 @@ use crate::support::{common, error::TestError};
 use bitcoin::{Block, consensus::serialize, hashes::Hash as _};
 use bitcoin_rs_projection::{
     ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexReader, IndexWatermark, IndexWriter,
-    PreparedBatch, PreparedBatchLimits, SpentCoinScripts,
+    PreparedBatch, PreparedBatchLimits, SpentCoin, SpentCoins,
 };
 use bitcoin_rs_storage::KvStore;
 use std::sync::{Arc, atomic::Ordering};
 
 struct NoSpends;
-impl SpentCoinScripts for NoSpends {
-    fn script_bytes(&self, _: &[u8; 32], _: u32) -> Option<&[u8]> {
+impl SpentCoins for NoSpends {
+    fn spent_coin(&self, _: &[u8; 32], _: u32) -> Option<SpentCoin<'_>> {
         None
     }
 }

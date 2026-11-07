@@ -68,6 +68,10 @@ fn family_bytes_accounting() -> Result<(), IndexError> {
     let outpoint2 = OutPoint::new(Txid(Hash256::from_le_bytes(&[2; 32])), 1);
     let live_row1 = ScriptLiveRow::new(ScriptHash::from_byte_array([10; 32]), &outpoint1);
     let live_row2 = ScriptLiveRow::new(ScriptHash::from_byte_array([20; 32]), &outpoint2);
+    let live_coin1 =
+        crate::types::ScriptLiveCoin::new(ScriptHash::from_byte_array([10; 32]), 100, 7, false);
+    let live_coin2 =
+        crate::types::ScriptLiveCoin::new(ScriptHash::from_byte_array([20; 32]), 200, 8, false);
 
     let filter = super::super::filters::BasicFilter {
         filter: vec![0xaa, 0xbb, 0xcc],
@@ -80,7 +84,16 @@ fn family_bytes_accounting() -> Result<(), IndexError> {
         funding_rows: positioned_histories(),
         spending_rows: positioned_rows(),
         header_rows: vec![[0x42; crate::types::HEADER_ROW_SIZE]],
-        live_ops: vec![LiveOp::Insert(live_row1), LiveOp::Delete(live_row2)],
+        live_ops: vec![
+            LiveOp::Insert {
+                row: live_row1,
+                coin: live_coin1,
+            },
+            LiveOp::Delete {
+                row: live_row2,
+                coin: live_coin2,
+            },
+        ],
         filter_rows: vec![([0x33; 32], filter)],
     };
     rows.sort();
@@ -93,13 +106,13 @@ fn family_bytes_accounting() -> Result<(), IndexError> {
     assert_eq!(family.tx_lookup, 42);
     assert_eq!(family.script_history, 279);
     assert_eq!(family.headers, 80);
-    assert_eq!(family.script_live, 86);
+    assert_eq!(family.script_live, 120);
     assert_eq!(family.filters, 101);
 
-    assert_eq!(total_bytes, 42 + 279 + 80 + 86 + 101);
+    assert_eq!(total_bytes, 42 + 279 + 80 + 120 + 101);
 
     let mut puts = BufferedWriteBatch::default();
-    put_rows(&mut puts, &rows);
+    put_rows(&mut puts, &rows)?;
     let emitted_bytes: usize = puts
         .into_ops()
         .iter()
@@ -353,7 +366,7 @@ fn row_accounting_matches_emitted_bytes_and_shared_header_deletion() -> Result<(
         }
     );
     let mut puts = BufferedWriteBatch::default();
-    put_rows(&mut puts, &rows);
+    put_rows(&mut puts, &rows)?;
     let puts = puts.into_ops();
     assert_eq!(puts.len(), rows.total());
     let encoded_bytes: usize = puts
@@ -368,9 +381,9 @@ fn row_accounting_matches_emitted_bytes_and_shared_header_deletion() -> Result<(
     for delete_shared_identity in [false, true] {
         let mut deletes = BufferedWriteBatch::default();
         if delete_shared_identity {
-            delete_rows_with_headers(&mut deletes, &rows);
+            delete_rows_with_headers(&mut deletes, &rows)?;
         } else {
-            delete_rows(&mut deletes, &rows);
+            delete_rows(&mut deletes, &rows)?;
         }
         let deletes = deletes.into_ops();
         let expected: Vec<_> = puts
@@ -399,17 +412,33 @@ fn row_accounting_matches_emitted_bytes_and_shared_header_deletion() -> Result<(
 }
 
 #[test]
-fn live_coalescing_matches_first_and_last_operations_for_all_small_sequences() {
+fn live_coalescing_matches_first_and_last_operations_for_all_small_sequences()
+-> Result<(), IndexError> {
     let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[0; 32])), 0);
     let keys = [
         ScriptLiveRow::new(ScriptHash::from_byte_array([0; 32]), &outpoint),
         ScriptLiveRow::new(ScriptHash::from_byte_array([1; 32]), &outpoint),
     ];
+    let coin = |hash: [u8; 32]| {
+        crate::types::ScriptLiveCoin::new(ScriptHash::from_byte_array(hash), 1, 1, false)
+    };
     let choices = [
-        LiveOp::Insert(keys[0]),
-        LiveOp::Delete(keys[0]),
-        LiveOp::Insert(keys[1]),
-        LiveOp::Delete(keys[1]),
+        LiveOp::Insert {
+            row: keys[0],
+            coin: coin([0; 32]),
+        },
+        LiveOp::Delete {
+            row: keys[0],
+            coin: coin([0; 32]),
+        },
+        LiveOp::Insert {
+            row: keys[1],
+            coin: coin([1; 32]),
+        },
+        LiveOp::Delete {
+            row: keys[1],
+            coin: coin([1; 32]),
+        },
     ];
     for len in 0..=5_u32 {
         for mut pattern in 0..4_usize.pow(len) {
@@ -421,23 +450,29 @@ fn live_coalescing_matches_first_and_last_operations_for_all_small_sequences() {
             for invert in [false, true] {
                 let mut batch = BufferedWriteBatch::default();
                 if invert {
-                    invert_live_ops(&mut batch, &ops);
+                    invert_live_ops(&mut batch, &ops)?;
                 } else {
-                    apply_live_ops(&mut batch, &ops);
+                    apply_live_ops(&mut batch, &ops)?;
                 }
                 let mut expected = BTreeMap::new();
-                for key in keys {
-                    let matches_key = |op: &&LiveOp| match op {
-                        LiveOp::Insert(row) | LiveOp::Delete(row) => *row == key,
-                    };
+                for (key_index, key) in keys.iter().enumerate() {
+                    let matches_key = |op: &&LiveOp| *op.row() == *key;
                     let decisive = if invert {
                         ops.iter().find(matches_key)
                     } else {
                         ops.iter().rfind(matches_key)
                     };
                     if let Some(op) = decisive {
-                        let insert = matches!(op, LiveOp::Insert(_)) != invert;
-                        expected.insert(key.as_bytes().to_vec(), insert.then(Vec::new));
+                        let insert = matches!(op, LiveOp::Insert { .. }) != invert;
+                        let byte = u8::try_from(key_index).unwrap_or(0);
+                        let coin = crate::types::ScriptLiveCoin::new(
+                            ScriptHash::from_byte_array([byte; 32]),
+                            1,
+                            1,
+                            false,
+                        );
+                        let value = coin.encode_value()?;
+                        expected.insert(key.as_bytes().to_vec(), insert.then_some(value));
                     }
                 }
                 let mutations: Vec<(Vec<u8>, Option<Vec<u8>>)> = batch
@@ -470,4 +505,5 @@ fn live_coalescing_matches_first_and_last_operations_for_all_small_sequences() {
             }
         }
     }
+    Ok(())
 }

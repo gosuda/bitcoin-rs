@@ -80,10 +80,10 @@ pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertE
     let mut namespaces_report = Vec::new();
 
     let node_namespaces = [("chainstate", "chainstate"), ("txindex", "txindex")];
-    let to_path = args.destination_path()?;
+    let (_, to) = args.convert_roots()?;
     for &(ns_name, rel_path) in &node_namespaces {
-        let dst_path = to_path.join(rel_path);
-        let scratch_base = to_path.join(".convert-src");
+        let dst_path = to.join(rel_path);
+        let scratch_base = to.join(".convert-src");
         let scratch_path = scratch_base.join(rel_path);
 
         let paths = NamespacePaths {
@@ -1165,7 +1165,7 @@ fn run_step_3_to_4(
     target_engine: StorageBackend,
 ) -> Result<ConversionReport, ConvertError> {
     let (checkpoint_dir, _reference, manifest) = check_complete_checkpoint(&roots.from_dir)?;
-    let to_path = args.destination_path()?;
+    let (_, to_path) = args.convert_roots()?;
 
     let mut namespaces_report = Vec::new();
 

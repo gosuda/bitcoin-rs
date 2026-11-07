@@ -18,7 +18,7 @@ use bitcoin_rs_consensus::primitives::{Hash256, OutPoint as NativeOutPoint, Txid
 use bitcoin_rs_projection::{
     ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexWatermark,
     IndexWatermarks, IndexWriter, MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits,
-    ScriptHash, ScriptLiveRow, SpentCoinScripts,
+    ScriptHash, ScriptLiveRow, SpentCoin, SpentCoins,
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 
@@ -27,7 +27,7 @@ fn commit_rollback_one_with_spent_scripts<S: KvStore>(
     capabilities: IndexCapabilities,
     prev: Option<IndexWatermark>,
     body: &[u8],
-    spent_scripts: &dyn SpentCoinScripts,
+    spent_scripts: &dyn SpentCoins,
 ) -> Result<(), IndexError> {
     let (fence, _) = writer.fenced_watermarks()?;
     writer.commit_rollback_one_for_with_cursor_with_spent_scripts(
@@ -41,20 +41,56 @@ fn commit_rollback_one_with_spent_scripts<S: KvStore>(
 }
 
 #[derive(Default)]
-struct MapScripts(hashbrown::HashMap<(Txid, u32), Vec<u8>>);
+struct MapScripts(hashbrown::HashMap<(Txid, u32), FixtureCoin>);
+
+#[derive(Clone)]
+struct FixtureCoin {
+    script: Vec<u8>,
+    value: u64,
+    height: u32,
+    coinbase: bool,
+}
 
 impl MapScripts {
-    fn insert(&mut self, outpoint: OutPoint, script: &ScriptBuf) {
-        self.0
-            .insert((outpoint.txid, outpoint.vout), script.to_bytes());
+    fn insert(&mut self, outpoint: OutPoint, coin: FixtureCoin) {
+        self.0.insert((outpoint.txid, outpoint.vout), coin);
     }
 }
 
-impl SpentCoinScripts for MapScripts {
-    fn script_bytes(&self, txid: &[u8; 32], vout: u32) -> Option<&[u8]> {
+impl FixtureCoin {
+    /// A coin the fixture chain paid to `script` at `height`; the canonical
+    /// value of fixture coinbase outputs is 50 sat.
+    fn paying(script: &ScriptBuf, height: u32) -> Self {
+        Self {
+            script: script.to_bytes(),
+            value: 50,
+            height,
+            coinbase: true,
+        }
+    }
+
+    /// A coin that predates the fixture chain; only its script identity is
+    /// observable through the index.
+    fn external(script: &ScriptBuf) -> Self {
+        Self {
+            script: script.to_bytes(),
+            value: 0,
+            height: 0,
+            coinbase: false,
+        }
+    }
+}
+
+impl SpentCoins for MapScripts {
+    fn spent_coin(&self, txid: &[u8; 32], vout: u32) -> Option<SpentCoin<'_>> {
         self.0
             .get(&(Txid::from_byte_array(*txid), vout))
-            .map(Vec::as_slice)
+            .map(|coin| SpentCoin {
+                script: &coin.script,
+                value: coin.value,
+                height: coin.height,
+                coinbase: coin.coinbase,
+            })
     }
 }
 
@@ -223,10 +259,15 @@ fn persistent_writer_live_roundtrip<S: KvStore>(
     );
     let row = ScriptLiveRow::new(scripthash, &native);
     assert_eq!(row.as_bytes().len(), 43);
-    assert_eq!(
-        store.get(ColumnFamily::ScriptLive, row.as_bytes())?,
-        Some(Vec::new())
-    );
+    let Some(stored) = store.get(ColumnFamily::ScriptLive, row.as_bytes())? else {
+        return Err(TestError::from("the funding output row is stored"));
+    };
+    let stored_coin = bitcoin_rs_projection::ScriptLiveCoin::decode_value(&stored)
+        .map_err(|_| TestError::from("format 8 rows carry a coin payload"))?;
+    assert_eq!(stored_coin.scripthash, scripthash);
+    assert_eq!(stored_coin.value, funding_tx.output[1].value.to_sat());
+    assert_eq!(stored_coin.height, 1);
+    assert!(stored_coin.coinbase);
     let scan = writer.snapshot()?.live_rows(
         scripthash,
         bitcoin_rs_storage::PrefixScanLimit {
@@ -239,7 +280,7 @@ fn persistent_writer_live_roundtrip<S: KvStore>(
     assert_eq!(scan.rows[0].as_bytes(), row.as_bytes());
 
     let mut anchor = MapScripts::default();
-    anchor.insert(outpoint, &wallet);
+    anchor.insert(outpoint, FixtureCoin::paying(&wallet, 1));
     let (spending, spending_hash) = block_bytes(
         funding_hash,
         vec![coinbase(2), spend(&[outpoint], &[script(0xdd)])],
@@ -338,7 +379,16 @@ fn seed_live_and_reopen<S: KvStore>(
         hash: [0x42; 32],
     };
     let high_vout = NativeOutPoint::new(native.txid, 256);
-    let coins = [(native, scripthash), (high_vout, scripthash)];
+    let coins = [
+        (
+            native,
+            bitcoin_rs_projection::ScriptLiveCoin::new(scripthash, 1, 7, false),
+        ),
+        (
+            high_vout,
+            bitcoin_rs_projection::ScriptLiveCoin::new(scripthash, 2, 7, false),
+        ),
+    ];
     assert_eq!(writer.seed_script_live(coins, seed_tip)?, 2);
     let (_, after_seed) = writer.fenced_watermarks()?;
     assert_eq!(after_seed.script_live, Some(seed_tip));
@@ -401,7 +451,7 @@ fn live_rows_follow_connect_spend_and_disconnect() -> Result<(), TestError> {
     };
     let pay_txid = pay.compute_txid();
     let mut anchor = MapScripts::default();
-    anchor.insert(external, &funding_script);
+    anchor.insert(external, FixtureCoin::external(&funding_script));
     chain.connect(vec![coinbase(1), pay], &anchor)?;
 
     let o0 = OutPoint {
@@ -416,7 +466,7 @@ fn live_rows_follow_connect_spend_and_disconnect() -> Result<(), TestError> {
 
     let sweep = spend(&[o0], &[script(0xcc)]);
     let mut anchor2 = MapScripts::default();
-    anchor2.insert(o0, &wallet);
+    anchor2.insert(o0, FixtureCoin::paying(&wallet, chain.height));
     let (body2, hash2) = block_bytes(chain.tip, vec![coinbase(2), sweep]);
     let prepared = chain.writer.prepare_block_with_spent_scripts(
         IndexCapabilities::TX_AND_SCRIPTS,
@@ -452,6 +502,75 @@ fn live_rows_follow_connect_spend_and_disconnect() -> Result<(), TestError> {
 }
 
 #[test]
+fn disconnect_restores_the_full_coin_payload() -> Result<(), TestError> {
+    let mut chain = Chain::new()?;
+    let empty = MapScripts::default();
+    chain.connect(vec![coinbase(0)], &empty)?;
+
+    let wallet = script(0xaa);
+    let funding = spend(&[OutPoint::null()], std::slice::from_ref(&wallet));
+    let funding_txid = funding.compute_txid();
+    let funding_outpoint = OutPoint {
+        txid: funding_txid,
+        vout: 0,
+    };
+    chain.connect(vec![funding], &MapScripts::default())?;
+
+    let sweep = spend(&[funding_outpoint], &[script(0xdd)]);
+    let mut anchor = MapScripts::default();
+    anchor.insert(funding_outpoint, FixtureCoin::paying(&wallet, 1));
+    let (body, hash) = block_bytes(chain.tip, vec![coinbase(1), sweep]);
+    let prepared = chain.writer.prepare_block_with_spent_scripts(
+        IndexCapabilities::TX_AND_SCRIPTS,
+        chain.height,
+        hash,
+        &body,
+        &anchor,
+    )?;
+    let batch = common::batch_with_limits(
+        prepared,
+        PreparedBatchLimits {
+            max_rows: 10_000,
+            max_bytes: 10_000_000,
+        },
+    );
+    chain.writer.commit_forward(batch)?;
+    assert_eq!(chain.live(&wallet), Vec::<OutPoint>::new());
+
+    let prev = IndexWatermark {
+        height: 1,
+        hash: chain.tip,
+    };
+    commit_rollback_one_with_spent_scripts(
+        &mut chain.writer,
+        IndexCapabilities::TX_AND_SCRIPTS,
+        Some(prev),
+        &body,
+        &anchor,
+    )?;
+
+    let scripthash = bitcoin_rs_projection::ScriptHash::from_script_bytes(wallet.as_bytes());
+    let scan = chain
+        .writer
+        .snapshot()?
+        .live_rows(
+            scripthash,
+            bitcoin_rs_storage::PrefixScanLimit {
+                max_rows: 10,
+                max_bytes: 10_000,
+            },
+        )
+        .map_err(TestError::from)?;
+    assert_eq!(scan.rows.len(), 1);
+    let coin = scan.coins[0];
+    assert_eq!(coin.scripthash, scripthash);
+    assert_eq!(coin.value, 50);
+    assert_eq!(coin.height, 1);
+    assert!(coin.coinbase);
+    Ok(())
+}
+
+#[test]
 fn live_rows_restore_a_replaced_outpoint() -> Result<(), TestError> {
     let mut chain = Chain::new()?;
     chain.connect(vec![coinbase(0)], &MapScripts::default())?;
@@ -470,8 +589,8 @@ fn live_rows_restore_a_replaced_outpoint() -> Result<(), TestError> {
         vout: 0,
     };
     let mut anchor = MapScripts::default();
-    anchor.insert(external, &script(0x74));
-    anchor.insert(replaced, &old_script);
+    anchor.insert(external, FixtureCoin::external(&script(0x74)));
+    anchor.insert(replaced, FixtureCoin::external(&old_script));
 
     let (body, hash) = block_bytes(chain.tip, vec![coinbase(1), creator]);
     let prepared = chain.writer.prepare_block_with_spent_scripts(
@@ -556,7 +675,7 @@ fn same_block_create_and_spend_cancels_without_an_anchor() -> Result<(), TestErr
     let spender_txid = spender.compute_txid();
 
     let mut anchor = MapScripts::default();
-    anchor.insert(external, &script(0xef));
+    anchor.insert(external, FixtureCoin::external(&script(0xef)));
     chain.connect(vec![coinbase(1), creator, spender], &anchor)?;
 
     assert_eq!(chain.live(&transient), Vec::<OutPoint>::new());
@@ -642,7 +761,7 @@ fn live_predicate_matches_utxo_admission_not_history() -> Result<(), TestError> 
     };
     let txid = tx.compute_txid();
     let mut anchor = MapScripts::default();
-    anchor.insert(external, &script(0x23));
+    anchor.insert(external, FixtureCoin::external(&script(0x23)));
     chain.connect(vec![coinbase(1), tx], &anchor)?;
 
     assert_eq!(chain.live(&op_return), Vec::<OutPoint>::new());
@@ -665,9 +784,18 @@ struct NoSpend;
 
 static NO_SPEND_SCRIPT: [u8; 2] = [0x51, 0x01];
 
-impl bitcoin_rs_projection::SpentCoinScripts for NoSpend {
-    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
-        Some(NO_SPEND_SCRIPT.as_slice())
+impl bitcoin_rs_projection::SpentCoins for NoSpend {
+    fn spent_coin(
+        &self,
+        _txid: &[u8; 32],
+        _vout: u32,
+    ) -> Option<bitcoin_rs_projection::SpentCoin<'_>> {
+        Some(bitcoin_rs_projection::SpentCoin {
+            script: NO_SPEND_SCRIPT.as_slice(),
+            value: 0,
+            height: 0,
+            coinbase: false,
+        })
     }
 }
 
@@ -747,7 +875,7 @@ fn seeding_resets_partial_rows_and_stamps_once() -> Result<(), TestError> {
         .map(|vout| {
             (
                 NativeOutPoint::new(NativeTxid(Hash256::from_le_bytes(&[0x33_u8; 32])), vout),
-                scripthash,
+                bitcoin_rs_projection::ScriptLiveCoin::new(scripthash, 3, 8, false),
             )
         })
         .collect::<Vec<_>>();
@@ -784,7 +912,7 @@ fn seed_stream_fenced_write_failure_does_not_publish_watermark() -> Result<(), T
         .map(|vout| {
             (
                 NativeOutPoint::new(NativeTxid(Hash256::from_le_bytes(&[0x34_u8; 32])), vout),
-                scripthash,
+                bitcoin_rs_projection::ScriptLiveCoin::new(scripthash, 1, 0, false),
             )
         })
         .collect::<Vec<_>>();

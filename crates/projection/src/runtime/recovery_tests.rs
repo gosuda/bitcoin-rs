@@ -457,9 +457,14 @@ impl Harness {
 #[test]
 fn missing_undo_during_filter_rollback_does_not_reset_filters_or_stop_siblings() {
     struct SpentScript;
-    impl crate::SpentCoinScripts for SpentScript {
-        fn script_bytes(&self, _: &[u8; 32], _: u32) -> Option<&[u8]> {
-            Some(&[0x51])
+    impl crate::SpentCoins for SpentScript {
+        fn spent_coin(&self, _: &[u8; 32], _: u32) -> Option<crate::SpentCoin<'_>> {
+            Some(crate::SpentCoin {
+                script: &[0x51],
+                value: 0,
+                height: 0,
+                coinbase: false,
+            })
         }
     }
     let f = ForkFixture::new(2);

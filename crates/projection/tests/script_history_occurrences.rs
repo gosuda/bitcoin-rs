@@ -6,7 +6,7 @@ use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid, encode};
 use bitcoin_rs_projection::types::ScriptHistoryOccurrence;
 use bitcoin_rs_projection::{
     IndexCapabilities, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer, ScriptHash,
-    ScriptHashRow, SpendingPrefixRow, SpentCoinScripts,
+    ScriptHashRow, SpendingPrefixRow, SpentCoin, SpentCoins,
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit};
 
@@ -32,9 +32,14 @@ struct ChainScripts {
     by_txid: HashMap<[u8; 32], Vec<u8>>,
 }
 
-impl SpentCoinScripts for ChainScripts {
-    fn script_bytes(&self, txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
-        self.by_txid.get(txid).map(Vec::as_slice)
+impl SpentCoins for ChainScripts {
+    fn spent_coin(&self, txid: &[u8; 32], _vout: u32) -> Option<SpentCoin<'_>> {
+        self.by_txid.get(txid).map(|script| SpentCoin {
+            script,
+            value: 0,
+            height: 0,
+            coinbase: false,
+        })
     }
 }
 

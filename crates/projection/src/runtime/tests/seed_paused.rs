@@ -159,7 +159,7 @@ impl TxIndexWriter for GatedWriter {
         height: u32,
         hash: [u8; 32],
         body: &[u8],
-        spent_scripts: &dyn crate::SpentCoinScripts,
+        spent_scripts: &dyn crate::SpentCoins,
     ) -> Result<PreparedBlock, IndexError> {
         self.inner
             .prepare_block_with_spent_scripts(capabilities, height, hash, body, spent_scripts)
@@ -184,17 +184,21 @@ impl TxIndexWriter for GatedWriter {
             Some(mut gate) => {
                 let mut emitted = 0usize;
                 self.inner.seed_script_live_stream(
-                    &mut |emit: &mut dyn FnMut(OutPoint, ScriptHash) -> Result<(), IndexError>| {
-                        let mut counting = |outpoint: OutPoint, hash: ScriptHash| {
-                            emitted += 1;
-                            if emitted == 4_097 {
-                                if let Some(tx) = gate.started.take() {
-                                    let _ = tx.send(());
+                    &mut |emit: &mut dyn FnMut(
+                        OutPoint,
+                        crate::types::ScriptLiveCoin,
+                    ) -> Result<(), IndexError>| {
+                        let mut counting =
+                            |outpoint: OutPoint, coin: crate::types::ScriptLiveCoin| {
+                                emitted += 1;
+                                if emitted == 4_097 {
+                                    if let Some(tx) = gate.started.take() {
+                                        let _ = tx.send(());
+                                    }
+                                    let _ = gate.release.recv_timeout(Duration::from_secs(60));
                                 }
-                                let _ = gate.release.recv_timeout(Duration::from_secs(60));
-                            }
-                            emit(outpoint, hash)
-                        };
+                                emit(outpoint, coin)
+                            };
                         produce(&mut counting)
                     },
                     tip,
@@ -229,7 +233,7 @@ impl TxIndexWriter for GatedWriter {
         prev: Option<IndexWatermark>,
         body: &[u8],
         cursor: crate::ConsumerCursorUpdate<'_>,
-        spent_scripts: &dyn crate::SpentCoinScripts,
+        spent_scripts: &dyn crate::SpentCoins,
     ) -> Result<(), IndexError> {
         self.inner
             .commit_rollback_one_for_with_cursor_with_spent_scripts(
@@ -876,7 +880,7 @@ fn seed_tamper_variants_yield_integrity_without_watermark() {
         );
         let mut emitted = 0usize;
         let result = artifact.for_each_coin_raw(
-            &mut |_: &OutPoint, _: &[u8]| {
+            &mut |_: &OutPoint, _: &[u8], _: u64, _: u32, _| {
                 emitted += 1;
                 Ok::<(), StorageError>(())
             },
@@ -914,7 +918,7 @@ fn seed_tamper_variants_yield_integrity_without_watermark() {
     let mut count = 0usize;
     artifact
         .for_each_coin_raw(
-            &mut |_: &OutPoint, _: &[u8]| {
+            &mut |_: &OutPoint, _: &[u8], _: u64, _: u32, _| {
                 count += 1;
                 Ok::<(), StorageError>(())
             },
@@ -1016,7 +1020,7 @@ fn seed_mutation_check_digest_removal_fails() {
         },
     );
     let result = artifact.for_each_coin_raw(
-        &mut |_: &OutPoint, _: &[u8]| Ok::<(), StorageError>(()),
+        &mut |_: &OutPoint, _: &[u8], _: u64, _: u32, _| Ok::<(), StorageError>(()),
         &|| false,
     );
     assert!(
@@ -1449,7 +1453,10 @@ fn seed_stream_polls_cancellation_and_leaves_no_watermark() {
         hash: [0x07; 32],
     };
     let immediate = writer.seed_script_live_stream(
-        &mut |_: &mut dyn FnMut(OutPoint, ScriptHash) -> Result<(), IndexError>| Ok(()),
+        &mut |_: &mut dyn FnMut(
+            OutPoint,
+            crate::types::ScriptLiveCoin,
+        ) -> Result<(), IndexError>| { Ok(()) },
         tip,
         &|| true,
     );
@@ -1466,25 +1473,28 @@ fn seed_stream_polls_cancellation_and_leaves_no_watermark() {
         "a cancelled entry must not stamp the watermark"
     );
 
-    let coins: Vec<(OutPoint, ScriptHash)> = (0..9_000_u32)
+    let coins: Vec<(OutPoint, crate::types::ScriptLiveCoin)> = (0..9_000_u32)
         .map(|v| {
             let mut bytes = [0x77_u8; 32];
             bytes[..4].copy_from_slice(&v.to_le_bytes());
             (
                 OutPoint::new(Hash256::from_le_bytes(&bytes).into(), 0),
-                scripthash,
+                crate::types::ScriptLiveCoin::new(scripthash, 1, 0, false),
             )
         })
         .collect();
     let seen = std::cell::Cell::new(0_u64);
     let mut next = 0_usize;
     let mid = writer.seed_script_live_stream(
-        &mut |emit: &mut dyn FnMut(OutPoint, ScriptHash) -> Result<(), IndexError>| {
+        &mut |emit: &mut dyn FnMut(
+            OutPoint,
+            crate::types::ScriptLiveCoin,
+        ) -> Result<(), IndexError>| {
             while next < coins.len() {
-                let (outpoint, hash) = coins[next];
+                let (outpoint, coin) = coins[next];
                 next += 1;
                 seen.set(seen.get() + 1);
-                emit(outpoint, hash)?;
+                emit(outpoint, coin)?;
             }
             Ok(())
         },

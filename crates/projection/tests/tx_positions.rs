@@ -10,8 +10,8 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_projection::types::{TX_POSITION_SIZE, TxPosition, TxPositionValue, U24_MAX};
 use bitcoin_rs_projection::{
-    IndexCapabilities, IndexWriter, PreparedBatch, PreparedBatchLimits, ScriptHash,
-    SpentCoinScripts,
+    IndexCapabilities, IndexWriter, PreparedBatch, PreparedBatchLimits, ScriptHash, SpentCoin,
+    SpentCoins,
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use proptest::prelude::*;
@@ -22,9 +22,14 @@ struct FixtureScripts;
 
 static FIXTURE_SPENT_SCRIPT: [u8; 2] = [0x51, 0x01];
 
-impl SpentCoinScripts for FixtureScripts {
-    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
-        Some(FIXTURE_SPENT_SCRIPT.as_slice())
+impl SpentCoins for FixtureScripts {
+    fn spent_coin(&self, _txid: &[u8; 32], _vout: u32) -> Option<SpentCoin<'_>> {
+        Some(SpentCoin {
+            script: FIXTURE_SPENT_SCRIPT.as_slice(),
+            value: 0,
+            height: 0,
+            coinbase: false,
+        })
     }
 }
 

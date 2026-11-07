@@ -191,6 +191,13 @@ impl TxidRow {
 
 pub(crate) const SCRIPT_LIVE_ROW_SIZE: usize = HASH_PREFIX_LEN + 32 + 3;
 
+/// `UtxoMeta` marker naming the derived-index on-disk format. The `0x00`
+/// prefix is reserved for index metadata; data row keys begin with ASCII
+/// letters and never collide.
+pub const INDEX_FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
+
+pub const INDEX_FORMAT_VERSION_VALUE: [u8; 4] = [0x08, 0x00, 0x00, 0x00];
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 #[repr(C)]
 pub struct ScriptLiveRow {
@@ -222,6 +229,115 @@ impl ScriptLiveRow {
         let mut vout = [0_u8; 3];
         vout.copy_from_slice(&self.key[HASH_PREFIX_LEN + 32..]);
         OutPoint::new(Txid(Hash256::from_le_bytes(&txid)), decode_u24_le(vout))
+    }
+}
+
+/// PRJ-11: the column value that makes a `ScriptLive` row self-contained. The
+/// full script hash rides in the value because the key carries only its
+/// 8-byte scan prefix, so the exact-script check stays answerable from the
+/// row itself (`PRJ-11`). The coin payload is the compact encoding
+/// `scripthash || varint(compress_amount(value)) || varint((height << 1) | coinbase)`
+/// with Core's `CompressAmount` and minimal varints; decoding refuses
+/// truncated input, malformed varints, amount overflow, height overflow, and
+/// trailing bytes.
+#[derive(Debug, thiserror::Error, Eq, PartialEq)]
+pub enum ScriptLiveValueError {
+    #[error("ScriptLive coin value {value} exceeds the encodable money range")]
+    AmountOutOfRange { value: u64 },
+    #[error("ScriptLive row value is truncated")]
+    Truncated,
+    #[error("ScriptLive row value carries a malformed varint")]
+    MalformedVarint,
+    #[error("ScriptLive row value amount overflows the money range")]
+    AmountOverflow,
+    #[error("ScriptLive row value height overflows 32 bits")]
+    HeightOverflow,
+    #[error("ScriptLive row value carries trailing bytes")]
+    TrailingBytes,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ScriptLiveCoin {
+    pub scripthash: ScriptHash,
+    pub value: u64,
+    pub height: u32,
+    pub coinbase: bool,
+}
+
+fn refused_varint(bytes: &[u8], offset: usize) -> ScriptLiveValueError {
+    let mut cursor = offset;
+    while bytes.get(cursor).is_some_and(|byte| byte & 0x80 != 0) {
+        cursor += 1;
+    }
+    if cursor >= bytes.len() {
+        ScriptLiveValueError::Truncated
+    } else {
+        ScriptLiveValueError::MalformedVarint
+    }
+}
+
+fn read_varint_step(bytes: &[u8], offset: usize) -> Result<(u64, usize), ScriptLiveValueError> {
+    bitcoin_rs_storage::utxo::read_varint(bytes, offset).map_err(|_| refused_varint(bytes, offset))
+}
+
+impl ScriptLiveCoin {
+    #[must_use]
+    pub const fn new(scripthash: ScriptHash, value: u64, height: u32, coinbase: bool) -> Self {
+        Self {
+            scripthash,
+            value,
+            height,
+            coinbase,
+        }
+    }
+
+    fn packed_height(&self) -> u64 {
+        (u64::from(self.height) << 1) | u64::from(self.coinbase)
+    }
+
+    #[must_use]
+    pub fn encoded_value_len(&self) -> Option<usize> {
+        let compressed = bitcoin_rs_storage::utxo::compress_amount(self.value).ok()?;
+        Some(
+            32 + bitcoin_rs_storage::utxo::varint_len(compressed)
+                + bitcoin_rs_storage::utxo::varint_len(self.packed_height()),
+        )
+    }
+
+    pub fn encode_value(&self) -> Result<Vec<u8>, ScriptLiveValueError> {
+        let compressed = bitcoin_rs_storage::utxo::compress_amount(self.value)
+            .map_err(|_| ScriptLiveValueError::AmountOutOfRange { value: self.value })?;
+        let mut out = Vec::with_capacity(
+            32 + bitcoin_rs_storage::utxo::varint_len(compressed)
+                + bitcoin_rs_storage::utxo::varint_len(self.packed_height()),
+        );
+        out.extend_from_slice(&self.scripthash.to_byte_array());
+        bitcoin_rs_storage::utxo::write_varint_into(&mut out, compressed);
+        bitcoin_rs_storage::utxo::write_varint_into(&mut out, self.packed_height());
+        Ok(out)
+    }
+
+    pub fn decode_value(bytes: &[u8]) -> Result<Self, ScriptLiveValueError> {
+        if bytes.len() < 32 {
+            return Err(ScriptLiveValueError::Truncated);
+        }
+        let mut scripthash = [0_u8; 32];
+        scripthash.copy_from_slice(&bytes[..32]);
+        let (compressed, cursor) = read_varint_step(bytes, 32)?;
+        let value = bitcoin_rs_storage::utxo::decompress_amount(compressed)
+            .ok_or(ScriptLiveValueError::AmountOverflow)?;
+        let (packed, end) = read_varint_step(bytes, cursor)?;
+        if end != bytes.len() {
+            return Err(ScriptLiveValueError::TrailingBytes);
+        }
+        let height =
+            u32::try_from(packed >> 1).map_err(|_| ScriptLiveValueError::HeightOverflow)?;
+        Ok(Self {
+            scripthash: ScriptHash::from_byte_array(scripthash),
+            value,
+            height,
+            coinbase: packed & 1 == 1,
+        })
     }
 }
 

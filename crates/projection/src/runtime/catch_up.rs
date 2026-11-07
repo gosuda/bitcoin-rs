@@ -702,7 +702,7 @@ impl Worker {
             .par_iter()
             .zip(bodies.par_iter())
             .map(|(identity, body)| -> AnchoredPreparation {
-                let prepare = |spent: &dyn crate::SpentCoinScripts| {
+                let prepare = |spent: &dyn crate::SpentCoins| {
                     self.writer.prepare_block_with_spent_scripts(
                         capabilities,
                         identity.height,

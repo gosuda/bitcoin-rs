@@ -32,6 +32,8 @@ fn create_synthetic_blocks(count: u32) -> Vec<CommittedBlock> {
                     vout: 0,
                     value: 50_000,
                     script: Bytes::copy_from_slice(b"\x76\xa9\x14synthetic_prev_script\x88\xac"),
+                    height: 0,
+                    coinbase: false,
                 });
             }
 

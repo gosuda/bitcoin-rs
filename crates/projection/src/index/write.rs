@@ -1,5 +1,5 @@
 use super::{
-    block::NoSpentScripts, block::SpentCoinScripts, block::pending_rows_for_block_with_header,
+    block::NoSpentScripts, block::SpentCoins, block::pending_rows_for_block_with_header,
     block::pending_rows_for_facts, capability::IndexCapabilities, capability::IndexCapability,
     capability::IndexWatermark, capability::IndexWatermarks, capability::SCRIPT_LIVE_WATERMARK_KEY,
     capability::put_selected_watermarks, error::IndexError, prepared::PreparedBatch,
@@ -26,14 +26,7 @@ impl<S: KvStore> IndexWriter<S> {
         let indexer = Indexer::new(store);
         let format_opt = indexer
             .store
-            .get(ColumnFamily::IdxMeta, FORMAT_VERSION_KEY)?
-            .or_else(|| {
-                indexer
-                    .store
-                    .get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)
-                    .ok()
-                    .flatten()
-            });
+            .get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)?;
         match format_opt {
             Some(value) if value.as_slice() == FORMAT_VERSION_VALUE => {}
             Some(value) => {
@@ -81,7 +74,7 @@ impl<S: KvStore> IndexWriter<S> {
     ) -> Result<usize, IndexError>
     where
         F: FnMut(
-            &mut dyn FnMut(OutPoint, crate::ScriptHash) -> Result<(), IndexError>,
+            &mut dyn FnMut(OutPoint, crate::types::ScriptLiveCoin) -> Result<(), IndexError>,
         ) -> Result<(), IndexError>,
     {
         const SEED_BATCH_ROWS: usize = 4_096;
@@ -105,9 +98,10 @@ impl<S: KvStore> IndexWriter<S> {
             &FORMAT_VERSION_VALUE,
         );
         let mut in_batch = 0;
-        let mut add = |outpoint, scripthash| -> Result<(), IndexError> {
-            let row = crate::types::ScriptLiveRow::new(scripthash, &outpoint);
-            batch.put(ColumnFamily::ScriptLive, row.as_bytes(), &[]);
+        let mut add = |outpoint, coin: crate::types::ScriptLiveCoin| -> Result<(), IndexError> {
+            let row = crate::types::ScriptLiveRow::new(coin.scripthash, &outpoint);
+            let value = coin.encode_value()?;
+            batch.put(ColumnFamily::ScriptLive, row.as_bytes(), &value);
             written += 1;
             in_batch += 1;
             if in_batch >= SEED_BATCH_ROWS {
@@ -173,7 +167,7 @@ impl<S: KvStore> IndexWriter<S> {
         seed_tip: IndexWatermark,
     ) -> Result<usize, IndexError>
     where
-        I: IntoIterator<Item = (OutPoint, crate::ScriptHash)>,
+        I: IntoIterator<Item = (OutPoint, crate::types::ScriptLiveCoin)>,
     {
         let mut coins = coins.into_iter();
         self.seed_script_live_stream(
@@ -276,7 +270,7 @@ impl<S: KvStore> IndexWriter<S> {
         height: u32,
         hash: [u8; 32],
         body: &[u8],
-        spent_scripts: &dyn SpentCoinScripts,
+        spent_scripts: &dyn SpentCoins,
     ) -> Result<PreparedBlock, IndexError> {
         if capabilities.is_empty() {
             return Err(IndexError::NonContiguousPrepared {
@@ -398,7 +392,7 @@ impl<S: KvStore> IndexWriter<S> {
             previous_filter_header,
         )?;
         let mut store_batch = self.indexer.store.new_batch();
-        put_rows(&mut store_batch, &merged);
+        put_rows(&mut store_batch, &merged)?;
         store_batch.put(
             ColumnFamily::UtxoMeta,
             FORMAT_VERSION_KEY,
@@ -446,7 +440,7 @@ impl<S: KvStore> IndexWriter<S> {
         prev: Option<IndexWatermark>,
         body: &[u8],
         cursor: ConsumerCursorUpdate<'_>,
-        spent_scripts: &dyn SpentCoinScripts,
+        spent_scripts: &dyn SpentCoins,
     ) -> Result<(), IndexError> {
         let current = fence
             .watermarks
@@ -485,9 +479,9 @@ impl<S: KvStore> IndexWriter<S> {
                     .is_some_and(|watermark| watermark.height >= current.height)
         });
         if unselected_keeps_identity {
-            delete_rows(&mut store_batch, &prepared.rows);
+            delete_rows(&mut store_batch, &prepared.rows)?;
         } else {
-            delete_rows_with_headers(&mut store_batch, &prepared.rows);
+            delete_rows_with_headers(&mut store_batch, &prepared.rows)?;
         }
         store_batch.put(
             ColumnFamily::UtxoMeta,
@@ -549,6 +543,13 @@ fn has_any_index_row<S: KvStore>(store: &S) -> Result<bool, IndexError> {
         ColumnFamily::Spending,
         ColumnFamily::BlockHeaders,
         ColumnFamily::ScriptLive,
+        ColumnFamily::IdxMeta,
+        ColumnFamily::TxDir,
+        ColumnFamily::ScriptDict,
+        ColumnFamily::ScriptPost,
+        ColumnFamily::SpendDir,
+        ColumnFamily::ScriptStats,
+        ColumnFamily::Filters,
     ] {
         let mut iter = store.iter_prefix(cf, &[])?;
         if let Some(entry) = iter.next() {

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use bitcoin::consensus::deserialize;
@@ -12,11 +12,15 @@ use bitcoin_rs_projection::segment::{
     Coverage, GenerationDescriptor, IndexGeneration, TailDescriptor, meta_gen_key,
 };
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
-use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore, block_undo_key};
+use bitcoin_rs_storage::{ColumnFamily, KvStore, block_undo_key};
 use bytes::Bytes;
 
 use crate::error::ConvertError;
+use crate::report::{FamilyResetReport, RebuildIndexReport};
+use crate::target::open_destination_store;
 
+const CURRENT_EPOCH: u32 = 3;
+const CURRENT_SCHEMA_MAX_BYTES: u64 = 16;
 const BLOCK_FILE_MAGIC: [u8; 4] = *b"BRSB";
 const RECORD_HEADER_LEN: usize = 44;
 const MAX_BLOCK_RECORD_BYTES: usize = 4 * 1024 * 1024;
@@ -39,19 +43,49 @@ impl Drop for ScratchGuard {
     }
 }
 
-pub(crate) fn rebuild_index_subcommand(datadir: &Path) -> Result<(), ConvertError> {
+pub(crate) fn run_rebuild_index(datadir: &Path) -> Result<RebuildIndexReport, ConvertError> {
+    if !datadir.is_dir() {
+        return Err(ConvertError::InvalidOperation(format!(
+            "datadir '{}' is not a directory",
+            datadir.display()
+        )));
+    }
+    read_datadir_epoch(datadir)?;
     let txindex_dir = datadir.join("txindex");
-    let scratch_guard = ScratchGuard::create(datadir.join("txindex_rebuild_scratch"))?;
+    if !txindex_dir.is_dir() {
+        return Err(ConvertError::InvalidOperation(format!(
+            "datadir '{}' has no txindex namespace to rebuild",
+            datadir.display()
+        )));
+    }
+    let engine = match bitcoin_rs_storage::detect_engine(&txindex_dir)? {
+        Some(engine) => engine,
+        None => {
+            let chainstate_dir = datadir.join("chainstate");
+            match bitcoin_rs_storage::detect_engine(&chainstate_dir)? {
+                Some(engine) => engine,
+                None => {
+                    return Err(ConvertError::IncompatibleData(format!(
+                        "cannot detect storage engine for datadir '{}': txindex is empty and chainstate engine is missing or unrecognized",
+                        datadir.display()
+                    )));
+                }
+            }
+        }
+    };
+    let store = open_destination_store(&txindex_dir, engine)?;
+    let reset = bitcoin_rs_projection::reset_offline(store.as_ref())
+        .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
 
-    let store = RocksDbStore::open(&txindex_dir).map_err(ConvertError::Storage)?;
+    let scratch_guard = ScratchGuard::create(datadir.join("txindex_rebuild_scratch"))?;
     let chainstate_dir = datadir.join("chainstate");
-    let chainstate_store = if chainstate_dir.is_dir() {
-        RocksDbStore::open(&chainstate_dir).ok()
+    let chainstate_store: Option<Box<dyn KvStore>> = if chainstate_dir.is_dir() {
+        open_destination_store(&chainstate_dir, engine).ok()
     } else {
         None
     };
 
-    let blocks = scan_retained_blocks(&datadir.join("blocks"), chainstate_store.as_ref())?;
+    let blocks = scan_retained_blocks(&datadir.join("blocks"), chainstate_store.as_deref())?;
 
     let builder = BulkSegmentBuilder::new(64 * 1024 * 1024, scratch_guard.path.clone());
     let gen_id = 1u64;
@@ -60,7 +94,7 @@ pub(crate) fn rebuild_index_subcommand(datadir: &Path) -> Result<(), ConvertErro
         Coverage::new(0, 0, [0u8; 32])
     } else {
         builder
-            .build_and_ingest(&store, gen_id, &blocks)
+            .build_and_ingest(store.as_ref(), gen_id, &blocks)
             .map_err(|_| {
                 ConvertError::Storage(bitcoin_rs_storage::StorageError::InvalidOperation(
                     "rebuild index build failed",
@@ -80,9 +114,9 @@ pub(crate) fn rebuild_index_subcommand(datadir: &Path) -> Result<(), ConvertErro
 
     let mut batch = store.new_batch();
     batch.put(
-        ColumnFamily::IdxMeta,
-        &[0x00, b'V'],
-        &[0x07, 0x00, 0x00, 0x00],
+        ColumnFamily::UtxoMeta,
+        bitcoin_rs_projection::INDEX_FORMAT_VERSION_KEY,
+        &bitcoin_rs_projection::INDEX_FORMAT_VERSION_VALUE,
     );
     for cap in IndexCapability::ALL {
         batch.put(
@@ -92,14 +126,51 @@ pub(crate) fn rebuild_index_subcommand(datadir: &Path) -> Result<(), ConvertErro
         );
     }
     store.write_durable(batch).map_err(ConvertError::Storage)?;
-
     drop(scratch_guard);
+
+    Ok(RebuildIndexReport {
+        datadir: datadir.display().to_string(),
+        engine: engine.as_str().to_owned(),
+        format_version: reset.format_version,
+        families: reset
+            .families
+            .into_iter()
+            .map(|(cf, rows_removed)| FamilyResetReport {
+                family: cf.name().to_owned(),
+                rows_removed,
+            })
+            .collect(),
+    })
+}
+
+fn read_datadir_epoch(datadir: &Path) -> Result<(), ConvertError> {
+    let path = datadir.join("CURRENT_SCHEMA");
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(ConvertError::UnknownEpoch(0));
+        }
+        Err(err) => return Err(ConvertError::Io(err)),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > CURRENT_SCHEMA_MAX_BYTES {
+        return Err(ConvertError::UnknownEpoch(0));
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    let epoch: u32 = text
+        .trim()
+        .parse()
+        .map_err(|_| ConvertError::UnknownEpoch(0))?;
+    if epoch != CURRENT_EPOCH {
+        return Err(ConvertError::UnknownEpoch(epoch));
+    }
     Ok(())
 }
 
 fn scan_retained_blocks(
     blocks_dir: &Path,
-    chainstate_store: Option<&RocksDbStore>,
+    chainstate_store: Option<&dyn KvStore>,
 ) -> Result<Vec<CommittedBlock>, ConvertError> {
     if !blocks_dir.is_dir() {
         return Ok(Vec::new());
@@ -126,7 +197,7 @@ fn scan_retained_blocks(
 
 fn read_blocks_from_file(
     path: &Path,
-    chainstate_store: Option<&RocksDbStore>,
+    chainstate_store: Option<&dyn KvStore>,
     blocks: &mut Vec<CommittedBlock>,
 ) -> Result<(), ConvertError> {
     let file = File::open(path)?;
@@ -163,7 +234,7 @@ fn read_blocks_from_file(
 
 type UndoMap = HashMap<([u8; 32], u32), (u64, Vec<u8>)>;
 
-fn load_undo_scripts(store: Option<&RocksDbStore>, height: u32, hash: [u8; 32]) -> UndoMap {
+fn load_undo_scripts(store: Option<&dyn KvStore>, height: u32, hash: [u8; 32]) -> UndoMap {
     let mut map = HashMap::new();
     let Some(store) = store else {
         return map;
@@ -238,6 +309,8 @@ fn parse_committed_block(
                         vout: prev_vout,
                         value: val,
                         script,
+                        height: 0,
+                        coinbase: false,
                     }
                 })
                 .collect()

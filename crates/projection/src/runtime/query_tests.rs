@@ -204,17 +204,20 @@ impl TxIndexSnapshot for QuerySnapshot {
             total.saturating_add(key.len()).saturating_add(value.len())
         });
         let mut rows = Vec::with_capacity(scan.rows.len());
+        let mut coins = Vec::with_capacity(scan.rows.len());
         for (key, value) in scan.rows {
-            if !value.is_empty() {
-                return Err(IndexError::InvalidLiveRowValue { len: value.len() });
-            }
             rows.push(
                 ScriptLiveRow::from_db_row(&key)
                     .ok_or(IndexError::InvalidPrefixRowLength { len: key.len() })?,
             );
+            coins.push(
+                crate::types::ScriptLiveCoin::decode_value(&value)
+                    .map_err(|_| IndexError::InvalidLiveRowValue { len: value.len() })?,
+            );
         }
         Ok(crate::ScriptLiveScan {
             rows,
+            coins,
             encoded_bytes,
             complete: scan.complete,
         })
@@ -1732,6 +1735,7 @@ impl TxIndexSnapshot for HistoricalSnapshot {
     ) -> Result<crate::ScriptLiveScan, IndexError> {
         Ok(crate::ScriptLiveScan {
             rows: Vec::new(),
+            coins: Vec::new(),
             encoded_bytes: 0,
             complete: true,
         })

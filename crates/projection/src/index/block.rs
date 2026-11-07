@@ -8,27 +8,38 @@ use crate::{
     types::ScriptHistoryOccurrence, types::SpendingPrefixRow, types::TxidRow, types::U24_MAX,
     types::encode_height, types::encode_history_height,
 };
-use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid, encode, layout::ParsedBlock};
+use bitcoin_rs_consensus::primitives::{
+    Hash256, OutPoint, Txid, encode, layout::ByteSpan, layout::ParsedBlock,
+    layout::ParsedTransaction,
+};
 
-pub trait SpentCoinScripts {
-    fn script_bytes(&self, txid: &[u8; 32], vout: u32) -> Option<&[u8]>;
+/// Pre-image of a spent coin: the fields a self-contained `ScriptLive` delete
+/// must carry so rollback undo can restore the row byte-for-byte (`PRJ-11`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpentCoin<'a> {
+    pub script: &'a [u8],
+    pub value: u64,
+    pub height: u32,
+    pub coinbase: bool,
+}
+
+pub trait SpentCoins {
+    fn spent_coin(&self, txid: &[u8; 32], vout: u32) -> Option<SpentCoin<'_>>;
 }
 
 pub(crate) struct NoSpentScripts;
 
-impl SpentCoinScripts for NoSpentScripts {
-    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
+impl SpentCoins for NoSpentScripts {
+    fn spent_coin(&self, _txid: &[u8; 32], _vout: u32) -> Option<SpentCoin<'_>> {
         None
     }
 }
-
 pub use bitcoin_rs_consensus::script::MAX_SCRIPT_SIZE as MAX_LIVE_SCRIPT_SIZE;
-
 pub(super) fn pending_rows_for_block_with_header(
     block: &[u8],
     height: u32,
     capabilities: IndexCapabilities,
-    spent_scripts: &dyn SpentCoinScripts,
+    spent_coins: &dyn SpentCoins,
 ) -> Result<(PendingRows, [u8; crate::types::HEADER_ROW_SIZE]), IndexError> {
     let parsed = ParsedBlock::parse_exact(block).map_err(IndexError::BlockParse)?;
     let header_bytes = parsed
@@ -41,7 +52,7 @@ pub(super) fn pending_rows_for_block_with_header(
     let height_bytes = encode_height(height);
     let mut rows = PendingRows::default();
     rows.header_rows.push(header_row);
-    let mut live_created: Vec<([u8; 32], u32, Option<ScriptHash>)> = Vec::new();
+    let mut live_created: Vec<LiveCreation> = Vec::new();
     let mut live_spent: Vec<([u8; 32], u32)> = Vec::new();
     let mut block_outputs: hashbrown::HashMap<([u8; 32], u32), Option<ScriptHash>> =
         hashbrown::HashMap::new();
@@ -50,7 +61,7 @@ pub(super) fn pending_rows_for_block_with_header(
         height,
         height_bytes,
         capabilities,
-        spent_scripts,
+        spent_coins,
     };
     for tx in parsed.transactions() {
         process_transaction(
@@ -63,40 +74,56 @@ pub(super) fn pending_rows_for_block_with_header(
         )?;
     }
     if capabilities.contains(IndexCapability::ScriptLive) {
-        push_live_ops(&mut rows, live_created, live_spent, height, spent_scripts)?;
+        push_live_ops(&mut rows, live_created, live_spent, height, spent_coins)?;
     }
     if capabilities.contains(IndexCapability::CompactFilters) {
         let hash = encode::double_sha256(header_bytes).to_le_bytes();
         rows.filter_rows.push((
             hash,
-            super::filters::build(&parsed, height, &hash, spent_scripts)?,
+            super::filters::build(&parsed, height, &hash, spent_coins)?,
         ));
     }
     Ok((rows, header_row))
 }
 
-pub(crate) struct CommittedBlockSpentScripts<'a> {
-    map: hashbrown::HashMap<([u8; 32], u32), &'a [u8]>,
+pub(crate) struct CommittedBlockSpentCoins<'a> {
+    map: hashbrown::HashMap<([u8; 32], u32), SpentCoin<'a>>,
 }
 
-impl<'a> CommittedBlockSpentScripts<'a> {
+impl<'a> CommittedBlockSpentCoins<'a> {
     #[must_use]
     pub(crate) fn new(block: &'a bitcoin_rs_storage::CommittedBlock) -> Self {
         let mut map = hashbrown::HashMap::new();
         for tx in &block.txs {
             for out in &tx.outputs {
-                map.insert((tx.txid, out.vout), out.script.as_ref());
+                map.insert(
+                    (tx.txid, out.vout),
+                    SpentCoin {
+                        script: out.script.as_ref(),
+                        value: out.value,
+                        height: block.height,
+                        coinbase: false,
+                    },
+                );
             }
             for input in &tx.inputs {
-                map.insert((input.txid, input.vout), input.script.as_ref());
+                map.insert(
+                    (input.txid, input.vout),
+                    SpentCoin {
+                        script: input.script.as_ref(),
+                        value: input.value,
+                        height: input.height,
+                        coinbase: input.coinbase,
+                    },
+                );
             }
         }
         Self { map }
     }
 }
 
-impl SpentCoinScripts for CommittedBlockSpentScripts<'_> {
-    fn script_bytes(&self, txid: &[u8; 32], vout: u32) -> Option<&[u8]> {
+impl SpentCoins for CommittedBlockSpentCoins<'_> {
+    fn spent_coin(&self, txid: &[u8; 32], vout: u32) -> Option<SpentCoin<'_>> {
         self.map.get(&(*txid, vout)).copied()
     }
 }
@@ -111,9 +138,9 @@ pub(super) fn pending_rows_for_facts(
     let mut rows = PendingRows::default();
     rows.header_rows.push(header_row);
 
-    let mut live_created: Vec<([u8; 32], u32, Option<ScriptHash>)> = Vec::new();
+    let mut live_created: Vec<LiveCreation> = Vec::new();
     let mut live_spent: Vec<([u8; 32], u32)> = Vec::new();
-    let spent_scripts = CommittedBlockSpentScripts::new(block);
+    let spent_coins = CommittedBlockSpentCoins::new(block);
 
     for tx in &block.txs {
         let position = crate::types::TxPosition::new(tx.offset, tx.len);
@@ -149,7 +176,7 @@ pub(super) fn pending_rows_for_facts(
             live_created,
             live_spent,
             block.height,
-            &spent_scripts,
+            &spent_coins,
         )?;
     }
     if capabilities.contains(IndexCapability::CompactFilters) {
@@ -211,7 +238,7 @@ fn process_facts_outputs(
     capabilities: IndexCapabilities,
     position: crate::types::TxPosition,
     rows: &mut PendingRows,
-    live_created: &mut Vec<([u8; 32], u32, Option<ScriptHash>)>,
+    live_created: &mut Vec<LiveCreation>,
 ) {
     if !capabilities.contains(IndexCapability::ScriptHistory)
         && !capabilities.contains(IndexCapability::ScriptLive)
@@ -241,7 +268,13 @@ fn process_facts_outputs(
         if capabilities.contains(IndexCapability::ScriptLive)
             && height_bytes != [0_u8; crate::types::HEIGHT_SIZE]
         {
-            live_created.push((tx.txid, output.vout, live_admission(script)));
+            live_created.push(LiveCreation {
+                txid: tx.txid,
+                vout: output.vout,
+                scripthash: live_admission(script),
+                value: output.value,
+                coinbase: tx.inputs.is_empty(),
+            });
         }
     }
 }
@@ -250,7 +283,7 @@ struct BlockContext<'a> {
     height: u32,
     height_bytes: [u8; crate::types::HEIGHT_SIZE],
     capabilities: IndexCapabilities,
-    spent_scripts: &'a dyn SpentCoinScripts,
+    spent_coins: &'a dyn SpentCoins,
 }
 
 struct TxContext {
@@ -258,12 +291,49 @@ struct TxContext {
     txid: [u8; 32],
 }
 
+struct LiveCreation {
+    txid: [u8; 32],
+    vout: u32,
+    scripthash: Option<ScriptHash>,
+    value: u64,
+    coinbase: bool,
+}
+
+fn output_value(tx: &ParsedTransaction<'_>, output_value: ByteSpan) -> u64 {
+    let bytes = tx
+        .span_bytes(output_value)
+        .unwrap_or_else(|| unreachable!("output value span belongs to the parsed image"));
+    let raw: [u8; 8] = bytes
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("the layout parser fixes output values at 8 bytes"));
+    u64::from_le_bytes(raw)
+}
+
+fn transaction_is_coinbase(tx: &ParsedTransaction<'_>) -> bool {
+    let Some(first) = tx.inputs().first() else {
+        return false;
+    };
+    if tx.inputs().len() != 1 {
+        return false;
+    }
+    let outpoint = tx
+        .span_bytes(first.outpoint())
+        .unwrap_or_else(|| unreachable!("input span belongs to the parsed image"));
+    let (prevout_txid, vout_bytes) = outpoint.split_at(32);
+    let vout = u32::from_le_bytes(
+        vout_bytes
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("an outpoint vout is four bytes")),
+    );
+    is_null_prevout(prevout_txid, vout)
+}
+
 fn process_transaction(
-    tx: &bitcoin_rs_consensus::primitives::layout::ParsedTransaction<'_>,
+    tx: &ParsedTransaction<'_>,
     ctx: &BlockContext<'_>,
     rows: &mut PendingRows,
     block_outputs: &mut hashbrown::HashMap<([u8; 32], u32), Option<ScriptHash>>,
-    live_created: &mut Vec<([u8; 32], u32, Option<ScriptHash>)>,
+    live_created: &mut Vec<LiveCreation>,
     live_spent: &mut Vec<([u8; 32], u32)>,
 ) -> Result<(), IndexError> {
     let span = tx.span();
@@ -278,14 +348,21 @@ fn process_transaction(
         position: crate::types::TxPosition::new(span.start(), span.len()),
         txid: *tx.txid().as_bytes(),
     };
+    let coinbase = transaction_is_coinbase(tx);
 
-    let mut pending_live: Vec<(u32, Option<ScriptHash>)> = Vec::new();
+    let mut pending_live: Vec<(u32, Option<ScriptHash>, u64)> = Vec::new();
     process_inputs(tx, ctx, &tx_ctx, rows, block_outputs, live_spent)?;
     process_outputs(tx, ctx, &tx_ctx, rows, block_outputs, &mut pending_live);
 
     if ctx.capabilities.contains(IndexCapability::TxLookup) || !pending_live.is_empty() {
-        for (vout, scripthash) in pending_live {
-            live_created.push((tx_ctx.txid, vout, scripthash));
+        for (vout, scripthash, value) in pending_live {
+            live_created.push(LiveCreation {
+                txid: tx_ctx.txid,
+                vout,
+                scripthash,
+                value,
+                coinbase,
+            });
         }
         if ctx.capabilities.contains(IndexCapability::TxLookup) {
             rows.txid_rows.push(PositionedRow {
@@ -329,13 +406,14 @@ fn process_inputs(
             let scripthash = match block_outputs.get(&(previous_txid, vout)).copied() {
                 Some(scripthash) => scripthash,
                 None => Some(ScriptHash::from_script_bytes(
-                    ctx.spent_scripts.script_bytes(&previous_txid, vout).ok_or(
-                        IndexError::MissingSpentCoin {
+                    ctx.spent_coins
+                        .spent_coin(&previous_txid, vout)
+                        .ok_or(IndexError::MissingSpentCoin {
                             txid: previous_txid,
                             vout,
                             height: ctx.height,
-                        },
-                    )?,
+                        })?
+                        .script,
                 )),
             };
             if let Some(scripthash) = scripthash
@@ -365,12 +443,12 @@ fn process_inputs(
 }
 
 fn process_outputs(
-    tx: &bitcoin_rs_consensus::primitives::layout::ParsedTransaction<'_>,
+    tx: &ParsedTransaction<'_>,
     ctx: &BlockContext<'_>,
     tx_ctx: &TxContext,
     rows: &mut PendingRows,
     block_outputs: &mut hashbrown::HashMap<([u8; 32], u32), Option<ScriptHash>>,
-    pending_live: &mut Vec<(u32, Option<ScriptHash>)>,
+    pending_live: &mut Vec<(u32, Option<ScriptHash>, u64)>,
 ) {
     let mut funded_in_tx = hashbrown::HashSet::<ScriptHash>::new();
     for (index, output) in tx.outputs().iter().enumerate() {
@@ -406,21 +484,25 @@ fn process_outputs(
             && ctx.height_bytes != [0_u8; crate::types::HEIGHT_SIZE]
             && let Ok(vout) = u32::try_from(index)
         {
-            pending_live.push((vout, live_admission(script)));
+            pending_live.push((
+                vout,
+                live_admission(script),
+                output_value(tx, output.value()),
+            ));
         }
     }
 }
 
 fn push_live_ops(
     rows: &mut PendingRows,
-    created: Vec<([u8; 32], u32, Option<ScriptHash>)>,
+    created: Vec<LiveCreation>,
     spent: Vec<([u8; 32], u32)>,
     height: u32,
-    spent_scripts: &dyn SpentCoinScripts,
+    spent_coins: &dyn SpentCoins,
 ) -> Result<(), IndexError> {
     let created_keys: hashbrown::HashSet<([u8; 32], u32)> = created
         .iter()
-        .map(|(txid, vout, _)| (*txid, *vout))
+        .map(|creation| (creation.txid, creation.vout))
         .collect();
     let mut cancelled = hashbrown::HashSet::new();
     let mut deletes = Vec::new();
@@ -429,34 +511,54 @@ fn push_live_ops(
             cancelled.insert((txid, vout));
             continue;
         }
-        let script = spent_scripts
-            .script_bytes(&txid, vout)
+        let coin = spent_coins
+            .spent_coin(&txid, vout)
             .ok_or(IndexError::MissingSpentCoin { txid, vout, height })?;
         let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&txid)), vout);
-        deletes.push(LiveOp::Delete(crate::types::ScriptLiveRow::new(
-            ScriptHash::from_script_bytes(script),
-            &outpoint,
-        )));
+        deletes.push(LiveOp::Delete {
+            row: crate::types::ScriptLiveRow::new(
+                ScriptHash::from_script_bytes(coin.script),
+                &outpoint,
+            ),
+            coin: crate::types::ScriptLiveCoin::new(
+                ScriptHash::from_script_bytes(coin.script),
+                coin.value,
+                coin.height,
+                coin.coinbase,
+            ),
+        });
     }
-    for (txid, vout, scripthash) in created {
-        if cancelled.contains(&(txid, vout)) {
+    for creation in created {
+        if cancelled.contains(&(creation.txid, creation.vout)) {
             continue;
         }
-        let Some(scripthash) = scripthash else {
+        let Some(scripthash) = creation.scripthash else {
             continue;
         };
-        let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&txid)), vout);
-        if let Some(old_script) = spent_scripts.script_bytes(&txid, vout) {
-            rows.live_ops
-                .push(LiveOp::Delete(crate::types::ScriptLiveRow::new(
-                    ScriptHash::from_script_bytes(old_script),
+        let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&creation.txid)), creation.vout);
+        if let Some(old_coin) = spent_coins.spent_coin(&creation.txid, creation.vout) {
+            rows.live_ops.push(LiveOp::Delete {
+                row: crate::types::ScriptLiveRow::new(
+                    ScriptHash::from_script_bytes(old_coin.script),
                     &outpoint,
-                )));
+                ),
+                coin: crate::types::ScriptLiveCoin::new(
+                    ScriptHash::from_script_bytes(old_coin.script),
+                    old_coin.value,
+                    old_coin.height,
+                    old_coin.coinbase,
+                ),
+            });
         }
-        rows.live_ops
-            .push(LiveOp::Insert(crate::types::ScriptLiveRow::new(
-                scripthash, &outpoint,
-            )));
+        rows.live_ops.push(LiveOp::Insert {
+            row: crate::types::ScriptLiveRow::new(scripthash, &outpoint),
+            coin: crate::types::ScriptLiveCoin::new(
+                scripthash,
+                creation.value,
+                height,
+                creation.coinbase,
+            ),
+        });
     }
     rows.live_ops.extend(deletes);
     Ok(())

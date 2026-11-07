@@ -3,11 +3,13 @@ use parking_lot::RwLock;
 
 use crate::{
     ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexWatermark, IndexWatermarks,
-    IndexWriteFence, IndexWriter, PreparedBatch, PreparedBlock, ScriptHash, SpentCoinScripts,
+    IndexWriteFence, IndexWriter, PreparedBatch, PreparedBlock, SpentCoins,
     index::PortableImportRow,
 };
 
-pub(crate) type ScriptLiveSeedProduce<'a> = dyn FnMut(&mut dyn FnMut(OutPoint, ScriptHash) -> Result<(), IndexError>) -> Result<(), IndexError>
+pub(crate) type ScriptLiveSeedProduce<'a> = dyn FnMut(
+        &mut dyn FnMut(OutPoint, crate::types::ScriptLiveCoin) -> Result<(), IndexError>,
+    ) -> Result<(), IndexError>
     + 'a;
 
 pub(crate) type PortableImportProduce<'a> = dyn FnMut(&mut dyn FnMut(PortableImportRow<'_>) -> Result<(), IndexError>) -> Result<(), IndexError>
@@ -21,7 +23,7 @@ pub(crate) trait TxIndexWriter: Send + Sync {
         height: u32,
         hash: [u8; 32],
         body: &[u8],
-        spent_scripts: &dyn SpentCoinScripts,
+        spent_scripts: &dyn SpentCoins,
     ) -> Result<PreparedBlock, IndexError>;
     fn prepare_block_from_facts(
         &self,
@@ -53,7 +55,7 @@ pub(crate) trait TxIndexWriter: Send + Sync {
         prev: Option<IndexWatermark>,
         body: &[u8],
         cursor: ConsumerCursorUpdate<'_>,
-        spent_scripts: &dyn SpentCoinScripts,
+        spent_scripts: &dyn SpentCoins,
     ) -> Result<(), IndexError>;
 
     fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError>;
@@ -86,7 +88,7 @@ where
         height: u32,
         hash: [u8; 32],
         body: &[u8],
-        spent_scripts: &dyn SpentCoinScripts,
+        spent_scripts: &dyn SpentCoins,
     ) -> Result<PreparedBlock, IndexError> {
         self.read().prepare_block_with_spent_scripts(
             capabilities,
@@ -141,7 +143,7 @@ where
         prev: Option<IndexWatermark>,
         body: &[u8],
         cursor: ConsumerCursorUpdate<'_>,
-        spent_scripts: &dyn SpentCoinScripts,
+        spent_scripts: &dyn SpentCoins,
     ) -> Result<(), IndexError> {
         self.write()
             .commit_rollback_one_for_with_cursor_with_spent_scripts(

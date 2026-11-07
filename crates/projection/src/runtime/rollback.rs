@@ -138,7 +138,17 @@ impl Worker {
         let cancelled = || self.runtime.should_stop();
         let result = self.writer.seed_script_live_stream(
             &mut |emit| match artifact.for_each_coin_raw::<IndexError, _>(
-                &mut |outpoint, script| emit(*outpoint, ScriptHash::from_script_bytes(script)),
+                &mut |outpoint, script, value, height, coinbase| {
+                    emit(
+                        *outpoint,
+                        crate::types::ScriptLiveCoin::new(
+                            ScriptHash::from_script_bytes(script),
+                            value,
+                            height,
+                            coinbase,
+                        ),
+                    )
+                },
                 &cancelled,
             ) {
                 Ok(()) => Ok(()),
@@ -288,7 +298,7 @@ impl Worker {
         .transpose()?;
         lease.release();
 
-        let spent: &dyn crate::SpentCoinScripts =
+        let spent: &dyn crate::SpentCoins =
             anchor.as_ref().map_or(&NoSpentScripts, |anchor| anchor);
 
         let prev = if watermark.height == 0 {
@@ -355,7 +365,7 @@ impl Worker {
     ) -> Result<UndoScripts, DerivedIndexWorkerError> {
         if height == 0 {
             return Ok(UndoScripts {
-                scripts: hashbrown::HashMap::new(),
+                coins: hashbrown::HashMap::new(),
             });
         }
         let hash = Hash256::from_le_bytes(&hash_bytes);

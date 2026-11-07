@@ -915,6 +915,7 @@ mod tests {
         })?;
         budget.accept_live_scan(ScriptLiveScan {
             rows: Vec::new(),
+            coins: Vec::new(),
             encoded_bytes: 3,
             complete: true,
         })?;
@@ -943,6 +944,7 @@ mod tests {
         ));
         let live = budget.accept_live_scan(ScriptLiveScan {
             rows: Vec::new(),
+            coins: Vec::new(),
             encoded_bytes: 3,
             complete: false,
         });
@@ -1030,6 +1032,7 @@ mod tests {
         assert_eq!(budget.remaining_bytes, 2);
         budget.accept_live_scan(ScriptLiveScan {
             rows: Vec::new(),
+            coins: Vec::new(),
             encoded_bytes: 2,
             complete: true,
         })?;

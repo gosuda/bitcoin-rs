@@ -1,4 +1,4 @@
-use super::{IndexError, SpentCoinScripts};
+use super::{IndexError, SpentCoins};
 use bitcoin_rs_consensus::primitives::{encode, layout::ParsedBlock};
 use bitcoin_rs_storage::{ColumnFamily, KvSnapshot};
 
@@ -69,7 +69,7 @@ pub(super) fn build(
     parsed: &ParsedBlock<'_>,
     height: u32,
     hash: &[u8; 32],
-    spent: &dyn SpentCoinScripts,
+    spent: &dyn SpentCoins,
 ) -> Result<BasicFilter, IndexError> {
     let k0 = u64::from_le_bytes(
         hash[..8]
@@ -102,7 +102,7 @@ pub(super) fn build(
             let script = created
                 .get(&(txid, vout))
                 .copied()
-                .or_else(|| spent.script_bytes(&txid, vout))
+                .or_else(|| spent.spent_coin(&txid, vout).map(|coin| coin.script))
                 .ok_or(IndexError::MissingSpentCoin { txid, vout, height })?;
             writer.add_element(script);
         }
@@ -174,13 +174,19 @@ pub(super) fn build_from_facts(
 )]
 mod tests {
     use super::*;
+    use crate::SpentCoin;
     use bitcoin::{consensus::deserialize, hashes::Hash as _, hex::FromHex as _};
     use bitcoin_rs_storage::Bytes;
 
     struct Scripts(hashbrown::HashMap<([u8; 32], u32), Vec<u8>>);
-    impl SpentCoinScripts for Scripts {
-        fn script_bytes(&self, txid: &[u8; 32], vout: u32) -> Option<&[u8]> {
-            self.0.get(&(*txid, vout)).map(Vec::as_slice)
+    impl SpentCoins for Scripts {
+        fn spent_coin(&self, txid: &[u8; 32], vout: u32) -> Option<SpentCoin<'_>> {
+            self.0.get(&(*txid, vout)).map(|script| SpentCoin {
+                script,
+                value: 0,
+                height: 0,
+                coinbase: false,
+            })
         }
     }
 
@@ -233,8 +239,8 @@ mod tests {
                             .cloned()
                             .or_else(|| {
                                 scripts
-                                    .script_bytes(&prev_txid, prev_vout)
-                                    .map(Bytes::copy_from_slice)
+                                    .spent_coin(&prev_txid, prev_vout)
+                                    .map(|c| Bytes::copy_from_slice(c.script))
                             })
                             .expect("prevout script must exist");
                         inputs.push(bitcoin_rs_storage::SpentPrevout {
@@ -242,6 +248,8 @@ mod tests {
                             vout: prev_vout,
                             value: 0,
                             script,
+                            height: 0,
+                            coinbase: false,
                         });
                     }
                 }

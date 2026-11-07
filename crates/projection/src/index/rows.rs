@@ -5,8 +5,30 @@ use zerocopy::IntoBytes;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(super) enum LiveOp {
-    Insert(crate::types::ScriptLiveRow),
-    Delete(crate::types::ScriptLiveRow),
+    Insert {
+        row: crate::types::ScriptLiveRow,
+        coin: crate::types::ScriptLiveCoin,
+    },
+    /// Carries the stored pre-image so the inverse orientation can restore
+    /// the full payload (PRJ-11 rows are self-contained).
+    Delete {
+        row: crate::types::ScriptLiveRow,
+        coin: crate::types::ScriptLiveCoin,
+    },
+}
+
+impl LiveOp {
+    pub(super) const fn row(&self) -> &crate::types::ScriptLiveRow {
+        match self {
+            LiveOp::Insert { row, .. } | LiveOp::Delete { row, .. } => row,
+        }
+    }
+
+    const fn coin(&self) -> crate::types::ScriptLiveCoin {
+        match self {
+            LiveOp::Insert { coin, .. } | LiveOp::Delete { coin, .. } => *coin,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -239,11 +261,18 @@ impl PendingRows {
             .checked_mul(crate::types::HEADER_ROW_SIZE)
             .ok_or(IndexError::MutationSizeOverflow)?;
 
-        let script_live = self
-            .live_ops
-            .len()
-            .checked_mul(crate::types::SCRIPT_LIVE_ROW_SIZE)
-            .ok_or(IndexError::MutationSizeOverflow)?;
+        let script_live = self.live_ops.iter().try_fold(0_usize, |total, op| {
+            let size = match op {
+                LiveOp::Insert { coin, .. } => coin
+                    .encoded_value_len()
+                    .and_then(|len| crate::types::SCRIPT_LIVE_ROW_SIZE.checked_add(len))
+                    .ok_or(IndexError::MutationSizeOverflow)?,
+                LiveOp::Delete { .. } => crate::types::SCRIPT_LIVE_ROW_SIZE,
+            };
+            total
+                .checked_add(size)
+                .ok_or(IndexError::MutationSizeOverflow)
+        })?;
 
         let filters = self
             .filter_rows
@@ -275,44 +304,64 @@ enum LiveOpsOrientation {
     Inverse,
 }
 
-pub(super) fn apply_live_ops(batch: &mut BufferedWriteBatch, ops: &[LiveOp]) {
-    apply_live_ops_oriented(batch, ops, LiveOpsOrientation::Forward);
+pub(super) fn apply_live_ops(
+    batch: &mut BufferedWriteBatch,
+    ops: &[LiveOp],
+) -> Result<(), IndexError> {
+    apply_live_ops_oriented(batch, ops, LiveOpsOrientation::Forward)
 }
 
-pub(super) fn invert_live_ops(batch: &mut BufferedWriteBatch, ops: &[LiveOp]) {
-    apply_live_ops_oriented(batch, ops, LiveOpsOrientation::Inverse);
+pub(super) fn invert_live_ops(
+    batch: &mut BufferedWriteBatch,
+    ops: &[LiveOp],
+) -> Result<(), IndexError> {
+    apply_live_ops_oriented(batch, ops, LiveOpsOrientation::Inverse)
 }
 
 fn apply_live_ops_oriented(
     batch: &mut BufferedWriteBatch,
     ops: &[LiveOp],
     orientation: LiveOpsOrientation,
-) {
-    let mut last: hashbrown::HashMap<[u8; crate::types::SCRIPT_LIVE_ROW_SIZE], bool> =
+) -> Result<(), IndexError> {
+    enum PendingWrite {
+        Put(crate::types::ScriptLiveCoin),
+        Remove,
+    }
+    let mut last: hashbrown::HashMap<[u8; crate::types::SCRIPT_LIVE_ROW_SIZE], PendingWrite> =
         hashbrown::HashMap::new();
     let invert = matches!(orientation, LiveOpsOrientation::Inverse);
-    let record = |op: &LiveOp| {
-        let (row, insert) = match op {
-            LiveOp::Insert(row) => (row, !invert),
-            LiveOp::Delete(row) => (row, invert),
-        };
-        last.insert(*row.as_bytes(), insert);
-    };
-    if invert {
-        ops.iter().rev().for_each(record);
+    let ordered: Box<dyn Iterator<Item = &LiveOp>> = if invert {
+        Box::new(ops.iter().rev())
     } else {
-        ops.iter().for_each(record);
-    }
-    for (key, insert) in last {
-        if insert {
-            batch.put(ColumnFamily::ScriptLive, &key, &[]);
+        Box::new(ops.iter())
+    };
+    for op in ordered {
+        let put = matches!(op, LiveOp::Insert { .. }) != invert;
+        let write = if put {
+            PendingWrite::Put(op.coin())
         } else {
-            batch.delete(ColumnFamily::ScriptLive, &key);
+            PendingWrite::Remove
+        };
+        last.insert(*op.row().as_bytes(), write);
+    }
+    for (key, write) in last {
+        match write {
+            PendingWrite::Put(coin) => {
+                let value = coin.encode_value()?;
+                batch.put(ColumnFamily::ScriptLive, &key, &value);
+            }
+            PendingWrite::Remove => {
+                batch.delete(ColumnFamily::ScriptLive, &key);
+            }
         }
     }
+    Ok(())
 }
 
-pub(super) fn put_rows(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
+pub(super) fn put_rows(
+    batch: &mut BufferedWriteBatch,
+    rows: &PendingRows,
+) -> Result<(), IndexError> {
     for (cf, positioned) in [
         (ColumnFamily::TxConfirmed, &rows.txid_rows),
         (ColumnFamily::Spending, &rows.spending_rows),
@@ -342,10 +391,14 @@ pub(super) fn put_rows(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
             &filter.encode(),
         );
     }
-    apply_live_ops(batch, &rows.live_ops);
+    apply_live_ops(batch, &rows.live_ops)?;
+    Ok(())
 }
 
-pub(super) fn delete_rows(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
+pub(super) fn delete_rows(
+    batch: &mut BufferedWriteBatch,
+    rows: &PendingRows,
+) -> Result<(), IndexError> {
     for (cf, positioned) in [
         (ColumnFamily::TxConfirmed, &rows.txid_rows),
         (ColumnFamily::Spending, &rows.spending_rows),
@@ -363,14 +416,19 @@ pub(super) fn delete_rows(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
     for (hash, _) in &rows.filter_rows {
         batch.delete(ColumnFamily::UtxoMeta, &super::filters::key(hash));
     }
-    invert_live_ops(batch, &rows.live_ops);
+    invert_live_ops(batch, &rows.live_ops)?;
+    Ok(())
 }
 
-pub(super) fn delete_rows_with_headers(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
-    delete_rows(batch, rows);
+pub(super) fn delete_rows_with_headers(
+    batch: &mut BufferedWriteBatch,
+    rows: &PendingRows,
+) -> Result<(), IndexError> {
+    delete_rows(batch, rows)?;
     for row in &rows.header_rows {
         batch.delete(ColumnFamily::BlockHeaders, row);
     }
+    Ok(())
 }
 
 #[cfg(test)]

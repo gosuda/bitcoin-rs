@@ -889,7 +889,7 @@ pub(crate) fn build_committed_facts(
     let parent_hash = image.header().prev_blockhash.0.to_le_bytes();
 
     let mut prevout_map =
-        HashMap::<([u8; 32], u32), (u64, Bytes)>::with_capacity(undo.restores().len());
+        HashMap::<([u8; 32], u32), (u64, Bytes, u32, bool)>::with_capacity(undo.restores().len());
     for add in undo.restores() {
         let txid = *add.outpoint.txid.as_bytes();
         let vout = add.outpoint.vout;
@@ -898,6 +898,8 @@ pub(crate) fn build_committed_facts(
             (
                 add.txout.value.to_sat(),
                 Bytes::copy_from_slice(&add.txout.script_pubkey),
+                add.height,
+                add.coinbase,
             ),
         );
     }
@@ -916,12 +918,15 @@ pub(crate) fn build_committed_facts(
                 let outpoint = tx.input_outpoint(j);
                 let prev_txid = *outpoint.txid.as_bytes();
                 let prev_vout = outpoint.vout;
-                let (value, script) = prevout_map.get(&(prev_txid, prev_vout))?.clone();
+                let (value, script, height, coinbase) =
+                    prevout_map.get(&(prev_txid, prev_vout))?.clone();
                 inputs.push(SpentPrevout {
                     txid: prev_txid,
                     vout: prev_vout,
                     value,
                     script,
+                    height,
+                    coinbase,
                 });
             }
         }
@@ -937,9 +942,11 @@ pub(crate) fn build_committed_facts(
                 value,
                 script: script.clone(),
             });
-            prevout_map.insert((txid, vout_u32), (value, script));
+            prevout_map.insert(
+                (txid, vout_u32),
+                (value, script, outcome.height, tx.is_coinbase()),
+            );
         }
-
         txs.push(TxFacts {
             txid,
             offset,

@@ -742,11 +742,14 @@ impl VerifiedSnapshotArtifact {
     /// `cancelled` is polled at entry and every 4,096 emitted coins; a trip
     /// returns [`RawSeedError::Cancelled`] with the bundle intact so the
     /// caller can retry with the same artifact.
-    pub fn for_each_coin_raw<E, F: FnMut(&OutPoint, &[u8]) -> Result<(), E> + ?Sized>(
+    pub fn for_each_coin_raw<E, F>(
         &mut self,
         emit: &mut F,
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<(), RawSeedError<E>> {
+    ) -> Result<(), RawSeedError<E>>
+    where
+        F: FnMut(&OutPoint, &[u8], u64, u32, bool) -> Result<(), E> + ?Sized,
+    {
         self.file.rewind().map_err(RawSeedError::Io)?;
         let limit = self
             .witness
@@ -857,11 +860,14 @@ struct RawStreamCounts {
     outputs: u64,
 }
 
-fn read_raw_snapshot_stream<E, F: FnMut(&OutPoint, &[u8]) -> Result<(), E> + ?Sized>(
+fn read_raw_snapshot_stream<E, F>(
     reader: &mut impl Read,
     emit: &mut F,
     cancelled: &dyn Fn() -> bool,
-) -> Result<RawStreamCounts, RawSeedError<E>> {
+) -> Result<RawStreamCounts, RawSeedError<E>>
+where
+    F: FnMut(&OutPoint, &[u8], u64, u32, bool) -> Result<(), E> + ?Sized,
+{
     const SEED_CANCEL_POLL_COINS: u64 = 4_096;
     if cancelled() {
         return Err(RawSeedError::Cancelled);
@@ -886,7 +892,14 @@ fn read_raw_snapshot_stream<E, F: FnMut(&OutPoint, &[u8]) -> Result<(), E> + ?Si
             let output = read_snapshot_output(reader).map_err(map_snapshot_error)?;
             checked_record_vout(&output, &mut seen_vouts).map_err(map_snapshot_error)?;
             let outpoint = OutPoint::new(Txid::from(txid), output.vout);
-            emit(&outpoint, &output.script_pubkey).map_err(RawSeedError::Emit)?;
+            emit(
+                &outpoint,
+                &output.script_pubkey,
+                output.value,
+                output.height,
+                output.coinbase,
+            )
+            .map_err(RawSeedError::Emit)?;
             outputs = outputs.checked_add(1).ok_or(RawSeedError::Integrity)?;
             if outputs.is_multiple_of(SEED_CANCEL_POLL_COINS) && cancelled() {
                 return Err(RawSeedError::Cancelled);
@@ -1114,7 +1127,7 @@ mod seed_no_token_tests {
     fn raw_stream(bytes: &[u8]) -> Result<RawStreamCounts, RawSeedError<TestError>> {
         read_raw_snapshot_stream(
             &mut Cursor::new(bytes),
-            &mut |_outpoint, _script| Ok(()),
+            &mut |_outpoint, _script, _value, _height, _coinbase| Ok(()),
             &|| false,
         )
     }

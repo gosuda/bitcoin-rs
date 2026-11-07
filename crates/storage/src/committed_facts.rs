@@ -81,4 +81,6 @@ pub struct SpentPrevout {
     pub vout: u32,
     pub value: u64,
     pub script: Bytes,
+    pub height: u32,
+    pub coinbase: bool,
 }

@@ -8,6 +8,7 @@ pub mod block_log;
 pub use block_log::{BlockLog, BlockLogReader, BlockRecord};
 mod capabilities;
 mod index;
+pub mod offline;
 pub mod portable;
 pub mod query_api;
 pub mod reconcile;
@@ -27,8 +28,10 @@ pub use index::{
     BasicFilter, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
     IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, Indexer,
     MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptLiveScan,
-    SpentCoinScripts, TxIndexFamily, TxIndexPage, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
+    SpentCoin, SpentCoins, TxIndexFamily, TxIndexPage, TxIndexScan, TxIndexScanRow,
+    TxIndexSnapshot,
 };
+pub use offline::{IndexResetReport, reset_offline};
 pub use query_api::{
     CompactFilterQuery, DerivedIndexInfo, DerivedIndexQuery, RollbackWarningSource,
     SCRIPT_HISTORY_PAGE_MAX, ScriptHistoryPage, ScriptHistoryRecord, ScriptIndexQuery,
@@ -36,7 +39,7 @@ pub use query_api::{
 };
 pub use reconcile::{CURSOR_BYTE_LEN, ConsumerCursor, CursorDecodeError};
 pub use types::{
-    HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, HashPrefixRow, ScriptHash, ScriptHashRow,
-    ScriptHistoryOccurrence, ScriptLiveRow, SpendingPrefixRow, TxPosition, TxPositionValue,
-    positions_are_valid,
+    HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, HashPrefixRow, INDEX_FORMAT_VERSION_KEY,
+    INDEX_FORMAT_VERSION_VALUE, ScriptHash, ScriptHashRow, ScriptHistoryOccurrence, ScriptLiveCoin,
+    ScriptLiveRow, SpendingPrefixRow, TxPosition, TxPositionValue, positions_are_valid,
 };

@@ -186,6 +186,8 @@ pub(crate) enum TestError {
     #[error(transparent)]
     Index(#[from] crate::IndexError),
     #[error(transparent)]
+    LiveValue(#[from] crate::types::ScriptLiveValueError),
+    #[error(transparent)]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(transparent)]
     Io(#[from] std::io::Error),

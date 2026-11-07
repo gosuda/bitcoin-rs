@@ -22,7 +22,11 @@ pub enum IndexError {
     InvalidPrefixRowLength { len: usize },
     #[error("invalid ScriptLive row value length {len}")]
     InvalidLiveRowValue { len: usize },
-    #[error("unsupported TxIndex format version {version}")]
+    #[error(transparent)]
+    LiveValue(#[from] crate::types::ScriptLiveValueError),
+    #[error(
+        "unsupported TxIndex format version {version}; run bitcoin-rs-storage-convert rebuild-index to rebuild"
+    )]
     UnsupportedTxIndexFormatVersion { version: u32 },
     #[error(
         "block body identity mismatch at height {height}: expected {expected:?}, found {actual:?}"
@@ -53,7 +57,9 @@ pub enum IndexError {
     },
     #[error("ScriptLive is already seeded; reset the capability first")]
     LiveAlreadySeeded,
-    #[error("TxIndex tables are present without a versioned watermark")]
+    #[error(
+        "TxIndex tables are present without a versioned watermark; run bitcoin-rs-storage-convert rebuild-index to rebuild"
+    )]
     LegacyCursorlessIndex,
     #[error("invalid TxIndex capability reset marker")]
     InvalidResetMarker,

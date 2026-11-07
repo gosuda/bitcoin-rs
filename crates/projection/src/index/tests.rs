@@ -8,8 +8,7 @@ use bitcoin_rs_consensus::primitives::{
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvStore, RocksDbStore};
 
 use super::{
-    IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer,
-    SpentCoinScripts,
+    IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer, SpentCoins,
 };
 use crate::{ScriptHash, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow};
 
@@ -19,9 +18,16 @@ struct FixtureScripts;
 
 static FIXTURE_SPENT_SCRIPT: [u8; 2] = [0x51, 0x01];
 
-impl SpentCoinScripts for FixtureScripts {
-    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
-        Some(FIXTURE_SPENT_SCRIPT.as_slice())
+use crate::SpentCoin;
+
+impl SpentCoins for FixtureScripts {
+    fn spent_coin(&self, _txid: &[u8; 32], _vout: u32) -> Option<SpentCoin<'_>> {
+        Some(SpentCoin {
+            script: FIXTURE_SPENT_SCRIPT.as_slice(),
+            value: 0,
+            height: 0,
+            coinbase: false,
+        })
     }
 }
 
@@ -125,7 +131,10 @@ fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), crate::p
 
     let outpoint = spent_outpoint(5, 0);
     writer.seed_script_live(
-        [(outpoint, scripthash)],
+        [(
+            outpoint,
+            crate::types::ScriptLiveCoin::new(scripthash, 0, 0, false),
+        )],
         IndexWatermark {
             height: 7,
             hash: [0x07; 32],
@@ -136,8 +145,9 @@ fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), crate::p
         .as_bytes()
         .to_vec();
     malformed.truncate(40);
+    let coin = crate::types::ScriptLiveCoin::new(scripthash, 1000, 1, false);
     let mut batch = store.new_batch();
-    batch.put(ColumnFamily::ScriptLive, &malformed, &[]);
+    batch.put(ColumnFamily::ScriptLive, &malformed, &coin.encode_value()?);
     store.write(batch)?;
 
     let Err(error) = writer.indexer().iter_live_outpoints(scripthash) else {

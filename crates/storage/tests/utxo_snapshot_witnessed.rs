@@ -120,7 +120,7 @@ fn raw_projection(
 ) -> Result<Vec<RawCoin>, RawSeedError<Infallible>> {
     let mut coins = Vec::new();
     artifact.for_each_coin_raw(
-        &mut |outpoint: &OutPoint, script: &[u8]| {
+        &mut |outpoint: &OutPoint, script: &[u8], _: u64, _: u32, _| {
             let outpoint = *outpoint;
             coins.push(RawCoin {
                 txid: *outpoint.txid.as_bytes(),
@@ -437,7 +437,7 @@ fn emit_failure_aborts_as_emit() -> TestResult {
     );
     let mut calls = 0_u64;
     let result = artifact.for_each_coin_raw(
-        &mut |_: &OutPoint, _: &[u8]| {
+        &mut |_: &OutPoint, _: &[u8], _: u64, _: u32, _| {
             calls += 1;
             Err(Boom)
         },
@@ -473,7 +473,7 @@ fn empty_snapshot_mints_and_traverses_zero_coins() -> TestResult {
     );
     let mut count = 0_u64;
     artifact.for_each_coin_raw(
-        &mut |_: &OutPoint, _: &[u8]| {
+        &mut |_: &OutPoint, _: &[u8], _: u64, _: u32, _| {
             count += 1;
             Ok::<(), Infallible>(())
         },
@@ -550,7 +550,7 @@ fn first_offer_wins_take_clears_demand() -> TestResult {
 
     let mut count = 0_u64;
     taken.for_each_coin_raw(
-        &mut |_: &OutPoint, _: &[u8]| {
+        &mut |_: &OutPoint, _: &[u8], _: u64, _: u32, _| {
             count += 1;
             Ok::<(), Infallible>(())
         },
@@ -628,7 +628,7 @@ fn seed_traversal_polls_cancellation_every_4096_coins() -> TestResult {
 
     let mut count = 0_u64;
     let immediate = artifact.for_each_coin_raw(
-        &mut |_: &OutPoint, _: &[u8]| {
+        &mut |_: &OutPoint, _: &[u8], _: u64, _: u32, _| {
             count += 1;
             Ok::<(), Infallible>(())
         },
@@ -643,7 +643,7 @@ fn seed_traversal_polls_cancellation_every_4096_coins() -> TestResult {
     let seen = std::cell::Cell::new(0_u64);
     let mut emitted = 0_u64;
     let mid = artifact.for_each_coin_raw(
-        &mut |_: &OutPoint, _: &[u8]| {
+        &mut |_: &OutPoint, _: &[u8], _: u64, _: u32, _| {
             seen.set(seen.get() + 1);
             emitted += 1;
             Ok::<(), Infallible>(())
@@ -661,7 +661,7 @@ fn seed_traversal_polls_cancellation_every_4096_coins() -> TestResult {
 
     let mut all = 0_u64;
     artifact.for_each_coin_raw(
-        &mut |_: &OutPoint, _: &[u8]| {
+        &mut |_: &OutPoint, _: &[u8], _: u64, _: u32, _| {
             all += 1;
             Ok::<(), Infallible>(())
         },

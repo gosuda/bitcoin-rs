@@ -70,11 +70,10 @@ impl<S: KvStore> Indexer<S> {
         let mut outpoints = Vec::new();
         for row in iter {
             let (key, value) = row?;
-            if !value.is_empty() {
-                return Err(IndexError::InvalidLiveRowValue { len: value.len() });
-            }
             let row = crate::types::ScriptLiveRow::from_db_row(&key)
                 .ok_or(IndexError::InvalidPrefixRowLength { len: key.len() })?;
+            crate::types::ScriptLiveCoin::decode_value(&value)
+                .map_err(|_| IndexError::InvalidLiveRowValue { len: value.len() })?;
             outpoints.push(row.outpoint());
         }
         Ok(outpoints)

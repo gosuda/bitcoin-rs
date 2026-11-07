@@ -461,13 +461,13 @@ fn build_derived_index_open_spec(
                 DerivedIndexComposer { backend, epoch },
             )
         }),
-        utxo: None,
-        chain_transition: None,
         bundle: index_bundle_directive(config)?,
         facts_rx: None,
         facts_bytes: None,
         facts_gap: None,
         seed_slot,
+        utxo: None,
+        chain_transition: None,
     }))
 }
 

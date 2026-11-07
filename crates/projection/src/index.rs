@@ -10,7 +10,7 @@ mod state;
 mod write;
 
 pub(crate) use block::NoSpentScripts;
-pub use block::{MAX_LIVE_SCRIPT_SIZE, SpentCoinScripts};
+pub use block::{MAX_LIVE_SCRIPT_SIZE, SpentCoin, SpentCoins};
 pub use capability::{IndexCapabilities, IndexCapability, IndexWatermark, IndexWatermarks};
 pub use error::IndexError;
 pub use filters::BasicFilter;

@@ -679,6 +679,7 @@ mod tests {
         ) -> Result<ScriptLiveScan, IndexError> {
             Ok(ScriptLiveScan {
                 rows: Vec::new(),
+                coins: Vec::new(),
                 encoded_bytes: 0,
                 complete: true,
             })

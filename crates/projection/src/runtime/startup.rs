@@ -242,9 +242,10 @@ fn publish_serving_query_engine(open: &OpenDerivedIndex, setup: &WorkerSetup<'_>
             setup.applied_tip.clone(),
             setup.body_source.clone(),
             QueryEngineLive {
-                utxo: setup.spec.utxo.clone(),
-                chain_transition: setup.spec.chain_transition.clone(),
                 enabled: setup.spec.enabled,
+                utxo: setup.spec.utxo.clone(),
+                #[cfg(any(test, feature = "test-seam"))]
+                chain_transition: None,
             },
         )
         .with_scripthash_limit(setup.spec.scripthash_limit),

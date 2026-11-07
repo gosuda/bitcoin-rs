@@ -422,11 +422,7 @@ impl NodeState {
                     spec.facts_bytes = Some(bytes);
                     spec.facts_gap = Some(gap);
                 }
-                spec.utxo = Some(bitcoin_rs_storage::utxo::UtxoReader::with_coin_store(
-                    Arc::clone(&utxo),
-                    storage.coins(),
-                ));
-                spec.chain_transition = Some(transition.stable_read());
+
                 let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
                 let runtime = Arc::new(bitcoin_rs_projection::runtime::DerivedIndexRuntime::new(
                     wake_tx,

@@ -3,8 +3,9 @@
 Owns the confirmed-transaction index: compact rows over the workspace key-value
 store and versioned `TxLookup`/`ScriptHistory`/`ScriptLive` watermarks that pin
 rows to an exact active-chain prefix. `ScriptLive` is the compact reverse view
-of the authoritative UTXO set: each row stores an empty value and a complete
-outpoint after an eight-byte script-hash prefix.
+of the authoritative UTXO set: each row stores a complete outpoint after an
+eight-byte script-hash prefix, with a value carrying the full script hash and
+the coin's value, height, and coinbase flag in compact varint form.
 
 `IndexWriter` is the sole mutation owner. It walks a serialized block once
 (`prepare_block` / `prepare_block_with_spent_scripts`) and commits bounded
