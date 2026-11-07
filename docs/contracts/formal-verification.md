@@ -117,6 +117,7 @@ This table shows the status of each Kani harness and each property that moved to
 | Module | Property | Status | Lean theorem path |
 | --- | --- | --- | --- |
 | primitives | 4 harnesses | Verified (under 1 s each) | None |
+| primitives sighash | `tapleaf_hash_input_stream_matches_concatenation_and_spec` (`SCR-03`) | Kani bound MAX_SCRIPT_LEN = 253; SHA-256 stubbed with a recording model, so the harness proves the input stream, not the digest; BIP341 leaf digests pinned by `tapleaf_hash_matches_bip341_wallet_vectors` | None |
 | mempool chunk_index | `chunk_key_cmp_is_antisymmetric` | Verified (489 s) | None |
 | mempool chunk_index | `chunk_key_cmp_is_transitive` | Moved to Lean (>1800 s) | `docs/lean/Mempool/ChunkIndex.lean::chunkKey_strict_total_order` |
 | mempool fee_diagram | `fee_weight_rate_cmp_is_transitive` | Moved to Lean (>1800 s) | `docs/lean/Mempool/FeeDiagram.lean::rateCmp_total_preorder` |

@@ -315,7 +315,7 @@ proofs_stage() {
     echo "==> ${kani_label}"
     (
       set -euo pipefail
-      local -a cmd=(cargo kani --tests)
+      local -a cmd=(cargo kani --tests -Z stubbing)
       if [[ -n "${PROOFS_KANI_CMD:-}" ]]; then
         read -r -a cmd <<< "${PROOFS_KANI_CMD}"
       fi

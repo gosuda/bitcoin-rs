@@ -471,11 +471,11 @@ impl Sighash {
     }
 }
 
+// SCR-03
 #[must_use]
 pub fn tapleaf_hash(leaf_version: u8, script: &[u8]) -> Hash256 {
     let len = varint::encode(compact_len(script.len()));
-    let msg = [&[leaf_version][..], len.as_slice(), script].concat();
-    tagged_hash(b"TapLeaf", &msg)
+    tagged_hash_parts(b"TapLeaf", &[&[leaf_version][..], len.as_slice(), script])
 }
 
 fn validate_annex(bytes: &[u8]) -> Result<&[u8], SighashError> {
@@ -523,10 +523,41 @@ fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
     engine.finalize().into()
 }
 
-fn tagged_hash(tag: &[u8], msg: &[u8]) -> Hash256 {
-    let tag_hash = Sha256::digest(tag);
-    Hash256::from_le_bytes(&sha256_parts(&[&tag_hash, &tag_hash, msg]))
+fn hash_digest(data: &[u8]) -> [u8; 32] {
+    Sha256::digest(data).into()
 }
+
+fn hash_feed(engine: &mut Sha256, data: &[u8]) {
+    Digest::update(engine, data);
+}
+
+fn hash_finish(engine: Sha256) -> [u8; 32] {
+    engine.finalize().into()
+}
+
+fn tag_engine(tag: &[u8]) -> Sha256 {
+    let tag_hash = hash_digest(tag);
+    let mut engine = Sha256::new();
+    hash_feed(&mut engine, &tag_hash);
+    hash_feed(&mut engine, &tag_hash);
+    engine
+}
+
+// SCR-03
+fn tagged_hash_parts(tag: &[u8], parts: &[&[u8]]) -> Hash256 {
+    let mut engine = tag_engine(tag);
+    for part in parts {
+        hash_feed(&mut engine, part);
+    }
+    Hash256::from_le_bytes(&hash_finish(engine))
+}
+
+fn tagged_hash(tag: &[u8], msg: &[u8]) -> Hash256 {
+    tagged_hash_parts(tag, &[msg])
+}
+
+#[cfg(kani)]
+mod proofs;
 
 #[cfg(test)]
 mod tests {
@@ -534,12 +565,59 @@ mod tests {
 
     use super::{
         CODESEPARATOR_POSITION, Sighash, SighashCache, SighashError, TAPSCRIPT_LEAF_VERSION,
-        tapleaf_hash,
+        compact_len, tagged_hash, tapleaf_hash,
     };
-    use crate::primitives::{Hash256, OutPoint, Tx, Txid};
+    use crate::primitives::{Hash256, OutPoint, Tx, Txid, varint};
 
     fn pin(hex: &str) -> Hash256 {
         Hash256::from_str_be(hex).expect("pinned hash hex")
+    }
+
+    #[test]
+    fn tapleaf_hash_streaming_matches_concatenation_form() {
+        for len in [0, 1, 10, 32, 100, 1000] {
+            let script = vec![0x42_u8; len];
+            let leaf_version = TAPSCRIPT_LEAF_VERSION;
+            let streaming = tapleaf_hash(leaf_version, &script);
+            let encoded_len = varint::encode(compact_len(script.len()));
+            let msg = [
+                &[leaf_version][..],
+                encoded_len.as_slice(),
+                script.as_slice(),
+            ]
+            .concat();
+            let oracle = tagged_hash(b"TapLeaf", &msg);
+            assert_eq!(streaming, oracle);
+        }
+    }
+
+    #[test]
+    fn tapleaf_hash_matches_bip341_wallet_vectors() {
+        let vectors = [
+            (
+                0xc0_u8,
+                "20d85a959b0290bf19bb89ed43c916be835475d013da4b362117393e25a48229b8ac",
+                "5b75adecf53548f3ec6ad7d78383bf84cc57b55a3127c72b9a2481752dd88b21",
+            ),
+            (
+                0xfa_u8,
+                "06424950333431",
+                "f224a923cd0021ab202ab139cc56802ddb92dcfc172b9212261a539df79a112a",
+            ),
+            (
+                0xc0_u8,
+                "20387671353e273264c495656e27e39ba899ea8fee3bb69fb2a680e22093447d48ac",
+                "8ad69ec7cf41c2a4001fd1f738bf1e505ce2277acdcaa63fe4765192497f47a7",
+            ),
+        ];
+        for (leaf_version, script_hex, leaf_hash_hex) in vectors {
+            let script = crate::primitives::hex::hex_decode(script_hex).expect("vector script hex");
+            let leaf_hash = Hash256::from_le_bytes(
+                &crate::primitives::hex::hex_decode_array::<32>(leaf_hash_hex)
+                    .expect("vector leaf hash hex"),
+            );
+            assert_eq!(tapleaf_hash(leaf_version, &script), leaf_hash);
+        }
     }
 
     fn synthetic_tx(output_count: usize) -> Tx {
