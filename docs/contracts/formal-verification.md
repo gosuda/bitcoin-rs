@@ -128,7 +128,7 @@ This table shows the status of each Kani harness and each property that moved to
 | projection handoff | 7 lifecycle harnesses (PRJ-01, PRJ-02, PRJ-04, PRJ-13, IDX-08) | Kani verified; independent Lean model compiled | docs/lean/ProjectionIndex/HandoffSafety.lean::safety_inductive |
 | projection generations | 7 lifecycle harnesses (PRJ-05, PRJ-07, PRJ-09, REO-04, REO-05) | Kani verified; independent Lean model compiled | docs/lean/ProjectionIndex/GenerationsSafety.lean::safety_inductive |
 | serving view | 6 lifecycle harnesses (`QRY-01..08`, `PRJ-11`) | Kani verified; independent Lean model compiled | `docs/lean/ServingView/Safety.lean::safety_inductive` |
-| snapshot bootstrap | 7 safety invariants (SNP-01..11) | Independent Lean model compiled | `docs/lean/SnapshotBootstrap/Safety.lean::safety_inductive` |
+| snapshot bootstrap | 6 lifecycle harnesses (`SNP-01..11`) | Kani verified; independent Lean model compiled | `docs/lean/SnapshotBootstrap/Safety.lean::safety_inductive` |
 | node budget | `safety_init`, `safety_inductive`, `refusal_preserves_consensus_validity` | Verified | `docs/lean/NodeBudget/Safety.lean::safety_inductive` |
 | mempool settlement | `safety_init`, `safety_inductive`, `template_never_has_confirmed_tx` | Verified | `docs/lean/MempoolSettlement/Safety.lean::safety_inductive` |
 
@@ -137,5 +137,7 @@ The storage schema models specify the Epoch 3 admission and offline conversion d
 The index startup models specify helper thread ownership, joined cancellation, startup timeout abandonment, host teardown deadlines, and checkpoint gating under EMB-01. These design models MUST NOT be reported as implementation refinement proofs or OS durability proofs. Lean phase definitions specify the sequential transition system; they do not establish physical thread execution guarantees.
 
 The serving view query lifecycle model in `crates/index/src/runtime/query/proofs.rs` specifies view capture, extension immunity, explicit coverage and unavailable status, retired view expiration, lock-free self-contained ScriptLive, and post-access serialization without locks under QRY-01..08 and PRJ-11. This design model MUST NOT be reported as an implementation refinement proof.
+
+The snapshot bootstrap model in `crates/chainstate/src/assumeutxo/proofs.rs` specifies unified single-pass streaming decode of coins and ScriptLive base, publication gating on UTXO verification, direct attachment of verified index generations, index failure domain isolation, independence of the three reported positions, and explicit historical body availability under SNP-01..11. This design model MUST NOT be reported as an implementation refinement proof.
 
 The index startup TLC check MUST use `INIT Init`, `NEXT Next`, `INVARIANT TypeOK`, `INVARIANT Safety`, and `PROPERTY ConditionalProgress`. The checker is `tlc2.TLC` in the pinned Apalache JAR. The check MUST use exhaustive breadth-first search without a depth limit, state constraints, or fairness assumptions. `ConditionalProgress` specifies sticky failure safety, not liveness.

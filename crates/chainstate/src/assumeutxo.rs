@@ -1354,6 +1354,8 @@ impl AssumeUtxoManager {
     }
 }
 
+#[cfg(any(test, verification, kani))]
+pub(crate) mod proofs;
 #[cfg(test)]
 mod tests;
 
