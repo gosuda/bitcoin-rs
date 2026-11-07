@@ -125,8 +125,8 @@ This table shows the status of each Kani harness and each property that moved to
 | storage schema | 7 lifecycle harnesses (`RCV-09`) | Kani verified; independent Lean model compiled | `docs/lean/Storage/Schema.lean::invariant_step` |
 | storage schema epoch 4 | 11 lifecycle harnesses (`RCV-09`, `RCV-10`) | Kani verified; independent Lean model compiled | `docs/lean/Storage/SchemaEpoch4.lean::invariant_step` |
 | index startup | 8 lifecycle harnesses (`EMB-01`) | Kani verified; independent Lean model compiled | `docs/lean/IndexOpen/Safety.lean::safety_inductive` |
-| projection handoff | 7 lifecycle harnesses (PRJ-01, PRJ-02, PRJ-04, PRJ-13, IDX-08) | Kani specified; independent Lean model compiled | docs/lean/ProjectionIndex/HandoffSafety.lean::safety_inductive |
-| projection generations | 7 lifecycle harnesses (PRJ-05, PRJ-07, PRJ-09, REO-04, REO-05) | Kani specified; independent Lean model compiled | docs/lean/ProjectionIndex/GenerationsSafety.lean::safety_inductive |
+| projection handoff | 7 lifecycle harnesses (PRJ-01, PRJ-02, PRJ-04, PRJ-13, IDX-08) | Kani verified; independent Lean model compiled | docs/lean/ProjectionIndex/HandoffSafety.lean::safety_inductive |
+| projection generations | 7 lifecycle harnesses (PRJ-05, PRJ-07, PRJ-09, REO-04, REO-05) | Kani verified; independent Lean model compiled | docs/lean/ProjectionIndex/GenerationsSafety.lean::safety_inductive |
 | serving view | 6 safety invariants (QRY-01..08, PRJ-11) | Independent Lean model compiled | `docs/lean/ServingView/Safety.lean::safety_inductive` |
 | snapshot bootstrap | 7 safety invariants (SNP-01..11) | Independent Lean model compiled | `docs/lean/SnapshotBootstrap/Safety.lean::safety_inductive` |
 | node budget | `safety_init`, `safety_inductive`, `refusal_preserves_consensus_validity` | Verified | `docs/lean/NodeBudget/Safety.lean::safety_inductive` |
