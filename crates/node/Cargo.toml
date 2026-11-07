@@ -120,4 +120,3 @@ path = "tests/crash_recovery.rs"
 [[test]]
 name = "pool_ledger"
 path = "tests/pool_ledger.rs"
-required-features = ["pool", "test-seam"]
