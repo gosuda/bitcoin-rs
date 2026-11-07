@@ -64,7 +64,7 @@ The stricter cases are deliberate. The node disconnects the peer and temporarily
 
 Two Core commands are absent by policy. The node decodes `getblocks` and `mempool` and ignores them; Core answers them with an `inv`. BIP330 `sendtxrcncl` stays untyped: a ready peer ignores it like any unknown command, and the node disconnects a peer that sends it before readiness. Core whitelists that command during the handshake, so the affected topology is a Core peer dialing bitcoin-rs with `-txreconciliation=1`.
 
-BIP324 v2 transport is on by default in the node. `--v2transport=false` keeps every connection on v1. The embedder default is different: `P2pServiceConfig::default()` sets `v2_transport: false`, and an embedder must enable it. See [`crates/p2p/src/service.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/service.rs).
+BIP324 v2 transport is on by default in the node. `--v2transport=false` keeps every connection on v1. The embedder default is different: `P2pServiceConfig::default()` sets `v2_transport: false`, and an embedder must enable it. See [`crates/wire/src/service.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/wire/src/service.rs).
 
 ## Mempool policy
 

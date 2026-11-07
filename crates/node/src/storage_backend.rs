@@ -99,8 +99,8 @@ mod tests {
         let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         for src in [
             crates.join("node/src"),
-            crates.join("chainstate/src"),
-            crates.join("index/src"),
+            crates.join("execution/src"),
+            crates.join("projection/src"),
         ] {
             assert_no_concrete_opens(&src);
         }

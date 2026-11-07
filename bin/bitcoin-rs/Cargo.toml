@@ -22,9 +22,10 @@ thiserror.workspace = true
 clap.workspace = true
 toml.workspace = true
 bitcoin-rs-node.workspace = true
-bitcoin-rs-execution.workspace = true
 bitcoin-rs-storage.workspace = true
 bitcoin-rs-consensus.workspace = true
+bitcoin-rs-execution.workspace = true
+bitcoin-rs-wire.workspace = true
 
 [dev-dependencies]
 parking_lot.workspace = true
@@ -32,7 +33,6 @@ rustix.workspace = true
 sonic-rs.workspace = true
 tempfile.workspace = true
 bitcoin.workspace = true
-bitcoin-rs-consensus.workspace = true
 bitcoin-rs-rpc = { workspace = true }
 bitcoin-rs-e2e.workspace = true
 
@@ -48,16 +48,6 @@ zmq = ["bitcoin-rs-node/zmq"]
 silent-payments = ["bitcoin-rs-node/silent-payments"]
 pool = ["bitcoin-rs-node/pool"]
 pool-sv2 = ["bitcoin-rs-node/pool-sv2"]
-surrealkv = [
-    "bitcoin-rs-node/surrealkv",
-    "bitcoin-rs-execution/surrealkv",
-    "bitcoin-rs-storage/surrealkv",
-]
-mdbx = [
-    "bitcoin-rs-node/mdbx",
-    "bitcoin-rs-execution/mdbx",
-    "bitcoin-rs-storage/mdbx",
-]
 
 [[test]]
 name = "suite"

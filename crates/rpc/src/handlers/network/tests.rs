@@ -5,20 +5,20 @@ use sonic_rs::{JsonContainerTrait, JsonValueTrait, json};
 #[test]
 fn configured_overlay_route_is_reported_without_claiming_an_operational_peer() {
     let mut ctx = Context::new();
-    let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
-        bitcoin_rs_p2p::P2pServiceConfig {
-            overlay: bitcoin_rs_p2p::overlay::OverlayConfig {
+    let p2p = Arc::new(bitcoin_rs_wire::P2pService::new(
+        bitcoin_rs_wire::P2pServiceConfig {
+            overlay: bitcoin_rs_wire::overlay::OverlayConfig {
                 onion_proxy: Some(
                     "127.0.0.1:9050"
                         .parse()
                         .unwrap_or_else(|error| panic!("proxy: {error}")),
                 ),
-                onlynet: vec![bitcoin_rs_p2p::PeerNetwork::Onion],
-                ..bitcoin_rs_p2p::overlay::OverlayConfig::default()
+                onlynet: vec![bitcoin_rs_wire::PeerNetwork::Onion],
+                ..bitcoin_rs_wire::overlay::OverlayConfig::default()
             },
-            ..bitcoin_rs_p2p::P2pServiceConfig::default()
+            ..bitcoin_rs_wire::P2pServiceConfig::default()
         },
-        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
+        bitcoin_rs_wire::LatchReader::fixture_never(),
     ));
     ctx.network.peer_table = p2p.table();
     ctx.network.p2p = p2p;
@@ -73,17 +73,17 @@ fn getnetworkinfo_reports_zero_connections_on_fresh_context() {
 fn getnetworkinfo_reports_configured_overlay_state_without_probing()
 -> Result<(), crate::test_error::TestError> {
     let mut ctx = Context::new();
-    let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
-        bitcoin_rs_p2p::P2pServiceConfig {
-            overlay: bitcoin_rs_p2p::overlay::OverlayConfig {
+    let p2p = Arc::new(bitcoin_rs_wire::P2pService::new(
+        bitcoin_rs_wire::P2pServiceConfig {
+            overlay: bitcoin_rs_wire::overlay::OverlayConfig {
                 onion_proxy: Some("127.0.0.1:1".parse()?),
                 i2p_sam: Some("127.0.0.1:2".parse()?),
                 randomize_credentials: true,
-                ..bitcoin_rs_p2p::overlay::OverlayConfig::default()
+                ..bitcoin_rs_wire::overlay::OverlayConfig::default()
             },
-            ..bitcoin_rs_p2p::P2pServiceConfig::default()
+            ..bitcoin_rs_wire::P2pServiceConfig::default()
         },
-        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
+        bitcoin_rs_wire::LatchReader::fixture_never(),
     ));
     ctx.network.peer_table = p2p.table();
     ctx.network.p2p = p2p;
@@ -146,15 +146,15 @@ fn getnetworkinfo_reports_configured_overlay_state_without_probing()
 fn getnetworkinfo_does_not_call_onion_reachable_with_control_only()
 -> Result<(), crate::test_error::TestError> {
     let mut ctx = Context::new();
-    let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
-        bitcoin_rs_p2p::P2pServiceConfig {
-            overlay: bitcoin_rs_p2p::overlay::OverlayConfig {
+    let p2p = Arc::new(bitcoin_rs_wire::P2pService::new(
+        bitcoin_rs_wire::P2pServiceConfig {
+            overlay: bitcoin_rs_wire::overlay::OverlayConfig {
                 tor_control: Some("127.0.0.1:9051".parse()?),
-                ..bitcoin_rs_p2p::overlay::OverlayConfig::default()
+                ..bitcoin_rs_wire::overlay::OverlayConfig::default()
             },
-            ..bitcoin_rs_p2p::P2pServiceConfig::default()
+            ..bitcoin_rs_wire::P2pServiceConfig::default()
         },
-        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
+        bitcoin_rs_wire::LatchReader::fixture_never(),
     ));
     ctx.network.peer_table = p2p.table();
     ctx.network.p2p = p2p;
@@ -206,28 +206,28 @@ fn getnetworkinfo_calls_onion_reachable_with_an_outbound_socks_route()
     for (label, overlay, expect_reachable) in [
         (
             "onion route",
-            bitcoin_rs_p2p::overlay::OverlayConfig {
+            bitcoin_rs_wire::overlay::OverlayConfig {
                 onion_proxy: Some("127.0.0.1:9050".parse()?),
-                ..bitcoin_rs_p2p::overlay::OverlayConfig::default()
+                ..bitcoin_rs_wire::overlay::OverlayConfig::default()
             },
             true,
         ),
         (
             "general proxy alone",
-            bitcoin_rs_p2p::overlay::OverlayConfig {
+            bitcoin_rs_wire::overlay::OverlayConfig {
                 proxy: Some("127.0.0.1:9050".parse()?),
-                ..bitcoin_rs_p2p::overlay::OverlayConfig::default()
+                ..bitcoin_rs_wire::overlay::OverlayConfig::default()
             },
             false,
         ),
     ] {
         let mut ctx = Context::new();
-        let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
-            bitcoin_rs_p2p::P2pServiceConfig {
+        let p2p = Arc::new(bitcoin_rs_wire::P2pService::new(
+            bitcoin_rs_wire::P2pServiceConfig {
                 overlay,
-                ..bitcoin_rs_p2p::P2pServiceConfig::default()
+                ..bitcoin_rs_wire::P2pServiceConfig::default()
             },
-            bitcoin_rs_execution::chain::LatchReader::fixture_never(),
+            bitcoin_rs_wire::LatchReader::fixture_never(),
         ));
         ctx.network.peer_table = p2p.table();
         ctx.network.p2p = p2p;
@@ -332,18 +332,18 @@ fn getnetworkinfo_reports_default_overlays_unconfigured_and_unreachable()
 fn getnetworkinfo_reports_onlynet_and_credential_isolation()
 -> Result<(), crate::test_error::TestError> {
     let mut ctx = Context::new();
-    let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
-        bitcoin_rs_p2p::P2pServiceConfig {
-            overlay: bitcoin_rs_p2p::overlay::OverlayConfig {
+    let p2p = Arc::new(bitcoin_rs_wire::P2pService::new(
+        bitcoin_rs_wire::P2pServiceConfig {
+            overlay: bitcoin_rs_wire::overlay::OverlayConfig {
                 proxy: Some("127.0.0.1:9050".parse()?),
                 onion_proxy: Some("127.0.0.1:9050".parse()?),
                 randomize_credentials: false,
-                onlynet: vec![bitcoin_rs_p2p::PeerNetwork::Onion],
-                ..bitcoin_rs_p2p::overlay::OverlayConfig::default()
+                onlynet: vec![bitcoin_rs_wire::PeerNetwork::Onion],
+                ..bitcoin_rs_wire::overlay::OverlayConfig::default()
             },
-            ..bitcoin_rs_p2p::P2pServiceConfig::default()
+            ..bitcoin_rs_wire::P2pServiceConfig::default()
         },
-        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
+        bitcoin_rs_wire::LatchReader::fixture_never(),
     ));
     ctx.network.peer_table = p2p.table();
     ctx.network.p2p = p2p;

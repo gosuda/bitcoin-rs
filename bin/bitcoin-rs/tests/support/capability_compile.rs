@@ -28,7 +28,7 @@ impl ProductionConsumer {
     pub(super) fn new(root: &Path) -> Result<Self> {
         let directory = tempfile::tempdir()?;
         let execution = sonic_rs::to_string(&root.join("crates/execution"))?;
-        let p2p = sonic_rs::to_string(&root.join("crates/p2p"))?;
+        let wire = sonic_rs::to_string(&root.join("crates/wire"))?;
         let storage = sonic_rs::to_string(&root.join("crates/storage"))?;
         std::fs::create_dir(directory.path().join("src"))?;
         std::fs::write(
@@ -47,7 +47,7 @@ name = "capability_consumer"
 
 [dependencies]
 bitcoin-rs-execution = {{ path = {execution}, default-features = false }}
-bitcoin-rs-p2p = {{ path = {p2p}, default-features = false }}
+bitcoin-rs-wire = {{ path = {wire}, default-features = false }}
 bitcoin-rs-storage = {{ path = {storage}, default-features = false }}
 "#
             ),

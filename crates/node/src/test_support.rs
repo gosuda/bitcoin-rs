@@ -34,7 +34,7 @@ pub enum TestError {
     #[error(transparent)]
     AssumeUtxo(Box<bitcoin_rs_execution::AssumeUtxoError>),
     #[error(transparent)]
-    P2pStart(#[from] bitcoin_rs_p2p::P2pServiceError),
+    P2pStart(#[from] bitcoin_rs_wire::P2pServiceError),
     #[error(transparent)]
     HexToBytes(#[from] bitcoin::hex::HexToBytesError),
     #[error(transparent)]
@@ -85,7 +85,7 @@ pub enum TestError {
     #[error(transparent)]
     ChainChange(#[from] bitcoin_rs_mempool::ChainChangeError),
     #[error(transparent)]
-    Peer(#[from] bitcoin_rs_p2p::PeerError),
+    Peer(#[from] bitcoin_rs_wire::PeerError),
     #[error(transparent)]
     Mempool(#[from] bitcoin_rs_mempool::MempoolError),
     #[error(transparent)]
@@ -136,6 +136,37 @@ pub enum TestError {
     ChannelSend(&'static str),
     #[error("{0}")]
     Message(String),
+    #[error("commit failed: {0}")]
+    Commit(String),
+    #[error("unexpected: {0}")]
+    Unexpected(String),
+    #[error("liveness failed: {0}")]
+    Liveness(String),
+    #[error("panic: {0}")]
+    Panicked(&'static str),
+    #[error(transparent)]
+    Listener(#[from] bitcoin_rs_wire::listener::ListenerError),
+    #[error(transparent)]
+    Recv(#[from] crossbeam_channel::RecvError),
+    #[error(transparent)]
+    TryRecv(#[from] crossbeam_channel::TryRecvError),
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+pub type TestResult = Result<(), TestError>;
+
+#[cfg(any(test, feature = "test-seam"))]
+impl From<&'static str> for TestError {
+    fn from(msg: &'static str) -> Self {
+        Self::Missing(msg)
+    }
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+impl<T> From<crossbeam_channel::SendError<T>> for TestError {
+    fn from(_: crossbeam_channel::SendError<T>) -> Self {
+        Self::ChannelSend("send failed")
+    }
 }
 
 #[cfg(any(test, feature = "test-seam"))]

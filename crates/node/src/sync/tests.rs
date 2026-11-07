@@ -10,9 +10,9 @@ use bitcoin_rs_storage::utxo::UtxoSet;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
+use crate::p2p::sync::chain::{SyncChain, WindowApplyDisposition};
 use crate::test_support::TestError;
 use bitcoin_rs_execution::Chainstate;
-use bitcoin_rs_p2p::sync::chain::{SyncChain, WindowApplyDisposition};
 
 #[test]
 fn window_failure_keeps_committed_followers_and_native_retry_policy()

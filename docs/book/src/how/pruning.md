@@ -71,7 +71,7 @@ The node refuses two cases before any deletion:
 
 ## What a pruned node advertises and refuses
 
-`--prune-target-mb` greater than zero turns on pruned mode. The node advertises `WITNESS | NETWORK_LIMITED` instead of `WITNESS | NETWORK`, adding `P2P_V2` when v2 transport is on (`crates/node/src/state/open.rs`). Outside IBD, its download policy lets a `NETWORK_LIMITED` peer serve a height only when that height is within the last 288 blocks of the peer's tip (`crates/p2p/src/download_window/policy.rs:18-20`, `90-140`). `getblockchaininfo` reports `"pruned": true`, the stored `pruneheight`, and `prune_target_size: None` (`crates/rpc/src/handlers/chain.rs`).
+`--prune-target-mb` greater than zero turns on pruned mode. The node advertises `WITNESS | NETWORK_LIMITED` instead of `WITNESS | NETWORK`, adding `P2P_V2` when v2 transport is on (`crates/node/src/state/open.rs`). Outside IBD, its download policy lets a `NETWORK_LIMITED` peer serve a height only when that height is within the last 288 blocks of the peer's tip (`crates/node/src/p2p/download_window/policy.rs:18-20`, `90-140`). `getblockchaininfo` reports `"pruned": true`, the stored `pruneheight`, and `prune_target_size: None` (`crates/rpc/src/handlers/chain.rs`).
 
 The node refuses reads that need a deleted body with distinct messages:
 

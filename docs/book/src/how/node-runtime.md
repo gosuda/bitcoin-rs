@@ -27,9 +27,9 @@ The listener spawns the per-connection RPC threads itself, `rpc-connection` with
 
 ## Event loop ticks
 
-The event loop is a `crossbeam` select over three inputs (`crates/node/src/event_loop.rs:31-58`): the shutdown latch, a 1 second tick (`SYNC_TICK`, `event_loop.rs:8`), and a bounded wake channel that P2P triggers when new headers or blocks arrive (`sync_wake`, `lifecycle.rs`; `on_peer_ready`, `lifecycle.rs`). Every tick or wake runs one `BlockSync::tick` (`crates/p2p/src/sync.rs:426`), measured into the `node.event_loop.tick_seconds` histogram, and every 1,024 iterations the loop emits a debug heartbeat with the iteration and tick counts (`event_loop.rs:37-39`). Two side conditions end the loop: a shutdown latch fires, or `sync.closed_for_recovery()` reports a chainstate closed for recovery, in which case the loop itself requests shutdown and the run exits (`event_loop.rs:60-65`, counter `node.sync.apply_halt_shutdowns`). The loop emits a sync progress line when 60 seconds have actually elapsed since the last one, not once per tick (`progress_due`, `event_loop.rs:82`); `telemetry_uses_elapsed_time_not_wake_count` (`event_loop.rs:92`) pins that rule.
+The event loop is a `crossbeam` select over three inputs (`crates/node/src/event_loop.rs:31-58`): the shutdown latch, a 1 second tick (`SYNC_TICK`, `event_loop.rs:8`), and a bounded wake channel that P2P triggers when new headers or blocks arrive (`sync_wake`, `lifecycle.rs`; `on_peer_ready`, `lifecycle.rs`). Every tick or wake runs one `BlockSync::tick` (`crates/node/src/p2p/sync.rs:426`), measured into the `node.event_loop.tick_seconds` histogram, and every 1,024 iterations the loop emits a debug heartbeat with the iteration and tick counts (`event_loop.rs:37-39`). Two side conditions end the loop: a shutdown latch fires, or `sync.closed_for_recovery()` reports a chainstate closed for recovery, in which case the loop itself requests shutdown and the run exits (`event_loop.rs:60-65`, counter `node.sync.apply_halt_shutdowns`). The loop emits a sync progress line when 60 seconds have actually elapsed since the last one, not once per tick (`progress_due`, `event_loop.rs:82`); `telemetry_uses_elapsed_time_not_wake_count` (`event_loop.rs:92`) pins that rule.
 
-`BlockSync::emit_sync_progress` (`crates/p2p/src/sync/telemetry.rs:4`) logs the applied height, header height, gap, live peers, and IBD state; it logs a `sync progress: frontier cannot advance` warning instead when the plan reports a stall reason other than being at the tip. The trace below shows both shapes of the line.
+`BlockSync::emit_sync_progress` (`crates/node/src/p2p/sync/telemetry.rs:4`) logs the applied height, header height, gap, live peers, and IBD state; it logs a `sync progress: frontier cannot advance` warning instead when the plan reports a stall reason other than being at the tip. The trace below shows both shapes of the line.
 
 ## Chain feed: stable hint and settled poll
 
@@ -151,7 +151,7 @@ From the same run, the lines that show the runtime working, with boot noise remo
 20:20:15.890213 INFO sync progress applied_height=101 header_height=101 peers=0 ibd=false
 ```
 
-The 101 blocks between the second and third progress lines came from one `generatetoaddress 101` call; the progress line carries `gap` only while in IBD, matching `emit_sync_progress` (`crates/p2p/src/sync/telemetry.rs:22-34`). No DNS seeds resolve in this sandbox (`DNS bootstrap unavailable`), so `peers=0` throughout; block sync itself, the window and staging machinery, is owned by [header-sync-and-block-download](header-sync-and-block-download.md).
+The 101 blocks between the second and third progress lines came from one `generatetoaddress 101` call; the progress line carries `gap` only while in IBD, matching `emit_sync_progress` (`crates/node/src/p2p/sync/telemetry.rs:22-34`). No DNS seeds resolve in this sandbox (`DNS bootstrap unavailable`), so `peers=0` throughout; block sync itself, the window and staging machinery, is owned by [header-sync-and-block-download](header-sync-and-block-download.md).
 
 ## Where it is proven
 

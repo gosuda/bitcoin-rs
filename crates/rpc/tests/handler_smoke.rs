@@ -14,12 +14,12 @@ use bitcoin_rs_consensus::primitives::{
 use bitcoin_rs_execution::chain::{ChainWork, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_mining::FakeMiningControl;
-use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable, wire::PROTOCOL_VERSION};
 use bitcoin_rs_projection::block_log::BlockRecord;
 use bitcoin_rs_rpc::context::{ChainControl, ChainControlError, Context};
 use bitcoin_rs_rpc::{Handler, RpcError};
-use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
+use bitcoin_rs_storage::block_body::BlockBodySource;
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_wire::{PeerInfo, PeerLease, PeerTable, wire::PROTOCOL_VERSION};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
 use crate::mining_fixture;
@@ -768,11 +768,11 @@ fn network_peer_methods_read_shared_peer_table() -> Result<(), TestError> {
         relay_transactions: true,
         compact_block_relay: false,
         send_headers: false,
-        endpoint: Some(bitcoin_rs_p2p::PeerEndpoint::Ip(SocketAddr::new(
+        endpoint: Some(bitcoin_rs_wire::PeerEndpoint::Ip(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             8333,
         ))),
-        network: bitcoin_rs_p2p::NetworkLabel::Ipv4,
+        network: bitcoin_rs_wire::NetworkLabel::Ipv4,
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333).into(),
         version: 70016,
         services: 0,
@@ -781,13 +781,13 @@ fn network_peer_methods_read_shared_peer_table() -> Result<(), TestError> {
         best_known_height: 0,
         conn_time: 0,
         inbound: true,
-        addr_bind: bitcoin_rs_p2p::TransportRemote::new(SocketAddr::new(
+        addr_bind: bitcoin_rs_wire::TransportRemote::new(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             8333,
         )),
         time_offset: 0,
-        counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
-        transport: bitcoin_rs_p2p::TransportProtocol::V1,
+        counters: Arc::new(bitcoin_rs_wire::PeerCounters::default()),
+        transport: bitcoin_rs_wire::TransportProtocol::V1,
     };
     let (tx, _rx) = crossbeam_channel::unbounded();
     let lease = PeerLease::new(tx);
@@ -985,7 +985,7 @@ impl BlockBodySource for SingleBlockSource {
         &self,
         height: u32,
         hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         Ok((height == self.height && hash == self.hash).then(|| self.body.clone()))
     }
 }

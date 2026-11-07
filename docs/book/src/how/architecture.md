@@ -3,16 +3,16 @@
 A block moves through six stages: the peer connection, the sync loop, the block stager, the chainstate transition, the durable-head commit, and the node followers. Chainstate owns the authoritative mutation; every other stage either feeds it or observes its committed result (`ARCH-07`, [architecture contract](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/architecture.md#arch-07-chainstate-owns-authoritative-applied-chain-mutation)).
 
 ```text
-peer read loop (crates/p2p/src/listener.rs)
+peer read loop (crates/wire/src/listener.rs)
   |  InboundBlock { BlockPayload, source, credits }
   v
-bounded inbound-block channel (crates/p2p/src/service.rs)
+bounded inbound-block channel (crates/wire/src/service.rs)
   |  wake
   v
-BlockSync::tick (crates/p2p/src/sync.rs)
+BlockSync::tick (crates/node/src/p2p/sync.rs)
   |  drain, bind body to header, divert historical deliveries
   v
-BlockStager::insert (crates/p2p/src/block_stager.rs)
+BlockStager::insert (crates/node/src/p2p/block_stager.rs)
   |  dedupe by hash, byte budgets, expected-prefix order
   v
 apply_buffered_blocks (crates/p2p/src/sync/commit.rs)
@@ -104,10 +104,10 @@ The order is the contract: apply profile, durable commit receipt, tip publicatio
 
 | Invariant | Test | File |
 | --- | --- | --- |
-| Prefix drain stops at the first missing hash | `drain_expected_prefix_stops_at_first_missing_hash` | [`crates/p2p/src/block_stager/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/block_stager/tests.rs) |
+| Prefix drain stops at the first missing hash | `drain_expected_prefix_stops_at_first_missing_hash` | [`crates/node/src/p2p/block_stager/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/p2p/block_stager/tests.rs) |
 | A matching durable head needs no replay | `matching_durable_head_requires_no_replay` | [`crates/execution/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/durable/tests.rs) |
 | Followers emit in commit order | `connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order` | [`crates/node/src/chain_effects/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/chain_effects/tests.rs) |
 | Event sequence survives restart | `resumed_snapshot_continues_sequence` | [`crates/execution/src/events.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/events.rs) |
-| Apply waits for a pending reorg | `apply_buffered_blocks_waits_for_pending_reorg` | [`crates/p2p/src/sync/tests/download_frontier.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/sync/tests/download_frontier.rs) |
+| Apply waits for a pending reorg | `apply_buffered_blocks_waits_for_pending_reorg` | [`crates/node/src/p2p/sync/tests/download_frontier.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/p2p/sync/tests/download_frontier.rs) |
 
 The chain-events contract owns the fence order and the consumer cursor: [docs/contracts/chain-events.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/chain-events.md). The [state and storage](state-and-storage.md) chapter covers the durable records, and the [p2p](p2p.md) chapter covers peer policy before staging.

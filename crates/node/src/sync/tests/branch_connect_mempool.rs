@@ -372,7 +372,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
 #[test]
 fn admit_headers_reports_the_tip_a_heavier_fork_displaced()
 -> Result<(), crate::test_support::TestError> {
-    use bitcoin_rs_p2p::sync::chain::HeaderAdmission;
+    use crate::p2p::sync::chain::HeaderAdmission;
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
     tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;

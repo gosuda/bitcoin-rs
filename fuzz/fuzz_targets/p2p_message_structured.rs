@@ -17,7 +17,7 @@ use bitcoin::p2p::message_filter::{
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::{Address, Magic, ServiceFlags};
 use bitcoin::{BlockHash, FilterHash, Txid, merkle_tree::MerkleBlock};
-use bitcoin_rs_p2p::wire::{
+use bitcoin_rs_wire::wire::{
     MAX_MESSAGE_PAYLOAD, Message, encode_payload, read_message, write_message,
 };
 use bitcoin_rs_consensus::primitives::layout::decode_reservation;

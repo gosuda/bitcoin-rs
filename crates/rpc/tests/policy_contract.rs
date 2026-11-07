@@ -1551,7 +1551,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
             derived_index_status: None,
         },
         network: NetworkHandles {
-            overlay: bitcoin_rs_p2p::overlay::OverlayConfig::default(),
+            overlay: bitcoin_rs_wire::overlay::OverlayConfig::default(),
             peer_table: state.peer_table(),
             p2p: state.p2p(),
             local_services: state.p2p().local_services().to_u64(),

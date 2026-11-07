@@ -1,0 +1,743 @@
+use super::*;
+
+use super::super::frontier::{
+    BodyState, ChainFrontier, HeaderAction, NoProgressReason, RequiredBody, SyncFrontier,
+    UsablePeer,
+};
+use crate::p2p::BlockStager;
+use crate::p2p::download_window::{BlameReason, BlockedContext, BlockedDecision, DownloadWindow};
+use bitcoin_rs_execution::chain::{ChainWork, NodeId};
+
+fn stall_blame(
+    window: &mut DownloadWindow,
+    stager: &BlockStager,
+    tree: &bitcoin_rs_execution::chain::BlockTree,
+    next_apply: u32,
+    at: Instant,
+) -> Option<PeerSource> {
+    match window.observe_blocked(
+        BlockedContext {
+            next_apply_height: Some(next_apply),
+            frontier_hash: None,
+            apply_side_busy: false,
+        },
+        stager,
+        tree,
+        at,
+    ) {
+        BlockedDecision::Blame {
+            owner,
+            reason: BlameReason::Staller,
+        } => Some(owner),
+        other @ BlockedDecision::Blame { .. } => {
+            panic!("stall_blame convicted for another reason: {other:?}")
+        }
+        _ => None,
+    }
+}
+fn snap(tip_id: u32, height: u32, hash_byte: u8) -> Arc<TipSnapshot> {
+    Arc::new(TipSnapshot {
+        tip_id: NodeId::new(tip_id),
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
+        height,
+        chainwork: ChainWork::from(u64::from(height) + 1),
+        hash: Hash256::from_le_bytes(&[hash_byte; 32]),
+    })
+}
+
+fn hash(byte: u8) -> Hash256 {
+    Hash256::from_le_bytes(&[byte; 32])
+}
+
+fn addr_of(port: u16) -> PeerRemote {
+    PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port,
+    ))
+}
+
+fn usable(port: u16, best_known: i32, active_height: Option<u32>) -> UsablePeer {
+    UsablePeer {
+        source: PeerSource::for_test(addr_of(port)),
+        info: synthetic_peer(addr_of(port), best_known),
+        demonstrated_tips: Vec::new(),
+        active_height,
+        headers_horizon: None,
+        role: bitcoin_rs_wire::peer_info::PeerRole::FullRelay,
+        manual: false,
+        connected_at: Instant::now(),
+    }
+}
+
+fn chain_frontier(required_height: u32, closed_for_recovery: bool) -> ChainFrontier {
+    ChainFrontier {
+        applied_tip: Some(snap(1, required_height.saturating_sub(1), 0x01)),
+        chain_tip: Some(snap(2, required_height + 4, 0x02)),
+        next_required: Some(RequiredBody {
+            height: required_height,
+            hash: hash(0x03),
+        }),
+        closed_for_recovery,
+    }
+}
+
+fn frontier(
+    chain: ChainFrontier,
+    body_state: Option<BodyState>,
+    usable_peers: Vec<UsablePeer>,
+) -> SyncFrontier {
+    SyncFrontier {
+        chain,
+        body_state,
+        header_request: None,
+        header_request_live: false,
+        usable_peers,
+    }
+}
+
+fn assert_invariant(frontier: &SyncFrontier) -> super::super::frontier::FrontierPlan {
+    let plan = frontier.plan();
+    if frontier.chain.next_required.is_some() {
+        assert!(
+            plan.schedule_bodies || plan.no_progress.is_some(),
+            "unowned/owned body with no scheduled recovery must carry a \
+             NoProgressReason: {plan:?}"
+        );
+    }
+    plan
+}
+
+#[test]
+fn unowned_frontier_schedules_recovery_when_a_capable_peer_exists() {
+    let plan = assert_invariant(&frontier(
+        chain_frontier(5, false),
+        Some(BodyState::Unowned),
+        vec![usable(9001, 100, None)],
+    ));
+    assert!(plan.schedule_bodies);
+    assert_eq!(plan.no_progress, None);
+    match plan.header_action {
+        HeaderAction::Probe(source) => assert_eq!(source.endpoint, addr_of(9001).endpoint()),
+        action => panic!("expected Probe, got {action:?}"),
+    }
+}
+
+#[test]
+fn unowned_frontier_with_no_peers_reports_no_usable_peers() {
+    let plan = assert_invariant(&frontier(
+        chain_frontier(5, false),
+        Some(BodyState::Unowned),
+        Vec::new(),
+    ));
+    assert!(!plan.schedule_bodies);
+    assert_eq!(plan.no_progress, Some(NoProgressReason::NoUsablePeers));
+    assert_eq!(plan.header_action, HeaderAction::Idle);
+}
+
+#[test]
+fn unowned_frontier_with_only_incapable_peers_reports_no_capable_peer() {
+    let plan = assert_invariant(&frontier(
+        chain_frontier(5, false),
+        Some(BodyState::Unowned),
+        vec![usable(9001, 2, None)],
+    ));
+    assert!(plan.schedule_bodies);
+    assert_eq!(plan.no_progress, Some(NoProgressReason::NoCapablePeer));
+}
+
+#[test]
+fn unowned_frontier_while_apply_halted_reports_apply_halted() {
+    let plan = assert_invariant(&frontier(
+        chain_frontier(5, true),
+        Some(BodyState::Unowned),
+        vec![usable(9001, 100, None)],
+    ));
+    assert!(!plan.schedule_bodies);
+    assert_eq!(plan.no_progress, Some(NoProgressReason::ApplyHalted));
+}
+
+#[test]
+fn in_flight_frontier_on_a_dead_connection_recovers_as_unowned() {
+    let dead = PeerSource::for_test(addr_of(9010));
+    let plan = assert_invariant(&frontier(
+        chain_frontier(5, false),
+        Some(BodyState::InFlight(dead)),
+        vec![usable(9011, 100, None)],
+    ));
+    assert!(plan.schedule_bodies);
+    assert_eq!(plan.no_progress, None);
+}
+
+#[test]
+fn in_flight_frontier_on_a_live_owner_is_progress() {
+    let live = usable(9010, 100, None);
+    let owner = live.source;
+    let plan = assert_invariant(&frontier(
+        chain_frontier(5, false),
+        Some(BodyState::InFlight(owner)),
+        vec![live],
+    ));
+    assert!(plan.schedule_bodies);
+    assert_eq!(plan.no_progress, None);
+    assert_eq!(plan.header_action, HeaderAction::Extend);
+}
+
+#[test]
+fn staged_frontier_is_progress_without_recovery() {
+    let plan = assert_invariant(&frontier(
+        chain_frontier(5, false),
+        Some(BodyState::Staged),
+        vec![usable(9001, 100, None)],
+    ));
+    assert!(plan.schedule_bodies);
+    assert_eq!(plan.no_progress, None);
+}
+
+#[test]
+fn at_tip_reports_at_tip() {
+    let tip = snap(1, 7, 0x09);
+    let plan = assert_invariant(&SyncFrontier {
+        chain: ChainFrontier {
+            applied_tip: Some(Arc::clone(&tip)),
+            chain_tip: Some(tip),
+            next_required: None,
+            closed_for_recovery: false,
+        },
+        body_state: None,
+        header_request: None,
+        header_request_live: false,
+        usable_peers: vec![usable(9001, 100, None)],
+    });
+    assert!(!plan.schedule_bodies);
+    assert_eq!(plan.no_progress, Some(NoProgressReason::AtTip));
+}
+
+#[test]
+fn diverged_tips_with_unresolvable_frontier_report_frontier_unresolvable() {
+    let plan = assert_invariant(&frontier(
+        ChainFrontier {
+            applied_tip: Some(snap(1, 0, 0x01)),
+            chain_tip: Some(snap(2, 9, 0x02)),
+            next_required: None,
+            closed_for_recovery: false,
+        },
+        None,
+        vec![usable(9001, 100, None)],
+    ));
+    assert!(!plan.schedule_bodies);
+    assert_eq!(
+        plan.no_progress,
+        Some(NoProgressReason::FrontierUnresolvable)
+    );
+}
+
+#[test]
+fn missing_tip_snapshot_reports_chain_view_unavailable() {
+    let plan = assert_invariant(&frontier(
+        ChainFrontier {
+            applied_tip: None,
+            chain_tip: Some(snap(2, 9, 0x02)),
+            next_required: None,
+            closed_for_recovery: false,
+        },
+        None,
+        vec![usable(9001, 100, None)],
+    ));
+    assert_eq!(
+        plan.no_progress,
+        Some(NoProgressReason::ChainViewUnavailable)
+    );
+}
+
+#[test]
+fn live_pending_header_request_awaits_its_connection() {
+    let source = PeerSource::for_test(addr_of(9001));
+    let mut frontier = frontier(
+        chain_frontier(5, false),
+        Some(BodyState::Unowned),
+        vec![usable(9001, 100, None)],
+    );
+    frontier.usable_peers[0].source = source;
+    frontier.header_request = Some(super::super::HeaderRequest {
+        source,
+        kind: super::super::HeaderRequestKind::Frontier,
+        locator_tip_hash: hash(0x01),
+        target_height: 6,
+        requested_at: Instant::now(),
+        state: super::super::HeaderRequestState::AwaitingResponse,
+    });
+    frontier.header_request_live = true;
+    assert_eq!(frontier.plan().header_action, HeaderAction::AwaitPending);
+}
+
+#[test]
+fn probe_rotates_past_the_dead_pending_owner() {
+    let dead_owner = PeerSource::for_test(addr_of(9005));
+    let mut frontier = frontier(
+        chain_frontier(5, false),
+        Some(BodyState::Unowned),
+        vec![usable(9001, 100, None), usable(9007, 100, None)],
+    );
+    frontier.header_request = Some(super::super::HeaderRequest {
+        source: dead_owner,
+        kind: super::super::HeaderRequestKind::Frontier,
+        locator_tip_hash: hash(0x01),
+        target_height: 6,
+        requested_at: Instant::now(),
+        state: super::super::HeaderRequestState::AwaitingResponse,
+    });
+    frontier.header_request_live = super::super::frontier::header_request_live(
+        frontier.header_request,
+        &frontier.usable_peers,
+        Instant::now(),
+    );
+    assert!(!frontier.header_request_live);
+    match frontier.plan().header_action {
+        HeaderAction::Probe(source) => {
+            assert_eq!(source.endpoint, addr_of(9001).endpoint());
+            assert_ne!(source, dead_owner);
+        }
+        action => panic!("expected Probe, got {action:?}"),
+    }
+}
+
+#[test]
+fn non_serving_peers_are_never_probe_picks() {
+    let mut non_serving = usable(9001, 100, None);
+    non_serving.info.services = 0;
+    let frontier = frontier(
+        chain_frontier(5, false),
+        Some(BodyState::Unowned),
+        vec![non_serving, usable(9002, 100, None)],
+    );
+    match frontier.plan().header_action {
+        HeaderAction::Probe(source) => assert_eq!(source.endpoint, addr_of(9002).endpoint()),
+        action => panic!("expected Probe, got {action:?}"),
+    }
+}
+
+fn naive_plan(frontier: &SyncFrontier) -> super::super::frontier::FrontierPlan {
+    let mut plan = super::super::frontier::FrontierPlan::default();
+    let peers_exist = !frontier.usable_peers.is_empty();
+    let body_state = match frontier.body_state {
+        Some(BodyState::InFlight(owner))
+            if !frontier
+                .usable_peers
+                .iter()
+                .any(|peer| peer.source == owner) =>
+        {
+            Some(BodyState::Unowned)
+        }
+        state => state,
+    };
+    let body_unowned =
+        matches!(body_state, Some(BodyState::Unowned)) && !frontier.chain.closed_for_recovery;
+
+    plan.header_action = if frontier.header_request_live {
+        HeaderAction::AwaitPending
+    } else if !peers_exist {
+        HeaderAction::Idle
+    } else if body_unowned {
+        if frontier.usable_peers.is_empty() {
+            HeaderAction::Extend
+        } else {
+            HeaderAction::Probe(frontier.usable_peers[0].source)
+        }
+    } else {
+        HeaderAction::Extend
+    };
+
+    let Some(required) = frontier.chain.next_required else {
+        plan.no_progress = Some(if frontier.chain.closed_for_recovery {
+            NoProgressReason::ApplyHalted
+        } else if frontier.chain.applied_tip.is_none() || frontier.chain.chain_tip.is_none() {
+            NoProgressReason::ChainViewUnavailable
+        } else if frontier.chain.applied_tip.as_ref() == frontier.chain.chain_tip.as_ref() {
+            NoProgressReason::AtTip
+        } else {
+            NoProgressReason::FrontierUnresolvable
+        });
+        return plan;
+    };
+
+    if frontier.chain.closed_for_recovery {
+        plan.no_progress = Some(NoProgressReason::ApplyHalted);
+        return plan;
+    }
+
+    if !peers_exist {
+        plan.no_progress = Some(NoProgressReason::NoUsablePeers);
+        return plan;
+    }
+
+    plan.schedule_bodies = true;
+    if matches!(body_state, Some(BodyState::Unowned)) {
+        let has_capable = frontier.usable_peers.iter().any(|peer| {
+            let claimed = u32::try_from(peer.info.best_known_height).ok();
+            let resolved = peer.active_height;
+            let capable = match (claimed, resolved) {
+                (Some(c), Some(r)) => Some(c.max(r)),
+                (Some(c), None) => Some(c),
+                (None, r) => r,
+            };
+            capable.is_some_and(|h| h >= required.height)
+        });
+        if !has_capable {
+            plan.no_progress = Some(NoProgressReason::NoCapablePeer);
+        }
+    }
+    plan
+}
+
+fn frontier_cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(1024)
+}
+
+fn frontier_peak_schedule_universal_invariant(
+    chain: ChainFrontier,
+    body_state: Option<BodyState>,
+    usable_peers: Vec<UsablePeer>,
+    header_request_live: bool,
+) {
+    let frontier = SyncFrontier {
+        header_request_live,
+        chain,
+        body_state,
+        header_request: None,
+        usable_peers,
+    };
+    let plan = frontier.plan();
+    if frontier.chain.next_required.is_some() {
+        assert!(
+            plan.schedule_bodies || plan.no_progress.is_some(),
+            "required body must schedule recovery or name the reason: {plan:?}"
+        );
+    }
+    if let Some(BodyState::InFlight(owner)) = frontier.body_state
+        && !frontier.chain.closed_for_recovery
+        && frontier
+            .usable_peers
+            .iter()
+            .any(|peer| peer.source == owner)
+    {
+        assert!(plan.schedule_bodies, "live owner is progress: {plan:?}");
+        assert_eq!(plan.no_progress, None);
+    }
+    if let Some(BodyState::InFlight(owner)) = frontier.body_state
+        && !frontier.usable_peers.is_empty()
+        && !frontier
+            .usable_peers
+            .iter()
+            .any(|peer| peer.source == owner)
+        && !frontier.chain.closed_for_recovery
+        && !frontier
+            .usable_peers
+            .iter()
+            .any(|peer| peer.capability().is_some())
+    {
+        assert_eq!(plan.no_progress, Some(NoProgressReason::NoCapablePeer));
+    }
+    if plan.no_progress == Some(NoProgressReason::NoUsablePeers) {
+        assert!(frontier.usable_peers.is_empty());
+    }
+    if frontier.usable_peers.is_empty()
+        && frontier.chain.next_required.is_some()
+        && !frontier.chain.closed_for_recovery
+    {
+        assert_eq!(plan.no_progress, Some(NoProgressReason::NoUsablePeers));
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig { cases: frontier_cases(), ..proptest::prelude::ProptestConfig::default() })]
+
+    #[test]
+    fn frontier_plan_matches_naive_reference(
+        applied_ahead in proptest::bool::ANY,
+        next_required in proptest::option::of(0_u32..16),
+        closed_for_recovery in proptest::bool::ANY,
+        body_case in 0_u8..3,
+        in_flight_live in proptest::bool::ANY,
+        peers in proptest::collection::vec(
+            (0_i32..32, proptest::bool::ANY, proptest::bool::ANY),
+            0..5usize,
+        ),
+        pending_live in proptest::bool::ANY,
+    ) {
+        let applied = snap(1, 8, 0x01);
+        let chain_tip = if applied_ahead {
+            Arc::clone(&applied)
+        } else {
+            snap(2, 12, 0x02)
+        };
+        let usable_peers = peers
+            .iter()
+            .enumerate()
+            .map(|(idx, (height, evidenced, resolved))| {
+                let mut peer = usable(
+                    u16::try_from(9100 + idx).unwrap_or(9100),
+                    *height,
+                    resolved.then_some(u32::try_from(*height).unwrap_or(0)),
+                );
+                if *evidenced {
+                    peer.demonstrated_tips = vec![hash(0x77)];
+                }
+                peer
+            })
+            .collect::<Vec<_>>();
+        let body_state = next_required.map(|_height| match body_case {
+            0 => BodyState::Unowned,
+            1 => BodyState::Staged,
+            _ => {
+                if in_flight_live {
+                    usable_peers.first().map_or(BodyState::Unowned, |peer| {
+                        BodyState::InFlight(peer.source)
+                    })
+                } else {
+                    BodyState::InFlight(PeerSource::for_test(addr_of(9999)))
+                }
+            }
+        });
+        let owner = usable_peers.first().map(|peer| peer.source);
+        let header_request = if let (true, Some(source)) = (pending_live, owner) {
+            Some(super::super::HeaderRequest {
+                source,
+                kind: super::super::HeaderRequestKind::Frontier,
+                locator_tip_hash: hash(0x01),
+                target_height: 9,
+                requested_at: Instant::now(),
+                state: super::super::HeaderRequestState::AwaitingResponse,
+            })
+        } else {
+            None
+        };
+        let frontier = SyncFrontier {
+            chain: ChainFrontier {
+                applied_tip: Some(applied),
+                chain_tip: Some(chain_tip),
+                next_required: next_required.map(|height| RequiredBody {
+                    height,
+                    hash: hash(0x03),
+                }),
+                closed_for_recovery,
+            },
+            body_state,
+            header_request,
+            header_request_live: header_request.is_some(),
+            usable_peers,
+        };
+        let expected = naive_plan(&frontier);
+        let actual = frontier.plan();
+        proptest::prop_assert_eq!(actual.schedule_bodies, expected.schedule_bodies);
+        proptest::prop_assert_eq!(actual.no_progress, expected.no_progress);
+        proptest::prop_assert!(
+            std::mem::discriminant(&actual.header_action)
+                == std::mem::discriminant(&expected.header_action),
+            "header action class matches naive reference: actual {:?} expected {:?}",
+            actual.header_action,
+            expected.header_action
+        );
+    }
+
+    #[test]
+    fn frontier_peak_schedule_universal_invariant_prop(
+        applied_ahead in proptest::bool::ANY,
+        next_required in proptest::option::of(0_u32..16),
+        closed_for_recovery in proptest::bool::ANY,
+        body_case in 0_u8..3,
+        in_flight_live in proptest::bool::ANY,
+        peers in proptest::collection::vec(
+            (0_i32..32, proptest::bool::ANY),
+            0..5usize,
+        ),
+        pending_live in proptest::bool::ANY,
+    ) {
+        let applied = snap(1, 8, 0x01);
+        let chain_tip = if applied_ahead {
+            Arc::clone(&applied)
+        } else {
+            snap(2, 12, 0x02)
+        };
+        let usable_peers = peers
+            .iter()
+            .enumerate()
+            .map(|(idx, (height, evidenced))| {
+                let mut peer = usable(
+                    u16::try_from(9100 + idx).unwrap_or(9100),
+                    *height,
+                    Some(u32::try_from(*height).unwrap_or(0)),
+                );
+                if *evidenced {
+                    peer.demonstrated_tips = vec![hash(0x77)];
+                }
+                peer
+            })
+            .collect::<Vec<_>>();
+        let body_state = next_required.map(|_height| match body_case {
+            0 => BodyState::Unowned,
+            1 => BodyState::Staged,
+            _ => {
+                if in_flight_live {
+                    usable_peers.first().map_or(BodyState::Unowned, |peer| {
+                        BodyState::InFlight(peer.source)
+                    })
+                } else {
+                    BodyState::InFlight(PeerSource::for_test(addr_of(9999)))
+                }
+            }
+        });
+        let chain = ChainFrontier {
+            applied_tip: Some(applied),
+            chain_tip: Some(chain_tip),
+            next_required: next_required.map(|height| RequiredBody {
+                height,
+                hash: hash(0x03),
+            }),
+            closed_for_recovery,
+        };
+        frontier_peak_schedule_universal_invariant(
+            chain,
+            body_state,
+            usable_peers,
+            pending_live,
+        );
+    }
+}
+
+#[test]
+fn convicted_connection_cannot_pass_its_stall_to_a_replacement() -> TestResult {
+    let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(4)?;
+    install_budget(
+        &sync,
+        super::super::SyncBudget {
+            max_received_blocks: 2,
+            ..super::super::default_sync_budget(Network::Regtest)
+        },
+    );
+    let staller = test_addr(9810, 0)?;
+    let (tx, rx) = bitcoin_rs_wire::test_support::message_channel();
+    let conn1 = PeerLease::new(tx);
+    peers.register(staller, conn1.clone());
+    peers.publish_info(staller, &conn1, synthetic_peer(staller, 200));
+
+    sync.tick();
+    assert_applied_genesis(&applied_tip, &block_tree)?;
+    let Message::GetData(inventory) = rx.try_recv()? else {
+        return Err(std::io::Error::other("expected the window getdata").into());
+    };
+    assert!(witness_block_inventory(inventory)?.contains(&expected[0]));
+
+    let tail = Hash256::from_le_bytes(expected[3].as_bytes());
+    let now = Instant::now();
+    {
+        let mut scheduler = sync.scheduler.lock();
+        let block = regtest_fixture::mined_block_with_prev_hash(
+            BlockHash(Hash256::from_le_bytes(expected[2].as_bytes())),
+            4,
+            vec![super::transaction(0xEE)],
+        )
+        .or_fail("regtest fixture block");
+        let payload = BlockPayload::from_local(block);
+        scheduler.window.seed_front_cadence_for_test(50, now);
+        scheduler.stager.insert(
+            tail,
+            None,
+            payload,
+            Some(conn1.source(staller.endpoint())),
+            now,
+        );
+        scheduler
+            .window
+            .mark_received_from(tail, 80, Some(conn1.source(staller.endpoint())), now);
+    }
+
+    let next_apply = sync
+        .observe_chain_frontier()
+        .next_required
+        .ok_or_else(|| std::io::Error::other("missing next required"))?
+        .height;
+    {
+        let mut scheduler = sync.scheduler.lock();
+        let tree = sync.chain.block_tree();
+        let state = &mut *scheduler;
+        stall_blame(&mut state.window, &state.stager, &tree, next_apply, now);
+    }
+    let owner = {
+        let mut scheduler = sync.scheduler.lock();
+        let tree = sync.chain.block_tree();
+        let state = &mut *scheduler;
+        stall_blame(
+            &mut state.window,
+            &state.stager,
+            &tree,
+            next_apply,
+            now + super::super::BLOCK_STALLING_TIMEOUT,
+        )
+    };
+    let (tx2, rx2) = bitcoin_rs_wire::test_support::message_channel();
+    let conn2 = PeerLease::new(tx2);
+    peers.register(staller, conn2.clone());
+    peers.publish_info(staller, &conn2, synthetic_peer(staller, 200));
+
+    let owner = owner.ok_or_else(|| std::io::Error::other("missing stall owner"))?;
+    assert!(
+        !peers.disconnect_source(owner),
+        "convicting a replaced connection must not disconnect its successor"
+    );
+    let conn2_source = conn2.source(staller.endpoint());
+    assert!(peers.is_current(conn2_source));
+    assert!(!conn2.is_cancelled());
+    sync.reconcile_peer_sessions();
+
+    sync.tick();
+    let Message::GetData(reissued) = rx2.try_recv()? else {
+        return Err(std::io::Error::other(
+            "the replacement must inherit the released frontier work",
+        )
+        .into());
+    };
+    assert!(
+        witness_block_inventory(reissued)?.contains(&expected[0]),
+        "conn1's released front must be re-requested from conn2"
+    );
+    Ok(())
+}
+
+#[test]
+fn release_sweep_is_connection_exact_at_the_same_address() -> TestResult {
+    let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(4)?;
+    let addr = test_addr(9820, 0)?;
+    let rx = connect_peer(&peers, synthetic_peer(addr, 200));
+    sync.tick();
+    assert_applied_genesis(&applied_tip, &block_tree)?;
+    let Message::GetData(inventory) = rx.try_recv()? else {
+        return Err(std::io::Error::other("expected the window getdata").into());
+    };
+    assert!(witness_block_inventory(inventory)?.contains(&expected[0]));
+    let owner = current_source(&peers, addr);
+    let front = Hash256::from_le_bytes(expected[0].as_bytes());
+    assert_eq!(
+        sync.scheduler.lock().window.pending_owner(&front),
+        Some(owner)
+    );
+
+    sync.scheduler
+        .lock()
+        .window
+        .retain_owned_by(|source| *source == owner);
+    assert_eq!(
+        sync.scheduler.lock().window.pending_owner(&front),
+        Some(owner),
+        "the live connection's pending must survive a release sweep"
+    );
+    sync.scheduler.lock().window.retain_owned_by(|_| false);
+    assert_eq!(
+        sync.scheduler.lock().window.pending_owner(&front),
+        None,
+        "a sweep missing the connection must release its pending"
+    );
+    Ok(())
+}

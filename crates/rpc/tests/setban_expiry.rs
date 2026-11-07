@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bitcoin_rs_p2p::BannedSubnet;
 use bitcoin_rs_rpc::{Handler, RpcError, context::Context};
+use bitcoin_rs_wire::BannedSubnet;
 use sonic_rs::{JsonValueTrait as _, json};
 
 fn handler() -> Handler {

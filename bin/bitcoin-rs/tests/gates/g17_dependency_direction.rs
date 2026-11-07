@@ -10,8 +10,8 @@ const READ_CONTROL: &str = r"
 use std::sync::Arc;
 use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader, TipSnapshot};
 use bitcoin_rs_execution::{Chainstate, ChainstateSnapshot};
-use bitcoin_rs_p2p::sync::SyncChain;
-use bitcoin_rs_p2p::sync::chain::{ReorgError, HistoricalAdvance, WindowApplyDisposition};
+use bitcoin_rs_node::p2p::sync::SyncChain;
+use bitcoin_rs_node::p2p::sync::chain::{ReorgError, HistoricalAdvance, WindowApplyDisposition};
 
 pub fn sync_outcomes(
     branch: bitcoin_rs_execution::reorg::ReorgError,

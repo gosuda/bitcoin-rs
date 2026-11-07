@@ -12,6 +12,7 @@ mod lifecycle;
 pub mod metrics;
 pub mod mining;
 pub mod offline_import;
+pub mod p2p;
 #[cfg(feature = "pool")]
 mod pool;
 pub mod reorg;
@@ -38,8 +39,6 @@ pub mod test_support;
 #[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 pub use test_support::TestError;
-#[cfg(any(test, verification, kani))]
-pub(crate) mod budget_model;
 pub mod sync;
 #[cfg(not(feature = "test-seam"))]
 #[allow(
@@ -84,7 +83,7 @@ pub use mining::MiningCoordinator;
 pub use offline_import::{OfflineImportError, run_offline_import};
 pub use run::{RunError, run};
 
-pub use sync::BlockSync;
+pub use p2p::BlockSync;
 
 pub use bitcoin_rs_projection::runtime::DerivedIndexRuntime;
 

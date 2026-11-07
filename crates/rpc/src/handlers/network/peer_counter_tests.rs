@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use std::io::{Read as _, Write as _};
 use std::net::SocketAddr;
 
-use bitcoin_rs_p2p::{CountingStream, PeerCounters, PeerInfo, PeerLease, PeerTable};
+use bitcoin_rs_wire::{CountingStream, PeerCounters, PeerInfo, PeerLease, PeerTable};
 use crossbeam_channel::unbounded;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
@@ -23,8 +23,8 @@ fn inbound_peer(addr: &str, bind: &str, time_offset: i64, counters: Arc<PeerCoun
         relay_transactions: true,
         compact_block_relay: false,
         send_headers: false,
-        endpoint: Some(bitcoin_rs_p2p::PeerEndpoint::Ip(parse(addr))),
-        network: bitcoin_rs_p2p::PeerEndpoint::Ip(parse(addr)).net(),
+        endpoint: Some(bitcoin_rs_wire::PeerEndpoint::Ip(parse(addr))),
+        network: bitcoin_rs_wire::PeerEndpoint::Ip(parse(addr)).net(),
         addr: parse(addr).into(),
         version: 70_016,
         services: 0,
@@ -33,10 +33,10 @@ fn inbound_peer(addr: &str, bind: &str, time_offset: i64, counters: Arc<PeerCoun
         best_known_height: 0,
         conn_time: 0,
         inbound: true,
-        addr_bind: bitcoin_rs_p2p::TransportRemote::new(parse(bind)),
+        addr_bind: bitcoin_rs_wire::TransportRemote::new(parse(bind)),
         time_offset,
         counters,
-        transport: bitcoin_rs_p2p::TransportProtocol::V1,
+        transport: bitcoin_rs_wire::TransportProtocol::V1,
     }
 }
 
@@ -178,9 +178,9 @@ fn getpeerinfo_reports_the_negotiated_transport() {
     session_id[0] = 0xab;
     session_id[31] = 0x01;
     for (transport, kind, id) in [
-        (bitcoin_rs_p2p::TransportProtocol::V1, "v1", String::new()),
+        (bitcoin_rs_wire::TransportProtocol::V1, "v1", String::new()),
         (
-            bitcoin_rs_p2p::TransportProtocol::V2 { session_id },
+            bitcoin_rs_wire::TransportProtocol::V2 { session_id },
             "v2",
             format!("ab{}01", "00".repeat(30)),
         ),

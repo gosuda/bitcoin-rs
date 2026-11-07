@@ -20,18 +20,19 @@ use bitcoin_rs_mining::{
     BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, FakeMiningControl,
     MiningControl, MiningControlError, MiningInfo,
 };
+use bitcoin_rs_node::p2p::{
+    DEFAULT_TX_RELAY_QUEUE_CAPACITY, InboundBody, PeerRelaySink, TxRelayQueue,
+    spawn_tx_relay_worker,
+};
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::tx_ingress::spawn_tx_ingress_consumer;
 use bitcoin_rs_node::{Network, NodeConfig};
-use bitcoin_rs_p2p::PeerRole;
-use bitcoin_rs_p2p::dispatch::dispatch_inbound_full;
-use bitcoin_rs_p2p::handshake::{run_inbound_handshake, version_message};
-use bitcoin_rs_p2p::wire::{PeerError, read_message, write_message};
-use bitcoin_rs_p2p::{
-    DEFAULT_TX_RELAY_QUEUE_CAPACITY, InboundBody, InboundTx, Message, Peer, PeerLease,
-    PeerRelaySink, TxRelayQueue, spawn_tx_relay_worker,
-};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_wire::PeerRole;
+use bitcoin_rs_wire::dispatch::dispatch_inbound_full;
+use bitcoin_rs_wire::handshake::{run_inbound_handshake, version_message};
+use bitcoin_rs_wire::wire::{PeerError, read_message, write_message};
+use bitcoin_rs_wire::{InboundTx, Message, Peer, PeerLease};
 use crossbeam_channel::Sender;
 
 const READ_POLL: Duration = Duration::from_millis(200);
@@ -187,14 +188,15 @@ fn loopback_skip() -> Option<String> {
 #[derive(Clone)]
 struct PeerWiring {
     magic: Magic,
-    peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
+    peer_table: Arc<bitcoin_rs_wire::PeerTable>,
+    tx_policy: Arc<bitcoin_rs_node::p2p::NodeTxPolicy>,
     ingress_tx: Sender<InboundBody>,
     stop: Arc<AtomicBool>,
 }
 
 struct LoopbackPeer {
     dialer: TcpStream,
-    peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
+    peer_table: Arc<bitcoin_rs_wire::PeerTable>,
     peer_addr: SocketAddr,
     lease: PeerLease,
     pump: Option<std::thread::JoinHandle<()>>,
@@ -206,7 +208,7 @@ impl LoopbackPeer {
         self.lease.cancel();
         let _ = self.dialer.shutdown(Shutdown::Both);
         self.peer_table.remove_current(
-            bitcoin_rs_p2p::PeerEndpoint::Ip(self.peer_addr),
+            bitcoin_rs_wire::PeerEndpoint::Ip(self.peer_addr),
             &self.lease,
         );
         let service_ok = self
@@ -236,7 +238,7 @@ fn open_loopback_peer(
     let dialer = TcpStream::connect(listener.local_addr()?)?;
     let (accepted, peer_addr) = listener.accept()?;
 
-    let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
+    let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<bitcoin_rs_wire::QueuedFrame>();
     let lease = PeerLease::new_inbound(outbound_tx);
     let mut wire_out = accepted
         .try_clone()
@@ -254,7 +256,7 @@ fn open_loopback_peer(
     };
     wiring
         .peer_table
-        .register(bitcoin_rs_p2p::PeerEndpoint::Ip(peer_addr), lease.clone());
+        .register(bitcoin_rs_wire::PeerEndpoint::Ip(peer_addr), lease.clone());
     let pump_lease = lease.clone();
     peer.pump = Some(
         std::thread::Builder::new()
@@ -319,18 +321,18 @@ fn serve_connection(
     let Ok(addr_bind) = peer.stream.local_addr() else {
         return;
     };
-    let mut info = bitcoin_rs_p2p::PeerInfo::inbound_from_version(
+    let mut info = bitcoin_rs_wire::PeerInfo::inbound_from_version(
         peer_addr,
         addr_bind,
         version,
         0,
         0,
-        Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+        Arc::new(bitcoin_rs_wire::PeerCounters::default()),
     );
     info.wtxid_relay = peer.wtxid_relay.peer_supported();
     if !wiring
         .peer_table
-        .publish_info(bitcoin_rs_p2p::PeerEndpoint::Ip(peer_addr), lease, info)
+        .publish_info(bitcoin_rs_wire::PeerEndpoint::Ip(peer_addr), lease, info)
     {
         return;
     }
@@ -339,9 +341,8 @@ fn serve_connection(
         if wiring.stop.load(Ordering::Relaxed) {
             return;
         }
-        wiring
-            .peer_table
-            .poll_transaction_requests(gateway.as_ref());
+        let inventory = bitcoin_rs_node::p2p::RefTxInventory(gateway.as_ref());
+        wiring.tx_policy.poll_transaction_requests(&inventory);
         match read_message(&mut peer.stream, magic) {
             Ok((message, _raw)) => {
                 if let Message::Tx(tx) = message {
@@ -360,18 +361,16 @@ fn serve_connection(
                     &mut peer,
                     &message,
                     None,
-                    Some(gateway.as_ref()),
+                    Some(&inventory),
                     &|| true,
                     &|| true,
                     &mut send,
                     &mut |_| {},
                     &mut |items| {
                         wiring
-                            .peer_table
+                            .tx_policy
                             .announce_transactions(lease.source_ip(peer_addr), &items);
-                        wiring
-                            .peer_table
-                            .poll_transaction_requests(gateway.as_ref());
+                        wiring.tx_policy.poll_transaction_requests(&inventory);
                     },
                 );
             }
@@ -558,6 +557,7 @@ impl Harness {
         let wiring = PeerWiring {
             magic,
             peer_table: state.peer_table(),
+            tx_policy: Arc::clone(&state.tx_policy),
             ingress_tx,
             stop: Arc::new(AtomicBool::new(false)),
         };
@@ -571,11 +571,11 @@ impl Harness {
         wait_until(OBSERVE_TIMEOUT, || {
             wiring
                 .peer_table
-                .ready_source(bitcoin_rs_p2p::PeerEndpoint::Ip(source.peer_addr))
+                .ready_source(bitcoin_rs_wire::PeerEndpoint::Ip(source.peer_addr))
                 .is_some()
                 && wiring
                     .peer_table
-                    .ready_source(bitcoin_rs_p2p::PeerEndpoint::Ip(bystander.peer_addr))
+                    .ready_source(bitcoin_rs_wire::PeerEndpoint::Ip(bystander.peer_addr))
                     .is_some()
         })?;
 
@@ -594,7 +594,7 @@ impl Harness {
             _dir: dir,
         };
         harness.relay = Some(spawn_tx_relay_worker(
-            PeerRelaySink::new(harness.state.peer_table()),
+            PeerRelaySink::new(Arc::clone(&harness.state.tx_policy)),
             relay_rx,
             Arc::downgrade(&harness.gateway),
             harness.shutdown.reader(),
@@ -618,6 +618,7 @@ impl Harness {
         let wiring = PeerWiring {
             magic: self.magic,
             peer_table: self.state.peer_table(),
+            tx_policy: Arc::clone(&self.state.tx_policy),
             ingress_tx: self.state.inbound_tx_sender(),
             stop: Arc::clone(&self.stop),
         };
@@ -626,7 +627,7 @@ impl Harness {
         wait_until(OBSERVE_TIMEOUT, || {
             wiring
                 .peer_table
-                .ready_source(bitcoin_rs_p2p::PeerEndpoint::Ip(peer.peer_addr))
+                .ready_source(bitcoin_rs_wire::PeerEndpoint::Ip(peer.peer_addr))
                 .is_some()
         })?;
         Ok(peer)

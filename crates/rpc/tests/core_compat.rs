@@ -6,17 +6,18 @@ use crate::mining_fixture;
 
 use alloc::sync::Arc;
 
-use bitcoin_rs_consensus::primitives::client_version;
-use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256, Network, consensus_bytes};
+use bitcoin_rs_consensus::primitives::{
+    BlockPayload, Hash256, Network, client_version, consensus_bytes,
+};
 use bitcoin_rs_execution::chain::{ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_mining::{
     BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, MiningCapability,
     MiningControl, MiningControlError, MiningInfo, TemplateMutation,
 };
-use bitcoin_rs_p2p::FEATURE_VERSION;
-use bitcoin_rs_p2p::wire::PROTOCOL_VERSION;
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::Context;
+use bitcoin_rs_wire::FEATURE_VERSION;
+use bitcoin_rs_wire::wire::PROTOCOL_VERSION;
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait as _, json};
 
 fn typed<T: serde::de::DeserializeOwned>(

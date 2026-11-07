@@ -112,7 +112,7 @@ fn poisoned_chain(
 fn poisoned_undo_store_halts_apply_and_trips_the_shutdown_latch() -> Result<(), TestError> {
     let (handles, blocks) = poisoned_chain(2)?;
     let followers = crate::chain_effects::ChainFollowers::noop();
-    let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
+    let peers = Arc::new(bitcoin_rs_wire::PeerTable::new());
     let (_inbound_headers_tx, inbound_headers_rx) = unbounded();
     let (inbound_blocks_tx, inbound_blocks_rx) = unbounded();
     let ibd = Arc::new(bitcoin_rs_execution::chain::InitialBlockDownload::new(
@@ -130,7 +130,7 @@ fn poisoned_undo_store_halts_apply_and_trips_the_shutdown_latch() -> Result<(), 
     ));
 
     inbound_blocks_tx
-        .send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))
+        .send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))
         .map_err(|_| TestError::Missing("inbound block channel closed"))?;
     sync.tick();
     assert!(
@@ -145,7 +145,7 @@ fn poisoned_undo_store_halts_apply_and_trips_the_shutdown_latch() -> Result<(), 
 
     for block in [&blocks[1], &blocks[0]] {
         inbound_blocks_tx
-            .send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
+            .send(bitcoin_rs_wire::InboundBlock::from_local(block.clone()))
             .map_err(|_| TestError::Missing("inbound block channel closed"))?;
     }
     sync.tick();

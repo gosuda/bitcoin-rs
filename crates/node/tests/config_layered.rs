@@ -620,7 +620,7 @@ fn operator_noban_defaults_empty_and_uses_the_subnet_owner() -> Result<()> {
         NodeConfig::default_for_network(Network::Regtest)
             .p2p
             .noban_subnets,
-        Vec::<bitcoin_rs_node::options::IpSubnet>::new()
+        Vec::<bitcoin_rs_wire::IpSubnet>::new()
     );
     let layer: UserConfig = toml::from_str(
         r#"network = "regtest"
@@ -643,7 +643,7 @@ p2p_noban = ["192.0.2.99/24", "::1"]
     environment.apply_env("BITCOIN_RS_P2P_NOBAN", std::ffi::OsStr::new(""))?;
     assert_eq!(
         resolve(&[&layer, &environment])?.p2p.noban_subnets,
-        Vec::<bitcoin_rs_node::options::IpSubnet>::new()
+        Vec::<bitcoin_rs_wire::IpSubnet>::new()
     );
     assert!(
         environment

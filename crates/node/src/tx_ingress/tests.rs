@@ -1,4 +1,5 @@
 use super::*;
+use crate::p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY;
 use arc_swap::ArcSwapOption;
 use bitcoin::hashes::Hash as _;
 use bitcoin_rs_consensus::ValidationEngine;
@@ -11,7 +12,6 @@ use bitcoin_rs_mempool::{
     MutationOutcome,
 };
 use bitcoin_rs_mining::FakeMiningControl;
-use bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY;
 use bitcoin_rs_storage::utxo::UtxoSet;
 use parking_lot::{Mutex, RwLock};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -72,7 +72,7 @@ fn make_consumer(
     mining: &Arc<FakeMiningControl>,
 ) -> (
     TxIngressConsumer,
-    crossbeam_channel::Receiver<bitcoin_rs_p2p::RelayRequest>,
+    crossbeam_channel::Receiver<crate::p2p::RelayRequest>,
 ) {
     use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
     let utxo = Arc::new(UtxoSet::new());
@@ -101,12 +101,15 @@ fn make_consumer(
     )
     .expect("utxo commit must succeed");
     let (relay, relay_rx) = TxRelayQueue::new(DEFAULT_TX_RELAY_QUEUE_CAPACITY);
+    let table = Arc::new(bitcoin_rs_wire::PeerTable::new());
+    let tx_policy = Arc::new(crate::p2p::NodeTxPolicy::with_table(Arc::clone(&table)));
     let consumer = TxIngressConsumer {
         utxo: bitcoin_rs_storage::utxo::UtxoReader::new(utxo),
         applied_tip: TipReader::new(Arc::new(ArcSwapOption::empty())),
         block_tree: BlockTreeReader::new(Arc::new(RwLock::new(BlockTree::new()))),
         network: Network::Regtest,
-        peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
+        peer_table: Arc::clone(&table),
+        tx_policy,
         mempool_gateway: Arc::clone(gateway),
         mining_control: mining.clone(),
         relay,
@@ -114,10 +117,10 @@ fn make_consumer(
     (consumer, relay_rx)
 }
 
-fn test_source() -> bitcoin_rs_p2p::PeerSource {
+fn test_source() -> bitcoin_rs_wire::PeerSource {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_333);
-    let (queue, _frames) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
-    let lease = bitcoin_rs_p2p::PeerLease::new(queue);
+    let (queue, _frames) = crossbeam_channel::unbounded::<bitcoin_rs_wire::QueuedFrame>();
+    let lease = bitcoin_rs_wire::PeerLease::new(queue);
     lease.source_ip(addr)
 }
 
@@ -160,7 +163,7 @@ fn consumer_preserves_exact_connection_id() {
     let expected_conn_id = source.connection_id();
 
     let tx = spending_tx();
-    let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
+    let inbound = bitcoin_rs_wire::InboundTx::new(tx, source);
 
     let mining = FakeMiningControl::unavailable("not implemented");
     let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
@@ -191,7 +194,7 @@ fn rejected_tx_does_not_relay_or_wake_mining() {
 
     let source = test_source();
     let tx = coinbase_tx(50_000);
-    let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
+    let inbound = bitcoin_rs_wire::InboundTx::new(tx, source);
 
     let mining = FakeMiningControl::unavailable("not implemented");
     let (consumer, relay_rx) = make_consumer(&gateway, &mining);
@@ -214,7 +217,7 @@ fn duplicate_tx_does_not_relay_or_wake_mining() {
     gateway.insert_entry(AdmissionOrigin::Rpc, entry).unwrap();
 
     let source = test_source();
-    let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
+    let inbound = bitcoin_rs_wire::InboundTx::new(tx, source);
 
     let mining = FakeMiningControl::unavailable("not implemented");
     let (consumer, relay_rx) = make_consumer(&gateway, &mining);
@@ -235,7 +238,7 @@ fn accepted_tx_relays_and_wakes_mining() {
     let source = test_source();
     let tx = spending_tx();
     let txid = tx.txid();
-    let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
+    let inbound = bitcoin_rs_wire::InboundTx::new(tx, source);
 
     let mining = FakeMiningControl::unavailable("not implemented");
     let (consumer, relay_rx) = make_consumer(&gateway, &mining);
@@ -257,18 +260,18 @@ fn held_orphan_uses_ancestor_package_only_for_negotiated_peers() {
     let table = Arc::clone(&consumer.peer_table);
 
     let anc_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_334);
-    let (anc_sender, anc_receiver) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
-    let anc_lease = bitcoin_rs_p2p::PeerLease::new(anc_sender);
+    let (anc_sender, anc_receiver) = crossbeam_channel::unbounded::<bitcoin_rs_wire::QueuedFrame>();
+    let anc_lease = bitcoin_rs_wire::PeerLease::new(anc_sender);
     let anc_source = anc_lease.source_ip(anc_addr);
-    let anc_endpoint = bitcoin_rs_p2p::PeerEndpoint::Ip(anc_addr);
+    let anc_endpoint = bitcoin_rs_wire::PeerEndpoint::Ip(anc_addr);
     assert!(!table.register(anc_endpoint, anc_lease));
-    assert!(table.seed_package_relay(anc_source, bitcoin_rs_p2p::packages::PKG_RELAY_ANC));
+    assert!(table.seed_package_relay(anc_source, bitcoin_rs_wire::packages::PKG_RELAY_ANC));
 
     let mut anc_orphan = spending_tx();
     let anc_parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
     anc_orphan.inputs[0].previous_output = OutPoint::new(anc_parent, 0);
     let anc_subject = anc_orphan.wtxid();
-    consumer.process_one(bitcoin_rs_p2p::InboundTx::new(anc_orphan, anc_source));
+    consumer.process_one(bitcoin_rs_wire::InboundTx::new(anc_orphan, anc_source));
 
     let anc_message = anc_receiver
         .try_recv()
@@ -276,9 +279,9 @@ fn held_orphan_uses_ancestor_package_only_for_negotiated_peers() {
         .into_message();
     assert!(matches!(
         anc_message,
-        bitcoin_rs_p2p::Message::GetData(items)
+        bitcoin_rs_wire::Message::GetData(items)
             if items == vec![bitcoin::p2p::message_blockdata::Inventory::Unknown {
-                inv_type: bitcoin_rs_p2p::packages::MSG_ANCPKGINFO,
+                inv_type: bitcoin_rs_wire::packages::MSG_ANCPKGINFO,
                 hash: anc_subject.0.to_le_bytes(),
             }]
     ));
@@ -286,16 +289,16 @@ fn held_orphan_uses_ancestor_package_only_for_negotiated_peers() {
 
     let ordinary_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_335);
     let (ordinary_sender, ordinary_receiver) =
-        crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
-    let ordinary_lease = bitcoin_rs_p2p::PeerLease::new(ordinary_sender);
+        crossbeam_channel::unbounded::<bitcoin_rs_wire::QueuedFrame>();
+    let ordinary_lease = bitcoin_rs_wire::PeerLease::new(ordinary_sender);
     let ordinary_source = ordinary_lease.source_ip(ordinary_addr);
-    let ordinary_endpoint = bitcoin_rs_p2p::PeerEndpoint::Ip(ordinary_addr);
+    let ordinary_endpoint = bitcoin_rs_wire::PeerEndpoint::Ip(ordinary_addr);
     assert!(!table.register(ordinary_endpoint, ordinary_lease));
 
     let mut ordinary_orphan = spending_tx();
     let ordinary_parent = Txid::from(Hash256::from_le_bytes(&[0xDD; 32]));
     ordinary_orphan.inputs[0].previous_output = OutPoint::new(ordinary_parent, 0);
-    consumer.process_one(bitcoin_rs_p2p::InboundTx::new(
+    consumer.process_one(bitcoin_rs_wire::InboundTx::new(
         ordinary_orphan,
         ordinary_source,
     ));
@@ -306,7 +309,7 @@ fn held_orphan_uses_ancestor_package_only_for_negotiated_peers() {
         .into_message();
     assert!(matches!(
         ordinary_message,
-        bitcoin_rs_p2p::Message::GetData(items)
+        bitcoin_rs_wire::Message::GetData(items)
             if matches!(items.as_slice(), [bitcoin::p2p::message_blockdata::Inventory::Transaction(_)])
     ));
     assert!(ordinary_receiver.try_recv().is_err());
@@ -324,7 +327,7 @@ fn coinbase_is_rejected_not_orphaned() {
     let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
     let coinbase = coinbase_tx(50_000);
     let txid = coinbase.txid();
-    consumer.process_one(bitcoin_rs_p2p::InboundTx::new(coinbase, test_source()));
+    consumer.process_one(bitcoin_rs_wire::InboundTx::new(coinbase, test_source()));
     assert_eq!(consumer.mempool_gateway.orphan_count(), 0);
     assert!(consumer.mempool_gateway.is_rejected(Hash256::from(txid)));
 }
@@ -338,7 +341,7 @@ fn non_final_tx_is_rejected_not_admitted() {
     tx.lock_time = LockTime::from_consensus(100);
     tx.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE);
     let txid = tx.txid();
-    consumer.process_one(bitcoin_rs_p2p::InboundTx::new(tx, test_source()));
+    consumer.process_one(bitcoin_rs_wire::InboundTx::new(tx, test_source()));
     assert!(!gateway.read().contains_txid(&txid));
     assert!(consumer.mempool_gateway.is_rejected(Hash256::from(txid)));
 }
@@ -374,7 +377,7 @@ fn oversized_missing_input_tx_is_rejected_not_orphaned() {
     );
     let txid = tx.txid();
     let wtxid = tx.wtxid();
-    consumer.process_one(bitcoin_rs_p2p::InboundTx::new(tx, test_source()));
+    consumer.process_one(bitcoin_rs_wire::InboundTx::new(tx, test_source()));
     assert_eq!(consumer.mempool_gateway.orphan_count(), 0);
     assert!(consumer.mempool_gateway.is_rejected(Hash256::from(wtxid)));
     assert!(!consumer.mempool_gateway.have_tx(Hash256::from(txid), false));
@@ -395,7 +398,7 @@ fn retry_poll_evicts_an_orphan_after_its_connection_is_gone() {
         OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0xEE; 32])), 0);
     let txid = orphan.txid();
 
-    consumer.process_one(bitcoin_rs_p2p::InboundTx::new(orphan, test_source()));
+    consumer.process_one(bitcoin_rs_wire::InboundTx::new(orphan, test_source()));
     assert_eq!(gateway.orphan_count(), 1);
 
     assert!(!consumer.process_retries());
@@ -405,8 +408,8 @@ fn retry_poll_evicts_an_orphan_after_its_connection_is_gone() {
 
 #[test]
 fn consumer_processes_admitted_package_and_publishes_generation() {
+    use crate::p2p::{InboundBody, PackageCapacity};
     use bitcoin_rs_consensus::primitives::encode::ConsensusEncode;
-    use bitcoin_rs_p2p::{InboundBody, PackageCapacity};
 
     let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
@@ -447,9 +450,9 @@ fn consumer_processes_admitted_package_and_publishes_generation() {
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 19_333);
     let (queue, _frames) = crossbeam_channel::unbounded();
-    let lease = bitcoin_rs_p2p::PeerLease::new(queue);
+    let lease = bitcoin_rs_wire::PeerLease::new(queue);
     let source = lease.source_ip(addr);
-    let endpoint = bitcoin_rs_p2p::PeerEndpoint::Ip(addr);
+    let endpoint = bitcoin_rs_wire::PeerEndpoint::Ip(addr);
     table.register(endpoint, lease.clone());
     let version = bitcoin::p2p::message_network::VersionMessage {
         version: 70016,
@@ -465,18 +468,22 @@ fn consumer_processes_admitted_package_and_publishes_generation() {
     table.publish_info(
         endpoint,
         &lease,
-        bitcoin_rs_p2p::PeerInfo::inbound_from_version(
+        bitcoin_rs_wire::PeerInfo::inbound_from_version(
             addr,
             addr,
             &version,
             0,
             0,
-            std::sync::Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+            std::sync::Arc::new(bitcoin_rs_wire::PeerCounters::default()),
         ),
     );
 
-    assert!(table.request_package_info(source, child_wtxid, &[]));
-    assert!(table.request_package_transactions(
+    assert!(
+        consumer
+            .tx_policy
+            .request_package_info(source, child_wtxid, &[])
+    );
+    assert!(consumer.tx_policy.request_package_transactions(
         source,
         child_wtxid,
         vec![parent.wtxid(), child_wtxid]
@@ -489,10 +496,11 @@ fn consumer_processes_admitted_package_and_publishes_generation() {
     let payload = bytes::Bytes::from(payload);
 
     let capacity = PackageCapacity::new(100_000);
-    let inbound = table
+    let inbound = consumer
+        .tx_policy
         .admit_package(
             &capacity,
-            consumer.mempool_gateway.as_ref(),
+            &crate::p2p::RefTxInventory(&consumer.mempool_gateway),
             source,
             payload,
         )
@@ -508,14 +516,13 @@ fn consumer_processes_admitted_package_and_publishes_generation() {
 
     assert_eq!(capacity.reserved(), 0);
     assert_eq!(capacity.held(), 0);
-    let teardown = table.clear_package_claims(&capacity);
-    assert_eq!(teardown.claims_cleared, 0);
+    let _teardown = consumer.tx_policy.clear_package_claims(&capacity);
 }
 
 fn publish_peer_info(
-    table: &bitcoin_rs_p2p::PeerTable,
-    endpoint: bitcoin_rs_p2p::PeerEndpoint,
-    lease: &bitcoin_rs_p2p::PeerLease,
+    table: &bitcoin_rs_wire::PeerTable,
+    endpoint: bitcoin_rs_wire::PeerEndpoint,
+    lease: &bitcoin_rs_wire::PeerLease,
     addr: SocketAddr,
 ) {
     let version = bitcoin::p2p::message_network::VersionMessage {
@@ -532,32 +539,32 @@ fn publish_peer_info(
     table.publish_info(
         endpoint,
         lease,
-        bitcoin_rs_p2p::PeerInfo::inbound_from_version(
+        bitcoin_rs_wire::PeerInfo::inbound_from_version(
             addr,
             addr,
             &version,
             0,
             0,
-            std::sync::Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+            std::sync::Arc::new(bitcoin_rs_wire::PeerCounters::default()),
         ),
     );
 }
 
 fn negotiated_peer(
-    table: &bitcoin_rs_p2p::PeerTable,
+    table: &bitcoin_rs_wire::PeerTable,
     port: u16,
 ) -> (
-    bitcoin_rs_p2p::PeerSource,
-    crossbeam_channel::Receiver<bitcoin_rs_p2p::QueuedFrame>,
+    bitcoin_rs_wire::PeerSource,
+    crossbeam_channel::Receiver<bitcoin_rs_wire::QueuedFrame>,
 ) {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let (sender, receiver) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
-    let lease = bitcoin_rs_p2p::PeerLease::new(sender);
+    let (sender, receiver) = crossbeam_channel::unbounded::<bitcoin_rs_wire::QueuedFrame>();
+    let lease = bitcoin_rs_wire::PeerLease::new(sender);
     let source = lease.source_ip(addr);
-    let endpoint = bitcoin_rs_p2p::PeerEndpoint::Ip(addr);
+    let endpoint = bitcoin_rs_wire::PeerEndpoint::Ip(addr);
     assert!(!table.register(endpoint, lease.clone()));
     publish_peer_info(table, endpoint, &lease, addr);
-    assert!(table.seed_package_relay(source, bitcoin_rs_p2p::packages::PKG_RELAY_ANC));
+    assert!(table.seed_package_relay(source, bitcoin_rs_wire::packages::PKG_RELAY_ANC));
     (source, receiver)
 }
 
@@ -567,16 +574,16 @@ fn orphan_spending(parent: Txid) -> Tx {
     orphan
 }
 
-fn parent_getdata(parent: Txid) -> bitcoin_rs_p2p::Message {
-    bitcoin_rs_p2p::Message::GetData(vec![
+fn parent_getdata(parent: Txid) -> bitcoin_rs_wire::Message {
+    bitcoin_rs_wire::Message::GetData(vec![
         bitcoin::p2p::message_blockdata::Inventory::Transaction(bitcoin::Txid::from_byte_array(
             *parent.as_bytes(),
         )),
     ])
 }
 
-fn parent_witness_getdata(parent: Txid) -> bitcoin_rs_p2p::Message {
-    bitcoin_rs_p2p::Message::GetData(vec![
+fn parent_witness_getdata(parent: Txid) -> bitcoin_rs_wire::Message {
+    bitcoin_rs_wire::Message::GetData(vec![
         bitcoin::p2p::message_blockdata::Inventory::WitnessTransaction(
             bitcoin::Txid::from_byte_array(*parent.as_bytes()),
         ),
@@ -590,13 +597,13 @@ fn refused_solicitation_at_in_flight_cap_queues_parents_for_retry() {
     let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
     let table = Arc::clone(&consumer.peer_table);
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_336);
-    let (sender, receiver) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
-    let lease = bitcoin_rs_p2p::PeerLease::new(sender);
+    let (sender, receiver) = crossbeam_channel::unbounded::<bitcoin_rs_wire::QueuedFrame>();
+    let lease = bitcoin_rs_wire::PeerLease::new(sender);
     let source = lease.source_ip(addr);
-    let endpoint = bitcoin_rs_p2p::PeerEndpoint::Ip(addr);
+    let endpoint = bitcoin_rs_wire::PeerEndpoint::Ip(addr);
     assert!(!table.register(endpoint, lease.clone()));
     publish_peer_info(&table, endpoint, &lease, addr);
-    assert!(table.seed_package_relay(source, bitcoin_rs_p2p::packages::PKG_RELAY_ANC));
+    assert!(table.seed_package_relay(source, bitcoin_rs_wire::packages::PKG_RELAY_ANC));
 
     let mut fillers = Vec::new();
     for n in 0u32..100 {
@@ -604,7 +611,7 @@ fn refused_solicitation_at_in_flight_cap_queues_parents_for_retry() {
         hash[..4].copy_from_slice(&n.to_le_bytes());
         let filler = Wtxid(Hash256::from_le_bytes(&hash));
         fillers.push(filler);
-        assert!(table.request_package_info(source, filler, &[]));
+        assert!(consumer.tx_policy.request_package_info(source, filler, &[]));
     }
     for _ in 0..100 {
         let _ = receiver
@@ -615,24 +622,30 @@ fn refused_solicitation_at_in_flight_cap_queues_parents_for_retry() {
 
     let parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
     let subject = orphan_spending(parent).wtxid();
-    consumer.process_one(bitcoin_rs_p2p::InboundTx::new(
+    consumer.process_one(bitcoin_rs_wire::InboundTx::new(
         orphan_spending(parent),
         source,
     ));
     assert!(receiver.try_recv().is_err());
     assert_eq!(consumer.mempool_gateway.orphan_count(), 1);
     let (other, other_receiver) = negotiated_peer(&table, 18_341);
-    assert!(table.request_package_info(other, subject, &[]));
+    assert!(consumer.tx_policy.request_package_info(other, subject, &[]));
     assert!(matches!(
         other_receiver
             .try_recv()
             .expect("alternate solicitation queued")
             .into_message(),
-        bitcoin_rs_p2p::Message::GetData(_)
+        bitcoin_rs_wire::Message::GetData(_)
     ));
 
-    assert!(table.release_package_info(source, fillers[0], consumer.mempool_gateway.as_ref()));
-    table.poll_transaction_requests(consumer.mempool_gateway.as_ref());
+    assert!(consumer.tx_policy.release_package_info(
+        source,
+        fillers[0],
+        &crate::p2p::RefTxInventory(&consumer.mempool_gateway)
+    ));
+    consumer
+        .tx_policy
+        .poll_transaction_requests(&crate::p2p::RefTxInventory(&consumer.mempool_gateway));
     assert_eq!(
         receiver
             .try_recv()
@@ -650,36 +663,44 @@ fn unanswered_solicitation_suppresses_duplicate_parent_requests() {
     let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
     let table = Arc::clone(&consumer.peer_table);
     let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_337);
-    let (sender_a, receiver_a) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
-    let lease_a = bitcoin_rs_p2p::PeerLease::new(sender_a);
+    let (sender_a, receiver_a) = crossbeam_channel::unbounded::<bitcoin_rs_wire::QueuedFrame>();
+    let lease_a = bitcoin_rs_wire::PeerLease::new(sender_a);
     let source_a = lease_a.source_ip(addr_a);
-    assert!(!table.register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr_a), lease_a));
-    assert!(table.seed_package_relay(source_a, bitcoin_rs_p2p::packages::PKG_RELAY_ANC));
+    assert!(!table.register(bitcoin_rs_wire::PeerEndpoint::Ip(addr_a), lease_a));
+    assert!(table.seed_package_relay(source_a, bitcoin_rs_wire::packages::PKG_RELAY_ANC));
     let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_338);
-    let (sender_b, receiver_b) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
-    let lease_b = bitcoin_rs_p2p::PeerLease::new(sender_b);
+    let (sender_b, receiver_b) = crossbeam_channel::unbounded::<bitcoin_rs_wire::QueuedFrame>();
+    let lease_b = bitcoin_rs_wire::PeerLease::new(sender_b);
     let source_b = lease_b.source_ip(addr_b);
-    assert!(!table.register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr_b), lease_b));
-    assert!(table.seed_package_relay(source_b, bitcoin_rs_p2p::packages::PKG_RELAY_ANC));
+    assert!(!table.register(bitcoin_rs_wire::PeerEndpoint::Ip(addr_b), lease_b));
+    assert!(table.seed_package_relay(source_b, bitcoin_rs_wire::packages::PKG_RELAY_ANC));
 
     let parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
     let subject = orphan_spending(parent).wtxid();
-    assert!(table.request_package_info(source_b, subject, &[parent]));
+    assert!(
+        consumer
+            .tx_policy
+            .request_package_info(source_b, subject, &[parent])
+    );
     assert!(matches!(
         receiver_b
             .try_recv()
             .expect("solicitation queued")
             .into_message(),
-        bitcoin_rs_p2p::Message::GetData(_)
+        bitcoin_rs_wire::Message::GetData(_)
     ));
 
-    consumer.process_one(bitcoin_rs_p2p::InboundTx::new(
+    consumer.process_one(bitcoin_rs_wire::InboundTx::new(
         orphan_spending(parent),
         source_a,
     ));
     assert!(receiver_a.try_recv().is_err());
     assert_eq!(consumer.mempool_gateway.orphan_count(), 1);
-    assert!(table.release_package_info(source_b, subject, consumer.mempool_gateway.as_ref()));
+    assert!(consumer.tx_policy.release_package_info(
+        source_b,
+        subject,
+        &crate::p2p::RefTxInventory(&consumer.mempool_gateway)
+    ));
     assert!(receiver_b.try_recv().is_err());
 }
 
@@ -690,31 +711,35 @@ fn closed_owner_solicitation_falls_back_to_live_supplier_parents() {
     let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
     let table = Arc::clone(&consumer.peer_table);
     let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_339);
-    let (sender_a, receiver_a) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
-    let lease_a = bitcoin_rs_p2p::PeerLease::new(sender_a);
+    let (sender_a, receiver_a) = crossbeam_channel::unbounded::<bitcoin_rs_wire::QueuedFrame>();
+    let lease_a = bitcoin_rs_wire::PeerLease::new(sender_a);
     let source_a = lease_a.source_ip(addr_a);
-    assert!(!table.register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr_a), lease_a.clone()));
-    assert!(table.seed_package_relay(source_a, bitcoin_rs_p2p::packages::PKG_RELAY_ANC));
+    assert!(!table.register(bitcoin_rs_wire::PeerEndpoint::Ip(addr_a), lease_a.clone()));
+    assert!(table.seed_package_relay(source_a, bitcoin_rs_wire::packages::PKG_RELAY_ANC));
     let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_340);
-    let (sender_b, receiver_b) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
-    let lease_b = bitcoin_rs_p2p::PeerLease::new(sender_b);
+    let (sender_b, receiver_b) = crossbeam_channel::unbounded::<bitcoin_rs_wire::QueuedFrame>();
+    let lease_b = bitcoin_rs_wire::PeerLease::new(sender_b);
     let source_b = lease_b.source_ip(addr_b);
-    assert!(!table.register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr_b), lease_b));
-    assert!(table.seed_package_relay(source_b, bitcoin_rs_p2p::packages::PKG_RELAY_ANC));
+    assert!(!table.register(bitcoin_rs_wire::PeerEndpoint::Ip(addr_b), lease_b));
+    assert!(table.seed_package_relay(source_b, bitcoin_rs_wire::packages::PKG_RELAY_ANC));
 
     let parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
     let subject = orphan_spending(parent).wtxid();
-    assert!(table.request_package_info(source_a, subject, &[parent]));
+    assert!(
+        consumer
+            .tx_policy
+            .request_package_info(source_a, subject, &[parent])
+    );
     assert!(matches!(
         receiver_a
             .try_recv()
             .expect("solicitation queued")
             .into_message(),
-        bitcoin_rs_p2p::Message::GetData(_)
+        bitcoin_rs_wire::Message::GetData(_)
     ));
     lease_a.cancel();
 
-    consumer.process_one(bitcoin_rs_p2p::InboundTx::new(
+    consumer.process_one(bitcoin_rs_wire::InboundTx::new(
         orphan_spending(parent),
         source_b,
     ));

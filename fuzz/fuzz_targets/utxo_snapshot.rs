@@ -8,7 +8,7 @@ use bitcoin_rs_storage::utxo::core_snapshot::{
 };
 use libfuzzer_sys::fuzz_target;
 
-const CORE_FIXTURE: &[u8] = include_bytes!("../../crates/storage/tests/fixtures/core-v2/core200.dat");
+const CORE_FIXTURE: &[u8] = include_bytes!("../../crates/utxo/tests/fixtures/core-v2/core200.dat");
 const CORE_HEADER_BYTES: usize = 51;
 
 fuzz_target!(|data: &[u8]| {

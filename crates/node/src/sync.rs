@@ -1,15 +1,15 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Header, Network};
-use bitcoin_rs_p2p::sync::chain::{
+use crate::p2p::sync::chain::{
     HeaderAdmission, HistoricalAdvance, ReorgError, SyncChain, SyncChainError,
     WindowApplyDisposition, WindowCommitError,
 };
-use bitcoin_rs_p2p::{InboundHeaders, PeerTable};
+use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Header, Network};
+use bitcoin_rs_wire::{InboundHeaders, PeerTable};
 use crossbeam_channel::Receiver;
 
-pub use bitcoin_rs_p2p::sync::{BlockSync, default_sync_budget};
+pub use crate::p2p::sync::{BlockSync, default_sync_budget};
 
 struct NodeSyncChain {
     assumeutxo: Option<Arc<bitcoin_rs_execution::AssumeUtxoManager>>,
@@ -24,7 +24,7 @@ pub fn block_sync(
     followers: crate::chain_effects::ChainFollowers,
     peer_table: Arc<PeerTable>,
     inbound_headers_rx: Receiver<InboundHeaders>,
-    inbound_blocks_rx: Receiver<bitcoin_rs_p2p::InboundBlock>,
+    inbound_blocks_rx: Receiver<bitcoin_rs_wire::InboundBlock>,
     ibd: Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
     assumeutxo: Option<Arc<bitcoin_rs_execution::AssumeUtxoManager>>,
 ) -> BlockSync {

@@ -15,7 +15,6 @@ use bitcoin_rs_execution::ValidationMode;
 use bitcoin_rs_storage::StorageBackend;
 
 pub use bitcoin_rs_consensus::primitives::NetworkLabel;
-pub use bitcoin_rs_p2p::{IpSubnet, PeerNetwork};
 
 pub fn parse_network(value: &str) -> std::result::Result<NetworkSelection, OptionParseError> {
     NetworkSelection::from_str(value)
@@ -147,12 +146,12 @@ pub fn parse_connect_endpoint(value: &str) -> std::result::Result<String, Option
 
 pub fn parse_peer_network(
     value: &str,
-) -> std::result::Result<bitcoin_rs_p2p::PeerNetwork, OptionParseError> {
+) -> std::result::Result<bitcoin_rs_wire::PeerNetwork, OptionParseError> {
     value
         .parse()
         .map_err(|expected| OptionParseError::PeerNetwork { expected })
 }
-fn parse_peer_networks(value: &str) -> Result<Vec<bitcoin_rs_p2p::PeerNetwork>, OptionParseError> {
+fn parse_peer_networks(value: &str) -> Result<Vec<bitcoin_rs_wire::PeerNetwork>, OptionParseError> {
     if value.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -197,13 +196,13 @@ pub fn parse_network_label(
 
 pub fn parse_noban_subnet(
     value: &str,
-) -> std::result::Result<bitcoin_rs_p2p::IpSubnet, bitcoin_rs_p2p::SubnetParseError> {
+) -> std::result::Result<bitcoin_rs_wire::IpSubnet, bitcoin_rs_wire::SubnetParseError> {
     value.parse()
 }
 
 fn parse_noban_list(
     value: &str,
-) -> Result<Vec<bitcoin_rs_p2p::IpSubnet>, bitcoin_rs_p2p::SubnetParseError> {
+) -> Result<Vec<bitcoin_rs_wire::IpSubnet>, bitcoin_rs_wire::SubnetParseError> {
     if value.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -543,7 +542,7 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_ASMAP", parse_path]
                         toml native("asmap")
                     }
-                    noban_subnets as p2p_noban: Option<Vec<$crate::options::IpSubnet>> {
+                    noban_subnets as p2p_noban: Option<Vec<bitcoin_rs_wire::IpSubnet>> {
                         cli[#[arg(long = "p2p-noban", value_delimiter = ',', value_parser = $crate::options::parse_noban_subnet)]]
                         env["BITCOIN_RS_P2P_NOBAN", parse_noban_list]
                         toml each("p2p_noban", parse_noban_subnet)
@@ -599,7 +598,7 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_OVERLAY_PORT", str::parse]
                         toml native("overlay_port")
                     }
-                    onlynet as onlynet: Option<Vec<$crate::options::PeerNetwork>> {
+                    onlynet as onlynet: Option<Vec<bitcoin_rs_wire::PeerNetwork>> {
                         cli[#[arg(long = "onlynet", value_delimiter = ',', value_parser = $crate::options::parse_peer_network)]]
                         env["BITCOIN_RS_ONLYNET", parse_peer_networks]
                         toml each("onlynet", parse_peer_network)

@@ -130,12 +130,12 @@ fn sample_block() -> Block {
 }
 
 fn register_dummy_peer(ctx: &Context) {
-    let (tx, _rx) = crossbeam_channel::bounded::<bitcoin_rs_p2p::QueuedFrame>(1);
+    let (tx, _rx) = crossbeam_channel::bounded::<bitcoin_rs_wire::QueuedFrame>(1);
     ctx.network.peer_table.register(
         "127.0.0.1:8333"
-            .parse::<bitcoin_rs_p2p::PeerRemote>()
+            .parse::<bitcoin_rs_wire::PeerRemote>()
             .unwrap_or_else(|error| panic!("dummy peer addr: {error}")),
-        bitcoin_rs_p2p::PeerLease::new(tx),
+        bitcoin_rs_wire::PeerLease::new(tx),
     );
 }
 

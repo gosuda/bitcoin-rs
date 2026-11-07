@@ -32,14 +32,14 @@ pub(crate) const MEMPOOL_CRATE: &str = "bitcoin-rs-mempool";
 pub(crate) const CHAINSTATE_CRATE: &str = "bitcoin-rs-execution";
 
 pub(crate) const MEMPOOL_CONSUMER_CRATES: [&str; 4] =
-    ["bitcoin-rs-p2p", RPC_CRATE, NODE_CRATE, BIN_CRATE];
+    ["bitcoin-rs-wire", RPC_CRATE, NODE_CRATE, BIN_CRATE];
 
 pub(crate) fn approved_layer(crate_name: &str) -> u8 {
     match crate_name {
         "bitcoin-rs-consensus" => 0,
         STORAGE_CRATE => 1,
         CHAINSTATE_CRATE
-        | "bitcoin-rs-p2p"
+        | "bitcoin-rs-wire"
         | "bitcoin-rs-mempool"
         | "bitcoin-rs-projection"
         | "bitcoin-rs-mining" => 2,

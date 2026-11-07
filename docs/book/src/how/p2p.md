@@ -139,12 +139,12 @@ Inbound headers pass through `HeadersSyncState::process`, which decides presync,
 
 | Invariant | Test | File |
 | --- | --- | --- |
-| An outbound v2 dial negotiates BIP324 | `an_outbound_v2_dial_negotiates_bip324` | [`crates/p2p/src/listener/v2_transport_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/listener/v2_transport_tests.rs) |
-| A silent responder ends at the deadline | `a_silent_responder_ends_at_the_handshake_deadline` | [`crates/p2p/src/listener/v2_transport_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/listener/v2_transport_tests.rs) |
-| An unanswered v2 dial retries over v1 | `an_unanswered_v2_dial_retries_once_over_v1` | [`crates/p2p/src/listener/v2_transport_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/listener/v2_transport_tests.rs) |
-| Manual and protected peers never discourage an IP | `manual_and_protected_local_connections_never_discourage_an_ip` | [`crates/p2p/src/listener/discouragement_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/listener/discouragement_tests.rs) |
-| Missing compact-block transactions complete through `getblocktxn` | `missing_tx_requests_getblocktxn_and_completes_on_blocktxn` | [`crates/p2p/src/compact_blocks/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/compact_blocks/tests.rs) |
-| Invalid `getblocktxn` indexes disconnect | `invalid_getblocktxn_indexes_disconnect` | [`crates/p2p/src/dispatch/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/dispatch/tests.rs) |
-| A same-address reconnect does not inherit a stalled request | `same_address_reconnect_does_not_inherit_stalled_inflight` | [`crates/p2p/src/sync/tests/header_rotation.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/sync/tests/header_rotation.rs) |
+| An outbound v2 dial negotiates BIP324 | `an_outbound_v2_dial_negotiates_bip324` | [`crates/wire/src/listener/v2_transport_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/wire/src/listener/v2_transport_tests.rs) |
+| A silent responder ends at the deadline | `a_silent_responder_ends_at_the_handshake_deadline` | [`crates/wire/src/listener/v2_transport_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/wire/src/listener/v2_transport_tests.rs) |
+| An unanswered v2 dial retries over v1 | `an_unanswered_v2_dial_retries_once_over_v1` | [`crates/wire/src/listener/v2_transport_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/wire/src/listener/v2_transport_tests.rs) |
+| Manual and protected peers never discourage an IP | `manual_and_protected_local_connections_never_discourage_an_ip` | [`crates/wire/src/listener/discouragement_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/wire/src/listener/discouragement_tests.rs) |
+| Missing compact-block transactions complete through `getblocktxn` | `missing_tx_requests_getblocktxn_and_completes_on_blocktxn` | [`crates/wire/src/compact_blocks/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/wire/src/compact_blocks/tests.rs) |
+| Invalid `getblocktxn` indexes disconnect | `invalid_getblocktxn_indexes_disconnect` | [`crates/wire/src/dispatch/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/wire/src/dispatch/tests.rs) |
+| A same-address reconnect does not inherit a stalled request | `same_address_reconnect_does_not_inherit_stalled_inflight` | [`crates/node/src/p2p/sync/tests/header_rotation.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/p2p/sync/tests/header_rotation.rs) |
 
 The [architecture](architecture.md) chapter shows where a staged block goes next, and the [mempool](mempool.md) chapter covers transaction relay after admission.

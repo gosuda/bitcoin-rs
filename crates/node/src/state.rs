@@ -81,18 +81,20 @@ pub struct NodeState {
     derived_index: index::DerivedIndexHost,
     prune_service: Option<Arc<dyn PruneService>>,
     mempool_gateway: Arc<bitcoin_rs_mempool::MempoolGateway>,
-    p2p: Arc<bitcoin_rs_p2p::P2pService>,
-    inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundBody>,
-    inbound_tx_rx: Mutex<Option<Receiver<bitcoin_rs_p2p::InboundBody>>>,
-    package_capacity: bitcoin_rs_p2p::PackageCapacity,
+    p2p: Arc<bitcoin_rs_wire::P2pService>,
+    inbound_tx_tx: Sender<crate::p2p::InboundBody>,
+    inbound_tx_rx: Mutex<Option<Receiver<crate::p2p::InboundBody>>>,
+    package_capacity: crate::p2p::PackageCapacity,
+    pub tx_policy: Arc<crate::p2p::NodeTxPolicy>,
     transition: bitcoin_rs_execution::chain::TransitionDomain,
     chainstate: Arc<bitcoin_rs_execution::Chainstate>,
     followers: crate::chain_effects::ChainFollowers,
     sync: Arc<crate::BlockSync>,
     recovery_reporter: Arc<storage::RecoveryReporter>,
     pub(crate) snapshots: Arc<crate::snapshot::SnapshotControl>,
-    block_announce_rx: Mutex<Option<bitcoin_rs_p2p::BlockAnnounceReceiver>>,
+    block_announce_rx: Mutex<Option<crate::p2p::BlockAnnounceReceiver>>,
     shutdown: Arc<bitcoin_rs_execution::chain::LatchWriter>,
+    _p2p_shutdown_guard: bitcoin_rs_execution::chain::HookGuard,
 }
 
 impl Drop for NodeState {
@@ -206,17 +208,17 @@ impl NodeState {
     }
 
     #[must_use]
-    pub fn p2p(&self) -> Arc<bitcoin_rs_p2p::P2pService> {
+    pub fn p2p(&self) -> Arc<bitcoin_rs_wire::P2pService> {
         Arc::clone(&self.p2p)
     }
 
     #[must_use]
-    pub fn peer_table(&self) -> Arc<bitcoin_rs_p2p::PeerTable> {
+    pub fn peer_table(&self) -> Arc<bitcoin_rs_wire::PeerTable> {
         self.p2p.table()
     }
 
     #[cfg(any(test, feature = "test-seam"))]
-    pub fn inbound_blocks_sender(&self) -> Sender<bitcoin_rs_p2p::InboundBlock> {
+    pub fn inbound_blocks_sender(&self) -> Sender<bitcoin_rs_wire::InboundBlock> {
         self.p2p.inbound_blocks_sender()
     }
 
@@ -225,22 +227,22 @@ impl NodeState {
         Arc::clone(&self.recovery_reporter)
     }
 
-    pub fn inbound_tx_sender(&self) -> Sender<bitcoin_rs_p2p::InboundBody> {
+    pub fn inbound_tx_sender(&self) -> Sender<crate::p2p::InboundBody> {
         self.inbound_tx_tx.clone()
     }
 
     #[must_use]
-    pub fn take_inbound_tx_receiver(&self) -> Option<Receiver<bitcoin_rs_p2p::InboundBody>> {
+    pub fn take_inbound_tx_receiver(&self) -> Option<Receiver<crate::p2p::InboundBody>> {
         self.inbound_tx_rx.lock().take()
     }
 
     #[must_use]
-    pub fn package_capacity(&self) -> bitcoin_rs_p2p::PackageCapacity {
+    pub fn package_capacity(&self) -> crate::p2p::PackageCapacity {
         self.package_capacity.clone()
     }
 
     #[must_use]
-    pub fn take_block_announce_receiver(&self) -> Option<bitcoin_rs_p2p::BlockAnnounceReceiver> {
+    pub fn take_block_announce_receiver(&self) -> Option<crate::p2p::BlockAnnounceReceiver> {
         self.block_announce_rx.lock().take()
     }
 

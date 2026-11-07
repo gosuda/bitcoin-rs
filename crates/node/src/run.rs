@@ -30,9 +30,9 @@ pub enum RunError {
     #[error(transparent)]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(transparent)]
-    P2pStart(#[from] bitcoin_rs_p2p::P2pServiceError),
+    P2pStart(#[from] bitcoin_rs_wire::P2pServiceError),
     #[error(transparent)]
-    P2pJoin(#[from] bitcoin_rs_p2p::P2pJoinError),
+    P2pJoin(#[from] bitcoin_rs_wire::P2pJoinError),
     #[error(transparent)]
     Maintenance(#[from] bitcoin_rs_execution::MaintenanceError),
     #[error(transparent)]
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn explicit_directive_is_respected_as_is() {
-        let level = "debug,bitcoin_rs_p2p=trace";
+        let level = "debug,bitcoin_rs_wire=trace";
         let directive = build_filter_directive(level);
         assert_eq!(directive, level);
     }

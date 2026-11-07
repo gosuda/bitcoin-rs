@@ -26,7 +26,7 @@ migration.
 Metrics MUST NOT carry per-event payloads, block/tx/peer identity, or any
 other high-cardinality label value. The only label values allowed are
 enumerations: backend names, durability modes, and closed reason taxonomies
-(see `node.sync.stall_episodes_cleared{reason}` in `crates/p2p/src/download_window.rs`
+(see `node.sync.stall_episodes_cleared{reason}` in `crates/node/src/p2p/download_window.rs`
 for the pattern). They also include the enum capability states of `node.capability.txindex_readiness`, and
 the closed family labels of `index.family_planned_write_bytes{family}` where
 `family` in `{tx_lookup, script_history, script_live, headers, filters}`.

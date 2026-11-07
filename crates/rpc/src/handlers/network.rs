@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::hex::DisplayHex;
 use bitcoin_rs_consensus::primitives::unix_time_secs;
-use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
+use bitcoin_rs_wire::{BannedSubnet, IpSubnet};
 use sonic_rs::{JsonValueTrait, Value};
 
 use crate::context::Context;
@@ -105,10 +105,10 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
             reachable: state.allowed
                 && network_active
                 && match state.network {
-                    bitcoin_rs_p2p::PeerNetwork::Ipv4 | bitcoin_rs_p2p::PeerNetwork::Ipv6 => {
+                    bitcoin_rs_wire::PeerNetwork::Ipv4 | bitcoin_rs_wire::PeerNetwork::Ipv6 => {
                         state.proxy.is_none() || state.operational
                     }
-                    bitcoin_rs_p2p::PeerNetwork::Onion | bitcoin_rs_p2p::PeerNetwork::I2p => {
+                    bitcoin_rs_wire::PeerNetwork::Onion | bitcoin_rs_wire::PeerNetwork::I2p => {
                         state.proxy.is_some()
                     }
                 },
@@ -116,7 +116,7 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
                 .proxy
                 .map_or_else(String::new, |socket| socket.to_string()),
             proxy_randomize_credentials: state.proxy.is_some()
-                && state.network != bitcoin_rs_p2p::PeerNetwork::I2p
+                && state.network != bitcoin_rs_wire::PeerNetwork::I2p
                 && ctx.network.p2p.proxy_randomize_credentials(),
         })
         .collect::<Vec<_>>();
@@ -134,10 +134,10 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         version: usize::try_from(bitcoin_rs_consensus::primitives::client_version())
             .unwrap_or(usize::MAX),
         subversion: ctx.network.user_agent.clone(),
-        protocol_version: usize::try_from(bitcoin_rs_p2p::wire::PROTOCOL_VERSION)
+        protocol_version: usize::try_from(bitcoin_rs_wire::wire::PROTOCOL_VERSION)
             .unwrap_or(usize::MAX),
         local_services: format!("{local_services:016x}"),
-        local_services_names: bitcoin_rs_p2p::service_flag_names(local_services)
+        local_services_names: bitcoin_rs_wire::service_flag_names(local_services)
             .into_iter()
             .map(str::to_owned)
             .collect(),
@@ -151,7 +151,7 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         relay_fee: DEFAULT_RELAY_FEE_BTC_PER_KVB,
         incremental_fee: DEFAULT_INCREMENTAL_FEE_BTC_PER_KVB,
         local_addresses: {
-            let mut seen: HashSet<bitcoin_rs_p2p::PeerEndpoint> = HashSet::new();
+            let mut seen: HashSet<bitcoin_rs_wire::PeerEndpoint> = HashSet::new();
             let mut addresses: Vec<corepc_types::v17::GetNetworkInfoAddress> = states
                 .iter()
                 .filter_map(|state| state.local_address)
@@ -167,7 +167,7 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
             for endpoint in ctx.network.p2p.overlay_addresses() {
                 if !matches!(
                     endpoint.address().network(),
-                    bitcoin_rs_p2p::PeerNetwork::Onion | bitcoin_rs_p2p::PeerNetwork::I2p
+                    bitcoin_rs_wire::PeerNetwork::Onion | bitcoin_rs_wire::PeerNetwork::I2p
                 ) || !seen.insert(endpoint)
                 {
                     continue;
@@ -186,7 +186,7 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
 
 const MIN_TIME_OFFSET_SAMPLES: usize = 5;
 
-fn median_time_offset(peers: &[bitcoin_rs_p2p::PeerInfo]) -> i64 {
+fn median_time_offset(peers: &[bitcoin_rs_wire::PeerInfo]) -> i64 {
     let mut offsets: Vec<i64> = peers
         .iter()
         .filter(|peer| !peer.inbound)
@@ -301,8 +301,8 @@ fn per_message_map(entries: Vec<(&'static str, u64)>) -> std::collections::BTree
 }
 
 fn peer_info_wire(
-    session: &bitcoin_rs_p2p::PeerSession,
-    peer: &bitcoin_rs_p2p::PeerInfo,
+    session: &bitcoin_rs_wire::PeerSession,
+    peer: &bitcoin_rs_wire::PeerInfo,
     minimum_fee_filter: f64,
 ) -> PeerInfoWire {
     PeerInfoWire {
@@ -319,7 +319,7 @@ fn peer_info_wire(
             .map(str::to_owned)
             .collect(),
         relay_transactions: peer.relay_transactions
-            && session.lease.role() == bitcoin_rs_p2p::PeerRole::FullRelay,
+            && session.lease.role() == bitcoin_rs_wire::PeerRole::FullRelay,
         last_send: i64::try_from(peer.counters.last_send()).unwrap_or(i64::MAX),
         last_received: i64::try_from(peer.counters.last_recv()).unwrap_or(i64::MAX),
         last_transaction: 0,
@@ -362,17 +362,17 @@ fn peer_info_wire(
             ConnectionType::Manual
         } else {
             match session.lease.role() {
-                bitcoin_rs_p2p::PeerRole::BlockRelayOnly => ConnectionType::BlockRelayOnly,
-                bitcoin_rs_p2p::PeerRole::FullRelay => ConnectionType::OutboundFullRelay,
+                bitcoin_rs_wire::PeerRole::BlockRelayOnly => ConnectionType::BlockRelayOnly,
+                bitcoin_rs_wire::PeerRole::FullRelay => ConnectionType::OutboundFullRelay,
             }
         }),
         transport_protocol_type: match peer.transport {
-            bitcoin_rs_p2p::TransportProtocol::V1 => TransportProtocolType::V1,
-            bitcoin_rs_p2p::TransportProtocol::V2 { .. } => TransportProtocolType::V2,
+            bitcoin_rs_wire::TransportProtocol::V1 => TransportProtocolType::V1,
+            bitcoin_rs_wire::TransportProtocol::V2 { .. } => TransportProtocolType::V2,
         },
         session_id: match peer.transport {
-            bitcoin_rs_p2p::TransportProtocol::V1 => String::new(),
-            bitcoin_rs_p2p::TransportProtocol::V2 { session_id } => {
+            bitcoin_rs_wire::TransportProtocol::V1 => String::new(),
+            bitcoin_rs_wire::TransportProtocol::V2 { session_id } => {
                 session_id.to_lower_hex_string()
             }
         },
@@ -493,7 +493,7 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
             "v2transport conflicts with this node's -v2transport setting; per-dial transport selection is not supported (see -v2transport)".to_owned(),
         ));
     }
-    let addr = if let Ok(endpoint) = bitcoin_rs_p2p::PeerEndpoint::from_str(node) {
+    let addr = if let Ok(endpoint) = bitcoin_rs_wire::PeerEndpoint::from_str(node) {
         endpoint
     } else if command != "remove"
         && node
@@ -538,16 +538,16 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
     Ok(Value::new_null())
 }
 
-fn control_error_to_rpc_error(error: bitcoin_rs_p2p::P2pControlError) -> RpcError {
+fn control_error_to_rpc_error(error: bitcoin_rs_wire::P2pControlError) -> RpcError {
     match error {
-        bitcoin_rs_p2p::P2pControlError::NetworkDisabled => {
+        bitcoin_rs_wire::P2pControlError::NetworkDisabled => {
             RpcError::InvalidParams("destination network disabled")
         }
-        bitcoin_rs_p2p::P2pControlError::Banned => RpcError::InvalidParams("node is banned"),
-        bitcoin_rs_p2p::P2pControlError::QueueFull => {
+        bitcoin_rs_wire::P2pControlError::Banned => RpcError::InvalidParams("node is banned"),
+        bitcoin_rs_wire::P2pControlError::QueueFull => {
             RpcError::Internal("p2p outbound queue full".to_owned())
         }
-        bitcoin_rs_p2p::P2pControlError::Closed => {
+        bitcoin_rs_wire::P2pControlError::Closed => {
             RpcError::Internal("p2p outbound channel closed".to_owned())
         }
     }
@@ -576,7 +576,7 @@ pub(crate) fn disconnectnode(ctx: &Arc<Context>, params: &Value) -> Result<Value
     match (address, nodeid) {
         (Some(address), None) => {
             let addr = address
-                .parse::<bitcoin_rs_p2p::PeerRemote>()
+                .parse::<bitcoin_rs_wire::PeerRemote>()
                 .map_err(|_| RpcError::InvalidParams("address must be a valid host:port"))?;
             if !ctx.network.p2p.disconnect_ready(addr) {
                 return Err(RpcError::NotFound("Node not found in connected nodes"));
@@ -589,7 +589,7 @@ pub(crate) fn disconnectnode(ctx: &Arc<Context>, params: &Value) -> Result<Value
         }
         (Some(address), Some(id)) => {
             let addr = address
-                .parse::<bitcoin_rs_p2p::PeerRemote>()
+                .parse::<bitcoin_rs_wire::PeerRemote>()
                 .map_err(|_| RpcError::InvalidParams("address must be a valid host:port"))?;
             if !ctx.network.p2p.disconnect_ready_node_id_at(addr, id) {
                 return Err(RpcError::NotFound("Node not found in connected nodes"));
@@ -632,7 +632,7 @@ pub(crate) fn getnodeaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Val
     let count = optional_u64(params, 0, 1)?;
 
     let now = unix_time_secs();
-    let mut seen: HashSet<bitcoin_rs_p2p::PeerEndpoint> = HashSet::new();
+    let mut seen: HashSet<bitcoin_rs_wire::PeerEndpoint> = HashSet::new();
     let mut entries: Vec<v31::NodeAddress> = Vec::new();
 
     for peer in ctx.network.peer_table.infos() {
@@ -790,7 +790,7 @@ mod admin_rpc_tests {
 
     #[test]
     fn setnetworkactive_false_cancels_all_leases() {
-        use bitcoin_rs_p2p::PeerLease;
+        use bitcoin_rs_wire::PeerLease;
         use crossbeam_channel::unbounded;
 
         let addr_a: SocketAddr = "127.0.0.1:8333".parse().expect("addr");
@@ -802,10 +802,10 @@ mod admin_rpc_tests {
         let lease_b = PeerLease::new(tx_b);
         ctx.network
             .peer_table
-            .register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr_a), lease_a.clone());
+            .register(bitcoin_rs_wire::PeerEndpoint::Ip(addr_a), lease_a.clone());
         ctx.network
             .peer_table
-            .register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr_b), lease_b.clone());
+            .register(bitcoin_rs_wire::PeerEndpoint::Ip(addr_b), lease_b.clone());
         let ctx = Arc::new(ctx);
 
         let _ = setnetworkactive(&ctx, &json!([false]))
@@ -1027,7 +1027,7 @@ mod peer_counter_tests;
 mod getnodeaddresses_tests {
     use super::*;
     use alloc::sync::Arc;
-    use bitcoin_rs_p2p::{PeerInfo, PeerLease};
+    use bitcoin_rs_wire::{PeerInfo, PeerLease};
     use sonic_rs::{JsonContainerTrait, JsonValueTrait, json};
 
     fn peer(addr: &str, services: u64) -> PeerInfo {
@@ -1037,8 +1037,8 @@ mod getnodeaddresses_tests {
             relay_transactions: true,
             compact_block_relay: false,
             send_headers: false,
-            endpoint: Some(bitcoin_rs_p2p::PeerEndpoint::Ip(parsed)),
-            network: bitcoin_rs_p2p::PeerEndpoint::Ip(parsed).net(),
+            endpoint: Some(bitcoin_rs_wire::PeerEndpoint::Ip(parsed)),
+            network: bitcoin_rs_wire::PeerEndpoint::Ip(parsed).net(),
             addr: parsed.into(),
             version: 70_016,
             services,
@@ -1047,10 +1047,10 @@ mod getnodeaddresses_tests {
             best_known_height: 0,
             conn_time: 100,
             inbound: false,
-            addr_bind: bitcoin_rs_p2p::TransportRemote::new(parsed),
+            addr_bind: bitcoin_rs_wire::TransportRemote::new(parsed),
             time_offset: 0,
-            counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
-            transport: bitcoin_rs_p2p::TransportProtocol::V1,
+            counters: Arc::new(bitcoin_rs_wire::PeerCounters::default()),
+            transport: bitcoin_rs_wire::TransportProtocol::V1,
         }
     }
 
@@ -1072,7 +1072,7 @@ mod getnodeaddresses_tests {
         let ctx = Context::new();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let lease = PeerLease::new_inbound(tx);
-        let remote = bitcoin_rs_p2p::PeerRemote::AnonymousTor(lease.connection_id());
+        let remote = bitcoin_rs_wire::PeerRemote::AnonymousTor(lease.connection_id());
         let mut info = peer("127.0.0.1:8333", 9);
         info.addr = remote;
         info.endpoint = None;
@@ -1147,7 +1147,7 @@ mod getnodeaddresses_tests {
         add_peer(&ctx, peer("127.0.0.1:8333", 9));
         ctx.network
             .p2p
-            .add_node(bitcoin_rs_p2p::parse_endpoint("127.0.0.1:8333").expect("addr"))
+            .add_node(bitcoin_rs_wire::parse_endpoint("127.0.0.1:8333").expect("addr"))
             .expect("add_node");
         let ctx = Arc::new(ctx);
         let result = getnodeaddresses(&ctx, &json!([0]))
@@ -1192,7 +1192,7 @@ mod getnodeaddresses_tests {
         let ctx = Context::new();
         ctx.network
             .p2p
-            .add_node(bitcoin_rs_p2p::parse_endpoint("10.0.0.1:8333").expect("addr"))
+            .add_node(bitcoin_rs_wire::parse_endpoint("10.0.0.1:8333").expect("addr"))
             .expect("add_node");
         let ctx = Arc::new(ctx);
         let result = getnodeaddresses(&ctx, &json!([0]))

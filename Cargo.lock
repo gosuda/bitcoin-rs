@@ -343,6 +343,7 @@ dependencies = [
  "bitcoin-rs-node",
  "bitcoin-rs-rpc",
  "bitcoin-rs-storage",
+ "bitcoin-rs-wire",
  "clap",
  "mimalloc",
  "parking_lot",
@@ -488,10 +489,10 @@ dependencies = [
  "bitcoin-rs-mempool",
  "bitcoin-rs-mining",
  "bitcoin-rs-node",
- "bitcoin-rs-p2p",
  "bitcoin-rs-projection",
  "bitcoin-rs-rpc",
  "bitcoin-rs-storage",
+ "bitcoin-rs-wire",
  "bytes",
  "cap-fs-ext",
  "cap-std",
@@ -505,12 +506,14 @@ dependencies = [
  "mining_sv2",
  "noise_sv2",
  "parking_lot",
+ "proptest",
  "quanta 0.13.0",
  "rayon",
  "rustix",
  "serde",
  "sha2",
  "signal-hook",
+ "smallvec",
  "sonic-rs",
  "tempfile",
  "thiserror",
@@ -518,38 +521,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zeroize",
-]
-
-[[package]]
-name = "bitcoin-rs-p2p"
-version = "0.15.0"
-dependencies = [
- "arc-swap",
- "base64 0.22.1",
- "bitcoin",
- "bitcoin-rs-consensus",
- "bitcoin-rs-execution",
- "bitcoin-rs-mempool",
- "bitcoin-rs-projection",
- "bitcoin-rs-storage",
- "bytes",
- "chacha20 0.10.2",
- "chacha20poly1305 0.11.0",
- "crossbeam-channel",
- "hashbrown 0.17.1",
- "hkdf",
- "metrics",
- "parking_lot",
- "proptest",
- "proptest-state-machine",
- "rustix",
- "serde",
- "sha2",
- "smallvec",
- "sonic-rs",
- "tempfile",
- "thiserror",
- "tracing",
 ]
 
 [[package]]
@@ -605,10 +576,10 @@ dependencies = [
  "bitcoin-rs-mempool",
  "bitcoin-rs-mining",
  "bitcoin-rs-node",
- "bitcoin-rs-p2p",
  "bitcoin-rs-projection",
  "bitcoin-rs-rpc",
  "bitcoin-rs-storage",
+ "bitcoin-rs-wire",
  "bytes",
  "cap-fs-ext",
  "cap-std",
@@ -705,6 +676,35 @@ dependencies = [
  "serde",
  "sonic-rs",
  "tempfile",
+]
+
+[[package]]
+name = "bitcoin-rs-wire"
+version = "0.15.0"
+dependencies = [
+ "arc-swap",
+ "base64 0.22.1",
+ "bitcoin",
+ "bitcoin-rs-consensus",
+ "bitcoin-rs-storage",
+ "bytes",
+ "chacha20 0.10.2",
+ "chacha20poly1305 0.11.0",
+ "crossbeam-channel",
+ "hashbrown 0.17.1",
+ "hkdf",
+ "metrics",
+ "parking_lot",
+ "proptest",
+ "proptest-state-machine",
+ "rustix",
+ "serde",
+ "sha2",
+ "smallvec",
+ "sonic-rs",
+ "tempfile",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

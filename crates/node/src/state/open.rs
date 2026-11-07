@@ -12,6 +12,8 @@ use super::storage::StoredBlockBodySource;
 use crate::NodeConfig;
 use crate::config::ConfigError;
 
+use crate::p2p::download_window::FAST_OUTBOUND_PEER_TARGET;
+use crate::p2p::download_window::fast_sync_budget;
 use bitcoin_rs_consensus::{ScriptExecutionCache, ValidationEngine};
 use bitcoin_rs_execution::ChainstateParts;
 use bitcoin_rs_execution::events::{
@@ -28,8 +30,6 @@ use bitcoin_rs_execution::verify::{
 use bitcoin_rs_mempool::BodyInterest;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolLimits;
-use bitcoin_rs_p2p::download_window::FAST_OUTBOUND_PEER_TARGET;
-use bitcoin_rs_p2p::download_window::fast_sync_budget;
 use bitcoin_rs_projection::block_log::BlockLog;
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use parking_lot::Mutex;
@@ -458,9 +458,14 @@ impl NodeState {
         } else {
             P2P_OUTBOUND_FULL_RELAY_SLOTS
         };
-        let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
-            bitcoin_rs_p2p::P2pServiceConfig {
-                overlay: bitcoin_rs_p2p::overlay::OverlayConfig {
+        let p2p_shutdown = Arc::new(bitcoin_rs_wire::latch::LatchWriter::new());
+        let p2p_shutdown_guard = chainstate.shutdown_reader().on_cancel({
+            let p2p_shutdown = Arc::clone(&p2p_shutdown);
+            move || p2p_shutdown.trigger()
+        });
+        let p2p = Arc::new(bitcoin_rs_wire::P2pService::new(
+            bitcoin_rs_wire::P2pServiceConfig {
+                overlay: bitcoin_rs_wire::overlay::OverlayConfig {
                     identity_dir: config.data_dir.join(&config.p2p.overlay.identity_dir),
                     ..config.p2p.overlay.clone()
                 },
@@ -500,9 +505,9 @@ impl NodeState {
                 },
                 v2_transport: config.p2p.v2_transport,
                 relay_offers: config.p2p.relay_offers,
-                ..bitcoin_rs_p2p::P2pServiceConfig::default()
+                ..bitcoin_rs_wire::P2pServiceConfig::default()
             },
-            chainstate.shutdown_reader(),
+            p2p_shutdown.reader(),
         ));
         let peer_table = p2p.table();
         let inbound_headers_rx = p2p
@@ -511,10 +516,14 @@ impl NodeState {
         let inbound_blocks_rx = p2p
             .take_inbound_blocks_receiver()
             .ok_or(NodeOpenError::InboundBlocksReceiverTaken)?;
+        let tx_policy = Arc::new(crate::p2p::NodeTxPolicy::new(
+            peer_table.clone(),
+            Arc::new(parking_lot::Mutex::new(crate::p2p::TxPolicy::default())),
+        ));
         let (inbound_tx_tx, inbound_tx_rx_raw) =
-            crossbeam_channel::bounded::<bitcoin_rs_p2p::InboundBody>(INBOUND_TX_CHANNEL_LIMIT);
+            crossbeam_channel::bounded::<crate::p2p::InboundBody>(INBOUND_TX_CHANNEL_LIMIT);
         let inbound_tx_rx = Mutex::new(Some(inbound_tx_rx_raw));
-        let package_capacity = bitcoin_rs_p2p::PackageCapacity::new(PACKAGE_INGRESS_MAX_BYTES);
+        let package_capacity = crate::p2p::PackageCapacity::new(PACKAGE_INGRESS_MAX_BYTES);
         let mining_generation = Arc::new(crate::mining::MiningGenerationSignal::new());
         let staged_mining = Arc::clone(&mining_generation);
         let staged_ibd = chainstate.ibd_latch();
@@ -539,7 +548,7 @@ impl NodeState {
                 script_cache,
             ))
         };
-        let (block_announce_queue, block_announce_rx) = bitcoin_rs_p2p::BlockAnnounceQueue::new();
+        let (block_announce_queue, block_announce_rx) = crate::p2p::BlockAnnounceQueue::new();
         let followers = crate::chain_effects::ChainFollowers::new(
             Arc::clone(&blocks),
             Arc::clone(&zmq_publisher),
@@ -732,6 +741,7 @@ impl NodeState {
             inbound_tx_tx,
             inbound_tx_rx,
             package_capacity,
+            tx_policy,
             transition,
             chainstate,
             followers,
@@ -740,6 +750,7 @@ impl NodeState {
             snapshots,
             block_announce_rx: Mutex::new(Some(block_announce_rx)),
             shutdown,
+            _p2p_shutdown_guard: p2p_shutdown_guard,
         })
     }
 }

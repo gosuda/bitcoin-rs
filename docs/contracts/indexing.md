@@ -76,7 +76,7 @@ Owners:
 - Proof:
   - `crates/projection/src/runtime/query_tests.rs` (`filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries`)
   - `crates/rpc/tests/handler_smoke.rs` (`compact_filter_rpc_exposes_only_enabled_ready_data`)
-  - `crates/p2p/src/listener.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
+  - `crates/wire/src/listener.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
 - `ScriptLive` is not a duplicate coin table.
 - Its empty-valued key is `script-hash-prefix || full-outpoint`.
 - The prefix is only a scan accelerator.
@@ -601,7 +601,7 @@ That document gives consumer usage and defers to this clause for every consisten
 - The query engine captures immutable block identities and one index snapshot without acquiring chain-transition authority.
 - P2P resolves filter stop hashes against the applied chain.
 - A competing headers-only branch does not change which filters are servable.
-- Proof: `crates/p2p/src/chain_query.rs` (`compact_filters_follow_applied_chain_when_competing_headers_lead`).
+- Proof: `crates/node/src/p2p/chain_query.rs` (`compact_filters_follow_applied_chain_when_competing_headers_lead`).
 - P2P streams at most one filter payload at a time under the send-headroom gate.
 - Header and checkpoint replies retain only commitments.
 - Requests are bounded to 1,000 filters, 2,000 hashes, or 100,000 checkpoint headers (below the 4 MB envelope).
@@ -615,7 +615,7 @@ That document gives consumer usage and defers to this clause for every consisten
 - Disabled, unavailable, unknown, non-basic, and oversized requests receive no filter answer.
 - For decoded non-basic types, unknown or unapplied stops, inverted ranges, and oversized ranges, bitcoin-rs keeps the connection open without discouragement.
 - Core 31.1 disconnects those requests.
-- Proof: `crates/p2p/src/chain_query.rs` (`invalid_compact_filter_requests_are_ignored_without_querying_the_index`) and wire checks in `tools/compact-filter-interop/run.py`.
+- Proof: `crates/node/src/p2p/chain_query.rs` (`invalid_compact_filter_requests_are_ignored_without_querying_the_index`) and wire checks in `tools/compact-filter-interop/run.py`.
 - To bridge a just-announced tip and asynchronous publication, a valid P2P request can be deferred for up to five seconds.
 - Time refused by the aggregate outbound budget is not counted toward the five seconds.
 - Time taken by the index or the connection queue is counted toward the five seconds.

@@ -398,12 +398,12 @@ pub struct IndexHandles {
 }
 
 pub struct NetworkHandles {
-    pub peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
-    pub p2p: Arc<bitcoin_rs_p2p::P2pService>,
+    pub peer_table: Arc<bitcoin_rs_wire::PeerTable>,
+    pub p2p: Arc<bitcoin_rs_wire::P2pService>,
     pub local_services: u64,
     /// The subversion this node advertises (`getnetworkinfo.subversion`).
     pub user_agent: String,
-    pub overlay: bitcoin_rs_p2p::overlay::OverlayConfig,
+    pub overlay: bitcoin_rs_wire::overlay::OverlayConfig,
     /// The node-wide `-v2transport` setting passed once from the node's
     /// `p2p.v2_transport` config; `addnode` accepts an explicit `v2transport`
     /// argument only when it equals this value.
@@ -575,18 +575,18 @@ impl Default for MempoolHandles {
 #[cfg(any(test, feature = "test-seam"))]
 impl Default for NetworkHandles {
     fn default() -> Self {
-        let config = bitcoin_rs_p2p::P2pServiceConfig::default();
+        let config = bitcoin_rs_wire::P2pServiceConfig::default();
         let v2_transport = config.v2_transport;
-        let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
+        let p2p = Arc::new(bitcoin_rs_wire::P2pService::new(
             config,
-            LatchReader::fixture_never(),
+            bitcoin_rs_wire::LatchReader::fixture_never(),
         ));
         Self {
             peer_table: p2p.table(),
             p2p,
             local_services: 0x09,
             user_agent: bitcoin_rs_consensus::primitives::USER_AGENT.to_owned(),
-            overlay: bitcoin_rs_p2p::overlay::OverlayConfig::default(),
+            overlay: bitcoin_rs_wire::overlay::OverlayConfig::default(),
             v2_transport,
         }
     }
@@ -1353,7 +1353,7 @@ impl BlockBodySource for BlockBodies {
         &self,
         height: u32,
         hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         Ok(self
             .bodies
             .iter()

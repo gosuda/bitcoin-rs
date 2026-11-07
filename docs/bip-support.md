@@ -40,19 +40,19 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 | BIP | Capability | Support | External evidence | Notes |
 | :-- | :-- | :--: | :--: | :-- |
 | 37 | [Bloom filters](policies/p2p-compatibility.md#5-message-surface) | ❌ | - | Commands decoded then ignored; no filter service |
-| 111 | [NODE_BLOOM](../crates/p2p/src/wire.rs) | ❌ | - | Service bit not advertised |
-| 130 | [Headers announcements](../crates/p2p/src/block_announce.rs) | ✅ | - | Up to 8 headers; [CORE-05 qualification pending](contracts/core-differential.md#core-05-proactive-block-announcements-across-a-live-reorg) |
-| 133 | [Fee filter](../crates/p2p/src/tx_policy/relay.rs) | ✅ | - | Per-peer inventory floor; rounded local refresh |
-| 144 | [Segwit relay](../crates/p2p/src/dispatch.rs) | ✅ | - | Witness block/transaction inventory preserves bytes |
-| 152 | [Compact blocks](../crates/p2p/src/compact_blocks.rs) | ✅ | ✓ | Announcements are implemented (see policy §7); only the CORE-05 live-reorg qualification is pending; [Core 31.1 request/response scope](api/ecosystem-compat.toml); reconstruction counts diagnostic |
-| 155 | [Address v2](../crates/p2p/src/wire.rs) | ◐ | - | Negotiation, IP receive path, and `addrv2` getaddr replies (IPv4/IPv6 rows only) |
+| 111 | [NODE_BLOOM](../crates/wire/src/wire.rs) | ❌ | - | Service bit not advertised |
+| 130 | [Headers announcements](../crates/node/src/p2p/block_announce.rs) | ✅ | - | Up to 8 headers; [CORE-05 qualification pending](contracts/core-differential.md#core-05-proactive-block-announcements-across-a-live-reorg) |
+| 133 | [Fee filter](../crates/node/src/p2p/tx_policy/relay.rs) | ✅ | - | Per-peer inventory floor; rounded local refresh |
+| 144 | [Segwit relay](../crates/wire/src/dispatch.rs) | ✅ | - | Witness block/transaction inventory preserves bytes |
+| 152 | [Compact blocks](../crates/wire/src/compact_blocks.rs) | ✅ | ✓ | Announcements are implemented (see policy §7); only the CORE-05 live-reorg qualification is pending; [Core 31.1 request/response scope](api/ecosystem-compat.toml); reconstruction counts diagnostic |
+| 155 | [Address v2](../crates/wire/src/wire.rs) | ◐ | - | Negotiation, IP receive path, and `addrv2` getaddr replies (IPv4/IPv6 rows only) |
 | 157/158 | [Compact filters](../crates/projection/src/index/filters.rs) | ✅ | ✓ | Optional blockfilterindex; basic active-chain filters; [Kyoto regtest scope](api/ecosystem-compat.toml) |
 | 159 | [Limited-network service](../crates/node/src/state/open.rs) | ✅ | - | Pruned nodes advertise NETWORK_LIMITED + WITNESS |
-| 324 | [v2 transport](../crates/p2p/src/transport.rs) | ✅ | ✓ | On by default (`--v2transport=false` opts out); [Core 31.1 interop in both directions](api/ecosystem-compat.toml) under [CORE-06](contracts/core-differential.md); [vectors](../crates/p2p/tests/data/bip324/) and [negotiation tests](../crates/p2p/src/listener/v2_transport_tests.rs) |
+| 324 | [v2 transport](../crates/wire/src/transport.rs) | ✅ | ✓ | On by default (`--v2transport=false` opts out); [Core 31.1 interop in both directions](api/ecosystem-compat.toml) under [CORE-06](contracts/core-differential.md); [vectors](../crates/wire/tests/data/bip324/) and [negotiation tests](../crates/wire/src/listener/v2_transport_tests.rs) |
 | 330 | [Erlay](https://github.com/gosuda/bitcoin-rs/issues/1501) | ❌ | - | Explicitly deferred backlog (#1501 tracks the deferral, so the policy keeps it `Unsupported` rather than `Planned`); sendtxrcncl ignored |
-| 339 | [Wtxid relay](../crates/p2p/src/peer.rs) | ✅ | - | Negotiation, announcements and getdata |
-| 434 | [Feature negotiation](../crates/p2p/src/feature.rs) | 🧪 | - | Draft-pinned `feature` codec and pre-`verack` negotiation at protocol 70017; no feature is announced; local proof pending; Core 31.1 does not support BIP434 ([policy §7](policies/p2p-compatibility.md#7-deviation-ledger)) |
-| 35 | [Mempool request](../crates/p2p/src/dispatch.rs) | ❌ | - | Command decoded then ignored |
+| 339 | [Wtxid relay](../crates/wire/src/peer.rs) | ✅ | - | Negotiation, announcements and getdata |
+| 434 | [Feature negotiation](../crates/wire/src/feature.rs) | 🧪 | - | Draft-pinned `feature` codec and pre-`verack` negotiation at protocol 70017; no feature is announced; local proof pending; Core 31.1 does not support BIP434 ([policy §7](policies/p2p-compatibility.md#7-deviation-ledger)) |
+| 35 | [Mempool request](../crates/wire/src/dispatch.rs) | ❌ | - | Command decoded then ignored |
 
 ## Mining
 

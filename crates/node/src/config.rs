@@ -7,10 +7,10 @@ use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_execution::{ChainstateJournalConfig, ValidationMode};
 #[cfg(feature = "pool")]
 use bitcoin_rs_mining::pool::ledger as pool_ledger;
-use bitcoin_rs_p2p::PeerNetwork;
-use bitcoin_rs_p2p::endpoint::{ClassifiedEndpoint, classify_endpoint};
 use bitcoin_rs_projection::IndexCapabilities;
 use bitcoin_rs_storage::StorageBackend;
+use bitcoin_rs_wire::PeerNetwork;
+use bitcoin_rs_wire::endpoint::{ClassifiedEndpoint, classify_endpoint};
 use core::fmt;
 use crossbeam_channel::Receiver;
 use serde::Deserialize;
@@ -28,7 +28,7 @@ pub enum ConfigError {
     #[error(transparent)]
     IndexBundleDir(#[from] IndexBundleDirError),
     #[error(transparent)]
-    Subnet(#[from] bitcoin_rs_p2p::SubnetParseError),
+    Subnet(#[from] bitcoin_rs_wire::SubnetParseError),
     #[error(transparent)]
     SocketAddr(#[from] std::net::AddrParseError),
     #[error(transparent)]
@@ -523,16 +523,16 @@ pub struct StorageConfig {
 
 #[derive(Clone, Debug)]
 pub struct P2pConfig {
-    pub overlay: bitcoin_rs_p2p::overlay::OverlayConfig,
+    pub overlay: bitcoin_rs_wire::overlay::OverlayConfig,
     pub magic: [u8; 4],
     pub listen: Vec<SocketAddr>,
     pub dns_seeds_enabled: bool,
     pub asmap: Option<PathBuf>,
-    pub noban_subnets: Vec<bitcoin_rs_p2p::IpSubnet>,
+    pub noban_subnets: Vec<bitcoin_rs_wire::IpSubnet>,
     pub connect: Vec<String>,
     pub fast_sync: bool,
     pub v2_transport: bool,
-    pub relay_offers: bitcoin_rs_p2p::RelayOffers,
+    pub relay_offers: bitcoin_rs_wire::RelayOffers,
     /// `-uacomment` values, composed into the subversion exactly as Core's
     /// `InitSubversion` does (`crates/primitives` `sub_version`).
     pub ua_comments: Vec<String>,
@@ -897,7 +897,7 @@ fn materialize_p2p(
     network: Network,
 ) -> P2pConfig {
     P2pConfig {
-        overlay: bitcoin_rs_p2p::overlay::OverlayConfig {
+        overlay: bitcoin_rs_wire::overlay::OverlayConfig {
             proxy: settings.proxy,
             onion_proxy: settings.onion_proxy,
             onlynet: settings.onlynet.clone().unwrap_or_default(),
@@ -928,7 +928,7 @@ fn materialize_p2p(
             .unwrap_or_else(|| profile.connect.clone()),
         fast_sync: settings.fast_sync.unwrap_or(false),
         v2_transport: settings.v2_transport.unwrap_or(true),
-        relay_offers: bitcoin_rs_p2p::RelayOffers {
+        relay_offers: bitcoin_rs_wire::RelayOffers {
             package_relay: settings.package_relay.unwrap_or(false),
             stale_tip_relay: settings.stale_tip_relay.unwrap_or(false),
             stale_tip_prefers_blocks: settings.stale_tip_prefers_blocks.unwrap_or(false),

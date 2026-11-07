@@ -486,7 +486,7 @@ impl NodeServices {
         }
         if let Some(state) = state {
             let package_teardown = state
-                .peer_table()
+                .tx_policy
                 .clear_package_claims(&state.package_capacity());
             if package_teardown.bytes_reserved != 0 || package_teardown.held != 0 {
                 tracing::warn!(?package_teardown, "package ingress held bytes at teardown");
@@ -731,9 +731,9 @@ pub(crate) fn start_node(
     guard.services.shutdown_forwarder = injected_shutdown_forwarder;
     let block_body_source = state.block_body_source()?;
     let chainstate = state.chainstate();
-    let recent_block = bitcoin_rs_p2p::RecentBlockSlot::default();
-    let p2p_chain_query: Arc<dyn bitcoin_rs_p2p::ChainQuery> = Arc::new(
-        bitcoin_rs_p2p::ActiveChainQuery::new(
+    let recent_block = crate::p2p::RecentBlockSlot::default();
+    let p2p_chain_query: Arc<dyn bitcoin_rs_wire::ChainQuery> = Arc::new(
+        crate::p2p::ActiveChainQuery::new(
             chainstate.block_tree_reader(),
             chainstate.applied_tip_reader(),
             state.config().network,
@@ -760,13 +760,16 @@ pub(crate) fn start_node(
     signal.attach(&mining_control);
     signal.attach_sequence_wake(&sequence_wake);
     let gateway = state.mempool_gateway();
-    let tx_inventory: Arc<dyn bitcoin_rs_p2p::TxInventory> = gateway.clone();
-    let compact_hints: Arc<dyn bitcoin_rs_p2p::CompactBlockHints> = gateway.clone();
+    let node_tx_inv = Arc::new(crate::p2p::NodeTxInventory(gateway.clone()));
+    let tx_inventory: Arc<dyn bitcoin_rs_wire::TxInventory> =
+        Arc::new(crate::p2p::NodeTxInventory(gateway.clone()));
+    let compact_hints: Arc<dyn bitcoin_rs_wire::CompactBlockHints> =
+        Arc::new(crate::p2p::NodeTxInventory(gateway.clone()));
     let block_announcer = Arc::new(
-        bitcoin_rs_p2p::BlockAnnouncer::new(
+        crate::p2p::BlockAnnouncer::new(
             state.peer_table(),
             Arc::clone(&p2p_chain_query),
-            bitcoin_rs_p2p::BlockAnnounceConfig::default(),
+            crate::p2p::BlockAnnounceConfig::default(),
         )
         .with_ibd(state.ibd(), state.config().network)
         .with_recent_block(recent_block)
@@ -781,25 +784,38 @@ pub(crate) fn start_node(
         .set_pow_valid_block(pow_valid_hook)
         .map_err(|_| RunError::PowValidHookInstalled)?;
     if let Some(announce_rx) = state.take_block_announce_receiver() {
-        guard.services.block_announce = Some(bitcoin_rs_p2p::spawn_block_announce_worker(
+        guard.services.block_announce = Some(crate::p2p::spawn_block_announce_worker(
             Arc::clone(&block_announcer),
             announce_rx,
             state.shutdown_reader(),
         )?);
     }
-    let listener_extras = bitcoin_rs_p2p::ListenerExtras {
+    let tx_ingress: Arc<dyn bitcoin_rs_wire::listener::TxIngressObserver> =
+        Arc::new(crate::p2p::NodeTxIngress::new(
+            state.inbound_tx_sender(),
+            state.package_capacity(),
+            Arc::clone(&state.tx_policy),
+            Arc::clone(&node_tx_inv),
+            state.shutdown_reader(),
+        ));
+    let tx_policy = unsize_tx_policy(Arc::clone(&state.tx_policy));
+    let node_ibd: Arc<dyn bitcoin_rs_wire::listener::IbdState> =
+        Arc::new(crate::p2p::NodeIbd(state.ibd()));
+    let block_sync_obs = unsize_block_sync(Arc::clone(&peer_ready_sync));
+    let block_announcer_obs = unsize_block_announcer(Arc::clone(&block_announcer));
+    let listener_extras = bitcoin_rs_wire::ListenerExtras {
         tx_inventory: Some(tx_inventory),
         compact_hints: Some(compact_hints),
-        inbound_tx: Some(state.inbound_tx_sender()),
-        package_capacity: Some(state.package_capacity()),
-        ibd: Some((state.ibd(), state.config().network)),
-        block_sync: Some(Arc::clone(&peer_ready_sync)),
-        block_announcer: Some(block_announcer),
+        tx_ingress: Some(tx_ingress),
+        tx_policy: Some(tx_policy),
+        ibd: Some((node_ibd, state.config().network)),
+        block_sync: Some(block_sync_obs),
+        block_announcer: Some(block_announcer_obs),
     };
     let (relay_queue, relay_rx) =
-        bitcoin_rs_p2p::TxRelayQueue::new(bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY);
-    guard.services.tx_relay = Some(bitcoin_rs_p2p::spawn_tx_relay_worker(
-        bitcoin_rs_p2p::PeerRelaySink::new(state.peer_table())
+        crate::p2p::TxRelayQueue::new(crate::p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY);
+    guard.services.tx_relay = Some(crate::p2p::spawn_tx_relay_worker(
+        crate::p2p::PeerRelaySink::new(Arc::clone(&state.tx_policy))
             .with_ibd(state.ibd(), state.config().network),
         relay_rx,
         Arc::downgrade(&gateway),
@@ -819,7 +835,7 @@ pub(crate) fn start_node(
     gateway
         .attach_observer_leg(
             "tx-relay",
-            Arc::new(bitcoin_rs_p2p::LocalTxRelayObserver::new(
+            Arc::new(crate::p2p::LocalTxRelayObserver::new(
                 relay_queue,
                 Arc::downgrade(&gateway),
             )),
@@ -850,8 +866,8 @@ pub(crate) fn start_node(
     if let Some(pool) = guard.services.pool.as_mut() {
         pool.start()?;
     }
-    let peer_ready: Arc<dyn Fn(bitcoin_rs_p2p::PeerSource) + Send + Sync> =
-        Arc::new(move |source: bitcoin_rs_p2p::PeerSource| {
+    let peer_ready: Arc<dyn Fn(bitcoin_rs_wire::PeerSource) + Send + Sync> =
+        Arc::new(move |source: bitcoin_rs_wire::PeerSource| {
             peer_ready_sync.on_peer_ready(source);
         });
     state
@@ -941,5 +957,22 @@ fn cap_global_thread_pool() {
     }
 }
 
+fn unsize_tx_policy(
+    policy: Arc<crate::p2p::tx_policy::NodeTxPolicy>,
+) -> Arc<dyn bitcoin_rs_wire::listener::TxPolicyObserver> {
+    policy
+}
+
+fn unsize_block_sync(
+    sync: Arc<crate::BlockSync>,
+) -> Arc<dyn bitcoin_rs_wire::listener::BlockSyncObserver> {
+    sync
+}
+
+fn unsize_block_announcer(
+    announcer: Arc<crate::p2p::BlockAnnouncer>,
+) -> Arc<dyn bitcoin_rs_wire::listener::BlockAnnounceObserver> {
+    announcer
+}
 #[cfg(test)]
 mod tests;

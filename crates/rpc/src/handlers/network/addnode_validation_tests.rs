@@ -116,7 +116,7 @@ fn addnode_skips_queueing_while_network_is_inactive() {
     let ctx = Arc::new(Context::new());
     ctx.network.p2p.set_network_active(false);
 
-    let persisted = bitcoin_rs_p2p::PeerEndpoint::Ip(SocketAddr::from(([127, 0, 0, 1], 8333)));
+    let persisted = bitcoin_rs_wire::PeerEndpoint::Ip(SocketAddr::from(([127, 0, 0, 1], 8333)));
     let result = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]));
     assert!(result.is_ok());
     assert_eq!(ctx.network.p2p.added_nodes().as_slice(), &[persisted]);
@@ -135,18 +135,18 @@ fn addnode_add_persists_node() {
     assert!(result.is_null());
     assert_eq!(
         ctx.network.p2p.added_nodes().as_slice(),
-        &[bitcoin_rs_p2p::PeerEndpoint::from(([127, 0, 0, 1], 8333))]
+        &[bitcoin_rs_wire::PeerEndpoint::from(([127, 0, 0, 1], 8333))]
     );
 }
 
 #[test]
 fn addnode_returns_error_when_outbound_queue_is_full() {
-    let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
-        bitcoin_rs_p2p::P2pServiceConfig {
+    let p2p = Arc::new(bitcoin_rs_wire::P2pService::new(
+        bitcoin_rs_wire::P2pServiceConfig {
             outbound_queue_limit: 1,
-            ..bitcoin_rs_p2p::P2pServiceConfig::default()
+            ..bitcoin_rs_wire::P2pServiceConfig::default()
         },
-        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
+        bitcoin_rs_wire::LatchReader::fixture_never(),
     ));
     p2p.add_node_onetry(SocketAddr::from(([127, 0, 0, 1], 8333)).into())
         .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
@@ -161,12 +161,12 @@ fn addnode_returns_error_when_outbound_queue_is_full() {
 
 #[test]
 fn addnode_add_persists_when_outbound_queue_is_full() {
-    let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
-        bitcoin_rs_p2p::P2pServiceConfig {
+    let p2p = Arc::new(bitcoin_rs_wire::P2pService::new(
+        bitcoin_rs_wire::P2pServiceConfig {
             outbound_queue_limit: 1,
-            ..bitcoin_rs_p2p::P2pServiceConfig::default()
+            ..bitcoin_rs_wire::P2pServiceConfig::default()
         },
-        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
+        bitcoin_rs_wire::LatchReader::fixture_never(),
     ));
     p2p.add_node_onetry(SocketAddr::from(([127, 0, 0, 1], 8333)).into())
         .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
@@ -181,7 +181,7 @@ fn addnode_add_persists_when_outbound_queue_is_full() {
     let added = ctx.network.p2p.added_nodes();
     assert_eq!(
         added.as_slice(),
-        [bitcoin_rs_p2p::PeerEndpoint::from(([127, 0, 0, 2], 8333))]
+        [bitcoin_rs_wire::PeerEndpoint::from(([127, 0, 0, 2], 8333))]
     );
 }
 
@@ -217,7 +217,7 @@ fn disconnectnode_rejects_unconnected_address() {
 
 #[test]
 fn disconnectnode_cancels_lease_and_removes_peer() {
-    use bitcoin_rs_p2p::{PeerInfo, PeerLease};
+    use bitcoin_rs_wire::{PeerInfo, PeerLease};
     use crossbeam_channel::unbounded;
 
     let addr: SocketAddr = "127.0.0.1:8333".parse().expect("addr");
@@ -227,8 +227,8 @@ fn disconnectnode_cancels_lease_and_removes_peer() {
         relay_transactions: true,
         compact_block_relay: false,
         send_headers: false,
-        endpoint: Some(bitcoin_rs_p2p::PeerEndpoint::Ip(addr)),
-        network: bitcoin_rs_p2p::PeerEndpoint::Ip(addr).net(),
+        endpoint: Some(bitcoin_rs_wire::PeerEndpoint::Ip(addr)),
+        network: bitcoin_rs_wire::PeerEndpoint::Ip(addr).net(),
         addr: addr.into(),
         version: 70_016,
         services: 9,
@@ -237,19 +237,19 @@ fn disconnectnode_cancels_lease_and_removes_peer() {
         best_known_height: 0,
         conn_time: 0,
         inbound: false,
-        addr_bind: bitcoin_rs_p2p::TransportRemote::new(addr),
+        addr_bind: bitcoin_rs_wire::TransportRemote::new(addr),
         time_offset: 0,
-        counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
-        transport: bitcoin_rs_p2p::TransportProtocol::V1,
+        counters: Arc::new(bitcoin_rs_wire::PeerCounters::default()),
+        transport: bitcoin_rs_wire::TransportProtocol::V1,
     };
     let (tx, _rx) = unbounded();
     let lease = PeerLease::new(tx);
     ctx.network
         .peer_table
-        .register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr), lease.clone());
+        .register(bitcoin_rs_wire::PeerEndpoint::Ip(addr), lease.clone());
     ctx.network
         .peer_table
-        .publish_info(bitcoin_rs_p2p::PeerEndpoint::Ip(addr), &lease, info);
+        .publish_info(bitcoin_rs_wire::PeerEndpoint::Ip(addr), &lease, info);
     let ctx = Arc::new(ctx);
 
     let result = disconnectnode(&ctx, &json!([addr.to_string().as_str()]))
@@ -260,9 +260,9 @@ fn disconnectnode_cancels_lease_and_removes_peer() {
     assert_eq!(ctx.network.peer_table.infos(), []);
 }
 
-fn peer_info_at(addr: SocketAddr) -> bitcoin_rs_p2p::PeerInfo {
-    let endpoint = bitcoin_rs_p2p::PeerEndpoint::Ip(addr);
-    bitcoin_rs_p2p::PeerInfo {
+fn peer_info_at(addr: SocketAddr) -> bitcoin_rs_wire::PeerInfo {
+    let endpoint = bitcoin_rs_wire::PeerEndpoint::Ip(addr);
+    bitcoin_rs_wire::PeerInfo {
         wtxid_relay: false,
         relay_transactions: true,
         compact_block_relay: false,
@@ -277,25 +277,25 @@ fn peer_info_at(addr: SocketAddr) -> bitcoin_rs_p2p::PeerInfo {
         best_known_height: 0,
         conn_time: 0,
         inbound: false,
-        addr_bind: bitcoin_rs_p2p::TransportRemote::new(addr),
+        addr_bind: bitcoin_rs_wire::TransportRemote::new(addr),
         time_offset: 0,
-        counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
-        transport: bitcoin_rs_p2p::TransportProtocol::V1,
+        counters: Arc::new(bitcoin_rs_wire::PeerCounters::default()),
+        transport: bitcoin_rs_wire::TransportProtocol::V1,
     }
 }
 
-fn register_pending_peer(ctx: &Context, addr: SocketAddr) -> bitcoin_rs_p2p::PeerLease {
+fn register_pending_peer(ctx: &Context, addr: SocketAddr) -> bitcoin_rs_wire::PeerLease {
     let (tx, _rx) = crossbeam_channel::unbounded();
-    let lease = bitcoin_rs_p2p::PeerLease::new(tx);
+    let lease = bitcoin_rs_wire::PeerLease::new(tx);
     ctx.network
         .peer_table
-        .register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr), lease.clone());
+        .register(bitcoin_rs_wire::PeerEndpoint::Ip(addr), lease.clone());
     lease
 }
 
-fn register_peer(ctx: &Context, addr: SocketAddr) -> bitcoin_rs_p2p::PeerLease {
+fn register_peer(ctx: &Context, addr: SocketAddr) -> bitcoin_rs_wire::PeerLease {
     let lease = register_pending_peer(ctx, addr);
-    let endpoint = bitcoin_rs_p2p::PeerEndpoint::Ip(addr);
+    let endpoint = bitcoin_rs_wire::PeerEndpoint::Ip(addr);
     assert!(
         ctx.network
             .peer_table
@@ -506,7 +506,7 @@ fn disconnectnode_nodeid_never_disconnects_a_replacement_at_the_same_address()
 #[test]
 fn disconnectnode_nodeid_addresses_an_anonymous_inbound_session()
 -> Result<(), crate::test_error::TestError> {
-    use bitcoin_rs_p2p::{PeerInfo, PeerLease};
+    use bitcoin_rs_wire::{PeerInfo, PeerLease};
     use crossbeam_channel::unbounded;
 
     let ctx = Context::new();
@@ -518,7 +518,7 @@ fn disconnectnode_nodeid_addresses_an_anonymous_inbound_session()
         relay_transactions: true,
         compact_block_relay: false,
         send_headers: false,
-        addr: bitcoin_rs_p2p::PeerRemote::AnonymousTor(anon.connection_id()),
+        addr: bitcoin_rs_wire::PeerRemote::AnonymousTor(anon.connection_id()),
         endpoint: None,
         network: bitcoin_rs_consensus::primitives::NetworkLabel::Onion,
         version: 70_016,
@@ -528,10 +528,10 @@ fn disconnectnode_nodeid_addresses_an_anonymous_inbound_session()
         best_known_height: 0,
         conn_time: 0,
         inbound: true,
-        addr_bind: bitcoin_rs_p2p::TransportRemote::new("127.0.0.1:9000".parse()?),
+        addr_bind: bitcoin_rs_wire::TransportRemote::new("127.0.0.1:9000".parse()?),
         time_offset: 0,
-        counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
-        transport: bitcoin_rs_p2p::TransportProtocol::V1,
+        counters: Arc::new(bitcoin_rs_wire::PeerCounters::default()),
+        transport: bitcoin_rs_wire::TransportProtocol::V1,
     };
     let published = ctx
         .network
@@ -539,7 +539,7 @@ fn disconnectnode_nodeid_addresses_an_anonymous_inbound_session()
         .publish_info_unidentified(&anon, info);
     assert!(published);
     let node_id = anon.node_id();
-    let handle = bitcoin_rs_p2p::PeerRemote::AnonymousTor(anon.connection_id()).to_string();
+    let handle = bitcoin_rs_wire::PeerRemote::AnonymousTor(anon.connection_id()).to_string();
     let ctx = Arc::new(ctx);
 
     let peers = getpeerinfo(&ctx, &json!(null))?;
@@ -663,7 +663,7 @@ fn disconnectnode_address_only_ignores_a_session_still_handshaking()
     assert_eq!(ctx.network.peer_table.len(), 1);
 
     assert!(ctx.network.peer_table.publish_info(
-        bitcoin_rs_p2p::PeerEndpoint::Ip(addr),
+        bitcoin_rs_wire::PeerEndpoint::Ip(addr),
         &pending,
         peer_info_at(addr)
     ));

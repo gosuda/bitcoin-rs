@@ -315,7 +315,7 @@ generation is fixed for the whole transition rather than read from a
 snapshot that may have moved.
 
 ### Count-and-byte bound
-A window sized by whichever of a count cap and a byte cap binds first, because item size varies by orders of magnitude across the chain. The script window (`window_len`, `crates/execution/src/lib.rs`) and the download window's pending and staging budgets (`SyncBudget` in `crates/p2p/src/download_window.rs`) both use it. In the script window one block larger than the whole byte cap still goes through alone rather than stalling the chain.
+A window sized by whichever of a count cap and a byte cap binds first, because item size varies by orders of magnitude across the chain. The script window (`window_len`, `crates/execution/src/lib.rs`) and the download window's pending and staging budgets (`SyncBudget` in `crates/node/src/p2p/download_window.rs`) both use it. In the script window one block larger than the whole byte cap still goes through alone rather than stalling the chain.
 
 ## Chain state and reorg
 

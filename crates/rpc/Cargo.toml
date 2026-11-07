@@ -26,7 +26,7 @@ bitcoin-rs-execution.workspace = true
 bitcoin-rs-storage.workspace = true
 bitcoin-rs-projection.workspace = true
 bitcoin-rs-mempool.workspace = true
-bitcoin-rs-p2p.workspace = true
+bitcoin-rs-wire.workspace = true
 bitcoin-rs-mining.workspace = true
 bitcoin.workspace = true
 miniscript.workspace = true
@@ -47,12 +47,11 @@ mio.workspace = true
 zmq = { workspace = true, optional = true }
 
 [dev-dependencies]
-bitcoin-rs-storage = { workspace = true, default-features = false, features = ["test-seam"] }
+bitcoin-rs-storage = { workspace = true, default-features = false }
 bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }
-bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-wire = { workspace = true, features = ["test-seam"] }
 toml.workspace = true
 bitcoin-rs-e2e.workspace = true
-bitcoin-rs-execution = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-node = { workspace = true, default-features = false, features = ["test-seam"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }

@@ -14,14 +14,13 @@ libfuzzer-sys = "0.4"
 bitcoin = { version = ">=0.32.9, <0.33", default-features = false, features = [
     "std", "secp-recovery", "serde", "rand-std",
 ] }
-bitcoin-rs-p2p = { path = "../crates/p2p", default-features = false, features = ["fuzzing"] }
+bitcoin-rs-wire = { path = "../crates/wire", default-features = false, features = ["fuzzing"] }
 bitcoin-rs-consensus = { path = "../crates/consensus", default-features = false }
 bitcoin-rs-mempool = { path = "../crates/mempool", default-features = false }
 tempfile = "3"
 bitcoin-rs-projection = { path = "../crates/projection" }
 bitcoin-rs-rpc = { path = "../crates/rpc", default-features = false, features = ["test-seam"] }
 bitcoin-rs-storage = { path = "../crates/storage", default-features = false }
-bitcoin-rs-execution = { path = "../crates/execution", features = ["test-seam"] }
 sonic-rs = "0.5"
 miniscript = { version = ">=13, <14", default-features = false, features = ["std"] }
 [[bin]]

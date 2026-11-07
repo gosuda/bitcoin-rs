@@ -1,0 +1,197 @@
+use crate::feature::{FEATURE_VERSION, FeatureAnnouncement};
+use crate::packages::SendPackages;
+use crate::peer::{Peer, PeerState};
+use crate::wire::{Message, PeerError};
+
+pub fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerError> {
+    match message {
+        Message::Version(version) => receive_version(peer, version.clone()),
+        Message::Verack => receive_verack(peer),
+        Message::Feature(announcement) => receive_feature(peer, announcement),
+        Message::SendPackages(send_packages) => receive_send_packages(peer, *send_packages),
+        Message::SendHeaders => {
+            ensure_version_received(peer)?;
+            ensure_negotiating_or_ready(peer)?;
+            peer.capabilities.send_headers = true;
+            Ok(())
+        }
+        Message::SendAddrV2 => {
+            ensure_version_received(peer)?;
+            ensure_negotiating_or_ready(peer)?;
+            peer.capabilities.addr_v2 = true;
+            Ok(())
+        }
+        Message::WtxidRelay => {
+            ensure_version_received(peer)?;
+            if peer.state == PeerState::Ready {
+                return Ok(());
+            }
+            ensure_negotiating_or_ready(peer)?;
+            peer.wtxid_relay.mark_peer_supported();
+            Ok(())
+        }
+        Message::SendCmpct(send_cmpct) => {
+            ensure_version_received(peer)?;
+            ensure_negotiating_or_ready(peer)?;
+            peer.compact_blocks.record_remote_preference(send_cmpct);
+            Ok(())
+        }
+        Message::Addr(_)
+        | Message::Inv(_)
+        | Message::GetData(_)
+        | Message::NotFound(_)
+        | Message::GetBlocks(_)
+        | Message::GetHeaders(_)
+        | Message::MemPool
+        | Message::Tx(_)
+        | Message::Block(_)
+        | Message::BlockPayload(_)
+        | Message::Headers(_)
+        | Message::GetAddr
+        | Message::FeeFilter(_)
+        | Message::Ping(_)
+        | Message::Pong(_)
+        | Message::MerkleBlock(_)
+        | Message::FilterLoad(_)
+        | Message::FilterAdd(_)
+        | Message::FilterClear
+        | Message::GetCFilters(_)
+        | Message::CFilter(_)
+        | Message::GetCFHeaders(_)
+        | Message::CFHeaders(_)
+        | Message::GetCFCheckpt(_)
+        | Message::CFCheckpt(_)
+        | Message::CmpctBlock(_)
+        | Message::GetBlockTxn(_)
+        | Message::BlockTxn(_)
+        | Message::Alert(_)
+        | Message::Reject(_)
+        | Message::AddrV2(_)
+        | Message::AncPkgInfo(_)
+        | Message::GetPkgTxns(_)
+        | Message::PkgTxns(_)
+        | Message::PkgTxnsPayload(_)
+        | Message::StaleTip(_)
+        | Message::Unknown { .. } => require_ready(peer.state),
+    }
+}
+
+pub(crate) const fn require_ready(state: PeerState) -> Result<(), PeerError> {
+    if matches!(state, PeerState::Ready) {
+        Ok(())
+    } else {
+        Err(PeerError::Misbehavior(
+            "message received before handshake completed",
+        ))
+    }
+}
+
+fn receive_version<S>(
+    peer: &mut Peer<S>,
+    version: bitcoin::p2p::message_network::VersionMessage,
+) -> Result<(), PeerError> {
+    if peer.remote_version.is_some() {
+        return Err(PeerError::Misbehavior("duplicate version message"));
+    }
+    if peer
+        .inbound_handshake_nonces
+        .as_ref()
+        .is_some_and(|nonces| nonces.is_in_flight(version.nonce))
+    {
+        return Err(PeerError::SelfConnection);
+    }
+    if let Some(local_nonce) = peer.local_nonce {
+        if version.nonce == local_nonce && local_nonce != 0 {
+            return Err(PeerError::SelfConnection);
+        }
+    }
+    match peer.state {
+        PeerState::Disconnected | PeerState::VersionExchange | PeerState::Verack => {
+            peer.remote_version = Some(version);
+            if peer.received_verack {
+                peer.state = PeerState::Ready;
+            } else {
+                peer.state = PeerState::Verack;
+            }
+            Ok(())
+        }
+        PeerState::Ready | PeerState::Disconnecting => {
+            Err(PeerError::Misbehavior("duplicate version message"))
+        }
+    }
+}
+
+fn receive_feature<S>(
+    peer: &mut Peer<S>,
+    announcement: &FeatureAnnouncement,
+) -> Result<(), PeerError> {
+    if ensure_version_to_verack_window(peer)? < FEATURE_VERSION {
+        return Err(PeerError::Misbehavior(
+            "feature received from a peer below the feature protocol version",
+        ));
+    }
+    if announcement.is_supported() {
+        peer.remote_features
+            .entry(announcement.id.clone())
+            .or_insert_with(|| announcement.data.clone());
+    }
+    Ok(())
+}
+
+fn receive_send_packages<S>(
+    peer: &mut Peer<S>,
+    send_packages: SendPackages,
+) -> Result<(), PeerError> {
+    ensure_version_to_verack_window(peer)?;
+    peer.package_relay.record_remote(send_packages.versions);
+    Ok(())
+}
+
+fn ensure_version_to_verack_window<S>(peer: &Peer<S>) -> Result<u32, PeerError> {
+    let Some(remote_version) = peer.remote_version.as_ref() else {
+        return Err(PeerError::Misbehavior(
+            "negotiation message received before version",
+        ));
+    };
+    if peer.received_verack || !matches!(peer.state, PeerState::VersionExchange | PeerState::Verack)
+    {
+        return Err(PeerError::Misbehavior(
+            "negotiation message received outside the version-to-verack window",
+        ));
+    }
+    Ok(remote_version.version)
+}
+
+const fn receive_verack<S>(peer: &mut Peer<S>) -> Result<(), PeerError> {
+    if peer.remote_version.is_none() {
+        return Err(PeerError::Misbehavior("verack received before version"));
+    }
+    if peer.received_verack {
+        return Err(PeerError::Misbehavior("duplicate verack message"));
+    }
+    peer.received_verack = true;
+    peer.refresh_ready_state();
+    Ok(())
+}
+
+const fn ensure_version_received<S>(peer: &Peer<S>) -> Result<(), PeerError> {
+    if peer.remote_version.is_none() && !matches!(peer.state, PeerState::Ready) {
+        Err(PeerError::Misbehavior(
+            "negotiation message received before version",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+const fn ensure_negotiating_or_ready<S>(peer: &Peer<S>) -> Result<(), PeerError> {
+    match peer.state {
+        PeerState::VersionExchange | PeerState::Verack | PeerState::Ready => Ok(()),
+        PeerState::Disconnected | PeerState::Disconnecting => Err(PeerError::Misbehavior(
+            "feature negotiation outside handshake",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests;
