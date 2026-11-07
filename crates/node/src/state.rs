@@ -98,6 +98,9 @@ pub struct NodeState {
     block_announce_rx: Mutex<Option<crate::p2p::block_announce::BlockAnnounceReceiver>>,
     shutdown: Arc<bitcoin_rs_execution::chain::LatchWriter>,
     _p2p_shutdown_guard: bitcoin_rs_execution::chain::HookGuard,
+    block_memory: Arc<bitcoin_rs_wire::inbound::block_memory::BlockMemory>,
+    #[cfg(any(test, feature = "test-seam"))]
+    budget: Arc<crate::budget::NodeBudget>,
 }
 
 impl Drop for NodeState {
@@ -130,6 +133,17 @@ impl NodeState {
         &self.config.data_dir
     }
 
+    #[must_use]
+    pub fn block_memory(&self) -> Arc<bitcoin_rs_wire::inbound::block_memory::BlockMemory> {
+        Arc::clone(&self.block_memory)
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn budget(&self) -> Arc<crate::budget::NodeBudget> {
+        Arc::clone(&self.budget)
+    }
     #[cfg(test)]
     pub(crate) const fn resume_source(&self) -> ResumeSource {
         self.resume_source

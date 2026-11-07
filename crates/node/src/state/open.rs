@@ -705,9 +705,19 @@ impl NodeState {
             assumeutxo: Some(Arc::clone(&assumeutxo)),
             budget: Arc::clone(&budget),
         }));
-        if config.p2p.fast_sync {
-            sync.install_budget(fast_sync_budget(config.network));
-        }
+        let staged_cap = usize::try_from(budget.caps().staged_images).unwrap_or(usize::MAX);
+        let sync_budget = if config.p2p.fast_sync {
+            fast_sync_budget(config.network).with_byte_ceiling(staged_cap)
+        } else {
+            crate::p2p::default_sync_budget(config.network).with_byte_ceiling(staged_cap)
+        };
+        sync.install_budget(sync_budget);
+        let ingress_ledger = Arc::new(crate::budget::BudgetedIngressLedger::new(Arc::clone(
+            &budget,
+        )));
+        let block_memory = Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
+            ingress_ledger,
+        ));
         let prune_service = if config.storage.prune_target_mb > 0 {
             Some(storage.deferred.prune_service(
                 Arc::clone(&block_files),
@@ -781,6 +791,9 @@ impl NodeState {
             block_announce_rx: Mutex::new(Some(block_announce_rx)),
             shutdown,
             _p2p_shutdown_guard: p2p_shutdown_guard,
+            block_memory,
+            #[cfg(any(test, feature = "test-seam"))]
+            budget,
         })
     }
 }

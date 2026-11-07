@@ -328,13 +328,11 @@ impl NodeBudget {
         self.ledger.lock().ingress_refused
     }
 
-    #[cfg(test)]
     #[must_use]
     pub fn available_of_charges(&self, owner: BudgetOwner) -> u64 {
         self.ledger.lock().charges[owner.index()]
     }
 
-    #[cfg(test)]
     #[must_use]
     pub fn available_of_reservations(&self, owner: BudgetOwner) -> u64 {
         self.ledger.lock().reserved[owner.index()]
@@ -470,6 +468,10 @@ impl NodeBudget {
         self.released.notify_all();
         Ok(())
     }
+    pub fn wait_released(&self, timeout: Duration) {
+        let mut ledger = self.ledger.lock();
+        self.released.wait_for(&mut ledger, timeout);
+    }
 
     #[must_use]
     pub fn is_safe(&self) -> bool {
@@ -554,6 +556,50 @@ impl BudgetCharge for NodeBudget {
 
     fn available_bytes(&self, owner: BudgetOwner) -> u64 {
         self.available(owner)
+    }
+}
+
+pub struct BudgetedIngressLedger {
+    budget: Arc<NodeBudget>,
+}
+
+impl BudgetedIngressLedger {
+    #[must_use]
+    pub fn new(budget: Arc<NodeBudget>) -> Self {
+        Self { budget }
+    }
+}
+
+impl bitcoin_rs_wire::inbound::block_memory::IngressLedger for BudgetedIngressLedger {
+    fn capacity(&self) -> usize {
+        usize::try_from(self.budget.caps().staged_images).unwrap_or(usize::MAX)
+    }
+
+    fn try_take(&self, bytes: usize) -> bool {
+        let bytes_u64 = u64::try_from(bytes).unwrap_or(u64::MAX);
+        if self
+            .budget
+            .reserve(BudgetOwner::StagedImages, bytes_u64)
+            .is_ok()
+        {
+            if self
+                .budget
+                .allocate(BudgetOwner::StagedImages, bytes_u64)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn give_back(&self, bytes: usize) {
+        let bytes_u64 = u64::try_from(bytes).unwrap_or(0);
+        let _ = self.budget.release(BudgetOwner::StagedImages, bytes_u64);
+    }
+
+    fn wait_released(&self, timeout: Duration) {
+        self.budget.wait_released(timeout);
     }
 }
 

@@ -34,6 +34,14 @@ pub struct SyncBudget {
 }
 
 impl SyncBudget {
+    #[must_use]
+    pub fn with_byte_ceiling(mut self, ceiling: usize) -> Self {
+        self.max_pending_bytes = self.max_pending_bytes.min(ceiling);
+        self.max_received_bytes = self.max_received_bytes.min(ceiling);
+        self.max_retained_bytes = self.max_retained_bytes.min(ceiling);
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn with_pending_timeout_override(mut self, timeout: Duration) -> Self {
         self.pending_timeout_override = Some(timeout);

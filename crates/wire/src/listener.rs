@@ -167,6 +167,7 @@ pub struct ListenerExtras {
     pub ibd: Option<(Arc<dyn IbdState>, Network)>,
     pub block_sync: Option<Arc<dyn BlockSyncObserver>>,
     pub block_announcer: Option<Arc<dyn BlockAnnounceObserver>>,
+    pub block_memory: Option<Arc<crate::inbound::block_memory::BlockMemory>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -276,7 +277,7 @@ impl ConnectionShared {
             relay_offers: RelayOffers::default(),
             overlay: Arc::new(crate::overlay::OverlayTransport::new(Arc::default())),
             shared_outbound: Arc::new(crate::connection::SharedOutboundBudget::new()),
-            block_memory: Arc::default(),
+            block_memory: extras.block_memory.unwrap_or_default(),
             dial_routes: crate::DialRoutes::default(),
             #[cfg(test)]
             test_keepalive_intervals: std::sync::OnceLock::new(),

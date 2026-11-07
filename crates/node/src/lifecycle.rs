@@ -816,6 +816,7 @@ pub(crate) fn start_node(
         ibd: Some((node_ibd, state.config().network)),
         block_sync: Some(block_sync_obs),
         block_announcer: Some(block_announcer_obs),
+        block_memory: Some(state.block_memory()),
     };
     let (relay_queue, relay_rx) =
         crate::p2p::TxRelayQueue::new(crate::p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY);

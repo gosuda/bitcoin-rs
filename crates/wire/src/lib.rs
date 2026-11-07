@@ -22,6 +22,7 @@ pub mod feature;
 pub mod fsm;
 pub mod handshake;
 pub mod inbound;
+pub use inbound::block_memory;
 pub mod inv;
 pub mod listener;
 pub mod netgroup;
