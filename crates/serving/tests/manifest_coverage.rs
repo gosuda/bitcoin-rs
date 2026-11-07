@@ -214,6 +214,7 @@ fn esplora_extension_row_resolves_to_the_router() {
     );
 }
 
+// API-01
 #[test]
 fn manifest_has_no_duplicate_rows() {
     let mut seen = BTreeSet::new();

@@ -122,10 +122,6 @@ mod tests {
         DecodeError, Hash256, OutPoint, TxIn, TxOut, Txid, encode::consensus_bytes,
     };
 
-    use crate::primitives::test_error::TestError;
-
-    type Result<T, E = TestError> = std::result::Result<T, E>;
-
     fn native_tx() -> Tx {
         Tx {
             version: 2,

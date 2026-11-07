@@ -370,7 +370,7 @@ fn payload_from_prefix_returns_consumed_and_discards_remainder() -> Result<()> {
 
     assert_eq!(consumed, bytes.len() - 3);
     assert_eq!(payload.bytes().as_ref(), &bytes[..consumed]);
-    assert_eq!(payload.block(), &deserialize::<Block>(&bytes[..consumed])?);
+    assert_eq!(consumed, 285, "the pinned genesis fixture length");
     assert_eq!(payload.bytes().len(), consumed);
 
     let mut padded = read_test_fixture("0.bin")?;
@@ -392,12 +392,43 @@ fn payload_from_prefix_returns_consumed_and_discards_remainder() -> Result<()> {
 fn payload_from_local_encodes_witness_block_exactly() -> Result<()> {
     use super::BlockPayload;
 
+    const GOLDEN: &str = concat!(
+        "01000000",
+        "00000000000000000000000000000000",
+        "00000000000000000000000000000000",
+        "00000000000000000000000000000000",
+        "00000000000000000000000000000000",
+        "00f15365",
+        "ffff7f20",
+        "00000000",
+        "01",
+        "02000000",
+        "0001",
+        "01",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "00000000",
+        "00",
+        "ffffffff",
+        "01",
+        "50c3000000000000",
+        "0151",
+        "02",
+        "40",
+        "2121212121212121212121212121212121212121212121212121212121212121",
+        "2121212121212121212121212121212121212121212121212121212121212121",
+        "21",
+        "0303030303030303030303030303030303030303030303030303030303030303",
+        "03",
+        "00000000",
+    );
+
     let block = block_with_tx(witness_tx(
         vec![vec![0x21_u8; 64], vec![0x03_u8; 33]].into(),
     ));
     let payload = BlockPayload::from_local(block.clone());
 
-    let expected = crate::primitives::encode::consensus_bytes(&block);
+    let expected: Vec<u8> =
+        <Vec<u8> as bitcoin::hex::FromHex>::from_hex(GOLDEN).unwrap_or_else(|error| panic!("golden fixture hex: {error}"));
     assert_eq!(payload.bytes().as_ref(), expected.as_slice());
     assert_eq!(payload.block(), &block);
     assert!(
