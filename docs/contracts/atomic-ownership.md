@@ -325,3 +325,58 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 - A snapshot does not claim that historical transaction bodies are available.
 - Trusted index records cannot supply a missing raw transaction body.
+
+### `BUD-01`: Upfront ingress resource reservation
+
+- Ingress processing must reserve resources before materializing variable-sized data structures.
+
+### `BUD-02`: Unified accounting model
+
+- Peer quotas, block-byte reservations, and execution-work limits must share one node-wide accounting model.
+
+### `BUD-03`: Resource refusal isolation from consensus
+
+- A refusal caused by resource limits must not be recorded as a consensus-invalid block.
+
+### `BUD-04`: Bounded scheduling domains
+
+- CPU work must use one bounded scheduling domain.
+- Blocking storage operations must be isolated from verification workers.
+- The node must not nest worker thread pools or construct per-input task graphs.
+
+### `BUD-05`: Reserved foreground progress
+
+- Foreground chain progress must have reserved execution capacity.
+- Historical validation and background projections receive bounded, fair service.
+
+### `BUD-06`: Unified retained memory budget
+
+- One memory budget must cover all retained allocations: block images and layouts, resolved prevouts, window workspaces, verification scratch, coin cache, projection buffers, query snapshots, and backend caches.
+- A shared buffer is charged once to its owner.
+- The libmdbx storage engine relies on the operating system page cache, so its cache memory is accounted by the kernel rather than this budget; the node budget records this engine limitation as an explicit exception to backend cache tracking.
+
+### `BUD-07`: Work refusal on budget exhaustion
+
+- When a resource budget is exhausted, the owner must release resources or refuse new work.
+- The component must not add unbounded memory buffering.
+
+### `MPS-01`: Mempool dependency graph and settlement
+
+- The mempool must own its transaction dependency graph and policy state.
+- A chain commit must supply ordered transaction and spend effects to settle mempool transactions.
+
+### `MPS-02`: Shared immutable transaction data
+
+- Transaction bytes and computed cryptographic facts must be shared immutable objects between consensus and the mempool.
+- Consensus checks and mempool admission policies remain distinct.
+
+### `MPS-03`: Atomic mining template views
+
+- Mining template generation must consume a matched pair: one applied epoch and one settled mempool generation.
+- A template must never combine a new chain state with an obsolete dependency graph.
+
+### `MPS-04`: Bounded event delivery
+
+- Notifications describe committed blocks.
+- Notifications do not guarantee availability of intermediate UTXO states.
+- Event observers must use bounded delivery channels with explicit gap detection.

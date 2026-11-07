@@ -9,4 +9,5 @@ lean_lib Proofs where
     .submodules `Mempool, .submodules `ChainAdmission, .submodules `PeerLeases,
     .submodules `ProjectionMining, .submodules `P2p, .submodules `Storage,
     .submodules `IndexOpen, .submodules `ProjectionIndex,
-    .submodules `ServingView, .submodules `SnapshotBootstrap]
+    .submodules `ServingView, .submodules `SnapshotBootstrap,
+    .submodules `NodeBudget, .submodules `MempoolSettlement]
