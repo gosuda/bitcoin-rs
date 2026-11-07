@@ -1,7 +1,5 @@
 pub mod bulk_builder;
 pub mod format;
-#[cfg(any(test, verification, kani))]
-pub mod proofs;
 #[cfg(test)]
 mod tests;
 
