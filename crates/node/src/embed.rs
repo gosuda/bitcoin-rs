@@ -90,6 +90,11 @@ impl Node {
             .import_manifest(path)
             .map_err(|error| NodeError::Snapshot(error.to_string()))
     }
+    pub fn three_positions(&self) -> Result<crate::snapshot::ThreePositions, NodeError> {
+        self.state
+            .three_positions()
+            .map_err(|error| NodeError::Snapshot(error.to_string()))
+    }
 
     #[must_use]
     pub fn capabilities(&self) -> CapabilitySnapshot {

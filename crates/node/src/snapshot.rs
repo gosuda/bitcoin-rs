@@ -57,7 +57,6 @@ pub(crate) struct SnapshotControl {
     script_live_seed: Option<Arc<bitcoin_rs_projection::snapshot_seed::ScriptLiveSeedState>>,
     pub(crate) derived_index_runtime:
         Option<Arc<bitcoin_rs_projection::runtime::DerivedIndexRuntime>>,
-    #[expect(dead_code, reason = "consumed by three_positions in SNP-09")]
     pub(crate) derived_index_status:
         Option<Arc<bitcoin_rs_projection::runtime::DerivedIndexCapability>>,
     import: Mutex<()>,
@@ -777,6 +776,41 @@ impl SnapshotControl {
             }
         }
     }
+    pub(crate) fn three_positions(&self) -> Result<ThreePositions, SnapshotControlError> {
+        let active_chain_height = self
+            .chainstate
+            .applied_tip_snapshot()
+            .map_or(0, |tip| tip.height);
+        let status = self
+            .manager
+            .status()
+            .map_err(|error| SnapshotControlError::Failed(error.to_string()))?;
+        let historical_validation_height = match status {
+            AssumeUtxoDiskStatus::Validating {
+                historical_height, ..
+            } => historical_height,
+            AssumeUtxoDiskStatus::Finalized { base_height, .. } => base_height,
+            _ => 0,
+        };
+        let projection_coverage = self
+            .derived_index_status
+            .as_ref()
+            .and_then(|status| status.coverage_height());
+        Ok(ThreePositions {
+            active_chain_height,
+            historical_validation_height,
+            projection_coverage,
+        })
+    }
+}
+
+/// SNP-09: three independent reported positions: active-chain application,
+/// historical verification progress, and projection coverage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreePositions {
+    pub active_chain_height: u32,
+    pub historical_validation_height: u32,
+    pub projection_coverage: Option<u32>,
 }
 
 fn micros(elapsed: Duration) -> u64 {

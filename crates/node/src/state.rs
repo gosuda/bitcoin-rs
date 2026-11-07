@@ -344,6 +344,15 @@ impl NodeState {
         self.snapshots.import_manifest(path.as_ref())
     }
 
+    pub fn three_positions(
+        &self,
+    ) -> core::result::Result<
+        crate::snapshot::ThreePositions,
+        bitcoin_rs_serving::context::SnapshotControlError,
+    > {
+        self.snapshots.three_positions()
+    }
+
     #[must_use]
     pub fn derived_index_query(
         &self,

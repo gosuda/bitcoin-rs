@@ -79,7 +79,7 @@ pub use chain_feed::{
 };
 pub use embed::{Node, NodeError};
 
-pub use snapshot::{SnapshotImport, SnapshotImportError};
+pub use snapshot::{SnapshotImport, SnapshotImportError, ThreePositions};
 pub use state::{DataDirLockError, open::NodeOpenError, open::StartupVerificationPaths};
 
 pub use mining::MiningCoordinator;

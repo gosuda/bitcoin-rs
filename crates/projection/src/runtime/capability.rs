@@ -147,6 +147,17 @@ impl DerivedIndexCapability {
             }
         }
     }
+    #[must_use]
+    pub fn coverage_height(&self) -> Option<u32> {
+        let lifecycle = self.lifecycle.as_ref()?.load();
+        let engine = match &**lifecycle {
+            DerivedIndexLifecycle::Serving(engine) => engine,
+            _ => return None,
+        };
+        Self::progress(engine, self.enabled)
+            .ok()
+            .map(|progress| progress.processed_height)
+    }
 }
 
 impl DerivedIndexCapabilitySource for DerivedIndexCapability {
@@ -159,5 +170,9 @@ impl DerivedIndexCapabilitySource for DerivedIndexCapability {
             _ => CapabilityState::Disabled,
         };
         derived_index_status(enabled, state)
+    }
+
+    fn coverage_height(&self) -> Option<u32> {
+        self.coverage_height()
     }
 }

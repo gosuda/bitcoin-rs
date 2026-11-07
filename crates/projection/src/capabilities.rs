@@ -78,6 +78,10 @@ pub struct CapabilitySnapshot {
 
 pub trait DerivedIndexCapabilitySource: Send + Sync {
     fn capability(&self) -> CapabilityStatus;
+
+    fn coverage_height(&self) -> Option<u32> {
+        None
+    }
 }
 
 #[must_use]

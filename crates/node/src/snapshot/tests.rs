@@ -26,6 +26,12 @@ impl From<SnapshotExportError> for TestError {
     }
 }
 
+impl From<SnapshotControlError> for TestError {
+    fn from(error: SnapshotControlError) -> Self {
+        Self::Io(std::io::Error::other(error))
+    }
+}
+
 #[test]
 fn active_origin_survives_failure_and_validated_provenance_survives_finalization() {
     let base = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[7; 32]);
@@ -1083,6 +1089,64 @@ fn manifest_with_invalid_index_commitment_rejects_and_keeps_coin_store_unpublish
         .utxo()
         .with_stable_view(|view| Ok::<_, TestError>(view.len()))?;
     assert_eq!(utxo_len, 0);
+
+    Ok(())
+}
+
+// SNP-09
+#[test]
+fn three_positions_move_independently() -> Result<(), TestError> {
+    let pinned = regtest_pin()?;
+    let dir = tempfile::tempdir()?;
+    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let core_bytes = std::fs::read(&core_path)?;
+    let manifest_path = write_valid_manifest(dir.path(), pinned, &core_bytes)?;
+
+    state.import_manifest(&manifest_path)?;
+    let p0 = state.three_positions()?;
+    assert_eq!(p0.active_chain_height, 200);
+    assert_eq!(p0.historical_validation_height, 0);
+    assert_ne!(p0.active_chain_height, p0.historical_validation_height);
+
+    let child = bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(
+        bitcoin_rs_consensus::primitives::BlockHash::from(pinned.block_hash),
+        201,
+    )?;
+    state.chainstate().admit_headers(&[child.header])?;
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+        child,
+    ))?;
+
+    let p1 = state.three_positions()?;
+    assert_eq!(p1.active_chain_height, 201);
+    assert_eq!(p1.historical_validation_height, 0);
+    assert_ne!(p1.active_chain_height, p0.active_chain_height);
+    assert_eq!(
+        p1.historical_validation_height,
+        p0.historical_validation_height
+    );
+
+    let genesis =
+        bitcoin_rs_consensus::primitives::BlockImage::from_local(Network::Regtest.genesis_block());
+    state.snapshots.manager.step_historical(&genesis)?;
+
+    let raw: Vec<String> = sonic_rs::from_str(include_str!(
+        "../../../storage/tests/fixtures/core-v2/blocks200.json"
+    ))?;
+    let block1: bitcoin::Block = bitcoin::consensus::encode::deserialize_hex(&raw[0])?;
+    let block1_image = bitcoin_rs_consensus::primitives::BlockImage::from_raw(bytes::Bytes::from(
+        bitcoin::consensus::serialize(&block1),
+    ))?;
+    state.snapshots.manager.step_historical(&block1_image)?;
+
+    let p2 = state.three_positions()?;
+    assert_eq!(p2.active_chain_height, 201);
+    assert_eq!(p2.historical_validation_height, 1);
+    assert_eq!(p2.active_chain_height, p1.active_chain_height);
+    assert_ne!(
+        p2.historical_validation_height,
+        p1.historical_validation_height
+    );
 
     Ok(())
 }
