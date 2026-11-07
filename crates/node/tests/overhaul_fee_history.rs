@@ -7,12 +7,12 @@ use bitcoin_rs_node::test_support::TestError;
 type Result<T, E = TestError> = core::result::Result<T, E>;
 
 use crate::support::{p2sh_true_output, p2sh_true_spend_script_sig, parent_txid};
-use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness, unix_time_secs,
 };
 use bitcoin_rs_consensus::script::push_int;
+use bitcoin_rs_execution::chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_mempool::{AdmissionOrigin, FeeEstimator, SubmitOutcome};
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, NodeConfig};

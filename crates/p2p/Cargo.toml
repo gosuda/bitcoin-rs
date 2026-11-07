@@ -33,8 +33,7 @@ default = ["overlay"]
 
 [dependencies]
 bitcoin-rs-consensus.workspace = true
-bitcoin-rs-chain.workspace = true
-bitcoin-rs-chainstate = { workspace = true, default-features = false }
+bitcoin-rs-execution = { workspace = true, default-features = false }
 bitcoin-rs-mempool.workspace = true
 bitcoin-rs-storage = { workspace = true, default-features = false }
 bitcoin-rs-index.workspace = true
@@ -60,7 +59,7 @@ hkdf.workspace = true
 rustix = { workspace = true, features = ["fs", "net"] }
 
 [dev-dependencies]
-bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-execution = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 proptest.workspace = true
 proptest-state-machine.workspace = true

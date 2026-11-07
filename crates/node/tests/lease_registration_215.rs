@@ -2,8 +2,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::BlockTree;
-use bitcoin_rs_chainstate::Chainstate;
+use bitcoin_rs_execution::Chainstate;
+use bitcoin_rs_execution::chain::BlockTree;
 use bitcoin_rs_node::{BlockSync, Network};
 use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable, QueuedFrame};
 use bitcoin_rs_storage::utxo::UtxoSet;
@@ -27,7 +27,9 @@ fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
         block_tree,
         Arc::new(utxo),
         coin_stats,
-        Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
+        Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
+            0,
+        )),
     );
     let ibd = handles.ibd_latch();
     bitcoin_rs_node::sync::block_sync(

@@ -40,7 +40,7 @@ enum CancellationMode {
 }
 
 fn check_scan_cancellation(mode: CancellationMode) -> TestResult {
-    let transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let context = Arc::new(Context::new().with_chain_transition(transition.clone()));
     let handler = Arc::new(Handler::new(Arc::clone(&context)));
     let server = RpcServer::bind(
@@ -52,7 +52,7 @@ fn check_scan_cancellation(mode: CancellationMode) -> TestResult {
         false,
     )?;
     let address = server.local_addr()?;
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     let flag = shutdown.reader();
     let serving = std::thread::spawn(move || server.serve_with_shutdown(flag));
     let mut control = Connection::new(address);

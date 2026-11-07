@@ -8,15 +8,15 @@ use dependency_graph::WorkspaceGraph;
 
 const READ_CONTROL: &str = r"
 use std::sync::Arc;
-use bitcoin_rs_chain::{BlockTreeReader, TipReader, TipSnapshot};
-use bitcoin_rs_chainstate::{Chainstate, ChainstateSnapshot};
+use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader, TipSnapshot};
+use bitcoin_rs_execution::{Chainstate, ChainstateSnapshot};
 use bitcoin_rs_p2p::sync::SyncChain;
 use bitcoin_rs_p2p::sync::chain::{ReorgError, HistoricalAdvance, WindowApplyDisposition};
 
 pub fn sync_outcomes(
-    branch: bitcoin_rs_chainstate::reorg::ReorgError,
-    historical: bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance,
-    disposition: bitcoin_rs_chainstate::WindowApplyDisposition,
+    branch: bitcoin_rs_execution::reorg::ReorgError,
+    historical: bitcoin_rs_execution::assumeutxo::HistoricalAdvance,
+    disposition: bitcoin_rs_execution::WindowApplyDisposition,
 ) -> (ReorgError, HistoricalAdvance, WindowApplyDisposition) {
     (branch, historical, disposition)
 }
@@ -144,7 +144,7 @@ fn fixture_owners_expose_no_production_injection_or_synthetic_constructors() -> 
             "arm_persist_fault",
         ),
         (
-            "pub fn denied() { let _ = bitcoin_rs_chainstate::Chainstate::new; }",
+            "pub fn denied() { let _ = bitcoin_rs_execution::Chainstate::new; }",
             &["E0599"][..],
             "new",
         ),

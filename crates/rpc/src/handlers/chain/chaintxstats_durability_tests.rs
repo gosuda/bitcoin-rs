@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
+use bitcoin_rs_execution::chain::{NodeStatus, TipSnapshot};
 use sonic_rs::{JsonValueTrait, json};
 
 use super::*;
@@ -32,8 +32,11 @@ pub(super) fn insert_counted_chain(ctx: &Context, times: &[u32], counts: &[u64])
         let id = tree
             .insert_node(parent, header, NodeStatus::Active)
             .unwrap_or_else(|err| panic!("insert {height}: {err}"));
-        tree.restore_chain_tx_count(id, bitcoin_rs_chain::ChainTxCount::established(count))
-            .unwrap_or_else(|err| panic!("count {height}: {err}"));
+        tree.restore_chain_tx_count(
+            id,
+            bitcoin_rs_execution::chain::ChainTxCount::established(count),
+        )
+        .unwrap_or_else(|err| panic!("count {height}: {err}"));
         parent = Some(id);
         let node = tree
             .node(id)
@@ -300,8 +303,11 @@ fn reorg_fixture(ctx: &Context) -> (Hash256, Hash256, TipSnapshot) {
     let genesis_id = tree
         .insert_node(None, genesis, NodeStatus::Active)
         .unwrap_or_else(|err| panic!("genesis: {err}"));
-    tree.restore_chain_tx_count(genesis_id, bitcoin_rs_chain::ChainTxCount::established(1))
-        .unwrap_or_else(|err| panic!("genesis count: {err}"));
+    tree.restore_chain_tx_count(
+        genesis_id,
+        bitcoin_rs_execution::chain::ChainTxCount::established(1),
+    )
+    .unwrap_or_else(|err| panic!("genesis count: {err}"));
     let lost = Header {
         version: 1,
         prev_blockhash: genesis.compute_hash(),
@@ -313,8 +319,11 @@ fn reorg_fixture(ctx: &Context) -> (Hash256, Hash256, TipSnapshot) {
     let lost_id = tree
         .insert_node(Some(genesis_id), lost, NodeStatus::HeaderValid)
         .unwrap_or_else(|err| panic!("lost: {err}"));
-    tree.restore_chain_tx_count(lost_id, bitcoin_rs_chain::ChainTxCount::established(3))
-        .unwrap_or_else(|err| panic!("lost count: {err}"));
+    tree.restore_chain_tx_count(
+        lost_id,
+        bitcoin_rs_execution::chain::ChainTxCount::established(3),
+    )
+    .unwrap_or_else(|err| panic!("lost count: {err}"));
     let won = Header {
         version: 1,
         prev_blockhash: genesis.compute_hash(),
@@ -326,8 +335,11 @@ fn reorg_fixture(ctx: &Context) -> (Hash256, Hash256, TipSnapshot) {
     let won_id = tree
         .insert_node(Some(genesis_id), won, NodeStatus::Active)
         .unwrap_or_else(|err| panic!("won: {err}"));
-    tree.restore_chain_tx_count(won_id, bitcoin_rs_chain::ChainTxCount::established(8))
-        .unwrap_or_else(|err| panic!("won count: {err}"));
+    tree.restore_chain_tx_count(
+        won_id,
+        bitcoin_rs_execution::chain::ChainTxCount::established(8),
+    )
+    .unwrap_or_else(|err| panic!("won count: {err}"));
     let child = Header {
         version: 1,
         prev_blockhash: won.compute_hash(),
@@ -339,8 +351,11 @@ fn reorg_fixture(ctx: &Context) -> (Hash256, Hash256, TipSnapshot) {
     let child_id = tree
         .insert_node(Some(won_id), child, NodeStatus::Active)
         .unwrap_or_else(|err| panic!("child: {err}"));
-    tree.restore_chain_tx_count(child_id, bitcoin_rs_chain::ChainTxCount::established(15))
-        .unwrap_or_else(|err| panic!("child count: {err}"));
+    tree.restore_chain_tx_count(
+        child_id,
+        bitcoin_rs_execution::chain::ChainTxCount::established(15),
+    )
+    .unwrap_or_else(|err| panic!("child count: {err}"));
     let lost_hash = tree
         .node(lost_id)
         .unwrap_or_else(|err| panic!("lost node: {err}"))

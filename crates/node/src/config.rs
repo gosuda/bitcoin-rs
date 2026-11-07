@@ -2,9 +2,9 @@ use crate::options::{
     ChainstateJournalOverrides, IndexBundleDirError, OptionParseError, UserConfig,
     check_index_bundle_path,
 };
-use bitcoin_rs_chainstate::{ChainstateJournalConfig, ValidationMode};
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::primitives::Network;
+use bitcoin_rs_execution::{ChainstateJournalConfig, ValidationMode};
 use bitcoin_rs_index::IndexCapabilities;
 #[cfg(feature = "pool")]
 use bitcoin_rs_mining::pool::ledger as pool_ledger;

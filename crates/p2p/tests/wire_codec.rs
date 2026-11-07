@@ -340,7 +340,9 @@ fn compact_block_header() -> Header {
         prev_blockhash: BlockHash::all_zeros(),
         merkle_root: TxMerkleNode::all_zeros(),
         time: 0,
-        bits: CompactTarget::from_consensus(bitcoin_rs_chain::regtest_fixture::REGTEST_BITS),
+        bits: CompactTarget::from_consensus(
+            bitcoin_rs_execution::chain::regtest_fixture::REGTEST_BITS,
+        ),
         nonce: 0,
     }
 }

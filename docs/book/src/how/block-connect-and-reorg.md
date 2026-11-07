@@ -2,7 +2,7 @@
 
 The connect path turns admitted blocks into a durably committed chain tip: it checks each block in a fixed order, groups the writes of consecutive blocks into one commit, and keeps an undo record so any later reorg can roll back. Reorgs and invalidations run through the same machinery in reverse. Read [how/validation.md](validation.md) for the script rules and [run/sync-and-recovery.md](../run/sync-and-recovery.md) for what the operator sees; this page is the code-level view.
 
-The whole path lives in `crates/chainstate/src`: `window.rs` owns the apply window and error classification, `connect.rs` owns per-block checks and commit, `reorg.rs` and `disconnect.rs` own rollback, `durable.rs` owns the durable head. The contracts own the guarantees: `SYNC-05` (commit-before-publish), `SYNC-04` (failure classification), `RCV-04` to `RCV-08` (recovery mechanics) in `docs/contracts/synchronization.md`.
+The whole path lives in `crates/execution/src`: `window.rs` owns the apply window and error classification, `connect.rs` owns per-block checks and commit, `reorg.rs` and `disconnect.rs` own rollback, `durable.rs` owns the durable head. The contracts own the guarantees: `SYNC-05` (commit-before-publish), `SYNC-04` (failure classification), `RCV-04` to `RCV-08` (recovery mechanics) in `docs/contracts/synchronization.md`.
 
 ## The apply window
 
@@ -41,7 +41,7 @@ The timing breakdown lines `apply_block: profile`, `apply_block: tail begin`, an
 
 BIP30 forbids a second live transaction with a txid that already has live outputs; BIP34 requires the coinbase scriptSig to start with the block height. `check_bip30_and_bip34` (`connect.rs:1262`) implements both in one pass:
 
-- `bip30_duplicate_scan_required` (`crates/chain/src/deployment.rs:299`) decides whether a live-output scan is needed at all. The scan runs unless the code can cheaply prove duplicates are impossible: it is required above `BIP34_IMPLIES_BIP30_LIMIT = 1_983_702` (`crates/consensus/src/bip30.rs:5`), below BIP34 activation, and whenever there is no known activation hash, no previous tip, or the ancestor at the activation height does not match the network's expected activation hash (`deployment.rs:305` to `deployment.rs:326`). Regtest has no activation hash (`crates/consensus/src/primitives/network/tests.rs:118`), so the scan always runs there; mainnet can skip it once BIP34 is active and the ancestor is confirmed.
+- `bip30_duplicate_scan_required` (`crates/execution/src/chain/deployment.rs:299`) decides whether a live-output scan is needed at all. The scan runs unless the code can cheaply prove duplicates are impossible: it is required above `BIP34_IMPLIES_BIP30_LIMIT = 1_983_702` (`crates/consensus/src/bip30.rs:5`), below BIP34 activation, and whenever there is no known activation hash, no previous tip, or the ancestor at the activation height does not match the network's expected activation hash (`deployment.rs:305` to `deployment.rs:326`). Regtest has no activation hash (`crates/consensus/src/primitives/network/tests.rs:118`), so the scan always runs there; mainnet can skip it once BIP34 is active and the ancestor is confirmed.
 - When scanning, `handles.utxo.has_live_outputs_for_txid` flags any duplicate; only then does `bip30::check_duplicate_txid` (`crates/consensus/src/bip30.rs:26`) run, which exempts exactly the two historical duplicate-coinbase blocks at heights 91,842 and 91,880 (`BIP30_DUPLICATE_TXID_EXCEPTIONS`, `bip30.rs:7`).
 - `check_bip34` (`connect.rs:1291`) runs when `network.is_bip34_active(height)` and delegates to `bip34::check_bip34` (`crates/consensus/src/bip34.rs:5`), which minimally-encodes the height and compares it to the coinbase scriptSig prefix.
 
@@ -49,11 +49,11 @@ Error precedence here is fixed by call order: the early `check_bip34` at `connec
 
 ## Undo records
 
-Every committed block produces an `UndoRecord`: the prevouts its inputs spent, built inside `build_block_changes_checked` (`connect.rs:879`). The window stage holds it as `PendingBlockCommit.undo_record` (`window.rs:31`) and `flush` writes all undo rows in the same `CommitRecords` batch as the body rows and durable-head facts (`window.rs:97`). Disconnects load the record back with `load_block_undo_for_block` and replay it through `rollback_block` (`disconnect.rs:80`). A disconnect whose removed outpoints differ from the stored undo fails (`disconnect_refuses_undo_whose_removed_outpoint_differs_from_the_block`, `crates/chainstate/src/tests/utxo_integrity_tests.rs:170`); a missing or truncated undo keeps state and refuses (`utxo_integrity_tests.rs:235`).
+Every committed block produces an `UndoRecord`: the prevouts its inputs spent, built inside `build_block_changes_checked` (`connect.rs:879`). The window stage holds it as `PendingBlockCommit.undo_record` (`window.rs:31`) and `flush` writes all undo rows in the same `CommitRecords` batch as the body rows and durable-head facts (`window.rs:97`). Disconnects load the record back with `load_block_undo_for_block` and replay it through `rollback_block` (`disconnect.rs:80`). A disconnect whose removed outpoints differ from the stored undo fails (`disconnect_refuses_undo_whose_removed_outpoint_differs_from_the_block`, `crates/execution/src/tests/utxo_integrity_tests.rs:170`); a missing or truncated undo keeps state and refuses (`utxo_integrity_tests.rs:235`).
 
 ## Reorg attempt and settlement
 
-A reorg is a planned disconnect-then-connect. `plan_reorg` (`crates/chain/src/reorg.rs:9`) walks both tips back to the common ancestor and returns `ReorgPlan { disconnect, connect }`. `switch_to_branch` (`crates/chainstate/src/reorg.rs:389`) executes it:
+A reorg is a planned disconnect-then-connect. `plan_reorg` (`crates/execution/src/chain/reorg.rs:9`) walks both tips back to the common ancestor and returns `ReorgPlan { disconnect, connect }`. `switch_to_branch` (`crates/execution/src/reorg.rs:389`) executes it:
 
 1. Plan (`current_reorg_plan`, `reorg.rs:885`), prepare branches (`prepare_branches`, `reorg.rs:350`): resolve both node lists, take a retention lease down to the lowest height touched (`retention_lease_for`, `reorg.rs:312`), and load the connect-side bodies. The streaming windows hold at most 8 disconnect bodies and 8 connect bodies in memory (`DISCONNECT_STREAM_WINDOW` and `CONNECT_STREAM_WINDOW`, `reorg.rs:11`). A missing connect body stops the plan with `ReorgError::MissingBody { hash, height }` before any mutation.
 2. Lock the transition and re-plan. If the plan changed under the lock, drop it and loop (`reorg.rs:432`).
@@ -65,7 +65,7 @@ A reorg is a planned disconnect-then-connect. `plan_reorg` (`crates/chain/src/re
 
 ## Fatal versus Operational settlement
 
-`classify_apply_error` (`window.rs:343`) sorts every `ApplyError` into one of four dispositions (`WindowApplyDisposition`, `crates/chainstate/src/lib.rs:1318`):
+`classify_apply_error` (`window.rs:343`) sorts every `ApplyError` into one of four dispositions (`WindowApplyDisposition`, `crates/execution/src/lib.rs:1318`):
 
 | Disposition | Cause class | What the node does |
 |---|---|---|
@@ -82,11 +82,11 @@ The window treats them asymmetrically (`apply_window_admitted`, `window.rs:189`)
 
 | Invariant | Test | Location |
 |---|---|---|
-| A window commits every block in order | `a_window_commits_every_block_in_order` | `crates/chainstate/src/tests/window_pipeline_tests.rs:188` |
-| Duplicate live txid refused at any height | `a_block_with_a_duplicate_live_txid_is_refused_at_any_height` | `crates/chainstate/src/tests/utxo_integrity_tests.rs:283` |
-| Disconnect refuses a mismatching undo | `disconnect_refuses_undo_whose_removed_outpoint_differs_from_the_block` | `crates/chainstate/src/tests/utxo_integrity_tests.rs:170` |
-| Reorg below the retained undo window refuses before mutation | `a_reorg_below_the_retained_undo_window_refuses_before_mutation` | `crates/chainstate/src/tests/utxo_integrity_tests.rs:348` |
-| Fatal pre-transition settlement closes admission | `fatal_pretransition_settlement_closes_admission` | `crates/chainstate/src/reorg.rs:956` |
+| A window commits every block in order | `a_window_commits_every_block_in_order` | `crates/execution/src/tests/window_pipeline_tests.rs:188` |
+| Duplicate live txid refused at any height | `a_block_with_a_duplicate_live_txid_is_refused_at_any_height` | `crates/execution/src/tests/utxo_integrity_tests.rs:283` |
+| Disconnect refuses a mismatching undo | `disconnect_refuses_undo_whose_removed_outpoint_differs_from_the_block` | `crates/execution/src/tests/utxo_integrity_tests.rs:170` |
+| Reorg below the retained undo window refuses before mutation | `a_reorg_below_the_retained_undo_window_refuses_before_mutation` | `crates/execution/src/tests/utxo_integrity_tests.rs:348` |
+| Fatal pre-transition settlement closes admission | `fatal_pretransition_settlement_closes_admission` | `crates/execution/src/reorg.rs:956` |
 | Committed outcome retained, retry forbidden on settlement failure | `committed_connect_settlement_failure_retains_outcome_and_forbids_retry` | `crates/node/src/chain_effects/tests.rs` (clause `SYNC-04` evidence) |
 
 Running the window test at this tree:

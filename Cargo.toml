@@ -3,8 +3,7 @@ resolver = "3"
 members = [
     "crates/consensus",
     "crates/storage",
-    "crates/chain",
-    "crates/chainstate",
+    "crates/execution",
     "crates/index",
 
     "crates/mempool",
@@ -41,8 +40,7 @@ authors      = ["metaphorics"]
 # Cargo cannot inherit `version` into `[workspace.dependencies]`; bump both together.
 bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.15.0", default-features = false }
 bitcoin-rs-storage    = { path = "crates/storage",    version = "0.15.0", default-features = false }
-bitcoin-rs-chain      = { path = "crates/chain",      version = "0.15.0", default-features = false }
-bitcoin-rs-chainstate = { path = "crates/chainstate", version = "0.15.0", default-features = false }
+bitcoin-rs-execution  = { path = "crates/execution", version = "0.15.0", default-features = false }
 bitcoin-rs-index      = { path = "crates/index",      version = "0.15.0" }
 
 bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.15.0" }

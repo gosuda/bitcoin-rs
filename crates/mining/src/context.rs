@@ -1,8 +1,8 @@
-use bitcoin_rs_chain::{
-    BlockTree, ChainError, candidate_version, header_sync, node::NodeId, softfork_state,
-};
 use bitcoin_rs_consensus::primitives::{CompactTarget, Hash256, Network};
 use bitcoin_rs_consensus::{LocktimeRule, locktime_cutoff};
+use bitcoin_rs_execution::chain::{
+    BlockTree, ChainError, candidate_version, header_sync, node::NodeId, softfork_state,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MiningChainContext {
@@ -68,8 +68,8 @@ impl MiningChainContext {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_chain::{BlockTree, ChainError, header_sync, node::NodeStatus};
     use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
+    use bitcoin_rs_execution::chain::{BlockTree, ChainError, header_sync, node::NodeStatus};
 
     use super::MiningChainContext;
     use crate::test_error::TestError;
@@ -110,7 +110,7 @@ mod tests {
         let recovered = MiningChainContext::resolve(&tree, Network::Regtest, tip, tip_time + 1201)?;
         assert_eq!(recovered.bits, CompactTarget::from_consensus(0x207f_ffff));
 
-        let unknown = bitcoin_rs_chain::node::NodeId::new(u32::MAX);
+        let unknown = bitcoin_rs_execution::chain::node::NodeId::new(u32::MAX);
         assert_eq!(
             MiningChainContext::resolve(&tree, Network::Regtest, unknown, 0),
             Err(ChainError::UnknownNode { id: unknown })
@@ -260,7 +260,7 @@ mod tests {
         start_time: u32,
         version_at: impl Fn(u32) -> i32,
         bits: u32,
-    ) -> Result<bitcoin_rs_chain::node::NodeId, TestError> {
+    ) -> Result<bitcoin_rs_execution::chain::node::NodeId, TestError> {
         let mut prev = BlockHash::default();
         let mut tip = None;
         for height in 0..len {

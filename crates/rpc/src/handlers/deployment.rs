@@ -1,10 +1,10 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
-use bitcoin_rs_chain::{DeploymentStatus, VersionBitsStatus, deployment_statuses};
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::script::VerifyFlags;
 use bitcoin_rs_consensus::{DeploymentState, SoftforkState};
+use bitcoin_rs_execution::chain::{DeploymentStatus, VersionBitsStatus, deployment_statuses};
 use corepc_types::v31;
 use sonic_rs::{JsonValueTrait as _, Value};
 
@@ -53,7 +53,9 @@ pub(crate) fn at_hash(ctx: &Context, hash: Hash256) -> Result<Value, RpcError> {
         None => return Err(RpcError::InvalidAddressOrKey("Block not found".to_owned())),
     };
     let statuses = deployment_statuses(&tree, network, block).map_err(|error| match error {
-        bitcoin_rs_chain::DeploymentQueryError::Budget { .. } => RpcError::Misc(error.to_string()),
+        bitcoin_rs_execution::chain::DeploymentQueryError::Budget { .. } => {
+            RpcError::Misc(error.to_string())
+        }
         _ => RpcError::Internal(error.to_string()),
     })?;
     let softforks = SoftforkState {

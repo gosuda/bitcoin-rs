@@ -16,7 +16,7 @@ use crate::sync::test_support::{TestChain, mined_chain};
 use crate::test_support::{
     TestError, TestResult, connect_peer, current_source, synthetic_peer, test_addr,
 };
-use bitcoin_rs_chain::regtest_fixture;
+use bitcoin_rs_execution::chain::regtest_fixture;
 
 fn genesis_body() -> bitcoin_rs_consensus::primitives::Block {
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);

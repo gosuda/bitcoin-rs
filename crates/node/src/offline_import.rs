@@ -224,7 +224,7 @@ pub enum OfflineImportError {
     BackpressureCheckpointFailed {
         hash: bitcoin_rs_consensus::primitives::BlockHash,
         #[source]
-        source: Box<bitcoin_rs_chainstate::CheckpointError>,
+        source: Box<bitcoin_rs_execution::CheckpointError>,
     },
     #[error("journal backpressure relief checkpoint skipped at block {hash}: no applied tip")]
     BackpressureCheckpointSkipped {
@@ -324,7 +324,7 @@ pub enum OfflineImportError {
     VerificationSkippedData { height: u32 },
     #[error("verification of the applied tip failed: {verify_error}")]
     VerificationFailed {
-        verify_error: Box<bitcoin_rs_chainstate::verify::VerifyError>,
+        verify_error: Box<bitcoin_rs_execution::verify::VerifyError>,
     },
     #[error("coin stats scan failed: {scan_error}")]
     CoinStatsScan {
@@ -340,7 +340,7 @@ pub enum OfflineImportError {
     },
     #[error("clean checkpoint publication failed: {checkpoint_error}")]
     CheckpointPublicationFailed {
-        checkpoint_error: Box<bitcoin_rs_chainstate::CheckpointError>,
+        checkpoint_error: Box<bitcoin_rs_execution::CheckpointError>,
     },
     #[error("clean checkpoint publication skipped: no applied tip")]
     CheckpointPublicationSkipped,
@@ -445,7 +445,7 @@ fn validate_offline_import_config_and_manifest(
 
 fn determine_resume_skip(
     manifest_doc: &Manifest,
-    chainstate: &bitcoin_rs_chainstate::Chainstate,
+    chainstate: &bitcoin_rs_execution::Chainstate,
     data_dir: &Path,
 ) -> Result<usize, OfflineImportError> {
     let already = chainstate.applied_tip_snapshot();
@@ -630,7 +630,7 @@ fn connect_batch(
             let retention_limited = matches!(
                 &error,
                 crate::ConnectMutationError::NotCommitted(
-                    bitcoin_rs_chainstate::ApplyError::JournalBackpressure(inner)
+                    bitcoin_rs_execution::ApplyError::JournalBackpressure(inner)
                 ) if matches!(
                     inner.as_ref(),
                     bitcoin_rs_storage::chainstate_journal::JournalWriterError::RetentionLimit { .. }
@@ -778,7 +778,7 @@ fn block_index_for_height(start_height: u32, height: u32) -> Result<usize, Offli
 
 fn require_full_validation_provenance(
     data_dir: &Path,
-    tip: &bitcoin_rs_chain::TipSnapshot,
+    tip: &bitcoin_rs_execution::chain::TipSnapshot,
 ) -> Result<(), OfflineImportError> {
     match read_full_validation_provenance(data_dir) {
         Ok(record)
@@ -826,7 +826,7 @@ fn read_full_validation_provenance(
 
 fn write_full_validation_provenance(
     data_dir: &Path,
-    tip: &bitcoin_rs_chain::TipSnapshot,
+    tip: &bitcoin_rs_execution::chain::TipSnapshot,
 ) -> Result<(), OfflineImportError> {
     let doc = FullValidationProvenance {
         schema: FULL_VALIDATION_PROVENANCE_SCHEMA.to_owned(),
@@ -867,9 +867,9 @@ fn write_full_validation_provenance(
 }
 
 fn resolve_offline_validation_mode(
-    _inherited: bitcoin_rs_chainstate::ValidationMode,
-) -> bitcoin_rs_chainstate::ValidationMode {
-    bitcoin_rs_chainstate::ValidationMode::Full
+    _inherited: bitcoin_rs_execution::ValidationMode,
+) -> bitcoin_rs_execution::ValidationMode {
+    bitcoin_rs_execution::ValidationMode::Full
 }
 
 fn check_payload_against_entry(
@@ -999,14 +999,14 @@ fn verify_and_certify(
     if body.is_none() {
         return Err(OfflineImportError::TipBodyUnavailable);
     }
-    let request = bitcoin_rs_chainstate::verify::VerifyRequest {
-        level: bitcoin_rs_chainstate::verify::CheckLevel::CheckUndoAndCommitments,
+    let request = bitcoin_rs_execution::verify::VerifyRequest {
+        level: bitcoin_rs_execution::verify::CheckLevel::CheckUndoAndCommitments,
         depth: NonZeroU32::new(1),
         cancellation: None,
     };
-    match bitcoin_rs_chainstate::verify::verify_recent_blocks(&chainstate, request) {
-        Ok(bitcoin_rs_chainstate::verify::VerifyOutcome::Passed { .. }) => {}
-        Ok(bitcoin_rs_chainstate::verify::VerifyOutcome::SkippedNoBlockData { height }) => {
+    match bitcoin_rs_execution::verify::verify_recent_blocks(&chainstate, request) {
+        Ok(bitcoin_rs_execution::verify::VerifyOutcome::Passed { .. }) => {}
+        Ok(bitcoin_rs_execution::verify::VerifyOutcome::SkippedNoBlockData { height }) => {
             return Err(OfflineImportError::VerificationSkippedData { height });
         }
         Err(verify_error) => {

@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
 
-use bitcoin_rs_chain::{
-    ChainWork, block_work, current_unix_seconds, permitted_difficulty_transition, validate_pow,
-};
 use bitcoin_rs_consensus::primitives::{
     CompactTarget, Hash256, Header, HeadersSyncParams, Network,
+};
+use bitcoin_rs_execution::chain::{
+    ChainWork, block_work, current_unix_seconds, permitted_difficulty_transition, validate_pow,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -526,9 +526,11 @@ impl HeadersSyncState {
 #[cfg(test)]
 mod tests {
     use super::{HeaderAnchor, HeaderSyncError, HeadersSyncPhase, HeadersSyncState};
-    use bitcoin_rs_chain::{ChainWork, block_work, current_unix_seconds, regtest_fixture};
     use bitcoin_rs_consensus::primitives::{
         BlockHash, Hash256, Header, HeadersSyncParams, Network,
+    };
+    use bitcoin_rs_execution::chain::{
+        ChainWork, block_work, current_unix_seconds, regtest_fixture,
     };
 
     type TestResult = Result<(), crate::test_support::TestError>;

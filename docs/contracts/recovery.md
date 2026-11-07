@@ -20,12 +20,12 @@ Startup restores that checkpoint before replaying any remaining certified histor
 Startup ignores an unreferenced generation.
 
 Owners:
-- Authoritative durable root and ordered commit protocol (`crates/chainstate/src/connect.rs`, `disconnect.rs`, `durable.rs`).
-- Recovery and schema admission (`crates/chainstate/src/recovery.rs`, with process-composition tests in `crates/node/src/state/tests/`).
+- Authoritative durable root and ordered commit protocol (`crates/execution/src/connect.rs`, `disconnect.rs`, `durable.rs`).
+- Recovery and schema admission (`crates/execution/src/recovery.rs`, with process-composition tests in `crates/node/src/state/tests/`).
 - Persistent coin transition boundary (`crates/storage/src/utxo/set.rs`, durable form in `crates/storage/src/durable_head.rs`).
 - Crash and lost-write fault tests (`crates/node/tests/crash_recovery.rs`).
-- Reorg and disconnect (`crates/chainstate/src/reorg.rs`, `disconnect.rs`).
-- Checkpoint publication and recovery (`crates/chainstate/src/checkpoint.rs` and companions, `crates/storage/src/checkpoint/`).
+- Reorg and disconnect (`crates/execution/src/reorg.rs`, `disconnect.rs`).
+- Checkpoint publication and recovery (`crates/execution/src/checkpoint.rs` and companions, `crates/storage/src/checkpoint/`).
 - Index worker recovery (`crates/index/src/runtime/recovery_tests.rs`).
 - Policy (`docs/policies/db-migration.md`).
 
@@ -124,7 +124,7 @@ struct DurableHead {
 - Startup retries this cleanup for a committed `Finalized` head.
 - Cleanup failures are warnings, not recovery failures.
 - Ordinary checkpoints and unknown files are preserved.
-- Proof: `crates/chainstate/src/assumeutxo/tests.rs` covers commitment verification, isolated replay, terminal-write failures, and role guards.
+- Proof: `crates/execution/src/assumeutxo/tests.rs` covers commitment verification, isolated replay, terminal-write failures, and role guards.
 - Proof: `assumeutxo_recovery_tests.rs` covers real-storage restart, process-kill boundaries, and lost failure receipts.
 - The tests also cover root-preserving archive replay, checkpoint pin binding, pruning, and below-base reorg restart.
 
@@ -221,7 +221,7 @@ Commit details:
 - Append-gap admission and filesystem errors still fail closed.
 - Other journal refusals (append gaps, unreadable state, corruption, storage/filesystem failures) never enter this checkpoint-and-retry path.
 - Proof: `crates/node/tests/mining/coordination.rs` (staged preparation, commit-time install, stale-race discard).
-- Proof: `crates/chainstate/src/tests/` (grouped-window staging).
+- Proof: `crates/execution/src/tests/` (grouped-window staging).
 - Proof: `durable_replay_tests.rs` (gap replay never fires the staged-tip hook).
 - Proof: `crates/mining/src/coordinator/tests.rs` (receipt install, mismatch fallback, waiter release).
 - Proof: `crates/node/src/chain_effects.rs` (gatewayless empty receipt).
@@ -239,7 +239,7 @@ Replay validation rules:
 - Script failure stops admission before publishing the invalid block.
 - Script failure preserves the durable head and full-revalidation marker.
 - Script failure leaves checkpoint publication as the marker-retirement owner.
-- Proof: `crates/chainstate/src/durable/tests/revalidation.rs` tests script-invalid AssumeValid commits rejected in cold recovery.
+- Proof: `crates/execution/src/durable/tests/revalidation.rs` tests script-invalid AssumeValid commits rejected in cold recovery.
 - A `Full` start over such a head rebuilds cold.
 - A completed rebuild attests `Full`.
 - The tests verify valid-spend receipt reuse and corrupt-undo refusal.
@@ -404,7 +404,7 @@ The crash and error points in this contract and `docs/policies/db-migration.md` 
 - Publication acquires the exclusive apply fence, then admission's publication mutex, and checks recovery closure before writing artifacts.
 - Recovery closure takes only the publication mutex, so it can run while its caller holds an apply permit. A publication admitted first completes before closure; closure that wins first refuses later publication.
 - Recovery closure triggers its latch and wakes waiters under the publication mutex. It releases that mutex before it runs cancellation hooks. A hook can call recovery closure again without a lock cycle.
-- Proof: `crates/chainstate/src/tests/checkpoint_debt_tests.rs::recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication` (paused body sync), `checkpoint_refuses_a_closed_for_recovery_chainstate` (closure first), and `crates/chainstate/src/tests/admission_tests.rs::recovery_closure_does_not_upgrade_an_apply_permit` (lock order) and `recovery_closure_hooks_can_reenter_after_publication_unlocks` (cancellation hooks). The interleaving proof does not inject journal compaction/resume or marker-retirement faults.
+- Proof: `crates/execution/src/tests/checkpoint_debt_tests.rs::recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication` (paused body sync), `checkpoint_refuses_a_closed_for_recovery_chainstate` (closure first), and `crates/execution/src/tests/admission_tests.rs::recovery_closure_does_not_upgrade_an_apply_permit` (lock order) and `recovery_closure_hooks_can_reenter_after_publication_unlocks` (cancellation hooks). The interleaving proof does not inject journal compaction/resume or marker-retirement faults.
 - The checkpoint publisher freezes the published state.
 - The published state always trails or meets the durable head, because publication follows the batch.
 - Before writing, the publisher loads the head.
@@ -444,7 +444,7 @@ The crash and error points in this contract and `docs/policies/db-migration.md` 
 ### Checkpoint header artifact and side branches
 
 - The checkpoint header artifact restores the block tree, not only the active chain.
-- `crates/chainstate/src/checkpoint/headers.rs` owns its layout.
+- `crates/execution/src/checkpoint/headers.rs` owns its layout.
 - The manifest-bound artifact SHA-256 authenticates every byte.
 - No other file persists branch state.
 - Version 2 is written: the active ancestry of the selected best tip, then non-`Invalid` tree nodes off that ancestry.

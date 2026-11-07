@@ -5,7 +5,7 @@ use bitcoin_rs_consensus::primitives::Network;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bitcoin_rs_chain::InitialBlockDownload;
+use bitcoin_rs_execution::chain::InitialBlockDownload;
 
 use super::DownloadWindow;
 use crate::connection::PeerSource;

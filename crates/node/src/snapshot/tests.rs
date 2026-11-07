@@ -384,7 +384,7 @@ fn interrupted_export_publishes_nothing_and_removes_its_staged_file() -> Result<
     let output = out.join("interrupted.dat");
 
     let cancelled = {
-        let trigger = bitcoin_rs_chain::LatchWriter::new();
+        let trigger = bitcoin_rs_execution::chain::LatchWriter::new();
         trigger.trigger();
         trigger.reader()
     };

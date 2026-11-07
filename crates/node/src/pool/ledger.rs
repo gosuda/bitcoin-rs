@@ -4,9 +4,9 @@ use std::sync::{
     atomic::{AtomicU8, Ordering},
 };
 
-use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_consensus::primitives::encode::deserialize;
 use bitcoin_rs_consensus::primitives::{Block, Hash256, OutPoint as NodeOutPoint, Txid};
+use bitcoin_rs_execution::Chainstate;
 use bitcoin_rs_index::{DerivedIndexQuery, ScriptIndexQuery};
 use bitcoin_rs_mempool::MempoolReader;
 use bitcoin_rs_mining::pool::ledger as pool_ledger;
@@ -25,7 +25,7 @@ use bitcoin_rs_storage::block_body::BlockBodyStore;
 pub(crate) struct NodeChainView {
     chainstate: Arc<Chainstate>,
     bodies: Arc<dyn BlockBodyStore>,
-    stable: bitcoin_rs_chain::StableRead,
+    stable: bitcoin_rs_execution::chain::StableRead,
     mempool: MempoolReader,
     transactions: Option<Arc<dyn DerivedIndexQuery>>,
     scripts: Option<Arc<dyn ScriptIndexQuery>>,
@@ -34,7 +34,7 @@ pub(crate) struct NodeChainView {
 impl NodeChainView {
     pub(crate) fn new(
         chainstate: Arc<Chainstate>,
-        stable: bitcoin_rs_chain::StableRead,
+        stable: bitcoin_rs_execution::chain::StableRead,
         mempool: MempoolReader,
         transactions: Option<Arc<dyn DerivedIndexQuery>>,
         scripts: Option<Arc<dyn ScriptIndexQuery>>,
@@ -57,7 +57,7 @@ impl NodeChainView {
         observe()
     }
 
-    fn tip_generation(&self) -> Option<Arc<bitcoin_rs_chain::TipSnapshot>> {
+    fn tip_generation(&self) -> Option<Arc<bitcoin_rs_execution::chain::TipSnapshot>> {
         self.chainstate.applied_tip_snapshot()
     }
 
@@ -497,8 +497,8 @@ impl ChainView for NodeChainView {
 }
 
 fn tip_unchanged(
-    before: Option<&Arc<bitcoin_rs_chain::TipSnapshot>>,
-    after: Option<&Arc<bitcoin_rs_chain::TipSnapshot>>,
+    before: Option<&Arc<bitcoin_rs_execution::chain::TipSnapshot>>,
+    after: Option<&Arc<bitcoin_rs_execution::chain::TipSnapshot>>,
 ) -> bool {
     match (before, after) {
         (None, None) => true,

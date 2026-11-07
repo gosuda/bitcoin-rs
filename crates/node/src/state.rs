@@ -3,10 +3,10 @@ use crate::config::ConfigError;
 use crate::run::RunError;
 use crate::snapshot::SnapshotImportError;
 #[cfg(any(test, feature = "test-seam"))]
-use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_chainstate::events::ChainEventPublisher;
+use bitcoin_rs_execution::chain::TipSnapshot;
+use bitcoin_rs_execution::events::ChainEventPublisher;
 #[cfg(test)]
-pub(crate) use bitcoin_rs_chainstate::recovery::ResumeSource;
+pub(crate) use bitcoin_rs_execution::recovery::ResumeSource;
 use bitcoin_rs_index::runtime::DEFAULT_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::OpenDerivedIndex;
 use bitcoin_rs_index::runtime::open_derived_index_store_on_worker;
@@ -85,14 +85,14 @@ pub struct NodeState {
     inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundBody>,
     inbound_tx_rx: Mutex<Option<Receiver<bitcoin_rs_p2p::InboundBody>>>,
     package_capacity: bitcoin_rs_p2p::PackageCapacity,
-    transition: bitcoin_rs_chain::TransitionDomain,
-    chainstate: Arc<bitcoin_rs_chainstate::Chainstate>,
+    transition: bitcoin_rs_execution::chain::TransitionDomain,
+    chainstate: Arc<bitcoin_rs_execution::Chainstate>,
     followers: crate::chain_effects::ChainFollowers,
     sync: Arc<crate::BlockSync>,
     recovery_reporter: Arc<storage::RecoveryReporter>,
     pub(crate) snapshots: Arc<crate::snapshot::SnapshotControl>,
     block_announce_rx: Mutex<Option<bitcoin_rs_p2p::BlockAnnounceReceiver>>,
-    shutdown: Arc<bitcoin_rs_chain::LatchWriter>,
+    shutdown: Arc<bitcoin_rs_execution::chain::LatchWriter>,
 }
 
 impl Drop for NodeState {
@@ -139,7 +139,7 @@ impl NodeState {
     #[cfg(any(test, feature = "test-seam"))]
     #[doc(hidden)]
     #[must_use]
-    pub fn undo_store(&self) -> Arc<dyn bitcoin_rs_chainstate::UndoStore> {
+    pub fn undo_store(&self) -> Arc<dyn bitcoin_rs_execution::UndoStore> {
         self.storage.undo_store()
     }
 
@@ -250,17 +250,17 @@ impl NodeState {
     }
 
     #[must_use]
-    pub(crate) fn ibd(&self) -> Arc<bitcoin_rs_chain::InitialBlockDownload> {
+    pub(crate) fn ibd(&self) -> Arc<bitcoin_rs_execution::chain::InitialBlockDownload> {
         self.chainstate.ibd_latch()
     }
 
     #[must_use]
-    pub fn shutdown_reader(&self) -> bitcoin_rs_chain::LatchReader {
+    pub fn shutdown_reader(&self) -> bitcoin_rs_execution::chain::LatchReader {
         self.shutdown.reader()
     }
 
     #[must_use]
-    pub fn shutdown_writer(&self) -> Arc<bitcoin_rs_chain::LatchWriter> {
+    pub fn shutdown_writer(&self) -> Arc<bitcoin_rs_execution::chain::LatchWriter> {
         Arc::clone(&self.shutdown)
     }
 
@@ -270,12 +270,12 @@ impl NodeState {
     }
 
     #[must_use]
-    pub fn chainstate(&self) -> Arc<bitcoin_rs_chainstate::Chainstate> {
+    pub fn chainstate(&self) -> Arc<bitcoin_rs_execution::Chainstate> {
         Arc::clone(&self.chainstate)
     }
 
     #[must_use]
-    pub fn stable_read(&self) -> bitcoin_rs_chain::StableRead {
+    pub fn stable_read(&self) -> bitcoin_rs_execution::chain::StableRead {
         self.transition.stable_read()
     }
 
@@ -295,20 +295,20 @@ impl NodeState {
 
     pub fn publish_checkpoint(
         &self,
-    ) -> core::result::Result<Option<u64>, bitcoin_rs_chainstate::CheckpointError> {
+    ) -> core::result::Result<Option<u64>, bitcoin_rs_execution::CheckpointError> {
         self.chainstate.publish_checkpoint()
     }
 
     pub fn start_chainstate_maintenance(
         &self,
-    ) -> core::result::Result<std::thread::JoinHandle<()>, bitcoin_rs_chainstate::MaintenanceError>
+    ) -> core::result::Result<std::thread::JoinHandle<()>, bitcoin_rs_execution::MaintenanceError>
     {
         self.chainstate.start_maintenance()
     }
 
     pub fn chainstates_summary(
         &self,
-    ) -> Result<bitcoin_rs_chainstate::ChainstatesSummary, bitcoin_rs_chainstate::AssumeUtxoError>
+    ) -> Result<bitcoin_rs_execution::ChainstatesSummary, bitcoin_rs_execution::AssumeUtxoError>
     {
         self.snapshots.manager.chainstates_summary()
     }

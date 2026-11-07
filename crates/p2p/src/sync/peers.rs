@@ -16,10 +16,10 @@ use crate::download_window::{
     BlockDownloadPolicy, peer_can_serve_height, serves_requested_height, statically_fanout_eligible,
 };
 use crate::peer_info::PeerRole;
-use bitcoin_rs_chain::BlockTree;
-use bitcoin_rs_chain::ChainError;
-use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_execution::chain::BlockTree;
+use bitcoin_rs_execution::chain::ChainError;
+use bitcoin_rs_execution::chain::NodeId;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -557,10 +557,10 @@ mod tests {
     use crate::connection::PeerSource;
     use crate::download_window::FanoutCandidate;
     use crate::download_window::SyncPeer;
-    use bitcoin_rs_chain::{
+    use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
+    use bitcoin_rs_execution::chain::{
         BlockTree, ChainError, NodeId, NodeStatus, accept_headers, compact_is_met_by,
     };
-    use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
     use std::net::SocketAddr;
     fn body_candidate_impl(port: u16, height: i32, soft_blocked: bool) -> FanoutCandidate {
         FanoutCandidate {
@@ -687,7 +687,7 @@ mod tests {
             &[grandchild],
             Network::Regtest,
             901_800,
-            bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
+            bitcoin_rs_execution::chain::HeaderValidationMode::LiveAdmission,
         )
         .err()
         .ok_or("a descendant of an invalidated block must be refused")?;

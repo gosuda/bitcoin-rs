@@ -49,7 +49,7 @@ fn full_header_ingress_observes_session_and_lease_cancellation() -> TestResult {
         let (headers_tx, headers_rx) = crossbeam_channel::bounded(1);
         let (blocks_tx, _blocks_rx) = crossbeam_channel::bounded(1);
         let mut shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
-        let session_cancel = bitcoin_rs_chain::LatchWriter::new();
+        let session_cancel = bitcoin_rs_execution::chain::LatchWriter::new();
         shared.session_cancel = session_cancel.reader();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(tx);
@@ -145,7 +145,7 @@ fn run_sustained_ingress_case(delivery: HeaderDelivery) -> TestResult {
         ))?;
     let mut shared = test_shared(peers, headers_tx, blocks_tx);
     shared.block_sync = Some(Arc::clone(&sync));
-    let stop = bitcoin_rs_chain::LatchWriter::new();
+    let stop = bitcoin_rs_execution::chain::LatchWriter::new();
     shared.session_cancel = stop.reader();
     let (producer, filled_rx) =
         spawn_ingress_producer(blocks, delivery, shared, lease, addr, Arc::clone(&sync));
@@ -206,7 +206,7 @@ fn drain_sustained_ingress(
     producer: std::thread::JoinHandle<()>,
     headers_rx: &crossbeam_channel::Receiver<crate::InboundHeaders>,
     blocks_rx: &crossbeam_channel::Receiver<crate::InboundBlock>,
-    stop: &bitcoin_rs_chain::LatchWriter,
+    stop: &bitcoin_rs_execution::chain::LatchWriter,
     started: Instant,
     initial_peak: usize,
 ) -> Result<IngressDrainMetrics, crate::test_support::TestError> {

@@ -2,8 +2,10 @@ use std::cmp::Reverse;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use bitcoin_rs_chain::{BlockTree, BlockTreeNode, ChainWork, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_execution::chain::{
+    BlockTree, BlockTreeNode, ChainWork, NodeId, NodeStatus, TipSnapshot,
+};
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 

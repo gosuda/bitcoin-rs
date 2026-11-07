@@ -170,9 +170,9 @@ pub enum P2pControlError {
 }
 
 struct Workers {
-    shutdown: bitcoin_rs_chain::LatchWriter,
-    overlay_shutdown: Arc<bitcoin_rs_chain::LatchWriter>,
-    session_cancel: Arc<bitcoin_rs_chain::LatchWriter>,
+    shutdown: bitcoin_rs_execution::chain::LatchWriter,
+    overlay_shutdown: Arc<bitcoin_rs_execution::chain::LatchWriter>,
+    session_cancel: Arc<bitcoin_rs_execution::chain::LatchWriter>,
     listeners: Vec<JoinHandle<Result<(), ListenerError>>>,
     outbound: Option<JoinHandle<()>>,
     bootstrap: Option<JoinHandle<()>>,
@@ -183,9 +183,9 @@ struct Workers {
 impl Default for Workers {
     fn default() -> Self {
         Self {
-            shutdown: bitcoin_rs_chain::LatchWriter::new(),
-            overlay_shutdown: Arc::new(bitcoin_rs_chain::LatchWriter::new()),
-            session_cancel: Arc::new(bitcoin_rs_chain::LatchWriter::new()),
+            shutdown: bitcoin_rs_execution::chain::LatchWriter::new(),
+            overlay_shutdown: Arc::new(bitcoin_rs_execution::chain::LatchWriter::new()),
+            session_cancel: Arc::new(bitcoin_rs_execution::chain::LatchWriter::new()),
             listeners: Vec::new(),
             outbound: None,
             bootstrap: None,
@@ -197,9 +197,9 @@ impl Default for Workers {
 
 impl Workers {
     fn new(
-        shutdown: bitcoin_rs_chain::LatchWriter,
-        overlay_shutdown: Arc<bitcoin_rs_chain::LatchWriter>,
-        session_cancel: Arc<bitcoin_rs_chain::LatchWriter>,
+        shutdown: bitcoin_rs_execution::chain::LatchWriter,
+        overlay_shutdown: Arc<bitcoin_rs_execution::chain::LatchWriter>,
+        session_cancel: Arc<bitcoin_rs_execution::chain::LatchWriter>,
     ) -> Self {
         Self {
             shutdown,
@@ -381,8 +381,8 @@ impl From<Arc<RwLock<Vec<crate::BannedSubnet>>>> for BannedReader {
 pub struct P2pService {
     overlay: Arc<crate::overlay::OverlayTransport>,
     config: P2pServiceConfig,
-    shutdown: bitcoin_rs_chain::LatchReader,
-    worker_shutdown: Mutex<Arc<bitcoin_rs_chain::LatchWriter>>,
+    shutdown: bitcoin_rs_execution::chain::LatchReader,
+    worker_shutdown: Mutex<Arc<bitcoin_rs_execution::chain::LatchWriter>>,
     network_active: Arc<AtomicBool>,
     peer_table: Arc<crate::PeerTable>,
     banned: BannedReader,
@@ -396,7 +396,7 @@ pub struct P2pService {
     inbound_blocks_tx: Sender<crate::InboundBlock>,
     inbound_blocks_rx: Mutex<Option<Receiver<crate::InboundBlock>>>,
     workers: Mutex<Option<Workers>>,
-    session_cancel: Mutex<Arc<bitcoin_rs_chain::LatchWriter>>,
+    session_cancel: Mutex<Arc<bitcoin_rs_execution::chain::LatchWriter>>,
     shared_outbound: Arc<crate::connection::SharedOutboundBudget>,
     overlay_addresses: Arc<Mutex<Vec<crate::PeerEndpoint>>>,
 }
@@ -412,7 +412,10 @@ impl std::fmt::Debug for P2pService {
 
 impl P2pService {
     #[must_use]
-    pub fn new(config: P2pServiceConfig, shutdown: bitcoin_rs_chain::LatchReader) -> Self {
+    pub fn new(
+        config: P2pServiceConfig,
+        shutdown: bitcoin_rs_execution::chain::LatchReader,
+    ) -> Self {
         let (outbound_tx, outbound_rx) = crossbeam_channel::bounded(config.outbound_queue_limit);
         let (inbound_headers_tx, inbound_headers_rx) =
             crossbeam_channel::bounded(INBOUND_HEADER_QUEUE_LIMIT);
@@ -437,10 +440,10 @@ impl P2pService {
             config,
             address_book,
             shutdown,
-            worker_shutdown: Mutex::new(Arc::new(bitcoin_rs_chain::LatchWriter::new())),
+            worker_shutdown: Mutex::new(Arc::new(bitcoin_rs_execution::chain::LatchWriter::new())),
             network_active: Arc::new(AtomicBool::new(true)),
             peer_table: Arc::new(crate::PeerTable::new()),
-            session_cancel: Mutex::new(Arc::new(bitcoin_rs_chain::LatchWriter::new())),
+            session_cancel: Mutex::new(Arc::new(bitcoin_rs_execution::chain::LatchWriter::new())),
             banned,
             added_nodes: Arc::new(RwLock::new(Vec::new())),
             fixed_destinations: Arc::new(RwLock::new(Vec::new())),
@@ -492,13 +495,13 @@ impl P2pService {
             return Err(P2pServiceError::AlreadyStarted);
         }
 
-        let overlay_shutdown = Arc::new(bitcoin_rs_chain::LatchWriter::new());
-        let session_cancel = Arc::new(bitcoin_rs_chain::LatchWriter::new());
+        let overlay_shutdown = Arc::new(bitcoin_rs_execution::chain::LatchWriter::new());
+        let session_cancel = Arc::new(bitcoin_rs_execution::chain::LatchWriter::new());
         *self.session_cancel.lock() = Arc::clone(&session_cancel);
         *self.worker_shutdown.lock() = Arc::clone(&overlay_shutdown);
 
         let mut workers = Workers::new(
-            bitcoin_rs_chain::LatchWriter::new(),
+            bitcoin_rs_execution::chain::LatchWriter::new(),
             overlay_shutdown,
             session_cancel,
         );
@@ -594,7 +597,7 @@ impl P2pService {
     fn spawn_outbound_worker(
         &self,
         shared: crate::listener::ConnectionShared,
-        shutdown: &bitcoin_rs_chain::LatchReader,
+        shutdown: &bitcoin_rs_execution::chain::LatchReader,
     ) -> Result<JoinHandle<()>, io::Error> {
         let address_book = Arc::clone(&self.address_book);
         let manual_nodes = Arc::clone(&self.added_nodes);
@@ -738,7 +741,7 @@ impl P2pService {
         &self,
         block_sync: Option<Arc<crate::sync::BlockSync>>,
         chain_query: Option<Arc<dyn crate::ChainQuery>>,
-        shutdown: &bitcoin_rs_chain::LatchReader,
+        shutdown: &bitcoin_rs_execution::chain::LatchReader,
         routes: crate::RouteTable,
     ) -> Result<Option<JoinHandle<()>>, io::Error> {
         if !self.config.fixed_peers.is_empty() {
@@ -814,7 +817,7 @@ impl P2pService {
     }
 
     #[must_use]
-    pub fn shutdown_reader(&self) -> &bitcoin_rs_chain::LatchReader {
+    pub fn shutdown_reader(&self) -> &bitcoin_rs_execution::chain::LatchReader {
         &self.shutdown
     }
 
@@ -1188,7 +1191,7 @@ fn is_manual_endpoint(manual: &[PeerEndpoint], addr: PeerEndpoint) -> bool {
         .any(|pin| crate::addrman::canonical(*pin) == addr)
 }
 
-fn wait_for_shutdown(shutdown: &bitcoin_rs_chain::LatchReader, delay: Duration) -> bool {
+fn wait_for_shutdown(shutdown: &bitcoin_rs_execution::chain::LatchReader, delay: Duration) -> bool {
     if shutdown.is_triggered() {
         return true;
     }
@@ -1255,7 +1258,7 @@ fn bootstrap_fixed_peer_endpoints<R, I>(
 }
 
 fn run_fixed_peer_resolution(
-    shutdown: bitcoin_rs_chain::LatchReader,
+    shutdown: bitcoin_rs_execution::chain::LatchReader,
     network_active: Arc<AtomicBool>,
     destinations: Arc<RwLock<Vec<PeerEndpoint>>>,
     endpoints: Vec<String>,
@@ -1601,7 +1604,7 @@ fn has_automatic_outbound_capacity(
 }
 
 struct AddressMaintenance {
-    shutdown: bitcoin_rs_chain::LatchReader,
+    shutdown: bitcoin_rs_execution::chain::LatchReader,
     network_active: Arc<AtomicBool>,
     peer_table: Arc<crate::PeerTable>,
     outbound_tx: Sender<OutboundDial>,

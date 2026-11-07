@@ -8,7 +8,7 @@ use super::{
     TxPosition, TxPositionValue, TxQueryError, TxUnavailableCause, Txid, deserialize,
 };
 use crate::query_api::{CoveredPrefix, HistoricalUnavailableCause, ScriptHistoryPage};
-use bitcoin_rs_chain::{AncestryBudgetExceeded, NodeId};
+use bitcoin_rs_execution::chain::{AncestryBudgetExceeded, NodeId};
 
 mod filters;
 #[cfg(any(test, verification, kani))]
@@ -163,7 +163,7 @@ impl QueryBudget {
 
 pub(crate) struct QueryEngineLive {
     pub(crate) utxo: Option<bitcoin_rs_storage::utxo::UtxoReader>,
-    pub(crate) chain_transition: Option<bitcoin_rs_chain::StableRead>,
+    pub(crate) chain_transition: Option<bitcoin_rs_execution::chain::StableRead>,
     pub(crate) enabled: IndexCapabilities,
 }
 
@@ -224,11 +224,11 @@ pub struct DerivedIndexQueryEngine {
     scripthash_limit: usize,
     runtime: Arc<DerivedIndexRuntime>,
     reader: Arc<dyn IndexReader>,
-    block_tree: bitcoin_rs_chain::BlockTreeReader,
-    applied_tip: bitcoin_rs_chain::TipReader,
+    block_tree: bitcoin_rs_execution::chain::BlockTreeReader,
+    applied_tip: bitcoin_rs_execution::chain::TipReader,
     body_source: Option<Arc<dyn BlockBodySource>>,
     utxo: Option<bitcoin_rs_storage::utxo::UtxoReader>,
-    chain_transition: Option<bitcoin_rs_chain::StableRead>,
+    chain_transition: Option<bitcoin_rs_execution::chain::StableRead>,
     enabled: IndexCapabilities,
 }
 
@@ -244,8 +244,8 @@ impl DerivedIndexQueryEngine {
     pub(crate) fn new(
         runtime: Arc<DerivedIndexRuntime>,
         reader: Arc<dyn IndexReader>,
-        block_tree: bitcoin_rs_chain::BlockTreeReader,
-        applied_tip: bitcoin_rs_chain::TipReader,
+        block_tree: bitcoin_rs_execution::chain::BlockTreeReader,
+        applied_tip: bitcoin_rs_execution::chain::TipReader,
         body_source: Option<Arc<dyn BlockBodySource>>,
         live: QueryEngineLive,
     ) -> Self {
@@ -1064,7 +1064,7 @@ mod tests {
         }
     }
 
-    fn anchor_test_engine(tree: bitcoin_rs_chain::BlockTree) -> DerivedIndexQueryEngine {
+    fn anchor_test_engine(tree: bitcoin_rs_execution::chain::BlockTree) -> DerivedIndexQueryEngine {
         use parking_lot::RwLock;
 
         let tree = Arc::new(RwLock::new(tree));
@@ -1074,8 +1074,8 @@ mod tests {
         DerivedIndexQueryEngine::new(
             runtime,
             Arc::new(UnreachableReader),
-            bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&tree)),
-            bitcoin_rs_chain::TipReader::new(tip_cell),
+            bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(&tree)),
+            bitcoin_rs_execution::chain::TipReader::new(tip_cell),
             None,
             QueryEngineLive {
                 utxo: None,
@@ -1087,10 +1087,10 @@ mod tests {
 
     #[test]
     fn covered_anchor_rejects_watermark_height_mismatch() {
-        use bitcoin_rs_chain::NodeStatus;
+        use bitcoin_rs_execution::chain::NodeStatus;
 
         let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
-        let mut tree = bitcoin_rs_chain::BlockTree::new();
+        let mut tree = bitcoin_rs_execution::chain::BlockTree::new();
         let genesis_id = tree
             .insert_header(genesis.header, NodeStatus::HeaderValid)
             .unwrap_or_else(|error| panic!("genesis header: {error:?}"));

@@ -1,9 +1,9 @@
 //! Versioned bundle manifest: schema, canonical encoding, and field validation.
 
 use super::{IndexBundleError, artifact::HEADER_LEN};
-use bitcoin_rs_chain::ChainWork;
 use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_consensus::primitives::hex::{hex_decode_array, hex_encode, is_lowercase_hex};
+use bitcoin_rs_execution::chain::ChainWork;
 use serde::{Deserialize, Serialize};
 
 pub(super) const BUNDLE_FORMAT: &str = "bitcoin-rs-index-bundle";

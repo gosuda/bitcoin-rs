@@ -21,8 +21,7 @@ tempfile = "3"
 bitcoin-rs-index = { path = "../crates/index" }
 bitcoin-rs-rpc = { path = "../crates/rpc", default-features = false, features = ["test-seam"] }
 bitcoin-rs-storage = { path = "../crates/storage", default-features = false }
-bitcoin-rs-chain = { path = "../crates/chain", features = ["test-seam"] }
-bitcoin-rs-chainstate = { path = "../crates/chainstate", features = ["test-seam"] }
+bitcoin-rs-execution = { path = "../crates/execution", features = ["test-seam"] }
 sonic-rs = "0.5"
 miniscript = { version = ">=13, <14", default-features = false, features = ["std"] }
 [[bin]]

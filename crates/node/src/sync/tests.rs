@@ -1,17 +1,17 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, BlockPayload, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
 };
 use bitcoin_rs_consensus::script::push_int;
+use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
 use bitcoin_rs_storage::utxo::UtxoSet;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
 use crate::test_support::TestError;
-use bitcoin_rs_chainstate::Chainstate;
+use bitcoin_rs_execution::Chainstate;
 use bitcoin_rs_p2p::sync::chain::{SyncChain, WindowApplyDisposition};
 
 #[test]
@@ -117,7 +117,9 @@ fn apply_handles(
         Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
             bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         )),
-        Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
+        Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
+            0,
+        )),
     )
 }
 

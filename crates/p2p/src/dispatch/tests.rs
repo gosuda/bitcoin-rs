@@ -2441,7 +2441,9 @@ fn test_header(prev_blockhash: BlockHash, nonce: u32) -> Header {
         prev_blockhash,
         merkle_root: Hash256::from_le_bytes(&[0; 32]),
         time: nonce,
-        bits: CompactTarget::from_consensus(bitcoin_rs_chain::regtest_fixture::REGTEST_BITS),
+        bits: CompactTarget::from_consensus(
+            bitcoin_rs_execution::chain::regtest_fixture::REGTEST_BITS,
+        ),
         nonce,
     }
 }

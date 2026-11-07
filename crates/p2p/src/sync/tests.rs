@@ -12,13 +12,13 @@ use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use bitcoin::hashes::Hash;
-use bitcoin_rs_chain::{
-    BlockTree, ChainWork, HeaderRefusal, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot,
-    regtest_fixture,
-};
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, BlockPayload, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
     consensus_bytes,
+};
+use bitcoin_rs_execution::chain::{
+    BlockTree, ChainWork, HeaderRefusal, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot,
+    regtest_fixture,
 };
 use crossbeam_channel::unbounded;
 use hashbrown::HashMap;
@@ -1798,7 +1798,7 @@ fn nbits_mismatch_header(prev_blockhash: BlockHash, height: u32) -> Header {
 
 fn far_future_header(prev_blockhash: BlockHash, height: u32) -> Result<Header, TestError> {
     let mut header = regtest_fixture::mined_regtest_header(prev_blockhash, height)?;
-    header.time = bitcoin_rs_chain::current_unix_seconds().saturating_add(3 * 60 * 60);
+    header.time = bitcoin_rs_execution::chain::current_unix_seconds().saturating_add(3 * 60 * 60);
     regtest_fixture::mine_header_to_declared_target(&mut header)?;
     Ok(header)
 }
@@ -2217,7 +2217,7 @@ fn failed_branch_switch_reports_the_displaced_tip_once() -> TestResult {
             connected: 0,
             hash: invalidated[0],
             stopped_at: 0,
-            source: Box::new(bitcoin_rs_chainstate::ApplyError::Shutdown),
+            source: Box::new(bitcoin_rs_execution::ApplyError::Shutdown),
             disposition: WindowApplyDisposition::Permanent,
             invalidated: invalidated.into(),
             demoted_tip: Some(displaced),

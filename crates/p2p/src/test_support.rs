@@ -37,7 +37,7 @@ pub(crate) enum TestError {
     #[error(transparent)]
     Listener(#[from] crate::listener::ListenerError),
     #[error(transparent)]
-    Chain(#[from] bitcoin_rs_chain::ChainError),
+    Chain(#[from] bitcoin_rs_execution::chain::ChainError),
     #[error(transparent)]
     Primitives(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
@@ -51,7 +51,7 @@ pub(crate) enum TestError {
     #[error("channel send failed")]
     ChannelSend,
     #[error(transparent)]
-    RegtestFixture(#[from] bitcoin_rs_chain::regtest_fixture::RegtestFixtureError),
+    RegtestFixture(#[from] bitcoin_rs_execution::chain::regtest_fixture::RegtestFixtureError),
     #[error("commit failed: {0}")]
     Commit(String),
     #[error("unexpected: {0}")]

@@ -9,7 +9,7 @@ mod recovery;
 
 use crate::test_support::TestError;
 
-use bitcoin_rs_chain::{TipSnapshot, regtest_fixture};
+use bitcoin_rs_execution::chain::{TipSnapshot, regtest_fixture};
 
 use bitcoin_rs_consensus::primitives::{Hash256, chain_constants::CORE_REORG_SAFETY_MARGIN};
 
@@ -19,7 +19,7 @@ use core::mem::size_of;
 
 use hashbrown::HashMap;
 
-use bitcoin_rs_chainstate::{events::*, recovery::*};
+use bitcoin_rs_execution::{events::*, recovery::*};
 
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -29,12 +29,12 @@ use std::{
 use super::*;
 use bitcoin_rs_consensus::primitives::LockTime;
 
-fn applied_chain_tx_count(state: &NodeState) -> bitcoin_rs_chain::ChainTxCount {
+fn applied_chain_tx_count(state: &NodeState) -> bitcoin_rs_execution::chain::ChainTxCount {
     state
         .chainstate()
         .applied_tip_reader()
         .load_full()
-        .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| {
+        .map_or(bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN, |tip| {
             tip.chain_tx_count
         })
 }
@@ -50,11 +50,11 @@ fn publish_applied_tip_height(state: &NodeState, height: u32) {
         .chainstate()
         .applied_tip()
         .store(Some(Arc::new(TipSnapshot {
-            tip_id: bitcoin_rs_chain::node::NodeId::new(height),
+            tip_id: bitcoin_rs_execution::chain::node::NodeId::new(height),
             height,
-            chainwork: bitcoin_rs_chain::node::ChainWork::ZERO,
+            chainwork: bitcoin_rs_execution::chain::node::ChainWork::ZERO,
             hash: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&hash),
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
         })));
 }
 

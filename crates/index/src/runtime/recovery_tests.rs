@@ -10,7 +10,7 @@ use bitcoin::{
     script::Builder,
 };
 
-use bitcoin_rs_chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
+use bitcoin_rs_execution::chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
 
 use crate::IndexCapabilities;
 
@@ -372,15 +372,17 @@ impl Harness {
         let worker = Worker {
             runtime: Arc::clone(&runtime),
             writer: Arc::clone(&writer),
-            applied_tip: bitcoin_rs_chain::TipReader::new(Arc::clone(&applied_tip)),
-            block_tree: bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&fixture.tree)),
+            applied_tip: bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&applied_tip)),
+            block_tree: bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(
+                &fixture.tree,
+            )),
             body_store: Some(body_store),
             history: HistoryAccess::new(Arc::clone(&retention), RetentionBudget::Unlimited),
             batch_limits: DEFAULT_BATCH_LIMITS,
             enabled,
             chain_events: Arc::new(TestChainCursor),
             reporter,
-            shutdown: bitcoin_rs_chain::LatchReader::fixture_never(),
+            shutdown: bitcoin_rs_execution::chain::LatchReader::fixture_never(),
             wake_rx,
             quiet_period: Duration::ZERO,
             batch_delay: Duration::ZERO,
@@ -1199,15 +1201,17 @@ impl SeedCellHarness {
         let worker = Worker {
             runtime: Arc::clone(&runtime),
             writer: Arc::clone(&writer),
-            applied_tip: bitcoin_rs_chain::TipReader::new(Arc::clone(&applied_tip)),
-            block_tree: bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&fixture.tree)),
+            applied_tip: bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&applied_tip)),
+            block_tree: bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(
+                &fixture.tree,
+            )),
             body_store: Some(body_store),
             history: HistoryAccess::new(Arc::clone(&retention), RetentionBudget::Depth(288)),
             batch_limits: DEFAULT_BATCH_LIMITS,
             enabled,
             chain_events: Arc::new(TestChainCursor),
             reporter,
-            shutdown: bitcoin_rs_chain::LatchReader::fixture_never(),
+            shutdown: bitcoin_rs_execution::chain::LatchReader::fixture_never(),
             wake_rx,
             quiet_period: Duration::ZERO,
             batch_delay: Duration::ZERO,

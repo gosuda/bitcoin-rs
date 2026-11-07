@@ -1,11 +1,15 @@
 fn scantxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    super::scantxoutset(ctx, params, &bitcoin_rs_chain::LatchReader::fixture_never())
+    super::scantxoutset(
+        ctx,
+        params,
+        &bitcoin_rs_execution::chain::LatchReader::fixture_never(),
+    )
 }
 
 use alloc::sync::Arc;
 
-use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, TxOut, Txid};
+use bitcoin_rs_execution::chain::{ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 
 use super::*;
@@ -102,14 +106,14 @@ fn scantxoutset_addr_returns_matching_unspents() {
 
 #[test]
 fn scantxoutset_waits_for_one_consistent_utxo_and_tip_transition() {
-    let transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let context = Context::new().with_chain_transition(transition.clone());
     let old_tip = TipSnapshot {
         tip_id: NodeId::new(0),
         height: 0,
         chainwork: ChainWork::ZERO,
         hash: test_txid(100),
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     };
     context.chain.applied_tip.store(Some(Arc::new(old_tip)));
     let ctx = Arc::new(context);
@@ -154,7 +158,7 @@ fn scantxoutset_waits_for_one_consistent_utxo_and_tip_transition() {
         height: 1,
         chainwork: ChainWork::from(1_u64),
         hash: test_txid(103),
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     };
     ctx.chain.applied_tip.store(Some(Arc::new(new_tip.clone())));
     drop(transition_guard);
@@ -346,7 +350,7 @@ fn scantxoutset_status_abort_release_and_failure_cleanup() {
         &ctx,
         &permit,
         &std::collections::BTreeMap::new(),
-        &bitcoin_rs_chain::LatchReader::fixture_never(),
+        &bitcoin_rs_execution::chain::LatchReader::fixture_never(),
     )
     .unwrap_or_else(|error| panic!("cancel result: {error}"));
     assert_eq!(result["success"].as_bool(), Some(false));
@@ -366,7 +370,7 @@ fn scantxoutset_status_abort_release_and_failure_cleanup() {
 
 #[test]
 fn scan_can_abort_while_waiting_for_chain_transition() {
-    let transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let ctx = Arc::new(Context::new().with_chain_transition(transition.clone()));
     let held = transition.lock();
     let worker_ctx = Arc::clone(&ctx);
@@ -401,7 +405,7 @@ fn scan_projection_uses_retained_branch_after_tip_changes() {
         height: 3,
         chainwork: ChainWork::ZERO,
         hash: test_txid(300),
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     };
     ctx.chain.applied_tip.store(Some(Arc::new(tip.clone())));
     let applied = ctx.chain.applied_view();
@@ -732,7 +736,7 @@ fn scan_expansion_observes_abort_shutdown_and_deadline() -> TestResult {
     let ctx = Arc::new(Context::new());
     for cause in ["abort", "shutdown", "deadline"] {
         let permit = ctx.chain.utxo.reserve_scan()?;
-        let cancellation_writer = bitcoin_rs_chain::LatchWriter::new();
+        let cancellation_writer = bitcoin_rs_execution::chain::LatchWriter::new();
         let cancellation = cancellation_writer.reader();
         let descriptor = scan_descriptor(
             &format!("wpkh({SCAN_XPUB}/<0;1>/*)"),
@@ -921,7 +925,7 @@ fn ranged_descriptor_budget_bounds_and_omitted_multipath_default() {
 fn cancellation_during_ranged_scan_releases_reservation() {
     let ctx = Arc::new(Context::new());
     let xpub = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
-    let stop = bitcoin_rs_chain::LatchWriter::new();
+    let stop = bitcoin_rs_execution::chain::LatchWriter::new();
     stop.trigger();
     let cancel_reader = stop.reader();
 

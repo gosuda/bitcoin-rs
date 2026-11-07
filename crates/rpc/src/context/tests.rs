@@ -30,7 +30,7 @@ fn eight_threads_share_one_context_for_getblockcount() {
 
 #[test]
 fn applied_view_uses_one_publication() {
-    use bitcoin_rs_chain::{ChainTxCount, ChainWork, NodeId};
+    use bitcoin_rs_execution::chain::{ChainTxCount, ChainWork, NodeId};
 
     let ctx = Context::new();
     let tip = |height: u32, byte: u8, work: u64, count| {
@@ -86,14 +86,14 @@ fn applied_view_does_not_wait_for_transition() -> Result<(), crate::test_error::
     use std::sync::mpsc;
     use std::time::Duration;
 
-    let barrier = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let barrier = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let ctx = Arc::new(Context::new().with_chain_transition(barrier.clone()));
     ctx.chain.applied_tip.store(Some(Arc::new(TipSnapshot {
-        tip_id: bitcoin_rs_chain::NodeId::new(0),
+        tip_id: bitcoin_rs_execution::chain::NodeId::new(0),
         height: 5,
-        chainwork: bitcoin_rs_chain::ChainWork::ZERO,
+        chainwork: bitcoin_rs_execution::chain::ChainWork::ZERO,
         hash: bitcoin_rs_consensus::primitives::Hash256::default(),
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(1),
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::established(1),
     })));
 
     let transition = barrier.lock();
@@ -236,12 +236,12 @@ fn from_handles_shares_chain_handles_with_caller() {
     let coin_stats = Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
         bitcoin_rs_storage::utxo::stats::CoinStats::default(),
     ));
-    let block_tree = Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()));
-    let progress = bitcoin_rs_chain::ChainProgressReader::new(
+    let block_tree = Arc::new(RwLock::new(bitcoin_rs_execution::chain::BlockTree::new()));
+    let progress = bitcoin_rs_execution::chain::ChainProgressReader::new(
         TipReader::new(Arc::clone(&chain_tip)),
         TipReader::new(Arc::clone(&applied_tip)),
         BlockTreeReader::new(Arc::clone(&block_tree)),
-        Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+        Arc::new(bitcoin_rs_execution::chain::InitialBlockDownload::new(
             TipReader::new(Arc::clone(&applied_tip)),
             BlockTreeReader::new(Arc::clone(&block_tree)),
         )),
@@ -250,7 +250,7 @@ fn from_handles_shares_chain_handles_with_caller() {
         bitcoin_rs_p2p::P2pServiceConfig::default(),
         LatchReader::fixture_never(),
     ));
-    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let ctx = Context::from_handles(ContextHandles {
         chain: ChainHandles {
             chain_tip: TipReader::new(Arc::clone(&chain_tip)),
@@ -291,11 +291,11 @@ fn from_handles_shares_chain_handles_with_caller() {
     drop(held);
     let snapshot = |count| {
         Arc::new(TipSnapshot {
-            tip_id: bitcoin_rs_chain::NodeId::new(0),
+            tip_id: bitcoin_rs_execution::chain::NodeId::new(0),
             height: 7,
-            chainwork: bitcoin_rs_chain::ChainWork::ZERO,
+            chainwork: bitcoin_rs_execution::chain::ChainWork::ZERO,
             hash: Hash256::from_le_bytes(&[7; 32]),
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(count),
+            chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::established(count),
         })
     };
     chain_tip.store(Some(snapshot(1)));
@@ -334,7 +334,7 @@ fn from_handles_shares_chain_handles_with_caller() {
             .insert_node(
                 None,
                 genesis.header,
-                bitcoin_rs_chain::node::NodeStatus::Active,
+                bitcoin_rs_execution::chain::node::NodeStatus::Active,
             )
             .expect("genesis insert");
         assert!(
@@ -354,11 +354,11 @@ fn status_keeps_the_captured_applied_pair() {
     let ctx = Context::new();
     let tip = |height: u32, byte: u8, work: u64, count| {
         Arc::new(TipSnapshot {
-            tip_id: bitcoin_rs_chain::NodeId::new(height),
+            tip_id: bitcoin_rs_execution::chain::NodeId::new(height),
             height,
-            chainwork: bitcoin_rs_chain::ChainWork::from(work),
+            chainwork: bitcoin_rs_execution::chain::ChainWork::from(work),
             hash: Hash256::from_le_bytes(&[byte; 32]),
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(count),
+            chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::established(count),
         })
     };
     ctx.chain.applied_tip.store(Some(tip(3, 0xaa, 7, 42)));
@@ -375,7 +375,10 @@ fn status_keeps_the_captured_applied_pair() {
     );
     assert_eq!(
         progress.chain_work,
-        format!("{:064x}", bitcoin_rs_chain::ChainWork::from(7_u64)),
+        format!(
+            "{:064x}",
+            bitcoin_rs_execution::chain::ChainWork::from(7_u64)
+        ),
         "chainwork must stay at the capture"
     );
     assert_eq!(
@@ -459,7 +462,11 @@ fn header_hex_is_unchanged_by_sourcing_the_header_from_the_tree() {
     let ctx = Arc::new(Context::new());
     {
         let mut tree = ctx.chain.block_tree.write();
-        let _ = tree.insert_node(None, block.header, bitcoin_rs_chain::NodeStatus::Active);
+        let _ = tree.insert_node(
+            None,
+            block.header,
+            bitcoin_rs_execution::chain::NodeStatus::Active,
+        );
     }
     let hash = Hash256::from(block.block_hash());
     let Some(record) = ctx.chain.block_by_hash(hash) else {
@@ -482,7 +489,11 @@ fn block_by_hash_answers_with_the_tree_header_for_a_cached_record() {
     let ctx = Arc::new(Context::new());
     {
         let mut tree = ctx.chain.block_tree.write();
-        let _ = tree.insert_node(None, block.header, bitcoin_rs_chain::NodeStatus::Active);
+        let _ = tree.insert_node(
+            None,
+            block.header,
+            bitcoin_rs_execution::chain::NodeStatus::Active,
+        );
     }
     let cached = BlockRecord::from_block(0, &block);
     let hash = Hash256::from(cached.hash);
@@ -528,8 +539,8 @@ fn synthetic_record_has_no_header_and_renders_empty_hex() {
 
 #[test]
 fn tree_derived_record_carries_the_header() {
-    use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_consensus::primitives::Header;
+    use bitcoin_rs_execution::chain::NodeStatus;
 
     let ctx = Context::new();
     let header = Header {
@@ -574,8 +585,8 @@ fn height_for_hash_returns_none_when_tree_empty() {
 #[test]
 fn block_by_height_prefers_tree_identity_over_stale_cache()
 -> Result<(), crate::test_error::TestError> {
-    use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_consensus::primitives::Header;
+    use bitcoin_rs_execution::chain::NodeStatus;
 
     let ctx = Context::new();
     let (child_hash, stale_hash) = {
@@ -627,8 +638,8 @@ fn block_by_height_prefers_tree_identity_over_stale_cache()
 #[test]
 fn height_lookups_follow_applied_tip_when_header_fork_leads()
 -> Result<(), crate::test_error::TestError> {
-    use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_consensus::primitives::Header;
+    use bitcoin_rs_execution::chain::NodeStatus;
 
     let ctx = Context::new();
     let (applied_tip, header_tip) = {
@@ -716,7 +727,7 @@ fn ibd_latch_judges_the_contexts_own_tree() {
             .insert_node(
                 None,
                 genesis.header,
-                bitcoin_rs_chain::node::NodeStatus::Active,
+                bitcoin_rs_execution::chain::node::NodeStatus::Active,
             )
             .expect("genesis insert");
         let mut child = genesis.header;
@@ -727,7 +738,7 @@ fn ibd_latch_judges_the_contexts_own_tree() {
             .insert_node(
                 Some(genesis_id),
                 child,
-                bitcoin_rs_chain::node::NodeStatus::Active,
+                bitcoin_rs_execution::chain::node::NodeStatus::Active,
             )
             .expect("child insert");
         let node = tree.node(child_id).expect("inserted node");
@@ -743,19 +754,19 @@ fn ibd_latch_judges_the_contexts_own_tree() {
     let chain_tip = TipReader::new(Arc::new(ArcSwapOption::empty()));
     let applied_tip = Arc::new(ArcSwapOption::empty());
 
-    let block_tree = Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()));
+    let block_tree = Arc::new(RwLock::new(bitcoin_rs_execution::chain::BlockTree::new()));
     let status: Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> = Arc::new(ReadySource);
     let ctx = Context::from_handles(ContextHandles {
         chain: ChainHandles {
             chain_tip: chain_tip.clone(),
             applied_tip: TipReader::new(Arc::clone(&applied_tip)),
             active_tip_wait: None,
-            chain_transition: bitcoin_rs_chain::TransitionDomain::new().stable_read(),
-            progress: bitcoin_rs_chain::ChainProgressReader::new(
+            chain_transition: bitcoin_rs_execution::chain::TransitionDomain::new().stable_read(),
+            progress: bitcoin_rs_execution::chain::ChainProgressReader::new(
                 chain_tip,
                 TipReader::new(Arc::clone(&applied_tip)),
                 BlockTreeReader::new(Arc::clone(&block_tree)),
-                Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+                Arc::new(bitcoin_rs_execution::chain::InitialBlockDownload::new(
                     TipReader::new(Arc::clone(&applied_tip)),
                     BlockTreeReader::new(Arc::clone(&block_tree)),
                 )),
@@ -773,7 +784,7 @@ fn ibd_latch_judges_the_contexts_own_tree() {
             chain_network: Network::Mainnet,
             block_body_source: None,
             block_undo_source: None,
-            closed_for_recovery: bitcoin_rs_chain::LatchWriter::new().reader(),
+            closed_for_recovery: bitcoin_rs_execution::chain::LatchWriter::new().reader(),
             rollback_warnings: None,
         },
         mempool: MempoolHandles {

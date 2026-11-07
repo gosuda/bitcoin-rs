@@ -202,7 +202,7 @@ fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> Re
     let mut previous = genesis.block().block_hash();
     for height in 1..=3 {
         let block = BlockPayload::from_local(
-            bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
+            bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
         );
         state.apply_block(&block)?;
         previous = block.block().block_hash();
@@ -213,7 +213,7 @@ fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> Re
         sync: state.sync(),
         snapshots: Arc::clone(&state.snapshots),
     };
-    let cancellation = bitcoin_rs_chain::LatchReader::fixture_never();
+    let cancellation = bitcoin_rs_execution::chain::LatchReader::fixture_never();
     for check_level in 0..=4 {
         for nblocks in [0, 2, 100] {
             assert!(
@@ -251,7 +251,7 @@ fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> Resul
         sync: state.sync(),
         snapshots: Arc::clone(&state.snapshots),
     };
-    let live = bitcoin_rs_chain::LatchReader::fixture_never();
+    let live = bitcoin_rs_execution::chain::LatchReader::fixture_never();
     for check_level in 0..=4 {
         for nblocks in [0, 1, 6] {
             assert!(
@@ -280,13 +280,13 @@ fn verify_chain_reports_cancellation_and_recovery_closure() -> Result<(), TestEr
         sync: state.sync(),
         snapshots: Arc::clone(&state.snapshots),
     };
-    let live = bitcoin_rs_chain::LatchReader::fixture_never();
+    let live = bitcoin_rs_execution::chain::LatchReader::fixture_never();
     assert!(
         matches!(control.verify_chain(3, 6, &live), Ok(true)),
         "an open chain must verify"
     );
     let fired = {
-        let trigger = bitcoin_rs_chain::LatchWriter::new();
+        let trigger = bitcoin_rs_execution::chain::LatchWriter::new();
         trigger.trigger();
         trigger.reader()
     };
@@ -689,15 +689,15 @@ fn recovery_closure_stops_the_node_run_loop() -> Result<(), TestError> {
 // SYNC-04
 #[test]
 fn fatal_settlement_teardown_skips_the_checkpoint_and_answers_an_error() -> Result<(), TestError> {
-    type CloseChain = Box<dyn Fn(&bitcoin_rs_chainstate::Chainstate)>;
+    type CloseChain = Box<dyn Fn(&bitcoin_rs_execution::Chainstate)>;
     let variants: Vec<(&str, CloseChain)> = vec![
         (
             "fatal-settlement",
-            Box::new(|chain: &bitcoin_rs_chainstate::Chainstate| chain.fail_closed_for_recovery()),
+            Box::new(|chain: &bitcoin_rs_execution::Chainstate| chain.fail_closed_for_recovery()),
         ),
         (
             "graceful-close",
-            Box::new(|chain: &bitcoin_rs_chainstate::Chainstate| {
+            Box::new(|chain: &bitcoin_rs_execution::Chainstate| {
                 drop(chain.close());
             }),
         ),
@@ -1054,7 +1054,7 @@ impl ServedWitness {
     fn serve(
         &mut self,
         server: RpcServer,
-        shutdown: bitcoin_rs_chain::LatchReader,
+        shutdown: bitcoin_rs_execution::chain::LatchReader,
     ) -> Result<(), TestError> {
         self.server = Some(BoundedThread::spawn("verifychain-rpc-server", move || {
             server.serve_with_shutdown(shutdown)
@@ -1167,7 +1167,7 @@ fn apply_regtest_chain(state: &NodeState) -> Result<(), TestError> {
     let mut previous = genesis.block().block_hash();
     for height in 1..=3 {
         let block = BlockPayload::from_local(
-            bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
+            bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
         );
         state.apply_block(&block)?;
         previous = block.block().block_hash();
@@ -1265,7 +1265,7 @@ fn verifychain_socket_reports_recovery_closure() -> Result<(), TestError> {
     let server = bind_test_rpc(&state)?;
     let addr = server.local_addr()?;
 
-    let stop = Arc::new(bitcoin_rs_chain::LatchWriter::new());
+    let stop = Arc::new(bitcoin_rs_execution::chain::LatchWriter::new());
     let mut witness = ServedWitness::new(
         {
             let stop = Arc::clone(&stop);

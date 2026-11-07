@@ -6,9 +6,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_chain::{ActiveTipWait, LatchReader, LatchWriter, TipSnapshot, TipWaitCondition};
-use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_consensus::primitives::Network;
+use bitcoin_rs_execution::Chainstate;
+use bitcoin_rs_execution::chain::{
+    ActiveTipWait, LatchReader, LatchWriter, TipSnapshot, TipWaitCondition,
+};
 use bitcoin_rs_rpc::{Auth, Handler, RpcServer, context::Context};
 use parking_lot::{Condvar, Mutex};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
@@ -69,12 +71,16 @@ fn context() -> (Arc<Context>, Arc<Chainstate>, Arc<ObservableTipWait>) {
         Network::Regtest,
         Arc::new(arc_swap::ArcSwapOption::empty()),
         Arc::new(arc_swap::ArcSwapOption::empty()),
-        Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
+        Arc::new(parking_lot::RwLock::new(
+            bitcoin_rs_execution::chain::BlockTree::new(),
+        )),
         Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
         Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
             bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         )),
-        Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
+        Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
+            0,
+        )),
     ));
     let genesis_payload = bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         Network::Regtest.genesis_block(),

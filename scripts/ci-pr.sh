@@ -60,14 +60,14 @@ clippy_profiles() {
   profile "clippy: workspace (kernel-free)" \
     cargo clippy --locked --workspace --all-targets \
       --features bitcoin-rs/silent-payments \
-      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chainstate \
+      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-execution \
       --exclude bitcoin-rs-node \
       -- -D warnings
   profile "clippy: bitcoin-rs-consensus (native)" \
     cargo clippy --locked -p bitcoin-rs-consensus \
       --no-default-features --all-targets -- -D warnings
-  profile "clippy: bitcoin-rs-chainstate (native)" \
-    cargo clippy --locked -p bitcoin-rs-chainstate \
+  profile "clippy: bitcoin-rs-execution (native)" \
+    cargo clippy --locked -p bitcoin-rs-execution \
       --all-targets -- -D warnings
   profile "clippy: bitcoin-rs-node (zmq,silent-payments)" \
     cargo clippy --locked -p bitcoin-rs-node \
@@ -102,8 +102,8 @@ test_crates_profiles() {
     cargo_test -p bitcoin-rs-storage --features surrealkv,mdbx --test suite
   profile "test: bitcoin-rs-consensus (native)" \
     cargo_test -p bitcoin-rs-consensus --no-default-features
-  profile "test: bitcoin-rs-chainstate (native)" \
-    cargo_test -p bitcoin-rs-chainstate
+  profile "test: bitcoin-rs-execution (native)" \
+    cargo_test -p bitcoin-rs-execution
   profile "test: bitcoin-rs-p2p" \
     cargo_test -p bitcoin-rs-p2p
   profile "test: bitcoin-rs-node (zmq)" \
@@ -126,7 +126,7 @@ test_workspace_profiles() {
   # including the process-harness suite that launches the pinned bitcoind.
   profile "test: workspace (kernel-free)" \
     cargo_test --workspace \
-      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chainstate \
+      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-execution \
       --exclude bitcoin-rs-p2p \
       --exclude bitcoin-rs-node --exclude bitcoin-rs-rpc \
       --exclude bitcoin-rs-snapshot

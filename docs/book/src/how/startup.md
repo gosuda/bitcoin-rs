@@ -21,7 +21,7 @@ The binary parses the CLI, resolves config, opens the data directory under a loc
 2. `initialize_data_dir` (`open.rs`) creates the process epoch used by recovery evidence.
 3. Split the dbcache budget between chainstate and txindex, then `NodeStorage::open` (`open.rs`).
 4. Bind ZMQ publisher sockets from `[[notifications.zmq]]` TOML endpoints (`open.rs`; key form in [reference/config-keys.md](../reference/config-keys.md)).
-5. `require_full_script_attestation` then `prepare_initial_chainstate` (`open.rs`): restore from checkpoint or journal, or start cold. The chosen source logs one line from `crates/chainstate/src/recovery.rs:339`, `:354`, or `:464`:
+5. `require_full_script_attestation` then `prepare_initial_chainstate` (`open.rs`): restore from checkpoint or journal, or start cold. The chosen source logs one line from `crates/execution/src/recovery.rs:339`, `:354`, or `:464`:
 
    ```
    INFO bitcoin_rs_chainstate::recovery: chainstate restore selected restore_source="checkpoint" checkpoint_generation=2 checkpoint_height=5 height=5 hash="0ef5cd..."
@@ -35,7 +35,7 @@ The binary parses the CLI, resolves config, opens the data directory under a loc
 8. Install the tip-staged hook for mining, the mempool gateway, block-announce queue, and chain followers (`open.rs`).
 9. Configure checkpointing and clear any disconnect marker (`open.rs`); an unrecoverable durable-head gap returns `UnrecoverableDurableHeadGap` naming the three on-disk paths to fix or wipe.
 10. Restore the mempool snapshot (`open.rs`) with its `mempool snapshot revalidation finished` line, then open the assumeutxo manager and the block sync.
-11. `verify_startup_window` (`open.rs`) re-verifies the last `STARTUP_VERIFY_DEPTH = 6` blocks (`crates/chainstate/src/verify.rs:24`) at `CheckLevel::CheckUndoAndCommitments`, logging `startup verification passed blocks=5` (`open.rs`). Failure returns `StartupVerification` with the four paths to inspect.
+11. `verify_startup_window` (`open.rs`) re-verifies the last `STARTUP_VERIFY_DEPTH = 6` blocks (`crates/execution/src/verify.rs:24`) at `CheckLevel::CheckUndoAndCommitments`, logging `startup verification passed blocks=5` (`open.rs`). Failure returns `StartupVerification` with the four paths to inspect.
 
 One real cold start, trimmed (timestamps and LSM-tree table recovery removed; `$DATA` is the data directory):
 
@@ -79,7 +79,7 @@ The shutdown latch and chainstate shutdown request propagate to every service. `
 | Another process holds the datadir | `DataDirLock::acquire` (`open.rs`) | `DataDirLock` error from `NodeOpenError` |
 | Durable head gap that replay cannot close | `recover_disconnect_marker` (`open.rs`) | `UnrecoverableDurableHeadGap { chainstate, checkpoints, txindex, source }` |
 | Last 6 blocks fail undo/commitment checks | `verify_startup_window` (`open.rs`) | `StartupVerification` naming blocks, chainstate, checkpoints, txindex paths |
-| Stored chain was not fully script-validated | `require_full_script_attestation` (`open.rs`) | warning `the stored chain was not fully script-validated; rebuilding it with full validation` (`crates/chainstate/src/recovery.rs:135`) |
+| Stored chain was not fully script-validated | `require_full_script_attestation` (`open.rs`) | warning `the stored chain was not fully script-validated; rebuilding it with full validation` (`crates/execution/src/recovery.rs:135`) |
 | RPC port taken | `start_rpc_listeners` | `failed to bind RPC listener at {address}` (`run.rs:41`) |
 | Metrics evidence identity mismatch | `init_metrics_services` | `metrics recorder already serves a different evidence identity` (`run.rs:71`) |
 
@@ -88,8 +88,8 @@ The shutdown latch and chainstate shutdown request propagate to every service. `
 | Invariant | Test | Location |
 |---|---|---|
 | Event-loop progress uses elapsed time | `telemetry_uses_elapsed_time_not_wake_count` | `crates/node/src/event_loop.rs:105` |
-| Startup window depth and level | `STARTUP_VERIFY_DEPTH = 6`, `CheckLevel::CheckUndoAndCommitments` | `crates/chainstate/src/verify.rs:24`, `open.rs` |
-| Journal replay matches the durable head identity | `replayed_frontier_must_match_the_durable_head_identity` | `crates/chainstate/src/journal/replay_tests.rs` (also cited in [how/state-and-storage.md](state-and-storage.md)) |
+| Startup window depth and level | `STARTUP_VERIFY_DEPTH = 6`, `CheckLevel::CheckUndoAndCommitments` | `crates/execution/src/verify.rs:24`, `open.rs` |
+| Journal replay matches the durable head identity | `replayed_frontier_must_match_the_durable_head_identity` | `crates/execution/src/journal/replay_tests.rs` (also cited in [how/state-and-storage.md](state-and-storage.md)) |
 | Crash recovery end to end | `crates/node/tests/crash_recovery.rs` (clause `SYNC-05` evidence) |
 
 Commands run for this page: the regtest traces above come from `./target/release/bitcoin-rs --network regtest --data-dir $DATA --log-level debug` with `generatetoaddress` over RPC; the restart traces (checkpoint and journal restore lines) come from a second and third start on the same datadir.

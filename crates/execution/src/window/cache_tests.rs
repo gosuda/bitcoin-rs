@@ -1,0 +1,342 @@
+use std::sync::Arc;
+
+use crate::chain::NodeStatus;
+use crate::chain::regtest_fixture::{
+    coinbase, mined_block_with_prev_hash, mined_regtest_child_at as mined_child,
+};
+use bitcoin_rs_consensus::primitives::{
+    Amount, BlockHash, BlockPayload, Hash256, LockTime, Network, OutPoint, Sequence, Tx, TxIn,
+    TxOut, Witness,
+};
+use bitcoin_rs_consensus::{ScriptExecutionCache, UtxoView, ValidationEngine};
+use bitcoin_rs_storage::utxo::UtxoSet;
+
+use crate::Chainstate;
+use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
+
+struct PrevoutMap<'a>(&'a [(OutPoint, TxOut)]);
+
+impl UtxoView for PrevoutMap<'_> {
+    fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
+        self.0
+            .iter()
+            .find(|(candidate, _)| candidate == outpoint)
+            .map(|(_, txout)| txout.clone())
+    }
+}
+fn matured_funding(handles: &Chainstate) -> TestResult<(Tx, Tx, BlockHash)> {
+    let network = Network::Regtest;
+    let mut parent = network.genesis_block().block_hash();
+    let mut funded: Option<Tx> = None;
+    let mut funded_next: Option<Tx> = None;
+    for height in 1..=101 {
+        let block = mined_child(parent, height)?;
+        handles.apply_block(&BlockPayload::from_local(block.clone()))?;
+        if height == 1 {
+            funded = Some(block.txs[0].clone());
+        }
+        if height == 2 {
+            funded_next = Some(block.txs[0].clone());
+        }
+        parent = block.block_hash();
+    }
+    Ok((
+        funded.ok_or(TestError::Missing("height-1 coinbase missing"))?,
+        funded_next.ok_or(TestError::Missing("height-2 coinbase missing"))?,
+        parent,
+    ))
+}
+
+fn spend_tx(funded: &Tx, script_sig: Vec<u8>) -> Tx {
+    Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(funded.txid(), 0),
+            script_sig: script_sig.into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(funded.outputs[0].value.to_sat() - 1_000),
+            script_pubkey: vec![0x51].into(),
+        }],
+    }
+}
+
+#[test]
+fn window_commit_consumes_verified_script_cache_entry() -> TestResult {
+    let network = Network::Regtest;
+    let mut handles: Chainstate = handles(network, Arc::new(UtxoSet::new()));
+    seed_genesis(&handles)?;
+
+    let (funded, _, parent) = matured_funding(&handles)?;
+
+    let cache = Arc::new(ScriptExecutionCache::new());
+    handles.script_cache = Some(Arc::clone(&cache));
+
+    let prevout = OutPoint::new(funded.txid(), 0);
+    let good = spend_tx(&funded, vec![0x51]);
+    let wtxid = good.wtxid();
+    let block = mined_block_with_prev_hash(parent, 102, vec![coinbase(102), good])?;
+    handles
+        .block_tree
+        .write()
+        .insert_header(block.header, NodeStatus::HeaderValid)
+        .map_err(TestError::Chain)?;
+
+    let block_hash = Hash256::from(block.block_hash());
+    let applied = handles
+        .applied_tip
+        .load_full()
+        .ok_or(TestError::Missing("window test needs an applied tip"))?;
+    let next_height = applied.height + 1;
+    let softfork = {
+        let tree = handles.block_tree.read();
+        crate::chain::softfork_state(&tree, network, Some(applied.tip_id), next_height)
+    };
+    let flags = bitcoin_rs_consensus::verify_block::verify_flags(
+        network,
+        next_height,
+        block_hash,
+        softfork,
+    );
+    let prevouts = [(prevout, funded.outputs[0].clone())];
+    bitcoin_rs_consensus::verify_tx::verify_transaction(
+        &block.txs[1],
+        &PrevoutMap(&prevouts),
+        next_height,
+        0,
+        flags,
+        ValidationEngine::Native,
+        None,
+    )?;
+    cache.insert(wtxid, flags);
+
+    let payload = BlockPayload::from_local(block);
+    let outcomes = handles.apply_window(&[&payload])?;
+    assert_eq!(outcomes.len(), 1, "window must commit its one block");
+    assert_eq!(outcomes[0].tip.height, next_height);
+    assert_eq!(outcomes[0].hash, block_hash);
+    assert!(
+        !cache.take(wtxid, flags),
+        "the window take must have consumed the entry exactly once"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_failed_window_restores_the_script_cache_entries_it_took() -> TestResult {
+    let network = Network::Regtest;
+    let mut handles: Chainstate = handles(network, Arc::new(UtxoSet::new()));
+    seed_genesis(&handles)?;
+
+    let (funded, funded_next, parent) = matured_funding(&handles)?;
+
+    let cache = Arc::new(ScriptExecutionCache::new());
+    handles.script_cache = Some(Arc::clone(&cache));
+
+    let good = spend_tx(&funded, vec![0x51]);
+    let bad = spend_tx(&funded_next, vec![0x00]);
+    let good_wtxid = good.wtxid();
+
+    let first = mined_block_with_prev_hash(parent, 102, vec![coinbase(102), good])?;
+    let second = mined_block_with_prev_hash(first.block_hash(), 103, vec![coinbase(103), bad])?;
+    for block in [&first, &second] {
+        handles
+            .block_tree
+            .write()
+            .insert_header(block.header, NodeStatus::HeaderValid)
+            .map_err(TestError::Chain)?;
+    }
+
+    let applied = handles
+        .applied_tip
+        .load_full()
+        .ok_or(TestError::Missing("window test needs an applied tip"))?;
+    let softfork = {
+        let tree = handles.block_tree.read();
+        crate::chain::softfork_state(&tree, network, Some(applied.tip_id), 102)
+    };
+    let flags = bitcoin_rs_consensus::verify_block::verify_flags(
+        network,
+        102,
+        Hash256::from(first.block_hash()),
+        softfork,
+    );
+    let prevouts = [(OutPoint::new(funded.txid(), 0), funded.outputs[0].clone())];
+    bitcoin_rs_consensus::verify_tx::verify_transaction(
+        &first.txs[1],
+        &PrevoutMap(&prevouts),
+        102,
+        0,
+        flags,
+        ValidationEngine::Native,
+        None,
+    )?;
+    cache.insert(good_wtxid, flags);
+
+    let first_payload = BlockPayload::from_local(first);
+    let second_payload = BlockPayload::from_local(second);
+    let payloads = [&first_payload, &second_payload];
+    let proven = super::prove_window(&handles, &payloads).proven;
+    assert!(
+        proven.is_empty(),
+        "bad script at 103 must fail the pre-proof"
+    );
+    assert!(
+        cache.take(good_wtxid, flags),
+        "failed pre-proof must restore taken entries"
+    );
+
+    cache.insert(good_wtxid, flags);
+    let err = handles
+        .apply_window(&payloads)
+        .err()
+        .ok_or(TestError::Missing(
+            "the invalid second block must fail the window apply",
+        ))?;
+    assert_eq!(err.applied, 1, "one block committed before the failure");
+    assert_eq!(err.committed.len(), 1);
+    assert_eq!(err.committed[0].tip.height, 102);
+    assert_eq!(
+        err.committed[0].hash,
+        Hash256::from(first_payload.block().block_hash())
+    );
+    assert!(
+        matches!(
+            err.source,
+            crate::ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script { .. })
+        ),
+        "failure must be the second block's script verdict"
+    );
+    let tip = handles
+        .applied_tip
+        .load_full()
+        .ok_or(TestError::Missing("window test needs an applied tip"))?;
+    assert_eq!(tip.height, 102, "the valid prefix stays committed");
+    assert!(
+        !cache.take(good_wtxid, flags),
+        "fallback commit consumed the restored entry"
+    );
+    Ok(())
+}
+#[test]
+fn a_window_refused_after_proof_restores_only_uncommitted_takes() -> TestResult {
+    let network = Network::Regtest;
+    let mut handles: Chainstate = handles(network, Arc::new(UtxoSet::new()));
+    seed_genesis(&handles)?;
+
+    let (funded, funded_next, parent) = matured_funding(&handles)?;
+
+    let cache = Arc::new(ScriptExecutionCache::new());
+    handles.script_cache = Some(Arc::clone(&cache));
+
+    let first_spend = spend_tx(&funded, vec![0x51]);
+    let second_spend = spend_tx(&funded_next, vec![0x51]);
+    let first_wtxid = first_spend.wtxid();
+    let second_wtxid = second_spend.wtxid();
+
+    let first = mined_block_with_prev_hash(parent, 102, vec![coinbase(102), first_spend])?;
+    let mut rich_coinbase = coinbase(103);
+    rich_coinbase.outputs[0].value =
+        Amount::from_sat(rich_coinbase.outputs[0].value.to_sat() + 1_000_000);
+    let second =
+        mined_block_with_prev_hash(first.block_hash(), 103, vec![rich_coinbase, second_spend])
+            .map_err(TestError::RegtestFixture)?;
+    for block in [&first, &second] {
+        handles
+            .block_tree
+            .write()
+            .insert_header(block.header, NodeStatus::HeaderValid)
+            .map_err(TestError::Chain)?;
+    }
+
+    let first_hash = Hash256::from(first.block_hash());
+    let second_hash = Hash256::from(second.block_hash());
+    let (flags_first, flags_second) = {
+        let applied = handles
+            .applied_tip
+            .load_full()
+            .ok_or(TestError::Missing("window test needs an applied tip"))?;
+        let tree = handles.block_tree.read();
+        let softfork_first =
+            crate::chain::softfork_state(&tree, network, Some(applied.tip_id), 102);
+        let flags_first = bitcoin_rs_consensus::verify_block::verify_flags(
+            network,
+            102,
+            first_hash,
+            softfork_first,
+        );
+        let first_id = tree
+            .lookup(first_hash)
+            .ok_or(TestError::Missing("first header must be in the tree"))?;
+        let softfork_second = crate::chain::softfork_state(&tree, network, Some(first_id), 103);
+        let flags_second = bitcoin_rs_consensus::verify_block::verify_flags(
+            network,
+            103,
+            second_hash,
+            softfork_second,
+        );
+        (flags_first, flags_second)
+    };
+    let first_prevouts = [(OutPoint::new(funded.txid(), 0), funded.outputs[0].clone())];
+    bitcoin_rs_consensus::verify_tx::verify_transaction(
+        &first.txs[1],
+        &PrevoutMap(&first_prevouts),
+        102,
+        0,
+        flags_first,
+        ValidationEngine::Native,
+        None,
+    )
+    .map_err(TestError::Consensus)?;
+    cache.insert(first_wtxid, flags_first);
+    let second_prevouts = [(
+        OutPoint::new(funded_next.txid(), 0),
+        funded_next.outputs[0].clone(),
+    )];
+    bitcoin_rs_consensus::verify_tx::verify_transaction(
+        &second.txs[1],
+        &PrevoutMap(&second_prevouts),
+        103,
+        0,
+        flags_second,
+        ValidationEngine::Native,
+        None,
+    )
+    .map_err(TestError::Consensus)?;
+    cache.insert(second_wtxid, flags_second);
+
+    let first_payload = BlockPayload::from_local(first);
+    let second_payload = BlockPayload::from_local(second);
+    let payloads = [&first_payload, &second_payload];
+    let err = handles
+        .apply_window(&payloads)
+        .err()
+        .ok_or(TestError::Missing(
+            "the inflated coinbase must fail the window apply",
+        ))?;
+    assert_eq!(err.applied, 1, "one block committed before the failure");
+    assert_eq!(err.committed.len(), 1);
+    assert_eq!(err.committed[0].tip.height, 102);
+    assert_eq!(err.committed[0].hash, first_hash);
+    assert!(
+        matches!(
+            err.source,
+            crate::ApplyError::Consensus(
+                bitcoin_rs_consensus::ConsensusError::CoinbaseAmount { .. }
+            )
+        ),
+        "failure must be the second block's coinbase amount"
+    );
+    assert!(
+        !cache.take(first_wtxid, flags_first),
+        "committed prefix stays consumed"
+    );
+    assert!(
+        cache.take(second_wtxid, flags_second),
+        "refused block restores the takes it never committed"
+    );
+    Ok(())
+}

@@ -20,10 +20,10 @@ mod script_live_outage_engine_tests {
         pow::CompactTarget,
         script::Builder,
     };
-    use bitcoin_rs_chain::{
+    use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Header, Txid, deserialize};
+    use bitcoin_rs_execution::chain::{
         BlockTree, BlockTreeReader, ChainTxCount, NodeStatus, TipReader, TipSnapshot,
     };
-    use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Header, Txid, deserialize};
     use bitcoin_rs_storage::RocksDbStore;
     use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
     use parking_lot::RwLock;

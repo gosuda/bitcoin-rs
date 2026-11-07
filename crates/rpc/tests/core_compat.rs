@@ -6,9 +6,9 @@ use crate::mining_fixture;
 
 use alloc::sync::Arc;
 
-use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_consensus::primitives::client_version;
 use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256, Network, consensus_bytes};
+use bitcoin_rs_execution::chain::{ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_mining::{
     BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, MiningCapability,
     MiningControl, MiningControlError, MiningInfo, TemplateMutation,
@@ -33,7 +33,7 @@ fn tipped_context() -> Arc<Context> {
         height: 42,
         chainwork: ChainWork::ZERO,
         hash: Hash256::from_le_bytes(&[42_u8; 32]),
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     };
     ctx.chain.chain_tip.store(Some(Arc::new(tip.clone())));
     ctx.chain.applied_tip.store(Some(Arc::new(tip)));

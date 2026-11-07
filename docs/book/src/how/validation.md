@@ -26,7 +26,7 @@ The five layers map to crate directories:
 | primitives | [`crates/primitives/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/primitives/src) | `Tx`, `TxIn`, `TxOut`, `Block`, `Header`, `OutPoint`, `Hash256`, `Amount`, sighash types and cache keys; no execution |
 | script | [`crates/script/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/script/src) | `Interpreter`, `VerifyFlags`, `PreparedTransaction`, Taproot, sigop counting, signature cache |
 | consensus | [`crates/consensus/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/consensus/src) | `ValidationEngine`, transaction rules, block rules, kernel dispatch |
-| chainstate | [`crates/chainstate/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/chainstate/src) | Validation mode, assume-valid gate, apply path and its skip decision |
+| chainstate | [`crates/execution/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/execution/src) | Validation mode, assume-valid gate, apply path and its skip decision |
 | mempool | [`crates/mempool/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/mempool/src) | Admission-time script checks, standardness, sigop policy |
 
 ## The native interpreter
@@ -107,8 +107,8 @@ Do not read "zero mismatches" as blanket consensus parity. The claim covers the 
 | Native column of `script_tests.json` passes | `script_tests_native_column` | [`crates/consensus/tests/script_core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/consensus/tests/script_core_vectors.rs) |
 | Native column of `tx_valid.json` passes | `tx_valid_native_column` | [`crates/consensus/tests/script_core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/consensus/tests/script_core_vectors.rs) |
 | Native column of `tx_invalid.json` passes | `tx_invalid_native_column` | [`crates/consensus/tests/script_core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/consensus/tests/script_core_vectors.rs) |
-| An unmatched pin does not skip scripts | `assume_valid_without_matching_pin_does_not_skip_scripts` | [`crates/chainstate/src/tests/assumevalid_trust_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chainstate/src/tests/assumevalid_trust_tests.rs) |
-| A reorg that drops the pin revokes trust | `assume_valid_trust_is_revoked_when_a_reorg_drops_the_pin` | [`crates/chainstate/src/tests/assumevalid_trust_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chainstate/src/tests/assumevalid_trust_tests.rs) |
+| An unmatched pin does not skip scripts | `assume_valid_without_matching_pin_does_not_skip_scripts` | [`crates/execution/src/tests/assumevalid_trust_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/tests/assumevalid_trust_tests.rs) |
+| A reorg that drops the pin revokes trust | `assume_valid_trust_is_revoked_when_a_reorg_drops_the_pin` | [`crates/execution/src/tests/assumevalid_trust_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/tests/assumevalid_trust_tests.rs) |
 | The engine defaults to native across layers | `validation_engine_defaults_to_native_and_layers_field_by_field` | [`crates/node/src/config/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/config/tests.rs) |
 
 The [BIP support](../trust/bip-support.md) page lists the activated soft forks, and the [verification](../trust/verification.md) page covers the wider evidence set.

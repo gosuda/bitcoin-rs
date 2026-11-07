@@ -1,9 +1,9 @@
 use alloc::sync::Arc;
 
-use bitcoin_rs_chain::{LatchReader, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
 };
+use bitcoin_rs_execution::chain::{LatchReader, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, arm_admission_park, reset_admission_park};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
@@ -47,7 +47,7 @@ fn fixture_genesis() -> Block {
         txs: vec![coinbase],
     };
     block.header.merkle_root =
-        bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
+        bitcoin_rs_execution::chain::regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
     block
 }
 
@@ -185,7 +185,7 @@ fn sendrawtransaction_rejects_odd_length_and_invalid_and_oversize_hex() {
 #[test]
 fn decoderawtransaction_rejects_odd_length_and_invalid_and_oversize_hex() {
     let ctx = Arc::new(Context::new());
-    let latch = bitcoin_rs_chain::LatchWriter::new().reader();
+    let latch = bitcoin_rs_execution::chain::LatchWriter::new().reader();
     let odd = super::decoderawtransaction(&ctx, &json!(["abc"]), &latch)
         .expect_err("odd length hex must fail");
     assert_eq!(odd.code(), RpcError::CORE_DESERIALIZATION_ERROR);
@@ -312,7 +312,7 @@ fn testmempoolaccept_survives_one_oversize_row_with_package_too_large() {
 #[test]
 fn decoderawtransaction_decodes_oversize_hex_like_core() {
     let ctx = Arc::new(Context::new());
-    let latch = bitcoin_rs_chain::LatchWriter::new().reader();
+    let latch = bitcoin_rs_execution::chain::LatchWriter::new().reader();
     let raw = consensus_bytes(&many_output_tx(117_700)).to_lower_hex_string();
     let value = super::decoderawtransaction(&ctx, &json!([raw]), &latch)
         .unwrap_or_else(|err| panic!("Core decodes any hex that fits the request: {err}"));
@@ -416,7 +416,7 @@ fn getrawtransaction_explicit_coinbase_preserves_undo_failures_and_render_budget
     spend.inputs[0].previous_output = OutPoint::new(block.txs[0].txid(), 0);
     block.txs.push(spend);
     block.header.merkle_root =
-        bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs).expect("merkle root");
+        bitcoin_rs_execution::chain::regtest_fixture::merkle_root(&block.txs).expect("merkle root");
     let context = |failure| {
         let mut ctx = Context::new();
         ctx.chain
@@ -532,7 +532,7 @@ fn getrawtransaction_detailed_read_omits_unavailable_undo_and_rejects_partial_ro
     spend.outputs[0].value = Amount::from_sat(49);
     block.txs.push(spend.clone());
     block.header.merkle_root =
-        bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs).expect("merkle root");
+        bitcoin_rs_execution::chain::regtest_fixture::merkle_root(&block.txs).expect("merkle root");
     for mode in 0..4 {
         let mut ctx = Context::new();
         ctx.chain
@@ -594,7 +594,7 @@ fn getrawtransaction_uses_applied_ancestry_for_explicit_block_metadata() {
         tree.insert_node(Some(sibling_id), higher.header, NodeStatus::HeaderValid)
             .expect("higher header fork");
         let node = tree.node(active_id).expect("active node");
-        bitcoin_rs_chain::TipSnapshot {
+        bitcoin_rs_execution::chain::TipSnapshot {
             tip_id: active_id,
             chain_tx_count: node.chain_tx_count,
             hash: node.hash,
@@ -1022,7 +1022,7 @@ fn distinct_block(marker: u8) -> Block {
         input.script_sig = Script::from_bytes(vec![marker; 4]);
     }
     block.header.merkle_root =
-        bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
+        bitcoin_rs_execution::chain::regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
     block
 }
 
@@ -1045,7 +1045,7 @@ fn block_with_two_txs(marker: u8) -> Block {
     };
     block.txs.push(extra);
     block.header.merkle_root =
-        bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
+        bitcoin_rs_execution::chain::regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
     block
 }
 
@@ -1626,7 +1626,7 @@ fn gettxoutproof_utxo_path_answers_interrupted_when_cancelled() {
     ));
     ctx.chain.add_block(BlockRecord::from_block(1, &block));
     let ctx = Arc::new(ctx);
-    let latch = bitcoin_rs_chain::LatchWriter::new();
+    let latch = bitcoin_rs_execution::chain::LatchWriter::new();
     latch.trigger();
 
     let cancelled = super::gettxoutproof(&ctx, &json!([[txid.to_string()]]), &latch.reader());
@@ -1652,7 +1652,7 @@ fn gettxoutproof_utxo_path_interrupts_for_a_mixed_txid_list() {
     attach_body_for_block(&mut ctx, &block, 1);
     ctx.chain.add_block(BlockRecord::from_block(1, &block));
     let ctx = Arc::new(ctx);
-    let latch = bitcoin_rs_chain::LatchWriter::new();
+    let latch = bitcoin_rs_execution::chain::LatchWriter::new();
     latch.trigger();
 
     let cancelled = super::gettxoutproof(

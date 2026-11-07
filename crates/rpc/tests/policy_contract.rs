@@ -9,7 +9,7 @@ use bitcoin_rs_mempool::{
     MutationOutcome, PolicyError, RbfError, RemovalReason, ReplacementCandidate,
 };
 
-use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot, regtest_fixture};
+use bitcoin_rs_execution::chain::{ChainWork, NodeId, TipSnapshot, regtest_fixture};
 
 use bitcoin_rs_node::{
     Network, NodeConfig,
@@ -1399,7 +1399,7 @@ const REORG_SUBSIDY_SATS: u64 = 50 * 100_000_000;
 const REORG_SPEND_FEE_SATS: u64 = 10_000;
 
 struct NodeInvalidator {
-    handles: Arc<bitcoin_rs_chainstate::Chainstate>,
+    handles: Arc<bitcoin_rs_execution::Chainstate>,
     followers: bitcoin_rs_node::ChainFollowers,
 }
 
@@ -1417,7 +1417,7 @@ impl ChainControl for NodeInvalidator {
     fn dump_txoutset(
         &self,
         _path: &std::path::Path,
-        _cancellation: &bitcoin_rs_chain::LatchReader,
+        _cancellation: &bitcoin_rs_execution::chain::LatchReader,
     ) -> Result<
         bitcoin_rs_rpc::context::SnapshotExport,
         bitcoin_rs_rpc::context::SnapshotControlError,
@@ -1431,7 +1431,7 @@ impl ChainControl for NodeInvalidator {
         &self,
         _check_level: u8,
         _nblocks: u32,
-        _cancellation: &bitcoin_rs_chain::LatchReader,
+        _cancellation: &bitcoin_rs_execution::chain::LatchReader,
     ) -> Result<bool, ChainControlError> {
         Ok(false)
     }
@@ -1721,7 +1721,7 @@ fn immature_coinbase_spends_reject_on_both_rpcs_and_admit_at_maturity()
         height: 119,
         chainwork: ChainWork::ZERO,
         hash: Hash256::from_le_bytes(&[0x71; 32]),
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     })));
     handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&spend)]))?;
     assert!(

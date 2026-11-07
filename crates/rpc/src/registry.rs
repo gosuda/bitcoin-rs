@@ -13,7 +13,11 @@ type HandlerFn = fn(&Arc<Context>, &Value) -> Result<Value, RpcError>;
 pub(crate) enum Dispatch {
     Immediate(HandlerFn),
     Cancellable(
-        fn(&Arc<Context>, &Value, &bitcoin_rs_chain::LatchReader) -> Result<Value, RpcError>,
+        fn(
+            &Arc<Context>,
+            &Value,
+            &bitcoin_rs_execution::chain::LatchReader,
+        ) -> Result<Value, RpcError>,
     ),
 }
 

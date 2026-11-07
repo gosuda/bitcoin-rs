@@ -1,5 +1,5 @@
-use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_consensus::ConsensusError;
+use bitcoin_rs_execution::chain::ChainError;
 use compact_str::CompactString;
 
 use crate::{MiningControlError, MiningError};

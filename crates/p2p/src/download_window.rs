@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_execution::chain::{BlockTree, TipSnapshot};
 use hashbrown::{HashMap, HashSet};
 use smallvec::SmallVec;
 
@@ -1845,7 +1845,7 @@ fn non_empty_request(
 
 fn contiguous_request_entries(
     tree: &BlockTree,
-    tip_id: bitcoin_rs_chain::NodeId,
+    tip_id: bitcoin_rs_execution::chain::NodeId,
     start_height: u32,
     end_height: u32,
 ) -> Option<Vec<PeerRequestEntry>> {

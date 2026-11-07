@@ -2,8 +2,8 @@ use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
 
-use bitcoin_rs_chain::regtest_fixture;
-use bitcoin_rs_chainstate::ApplyError;
+use bitcoin_rs_execution::ApplyError;
+use bitcoin_rs_execution::chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
 use bitcoin_rs_consensus::primitives::{BlockHash, Hash256};
@@ -78,8 +78,9 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
             .chainstate()
             .applied_tip_reader()
             .load_full()
-            .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| tip
-                .chain_tx_count),
+            .map_or(bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN, |tip| {
+                tip.chain_tx_count
+            }),
         expected_tx_count
     );
     Ok(())

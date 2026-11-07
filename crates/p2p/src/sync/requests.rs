@@ -507,9 +507,9 @@ mod tests {
     }
 
     fn test_chain() -> (
-        bitcoin_rs_chain::BlockTree,
+        bitcoin_rs_execution::chain::BlockTree,
         Vec<(
-            bitcoin_rs_chain::NodeId,
+            bitcoin_rs_execution::chain::NodeId,
             bitcoin_rs_consensus::primitives::Header,
         )>,
     ) {
@@ -530,12 +530,16 @@ mod tests {
         })
         .take(32)
         .collect();
-        let mut tree = bitcoin_rs_chain::BlockTree::new();
+        let mut tree = bitcoin_rs_execution::chain::BlockTree::new();
         let mut parent = None;
         let mut nodes = Vec::with_capacity(headers.len());
         for header in headers {
             let inserted = tree
-                .insert_node(parent, header, bitcoin_rs_chain::NodeStatus::HeaderValid)
+                .insert_node(
+                    parent,
+                    header,
+                    bitcoin_rs_execution::chain::NodeStatus::HeaderValid,
+                )
                 .unwrap_or_else(|error| panic!("test header: {error}"));
             parent = Some(inserted);
             nodes.push((inserted, header));
@@ -549,7 +553,7 @@ mod tests {
         super::super::SchedulerState,
         bitcoin_rs_consensus::primitives::Hash256,
     ) {
-        use bitcoin_rs_chain::{ChainTxCount, ChainWork, TipSnapshot};
+        use bitcoin_rs_execution::chain::{ChainTxCount, ChainWork, TipSnapshot};
         let budget =
             crate::sync::default_sync_budget(bitcoin_rs_consensus::primitives::Network::Regtest);
         let mut window = DownloadWindow::new(budget);

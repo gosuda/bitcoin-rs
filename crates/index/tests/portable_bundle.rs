@@ -20,10 +20,10 @@ use bitcoin::{
     pow::CompactTarget,
     script::Builder,
 };
-use bitcoin_rs_chain::{
+use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Network, Txid};
+use bitcoin_rs_execution::chain::{
     BlockTree, BlockTreeReader, ChainTxCount, LatchWriter, NodeStatus, TipReader, TipSnapshot,
 };
-use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Network, Txid};
 use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
 use bitcoin_rs_index::reconcile::{ChainCursorSource, ConsumerCursor};
 use bitcoin_rs_index::runtime::{

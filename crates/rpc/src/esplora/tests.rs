@@ -6,11 +6,11 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use bitcoin::hex::DisplayHex as _;
-use bitcoin_rs_chain::{NodeStatus, regtest_fixture::merkle_root};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
+use bitcoin_rs_execution::chain::{NodeStatus, regtest_fixture::merkle_root};
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, MempoolObserver, MutationEnvelope};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
@@ -285,7 +285,7 @@ struct StaticScriptIndex {
 }
 
 struct RepublishTipScriptIndex {
-    applied_tip: bitcoin_rs_chain::TipReader,
+    applied_tip: bitcoin_rs_execution::chain::TipReader,
 }
 
 impl crate::context::ScriptIndexQuery for RepublishTipScriptIndex {
@@ -961,8 +961,8 @@ fn composed_response_retries_when_the_applied_tip_identity_changes() {
 
 #[test]
 fn block_status_and_block_list_never_straddle_two_applied_branches() -> Result<(), TestError> {
-    use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
     use bitcoin_rs_consensus::primitives::Header;
+    use bitcoin_rs_execution::chain::{NodeStatus, TipSnapshot};
 
     let header = |prev: BlockHash, nonce: u32, time: u32| Header {
         version: 1,
@@ -1006,16 +1006,16 @@ fn block_status_and_block_list_never_straddle_two_applied_branches() -> Result<(
             Arc::new(TipSnapshot {
                 tip_id: a1_id,
                 height: 1,
-                chainwork: bitcoin_rs_chain::ChainWork::ZERO,
+                chainwork: bitcoin_rs_execution::chain::ChainWork::ZERO,
                 hash: a1_hash.0,
-                chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+                chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
             }),
             Arc::new(TipSnapshot {
                 tip_id: b2_id,
                 height: 2,
-                chainwork: bitcoin_rs_chain::ChainWork::ZERO,
+                chainwork: bitcoin_rs_execution::chain::ChainWork::ZERO,
                 hash: b2_hash.0,
-                chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+                chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
             }),
         )
     };
@@ -2721,7 +2721,7 @@ fn backend_transaction_batches_share_duplicate_bodies_and_preserve_rows() {
 
 struct FailingParentIndex {
     error: Option<TxQueryError>,
-    republish: Option<bitcoin_rs_chain::TipReader>,
+    republish: Option<bitcoin_rs_execution::chain::TipReader>,
     parent: Tx,
 }
 

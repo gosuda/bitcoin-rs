@@ -3,13 +3,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use binary_sv2::{B064K, B0255, Decodable, Encodable, GetSize, Seq0255, Str0255, U256};
-use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::primitives::{
     Amount, BlockPayload, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
     Sequence, Tx, TxIn, TxOut, Txid, Witness, encode::double_sha256,
 };
 use bitcoin_rs_consensus::script::VerifyFlags;
+use bitcoin_rs_execution::chain::compact_is_met_by;
 use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolGateway,
     MempoolLimits, SubmitOutcome,

@@ -79,7 +79,7 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
     assert_eq!(connected, 0, "nothing connected before the body mutation");
     assert_eq!(
         disposition,
-        bitcoin_rs_chainstate::WindowApplyDisposition::BodyMutated
+        bitcoin_rs_execution::WindowApplyDisposition::BodyMutated
     );
     assert!(
         invalidated.is_empty(),
@@ -242,7 +242,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
     }
     let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
     let handles =
-        bitcoin_rs_chainstate::Chainstate::from_parts(bitcoin_rs_chainstate::ChainstateParts {
+        bitcoin_rs_execution::Chainstate::from_parts(bitcoin_rs_execution::ChainstateParts {
             network: Network::Regtest,
             block_tree: tree,
             restored_applied_tip: None,
@@ -250,13 +250,15 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
                 bitcoin_rs_storage::utxo::stats::CoinStats::default(),
             )),
-            chain_events: Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
+            chain_events: Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
+                0,
+            )),
             block_body_store: Some(Arc::new(Bodies::default())),
             undo_store: Arc::new(bitcoin_rs_storage::undo::InMemoryUndoStore::default()),
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
-            chain_transition: bitcoin_rs_chain::TransitionDomain::new().authority(),
+            chain_transition: bitcoin_rs_execution::chain::TransitionDomain::new().authority(),
             assume_valid_height: 0,
-            validation_mode: bitcoin_rs_chainstate::ValidationMode::AssumeValid,
+            validation_mode: bitcoin_rs_execution::ValidationMode::AssumeValid,
             validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
             script_cache: None,
             journal: None,
@@ -267,7 +269,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
                 retention,
                 bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(288),
             ),
-            role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
+            role: bitcoin_rs_execution::ChainstateRole::Ordinary,
         });
     handles.apply_block(&BlockPayload::from_local(genesis))?;
     for block in &blocks {

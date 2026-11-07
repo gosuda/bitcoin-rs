@@ -2,8 +2,8 @@ use std::time::Instant;
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_execution::chain::TipSnapshot;
 
 use super::BlockSync;
 use super::chain::HistoricalAdvance;

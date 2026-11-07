@@ -418,7 +418,7 @@ wallet interoperability remain unverified.
 
 - Owner: `ensure_template_ready` in `crates/rpc/src/handlers/mining.rs`.
 - Template mode on mainnet requires at least one live peer in `PeerTable`.
-- Template mode on mainnet also requires leaving IBD (`!ctx.chain.ibd.is_active(now, network)`, latch in `crates/chain/src/ibd.rs`).
+- Template mode on mainnet also requires leaving IBD (`!ctx.chain.ibd.is_active(now, network)`, latch in `crates/execution/src/chain/ibd.rs`).
 - Failures return Core `-9` (`bitcoin-rs is not connected!`) and `-10` (`bitcoin-rs is in initial sync and waiting for blocks...`).
 - Proposal mode skips these gates.
 - Non-mainnet networks skip these gates (Core `IsTestChain()`).

@@ -1,8 +1,8 @@
 use super::BlockSync;
 use super::chain::ReorgError;
 use super::chain::WindowApplyDisposition;
-use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_execution::chain::NodeId;
 use std::time::Instant;
 
 impl BlockSync {

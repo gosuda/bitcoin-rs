@@ -293,7 +293,7 @@ fn txout_typed(
 pub(crate) fn gettxoutproof(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<Value, RpcError> {
     let array = params_array(params)?;
     let Some(txids_value) = array.first() else {
@@ -356,7 +356,7 @@ const MAX_OUTPUTS_PER_BLOCK: u32 = 111_111;
 fn block_from_utxo(
     ctx: &Arc<Context>,
     ordered: &[Txid],
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<Option<BlockRecord>, RpcError> {
     for txid in ordered {
         if cancellation.is_triggered() {
@@ -382,7 +382,7 @@ fn block_from_utxo(
 fn block_via_index(
     ctx: &Arc<Context>,
     txid: Option<&Txid>,
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<Option<BlockRecord>, RpcError> {
     let Some(txid) = txid else {
         return Ok(None);
@@ -432,7 +432,7 @@ fn proof_from_single_record(
     ctx: &Arc<Context>,
     record: &bitcoin_rs_index::block_log::BlockRecord,
     wanted: &hashbrown::HashSet<Txid>,
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<Value, RpcError> {
     if cancellation.is_triggered() {
         return Err(proof_interrupted());
@@ -656,7 +656,7 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
 pub(crate) fn decoderawtransaction(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<Value, RpcError> {
     let raw = required_str(params, 0, "raw transaction is required")?;
     if cancellation.is_triggered() {
@@ -675,7 +675,7 @@ pub(crate) fn decoderawtransaction(
 pub(crate) fn compressrawtransaction(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<Value, RpcError> {
     if !ctx.compressed_transactions {
         return Err(RpcError::MethodDisabled(
@@ -714,7 +714,7 @@ pub(crate) fn compressrawtransaction(
 pub(crate) fn decompressrawtransaction(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<Value, RpcError> {
     if !ctx.compressed_transactions {
         return Err(RpcError::MethodDisabled(

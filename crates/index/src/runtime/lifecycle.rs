@@ -8,7 +8,7 @@ use super::namespace::NamespaceRegistry;
 use super::startup::fail_worker;
 use super::startup::run_worker_with_open;
 use arc_swap::ArcSwap;
-use bitcoin_rs_chain::{BlockTreeReader, LatchWriter, TipReader};
+use bitcoin_rs_execution::chain::{BlockTreeReader, LatchWriter, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::HistoryAccess;
@@ -29,7 +29,7 @@ impl DerivedIndexWorker {
         body_source: Option<Arc<dyn BlockBodySource>>,
         chain_events: Arc<dyn crate::reconcile::ChainCursorSource>,
         reporter: Arc<dyn crate::runtime::IndexAheadSink>,
-        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+        shutdown: impl Into<bitcoin_rs_execution::chain::LatchReader>,
         wake_rx: Receiver<()>,
     ) -> std::io::Result<Self> {
         let shutdown = shutdown.into();

@@ -1,10 +1,10 @@
 use super::*;
 use crate::test_support::TestError;
-use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::primitives::{
     Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
 };
+use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolLimits,
     MutationOutcome, PeerToken, SubmitError, SubmitOutcome,
@@ -516,7 +516,7 @@ fn active_chain_change_is_retryable_not_shutdown() -> Result<(), TestError> {
 
     assert!(matches!(
         followers.begin_mempool_change(),
-        Err(bitcoin_rs_chainstate::ApplyError::ConcurrentChainChange)
+        Err(bitcoin_rs_execution::ApplyError::ConcurrentChainChange)
     ));
     active.finish()?;
     assert!(followers.begin_mempool_change()?.is_some());
@@ -547,10 +547,7 @@ fn committed_connect_settlement_failure_retains_outcome_and_forbids_retry() -> R
         }
     };
     assert_eq!(outcome.hash, hash);
-    assert!(matches!(
-        source,
-        bitcoin_rs_chainstate::ApplyError::Shutdown
-    ));
+    assert!(matches!(source, bitcoin_rs_execution::ApplyError::Shutdown));
     let Some(committed_tip) = state.chainstate().applied_tip_snapshot() else {
         panic!("committed tip missing");
     };
@@ -558,7 +555,7 @@ fn committed_connect_settlement_failure_retains_outcome_and_forbids_retry() -> R
     assert!(matches!(
         followers.apply_connect(&state.chainstate(), &genesis),
         Err(ConnectMutationError::NotCommitted(
-            bitcoin_rs_chainstate::ApplyError::Shutdown
+            bitcoin_rs_execution::ApplyError::Shutdown
         ))
     ));
     Ok(())

@@ -377,7 +377,7 @@ impl crate::coordinator::MempoolSequenceWake for FakeMiningControl {
         self.published_from.lock().push(sequence);
     }
 
-    fn stage_tip(&self, tip: &bitcoin_rs_chain::TipSnapshot, _block: &Block) {
+    fn stage_tip(&self, tip: &bitcoin_rs_execution::chain::TipSnapshot, _block: &Block) {
         self.staged_tips.lock().push(tip.hash);
     }
 

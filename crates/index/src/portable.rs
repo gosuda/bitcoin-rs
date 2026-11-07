@@ -6,8 +6,8 @@ mod restore;
 
 use crate::writer::TxIndexWriter;
 use crate::{IndexCapabilities, IndexError, IndexReader, IndexWatermark};
-use bitcoin_rs_chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_consensus::primitives::Network;
+use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use std::path::{Path, PathBuf};
 
@@ -192,7 +192,7 @@ pub(crate) enum TestError {
     #[error(transparent)]
     TryFromInt(#[from] std::num::TryFromIntError),
     #[error(transparent)]
-    Chain(#[from] bitcoin_rs_chain::ChainError),
+    Chain(#[from] bitcoin_rs_execution::chain::ChainError),
     #[error(transparent)]
     Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]

@@ -13,9 +13,9 @@ mod telemetry;
 
 #[cfg(test)]
 use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin_rs_chain::BlockTree;
-use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_execution::chain::BlockTree;
+use bitcoin_rs_execution::chain::NodeId;
 use crossbeam_channel::Receiver;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
@@ -122,7 +122,7 @@ pub struct BlockSync {
     historical_work: Mutex<()>,
     pub(crate) chain: Arc<dyn SyncChain>,
     peer_table: Arc<PeerTable>,
-    ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+    ibd: Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
     inbound_headers_rx: Receiver<InboundHeaders>,
     inbound_blocks_rx: Receiver<crate::InboundBlock>,
     scheduler: Mutex<SchedulerState>,
@@ -276,7 +276,7 @@ impl BlockSync {
         peer_table: Arc<PeerTable>,
         inbound_headers_rx: Receiver<InboundHeaders>,
         inbound_blocks_rx: Receiver<crate::InboundBlock>,
-        ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+        ibd: Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
     ) -> Self {
         let budget = default_sync_budget(chain.network());
         let stale_tips = Arc::new(StaleTipRetainer::seed(&chain.block_tree()));
@@ -369,14 +369,15 @@ impl BlockSync {
     ) -> bool {
         let hash = Hash256::from(header.compute_hash());
         let network = self.chain.network();
-        if bitcoin_rs_chain::validate_pow(header, hash, network).is_err() {
+        if bitcoin_rs_consensus::header_rules::validate_pow(header, hash, network).is_err() {
             return false;
         }
         let (candidate_work, candidate_height) = {
             let tree = self.chain.block_tree();
             let invalid = |id: NodeId| {
-                tree.node(id)
-                    .is_ok_and(|node| node.status == bitcoin_rs_chain::NodeStatus::Invalid)
+                tree.node(id).is_ok_and(|node| {
+                    node.status == bitcoin_rs_execution::chain::NodeStatus::Invalid
+                })
             };
             let known = tree.lookup(hash);
             if known.is_some_and(invalid) {
@@ -389,13 +390,13 @@ impl BlockSync {
                 return false;
             };
             if known.is_none()
-                && bitcoin_rs_chain::validate_contextual_header(
+                && bitcoin_rs_execution::chain::validate_contextual_header(
                     &tree,
                     parent_id,
                     header,
                     network,
-                    bitcoin_rs_chain::current_unix_seconds(),
-                    bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
+                    bitcoin_rs_execution::chain::current_unix_seconds(),
+                    bitcoin_rs_execution::chain::HeaderValidationMode::LiveAdmission,
                 )
                 .is_err()
             {
@@ -405,7 +406,7 @@ impl BlockSync {
                 return false;
             };
             (
-                parent.chainwork + bitcoin_rs_chain::block_work(header),
+                parent.chainwork + bitcoin_rs_consensus::header_rules::block_work(header),
                 parent.height.saturating_add(1),
             )
         };
@@ -685,11 +686,11 @@ pub(crate) mod test_support;
 
 #[cfg(test)]
 #[must_use]
-pub(crate) fn syncing_ibd_latch() -> Arc<bitcoin_rs_chain::InitialBlockDownload> {
-    Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
-        bitcoin_rs_chain::TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty())),
-        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(
-            parking_lot::RwLock::new(BlockTree::new()),
-        )),
+pub(crate) fn syncing_ibd_latch() -> Arc<bitcoin_rs_execution::chain::InitialBlockDownload> {
+    Arc::new(bitcoin_rs_execution::chain::InitialBlockDownload::new(
+        bitcoin_rs_execution::chain::TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty())),
+        bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(
+            BlockTree::new(),
+        ))),
     ))
 }

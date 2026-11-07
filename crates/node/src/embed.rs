@@ -17,7 +17,7 @@ use thiserror::Error;
 use crate::lifecycle::{NodeServices, TeardownMode, start_node};
 use crate::run::RunError;
 use crate::state::NodeState;
-use bitcoin_rs_chainstate::events::ChainSnapshot;
+use bitcoin_rs_execution::events::ChainSnapshot;
 
 #[derive(Debug, Error)]
 pub enum NodeError {
@@ -67,7 +67,7 @@ impl Node {
 
     pub fn chainstates_summary(
         &self,
-    ) -> Result<bitcoin_rs_chainstate::ChainstatesSummary, NodeError> {
+    ) -> Result<bitcoin_rs_execution::ChainstatesSummary, NodeError> {
         self.state
             .chainstates_summary()
             .map_err(|error| NodeError::Unavailable(error.to_string()))

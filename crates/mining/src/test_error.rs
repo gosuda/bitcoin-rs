@@ -1,7 +1,7 @@
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TestError {
     #[error(transparent)]
-    Chain(#[from] bitcoin_rs_chain::ChainError),
+    Chain(#[from] bitcoin_rs_execution::chain::ChainError),
     #[error(transparent)]
     Mining(#[from] crate::MiningError),
     #[error(transparent)]

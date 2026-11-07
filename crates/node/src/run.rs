@@ -34,9 +34,9 @@ pub enum RunError {
     #[error(transparent)]
     P2pJoin(#[from] bitcoin_rs_p2p::P2pJoinError),
     #[error(transparent)]
-    Maintenance(#[from] bitcoin_rs_chainstate::MaintenanceError),
+    Maintenance(#[from] bitcoin_rs_execution::MaintenanceError),
     #[error(transparent)]
-    Checkpoint(Box<bitcoin_rs_chainstate::CheckpointError>),
+    Checkpoint(Box<bitcoin_rs_execution::CheckpointError>),
     #[error("{0}")]
     Node(crate::embed::NodeError),
     #[error("failed to bind RPC listener at {address}")]
@@ -247,8 +247,8 @@ impl From<crate::state::open::NodeOpenError> for RunError {
     }
 }
 
-impl From<bitcoin_rs_chainstate::CheckpointError> for RunError {
-    fn from(error: bitcoin_rs_chainstate::CheckpointError) -> Self {
+impl From<bitcoin_rs_execution::CheckpointError> for RunError {
+    fn from(error: bitcoin_rs_execution::CheckpointError) -> Self {
         Self::Checkpoint(Box::new(error))
     }
 }
@@ -288,7 +288,7 @@ fn build_filter_directive(level: &str) -> String {
     }
 }
 
-fn wait_for_shutdown(shutdown: &bitcoin_rs_chain::LatchReader) {
+fn wait_for_shutdown(shutdown: &bitcoin_rs_execution::chain::LatchReader) {
     if !shutdown.is_triggered() {
         let _ = shutdown.closed().recv();
     }
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn wait_for_shutdown_wakes_promptly_on_trigger() {
-        let writer = bitcoin_rs_chain::LatchWriter::new();
+        let writer = bitcoin_rs_execution::chain::LatchWriter::new();
         let reader = writer.reader();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let handle = std::thread::spawn(move || {

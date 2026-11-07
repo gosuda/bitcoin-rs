@@ -22,8 +22,8 @@ zmq = ["dep:zmq"]
 
 [dependencies]
 bitcoin-rs-consensus.workspace = true
+bitcoin-rs-execution.workspace = true
 bitcoin-rs-storage.workspace = true
-bitcoin-rs-chain.workspace = true
 bitcoin-rs-index.workspace = true
 bitcoin-rs-mempool.workspace = true
 bitcoin-rs-p2p.workspace = true
@@ -52,8 +52,7 @@ bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }
 toml.workspace = true
 bitcoin-rs-e2e.workspace = true
-bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
-bitcoin-rs-chainstate = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-execution = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-node = { workspace = true, default-features = false, features = ["test-seam"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }

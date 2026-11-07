@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use binary_sv2::{Encodable, GetSize, Str0255, U256};
 use bitcoin::secp256k1::{Keypair, Secp256k1};
-use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Network};
+use bitcoin_rs_execution::chain::compact_is_met_by;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_mining::pool::ledger::{Ledger, MinerId, PayoutPolicy, PoolConfig};
 use bitcoin_rs_mining::pool::stratum::sv2::{
@@ -632,7 +632,7 @@ fn reaped_worker_panic_propagates_through_stop_join() {
             .is_empty(),
         "reaped handle leaves no join for stop_join"
     );
-    let cancel = bitcoin_rs_chain::LatchWriter::new();
+    let cancel = bitcoin_rs_execution::chain::LatchWriter::new();
     let mut service = super::Sv2Service {
         cancel,
         listener: None,
@@ -667,7 +667,7 @@ fn stop_join_joins_remaining_workers_after_panic() {
             std::thread::sleep(Duration::from_millis(50));
         }));
     }
-    let cancel = bitcoin_rs_chain::LatchWriter::new();
+    let cancel = bitcoin_rs_execution::chain::LatchWriter::new();
     let mut service = super::Sv2Service {
         cancel,
         listener: None,
@@ -696,7 +696,7 @@ fn stop_join_joins_remaining_workers_after_panic() {
 
 #[test]
 fn sv2_listener_stops_promptly_on_cancellation() -> TestResult {
-    let cancel = bitcoin_rs_chain::LatchWriter::new();
+    let cancel = bitcoin_rs_execution::chain::LatchWriter::new();
     let cancel_reader = cancel.reader();
     let listener =
         std::net::TcpListener::bind("127.0.0.1:0").map_err(|error| FixtureError::Sv2 {

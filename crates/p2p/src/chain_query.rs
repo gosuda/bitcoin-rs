@@ -7,11 +7,11 @@ use bitcoin::blockdata::block::Block as RegistryBlock;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
-use bitcoin_rs_chain::{BlockTree, BlockTreeReader, ChainWork, NodeStatus, TipReader};
 use bitcoin_rs_consensus::primitives::layout::{ParsedBlock, ParsedTransaction};
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, Hash256, Header, Network, consensus_bytes, deserialize,
 };
+use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, ChainWork, NodeStatus, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use parking_lot::Mutex;
 #[cfg(test)]
@@ -789,7 +789,7 @@ impl ActiveChainQuery {
 
 fn stale_block_is_recent(
     tree: &BlockTree,
-    node: &bitcoin_rs_chain::BlockTreeNode,
+    node: &bitcoin_rs_execution::chain::BlockTreeNode,
     network: Network,
 ) -> bool {
     let Some(best_tip) = tree.tip() else {
@@ -804,7 +804,7 @@ fn stale_block_is_recent(
     if node.chainwork >= best.chainwork {
         return true;
     }
-    let work = bitcoin_rs_chain::block_work(&best.header);
+    let work = bitcoin_rs_consensus::header_rules::block_work(&best.header);
     work != ChainWork::ZERO
         && (best.chainwork - node.chainwork)
             .checked_mul(ChainWork::from(network.target_spacing_seconds()))
@@ -869,7 +869,7 @@ pub(crate) fn cmpct_message_from_native(block: &Block, version: u64) -> Option<M
 
 fn header_for_active_stop(
     tree: &BlockTree,
-    tip_id: bitcoin_rs_chain::NodeId,
+    tip_id: bitcoin_rs_execution::chain::NodeId,
     stop_hash: BlockHash,
 ) -> Option<Header> {
     if stop_hash == BlockHash::default() {

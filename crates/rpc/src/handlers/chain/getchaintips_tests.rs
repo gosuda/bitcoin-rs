@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 
-use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_execution::chain::{ChainWork, NodeId, TipSnapshot};
 
 use super::*;
 
@@ -41,7 +41,7 @@ fn getchaintips_emits_the_applied_tip_as_active() -> Result<(), crate::test_erro
         height: 0,
         chainwork: ChainWork::ZERO,
         hash,
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     };
     ctx.chain.chain_tip.store(Some(Arc::new(tip.clone())));
     ctx.chain.applied_tip.store(Some(Arc::new(tip)));
@@ -74,7 +74,7 @@ fn getchaintips_serves_snapshot_tip_without_a_tree_row() {
         height: 42,
         chainwork: ChainWork::ZERO,
         hash,
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     })));
     let tips =
         getchaintips(&ctx, &json!([])).unwrap_or_else(|err| panic!("getchaintips failed: {err}"));
@@ -122,7 +122,7 @@ fn getchaintips_emits_two_tips_when_chain_is_forked() -> Result<(), crate::test_
         height: 1,
         chainwork: active_chainwork,
         hash: active_hash,
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     };
     ctx.chain.chain_tip.store(Some(Arc::new(tip.clone())));
     ctx.chain.applied_tip.store(Some(Arc::new(tip)));
@@ -166,7 +166,7 @@ fn getchaintips_emits_branchlen_one_for_non_active_sibling_of_active_tip()
             height: 0,
             chainwork: ChainWork::ZERO,
             hash: genesis_hash,
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
         })));
         tree.node(sibling_id)?.height
     };
@@ -203,8 +203,8 @@ fn ctx_with_headers_ahead(
 ) -> Result<
     (
         Arc<Context>,
-        bitcoin_rs_chain::NodeId,
-        bitcoin_rs_chain::NodeId,
+        bitcoin_rs_execution::chain::NodeId,
+        bitcoin_rs_execution::chain::NodeId,
     ),
     crate::test_error::TestError,
 > {
@@ -240,7 +240,7 @@ fn ctx_with_headers_ahead(
         height: applied_height,
         chainwork: applied_work,
         hash: applied_hash,
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     })));
     Ok((ctx, applied_id, header_id))
 }
@@ -364,7 +364,7 @@ fn a_branch_left_behind_by_a_reorg_is_reported_as_headers_only()
         height,
         chainwork,
         hash,
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     })));
 
     let tips = tips_of(&ctx);
@@ -484,7 +484,7 @@ fn getchaintips_marks_unapplied_best_header_as_headers_only()
         height: 0,
         chainwork: genesis_chainwork,
         hash: genesis_hash,
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     })));
 
     let result =

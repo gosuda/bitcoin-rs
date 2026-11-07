@@ -1,5 +1,5 @@
-use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_consensus::primitives::{Header, LockTime, Sequence, TxIn, TxOut, Witness};
+use bitcoin_rs_execution::chain::NodeStatus;
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sha2::{Digest as _, Sha256};
 

@@ -2,10 +2,6 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bitcoin_rs_chain::ChainError;
-use bitcoin_rs_chain::HookGuard;
-use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_consensus::primitives::Block;
 use bitcoin_rs_consensus::primitives::CompactTarget;
 use bitcoin_rs_consensus::primitives::Hash256;
@@ -15,6 +11,10 @@ use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_consensus::script::VerifyFlags;
 use bitcoin_rs_consensus::transaction_sigop_cost;
 use bitcoin_rs_consensus::{MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_SIGOPS_COST, MAX_BLOCK_WEIGHT};
+use bitcoin_rs_execution::chain::ChainError;
+use bitcoin_rs_execution::chain::HookGuard;
+use bitcoin_rs_execution::chain::TipSnapshot;
+use bitcoin_rs_execution::chain::current_unix_seconds;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::MutationOutcome;
 use bitcoin_rs_mempool::MutationResult;
@@ -224,7 +224,7 @@ pub trait ChainContextSource: Send + Sync {
 pub struct MiningService {
     network: Network,
     coinbase_script: Vec<u8>,
-    shutdown: bitcoin_rs_chain::LatchReader,
+    shutdown: bitcoin_rs_execution::chain::LatchReader,
     applied_tip: Arc<dyn AppliedTipSource>,
     mempool: Arc<dyn MempoolSnapshotSource>,
     chain: Arc<dyn ChainContextSource>,
@@ -242,7 +242,7 @@ impl MiningService {
         mempool: Arc<dyn MempoolSnapshotSource>,
         chain: Arc<dyn ChainContextSource>,
         coinbase_script: Vec<u8>,
-        shutdown: bitcoin_rs_chain::LatchReader,
+        shutdown: bitcoin_rs_execution::chain::LatchReader,
     ) -> Self {
         let seed = mempool.current_revisions().0;
         let wake = Arc::new(Condvar::new());
@@ -1063,7 +1063,7 @@ struct PrepMailbox {
 struct PrepShared {
     network: Network,
     coinbase_script: Vec<u8>,
-    shutdown: bitcoin_rs_chain::LatchReader,
+    shutdown: bitcoin_rs_execution::chain::LatchReader,
     mempool: Arc<dyn MempoolSnapshotSource>,
     chain: Arc<dyn ChainContextSource>,
     mailbox: parking_lot::Mutex<PrepMailbox>,

@@ -37,7 +37,7 @@ The typed in-process surface provides `Node::start`, gateway broadcast, and cons
   - Embedders MUST use operation-oriented `Node` methods only.
 - **EMB-04: Typed reads mirror the RPC facts.**
   - `snapshot()` returns the coherent `ChainSnapshot`.
-  - `sync_progress()` runs the identical `getblockchaininfo` projection via `ChainHandles::sync_progress` (`crates/rpc/src/context.rs`) over `ChainProgressReader` (`crates/chain/src/progress.rs`).
+  - `sync_progress()` runs the identical `getblockchaininfo` projection via `ChainHandles::sync_progress` (`crates/rpc/src/context.rs`) over `ChainProgressReader` (`crates/execution/src/chain/progress.rs`).
   - `capabilities()` returns `CapabilitySnapshot` (`crates/index/src/capabilities.rs`).
 - **EMB-05: Broadcast is the shared admission.**
   - `Node::broadcast`, `sendrawtransaction` (`crates/rpc/src/handlers/tx.rs`), and Esplora broadcasts all call `MempoolGateway::submit_local_transaction`.

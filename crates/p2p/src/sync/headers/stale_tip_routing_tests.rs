@@ -3,9 +3,9 @@ use super::super::chain::HeaderAdmission;
 use super::super::chain::SyncChain;
 use super::super::chain::SyncChainError;
 use super::super::chain::WindowCommitError;
-use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_chain::{BlockTree, ChainWork, NodeStatus};
 use bitcoin_rs_consensus::primitives::{Hash256, Header, Network};
+use bitcoin_rs_execution::chain::TipSnapshot;
+use bitcoin_rs_execution::chain::{BlockTree, ChainWork, NodeStatus};
 use parking_lot::RwLockReadGuard;
 use std::sync::Arc;
 
@@ -49,12 +49,12 @@ impl SyncChain for RoutingStubChain {
 
     fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission {
         let mut tree = self.tree.write();
-        match bitcoin_rs_chain::accept_headers(
+        match bitcoin_rs_execution::chain::accept_headers(
             &mut tree,
             headers,
             self.network,
-            bitcoin_rs_chain::current_unix_seconds(),
-            bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
+            bitcoin_rs_execution::chain::current_unix_seconds(),
+            bitcoin_rs_execution::chain::HeaderValidationMode::LiveAdmission,
         ) {
             Ok(admitted) => {
                 let announced_tip = admitted
@@ -101,13 +101,13 @@ impl SyncChain for RoutingStubChain {
 
     fn switch_to_branch(
         &self,
-        _target: bitcoin_rs_chain::NodeId,
+        _target: bitcoin_rs_execution::chain::NodeId,
         _staged_body: &mut dyn FnMut(
             Hash256,
         )
             -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
         _connected_body: &mut dyn FnMut(Hash256),
-    ) -> Result<(), bitcoin_rs_chainstate::reorg::ReorgError> {
+    ) -> Result<(), bitcoin_rs_execution::reorg::ReorgError> {
         Ok(())
     }
 }
@@ -179,8 +179,9 @@ fn regtest_tree_with_main() -> BlockTree {
         .lookup(Hash256::from(prev))
         .unwrap_or_else(|| panic!("genesis indexed"));
     for height in 1..=2_u32 {
-        let header = bitcoin_rs_chain::regtest_fixture::mined_regtest_header(prev, height)
-            .unwrap_or_else(|error| panic!("fixture mines: {error}"));
+        let header =
+            bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header(prev, height)
+                .unwrap_or_else(|error| panic!("fixture mines: {error}"));
         prev = header.compute_hash();
         tip_id = tree
             .insert_node(Some(tip_id), header, NodeStatus::HeaderValid)
@@ -195,10 +196,14 @@ fn low_work_stale_tip_page_defers_while_broken_page_admits() {
     let floor = ChainWork::from_be_bytes([0xFF_u8; 32]);
     let (sync, _peers, _headers_tx) = routing_sync(tree, floor);
     let genesis_prev = Network::Regtest.genesis_block().block_hash();
-    let first = bitcoin_rs_chain::regtest_fixture::mined_regtest_header(genesis_prev, 101)
-        .unwrap_or_else(|error| panic!("fixture mines: {error}"));
-    let second = bitcoin_rs_chain::regtest_fixture::mined_regtest_header(first.compute_hash(), 102)
-        .unwrap_or_else(|error| panic!("fixture mines: {error}"));
+    let first =
+        bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header(genesis_prev, 101)
+            .unwrap_or_else(|error| panic!("fixture mines: {error}"));
+    let second = bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header(
+        first.compute_hash(),
+        102,
+    )
+    .unwrap_or_else(|error| panic!("fixture mines: {error}"));
     let valid_page = [first, second];
     assert!(
         sync.presync_anchor(&valid_page).is_some(),
@@ -210,7 +215,7 @@ fn low_work_stale_tip_page_defers_while_broken_page_admits() {
     );
     let mut broken = valid_page;
     broken[1].nonce = broken[1].nonce.wrapping_add(1).wrapping_mul(7919);
-    if bitcoin_rs_chain::validate_pow(
+    if bitcoin_rs_consensus::header_rules::validate_pow(
         &broken[1],
         Hash256::from(broken[1].compute_hash()),
         Network::Regtest,
@@ -241,8 +246,9 @@ fn partial_prefix_rejection_preserves_demoted_tip() {
     let mut batch = Vec::new();
     let mut prev = genesis_prev;
     for height in [101_u32, 102, 103] {
-        let header = bitcoin_rs_chain::regtest_fixture::mined_regtest_header(prev, height)
-            .unwrap_or_else(|error| panic!("fixture mines: {error}"));
+        let header =
+            bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header(prev, height)
+                .unwrap_or_else(|error| panic!("fixture mines: {error}"));
         prev = header.compute_hash();
         batch.push(header);
     }
@@ -250,7 +256,7 @@ fn partial_prefix_rejection_preserves_demoted_tip() {
         bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[0xFF_u8; 32]),
     );
     batch.push(
-        bitcoin_rs_chain::regtest_fixture::mined_regtest_header(garbage, 104)
+        bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header(garbage, 104)
             .unwrap_or_else(|error| panic!("fixture mines: {error}")),
     );
     headers_tx
@@ -289,7 +295,7 @@ fn duplicate_fetch_skips_owned_body() {
         .chain_tip()
         .unwrap_or_else(|| panic!("tree has a tip"));
     let prev = bitcoin_rs_consensus::primitives::BlockHash::from(tip.hash);
-    let header = bitcoin_rs_chain::regtest_fixture::mined_regtest_header(prev, 3)
+    let header = bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header(prev, 3)
         .unwrap_or_else(|error| panic!("fixture mines: {error}"));
     let tip_hash = Hash256::from(header.compute_hash());
     assert!(
@@ -324,8 +330,9 @@ fn duplicate_fetch_skips_owned_body() {
         .chain_tip()
         .unwrap_or_else(|| panic!("tree has a tip"));
     let prev = bitcoin_rs_consensus::primitives::BlockHash::from(tip.hash);
-    let control_header = bitcoin_rs_chain::regtest_fixture::mined_regtest_header(prev, 4)
-        .unwrap_or_else(|error| panic!("fixture mines: {error}"));
+    let control_header =
+        bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header(prev, 4)
+            .unwrap_or_else(|error| panic!("fixture mines: {error}"));
     headers_tx
         .send(crate::InboundHeaders {
             headers: vec![control_header],

@@ -197,7 +197,7 @@ mod tests {
                     outbound_block_relay_slots: 0,
                     ..P2pServiceConfig::default()
                 },
-                bitcoin_rs_chain::LatchReader::fixture_never(),
+                bitcoin_rs_execution::chain::LatchReader::fixture_never(),
             );
             if !fixed {
                 service.add_node(endpoint).expect("persistent addnode");

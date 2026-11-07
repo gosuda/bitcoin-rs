@@ -40,7 +40,7 @@ A connect commits in this order:
 
 The UTXO mutation is not carried inside the head batch. The batch names the undo and body records that make the mutation recoverable, and the compare-and-set makes exactly one head advance win.
 
-Body and undo records are retained under the head's certified extents. When a batch is 64 blocks or 8 MiB, the group flushes as one head commit; the limit is `DURABLE_HEAD_GROUP_BLOCKS` in `crates/chainstate/src/window.rs`.
+Body and undo records are retained under the head's certified extents. When a batch is 64 blocks or 8 MiB, the group flushes as one head commit; the limit is `DURABLE_HEAD_GROUP_BLOCKS` in `crates/execution/src/window.rs`.
 
 ## Undo and the journal
 
@@ -119,8 +119,8 @@ INFO bitcoin_rs_node::lifecycle published clean chainstate checkpoint generation
 
 | Invariant | Test | File |
 | --- | --- | --- |
-| A matching head needs no replay | `matching_durable_head_requires_no_replay` | [`crates/chainstate/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chainstate/src/durable/tests.rs) |
-| Replayed frontier matches the head identity | `replayed_frontier_must_match_the_durable_head_identity` | [`crates/chainstate/src/journal/replay_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chainstate/src/journal/replay_tests.rs) |
+| A matching head needs no replay | `matching_durable_head_requires_no_replay` | [`crates/execution/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/durable/tests.rs) |
+| Replayed frontier matches the head identity | `replayed_frontier_must_match_the_durable_head_identity` | [`crates/execution/src/journal/replay_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/journal/replay_tests.rs) |
 | Pruning keeps retained reorg history | `prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs` | [`crates/node/src/state/tests/recovery.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state/tests/recovery.rs) |
 | A second open is refused while the first lives | `second_open_while_first_lives_refuses_and_reopen_succeeds_after_drop` | [`crates/node/src/state/tests/data_dir_lock.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state/tests/data_dir_lock.rs) |
 

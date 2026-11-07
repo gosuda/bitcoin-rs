@@ -34,11 +34,15 @@ static TEST_CHAIN: std::sync::LazyLock<Vec<bitcoin_rs_consensus::primitives::Hea
         .collect()
     });
 
-fn test_tree() -> bitcoin_rs_chain::BlockTree {
-    let mut tree = bitcoin_rs_chain::BlockTree::new();
+fn test_tree() -> bitcoin_rs_execution::chain::BlockTree {
+    let mut tree = bitcoin_rs_execution::chain::BlockTree::new();
     let mut parent = None;
     for header in TEST_CHAIN.iter() {
-        let inserted = tree.insert_node(parent, *header, bitcoin_rs_chain::NodeStatus::HeaderValid);
+        let inserted = tree.insert_node(
+            parent,
+            *header,
+            bitcoin_rs_execution::chain::NodeStatus::HeaderValid,
+        );
         parent = Some(inserted.unwrap_or_else(|error| panic!("test chain header: {error}")));
     }
     tree
@@ -117,7 +121,7 @@ fn test_source(addr: crate::PeerEndpoint) -> PeerSource {
 fn stall_owner(
     window: &mut DownloadWindow,
     stager: &BlockStager,
-    tree: &bitcoin_rs_chain::BlockTree,
+    tree: &bitcoin_rs_execution::chain::BlockTree,
     next_apply_height: u32,
     apply_side_busy: bool,
     now: Instant,

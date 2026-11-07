@@ -26,7 +26,7 @@ impl EventLoop {
 
     pub(crate) fn spin(
         self,
-        shutdown: &bitcoin_rs_chain::LatchReader,
+        shutdown: &bitcoin_rs_execution::chain::LatchReader,
         request_shutdown: impl Fn(),
     ) {
         let mut iterations: u64 = 0;

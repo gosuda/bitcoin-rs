@@ -7,7 +7,7 @@ pub(crate) enum TestError {
     #[error(transparent)]
     Sonic(#[from] sonic_rs::Error),
     #[error(transparent)]
-    Chain(#[from] bitcoin_rs_chain::ChainError),
+    Chain(#[from] bitcoin_rs_execution::chain::ChainError),
     #[error(transparent)]
     AddrParse(#[from] std::net::AddrParseError),
     #[error(transparent)]

@@ -4,12 +4,12 @@ use std::time::Duration;
 use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
-use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockBodyMetadata, BlockHash, CompactTarget, Hash256, Header, LockTime,
     OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, unix_time_secs,
 };
 use bitcoin_rs_consensus::script::push_int;
+use bitcoin_rs_execution::chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 use bitcoin_rs_storage::block_body::{BlockBodyReader, BlockBodyStore};
 use bitcoin_rs_storage::{BlockFilePosition, BodyExtent, BoundedReadError, StorageError};

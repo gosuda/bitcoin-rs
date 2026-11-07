@@ -48,7 +48,7 @@ use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 
-use bitcoin_rs_chainstate::ValidationMode;
+use bitcoin_rs_execution::ValidationMode;
 use bitcoin_rs_node::{Auth, Network, ScriptIndexMode};
 
 #[derive(Debug, thiserror::Error)]

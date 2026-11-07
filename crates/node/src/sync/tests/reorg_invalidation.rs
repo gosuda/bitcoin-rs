@@ -48,7 +48,7 @@ fn matured_chain_with_body_store() -> Result<MaturedBodyStore, crate::test_suppo
     let bodies_store = Arc::new(Bodies::default());
     let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
     let handles =
-        bitcoin_rs_chainstate::Chainstate::from_parts(bitcoin_rs_chainstate::ChainstateParts {
+        bitcoin_rs_execution::Chainstate::from_parts(bitcoin_rs_execution::ChainstateParts {
             network: Network::Regtest,
             block_tree: tree,
             restored_applied_tip: None,
@@ -56,13 +56,15 @@ fn matured_chain_with_body_store() -> Result<MaturedBodyStore, crate::test_suppo
             coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
                 bitcoin_rs_storage::utxo::stats::CoinStats::default(),
             )),
-            chain_events: Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
+            chain_events: Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
+                0,
+            )),
             block_body_store: Some(bodies_store.clone()),
             undo_store: Arc::new(bitcoin_rs_storage::undo::InMemoryUndoStore::default()),
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
-            chain_transition: bitcoin_rs_chain::TransitionDomain::new().authority(),
+            chain_transition: bitcoin_rs_execution::chain::TransitionDomain::new().authority(),
             assume_valid_height: 0,
-            validation_mode: bitcoin_rs_chainstate::ValidationMode::AssumeValid,
+            validation_mode: bitcoin_rs_execution::ValidationMode::AssumeValid,
             validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
             script_cache: None,
             journal: None,
@@ -73,7 +75,7 @@ fn matured_chain_with_body_store() -> Result<MaturedBodyStore, crate::test_suppo
                 retention,
                 bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(288),
             ),
-            role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
+            role: bitcoin_rs_execution::ChainstateRole::Ordinary,
         });
     handles.apply_block(&BlockPayload::from_local(genesis))?;
     for block in &main {
@@ -151,7 +153,7 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
                 ref disposition,
                 ref invalidated,
                 ..
-            }) if *disposition == bitcoin_rs_chainstate::WindowApplyDisposition::BodyMutated
+            }) if *disposition == bitcoin_rs_execution::WindowApplyDisposition::BodyMutated
                 && invalidated.is_empty()
         ),
         "the mutated second body must fail as BodyMutated after one committed connect, \
@@ -248,7 +250,7 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), crate::test_s
         matches!(
             &outcome,
             Err(crate::reorg::ReorgError::ConnectFailed {
-                disposition: bitcoin_rs_chainstate::WindowApplyDisposition::Permanent,
+                disposition: bitcoin_rs_execution::WindowApplyDisposition::Permanent,
                 invalidated,
                 ..
             }) if invalidated.len() == 2
@@ -331,7 +333,7 @@ fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
     assert!(matches!(
         *original,
         crate::reorg::ReorgError::ConnectFailed {
-            disposition: bitcoin_rs_chainstate::WindowApplyDisposition::Permanent,
+            disposition: bitcoin_rs_execution::WindowApplyDisposition::Permanent,
             ..
         }
     ));

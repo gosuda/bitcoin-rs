@@ -2,8 +2,8 @@ use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitcoin_rs_chain::LatchReader;
-use bitcoin_rs_chainstate::verify::{
+use bitcoin_rs_execution::chain::LatchReader;
+use bitcoin_rs_execution::verify::{
     CheckLevel, VerifyError, VerifyOutcome, VerifyRequest, verify_recent_blocks,
 };
 use bitcoin_rs_mining::MiningControl;
@@ -50,7 +50,7 @@ const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct RpcChainControl {
-    handles: Arc<bitcoin_rs_chainstate::Chainstate>,
+    handles: Arc<bitcoin_rs_execution::Chainstate>,
     followers: crate::chain_effects::ChainFollowers,
     sync: Arc<crate::BlockSync>,
     snapshots: Arc<crate::snapshot::SnapshotControl>,
@@ -360,7 +360,7 @@ pub(crate) struct NodeServices {
     event_loop: Option<std::thread::JoinHandle<()>>,
     shutdown_forwarder: Option<(
         std::thread::JoinHandle<()>,
-        Arc<bitcoin_rs_chain::LatchWriter>,
+        Arc<bitcoin_rs_execution::chain::LatchWriter>,
     )>,
     metrics: Option<crate::metrics::MetricsServer>,
     rpc_threads: Vec<std::thread::JoinHandle<std::io::Result<()>>>,
@@ -773,7 +773,7 @@ pub(crate) fn start_node(
         .with_stale_tips(peer_ready_sync.stale_tips(), chainstate.block_tree_reader()),
     );
     let announcer_for_hook = Arc::clone(&block_announcer);
-    let pow_valid_hook: bitcoin_rs_chainstate::PowValidBlockHook =
+    let pow_valid_hook: bitcoin_rs_execution::PowValidBlockHook =
         Arc::new(move |block, hash, height| {
             announcer_for_hook.announce_pow_valid(block, hash, height);
         });

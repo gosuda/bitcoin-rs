@@ -2,7 +2,6 @@ use crate::support::TestError;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::bip34::check_bip34;
 use bitcoin_rs_consensus::primitives::{
@@ -11,6 +10,7 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_consensus::script::VerifyFlags;
 use bitcoin_rs_consensus::verify_block::verify_block_rules;
+use bitcoin_rs_execution::chain::compact_is_met_by;
 use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolGateway,
     MempoolLimits, SubmitOutcome,

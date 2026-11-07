@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxIn, Txid};
 
 use super::*;
-use bitcoin_rs_chain::{ChainWork, LatchReader, NodeId, TipSnapshot};
+use bitcoin_rs_execution::chain::{ChainWork, LatchReader, NodeId, TipSnapshot};
 use bitcoin_rs_index::block_log::BlockLog;
 
 struct SingleBlockSource {
@@ -65,7 +65,7 @@ fn context_with_tip(
         height: u32::try_from(times.len().saturating_sub(1)).unwrap_or(u32::MAX),
         chainwork: ChainWork::ZERO,
         hash: tip_hash,
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     };
     ctx.chain.chain_tip.store(Some(Arc::new(tip.clone())));
     ctx.chain.applied_tip.store(Some(Arc::new(tip)));
@@ -142,8 +142,9 @@ fn fixture_block_with_spend() -> Block {
         lock_time: LockTime::ZERO,
     };
     block.txs.push(spend);
-    block.header.merkle_root = bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs)
-        .expect("merkle root over two transactions");
+    block.header.merkle_root =
+        bitcoin_rs_execution::chain::regtest_fixture::merkle_root(&block.txs)
+            .expect("merkle root over two transactions");
     block
 }
 
@@ -526,7 +527,8 @@ fn verbose_block_and_raw_consumers_preserve_unsigned_transaction_versions() {
     block.txs[0].version = u32::MAX;
     block.txs[1].version = 1_u32 << 31;
     block.header.merkle_root =
-        bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs).expect("fixture merkle root");
+        bitcoin_rs_execution::chain::regtest_fixture::merkle_root(&block.txs)
+            .expect("fixture merkle root");
     let record = BlockRecord::from_block(0, &block);
     let mut ctx = Context::new();
     ctx.chain.block_body_source = Some(Arc::new(SingleBlockSource {
@@ -730,7 +732,7 @@ fn gettxoutsetinfo_pairs_one_height_with_one_hash_across_a_swap() {
         height: 7,
         chainwork: ChainWork::ZERO,
         hash: Hash256::from_le_bytes(&[0x0b; 32]),
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     });
     assert_ne!(a.height, b.height, "the fixture tips must differ");
     assert_ne!(a.hash, b.hash, "the fixture tips must differ");
@@ -799,7 +801,7 @@ struct Fork {
 }
 
 fn forked_ctx() -> Result<Fork, crate::test_error::TestError> {
-    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_execution::chain::NodeStatus;
 
     let ctx = Context::new();
     let header = |prev: BlockHash, nonce: u32, time: u32| Header {
@@ -885,7 +887,7 @@ fn verbose_block_facts_never_straddle_two_applied_publications()
 -> Result<(), crate::test_error::TestError> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_execution::chain::NodeStatus;
 
     let ctx = Context::new();
     let header = |prev: BlockHash, nonce: u32, time: u32| Header {
@@ -914,14 +916,14 @@ fn verbose_block_facts_never_straddle_two_applied_publications()
                 height: 1,
                 chainwork: ChainWork::ZERO,
                 hash: a1_hash.0,
-                chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+                chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
             }),
             Arc::new(TipSnapshot {
                 tip_id: b2_id,
                 height: 2,
                 chainwork: ChainWork::ZERO,
                 hash: b2_hash.0,
-                chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+                chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
             }),
         )
     };
@@ -1171,7 +1173,7 @@ fn getblockchaininfo_verificationprogress_follows_the_two_tips() {
             height,
             chainwork: ChainWork::ZERO,
             hash: Hash256::from_le_bytes(&[7_u8; 32]),
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
         })
     };
     let cases: [(&str, Option<u32>, Option<u32>, f64); 3] = [
@@ -1267,7 +1269,7 @@ fn getblockchaininfo_reports_tip_time_and_median_time_past() {
 
 #[test]
 fn getblockchaininfo_uses_one_applied_tip_snapshot() {
-    use bitcoin_rs_chain::ChainWork;
+    use bitcoin_rs_execution::chain::ChainWork;
 
     let ctx = context_with_tip(
         bitcoin_rs_consensus::primitives::Network::Regtest,
@@ -1287,7 +1289,7 @@ fn getblockchaininfo_uses_one_applied_tip_snapshot() {
         height: 99,
         chainwork: ChainWork::from_be_bytes([2; 32]),
         hash: Hash256::from_le_bytes(&[9; 32]),
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     })));
 
     let result = getblockchaininfo(&ctx, &json!([]))
@@ -1386,8 +1388,11 @@ fn getchaintxstats_window_tx_count_includes_in_range_blocks() {
         let id = tree
             .insert_node(None, genesis.header, NodeStatus::Active)
             .unwrap_or_else(|err| panic!("insert genesis: {err}"));
-        tree.restore_chain_tx_count(id, bitcoin_rs_chain::ChainTxCount::established(1))
-            .unwrap_or_else(|err| panic!("record genesis: {err}"));
+        tree.restore_chain_tx_count(
+            id,
+            bitcoin_rs_execution::chain::ChainTxCount::established(1),
+        )
+        .unwrap_or_else(|err| panic!("record genesis: {err}"));
         let node = tree
             .node(id)
             .unwrap_or_else(|err| panic!("genesis node: {err}"));
@@ -1396,7 +1401,7 @@ fn getchaintxstats_window_tx_count_includes_in_range_blocks() {
             height: node.height,
             chainwork: node.chainwork,
             hash: node.hash,
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(42),
+            chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::established(42),
         }
     };
     ctx.chain.applied_tip.store(Some(Arc::new(tip)));
@@ -1427,7 +1432,7 @@ fn getchaintxstats_uses_the_applied_tip_count_when_per_node_count_is_unset() {
             height: node.height,
             chainwork: node.chainwork,
             hash: node.hash,
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(42),
+            chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::established(42),
         }
     };
     ctx.chain.applied_tip.store(Some(Arc::new(tip)));
@@ -1457,7 +1462,7 @@ fn getchaintxstats_time_reflects_tip_block_header_timestamp() {
             height: node.height,
             chainwork: node.chainwork,
             hash: node.hash,
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(42),
+            chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::established(42),
         }
     };
     ctx.chain.applied_tip.store(Some(Arc::new(tip)));
@@ -1578,7 +1583,7 @@ fn getchaintxstats_two_block_window_uses_one_folded_window()
             cumulative = cumulative.saturating_add(u64::from(height.saturating_add(1)));
             tree.restore_chain_tx_count(
                 id,
-                bitcoin_rs_chain::ChainTxCount::established(cumulative),
+                bitcoin_rs_execution::chain::ChainTxCount::established(cumulative),
             )?;
             parent = Some(id);
             let node = tree.node(id)?;
@@ -1697,7 +1702,7 @@ fn getchaintxstats_tip_time_uses_first_applied_height_record() {
                 .unwrap_or_else(|err| panic!("insert {height}: {err}"));
             tree.restore_chain_tx_count(
                 id,
-                bitcoin_rs_chain::ChainTxCount::established(u64::from(height) + 1),
+                bitcoin_rs_execution::chain::ChainTxCount::established(u64::from(height) + 1),
             )
             .unwrap_or_else(|err| panic!("count {height}: {err}"));
             parent = Some(id);
@@ -1754,14 +1759,14 @@ fn getchaintips_marks_active_from_applied_tip() {
         height: 0,
         chainwork: ChainWork::ZERO,
         hash: applied_hash,
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     })));
     ctx.chain.chain_tip.store(Some(Arc::new(TipSnapshot {
         tip_id: header_id,
         height: 1,
         chainwork: ChainWork::ZERO,
         hash: header_hash,
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     })));
     let tips = getchaintips(&ctx, &json!([])).unwrap();
     let tips = tips.as_array().expect("array");
@@ -1785,7 +1790,7 @@ fn getchaintips_marks_active_from_applied_tip() {
 #[test]
 fn sync_with_validation_interface_queue_answers_null() {
     let ctx = Arc::new(Context::new());
-    let never = || bitcoin_rs_chain::LatchReader::fixture_never();
+    let never = || bitcoin_rs_execution::chain::LatchReader::fixture_never();
     for params in [json!([]), Value::new_null()] {
         let reply = syncwithvalidationinterfacequeue(&ctx, &params, &never())
             .unwrap_or_else(|err| panic!("params {params:?} must answer: {err}"));
@@ -1815,7 +1820,7 @@ fn sync_with_validation_interface_queue_waits_out_a_held_transition() {
         syncwithvalidationinterfacequeue(
             &worker_ctx,
             &json!([]),
-            &bitcoin_rs_chain::LatchReader::fixture_never(),
+            &bitcoin_rs_execution::chain::LatchReader::fixture_never(),
         )
     });
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1833,7 +1838,7 @@ fn sync_with_validation_interface_queue_waits_out_a_held_transition() {
     );
     let interrupted_ctx = Arc::new(Context::new());
     let _still_held = interrupted_ctx.chain.chain_transition.lock();
-    let stopped_latch = bitcoin_rs_chain::LatchWriter::new();
+    let stopped_latch = bitcoin_rs_execution::chain::LatchWriter::new();
     stopped_latch.trigger();
     let stopped = stopped_latch.reader();
     let error = syncwithvalidationinterfacequeue(&interrupted_ctx, &json!([]), &stopped)

@@ -221,7 +221,7 @@ fn non_regular_epoch_lock_refuses_start() -> Result<(), TestError> {
     config.p2p.listen.clear();
 
     let Err(crate::NodeOpenError::DataDir(
-        bitcoin_rs_chainstate::events::DataDirError::LockNotRegularFile,
+        bitcoin_rs_execution::events::DataDirError::LockNotRegularFile,
     )) = NodeState::open(config, None)
     else {
         return Err(TestError::message(

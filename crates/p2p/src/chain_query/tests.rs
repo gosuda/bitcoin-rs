@@ -1,9 +1,9 @@
 use super::*;
 use crate::inv::wire_block_hash;
 use bitcoin::{BlockHash as WireBlockHash, Txid as WireTxid};
-use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_consensus::primitives::consensus_bytes;
 use bitcoin_rs_consensus::primitives::{Block, CompactTarget, Tx};
+use bitcoin_rs_execution::chain::NodeStatus;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -12,7 +12,7 @@ enum TestError {
     #[error(transparent)]
     Peer(#[from] crate::PeerError),
     #[error(transparent)]
-    Chain(#[from] bitcoin_rs_chain::ChainError),
+    Chain(#[from] bitcoin_rs_execution::chain::ChainError),
     #[error(transparent)]
     TryFromInt(#[from] std::num::TryFromIntError),
     #[error(transparent)]
@@ -20,7 +20,7 @@ enum TestError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    RegtestFixture(#[from] bitcoin_rs_chain::regtest_fixture::RegtestFixtureError),
+    RegtestFixture(#[from] bitcoin_rs_execution::chain::regtest_fixture::RegtestFixtureError),
     #[error("missing: {0}")]
     Missing(&'static str),
 }
@@ -921,7 +921,7 @@ fn low_work_chain_serves_no_headers() -> TestResult {
     let genesis = test_header(BlockHash::default(), 0);
     let first = test_header(genesis.compute_hash(), 1);
     let second = test_header(first.compute_hash(), 2);
-    let low_work_tree = || -> Result<BlockTree, bitcoin_rs_chain::ChainError> {
+    let low_work_tree = || -> Result<BlockTree, bitcoin_rs_execution::chain::ChainError> {
         let mut tree = BlockTree::new();
         let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
         let first_id = tree.insert_node(Some(genesis_id), first, NodeStatus::Active)?;
@@ -1424,7 +1424,7 @@ fn chain_at(
     headers: &[Header],
     height: u32,
     block: &Block,
-) -> Result<ActiveChainQuery, bitcoin_rs_chain::ChainError> {
+) -> Result<ActiveChainQuery, bitcoin_rs_execution::chain::ChainError> {
     let source = SingleBlockSource {
         height,
         hash: block.block_hash(),
@@ -2010,7 +2010,10 @@ fn stale_inventory_requires_validation_and_core_age_bounds() -> TestResult {
             let mut tree = query.block_tree.write();
             let stale_id = tree.lookup(stale.block_hash().into()).ok_or("stale")?;
             if !validated {
-                tree.restore_chain_tx_count(stale_id, bitcoin_rs_chain::ChainTxCount::UNKNOWN)?;
+                tree.restore_chain_tx_count(
+                    stale_id,
+                    bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
+                )?;
             }
             let stale_work = tree.node(stale_id)?.chainwork;
             let best_id = tree.tip_id().ok_or("tip")?;
@@ -2203,7 +2206,7 @@ fn serving_rechecks_reorg_invalidation_and_age_after_io() -> TestResult {
             let n = tree.node(id)?;
             query
                 .applied_tip
-                .store(Some(Arc::new(bitcoin_rs_chain::TipSnapshot {
+                .store(Some(Arc::new(bitcoin_rs_execution::chain::TipSnapshot {
                     tip_id: id,
                     height: n.height,
                     hash: n.hash,
@@ -2285,10 +2288,13 @@ fn getblocktxn_rechecks_inventory_policy_when_io_crosses_depth_ten() -> TestResu
                         "fixture node missing".to_owned(),
                     )
                 })?;
-                tree.restore_chain_tx_count(stale_id, bitcoin_rs_chain::ChainTxCount::UNKNOWN)
-                    .map_err(|error| {
-                        bitcoin_rs_storage::block_body::BlockBodyReadError::Read(error.to_string())
-                    })?;
+                tree.restore_chain_tx_count(
+                    stale_id,
+                    bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
+                )
+                .map_err(|error| {
+                    bitcoin_rs_storage::block_body::BlockBodyReadError::Read(error.to_string())
+                })?;
             }
             self.applied.store(tree.tip());
             drop(tree);
@@ -2329,7 +2335,9 @@ fn getblocktxn_rechecks_inventory_policy_when_io_crosses_depth_ten() -> TestResu
     Ok(())
 }
 
-fn query_with(headers: Vec<Header>) -> Result<ActiveChainQuery, bitcoin_rs_chain::ChainError> {
+fn query_with(
+    headers: Vec<Header>,
+) -> Result<ActiveChainQuery, bitcoin_rs_execution::chain::ChainError> {
     let mut tree = BlockTree::new();
     let mut parent = None;
     for header in headers {
@@ -2355,7 +2363,9 @@ fn test_header(prev_blockhash: BlockHash, nonce: u32) -> Header {
         prev_blockhash,
         merkle_root: Hash256::default(),
         time: nonce,
-        bits: CompactTarget::from_consensus(bitcoin_rs_chain::regtest_fixture::REGTEST_BITS),
+        bits: CompactTarget::from_consensus(
+            bitcoin_rs_execution::chain::regtest_fixture::REGTEST_BITS,
+        ),
         nonce,
     }
 }
@@ -2609,7 +2619,7 @@ fn held_deep_body_uses_full_block_inventory_policy() -> TestResult {
 
 #[test]
 fn stale_tip_announcement_reconstructs_demoted_fork() -> TestResult {
-    use bitcoin_rs_chain::regtest_fixture::mined_regtest_header;
+    use bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header;
     let mut tree = BlockTree::new();
     let genesis = Network::Regtest.genesis_block().header;
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -2666,7 +2676,7 @@ fn stale_tip_announcement_reconstructs_demoted_fork() -> TestResult {
 
 #[test]
 fn stale_tip_announcement_reports_too_many_above_twenty_headers() -> TestResult {
-    use bitcoin_rs_chain::regtest_fixture::mined_regtest_header;
+    use bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header;
     let mut tree = BlockTree::new();
     let genesis = Network::Regtest.genesis_block().header;
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;

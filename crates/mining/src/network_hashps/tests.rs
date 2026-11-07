@@ -1,15 +1,15 @@
 use super::estimate_network_hashps;
 use super::network_hash_ps;
 use crate::MiningControlError;
-use bitcoin_rs_chain::BlockTree;
-use bitcoin_rs_chain::NodeId;
-use bitcoin_rs_chain::NodeStatus;
-use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_consensus::primitives::BlockHash;
 use bitcoin_rs_consensus::primitives::CompactTarget;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::Header;
 use bitcoin_rs_consensus::primitives::Network;
+use bitcoin_rs_execution::chain::BlockTree;
+use bitcoin_rs_execution::chain::NodeId;
+use bitcoin_rs_execution::chain::NodeStatus;
+use bitcoin_rs_execution::chain::TipSnapshot;
 
 const BITS: u32 = 0x207f_ffff;
 
@@ -41,7 +41,7 @@ fn snapshot(tree: &BlockTree, tip_id: NodeId) -> TipSnapshot {
     }
 }
 
-fn work_to_f64(work: bitcoin_rs_chain::ChainWork) -> f64 {
+fn work_to_f64(work: bitcoin_rs_execution::chain::ChainWork) -> f64 {
     let bytes: [u8; 32] = work.to_be_bytes();
     bytes
         .iter()

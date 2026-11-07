@@ -21,11 +21,11 @@ apply_buffered_blocks (crates/p2p/src/sync/commit.rs)
 node commit_window (crates/node/src/sync.rs)
   |  chain transition + mempool generation fence
   v
-chainstate connect_window (crates/chainstate/src/window.rs)
+chainstate connect_window (crates/execution/src/window.rs)
   |  per block: validate, persist undo/body, mutate UTXO
   |  per group: one durable-head batch (64 blocks or 8 MiB)
   v
-publish_applied (crates/chainstate/src/lib.rs)
+publish_applied (crates/execution/src/lib.rs)
   |  applied-tip cell, ChainEventPublisher sequence
   v
 node ChainFollowers::on_connect (crates/node/src/chain_effects.rs)
@@ -61,13 +61,13 @@ Inside chainstate, each block is applied with `PublishMode::Grouped`:
 5. The journal record is appended after the head commit. A journal failure logs a warning and recovery may fall back to full revalidation; it does not roll back the committed head.
 6. `publish_applied` stores the applied tip and advances the event sequence.
 
-The durable receipt exists before the tip is published. Apply returns only after the batch receipt, so a reader that sees the new tip is seeing a head that survives a crash. A head that does not match the restored tip at startup is a replay gap; `matching_durable_head_requires_no_replay` in [`crates/chainstate/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chainstate/src/durable/tests.rs) pins that rule.
+The durable receipt exists before the tip is published. Apply returns only after the batch receipt, so a reader that sees the new tip is seeing a head that survives a crash. A head that does not match the restored tip at startup is a replay gap; `matching_durable_head_requires_no_replay` in [`crates/execution/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/durable/tests.rs) pins that rule.
 
 The UTXO set is mutated on the live set through `utxo::contract`, not carried in the durable-head batch. The head batch names the undo and body rows that make the mutation recoverable.
 
 ## Publication and followers
 
-`publish_applied` replaces the applied-tip cell under one gate and then records a `ChainSnapshot { epoch, sequence, tip_hash, tip_height }`. The snapshot is the coherent, non-torn view index consumers read (`EVT-01`). `resumed_snapshot_continues_sequence` in `crates/chainstate/src/events.rs` pins sequence continuity across restart.
+`publish_applied` replaces the applied-tip cell under one gate and then records a `ChainSnapshot { epoch, sequence, tip_hash, tip_height }`. The snapshot is the coherent, non-torn view index consumers read (`EVT-01`). `resumed_snapshot_continues_sequence` in `crates/execution/src/events.rs` pins sequence continuity across restart.
 
 `ChainFollowers::on_connect` runs while the transition is still held, in this order:
 
@@ -105,9 +105,9 @@ The order is the contract: apply profile, durable commit receipt, tip publicatio
 | Invariant | Test | File |
 | --- | --- | --- |
 | Prefix drain stops at the first missing hash | `drain_expected_prefix_stops_at_first_missing_hash` | [`crates/p2p/src/block_stager/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/block_stager/tests.rs) |
-| A matching durable head needs no replay | `matching_durable_head_requires_no_replay` | [`crates/chainstate/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chainstate/src/durable/tests.rs) |
+| A matching durable head needs no replay | `matching_durable_head_requires_no_replay` | [`crates/execution/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/durable/tests.rs) |
 | Followers emit in commit order | `connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order` | [`crates/node/src/chain_effects/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/chain_effects/tests.rs) |
-| Event sequence survives restart | `resumed_snapshot_continues_sequence` | [`crates/chainstate/src/events.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chainstate/src/events.rs) |
+| Event sequence survives restart | `resumed_snapshot_continues_sequence` | [`crates/execution/src/events.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/events.rs) |
 | Apply waits for a pending reorg | `apply_buffered_blocks_waits_for_pending_reorg` | [`crates/p2p/src/sync/tests/download_frontier.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/sync/tests/download_frontier.rs) |
 
 The chain-events contract owns the fence order and the consumer cursor: [docs/contracts/chain-events.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/chain-events.md). The [state and storage](state-and-storage.md) chapter covers the durable records, and the [p2p](p2p.md) chapter covers peer policy before staging.

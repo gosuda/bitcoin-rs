@@ -161,7 +161,7 @@ fn unmarked_nonempty_datadir_is_refused_without_modification() -> Result<(), Tes
     std::fs::write(config.data_dir.join("legacy-state"), b"old")?;
 
     let data_dir = config.data_dir.clone();
-    let Err(NodeOpenError::DataDir(bitcoin_rs_chainstate::events::DataDirError::ValidateSchema {
+    let Err(NodeOpenError::DataDir(bitcoin_rs_execution::events::DataDirError::ValidateSchema {
         source,
         ..
     })) = NodeState::open(config, None)
@@ -230,7 +230,7 @@ fn mismatched_datadir_schema_is_refused_before_storage_opens() -> Result<(), Tes
     )?;
 
     let data_dir = config.data_dir.clone();
-    let Err(NodeOpenError::DataDir(bitcoin_rs_chainstate::events::DataDirError::ValidateSchema {
+    let Err(NodeOpenError::DataDir(bitcoin_rs_execution::events::DataDirError::ValidateSchema {
         source,
         ..
     })) = NodeState::open(config, None)

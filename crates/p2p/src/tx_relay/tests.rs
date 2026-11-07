@@ -374,7 +374,7 @@ fn relay_worker_announces_only_live_transactions() {
         1,
     );
 
-    let shutdown = bitcoin_rs_chain::LatchReader::fixture_never();
+    let shutdown = bitcoin_rs_execution::chain::LatchReader::fixture_never();
     let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), shutdown)
         .expect("relay worker spawns");
     drop(queue);
@@ -400,7 +400,7 @@ fn relay_worker_exits_when_queue_closes_with_observer_attached() {
         )
         .expect("observer slot");
     let sink = FakeSink::new(Vec::new());
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), shutdown.reader())
         .expect("relay worker spawns");
 
@@ -813,7 +813,7 @@ fn tx_relay_worker_promptly_exits_on_latch_trigger_while_idle() {
     let gateway = relay_identity_gateway();
     let (_queue, rx) = TxRelayQueue::new(8);
     let sink = FakeSink::new(Vec::new());
-    let latch = bitcoin_rs_chain::LatchWriter::new();
+    let latch = bitcoin_rs_execution::chain::LatchWriter::new();
     let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), latch.reader())
         .expect("relay worker spawns");
 

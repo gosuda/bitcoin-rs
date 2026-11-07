@@ -22,17 +22,17 @@ pub enum TestError {
     #[error(transparent)]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(transparent)]
-    Apply(Box<bitcoin_rs_chainstate::ApplyError>),
+    Apply(Box<bitcoin_rs_execution::ApplyError>),
     #[error(transparent)]
-    Recovery(Box<bitcoin_rs_chainstate::recovery::RecoveryError>),
+    Recovery(Box<bitcoin_rs_execution::recovery::RecoveryError>),
     #[error(transparent)]
-    Checkpoint(Box<bitcoin_rs_chainstate::CheckpointError>),
+    Checkpoint(Box<bitcoin_rs_execution::CheckpointError>),
     #[error(transparent)]
-    CheckpointSetup(#[from] bitcoin_rs_chainstate::CheckpointSetupError),
+    CheckpointSetup(#[from] bitcoin_rs_execution::CheckpointSetupError),
     #[error(transparent)]
-    Maintenance(#[from] bitcoin_rs_chainstate::MaintenanceError),
+    Maintenance(#[from] bitcoin_rs_execution::MaintenanceError),
     #[error(transparent)]
-    AssumeUtxo(Box<bitcoin_rs_chainstate::AssumeUtxoError>),
+    AssumeUtxo(Box<bitcoin_rs_execution::AssumeUtxoError>),
     #[error(transparent)]
     P2pStart(#[from] bitcoin_rs_p2p::P2pServiceError),
     #[error(transparent)]
@@ -77,7 +77,7 @@ pub enum TestError {
     #[error(transparent)]
     TryFromInt(#[from] std::num::TryFromIntError),
     #[error(transparent)]
-    Chain(#[from] bitcoin_rs_chain::ChainError),
+    Chain(#[from] bitcoin_rs_execution::chain::ChainError),
     #[error(transparent)]
     Node(#[from] crate::embed::NodeError),
     #[error(transparent)]
@@ -91,7 +91,7 @@ pub enum TestError {
     #[error(transparent)]
     AddressParse(#[from] bitcoin::address::ParseError),
     #[error(transparent)]
-    Disconnect(#[from] bitcoin_rs_chainstate::DisconnectError),
+    Disconnect(#[from] bitcoin_rs_execution::DisconnectError),
     #[error(transparent)]
     Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error(transparent)]
@@ -109,7 +109,7 @@ pub enum TestError {
     #[error("thread panicked")]
     ThreadPanicked,
     #[error(transparent)]
-    RegtestFixture(#[from] bitcoin_rs_chain::regtest_fixture::RegtestFixtureError),
+    RegtestFixture(#[from] bitcoin_rs_execution::chain::regtest_fixture::RegtestFixtureError),
     #[error(transparent)]
     Prune(#[from] bitcoin_rs_storage::pruning::PruneError),
     #[error(transparent)]
@@ -119,13 +119,13 @@ pub enum TestError {
     #[error(transparent)]
     Prioritise(#[from] bitcoin_rs_mempool::PrioritiseError),
     #[error(transparent)]
-    Reorg(#[from] bitcoin_rs_chainstate::reorg::ReorgError),
+    Reorg(#[from] bitcoin_rs_execution::reorg::ReorgError),
     #[error(transparent)]
-    DataDir(#[from] bitcoin_rs_chainstate::events::DataDirError),
+    DataDir(#[from] bitcoin_rs_execution::events::DataDirError),
     #[error(transparent)]
     StdRecvTimeout(#[from] std::sync::mpsc::RecvTimeoutError),
     #[error(transparent)]
-    HeaderAdmission(#[from] bitcoin_rs_chainstate::HeaderAdmissionError),
+    HeaderAdmission(#[from] bitcoin_rs_execution::HeaderAdmissionError),
     #[error(transparent)]
     Evidence(#[from] bitcoin_rs_storage::recovery_evidence::EvidenceError),
     #[error(transparent)]
@@ -161,29 +161,29 @@ impl From<crate::ConnectMutationError> for TestError {
 }
 
 #[cfg(any(test, feature = "test-seam"))]
-impl From<bitcoin_rs_chainstate::ApplyError> for TestError {
-    fn from(error: bitcoin_rs_chainstate::ApplyError) -> Self {
+impl From<bitcoin_rs_execution::ApplyError> for TestError {
+    fn from(error: bitcoin_rs_execution::ApplyError) -> Self {
         Self::Apply(Box::new(error))
     }
 }
 
 #[cfg(any(test, feature = "test-seam"))]
-impl From<bitcoin_rs_chainstate::recovery::RecoveryError> for TestError {
-    fn from(error: bitcoin_rs_chainstate::recovery::RecoveryError) -> Self {
+impl From<bitcoin_rs_execution::recovery::RecoveryError> for TestError {
+    fn from(error: bitcoin_rs_execution::recovery::RecoveryError) -> Self {
         Self::Recovery(Box::new(error))
     }
 }
 
 #[cfg(any(test, feature = "test-seam"))]
-impl From<bitcoin_rs_chainstate::CheckpointError> for TestError {
-    fn from(error: bitcoin_rs_chainstate::CheckpointError) -> Self {
+impl From<bitcoin_rs_execution::CheckpointError> for TestError {
+    fn from(error: bitcoin_rs_execution::CheckpointError) -> Self {
         Self::Checkpoint(Box::new(error))
     }
 }
 
 #[cfg(any(test, feature = "test-seam"))]
-impl From<bitcoin_rs_chainstate::AssumeUtxoError> for TestError {
-    fn from(error: bitcoin_rs_chainstate::AssumeUtxoError) -> Self {
+impl From<bitcoin_rs_execution::AssumeUtxoError> for TestError {
+    fn from(error: bitcoin_rs_execution::AssumeUtxoError) -> Self {
         Self::AssumeUtxo(Box::new(error))
     }
 }

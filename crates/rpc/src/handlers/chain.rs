@@ -2,12 +2,12 @@ use alloc::sync::Arc;
 use core::cell::OnceCell;
 use core::str::FromStr as _;
 
-use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_consensus::primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, TxOut, consensus_bytes,
     deserialize, u64_to_f64,
 };
+use bitcoin_rs_execution::chain::NodeStatus;
 
 #[cfg(test)]
 use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
@@ -126,7 +126,7 @@ pub(crate) fn loadtxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 pub(crate) fn dumptxoutset(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<Value, RpcError> {
     super::ensure_at_most_params(params, 2)?;
     let path = required_str(params, 0, "path is required")?;
@@ -315,8 +315,8 @@ struct ChainTxStats {
 }
 
 fn branch_hashes(
-    tree: &bitcoin_rs_chain::BlockTree,
-    branch_tip: bitcoin_rs_chain::NodeId,
+    tree: &bitcoin_rs_execution::chain::BlockTree,
+    branch_tip: bitcoin_rs_execution::chain::NodeId,
 ) -> Option<Vec<Hash256>> {
     let floor = tree.node(branch_tip).ok()?.height;
     let width = usize::try_from(floor).ok()?.checked_add(1)?;
@@ -336,8 +336,8 @@ fn branch_hashes(
 
 fn log_prefix_count(
     log: &BlockLog,
-    tree: &bitcoin_rs_chain::BlockTree,
-    branch_tip: bitcoin_rs_chain::NodeId,
+    tree: &bitcoin_rs_execution::chain::BlockTree,
+    branch_tip: bitcoin_rs_execution::chain::NodeId,
     branch: &OnceCell<Option<Vec<Hash256>>>,
     height: u32,
 ) -> Option<u64> {
@@ -357,9 +357,9 @@ fn log_prefix_count(
 
 fn count_through(
     ctx: &Context,
-    tree: &bitcoin_rs_chain::BlockTree,
+    tree: &bitcoin_rs_execution::chain::BlockTree,
     applied: &AppliedView,
-    node_id: bitcoin_rs_chain::NodeId,
+    node_id: bitcoin_rs_execution::chain::NodeId,
     branch: &OnceCell<Option<Vec<Hash256>>>,
 ) -> Option<u64> {
     let node = tree.node(node_id).ok()?;
@@ -377,9 +377,9 @@ fn count_through(
 
 fn window_tx_count_between(
     ctx: &Context,
-    tree: &bitcoin_rs_chain::BlockTree,
-    start_id: bitcoin_rs_chain::NodeId,
-    end_id: bitcoin_rs_chain::NodeId,
+    tree: &bitcoin_rs_execution::chain::BlockTree,
+    start_id: bitcoin_rs_execution::chain::NodeId,
+    end_id: bitcoin_rs_execution::chain::NodeId,
     branch: &OnceCell<Option<Vec<Hash256>>>,
 ) -> Option<u64> {
     let start = tree.node(start_id).ok()?;
@@ -397,7 +397,7 @@ fn window_tx_count_between(
 
 fn window_stats(
     ctx: &Context,
-    tree: &bitcoin_rs_chain::BlockTree,
+    tree: &bitcoin_rs_execution::chain::BlockTree,
     applied: &AppliedView,
     tip_hash: Hash256,
     window_block_count: u64,
@@ -918,7 +918,7 @@ pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 pub(crate) fn syncwithvalidationinterfacequeue(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let _settled = loop {
@@ -964,7 +964,7 @@ pub(crate) fn invalidateblock(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 pub(crate) fn verifychain(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<Value, RpcError> {
     super::ensure_at_most_params(params, 2)?;
     let array = params_array(params)?;
@@ -1129,7 +1129,7 @@ fn execute_txoutset_scan(
     ctx: &Context,
     hash_type: &str,
     permit: &bitcoin_rs_storage::utxo::scan::UtxoScanPermit<'_>,
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<(AppliedView, TxOutSetScan), RpcError> {
     let cancelled = || permit.aborted() || cancellation.is_triggered();
     for _ in 0..4 {
@@ -1178,7 +1178,7 @@ fn format_txoutsetinfo_response(
 pub(crate) fn gettxoutsetinfo(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<Value, RpcError> {
     let hash_type = parse_txoutsetinfo_params(params)?;
     let scan_permit = ctx.chain.utxo.reserve_scan().map_err(|error| match error {
@@ -1306,7 +1306,7 @@ const MAX_SCAN_RESPONSE_BYTES: usize = 16 * 1_048_576;
 pub(crate) fn scantxoutset(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<Value, RpcError> {
     let (action, objects) = scan_arguments(params)?;
     match action {
@@ -1373,7 +1373,7 @@ fn scantxoutset_scan(
     ctx: &Context,
     permit: &bitcoin_rs_storage::utxo::scan::UtxoScanPermit<'_>,
     scan_scripts: &std::collections::BTreeMap<Vec<u8>, String>,
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancellation: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<Value, RpcError> {
     let scripts = scan_scripts.keys().cloned().collect();
     let (applied, complete, mut scan) = loop {
@@ -1963,8 +1963,8 @@ mod getdifficulty_tests {
 mod pruneblockchain_tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
     use bitcoin_rs_consensus::primitives::Hash256;
+    use bitcoin_rs_execution::chain::{ChainWork, NodeId, TipSnapshot};
 
     use super::*;
 
@@ -1994,7 +1994,7 @@ mod pruneblockchain_tests {
             height,
             chainwork: ChainWork::ZERO,
             hash: Hash256::default(),
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
         })));
     }
 
@@ -2153,10 +2153,10 @@ mod getchaintips_tests;
 mod verifychain_tests;
 
 fn compute_branchlen(
-    tree: &bitcoin_rs_chain::BlockTree,
-    leaf_id: bitcoin_rs_chain::NodeId,
+    tree: &bitcoin_rs_execution::chain::BlockTree,
+    leaf_id: bitcoin_rs_execution::chain::NodeId,
     leaf_height: u32,
-    active_tip_id: Option<bitcoin_rs_chain::NodeId>,
+    active_tip_id: Option<bitcoin_rs_execution::chain::NodeId>,
 ) -> u32 {
     let Some(active_id) = active_tip_id else {
         return leaf_height;
@@ -2187,8 +2187,8 @@ mod chaintxstats_window_tests;
 mod verification_progress_wiring_tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_chain::{ChainWork, NodeStatus, TipSnapshot};
     use bitcoin_rs_consensus::primitives::Hash256;
+    use bitcoin_rs_execution::chain::{ChainWork, NodeStatus, TipSnapshot};
     use sonic_rs::{JsonValueTrait, json};
 
     use super::*;
@@ -2209,14 +2209,17 @@ mod verification_progress_wiring_tests {
                 .insert_node(None, header, NodeStatus::Active)
                 .unwrap_or_else(|err| panic!("insert: {err}"));
             if let Some(count) = chain_tx_count {
-                tree.restore_chain_tx_count(id, bitcoin_rs_chain::ChainTxCount::established(count))
-                    .unwrap_or_else(|err| panic!("restore: {err}"));
+                tree.restore_chain_tx_count(
+                    id,
+                    bitcoin_rs_execution::chain::ChainTxCount::established(count),
+                )
+                .unwrap_or_else(|err| panic!("restore: {err}"));
             }
             id
         };
         let applied_chain_tx_count = chain_tx_count.map_or(
-            bitcoin_rs_chain::ChainTxCount::UNKNOWN,
-            bitcoin_rs_chain::ChainTxCount::established,
+            bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
+            bitcoin_rs_execution::chain::ChainTxCount::established,
         );
         let hash = header.compute_hash().0;
         ctx.chain.chain_tip.store(Some(Arc::new(TipSnapshot {
@@ -2224,7 +2227,7 @@ mod verification_progress_wiring_tests {
             height: 100,
             chainwork: ChainWork::ZERO,
             hash,
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
         })));
         ctx.chain.applied_tip.store(Some(Arc::new(TipSnapshot {
             tip_id: id,
@@ -2311,7 +2314,7 @@ mod dumptxoutset_tests {
         fn dump_txoutset(
             &self,
             path: &std::path::Path,
-            cancellation: &bitcoin_rs_chain::LatchReader,
+            cancellation: &bitcoin_rs_execution::chain::LatchReader,
         ) -> Result<SnapshotExport, SnapshotControlError> {
             *self.seen.lock().unwrap_or_else(PoisonError::into_inner) = Some(path.to_path_buf());
             if cancellation.is_triggered() {
@@ -2338,7 +2341,7 @@ mod dumptxoutset_tests {
             &self,
             _check_level: u8,
             _nblocks: u32,
-            _cancellation: &bitcoin_rs_chain::LatchReader,
+            _cancellation: &bitcoin_rs_execution::chain::LatchReader,
         ) -> Result<bool, ChainControlError> {
             Ok(false)
         }

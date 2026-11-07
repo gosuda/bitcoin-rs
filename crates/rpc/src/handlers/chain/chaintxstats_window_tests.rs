@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use bitcoin_rs_chain::NodeStatus;
+use bitcoin_rs_execution::chain::NodeStatus;
 use sonic_rs::{JsonValueTrait, json};
 
 use super::*;
@@ -65,14 +65,14 @@ fn chain_ctx_with_counter(times: &[u32], chain_tx_count: Option<u64>) -> Arc<Con
     };
     ctx.chain
         .applied_tip
-        .store(Some(Arc::new(bitcoin_rs_chain::TipSnapshot {
+        .store(Some(Arc::new(bitcoin_rs_execution::chain::TipSnapshot {
             tip_id,
             height,
-            chainwork: bitcoin_rs_chain::ChainWork::ZERO,
+            chainwork: bitcoin_rs_execution::chain::ChainWork::ZERO,
             hash: hash.into(),
             chain_tx_count: chain_tx_count.map_or(
-                bitcoin_rs_chain::ChainTxCount::UNKNOWN,
-                bitcoin_rs_chain::ChainTxCount::established,
+                bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
+                bitcoin_rs_execution::chain::ChainTxCount::established,
             ),
         })));
     ctx

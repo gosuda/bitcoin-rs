@@ -1,6 +1,6 @@
 use super::*;
-use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{Block, Network};
+use bitcoin_rs_execution::chain::{NodeStatus, TipSnapshot};
 use bitcoin_rs_storage::utxo::contract::{BlockSpends, BlockUndoSource, HistoryUnavailable};
 
 type Result<T = ()> = std::result::Result<T, crate::test_error::TestError>;
@@ -81,7 +81,7 @@ fn moved_tip_and_recovery_after_source_read_refuse_publication() -> Result {
     for close in [false, true] {
         let (mut ctx, block) = fixture()?;
         let applied = ctx.chain.applied_tip.clone();
-        let closed = bitcoin_rs_chain::LatchWriter::new();
+        let closed = bitcoin_rs_execution::chain::LatchWriter::new();
         ctx.chain.closed_for_recovery = closed.reader();
         ctx.chain.block_undo_source = Some(Arc::new(Source(move |_, _| {
             if close {

@@ -29,7 +29,7 @@ const ANNOUNCE_POLL: Duration = Duration::from_millis(100);
 
 pub(crate) fn ibd_active(
     ibd: Option<&(
-        Arc<bitcoin_rs_chain::InitialBlockDownload>,
+        Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
         bitcoin_rs_consensus::primitives::Network,
     )>,
 ) -> bool {
@@ -111,13 +111,13 @@ pub struct BlockAnnouncer {
     chain_query: Arc<dyn ChainQuery>,
     config: BlockAnnounceConfig,
     ibd: Option<(
-        Arc<bitcoin_rs_chain::InitialBlockDownload>,
+        Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
         bitcoin_rs_consensus::primitives::Network,
     )>,
     state: Mutex<AnnounceState>,
     recent: RecentBlockSlot,
     stale_tips: Option<Arc<crate::sync::StaleTipRetainer>>,
-    block_tree: Option<bitcoin_rs_chain::BlockTreeReader>,
+    block_tree: Option<bitcoin_rs_execution::chain::BlockTreeReader>,
 }
 
 impl BlockAnnouncer {
@@ -143,7 +143,7 @@ impl BlockAnnouncer {
     pub fn with_stale_tips(
         mut self,
         stale_tips: Arc<crate::sync::StaleTipRetainer>,
-        block_tree: bitcoin_rs_chain::BlockTreeReader,
+        block_tree: bitcoin_rs_execution::chain::BlockTreeReader,
     ) -> Self {
         self.stale_tips = Some(stale_tips);
         self.block_tree = Some(block_tree);
@@ -159,7 +159,7 @@ impl BlockAnnouncer {
     #[must_use]
     pub fn with_ibd(
         mut self,
-        ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+        ibd: Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
         network: bitcoin_rs_consensus::primitives::Network,
     ) -> Self {
         self.ibd = Some((ibd, network));
@@ -753,7 +753,7 @@ impl BlockAnnouncer {
 pub fn spawn_block_announce_worker(
     announcer: Arc<BlockAnnouncer>,
     rx: BlockAnnounceReceiver,
-    shutdown: bitcoin_rs_chain::LatchReader,
+    shutdown: bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<std::thread::JoinHandle<()>, std::io::Error> {
     std::thread::Builder::new()
         .name("bitcoin-rs-block-announce".into())

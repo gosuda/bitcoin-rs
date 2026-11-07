@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, Txid, Wtxid,
     encode::{consensus_bytes, double_sha256},
@@ -9,6 +8,7 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_consensus::script::VerifyFlags;
 use bitcoin_rs_consensus::{compute_merkle_root, transaction_sigop_cost};
+use bitcoin_rs_execution::chain::compact_is_met_by;
 use bitcoin_rs_mempool::{BlockRemovalPlan, Mempool, MempoolMiningSnapshot};
 use hashbrown::HashMap;
 

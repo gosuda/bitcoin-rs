@@ -1,8 +1,8 @@
 use std::sync::{Arc, Weak};
 
-use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_consensus::primitives::Block;
 use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_execution::chain::TipSnapshot;
 use bitcoin_rs_mempool::MempoolObserver;
 use bitcoin_rs_mempool::MutationEnvelope;
 use bitcoin_rs_mempool::MutationResult;

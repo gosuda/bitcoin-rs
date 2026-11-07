@@ -1,9 +1,9 @@
 use super::{GateResult, fail};
-use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Witness,
 };
 use bitcoin_rs_consensus::script::push_int;
+use bitcoin_rs_execution::chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
 pub(crate) const SEED_BASE_TIME: u32 = 1_296_688_603;
@@ -75,7 +75,9 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> GateResult<SeedChain>
     })
 }
 
-pub(crate) fn current_tip(state: &NodeState) -> GateResult<bitcoin_rs_chain::TipSnapshot> {
+pub(crate) fn current_tip(
+    state: &NodeState,
+) -> GateResult<bitcoin_rs_execution::chain::TipSnapshot> {
     let Some(tip) = state.chainstate().applied_tip_snapshot() else {
         return Err(fail("applied tip must exist"));
     };

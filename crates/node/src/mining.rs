@@ -1,19 +1,19 @@
 use crate::chain_effects::{ChainFollowers, ConnectMutationError};
 use alloc::sync::Arc;
-use bitcoin_rs_chain::ChainError;
-use bitcoin_rs_chain::NodeStatus;
-use bitcoin_rs_chain::StableRead;
-use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_chain::signalling_deployments;
-use bitcoin_rs_chain::{BlockTreeReader, TipReader};
-use bitcoin_rs_chainstate::ApplyError;
-use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_consensus::primitives::Block;
 use bitcoin_rs_consensus::primitives::BlockPayload;
 use bitcoin_rs_consensus::primitives::CompactTarget;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::Header;
 use bitcoin_rs_consensus::primitives::Network;
+use bitcoin_rs_execution::ApplyError;
+use bitcoin_rs_execution::Chainstate;
+use bitcoin_rs_execution::chain::ChainError;
+use bitcoin_rs_execution::chain::NodeStatus;
+use bitcoin_rs_execution::chain::StableRead;
+use bitcoin_rs_execution::chain::TipSnapshot;
+use bitcoin_rs_execution::chain::signalling_deployments;
+use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::MempoolReader;
 use bitcoin_rs_mempool::MutationResult;
@@ -56,7 +56,7 @@ pub struct MiningCoordinator {
     chainstate: Arc<Chainstate>,
     block_tree: BlockTreeReader,
     followers: ChainFollowers,
-    shutdown: bitcoin_rs_chain::LatchReader,
+    shutdown: bitcoin_rs_execution::chain::LatchReader,
     service: MiningService,
 }
 
@@ -482,10 +482,10 @@ impl MiningControl for MiningCoordinator {
         }
         match self.chainstate.admit_headers(std::slice::from_ref(&header)) {
             Ok(_) => Ok(()),
-            Err(bitcoin_rs_chainstate::HeaderAdmissionError::Rejected(error)) => {
+            Err(bitcoin_rs_execution::HeaderAdmissionError::Rejected(error)) => {
                 Err(header_reject_reason(error))
             }
-            Err(bitcoin_rs_chainstate::HeaderAdmissionError::Refused(error)) => Err(
+            Err(bitcoin_rs_execution::HeaderAdmissionError::Refused(error)) => Err(
                 MiningControlError::Unavailable(CompactString::from(error.to_string())),
             ),
         }
@@ -601,8 +601,8 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             CompactString::from("bad-txns-inputs-missingorspent")
         }
         ApplyError::Consensus(_)
-            if bitcoin_rs_chainstate::classify_apply_error(error)
-                == bitcoin_rs_chainstate::WindowApplyDisposition::Operational =>
+            if bitcoin_rs_execution::classify_apply_error(error)
+                == bitcoin_rs_execution::WindowApplyDisposition::Operational =>
         {
             return Err(MiningControlError::Failed(CompactString::from(
                 error.to_string(),

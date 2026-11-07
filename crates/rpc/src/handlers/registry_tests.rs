@@ -380,17 +380,21 @@ fn named_parameter_errors_use_core_invalid_parameter_code() {
     );
 }
 
-fn test_context() -> (Arc<Context>, Arc<bitcoin_rs_chainstate::Chainstate>) {
-    let chainstate = Arc::new(bitcoin_rs_chainstate::Chainstate::new(
+fn test_context() -> (Arc<Context>, Arc<bitcoin_rs_execution::Chainstate>) {
+    let chainstate = Arc::new(bitcoin_rs_execution::Chainstate::new(
         bitcoin_rs_consensus::primitives::Network::Regtest,
         Arc::new(arc_swap::ArcSwapOption::empty()),
         Arc::new(arc_swap::ArcSwapOption::empty()),
-        Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
+        Arc::new(parking_lot::RwLock::new(
+            bitcoin_rs_execution::chain::BlockTree::new(),
+        )),
         Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
         Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
             bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         )),
-        Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
+        Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
+            0,
+        )),
     ));
     chainstate
         .apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(

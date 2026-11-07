@@ -147,7 +147,7 @@ pub trait RelaySink: Send + Sync {
 pub struct PeerRelaySink {
     peers: Arc<crate::PeerTable>,
     ibd: Option<(
-        Arc<bitcoin_rs_chain::InitialBlockDownload>,
+        Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
         bitcoin_rs_consensus::primitives::Network,
     )>,
 }
@@ -161,7 +161,7 @@ impl PeerRelaySink {
     #[must_use]
     pub fn with_ibd(
         mut self,
-        ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+        ibd: Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
         network: bitcoin_rs_consensus::primitives::Network,
     ) -> Self {
         self.ibd = Some((ibd, network));
@@ -265,7 +265,7 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
     sink: S,
     rx: Receiver<RelayRequest>,
     gateway: Weak<MempoolGateway>,
-    shutdown: bitcoin_rs_chain::LatchReader,
+    shutdown: bitcoin_rs_execution::chain::LatchReader,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("bitcoin-rs-tx-relay".to_owned())

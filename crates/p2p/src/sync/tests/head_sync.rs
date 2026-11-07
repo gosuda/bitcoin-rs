@@ -1250,7 +1250,7 @@ fn compact_reconstruction_admission_reads_admitted_tree_state() -> TestResult {
     };
 
     let mut ahead = tip_child(tip, 43)?;
-    ahead.time = bitcoin_rs_chain::current_unix_seconds().saturating_add(3 * 60 * 60);
+    ahead.time = bitcoin_rs_execution::chain::current_unix_seconds().saturating_add(3 * 60 * 60);
     regtest_fixture::mine_header_to_declared_target(&mut ahead)?;
     assert!(
         !sync.compact_reconstruction_admissible(source, &ahead),

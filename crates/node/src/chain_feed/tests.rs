@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_support::TestError;
-use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Network};
+use bitcoin_rs_execution::chain::regtest_fixture;
 use std::{
     future::Future,
     task::{Context, Poll, Waker},

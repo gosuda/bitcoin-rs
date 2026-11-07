@@ -1,0 +1,109 @@
+use crate::chain::ChainError;
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::{ConsensusError, ScriptEngine, ValidationEngine};
+use bitcoin_rs_storage::StorageError;
+use bitcoin_rs_storage::chainstate_journal::JournalWriterError;
+
+use crate::{ApplyError, CheckpointError, WindowApplyDisposition, classify_apply_error};
+use ApplyError::{
+    BlockBodyPersistence, BlockOutputsExceedInputs, BlockValueOverflow, JournalBackpressure,
+    RecoveryPublication, UndoPersistence,
+};
+
+// SYNC-04
+#[test]
+fn apply_errors_classify_into_their_documented_dispositions() {
+    use ApplyError::{Chain, Consensus, DurableHeadCommit, ProofOfWork};
+    use ConsensusError::{
+        Kernel, MerkleRoot, MissingCoinbase, PrevoutCount, PrevoutMatrixSize, PrevoutMismatch,
+        Script, SignetSolution, SixtyFourByteMutation, UnsupportedEngine,
+    };
+    use WindowApplyDisposition::{BodyMutated, Fatal, Operational, Permanent};
+
+    let script = |engine| Script {
+        input_index: 0,
+        reason: "script failed".to_owned(),
+        engine,
+    };
+    let cases = [
+        (
+            Consensus(UnsupportedEngine {
+                engine: ValidationEngine::Kernel,
+            }),
+            Operational,
+        ),
+        (
+            Consensus(PrevoutCount {
+                input_count: 2,
+                prevout_count: 1,
+            }),
+            Operational,
+        ),
+        (
+            Consensus(PrevoutMatrixSize {
+                expected: 2,
+                actual: 1,
+            }),
+            Operational,
+        ),
+        (Consensus(PrevoutMismatch { input_index: 1 }), Operational),
+        (Consensus(Kernel("parse failed".to_owned())), Operational),
+        (Consensus(script(ScriptEngine::Kernel)), Permanent),
+        (Consensus(script(ScriptEngine::Native)), Permanent),
+        (Consensus(SignetSolution), Permanent),
+        (
+            ProofOfWork {
+                hash: Hash256::default(),
+            },
+            Permanent,
+        ),
+        (
+            Chain(ChainError::NbitsMismatch {
+                height: 2016,
+                expected: 1,
+                actual: 2,
+            }),
+            Permanent,
+        ),
+        (Consensus(MerkleRoot), BodyMutated),
+        (Consensus(SixtyFourByteMutation), BodyMutated),
+        (Consensus(MissingCoinbase), Permanent),
+        (
+            DurableHeadCommit(StorageError::backend("head batch lost")),
+            Fatal,
+        ),
+        (
+            UndoPersistence(StorageError::backend("RocksDbError: Poisoned")),
+            Fatal,
+        ),
+        (
+            BlockBodyPersistence(StorageError::backend("block append failed")),
+            Fatal,
+        ),
+        (
+            JournalBackpressure(Box::new(JournalWriterError::RetentionLimit {
+                bytes: 1024,
+                limit: 512,
+            })),
+            Operational,
+        ),
+        (
+            JournalBackpressure(Box::new(JournalWriterError::Io(std::io::Error::other(
+                "journal device gone",
+            )))),
+            Fatal,
+        ),
+        (BlockValueOverflow, Permanent),
+        (BlockOutputsExceedInputs, Permanent),
+        (
+            RecoveryPublication(Box::new(CheckpointError::Storage(StorageError::backend(
+                "checkpoint write lost",
+            )))),
+            Fatal,
+        ),
+    ];
+
+    for (error, expected) in cases {
+        assert_eq!(classify_apply_error(&error), expected, "{error}");
+    }
+}

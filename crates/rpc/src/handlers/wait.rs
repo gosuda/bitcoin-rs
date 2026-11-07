@@ -1,8 +1,8 @@
 use alloc::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_chain::{LatchReader, TipWaitCondition};
 use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_execution::chain::{LatchReader, TipWaitCondition};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 use crate::{RpcError, context::Context};

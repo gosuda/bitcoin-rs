@@ -15,7 +15,7 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> Result<(), Tes
         let state = NodeState::open(config.clone(), None)?;
         assert_eq!(
             applied_chain_tx_count(&state),
-            bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
             "a node that has applied nothing cannot know the count"
         );
 
@@ -25,7 +25,7 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> Result<(), Tes
         let counted = applied_chain_tx_count(&state);
         assert_eq!(
             counted,
-            bitcoin_rs_chain::ChainTxCount::established(genesis_tx_count),
+            bitcoin_rs_execution::chain::ChainTxCount::established(genesis_tx_count),
             "genesis establishes the count"
         );
 

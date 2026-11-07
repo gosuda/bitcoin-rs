@@ -2,7 +2,7 @@ use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
 
-use bitcoin_rs_chain::regtest_fixture;
+use bitcoin_rs_execution::chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
 use bitcoin_rs_consensus::primitives::{
@@ -590,7 +590,10 @@ fn prune_test_config(data_dir: PathBuf) -> NodeConfig {
     config
 }
 
-fn assert_tip(state: &NodeState, expected: &bitcoin_rs_chain::TipSnapshot) -> Result<()> {
+fn assert_tip(
+    state: &NodeState,
+    expected: &bitcoin_rs_execution::chain::TipSnapshot,
+) -> Result<()> {
     let tip = state
         .chainstate()
         .applied_tip_snapshot()

@@ -6,14 +6,14 @@ use crate::template::Candidate;
 use crate::template::TemplateId;
 use crate::template::select_template_body;
 use crate::template::select_template_body_after;
-use bitcoin_rs_chain::ChainTxCount;
-use bitcoin_rs_chain::ChainWork;
-use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_consensus::primitives::Amount;
 use bitcoin_rs_consensus::primitives::LockTime;
 use bitcoin_rs_consensus::primitives::Script;
 use bitcoin_rs_consensus::primitives::Tx;
 use bitcoin_rs_consensus::primitives::TxOut;
+use bitcoin_rs_execution::chain::ChainTxCount;
+use bitcoin_rs_execution::chain::ChainWork;
+use bitcoin_rs_execution::chain::NodeId;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolLimits;
 use bitcoin_rs_mempool::MutationChange;
@@ -441,7 +441,7 @@ fn service_with_chain(
         tip,
         pool,
         chain,
-        bitcoin_rs_chain::LatchReader::fixture_never(),
+        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
     )
 }
 
@@ -449,7 +449,7 @@ fn service_with_source(
     tip: Option<TipSnapshot>,
     pool: Arc<dyn MempoolSnapshotSource>,
     chain: Arc<dyn ChainContextSource>,
-    shutdown: bitcoin_rs_chain::LatchReader,
+    shutdown: bitcoin_rs_execution::chain::LatchReader,
 ) -> MiningService {
     MiningService::new(
         Network::Regtest,
@@ -882,7 +882,7 @@ fn stage_tip_is_idempotent_and_publishes_nothing() {
         Some(tip.clone()),
         pool.clone(),
         Arc::new(ResolvedChain),
-        bitcoin_rs_chain::LatchReader::fixture_never(),
+        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
     );
     let block = Network::Regtest.genesis_block();
     service.stage_tip(&tip, &block);
@@ -1079,7 +1079,7 @@ fn matching_foreground_joins_running_preparation_without_duplicate_finish() {
         Some(tip.clone()),
         pool.clone(),
         Arc::new(ResolvedChain),
-        bitcoin_rs_chain::LatchReader::fixture_never(),
+        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
     ));
     service.stage_tip(&tip, &Network::Regtest.genesis_block());
     wait_until_entered(&pool);
@@ -1120,7 +1120,7 @@ fn shutdown_releases_a_preparation_waiter() {
     let tip_hash = Hash256::from_le_bytes(&[0x69; 32]);
     let tip = tip_snapshot(tip_hash);
     let pool = Arc::new(GatedPool::new(5, 2));
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     let service = Arc::new(service_with_source(
         Some(tip.clone()),
         pool.clone(),
@@ -1164,7 +1164,7 @@ fn pending_stage_foreground_joins_without_duplicate_finish() {
         pool.clone(),
         Arc::new(ResolvedChain),
         Vec::new(),
-        bitcoin_rs_chain::LatchReader::fixture_never(),
+        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
     ));
     service.stage_tip(&tip_snapshot(first_hash), &Network::Regtest.genesis_block());
     wait_until_entered(&pool);
@@ -1215,7 +1215,7 @@ fn worker_panic_releases_joined_waiter_to_lazy_fallback() {
         Some(tip_snapshot(tip_hash)),
         pool.clone(),
         Arc::new(ResolvedChain),
-        bitcoin_rs_chain::LatchReader::fixture_never(),
+        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
     ));
     service.stage_tip(&tip_snapshot(tip_hash), &Network::Regtest.genesis_block());
     wait_until_entered(&pool);
@@ -1262,7 +1262,7 @@ fn ready_preparation_parks_until_the_receipt_and_serves_the_prepared_arc() {
         Some(tip.clone()),
         pool.clone(),
         Arc::new(ResolvedChain),
-        bitcoin_rs_chain::LatchReader::fixture_never(),
+        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
     ));
     service.stage_tip(&tip, &Network::Regtest.genesis_block());
     wait_until_ready(&service, tip_hash);
@@ -1305,7 +1305,7 @@ fn stale_ready_without_a_receipt_serves_lazily_instead_of_parking() {
     let tip = tip_snapshot(tip_hash);
     let pool = Arc::new(GatedPool::new(5, 2));
     pool.release();
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     let service = Arc::new(service_with_source(
         Some(tip.clone()),
         pool.clone(),
@@ -1414,7 +1414,7 @@ fn signalling_rules_resolve_once_per_tip_and_height() -> TestResult {
         Arc::new(StaticPool::new(5, 2)),
         chain.clone(),
         Vec::new(),
-        bitcoin_rs_chain::LatchReader::fixture_never(),
+        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
     );
     service.get_block_template(None, None)?;
     assert_eq!(

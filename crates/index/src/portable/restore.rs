@@ -17,9 +17,9 @@ use crate::{
     IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWatermarks,
     TxIndexFamily,
 };
-use bitcoin_rs_chain::BlockTreeReader;
-use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_execution::chain::BlockTreeReader;
+use bitcoin_rs_execution::chain::TipSnapshot;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read};

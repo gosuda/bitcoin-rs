@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin::hex::FromHex;
-use bitcoin_rs_chain::{BlockTree, TipSnapshot, regtest_fixture};
-use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, deserialize,
 };
+use bitcoin_rs_execution::Chainstate;
+use bitcoin_rs_execution::chain::{BlockTree, TipSnapshot, regtest_fixture};
 use bitcoin_rs_node::Network;
 use bitcoin_rs_node::test_support::TestError;
 use bitcoin_rs_storage::utxo::UtxoSet;
@@ -150,7 +150,10 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
             let id = tree
                 .lookup(block.block_hash().0)
                 .ok_or_else(|| TestError::message("missing admitted header"))?;
-            assert_ne!(tree.node(id)?.status, bitcoin_rs_chain::NodeStatus::Invalid);
+            assert_ne!(
+                tree.node(id)?.status,
+                bitcoin_rs_execution::chain::NodeStatus::Invalid
+            );
         }
     }
 
@@ -390,7 +393,7 @@ fn apply_handles_with_coin_stats_and_utxo(
     let mut utxo = UtxoSet::new();
     utxo.track_coin_stats((*coin_stats).clone());
     let utxo = Arc::new(utxo);
-    let chain_events = bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0);
+    let chain_events = bitcoin_rs_execution::events::ChainEventPublisher::detached(0);
     let handles = Chainstate::new(
         network,
         chain_tip,

@@ -7,12 +7,12 @@ use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin::hex::FromHex;
-use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness, deserialize as native_deserialize, encode::double_sha256,
 };
 use bitcoin_rs_consensus::script::push_int;
+use bitcoin_rs_execution::chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_mempool::{AdmissionOrigin, BodyInterest, MempoolEntry, SubmitOutcome};
 use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
@@ -328,7 +328,7 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
     Ok(tip.hash)
 }
 
-pub(crate) fn current_tip(state: &NodeState) -> Result<bitcoin_rs_chain::TipSnapshot> {
+pub(crate) fn current_tip(state: &NodeState) -> Result<bitcoin_rs_execution::chain::TipSnapshot> {
     let Some(tip) = state.chainstate().applied_tip_snapshot() else {
         return Err(TestError::message("applied tip must exist"));
     };

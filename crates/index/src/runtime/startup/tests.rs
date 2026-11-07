@@ -67,7 +67,7 @@ fn completed_worker_outcomes_release_without_poisoning() -> std::io::Result<()> 
 fn pending_open_cancels_before_the_open_deadline() {
     let (_open_tx, open_rx) = crossbeam_channel::bounded(1);
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     let shutdown_reader = shutdown.reader();
     let worker = std::thread::spawn(move || {
         let result =
@@ -88,7 +88,7 @@ fn pending_open_cancels_before_the_open_deadline() {
 #[test]
 fn shutdown_wins_over_an_expired_open_deadline() {
     let (_tx, rx) = crossbeam_channel::bounded(1);
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     shutdown.trigger();
     assert!(matches!(
         wait_for_open_result(&rx, Duration::ZERO, &shutdown.reader(), || false),
@@ -99,7 +99,7 @@ fn shutdown_wins_over_an_expired_open_deadline() {
 #[test]
 fn expired_open_deadline_is_typed() {
     let (_tx, rx) = crossbeam_channel::bounded(1);
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     assert!(matches!(
         wait_for_open_result(&rx, Duration::ZERO, &shutdown.reader(), || false),
         Err(DerivedIndexWorkerError::OpenTimeout { secs: 0 })
@@ -110,7 +110,7 @@ fn expired_open_deadline_is_typed() {
 fn disconnected_open_thread_is_a_storage_failure() {
     let (tx, rx) = crossbeam_channel::bounded(1);
     drop(tx);
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     assert!(matches!(
         wait_for_open_result(&rx, Duration::from_secs(1), &shutdown.reader(), || false),
         Err(DerivedIndexWorkerError::Storage(
@@ -128,7 +128,7 @@ fn backend_error_is_preserved_without_becoming_abandonment() {
         )))
         .is_ok()
     );
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     assert!(matches!(
         wait_for_open_result(&rx, Duration::from_secs(1), &shutdown.reader(), || false),
         Err(DerivedIndexWorkerError::Storage(
@@ -156,7 +156,7 @@ fn shutdown_before_thread_creation_never_touches_the_store() -> std::io::Result<
         bundle: crate::portable::IndexBundleDirective::None,
         seed_slot: None,
     };
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     shutdown.trigger();
     let result = open_derived_index_with_timeout(
         &spec,

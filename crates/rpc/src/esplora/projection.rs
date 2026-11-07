@@ -2,12 +2,12 @@ use core::str::FromStr as _;
 use std::sync::Arc;
 
 use bitcoin::hex::DisplayHex;
-use bitcoin_rs_chain::{TipSnapshot, softfork_state};
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, Hash256, Header, OutPoint, Tx, TxOut, Txid, deserialize,
 };
 use bitcoin_rs_consensus::script::{instructions, is_p2sh, is_p2wsh};
 use bitcoin_rs_consensus::{BlockRuleContext, check_block_body_binding};
+use bitcoin_rs_execution::chain::{TipSnapshot, softfork_state};
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
 

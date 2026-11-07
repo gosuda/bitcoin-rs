@@ -6,12 +6,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bitcoin_rs_chain::LatchReader;
-use bitcoin_rs_chainstate::{
+use bitcoin_rs_consensus::primitives::{Hash256, Network};
+use bitcoin_rs_execution::chain::LatchReader;
+use bitcoin_rs_execution::{
     ApplyError, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, Chainstate,
     ChainstateRole,
 };
-use bitcoin_rs_consensus::primitives::{Hash256, Network};
 use bitcoin_rs_rpc::context::{
     ChainstateInfo, ChainstatesInfo, SnapshotControlError, SnapshotExport, SnapshotImport,
 };
@@ -180,7 +180,7 @@ pub enum SnapshotImportError {
     #[error("invalid native snapshot: {0}")]
     Native(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error("snapshot admission failed: {0}")]
-    Admission(#[from] bitcoin_rs_chainstate::ApplyError),
+    Admission(#[from] bitcoin_rs_execution::ApplyError),
     #[error("snapshot consumer reconciliation failed: {0}")]
     Settlement(#[from] bitcoin_rs_mempool::ChainChangeError),
     #[error("snapshot activation failed: {activation}; consumer settlement failed: {settlement}")]

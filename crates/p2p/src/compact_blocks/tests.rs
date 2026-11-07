@@ -188,7 +188,7 @@ fn conforming_block(txs: Vec<Tx>) -> Block {
             merkle_root: Hash256::default(),
             time: 7,
             bits: bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(
-                bitcoin_rs_chain::regtest_fixture::REGTEST_BITS,
+                bitcoin_rs_execution::chain::regtest_fixture::REGTEST_BITS,
             ),
             nonce: 9,
         },

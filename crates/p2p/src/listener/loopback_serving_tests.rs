@@ -9,11 +9,11 @@ use bitcoin::bip152::ShortId;
 use bitcoin::blockdata::block::Block as RegistryBlock;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin_rs_chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint,
     Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
+use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader};
 use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
 use parking_lot::RwLock;
 
@@ -39,7 +39,7 @@ enum TestError {
     #[error(transparent)]
     TryFromInt(#[from] std::num::TryFromIntError),
     #[error(transparent)]
-    Chain(#[from] bitcoin_rs_chain::ChainError),
+    Chain(#[from] bitcoin_rs_execution::chain::ChainError),
     #[error(transparent)]
     Primitives(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
@@ -130,7 +130,9 @@ fn child_block(prev_blockhash: BlockHash, nonce: u32, txs: Vec<Tx>) -> Fallible<
             prev_blockhash,
             merkle_root: Hash256::from_le_bytes(&root),
             time: nonce,
-            bits: CompactTarget::from_consensus(bitcoin_rs_chain::regtest_fixture::REGTEST_BITS),
+            bits: CompactTarget::from_consensus(
+                bitcoin_rs_execution::chain::regtest_fixture::REGTEST_BITS,
+            ),
             nonce,
         },
         txs,
@@ -187,7 +189,7 @@ struct Node {
     addr: PeerEndpoint,
     table: Arc<PeerTable>,
     aggregate: Arc<SharedOutboundBudget>,
-    shutdown: bitcoin_rs_chain::LatchWriter,
+    shutdown: bitcoin_rs_execution::chain::LatchWriter,
     listener: Option<JoinHandle<Result<(), ListenerError>>>,
 }
 
@@ -207,7 +209,7 @@ impl Node {
                 .unwrap_or_else(|| panic!("expected IP fixture")),
         )?;
         let addr = listener.local_addr()?;
-        let shutdown = bitcoin_rs_chain::LatchWriter::new();
+        let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
         let reader = shutdown.reader();
         let thread = std::thread::spawn(move || serve(listener, reader, shared));
         Ok(Self {

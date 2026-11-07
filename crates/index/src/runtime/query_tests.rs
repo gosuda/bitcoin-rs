@@ -4,17 +4,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::types::{TxPosition, TxPositionValue, TxidRow};
 use crate::{HashPrefixRow, IndexCapabilities, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow};
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{NodeStatus, regtest_fixture};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
     Witness, consensus_bytes,
 };
+use bitcoin_rs_execution::chain::{NodeStatus, regtest_fixture};
 use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};
 
 use super::*;
 use crate::query_api::{HistoricalQueryError, HistoricalUnavailableCause};
 use crate::{IndexCapability, IndexWatermark};
-use bitcoin_rs_chain::{BlockTree, NodeId};
+use bitcoin_rs_execution::chain::{BlockTree, NodeId};
 use parking_lot::Mutex as ParkMutex;
 
 #[derive(Clone)]
@@ -70,7 +70,7 @@ fn fake_family_page(
 struct QuerySnapshot {
     watermark: IndexWatermark,
     scans: Vec<ScanResponse>,
-    chain_transition: bitcoin_rs_chain::StableRead,
+    chain_transition: bitcoin_rs_execution::chain::StableRead,
 }
 
 impl QuerySnapshot {
@@ -307,7 +307,7 @@ impl QueryFixture {
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let home = Arc::new(tip.clone());
         applied_tip.store(Some(Arc::clone(&home)));
-        let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+        let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
 
         let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
         let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
@@ -361,8 +361,8 @@ impl QueryFixture {
         let engine = DerivedIndexQueryEngine::new(
             Arc::clone(&runtime),
             reader,
-            bitcoin_rs_chain::BlockTreeReader::new(tree),
-            bitcoin_rs_chain::TipReader::new(applied_tip),
+            bitcoin_rs_execution::chain::BlockTreeReader::new(tree),
+            bitcoin_rs_execution::chain::TipReader::new(applied_tip),
             body_source,
             QueryEngineLive {
                 utxo: seed_utxo_reader(config.utxo_adds, tip.hash)?,
@@ -723,7 +723,7 @@ fn engine_with_body_source(
     let tree = Arc::new(RwLock::new(tree));
     let applied_tip = Arc::new(ArcSwapOption::empty());
     applied_tip.store(Some(Arc::new(tip.clone())));
-    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
     let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
     let reader = Arc::new(QueryReader {
@@ -739,8 +739,8 @@ fn engine_with_body_source(
     Ok(DerivedIndexQueryEngine::new(
         runtime,
         reader,
-        bitcoin_rs_chain::BlockTreeReader::new(tree),
-        bitcoin_rs_chain::TipReader::new(applied_tip),
+        bitcoin_rs_execution::chain::BlockTreeReader::new(tree),
+        bitcoin_rs_execution::chain::TipReader::new(applied_tip),
         body_source,
         QueryEngineLive {
             utxo: None,
@@ -1880,7 +1880,7 @@ impl HistoricalFixture {
         let tree = Arc::new(RwLock::new(tree));
         let tip_cell = Arc::new(ArcSwapOption::empty());
         tip_cell.store(Some(Arc::new(tip)));
-        let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+        let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
         let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
         let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
         let reader = Arc::new(HistoricalReader {
@@ -1897,8 +1897,8 @@ impl HistoricalFixture {
         let engine = DerivedIndexQueryEngine::new(
             Arc::clone(&runtime),
             reader,
-            bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&tree)),
-            bitcoin_rs_chain::TipReader::new(Arc::clone(&tip_cell)),
+            bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(&tree)),
+            bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&tip_cell)),
             body_source,
             QueryEngineLive {
                 utxo: None,
@@ -1936,7 +1936,7 @@ fn historical_extension_during_read_keeps_same_anchor() -> Result<(), crate::por
         runtime_clone.wake();
     }));
     let body = Arc::new(MovingBody::new(bodies, on_read));
-    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let reader = Arc::new(HistoricalReader {
         snapshot: HistoricalSnapshot {
             tx_watermark: Some(genesis_watermark),
@@ -1954,8 +1954,8 @@ fn historical_extension_during_read_keeps_same_anchor() -> Result<(), crate::por
     let engine = DerivedIndexQueryEngine::new(
         Arc::clone(&runtime),
         reader,
-        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
-        bitcoin_rs_chain::TipReader::new(tip_cell),
+        bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_execution::chain::TipReader::new(tip_cell),
         Some(body),
         QueryEngineLive {
             utxo: None,
@@ -1989,7 +1989,7 @@ fn historical_wake_without_tip_move_stays_valid_while_strict_retries()
         vec![(0, block.block_hash(), consensus_bytes(&block))],
         on_read,
     ));
-    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let reader: Arc<dyn IndexReader> = Arc::new(HistoricalReader {
         snapshot: HistoricalSnapshot {
             tx_watermark: Some(genesis_watermark),
@@ -2020,8 +2020,8 @@ fn historical_wake_without_tip_move_stays_valid_while_strict_retries()
     let historical = DerivedIndexQueryEngine::new(
         Arc::clone(&runtime),
         reader,
-        bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&tree_handle)),
-        bitcoin_rs_chain::TipReader::new(Arc::clone(&tip_cell)),
+        bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(&tree_handle)),
+        bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&tip_cell)),
         Some(body),
         QueryEngineLive {
             utxo: None,
@@ -2040,8 +2040,8 @@ fn historical_wake_without_tip_move_stays_valid_while_strict_retries()
     let strict = DerivedIndexQueryEngine::new(
         runtime,
         strict_reader,
-        bitcoin_rs_chain::BlockTreeReader::new(tree_handle),
-        bitcoin_rs_chain::TipReader::new(tip_cell),
+        bitcoin_rs_execution::chain::BlockTreeReader::new(tree_handle),
+        bitcoin_rs_execution::chain::TipReader::new(tip_cell),
         Some(strict_body),
         QueryEngineLive {
             utxo: None,
@@ -2083,7 +2083,7 @@ fn historical_reorg_above_anchor_stays_valid() -> Result<(), crate::portable::Te
         vec![(0, genesis.block_hash(), consensus_bytes(&genesis))],
         on_read,
     ));
-    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
     let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
     let reader = Arc::new(HistoricalReader {
@@ -2103,8 +2103,8 @@ fn historical_reorg_above_anchor_stays_valid() -> Result<(), crate::portable::Te
     let engine = DerivedIndexQueryEngine::new(
         runtime,
         reader,
-        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
-        bitcoin_rs_chain::TipReader::new(tip_cell),
+        bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_execution::chain::TipReader::new(tip_cell),
         Some(body),
         QueryEngineLive {
             utxo: None,
@@ -2131,7 +2131,7 @@ fn historical_reset_completing_after_snapshot_stays_valid() -> Result<(), crate:
     tip_cell.store(Some(Arc::new(tip_snapshot)));
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
     let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
-    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let shared_state = Arc::new(ParkMutex::new(HistoricalSnapshot {
         tx_watermark: Some(watermark),
         sh_watermark: Some(watermark),
@@ -2162,8 +2162,8 @@ fn historical_reset_completing_after_snapshot_stays_valid() -> Result<(), crate:
     let engine = DerivedIndexQueryEngine::new(
         runtime,
         reader,
-        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
-        bitcoin_rs_chain::TipReader::new(tip_cell),
+        bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_execution::chain::TipReader::new(tip_cell),
         Some(body),
         QueryEngineLive {
             utxo: None,
@@ -2214,7 +2214,7 @@ fn historical_reorg_below_anchor_retries() -> Result<(), crate::portable::TestEr
         ],
         on_read,
     ));
-    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
     let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
     let reader = Arc::new(HistoricalReader {
@@ -2237,8 +2237,8 @@ fn historical_reorg_below_anchor_retries() -> Result<(), crate::portable::TestEr
     let engine = DerivedIndexQueryEngine::new(
         runtime,
         reader,
-        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
-        bitcoin_rs_chain::TipReader::new(tip_cell),
+        bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_execution::chain::TipReader::new(tip_cell),
         Some(body),
         QueryEngineLive {
             utxo: None,
@@ -2266,7 +2266,7 @@ fn historical_unknown_watermark_hash_retries() -> Result<(), crate::portable::Te
     };
     let tip_cell = Arc::new(ArcSwapOption::empty());
     tip_cell.store(Some(Arc::new(tip)));
-    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
     let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
     let reader = Arc::new(HistoricalReader {
@@ -2281,8 +2281,8 @@ fn historical_unknown_watermark_hash_retries() -> Result<(), crate::portable::Te
     let engine = DerivedIndexQueryEngine::new(
         runtime,
         reader,
-        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
-        bitcoin_rs_chain::TipReader::new(tip_cell),
+        bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_execution::chain::TipReader::new(tip_cell),
         None,
         QueryEngineLive {
             utxo: None,
@@ -2316,7 +2316,7 @@ fn historical_stale_watermark_anchors_at_fork_and_excludes_orphans()
     let main_tip = tip_snapshot_for(&tree, main_id)?;
     let tip_cell = Arc::new(ArcSwapOption::empty());
     tip_cell.store(Some(Arc::new(main_tip)));
-    let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
+    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
     let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
     let stale_prefix = TxidRow::scan_prefix(&stale_txid);
@@ -2337,8 +2337,8 @@ fn historical_stale_watermark_anchors_at_fork_and_excludes_orphans()
     let engine = DerivedIndexQueryEngine::new(
         runtime,
         reader,
-        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
-        bitcoin_rs_chain::TipReader::new(tip_cell),
+        bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_execution::chain::TipReader::new(tip_cell),
         Some(Arc::new(MovingBody::new(
             vec![(1, main_child.block_hash(), consensus_bytes(&main_child))],
             None,

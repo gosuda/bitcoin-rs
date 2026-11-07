@@ -1,11 +1,11 @@
 use alloc::sync::Arc;
 
 use bitcoin::hex::DisplayHex as _;
-use bitcoin_rs_chain::{BlockHeader, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{
     Amount, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Txid, Witness, consensus_bytes,
 };
+use bitcoin_rs_execution::chain::{BlockHeader, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
@@ -412,7 +412,7 @@ fn build_divergent_tips(ctx: &Context) -> (u32, u32) {
                 merkle_root: Hash256::default(),
                 time: BASE + STEP * height,
                 bits: CompactTarget::from_consensus(
-                    bitcoin_rs_chain::regtest_fixture::REGTEST_BITS,
+                    bitcoin_rs_execution::chain::regtest_fixture::REGTEST_BITS,
                 ),
                 nonce: 0,
             };

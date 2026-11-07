@@ -1,6 +1,6 @@
 use super::*;
-use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxIn};
+use bitcoin_rs_execution::chain::{NodeStatus, TipSnapshot};
 use bitcoin_rs_index::block_log::BlockRecord;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait};
 
@@ -907,11 +907,11 @@ fn getutxos_plain_read_waits_for_the_chain_transition() {
 
 fn tip_snapshot(height: u32, byte: u8, count: u64) -> Arc<TipSnapshot> {
     Arc::new(TipSnapshot {
-        tip_id: bitcoin_rs_chain::NodeId::new(height),
+        tip_id: bitcoin_rs_execution::chain::NodeId::new(height),
         height,
-        chainwork: bitcoin_rs_chain::ChainWork::from(u128::from(count)),
+        chainwork: bitcoin_rs_execution::chain::ChainWork::from(u128::from(count)),
         hash: Hash256::from_le_bytes(&[byte; 32]),
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(count),
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::established(count),
     })
 }
 

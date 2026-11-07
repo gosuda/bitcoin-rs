@@ -541,7 +541,7 @@ mod tests {
     use super::*;
     use crate::types::{HashPrefixRow, ScriptHistoryOccurrence, TxPosition};
     use crate::{IndexCapability, IndexError, IndexWatermark, TxIndexScan};
-    use bitcoin_rs_chain::NodeId;
+    use bitcoin_rs_execution::chain::NodeId;
     use bitcoin_rs_storage::PrefixScanLimit;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

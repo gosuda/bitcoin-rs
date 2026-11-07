@@ -10,8 +10,8 @@ use serde::de::{Error as _, MapAccess, Visitor};
 
 use crate::config::{ConfigError, NetworkSelection, NotificationConfig, ScriptIndexMode};
 use bitcoin::hex::FromHex;
-use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_consensus::ValidationEngine;
+use bitcoin_rs_execution::ValidationMode;
 use bitcoin_rs_storage::StorageBackend;
 
 pub use bitcoin_rs_consensus::primitives::NetworkLabel;

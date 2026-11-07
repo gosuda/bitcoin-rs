@@ -121,7 +121,7 @@ fn state_writer_refuses_to_clobber() {
 
 #[test]
 fn connect_batch_relieve_journal_retention_pressure() {
-    use bitcoin_rs_chain::regtest_fixture;
+    use bitcoin_rs_execution::chain::regtest_fixture;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let mut config =
@@ -160,7 +160,7 @@ fn connect_batch_relieve_journal_retention_pressure() {
                 child.clone()
             )),
             Err(crate::ConnectMutationError::NotCommitted(
-                bitcoin_rs_chainstate::ApplyError::JournalBackpressure(_)
+                bitcoin_rs_execution::ApplyError::JournalBackpressure(_)
             ))
         ),
         "the fixture must prove retention pressure refuses the child"
@@ -271,7 +271,7 @@ fn manifest_network_matches_configured_identity() {
 
 #[test]
 fn offline_import_pins_full_validation_mode() {
-    use bitcoin_rs_chainstate::ValidationMode;
+    use bitcoin_rs_execution::ValidationMode;
     for inherited in [ValidationMode::Full, ValidationMode::AssumeValid] {
         assert_eq!(
             resolve_offline_validation_mode(inherited),
@@ -328,8 +328,11 @@ struct TwoBlockArchive {
 fn two_block_archive() -> TwoBlockArchive {
     use sha2::Digest as _;
     let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
-    let child = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)
-        .expect("mine child");
+    let child = bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(
+        genesis.block_hash(),
+        1,
+    )
+    .expect("mine child");
     let blocks = vec![genesis, child];
     let magic = bitcoin_rs_consensus::primitives::Network::Regtest.magic();
     let mut corpus = Vec::new();

@@ -1,0 +1,66 @@
+[package]
+autotests = false
+name = "bitcoin-rs-execution"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "bitcoin-rs :: execution"
+
+[lints]
+workspace = true
+
+[features]
+
+# `kernel` is capability ("bitcoinkernel support is compiled in"), not
+# selection; the engine a run uses is `validation.engine` at runtime. The
+# library default stays kernel-free so a plain `cargo build` needs no C++
+# toolchain — see docs/contracts/validation-default.md.
+default = []
+# Cross-crate tests and benchmarks that deliberately exercise low-level
+# follower-free mutation. Any downstream can enable this feature; the
+# production-build guarantee is in-workspace, where only dev-dependencies
+# select it and the g17 gate fails if it leaks into a shipped target.
+test-seam = ["bitcoin-rs-storage/test-seam"]
+kernel = ["bitcoin-rs-consensus/kernel"]
+surrealkv = [
+    "bitcoin-rs-storage/surrealkv",
+]
+mdbx = [
+    "bitcoin-rs-storage/mdbx",
+]
+
+[dependencies]
+bitcoin-rs-consensus.workspace = true
+bitcoin-rs-storage.workspace = true
+slab.workspace = true
+ruint.workspace = true
+
+arc-swap.workspace = true
+bytes.workspace = true
+cap-fs-ext.workspace = true
+crossbeam-channel.workspace = true
+cap-std.workspace = true
+hashbrown.workspace = true
+metrics.workspace = true
+parking_lot.workspace = true
+quanta.workspace = true
+rayon.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+sonic-rs.workspace = true
+
+[dev-dependencies]
+bitcoin-rs-execution = { workspace = true, default-features = false, features = ["test-seam"] }
+bitcoin.workspace = true
+tempfile.workspace = true
+proptest.workspace = true
+proptest-state-machine.workspace = true
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

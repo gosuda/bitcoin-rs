@@ -21,7 +21,7 @@ use crate::portable::{BundleHost, BundleOutcome, IndexBundleError, Withheld};
 use crate::writer::TxIndexWriter;
 use crate::{IndexCapability, IndexError, IndexWriter};
 use arc_swap::ArcSwap;
-use bitcoin_rs_chain::{BlockTreeReader, LatchReader, LatchWriter, TipReader};
+use bitcoin_rs_execution::chain::{BlockTreeReader, LatchReader, LatchWriter, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::HistoryAccess;
@@ -65,9 +65,9 @@ pub(super) fn run_worker_with_open(
     body_source: Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<dyn crate::reconcile::ChainCursorSource>,
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
-    shutdown: &bitcoin_rs_chain::LatchReader,
+    shutdown: &bitcoin_rs_execution::chain::LatchReader,
     wake_rx: &Receiver<()>,
-    open_abandoned: &bitcoin_rs_chain::LatchWriter,
+    open_abandoned: &bitcoin_rs_execution::chain::LatchWriter,
 ) {
     let namespace_key =
         match NamespaceRegistry::validate_child(&spec.canonical_data_root, spec.namespace) {
@@ -122,7 +122,7 @@ fn finish_worker(
     generation: &Generation,
     namespace_key: &Path,
     result: Result<(), DerivedIndexWorkerError>,
-    open_abandoned: &bitcoin_rs_chain::LatchWriter,
+    open_abandoned: &bitcoin_rs_execution::chain::LatchWriter,
 ) {
     let registry = &*NAMESPACE_REGISTRY;
     if let Err(error) = result {
@@ -389,7 +389,7 @@ pub(super) fn open_derived_index_with_timeout(
     spec: &DerivedIndexOpenSpec,
     txindex_dir: &Path,
     open_timeout: Duration,
-    shutdown: &bitcoin_rs_chain::LatchReader,
+    shutdown: &bitcoin_rs_execution::chain::LatchReader,
     should_stop: impl Fn() -> bool,
 ) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
     if shutdown.is_triggered() || should_stop() {
@@ -526,7 +526,7 @@ impl Drop for Heartbeat {
 pub(super) fn wait_for_open_result(
     receiver: &crossbeam_channel::Receiver<Result<OpenDerivedIndex, DerivedIndexWorkerError>>,
     timeout: Duration,
-    shutdown: &bitcoin_rs_chain::LatchReader,
+    shutdown: &bitcoin_rs_execution::chain::LatchReader,
     should_stop: impl Fn() -> bool,
 ) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
     if shutdown.is_triggered() || should_stop() {

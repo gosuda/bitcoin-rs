@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitcoin_rs_chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_consensus::primitives::{Hash256, Network, Txid, Wtxid};
+use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolGateway, PeerToken, SubmitError, SubmitOutcome};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_p2p::TxRelayQueue;
@@ -18,7 +18,7 @@ pub fn spawn_tx_ingress_consumer(
     state: &NodeState,
     gateway: Arc<MempoolGateway>,
     mining_control: Arc<dyn MiningControl>,
-    shutdown: bitcoin_rs_chain::LatchReader,
+    shutdown: bitcoin_rs_execution::chain::LatchReader,
     tx_rx: Receiver<bitcoin_rs_p2p::InboundBody>,
     relay: TxRelayQueue,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
@@ -40,7 +40,7 @@ pub fn spawn_tx_ingress_consumer(
 
 fn run_consumer_loop(
     consumer: &TxIngressConsumer,
-    shutdown: &bitcoin_rs_chain::LatchReader,
+    shutdown: &bitcoin_rs_execution::chain::LatchReader,
     tx_rx: &Receiver<bitcoin_rs_p2p::InboundBody>,
 ) {
     while !shutdown.is_triggered() {

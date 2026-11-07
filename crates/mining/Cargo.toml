@@ -14,7 +14,7 @@ workspace = true
 
 [dependencies]
 bitcoin-rs-consensus.workspace = true
-bitcoin-rs-chain.workspace = true
+bitcoin-rs-execution.workspace = true
 bitcoin-rs-mempool.workspace = true
 hashbrown.workspace = true
 compact_str.workspace = true

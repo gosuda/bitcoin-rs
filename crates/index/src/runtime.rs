@@ -1,6 +1,6 @@
 use arc_swap::ArcSwap;
 
-use bitcoin_rs_chain::{
+use bitcoin_rs_execution::chain::{
     BlockTree, BlockTreeReader, LatchReader, LatchWriter, TipReader, TipSnapshot,
 };
 use bitcoin_rs_storage::block_body::BlockBodySource;
@@ -442,7 +442,7 @@ pub struct DerivedIndexOpenSpec {
         Arc<dyn Fn(&Path) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> + Send + Sync>,
     pub seed_slot: Option<SeedOfferCell>,
     pub utxo: Option<bitcoin_rs_storage::utxo::UtxoReader>,
-    pub chain_transition: Option<bitcoin_rs_chain::StableRead>,
+    pub chain_transition: Option<bitcoin_rs_execution::chain::StableRead>,
     pub bundle: crate::portable::IndexBundleDirective,
 }
 

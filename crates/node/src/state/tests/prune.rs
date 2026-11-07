@@ -243,8 +243,8 @@ fn prune_to_height_advances_published_height() -> Result<(), TestError> {
 
 #[test]
 fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> Result<(), TestError> {
-    use bitcoin_rs_chainstate::AssumeUtxoManager;
     use bitcoin_rs_consensus::primitives::Network;
+    use bitcoin_rs_execution::AssumeUtxoManager;
     use bitcoin_rs_rpc::context::PruneService;
     use bitcoin_rs_storage::FlatFileBlockStore;
     use std::sync::atomic::AtomicU32;
@@ -265,7 +265,7 @@ fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> Resul
     let pinned = Network::Regtest
         .assume_utxo_for_height(110)
         .ok_or_else(|| TestError::message("pinned 110 missing"))?;
-    let status = bitcoin_rs_chainstate::AssumeUtxoDiskStatus::Validating {
+    let status = bitcoin_rs_execution::AssumeUtxoDiskStatus::Validating {
         base_height: pinned.height,
         base_hash: pinned.block_hash,
         expected_hash_serialized: pinned.hash_serialized,

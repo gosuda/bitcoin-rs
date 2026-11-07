@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bitcoin::p2p::ServiceFlags;
-use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_execution::chain::TipSnapshot;
 
 use crate::PeerInfo;
 use crate::connection::PeerSource;
@@ -259,10 +259,10 @@ mod tests {
 
     fn snap(tip_id: u32, height: u32, hash_byte: u8) -> std::sync::Arc<TipSnapshot> {
         std::sync::Arc::new(TipSnapshot {
-            tip_id: bitcoin_rs_chain::NodeId::new(tip_id),
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            tip_id: bitcoin_rs_execution::chain::NodeId::new(tip_id),
+            chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
             height,
-            chainwork: bitcoin_rs_chain::ChainWork::from(u64::from(height) + 1),
+            chainwork: bitcoin_rs_execution::chain::ChainWork::from(u64::from(height) + 1),
             hash: Hash256::from_le_bytes(&[hash_byte; 32]),
         })
     }

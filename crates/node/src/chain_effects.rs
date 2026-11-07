@@ -4,7 +4,7 @@ use bitcoin_rs_consensus::primitives::{Block, BlockHash, BlockPayload, Hash256};
 use bitcoin_rs_index::block_log::{BlockLog, BlockRecord};
 use parking_lot::RwLock;
 
-use bitcoin_rs_chainstate::{ConnectOutcome, DisconnectOutcome};
+use bitcoin_rs_execution::{ConnectOutcome, DisconnectOutcome};
 use bitcoin_rs_index::runtime::DerivedIndexRuntime;
 use bitcoin_rs_mempool::AdmissionOrigin;
 use bitcoin_rs_mempool::ChainChangeGuard;
@@ -15,12 +15,12 @@ use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectMutationError {
     #[error("connect did not produce a committed outcome: {0}")]
-    NotCommitted(#[source] bitcoin_rs_chainstate::ApplyError),
+    NotCommitted(#[source] bitcoin_rs_execution::ApplyError),
     #[error("authoritative connect committed, but node settlement failed: {source}")]
     CommittedButSettlementFailed {
         outcome: Box<ConnectOutcome>,
         #[source]
-        source: bitcoin_rs_chainstate::ApplyError,
+        source: bitcoin_rs_execution::ApplyError,
     },
 }
 
@@ -130,7 +130,7 @@ impl ChainFollowers {
 
     pub(crate) fn begin_mempool_change(
         &self,
-    ) -> core::result::Result<Option<ChainChangeGuard>, bitcoin_rs_chainstate::ApplyError> {
+    ) -> core::result::Result<Option<ChainChangeGuard>, bitcoin_rs_execution::ApplyError> {
         self.mempool
             .as_ref()
             .map(|gateway| {
@@ -138,10 +138,10 @@ impl ChainFollowers {
                     bitcoin_rs_mempool::ChainChangeError::AlreadyActive
                     | bitcoin_rs_mempool::ChainChangeError::GenerationMoved
                     | bitcoin_rs_mempool::ChainChangeError::ForeignGuard => {
-                        bitcoin_rs_chainstate::ApplyError::ConcurrentChainChange
+                        bitcoin_rs_execution::ApplyError::ConcurrentChainChange
                     }
                     bitcoin_rs_mempool::ChainChangeError::Overflow => {
-                        bitcoin_rs_chainstate::ApplyError::ChainChangeGenerationOverflow
+                        bitcoin_rs_execution::ApplyError::ChainChangeGenerationOverflow
                     }
                 })
             })
@@ -149,15 +149,15 @@ impl ChainFollowers {
     }
 
     pub(crate) fn finish_transition(
-        handles: &bitcoin_rs_chainstate::Chainstate,
-        transition: bitcoin_rs_chainstate::ChainTransition<'_>,
+        handles: &bitcoin_rs_execution::Chainstate,
+        transition: bitcoin_rs_execution::ChainTransition<'_>,
         mempool_change: Option<ChainChangeGuard>,
-    ) -> core::result::Result<(), bitcoin_rs_chainstate::ApplyError> {
+    ) -> core::result::Result<(), bitcoin_rs_execution::ApplyError> {
         if let Some(change) = mempool_change
             && change.finish().is_err()
         {
             handles.fail_closed_for_recovery();
-            return Err(bitcoin_rs_chainstate::ApplyError::Shutdown);
+            return Err(bitcoin_rs_execution::ApplyError::Shutdown);
         }
         drop(transition);
         Ok(())
@@ -262,7 +262,7 @@ impl ChainFollowers {
 
     pub(crate) fn apply_connect(
         &self,
-        handles: &bitcoin_rs_chainstate::Chainstate,
+        handles: &bitcoin_rs_execution::Chainstate,
         payload: &BlockPayload,
     ) -> core::result::Result<ConnectOutcome, ConnectMutationError> {
         let transition = handles
@@ -276,8 +276,8 @@ impl ChainFollowers {
 
     pub(crate) fn apply_connect_in_transition(
         &self,
-        handles: &bitcoin_rs_chainstate::Chainstate,
-        transition: bitcoin_rs_chainstate::ChainTransition<'_>,
+        handles: &bitcoin_rs_execution::Chainstate,
+        transition: bitcoin_rs_execution::ChainTransition<'_>,
         mempool_change: Option<ChainChangeGuard>,
         payload: &BlockPayload,
     ) -> core::result::Result<ConnectOutcome, ConnectMutationError> {
@@ -293,8 +293,8 @@ impl ChainFollowers {
                 }
             }
             Err(error) => {
-                if bitcoin_rs_chainstate::classify_apply_error(&error)
-                    == bitcoin_rs_chainstate::WindowApplyDisposition::Fatal
+                if bitcoin_rs_execution::classify_apply_error(&error)
+                    == bitcoin_rs_execution::WindowApplyDisposition::Fatal
                 {
                     drop(mempool_change);
                     drop(transition);
@@ -317,7 +317,7 @@ impl ChainFollowers {
 }
 
 pub(crate) fn bootstrap_genesis(
-    handles: &bitcoin_rs_chainstate::Chainstate,
+    handles: &bitcoin_rs_execution::Chainstate,
     followers: &ChainFollowers,
 ) -> Result<(), ConnectMutationError> {
     if handles.applied_tip_snapshot().is_some() {

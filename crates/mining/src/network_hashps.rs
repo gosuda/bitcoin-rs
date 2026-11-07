@@ -1,7 +1,7 @@
-use bitcoin_rs_chain::BlockTree;
-use bitcoin_rs_chain::NodeId;
-use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_consensus::primitives::Network;
+use bitcoin_rs_execution::chain::BlockTree;
+use bitcoin_rs_execution::chain::NodeId;
+use bitcoin_rs_execution::chain::TipSnapshot;
 use compact_str::CompactString;
 
 use crate::MiningControlError;

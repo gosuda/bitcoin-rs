@@ -7,11 +7,11 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitcoin::hex::DisplayHex;
-use bitcoin_rs_chain::{ChainWork, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
     Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
+use bitcoin_rs_execution::chain::{ChainWork, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_index::block_log::BlockRecord;
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_mining::FakeMiningControl;
@@ -330,7 +330,7 @@ fn getblockhash_zero_returns_mainnet_genesis_on_fresh_context() -> Result<(), Te
 #[test]
 fn getblockchaininfo_reports_the_apply_halt_fact() -> Result<(), TestError> {
     let mut ctx = Context::new();
-    let closed = bitcoin_rs_chain::LatchWriter::new();
+    let closed = bitcoin_rs_execution::chain::LatchWriter::new();
     ctx.chain.closed_for_recovery = closed.reader();
     let ctx = Arc::new(ctx);
     let handler = Handler::new(Arc::clone(&ctx));
@@ -377,7 +377,7 @@ impl ChainControl for RecordingChainControl {
     fn dump_txoutset(
         &self,
         _path: &std::path::Path,
-        _cancellation: &bitcoin_rs_chain::LatchReader,
+        _cancellation: &bitcoin_rs_execution::chain::LatchReader,
     ) -> Result<
         bitcoin_rs_rpc::context::SnapshotExport,
         bitcoin_rs_rpc::context::SnapshotControlError,
@@ -391,7 +391,7 @@ impl ChainControl for RecordingChainControl {
         &self,
         _check_level: u8,
         _nblocks: u32,
-        _cancellation: &bitcoin_rs_chain::LatchReader,
+        _cancellation: &bitcoin_rs_execution::chain::LatchReader,
     ) -> Result<bool, ChainControlError> {
         match &self.verify_error {
             Some(error) => Err(error.clone()),
@@ -470,7 +470,7 @@ fn verifychain_maps_control_interruptions_to_core_errors() {
             height: 42,
             hash: Hash256::from_le_bytes(&[0xff; 32]),
             chainwork: ChainWork::default(),
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
         };
         ctx.chain.applied_tip.store(Some(Arc::new(tip)));
         let handler = Handler::new(Arc::new(ctx));
@@ -490,7 +490,7 @@ fn getblockchaininfo_surfaces_published_chainwork_hex() -> Result<(), TestError>
         height: 42,
         hash: Hash256::from_le_bytes(&[0xff; 32]),
         chainwork: ChainWork::from_be_bytes([0x11; 32]),
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     };
     ctx.chain.chain_tip.store(Some(Arc::new(tip.clone())));
     ctx.chain.applied_tip.store(Some(Arc::new(tip)));
@@ -734,14 +734,14 @@ fn chain_rpcs_report_applied_tip_separately_from_headers() -> Result<(), TestErr
         height: 10,
         hash: Hash256::from_le_bytes(&[0xaa; 32]),
         chainwork: ChainWork::default(),
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     };
     let applied_tip = TipSnapshot {
         tip_id: NodeId::new(0),
         height: 7,
         hash: Hash256::from_le_bytes(&[0xbb; 32]),
         chainwork: ChainWork::default(),
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
     };
     ctx.chain.chain_tip.store(Some(Arc::new(headers_tip)));
     ctx.chain.applied_tip.store(Some(Arc::new(applied_tip)));
@@ -940,7 +940,8 @@ fn fee_block(low_tx: Tx, high_tx: Tx) -> Block {
         }],
     };
     let txs = vec![coinbase, low_tx, high_tx];
-    let merkle_root = bitcoin_rs_chain::regtest_fixture::merkle_root(&txs).unwrap_or_default();
+    let merkle_root =
+        bitcoin_rs_execution::chain::regtest_fixture::merkle_root(&txs).unwrap_or_default();
     Block {
         header: Header {
             version: 1,
@@ -1004,8 +1005,9 @@ impl Fixture {
 
         ctx.chain.chain_network = Network::Regtest;
         let tx = tx(1, vec![0x51]);
-        let merkle_root = bitcoin_rs_chain::regtest_fixture::merkle_root(std::slice::from_ref(&tx))
-            .unwrap_or_default();
+        let merkle_root =
+            bitcoin_rs_execution::chain::regtest_fixture::merkle_root(std::slice::from_ref(&tx))
+                .unwrap_or_default();
         let block = Block {
             header: Header {
                 version: 1,

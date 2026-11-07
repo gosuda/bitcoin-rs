@@ -53,7 +53,7 @@ fn chain_on(fork: &Header, fork_height: u32, len: usize) -> Vec<Header> {
 
 fn chain_work(headers: &[Header]) -> ChainWork {
     headers.iter().fold(ChainWork::ZERO, |total, header| {
-        total + bitcoin_rs_chain::block_work(header)
+        total + bitcoin_rs_consensus::header_rules::block_work(header)
     })
 }
 
@@ -410,7 +410,7 @@ fn low_work_headers_do_not_reach_block_tree() -> TestResult {
 
     let chain = chain_on(&genesis, 0, 2 * PAGE + 500);
     assert_eq!(
-        bitcoin_rs_chain::block_work(&chain[0]),
+        bitcoin_rs_consensus::header_rules::block_work(&chain[0]),
         ChainWork::from(WORK_PER_HEADER),
         "the fixture's work-per-header constant must hold"
     );
@@ -616,7 +616,7 @@ fn a_substituted_redownload_header_disconnects_the_connection() -> TestResult {
             .unwrap_or_else(|| unreachable!("the sync state is live"));
         if hash != Hash256::from(original_hash)
             && bit != original_bit
-            && bitcoin_rs_chain::compact_is_met_by(rogue.bits, hash)
+            && bitcoin_rs_execution::chain::compact_is_met_by(rogue.bits, hash)
         {
             break;
         }
@@ -627,7 +627,7 @@ fn a_substituted_redownload_header_disconnects_the_connection() -> TestResult {
     for index in commitment_index..chain_len {
         let mut header = substituted[index];
         header.prev_blockhash = substituted[index - 1].compute_hash();
-        while !bitcoin_rs_chain::compact_is_met_by(
+        while !bitcoin_rs_execution::chain::compact_is_met_by(
             header.bits,
             Hash256::from(header.compute_hash()),
         ) {
@@ -1337,8 +1337,10 @@ fn body_carried_low_work_bad_pow_is_discarded_and_faults_peer() -> TestResult {
         1,
         vec![regtest_fixture::coinbase(1)],
     )?;
-    while bitcoin_rs_chain::compact_is_met_by(block.header.bits, Hash256::from(block.block_hash()))
-    {
+    while bitcoin_rs_execution::chain::compact_is_met_by(
+        block.header.bits,
+        Hash256::from(block.block_hash()),
+    ) {
         block.header.nonce = block.header.nonce.wrapping_add(1);
     }
 
@@ -1355,8 +1357,10 @@ fn body_carried_low_work_bad_nbits_is_discarded_and_faults_peer() -> TestResult 
     )?;
     block.header.bits =
         bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x207f_fffe);
-    while !bitcoin_rs_chain::compact_is_met_by(block.header.bits, Hash256::from(block.block_hash()))
-    {
+    while !bitcoin_rs_execution::chain::compact_is_met_by(
+        block.header.bits,
+        Hash256::from(block.block_hash()),
+    ) {
         block.header.nonce = block.header.nonce.wrapping_add(1);
     }
 

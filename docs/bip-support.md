@@ -24,12 +24,12 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 | 34 | [Coinbase height](../crates/consensus/src/bip34.rs) | ✅ | - | Core activation heights; BIP30 recheck limit |
 | 65 | [CLTV](../crates/consensus/src/verify_block.rs) | ✅ | - | Core activation heights |
 | 66 | [Strict DER](../crates/consensus/src/verify_block.rs) | ✅ | - | Core activation heights |
-| 68/112/113 | [Relative locks / MTP](../crates/consensus/src/bip68.rs) | ✅ | - | [Block connection](../crates/chainstate/src/connect.rs); BIP9 activation |
-| 94 | [Timewarp protection](../crates/chain/src/header_sync.rs) | ✅ | - | Testnet4 BIP94 candidate-timestamp floor at retarget boundaries |
+| 68/112/113 | [Relative locks / MTP](../crates/consensus/src/bip68.rs) | ✅ | - | [Block connection](../crates/execution/src/connect.rs); BIP9 activation |
+| 94 | [Timewarp protection](../crates/execution/src/chain/header_sync.rs) | ✅ | - | Testnet4 BIP94 candidate-timestamp floor at retarget boundaries |
 | 141 | [Segwit validation](../crates/consensus/tests/witness_commitment_rules.rs) | ✅ | - | Commitments, weight, [sigops](../crates/consensus/tests/witness_sigop_activation.rs) |
 | 143 | [Segwit v0 sighash](../crates/consensus/tests/shared_sighash.rs) | ✅ | - | [Reference vectors](../crates/consensus/tests/primitives_bip_vectors.rs) |
 | 147 | [NULLDUMMY](../crates/consensus/src/script/eval.rs) | ✅ | - | Enforced with WITNESS flag |
-| 320 | [General-purpose version bits](../crates/chain/src/deployment.rs) | ❌ | - | Candidates use versionbits; no general-purpose policy |
+| 320 | [General-purpose version bits](../crates/execution/src/chain/deployment.rs) | ❌ | - | Candidates use versionbits; no general-purpose policy |
 | 325 | [Signet block solution](../crates/consensus/src/signet.rs) | ◐ | - | Default challenge only; custom challenges unsupported |
 | 341 | [Taproot](../crates/consensus/src/script/taproot.rs) | ✅ | - | Height-gated; key and script paths |
 | 342 | [Tapscript](../crates/consensus/src/script/eval.rs) | ✅ | - | OP_SUCCESSx; [tagged hashes](../crates/consensus/src/script/taproot.rs) |

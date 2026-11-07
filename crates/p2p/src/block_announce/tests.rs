@@ -4,10 +4,12 @@ use arc_swap::ArcSwapOption;
 use bitcoin::bip152::HeaderAndShortIds;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_compact_blocks::CmpctBlock;
-use bitcoin_rs_chain::{BlockTree, BlockTreeReader, InitialBlockDownload, NodeStatus, TipReader};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, CompactTarget, Header, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Witness,
+};
+use bitcoin_rs_execution::chain::{
+    BlockTree, BlockTreeReader, InitialBlockDownload, NodeStatus, TipReader,
 };
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -429,7 +431,7 @@ fn rotation_saturated_restores_full_selection_in_place_and_retries() {
 }
 
 struct WorkerStop {
-    shutdown: bitcoin_rs_chain::LatchWriter,
+    shutdown: bitcoin_rs_execution::chain::LatchWriter,
     queue: Option<BlockAnnounceQueue>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -471,7 +473,7 @@ fn worker_timeout_retries_saturated_announcement_without_new_wake() {
     let hold = crate::test_support::hog(&aggregate, 512);
     let (queue, worker_rx) = BlockAnnounceQueue::new();
     assert!(queue.wake(), "the wake enqueued the tip");
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     let worker = spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, shutdown.reader())
         .expect("the announce worker spawns");
     let _stop = WorkerStop {
@@ -992,7 +994,7 @@ fn worker_retries_tip_with_no_ready_peers_until_connection_arrives() {
     assert_eq!(announcer.process_tip_retry(), Vec::new());
     let (_lease, rx) = setup_peer(&table, &announcer, test_addr(1014), false);
     let (queue, worker_rx) = BlockAnnounceQueue::new();
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     let worker = spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, shutdown.reader())
         .expect("the announce worker spawns");
     let _stop = WorkerStop {
@@ -1682,7 +1684,7 @@ fn post_commit_process_tip_sends_no_second_cmpctblock() {
 #[test]
 fn stale_tip_relayed_to_bip332_peer_and_suppressed_on_repeat() {
     use crate::staletip::{CompressedHeader, StaleTipAnnouncement};
-    use bitcoin_rs_chain::regtest_fixture::mined_regtest_header;
+    use bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header;
     let table = Arc::new(PeerTable::new());
     let chain = Arc::new(MockAnnounceChain::new(5));
     let addr = test_addr(1401);
@@ -1777,7 +1779,7 @@ fn stale_tip_relayed_to_bip332_peer_and_suppressed_on_repeat() {
 #[test]
 fn prefers_blocks_peer_gets_same_retained_tip_once_body_available() {
     use crate::staletip::{CompressedHeader, StaleTipAnnouncement};
-    use bitcoin_rs_chain::regtest_fixture::mined_regtest_header;
+    use bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header;
     let table = Arc::new(PeerTable::new());
     let chain = Arc::new(MockAnnounceChain::new(5));
     let addr = test_addr(1403);
@@ -1919,7 +1921,7 @@ fn block_announce_worker_cancels_promptly_on_latch() {
         BlockAnnounceConfig::default(),
     ));
     let (_queue, worker_rx) = BlockAnnounceQueue::new();
-    let latch = bitcoin_rs_chain::LatchWriter::new();
+    let latch = bitcoin_rs_execution::chain::LatchWriter::new();
     let worker =
         spawn_block_announce_worker(announcer, worker_rx, latch.reader()).expect("worker spawns");
     let (join_tx, join_rx) = crossbeam_channel::bounded(1);

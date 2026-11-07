@@ -3,7 +3,7 @@
 
 Owners:
 - Durable commit and stable publication:
-  `crates/chainstate/src/lib.rs` and its connect/disconnect/window modules
+  `crates/execution/src/lib.rs` and its connect/disconnect/window modules
 - Mempool reconciliation and canonical lifecycle:
   `crates/mempool/src/gateway.rs`, `crates/mempool/src/mutation.rs`
 - Bounded observer delivery and gap accounting:
@@ -98,7 +98,7 @@ Owners:
 
 ## Startup crash recovery
 
-On daemon start, `NodeState::open` delegates authoritative recovery to `crates/chainstate/src/recovery.rs` and reconciles to the committed applied tip. Chain-event consumers therefore reconcile against the durable applied tip. System-level convergence after crash, lost write, and reorg is owned by [recovery.md](recovery.md).
+On daemon start, `NodeState::open` delegates authoritative recovery to `crates/execution/src/recovery.rs` and reconciles to the committed applied tip. Chain-event consumers therefore reconcile against the durable applied tip. System-level convergence after crash, lost write, and reorg is owned by [recovery.md](recovery.md).
 
 ## Verification boundaries
 

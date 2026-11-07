@@ -25,9 +25,9 @@ use crate::download_window::SyncPeer;
 use crate::peer_info::PeerInfo;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
-use bitcoin_rs_chain::{ChainError, NodeId, NodeStatus, validate_pow};
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::Header;
+use bitcoin_rs_execution::chain::{ChainError, NodeId, NodeStatus, validate_pow};
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -120,7 +120,7 @@ impl BlockSync {
                 continue;
             };
             if matches!(&admission, HeaderAdmission::Rejected(_)) {
-                let demoted = bitcoin_rs_chain::header_sync::demoted_tip_after_rejection(
+                let demoted = bitcoin_rs_execution::chain::header_sync::demoted_tip_after_rejection(
                     &self.chain.block_tree(),
                     pre_tip,
                 );
@@ -318,7 +318,7 @@ impl BlockSync {
     fn request_ancestry_after_refusal(
         &self,
         source: Option<PeerSource>,
-        error: &bitcoin_rs_chain::HeaderRefusal,
+        error: &bitcoin_rs_execution::chain::HeaderRefusal,
     ) {
         let now = Instant::now();
         let mut last = self.refused_rerequest_at.lock();
@@ -999,13 +999,13 @@ impl BlockSync {
         let hash = Hash256::from(header.compute_hash());
         validate_pow(header, hash, network)
             .and_then(|()| {
-                bitcoin_rs_chain::validate_contextual_header(
+                bitcoin_rs_execution::chain::validate_contextual_header(
                     &tree,
                     parent_id,
                     header,
                     network,
-                    bitcoin_rs_chain::current_unix_seconds(),
-                    bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
+                    bitcoin_rs_execution::chain::current_unix_seconds(),
+                    bitcoin_rs_execution::chain::HeaderValidationMode::LiveAdmission,
                 )
             })
             .is_err()
@@ -1037,13 +1037,13 @@ impl BlockSync {
         let hash = Hash256::from(headers[0].compute_hash());
         validate_pow(&headers[0], hash, network)
             .and_then(|()| {
-                bitcoin_rs_chain::validate_contextual_header(
+                bitcoin_rs_execution::chain::validate_contextual_header(
                     &tree,
                     first_parent,
                     &headers[0],
                     network,
-                    bitcoin_rs_chain::current_unix_seconds(),
-                    bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
+                    bitcoin_rs_execution::chain::current_unix_seconds(),
+                    bitcoin_rs_execution::chain::HeaderValidationMode::LiveAdmission,
                 )
             })
             .is_err()
@@ -1092,7 +1092,7 @@ impl BlockSync {
         });
         if page_self_valid {
             let claimed = headers.iter().fold(fork.chainwork, |sum, header| {
-                sum.saturating_add(bitcoin_rs_chain::block_work(header))
+                sum.saturating_add(bitcoin_rs_consensus::header_rules::block_work(header))
             });
             if claimed >= minimum_work {
                 return None;

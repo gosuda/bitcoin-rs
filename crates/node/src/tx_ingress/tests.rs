@@ -1,11 +1,11 @@
 use super::*;
 use arc_swap::ArcSwapOption;
 use bitcoin::hashes::Hash as _;
-use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::primitives::{
     Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
 };
+use bitcoin_rs_execution::chain::BlockTree;
 use bitcoin_rs_mempool::{
     BodyInterest, Mempool, MempoolEntry, MempoolLimits, MempoolObserver, MutationEnvelope,
     MutationOutcome,
@@ -739,7 +739,7 @@ fn tx_ingress_consumer_stops_promptly_on_cancellation() {
     let gateway = zero_fee_gateway();
     let mining = Arc::new(FakeMiningControl::default());
     let (consumer, _relay_rx) = make_consumer(&gateway, &mining);
-    let writer = bitcoin_rs_chain::LatchWriter::new();
+    let writer = bitcoin_rs_execution::chain::LatchWriter::new();
     let shutdown = writer.reader();
     let (_tx, tx_rx) = crossbeam_channel::bounded(1);
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);

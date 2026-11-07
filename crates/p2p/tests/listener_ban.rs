@@ -49,7 +49,7 @@ fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), T
         Arc::new(PeerTable::new()),
         Arc::new(RwLock::new(vec![ban(IpSubnet::from_ip(addr.ip()))])),
         Arc::new(AtomicBool::new(true)),
-        bitcoin_rs_chain::LatchWriter::new().reader(),
+        bitcoin_rs_execution::chain::LatchWriter::new().reader(),
     );
 
     let handle = spawn_outbound_connection(addr.into(), shared, PeerRole::FullRelay);
@@ -86,7 +86,7 @@ fn inbound_ban_drops_connection_pre_handshake() -> Result<(), TestError> {
     )?;
     let addr = listener.local_addr()?;
 
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     let peer_table = Arc::new(PeerTable::new());
     let banned = Arc::new(RwLock::new(vec![ban(IpSubnet::new(
         IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)),
@@ -96,7 +96,7 @@ fn inbound_ban_drops_connection_pre_handshake() -> Result<(), TestError> {
         Arc::clone(&peer_table),
         banned,
         Arc::new(AtomicBool::new(true)),
-        bitcoin_rs_chain::LatchWriter::new().reader(),
+        bitcoin_rs_execution::chain::LatchWriter::new().reader(),
     );
 
     let listener_shutdown = shutdown.reader();
@@ -129,13 +129,13 @@ fn network_inactive_drops_inbound_pre_handshake() -> Result<(), TestError> {
     )?;
     let addr = listener.local_addr()?;
 
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     let peer_table = Arc::new(PeerTable::new());
     let shared = wiring(
         Arc::clone(&peer_table),
         Arc::new(RwLock::new(Vec::new())),
         Arc::new(AtomicBool::new(false)),
-        bitcoin_rs_chain::LatchWriter::new().reader(),
+        bitcoin_rs_execution::chain::LatchWriter::new().reader(),
     );
 
     let listener_shutdown = shutdown.reader();
@@ -172,7 +172,7 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), TestError> {
         Arc::new(PeerTable::new()),
         Arc::new(RwLock::new(Vec::new())),
         Arc::clone(&network_active),
-        bitcoin_rs_chain::LatchWriter::new().reader(),
+        bitcoin_rs_execution::chain::LatchWriter::new().reader(),
     );
 
     let inactive = spawn_outbound_connection(addr.into(), shared.clone(), PeerRole::FullRelay);
@@ -217,7 +217,7 @@ fn cancelled_start_refuses_outbound_before_connect() -> Result<(), TestError> {
     });
 
     let peer_table = Arc::new(PeerTable::new());
-    let cancelled = bitcoin_rs_chain::LatchWriter::new();
+    let cancelled = bitcoin_rs_execution::chain::LatchWriter::new();
     cancelled.trigger();
     let shared = wiring(
         Arc::clone(&peer_table),
@@ -257,7 +257,7 @@ fn live_handshake_traffic_reaches_the_aggregate_ledger() -> Result<(), TestError
         Arc::clone(&peer_table),
         Arc::new(RwLock::new(Vec::new())),
         Arc::new(AtomicBool::new(true)),
-        bitcoin_rs_chain::LatchWriter::new().reader(),
+        bitcoin_rs_execution::chain::LatchWriter::new().reader(),
     );
     let outbound_handle = spawn_outbound_connection(addr.into(), shared, PeerRole::FullRelay);
 
@@ -313,8 +313,8 @@ fn self_dial_is_refused_by_its_own_in_flight_nonce() -> Result<(), TestError> {
     )?;
     let addr = listener.local_addr()?;
 
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
-    let session_cancel = Arc::new(bitcoin_rs_chain::LatchWriter::new());
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+    let session_cancel = Arc::new(bitcoin_rs_execution::chain::LatchWriter::new());
     let peer_table = Arc::new(PeerTable::new());
     let shared = wiring(
         Arc::clone(&peer_table),
@@ -361,7 +361,7 @@ fn wiring(
     peer_table: Arc<PeerTable>,
     banned: Arc<RwLock<Vec<BannedSubnet>>>,
     network_active: Arc<AtomicBool>,
-    session_cancel: bitcoin_rs_chain::LatchReader,
+    session_cancel: bitcoin_rs_execution::chain::LatchReader,
 ) -> ConnectionShared {
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();

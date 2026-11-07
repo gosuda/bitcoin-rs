@@ -12,19 +12,19 @@ use super::storage::StoredBlockBodySource;
 use crate::NodeConfig;
 use crate::config::ConfigError;
 
-use bitcoin_rs_chainstate::ChainstateParts;
-use bitcoin_rs_chainstate::events::{
+use bitcoin_rs_consensus::{ScriptExecutionCache, ValidationEngine};
+use bitcoin_rs_execution::ChainstateParts;
+use bitcoin_rs_execution::events::{
     ChainEventPublisher, ChainSnapshot, DataDirError, initialize_data_dir,
 };
-use bitcoin_rs_chainstate::recovery::{
+use bitcoin_rs_execution::recovery::{
     InitialChainstate, RecoveryError, ResumeSource, STALE_RESTORE_ERROR_THRESHOLD,
     open_journal_dir, prepare_initial_chainstate,
 };
-use bitcoin_rs_chainstate::verify::{
+use bitcoin_rs_execution::verify::{
     CheckLevel, STARTUP_VERIFY_DEPTH, VerifyError, VerifyOutcome, VerifyRequest,
     verify_recent_blocks,
 };
-use bitcoin_rs_consensus::{ScriptExecutionCache, ValidationEngine};
 use bitcoin_rs_index::block_log::BlockLog;
 use bitcoin_rs_mempool::BodyInterest;
 use bitcoin_rs_mempool::Mempool;
@@ -59,14 +59,14 @@ pub enum NodeOpenError {
     #[error(transparent)]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(transparent)]
-    CheckpointSetup(#[from] bitcoin_rs_chainstate::CheckpointSetupError),
+    CheckpointSetup(#[from] bitcoin_rs_execution::CheckpointSetupError),
     #[error(transparent)]
     JournalWriter(#[from] bitcoin_rs_storage::chainstate_journal::JournalWriterError),
     #[cfg(feature = "zmq")]
     #[error(transparent)]
     ZmqBind(#[from] bitcoin_rs_rpc::zmq::ZmqBindError),
     #[error(transparent)]
-    Apply(Box<bitcoin_rs_chainstate::ApplyError>),
+    Apply(Box<bitcoin_rs_execution::ApplyError>),
     #[error("create data_dir {path}")]
     CreateDataDir {
         path: PathBuf,
@@ -98,7 +98,7 @@ pub enum NodeOpenError {
         checkpoints: PathBuf,
         txindex: PathBuf,
         #[source]
-        source: Box<bitcoin_rs_chainstate::ApplyError>,
+        source: Box<bitcoin_rs_execution::ApplyError>,
     },
     #[error("mempool snapshot restore timeout exceeds the platform clock range")]
     MempoolRestoreClockRange,
@@ -106,7 +106,7 @@ pub enum NodeOpenError {
     GatewayObserverLeg(&'static str),
     #[error("assumeutxo open failed: {error}")]
     AssumeUtxoOpen {
-        error: Box<bitcoin_rs_chainstate::AssumeUtxoError>,
+        error: Box<bitcoin_rs_execution::AssumeUtxoError>,
     },
     #[error(
         "startup verification of the last {depth} applied blocks failed. Verification repairs nothing, but recovery earlier in this startup may already have changed the data directory. Restore it from a backup, or remove or quarantine {}, {}, {}, and {}, then resync.",
@@ -129,14 +129,14 @@ impl From<RecoveryError> for NodeOpenError {
     }
 }
 
-impl From<bitcoin_rs_chainstate::ApplyError> for NodeOpenError {
-    fn from(error: bitcoin_rs_chainstate::ApplyError) -> Self {
+impl From<bitcoin_rs_execution::ApplyError> for NodeOpenError {
+    fn from(error: bitcoin_rs_execution::ApplyError) -> Self {
         Self::Apply(Box::new(error))
     }
 }
 
 fn verify_startup_window(
-    chainstate: &bitcoin_rs_chainstate::Chainstate,
+    chainstate: &bitcoin_rs_execution::Chainstate,
     data_dir: &std::path::Path,
 ) -> Result<(), NodeOpenError> {
     let request = VerifyRequest {
@@ -250,7 +250,7 @@ impl NodeState {
             script_live_seed,
         } = {
             let head = durable_head.load()?;
-            bitcoin_rs_chainstate::recovery::require_full_script_attestation(
+            bitcoin_rs_execution::recovery::require_full_script_attestation(
                 &config.data_dir,
                 config.validation.mode,
                 head.as_ref(),
@@ -360,9 +360,9 @@ impl NodeState {
         bitcoin_rs_mempool::fee_history::load(&config.data_dir, &mempool);
         let blocks = Arc::new(RwLock::new(BlockLog::new()));
         let chain_events_raw = ChainEventPublisher::new(initial_snapshot);
-        let transition = bitcoin_rs_chain::TransitionDomain::new();
+        let transition = bitcoin_rs_execution::chain::TransitionDomain::new();
         let chain_events = Arc::new(chain_events_raw);
-        let mut chainstate = bitcoin_rs_chainstate::Chainstate::from_parts(ChainstateParts {
+        let mut chainstate = bitcoin_rs_execution::Chainstate::from_parts(ChainstateParts {
             network: config.network,
             block_tree: block_tree_value,
             restored_applied_tip,
@@ -382,7 +382,7 @@ impl NodeState {
             capture_block_bytes: false,
             retention: storage.mandatory_retention(),
             history: storage.bounded_history(),
-            role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
+            role: bitcoin_rs_execution::ChainstateRole::Ordinary,
         });
         let seed_offer: Option<bitcoin_rs_storage::utxo::SeedOfferCell> =
             if !derived_index_capabilities(&config).is_empty()
@@ -560,9 +560,9 @@ impl NodeState {
             Arc::clone(&durable_tip_height),
             seed_offer.clone(),
         )?;
-        match bitcoin_rs_chainstate::recover_disconnect_marker(&chainstate) {
+        match bitcoin_rs_execution::recover_disconnect_marker(&chainstate) {
             Ok(()) => {}
-            Err(error @ bitcoin_rs_chainstate::ApplyError::DurableHeadGapUnrecoverable { .. }) => {
+            Err(error @ bitcoin_rs_execution::ApplyError::DurableHeadGapUnrecoverable { .. }) => {
                 return Err(NodeOpenError::UnrecoverableDurableHeadGap {
                     chainstate: config.data_dir.join("chainstate"),
                     checkpoints: config
@@ -665,7 +665,7 @@ impl NodeState {
         }
         let ibd = chainstate.ibd_latch();
         let assumeutxo = Arc::new(
-            bitcoin_rs_chainstate::AssumeUtxoManager::open(
+            bitcoin_rs_execution::AssumeUtxoManager::open(
                 config.network,
                 Arc::clone(&chainstate),
                 config.data_dir.clone(),

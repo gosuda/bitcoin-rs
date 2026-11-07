@@ -19,7 +19,7 @@ use super::open::NodeOpenError;
 
 pub(super) struct NodeStorage {
     backend: StorageBackend,
-    undo_store: Arc<dyn bitcoin_rs_chainstate::UndoStore>,
+    undo_store: Arc<dyn bitcoin_rs_execution::UndoStore>,
     durable_head: Arc<dyn bitcoin_rs_storage::DurableHeadStore>,
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
@@ -66,7 +66,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
         });
         let storage = NodeStorage {
             backend: self.backend,
-            undo_store: Arc::new(bitcoin_rs_chainstate::KvUndoStore::new(Arc::clone(&store))),
+            undo_store: Arc::new(bitcoin_rs_execution::KvUndoStore::new(Arc::clone(&store))),
             durable_head,
             block_body_store: Arc::new(bitcoin_rs_storage::block_body::IndexedBlockBodyStore::new(
                 Arc::clone(&store),
@@ -124,7 +124,7 @@ impl NodeStorage {
         Arc::clone(&self.block_body_store)
     }
 
-    pub(super) fn undo_store(&self) -> Arc<dyn bitcoin_rs_chainstate::UndoStore> {
+    pub(super) fn undo_store(&self) -> Arc<dyn bitcoin_rs_execution::UndoStore> {
         Arc::clone(&self.undo_store)
     }
 
@@ -154,14 +154,14 @@ pub(super) trait DeferredChainstateServices: Send + Sync {
     fn prune_service(
         &self,
         block_files: Arc<FlatFileBlockStore>,
-        authority: bitcoin_rs_chainstate::PruneAuthority,
+        authority: bitcoin_rs_execution::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     ) -> Result<Arc<dyn PruneService>, NodeOpenError>;
     fn journal_writer(
         &self,
         dir: cap_std::fs::Dir,
-        bootstrap: bitcoin_rs_chainstate::JournalBootstrap,
+        bootstrap: bitcoin_rs_execution::JournalBootstrap,
     ) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter, NodeOpenError>;
 }
 
@@ -173,7 +173,7 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
     fn prune_service(
         &self,
         block_files: Arc<FlatFileBlockStore>,
-        authority: bitcoin_rs_chainstate::PruneAuthority,
+        authority: bitcoin_rs_execution::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     ) -> Result<Arc<dyn PruneService>, NodeOpenError> {
@@ -189,7 +189,7 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
     fn journal_writer(
         &self,
         dir: cap_std::fs::Dir,
-        bootstrap: bitcoin_rs_chainstate::JournalBootstrap,
+        bootstrap: bitcoin_rs_execution::JournalBootstrap,
     ) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter, NodeOpenError> {
         build_journal_writer(dir, Arc::clone(&self.store), &bootstrap)
     }
@@ -198,7 +198,7 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
 fn build_journal_writer<S: KvStore + 'static>(
     dir: cap_std::fs::Dir,
     store: Arc<S>,
-    bootstrap: &bitcoin_rs_chainstate::JournalBootstrap,
+    bootstrap: &bitcoin_rs_execution::JournalBootstrap,
 ) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter, NodeOpenError> {
     let mut writer = if bootstrap.open_existing {
         bitcoin_rs_storage::chainstate_journal::JournalWriter::open(dir, store)?
@@ -295,7 +295,7 @@ impl BlockBodySource for StoredBlockBodySource {
 pub(super) struct NodePruneService<S: KvStore> {
     store: Arc<S>,
     block_files: Arc<FlatFileBlockStore>,
-    authority: bitcoin_rs_chainstate::PruneAuthority,
+    authority: bitcoin_rs_execution::PruneAuthority,
     pruneheight: Mutex<Option<u32>>,
     durable_tip_height: Arc<AtomicU32>,
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
@@ -305,7 +305,7 @@ impl<S: KvStore> NodePruneService<S> {
     pub(super) fn new(
         store: Arc<S>,
         block_files: Arc<FlatFileBlockStore>,
-        authority: bitcoin_rs_chainstate::PruneAuthority,
+        authority: bitcoin_rs_execution::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     ) -> Result<Self, NodeOpenError> {

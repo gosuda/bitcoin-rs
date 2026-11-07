@@ -244,7 +244,7 @@ if verification runs. Consumers must not require every field on a single event.
 - The chainstate observability fixtures check retired metric names only on the
   caller thread. The fixtures connect coinbase-only apply/window cases on
   top of a directly published genesis seed. Seeding alone (`seed_genesis` in
-  `crates/chainstate/src/test_fixtures.rs`) publishes the genesis tip with
+  `crates/execution/src/test_fixtures.rs`) publishes the genesis tip with
   count 1 without connect and without hooks, so it emits no apply/window
   observation. Nonzero stage observations require at least one connected mined
   coinbase-only child: `apply_block` for the apply timers, a `connect_window`

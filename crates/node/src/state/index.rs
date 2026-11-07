@@ -69,7 +69,7 @@ impl DerivedIndexHost {
 
     pub(super) fn start(
         &mut self,
-        chainstate: &bitcoin_rs_chainstate::Chainstate,
+        chainstate: &bitcoin_rs_execution::Chainstate,
         history: bitcoin_rs_storage::pruning::HistoryAccess,
     ) -> Result<(), IndexWorkerError> {
         let Some(enabled) = self.enabled.as_mut() else {
