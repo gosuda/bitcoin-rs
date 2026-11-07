@@ -96,9 +96,12 @@ impl BridgeQueue {
     }
 }
 
+pub(crate) const ITER_PREFIX_PAGE_SIZE: usize = 64;
+
 struct BridgeHandle {
     queue: Arc<BridgeQueue>,
     worker_thread: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
+    rt_handle: tokio::runtime::Handle,
 }
 
 impl BridgeHandle {
@@ -116,8 +119,9 @@ impl BridgeHandle {
             closed: AtomicBool::new(false),
         });
 
-        let (init_tx, init_rx) =
-            std::sync::mpsc::sync_channel::<Result<Arc<surrealkv::Tree>, StorageError>>(1);
+        let (init_tx, init_rx) = std::sync::mpsc::sync_channel::<
+            Result<(Arc<surrealkv::Tree>, tokio::runtime::Handle), StorageError>,
+        >(1);
         let worker_queue = Arc::clone(&queue);
 
         let thread_handle = std::thread::Builder::new()
@@ -133,6 +137,7 @@ impl BridgeHandle {
                         return;
                     }
                 };
+                let handle = rt.handle().clone();
 
                 rt.block_on(async move {
                     let tree_res = surrealkv::TreeBuilder::new()
@@ -147,7 +152,7 @@ impl BridgeHandle {
                     let tree = match tree_res {
                         Ok(t) => {
                             let tree_arc = Arc::new(t);
-                            let _ = init_tx.send(Ok(Arc::clone(&tree_arc)));
+                            let _ = init_tx.send(Ok((Arc::clone(&tree_arc), handle)));
                             tree_arc
                         }
                         Err(e) => {
@@ -192,13 +197,14 @@ impl BridgeHandle {
             })
             .map_err(StorageError::Io)?;
 
-        let tree = init_rx.recv().map_err(|_| {
+        let (tree, rt_handle) = init_rx.recv().map_err(|_| {
             StorageError::Backend("surrealkv runtime worker failed to init".to_string())
         })??;
 
         let handle = Self {
             queue,
             worker_thread: parking_lot::Mutex::new(Some(thread_handle)),
+            rt_handle,
         };
 
         Ok((handle, tree))
@@ -244,6 +250,102 @@ impl BridgeHandle {
         }
         res?
     }
+
+    pub(crate) fn stream_prefix(
+        &self,
+        txn: Arc<surrealkv::Transaction>,
+        cf: ColumnFamily,
+        prefix: Vec<u8>,
+    ) -> Result<crate::KvIter<'static>, StorageError> {
+        if self.is_closed() {
+            return Err(StorageError::Backend(
+                "surrealkv store is closed".to_string(),
+            ));
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<crate::KvPair>, StorageError>>(2);
+        let start = prefixed_key(cf, &prefix);
+        let end = prefix_end(cf, &prefix);
+
+        self.rt_handle.spawn(async move {
+            let mut cursor = start;
+            loop {
+                let (page, next_cursor, err, exhausted) =
+                    fetch_stream_page(&txn, cf, &prefix, &cursor, &end);
+
+                if let Some(e) = err {
+                    let _ = tx.send(Err(e)).await;
+                    break;
+                }
+
+                if !page.is_empty() && tx.send(Ok(page)).await.is_err() {
+                    break;
+                }
+
+                if exhausted {
+                    break;
+                }
+
+                match next_cursor {
+                    Some(c) if c < end => cursor = c,
+                    _ => break,
+                }
+
+                tokio::task::yield_now().await;
+            }
+        });
+
+        Ok(Box::new(SurrealKvPagedIter {
+            rx,
+            current_page: Vec::new().into_iter(),
+            finished: false,
+        }))
+    }
+}
+
+fn fetch_stream_page(
+    txn: &surrealkv::Transaction,
+    cf: ColumnFamily,
+    prefix: &[u8],
+    cursor: &[u8],
+    end: &[u8],
+) -> (
+    Vec<crate::KvPair>,
+    Option<Vec<u8>>,
+    Option<StorageError>,
+    bool,
+) {
+    let iter = match txn.range(cursor, end) {
+        Ok(i) => i,
+        Err(e) => return (Vec::new(), None, Some(StorageError::backend(e)), true),
+    };
+    let mut stream = LsmStreamIter {
+        iter,
+        cf,
+        prefix: prefix.to_vec(),
+        initialized: false,
+        _phantom: std::marker::PhantomData,
+    };
+    let mut page = Vec::with_capacity(ITER_PREFIX_PAGE_SIZE);
+    let mut err = None;
+    while page.len() < ITER_PREFIX_PAGE_SIZE {
+        match stream.next() {
+            Some(Ok(pair)) => page.push(pair),
+            Some(Err(e)) => {
+                err = Some(e);
+                break;
+            }
+            None => break,
+        }
+    }
+    let exhausted = page.len() < ITER_PREFIX_PAGE_SIZE && err.is_none();
+    let next_cursor = if let Some((last_k, _)) = page.last() {
+        let mut next_k = prefixed_key(cf, last_k);
+        next_k.push(0);
+        Some(next_k)
+    } else {
+        None
+    };
+    (page, next_cursor, err, exhausted)
 }
 
 pub struct SurrealKvStore {
@@ -566,22 +668,12 @@ impl KvStore for SurrealKvStore {
         prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError> {
         self.check_open()?;
-        let start = prefixed_key(cf, prefix);
-        let end = prefix_end(cf, prefix);
-        let txn = self
-            .tree
-            .begin_with_mode(surrealkv::Mode::ReadOnly)
-            .map_err(StorageError::backend)?;
-        let iter = txn.range(&start, &end).map_err(StorageError::backend)?;
-        let stream = LsmStreamIter {
-            iter,
-            cf,
-            prefix: prefix.to_vec(),
-            initialized: false,
-            _phantom: std::marker::PhantomData,
-        };
-        let rows: Result<Vec<_>, _> = stream.collect();
-        Ok(Box::new(rows?.into_iter().map(Ok)))
+        let txn = Arc::new(
+            self.tree
+                .begin_with_mode(surrealkv::Mode::ReadOnly)
+                .map_err(StorageError::backend)?,
+        );
+        self.bridge.stream_prefix(txn, cf, prefix.to_vec())
     }
 
     fn scan_prefix_bounded(
@@ -757,7 +849,10 @@ impl KvStore for SurrealKvStore {
             .tree
             .begin_with_mode(surrealkv::Mode::ReadOnly)
             .map_err(StorageError::backend)?;
-        Ok(Box::new(SurrealKvSnapshot { txn }))
+        Ok(Box::new(SurrealKvSnapshot {
+            txn: Arc::new(txn),
+            bridge: Arc::clone(&self.bridge),
+        }))
     }
 
     fn multi_get(
@@ -796,7 +891,8 @@ impl KvStore for SurrealKvStore {
 }
 
 pub(crate) struct SurrealKvSnapshot {
-    txn: surrealkv::Transaction,
+    txn: Arc<surrealkv::Transaction>,
+    bridge: Arc<BridgeHandle>,
 }
 
 impl KvSnapshot for SurrealKvSnapshot {
@@ -832,21 +928,8 @@ impl KvSnapshot for SurrealKvSnapshot {
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError> {
-        let start = prefixed_key(cf, prefix);
-        let end = prefix_end(cf, prefix);
-        let iter = self
-            .txn
-            .range(&start, &end)
-            .map_err(StorageError::backend)?;
-        let stream = LsmStreamIter {
-            iter,
-            cf,
-            prefix: prefix.to_vec(),
-            initialized: false,
-            _phantom: std::marker::PhantomData,
-        };
-        let rows: Result<Vec<_>, _> = stream.collect();
-        Ok(Box::new(rows?.into_iter().map(Ok)))
+        self.bridge
+            .stream_prefix(Arc::clone(&self.txn), cf, prefix.to_vec())
     }
 
     fn last_prefix(&self, cf: ColumnFamily, prefix: &[u8]) -> Result<Option<KvPair>, StorageError> {
@@ -977,6 +1060,44 @@ impl<I: surrealkv::LSMIterator> Iterator for LsmStreamIter<'_, I> {
         match self.iter.value() {
             Ok(v) => Some(Ok((logical_key.to_vec(), v))),
             Err(e) => Some(Err(StorageError::backend(e))),
+        }
+    }
+}
+
+struct SurrealKvPagedIter {
+    rx: tokio::sync::mpsc::Receiver<Result<Vec<KvPair>, StorageError>>,
+    current_page: std::vec::IntoIter<KvPair>,
+    finished: bool,
+}
+
+impl Iterator for SurrealKvPagedIter {
+    type Item = Result<KvPair, StorageError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        loop {
+            if let Some(item) = self.current_page.next() {
+                return Some(Ok(item));
+            }
+            match self.rx.blocking_recv() {
+                Some(Ok(page)) => {
+                    if page.is_empty() {
+                        self.finished = true;
+                        return None;
+                    }
+                    self.current_page = page.into_iter();
+                }
+                Some(Err(e)) => {
+                    self.finished = true;
+                    return Some(Err(e));
+                }
+                None => {
+                    self.finished = true;
+                    return None;
+                }
+            }
         }
     }
 }

@@ -131,3 +131,53 @@ fn eng_01_concurrent_ingest_and_write_durable_if() {
     assert!(res1.is_ok(), "t1 ingest failed: {:?}", res1);
     assert!(res2.is_ok(), "t2 ingest failed: {:?}", res2);
 }
+
+#[cfg(feature = "surrealkv")]
+#[test]
+fn eng_02_surrealkv_iter_prefix_paged_streaming() {
+    use bitcoin_rs_storage::SurrealKvStore;
+    use std::collections::BTreeMap;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let db_path = temp.path().join("db");
+
+    let store = SurrealKvStore::open_with_cache(&db_path, 64 * 1024 * 1024).unwrap();
+    let cf = ColumnFamily::CoinRecords;
+
+    let mut oracle = BTreeMap::new();
+    let mut batch = BufferedWriteBatch::default();
+
+    for i in 0..200 {
+        let key = format!("pfx:{:05}", i).into_bytes();
+        let value = format!("val:{:05}", i).into_bytes();
+        oracle.insert(key.clone(), value.clone());
+        batch.put(cf, &key, &value);
+    }
+
+    for i in 0..50 {
+        let key = format!("other:{:05}", i).into_bytes();
+        let value = format!("oval:{:05}", i).into_bytes();
+        batch.put(cf, &key, &value);
+    }
+    batch.put(cf, b"pfy:00000", b"val:pfy");
+
+    store.write_durable(batch).unwrap();
+
+    let iter = store.iter_prefix(cf, b"pfx:").unwrap();
+    let rows: Vec<(Vec<u8>, Vec<u8>)> = iter.map(|r| r.unwrap()).collect();
+    let expected: Vec<(Vec<u8>, Vec<u8>)> =
+        oracle.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    assert_eq!(rows.len(), 200);
+    assert_eq!(rows, expected);
+
+    let snapshot = store.snapshot().unwrap();
+    let snap_iter = snapshot.iter_prefix(cf, b"pfx:").unwrap();
+    let snap_rows: Vec<(Vec<u8>, Vec<u8>)> = snap_iter.map(|r| r.unwrap()).collect();
+    assert_eq!(snap_rows.len(), 200);
+    assert_eq!(snap_rows, expected);
+
+    let mut early_iter = store.iter_prefix(cf, b"pfx:").unwrap();
+    let first_ten: Vec<_> = early_iter.by_ref().take(10).map(|r| r.unwrap()).collect();
+    assert_eq!(first_ten.len(), 10);
+    drop(early_iter);
+}
