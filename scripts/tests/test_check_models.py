@@ -6,6 +6,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import signal
 import sys
 import tempfile
@@ -855,5 +856,33 @@ class ModelEvidenceTests(unittest.TestCase):
             self.assertEqual(toolchain.jar, self.home / "lib/apalache.jar")
             self.assertEqual(toolchain.jar_sha256, check_models.sha256(toolchain.jar))
 
+
+    def test_tlc_performance_guard_fails_when_state_budget_exceeded(self) -> None:
+        log_text = "Model checking completed. No error has been found.\n"
+        match_pass = re.search(
+            r"(\d+) states generated, (\d+) distinct states found, (\d+) states left on queue\.",
+            "53 states generated, 26 distinct states found, 0 states left on queue.",
+        )
+        report_pass = check_models.TlcLogReport(
+            log_text=log_text,
+            state_match=match_pass,
+            queue_left=0,
+            distinct_states=26,
+            states_gen=53,
+        )
+        self.assertEqual(check_models.map_tlc_return_codes(0, report_pass, state_budget=26), (0, 0))
+
+        match_fail = re.search(
+            r"(\d+) states generated, (\d+) distinct states found, (\d+) states left on queue\.",
+            "60 states generated, 27 distinct states found, 0 states left on queue.",
+        )
+        report_fail = check_models.TlcLogReport(
+            log_text=log_text,
+            state_match=match_fail,
+            queue_left=0,
+            distinct_states=27,
+            states_gen=60,
+        )
+        self.assertEqual(check_models.map_tlc_return_codes(0, report_fail, state_budget=26), (14, 14))
 if __name__ == "__main__":
     unittest.main()

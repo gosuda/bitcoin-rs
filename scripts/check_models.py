@@ -344,7 +344,16 @@ def parse_tlc_log(log_path: Path) -> TlcLogReport:
     )
 
 
-def map_tlc_return_codes(native: int | None, report: TlcLogReport) -> tuple[int, int]:
+TLC_STATE_BUDGETS: dict[str, int] = {
+    "ProjectionMining/Projection": 26,
+}
+
+
+def map_tlc_return_codes(
+    native: int | None,
+    report: TlcLogReport,
+    state_budget: int | None = None,
+) -> tuple[int, int]:
     if native is None:
         return 14, 14
 
@@ -366,6 +375,8 @@ def map_tlc_return_codes(native: int | None, report: TlcLogReport) -> tuple[int,
         and report.states_gen is not None
         and report.states_gen >= report.distinct_states
     )
+    if state_budget is not None and report.distinct_states is not None and report.distinct_states > state_budget:
+        return 14, 14
     if complete_graph and complete_stats:
         return 0, 0
     return 14, 14
@@ -445,7 +456,8 @@ def run_tlc_module(
     native = execute_process(argv, run_dir, dict(os.environ), log, timeout)
 
     report = parse_tlc_log(log)
-    safety_rc, temporal_rc = map_tlc_return_codes(native, report)
+    state_budget = TLC_STATE_BUDGETS.get(module.name)
+    safety_rc, temporal_rc = map_tlc_return_codes(native, report, state_budget=state_budget)
     distinct_states = report.distinct_states
     states_gen = report.states_gen
 
