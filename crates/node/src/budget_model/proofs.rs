@@ -1,6 +1,6 @@
 use super::{
     Action, AllocationOwner, BudgetError, BudgetState, safety, step,
-    step_mutant_ingress_invalidation,
+    step_mutant_ingress_invalidation, step_mutant_mdbx_engine_cache,
 };
 
 fn any_budget_state() -> BudgetState {
@@ -62,7 +62,7 @@ fn any_bg_owner() -> AllocationOwner {
 fn any_action() -> Action {
     let tag: u8 = kani::any();
     let amt: u32 = kani::any();
-    kani::assume(tag < 13);
+    kani::assume(tag < 16);
     kani::assume(amt <= 2);
     match tag {
         0 => Action::ReserveIngress(amt),
@@ -77,6 +77,9 @@ fn any_action() -> Action {
         9 => Action::ReleaseCoinCache(amt),
         10 => Action::GrowEngineCache(amt),
         11 => Action::ShrinkEngineCache(amt),
+        12 => Action::ReserveEngineCache(amt),
+        13 => Action::AllocateEngineCache(amt),
+        14 => Action::ReleaseEngineCache(amt),
         _ => Action::Stutter,
     }
 }
@@ -152,8 +155,24 @@ fn harness_mdbx_zero_engine_cache_reporting() {
     let s = any_budget_state();
     kani::assume(s.is_mdbx);
     kani::assume(safety(&s));
-    assert_eq!(s.charges[AllocationOwner::EngineCache.index()], 0);
-    assert_eq!(s.reserved[AllocationOwner::EngineCache.index()], 0);
+    let a = any_action();
+    let s_next = step(&s, a);
+    assert_eq!(s_next.charges[AllocationOwner::EngineCache.index()], 0);
+    assert_eq!(s_next.reserved[AllocationOwner::EngineCache.index()], 0);
+}
+
+// BUD-06
+#[kani::proof]
+#[kani::should_panic]
+fn harness_negative_control_mdbx_engine_cache_reporting() {
+    let s = any_budget_state();
+    kani::assume(s.is_mdbx);
+    kani::assume(safety(&s));
+    let amt: u32 = kani::any();
+    kani::assume(amt > 0 && amt <= 2);
+    let s_next = step_mutant_mdbx_engine_cache(&s, Action::GrowEngineCache(amt));
+    assert_eq!(s_next.charges[AllocationOwner::EngineCache.index()], 0);
+    assert_eq!(s_next.reserved[AllocationOwner::EngineCache.index()], 0);
 }
 
 // BUD-03

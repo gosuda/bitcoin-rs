@@ -75,6 +75,9 @@ pub(crate) enum Action {
     ReleaseCoinCache(u32),
     GrowEngineCache(u32),
     ShrinkEngineCache(u32),
+    ReserveEngineCache(u32),
+    AllocateEngineCache(u32),
+    ReleaseEngineCache(u32),
     Stutter,
 }
 
@@ -261,6 +264,15 @@ pub(crate) fn step(s: &BudgetState, a: Action) -> BudgetState {
                 }
             }
         }
+        Action::ReserveEngineCache(amt) => {
+            let _ = next.reserve(AllocationOwner::EngineCache, amt);
+        }
+        Action::AllocateEngineCache(amt) => {
+            let _ = next.allocate(AllocationOwner::EngineCache, amt);
+        }
+        Action::ReleaseEngineCache(amt) => {
+            let _ = next.release(AllocationOwner::EngineCache, amt);
+        }
         Action::Stutter => {}
     }
     next
@@ -284,6 +296,24 @@ pub(crate) fn step_mutant_ingress_invalidation(s: &BudgetState, a: Action) -> Bu
                 next.block_refused = true;
                 next.consensus_invalid = true;
             }
+        }
+        _ => return step(s, a),
+    }
+    next
+}
+
+// BUD-06
+#[must_use]
+pub(crate) fn step_mutant_mdbx_engine_cache(s: &BudgetState, a: Action) -> BudgetState {
+    let mut next = s.clone();
+    match a {
+        Action::GrowEngineCache(amt) => {
+            let idx = AllocationOwner::EngineCache.index();
+            next.charges[idx] = next.charges[idx].saturating_add(amt);
+        }
+        Action::AllocateEngineCache(amt) => {
+            let idx = AllocationOwner::EngineCache.index();
+            next.charges[idx] = next.charges[idx].saturating_add(amt);
         }
         _ => return step(s, a),
     }
@@ -412,6 +442,15 @@ mod tests {
         assert!(safety(&s_grown));
     }
 
+    // BUD-06
+    #[test]
+    fn negative_control_mutant_mdbx_engine_cache_fails_safety() {
+        let s = BudgetState::init_mdbx(4, 1);
+        let mutant = step_mutant_mdbx_engine_cache(&s, Action::GrowEngineCache(1));
+        assert_eq!(mutant.charges[AllocationOwner::EngineCache.index()], 1);
+        assert!(!safety(&mutant));
+    }
+
     // BUD-01, BUD-02, BUD-03, BUD-05, BUD-06, BUD-07
     #[test]
     fn exhaustive_bfs_safety_verification() {
@@ -448,6 +487,9 @@ mod tests {
                     actions.push(Action::ReleaseCoinCache(amt));
                     actions.push(Action::GrowEngineCache(amt));
                     actions.push(Action::ShrinkEngineCache(amt));
+                    actions.push(Action::ReserveEngineCache(amt));
+                    actions.push(Action::AllocateEngineCache(amt));
+                    actions.push(Action::ReleaseEngineCache(amt));
                     for owner in [
                         AllocationOwner::FactsQueue,
                         AllocationOwner::IndexBuilder,
