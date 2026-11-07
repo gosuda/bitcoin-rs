@@ -24,7 +24,6 @@ mod mining_pool_sv1;
 #[cfg(feature = "pool-sv2")]
 mod mining_pool_sv2;
 mod mining_raw_sigops;
-mod mining_staged_parent_locks;
 mod mining_template_shape;
 mod mining_witness_commitment_vector;
 

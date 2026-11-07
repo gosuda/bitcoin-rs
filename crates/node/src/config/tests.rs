@@ -1116,10 +1116,14 @@ fn validation_engine_kernel_is_rejected_without_kernel_support() {
         Ok(_) => panic!("a build without kernel support must reject engine = kernel"),
         Err(error) => error,
     };
-    let message = error.to_string();
     assert!(
-        message.contains("not compiled") && message.contains("kernel"),
-        "unsupported-build error must name the missing capability, got {message}"
+        matches!(
+            error,
+            ConfigError::ValidationEngineUnsupported {
+                engine: ValidationEngine::Kernel
+            }
+        ),
+        "unsupported-build error must name the missing capability: {error:?}"
     );
 }
 

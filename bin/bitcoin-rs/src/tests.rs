@@ -435,49 +435,6 @@ fn v2_transport_defaults_on_and_disables_from_every_surface() {
     }
 }
 
-#[test]
-#[cfg(not(feature = "kernel"))]
-fn validation_engine_kernel_is_rejected_without_kernel_support() {
-    let error = match super::load(
-        ["bitcoin-rs", "--validation-engine", "kernel"],
-        std::iter::empty::<(OsString, OsString)>(),
-    ) {
-        Ok(_) => panic!("unsupported engine must fail startup from the CLI"),
-        Err(error) => error,
-    };
-    assert!(
-        error.to_string().contains("not compiled"),
-        "unsupported-build error must say so, got {error:#}"
-    );
-
-    let error = match super::load(
-        ["bitcoin-rs"],
-        std::iter::once(("BITCOIN_RS_VALIDATION_ENGINE", "kernel"))
-            .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-    ) {
-        Ok(_) => panic!("unsupported engine must fail startup from the environment"),
-        Err(error) => error,
-    };
-    assert!(
-        error.to_string().contains("not compiled"),
-        "unsupported-build error must say so, got {error:#}"
-    );
-
-    let error = match load_file(
-        "--config",
-        "validation_engine = \"kernel\"\n",
-        &[],
-        std::iter::empty::<(OsString, OsString)>(),
-    ) {
-        Ok(_) => panic!("unsupported engine must fail startup from TOML too"),
-        Err(error) => error,
-    };
-    assert!(
-        error.to_string().contains("not compiled"),
-        "unsupported-build error must say so, got {error:#}"
-    );
-}
-
 // VAL-01
 #[test]
 fn validation_engine_defaults_to_native_and_layers_flag_over_environment() {

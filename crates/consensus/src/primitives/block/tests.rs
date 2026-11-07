@@ -427,8 +427,8 @@ fn payload_from_local_encodes_witness_block_exactly() -> Result<()> {
     ));
     let payload = BlockPayload::from_local(block.clone());
 
-    let expected: Vec<u8> =
-        <Vec<u8> as bitcoin::hex::FromHex>::from_hex(GOLDEN).unwrap_or_else(|error| panic!("golden fixture hex: {error}"));
+    let expected: Vec<u8> = <Vec<u8> as bitcoin::hex::FromHex>::from_hex(GOLDEN)
+        .unwrap_or_else(|error| panic!("golden fixture hex: {error}"));
     assert_eq!(payload.bytes().as_ref(), expected.as_slice());
     assert_eq!(payload.block(), &block);
     assert!(

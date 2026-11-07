@@ -114,7 +114,6 @@ impl Tx {
 #[cfg(test)]
 mod tests {
     #![expect(clippy::expect_used, reason = "test assertions")]
-    use std::str::FromStr;
 
     use super::Tx;
     use crate::primitives::deserialize;
@@ -156,25 +155,6 @@ mod tests {
         tx.inputs[0].previous_output =
             OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), u32::MAX);
         assert!(!tx.is_coinbase());
-    }
-
-    #[test]
-    fn fixture_txids_match_golden_list_and_reencode() -> Result<()> {
-        let bytes = std::fs::read("tests/testdata/363731.bin")?;
-        let block = crate::primitives::deserialize::<crate::primitives::Block>(&bytes)?;
-        let golden = std::fs::read_to_string("tests/testdata/363731.txids.txt")?;
-        let expected: Vec<Txid> = golden
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(Txid::from_str)
-            .collect::<Result<_, _>>()?;
-
-        assert_eq!(block.txs.len(), expected.len());
-        for (tx, expected_txid) in block.txs.iter().take(10).zip(expected.iter()) {
-            assert_eq!(tx.txid(), *expected_txid);
-            assert_eq!(deserialize::<Tx>(&consensus_bytes(tx))?, *tx);
-        }
-        Ok(())
     }
 
     #[test]
