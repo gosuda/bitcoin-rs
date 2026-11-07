@@ -19,6 +19,21 @@ pub(crate) mod handoff {
     pub(crate) const QUEUE_BUDGET: usize = 2;
     pub(crate) const MAX_VERIFIED: u32 = 2;
 
+    #[cfg_attr(not(kani), allow(dead_code))]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub(crate) enum WakeMessage {
+        Signal,
+        BlockPayload { height: u32, payload_bytes: usize },
+    }
+
+    #[cfg_attr(not(kani), allow(dead_code))]
+    impl WakeMessage {
+        #[must_use]
+        pub(crate) const fn carries_payload(&self) -> bool {
+            matches!(self, Self::BlockPayload { .. })
+        }
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub(crate) enum HandoffAction {
         CommitBlock,
@@ -38,6 +53,7 @@ pub(crate) mod handoff {
         pub(crate) queue_bytes: usize,
         pub(crate) gap: bool,
         pub(crate) wake_pending: bool,
+        pub(crate) last_wake_message: Option<WakeMessage>,
         pub(crate) live_body_reads: u64,
         pub(crate) recovery_body_reads: u64,
         pub(crate) reorg_count: u32,
@@ -54,6 +70,7 @@ pub(crate) mod handoff {
                 queue_bytes: 0,
                 gap: false,
                 wake_pending: false,
+                last_wake_message: None,
                 live_body_reads: 0,
                 recovery_body_reads: 0,
                 reorg_count: 0,
@@ -100,6 +117,7 @@ pub(crate) mod handoff {
                         next.gap = true;
                     }
                     next.wake_pending = true;
+                    next.last_wake_message = Some(WakeMessage::Signal);
                 }
             }
             HandoffAction::VerifyHistorical => {
@@ -113,6 +131,7 @@ pub(crate) mod handoff {
                     next.queue_bytes -= 1;
                     next.coverage_height += 1;
                     next.wake_pending = false;
+                    next.last_wake_message = None;
                 }
             }
             HandoffAction::WorkerRecoveryStep => {
@@ -123,6 +142,7 @@ pub(crate) mod handoff {
                     next.recovery_body_reads = s.recovery_body_reads.saturating_add(1);
                     next.gap = next.coverage_height != s.applied_height;
                     next.wake_pending = false;
+                    next.last_wake_message = None;
                 }
             }
             HandoffAction::Reorganize { fork } => {
@@ -134,6 +154,7 @@ pub(crate) mod handoff {
                     next.queue_bytes = 0;
                     next.gap = true;
                     next.wake_pending = true;
+                    next.last_wake_message = Some(WakeMessage::Signal);
                     next.reorg_count += 1;
                 }
             }
@@ -153,9 +174,29 @@ pub(crate) mod handoff {
                     next.queue_len += 1;
                     next.queue_bytes += 1;
                     next.wake_pending = true;
+                    next.last_wake_message = Some(WakeMessage::Signal);
                 }
             }
             _ => return step(s, action),
+        }
+        next
+    }
+
+    // IDX-08
+    #[cfg_attr(not(kani), allow(dead_code))]
+    #[must_use]
+    pub(crate) fn step_mutant_wake_with_payload(
+        s: &HandoffState,
+        action: HandoffAction,
+    ) -> HandoffState {
+        let mut next = step(s, action);
+        if let HandoffAction::CommitBlock = action {
+            if s.applied_height < MAX_HEIGHT {
+                next.last_wake_message = Some(WakeMessage::BlockPayload {
+                    height: next.applied_height,
+                    payload_bytes: 1_000_000,
+                });
+            }
         }
         next
     }

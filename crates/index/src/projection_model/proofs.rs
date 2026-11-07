@@ -6,8 +6,9 @@ use super::generations::{
     step_missing_deep_reorg_guard,
 };
 use super::handoff::{
-    HandoffAction, HandoffState, MAX_HEIGHT, MAX_VERIFIED, QUEUE_BUDGET, safety as handoff_safety,
-    step as handoff_step, step_unbounded_queue,
+    HandoffAction, HandoffState, MAX_HEIGHT, MAX_VERIFIED, QUEUE_BUDGET, WakeMessage,
+    safety as handoff_safety, step as handoff_step, step_mutant_wake_with_payload,
+    step_unbounded_queue,
 };
 
 fn any_handoff_state() -> HandoffState {
@@ -41,6 +42,7 @@ fn any_handoff_state() -> HandoffState {
         queue_bytes,
         gap,
         wake_pending,
+        last_wake_message: wake_pending.then_some(WakeMessage::Signal),
         live_body_reads,
         recovery_body_reads,
         reorg_count,
@@ -179,11 +181,27 @@ fn harness_three_positions_independent_and_monotonic() {
 fn harness_wake_notification_carries_no_payload() {
     let s = any_handoff_state();
     kani::assume(handoff_safety(&s));
-    let next = handoff_step(&s, HandoffAction::CommitBlock);
-    if s.applied_height < MAX_HEIGHT {
+    let action = any_handoff_action();
+    let next = handoff_step(&s, action);
+    if s.applied_height < MAX_HEIGHT && matches!(action, HandoffAction::CommitBlock) {
         assert!(next.wake_pending);
     }
-    assert_eq!(std::mem::size_of::<()>(), 0);
+    if let Some(msg) = next.last_wake_message {
+        assert!(!msg.carries_payload());
+    }
+}
+
+// IDX-08
+#[kani::proof]
+#[kani::should_panic]
+fn harness_negative_control_wake_carries_payload() {
+    let s = any_handoff_state();
+    kani::assume(handoff_safety(&s));
+    kani::assume(s.applied_height < MAX_HEIGHT);
+    let next = step_mutant_wake_with_payload(&s, HandoffAction::CommitBlock);
+    assert!(next.wake_pending);
+    let msg = next.last_wake_message.expect("wake message sent");
+    assert!(!msg.carries_payload());
 }
 
 // PRJ-04
