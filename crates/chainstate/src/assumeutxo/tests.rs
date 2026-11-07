@@ -4,9 +4,11 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{ChainWork, NodeStatus};
 use bitcoin_rs_consensus::primitives::{AssumeUtxoData, Block, BlockPayload, Hash256, Network};
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
+use bitcoin_rs_storage::utxo::{
+    SnapshotLoad, UtxoSet, read_snapshot_strict_v4, write_snapshot_observed,
+};
 use bitcoin_rs_storage::{CommitRecords, DurableHead, DurableHeadStore, StorageError};
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
-use bitcoin_rs_utxo::{SnapshotLoad, UtxoSet, read_snapshot_strict_v4, write_snapshot_observed};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -135,7 +137,7 @@ impl Fixture {
         })
     }
 
-    fn load(&self) -> Result<SnapshotLoad, bitcoin_rs_utxo::UtxoError> {
+    fn load(&self) -> Result<SnapshotLoad, bitcoin_rs_storage::utxo::UtxoError> {
         read_snapshot_strict_v4(&mut Cursor::new(&self.snapshot))
     }
 
@@ -223,7 +225,7 @@ fn snapshot_rejects_coin_height_alias_with_identical_commitment() -> TestResult 
     assert!(matches!(
         manager.activate_pinned_snapshot(forged.set, forged.tip_hash, &fixture.pinned),
         Err(AssumeUtxoError::Utxo(
-            bitcoin_rs_utxo::UtxoError::SnapshotCoinHeightOutOfRange { .. }
+            bitcoin_rs_storage::utxo::UtxoError::SnapshotCoinHeightOutOfRange { .. }
         ))
     ));
     assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
@@ -309,9 +311,9 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
         (fixture.pinned.block_hash, fixture.pinned.height)
     );
     let (commitment, verified_stats) = loaded.set.with_stable_view(|view| {
-        Ok::<_, bitcoin_rs_utxo::UtxoError>((
+        Ok::<_, bitcoin_rs_storage::utxo::UtxoError>((
             view.hash_serialized_3_at_height(fixture.pinned.height)?,
-            bitcoin_rs_utxo::stats::scan_coin_stats(view, fixture.pinned.height, true)?,
+            bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, fixture.pinned.height, true)?,
         ))
     })?;
     assert_eq!(commitment, fixture.pinned.hash_serialized);

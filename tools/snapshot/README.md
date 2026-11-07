@@ -73,7 +73,7 @@ compiled bases. Listing a pin does not establish that a matching portable
 snapshot is hosted or has been successfully verified here.
 
 The process tests use the unmodified Core-produced regtest-200 artifact in
-[`crates/utxo/tests/fixtures/core-v2`](../../crates/utxo/tests/fixtures/core-v2).
+[`crates/utxo/tests/fixtures/core-v2`](../../crates/storage/tests/fixtures/core-v2).
 Its provenance and generator live beside the shared fixture. The expected
 block hash is `385901ccbd69dff6bbd00065d01fb8a9e464dede7cfe0372443884f9b1dcf6b9`,
 with commitment

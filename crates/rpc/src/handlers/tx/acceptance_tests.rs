@@ -6,7 +6,7 @@ use bitcoin_rs_consensus::primitives::{
     Amount, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Txid, Witness, consensus_bytes,
 };
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
 use super::{getrawtransaction, sendrawtransaction, testmempoolaccept};
@@ -37,7 +37,7 @@ fn seed_utxo(ctx: &Context, tag: u8, value: u64) {
         false,
         7,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::default(),

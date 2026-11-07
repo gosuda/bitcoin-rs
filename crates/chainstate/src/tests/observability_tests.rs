@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use bitcoin_rs_consensus::primitives::{BlockPayload, Network};
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::UtxoSet;
 use hashbrown::HashSet;
 use metrics::{
     Counter, CounterFn, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder,

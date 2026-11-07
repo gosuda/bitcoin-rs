@@ -2,11 +2,11 @@ use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at as mined_child;
 use bitcoin_rs_consensus::primitives::{Block, BlockHash, Hash256, Network, consensus_bytes};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
+use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_storage::{
     CommitRecords, DurableHead, DurableHeadStore, InMemoryDurableHeadStore, StorageError,
 };
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use parking_lot::Mutex;
 use proptest::prelude::*;
 use std::sync::Arc;

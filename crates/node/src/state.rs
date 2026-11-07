@@ -2,7 +2,6 @@ use crate::NodeConfig;
 use crate::config::ConfigError;
 use crate::run::RunError;
 use crate::snapshot::SnapshotImportError;
-use bitcoin_rs_chain::BlockBodySource;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chainstate::events::ChainEventPublisher;
@@ -16,6 +15,7 @@ use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_rpc::context::PruneService;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_storage::StorageBackend;
+use bitcoin_rs_storage::block_body::BlockBodySource;
 use crossbeam_channel::Receiver;
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
@@ -404,7 +404,7 @@ fn build_derived_index_open_spec(
     txindex_cache_bytes: u64,
     epoch: u64,
     guard: &bitcoin_rs_storage::StoreGuard,
-    seed_slot: Option<bitcoin_rs_utxo::SeedOfferCell>,
+    seed_slot: Option<bitcoin_rs_storage::utxo::SeedOfferCell>,
 ) -> core::result::Result<Option<bitcoin_rs_index::runtime::DerivedIndexOpenSpec>, ConfigError> {
     let enabled = derived_index_capabilities(config);
     if enabled.is_empty() {

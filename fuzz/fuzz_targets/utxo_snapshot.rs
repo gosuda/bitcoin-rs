@@ -3,17 +3,17 @@
 use std::io::Cursor;
 
 use bitcoin_rs_consensus::primitives::Network;
-use bitcoin_rs_utxo::core_snapshot::{
+use bitcoin_rs_storage::utxo::core_snapshot::{
     CoreV2Base, SnapshotLimits, read_and_verify, read_metadata, write_core_v2,
 };
 use libfuzzer_sys::fuzz_target;
 
-const CORE_FIXTURE: &[u8] = include_bytes!("../../crates/utxo/tests/fixtures/core-v2/core200.dat");
+const CORE_FIXTURE: &[u8] = include_bytes!("../../crates/storage/tests/fixtures/core-v2/core200.dat");
 const CORE_HEADER_BYTES: usize = 51;
 
 fuzz_target!(|data: &[u8]| {
-    let s1 = bitcoin_rs_utxo::read_snapshot_strict_v4_observed(&mut Cursor::new(data), ());
-    let s2 = bitcoin_rs_utxo::read_snapshot_strict_v4_observed(&mut Cursor::new(data), ());
+    let s1 = bitcoin_rs_storage::utxo::read_snapshot_strict_v4_observed(&mut Cursor::new(data), ());
+    let s2 = bitcoin_rs_storage::utxo::read_snapshot_strict_v4_observed(&mut Cursor::new(data), ());
     assert_eq!(
         s1.is_ok(),
         s2.is_ok(),
@@ -35,7 +35,7 @@ fuzz_target!(|data: &[u8]| {
         );
 
         let mut re_written = Vec::new();
-        if bitcoin_rs_utxo::write_snapshot_witnessed(
+        if bitcoin_rs_storage::utxo::write_snapshot_witnessed(
             &snap1.set,
             &snap1.tip_hash,
             snap1.height,
@@ -44,7 +44,7 @@ fuzz_target!(|data: &[u8]| {
         )
         .is_ok()
         {
-            let re_load = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut Cursor::new(&re_written))
+            let re_load = bitcoin_rs_storage::utxo::read_snapshot_strict_v4(&mut Cursor::new(&re_written))
                 .expect("re-encoded strict v4 snapshot must decode");
             assert_eq!(
                 re_load.tip_hash, snap1.tip_hash,

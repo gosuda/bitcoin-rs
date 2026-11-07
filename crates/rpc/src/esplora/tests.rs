@@ -13,7 +13,7 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, MempoolObserver, MutationEnvelope};
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 use super::projection::Projection;
@@ -140,7 +140,7 @@ fn transaction_with_funded_input(ctx: &Context, input_value: u64) -> (Tx, Tx) {
         false,
         1,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::from_le_bytes(&[0xaa; 32]),

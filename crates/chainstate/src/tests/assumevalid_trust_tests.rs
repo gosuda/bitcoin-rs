@@ -14,7 +14,7 @@ use bitcoin_rs_consensus::script::{
     opcode::{OP_PUSHNUM_1, OP_RETURN},
 };
 use bitcoin_rs_consensus::{ConsensusError, ValidationEngine};
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::UtxoSet;
 
 use super::{ApplyError, AssumeValidGate, BlockProvenance, Chainstate, ValidationMode};
 use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};

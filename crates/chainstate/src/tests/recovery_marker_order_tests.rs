@@ -4,8 +4,8 @@ use std::path::Path;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot, accept_headers};
 use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_storage::chainstate_journal::{FULL_REVALIDATION_MARKER, JOURNAL_DIR_NAME};
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
+use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use parking_lot::RwLock;
 
 use crate::checkpoint::headers::HeaderCheckpointConfig;

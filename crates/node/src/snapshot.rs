@@ -17,10 +17,12 @@ use bitcoin_rs_rpc::context::{
 };
 use bitcoin_rs_storage::checkpoint::fs::{HAS_ATOMIC_NOREPLACE_RENAME, rename_noreplace};
 use bitcoin_rs_storage::checkpoint::{create_file, open_data_dir, sync_dir};
-use bitcoin_rs_utxo::core_snapshot::{
+use bitcoin_rs_storage::utxo::core_snapshot::{
     CoreV2Base, CoreV2WriteReport, SnapshotError, SnapshotLimits, read_verified, write_core_v2,
 };
-use bitcoin_rs_utxo::{SeedOfferCell, SeedProvenance, V4Witness, VerifiedSnapshotArtifact};
+use bitcoin_rs_storage::utxo::{
+    SeedOfferCell, SeedProvenance, V4Witness, VerifiedSnapshotArtifact,
+};
 use parking_lot::Mutex;
 
 use crate::chain_effects::ChainFollowers;
@@ -172,11 +174,11 @@ pub enum SnapshotImportError {
     #[error("snapshot input cannot be in the node's snapshot recovery namespace")]
     RecoveryInput,
     #[error("invalid Core snapshot: {0}")]
-    Codec(#[from] bitcoin_rs_utxo::core_snapshot::SnapshotError),
+    Codec(#[from] bitcoin_rs_storage::utxo::core_snapshot::SnapshotError),
     #[error("snapshot activation failed: {0}")]
     Activation(#[from] AssumeUtxoError),
     #[error("invalid native snapshot: {0}")]
-    Native(#[from] bitcoin_rs_utxo::UtxoError),
+    Native(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error("snapshot admission failed: {0}")]
     Admission(#[from] bitcoin_rs_chainstate::ApplyError),
     #[error("snapshot consumer reconciliation failed: {0}")]
@@ -194,9 +196,9 @@ impl From<SnapshotImportError> for SnapshotControlError {
             SnapshotImportError::File(_)
             | SnapshotImportError::NotRegular
             | SnapshotImportError::RecoveryInput => Self::File(error.to_string()),
-            SnapshotImportError::Codec(bitcoin_rs_utxo::core_snapshot::SnapshotError::Io(_)) => {
-                Self::Failed(error.to_string())
-            }
+            SnapshotImportError::Codec(
+                bitcoin_rs_storage::utxo::core_snapshot::SnapshotError::Io(_),
+            ) => Self::Failed(error.to_string()),
             SnapshotImportError::Codec(_) | SnapshotImportError::Native(_) => {
                 Self::Invalid(error.to_string())
             }
@@ -500,7 +502,7 @@ impl SnapshotControl {
     pub(crate) fn import_native(&self, path: &Path) -> Result<(), SnapshotImportError> {
         let _permit = self.claim_import()?;
         let mut file = BufReader::new(open_regular_input(path)?);
-        let snapshot = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut file)?;
+        let snapshot = bitcoin_rs_storage::utxo::read_snapshot_strict_v4(&mut file)?;
         let base_hash = snapshot.tip_hash;
         self.activate(base_hash, |manager| {
             manager.activate_snapshot_state(snapshot.set, snapshot.tip_hash, snapshot.height)

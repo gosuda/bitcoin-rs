@@ -6,8 +6,8 @@ use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_node::{BlockSync, Network};
 use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable, QueuedFrame};
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
+use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use crossbeam_channel::unbounded;
 use parking_lot::RwLock;
 

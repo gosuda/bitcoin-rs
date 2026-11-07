@@ -31,7 +31,7 @@ use bitcoin_rs_p2p::{
     DEFAULT_TX_RELAY_QUEUE_CAPACITY, InboundBody, InboundTx, Message, Peer, PeerLease,
     PeerRelaySink, TxRelayQueue, spawn_tx_relay_worker,
 };
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use crossbeam_channel::Sender;
 
 const READ_POLL: Duration = Duration::from_millis(200);
@@ -76,7 +76,7 @@ fn fund_utxo_script(
         false,
         100,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &state.chainstate().utxo_handle(),
         &changes,
         &Hash256::from_le_bytes(&[0xBB; 32]),

@@ -10,9 +10,9 @@ use bitcoin_rs_consensus::primitives::{
     Amount, BlockHash, CompactTarget, Hash256, Header, Network, OutPoint, Script, TxOut, Txid,
     deserialize,
 };
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener, scan_coin_stats};
+use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener, scan_coin_stats};
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 
@@ -109,7 +109,7 @@ fn config() -> headers::HeaderCheckpointConfig {
 fn coinstats_wire_length_matches_the_encoded_length() -> TestResult {
     assert_eq!(
         usize::try_from(bitcoin_rs_storage::checkpoint::COINSTATS_PAYLOAD_LEN)?,
-        bitcoin_rs_utxo::stats::coin_stats::COIN_STATS_ENCODED_LEN,
+        bitcoin_rs_storage::utxo::stats::coin_stats::COIN_STATS_ENCODED_LEN,
         "the CoinStats wire payload length must equal the in-memory encoded length"
     );
     Ok(())
@@ -176,7 +176,7 @@ fn header_from_row(row: &[u8]) -> Result<Header, headers::HeaderCheckpointError>
     deserialize(row).map_err(|error| headers::HeaderCheckpointError::Codec(error.to_string()))
 }
 
-fn populated_utxo() -> Result<UtxoSet, bitcoin_rs_utxo::UtxoError> {
+fn populated_utxo() -> Result<UtxoSet, bitcoin_rs_storage::utxo::UtxoError> {
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(
         OutPoint::new(Txid(Hash256::from_le_bytes(&[7_u8; 32])), 3),
@@ -188,7 +188,7 @@ fn populated_utxo() -> Result<UtxoSet, bitcoin_rs_utxo::UtxoError> {
         0,
     ));
     let utxo = UtxoSet::new();
-    bitcoin_rs_utxo::contract::commit_block_changes(&utxo, &changes, &Hash256::default())?;
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(&utxo, &changes, &Hash256::default())?;
     Ok(utxo)
 }
 

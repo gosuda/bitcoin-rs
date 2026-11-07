@@ -7,7 +7,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitcoin::hex::DisplayHex;
-use bitcoin_rs_chain::{BlockBodySource, ChainWork, NodeId, NodeStatus, TipSnapshot};
+use bitcoin_rs_chain::{ChainWork, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
     Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
@@ -18,7 +18,8 @@ use bitcoin_rs_mining::FakeMiningControl;
 use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable, wire::PROTOCOL_VERSION};
 use bitcoin_rs_rpc::context::{ChainControl, ChainControlError, Context};
 use bitcoin_rs_rpc::{Handler, RpcError};
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
 use crate::mining_fixture;
@@ -519,7 +520,7 @@ fn gettxoutsetinfo_returns_real_utxo_counts() -> Result<(), TestError> {
         false,
         1,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::from_le_bytes(&[0xaa; 32]),
@@ -981,7 +982,7 @@ impl BlockBodySource for SingleBlockSource {
         &self,
         height: u32,
         hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, BlockBodyReadError> {
         Ok((height == self.height && hash == self.hash).then(|| self.body.clone()))
     }
 }

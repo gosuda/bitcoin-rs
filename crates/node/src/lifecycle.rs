@@ -2,7 +2,7 @@ use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitcoin_rs_chain::{BlockBodySource, LatchReader};
+use bitcoin_rs_chain::LatchReader;
 use bitcoin_rs_chainstate::verify::{
     CheckLevel, VerifyError, VerifyOutcome, VerifyRequest, verify_recent_blocks,
 };
@@ -14,6 +14,7 @@ use bitcoin_rs_rpc::{
         MempoolHandles, MiningHandles, NetworkHandles,
     },
 };
+use bitcoin_rs_storage::block_body::BlockBodySource;
 
 use crossbeam_channel::bounded;
 

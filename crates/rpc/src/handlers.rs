@@ -100,7 +100,7 @@ impl Handler {
                         && self.ctx.chain.utxo.scan_progress().is_some()
                     {
                         RpcError::ScanInProgress(
-                            bitcoin_rs_utxo::scan::UtxoScanError::InProgress.to_string(),
+                            bitcoin_rs_storage::utxo::scan::UtxoScanError::InProgress.to_string(),
                         )
                     } else {
                         error

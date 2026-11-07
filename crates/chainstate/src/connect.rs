@@ -20,11 +20,11 @@ use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::node::NodeId;
 use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Txid, consensus_bytes};
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, UtxoView};
-use bitcoin_rs_storage::{CommitRecords, ScriptAttestation};
-use bitcoin_rs_utxo::contract::{
+use bitcoin_rs_storage::utxo::contract::{
     BlockChangeError, BlockChangeInputs, BlockChanges, BlockValueTotals, UndoBatch, UndoRecord,
     build_block_changes,
 };
+use bitcoin_rs_storage::{CommitRecords, ScriptAttestation};
 use hashbrown::HashMap;
 use std::sync::Arc;
 
@@ -526,7 +526,7 @@ fn persist_payload(
     timings: &mut ApplyTimings,
 ) -> core::result::Result<PersistedPayload, ApplyError> {
     let undo_persist_started = quanta::Instant::now();
-    let undo_persist_result = bitcoin_rs_utxo::contract::persist_block_undo(
+    let undo_persist_result = bitcoin_rs_storage::utxo::contract::persist_block_undo(
         input.handles.undo_store.as_ref(),
         input.height,
         input.block_hash,
@@ -568,7 +568,7 @@ fn persist_payload(
     timings.block_tree_insert = block_tree_insert_dur;
 
     let utxo_commit_started = quanta::Instant::now();
-    let utxo_commit_result = bitcoin_rs_utxo::contract::commit_block_changes(
+    let utxo_commit_result = bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &input.handles.utxo,
         changes,
         &input.block_hash,
@@ -1451,8 +1451,10 @@ fn build_journal_record(
     height: u32,
     block_hash: Hash256,
     prev_hash: Hash256,
-    undo: &bitcoin_rs_utxo::contract::UndoBatch,
-    changes: &bitcoin_rs_utxo::contract::BlockChanges<&'_ bitcoin_rs_consensus::primitives::TxOut>,
+    undo: &bitcoin_rs_storage::utxo::contract::UndoBatch,
+    changes: &bitcoin_rs_storage::utxo::contract::BlockChanges<
+        &'_ bitcoin_rs_consensus::primitives::TxOut,
+    >,
     coin_stats_height_delta: i64,
 ) -> BuiltJournalRecord {
     if height == 0 {

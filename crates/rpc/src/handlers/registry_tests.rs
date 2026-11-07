@@ -386,9 +386,9 @@ fn test_context() -> (Arc<Context>, Arc<bitcoin_rs_chainstate::Chainstate>) {
         Arc::new(arc_swap::ArcSwapOption::empty()),
         Arc::new(arc_swap::ArcSwapOption::empty()),
         Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
-        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
-        Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
-            bitcoin_rs_utxo::stats::CoinStats::default(),
+        Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
+        Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
+            bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         )),
         Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
     ));

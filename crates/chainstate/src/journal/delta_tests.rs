@@ -1,5 +1,5 @@
 use bitcoin_rs_consensus::primitives::Amount;
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 
 use super::{Mutation, mutations_for_block};
 use crate::test_fixtures::journal_coin as coin;

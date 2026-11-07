@@ -30,7 +30,7 @@ impl ProductionConsumer {
         let chain = sonic_rs::to_string(&root.join("crates/chain"))?;
         let chainstate = sonic_rs::to_string(&root.join("crates/chainstate"))?;
         let p2p = sonic_rs::to_string(&root.join("crates/p2p"))?;
-        let utxo = sonic_rs::to_string(&root.join("crates/utxo"))?;
+        let storage = sonic_rs::to_string(&root.join("crates/storage"))?;
         std::fs::create_dir(directory.path().join("src"))?;
         std::fs::write(
             directory.path().join("Cargo.toml"),
@@ -50,7 +50,7 @@ name = "capability_consumer"
 bitcoin-rs-chain = {{ path = {chain}, default-features = false }}
 bitcoin-rs-chainstate = {{ path = {chainstate}, default-features = false }}
 bitcoin-rs-p2p = {{ path = {p2p}, default-features = false }}
-bitcoin-rs-utxo = {{ path = {utxo}, default-features = false }}
+bitcoin-rs-storage = {{ path = {storage}, default-features = false }}
 "#
             ),
         )?;
@@ -60,13 +60,11 @@ bitcoin-rs-utxo = {{ path = {utxo}, default-features = false }}
 
     pub(super) fn with_fixture_owners(root: &Path) -> Result<Self> {
         let consumer = Self::new(root)?;
-        let storage = sonic_rs::to_string(&root.join("crates/storage"))?;
         let rpc = sonic_rs::to_string(&root.join("crates/rpc"))?;
         let path = consumer.directory.path().join("Cargo.toml");
         let mut manifest = std::fs::read_to_string(&path)?;
         manifest.push_str(&format!(
-            "bitcoin-rs-storage = {{ path = {storage}, default-features = false }}\n\
-             bitcoin-rs-rpc = {{ path = {rpc}, default-features = false }}\n"
+            "bitcoin-rs-rpc = {{ path = {rpc}, default-features = false }}\n"
         ));
         std::fs::write(path, manifest)?;
         Ok(consumer)

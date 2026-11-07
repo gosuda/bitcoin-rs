@@ -96,7 +96,7 @@ pub(crate) fn transaction_json_with_spends(
     tx: &Tx,
     network: Network,
     chain: Option<TransactionChainContext>,
-    coins: Option<&[bitcoin_rs_utxo::UtxoCoin]>,
+    coins: Option<&[bitcoin_rs_storage::utxo::UtxoCoin]>,
     include_prevouts: bool,
 ) -> Result<Value, crate::error::RpcError> {
     use crate::error::RpcError;

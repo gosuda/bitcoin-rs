@@ -1,4 +1,4 @@
-//! Orders [`bitcoin_rs_utxo::contract::rollback_block`] against the journal, the
+//! Orders [`bitcoin_rs_storage::utxo::contract::rollback_block`] against the journal, the
 //! durable head, and publication.
 
 use super::durable::commit_disconnect_head;
@@ -7,7 +7,7 @@ use super::{Chainstate, DisconnectOutcome, DisconnectPlan};
 use crate::error::ApplyError;
 use bitcoin_rs_chain::{ChainTxCount, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{Block, Hash256, Tx, Txid};
-use bitcoin_rs_utxo::contract::{
+use bitcoin_rs_storage::utxo::contract::{
     BlockUndoCheck, RollbackError, load_block_undo_for_block, rollback_block,
 };
 

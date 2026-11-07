@@ -232,9 +232,9 @@ fn from_handles_shares_chain_handles_with_caller() {
 
     let chain_tip = Arc::new(ArcSwapOption::empty());
     let applied_tip = Arc::new(ArcSwapOption::empty());
-    let utxo = Arc::new(bitcoin_rs_utxo::UtxoSet::new());
-    let coin_stats = Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
-        bitcoin_rs_utxo::stats::CoinStats::default(),
+    let utxo = Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new());
+    let coin_stats = Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
+        bitcoin_rs_storage::utxo::stats::CoinStats::default(),
     ));
     let block_tree = Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()));
     let progress = bitcoin_rs_chain::ChainProgressReader::new(
@@ -258,7 +258,7 @@ fn from_handles_shares_chain_handles_with_caller() {
             active_tip_wait: None,
             progress,
             blocks: BlockLogReader::fixture_empty(),
-            utxo: bitcoin_rs_utxo::UtxoReader::new(Arc::clone(&utxo)),
+            utxo: bitcoin_rs_storage::utxo::UtxoReader::new(Arc::clone(&utxo)),
             coin_stats: Arc::clone(&coin_stats),
             block_tree: BlockTreeReader::new(Arc::clone(&block_tree)),
             chain_network: Network::Mainnet,
@@ -401,7 +401,7 @@ fn block_render_budget_releases_dropped_permits() {
 #[test]
 fn new_context_wires_utxo_commits_to_coin_stats() {
     use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, TxOut, Txid};
-    use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+    use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 
     let ctx = Context::new();
     let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[1_u8; 32])), 0);
@@ -412,7 +412,7 @@ fn new_context_wires_utxo_commits_to_coin_stats() {
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(outpoint, txout, true, 7));
 
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::default(),
@@ -761,9 +761,11 @@ fn ibd_latch_judges_the_contexts_own_tree() {
                 )),
             ),
             blocks: BlockLogReader::fixture_empty(),
-            utxo: bitcoin_rs_utxo::UtxoReader::new(Arc::new(bitcoin_rs_utxo::UtxoSet::new())),
-            coin_stats: Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
-                bitcoin_rs_utxo::stats::CoinStats::default(),
+            utxo: bitcoin_rs_storage::utxo::UtxoReader::new(Arc::new(
+                bitcoin_rs_storage::utxo::UtxoSet::new(),
+            )),
+            coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
+                bitcoin_rs_storage::utxo::stats::CoinStats::default(),
             )),
             prune_service: None,
             chain_control: None,

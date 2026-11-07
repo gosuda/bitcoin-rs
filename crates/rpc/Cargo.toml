@@ -22,11 +22,11 @@ zmq = ["dep:zmq"]
 
 [dependencies]
 bitcoin-rs-consensus.workspace = true
+bitcoin-rs-storage.workspace = true
 bitcoin-rs-chain.workspace = true
 bitcoin-rs-index.workspace = true
 bitcoin-rs-mempool.workspace = true
 bitcoin-rs-p2p.workspace = true
-bitcoin-rs-utxo.workspace = true
 bitcoin-rs-mining.workspace = true
 bitcoin.workspace = true
 miniscript.workspace = true
@@ -47,7 +47,7 @@ mio.workspace = true
 zmq = { workspace = true, optional = true }
 
 [dev-dependencies]
-bitcoin-rs-storage = { workspace = true, default-features = false }
+bitcoin-rs-storage = { workspace = true, default-features = false, features = ["test-seam"] }
 bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }
 toml.workspace = true
@@ -57,7 +57,6 @@ bitcoin-rs-chainstate = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-node = { workspace = true, default-features = false, features = ["test-seam"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
-bitcoin-rs-utxo = { workspace = true, features = ["test-seam"] }
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]

@@ -9,11 +9,11 @@ use bitcoin_rs_consensus::primitives::{
     TxOut, Witness,
 };
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
-use bitcoin_rs_storage::{InMemoryUndoStore, MandatoryRetention, RetentionRegistry, UndoStore};
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::contract::{
+use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::contract::{
     BlockChanges, UndoCodecError, UndoLoadError, UtxoAdd, commit_block_changes,
 };
+use bitcoin_rs_storage::{InMemoryUndoStore, MandatoryRetention, RetentionRegistry, UndoStore};
 
 use super::Chainstate;
 use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};

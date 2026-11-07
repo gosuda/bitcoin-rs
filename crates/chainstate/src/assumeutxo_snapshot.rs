@@ -13,10 +13,10 @@ use bitcoin_rs_consensus::primitives::{
     AssumeUtxoData, DecodeError, Network, consensus_bytes, deserialize,
 };
 use bitcoin_rs_storage::checkpoint::fs::{create_file, open_data_dir, sync_dir};
-use bitcoin_rs_utxo::core_snapshot::VerifiedSnapshotState;
-use bitcoin_rs_utxo::snapshot::{SeedProvenance, VerifiedSnapshotArtifact};
-use bitcoin_rs_utxo::stats::CoinStats;
-use bitcoin_rs_utxo::{
+use bitcoin_rs_storage::utxo::core_snapshot::VerifiedSnapshotState;
+use bitcoin_rs_storage::utxo::snapshot::{SeedProvenance, VerifiedSnapshotArtifact};
+use bitcoin_rs_storage::utxo::stats::CoinStats;
+use bitcoin_rs_storage::utxo::{
     SnapshotCoin, SnapshotCoinObserver, SnapshotLoad, UtxoSet, read_snapshot_strict_v4_witnessed,
 };
 
@@ -32,7 +32,7 @@ pub enum SnapshotArchiveError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    Utxo(#[from] bitcoin_rs_utxo::UtxoError),
+    Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error(transparent)]
     Chain(#[from] bitcoin_rs_chain::ChainError),
     #[error(transparent)]
@@ -158,11 +158,11 @@ fn recognized_reservation(
 ) -> std::io::Result<bool> {
     match kind {
         ReservationKind::Coins => {
-            match bitcoin_rs_utxo::snapshot::read_snapshot_metadata_v4(file) {
+            match bitcoin_rs_storage::utxo::snapshot::read_snapshot_metadata_v4(file) {
                 Ok(metadata) => {
                     Ok((metadata.tip_hash, metadata.height) == (pinned.block_hash, pinned.height))
                 }
-                Err(bitcoin_rs_utxo::UtxoError::Io(error))
+                Err(bitcoin_rs_storage::utxo::UtxoError::Io(error))
                     if error.kind() != std::io::ErrorKind::UnexpectedEof =>
                 {
                     Err(error)
@@ -254,15 +254,17 @@ pub(super) fn write_coins(
     data_dir: &Path,
     set: &UtxoSet,
     pinned: &AssumeUtxoData,
-) -> Result<Option<bitcoin_rs_utxo::V4Witness>, SnapshotArchiveError> {
+) -> Result<Option<bitcoin_rs_storage::utxo::V4Witness>, SnapshotArchiveError> {
     let directory = archive_directory(data_dir, pinned.block_hash)?;
     write_archive(&directory, "coins.dat", |writer| {
-        let (_, _, witness) = bitcoin_rs_utxo::snapshot::write_snapshot_witnessed(
+        let (_, _, witness) = bitcoin_rs_storage::utxo::snapshot::write_snapshot_witnessed(
             set,
             &pinned.block_hash,
             pinned.height,
             writer,
-            bitcoin_rs_utxo::stats::CoinStatsAccumulator::with_parallel_muhash(pinned.height),
+            bitcoin_rs_storage::utxo::stats::CoinStatsAccumulator::with_parallel_muhash(
+                pinned.height,
+            ),
         )?;
         Ok(witness)
     })
@@ -281,12 +283,19 @@ pub(super) fn write_coins_sealed(
     data_dir: &Path,
     state: VerifiedSnapshotState,
     pinned: &AssumeUtxoData,
-) -> Result<(UtxoSet, CoinStats, Option<bitcoin_rs_utxo::V4Witness>), SnapshotArchiveError> {
+) -> Result<
+    (
+        UtxoSet,
+        CoinStats,
+        Option<bitcoin_rs_storage::utxo::V4Witness>,
+    ),
+    SnapshotArchiveError,
+> {
     let directory = archive_directory(data_dir, pinned.block_hash)?;
     let (set, stats) = state.into_parts();
     let trailer = stats.muhash.finalize();
     let witness = write_archive(&directory, "coins.dat", |writer| {
-        let (_, _, witness) = bitcoin_rs_utxo::snapshot::write_snapshot_witnessed(
+        let (_, _, witness) = bitcoin_rs_storage::utxo::snapshot::write_snapshot_witnessed(
             &set,
             &pinned.block_hash,
             pinned.height,
@@ -401,9 +410,9 @@ pub(super) fn load_verified(
     }
     let mut stats = set.with_stable_view(|view| {
         if view.hash_serialized_3_at_height(pinned.height)? != pinned.hash_serialized {
-            return Err(bitcoin_rs_utxo::UtxoError::CorruptRecord);
+            return Err(bitcoin_rs_storage::utxo::UtxoError::CorruptRecord);
         }
-        bitcoin_rs_utxo::stats::scan_coin_stats(view, pinned.height, true)
+        bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, pinned.height, true)
     })?;
     stats.tx_count = pinned.chain_tx_count;
     let seed = VerifiedSnapshotArtifact::seal(
@@ -431,14 +440,14 @@ mod tests {
     use crate::test_fixtures::{TestError, TestResult};
 
     fn native_fixture() -> TestResult<(Vec<u8>, &'static AssumeUtxoData)> {
-        let core = include_bytes!("../../utxo/tests/fixtures/core-v2/core200.dat");
-        let loaded = bitcoin_rs_utxo::core_snapshot::read_and_verify(
+        let core = include_bytes!("../../storage/tests/fixtures/core-v2/core200.dat");
+        let loaded = bitcoin_rs_storage::utxo::core_snapshot::read_and_verify(
             &mut core.as_slice(),
             Network::Regtest,
-            bitcoin_rs_utxo::core_snapshot::SnapshotLimits::default(),
+            bitcoin_rs_storage::utxo::core_snapshot::SnapshotLimits::default(),
         )?;
         let mut native = Vec::new();
-        bitcoin_rs_utxo::write_snapshot_observed(
+        bitcoin_rs_storage::utxo::write_snapshot_observed(
             &loaded.set,
             &loaded.anchor.block_hash,
             loaded.anchor.height,
@@ -543,7 +552,7 @@ mod tests {
             header_orphan,
             consensus_bytes(&Network::Regtest.genesis_block().header),
         )?;
-        let core = include_bytes!("../../utxo/tests/fixtures/core-v2/core200.dat");
+        let core = include_bytes!("../../storage/tests/fixtures/core-v2/core200.dat");
         for (name, bytes) in [
             ("coins.dat", native.as_slice()),
             ("coins.tmp", core.as_slice()),
@@ -572,17 +581,18 @@ mod tests {
 
     #[test]
     fn sealed_archive_matches_recomputed_archive_byte_for_byte() -> TestResult {
-        let core = include_bytes!("../../utxo/tests/fixtures/core-v2/core200.dat");
-        let bare = bitcoin_rs_utxo::core_snapshot::read_and_verify(
+        let core = include_bytes!("../../storage/tests/fixtures/core-v2/core200.dat");
+        let bare = bitcoin_rs_storage::utxo::core_snapshot::read_and_verify(
             &mut core.as_slice(),
             Network::Regtest,
-            bitcoin_rs_utxo::core_snapshot::SnapshotLimits::default(),
+            bitcoin_rs_storage::utxo::core_snapshot::SnapshotLimits::default(),
         )?;
         let pinned = bare.anchor;
         let dir_old = tempfile::tempdir()?;
         write_coins(dir_old.path(), &bare.set, pinned)?;
-        let state =
-            bitcoin_rs_utxo::core_snapshot::VerifiedSnapshotState::verify(bare.set, pinned)?;
+        let state = bitcoin_rs_storage::utxo::core_snapshot::VerifiedSnapshotState::verify(
+            bare.set, pinned,
+        )?;
         let dir_new = tempfile::tempdir()?;
         write_coins_sealed(dir_new.path(), state, pinned)?;
         let archive_name = pinned.block_hash.to_string();

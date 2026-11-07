@@ -260,7 +260,7 @@ impl BlockBodySource for SingleBlockBody {
         &self,
         height: u32,
         hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         if height == self.height && hash == self.hash {
             self.full_reads.fetch_add(1, Ordering::Relaxed);
         }
@@ -680,7 +680,7 @@ fn transaction_reports_unavailable_when_indexed_body_is_missing()
 }
 
 struct FailingBody {
-    error: bitcoin_rs_chain::BlockBodyReadError,
+    error: bitcoin_rs_storage::block_body::BlockBodyReadError,
 }
 
 impl BlockBodySource for FailingBody {
@@ -688,7 +688,7 @@ impl BlockBodySource for FailingBody {
         &self,
         _height: u32,
         _hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         Err(self.error.clone())
     }
 }
@@ -700,7 +700,7 @@ impl BlockBodySource for MissingBody {
         &self,
         _height: u32,
         _hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         Ok(None)
     }
 }
@@ -753,7 +753,7 @@ fn engine_with_body_source(
 fn engine_with_body_error(
     block: &Block,
     scans: Vec<ScanResponse>,
-    error: bitcoin_rs_chain::BlockBodyReadError,
+    error: bitcoin_rs_storage::block_body::BlockBodyReadError,
 ) -> Result<DerivedIndexQueryEngine, crate::portable::TestError> {
     engine_with_body_source(block, scans, Some(Arc::new(FailingBody { error })))
 }
@@ -841,7 +841,7 @@ fn transaction_reports_storage_when_body_read_fails() -> Result<(), crate::porta
             vec![(indexed_row, vec![0])],
             true,
         )],
-        bitcoin_rs_chain::BlockBodyReadError::Read("injected read failure".into()),
+        bitcoin_rs_storage::block_body::BlockBodyReadError::Read("injected read failure".into()),
     )?;
 
     assert!(matches!(
@@ -865,7 +865,7 @@ fn transaction_reports_storage_when_body_is_corrupt() -> Result<(), crate::porta
             vec![(indexed_row, vec![0])],
             true,
         )],
-        bitcoin_rs_chain::BlockBodyReadError::Corrupt("injected corruption".into()),
+        bitcoin_rs_storage::block_body::BlockBodyReadError::Corrupt("injected corruption".into()),
     )?;
 
     assert!(matches!(
@@ -1028,7 +1028,7 @@ impl BlockBodySource for MultiBlockBody {
         &self,
         height: u32,
         hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         let hit = self
             .bodies
             .iter()
@@ -1060,19 +1060,19 @@ impl BlockBodySource for MultiBlockBody {
 fn seed_utxo_reader(
     adds: Vec<(OutPoint, TxOut, bool, u32)>,
     tip: Hash256,
-) -> Result<Option<bitcoin_rs_utxo::UtxoReader>, crate::portable::TestError> {
-    use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
+) -> Result<Option<bitcoin_rs_storage::utxo::UtxoReader>, crate::portable::TestError> {
+    use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
     if adds.is_empty() {
         return Ok(None);
     }
-    let set = Arc::new(bitcoin_rs_utxo::UtxoSet::new());
+    let set = Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new());
     let mut changes = BlockChanges::with_capacity(adds.len(), 0);
     for (outpoint, txout, coinbase, height) in adds {
         changes.add(UtxoAdd::new(outpoint, txout, coinbase, height));
     }
     commit_block_changes(&set, &changes, &tip)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    Ok(Some(bitcoin_rs_utxo::UtxoReader::new(set)))
+    Ok(Some(bitcoin_rs_storage::utxo::UtxoReader::new(set)))
 }
 
 fn child_block(parent: &Block, txs: Vec<Tx>) -> Result<Block, std::io::Error> {
@@ -1792,7 +1792,7 @@ impl BlockBodySource for MovingBody {
         &self,
         height: u32,
         hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         self.fire_once();
         let hit = self.lookup(height, hash);
         if hit.is_some() {

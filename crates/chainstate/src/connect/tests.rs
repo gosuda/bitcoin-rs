@@ -25,7 +25,7 @@ mod transaction_structure;
 fn empty_handles() -> Arc<crate::Chainstate> {
     Arc::new(handles(
         Network::Regtest,
-        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+        Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
     ))
 }
 
@@ -88,7 +88,10 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
     let mut outcomes = Vec::new();
     let mut undo_records = Vec::new();
     for capture_rawtx in [false, true] {
-        let mut handles = handles(Network::Regtest, Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
+        let mut handles = handles(
+            Network::Regtest,
+            Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
+        );
         seed_genesis(&handles)?;
         let tip_hash = apply_regtest_chain_to_height(&handles, 500)?;
         handles.set_capture_flags(capture_rawtx, false);
@@ -230,7 +233,7 @@ fn with_invalid_solution(valid: &Block) -> TestResult<Block> {
 fn signet_solution_is_checked_on_commit_not_proposal() -> TestResult {
     let handles = Arc::new(handles(
         Network::Signet,
-        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+        Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
     ));
     handles.apply_block(&BlockPayload::from_local(Network::Signet.genesis_block()))?;
 
@@ -267,7 +270,7 @@ use crate::test_support::MemoryBodies;
 use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_consensus::primitives::encode::double_sha256;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::UtxoSet;
 
 fn witness_child(
     parent: bitcoin_rs_consensus::primitives::BlockHash,

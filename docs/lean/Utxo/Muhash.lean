@@ -2,7 +2,7 @@ set_option exponentiation.threshold 4096
 
 /-
 Reduction modulo `2^3072 - 1103717` for the MuHash field used by
-`crates/utxo/src/stats/muhash3072.rs`. The reduction lemmas hold for every positive modulus; the
+`crates/storage/src/utxo/stats/muhash3072.rs`. The reduction lemmas hold for every positive modulus; the
 last three instantiate the field modulus.
 -/
 

@@ -1,12 +1,11 @@
 use super::artifact::CANCEL_POLL_RECORDS;
 use super::{IndexBundleError, Withheld};
 use crate::types::TxPosition;
-use bitcoin_rs_chain::{
-    BlockBodySource, BlockTreeReader, ChainTxCount, ChainWork, NodeId, NodeStatus, TipSnapshot,
-};
+use bitcoin_rs_chain::{BlockTreeReader, ChainTxCount, ChainWork, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{
     BlockHash, Hash256, Header, Tx, deserialize, layout::ParsedBlock, varint,
 };
+use bitcoin_rs_storage::block_body::BlockBodySource;
 use std::collections::{HashMap, VecDeque};
 
 pub(super) struct ChainBase {
@@ -372,8 +371,9 @@ mod tests {
     use std::sync::Arc;
 
     use bitcoin::hashes::Hash as _;
-    use bitcoin_rs_chain::{BlockBodyReadError, BlockTree};
+    use bitcoin_rs_chain::BlockTree;
     use bitcoin_rs_consensus::primitives::CompactTarget;
+    use bitcoin_rs_storage::block_body::BlockBodyReadError;
 
     type TestResult = Result<(), crate::portable::TestError>;
 

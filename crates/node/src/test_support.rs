@@ -93,7 +93,7 @@ pub enum TestError {
     #[error(transparent)]
     Disconnect(#[from] bitcoin_rs_chainstate::DisconnectError),
     #[error(transparent)]
-    Utxo(#[from] bitcoin_rs_utxo::UtxoError),
+    Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error(transparent)]
     Submit(#[from] bitcoin_rs_mempool::SubmitError),
     #[error(transparent)]
@@ -113,7 +113,7 @@ pub enum TestError {
     #[error(transparent)]
     Prune(#[from] bitcoin_rs_storage::pruning::PruneError),
     #[error(transparent)]
-    SnapshotUtxo(#[from] bitcoin_rs_utxo::core_snapshot::SnapshotError),
+    SnapshotUtxo(#[from] bitcoin_rs_storage::utxo::core_snapshot::SnapshotError),
     #[error(transparent)]
     DerivedIndexWorker(#[from] bitcoin_rs_index::runtime::DerivedIndexWorkerError),
     #[error(transparent)]

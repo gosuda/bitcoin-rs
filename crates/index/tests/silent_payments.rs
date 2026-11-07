@@ -10,7 +10,7 @@ use bitcoin_rs_index::silent_payments::{
     MAX_BODY_BYTES, MAX_PREVOUT_BYTES, TransactionTweak, TweakError, block_tweaks,
     transaction_tweak,
 };
-use bitcoin_rs_utxo::{
+use bitcoin_rs_storage::utxo::{
     UtxoCoin,
     contract::{BlockSpends, BlockSpendsError, HistoryUnavailable},
 };

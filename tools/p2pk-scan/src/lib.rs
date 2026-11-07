@@ -4,9 +4,9 @@ use std::io::{self, BufRead, Read};
 use bitcoin_rs_consensus::primitives::hex::{HexError, hex_decode, hex_encode};
 use bitcoin_rs_consensus::primitives::layout::ParsedBlock;
 use bitcoin_rs_consensus::primitives::{Block, BlockHash, OutPoint, Tx, TxOut, Txid};
-use bitcoin_rs_utxo::UtxoError;
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
+use bitcoin_rs_storage::utxo::UtxoError;
+use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
 use serde::Serialize;
 use thiserror::Error;
 

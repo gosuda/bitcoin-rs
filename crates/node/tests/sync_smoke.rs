@@ -10,8 +10,8 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_node::Network;
 use bitcoin_rs_node::test_support::TestError;
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
+use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use crossbeam_channel::unbounded;
 use parking_lot::RwLock;
 

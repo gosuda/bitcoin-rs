@@ -81,7 +81,7 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
 
 ### `ARCH-07a`: Chainstate mutates `utxo` through one narrow contract
 
-`bitcoin-rs-utxo` is not a second mutation authority. It holds the live coin set and persistence formats. Chainstate drives it through one coherent apply, commit, and disconnect contract (`crates/utxo/src/contract.rs`).
+`bitcoin-rs-utxo` is not a second mutation authority. It holds the live coin set and persistence formats. Chainstate drives it through one coherent apply, commit, and disconnect contract (`crates/storage/src/utxo/contract.rs`).
 
 - **Apply**: `build_block_changes` turns one validated block into its `BlockChanges`, its `UndoBatch`, and the `BlockValueTotals` needed for the coinbase check. Resolved prevouts enter through `SpentOutputLookup`. The live set at BIP30 exception heights enters as the optional overwritten lookup. **Commit**: `contract::commit_block_changes` applies one block's `BlockChanges` and emits commit events to the single attached `CoinStatsListener`. The raw mutator of the set is crate-private.
 - **Disconnect**: `persist_block_undo` and `load_block_undo` round-trip one block's `UndoBatch` as the `UndoRecord` bytes named by the durable head receipt. `rollback_block` applies that batch under the durable disconnect marker and the coinstats rewind. The raw inverse (`UtxoSet::undo_block`) is crate-private. Every external disconnect goes through `rollback_block`.

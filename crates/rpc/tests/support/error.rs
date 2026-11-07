@@ -31,9 +31,9 @@ pub(crate) enum TestError {
     #[error(transparent)]
     ChainChange(#[from] bitcoin_rs_mempool::ChainChangeError),
     #[error(transparent)]
-    Utxo(#[from] bitcoin_rs_utxo::UtxoError),
+    Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error(transparent)]
-    UtxoScan(#[from] bitcoin_rs_utxo::scan::UtxoScanError),
+    UtxoScan(#[from] bitcoin_rs_storage::utxo::scan::UtxoScanError),
     #[error(transparent)]
     NodeOpen(#[from] bitcoin_rs_node::NodeOpenError),
     #[error(transparent)]

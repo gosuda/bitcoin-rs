@@ -11,11 +11,11 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
+use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::{
     BoundedReadError, InMemoryUndoStore, MandatoryRetention, RetentionRegistry, StorageError,
     UndoStore,
 };
-use bitcoin_rs_utxo::UtxoSet;
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 

@@ -6,7 +6,7 @@ use alloc::sync::Arc;
 
 use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, TxOut, Txid};
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 
 use super::*;
 
@@ -31,7 +31,7 @@ fn burn_p2pkh_script() -> Vec<u8> {
 fn commit_test_utxo(ctx: &Context, outpoint: OutPoint, txout: TxOut, coinbase: bool, height: u32) {
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(outpoint, txout, coinbase, height));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &test_txid(8_000),
@@ -406,9 +406,9 @@ fn scan_projection_uses_retained_branch_after_tip_changes() {
     ctx.chain.applied_tip.store(Some(Arc::new(tip.clone())));
     let applied = ctx.chain.applied_view();
     let script = burn_p2pkh_script();
-    let scan = bitcoin_rs_utxo::UtxoScan {
+    let scan = bitcoin_rs_storage::utxo::UtxoScan {
         txouts: 1,
-        unspents: vec![bitcoin_rs_utxo::UtxoCoin {
+        unspents: vec![bitcoin_rs_storage::utxo::UtxoCoin {
             outpoint: OutPoint::new(test_txid(301).into(), 0),
             txout: TxOut {
                 value: Amount::from_sat(7),
@@ -430,8 +430,12 @@ fn scan_projection_uses_retained_branch_after_tip_changes() {
     assert_eq!(unspents[0].block_hash, tip.hash.to_string());
 }
 
-fn stale_branch_fixture() -> TestResult<(Context, AppliedView, bitcoin_rs_utxo::UtxoScan, Hash256)>
-{
+fn stale_branch_fixture() -> TestResult<(
+    Context,
+    AppliedView,
+    bitcoin_rs_storage::utxo::UtxoScan,
+    Hash256,
+)> {
     let ctx = Context::new();
     let (old, new, expected) = {
         let mut tree = ctx.chain.block_tree.write();
@@ -475,10 +479,10 @@ fn stale_branch_fixture() -> TestResult<(Context, AppliedView, bitcoin_rs_utxo::
     ctx.chain.applied_tip.store(Some(old));
     let applied = ctx.chain.applied_view();
     ctx.chain.applied_tip.store(Some(new));
-    let scan = bitcoin_rs_utxo::UtxoScan {
+    let scan = bitcoin_rs_storage::utxo::UtxoScan {
         txouts: 100,
         unspents: (0..100)
-            .map(|index| bitcoin_rs_utxo::UtxoCoin {
+            .map(|index| bitcoin_rs_storage::utxo::UtxoCoin {
                 outpoint: OutPoint::new(test_txid(index).into(), 0),
                 txout: TxOut {
                     value: Amount::from_sat(7),
@@ -625,7 +629,7 @@ fn scan_descriptor_limits_and_public_fixed_forms() {
             -8
         );
     }
-    let descriptors = vec!["raw(51)"; bitcoin_rs_utxo::scan::MAX_SCAN_SCRIPTS + 1];
+    let descriptors = vec!["raw(51)"; bitcoin_rs_storage::utxo::scan::MAX_SCAN_SCRIPTS + 1];
     assert_eq!(
         scantxoutset(&ctx, &json!(["start", descriptors]))
             .err()
@@ -740,9 +744,9 @@ fn scan_expansion_observes_abort_shutdown_and_deadline() -> TestResult {
             &|| {
                 if emitted.get() >= 2 {
                     if cause == "deadline" {
-                        return Err(scan_error(&bitcoin_rs_utxo::scan::UtxoScanError::Limit(
-                            "60 seconds",
-                        )));
+                        return Err(scan_error(
+                            &bitcoin_rs_storage::utxo::scan::UtxoScanError::Limit("60 seconds"),
+                        ));
                     }
                     if cause == "shutdown" {
                         cancellation_writer.trigger();

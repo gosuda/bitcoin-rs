@@ -22,7 +22,7 @@ Startup ignores an unreferenced generation.
 Owners:
 - Authoritative durable root and ordered commit protocol (`crates/chainstate/src/connect.rs`, `disconnect.rs`, `durable.rs`).
 - Recovery and schema admission (`crates/chainstate/src/recovery.rs`, with process-composition tests in `crates/node/src/state/tests/`).
-- Persistent coin transition boundary (`crates/utxo/src/set.rs`, durable form in `crates/storage/src/durable_head.rs`).
+- Persistent coin transition boundary (`crates/storage/src/utxo/set.rs`, durable form in `crates/storage/src/durable_head.rs`).
 - Crash and lost-write fault tests (`crates/node/tests/crash_recovery.rs`).
 - Reorg and disconnect (`crates/chainstate/src/reorg.rs`, `disconnect.rs`).
 - Checkpoint publication and recovery (`crates/chainstate/src/checkpoint.rs` and companions, `crates/storage/src/checkpoint/`).

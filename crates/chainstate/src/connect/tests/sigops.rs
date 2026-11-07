@@ -10,7 +10,10 @@ use bitcoin_rs_consensus::script::{opcode::*, push_data};
 use sha2::{Digest, Sha256};
 
 fn funded_chain() -> TestResult<(crate::Chainstate, Tx, BlockHash)> {
-    let chain = handles(Network::Regtest, Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
+    let chain = handles(
+        Network::Regtest,
+        Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
+    );
     seed_genesis(&chain)?;
     let mut funding = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
     funding.txs[0].outputs = (0..11)
@@ -251,7 +254,10 @@ fn aggregate_sigops_enforce_the_inclusive_budget_on_every_connect_path() -> Test
 #[test]
 fn coinbase_only_blocks_obey_the_sigop_budget() -> TestResult {
     for (count, cost) in [(1_000, 80_000), (1_001, 80_080)] {
-        let mut chain = handles(Network::Regtest, Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
+        let mut chain = handles(
+            Network::Regtest,
+            Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
+        );
         seed_genesis(&chain)?;
         let mut block = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
         block.txs[0].outputs[0].script_pubkey = vec![OP_CHECKMULTISIG; count].into();

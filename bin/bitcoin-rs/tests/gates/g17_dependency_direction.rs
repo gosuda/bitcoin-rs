@@ -37,7 +37,7 @@ pub fn observe(state: &Chainstate) -> (Option<Arc<TipSnapshot>>, usize) {
 
 pub fn observe_undo(state: &Chainstate) {
     if let Some(tip) = state.applied_tip_snapshot() {
-        let reader: &dyn bitcoin_rs_utxo::contract::BlockUndoSource = state;
+        let reader: &dyn bitcoin_rs_storage::utxo::contract::BlockUndoSource = state;
         let _ = reader.block_spends(tip.hash, tip.hash);
     }
 }
@@ -185,7 +185,7 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> Result<(), 
         )?;
     }
     consumer.deny(
-        &format!("{READ_CONTROL}\npub fn denied(reader: &dyn bitcoin_rs_utxo::contract::BlockUndoSource, state: &Chainstate) {{ if let Some(tip) = state.applied_tip_snapshot() {{ let _ = reader.persist_undo(tip.height, tip.hash, b\"\"); }} }}"),
+        &format!("{READ_CONTROL}\npub fn denied(reader: &dyn bitcoin_rs_storage::utxo::contract::BlockUndoSource, state: &Chainstate) {{ if let Some(tip) = state.applied_tip_snapshot() {{ let _ = reader.persist_undo(tip.height, tip.hash, b\"\"); }} }}"),
         &["E0599"],
         "persist_undo",
     )?;
@@ -244,7 +244,7 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> Result<(), 
     }
     consumer.deny(
         &format!(
-            "{READ_CONTROL}\npub fn denied(reader: &bitcoin_rs_utxo::UtxoReader) {{ let _ = reader.fixture_set(); }}"
+            "{READ_CONTROL}\npub fn denied(reader: &bitcoin_rs_storage::utxo::UtxoReader) {{ let _ = reader.fixture_set(); }}"
         ),
         &["E0599"],
         "fixture_set",

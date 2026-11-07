@@ -16,7 +16,7 @@ use crate::types::{
     HASH_PREFIX_ROW_SIZE, HashPrefixRow, TxPosition, TxPositionValue, positions_are_valid,
 };
 use crate::{IndexCapability, IndexError, IndexWatermark, IndexWriteFence, TxIndexFamily};
-use bitcoin_rs_chain::BlockBodySource;
+use bitcoin_rs_storage::block_body::BlockBodySource;
 use bitcoin_rs_storage::{PrefixScanLimit, StorageError};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;

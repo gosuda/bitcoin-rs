@@ -273,7 +273,7 @@ mod tests {
     };
     use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
     use bitcoin_rs_mempool::{MempoolEntry, MempoolObserver};
-    use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+    use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
     use parking_lot::Mutex;
 
     use bitcoin_rs_rpc::zmq::MempoolSequenceObserver;
@@ -390,7 +390,7 @@ mod tests {
                 1,
             ));
         }
-        bitcoin_rs_utxo::contract::commit_block_changes(
+        bitcoin_rs_storage::utxo::contract::commit_block_changes(
             &node.state.chainstate().utxo_handle(),
             &changes,
             &Hash256::from_le_bytes(&[0xAB; 32]),

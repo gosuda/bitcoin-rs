@@ -1,8 +1,8 @@
 #![no_main]
 
 use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_utxo::contract::{decode_undo_record, encode_undo_record};
-use bitcoin_rs_utxo::record::{OwnedUtxoOut, UtxoRecord};
+use bitcoin_rs_storage::utxo::contract::{decode_undo_record, encode_undo_record};
+use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

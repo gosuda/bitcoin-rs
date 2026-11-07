@@ -162,7 +162,7 @@ impl QueryBudget {
 }
 
 pub(crate) struct QueryEngineLive {
-    pub(crate) utxo: Option<bitcoin_rs_utxo::UtxoReader>,
+    pub(crate) utxo: Option<bitcoin_rs_storage::utxo::UtxoReader>,
     pub(crate) chain_transition: Option<bitcoin_rs_chain::StableRead>,
     pub(crate) enabled: IndexCapabilities,
 }
@@ -227,7 +227,7 @@ pub struct DerivedIndexQueryEngine {
     block_tree: bitcoin_rs_chain::BlockTreeReader,
     applied_tip: bitcoin_rs_chain::TipReader,
     body_source: Option<Arc<dyn BlockBodySource>>,
-    utxo: Option<bitcoin_rs_utxo::UtxoReader>,
+    utxo: Option<bitcoin_rs_storage::utxo::UtxoReader>,
     chain_transition: Option<bitcoin_rs_chain::StableRead>,
     enabled: IndexCapabilities,
 }

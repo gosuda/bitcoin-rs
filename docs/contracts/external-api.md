@@ -727,7 +727,7 @@ wallet interoperability remain unverified.
 - Interrupted export or full blocking quota returns `-1`.
 - Error `-32603` covers no-rename platform, closed admission, missing applied tip, unestablished chain tx count, concurrent export, and encode/write/length/sync failure.
 - Export evidence needs the pinned Core 31.1 `bitcoind`.
-- Test `e2e/tests/assumeutxo.rs::bitcoin_rs_export_is_accepted_by_a_fresh_core_node` submits the 200 fixture blocks and compares against `crates/utxo/tests/fixtures/core-v2/core200.dat`.
+- Test `e2e/tests/assumeutxo.rs::bitcoin_rs_export_is_accepted_by_a_fresh_core_node` submits the 200 fixture blocks and compares against `crates/storage/tests/fixtures/core-v2/core200.dat`.
 - The test loads the export into a fresh Core node.
 - The test fails (does not skip) when the binary is missing or its digest differs per `crates/rpc/core-compat.toml` (`scripts/install-bitcoind.sh`).
 - This covers regtest height-200 only; there is no mainnet memory, throughput, or commit-blocking claim.

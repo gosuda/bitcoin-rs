@@ -328,11 +328,11 @@ pub enum OfflineImportError {
     },
     #[error("coin stats scan failed: {scan_error}")]
     CoinStatsScan {
-        scan_error: bitcoin_rs_utxo::UtxoError,
+        scan_error: bitcoin_rs_storage::utxo::UtxoError,
     },
     #[error("hash_serialized_3 failed: {hash_error}")]
     HashSerialized3 {
-        hash_error: bitcoin_rs_utxo::UtxoError,
+        hash_error: bitcoin_rs_storage::utxo::UtxoError,
     },
     #[error("txout count does not fit: {count_error}")]
     TxoutCountDoesNotFit {
@@ -1017,7 +1017,7 @@ fn verify_and_certify(
     }
     let (txouts, total_amount_sat, muhash, set_hash) =
         node.chainstate().utxo_reader().with_stable_view(|view| {
-            let stats = bitcoin_rs_utxo::stats::scan_coin_stats(view, tip.height, true)
+            let stats = bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, tip.height, true)
                 .map_err(|scan_error| OfflineImportError::CoinStatsScan { scan_error })?;
             let set_hash = view
                 .hash_serialized_3()

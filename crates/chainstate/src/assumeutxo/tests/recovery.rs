@@ -630,7 +630,8 @@ fn snapshot_base_checkpoint_rejects_coin_height_alias() -> TestResult {
     assert!(height <= fixture.pinned.height);
     let invalid_height = height | 0x8000_0000;
     bytes[offset..offset + 4].copy_from_slice(&invalid_height.to_le_bytes());
-    let forged = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut std::io::Cursor::new(&bytes))?;
+    let forged =
+        bitcoin_rs_storage::utxo::read_snapshot_strict_v4(&mut std::io::Cursor::new(&bytes))?;
     assert_eq!(
         forged.set.lock_stable_view().hash_serialized_3()?,
         fixture.pinned.hash_serialized,
@@ -651,7 +652,7 @@ fn snapshot_base_checkpoint_rejects_coin_height_alias() -> TestResult {
     assert!(matches!(
         error,
         crate::recovery::RecoveryError::Utxo(
-            bitcoin_rs_utxo::UtxoError::SnapshotCoinHeightOutOfRange {
+            bitcoin_rs_storage::utxo::UtxoError::SnapshotCoinHeightOutOfRange {
                 height,
                 snapshot_height,
             }

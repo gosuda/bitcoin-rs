@@ -4,7 +4,7 @@ use std::path::Path;
 use bitcoin::BlockHash;
 use bitcoin::OutPoint as BitcoinOutPoint;
 use bitcoin_rs_consensus::primitives::hex::{hex_decode, hex_encode};
-use bitcoin_rs_utxo::stats::CoinStats;
+use bitcoin_rs_storage::utxo::stats::CoinStats;
 
 use crate::chain::{Chain, ChainBlock};
 use crate::convert;

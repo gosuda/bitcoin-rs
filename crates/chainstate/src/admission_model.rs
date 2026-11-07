@@ -782,7 +782,7 @@ mod tests {
     use parking_lot::Mutex;
 
     use bitcoin_rs_consensus::primitives::{Block, BlockHash, BlockPayload, Network};
-    use bitcoin_rs_utxo::UtxoSet;
+    use bitcoin_rs_storage::utxo::UtxoSet;
     use proptest::prelude::*;
     use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 

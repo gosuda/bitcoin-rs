@@ -1,7 +1,7 @@
 use super::*;
 use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{Block, Network};
-use bitcoin_rs_utxo::contract::{BlockSpends, BlockUndoSource, HistoryUnavailable};
+use bitcoin_rs_storage::utxo::contract::{BlockSpends, BlockUndoSource, HistoryUnavailable};
 
 type Result<T = ()> = std::result::Result<T, crate::test_error::TestError>;
 

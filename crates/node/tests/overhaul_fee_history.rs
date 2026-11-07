@@ -17,7 +17,7 @@ use bitcoin_rs_mempool::{AdmissionOrigin, FeeEstimator, SubmitOutcome};
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, NodeConfig};
 use bitcoin_rs_rpc::context::ChainAdmissionView;
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 
 const BASE_TIME: u32 = 1_296_688_603;
 const BLOCK_INTERVAL: u32 = 600;
@@ -60,7 +60,7 @@ fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> Result<()> {
         false,
         0,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &state.chainstate().utxo_handle(),
         &changes,
         &Hash256::from_le_bytes(&[0xBB; 32]),

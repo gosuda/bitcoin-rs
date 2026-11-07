@@ -3,11 +3,11 @@ use super::tx_count_delta_for;
 use super::{BlockProvenance, Chainstate, ProvenApply, PublishMode};
 use bitcoin_rs_chain::{ChainTxCount, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, OutPoint};
-use bitcoin_rs_storage::{CommitRecords, DurableHead};
-use bitcoin_rs_utxo::UtxoCoin;
-use bitcoin_rs_utxo::contract::{
+use bitcoin_rs_storage::utxo::UtxoCoin;
+use bitcoin_rs_storage::utxo::contract::{
     OutputSource, RollbackError, UndoLoadError, load_block_undo, rollback_block_recovery,
 };
+use bitcoin_rs_storage::{CommitRecords, DurableHead};
 
 /// What one durable head commit certified: the commit id and the exact cumulative
 /// transaction count publication may carry.
@@ -154,7 +154,7 @@ pub(super) fn commit_disconnect_head(
     Ok(DurableReceipt::from_head(&next))
 }
 
-struct UndoRowSpends<'a>(&'a bitcoin_rs_utxo::contract::UndoBatch);
+struct UndoRowSpends<'a>(&'a bitcoin_rs_storage::utxo::contract::UndoBatch);
 
 impl OutputSource for UndoRowSpends<'_> {
     fn get_entry(&self, outpoint: &OutPoint) -> Option<UtxoCoin> {

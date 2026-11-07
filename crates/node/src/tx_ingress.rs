@@ -7,7 +7,7 @@ use bitcoin_rs_mempool::{AdmissionOrigin, MempoolGateway, PeerToken, SubmitError
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_p2p::TxRelayQueue;
 use bitcoin_rs_rpc::context::ChainAdmissionView;
-use bitcoin_rs_utxo::UtxoReader;
+use bitcoin_rs_storage::utxo::UtxoReader;
 use crossbeam_channel::Receiver;
 
 use crate::state::NodeState;

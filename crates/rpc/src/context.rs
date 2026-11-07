@@ -1,13 +1,11 @@
 use alloc::sync::Arc;
 #[cfg(any(test, feature = "test-seam"))]
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{
-    BlockBodyReadError, BlockBodySource, BlockTreeReader, LatchReader, TipReader, TipSnapshot,
-    softfork_state,
-};
+use bitcoin_rs_chain::{BlockTreeReader, LatchReader, TipReader, TipSnapshot, softfork_state};
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_mempool::BodyInterest;
 use bitcoin_rs_mempool::{AdmissionChain, ChainAdmissionSnapshot, MempoolGateway, PrevoutMeta};
+use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
 
 use bitcoin_rs_consensus::primitives::{
     BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
@@ -282,20 +280,20 @@ pub struct ChainHandles {
     pub progress: bitcoin_rs_chain::ChainProgressReader,
     pub closed_for_recovery: LatchReader,
     pub blocks: BlockLogReader,
-    pub utxo: bitcoin_rs_utxo::UtxoReader,
-    pub coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
+    pub utxo: bitcoin_rs_storage::utxo::UtxoReader,
+    pub coin_stats: Arc<bitcoin_rs_storage::utxo::stats::CoinStatsListener>,
     pub block_tree: BlockTreeReader,
     pub chain_network: Network,
     pub chain_transition: bitcoin_rs_chain::StableRead,
     pub block_body_source: Option<Arc<dyn BlockBodySource>>,
-    pub block_undo_source: Option<Arc<dyn bitcoin_rs_utxo::contract::BlockUndoSource>>,
+    pub block_undo_source: Option<Arc<dyn bitcoin_rs_storage::utxo::contract::BlockUndoSource>>,
     pub prune_service: Option<Arc<dyn PruneService>>,
     pub chain_control: Option<Arc<dyn ChainControl>>,
     pub rollback_warnings: Option<Arc<dyn RollbackWarningSource>>,
 }
 
 pub struct ChainAdmissionView {
-    utxo: bitcoin_rs_utxo::UtxoReader,
+    utxo: bitcoin_rs_storage::utxo::UtxoReader,
     applied_tip: TipReader,
     block_tree: BlockTreeReader,
     network: Network,
@@ -304,7 +302,7 @@ pub struct ChainAdmissionView {
 impl ChainAdmissionView {
     #[must_use]
     pub const fn new(
-        utxo: bitcoin_rs_utxo::UtxoReader,
+        utxo: bitcoin_rs_storage::utxo::UtxoReader,
         applied_tip: TipReader,
         block_tree: BlockTreeReader,
         network: Network,
@@ -518,10 +516,10 @@ impl Default for ChainHandles {
 impl ChainHandles {
     #[must_use]
     fn with_transition(chain_transition: bitcoin_rs_chain::StableRead) -> Self {
-        let coin_stats_listener = bitcoin_rs_utxo::stats::CoinStatsListener::new(
-            bitcoin_rs_utxo::stats::CoinStats::default(),
+        let coin_stats_listener = bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
+            bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         );
-        let mut utxo = bitcoin_rs_utxo::UtxoSet::new();
+        let mut utxo = bitcoin_rs_storage::utxo::UtxoSet::new();
         utxo.track_coin_stats(coin_stats_listener.clone());
         let chain_tip = TipReader::new(Arc::new(ArcSwapOption::empty()));
         let applied_tip = TipReader::new(Arc::new(ArcSwapOption::empty()));
@@ -544,7 +542,7 @@ impl ChainHandles {
             progress,
             closed_for_recovery: bitcoin_rs_chain::LatchWriter::new().reader(),
             blocks: BlockLogReader::fixture_empty(),
-            utxo: bitcoin_rs_utxo::UtxoReader::new(Arc::new(utxo)),
+            utxo: bitcoin_rs_storage::utxo::UtxoReader::new(Arc::new(utxo)),
             coin_stats: Arc::new(coin_stats_listener),
             block_tree,
             chain_network: Network::Mainnet,
@@ -1350,7 +1348,7 @@ impl BlockBodySource for BlockBodies {
         &self,
         height: u32,
         hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, BlockBodyReadError> {
         Ok(self
             .bodies
             .iter()

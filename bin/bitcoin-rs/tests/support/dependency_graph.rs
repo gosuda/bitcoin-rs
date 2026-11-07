@@ -38,8 +38,8 @@ pub(crate) fn approved_layer(crate_name: &str) -> u8 {
     match crate_name {
         "bitcoin-rs-consensus" => 0,
         STORAGE_CRATE => 1,
-        "bitcoin-rs-chain" | CHAINSTATE_CRATE | "bitcoin-rs-utxo" | "bitcoin-rs-p2p"
-        | "bitcoin-rs-mempool" | "bitcoin-rs-index" | "bitcoin-rs-mining" => 2,
+        "bitcoin-rs-chain" | CHAINSTATE_CRATE | "bitcoin-rs-p2p" | "bitcoin-rs-mempool"
+        | "bitcoin-rs-index" | "bitcoin-rs-mining" => 2,
         RPC_CRATE => 3,
         NODE_CRATE
         | BIN_CRATE
@@ -249,27 +249,8 @@ impl WorkspaceGraph {
 
         if let Some(rpc_edges) = self.normal_deps.get(RPC_CRATE) {
             for dep in rpc_edges {
-                if dep == STORAGE_CRATE {
-                    violations.push(
-                        "rpc must not depend on the storage crate; it consumes node capabilities \
-                         through query traits"
-                            .to_owned(),
-                    );
-                }
                 if ENGINE_CRATES.contains(&dep.as_str()) {
                     violations.push(format!("rpc must not name the engine dependency `{dep}`"));
-                }
-            }
-        }
-
-        let rpc_features = self.features.get(RPC_CRATE);
-        if let Some(rpc_features) = rpc_features {
-            for (feature, implies) in rpc_features {
-                let forwards = implies.iter().any(|entry| entry.contains(STORAGE_CRATE));
-                if forwards {
-                    violations.push(format!(
-                        "rpc feature `{feature}` still forwards a storage backend"
-                    ));
                 }
             }
         }

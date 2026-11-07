@@ -5,7 +5,7 @@ use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
 };
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, arm_admission_park, reset_admission_park};
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 use std::sync::mpsc;
 use std::thread;
@@ -89,21 +89,23 @@ struct SpentRows {
     block: Block,
 }
 
-impl bitcoin_rs_utxo::contract::BlockUndoSource for SpentRows {
+impl bitcoin_rs_storage::utxo::contract::BlockUndoSource for SpentRows {
     fn block_spends(
         &self,
         _hash: Hash256,
         _expected: Hash256,
-    ) -> Result<bitcoin_rs_utxo::contract::BlockSpends, bitcoin_rs_utxo::contract::BlockSpendsError>
-    {
+    ) -> Result<
+        bitcoin_rs_storage::utxo::contract::BlockSpends,
+        bitcoin_rs_storage::utxo::contract::BlockSpendsError,
+    > {
         use bitcoin_rs_consensus::primitives::{Amount, Script};
         let Some(spend) = self.block.txs.get(1) else {
-            return Err(bitcoin_rs_utxo::contract::BlockSpendsError::UnknownBlock);
+            return Err(bitcoin_rs_storage::utxo::contract::BlockSpendsError::UnknownBlock);
         };
         let spent = spend
             .inputs
             .iter()
-            .map(|input| bitcoin_rs_utxo::UtxoCoin {
+            .map(|input| bitcoin_rs_storage::utxo::UtxoCoin {
                 outpoint: input.previous_output,
                 txout: TxOut {
                     value: Amount::from_sat(5_000_000_000),
@@ -113,7 +115,7 @@ impl bitcoin_rs_utxo::contract::BlockUndoSource for SpentRows {
                 height: 0,
             })
             .collect();
-        Ok(bitcoin_rs_utxo::contract::BlockSpends {
+        Ok(bitcoin_rs_storage::utxo::contract::BlockSpends {
             block: self.block.clone(),
             spent: Ok(vec![vec![], spent]),
         })
@@ -401,7 +403,7 @@ fn getrawtransaction_checks_mempool_before_failing_txindex()
 
 #[test]
 fn getrawtransaction_explicit_coinbase_preserves_undo_failures_and_render_budget() {
-    use bitcoin_rs_utxo::contract::{BlockSpends, BlockSpendsError, BlockUndoSource};
+    use bitcoin_rs_storage::utxo::contract::{BlockSpends, BlockSpendsError, BlockUndoSource};
 
     struct FailingSource(fn() -> BlockSpendsError);
     impl BlockUndoSource for FailingSource {
@@ -438,7 +440,7 @@ fn getrawtransaction_explicit_coinbase_preserves_undo_failures_and_render_budget
         (|| BlockSpendsError::Corrupt("fixture"), -32603),
         (
             || {
-                BlockSpendsError::Undo(bitcoin_rs_utxo::contract::UndoLoadError::Missing {
+                BlockSpendsError::Undo(bitcoin_rs_storage::utxo::contract::UndoLoadError::Missing {
                     hash: Hash256::default(),
                     height: 1,
                 })
@@ -495,7 +497,7 @@ fn getrawtransaction_explicit_coinbase_preserves_undo_failures_and_render_budget
 #[test]
 fn getrawtransaction_detailed_read_omits_unavailable_undo_and_rejects_partial_rows() {
     use bitcoin_rs_consensus::primitives::Amount;
-    use bitcoin_rs_utxo::contract::{
+    use bitcoin_rs_storage::utxo::contract::{
         BlockSpends, BlockSpendsError, BlockUndoSource, HistoryUnavailable,
     };
 
@@ -902,7 +904,7 @@ fn gettxoutproof_without_blockhash_answers_from_the_utxo_set() {
         false,
         0,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::default(),
@@ -938,7 +940,7 @@ fn gettxoutproof_without_blockhash_answers_core_message_when_the_transaction_is_
     let txid = coinbase.txid();
     let mut ctx = Context::new();
     let source = Arc::new(CountingBodySource::default());
-    let body_source: Arc<dyn bitcoin_rs_chain::BlockBodySource> =
+    let body_source: Arc<dyn bitcoin_rs_storage::block_body::BlockBodySource> =
         Arc::<CountingBodySource>::clone(&source);
     ctx.chain.block_body_source = Some(body_source);
     ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
@@ -1005,7 +1007,7 @@ fn fund_coin(ctx: &Context, outpoint: OutPoint, value_sat: u64) {
         false,
         0,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::default(),
@@ -1088,12 +1090,12 @@ struct PanicUnlessBodySource {
     body: Vec<u8>,
 }
 
-impl bitcoin_rs_chain::BlockBodySource for PanicUnlessBodySource {
+impl bitcoin_rs_storage::block_body::BlockBodySource for PanicUnlessBodySource {
     fn block_body(
         &self,
         height: u32,
         hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         if height == self.height && hash == self.hash {
             Ok(Some(self.body.clone()))
         } else {
@@ -1109,12 +1111,12 @@ struct CountingBodySource {
     calls: core::sync::atomic::AtomicUsize,
 }
 
-impl bitcoin_rs_chain::BlockBodySource for CountingBodySource {
+impl bitcoin_rs_storage::block_body::BlockBodySource for CountingBodySource {
     fn block_body(
         &self,
         _height: u32,
         _hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         self.calls
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         Ok(None)
@@ -1563,12 +1565,12 @@ struct CorruptBodySource {
     hash: BlockHash,
 }
 
-impl bitcoin_rs_chain::BlockBodySource for CorruptBodySource {
+impl bitcoin_rs_storage::block_body::BlockBodySource for CorruptBodySource {
     fn block_body(
         &self,
         height: u32,
         hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         if height == self.height && hash == self.hash {
             Ok(Some(vec![0xFF_u8; 80]))
         } else {
@@ -1724,7 +1726,7 @@ fn retry_fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
         false,
         1,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::from_le_bytes(&[0xaa; 32]),

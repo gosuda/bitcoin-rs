@@ -27,7 +27,7 @@ use bitcoin_rs_rpc::{
         MiningHandles, NetworkHandles,
     },
 };
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::UtxoSet;
 use compact_str::CompactString;
 use crossbeam_channel::{Receiver, bounded};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
@@ -517,7 +517,7 @@ pub(crate) fn rpc_handler(state: &NodeState, mining_control: Arc<dyn MiningContr
             active_tip_wait: Some(state.chainstate()),
             progress: state.chainstate().chain_progress_reader(),
             blocks: state.block_log_reader(),
-            utxo: bitcoin_rs_utxo::UtxoReader::new(Arc::new(UtxoSet::new())),
+            utxo: bitcoin_rs_storage::utxo::UtxoReader::new(Arc::new(UtxoSet::new())),
             coin_stats: state.chainstate().coin_stats_handle(),
             block_tree: state.chainstate().block_tree_reader(),
             chain_network: state.config().network,

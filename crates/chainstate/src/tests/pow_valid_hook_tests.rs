@@ -9,7 +9,7 @@ use bitcoin_rs_chain::regtest_fixture::{
     merkle_root, mine_block_to_declared_target, mined_regtest_child_at as mined_child,
 };
 use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256, Network};
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::UtxoSet;
 
 use super::ApplyError;
 use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};

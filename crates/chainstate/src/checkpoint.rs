@@ -41,9 +41,11 @@ use bitcoin_rs_storage::checkpoint::open_data_dir;
 use bitcoin_rs_storage::checkpoint::{ArtifactDigest, CheckpointStage};
 use bitcoin_rs_storage::checkpoint::{coinstats_artifact_payload, commit_publication};
 use bitcoin_rs_storage::checkpoint::{read_manifest, require_filename, verify_artifact};
-use bitcoin_rs_utxo::snapshot::{SeedProvenance, V4Witness, VerifiedSnapshotArtifact};
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsAccumulator, CoinStatsListener};
-use bitcoin_rs_utxo::{UtxoSet, read_snapshot_strict_v4_witnessed, write_snapshot_witnessed};
+use bitcoin_rs_storage::utxo::snapshot::{SeedProvenance, V4Witness, VerifiedSnapshotArtifact};
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsAccumulator, CoinStatsListener};
+use bitcoin_rs_storage::utxo::{
+    UtxoSet, read_snapshot_strict_v4_witnessed, write_snapshot_witnessed,
+};
 use cap_std::fs::{Dir, File};
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
@@ -58,7 +60,7 @@ fn classify_checkpoint_error(error: CheckpointError) -> CheckpointLoadError {
     match error {
         CheckpointError::Io(error)
         | CheckpointError::FullRevalidationMarker(error)
-        | CheckpointError::Utxo(bitcoin_rs_utxo::UtxoError::Io(error))
+        | CheckpointError::Utxo(bitcoin_rs_storage::utxo::UtxoError::Io(error))
         | CheckpointError::Storage(bitcoin_rs_storage::StorageError::Io(error)) => {
             classify_checkpoint_io(error)
         }
@@ -100,9 +102,9 @@ pub enum CheckpointError {
     #[error("checkpoint chain state failed: {0}")]
     Chain(#[from] bitcoin_rs_chain::ChainError),
     #[error("UTXO checkpoint failed: {0}")]
-    Utxo(#[from] bitcoin_rs_utxo::UtxoError),
+    Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error("CoinStats checkpoint decode failed: {0}")]
-    CoinStats(#[from] bitcoin_rs_utxo::stats::CoinStatsDecodeError),
+    CoinStats(#[from] bitcoin_rs_storage::utxo::stats::CoinStatsDecodeError),
     #[error("checkpoint I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("checkpoint block-body durability failed: {0}")]
@@ -420,7 +422,7 @@ fn verify_payload_files(
 
 fn validate_snapshot_payload(
     manifest: &CheckpointManifestV1,
-    snapshot: &bitcoin_rs_utxo::SnapshotLoad,
+    snapshot: &bitcoin_rs_storage::utxo::SnapshotLoad,
     expected_applied: &headers::HeaderCheckpointTip,
 ) -> Result<(), CheckpointError> {
     if (snapshot.height, snapshot.tip_hash) != (expected_applied.height, expected_applied.hash) {
@@ -466,7 +468,7 @@ fn read_coinstats(
 
 fn validate_derived_stats(
     manifest: &CheckpointManifestV1,
-    snapshot: &bitcoin_rs_utxo::SnapshotLoad,
+    snapshot: &bitcoin_rs_storage::utxo::SnapshotLoad,
     mut derived: CoinStats,
     coin_stats: &CoinStats,
 ) -> Result<(), CheckpointError> {
@@ -494,7 +496,7 @@ fn read_checkpoint_snapshot(
     height: u32,
 ) -> Result<
     (
-        bitcoin_rs_utxo::SnapshotLoad,
+        bitcoin_rs_storage::utxo::SnapshotLoad,
         CoinStats,
         V4Witness,
         std::fs::File,

@@ -1,8 +1,9 @@
 use arc_swap::ArcSwap;
 
 use bitcoin_rs_chain::{
-    BlockBodySource, BlockTree, BlockTreeReader, LatchReader, LatchWriter, TipReader, TipSnapshot,
+    BlockTree, BlockTreeReader, LatchReader, LatchWriter, TipReader, TipSnapshot,
 };
+use bitcoin_rs_storage::block_body::BlockBodySource;
 
 use crate::{
     IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWatermarks,
@@ -24,12 +25,12 @@ use crate::query_api::{
     TxUnavailableCause,
 };
 
+use bitcoin_rs_storage::utxo::snapshot::{SeedOfferCell, VerifiedSnapshotArtifact};
 use bitcoin_rs_storage::{
     PrefixScanLimit,
     block_body::BlockBodyStore,
     pruning::{HistoryAccess, HistoryLease, HistoryUnavailable},
 };
-use bitcoin_rs_utxo::snapshot::{SeedOfferCell, VerifiedSnapshotArtifact};
 
 use compact_str::CompactString;
 use std::sync::atomic::AtomicU64;
@@ -440,7 +441,7 @@ pub struct DerivedIndexOpenSpec {
     pub open_store:
         Arc<dyn Fn(&Path) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> + Send + Sync>,
     pub seed_slot: Option<SeedOfferCell>,
-    pub utxo: Option<bitcoin_rs_utxo::UtxoReader>,
+    pub utxo: Option<bitcoin_rs_storage::utxo::UtxoReader>,
     pub chain_transition: Option<bitcoin_rs_chain::StableRead>,
     pub bundle: crate::portable::IndexBundleDirective,
 }
@@ -486,8 +487,8 @@ impl UndoScripts {
     pub(crate) fn from_undo_bytes(
         bytes: &[u8],
         hash: Hash256,
-    ) -> Result<Self, bitcoin_rs_utxo::contract::UndoCodecError> {
-        let batch = bitcoin_rs_utxo::contract::decode_undo_record(bytes, hash)?;
+    ) -> Result<Self, bitcoin_rs_storage::utxo::contract::UndoCodecError> {
+        let batch = bitcoin_rs_storage::utxo::contract::decode_undo_record(bytes, hash)?;
         let mut scripts = hashbrown::HashMap::with_capacity(batch.restores().len());
         for add in batch.restores() {
             scripts.insert(

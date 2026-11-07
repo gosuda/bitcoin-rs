@@ -938,7 +938,7 @@ mod tests {
     use super::*;
 
     use bitcoin_rs_consensus::primitives::Network;
-    use bitcoin_rs_utxo::UtxoSet;
+    use bitcoin_rs_storage::utxo::UtxoSet;
 
     use std::sync::Arc;
 

@@ -47,7 +47,7 @@ pub(super) fn parse_block_for_apply(
     parsed.into_parts(&block.txs).map_err(ApplyError::Consensus)
 }
 
-pub(super) fn prepare_apply<'b, S: bitcoin_rs_utxo::contract::OutputSource + ?Sized>(
+pub(super) fn prepare_apply<'b, S: bitcoin_rs_storage::utxo::contract::OutputSource + ?Sized>(
     payload: &'b BlockPayload,
     source: &S,
     engine: bitcoin_rs_consensus::ValidationEngine,

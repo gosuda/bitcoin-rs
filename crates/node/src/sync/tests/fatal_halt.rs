@@ -5,11 +5,11 @@ use bitcoin_rs_chain::{BlockTree, NodeStatus, regtest_fixture};
 use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Network};
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
 use bitcoin_rs_storage::undo::InMemoryUndoStore;
+use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::{
     DisconnectMarker, InMemoryDurableHeadStore, MandatoryRetention, RetentionRegistry,
     StorageError, UndoStore,
 };
-use bitcoin_rs_utxo::UtxoSet;
 use crossbeam_channel::{bounded, unbounded};
 
 use crate::event_loop::EventLoop;
@@ -78,8 +78,8 @@ fn poisoned_chain(
         block_tree: tree,
         restored_applied_tip: None,
         utxo: Arc::new(UtxoSet::new()),
-        coin_stats: Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
-            bitcoin_rs_utxo::stats::CoinStats::default(),
+        coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
+            bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         )),
         chain_events: Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
         block_body_store: None,

@@ -26,17 +26,14 @@ test-seam = ["bitcoin-rs-storage/test-seam"]
 kernel = ["bitcoin-rs-consensus/kernel"]
 surrealkv = [
     "bitcoin-rs-storage/surrealkv",
-    "bitcoin-rs-utxo/surrealkv",
 ]
 mdbx = [
     "bitcoin-rs-storage/mdbx",
-    "bitcoin-rs-utxo/mdbx",
 ]
 
 [dependencies]
 bitcoin-rs-consensus.workspace = true
 bitcoin-rs-storage.workspace = true
-bitcoin-rs-utxo.workspace = true
 bitcoin-rs-chain.workspace = true
 
 arc-swap.workspace = true

@@ -32,7 +32,7 @@ pub enum ApplyError {
     #[error("chain: {0}")]
     Chain(#[from] bitcoin_rs_chain::ChainError),
     #[error("utxo commit: {0}")]
-    UtxoCommit(#[source] bitcoin_rs_utxo::UtxoError),
+    UtxoCommit(#[source] bitcoin_rs_storage::utxo::UtxoError),
     #[error("block body persistence: {0}")]
     BlockBodyPersistence(#[source] bitcoin_rs_storage::StorageError),
     #[error("undo persistence: {0}")]
@@ -45,7 +45,7 @@ pub enum ApplyError {
         vout: u32,
     },
     #[error(transparent)]
-    UndoLoad(#[from] bitcoin_rs_utxo::contract::UndoLoadError),
+    UndoLoad(#[from] bitcoin_rs_storage::utxo::contract::UndoLoadError),
     #[error("block {hash} is not the applied tip {tip}")]
     DisconnectNotTip {
         hash: bitcoin_rs_consensus::primitives::Hash256,
@@ -82,7 +82,7 @@ pub enum ApplyError {
     #[error("recovery checkpoint publication failed: {0}")]
     RecoveryPublication(#[source] Box<crate::checkpoint::CheckpointError>),
     #[error("coinstats rewind: {0}")]
-    CoinStatsRewind(#[source] bitcoin_rs_utxo::stats::CoinStatsRewindError),
+    CoinStatsRewind(#[source] bitcoin_rs_storage::utxo::stats::CoinStatsRewindError),
     #[error(
         "cannot disconnect block at height {height} at or below assumeutxo base height {base_height}"
     )]

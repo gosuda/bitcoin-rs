@@ -16,7 +16,7 @@ name = "p2pk-scan"
 path = "src/main.rs"
 [dependencies]
 bitcoin-rs-consensus.workspace = true
-bitcoin-rs-utxo.workspace = true
+bitcoin-rs-storage.workspace = true
 clap.workspace = true
 serde.workspace = true
 sonic-rs.workspace = true

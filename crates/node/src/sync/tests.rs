@@ -6,7 +6,7 @@ use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, BlockPayload, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
 };
 use bitcoin_rs_consensus::script::push_int;
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::UtxoSet;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
@@ -114,8 +114,8 @@ fn apply_handles(
         applied_tip,
         block_tree,
         Arc::new(UtxoSet::new()),
-        Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
-            bitcoin_rs_utxo::stats::CoinStats::default(),
+        Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
+            bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         )),
         Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
     )

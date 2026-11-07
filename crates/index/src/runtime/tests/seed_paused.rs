@@ -13,13 +13,15 @@ use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::{
     HistoryAccess, HistoryUnavailable, RetentionBudget, RetentionRegistry,
 };
-use bitcoin_rs_storage::{
-    ColumnFamily, InMemoryUndoStore, KvStore, PrefixScanLimit, RocksDbStore, StorageError,
+use bitcoin_rs_storage::utxo::contract::{
+    BlockChanges, SpentOutputLookup, UtxoAdd, commit_block_changes,
 };
-use bitcoin_rs_utxo::contract::{BlockChanges, SpentOutputLookup, UtxoAdd, commit_block_changes};
-use bitcoin_rs_utxo::{
+use bitcoin_rs_storage::utxo::{
     OfferOutcome, SeedOfferCell, SeedSlot, UtxoSet, VerifiedSnapshotArtifact,
     read_snapshot_strict_v4_witnessed, write_snapshot_witnessed,
+};
+use bitcoin_rs_storage::{
+    ColumnFamily, InMemoryUndoStore, KvStore, PrefixScanLimit, RocksDbStore, StorageError,
 };
 use parking_lot::{Mutex, RwLock};
 use std::io::{Seek, Write};
@@ -70,7 +72,10 @@ fn mint_seed_artifact(
     set: &UtxoSet,
     tip: Hash256,
     height: u32,
-) -> (VerifiedSnapshotArtifact, bitcoin_rs_utxo::V4Witness) {
+) -> (
+    VerifiedSnapshotArtifact,
+    bitcoin_rs_storage::utxo::V4Witness,
+) {
     let mut bytes = Vec::new();
     let (_, (), witness) =
         write_snapshot_witnessed(set, &tip, height, &mut bytes, ()).expect("witnessed encode");
@@ -88,7 +93,7 @@ fn mint_seed_artifact(
     let artifact = VerifiedSnapshotArtifact::seal(
         file,
         read_witness,
-        bitcoin_rs_utxo::SeedProvenance::AssumeUtxoArchive {
+        bitcoin_rs_storage::utxo::SeedProvenance::AssumeUtxoArchive {
             base: tip.to_le_bytes(),
         },
     );
@@ -356,13 +361,13 @@ impl BlockBodyStore for SeedBodyStore {
 }
 
 #[derive(Default)]
-struct SeedBranchCoins(Vec<bitcoin_rs_utxo::UtxoCoin>);
+struct SeedBranchCoins(Vec<bitcoin_rs_storage::utxo::UtxoCoin>);
 
 impl SpentOutputLookup for SeedBranchCoins {
     fn entry(
         &self,
         outpoint: &bitcoin_rs_consensus::primitives::OutPoint,
-    ) -> Option<&bitcoin_rs_utxo::UtxoCoin> {
+    ) -> Option<&bitcoin_rs_storage::utxo::UtxoCoin> {
         self.0.iter().find(|coin| coin.outpoint == *outpoint)
     }
 }
@@ -376,7 +381,7 @@ impl SeedBranchCoins {
     ) {
         for (tx, txid) in block.txs.iter().zip(txids) {
             for (vout, txout) in tx.outputs.iter().enumerate() {
-                self.0.push(bitcoin_rs_utxo::UtxoCoin {
+                self.0.push(bitcoin_rs_storage::utxo::UtxoCoin {
                     outpoint: bitcoin_rs_consensus::primitives::OutPoint::new(
                         *txid,
                         u32::try_from(vout).expect("vout"),
@@ -485,8 +490,8 @@ impl SeedFixture {
             };
             let txids = block.txids();
             if height > 0 {
-                let (_, undo, _) = bitcoin_rs_utxo::contract::build_block_changes(
-                    &bitcoin_rs_utxo::contract::BlockChangeInputs {
+                let (_, undo, _) = bitcoin_rs_storage::utxo::contract::build_block_changes(
+                    &bitcoin_rs_storage::utxo::contract::BlockChangeInputs {
                         block: &block,
                         height,
                         txids: &txids,
@@ -499,7 +504,7 @@ impl SeedFixture {
                     &coins,
                 )
                 .expect("undo batch");
-                let record = bitcoin_rs_utxo::contract::persist_block_undo(
+                let record = bitcoin_rs_storage::utxo::contract::persist_block_undo(
                     &store,
                     height,
                     Hash256::from_le_bytes(&key.1),
@@ -769,7 +774,7 @@ fn seed_paused_write_permits_apply_and_retires_generation() {
             bundle
                 .artifact
                 .as_ref()
-                .map(bitcoin_rs_utxo::VerifiedSnapshotArtifact::tip),
+                .map(bitcoin_rs_storage::utxo::VerifiedSnapshotArtifact::tip),
             bundle.lease.as_ref().expect("pin kept").floor(),
         )
     };
@@ -855,7 +860,7 @@ fn seed_tamper_variants_yield_integrity_without_watermark() {
         let mut artifact = VerifiedSnapshotArtifact::seal(
             file,
             witness,
-            bitcoin_rs_utxo::SeedProvenance::AssumeUtxoArchive {
+            bitcoin_rs_storage::utxo::SeedProvenance::AssumeUtxoArchive {
                 base: tip_hash.to_le_bytes(),
             },
         );
@@ -868,7 +873,10 @@ fn seed_tamper_variants_yield_integrity_without_watermark() {
             &|| false,
         );
         assert!(
-            matches!(result, Err(bitcoin_rs_utxo::RawSeedError::Integrity)),
+            matches!(
+                result,
+                Err(bitcoin_rs_storage::utxo::RawSeedError::Integrity)
+            ),
             "tampered bytes never traverse"
         );
         if index == 2 {
@@ -886,7 +894,7 @@ fn seed_tamper_variants_yield_integrity_without_watermark() {
     let mut artifact = VerifiedSnapshotArtifact::seal(
         read_clone,
         read_witness,
-        bitcoin_rs_utxo::SeedProvenance::AssumeUtxoArchive {
+        bitcoin_rs_storage::utxo::SeedProvenance::AssumeUtxoArchive {
             base: tip_hash.to_le_bytes(),
         },
     );
@@ -920,7 +928,7 @@ fn seed_tamper_variants_yield_integrity_without_watermark() {
     let poisoned = VerifiedSnapshotArtifact::seal(
         poisoned_file,
         witness,
-        bitcoin_rs_utxo::SeedProvenance::AssumeUtxoArchive {
+        bitcoin_rs_storage::utxo::SeedProvenance::AssumeUtxoArchive {
             base: tip_hash.to_le_bytes(),
         },
     );
@@ -993,7 +1001,7 @@ fn seed_mutation_check_digest_removal_fails() {
     let mut artifact = VerifiedSnapshotArtifact::seal(
         file,
         witness,
-        bitcoin_rs_utxo::SeedProvenance::AssumeUtxoArchive {
+        bitcoin_rs_storage::utxo::SeedProvenance::AssumeUtxoArchive {
             base: tip_hash.to_le_bytes(),
         },
     );
@@ -1002,7 +1010,10 @@ fn seed_mutation_check_digest_removal_fails() {
         &|| false,
     );
     assert!(
-        matches!(result, Err(bitcoin_rs_utxo::RawSeedError::Integrity)),
+        matches!(
+            result,
+            Err(bitcoin_rs_storage::utxo::RawSeedError::Integrity)
+        ),
         "only the digest comparison refuses a length-preserving flip"
     );
 }
@@ -1051,7 +1062,7 @@ fn seed_stop_while_paused_retains_bundle() {
             bundle
                 .artifact
                 .as_ref()
-                .map(bitcoin_rs_utxo::VerifiedSnapshotArtifact::tip),
+                .map(bitcoin_rs_storage::utxo::VerifiedSnapshotArtifact::tip),
             bundle.lease.as_ref().expect("pin kept").floor(),
         )
     };

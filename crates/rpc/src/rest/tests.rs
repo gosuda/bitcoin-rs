@@ -38,12 +38,12 @@ fn publish_active_chain(ctx: &Context, headers: &[Header]) -> Vec<Hash256> {
 
 struct PanicBlockSource;
 
-impl bitcoin_rs_chain::BlockBodySource for PanicBlockSource {
+impl bitcoin_rs_storage::block_body::BlockBodySource for PanicBlockSource {
     fn block_body(
         &self,
         _height: u32,
         _hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         panic!("exhausted render budget must not load a block body");
     }
 }

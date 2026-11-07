@@ -1,10 +1,10 @@
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_consensus::primitives::{Block, Hash256, deserialize};
-use bitcoin_rs_storage::{DurableHead, pruning::HistoryLease};
-use bitcoin_rs_utxo::contract::{
+use bitcoin_rs_storage::utxo::contract::{
     BlockSpends, BlockSpendsError, BlockUndoSource, HistoryUnavailable, UndoLoadError,
     block_spent_outputs, decode_undo_record_for_block,
 };
+use bitcoin_rs_storage::{DurableHead, pruning::HistoryLease};
 
 use crate::{AssumeUtxoDiskStatus, Chainstate};
 

@@ -9,7 +9,7 @@ use bitcoin_rs_consensus::primitives::{
     TxOut, Witness,
 };
 use bitcoin_rs_consensus::{ScriptExecutionCache, UtxoView, ValidationEngine};
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::UtxoSet;
 
 use crate::Chainstate;
 use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};

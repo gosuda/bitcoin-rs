@@ -2,9 +2,9 @@ use std::path::Path;
 
 use bitcoin::consensus::encode::serialize;
 use bitcoin_rs_consensus::primitives::{Block as PrimitiveBlock, OutPoint, deserialize};
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener, scan_coin_stats};
-use bitcoin_rs_utxo::{UtxoError, UtxoSet, write_snapshot_observed};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener, scan_coin_stats};
+use bitcoin_rs_storage::utxo::{UtxoError, UtxoSet, write_snapshot_observed};
 
 use crate::chain::Chain;
 use crate::convert;

@@ -7,7 +7,7 @@ use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, LockTime, Network,
     OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::UtxoSet;
 use parking_lot::Mutex;
 
 use super::{ApplyError, AssumeValidGate, Chainstate, WindowApplyDisposition, WindowApplyError};

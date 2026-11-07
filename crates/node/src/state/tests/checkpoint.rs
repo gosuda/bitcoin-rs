@@ -46,8 +46,9 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> Result<(), Tes
 #[test]
 fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError> {
     fn stable_hash(
-        view: &bitcoin_rs_utxo::UtxoSetView<'_>,
-    ) -> Result<bitcoin_rs_consensus::primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
+        view: &bitcoin_rs_storage::utxo::UtxoSetView<'_>,
+    ) -> Result<bitcoin_rs_consensus::primitives::Hash256, bitcoin_rs_storage::utxo::UtxoError>
+    {
         view.hash_serialized_3()
     }
     let dir = tempfile::tempdir()?;
@@ -112,7 +113,7 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
         .chainstate()
         .utxo_handle()
         .with_stable_view(|view| {
-            bitcoin_rs_utxo::stats::scan_coin_stats(view, next_tip.height, true)
+            bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, next_tip.height, true)
         })?;
     rescanned.tx_count = listener_after_apply.tx_count;
     assert_eq!(
@@ -129,7 +130,8 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
         .ok_or_else(|| std::io::Error::other("CURRENT has no generation directory"))?;
     let snapshot_file = std::fs::File::open(root.join(directory).join("utxo-v4.dat"))?;
     let mut snapshot_reader = std::io::BufReader::new(snapshot_file);
-    let snapshot = bitcoin_rs_utxo::snapshot::read_snapshot_strict_v4(&mut snapshot_reader)?;
+    let snapshot =
+        bitcoin_rs_storage::utxo::snapshot::read_snapshot_strict_v4(&mut snapshot_reader)?;
     assert_ne!(snapshot.muhash_trailer, [0_u8; 384]);
     assert_eq!(snapshot.muhash_trailer, rescanned.muhash.finalize());
     drop(resumed);
@@ -180,8 +182,9 @@ fn clean_checkpoint_lifecycle_is_backend_neutral() -> Result<(), TestError> {
 #[test]
 fn journal_replay_restores_state_above_checkpoint() -> Result<(), TestError> {
     fn stable_hash(
-        view: &bitcoin_rs_utxo::UtxoSetView<'_>,
-    ) -> Result<bitcoin_rs_consensus::primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
+        view: &bitcoin_rs_storage::utxo::UtxoSetView<'_>,
+    ) -> Result<bitcoin_rs_consensus::primitives::Hash256, bitcoin_rs_storage::utxo::UtxoError>
+    {
         view.hash_serialized_3()
     }
 

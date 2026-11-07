@@ -20,7 +20,7 @@ fn checkpoint_roundtrip_preserves_record_with_440_outputs() -> TestResult {
         ));
     }
     let utxo = UtxoSet::new();
-    bitcoin_rs_utxo::contract::commit_block_changes(&utxo, &changes, &Hash256::default())?;
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(&utxo, &changes, &Hash256::default())?;
 
     super::super::write_checkpoint(
         dir.path(),
@@ -67,7 +67,7 @@ fn scanned_trailer_restores_independently_scanned_stats() -> TestResult {
     let current: CurrentV1 = sonic_rs::from_slice(&fs::read(root.join(CURRENT_FILE))?)?;
     let generation = root.join(current.directory);
     let mut reader = std::io::BufReader::new(std::fs::File::open(generation.join(UTXO_FILE))?);
-    let snapshot = bitcoin_rs_utxo::snapshot::read_snapshot_strict_v4(&mut reader)?;
+    let snapshot = bitcoin_rs_storage::utxo::snapshot::read_snapshot_strict_v4(&mut reader)?;
     assert_ne!(snapshot.muhash_trailer, [0_u8; 384]);
     assert_eq!(snapshot.muhash_trailer, expected.muhash.finalize());
 
@@ -88,7 +88,7 @@ fn scanned_trailer_restores_independently_scanned_stats() -> TestResult {
         false,
         restored.applied_tip.height,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &restored.utxo,
         &changes,
         &Hash256::from_le_bytes(&[0xa5; 32]),

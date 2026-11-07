@@ -16,9 +16,9 @@ use bitcoin_rs_storage::InMemoryUndoStore;
 pub use bitcoin_rs_storage::KvUndoStore;
 pub use bitcoin_rs_storage::UndoStore;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
-use bitcoin_rs_utxo::contract::SpentOutputLookup;
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
-use bitcoin_rs_utxo::{UtxoCoin, UtxoSet};
+use bitcoin_rs_storage::utxo::contract::SpentOutputLookup;
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
+use bitcoin_rs_storage::utxo::{UtxoCoin, UtxoSet};
 use connect::{apply_block_admitted, apply_committed_block_admitted};
 use disconnect::disconnect_block_admitted;
 pub use durable::recover_disconnect_marker;
@@ -35,6 +35,7 @@ mod durable;
 #[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 pub mod fuzzing;
+pub(crate) mod overlay;
 mod prepare;
 mod tip_wait;
 mod window;
@@ -406,7 +407,7 @@ pub struct Chainstate {
     pub(crate) applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     pub(crate) block_tree: Arc<RwLock<BlockTree>>,
     pub(crate) utxo: Arc<UtxoSet>,
-    pub(crate) coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
+    pub(crate) coin_stats: Arc<bitcoin_rs_storage::utxo::stats::CoinStatsListener>,
     pub(crate) chain_events: Arc<crate::events::ChainEventPublisher>,
     pub(crate) block_body_store: Option<Arc<dyn BlockBodyStore>>,
     pub(crate) undo_store: Arc<dyn UndoStore>,
@@ -441,7 +442,7 @@ pub struct ChainstateParts {
     pub block_tree: BlockTree,
     pub restored_applied_tip: Option<TipSnapshot>,
     pub utxo: Arc<UtxoSet>,
-    pub coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
+    pub coin_stats: Arc<bitcoin_rs_storage::utxo::stats::CoinStatsListener>,
     pub chain_events: Arc<crate::events::ChainEventPublisher>,
     pub block_body_store: Option<Arc<dyn BlockBodyStore>>,
     pub undo_store: Arc<dyn UndoStore>,
@@ -599,8 +600,8 @@ impl Chainstate {
 
     fn install_snapshot(
         &self,
-        snapshot_set: bitcoin_rs_utxo::UtxoSet,
-        mut stats: bitcoin_rs_utxo::stats::CoinStats,
+        snapshot_set: bitcoin_rs_storage::utxo::UtxoSet,
+        mut stats: bitcoin_rs_storage::utxo::stats::CoinStats,
         pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
         persist: impl FnOnce(
             &BlockTree,
@@ -908,12 +909,12 @@ impl Chainstate {
     }
 
     #[must_use]
-    pub fn utxo_reader(&self) -> bitcoin_rs_utxo::UtxoReader {
-        bitcoin_rs_utxo::UtxoReader::new(Arc::clone(&self.utxo))
+    pub fn utxo_reader(&self) -> bitcoin_rs_storage::utxo::UtxoReader {
+        bitcoin_rs_storage::utxo::UtxoReader::new(Arc::clone(&self.utxo))
     }
 
     #[must_use]
-    pub fn coin_stats_handle(&self) -> Arc<bitcoin_rs_utxo::stats::CoinStatsListener> {
+    pub fn coin_stats_handle(&self) -> Arc<bitcoin_rs_storage::utxo::stats::CoinStatsListener> {
         Arc::clone(&self.coin_stats)
     }
 
@@ -1058,7 +1059,7 @@ impl Chainstate {
         applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
         block_tree: Arc<RwLock<BlockTree>>,
         utxo: Arc<UtxoSet>,
-        coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
+        coin_stats: Arc<bitcoin_rs_storage::utxo::stats::CoinStatsListener>,
         chain_events: Arc<crate::events::ChainEventPublisher>,
     ) -> Self {
         let assume_valid_gate = Arc::new(AssumeValidGate::new(network, 0));
@@ -1129,7 +1130,7 @@ impl Chainstate {
         &mut self,
         data_dir: &std::path::Path,
         durable_tip_height: Arc<std::sync::atomic::AtomicU32>,
-        seed_offer: Option<bitcoin_rs_utxo::SeedOfferCell>,
+        seed_offer: Option<bitcoin_rs_storage::utxo::SeedOfferCell>,
     ) -> core::result::Result<(), CheckpointSetupError> {
         let checkpoint_data_dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)?;
         let block_body_store = self
@@ -1275,7 +1276,7 @@ impl Chainstate {
 struct DisconnectPlan {
     parent_tip: TipSnapshot,
     parent_prev_hash: Hash256,
-    undo: bitcoin_rs_utxo::contract::UndoBatch,
+    undo: bitcoin_rs_storage::utxo::contract::UndoBatch,
     height: u32,
     tx_count_delta: u64,
 }
@@ -1428,7 +1429,7 @@ struct ResolvedUtxoView {
 }
 
 impl ResolvedUtxoView {
-    fn resolve<S: bitcoin_rs_utxo::contract::OutputSource + ?Sized>(
+    fn resolve<S: bitcoin_rs_storage::utxo::contract::OutputSource + ?Sized>(
         utxo: &S,
         block: &Block,
         tx_plan: &BlockTxPlan,

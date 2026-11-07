@@ -79,13 +79,13 @@ impl BlockBodyStore for MapBodyStore {
 }
 
 #[derive(Default)]
-struct BranchCoins(Vec<bitcoin_rs_utxo::UtxoCoin>);
+struct BranchCoins(Vec<bitcoin_rs_storage::utxo::UtxoCoin>);
 
-impl bitcoin_rs_utxo::contract::SpentOutputLookup for BranchCoins {
+impl bitcoin_rs_storage::utxo::contract::SpentOutputLookup for BranchCoins {
     fn entry(
         &self,
         outpoint: &bitcoin_rs_consensus::primitives::OutPoint,
-    ) -> Option<&bitcoin_rs_utxo::UtxoCoin> {
+    ) -> Option<&bitcoin_rs_storage::utxo::UtxoCoin> {
         self.0.iter().find(|coin| coin.outpoint == *outpoint)
     }
 }
@@ -99,7 +99,7 @@ impl BranchCoins {
     ) {
         for (tx, txid) in block.txs.iter().zip(txids) {
             for (vout, txout) in tx.outputs.iter().enumerate() {
-                self.0.push(bitcoin_rs_utxo::UtxoCoin {
+                self.0.push(bitcoin_rs_storage::utxo::UtxoCoin {
                     outpoint: bitcoin_rs_consensus::primitives::OutPoint::new(
                         *txid,
                         u32::try_from(vout).expect("vout"),
@@ -259,8 +259,8 @@ impl ForkFixture {
             };
             let txids = block.txids();
             if height > 0 {
-                let (_, undo, _) = bitcoin_rs_utxo::contract::build_block_changes(
-                    &bitcoin_rs_utxo::contract::BlockChangeInputs {
+                let (_, undo, _) = bitcoin_rs_storage::utxo::contract::build_block_changes(
+                    &bitcoin_rs_storage::utxo::contract::BlockChangeInputs {
                         block: &block,
                         height,
                         txids: &txids,
@@ -273,7 +273,7 @@ impl ForkFixture {
                     &coins,
                 )
                 .expect("undo batch");
-                let record = bitcoin_rs_utxo::contract::persist_block_undo(
+                let record = bitcoin_rs_storage::utxo::contract::persist_block_undo(
                     &store,
                     height,
                     Hash256::from_le_bytes(&key.1),
@@ -690,7 +690,7 @@ fn held_prefix() -> (ForkFixture, SeedCellHarness, BodyMap) {
     h.cell.want();
     assert_eq!(
         h.cell.offer(artifact),
-        bitcoin_rs_utxo::OfferOutcome::Stored
+        bitcoin_rs_storage::utxo::OfferOutcome::Stored
     );
     h.set_tip(&tip);
     h.settle_stalled(&mut None);
@@ -776,7 +776,7 @@ fn retained_prefix() -> (ForkFixture, SeedCellHarness, AbsentBody) {
     h.cell.want();
     assert_eq!(
         h.cell.offer(artifact),
-        bitcoin_rs_utxo::OfferOutcome::Stored
+        bitcoin_rs_storage::utxo::OfferOutcome::Stored
     );
     h.set_tip(&tip);
     assert!(matches!(
@@ -888,7 +888,7 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
         h.cell.want();
         assert_eq!(
             h.cell.offer(artifact),
-            bitcoin_rs_utxo::OfferOutcome::Stored
+            bitcoin_rs_storage::utxo::OfferOutcome::Stored
         );
         h.set_tip(&a2);
         h.settle(&mut None);
@@ -927,7 +927,7 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
             h.cell.want();
             assert_eq!(
                 h.cell.offer(artifact),
-                bitcoin_rs_utxo::OfferOutcome::Stored
+                bitcoin_rs_storage::utxo::OfferOutcome::Stored
             );
         }
         h.settle(&mut pending);
@@ -1078,7 +1078,10 @@ fn script_live_pruned_terminal_keeps_worker_alive() {
 
     let (token, _keep) = cell_seed_artifact(t.hash, t.height, 32);
     h.cell.want();
-    assert_eq!(h.cell.offer(token), bitcoin_rs_utxo::OfferOutcome::Stored);
+    assert_eq!(
+        h.cell.offer(token),
+        bitcoin_rs_storage::utxo::OfferOutcome::Stored
+    );
     h.settle(&mut pending);
     assert!(
         h.runtime.script_live_failure().is_none(),
@@ -1107,7 +1110,10 @@ fn seed_first_leg_consumes_held_lease() {
     let h_tip = f.tip(f.a[1]);
     let (token, _keep) = cell_seed_artifact(h_tip.hash, h_tip.height, 32);
     h.cell.want();
-    assert_eq!(h.cell.offer(token), bitcoin_rs_utxo::OfferOutcome::Stored);
+    assert_eq!(
+        h.cell.offer(token),
+        bitcoin_rs_storage::utxo::OfferOutcome::Stored
+    );
     h.set_tip(&f.tip(f.a[3]));
     let absent = f.a_key(3);
     let withheld = f
@@ -1171,7 +1177,7 @@ struct SeedCellHarness {
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     runtime: Arc<DerivedIndexRuntime>,
     retention: Arc<RetentionRegistry>,
-    cell: bitcoin_rs_utxo::SeedOfferCell,
+    cell: bitcoin_rs_storage::utxo::SeedOfferCell,
     worker: Worker,
 }
 
@@ -1188,7 +1194,8 @@ impl SeedCellHarness {
         let reporter: Arc<dyn IndexAheadSink> = RecordedIndexAhead::new();
         let body_store: Arc<dyn BlockBodyStore> = fixture.bodies.clone();
         let retention = Arc::new(RetentionRegistry::new());
-        let cell: bitcoin_rs_utxo::SeedOfferCell = Arc::new(bitcoin_rs_utxo::SeedSlot::new());
+        let cell: bitcoin_rs_storage::utxo::SeedOfferCell =
+            Arc::new(bitcoin_rs_storage::utxo::SeedSlot::new());
         let worker = Worker {
             runtime: Arc::clone(&runtime),
             writer: Arc::clone(&writer),
@@ -1271,14 +1278,17 @@ fn cell_seed_artifact(
     tip: Hash256,
     height: u32,
     n: u64,
-) -> (bitcoin_rs_utxo::VerifiedSnapshotArtifact, tempfile::TempDir) {
-    let set = bitcoin_rs_utxo::UtxoSet::new();
-    let mut changes = bitcoin_rs_utxo::contract::BlockChanges::default();
+) -> (
+    bitcoin_rs_storage::utxo::VerifiedSnapshotArtifact,
+    tempfile::TempDir,
+) {
+    let set = bitcoin_rs_storage::utxo::UtxoSet::new();
+    let mut changes = bitcoin_rs_storage::utxo::contract::BlockChanges::default();
     for i in 0..n {
         let mut bytes = [0_u8; 32];
         bytes[..8].copy_from_slice(&i.to_le_bytes());
         let txid = Hash256::from_le_bytes(&bytes);
-        changes.add(bitcoin_rs_utxo::contract::UtxoAdd::new(
+        changes.add(bitcoin_rs_storage::utxo::contract::UtxoAdd::new(
             bitcoin_rs_consensus::primitives::OutPoint::new(txid.into(), 0),
             bitcoin_rs_consensus::primitives::TxOut {
                 value: bitcoin_rs_consensus::primitives::Amount::from_sat(1_000 + i),
@@ -1288,10 +1298,11 @@ fn cell_seed_artifact(
             height,
         ));
     }
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &tip).expect("commit coins");
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(&set, &changes, &tip)
+        .expect("commit coins");
     let mut bytes = Vec::new();
     let (_, (), witness) =
-        bitcoin_rs_utxo::write_snapshot_witnessed(&set, &tip, height, &mut bytes, ())
+        bitcoin_rs_storage::utxo::write_snapshot_witnessed(&set, &tip, height, &mut bytes, ())
             .expect("witnessed encode");
     let witness = witness.expect("valid encode mints a witness");
     let dir = tempfile::tempdir().expect("artifact dir");
@@ -1299,12 +1310,12 @@ fn cell_seed_artifact(
     std::fs::write(&path, &bytes).expect("stage artifact");
     let mut file = std::fs::File::open(&path).expect("open artifact");
     let (_, (), read_witness) =
-        bitcoin_rs_utxo::read_snapshot_strict_v4_witnessed(&mut file, ()).expect("decode");
+        bitcoin_rs_storage::utxo::read_snapshot_strict_v4_witnessed(&mut file, ()).expect("decode");
     assert_eq!(read_witness.sha256(), witness.sha256());
-    let artifact = bitcoin_rs_utxo::VerifiedSnapshotArtifact::seal(
+    let artifact = bitcoin_rs_storage::utxo::VerifiedSnapshotArtifact::seal(
         file,
         read_witness,
-        bitcoin_rs_utxo::SeedProvenance::AssumeUtxoArchive {
+        bitcoin_rs_storage::utxo::SeedProvenance::AssumeUtxoArchive {
             base: tip.to_le_bytes(),
         },
     );

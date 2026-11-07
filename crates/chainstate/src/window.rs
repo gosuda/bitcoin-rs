@@ -28,7 +28,7 @@ pub(super) enum PublishMode<'a> {
 
 pub(super) struct PendingBlockCommit {
     pub outcome: ConnectOutcome,
-    pub undo_record: bitcoin_rs_utxo::contract::UndoRecord,
+    pub undo_record: bitcoin_rs_storage::utxo::contract::UndoRecord,
     pub prev_hash: Hash256,
     /// The derived journal record, emitted at flush — after the batch, so
     /// the journal never leads the durable head.
@@ -498,7 +498,7 @@ fn prepare_window<'a>(
     metrics::histogram!("node.window.parse_seconds").record(parse_started.elapsed().as_secs_f64());
 
     let prepare_started = quanta::Instant::now();
-    let mut overlay = bitcoin_rs_utxo::WindowOverlay::new(
+    let mut overlay = crate::overlay::WindowOverlay::new(
         handles.utxo.as_ref(),
         bitcoin_rs_consensus::MAX_SCRIPT_SIZE,
     );

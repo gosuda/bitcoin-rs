@@ -18,18 +18,15 @@ test-seam = []
 silent-payments = ["dep:secp256k1"]
 surrealkv = [
     "bitcoin-rs-storage/surrealkv",
-    "bitcoin-rs-utxo/surrealkv",
 ]
 mdbx = [
     "bitcoin-rs-storage/mdbx",
-    "bitcoin-rs-utxo/mdbx",
 ]
 
 [dependencies]
 bitcoin-rs-consensus.workspace = true
 bitcoin-rs-storage = { workspace = true, default-features = false }
 bitcoin-rs-chain.workspace = true
-bitcoin-rs-utxo.workspace = true
 arc-swap.workspace = true
 compact_str.workspace = true
 crossbeam-channel.workspace = true

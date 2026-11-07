@@ -29,7 +29,7 @@ fn operational_failures_are_not_block_rejections() {
                 expected: Hash256::default(),
                 found: Hash256::from_le_bytes(&[1; 32]),
             },
-            ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord),
+            ApplyError::UtxoCommit(bitcoin_rs_storage::utxo::UtxoError::CorruptRecord),
             ApplyError::BlockBodyPersistence(StorageError::InvalidOperation("body write failed")),
             ApplyError::UndoPersistence(StorageError::InvalidOperation("undo write failed")),
             ApplyError::DurableHeadCommit(StorageError::InvalidOperation("head write failed")),

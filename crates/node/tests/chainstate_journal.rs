@@ -11,8 +11,8 @@ use bitcoin_rs_consensus::primitives::{BlockHash, Hash256};
 use std::time::{Duration, Instant};
 
 fn stable_utxo_hash(
-    view: &bitcoin_rs_utxo::UtxoSetView<'_>,
-) -> Result<Hash256, bitcoin_rs_utxo::UtxoError> {
+    view: &bitcoin_rs_storage::utxo::UtxoSetView<'_>,
+) -> Result<Hash256, bitcoin_rs_storage::utxo::UtxoError> {
     view.hash_serialized_3()
 }
 
@@ -346,8 +346,8 @@ fn retention_pressure_stops_apply_before_tip_mutation() -> Result<()> {
 }
 
 fn assert_semantic_coin_stats_eq(
-    left: &bitcoin_rs_utxo::stats::CoinStats,
-    right: &bitcoin_rs_utxo::stats::CoinStats,
+    left: &bitcoin_rs_storage::utxo::stats::CoinStats,
+    right: &bitcoin_rs_storage::utxo::stats::CoinStats,
 ) {
     assert_eq!(left.height, right.height);
     assert_eq!(left.total_amount, right.total_amount);

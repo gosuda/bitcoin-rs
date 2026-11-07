@@ -135,9 +135,9 @@ mod tests {
             network,
             genesis_hash: network.genesis_block_hash(),
             block_tree: Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
-            utxo: Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
-            coin_stats: Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
-                bitcoin_rs_utxo::stats::CoinStats::default(),
+            utxo: Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
+            coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
+                bitcoin_rs_storage::utxo::stats::CoinStats::default(),
             )),
             journal: Arc::new(parking_lot::RwLock::new(None)),
             seed_offer: None,

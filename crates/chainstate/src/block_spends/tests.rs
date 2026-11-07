@@ -9,11 +9,11 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::{HistoryAccess, HistoryUnavailable, RetentionBudget};
-use bitcoin_rs_storage::{CommitRecords, InMemoryUndoStore, StorageError, UndoStore};
-use bitcoin_rs_utxo::{
+use bitcoin_rs_storage::utxo::{
     UtxoSet,
     contract::{BlockSpendsError, BlockUndoSource, UndoLoadError},
 };
+use bitcoin_rs_storage::{CommitRecords, InMemoryUndoStore, StorageError, UndoStore};
 use parking_lot::Mutex;
 
 use crate::{
@@ -358,7 +358,7 @@ fn retained_inputs_preserve_transaction_and_input_order_after_disconnect() -> Te
         assert_eq!(record.block, block);
         let rows = record.spent?;
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0], Vec::<bitcoin_rs_utxo::UtxoCoin>::new());
+        assert_eq!(rows[0], Vec::<bitcoin_rs_storage::utxo::UtxoCoin>::new());
         assert_eq!(rows[1].len(), 2);
         assert_eq!(rows[2].len(), 2);
         for (coin, (tx, height)) in rows[1].iter().zip([(second, 2), (first, 1)]) {

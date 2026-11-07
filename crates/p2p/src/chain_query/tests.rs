@@ -44,7 +44,7 @@ impl BlockBodySource for SingleBlockSource {
         &self,
         height: u32,
         hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         Ok((height == self.height && hash == self.hash).then(|| self.body.clone()))
     }
 }
@@ -60,7 +60,7 @@ impl BlockBodySource for CountingBodySource {
         &self,
         height: u32,
         hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         if let Some(limit) = self.tripwire {
             assert!(
                 self.loads.load(Ordering::Relaxed) < limit,
@@ -1137,7 +1137,7 @@ fn getdata_block_encodings_recheck_active_chain_after_body_load() -> TestResult 
             &self,
             _height: u32,
             _hash: BlockHash,
-        ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+        ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
             *self.tree.write() = BlockTree::new();
             Ok(Some(self.body.clone()))
         }
@@ -2155,28 +2155,30 @@ fn serving_rechecks_reorg_invalidation_and_age_after_io() -> TestResult {
             &self,
             height: u32,
             hash: BlockHash,
-        ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+        ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
             let mut tree = self.tree.write();
             match self.change {
                 1 => {
                     let id = tree.lookup(hash.into()).ok_or_else(|| {
-                        bitcoin_rs_chain::BlockBodyReadError::Read(
+                        bitcoin_rs_storage::block_body::BlockBodyReadError::Read(
                             "fixture node missing".to_owned(),
                         )
                     })?;
                     tree.invalidate_subtree(id).map_err(|error| {
-                        bitcoin_rs_chain::BlockBodyReadError::Read(error.to_string())
+                        bitcoin_rs_storage::block_body::BlockBodyReadError::Read(error.to_string())
                     })?;
                 }
                 2 => {
                     let tip = tree.tip_id().ok_or_else(|| {
-                        bitcoin_rs_chain::BlockBodyReadError::Read(
+                        bitcoin_rs_storage::block_body::BlockBodyReadError::Read(
                             "fixture node missing".to_owned(),
                         )
                     })?;
                     tree.node_mut(tip)
                         .map_err(|error| {
-                            bitcoin_rs_chain::BlockBodyReadError::Read(error.to_string())
+                            bitcoin_rs_storage::block_body::BlockBodyReadError::Read(
+                                error.to_string(),
+                            )
                         })?
                         .header
                         .time = 2_592_001;
@@ -2254,14 +2256,18 @@ fn getblocktxn_rechecks_inventory_policy_when_io_crosses_depth_ten() -> TestResu
             &self,
             height: u32,
             hash: BlockHash,
-        ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+        ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
             let mut tree = self.tree.write();
             let old_tip = tree.tip_id().ok_or_else(|| {
-                bitcoin_rs_chain::BlockBodyReadError::Read("fixture node missing".to_owned())
+                bitcoin_rs_storage::block_body::BlockBodyReadError::Read(
+                    "fixture node missing".to_owned(),
+                )
             })?;
             let mut header = test_header(
                 tree.node(old_tip)
-                    .map_err(|error| bitcoin_rs_chain::BlockBodyReadError::Read(error.to_string()))?
+                    .map_err(|error| {
+                        bitcoin_rs_storage::block_body::BlockBodyReadError::Read(error.to_string())
+                    })?
                     .hash
                     .into(),
                 200,
@@ -2270,14 +2276,18 @@ fn getblocktxn_rechecks_inventory_policy_when_io_crosses_depth_ten() -> TestResu
                 header.time = 2_592_001;
             }
             tree.insert_node(Some(old_tip), header, NodeStatus::HeaderValid)
-                .map_err(|error| bitcoin_rs_chain::BlockBodyReadError::Read(error.to_string()))?;
+                .map_err(|error| {
+                    bitcoin_rs_storage::block_body::BlockBodyReadError::Read(error.to_string())
+                })?;
             if self.change == 1 {
                 let stale_id = tree.lookup(hash.into()).ok_or_else(|| {
-                    bitcoin_rs_chain::BlockBodyReadError::Read("fixture node missing".to_owned())
+                    bitcoin_rs_storage::block_body::BlockBodyReadError::Read(
+                        "fixture node missing".to_owned(),
+                    )
                 })?;
                 tree.restore_chain_tx_count(stale_id, bitcoin_rs_chain::ChainTxCount::UNKNOWN)
                     .map_err(|error| {
-                        bitcoin_rs_chain::BlockBodyReadError::Read(error.to_string())
+                        bitcoin_rs_storage::block_body::BlockBodyReadError::Read(error.to_string())
                     })?;
             }
             self.applied.store(tree.tip());

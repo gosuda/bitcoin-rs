@@ -12,7 +12,6 @@ use super::storage::StoredBlockBodySource;
 use crate::NodeConfig;
 use crate::config::ConfigError;
 
-use bitcoin_rs_chain::BlockBodySource;
 use bitcoin_rs_chainstate::ChainstateParts;
 use bitcoin_rs_chainstate::events::{
     ChainEventPublisher, ChainSnapshot, DataDirError, initialize_data_dir,
@@ -32,6 +31,7 @@ use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolLimits;
 use bitcoin_rs_p2p::download_window::FAST_OUTBOUND_PEER_TARGET;
 use bitcoin_rs_p2p::download_window::fast_sync_budget;
+use bitcoin_rs_storage::block_body::BlockBodySource;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use std::path::PathBuf;
@@ -342,7 +342,7 @@ impl NodeState {
             tip_height: restored_applied_tip.as_ref().map_or(0, |tip| tip.height),
         };
         let coin_stats_listener =
-            bitcoin_rs_utxo::stats::CoinStatsListener::new(initial_coin_stats);
+            bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(initial_coin_stats);
         utxo_set.track_coin_stats(coin_stats_listener.clone());
         let journal = match journal_bootstrap {
             Some(bootstrap) => Some(
@@ -384,11 +384,13 @@ impl NodeState {
             history: storage.bounded_history(),
             role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
         });
-        let seed_offer: Option<bitcoin_rs_utxo::SeedOfferCell> =
+        let seed_offer: Option<bitcoin_rs_storage::utxo::SeedOfferCell> =
             if !derived_index_capabilities(&config).is_empty()
                 && config.indexes.script_index.is_enabled()
             {
-                Some(std::sync::Arc::new(bitcoin_rs_utxo::SeedSlot::new()))
+                Some(std::sync::Arc::new(
+                    bitcoin_rs_storage::utxo::SeedSlot::new(),
+                ))
             } else {
                 None
             };
@@ -407,7 +409,7 @@ impl NodeState {
         }
         let derived_index_parts = match derived_index_open_spec {
             Some(mut spec) => {
-                spec.utxo = Some(bitcoin_rs_utxo::UtxoReader::new(Arc::clone(&utxo)));
+                spec.utxo = Some(bitcoin_rs_storage::utxo::UtxoReader::new(Arc::clone(&utxo)));
                 spec.chain_transition = Some(transition.stable_read());
                 let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
                 let runtime =

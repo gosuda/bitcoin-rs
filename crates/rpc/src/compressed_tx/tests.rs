@@ -1051,7 +1051,7 @@ fn missing_context_degrades_compress_but_refuses_decompress() {
 fn production_resolver_resolves_through_block_bodies() {
     use std::sync::Arc;
 
-    use bitcoin_rs_chain::BlockBodySource;
+    use bitcoin_rs_storage::block_body::BlockBodySource;
     use sonic_rs::json;
 
     use crate::context::Context;
@@ -1063,7 +1063,7 @@ fn production_resolver_resolves_through_block_bodies() {
             &self,
             height: u32,
             _hash: bitcoin_rs_consensus::primitives::BlockHash,
-        ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+        ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
             Ok((height == 100).then(|| self.0.clone()))
         }
     }
@@ -1569,7 +1569,7 @@ fn shared_sighash_cache_recovers_every_input() {
 fn production_resolver_clones_only_the_requested_output() {
     use std::sync::Arc;
 
-    use bitcoin_rs_chain::BlockBodySource;
+    use bitcoin_rs_storage::block_body::BlockBodySource;
 
     use crate::context::Context;
 
@@ -1579,7 +1579,7 @@ fn production_resolver_clones_only_the_requested_output() {
             &self,
             height: u32,
             _hash: bitcoin_rs_consensus::primitives::BlockHash,
-        ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+        ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
             Ok((height == 100).then(|| self.0.clone()))
         }
     }
@@ -1697,12 +1697,12 @@ struct CountingBodies {
     loads: std::sync::Mutex<HashMap<u32, usize>>,
 }
 
-impl bitcoin_rs_chain::BlockBodySource for CountingBodies {
+impl bitcoin_rs_storage::block_body::BlockBodySource for CountingBodies {
     fn block_body(
         &self,
         height: u32,
         _hash: bitcoin_rs_consensus::primitives::BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         if let Some(body) = self.bodies.get(&height) {
             *self.loads.lock().unwrap().entry(height).or_default() += 1;
             Ok(Some(body.clone()))
@@ -1724,7 +1724,7 @@ fn cycling_fixture(
     let mut ctx = crate::context::Context::new();
     let mut bodies = HashMap::new();
     let mut txids = Vec::new();
-    let mut changes = bitcoin_rs_utxo::contract::BlockChanges::default();
+    let mut changes = bitcoin_rs_storage::utxo::contract::BlockChanges::default();
     for (slot, &height) in heights.iter().enumerate() {
         let funding = funding_tx(TxOut {
             value: Amount::from_sat(10_000),
@@ -1734,7 +1734,7 @@ fn cycling_fixture(
         let mut block = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
         block.txs = vec![funding.clone()];
         bodies.insert(height, consensus_bytes(&block));
-        changes.add(bitcoin_rs_utxo::contract::UtxoAdd::new(
+        changes.add(bitcoin_rs_storage::utxo::contract::UtxoAdd::new(
             OutPoint::new(txid, 0),
             funding.outputs[0].clone(),
             false,
@@ -1755,7 +1755,7 @@ fn cycling_fixture(
             });
         txids.push(txid);
     }
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &bitcoin_rs_consensus::primitives::Hash256::default(),
@@ -1765,7 +1765,7 @@ fn cycling_fixture(
         bodies,
         loads: std::sync::Mutex::new(HashMap::new()),
     });
-    let object: Arc<dyn bitcoin_rs_chain::BlockBodySource> = source.clone();
+    let object: Arc<dyn bitcoin_rs_storage::block_body::BlockBodySource> = source.clone();
     ctx.chain.block_body_source = Some(object);
     (ctx, source, txids)
 }

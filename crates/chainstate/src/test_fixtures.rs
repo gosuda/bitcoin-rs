@@ -4,8 +4,8 @@ use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{Amount, Hash256, Network, OutPoint, TxOut, Txid};
 use bitcoin_rs_storage::chainstate_journal::Coin;
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
+use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use parking_lot::{Mutex, RwLock};
 
 use crate::{ApplyError, Chainstate, TipStagedHook};
@@ -107,19 +107,21 @@ pub(crate) enum TestError {
     #[error(transparent)]
     Consensus(#[from] bitcoin_rs_consensus::ConsensusError),
     #[error(transparent)]
-    Utxo(#[from] bitcoin_rs_utxo::UtxoError),
+    Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error(transparent)]
-    BlockSpends(#[from] bitcoin_rs_utxo::contract::BlockSpendsError),
+    BlockSpends(#[from] bitcoin_rs_storage::utxo::contract::BlockSpendsError),
     #[error(transparent)]
-    UndoLoad(#[from] bitcoin_rs_utxo::contract::UndoLoadError),
+    UndoLoad(#[from] bitcoin_rs_storage::utxo::contract::UndoLoadError),
     #[error(transparent)]
-    BlockChange(#[from] bitcoin_rs_utxo::contract::BlockChangeError),
+    BlockChange(#[from] bitcoin_rs_storage::utxo::contract::BlockChangeError),
     #[error(transparent)]
-    Snapshot(#[from] bitcoin_rs_utxo::core_snapshot::SnapshotError),
+    Snapshot(#[from] bitcoin_rs_storage::utxo::core_snapshot::SnapshotError),
     #[error(transparent)]
-    StateVerify(#[from] bitcoin_rs_utxo::core_snapshot::StateVerifyError),
+    StateVerify(#[from] bitcoin_rs_storage::utxo::core_snapshot::StateVerifyError),
     #[error(transparent)]
-    RawSeed(#[from] bitcoin_rs_utxo::snapshot::RawSeedError<std::convert::Infallible>),
+    RawSeed(#[from] bitcoin_rs_storage::utxo::snapshot::RawSeedError<std::convert::Infallible>),
+    #[error(transparent)]
+    Overlay(#[from] crate::overlay::WindowOverlayError),
     #[error(transparent)]
     Apply(#[from] crate::ApplyError),
     #[error(transparent)]

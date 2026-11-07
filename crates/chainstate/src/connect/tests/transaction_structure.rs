@@ -23,8 +23,10 @@ fn zero_output_coinbase_never_publishes_under_any_script_policy() -> TestResult 
         for mode in [ValidationMode::Full, ValidationMode::AssumeValid] {
             for path in [Path::Direct, Path::Proposal, Path::Window] {
                 for spends in 0..=if height == 101 { 2 } else { 0 } {
-                    let mut chain =
-                        handles(Network::Regtest, Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
+                    let mut chain = handles(
+                        Network::Regtest,
+                        Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
+                    );
                     seed_genesis(&chain)?;
                     let parent = apply_regtest_chain_to_height(&chain, height - 1)?;
                     let funding = OutPoint::new(coinbase(1).txid(), 0);
@@ -117,7 +119,10 @@ fn zero_output_coinbase_never_publishes_under_any_script_policy() -> TestResult 
 fn proposal_and_commit_agree_on_coinbase_finality_without_proposal_side_effects() -> TestResult {
     let non_final_time = Network::Regtest.genesis_block().header.time + 101;
     for (locktime, is_final) in [(100, true), (101, false), (non_final_time, false)] {
-        let chain = handles(Network::Regtest, Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
+        let chain = handles(
+            Network::Regtest,
+            Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
+        );
         seed_genesis(&chain)?;
         let parent = apply_regtest_chain_to_height(&chain, 100)?;
         let mut block = mined_child(parent, 101)?;

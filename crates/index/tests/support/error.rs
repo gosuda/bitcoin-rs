@@ -17,9 +17,9 @@ pub(crate) enum TestError {
     #[error(transparent)]
     HexToArray(#[from] bitcoin::hex::HexToArrayError),
     #[error(transparent)]
-    BlockSpends(#[from] bitcoin_rs_utxo::contract::BlockSpendsError),
+    BlockSpends(#[from] bitcoin_rs_storage::utxo::contract::BlockSpendsError),
     #[error(transparent)]
-    HistoryUnavailable(#[from] bitcoin_rs_utxo::contract::HistoryUnavailable),
+    HistoryUnavailable(#[from] bitcoin_rs_storage::utxo::contract::HistoryUnavailable),
     #[cfg(feature = "silent-payments")]
     #[error(transparent)]
     Tweak(#[from] bitcoin_rs_index::silent_payments::TweakError),

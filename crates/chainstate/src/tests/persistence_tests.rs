@@ -9,13 +9,13 @@ use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, Network, OutPoint,
     Script, Tx, TxOut,
 };
+use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::contract::{BlockChangeInputs, build_block_changes};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_storage::{
     CommitRecords, DisconnectMarker, DurableHead, DurableHeadStore, InMemoryDurableHeadStore,
     InMemoryUndoStore, StorageError, UndoStore,
 };
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::contract::{BlockChangeInputs, build_block_changes};
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use hashbrown::HashMap;
 
 use super::{ApplyError, ResolvedUtxoView};
@@ -177,7 +177,7 @@ fn bip30_overwrite_undo_restores_original_coin() -> TestResult {
     };
     let mut seed = BlockChanges::default();
     seed.add(UtxoAdd::new(reused, older.clone(), true, 91_722));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &utxo,
         &seed,
         &Hash256::from_le_bytes(&[0x30; 32]),

@@ -425,7 +425,7 @@ impl FlatFileBlockStore {
         let recovered_offset = framed_stats_between(&mut file, scan_start, file_len)?.1;
         if recovered_offset != file_len {
             tracing::info!(
-                target: "bitcoin_rs_storage::block_file",
+                target: "crate::block_file",
                 file_no,
                 recovered_offset,
                 file_len,

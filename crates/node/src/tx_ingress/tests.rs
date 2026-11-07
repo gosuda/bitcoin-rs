@@ -12,7 +12,7 @@ use bitcoin_rs_mempool::{
 };
 use bitcoin_rs_mining::FakeMiningControl;
 use bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY;
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::UtxoSet;
 use parking_lot::{Mutex, RwLock};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -74,7 +74,7 @@ fn make_consumer(
     TxIngressConsumer,
     crossbeam_channel::Receiver<bitcoin_rs_p2p::RelayRequest>,
 ) {
-    use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+    use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
     let utxo = Arc::new(UtxoSet::new());
     let parent_txid = Txid::from(Hash256::from_le_bytes(&[0xAA; 32]));
     let mut changes = BlockChanges::with_capacity(1, 0);
@@ -94,7 +94,7 @@ fn make_consumer(
         false,
         100,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &utxo,
         &changes,
         &Hash256::from_le_bytes(&[0xBB; 32]),
@@ -102,7 +102,7 @@ fn make_consumer(
     .expect("utxo commit must succeed");
     let (relay, relay_rx) = TxRelayQueue::new(DEFAULT_TX_RELAY_QUEUE_CAPACITY);
     let consumer = TxIngressConsumer {
-        utxo: bitcoin_rs_utxo::UtxoReader::new(utxo),
+        utxo: bitcoin_rs_storage::utxo::UtxoReader::new(utxo),
         applied_tip: TipReader::new(Arc::new(ArcSwapOption::empty())),
         block_tree: BlockTreeReader::new(Arc::new(RwLock::new(BlockTree::new()))),
         network: Network::Regtest,

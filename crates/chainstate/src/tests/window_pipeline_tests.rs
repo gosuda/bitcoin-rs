@@ -14,11 +14,11 @@ use bitcoin_rs_consensus::primitives::{
     Tx, TxIn, TxOut, Txid, Witness,
 };
 use bitcoin_rs_consensus::script::opcode::OP_PUSHNUM_1;
+use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::{
     CommitRecords, DisconnectMarker, DurableHead, DurableHeadStore, InMemoryDurableHeadStore,
     InMemoryUndoStore, ScriptAttestation, StorageError, UndoStore,
 };
-use bitcoin_rs_utxo::UtxoSet;
 
 use super::{ApplyError, Chainstate, WindowApplyDisposition};
 use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};

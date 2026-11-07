@@ -6,7 +6,7 @@ use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_index::silent_payments::{BlockTweaks, block_tweaks};
-use bitcoin_rs_utxo::contract::{BlockSpendsError, BoundedReadError};
+use bitcoin_rs_storage::utxo::contract::{BlockSpendsError, BoundedReadError};
 use sonic_rs::{JsonValueTrait as _, Value, json};
 
 use crate::context::{AppliedView, Context};

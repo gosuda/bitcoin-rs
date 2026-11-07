@@ -1024,7 +1024,7 @@ pub(crate) fn verifychain(
 }
 
 struct TxOutSetScan {
-    stats: bitcoin_rs_utxo::stats::CoinStats,
+    stats: bitcoin_rs_storage::utxo::stats::CoinStats,
     txouts: usize,
     transactions: usize,
     set_hash: Option<(&'static str, String)>,
@@ -1063,8 +1063,8 @@ fn parse_txoutsetinfo_params(params: &Value) -> Result<&str, RpcError> {
 }
 
 fn compute_txoutset_hash(
-    stable: &bitcoin_rs_utxo::UtxoSetView<'_>,
-    stats: &bitcoin_rs_utxo::stats::CoinStats,
+    stable: &bitcoin_rs_storage::utxo::UtxoSetView<'_>,
+    stats: &bitcoin_rs_storage::utxo::stats::CoinStats,
     hash_type: &str,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<(&'static str, String)>, RpcError> {
@@ -1086,9 +1086,9 @@ fn compute_txoutset_hash(
     }
 }
 
-fn txoutset_walk_error(error: bitcoin_rs_utxo::UtxoError) -> RpcError {
+fn txoutset_walk_error(error: bitcoin_rs_storage::utxo::UtxoError) -> RpcError {
     match error {
-        bitcoin_rs_utxo::UtxoError::Cancelled => {
+        bitcoin_rs_storage::utxo::UtxoError::Cancelled => {
             RpcError::Misc("gettxoutsetinfo interrupted".to_owned())
         }
         error => RpcError::Internal(error.to_string()),
@@ -1106,7 +1106,7 @@ fn scan_txoutset_view(
     }
     let want_muhash = hash_type == "muhash";
     ctx.chain.utxo.with_stable_view(|stable| {
-        let stats = bitcoin_rs_utxo::stats::scan_coin_stats_cancellable(
+        let stats = bitcoin_rs_storage::utxo::stats::scan_coin_stats_cancellable(
             stable,
             view.height(),
             want_muhash,
@@ -1128,7 +1128,7 @@ fn scan_txoutset_view(
 fn execute_txoutset_scan(
     ctx: &Context,
     hash_type: &str,
-    permit: &bitcoin_rs_utxo::scan::UtxoScanPermit<'_>,
+    permit: &bitcoin_rs_storage::utxo::scan::UtxoScanPermit<'_>,
     cancellation: &bitcoin_rs_chain::LatchReader,
 ) -> Result<(AppliedView, TxOutSetScan), RpcError> {
     let cancelled = || permit.aborted() || cancellation.is_triggered();
@@ -1182,7 +1182,7 @@ pub(crate) fn gettxoutsetinfo(
 ) -> Result<Value, RpcError> {
     let hash_type = parse_txoutsetinfo_params(params)?;
     let scan_permit = ctx.chain.utxo.reserve_scan().map_err(|error| match error {
-        bitcoin_rs_utxo::scan::UtxoScanError::InProgress => {
+        bitcoin_rs_storage::utxo::scan::UtxoScanError::InProgress => {
             RpcError::InvalidParameter("a UTXO-wide scan is already running".to_owned())
         }
         error => RpcError::Internal(error.to_string()),
@@ -1360,9 +1360,9 @@ fn scan_arguments(params: &Value) -> Result<(&str, Option<&sonic_rs::Array>), Rp
     Ok((action, objects))
 }
 
-fn scan_error(error: &bitcoin_rs_utxo::scan::UtxoScanError) -> RpcError {
+fn scan_error(error: &bitcoin_rs_storage::utxo::scan::UtxoScanError) -> RpcError {
     match error {
-        bitcoin_rs_utxo::scan::UtxoScanError::InProgress => {
+        bitcoin_rs_storage::utxo::scan::UtxoScanError::InProgress => {
             RpcError::ScanInProgress(error.to_string())
         }
         _ => RpcError::Misc(error.to_string()),
@@ -1371,7 +1371,7 @@ fn scan_error(error: &bitcoin_rs_utxo::scan::UtxoScanError) -> RpcError {
 
 fn scantxoutset_scan(
     ctx: &Context,
-    permit: &bitcoin_rs_utxo::scan::UtxoScanPermit<'_>,
+    permit: &bitcoin_rs_storage::utxo::scan::UtxoScanPermit<'_>,
     scan_scripts: &std::collections::BTreeMap<Vec<u8>, String>,
     cancellation: &bitcoin_rs_chain::LatchReader,
 ) -> Result<Value, RpcError> {
@@ -1384,7 +1384,7 @@ fn scantxoutset_scan(
             break (
                 ctx.chain.applied_view(),
                 false,
-                bitcoin_rs_utxo::UtxoScan::default(),
+                bitcoin_rs_storage::utxo::UtxoScan::default(),
             );
         }
         if let Some(transition) = ctx
@@ -1443,7 +1443,7 @@ fn scantxoutset_scan(
 
 fn scan_ancestry(
     ctx: &Context,
-    scan: &bitcoin_rs_utxo::UtxoScan,
+    scan: &bitcoin_rs_storage::utxo::UtxoScan,
     applied: &AppliedView,
     cancelled: impl Fn() -> Result<bool, RpcError>,
     max_steps: usize,
@@ -1508,7 +1508,7 @@ fn parse_scan_scripts(
     scanobjects: &sonic_rs::Array,
     cancelled: impl Fn() -> Result<bool, RpcError>,
 ) -> Result<std::collections::BTreeMap<Vec<u8>, String>, RpcError> {
-    if scanobjects.len() > bitcoin_rs_utxo::scan::MAX_SCAN_SCRIPTS {
+    if scanobjects.len() > bitcoin_rs_storage::utxo::scan::MAX_SCAN_SCRIPTS {
         return Err(RpcError::InvalidParameter(
             "At most 1024 scan descriptors are supported".into(),
         ));
@@ -1530,7 +1530,7 @@ fn parse_scan_scripts(
         }
         let descriptor = scan_descriptor(descriptor, range, network)?;
         script_count = script_count.saturating_add(descriptor.script_count());
-        if script_count > bitcoin_rs_utxo::scan::MAX_SCAN_SCRIPTS {
+        if script_count > bitcoin_rs_storage::utxo::scan::MAX_SCAN_SCRIPTS {
             return Err(RpcError::InvalidParameter(
                 "At most 1024 scan script expansions are supported".into(),
             ));
@@ -1553,7 +1553,7 @@ fn parse_scan_scripts(
                     scripts.entry(script_pubkey)
                 {
                     script_bytes += entry.key().len();
-                    if script_bytes > bitcoin_rs_utxo::scan::MAX_SCAN_SCRIPT_BYTES {
+                    if script_bytes > bitcoin_rs_storage::utxo::scan::MAX_SCAN_SCRIPT_BYTES {
                         return Err(RpcError::InvalidParameter(
                             "Scan script byte limit exceeded".into(),
                         ));
@@ -1588,7 +1588,7 @@ fn scanobject_descriptor(scanobject: &Value) -> Result<(&str, Option<&Value>), R
 }
 
 fn scan_unspents(
-    scan: &bitcoin_rs_utxo::UtxoScan,
+    scan: &bitcoin_rs_storage::utxo::UtxoScan,
     descs: &std::collections::BTreeMap<Vec<u8>, String>,
     hashes: &std::collections::BTreeMap<u32, Hash256>,
     applied_height: u32,
@@ -1835,7 +1835,7 @@ fn render_block_header_verbose(
     })
 }
 
-type SpentCoins = Vec<Vec<bitcoin_rs_utxo::UtxoCoin>>;
+type SpentCoins = Vec<Vec<bitcoin_rs_storage::utxo::UtxoCoin>>;
 
 pub(super) fn block_with_spends(
     ctx: &Context,
@@ -1852,12 +1852,12 @@ pub(super) fn block_with_spends(
         let spent = match result.spent {
             Ok(spent) => Some(spent),
             Err(
-                bitcoin_rs_utxo::contract::HistoryUnavailable::Missing
-                | bitcoin_rs_utxo::contract::HistoryUnavailable::Pruned { .. },
+                bitcoin_rs_storage::utxo::contract::HistoryUnavailable::Missing
+                | bitcoin_rs_storage::utxo::contract::HistoryUnavailable::Pruned { .. },
             ) => None,
             Err(reason) => {
                 return Err(block_spends_error(
-                    bitcoin_rs_utxo::contract::BlockSpendsError::History(reason),
+                    bitcoin_rs_storage::utxo::contract::BlockSpendsError::History(reason),
                 ));
             }
         };
@@ -1875,8 +1875,10 @@ pub(super) fn block_with_spends(
     Ok((block, None))
 }
 
-fn block_spends_error(error: bitcoin_rs_utxo::contract::BlockSpendsError) -> RpcError {
-    use bitcoin_rs_utxo::contract::{BlockSpendsError as E, BoundedReadError, HistoryUnavailable};
+fn block_spends_error(error: bitcoin_rs_storage::utxo::contract::BlockSpendsError) -> RpcError {
+    use bitcoin_rs_storage::utxo::contract::{
+        BlockSpendsError as E, BoundedReadError, HistoryUnavailable,
+    };
     match error {
         E::UnknownBlock => RpcError::InvalidAddressOrKey("Block not found".to_owned()),
         E::History(HistoryUnavailable::Pruned { .. }) => RpcError::Misc("Block not available (pruned data)".to_owned()),
@@ -1890,7 +1892,7 @@ fn block_spends_error(error: bitcoin_rs_utxo::contract::BlockSpendsError) -> Rpc
 fn render_detailed_block(
     base: &v31::GetBlockVerboseTwo,
     block: &Block,
-    spent: Option<&[Vec<bitcoin_rs_utxo::UtxoCoin>]>,
+    spent: Option<&[Vec<bitcoin_rs_storage::utxo::UtxoCoin>]>,
     verbosity: u64,
     network: Network,
 ) -> Result<Value, RpcError> {

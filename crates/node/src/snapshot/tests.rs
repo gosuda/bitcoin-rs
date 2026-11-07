@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_support::TestError;
-use bitcoin_rs_utxo::core_snapshot::{SnapshotError, read_and_verify};
+use bitcoin_rs_storage::utxo::core_snapshot::{SnapshotError, read_and_verify};
 impl From<SnapshotExportError> for TestError {
     fn from(error: SnapshotExportError) -> Self {
         match error {
@@ -95,7 +95,7 @@ fn node_config(dir: &Path) -> crate::NodeConfig {
 
 fn core_headers() -> Result<Vec<bitcoin_rs_consensus::primitives::Header>, TestError> {
     let raw: Vec<String> = sonic_rs::from_str(include_str!(
-        "../../../utxo/tests/fixtures/core-v2/blocks200.json"
+        "../../../storage/tests/fixtures/core-v2/blocks200.json"
     ))?;
     raw.iter()
         .map(|hex| {
@@ -114,7 +114,7 @@ fn snapshot_inputs(dir: &Path) -> Result<(crate::state::NodeState, PathBuf, Path
         Network::Regtest.genesis_block(),
     ))?;
     state.chainstate().admit_headers(&core_headers()?)?;
-    let core_bytes = include_bytes!("../../../utxo/tests/fixtures/core-v2/core200.dat");
+    let core_bytes = include_bytes!("../../../storage/tests/fixtures/core-v2/core200.dat");
     let core_path = dir.join("core.dat");
     std::fs::write(&core_path, core_bytes)?;
     let snapshot = read_and_verify(
@@ -123,7 +123,7 @@ fn snapshot_inputs(dir: &Path) -> Result<(crate::state::NodeState, PathBuf, Path
         SnapshotLimits::default(),
     )?;
     let mut native = Vec::new();
-    bitcoin_rs_utxo::write_snapshot_observed(
+    bitcoin_rs_storage::utxo::write_snapshot_observed(
         &snapshot.set,
         &snapshot.anchor.block_hash,
         snapshot.anchor.height,
@@ -552,9 +552,9 @@ fn sealed_and_proofless_activation_install_identical_state_and_survive_restart()
         }
         let stats = state.chainstate().coin_stats_handle().snapshot();
         let (commitment, mut scanned) = state.chainstate().utxo().with_stable_view(|view| {
-            Ok::<_, bitcoin_rs_utxo::UtxoError>((
+            Ok::<_, bitcoin_rs_storage::utxo::UtxoError>((
                 view.hash_serialized_3_at_height(pinned.height)?,
-                bitcoin_rs_utxo::stats::scan_coin_stats(view, pinned.height, true)?,
+                bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, pinned.height, true)?,
             ))
         })?;
         assert_eq!(commitment, pinned.hash_serialized, "native={native}");
@@ -650,7 +650,9 @@ fn mutating_an_unproven_set_is_caught_by_the_single_verification() -> Result<(),
         Network::Regtest,
         SnapshotLimits::default(),
     )?;
-    loaded.set.replace_from(bitcoin_rs_utxo::UtxoSet::new());
+    loaded
+        .set
+        .replace_from(bitcoin_rs_storage::utxo::UtxoSet::new());
     let before_tip = state.chainstate().applied_tip_snapshot();
     let before_stats = state.chainstate().coin_stats_handle().snapshot();
     let result = state.snapshots.manager.activate_snapshot_state(
@@ -721,7 +723,7 @@ fn interrupted_activation_fails_closed_and_restart_retries_cleanly() -> Result<(
     assert_eq!(tip_identity(&resumed), Some((200, pinned.block_hash)));
     assert!(archive.join("headers.dat").is_file());
     let mut coins = BufReader::new(File::open(archive.join("coins.dat"))?);
-    let archived = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut coins)?;
+    let archived = bitcoin_rs_storage::utxo::read_snapshot_strict_v4(&mut coins)?;
     assert_eq!(
         (archived.height, archived.tip_hash, archived.set.len()),
         (pinned.height, pinned.block_hash, 200)

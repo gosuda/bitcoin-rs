@@ -10,10 +10,10 @@ use bitcoin_rs_storage::checkpoint::{
     CHECKPOINT_ROOT, CheckpointOpen, UTXO_FILE, open_checkpoint_generation_at,
 };
 
-use bitcoin_rs_utxo::snapshot::{
+use bitcoin_rs_storage::utxo::snapshot::{
     SeedOfferCell, SeedProvenance, V4Witness, VerifiedSnapshotArtifact,
 };
-use bitcoin_rs_utxo::{UtxoSet, stats::CoinStatsListener};
+use bitcoin_rs_storage::utxo::{UtxoSet, stats::CoinStatsListener};
 
 use bitcoin_rs_storage::recovery_evidence::{AppliedTipWitness, write_witness};
 
@@ -359,11 +359,16 @@ mod tests {
     fn committed_fifo_does_not_block_or_seal() -> TestResult {
         use std::os::unix::fs::FileTypeExt as _;
 
-        let set = bitcoin_rs_utxo::UtxoSet::new();
+        let set = bitcoin_rs_storage::utxo::UtxoSet::new();
         let tip = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[0_u8; 32]);
         let mut encoded = Vec::new();
-        let (_, (), witness) =
-            bitcoin_rs_utxo::snapshot::write_snapshot_witnessed(&set, &tip, 0, &mut encoded, ())?;
+        let (_, (), witness) = bitcoin_rs_storage::utxo::snapshot::write_snapshot_witnessed(
+            &set,
+            &tip,
+            0,
+            &mut encoded,
+            (),
+        )?;
         let Some(witness) = witness else {
             return Err(TestError::UnexpectedSuccess(
                 "empty snapshot must mint a witness",
@@ -388,8 +393,8 @@ mod tests {
 
         let cap_dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(dir.path())?;
         let worker_dir = cap_dir.try_clone()?;
-        let cell: bitcoin_rs_utxo::snapshot::SeedOfferCell =
-            std::sync::Arc::new(bitcoin_rs_utxo::snapshot::SeedSlot::new());
+        let cell: bitcoin_rs_storage::utxo::snapshot::SeedOfferCell =
+            std::sync::Arc::new(bitcoin_rs_storage::utxo::snapshot::SeedSlot::new());
         cell.want();
         let worker_cell = cell.clone();
 

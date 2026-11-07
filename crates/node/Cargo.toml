@@ -39,13 +39,11 @@ pool = ["bitcoin-rs-rpc/pool", "bitcoin-rs-mining/pool"]
 pool-sv2 = ["pool", "bitcoin-rs-mining/pool-sv2", "dep:zeroize"]
 surrealkv = [
     "bitcoin-rs-storage/surrealkv",
-    "bitcoin-rs-utxo/surrealkv",
     "bitcoin-rs-chainstate/surrealkv",
     "bitcoin-rs-index/surrealkv",
 ]
 mdbx = [
     "bitcoin-rs-storage/mdbx",
-    "bitcoin-rs-utxo/mdbx",
     "bitcoin-rs-chainstate/mdbx",
     "bitcoin-rs-index/mdbx",
 ]
@@ -54,7 +52,6 @@ mdbx = [
 hashbrown.workspace = true
 bitcoin-rs-consensus.workspace = true
 bitcoin-rs-storage.workspace = true
-bitcoin-rs-utxo.workspace = true
 bitcoin-rs-chain.workspace = true
 bitcoin-rs-chainstate.workspace = true
 bitcoin-rs-index.workspace = true

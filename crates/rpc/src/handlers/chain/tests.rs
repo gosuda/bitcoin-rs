@@ -16,12 +16,12 @@ struct SingleBlockSource {
 
 use crate::context::BlockBodies;
 
-impl bitcoin_rs_chain::BlockBodySource for SingleBlockSource {
+impl bitcoin_rs_storage::block_body::BlockBodySource for SingleBlockSource {
     fn block_body(
         &self,
         height: u32,
         hash: BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         self.calls
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         Ok((height == self.height && hash == self.hash).then(|| self.body.clone()))
@@ -186,7 +186,7 @@ fn compute_fee_fields_skips_indexer_for_coinbase_only_blocks() {
 
 #[test]
 fn undo_read_failures_preserve_core_integrity_and_availability_codes() {
-    use bitcoin_rs_utxo::contract::{BlockSpendsError, HistoryUnavailable};
+    use bitcoin_rs_storage::utxo::contract::{BlockSpendsError, HistoryUnavailable};
     let corruption = block_spends_error(BlockSpendsError::Corrupt("fixture"));
     assert_eq!(corruption.code(), -32603);
     assert_eq!(
@@ -204,7 +204,7 @@ fn undo_read_failures_preserve_core_integrity_and_availability_codes() {
     assert_eq!(block_spends_error(BlockSpendsError::Retry).code(), -1);
     assert_eq!(
         block_spends_error(BlockSpendsError::BodyRead(
-            bitcoin_rs_utxo::contract::BoundedReadError::Unsupported
+            bitcoin_rs_storage::utxo::contract::BoundedReadError::Unsupported
         ))
         .code(),
         -1
@@ -213,7 +213,7 @@ fn undo_read_failures_preserve_core_integrity_and_availability_codes() {
 
 #[test]
 fn a_cancelled_utxo_walk_reports_interruption() {
-    let error = txoutset_walk_error(bitcoin_rs_utxo::UtxoError::Cancelled);
+    let error = txoutset_walk_error(bitcoin_rs_storage::utxo::UtxoError::Cancelled);
 
     assert_eq!(error.code(), -1);
     assert_eq!(error.to_string(), "gettxoutsetinfo interrupted");
@@ -316,12 +316,12 @@ fn getblock_reads_metadata_only_record_from_body_source() -> Result<(), crate::t
         calls: AtomicUsize,
     }
 
-    impl bitcoin_rs_chain::BlockBodySource for SingleBlockSource {
+    impl bitcoin_rs_storage::block_body::BlockBodySource for SingleBlockSource {
         fn block_body(
             &self,
             height: u32,
             hash: BlockHash,
-        ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+        ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Ok((height == self.height && hash == self.hash).then(|| self.body.clone()))
         }
@@ -440,20 +440,22 @@ struct SpentSource {
     block: Block,
 }
 
-impl bitcoin_rs_utxo::contract::BlockUndoSource for SpentSource {
+impl bitcoin_rs_storage::utxo::contract::BlockUndoSource for SpentSource {
     fn block_spends(
         &self,
         _hash: Hash256,
         _expected: Hash256,
-    ) -> Result<bitcoin_rs_utxo::contract::BlockSpends, bitcoin_rs_utxo::contract::BlockSpendsError>
-    {
+    ) -> Result<
+        bitcoin_rs_storage::utxo::contract::BlockSpends,
+        bitcoin_rs_storage::utxo::contract::BlockSpendsError,
+    > {
         let Some(spend) = self.block.txs.get(1) else {
-            return Err(bitcoin_rs_utxo::contract::BlockSpendsError::UnknownBlock);
+            return Err(bitcoin_rs_storage::utxo::contract::BlockSpendsError::UnknownBlock);
         };
         let spent = spend
             .inputs
             .iter()
-            .map(|input| bitcoin_rs_utxo::UtxoCoin {
+            .map(|input| bitcoin_rs_storage::utxo::UtxoCoin {
                 outpoint: input.previous_output,
                 txout: bitcoin_rs_consensus::primitives::TxOut {
                     value: bitcoin_rs_consensus::primitives::Amount::from_sat(5_000_000_000),
@@ -463,7 +465,7 @@ impl bitcoin_rs_utxo::contract::BlockUndoSource for SpentSource {
                 height: 0,
             })
             .collect();
-        Ok(bitcoin_rs_utxo::contract::BlockSpends {
+        Ok(bitcoin_rs_storage::utxo::contract::BlockSpends {
             block: self.block.clone(),
             spent: Ok(vec![Vec::new(), spent]),
         })
@@ -1331,12 +1333,12 @@ fn getblockchaininfo_size_on_disk_uses_metadata_body_size() {
 fn getblockchaininfo_size_on_disk_comes_from_the_block_store() {
     struct SizedStore(u64);
 
-    impl bitcoin_rs_chain::BlockBodySource for SizedStore {
+    impl bitcoin_rs_storage::block_body::BlockBodySource for SizedStore {
         fn block_body(
             &self,
             _height: u32,
             _hash: BlockHash,
-        ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+        ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
             Ok(None)
         }
         fn disk_usage(&self) -> Option<u64> {

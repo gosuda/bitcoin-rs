@@ -31,7 +31,7 @@ use bitcoin_rs_rpc::{
     },
 };
 
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
@@ -90,7 +90,7 @@ fn fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
         false,
         1,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::from_le_bytes(&[0xaa; 32]),
@@ -1664,7 +1664,7 @@ fn fund_coinbase_utxo(ctx: &Context, label: u8, value: u64, height: u32) -> OutP
         true,
         height,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::from_le_bytes(&[0xaa; 32]),

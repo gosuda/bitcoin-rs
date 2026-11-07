@@ -6,8 +6,9 @@ mod restore;
 
 use crate::writer::TxIndexWriter;
 use crate::{IndexCapabilities, IndexError, IndexReader, IndexWatermark};
-use bitcoin_rs_chain::{BlockBodySource, BlockTreeReader, TipReader};
+use bitcoin_rs_chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_consensus::primitives::Network;
+use bitcoin_rs_storage::block_body::BlockBodySource;
 use std::path::{Path, PathBuf};
 
 pub(crate) use restore::reset_interrupted_import;

@@ -12,7 +12,7 @@ use bitcoin_rs_consensus::primitives::{
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry};
 use bitcoin_rs_rpc::context::Context;
 use bitcoin_rs_rpc::{Handler, RpcError};
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
 use crate::support::TestError;
@@ -66,7 +66,7 @@ fn fund_utxo(ctx: &Context, txid_byte: u8, value: u64) -> OutPoint {
         false,
         1,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::from_le_bytes(&[0xaa; 32]),

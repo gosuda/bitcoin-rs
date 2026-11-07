@@ -28,7 +28,7 @@ fn shutdown_closes_admission_and_waits_for_in_flight_apply() {
 fn is_closed_for_recovery_tracks_the_fatal_close() {
     let chainstate = crate::test_fixtures::handles(
         bitcoin_rs_consensus::primitives::Network::Regtest,
-        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+        Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
     );
     assert!(
         !chainstate.is_closed_for_recovery(),
@@ -49,7 +49,7 @@ fn is_closed_for_recovery_tracks_the_fatal_close() {
 fn shutdown_reader_unblocks_select_on_request_shutdown() {
     let chainstate = crate::test_fixtures::handles(
         bitcoin_rs_consensus::primitives::Network::Regtest,
-        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+        Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
     );
     let reader = chainstate.shutdown_reader();
     let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
@@ -76,7 +76,7 @@ fn shutdown_reader_unblocks_select_on_request_shutdown() {
 fn closed_for_recovery_reader_unblocks_select_on_fail_closed() {
     let chainstate = crate::test_fixtures::handles(
         bitcoin_rs_consensus::primitives::Network::Regtest,
-        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+        Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
     );
     let reader = chainstate.closed_for_recovery_reader();
     let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
@@ -106,7 +106,7 @@ fn shutdown_hooks_run_without_the_tip_gate() {
 
     let chainstate = Arc::new(crate::test_fixtures::handles(
         bitcoin_rs_consensus::primitives::Network::Regtest,
-        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+        Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
     ));
     let gate_free = Arc::new(AtomicBool::new(false));
     let observed = Arc::clone(&gate_free);
@@ -148,7 +148,7 @@ fn recovery_closure_does_not_upgrade_an_apply_permit() {
 fn recovery_closure_hooks_can_reenter_after_publication_unlocks() {
     let chain = Arc::new(crate::test_fixtures::handles(
         bitcoin_rs_consensus::primitives::Network::Regtest,
-        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+        Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
     ));
     let owner = Arc::clone(&chain);
     let _hook = chain.closed_for_recovery_reader().on_cancel(move || {

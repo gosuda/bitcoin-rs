@@ -4,10 +4,10 @@ use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, ChainError, NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Header, Network};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
+use bitcoin_rs_storage::utxo::{UtxoCoin, UtxoSet};
 use bitcoin_rs_storage::{InMemoryDurableHeadStore, InMemoryUndoStore, StorageError, UndoStore};
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
-use bitcoin_rs_utxo::{UtxoCoin, UtxoSet};
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
@@ -26,7 +26,7 @@ pub enum FuzzError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
-    Utxo(#[from] bitcoin_rs_utxo::set::UtxoError),
+    Utxo(#[from] bitcoin_rs_storage::utxo::set::UtxoError),
     #[error("no durable head is committed")]
     MissingDurableHead,
     #[error("durable head is not above the checkpoint tip")]

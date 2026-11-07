@@ -168,7 +168,7 @@ fn render_raw_transaction(
     record: Option<&BlockRecord>,
     explicit_block: bool,
     view: &AppliedView,
-    coins: Option<&[bitcoin_rs_utxo::UtxoCoin]>,
+    coins: Option<&[bitcoin_rs_storage::utxo::UtxoCoin]>,
 ) -> Result<Value, RpcError> {
     if verbose == 0 {
         return typed_to_sonic(&v31::GetRawTransaction(

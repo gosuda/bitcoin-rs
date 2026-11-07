@@ -21,8 +21,7 @@ use bitcoin::{
     script::Builder,
 };
 use bitcoin_rs_chain::{
-    BlockBodyReadError, BlockBodySource, BlockTree, BlockTreeReader, ChainTxCount, LatchWriter,
-    NodeStatus, TipReader, TipSnapshot,
+    BlockTree, BlockTreeReader, ChainTxCount, LatchWriter, NodeStatus, TipReader, TipSnapshot,
 };
 use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Network, Txid};
 use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
@@ -36,6 +35,7 @@ use bitcoin_rs_index::{
     DerivedIndexQuery, IndexCapabilities, IndexCapability, IndexReader, IndexWatermark, Indexer,
 };
 use bitcoin_rs_storage::block_body::BlockBodyStore;
+use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget, RetentionRegistry};
 use bitcoin_rs_storage::{
     BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvPair, KvSnapshot, KvStore, PrefixScan,

@@ -32,7 +32,7 @@ Ownership: the target-to-corpus mapping below is owned here. `scripts/import-qa-
 
 Corpora were minimized with cargo fuzz cmin after import; only minimized seeds are tracked here. Re-run the matching import script after major decoder changes to refresh.
 
-The embedded Core snapshot was produced by the unmodified pinned v31.1 binary from the deterministic regtest-200 chain. Its SHA-256 is `bb96a8a22e8114c36e0f570217795f5cc46baf366b0e74e7588de5b1e4392e7c`. [Fixture provenance and reproduction](../crates/utxo/tests/fixtures/core-v2/README.md) record the binary digest and immutable upstream source at `9be056a8a72b624dae9623b2f7bded92c2a21c91` (Bitcoin Core, MIT). This harness arm is authored here and does not imply a corpus import, minimization run, or executed fuzz campaign.
+The embedded Core snapshot was produced by the unmodified pinned v31.1 binary from the deterministic regtest-200 chain. Its SHA-256 is `bb96a8a22e8114c36e0f570217795f5cc46baf366b0e74e7588de5b1e4392e7c`. [Fixture provenance and reproduction](../crates/storage/tests/fixtures/core-v2/README.md) record the binary digest and immutable upstream source at `9be056a8a72b624dae9623b2f7bded92c2a21c91` (Bitcoin Core, MIT). This harness arm is authored here and does not imply a corpus import, minimization run, or executed fuzz campaign.
 
 See also [qa-corpus.md](../docs/contracts/qa-corpus.md) for the contracts index and precedence rule.
 

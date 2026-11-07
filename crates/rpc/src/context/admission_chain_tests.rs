@@ -1,6 +1,6 @@
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_consensus::primitives::{Header, LockTime, Sequence, TxIn, TxOut, Witness};
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sha2::{Digest as _, Sha256};
 
 use super::*;
@@ -79,7 +79,7 @@ fn stable_chainstate_reader_does_not_block_transaction_admission() -> TestResult
         false,
         0,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::default(),
@@ -110,7 +110,7 @@ fn unconfirmed_transaction_is_admitted_from_a_peer() -> TestResult {
         false,
         0,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::default(),
@@ -150,7 +150,7 @@ fn confirmed_hint_requires_live_chain_outputs() -> TestResult {
     let output = OutPoint::new(tx.txid(), 0);
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(output, tx.outputs[0].clone(), false, 0));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::default(),
@@ -179,7 +179,9 @@ fn admission_chain_uses_current_handles_and_one_applied_tip() -> TestResult {
         []
     );
 
-    ctx.chain.utxo = bitcoin_rs_utxo::UtxoReader::new(Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
+    ctx.chain.utxo = bitcoin_rs_storage::utxo::UtxoReader::new(Arc::new(
+        bitcoin_rs_storage::utxo::UtxoSet::new(),
+    ));
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(
         outpoint,
@@ -190,7 +192,7 @@ fn admission_chain_uses_current_handles_and_one_applied_tip() -> TestResult {
         false,
         0,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::default(),
@@ -237,7 +239,7 @@ fn admission_envelopes_share_gateway_outcomes() -> TestResult {
     ));
 
     let rpc_ctx = Arc::new(Context::new());
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &rpc_ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::default(),
@@ -257,7 +259,7 @@ fn admission_envelopes_share_gateway_outcomes() -> TestResult {
     assert!(!rpc_ctx.mempool.gateway.read().contains_txid(&orphan.txid()));
 
     let preview_ctx = Arc::new(Context::new());
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &preview_ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::default(),
@@ -386,7 +388,7 @@ fn sendrawtransaction_publishes_hashtx_once_per_admission() -> TestResult {
             .map(|seen| seen.clone())
             .unwrap_or_default()
     };
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &rpc_ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::default(),
@@ -472,7 +474,7 @@ fn submitpackage_publishes_hashtx_only_for_newly_admitted() -> TestResult {
             .map(|seen| seen.clone())
             .unwrap_or_default()
     };
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         &rpc_ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::default(),

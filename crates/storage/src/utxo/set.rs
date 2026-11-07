@@ -1,0 +1,873 @@
+use std::sync::Arc;
+use std::{borrow::Borrow, io, time::Instant};
+
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, TxOut, Txid};
+use parking_lot::{Mutex, RwLock, RwLockReadGuard};
+use rayon::prelude::*;
+use smallvec::SmallVec;
+use thiserror::Error;
+
+use crate::utxo::contract::{BlockChanges, UndoBatch, UtxoAdd};
+use crate::utxo::listener::UtxoChangeEvents;
+use crate::utxo::stats::CoinStatsListener;
+use crate::utxo::{UtxoKey, record::UtxoRecord, shard::Shard};
+
+const PARALLEL_NO_LISTENER_OP_THRESHOLD: usize = 2048;
+const PARALLEL_LISTENER_SHARD_THRESHOLD: usize = 8;
+const TXID_RUN_GROUPING_MAX_SHARDS: usize = 8;
+
+#[derive(Debug, Error)]
+pub enum UtxoError {
+    #[error(transparent)]
+    Scan(#[from] crate::utxo::scan::UtxoScanError),
+    #[error("script_pubkey is too large for a u16 length: {len} bytes")]
+    ScriptTooLarge { len: usize },
+    #[error("encoded UTXO record exceeds addressable size at {len} bytes")]
+    RecordTooLarge { len: usize },
+    #[error("invalid encoded UTXO record")]
+    CorruptRecord,
+    #[error("snapshot coin height {height} exceeds snapshot base {snapshot_height}")]
+    SnapshotCoinHeightOutOfRange { height: u32, snapshot_height: u32 },
+    #[error("snapshot I/O failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("invalid snapshot magic {actual:#010x}")]
+    InvalidSnapshotMagic { actual: u32 },
+    #[error("unsupported snapshot version {version}")]
+    UnsupportedSnapshotVersion { version: u32 },
+    #[error("snapshot record count {count} does not fit usize")]
+    SnapshotRecordCountTooLarge { count: u64 },
+    #[error("strict snapshot record count mismatch: declared {declared}, actual {actual}")]
+    SnapshotRecordCountMismatch { declared: u64, actual: usize },
+    #[error("snapshot record has too many live outputs: {count}")]
+    SnapshotOutputCountTooLarge { count: usize },
+    #[error("snapshot record duplicates vout {vout}")]
+    SnapshotDuplicateVout { vout: u32 },
+    #[error("snapshot shard {shard} does not match key shard {key_shard}")]
+    SnapshotShardMismatch { shard: u8, key_shard: u8 },
+    #[error("snapshot txid prefix does not match record key prefix")]
+    SnapshotTxidPrefixMismatch,
+    #[error("output value {value} exceeds the maximum money supply")]
+    AmountOutOfRange { value: u64 },
+    #[error("UTXO walk cancelled")]
+    Cancelled,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static SNAPSHOT_INSERTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UtxoCoin {
+    pub outpoint: OutPoint,
+    pub txout: TxOut,
+    pub coinbase: bool,
+    pub height: u32,
+}
+
+#[derive(Debug, Default)]
+pub struct UtxoScan {
+    pub txouts: usize,
+    pub unspents: Vec<UtxoCoin>,
+}
+
+#[derive(Copy, Clone)]
+pub(crate) struct BuildPayload<'a> {
+    pub(crate) outpoint: &'a OutPoint,
+    pub(crate) vout: u32,
+    pub(crate) txout: &'a TxOut,
+    pub(crate) coinbase: bool,
+    pub(crate) height: u32,
+}
+
+#[derive(Copy, Clone)]
+pub(crate) struct SpendPayload<'a> {
+    pub(crate) op: &'a OutPoint,
+    pub(crate) key: UtxoKey,
+    pub(crate) vout: u32,
+    pub(crate) txid: Hash256,
+}
+
+pub struct UtxoSet {
+    pub(crate) shards: [Shard; UtxoKey::SHARD_COUNT],
+    stable_view_lock: RwLock<()>,
+    pub(crate) scan: crate::utxo::scan::ScanState,
+    listener: Option<CoinStatsListener>,
+}
+
+#[derive(Debug, Default)]
+pub struct UtxoMemoryReport {
+    pub records: usize,
+    pub outputs: usize,
+    pub record_payload_bytes: usize,
+    pub table_bytes: usize,
+}
+
+impl UtxoMemoryReport {
+    #[must_use]
+    pub const fn accounted_bytes(&self) -> usize {
+        self.record_payload_bytes.saturating_add(self.table_bytes)
+    }
+}
+
+pub struct UtxoSetView<'a> {
+    set: &'a UtxoSet,
+    _guard: RwLockReadGuard<'a, ()>,
+}
+
+impl UtxoSetView<'_> {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.set.shards.iter().map(Shard::output_count).sum()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[must_use]
+    pub fn record_count(&self) -> usize {
+        self.set.shards.iter().map(Shard::record_count).sum()
+    }
+
+    #[must_use]
+    pub fn memory_report(&self) -> UtxoMemoryReport {
+        let mut report = UtxoMemoryReport::default();
+        for shard in &self.set.shards {
+            report.records += shard.record_count();
+            report.outputs += shard.output_count();
+            report.record_payload_bytes += shard.record_payload_bytes();
+            report.table_bytes += shard.table_bytes();
+        }
+        report
+    }
+
+    pub fn hash_serialized_3(&self) -> Result<Hash256, UtxoError> {
+        crate::utxo::snapshot::hash_serialized_3_stable(self)
+    }
+
+    pub fn hash_serialized_3_at_height(&self, snapshot_height: u32) -> Result<Hash256, UtxoError> {
+        crate::utxo::snapshot::hash_serialized_3_stable_at_height(self, snapshot_height)
+    }
+
+    pub fn hash_serialized_3_cancellable(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Hash256, UtxoError> {
+        crate::utxo::snapshot::hash_serialized_3_stable_cancellable(self, cancelled)
+    }
+
+    pub fn for_each_all(&self, mut f: impl FnMut(&OutPoint, &[u8])) {
+        for shard in &self.set.shards {
+            shard.for_each_all(&mut f);
+        }
+    }
+
+    #[must_use]
+    pub fn get_entry(&self, op: &OutPoint) -> Option<UtxoCoin> {
+        let key = UtxoKey::from_txid(&op.txid);
+        self.set.shards[usize::from(key.shard())].get_entry(key, &op.txid.into(), op.vout)
+    }
+
+    pub(crate) const fn shard(&self, idx: usize) -> &Shard {
+        &self.set.shards[idx]
+    }
+
+    pub(crate) fn listener_muhash3072(&self) -> Option<[u8; 384]> {
+        self.set
+            .listener
+            .as_ref()
+            .map(CoinStatsListener::muhash3072)
+    }
+}
+
+impl UtxoSet {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            shards: [(); UtxoKey::SHARD_COUNT].map(|()| Shard::new()),
+            stable_view_lock: RwLock::new(()),
+            scan: crate::utxo::scan::ScanState::default(),
+            listener: None,
+        }
+    }
+
+    pub(crate) fn try_stable_view(&self, timeout: std::time::Duration) -> Option<UtxoSetView<'_>> {
+        self.stable_view_lock
+            .try_read_for(timeout)
+            .map(|guard| UtxoSetView {
+                set: self,
+                _guard: guard,
+            })
+    }
+
+    /// Consuming the source excludes aliases, self-swaps, and concurrent source
+    /// mutation between verification and installation.
+    ///
+    /// The chainstate owner must install the matching coin statistics before publishing
+    /// its new tip.
+    pub fn replace_from(&self, other: Self) {
+        {
+            let _guard = self.stable_view_lock.write();
+            for (my_shard, other_shard) in self.shards.iter().zip(other.shards.iter()) {
+                my_shard.swap_table(other_shard);
+            }
+        }
+        drop(other);
+    }
+
+    pub fn track_coin_stats(&mut self, listener: CoinStatsListener) {
+        self.listener = Some(listener);
+    }
+
+    pub fn with_stable_view<R>(&self, read: impl FnOnce(&UtxoSetView<'_>) -> R) -> R {
+        read(&self.lock_stable_view())
+    }
+
+    #[must_use]
+    pub fn lock_stable_view(&self) -> UtxoSetView<'_> {
+        UtxoSetView {
+            set: self,
+            _guard: self.stable_view_lock.read(),
+        }
+    }
+
+    pub(crate) fn commit_block<T: Borrow<TxOut>>(
+        &self,
+        changes: &BlockChanges<T>,
+        block_hash: &Hash256,
+    ) -> Result<(), UtxoError> {
+        tracing::trace!(
+            %block_hash,
+            adds = changes.add_count(),
+            removes = changes.remove_count(),
+            "commit utxo block"
+        );
+        self.commit_adds_and_removes(changes.adds(), changes.spent_outpoints())
+    }
+
+    #[must_use]
+    pub fn get(&self, op: &OutPoint) -> Option<TxOut> {
+        let key = UtxoKey::from_txid(&op.txid);
+        self.shards[usize::from(key.shard())].get(key, &op.txid.into(), op.vout)
+    }
+
+    #[must_use]
+    pub fn get_entry(&self, op: &OutPoint) -> Option<UtxoCoin> {
+        let key = UtxoKey::from_txid(&op.txid);
+        self.shards[usize::from(key.shard())].get_entry(key, &op.txid.into(), op.vout)
+    }
+
+    pub fn scan_script_pubkeys(&self, scripts: &[Vec<u8>]) -> Result<UtxoScan, UtxoError> {
+        let permit = crate::utxo::scan::UtxoScanPermit::reserve(self)?;
+        Ok(permit.scan_scripts(scripts)?)
+    }
+
+    /// This is the transaction-level BIP30 predicate: a duplicate txid is
+    /// forbidden while any earlier output for that txid remains unspent.
+    #[must_use]
+    pub fn has_live_outputs_for_txid(&self, txid: &Hash256) -> bool {
+        let key = UtxoKey::from_txid(&Txid::from(*txid));
+        self.shards[usize::from(key.shard())].has_live_outputs_for_txid(key, txid)
+    }
+
+    pub(crate) fn undo_block(&self, undo: &UndoBatch) -> Result<(), UtxoError> {
+        self.commit_adds_and_removes(&undo.restores, &undo.removes)
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.with_stable_view(|view| view.len())
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[must_use]
+    pub fn record_count(&self) -> usize {
+        self.with_stable_view(|view| view.record_count())
+    }
+
+    pub(crate) fn insert_snapshot_record(&self, record: UtxoRecord) {
+        #[cfg(test)]
+        SNAPSHOT_INSERTIONS.with(|count| count.set(count.get() + 1));
+        self.shards[usize::from(record.key().shard())].insert_record(record);
+    }
+
+    fn commit_adds_and_removes<T: Borrow<TxOut>>(
+        &self,
+        adds: &[UtxoAdd<T>],
+        removes: &[OutPoint],
+    ) -> Result<(), UtxoError> {
+        let mut add_counts = [0_usize; UtxoKey::SHARD_COUNT];
+        let mut remove_counts = [0_usize; UtxoKey::SHARD_COUNT];
+
+        for add in adds {
+            validate_add(add)?;
+            let key = UtxoKey::from_txid(&add.outpoint.txid);
+            let shard_idx = usize::from(key.shard());
+            add_counts[shard_idx] = add_counts[shard_idx].saturating_add(1);
+        }
+        for remove in removes {
+            let key = UtxoKey::from_txid(&remove.txid);
+            let shard_idx = usize::from(key.shard());
+            remove_counts[shard_idx] = remove_counts[shard_idx].saturating_add(1);
+        }
+        let (active_shards, active_shard_count) = active_shards(&add_counts, &remove_counts);
+        if active_shard_count == 0 {
+            return Ok(());
+        }
+        if active_shard_count == 1 {
+            return self.commit_single_shard(adds, removes, active_shards[0]);
+        }
+
+        let listener = self.listener.as_ref();
+        let group_txid_runs =
+            listener.is_none() && active_shard_count <= TXID_RUN_GROUPING_MAX_SHARDS;
+        let buckets =
+            ShardCommitBuckets::new(adds, removes, &add_counts, &remove_counts, group_txid_runs);
+
+        let _stable_commit = self.stable_view_lock.write();
+
+        if let Some(listener) = listener {
+            return self.commit_multi_shard_with_listener(
+                &active_shards,
+                active_shard_count,
+                &buckets,
+                listener,
+            );
+        }
+
+        let total_ops = adds.len().saturating_add(removes.len());
+        if total_ops < PARALLEL_NO_LISTENER_OP_THRESHOLD {
+            for &shard_idx in &active_shards[..active_shard_count] {
+                let shard_adds = buckets.adds(shard_idx);
+                let shard_removes = buckets.removes(shard_idx);
+                self.shards[shard_idx].commit_batch(shard_adds, shard_removes)?;
+            }
+            return Ok(());
+        }
+
+        let errors = Mutex::new(Vec::new());
+        let target_tasks = rayon::current_num_threads().saturating_mul(2).max(1);
+        let shards_per_task = active_shard_count.div_ceil(target_tasks).max(1);
+        let buckets = &buckets;
+        let shards = &self.shards;
+        rayon::scope(|scope| {
+            for shard_chunk in active_shards[..active_shard_count].chunks(shards_per_task) {
+                let errors = &errors;
+                scope.spawn(move |_| {
+                    for &shard_idx in shard_chunk {
+                        let shard_adds = buckets.adds(shard_idx);
+                        let shard_removes = buckets.removes(shard_idx);
+                        let shard = &shards[shard_idx];
+                        if let Err(error) = shard.commit_batch(shard_adds, shard_removes) {
+                            errors.lock().push(error);
+                        }
+                    }
+                });
+            }
+        });
+
+        let mut errors = errors.into_inner();
+        if let Some(error) = errors.pop() {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn commit_multi_shard_with_listener(
+        &self,
+        active_shards: &[usize; UtxoKey::SHARD_COUNT],
+        active_shard_count: usize,
+        buckets: &ShardCommitBuckets<'_>,
+        listener: &CoinStatsListener,
+    ) -> Result<(), UtxoError> {
+        if active_shard_count < PARALLEL_LISTENER_SHARD_THRESHOLD {
+            return self.commit_serial_event_batches(
+                active_shards,
+                active_shard_count,
+                buckets,
+                listener,
+            );
+        }
+
+        let errors = Mutex::new(Vec::new());
+        let shard_events: Vec<_> = active_shards[..active_shard_count]
+            .par_iter()
+            .map(|&shard_idx| {
+                let shard_adds = buckets.adds(shard_idx);
+                let shard_removes = buckets.removes(shard_idx);
+                let shard = &self.shards[shard_idx];
+                let (shard_events, result) =
+                    shard.commit_batch_collect_events(shard_adds, shard_removes);
+                if let Err(error) = result {
+                    errors.lock().push(error);
+                }
+                shard_events
+            })
+            .collect();
+
+        let listener_started = Instant::now();
+        listener.on_committed_event_batches(&shard_events);
+        tracing::debug!(
+            batches = shard_events.len(),
+            listener_us = listener_started.elapsed().as_micros(),
+            "utxo listener: event batches"
+        );
+
+        let mut errors = errors.into_inner();
+        if let Some(error) = errors.pop() {
+            return Err(error);
+        }
+
+        Ok(())
+    }
+
+    fn commit_serial_event_batches(
+        &self,
+        active_shards: &[usize; UtxoKey::SHARD_COUNT],
+        active_shard_count: usize,
+        buckets: &ShardCommitBuckets<'_>,
+        listener: &CoinStatsListener,
+    ) -> Result<(), UtxoError> {
+        let mut error = None;
+        let mut shard_events =
+            SmallVec::<[UtxoChangeEvents<'_>; PARALLEL_LISTENER_SHARD_THRESHOLD]>::new();
+        for &shard_idx in &active_shards[..active_shard_count] {
+            let shard_adds = buckets.adds(shard_idx);
+            let shard_removes = buckets.removes(shard_idx);
+            let (events, result) =
+                self.shards[shard_idx].commit_batch_collect_events(shard_adds, shard_removes);
+            if let Err(shard_error) = result {
+                error = Some(shard_error);
+            }
+            shard_events.push(events);
+        }
+
+        let listener_started = Instant::now();
+        listener.on_committed_event_batches(&shard_events);
+        tracing::debug!(
+            batches = shard_events.len(),
+            listener_us = listener_started.elapsed().as_micros(),
+            "utxo listener: event batches"
+        );
+
+        if let Some(error) = error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn commit_single_shard<T: Borrow<TxOut>>(
+        &self,
+        adds: &[UtxoAdd<T>],
+        removes: &[OutPoint],
+        shard_idx: usize,
+    ) -> Result<(), UtxoError> {
+        let _stable_commit = self.stable_view_lock.write();
+        let Some(listener) = self.listener.as_ref() else {
+            return self.shards[shard_idx].commit_single_shard_batch(adds, removes, shard_idx);
+        };
+
+        self.shards[shard_idx]
+            .commit_single_shard_batch_with_listener(adds, removes, shard_idx, listener)
+    }
+}
+
+impl Default for UtxoSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone)]
+pub struct UtxoReader {
+    set: Arc<UtxoSet>,
+}
+
+impl UtxoReader {
+    pub fn reserve_scan(
+        &self,
+    ) -> Result<crate::utxo::scan::UtxoScanPermit<'_>, crate::utxo::scan::UtxoScanError> {
+        crate::utxo::scan::UtxoScanPermit::reserve(&self.set)
+    }
+
+    #[must_use]
+    pub fn scan_progress(&self) -> Option<u8> {
+        self.set.scan.status()
+    }
+
+    pub fn abort_scan(&self) -> bool {
+        self.set.scan.abort()
+    }
+
+    #[must_use]
+    pub fn new(set: Arc<UtxoSet>) -> Self {
+        Self { set }
+    }
+
+    #[must_use]
+    pub fn get_entry(&self, op: &OutPoint) -> Option<UtxoCoin> {
+        self.set.get_entry(op)
+    }
+
+    #[must_use]
+    pub fn has_live_outputs_for_txid(&self, txid: &Hash256) -> bool {
+        self.set.has_live_outputs_for_txid(txid)
+    }
+
+    pub fn scan_script_pubkeys(&self, scripts: &[Vec<u8>]) -> Result<UtxoScan, UtxoError> {
+        self.set.scan_script_pubkeys(scripts)
+    }
+
+    pub fn with_stable_view<R>(&self, read: impl FnOnce(&UtxoSetView<'_>) -> R) -> R {
+        self.set.with_stable_view(read)
+    }
+
+    #[must_use]
+    pub fn lock_stable_view(&self) -> UtxoSetView<'_> {
+        self.set.lock_stable_view()
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn fixture_set(&self) -> Arc<UtxoSet> {
+        Arc::clone(&self.set)
+    }
+}
+
+fn validate_add<T: Borrow<TxOut>>(add: &UtxoAdd<T>) -> Result<(), UtxoError> {
+    let script_len = add.txout.borrow().script_pubkey.len();
+    let _fits =
+        u16::try_from(script_len).map_err(|_| UtxoError::ScriptTooLarge { len: script_len })?;
+    Ok(())
+}
+
+type AddPayload<'a> = (UtxoKey, Hash256, BuildPayload<'a>);
+
+struct ShardCommitBuckets<'a> {
+    adds: ShardBucketSide<AddPayload<'a>>,
+    removes: ShardBucketSide<SpendPayload<'a>>,
+}
+
+enum BucketShape {
+    Empty,
+    Single(usize),
+    Scattered,
+}
+
+struct ShardBucketSide<T> {
+    payloads: Vec<T>,
+    ranges: [(usize, usize); UtxoKey::SHARD_COUNT],
+    shape: BucketShape,
+}
+
+impl<T> ShardBucketSide<T> {
+    fn empty() -> Self {
+        Self {
+            payloads: Vec::new(),
+            ranges: empty_ranges(),
+            shape: BucketShape::Empty,
+        }
+    }
+
+    fn direct(shard_idx: usize, payloads: Vec<T>) -> Self {
+        Self {
+            payloads,
+            ranges: empty_ranges(),
+            shape: BucketShape::Single(shard_idx),
+        }
+    }
+
+    fn scattered(ranges: &[(usize, usize); UtxoKey::SHARD_COUNT], payloads: Vec<T>) -> Self {
+        Self {
+            payloads,
+            ranges: *ranges,
+            shape: BucketShape::Scattered,
+        }
+    }
+}
+
+impl<'a> ShardCommitBuckets<'a> {
+    fn new<T: Borrow<TxOut>>(
+        adds: &'a [UtxoAdd<T>],
+        removes: &'a [OutPoint],
+        add_counts: &[usize; UtxoKey::SHARD_COUNT],
+        remove_counts: &[usize; UtxoKey::SHARD_COUNT],
+        group_txid_runs: bool,
+    ) -> Self {
+        let mut buckets = Self {
+            adds: build_add_side(adds, add_counts),
+            removes: build_remove_side(removes, remove_counts),
+        };
+        if group_txid_runs {
+            buckets.group_txid_runs();
+        }
+        buckets
+    }
+
+    fn adds(&self, shard_idx: usize) -> &[(UtxoKey, Hash256, BuildPayload<'a>)] {
+        self.adds.get(shard_idx)
+    }
+
+    fn removes(&self, shard_idx: usize) -> &[SpendPayload<'a>] {
+        self.removes.get(shard_idx)
+    }
+
+    fn group_txid_runs(&mut self) {
+        group_add_txid_runs(&mut self.adds);
+        group_remove_txid_runs(&mut self.removes);
+    }
+}
+
+impl<T> ShardBucketSide<T> {
+    fn get(&self, shard_idx: usize) -> &[T] {
+        match self.shape {
+            BucketShape::Empty => &[],
+            BucketShape::Single(active_shard) => {
+                if active_shard == shard_idx {
+                    &self.payloads
+                } else {
+                    &[]
+                }
+            }
+            BucketShape::Scattered => {
+                let (start, end) = self.ranges[shard_idx];
+                &self.payloads[start..end]
+            }
+        }
+    }
+}
+
+fn build_add_side<'a, T: Borrow<TxOut>>(
+    adds: &'a [UtxoAdd<T>],
+    counts: &[usize; UtxoKey::SHARD_COUNT],
+) -> ShardBucketSide<AddPayload<'a>> {
+    match bucket_shape(counts) {
+        BucketShape::Empty => ShardBucketSide::empty(),
+        BucketShape::Single(shard_idx) => {
+            ShardBucketSide::direct(shard_idx, direct_adds(adds, shard_idx))
+        }
+        BucketShape::Scattered => {
+            let (ranges, payloads) = scattered_adds(adds, counts);
+            ShardBucketSide::scattered(&ranges, payloads)
+        }
+    }
+}
+
+fn build_remove_side<'a>(
+    removes: &'a [OutPoint],
+    counts: &[usize; UtxoKey::SHARD_COUNT],
+) -> ShardBucketSide<SpendPayload<'a>> {
+    match bucket_shape(counts) {
+        BucketShape::Empty => ShardBucketSide::empty(),
+        BucketShape::Single(shard_idx) => {
+            ShardBucketSide::direct(shard_idx, direct_removes(removes, shard_idx))
+        }
+        BucketShape::Scattered => {
+            let (ranges, payloads) = scattered_removes(removes, counts);
+            ShardBucketSide::scattered(&ranges, payloads)
+        }
+    }
+}
+
+fn group_add_txid_runs(side: &mut ShardBucketSide<AddPayload<'_>>) {
+    side.group_payloads_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+}
+
+fn group_remove_txid_runs(side: &mut ShardBucketSide<SpendPayload<'_>>) {
+    side.group_payloads_by(|left, right| {
+        left.key
+            .cmp(&right.key)
+            .then_with(|| left.txid.cmp(&right.txid))
+    });
+}
+
+impl<T> ShardBucketSide<T> {
+    fn group_payloads_by(&mut self, mut compare: impl FnMut(&T, &T) -> core::cmp::Ordering) {
+        match self.shape {
+            BucketShape::Empty => {}
+            BucketShape::Single(_shard_idx) => {
+                self.payloads.sort_by(compare);
+            }
+            BucketShape::Scattered => {
+                for (start, end) in self.ranges {
+                    if end.saturating_sub(start) > 1 {
+                        self.payloads[start..end].sort_by(&mut compare);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn bucket_shape(counts: &[usize; UtxoKey::SHARD_COUNT]) -> BucketShape {
+    let mut active = None;
+    for (shard_idx, &count) in counts.iter().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        if active.replace(shard_idx).is_some() {
+            return BucketShape::Scattered;
+        }
+    }
+    active.map_or(BucketShape::Empty, BucketShape::Single)
+}
+
+fn direct_adds<T: Borrow<TxOut>>(adds: &[UtxoAdd<T>], shard_idx: usize) -> Vec<AddPayload<'_>> {
+    let mut payloads = Vec::with_capacity(adds.len());
+    for add in adds {
+        let key = UtxoKey::from_txid(&add.outpoint.txid);
+        debug_assert_eq!(usize::from(key.shard()), shard_idx);
+        payloads.push((key, add.outpoint.txid.into(), add.payload()));
+    }
+    payloads
+}
+
+fn direct_removes(removes: &[OutPoint], shard_idx: usize) -> Vec<SpendPayload<'_>> {
+    let mut payloads = Vec::with_capacity(removes.len());
+    for remove in removes {
+        let key = UtxoKey::from_txid(&remove.txid);
+        debug_assert_eq!(usize::from(key.shard()), shard_idx);
+        payloads.push(spend_payload(remove, key));
+    }
+    payloads
+}
+
+fn scattered_adds<'a, T: Borrow<TxOut>>(
+    adds: &'a [UtxoAdd<T>],
+    counts: &[usize; UtxoKey::SHARD_COUNT],
+) -> ([(usize, usize); UtxoKey::SHARD_COUNT], Vec<AddPayload<'a>>) {
+    let (ranges, mut cursors) = shard_ranges(counts);
+    let mut slots = std::iter::repeat_with(|| None)
+        .take(adds.len())
+        .collect::<Vec<Option<AddPayload<'a>>>>();
+    for add in adds {
+        let key = UtxoKey::from_txid(&add.outpoint.txid);
+        let shard_idx = usize::from(key.shard());
+        let cursor = &mut cursors[shard_idx];
+        slots[*cursor] = Some((key, add.outpoint.txid.into(), add.payload()));
+        *cursor = cursor.saturating_add(1);
+    }
+    debug_assert_eq!(cursors, range_ends(&ranges));
+    (ranges, initialized_slots(slots))
+}
+
+fn scattered_removes<'a>(
+    removes: &'a [OutPoint],
+    counts: &[usize; UtxoKey::SHARD_COUNT],
+) -> (
+    [(usize, usize); UtxoKey::SHARD_COUNT],
+    Vec<SpendPayload<'a>>,
+) {
+    let (ranges, mut cursors) = shard_ranges(counts);
+    let mut slots = std::iter::repeat_with(|| None)
+        .take(removes.len())
+        .collect::<Vec<Option<SpendPayload<'a>>>>();
+    for remove in removes {
+        let key = UtxoKey::from_txid(&remove.txid);
+        let shard_idx = usize::from(key.shard());
+        let cursor = &mut cursors[shard_idx];
+        slots[*cursor] = Some(spend_payload(remove, key));
+        *cursor = cursor.saturating_add(1);
+    }
+    debug_assert_eq!(cursors, range_ends(&ranges));
+    (ranges, initialized_slots(slots))
+}
+
+fn spend_payload(remove: &OutPoint, key: UtxoKey) -> SpendPayload<'_> {
+    SpendPayload {
+        op: remove,
+        key,
+        vout: remove.vout,
+        txid: remove.txid.into(),
+    }
+}
+
+const fn empty_ranges() -> [(usize, usize); UtxoKey::SHARD_COUNT] {
+    [(0_usize, 0_usize); UtxoKey::SHARD_COUNT]
+}
+
+fn shard_ranges(
+    counts: &[usize; UtxoKey::SHARD_COUNT],
+) -> (
+    [(usize, usize); UtxoKey::SHARD_COUNT],
+    [usize; UtxoKey::SHARD_COUNT],
+) {
+    let mut ranges = [(0_usize, 0_usize); UtxoKey::SHARD_COUNT];
+    let mut start = 0_usize;
+    for shard_idx in 0..UtxoKey::SHARD_COUNT {
+        let end = start.saturating_add(counts[shard_idx]);
+        ranges[shard_idx] = (start, end);
+        start = end;
+    }
+    let cursors = ranges.map(|(start, _end)| start);
+    (ranges, cursors)
+}
+
+fn range_ends(ranges: &[(usize, usize); UtxoKey::SHARD_COUNT]) -> [usize; UtxoKey::SHARD_COUNT] {
+    ranges.map(|(_start, end)| end)
+}
+
+fn initialized_slots<T>(slots: Vec<Option<T>>) -> Vec<T> {
+    slots
+        .into_iter()
+        .map(|slot| match slot {
+            Some(value) => value,
+            None => panic!("shard bucket counts allocate every slot"),
+        })
+        .collect()
+}
+
+fn active_shards(
+    add_counts: &[usize; UtxoKey::SHARD_COUNT],
+    remove_counts: &[usize; UtxoKey::SHARD_COUNT],
+) -> ([usize; UtxoKey::SHARD_COUNT], usize) {
+    let mut active = [0_usize; UtxoKey::SHARD_COUNT];
+    let mut len = 0_usize;
+    for shard_idx in 0..UtxoKey::SHARD_COUNT {
+        if add_counts[shard_idx] == 0 && remove_counts[shard_idx] == 0 {
+            continue;
+        }
+        active[len] = shard_idx;
+        len = len.saturating_add(1);
+    }
+    (active, len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin_rs_consensus::primitives::Amount;
+
+    #[test]
+    fn memory_report_accounts_payload_plus_table_bytes() -> Result<(), UtxoError> {
+        let set = UtxoSet::new();
+        let mut changes = BlockChanges::default();
+        let txid = Hash256::from_le_bytes(&[0x11; 32]);
+        for vout in 0..3_u32 {
+            changes.add(UtxoAdd::new(
+                OutPoint::new(Txid::from(txid), vout),
+                TxOut {
+                    value: Amount::from_sat(1_000 + u64::from(vout)),
+                    script_pubkey: vec![0x51].into(),
+                },
+                false,
+                1,
+            ));
+        }
+        set.commit_block(&changes, &Hash256::from_le_bytes(&[0x22; 32]))?;
+
+        let report = set.lock_stable_view().memory_report();
+        assert_eq!(report.records, 1);
+        assert_eq!(report.outputs, 3);
+        assert!(report.record_payload_bytes > 0);
+        assert!(report.table_bytes > 0);
+        Ok(())
+    }
+}

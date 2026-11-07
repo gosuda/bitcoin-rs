@@ -240,7 +240,9 @@ fn publish_gate_withholds_token_on_fused_mismatch() -> TestResult {
 
 #[test]
 fn publish_swap_between_commit_and_open_yields_integrity() -> TestResult {
-    use bitcoin_rs_utxo::snapshot::{RawSeedError, SeedProvenance, VerifiedSnapshotArtifact};
+    use bitcoin_rs_storage::utxo::snapshot::{
+        RawSeedError, SeedProvenance, VerifiedSnapshotArtifact,
+    };
 
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;

@@ -9,13 +9,12 @@ use bitcoin::bip152::ShortId;
 use bitcoin::blockdata::block::Block as RegistryBlock;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin_rs_chain::{
-    BlockBodyReadError, BlockBodySource, BlockTree, BlockTreeReader, NodeStatus, TipReader,
-};
+use bitcoin_rs_chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint,
     Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
+use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
 use parking_lot::RwLock;
 
 use super::getdata_pause_tests::{FAILSAFE, MAGIC, wait_until, wire_len_of};

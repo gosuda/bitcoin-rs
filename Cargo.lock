@@ -379,7 +379,6 @@ dependencies = [
  "bitcoin-rs-chainstate",
  "bitcoin-rs-consensus",
  "bitcoin-rs-storage",
- "bitcoin-rs-utxo",
  "bytes",
  "cap-fs-ext",
  "cap-std",
@@ -449,7 +448,6 @@ dependencies = [
  "bitcoin-rs-chain",
  "bitcoin-rs-consensus",
  "bitcoin-rs-storage",
- "bitcoin-rs-utxo",
  "bitcoin_hashes 0.14.101",
  "compact_str",
  "crossbeam-channel",
@@ -537,7 +535,6 @@ dependencies = [
  "bitcoin-rs-p2p",
  "bitcoin-rs-rpc",
  "bitcoin-rs-storage",
- "bitcoin-rs-utxo",
  "bytes",
  "cap-fs-ext",
  "cap-std",
@@ -605,7 +602,7 @@ version = "0.15.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-consensus",
- "bitcoin-rs-utxo",
+ "bitcoin-rs-storage",
  "clap",
  "serde",
  "sonic-rs",
@@ -629,7 +626,6 @@ dependencies = [
  "bitcoin-rs-p2p",
  "bitcoin-rs-rpc",
  "bitcoin-rs-storage",
- "bitcoin-rs-utxo",
  "bytes",
  "cap-fs-ext",
  "cap-std",
@@ -657,7 +653,7 @@ name = "bitcoin-rs-snapshot"
 version = "0.15.0"
 dependencies = [
  "bitcoin-rs-consensus",
- "bitcoin-rs-utxo",
+ "bitcoin-rs-storage",
  "clap",
  "rustix",
  "serde",
@@ -671,26 +667,34 @@ name = "bitcoin-rs-storage"
 version = "0.15.0"
 dependencies = [
  "arc-swap",
+ "bitcoin",
  "bitcoin-rs-consensus",
  "bitcoin-rs-storage",
  "bytes",
  "cap-fs-ext",
  "cap-std",
+ "crossbeam-utils",
  "hashbrown 0.17.1",
  "metrics",
+ "nohash-hasher",
  "parking_lot",
  "proptest",
+ "rayon",
+ "ruint",
  "rust-rocksdb",
  "rustix",
+ "secp256k1 0.29.1",
  "serde",
  "sha2",
  "signet-libmdbx",
+ "smallvec",
  "sonic-rs",
  "surrealkv",
  "tempfile",
  "thiserror",
  "tokio",
  "tracing",
+ "zerocopy",
 ]
 
 [[package]]
@@ -718,29 +722,6 @@ dependencies = [
  "serde",
  "sonic-rs",
  "tempfile",
-]
-
-[[package]]
-name = "bitcoin-rs-utxo"
-version = "0.15.0"
-dependencies = [
- "bitcoin",
- "bitcoin-rs-consensus",
- "bitcoin-rs-storage",
- "crossbeam-utils",
- "hashbrown 0.17.1",
- "nohash-hasher",
- "parking_lot",
- "proptest",
- "rayon",
- "ruint",
- "secp256k1 0.29.1",
- "sha2",
- "smallvec",
- "tempfile",
- "thiserror",
- "tracing",
- "zerocopy",
 ]
 
 [[package]]

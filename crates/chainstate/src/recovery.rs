@@ -3,8 +3,8 @@ use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_storage::ScriptAttestation;
 use bitcoin_rs_storage::chainstate_journal::JournalWriterError;
 use bitcoin_rs_storage::checkpoint::CheckpointLoadError;
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::snapshot::VerifiedSnapshotArtifact;
+use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::snapshot::VerifiedSnapshotArtifact;
 use std::path::{Path, PathBuf};
 
 use crate::assumeutxo_snapshot::SnapshotArchiveError;
@@ -30,7 +30,7 @@ pub enum RecoveryError {
     #[error(transparent)]
     Chain(#[from] bitcoin_rs_chain::ChainError),
     #[error(transparent)]
-    Utxo(#[from] bitcoin_rs_utxo::UtxoError),
+    Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error(transparent)]
     Snapshot(#[from] SnapshotArchiveError),
     #[error("read the script attestation of the durable head")]
@@ -142,7 +142,7 @@ pub fn require_full_script_attestation(
 
 pub struct InitialChainstate {
     pub utxo: UtxoSet,
-    pub coin_stats: bitcoin_rs_utxo::stats::CoinStats,
+    pub coin_stats: bitcoin_rs_storage::utxo::stats::CoinStats,
     pub tree: bitcoin_rs_chain::BlockTree,
     pub applied_tip: Option<TipSnapshot>,
     pub resume_source: ResumeSource,
@@ -250,7 +250,7 @@ fn cold_initial_chainstate(
 ) -> InitialChainstate {
     InitialChainstate {
         utxo: UtxoSet::new(),
-        coin_stats: bitcoin_rs_utxo::stats::CoinStats::default(),
+        coin_stats: bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         tree: bitcoin_rs_chain::BlockTree::new(),
         applied_tip: None,
         resume_source: ResumeSource::Cold,

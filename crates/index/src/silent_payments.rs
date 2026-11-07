@@ -1,6 +1,6 @@
 use bitcoin_hashes::{Hash as _, hash160};
 use bitcoin_rs_consensus::primitives::{BlockHash, Script, Tx, TxIn, Txid, consensus_bytes};
-use bitcoin_rs_utxo::contract::{BlockSpends, BlockSpendsError};
+use bitcoin_rs_storage::utxo::contract::{BlockSpends, BlockSpendsError};
 use secp256k1::{PublicKey, Scalar, Secp256k1};
 use sha2::{Digest as _, Sha256};
 

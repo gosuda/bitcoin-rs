@@ -8,7 +8,7 @@ use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256, Network};
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT;
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::UtxoSet;
 
 use crate::CheckpointError;
 use crate::test_fixtures::TestResult;

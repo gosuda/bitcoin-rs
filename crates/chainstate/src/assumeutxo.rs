@@ -6,8 +6,8 @@ use crate::error::{ApplyError, DisconnectError};
 use crate::{Chainstate, ConnectOutcome};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_consensus::primitives::{AssumeUtxoData, Block, BlockPayload, Hash256, Network};
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::core_snapshot::{StateVerifyError, VerifiedSnapshotState};
+use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::core_snapshot::{StateVerifyError, VerifiedSnapshotState};
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 mod serde_hash256 {
@@ -224,7 +224,7 @@ pub enum AssumeUtxoError {
     #[error("disconnect error: {0}")]
     Disconnect(#[from] DisconnectError),
     #[error("utxo error: {0}")]
-    Utxo(#[from] bitcoin_rs_utxo::UtxoError),
+    Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
 }
 
 impl From<StateVerifyError> for AssumeUtxoError {
@@ -286,7 +286,7 @@ pub struct AssumeUtxoManager {
     historical_undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
     data_dir: PathBuf,
     historical_checkpoint_interval: u32,
-    pending_activation_mint: Mutex<Option<bitcoin_rs_utxo::V4Witness>>,
+    pending_activation_mint: Mutex<Option<bitcoin_rs_storage::utxo::V4Witness>>,
 }
 
 impl std::fmt::Debug for AssumeUtxoManager {
@@ -674,7 +674,7 @@ impl AssumeUtxoManager {
         Ok(())
     }
 
-    pub fn take_pending_activation_witness(&self) -> Option<bitcoin_rs_utxo::V4Witness> {
+    pub fn take_pending_activation_witness(&self) -> Option<bitcoin_rs_storage::utxo::V4Witness> {
         self.pending_activation_mint.lock().take()
     }
 

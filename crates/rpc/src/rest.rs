@@ -534,7 +534,9 @@ fn route_blockhash_by_height(ctx: &Arc<Context>, suffix: &str) -> Response {
 }
 
 fn route_spent_txouts(ctx: &Context, suffix: &str) -> Response {
-    use bitcoin_rs_utxo::contract::{BlockSpendsError as E, BoundedReadError, HistoryUnavailable};
+    use bitcoin_rs_storage::utxo::contract::{
+        BlockSpendsError as E, BoundedReadError, HistoryUnavailable,
+    };
     let (hash_text, format) = split_format(suffix);
     if hash_text.contains('/') {
         return bad_request("Invalid URI format. Expected /rest/spenttxouts/<hash>.<ext>");

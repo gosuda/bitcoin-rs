@@ -1,7 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-mod block_body;
 mod count;
 mod deployment;
 pub mod header_sync;
@@ -23,7 +22,6 @@ use bitcoin_rs_consensus::primitives::Hash256;
 use thiserror::Error;
 
 pub use bitcoin_rs_consensus::SoftforkState;
-pub use block_body::{BlockBodyReadError, BlockBodySource};
 pub use count::ChainTxCount;
 pub use deployment::{
     DeploymentQueryError, DeploymentStatus, SignallingDeployment, VersionBitsStatus,

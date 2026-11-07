@@ -18,8 +18,8 @@ use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::pruning::{HistoryLease, HistoryUnavailable};
-use bitcoin_rs_utxo::snapshot::RawSeedError;
-use bitcoin_rs_utxo::snapshot::VerifiedSnapshotArtifact;
+use bitcoin_rs_storage::utxo::snapshot::RawSeedError;
+use bitcoin_rs_storage::utxo::snapshot::VerifiedSnapshotArtifact;
 use std::cell::Cell;
 
 pub(super) fn index_ahead_capability_label(capabilities: IndexCapabilities) -> Option<String> {

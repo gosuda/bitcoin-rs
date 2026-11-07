@@ -7,13 +7,12 @@ use bitcoin::blockdata::block::Block as RegistryBlock;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
-use bitcoin_rs_chain::{
-    BlockBodySource, BlockTree, BlockTreeReader, ChainWork, NodeStatus, TipReader,
-};
+use bitcoin_rs_chain::{BlockTree, BlockTreeReader, ChainWork, NodeStatus, TipReader};
 use bitcoin_rs_consensus::primitives::layout::{ParsedBlock, ParsedTransaction};
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, Hash256, Header, Network, consensus_bytes, deserialize,
 };
+use bitcoin_rs_storage::block_body::BlockBodySource;
 use parking_lot::Mutex;
 #[cfg(test)]
 use parking_lot::RwLock;

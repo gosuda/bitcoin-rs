@@ -19,7 +19,7 @@ use bitcoin_rs_consensus::script::{
 };
 use bitcoin_rs_consensus::{ConsensusError, ValidationEngine};
 use bitcoin_rs_storage::chainstate_journal::{FULL_REVALIDATION_MARKER, JOURNAL_DIR_NAME};
-use bitcoin_rs_utxo::stats::CoinStatsListener;
+use bitcoin_rs_storage::utxo::stats::CoinStatsListener;
 
 use crate::test_fixtures::{TestError, TestResult};
 

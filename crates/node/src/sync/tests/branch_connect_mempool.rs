@@ -247,8 +247,8 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             block_tree: tree,
             restored_applied_tip: None,
             utxo: Arc::new(UtxoSet::new()),
-            coin_stats: Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
-                bitcoin_rs_utxo::stats::CoinStats::default(),
+            coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
+                bitcoin_rs_storage::utxo::stats::CoinStats::default(),
             )),
             chain_events: Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
             block_body_store: Some(Arc::new(Bodies::default())),

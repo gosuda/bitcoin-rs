@@ -9,13 +9,13 @@ use bitcoin_rs_consensus::{
     BlockRuleContext, ConsensusError, check_block_body_binding,
     verify_block::verify_block_non_contextual,
 };
+use bitcoin_rs_storage::utxo::contract::{
+    UndoCodecError, decode_undo_record_for_block, undo_record_size_limit,
+};
 use bitcoin_rs_storage::{
     BoundedReadError, StorageError,
     block_body::BlockBodyStore,
     pruning::{HistoryLease, HistoryUnavailable},
-};
-use bitcoin_rs_utxo::contract::{
-    UndoCodecError, decode_undo_record_for_block, undo_record_size_limit,
 };
 
 use crate::block_spends::MAX_BLOCK_QUERY_BYTES;

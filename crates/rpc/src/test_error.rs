@@ -13,9 +13,9 @@ pub(crate) enum TestError {
     #[error(transparent)]
     AddressFromScript(#[from] bitcoin::address::FromScriptError),
     #[error(transparent)]
-    Utxo(#[from] bitcoin_rs_utxo::UtxoError),
+    Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error(transparent)]
-    UtxoScan(#[from] bitcoin_rs_utxo::scan::UtxoScanError),
+    UtxoScan(#[from] bitcoin_rs_storage::utxo::scan::UtxoScanError),
     #[error(transparent)]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(transparent)]

@@ -5,8 +5,8 @@ use bitcoin_rs_consensus::primitives::{Hash256, Header, deserialize};
 use bitcoin_rs_storage::chainstate_journal::{
     Coin, JournalRecord, JournalReplayBase, JournalReplayError, Mutation, replay_committed_range,
 };
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use hashbrown::HashMap;
 use thiserror::Error;
 
@@ -59,7 +59,7 @@ pub(crate) fn mutations_for_block(
 pub(crate) struct ReplayedState {
     pub tree: BlockTree,
     pub utxo: UtxoSet,
-    pub coin_stats: bitcoin_rs_utxo::stats::CoinStats,
+    pub coin_stats: bitcoin_rs_storage::utxo::stats::CoinStats,
     pub applied_tip: bitcoin_rs_chain::TipSnapshot,
 }
 
@@ -68,7 +68,7 @@ pub(crate) fn replay_from_journal(
     base_generation: u64,
     tree: BlockTree,
     utxo: UtxoSet,
-    coin_stats: bitcoin_rs_utxo::stats::CoinStats,
+    coin_stats: bitcoin_rs_storage::utxo::stats::CoinStats,
     base_tip: bitcoin_rs_chain::TipSnapshot,
 ) -> Result<Box<ReplayedState>, JournalReplayError> {
     let base = JournalReplayBase {
@@ -105,7 +105,7 @@ fn validate_replayed_head(
 struct ReplayAccumulator {
     tree: BlockTree,
     utxo: UtxoSet,
-    coin_stats: bitcoin_rs_utxo::stats::CoinStatsListener,
+    coin_stats: bitcoin_rs_storage::utxo::stats::CoinStatsListener,
     applied_tip: bitcoin_rs_chain::TipSnapshot,
     unknown_base: bool,
 }
@@ -114,7 +114,7 @@ impl ReplayAccumulator {
     fn new(
         tree: BlockTree,
         mut utxo: UtxoSet,
-        initial_coin_stats: bitcoin_rs_utxo::stats::CoinStats,
+        initial_coin_stats: bitcoin_rs_storage::utxo::stats::CoinStats,
         base_tip: bitcoin_rs_chain::TipSnapshot,
     ) -> Result<Self, JournalReplayError> {
         let base_node = tree.node(base_tip.tip_id).map_err(|error| {
@@ -130,7 +130,8 @@ impl ReplayAccumulator {
                 "checkpoint tip snapshot does not match its tree node".to_owned(),
             ));
         }
-        let coin_stats = bitcoin_rs_utxo::stats::CoinStatsListener::new(initial_coin_stats);
+        let coin_stats =
+            bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(initial_coin_stats);
         utxo.track_coin_stats(coin_stats.clone());
         let unknown_base = base_tip.chain_tx_count.to_wire() == 0 && base_tip.height != 0;
         Ok(Self {
@@ -179,7 +180,7 @@ fn replay_records(
     records: Vec<JournalRecord>,
     tree: BlockTree,
     utxo: UtxoSet,
-    initial_coin_stats: bitcoin_rs_utxo::stats::CoinStats,
+    initial_coin_stats: bitcoin_rs_storage::utxo::stats::CoinStats,
     base_tip: bitcoin_rs_chain::TipSnapshot,
 ) -> Result<ReplayedState, JournalReplayError> {
     let mut replay = ReplayAccumulator::new(tree, utxo, initial_coin_stats, base_tip)?;
@@ -305,7 +306,7 @@ fn apply_record_mutations(
             }
         }
     }
-    bitcoin_rs_utxo::contract::commit_block_changes(
+    bitcoin_rs_storage::utxo::contract::commit_block_changes(
         utxo,
         &changes,
         &Hash256::from_le_bytes(&record.block_hash),
@@ -319,7 +320,7 @@ fn apply_record_mutations(
 }
 
 fn advance_coin_stats(
-    coin_stats: &bitcoin_rs_utxo::stats::CoinStatsListener,
+    coin_stats: &bitcoin_rs_storage::utxo::stats::CoinStatsListener,
     record: &JournalRecord,
 ) -> Result<(), JournalReplayError> {
     let expected_height = i64::from(coin_stats.snapshot().height)
