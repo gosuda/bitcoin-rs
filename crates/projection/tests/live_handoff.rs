@@ -189,6 +189,10 @@ fn mine_test_block(prev: [u8; 32], height: u32, txs: Vec<Transaction>) -> bitcoi
     block
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "fixture decodes local regtest bytes with checked shapes"
+)]
 fn block_to_facts(
     block: &bitcoin::Block,
     height: u32,
@@ -261,6 +265,10 @@ fn block_to_facts(
 
 // PRJ-01
 #[test]
+#[expect(
+    clippy::expect_used,
+    reason = "the harness asserts wiring invariants on local fixtures"
+)]
 fn live_index_path_reads_zero_block_bodies() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let data_dir = temp_dir.path();
