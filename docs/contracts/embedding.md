@@ -19,10 +19,12 @@ The typed in-process surface provides `Node::start`, gateway broadcast, and cons
   - The first failure is remembered while later stages still run.
   - Repeated entry is inert.
   - The derived-index worker stops first under a bounded join.
+  - A shutdown request or cancellation arriving before or during store open keeps worker ownership of the helper thread; the worker joins the helper to completion, drops any acquired store handle, and stops without abandonment or namespace poison. Teardown preserves ordinary backend error or panic reporting without turning non-abandoned failures into fatal poison.
   - The checkpoint publishes and chainstate closes only after the index released its stores.
-  - An abandoned join records a teardown error.
+  - An abandoned join from an expired host teardown deadline or an un-canceled startup open timeout records a teardown error and marks the namespace poisoned.
   - A worker whose backend open was abandoned while a detached open thread still touches the store records a teardown error.
-  - The checkpoint never publishes while detached index I/O can still write.
+  - Eventual cleanup of a detached abandoned helper drops unowned store handles, but sticky poison prevents the abandoned path from becoming a clean completion.
+  - The checkpoint never publishes while detached index I/O can still write or when any teardown error or poison is recorded.
 - **EMB-02: Caller-owned runtime.**
   - `Node::start`/`Node::shutdown` are `async fn` on the caller's Tokio runtime.
   - The node never creates, enters, or retains a runtime.

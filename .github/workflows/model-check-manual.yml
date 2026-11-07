@@ -1,13 +1,10 @@
 name: model-check-manual
 
-# Operator-invoked owner of formal model evidence (issue: K=128 ChainAdmission Safety needs
-# ~30h+ at the pinned 4g heap, measured 2026-09-12; no hosted PR/main lane can
-# hold it). Runs the solver UNCHANGED at K=128. MANUAL ONLY, no schedule: a
-# cron on hosted runners (360-min cap) would fail every run and train everyone
-# to ignore the lane. Add a schedule back when a self-hosted/unbounded runner
-# exists. Informational: failures never block merges. A run uploads whatever
-# evidence it produced as an artifact; it never edits the proof inventory,
-# which docs/contracts/formal-verification.md owns.
+# Operator-invoked formal model evidence workflow. Historical Apalache evidence:
+# K=128 ChainAdmission Safety required ~30h+ at the pinned 4g heap, measured
+# 2026-09-12. MANUAL ONLY, no schedule. Informational: failures never block
+# merges. A run uploads whatever evidence it produced as an artifact; it never
+# edits the proof inventory, which docs/contracts/formal-verification.md owns.
 on:
   workflow_dispatch:
 concurrency:
@@ -39,7 +36,7 @@ jobs:
         run: printf 'JAVA_HOME_25_X64=%s\n' "$JAVA_HOME" >> "$GITHUB_ENV"
       - name: Provision pinned Apalache
         run: bash scripts/provision-ci-reference-fixtures.sh formal
-      - name: Formal model gate at K=128
+      - name: Configured formal model check
         run: |
           set -o pipefail
           rm -rf -- target/apalache

@@ -1,3 +1,6 @@
+#[cfg(kani)]
+pub(crate) mod open_model;
+
 use super::DerivedIndexLifecycle;
 use super::DerivedIndexOpenSpec;
 use super::DerivedIndexQueryEngine;
@@ -395,23 +398,56 @@ pub(super) fn open_derived_index_with_timeout(
     let (tx, rx) = crossbeam_channel::bounded(1);
     let open_store = Arc::clone(&spec.open_store);
     let dir = txindex_dir.to_path_buf();
-    let _join = thread::Builder::new()
+    let open_thread = thread::Builder::new()
         .name("bitcoin-rs-txindex-open".to_owned())
         .spawn(move || {
             let _receiver_gone = tx.send(open_store(&dir));
         })
         .map_err(|e| DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
 
-    let result = wait_for_open_result(&rx, open_timeout, shutdown, should_stop);
-    if matches!(&result, Err(DerivedIndexWorkerError::OpenTimeout { .. })) {
-        tracing::error!(
-            timeout_secs = open_timeout.as_secs(),
-            backend = %spec.storage_backend,
-            dir = %txindex_dir.display(),
-            "txindex store open timed out; detaching the open thread and poisoning its namespace"
-        );
+    let result = wait_for_open_result(&rx, open_timeout, shutdown, &should_stop);
+    match result {
+        Err(DerivedIndexWorkerError::OpenTimeout { secs }) => {
+            tracing::error!(
+                timeout_secs = open_timeout.as_secs(),
+                backend = %spec.storage_backend,
+                dir = %txindex_dir.display(),
+                "txindex store open timed out; detaching the open thread and poisoning its namespace"
+            );
+            Err(DerivedIndexWorkerError::OpenTimeout { secs })
+        }
+        Err(DerivedIndexWorkerError::OpenStopped) => {
+            if let Err(payload) = open_thread.join() {
+                std::panic::resume_unwind(payload);
+            }
+            match rx.try_recv() {
+                Ok(Ok(_open)) => Err(DerivedIndexWorkerError::Stopped),
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err(DerivedIndexWorkerError::Storage(
+                    bitcoin_rs_storage::StorageError::Backend(
+                        "txindex open thread exited without result".to_owned(),
+                    ),
+                )),
+            }
+        }
+        Ok(open) => {
+            if let Err(payload) = open_thread.join() {
+                std::panic::resume_unwind(payload);
+            }
+            if shutdown.is_triggered() || should_stop() {
+                drop(open);
+                Err(DerivedIndexWorkerError::Stopped)
+            } else {
+                Ok(open)
+            }
+        }
+        Err(err) => {
+            if let Err(payload) = open_thread.join() {
+                std::panic::resume_unwind(payload);
+            }
+            Err(err)
+        }
     }
-    result
 }
 
 pub fn open_derived_index_store_on_worker<S>(
@@ -494,13 +530,19 @@ pub(super) fn wait_for_open_result(
     should_stop: impl Fn() -> bool,
 ) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
     if shutdown.is_triggered() || should_stop() {
+        if let Ok(result) = receiver.try_recv() {
+            return result;
+        }
         return Err(DerivedIndexWorkerError::OpenStopped);
     }
     if timeout.is_zero() {
         return Err(DerivedIndexWorkerError::OpenTimeout { secs: 0 });
     }
     crossbeam_channel::select! {
-        recv(shutdown.closed()) -> _ => Err(DerivedIndexWorkerError::OpenStopped),
+        recv(shutdown.closed()) -> _ => match receiver.try_recv() {
+            Ok(result) => result,
+            Err(_) => Err(DerivedIndexWorkerError::OpenStopped),
+        },
         recv(receiver) -> result => match result {
             Ok(result) => result,
             Err(_) => Err(DerivedIndexWorkerError::Storage(

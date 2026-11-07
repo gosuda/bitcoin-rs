@@ -358,3 +358,184 @@ fn recovery_heartbeat_stops_after_a_successful_open() -> std::io::Result<()> {
     assert_no_heartbeat_lines_after_the_open_phase(&counter, "successful open");
     Ok(())
 }
+
+#[test]
+#[cfg(feature = "rocksdb")]
+fn cancellation_after_spawn_joins_helper_and_returns_stopped() -> std::io::Result<()> {
+    struct DropProbe(crossbeam_channel::Sender<()>);
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    let dir = tempfile::tempdir()?;
+    let store_dir = dir.path().join("txindex");
+    let (opened_tx, opened_rx) = crossbeam_channel::bounded(1);
+    let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(1);
+    let (dropped_tx, dropped_rx) = crossbeam_channel::bounded::<()>(1);
+    let mut spec = recovery_open_spec(dir.path());
+    let store_dir_clone = store_dir.clone();
+    spec.open_store = Arc::new(move |_| {
+        let guard: bitcoin_rs_storage::StoreGuard = Arc::new(DropProbe(dropped_tx.clone()));
+        let store = Arc::new(
+            bitcoin_rs_storage::RocksDbStore::open_with_cache(&store_dir_clone, 8 * 1024 * 1024)
+                .map(|s| s.guarded_by(guard))
+                .map_err(DerivedIndexWorkerError::Storage)?,
+        );
+        let _ = opened_tx.send(());
+        let _ = release_rx.recv();
+        open_derived_index_store_on_worker(store, crate::runtime::DEFAULT_BATCH_LIMITS, 1)
+    });
+    let shutdown = LatchWriter::new();
+    let shutdown_reader = shutdown.reader();
+    let store_dir_for_thread = store_dir.clone();
+    let open_thread = thread::spawn(move || {
+        open_derived_index_with_timeout(
+            &spec,
+            &store_dir_for_thread,
+            Duration::from_secs(30),
+            &shutdown_reader,
+            || false,
+        )
+    });
+
+    assert!(
+        opened_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "helper must open store and signal opened"
+    );
+
+    shutdown.trigger();
+    assert!(release_tx.send(()).is_ok());
+
+    let Ok(result) = open_thread.join() else {
+        panic!("open thread must join promptly");
+    };
+
+    assert!(
+        dropped_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "store must drop after open cancellation"
+    );
+
+    assert!(
+        matches!(result, Err(DerivedIndexWorkerError::Stopped)),
+        "cancellation after spawn must return clean Stopped, got {:?}",
+        result.as_ref().err()
+    );
+
+    let second_open =
+        bitcoin_rs_storage::RocksDbStore::open_with_cache(&store_dir, 8 * 1024 * 1024);
+    assert!(
+        second_open.is_ok(),
+        "second RocksDbStore open must succeed, proving helper joined and lock released: {:?}",
+        second_open.as_ref().err()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn cancellation_after_spawn_preserves_backend_error_when_helper_fails() -> std::io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store_dir = dir.path().join("txindex");
+    let (started_tx, started_rx) = crossbeam_channel::bounded(1);
+    let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(1);
+    let (helper_done_tx, helper_done_rx) = crossbeam_channel::bounded::<()>(1);
+    let mut spec = recovery_open_spec(dir.path());
+    spec.open_store = Arc::new(move |_| {
+        let _ = started_tx.send(());
+        let _ = release_rx.recv();
+        let _ = helper_done_tx.send(());
+        Err(DerivedIndexWorkerError::Storage(
+            bitcoin_rs_storage::StorageError::InvalidOperation("native corruption sentinel"),
+        ))
+    });
+    let shutdown = LatchWriter::new();
+    let shutdown_reader = shutdown.reader();
+    let open_thread = thread::spawn(move || {
+        open_derived_index_with_timeout(
+            &spec,
+            &store_dir,
+            Duration::from_secs(30),
+            &shutdown_reader,
+            || false,
+        )
+    });
+
+    assert!(
+        started_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "helper must signal started"
+    );
+    shutdown.trigger();
+    assert!(release_tx.send(()).is_ok());
+
+    let Ok(result) = open_thread.join() else {
+        panic!("open thread must join promptly");
+    };
+
+    let _ = helper_done_rx.recv_timeout(Duration::from_secs(5));
+
+    assert!(
+        matches!(
+            result,
+            Err(DerivedIndexWorkerError::Storage(
+                bitcoin_rs_storage::StorageError::InvalidOperation("native corruption sentinel")
+            ))
+        ),
+        "cancellation after spawn must preserve original typed backend error, got {:?}",
+        result.as_ref().err()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn cancellation_after_spawn_resumes_panic_when_helper_panics() -> std::io::Result<()> {
+    struct PanicSentinel(crossbeam_channel::Sender<()>);
+    impl Drop for PanicSentinel {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    let dir = tempfile::tempdir()?;
+    let store_dir = dir.path().join("txindex");
+    let (started_tx, started_rx) = crossbeam_channel::bounded(1);
+    let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(1);
+    let (unwound_tx, unwound_rx) = crossbeam_channel::bounded::<()>(1);
+    let mut spec = recovery_open_spec(dir.path());
+    spec.open_store = Arc::new(move |_| {
+        let _sentinel = PanicSentinel(unwound_tx.clone());
+        let _ = started_tx.send(());
+        let _ = release_rx.recv();
+        panic!("helper panic sentinel");
+    });
+    let shutdown = LatchWriter::new();
+    let shutdown_reader = shutdown.reader();
+    let open_thread = thread::spawn(move || {
+        open_derived_index_with_timeout(
+            &spec,
+            &store_dir,
+            Duration::from_secs(30),
+            &shutdown_reader,
+            || false,
+        )
+    });
+
+    assert!(
+        started_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "helper must signal started"
+    );
+    shutdown.trigger();
+    assert!(release_tx.send(()).is_ok());
+
+    let join_result = open_thread.join();
+    let _ = unwound_rx.recv_timeout(Duration::from_secs(5));
+
+    assert!(
+        join_result.is_err(),
+        "open_derived_index_with_timeout must resume panic on cancellation when helper panicked"
+    );
+
+    Ok(())
+}
