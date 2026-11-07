@@ -224,27 +224,36 @@ impl MockEngineState {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct LockTracker {
-    transition_lock_acquisitions: usize,
-    utxo_store_reads: usize,
+    transition_lock_acquisitions: std::cell::Cell<usize>,
+    utxo_store_reads: std::cell::Cell<usize>,
 }
 
 impl LockTracker {
     #[must_use]
     pub(crate) const fn new() -> Self {
         Self {
-            transition_lock_acquisitions: 0,
-            utxo_store_reads: 0,
+            transition_lock_acquisitions: std::cell::Cell::new(0),
+            utxo_store_reads: std::cell::Cell::new(0),
         }
     }
 
-    #[must_use]
-    pub(crate) const fn transition_lock_acquisitions(&self) -> usize {
+    pub(crate) fn record_transition_lock_acquisition(&self) {
         self.transition_lock_acquisitions
+            .set(self.transition_lock_acquisitions.get() + 1);
+    }
+    #[expect(dead_code, reason = "model invariant helper")]
+    pub(crate) fn record_utxo_store_read(&self) {
+        self.utxo_store_reads.set(self.utxo_store_reads.get() + 1);
     }
 
     #[must_use]
-    pub(crate) const fn utxo_store_reads(&self) -> usize {
-        self.utxo_store_reads
+    pub(crate) fn transition_lock_acquisitions(&self) -> usize {
+        self.transition_lock_acquisitions.get()
+    }
+
+    #[must_use]
+    pub(crate) fn utxo_store_reads(&self) -> usize {
+        self.utxo_store_reads.get()
     }
 }
 
@@ -286,20 +295,30 @@ pub(crate) struct ScriptLiveRow {
 
 pub(crate) struct ScriptLiveView<'a> {
     row: ScriptLiveRow,
-    _tracker: &'a LockTracker,
+    tracker: &'a LockTracker,
 }
 
 impl<'a> ScriptLiveView<'a> {
     #[must_use]
     pub(crate) const fn with_row_and_tracker(row: ScriptLiveRow, tracker: &'a LockTracker) -> Self {
-        Self {
-            row,
-            _tracker: tracker,
-        }
+        Self { row, tracker }
     }
 
     #[must_use]
     pub(crate) fn unspent_outputs_for(&self, script_hash: &[u8; 32]) -> Vec<OutPoint> {
+        if self.row.script_hash == *script_hash {
+            vec![self.row.outpoint]
+        } else {
+            vec![]
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn unspent_outputs_for_mutant_acquires_transition_lock(
+        &self,
+        script_hash: &[u8; 32],
+    ) -> Vec<OutPoint> {
+        self.tracker.record_transition_lock_acquisition();
         if self.row.script_hash == *script_hash {
             vec![self.row.outpoint]
         } else {
@@ -354,6 +373,12 @@ impl QuerySession {
 
     pub(crate) fn access_state(&mut self) {
         self.phase = QueryPhase::Captured;
+        self.locks.chain_lock = true;
+    }
+
+    pub(crate) fn access_state_script_live(&mut self) {
+        self.phase = QueryPhase::Captured;
+        self.locks = LockState::default();
     }
 
     pub(crate) fn release_state_and_build_buffer(&mut self) {
@@ -362,9 +387,25 @@ impl QuerySession {
         self.locks = LockState::default();
     }
 
+    pub(crate) fn release_state_and_build_buffer_mutant_retains_lock(&mut self) {
+        self.phase = QueryPhase::ResponseReady;
+        self.buffer_ready = true;
+        self.locks.chain_lock = true;
+    }
+
     pub(crate) fn start_serialization(&mut self) -> bool {
         if self.phase == QueryPhase::ResponseReady && self.buffer_ready && !self.locks.any_held() {
             self.phase = QueryPhase::Serializing;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn start_serialization_mutant_under_lock(&mut self) -> bool {
+        if self.phase == QueryPhase::ResponseReady && self.buffer_ready {
+            self.phase = QueryPhase::Serializing;
+            self.locks.chain_lock = true;
             true
         } else {
             false
@@ -389,6 +430,7 @@ impl QuerySession {
     pub(crate) fn complete(&mut self) {
         self.phase = QueryPhase::Idle;
         self.buffer_ready = false;
+        self.locks = LockState::default();
     }
 }
 
@@ -475,8 +517,8 @@ pub(crate) struct State {
     pub(crate) query_is_script_live: bool,
     pub(crate) query_result: QueryResult,
     pub(crate) query_locks_held: LockState,
+    pub(crate) transition_lock_held: bool,
 }
-
 #[must_use]
 pub(crate) fn is_gen_retired(retired_gens: &[bool; 4], generation: u64) -> bool {
     if let Ok(idx) = usize::try_from(generation) {
@@ -514,9 +556,9 @@ impl State {
                 chain_lock: false,
                 mempool_lock: false,
             },
+            transition_lock_held: false,
         }
     }
-
     #[must_use]
     pub(crate) fn is_generation_retired(&self, generation: u64) -> bool {
         is_gen_retired(&self.retired_gens, generation)
@@ -538,6 +580,8 @@ pub(crate) enum Action {
     ExtendChain,
     AdvanceCoverage,
     DeepReorg,
+    ChainTransitionAcquire,
+    ChainTransitionRelease,
     CaptureView {
         view_id: usize,
         is_script_live: bool,
@@ -548,6 +592,33 @@ pub(crate) enum Action {
     StartSerialization,
     FinishQuery,
     Stutter,
+}
+
+const fn can_capture_view(phase: QueryPhase, view_id: usize, target_height: u32) -> bool {
+    matches!(phase, QueryPhase::Idle)
+        && view_id >= 1
+        && view_id <= MAX_VIEWS
+        && target_height <= MAX_HEIGHT
+}
+
+fn evaluate_query_access(state: &State) -> Option<QueryResult> {
+    if state.query_phase != QueryPhase::Captured {
+        return None;
+    }
+    if !state.query_is_script_live && state.transition_lock_held {
+        return None;
+    }
+    let v = state.views[state.query_view_id];
+    if state.is_view_retired(state.query_view_id) {
+        return Some(QueryResult::ExpiredView);
+    }
+    if state.query_is_tip_promised && v.view_epoch_commit != state.tip_commit {
+        return Some(QueryResult::Retry);
+    }
+    if state.query_target_height > v.view_coverage {
+        return Some(QueryResult::Unavailable);
+    }
+    Some(QueryResult::AnswerOk)
 }
 
 #[must_use]
@@ -582,17 +653,23 @@ pub(crate) fn step(state: &State, action: &Action) -> State {
                 }
             }
         }
+        Action::ChainTransitionAcquire => {
+            if !state.transition_lock_held {
+                next.transition_lock_held = true;
+            }
+        }
+        Action::ChainTransitionRelease => {
+            if state.transition_lock_held {
+                next.transition_lock_held = false;
+            }
+        }
         Action::CaptureView {
             view_id,
             is_script_live,
             is_tip,
             target_height,
         } => {
-            if state.query_phase == QueryPhase::Idle
-                && *view_id >= 1
-                && *view_id <= MAX_VIEWS
-                && *target_height <= MAX_HEIGHT
-            {
+            if can_capture_view(state.query_phase, *view_id, *target_height) {
                 next.views[*view_id] = ViewRecord {
                     captured: true,
                     view_epoch_height: state.tip_height,
@@ -607,29 +684,18 @@ pub(crate) fn step(state: &State, action: &Action) -> State {
                 next.query_is_tip_promised = *is_tip;
                 next.query_is_script_live = *is_script_live;
                 next.query_result = QueryResult::None;
-                next.query_locks_held = LockState::default();
+                next.query_locks_held = LockState {
+                    transition_lock: false,
+                    chain_lock: !*is_script_live,
+                    mempool_lock: false,
+                };
             }
         }
         Action::AccessState => {
-            if state.query_phase == QueryPhase::Captured {
-                let v = state.views[state.query_view_id];
-                if state.is_view_retired(state.query_view_id) {
-                    next.query_result = QueryResult::ExpiredView;
-                    next.query_locks_held = LockState::default();
-                    next.query_phase = QueryPhase::ResponseReady;
-                } else if state.query_is_tip_promised && v.view_epoch_commit != state.tip_commit {
-                    next.query_result = QueryResult::Retry;
-                    next.query_locks_held = LockState::default();
-                    next.query_phase = QueryPhase::ResponseReady;
-                } else if state.query_target_height > v.view_coverage {
-                    next.query_result = QueryResult::Unavailable;
-                    next.query_locks_held = LockState::default();
-                    next.query_phase = QueryPhase::ResponseReady;
-                } else {
-                    next.query_result = QueryResult::AnswerOk;
-                    next.query_locks_held = LockState::default();
-                    next.query_phase = QueryPhase::ResponseReady;
-                }
+            if let Some(result) = evaluate_query_access(state) {
+                next.query_result = result;
+                next.query_locks_held = LockState::default();
+                next.query_phase = QueryPhase::ResponseReady;
             }
         }
         Action::StartSerialization => {
@@ -642,6 +708,7 @@ pub(crate) fn step(state: &State, action: &Action) -> State {
             if state.query_phase == QueryPhase::Serializing {
                 next.query_phase = QueryPhase::Idle;
                 next.query_result = QueryResult::None;
+                next.query_locks_held = LockState::default();
             }
         }
         Action::Stutter => {}
@@ -676,8 +743,36 @@ pub(crate) fn step_mutant_removed_coverage_guard(state: &State, action: &Action)
     next
 }
 
-// QRY-03
 #[must_use]
+pub(crate) fn step_mutant_script_live_acquires_transition_lock(
+    state: &State,
+    action: &Action,
+) -> State {
+    let mut next = step(state, action);
+    if let Action::CaptureView {
+        is_script_live: true,
+        ..
+    } = action
+    {
+        if state.query_phase == QueryPhase::Idle {
+            next.query_locks_held.transition_lock = true;
+        }
+    }
+    next
+}
+
+#[must_use]
+pub(crate) fn step_mutant_serialization_under_lock(state: &State, action: &Action) -> State {
+    let mut next = step(state, action);
+    if matches!(action, Action::StartSerialization)
+        && state.query_phase == QueryPhase::ResponseReady
+    {
+        next.query_phase = QueryPhase::Serializing;
+        next.query_locks_held.chain_lock = true;
+    }
+    next
+}
+// QRY-03
 pub(crate) const fn safety_history_query_never_retries(state: &State) -> bool {
     if matches!(state.query_result, QueryResult::Retry) {
         state.query_is_tip_promised
@@ -872,7 +967,16 @@ pub fn check_script_live_zero_transition_lock() {
 pub fn check_serialization_no_locks_held() {
     let mut session = QuerySession::new();
 
-    session.access_state();
+    let is_script_live: bool = kani::any();
+    if is_script_live {
+        session.access_state_script_live();
+        assert!(!session.holds_transition_lock());
+        assert!(!session.holds_chain_lock());
+    } else {
+        session.access_state();
+        assert!(session.holds_chain_lock());
+    }
+
     session.release_state_and_build_buffer();
 
     let in_serialization = session.start_serialization();
@@ -885,6 +989,101 @@ pub fn check_serialization_no_locks_held() {
     session.complete();
 }
 
+#[cfg(kani)]
+fn any_action() -> Action {
+    let disc: u8 = kani::any();
+    kani::assume(disc < 10);
+    match disc {
+        0 => Action::ExtendChain,
+        1 => Action::AdvanceCoverage,
+        2 => Action::DeepReorg,
+        3 => Action::ChainTransitionAcquire,
+        4 => Action::ChainTransitionRelease,
+        5 => {
+            let view_id: usize = kani::any();
+            kani::assume(view_id >= 1 && view_id <= MAX_VIEWS);
+            let target_height: u32 = kani::any();
+            kani::assume(target_height <= MAX_HEIGHT);
+            Action::CaptureView {
+                view_id,
+                is_script_live: kani::any(),
+                is_tip: kani::any(),
+                target_height,
+            }
+        }
+        6 => Action::AccessState,
+        7 => Action::StartSerialization,
+        8 => Action::FinishQuery,
+        _ => Action::Stutter,
+    }
+}
+
+// PRJ-11, QRY-08
+#[cfg(kani)]
+#[kani::proof]
+#[kani::unwind(4)]
+pub fn check_serving_view_symbolic_action_safety() {
+    let mut state = State::init();
+    assert!(safety(&state));
+
+    let steps: usize = kani::any();
+    kani::assume(steps <= 3);
+    for _ in 0..steps {
+        let action = any_action();
+        state = step(&state, &action);
+        assert!(safety(&state));
+    }
+}
+
+#[cfg(kani)]
+#[kani::proof]
+#[kani::unwind(4)]
+pub fn check_mutant_script_live_acquires_transition_lock_fails() {
+    let state = State::init();
+    let view_id: usize = kani::any();
+    kani::assume(view_id >= 1 && view_id <= MAX_VIEWS);
+    let target_height: u32 = kani::any();
+    kani::assume(target_height <= MAX_HEIGHT);
+    let is_tip: bool = kani::any();
+
+    let action = Action::CaptureView {
+        view_id,
+        is_script_live: true,
+        is_tip,
+        target_height,
+    };
+    let mutant = step_mutant_script_live_acquires_transition_lock(&state, &action);
+    assert!(!safety_script_live_lock_free(&mutant));
+    assert!(!safety(&mutant));
+}
+
+#[cfg(kani)]
+#[kani::proof]
+#[kani::unwind(4)]
+pub fn check_mutant_serialization_under_lock_fails() {
+    let mut state = State::init();
+    let view_id: usize = kani::any();
+    kani::assume(view_id >= 1 && view_id <= MAX_VIEWS);
+    let target_height: u32 = kani::any();
+    kani::assume(target_height <= MAX_HEIGHT);
+    let is_tip: bool = kani::any();
+
+    state = step(
+        &state,
+        &Action::CaptureView {
+            view_id,
+            is_script_live: false,
+            is_tip,
+            target_height,
+        },
+    );
+    state = step(&state, &Action::AccessState);
+    kani::assume(matches!(state.query_phase, QueryPhase::ResponseReady) && safety(&state));
+
+    let mutant = step_mutant_serialization_under_lock(&state, &Action::StartSerialization);
+    assert!(!safety_serialization_no_locks(&mutant));
+    assert!(!safety(&mutant));
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -905,6 +1104,8 @@ mod tests {
             Action::ExtendChain,
             Action::AdvanceCoverage,
             Action::DeepReorg,
+            Action::ChainTransitionAcquire,
+            Action::ChainTransitionRelease,
             Action::AccessState,
             Action::StartSerialization,
             Action::FinishQuery,
@@ -934,7 +1135,7 @@ mod tests {
             }
         }
 
-        assert_eq!(visited.len(), 30684);
+        assert_eq!(visited.len(), 61368);
     }
 
     #[test]
@@ -1045,11 +1246,103 @@ mod tests {
     fn test_serialization_no_locks_held() {
         let mut session = QuerySession::new();
         session.access_state();
+        assert!(session.holds_chain_lock());
         session.release_state_and_build_buffer();
         assert!(session.start_serialization());
         assert!(!session.holds_chain_lock());
         assert!(!session.holds_transition_lock());
         assert!(!session.holds_mempool_lock());
         session.complete();
+
+        let mut sl_session = QuerySession::new();
+        sl_session.access_state_script_live();
+        assert!(!sl_session.holds_chain_lock());
+        sl_session.release_state_and_build_buffer();
+        assert!(sl_session.start_serialization());
+        assert!(!sl_session.holds_chain_lock());
+        sl_session.complete();
+    }
+
+    #[test]
+    fn test_script_live_zero_transition_lock_mutant_negative_control() {
+        let tracker = LockTracker::new();
+        let script_hash = [7u8; 32];
+        let row = ScriptLiveRow {
+            outpoint: OutPoint {
+                txid: [3u8; 32],
+                vout: 1,
+            },
+            script_hash,
+            value: 50_000,
+            height: 100,
+            coinbase: false,
+        };
+        let view = ScriptLiveView::with_row_and_tracker(row, &tracker);
+        let outputs = view.unspent_outputs_for_mutant_acquires_transition_lock(&script_hash);
+        assert_eq!(outputs.len(), 1);
+        assert_ne!(tracker.transition_lock_acquisitions(), 0);
+    }
+
+    #[test]
+    fn test_serialization_under_lock_mutant_negative_control() {
+        let mut session = QuerySession::new();
+        session.access_state();
+        session.release_state_and_build_buffer_mutant_retains_lock();
+        assert!(session.start_serialization_mutant_under_lock());
+        assert!(session.holds_chain_lock());
+    }
+
+    #[test]
+    fn test_serving_view_negative_control_script_live_acquires_transition_lock() {
+        let mut state = State::init();
+        state = step(
+            &state,
+            &Action::CaptureView {
+                view_id: 1,
+                is_script_live: true,
+                is_tip: false,
+                target_height: 1,
+            },
+        );
+        assert_eq!(state.query_phase, QueryPhase::Captured);
+        assert!(safety(&state));
+
+        let mutant = step_mutant_script_live_acquires_transition_lock(
+            &State::init(),
+            &Action::CaptureView {
+                view_id: 1,
+                is_script_live: true,
+                is_tip: false,
+                target_height: 1,
+            },
+        );
+        assert!(!safety_script_live_lock_free(&mutant));
+        assert!(!safety(&mutant));
+    }
+
+    #[test]
+    fn test_serving_view_negative_control_serialization_under_lock() {
+        let mut state = State::init();
+        state = step(
+            &state,
+            &Action::CaptureView {
+                view_id: 1,
+                is_script_live: false,
+                is_tip: false,
+                target_height: 1,
+            },
+        );
+        state = step(&state, &Action::AccessState);
+        assert_eq!(state.query_phase, QueryPhase::ResponseReady);
+        assert!(safety(&state));
+
+        let safe_ser = step(&state, &Action::StartSerialization);
+        assert_eq!(safe_ser.query_phase, QueryPhase::Serializing);
+        assert!(safety(&safe_ser));
+
+        let mutant = step_mutant_serialization_under_lock(&state, &Action::StartSerialization);
+        assert_eq!(mutant.query_phase, QueryPhase::Serializing);
+        assert!(!safety_serialization_no_locks(&mutant));
+        assert!(!safety(&mutant));
     }
 }
