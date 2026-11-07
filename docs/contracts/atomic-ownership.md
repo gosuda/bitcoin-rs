@@ -39,6 +39,37 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 ## 3. Clauses
 
+### `SCR-01`: Taproot witness borrowing
+
+- The Taproot verifier must borrow the script, control block, annex, and signatures directly from the witness.
+- The verifier must not copy witness elements to the heap.
+
+### `SCR-02`: Stack item ownership
+
+- Only stack items that the interpreter mutates can be owned.
+- Initial stack entries must be borrowed byte spans when consensus rules permit.
+
+### `SCR-03`: Streaming tapleaf hash
+
+- `tapleaf_hash` must stream the leaf version, length prefix, and script directly into the tagged SHA-256 state.
+- The implementation must not allocate a temporary script-sized buffer.
+
+### `SCR-04`: Single interpreter semantics
+
+- The interpreter must keep one set of semantics for all scripts.
+- The interpreter must not detect inscriptions.
+- The interpreter must not use a shortcut that skips an unexecuted branch by byte search.
+
+### `SCR-05`: Inactive branch decoding
+
+- Decoding of an inactive branch must keep consensus rules for malformed pushes, `OP_SUCCESSx`, and opcode positions.
+
+### `SCR-06`: Verification cache binding
+
+- A signature cache entry must bind the exact verification inputs.
+- A script-result cache entry must bind the transaction, the resolved prevouts, and the verification flags.
+- Cache eviction must not change validation results.
+
 ### `WIN-01`: Ordered transaction resolution
 
 - The execution owner must resolve transactions in consensus order against the published coin state plus window-local creations and spends.

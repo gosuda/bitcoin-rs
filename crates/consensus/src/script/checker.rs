@@ -26,7 +26,7 @@ pub(crate) struct TxSignatureChecker<'a> {
     prevouts: &'a [TxOut],
     cache: &'a SighashCache<'a>,
     sig_cache: Option<&'a SignatureCache>,
-    annex: Option<Vec<u8>>,
+    annex: Option<&'a [u8]>,
 }
 
 impl<'a> TxSignatureChecker<'a> {
@@ -50,7 +50,7 @@ impl<'a> TxSignatureChecker<'a> {
         }
     }
 
-    pub(crate) fn set_annex(&mut self, annex: Option<Vec<u8>>) {
+    pub(crate) fn set_annex(&mut self, annex: Option<&'a [u8]>) {
         self.annex = annex;
     }
 
@@ -183,7 +183,7 @@ impl<'a> TxSignatureChecker<'a> {
             .taproot_signature_hash(
                 self.input_index,
                 self.prevouts,
-                self.annex.as_deref(),
+                self.annex,
                 leaf_codesep,
                 sighash_type,
             )

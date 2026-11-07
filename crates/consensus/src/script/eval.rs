@@ -144,14 +144,15 @@ fn cast_to_bool(bytes: &[u8]) -> bool {
 }
 
 #[must_use]
-pub(crate) fn item_is_true(item: &ScriptItem) -> bool {
+pub(crate) fn item_is_true(item: &ScriptItem<'_>) -> bool {
     cast_to_bool(&item_bytes(item))
 }
 
-fn item_bytes(item: &ScriptItem) -> Cow<'_, [u8]> {
+fn item_bytes<'a>(item: &'a ScriptItem<'_>) -> Cow<'a, [u8]> {
     match item {
         ScriptItem::Num(n) => Cow::Owned(script_num_serialize(*n).into_vec()),
         ScriptItem::Bytes(bytes) => Cow::Borrowed(bytes),
+        ScriptItem::Borrowed(bytes) => Cow::Borrowed(*bytes),
     }
 }
 
@@ -178,8 +179,8 @@ pub(crate) fn tapscript_op_success(script: &[u8], flags: VerifyFlags) -> Result<
     Ok(false)
 }
 
-pub(crate) fn eval_script(
-    stack: &mut Stack,
+pub(crate) fn eval_script<'a>(
+    stack: &mut Stack<'a>,
     script: &[u8],
     flags: VerifyFlags,
     checker: &TxSignatureChecker<'_>,
@@ -268,7 +269,7 @@ fn handle_push_bytes(
     opcode_byte: u8,
     conditions_true: bool,
     flags: VerifyFlags,
-    stack: &mut Stack,
+    stack: &mut Stack<'_>,
 ) -> Result<(), ScriptError> {
     if data.len() > MAX_SCRIPT_ELEMENT_SIZE {
         return Err(ScriptError::Invalid {
@@ -318,7 +319,7 @@ fn check_opcode_rules(
     Ok(())
 }
 
-fn push_bytes(stack: &mut Stack, data: &[u8]) -> Result<(), ScriptError> {
+fn push_bytes(stack: &mut Stack<'_>, data: &[u8]) -> Result<(), ScriptError> {
     stack
         .push(ScriptItem::Bytes(SmallVec::from_slice(data)))
         .map_err(|_| ScriptError::Invalid {
@@ -326,7 +327,7 @@ fn push_bytes(stack: &mut Stack, data: &[u8]) -> Result<(), ScriptError> {
         })
 }
 
-fn check_stack_depth(stack: &Stack, altstack: &Stack) -> Result<(), ScriptError> {
+fn check_stack_depth(stack: &Stack<'_>, altstack: &Stack<'_>) -> Result<(), ScriptError> {
     if stack.len() + altstack.len() > MAX_STACK_SIZE {
         return Err(ScriptError::Invalid {
             code: ScriptErrCode::StackSize,
@@ -367,11 +368,11 @@ pub const fn is_op_success(op: u8) -> bool {
         || (op >= 187 && op <= 254)
 }
 
-fn dispatch(
+fn dispatch<'a>(
     op: u8,
     f_exec: bool,
-    stack: &mut Stack,
-    altstack: &mut Stack,
+    stack: &mut Stack<'a>,
+    altstack: &mut Stack<'a>,
     conditions: &mut ConditionStack,
     op_count: &mut usize,
     require_minimal: bool,
@@ -950,8 +951,8 @@ fn eval_checksig(
     }
 }
 
-fn check_multisig(
-    stack: &mut Stack,
+fn check_multisig<'a>(
+    stack: &mut Stack<'a>,
     require_minimal: bool,
     flags: VerifyFlags,
     checker: &TxSignatureChecker<'_>,

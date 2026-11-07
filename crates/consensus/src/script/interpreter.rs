@@ -395,12 +395,12 @@ fn invalid(code: ScriptErrCode) -> ScriptError {
     ScriptError::Invalid { code }
 }
 
-fn verify_script(
+fn verify_script<'a>(
     script_sig: &[u8],
     script_pubkey: &[u8],
-    witness: &Witness,
+    witness: &'a Witness,
     flags: VerifyFlags,
-    checker: &mut TxSignatureChecker<'_>,
+    checker: &mut TxSignatureChecker<'a>,
 ) -> Result<(), ScriptError> {
     if flags.contains(VerifyFlags::SIGPUSHONLY) && !is_push_only(script_sig) {
         return Err(invalid(ScriptErrCode::SigPushonly));
@@ -503,7 +503,7 @@ fn verify_witness_program(
     program: &[u8],
     flags: VerifyFlags,
     checker: &TxSignatureChecker<'_>,
-    stack: &mut Stack,
+    stack: &mut Stack<'_>,
 ) -> Result<(), ScriptError> {
     if version != 0 {
         if flags.contains(VerifyFlags::DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM) {
@@ -575,14 +575,15 @@ fn p2wpkh_script_code(program: &[u8]) -> Vec<u8> {
     script
 }
 
-fn item_bytes_owned(item: &ScriptItem) -> Vec<u8> {
+fn item_bytes_owned(item: &ScriptItem<'_>) -> Vec<u8> {
     match item {
         ScriptItem::Num(value) => crate::script::push_int(*value),
         ScriptItem::Bytes(bytes) => bytes.to_vec(),
+        ScriptItem::Borrowed(bytes) => bytes.to_vec(),
     }
 }
 
-fn require_true_top(stack: &Stack) -> Result<(), ScriptError> {
+fn require_true_top(stack: &Stack<'_>) -> Result<(), ScriptError> {
     let top = stack
         .peek()
         .map_err(|_| invalid(ScriptErrCode::EvalFalse))?;
@@ -593,59 +594,118 @@ fn require_true_top(stack: &Stack) -> Result<(), ScriptError> {
     }
 }
 
-fn verify_taproot(
+// SCR-01
+pub(crate) struct TaprootWitnessView<'a> {
+    witness: &'a Witness,
+    stack_len: usize,
+    script_index: Option<usize>,
+    control_index: Option<usize>,
+    annex_index: Option<usize>,
+}
+
+impl<'a> TaprootWitnessView<'a> {
+    pub(crate) fn from_witness(witness: &'a Witness) -> Self {
+        assert!(!witness.is_empty(), "witness must not be empty");
+        let len = witness.len();
+        let (annex_index, annex_present) = if len >= 2 {
+            let last = witness.get(len - 1);
+            if last.is_some_and(|item| !item.is_empty() && item[0] == taproot::ANNEX_TAG) {
+                (Some(len - 1), 1)
+            } else {
+                (None, 0)
+            }
+        } else {
+            (None, 0)
+        };
+        let rest = len - annex_present;
+        if rest == 1 {
+            Self {
+                witness,
+                stack_len: 1,
+                script_index: None,
+                control_index: None,
+                annex_index,
+            }
+        } else {
+            Self {
+                witness,
+                stack_len: rest - 2,
+                script_index: Some(rest - 2),
+                control_index: Some(rest - 1),
+                annex_index,
+            }
+        }
+    }
+
+    pub(crate) fn annex(&self) -> Option<&'a [u8]> {
+        self.annex_index.and_then(|idx| self.witness.get(idx))
+    }
+
+    pub(crate) fn script(&self) -> Option<&'a [u8]> {
+        self.script_index.and_then(|idx| self.witness.get(idx))
+    }
+
+    pub(crate) fn control(&self) -> Option<&'a [u8]> {
+        self.control_index.and_then(|idx| self.witness.get(idx))
+    }
+
+    pub(crate) fn stack_item(&self, index: usize) -> &'a [u8] {
+        assert!(index < self.stack_len, "stack_item index out of bounds");
+        match self.witness.get(index) {
+            Some(bytes) => bytes,
+            None => unreachable!("witness item within stack_len"),
+        }
+    }
+
+    pub(crate) fn stack_len(&self) -> usize {
+        self.stack_len
+    }
+
+    pub(crate) fn is_key_path(&self) -> bool {
+        self.script_index.is_none()
+    }
+}
+
+fn verify_taproot<'a>(
     program: &[u8],
-    witness: &Witness,
+    witness: &'a Witness,
     flags: VerifyFlags,
-    checker: &mut TxSignatureChecker<'_>,
+    checker: &mut TxSignatureChecker<'a>,
 ) -> Result<(), ScriptError> {
     if witness.is_empty() {
         return Err(invalid(ScriptErrCode::WitnessProgramWitnessEmpty));
     }
 
-    let mut stack: Vec<Vec<u8>> = witness.iter().map(<[u8]>::to_vec).collect();
+    let view = TaprootWitnessView::from_witness(witness);
 
-    let annex_bytes = strip_annex(&mut stack);
-
-    if stack.len() == 1 {
-        let signature = &stack[0];
+    if view.is_key_path() {
+        let signature = view.stack_item(0);
         if signature.is_empty() {
             return Err(invalid(ScriptErrCode::SchnorrSigSize));
         }
-        checker.set_annex(annex_bytes);
+        checker.set_annex(view.annex());
         if checker.check_schnorr_signature(signature, program, None, u32::MAX)? {
             Ok(())
         } else {
             Err(invalid(ScriptErrCode::SchnorrSig))
         }
     } else {
-        verify_taproot_scriptpath(checker, program, witness, &mut stack, annex_bytes, flags)
+        verify_taproot_scriptpath(checker, program, &view, flags)
     }
 }
 
-fn strip_annex(stack: &mut Vec<Vec<u8>>) -> Option<Vec<u8>> {
-    if stack.len() < 2 {
-        return None;
-    }
-    let is_annex = stack
-        .last()
-        .is_some_and(|last| !last.is_empty() && last[0] == taproot::ANNEX_TAG);
-    if is_annex { stack.pop() } else { None }
-}
-
-fn verify_taproot_scriptpath(
-    checker: &mut TxSignatureChecker<'_>,
+// SCR-04, SCR-05
+fn verify_taproot_scriptpath<'a>(
+    checker: &mut TxSignatureChecker<'a>,
     program: &[u8],
-    witness: &Witness,
-    stack: &mut Vec<Vec<u8>>,
-    annex_bytes: Option<Vec<u8>>,
+    view: &TaprootWitnessView<'a>,
     flags: VerifyFlags,
 ) -> Result<(), ScriptError> {
-    let control = stack
-        .pop()
+    let control = view
+        .control()
         .ok_or_else(|| invalid(ScriptErrCode::WitnessProgramWitnessEmpty))?;
-    let script = stack
-        .pop()
+    let script = view
+        .script()
         .ok_or_else(|| invalid(ScriptErrCode::WitnessProgramWitnessEmpty))?;
 
     if control.len() < taproot::TAPROOT_CONTROL_BASE_SIZE
@@ -657,9 +717,9 @@ fn verify_taproot_scriptpath(
     }
 
     let leaf_version = control[0] & taproot::TAPROOT_LEAF_MASK;
-    let tapleaf = crate::primitives::tapleaf_hash(leaf_version, &script);
+    let tapleaf = crate::primitives::tapleaf_hash(leaf_version, script);
 
-    if !taproot::verify_taproot_commitment(&control, program, &tapleaf) {
+    if !taproot::verify_taproot_commitment(control, program, &tapleaf) {
         return Err(invalid(ScriptErrCode::WitnessProgramMismatch));
     }
 
@@ -670,26 +730,28 @@ fn verify_taproot_scriptpath(
         return Ok(());
     }
 
-    if eval::tapscript_op_success(&script, flags)? {
+    if eval::tapscript_op_success(script, flags)? {
         return Ok(());
     }
 
-    if stack.len() > eval::MAX_STACK_SIZE {
+    if view.stack_len() > eval::MAX_STACK_SIZE {
         return Err(invalid(ScriptErrCode::StackSize));
     }
     let mut witness_stack = Stack::new();
-    for element in &*stack {
+    for i in 0..view.stack_len() {
+        let element = view.stack_item(i);
         if element.len() > MAX_SCRIPT_ELEMENT_SIZE {
             return Err(invalid(ScriptErrCode::PushSize));
         }
         witness_stack
-            .push(ScriptItem::Bytes(element.as_slice().into()))
+            .push(ScriptItem::Borrowed(element))
             .map_err(|_| invalid(ScriptErrCode::StackSize))?;
     }
 
     let witness_serialized_size: usize =
-        encoded_len(u64::try_from(witness.len()).unwrap_or(u64::MAX))
-            + witness
+        encoded_len(u64::try_from(view.witness.len()).unwrap_or(u64::MAX))
+            + view
+                .witness
                 .iter()
                 .map(|elem| encoded_len(u64::try_from(elem.len()).unwrap_or(u64::MAX)) + elem.len())
                 .sum::<usize>();
@@ -697,11 +759,11 @@ fn verify_taproot_scriptpath(
         i64::try_from(witness_serialized_size).unwrap_or(i64::MAX) + eval::VALIDATION_WEIGHT_OFFSET,
     );
 
-    checker.set_annex(annex_bytes);
+    checker.set_annex(view.annex());
 
     eval::eval_script(
         &mut witness_stack,
-        &script,
+        script,
         flags,
         checker,
         SigVersion::Tapscript,
@@ -817,5 +879,51 @@ mod tests {
             }],
             lock_time: LockTime::ZERO,
         }
+    }
+
+    #[test]
+    fn taproot_witness_view_partitions_key_and_script_paths() {
+        use super::TaprootWitnessView;
+        let mut single = Witness::new();
+        single.push(b"sig");
+        let view_single = TaprootWitnessView::from_witness(&single);
+        assert!(view_single.is_key_path());
+        assert_eq!(view_single.stack_len(), 1);
+        assert_eq!(view_single.stack_item(0), b"sig");
+        assert_eq!(view_single.annex(), None);
+
+        let mut key_with_annex = Witness::new();
+        key_with_annex.push(b"sig");
+        key_with_annex.push(&[0x50, 0x01]);
+        let view_kwa = TaprootWitnessView::from_witness(&key_with_annex);
+        assert!(view_kwa.is_key_path());
+        assert_eq!(view_kwa.stack_len(), 1);
+        assert_eq!(view_kwa.stack_item(0), b"sig");
+        assert_eq!(view_kwa.annex(), Some(&[0x50, 0x01][..]));
+
+        let mut script_no_stack = Witness::new();
+        script_no_stack.push(b"script");
+        script_no_stack.push(b"control");
+        let view_sns = TaprootWitnessView::from_witness(&script_no_stack);
+        assert!(!view_sns.is_key_path());
+        assert_eq!(view_sns.stack_len(), 0);
+        assert_eq!(view_sns.script(), Some(&b"script"[..]));
+        assert_eq!(view_sns.control(), Some(&b"control"[..]));
+        assert_eq!(view_sns.annex(), None);
+
+        let mut script_full = Witness::new();
+        script_full.push(b"arg0");
+        script_full.push(b"arg1");
+        script_full.push(b"script");
+        script_full.push(b"control");
+        script_full.push(&[0x50, 0xff]);
+        let view_full = TaprootWitnessView::from_witness(&script_full);
+        assert!(!view_full.is_key_path());
+        assert_eq!(view_full.stack_len(), 2);
+        assert_eq!(view_full.stack_item(0), b"arg0");
+        assert_eq!(view_full.stack_item(1), b"arg1");
+        assert_eq!(view_full.script(), Some(&b"script"[..]));
+        assert_eq!(view_full.control(), Some(&b"control"[..]));
+        assert_eq!(view_full.annex(), Some(&[0x50, 0xff][..]));
     }
 }

@@ -2,47 +2,67 @@ use smallvec::SmallVec;
 use thiserror::Error;
 use tinyvec::ArrayVec;
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum ScriptItem {
+// SCR-02
+#[derive(Clone, Debug)]
+pub(crate) enum ScriptItem<'a> {
     Num(i64),
     Bytes(SmallVec<[u8; 32]>),
+    Borrowed(&'a [u8]),
 }
 
-impl Default for ScriptItem {
+impl<'a> Default for ScriptItem<'a> {
     fn default() -> Self {
         Self::Bytes(SmallVec::new())
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Stack {
-    items: ArrayVec<[ScriptItem; Self::MAX_DEPTH]>,
+impl<'a> PartialEq for ScriptItem<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Num(a), Self::Num(b)) => a == b,
+            (Self::Bytes(a), Self::Bytes(b)) => a.as_slice() == b.as_slice(),
+            (Self::Borrowed(a), Self::Borrowed(b)) => *a == *b,
+            (Self::Bytes(a), Self::Borrowed(b)) | (Self::Borrowed(b), Self::Bytes(a)) => {
+                a.as_slice() == *b
+            }
+            _ => false,
+        }
+    }
 }
 
-impl Stack {
-    pub(crate) const MAX_DEPTH: usize = 1000;
+impl<'a> Eq for ScriptItem<'a> {}
+
+pub(crate) const MAX_STACK_DEPTH: usize = 1000;
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Stack<'a> {
+    items: ArrayVec<[ScriptItem<'a>; MAX_STACK_DEPTH]>,
+}
+
+impl<'a> Stack<'a> {
+    pub(crate) const MAX_DEPTH: usize = MAX_STACK_DEPTH;
 
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub(crate) fn push(&mut self, item: ScriptItem) -> Result<(), StackError> {
+    pub(crate) fn push(&mut self, item: ScriptItem<'a>) -> Result<(), StackError> {
         match self.items.try_push(item) {
             Some(_) => Err(StackError::Overflow),
             None => Ok(()),
         }
     }
 
-    pub(crate) fn pop(&mut self) -> Result<ScriptItem, StackError> {
+    pub(crate) fn pop(&mut self) -> Result<ScriptItem<'a>, StackError> {
         self.items.pop().ok_or(StackError::Underflow)
     }
 
-    pub(crate) fn peek(&self) -> Result<&ScriptItem, StackError> {
+    pub(crate) fn peek(&self) -> Result<&ScriptItem<'a>, StackError> {
         self.items.last().ok_or(StackError::Underflow)
     }
 
-    pub(crate) fn peek_at(&self, depth: usize) -> Result<&ScriptItem, StackError> {
+    pub(crate) fn peek_at(&self, depth: usize) -> Result<&ScriptItem<'a>, StackError> {
         self.items
             .get(
                 self.items
@@ -54,7 +74,7 @@ impl Stack {
             .ok_or(StackError::Underflow)
     }
 
-    pub(crate) fn remove_at(&mut self, depth: usize) -> Result<ScriptItem, StackError> {
+    pub(crate) fn remove_at(&mut self, depth: usize) -> Result<ScriptItem<'a>, StackError> {
         let index = self
             .items
             .len()
@@ -64,7 +84,11 @@ impl Stack {
         Ok(self.items.remove(index))
     }
 
-    pub(crate) fn insert_at(&mut self, depth: usize, item: ScriptItem) -> Result<(), StackError> {
+    pub(crate) fn insert_at(
+        &mut self,
+        depth: usize,
+        item: ScriptItem<'a>,
+    ) -> Result<(), StackError> {
         if depth > self.items.len() {
             return Err(StackError::Underflow);
         }
@@ -90,7 +114,7 @@ impl Stack {
         self.push(item)
     }
 
-    pub(crate) fn drain(&mut self, count: usize) -> Result<Vec<ScriptItem>, StackError> {
+    pub(crate) fn drain(&mut self, count: usize) -> Result<Vec<ScriptItem<'a>>, StackError> {
         if count > self.items.len() {
             return Err(StackError::Underflow);
         }
@@ -170,5 +194,17 @@ mod tests {
         assert_eq!(stack.pop(), Ok(ScriptItem::Num(3)));
         assert!(stack.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn borrowed_and_bytes_items_compare_equal() {
+        use smallvec::SmallVec;
+        let bytes = SmallVec::<[u8; 32]>::from_slice(b"witness");
+        let borrowed = ScriptItem::Borrowed(b"witness");
+        let owned = ScriptItem::Bytes(bytes);
+        assert_eq!(borrowed, owned);
+        assert_eq!(owned, borrowed);
+        assert_ne!(borrowed, ScriptItem::Borrowed(b"other"));
+        assert_ne!(borrowed, ScriptItem::Num(0));
     }
 }
