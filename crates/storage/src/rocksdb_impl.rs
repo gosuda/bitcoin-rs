@@ -11,7 +11,8 @@ use rust_rocksdb::{
 
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
 
-const BLOCK_SIZE: usize = 4 * 1024 * 1024;
+const DEFAULT_BLOCK_SIZE: usize = 4 * 1024 * 1024;
+const COIN_RECORDS_BLOCK_SIZE: usize = 64 * 1024;
 pub const ROCKSDB_DEFAULT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const BLOOM_BITS_PER_KEY: f64 = 10.0;
 const WRITE_BUFFER_SIZE: usize = 128 << 20;
@@ -80,22 +81,29 @@ impl RocksDbStore {
         db_options.set_compression_type(DBCompressionType::Lz4);
         db_options.set_atomic_flush(false);
 
-        let mut table_options = BlockBasedOptions::default();
-        table_options.set_block_size(BLOCK_SIZE);
         let cache = Cache::new_lru_cache(cache_bytes);
-        table_options.set_block_cache(&cache);
-        table_options.set_bloom_filter(BLOOM_BITS_PER_KEY, false);
-        table_options.set_cache_index_and_filter_blocks(true);
+        let cf_options_for = |block_size: usize| {
+            let mut table_options = BlockBasedOptions::default();
+            table_options.set_block_size(block_size);
+            table_options.set_block_cache(&cache);
+            table_options.set_bloom_filter(BLOOM_BITS_PER_KEY, false);
+            table_options.set_cache_index_and_filter_blocks(true);
+            let mut cf_options = Options::default();
+            cf_options.set_compression_type(DBCompressionType::Lz4);
+            cf_options.set_write_buffer_size(WRITE_BUFFER_SIZE);
+            cf_options.set_block_based_table_factory(&table_options);
+            cf_options
+        };
+        let default_cf_options = cf_options_for(DEFAULT_BLOCK_SIZE);
+        let coin_records_cf_options = cf_options_for(COIN_RECORDS_BLOCK_SIZE);
 
-        let mut cf_options = Options::default();
-        cf_options.set_compression_type(DBCompressionType::Lz4);
-        cf_options.set_write_buffer_size(WRITE_BUFFER_SIZE);
-        cf_options.set_block_based_table_factory(&table_options);
-
-        let descriptors = ColumnFamily::ALL
-            .iter()
-            .copied()
-            .map(|cf| ColumnFamilyDescriptor::new(cf.name(), cf_options.clone()));
+        let descriptors = ColumnFamily::ALL.iter().copied().map(|cf| {
+            let options = match cf {
+                ColumnFamily::CoinRecords => coin_records_cf_options.clone(),
+                _ => default_cf_options.clone(),
+            };
+            ColumnFamilyDescriptor::new(cf.name(), options)
+        });
         let db = rust_rocksdb::DB::open_cf_descriptors(&db_options, path, descriptors)
             .map_err(StorageError::backend)?;
         Ok(Self {
