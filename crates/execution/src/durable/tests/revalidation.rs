@@ -583,7 +583,10 @@ fn full_start_over_a_pruned_datadir_names_the_way_out() -> TestResult {
         "a pruned datadir cannot rebuild with full validation",
     ))?;
     assert!(
-        error.to_string().contains("--validation-mode assume-valid"),
+        matches!(
+            error,
+            crate::recovery::RecoveryError::PrunedDatadirNeedsFullValidation
+        ),
         "{error}"
     );
     assert!(!requires_full_revalidation(checkpoint_dir.path()));

@@ -250,22 +250,6 @@ impl Default for RecoveryHeartbeatCounter {
     }
 }
 
-impl tracing::field::Visit for RecoveryHeartbeatCounter {
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if field.name() == "message" && value == "index store recovery in progress" {
-            self.on_line();
-        }
-    }
-
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message"
-            && format!("{value:?}").contains("index store recovery in progress")
-        {
-            self.on_line();
-        }
-    }
-}
-
 impl tracing::Subscriber for RecoveryHeartbeatCounter {
     fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
         true
@@ -280,7 +264,10 @@ impl tracing::Subscriber for RecoveryHeartbeatCounter {
     fn record_follows_from(&self, _id: &tracing::span::Id, _follows: &tracing::span::Id) {}
 
     fn event(&self, event: &tracing::Event<'_>) {
-        event.record(&mut self.clone());
+        let names: Vec<&str> = event.fields().map(|field| field.name()).collect();
+        if names.contains(&"capability") && names.contains(&"elapsed_secs") {
+            self.on_line();
+        }
     }
 
     fn enter(&self, _id: &tracing::span::Id) {}

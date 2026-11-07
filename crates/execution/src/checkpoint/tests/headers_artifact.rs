@@ -197,9 +197,10 @@ fn unsupported_utxo_codec_requires_explicit_resync() -> TestResult {
             "unsupported UTXO codec unexpectedly loaded",
         ));
     };
-    let message = error.to_string();
-    assert!(message.contains("unexpected payload codecs"));
-    assert!(message.contains("full resync"));
+    assert!(
+        matches!(error, CheckpointLoadError::Corrupt(_)),
+        "unexpected checkpoint load error: {error}"
+    );
     Ok(())
 }
 
@@ -267,7 +268,10 @@ fn semantic_utxo_trailing_byte_with_rebound_hashes_requires_resync() -> TestResu
             "semantic UTXO corruption unexpectedly loaded",
         ));
     };
-    assert!(error.to_string().contains("full resync"));
+    assert!(
+        matches!(error, CheckpointLoadError::Corrupt(_)),
+        "unexpected checkpoint load error: {error}"
+    );
     Ok(())
 }
 

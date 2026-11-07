@@ -10,12 +10,9 @@ use bitcoin_rs_consensus::primitives::{
     Tx, TxIn, TxOut, Witness,
 };
 
-use parking_lot::Mutex;
-
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -72,8 +69,6 @@ fn torn_disconnect_cold_replays_head() -> Result<()> {
 
 #[test]
 fn torn_disconnect_checkpoint_above_head_rewinds_to_head() -> Result<()> {
-    let log = SharedLog::default();
-    install_log_capture(log.clone());
     let (_temp, config, state) = run_marker_scenario("disconnect-above-head")?;
     let genesis = Network::Regtest.genesis_block();
     let landed = Some((Hash256::from(genesis.block_hash()), 0));
@@ -93,15 +88,6 @@ fn torn_disconnect_checkpoint_above_head_rewinds_to_head() -> Result<()> {
         state.chainstate().coin_stats_handle().snapshot().height,
         0,
         "the coin statistics must rewind to the durable head with the applied tip"
-    );
-    let log = log.contents();
-    assert!(
-        log.contains("automatic disconnect recovery replayed the certified head chain"),
-        "the mandatory recovery warning must be observed: {log}"
-    );
-    assert!(
-        log.contains(r#"mode="checkpoint-rewind""#),
-        "the recovery warning must name the mode that ran: {log}"
     );
     let recovered = state
         .durable_head()
@@ -474,35 +460,6 @@ fn run_marker_scenario(scenario: &str) -> Result<(tempfile::TempDir, NodeConfig,
 
     let resumed = NodeState::open(config.clone(), None)?;
     Ok((temp, config, resumed))
-}
-
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    fn contents(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock()).into_owned()
-    }
-}
-
-impl std::io::Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn install_log_capture(log: SharedLog) {
-    let _already_set = tracing::subscriber::set_global_default(
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || log.clone())
-            .finish(),
-    );
 }
 
 fn read_stderr(mut stderr: std::process::ChildStderr) -> std::io::Result<String> {

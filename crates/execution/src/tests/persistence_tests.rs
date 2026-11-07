@@ -328,10 +328,13 @@ fn current_schema_version_mismatch_and_corruption_refuses_open() -> TestResult {
 
     std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"1\n")?;
     let result = ensure_current_schema(&dir);
-    assert!(matches!(
-        &result,
-        Err(err) if err.to_string().contains("CURRENT_SCHEMA is not the current datadir schema epoch")
-    ));
+    assert!(
+        matches!(
+            &result,
+            Err(err) if err.kind() == std::io::ErrorKind::InvalidData
+        ),
+        "wrong schema epoch must be invalid data: {result:?}"
+    );
 
     std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"0\n")?;
     assert!(ensure_current_schema(&dir).is_err());

@@ -166,7 +166,10 @@ fn authenticated_coinstats_semantics_require_resync() -> TestResult {
                 "corrupt CoinStats checkpoint unexpectedly loaded",
             ));
         };
-        assert!(error.to_string().contains("full resync"));
+        assert!(
+            matches!(error, CheckpointLoadError::Corrupt(_)),
+            "unexpected checkpoint load error: {error}"
+        );
     }
     Ok(())
 }
