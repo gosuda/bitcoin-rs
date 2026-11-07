@@ -150,3 +150,78 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 - The node must not enforce an arbitrary limit on acceptable reorganization depth.
 - If recovery data is available, the node must restore the state; if missing, the node must reconstruct state from canonical block bodies.
+
+### `PRJ-01`: Live projection consumption of committed facts
+
+- On the normal live path, every enabled projection must consume the committed facts of the window.
+- A projection must not load or parse the live block body a second time.
+
+### `PRJ-02`: Recovery path projection reconstruction
+
+- On the recovery path, a projection can rebuild committed facts from retained block bytes and transition data.
+- The recovery path must not become the normal path.
+
+### `PRJ-03`: Zero overhead for disabled projections
+
+- A disabled projection must not allocate row buffers.
+- A disabled projection must not compute secondary hashes or extract transaction data.
+
+### `PRJ-04`: Non-blocking projection handoff
+
+- A slow projection must not block a consensus commit.
+- A slow projection must not retain an unbounded number of block images.
+- When its memory allowance is exhausted, the projection must release live images and resume from durable data.
+
+### `PRJ-10`: Selective catch-up data reads
+
+- Index catch-up must read only the non-witness byte ranges and recovery records that it requires.
+- Index catch-up must not fetch unneeded inscription payloads or unrequested witness data.
+
+### `PRJ-12`: Ordered transition input for compact filters
+
+- Compact filter construction must consume eligible output scripts and resolved spent scripts from ordered transitions.
+- Filter construction must not consume only the window delta.
+- A create-and-spend pair that cancels in the delta must remain in the filter input set per BIP158.
+
+### `PRJ-13`: Three independent progress positions
+
+- Active-chain application, historical validation, and projection coverage are three distinct facts.
+- The node must report these as three independent positions.
+- The node must not collapse these positions into one number.
+
+### `PRJ-05`: Immutable sorted segments and mutable tail
+
+- Historical index data must reside in immutable sorted segments.
+- Recent index data must reside in one bounded mutable tail.
+- The node must publish the tail as immutable views.
+
+### `PRJ-06`: Transaction occurrence identity
+
+- A transaction occurrence must identify its block identity and its transaction position.
+- A transaction id alone is not an occurrence.
+
+### `PRJ-07`: Logical directory for segment references
+
+- Segment-local references must resolve through a directory of exact logical identities.
+- A local file offset must never become a portable identity or a consensus identity.
+
+### `PRJ-08`: Deduplicated script dictionary and posting entries
+
+- A script identity must be stored once per segment dictionary.
+- A posting entry must hold an occurrence reference and flags, not a full script hash and transaction id.
+
+### `PRJ-09`: Bounded external sort for bulk construction
+
+- Historical index construction must use a bounded external sort: sequential scan, capability records, sorted runs, partitioned merge, and immutable generation output.
+- Bulk backfill must not simulate per-block live writes.
+
+### `REO-04`: Retirement of invalidated sealed segments
+
+- A sealed historical segment is immutable, but not final.
+- A chain fork that invalidates sealed coverage must retire that generation.
+- New queries must not attach the retired generation to the replacement chain.
+
+### `REO-05`: Nearest valid generation rebuild
+
+- Projection repair must rebuild from the nearest valid generation.
+- Unaffected index capabilities must continue to serve their valid declared coverage.
