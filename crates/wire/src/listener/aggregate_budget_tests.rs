@@ -482,7 +482,7 @@ fn request_deferred_not_reply() -> TestResult {
 fn a_bulk_tail_parked_on_the_aggregate_leaves_the_margin_for_control() -> TestResult {
     let block_a = block(11);
     let entry = scripted(&block_a);
-    let block_len = wire_len_of(&Message::BlockPayload(entry.1.clone()))?;
+    let block_len = wire_len_of(&Message::BlockBytes(entry.1.clone()))?;
     let aggregate = Arc::new(SharedOutboundBudget::with_limits(10 * block_len, block_len));
     let hold = hog(&aggregate, 8 * block_len + 1);
     let mut served = Served::start_on(
@@ -526,7 +526,7 @@ fn a_bulk_tail_parked_on_the_aggregate_leaves_the_margin_for_control() -> TestRe
     assert_eq!(
         read_messages(&mut served.client, 1)?,
         vec![Message::Block(
-            bitcoin_rs_consensus::primitives::BlockPayload::from_local(block_a),
+            bitcoin_rs_consensus::primitives::BlockImage::from_local(block_a),
         )],
         "the tail is served once the aggregate has room"
     );

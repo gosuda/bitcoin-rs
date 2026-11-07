@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::chain::regtest_fixture::{coinbase, mined_block_with_prev_hash, mined_regtest_child_at};
 use bitcoin_rs_consensus::primitives::{
-    Amount, Block, BlockPayload, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,
+    Amount, Block, BlockImage, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Witness, consensus_bytes,
 };
 use bitcoin_rs_storage::block_body::BlockBodyStore;
@@ -79,7 +79,7 @@ fn fixture(count: u32) -> TestResult<Fixture> {
     chain.retention = bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention));
     chain.history = HistoryAccess::new(Arc::clone(&retention), RetentionBudget::from_blocks(288));
     let genesis = Network::Regtest.genesis_block();
-    chain.apply_block(&BlockPayload::from_local(genesis.clone()))?;
+    chain.apply_block(&BlockImage::from_local(genesis.clone()))?;
     let mut blocks = vec![genesis];
     for height in 1..=count {
         let previous = blocks
@@ -87,7 +87,7 @@ fn fixture(count: u32) -> TestResult<Fixture> {
             .ok_or(TestError::Missing("no parent"))?
             .block_hash();
         let block = mined_regtest_child_at(previous, height)?;
-        chain.apply_block(&BlockPayload::from_local(block.clone()))?;
+        chain.apply_block(&BlockImage::from_local(block.clone()))?;
         blocks.push(block);
     }
     Ok(Fixture {
@@ -122,8 +122,7 @@ fn read_uses_receipts_and_rejects_uncertified_old_branches() -> TestResult {
     let mut cb = coinbase(2);
     cb.inputs[0].script_sig = vec![0x52, 0x01, 0x01].into();
     let fork = mined_block_with_prev_hash(f.blocks[1].block_hash(), 2, vec![cb])?;
-    f.chain
-        .apply_block(&BlockPayload::from_local(fork.clone()))?;
+    f.chain.apply_block(&BlockImage::from_local(fork.clone()))?;
     assert!(matches!(
         f.chain.block_spends(old, tip(&f.chain)?)?.spent,
         Err(HistoryUnavailable::Missing)
@@ -348,7 +347,7 @@ fn retained_inputs_preserve_transaction_and_input_order_after_disconnect() -> Te
         vec![coinbase(102), parent.clone(), child],
     )?;
     f.chain
-        .apply_block(&BlockPayload::from_local(block.clone()))?;
+        .apply_block(&BlockImage::from_local(block.clone()))?;
     for disconnected in [false, true] {
         if disconnected {
             f.chain.disconnect_block(&block)?;
@@ -412,7 +411,7 @@ fn retained_body_rejects_witness_changes_that_preserve_header_and_txids() -> Tes
     });
     let committed = mined_block_with_prev_hash(original.block_hash(), 2, vec![cb])?;
     f.chain
-        .apply_block(&BlockPayload::from_local(committed.clone()))?;
+        .apply_block(&BlockImage::from_local(committed.clone()))?;
     assert_eq!(
         f.chain
             .block_spends(hash(&committed), tip(&f.chain)?)?
@@ -442,7 +441,7 @@ fn retained_body_does_not_require_witness_for_pre_activation_commitment_lookalik
         let bodies = Arc::new(Bodies::default());
         chain.block_body_store = Some(bodies.clone());
         let genesis = network.genesis_block();
-        chain.apply_block(&BlockPayload::from_local(genesis.clone()))?;
+        chain.apply_block(&BlockImage::from_local(genesis.clone()))?;
         let mut cb = coinbase(1);
         cb.outputs.push(TxOut {
             value: Amount::from_sat(0),
@@ -475,7 +474,7 @@ fn retained_body_deployment_work_is_bounded_and_skipped_when_body_is_missing() -
     let bodies = Arc::new(Bodies::default());
     chain.block_body_store = Some(bodies.clone());
     let genesis = Network::Mainnet.genesis_block();
-    chain.apply_block(&BlockPayload::from_local(genesis.clone()))?;
+    chain.apply_block(&BlockImage::from_local(genesis.clone()))?;
     let block = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase(1)])?;
     let id = {
         let mut tree = chain.block_tree.write();

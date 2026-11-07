@@ -3,7 +3,7 @@ use super::*;
 use crate::assumeutxo::{DEFAULT_HISTORICAL_CHECKPOINT_INTERVAL, HistoricalAdvance};
 use crate::test_fixtures::{TestError, TestResult};
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_consensus::primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_storage::assumeutxo::HistoricalCheckpointRef;
 use bitcoin_rs_storage::block_body::IndexedBlockBodyStore;
 use bitcoin_rs_storage::{FlatFileBlockStore, KvDurableHeadStore, KvUndoStore, RocksDbStore};
@@ -139,9 +139,9 @@ fn finalize_snapshot_after_foreground_restart(
         crate::chain::regtest_fixture::mined_regtest_child_at(fixture.blocks[2].block_hash(), 3)?;
     active
         .begin_transition()?
-        .connect(&BlockPayload::from_local(child.clone()))?;
-    manager.step_historical(&BlockPayload::from_local(fixture.blocks[0].clone()))?;
-    manager.step_historical(&BlockPayload::from_local(fixture.blocks[1].clone()))?;
+        .connect(&BlockImage::from_local(child.clone()))?;
+    manager.step_historical(&BlockImage::from_local(fixture.blocks[0].clone()))?;
+    manager.step_historical(&BlockImage::from_local(fixture.blocks[1].clone()))?;
     let expected_stats = active.coin_stats.snapshot();
     let expected_tip = active
         .applied_tip_snapshot()
@@ -189,7 +189,7 @@ fn finalize_snapshot_after_foreground_restart(
         archived_extent
     );
     let events = active.chain_events.snapshot();
-    manager.step_historical(&BlockPayload::from_local(fixture.blocks[2].clone()))?;
+    manager.step_historical(&BlockImage::from_local(fixture.blocks[2].clone()))?;
     assert!(active.role().is_ordinary());
     assert_eq!(active.chain_events.snapshot(), events);
     assert_eq!(active.coin_stats.snapshot(), expected_stats);
@@ -314,8 +314,8 @@ fn publish_unaccepted_historical_checkpoint(
         let loaded = fixture.load()?;
         manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
     }?;
-    manager.step_historical(&BlockPayload::from_local(fixture.blocks[0].clone()))?;
-    manager.step_historical(&BlockPayload::from_local(fixture.blocks[1].clone()))?;
+    manager.step_historical(&BlockImage::from_local(fixture.blocks[0].clone()))?;
+    manager.step_historical(&BlockImage::from_local(fixture.blocks[1].clone()))?;
     let status = manager.status()?;
     let checkpoint = match &status {
         AssumeUtxoDiskStatus::Validating {
@@ -344,7 +344,7 @@ fn publish_unaccepted_historical_checkpoint(
     historical
         .lock_transition()?
         .into_transition()
-        .connect(&BlockPayload::from_local(fixture.blocks[2].clone()))?;
+        .connect(&BlockImage::from_local(fixture.blocks[2].clone()))?;
     let unaccepted_coins = historical.utxo.lock_stable_view().hash_serialized_3()?;
     assert_ne!(unaccepted_coins, accepted_coins);
     publish_two_historical_checkpoints(
@@ -457,7 +457,7 @@ fn restart_from_historical_checkpoint(
         "startup must retire publication residue"
     );
 
-    manager.step_historical(&BlockPayload::from_local(fixture.blocks[2].clone()))?;
+    manager.step_historical(&BlockImage::from_local(fixture.blocks[2].clone()))?;
     assert!(matches!(
         manager.status()?,
         AssumeUtxoDiskStatus::Finalized { .. }
@@ -499,7 +499,7 @@ fn finalized_checkpoint_cleanup_failure_is_retried_on_restart() -> TestResult {
         1,
     )?;
     for block in &fixture.blocks[..2] {
-        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+        manager.step_historical(&BlockImage::from_local((*block).clone()))?;
     }
     let root = dir
         .path()
@@ -512,7 +512,7 @@ fn finalized_checkpoint_cleanup_failure_is_retried_on_restart() -> TestResult {
         .path();
     let blocker = generation.join("operator-backup");
     std::fs::create_dir(&blocker)?;
-    manager.step_historical(&BlockPayload::from_local(fixture.blocks[2].clone()))?;
+    manager.step_historical(&BlockImage::from_local(fixture.blocks[2].clone()))?;
     assert!(matches!(
         manager.status()?,
         AssumeUtxoDiskStatus::Finalized { .. }
@@ -854,9 +854,9 @@ fn crash_writer() -> TestResult {
         crate::chain::regtest_fixture::mined_regtest_child_at(fixture.blocks[2].block_hash(), 3)?;
     active
         .begin_transition()?
-        .connect(&BlockPayload::from_local(child))?;
+        .connect(&BlockImage::from_local(child))?;
     for (height, block) in fixture.blocks.iter().enumerate() {
-        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+        manager.step_historical(&BlockImage::from_local((*block).clone()))?;
         if checkpoint_phase && height == 0 {
             publish_genesis_historical_checkpoint(&dir, &manager, block)?;
         }
@@ -1025,9 +1025,9 @@ fn finalized_checkpoint_recovers_without_replaying_pruned_foreground_history() -
         crate::chain::regtest_fixture::mined_regtest_child_at(fixture.blocks[2].block_hash(), 3)?;
     active
         .begin_transition()?
-        .connect(&BlockPayload::from_local(child.clone()))?;
+        .connect(&BlockImage::from_local(child.clone()))?;
     for block in &fixture.blocks {
-        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+        manager.step_historical(&BlockImage::from_local((*block).clone()))?;
     }
     assert!(active.publish_checkpoint()?.is_some());
     let stats = active.coin_stats.snapshot();
@@ -1122,7 +1122,7 @@ fn failed_pre_base_validation_cannot_be_forgotten_when_failure_receipt_is_lost()
         let loaded = fixture.load()?;
         manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
     }?;
-    manager.step_historical(&BlockPayload::from_local(fixture.blocks[0].clone()))?;
+    manager.step_historical(&BlockImage::from_local(fixture.blocks[0].clone()))?;
     let mut invalid = fixture.blocks[1].clone();
     invalid.txs[0].inputs[0].script_sig = bitcoin_rs_consensus::primitives::Script::new();
     invalid.header.merkle_root = crate::chain::regtest_fixture::merkle_root(&invalid.txs)
@@ -1130,7 +1130,7 @@ fn failed_pre_base_validation_cannot_be_forgotten_when_failure_receipt_is_lost()
     crate::chain::regtest_fixture::mine_block_to_declared_target(&mut invalid)?;
     assert!(
         manager
-            .step_historical(&BlockPayload::from_local(invalid.clone()))
+            .step_historical(&BlockImage::from_local(invalid.clone()))
             .is_err()
     );
     assert!(active.is_closed_for_recovery());
@@ -1221,11 +1221,11 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
                 .commit(Some(&prior), &next, &CommitRecords::default())?;
         }
         for block in &fixture.blocks[..2] {
-            manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+            manager.step_historical(&BlockImage::from_local((*block).clone()))?;
         }
         assert!(
             manager
-                .step_historical(&BlockPayload::from_local(fixture.blocks[2].clone()))
+                .step_historical(&BlockImage::from_local(fixture.blocks[2].clone()))
                 .is_err()
         );
         assert!(active.is_closed_for_recovery());
@@ -1293,7 +1293,7 @@ fn import_finalize_remove_archive_seed_completes() -> TestResult {
         .script_live_seed
         .ok_or(TestError::Missing("restart recovery must mint a seed"))?;
     for block in &fixture.blocks {
-        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+        manager.step_historical(&BlockImage::from_local((*block).clone()))?;
     }
     assert!(matches!(
         manager.status()?,

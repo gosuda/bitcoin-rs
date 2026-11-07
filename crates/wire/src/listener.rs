@@ -550,12 +550,12 @@ impl ConnectionShared {
         &self,
         lease: &crate::PeerLease,
         peer_addr: impl Into<crate::PeerRemote>,
-        payload: bitcoin_rs_consensus::primitives::BlockPayload,
+        payload: bitcoin_rs_consensus::primitives::BlockImage,
         memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
     ) {
         let peer_addr = peer_addr.into();
         let source = lease.source(peer_addr.endpoint());
-        let header = payload.block().header;
+        let header = payload.header();
         let hash = bitcoin_rs_consensus::primitives::Hash256::from(header.compute_hash());
         let requested = self
             .block_sync
@@ -572,7 +572,7 @@ impl ConnectionShared {
 
     pub(crate) fn forward_block(
         &self,
-        payload: bitcoin_rs_consensus::primitives::BlockPayload,
+        payload: bitcoin_rs_consensus::primitives::BlockImage,
         source: crate::PeerSource,
         forward_credit: Option<crate::connection::BlockForwardCredit>,
         memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
@@ -2832,7 +2832,7 @@ fn handle_compact_outcome(
             shared.send_block(
                 lease,
                 peer_addr,
-                bitcoin_rs_consensus::primitives::BlockPayload::from_local(block),
+                bitcoin_rs_consensus::primitives::BlockImage::from_local(block),
                 None,
             );
             None

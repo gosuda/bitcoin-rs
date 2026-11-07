@@ -1,5 +1,6 @@
 use bitcoin_rs_consensus::primitives::{
-    Amount, Block, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    Amount, Block, BlockImage, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid,
+    Witness,
 };
 use bitcoin_rs_consensus::script::push_int;
 use thiserror::Error;
@@ -8,6 +9,7 @@ use crate::mining::template::CoinbaseBudget;
 
 /// BIP141 `OP_RETURN` `PUSH36` `aa21a9ed` prefix. Core `MINIMUM_WITNESS_COMMITMENT` is 38 bytes.
 const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+const MINIMUM_WITNESS_COMMITMENT: usize = 38;
 
 pub const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
 
@@ -85,6 +87,22 @@ pub fn needs_witness_reserved_value(block: &Block, segwit_active: bool) -> bool 
         return false;
     };
     input.witness.is_empty()
+}
+
+#[must_use]
+pub fn image_needs_witness_reserved_value(image: &BlockImage, segwit_active: bool) -> bool {
+    if !segwit_active || image.tx_count() == 0 {
+        return false;
+    }
+    let coinbase = image.tx(0);
+    let has_commitment = (0..coinbase.output_count()).rev().any(|index| {
+        let script = coinbase.output_script(index);
+        script.len() >= MINIMUM_WITNESS_COMMITMENT && script[..6] == WITNESS_COMMITMENT_PREFIX
+    });
+    if !has_commitment {
+        return false;
+    }
+    coinbase.input_count() > 0 && coinbase.witness_item_count(0) == 0
 }
 
 pub fn update_uncommitted_block_structures(block: &mut Block, segwit_active: bool) {

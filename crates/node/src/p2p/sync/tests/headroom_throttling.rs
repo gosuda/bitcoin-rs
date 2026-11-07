@@ -1,5 +1,5 @@
 use super::*;
-use bitcoin_rs_consensus::primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockImage;
 
 #[test]
 fn tick_caps_requests_at_staged_byte_headroom() -> TestResult {
@@ -20,7 +20,7 @@ fn tick_caps_requests_at_staged_byte_headroom() -> TestResult {
             scheduler.stager.insert(
                 Hash256::from_le_bytes(&[seed; 32]),
                 None,
-                BlockPayload::from_local(block),
+                BlockImage::from_local(block),
                 None,
                 now,
             );
@@ -328,7 +328,7 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> TestResult {
         sync.scheduler.lock().stager.insert(
             successor,
             None,
-            BlockPayload::from_local(block),
+            BlockImage::from_local(block),
             None,
             Instant::now(),
         );
@@ -344,7 +344,7 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> TestResult {
         sync.scheduler.lock().stager.insert(
             frontier,
             None,
-            BlockPayload::from_local(block),
+            BlockImage::from_local(block),
             None,
             Instant::now(),
         );
@@ -417,7 +417,7 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame() -> TestResult {
         sync.scheduler.lock().stager.insert(
             hash,
             None,
-            BlockPayload::from_local(block),
+            BlockImage::from_local(block),
             None,
             Instant::now(),
         );

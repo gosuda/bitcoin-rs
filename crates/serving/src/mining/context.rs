@@ -1,4 +1,4 @@
-use bitcoin_rs_consensus::primitives::{Block, CompactTarget, Hash256, Network, Txid};
+use bitcoin_rs_consensus::primitives::{Block, BlockImage, CompactTarget, Hash256, Network, Txid};
 use bitcoin_rs_consensus::{LocktimeRule, locktime_cutoff};
 use bitcoin_rs_execution::chain::{
     BlockTree, ChainError, TipSnapshot, candidate_version, header_sync, node::NodeId,
@@ -18,7 +18,7 @@ pub struct PreparedTemplateBody {
 
 pub trait MempoolSequenceWake: Send + Sync {
     fn publish_generation_from(&self, sequence: u64);
-    fn stage_tip(&self, tip: &TipSnapshot, block: &Block);
+    fn stage_tip(&self, tip: &TipSnapshot, block: &BlockImage);
     fn publish_block_generation(&self, tip_hash: Hash256, removals: &MutationResult);
 }
 

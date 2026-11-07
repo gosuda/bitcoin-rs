@@ -1,7 +1,10 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use crate::primitives::{OutPoint, Script, SighashCache, Tx, TxOut, Witness, varint::encoded_len};
+use crate::primitives::{
+    OutPoint, Script, SighashCache, TransactionView, Tx, TxOut, TxView, Witness,
+    varint::encoded_len,
+};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
@@ -272,9 +275,9 @@ impl Interpreter {
             Cow::Owned(grafted)
         };
 
-        let cache = SighashCache::new(&spending);
+        let cache = SighashCache::new(&*spending);
         execute_spend(
-            &spending,
+            TxView::Owned(&spending),
             input_idx,
             script_pubkey,
             flags,
@@ -311,8 +314,26 @@ pub fn validate_prevouts(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> Result<(), 
     Ok(())
 }
 
+pub fn validate_prevouts_view(
+    tx: &TransactionView<'_>,
+    prevouts: &[(OutPoint, TxOut)],
+) -> Result<(), PrevoutError> {
+    if tx.input_count() != prevouts.len() {
+        return Err(PrevoutError::Count {
+            input_count: tx.input_count(),
+            prevout_count: prevouts.len(),
+        });
+    }
+    for (input_index, (outpoint, _)) in prevouts.iter().enumerate() {
+        if tx.input_outpoint(input_index) != *outpoint {
+            return Err(PrevoutError::Mismatch { input_index });
+        }
+    }
+    Ok(())
+}
+
 pub struct PreparedTransaction<'tx> {
-    tx: &'tx Tx,
+    tx: TxView<'tx>,
     prevouts: Vec<TxOut>,
     cache: SighashCache<'tx>,
 }
@@ -321,7 +342,7 @@ impl<'tx> PreparedTransaction<'tx> {
     pub fn new(tx: &'tx Tx, prevouts: &[(OutPoint, TxOut)]) -> Result<Self, PrevoutError> {
         validate_prevouts(tx, prevouts)?;
         Ok(Self {
-            tx,
+            tx: TxView::Owned(tx),
             prevouts: prevouts.iter().map(|(_, output)| output.clone()).collect(),
             cache: SighashCache::new(tx),
         })
@@ -332,9 +353,23 @@ impl<'tx> PreparedTransaction<'tx> {
         let mut prevouts: Vec<TxOut> = prevouts.into_iter().map(|(_, output)| output).collect();
         prevouts.shrink_to_fit();
         Ok(Self {
-            tx,
+            tx: TxView::Owned(tx),
             prevouts,
             cache: SighashCache::new(tx),
+        })
+    }
+
+    pub fn from_view(
+        view: TransactionView<'tx>,
+        prevouts: Vec<(OutPoint, TxOut)>,
+    ) -> Result<Self, PrevoutError> {
+        validate_prevouts_view(&view, &prevouts)?;
+        let mut prevouts: Vec<TxOut> = prevouts.into_iter().map(|(_, output)| output).collect();
+        prevouts.shrink_to_fit();
+        Ok(Self {
+            tx: TxView::View(view),
+            prevouts,
+            cache: SighashCache::new(view),
         })
     }
 
@@ -344,8 +379,8 @@ impl<'tx> PreparedTransaction<'tx> {
         flags: VerifyFlags,
         cache: Option<&SignatureCache>,
     ) -> Result<bool, ScriptError> {
-        let inputs = self.tx.inputs.len();
-        if self.tx.inputs.get(input_idx).is_none() {
+        let inputs = self.tx.input_count();
+        if input_idx >= inputs {
             return Err(ScriptError::InputIndexOutOfRange {
                 index: input_idx,
                 inputs,
@@ -364,7 +399,7 @@ impl<'tx> PreparedTransaction<'tx> {
 }
 
 fn execute_spend(
-    spending: &Tx,
+    spending: TxView<'_>,
     input_idx: usize,
     script_pubkey: &[u8],
     flags: VerifyFlags,
@@ -372,7 +407,7 @@ fn execute_spend(
     cache: &SighashCache<'_>,
     sig_cache: Option<&SignatureCache>,
 ) -> Result<bool, ScriptError> {
-    let input = &spending.inputs[input_idx];
+    let script_sig = spending.input_script_sig(input_idx);
     let mut checker = TxSignatureChecker::new(
         spending,
         input_idx,
@@ -381,13 +416,32 @@ fn execute_spend(
         cache,
         sig_cache,
     );
-    verify_script(
-        &input.script_sig,
-        script_pubkey,
-        &input.witness,
-        flags.filled(),
-        &mut checker,
-    )?;
+    match spending {
+        TxView::Owned(tx) => {
+            verify_script(
+                script_sig,
+                script_pubkey,
+                &tx.inputs[input_idx].witness,
+                flags.filled(),
+                &mut checker,
+            )?;
+        }
+        TxView::View(v) => {
+            let count = v.witness_item_count(input_idx);
+            let total_bytes = (0..count).map(|j| v.witness_item(input_idx, j).len()).sum();
+            let mut witness = Witness::with_capacity(count, total_bytes);
+            for j in 0..count {
+                witness.push(v.witness_item(input_idx, j));
+            }
+            verify_script(
+                script_sig,
+                script_pubkey,
+                &witness,
+                flags.filled(),
+                &mut checker,
+            )?;
+        }
+    }
     Ok(true)
 }
 

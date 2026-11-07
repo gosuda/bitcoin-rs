@@ -67,7 +67,7 @@ pub(crate) fn open_at_genesis(network: Network) -> Result<NodeFixture> {
     let _ =
         fixture
             .state
-            .apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+            .apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 network.genesis_block(),
             ))?;
     Ok(fixture)
@@ -264,7 +264,7 @@ pub(crate) fn disconnect_applied(state: &NodeState, block: &Block) -> Result<()>
         target,
         |hash| {
             (hash == block_hash)
-                .then(|| bitcoin_rs_consensus::primitives::BlockPayload::from_local(body.clone()))
+                .then(|| bitcoin_rs_consensus::primitives::BlockImage::from_local(body.clone()))
         },
         |_| {},
     )
@@ -282,7 +282,7 @@ pub(crate) fn open_regtest() -> Result<(NodeState, tempfile::TempDir)> {
 
 pub(crate) fn apply_genesis(state: &NodeState) -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis,
     ))?;
     Ok(())
@@ -319,7 +319,7 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
         block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
             .ok_or_else(|| TestError::message("seed block must have a merkle root"))?;
         regtest_fixture::mine_block_to_declared_target(&mut block)?;
-        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
             block,
         ))?;
         tip = current_tip(state)?;
@@ -499,7 +499,7 @@ pub(crate) fn mine_regtest_block(
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
         .ok_or_else(|| TestError::message("mined block must have a merkle root"))?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         block.clone(),
     ))?;
     Ok(block)

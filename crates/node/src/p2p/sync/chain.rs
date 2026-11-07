@@ -1,16 +1,15 @@
-use bitcoin_rs_execution::chain::BlockTree;
-use bitcoin_rs_execution::chain::NodeId;
-use bitcoin_rs_execution::chain::TipSnapshot;
-
-use bitcoin_rs_consensus::primitives::Block;
-use bitcoin_rs_consensus::primitives::BlockPayload;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::Header;
 use bitcoin_rs_consensus::primitives::Network;
 pub use bitcoin_rs_execution::WindowApplyDisposition;
 pub use bitcoin_rs_execution::assumeutxo::HistoricalAdvance;
+use bitcoin_rs_execution::chain::BlockTree;
 pub use bitcoin_rs_execution::chain::HeaderAdmission;
+use bitcoin_rs_execution::chain::NodeId;
+use bitcoin_rs_execution::chain::TipSnapshot;
 pub use bitcoin_rs_execution::reorg::ReorgError;
+
+use bitcoin_rs_consensus::primitives::BlockImage;
 use parking_lot::RwLockReadGuard;
 use std::sync::Arc;
 
@@ -80,7 +79,7 @@ pub trait SyncChain: Send + Sync {
         Ok(HistoricalAdvance::Complete)
     }
 
-    fn connect_historical(&self, _payload: &BlockPayload) -> Result<(), SyncChainError> {
+    fn connect_historical(&self, _payload: &BlockImage) -> Result<(), SyncChainError> {
         Err("historical validation is not configured".into())
     }
     fn network(&self) -> Network;
@@ -99,17 +98,17 @@ pub trait SyncChain: Send + Sync {
         bitcoin_rs_execution::chain::ChainWork::from_be_bytes(self.network().minimum_chain_work())
     }
 
-    fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError>;
+    fn check_body_binding(&self, block: &BlockImage) -> Result<(), SyncChainError>;
 
     fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize;
 
     #[expect(clippy::result_large_err)]
-    fn commit_window(&self, payloads: &[&BlockPayload]) -> Result<usize, WindowCommitError>;
+    fn commit_window(&self, payloads: &[&BlockImage]) -> Result<usize, WindowCommitError>;
 
     fn switch_to_branch(
         &self,
         target: NodeId,
-        staged_body: &mut dyn FnMut(Hash256) -> Option<BlockPayload>,
+        staged_body: &mut dyn FnMut(Hash256) -> Option<BlockImage>,
         connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), ReorgError>;
 }

@@ -493,7 +493,7 @@ fn import_corpus_archive(
     let mut stream = open_corpus(task.corpus)?;
     let mut hasher = sha2::Sha256::new();
     let mut total: u64 = 0;
-    let mut payloads: Vec<bitcoin_rs_consensus::primitives::BlockPayload> = Vec::new();
+    let mut payloads: Vec<bitcoin_rs_consensus::primitives::BlockImage> = Vec::new();
     for (index, entry) in task.manifest.blocks.iter().enumerate() {
         let record = read_record(&mut stream, task.expected_magic, entry)?;
         check_payload_against_entry(entry, &record.payload)?;
@@ -504,13 +504,12 @@ fn import_corpus_archive(
             continue;
         }
         let payload =
-            bitcoin_rs_consensus::primitives::BlockPayload::from_raw(Bytes::from(record.payload))
+            bitcoin_rs_consensus::primitives::BlockImage::from_raw(Bytes::from(record.payload))
                 .map_err(|decode_error| OfflineImportError::BlockDecode {
-                height: entry.height,
-                decode_error,
-            })?;
+                    height: entry.height,
+                    decode_error,
+                })?;
         if !payload
-            .block()
             .block_hash()
             .to_string()
             .eq_ignore_ascii_case(&entry.hash)
@@ -620,12 +619,12 @@ fn read_record(
 
 fn connect_batch(
     node: &crate::state::NodeState,
-    batch: &mut Vec<bitcoin_rs_consensus::primitives::BlockPayload>,
+    batch: &mut Vec<bitcoin_rs_consensus::primitives::BlockImage>,
 ) -> Result<(), OfflineImportError> {
     let chainstate = node.chainstate();
     let followers = node.chain_followers();
     for payload in batch.drain(..) {
-        let hash = payload.block().block_hash();
+        let hash = payload.block_hash();
         if let Err(error) = followers.apply_connect(&chainstate, &payload) {
             let retention_limited = matches!(
                 &error,

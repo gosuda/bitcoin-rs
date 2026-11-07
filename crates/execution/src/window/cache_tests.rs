@@ -5,8 +5,8 @@ use crate::chain::regtest_fixture::{
     coinbase, mined_block_with_prev_hash, mined_regtest_child_at as mined_child,
 };
 use bitcoin_rs_consensus::primitives::{
-    Amount, BlockHash, BlockPayload, Hash256, LockTime, Network, OutPoint, Sequence, Tx, TxIn,
-    TxOut, Witness,
+    Amount, BlockHash, BlockImage, Hash256, LockTime, Network, OutPoint, Sequence, Tx, TxIn, TxOut,
+    Witness,
 };
 use bitcoin_rs_consensus::{ScriptExecutionCache, UtxoView, ValidationEngine};
 use bitcoin_rs_storage::utxo::UtxoSet;
@@ -31,7 +31,7 @@ fn matured_funding(handles: &Chainstate) -> TestResult<(Tx, Tx, BlockHash)> {
     let mut funded_next: Option<Tx> = None;
     for height in 1..=101 {
         let block = mined_child(parent, height)?;
-        handles.apply_block(&BlockPayload::from_local(block.clone()))?;
+        handles.apply_block(&BlockImage::from_local(block.clone()))?;
         if height == 1 {
             funded = Some(block.txs[0].clone());
         }
@@ -113,7 +113,7 @@ fn window_commit_consumes_verified_script_cache_entry() -> TestResult {
     )?;
     cache.insert(wtxid, flags);
 
-    let payload = BlockPayload::from_local(block);
+    let payload = BlockImage::from_local(block);
     let outcomes = handles.apply_window(&[&payload])?;
     assert_eq!(outcomes.len(), 1, "window must commit its one block");
     assert_eq!(outcomes[0].tip.height, next_height);
@@ -176,8 +176,8 @@ fn a_failed_window_restores_the_script_cache_entries_it_took() -> TestResult {
     )?;
     cache.insert(good_wtxid, flags);
 
-    let first_payload = BlockPayload::from_local(first);
-    let second_payload = BlockPayload::from_local(second);
+    let first_payload = BlockImage::from_local(first);
+    let second_payload = BlockImage::from_local(second);
     let payloads = [&first_payload, &second_payload];
     let proven = super::prove_window(&handles, &payloads).proven;
     assert!(
@@ -201,7 +201,7 @@ fn a_failed_window_restores_the_script_cache_entries_it_took() -> TestResult {
     assert_eq!(err.committed[0].tip.height, 102);
     assert_eq!(
         err.committed[0].hash,
-        Hash256::from(first_payload.block().block_hash())
+        Hash256::from(first_payload.block_hash())
     );
     assert!(
         matches!(
@@ -308,8 +308,8 @@ fn a_window_refused_after_proof_restores_only_uncommitted_takes() -> TestResult 
     .map_err(TestError::Consensus)?;
     cache.insert(second_wtxid, flags_second);
 
-    let first_payload = BlockPayload::from_local(first);
-    let second_payload = BlockPayload::from_local(second);
+    let first_payload = BlockImage::from_local(first);
+    let second_payload = BlockImage::from_local(second);
     let payloads = [&first_payload, &second_payload];
     let err = handles
         .apply_window(&payloads)

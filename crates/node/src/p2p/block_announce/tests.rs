@@ -1586,7 +1586,7 @@ fn early_announce_sends_one_cmpctblock_to_parent_known_hb_peer() {
 
     let block = tip_child_block(chain.block_hash_at(1), 1200);
     let hash = Hash256::from(block.block_hash());
-    let sent = announcer.announce_pow_valid(&block, hash, 2);
+    let sent = announcer.announce_pow_valid(&BlockImage::from_local(block.clone()), hash, 2);
 
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].0, Some(addr));
@@ -1620,10 +1620,18 @@ fn early_announce_same_height_sends_nothing() {
 
     let block = tip_child_block(chain.block_hash_at(1), 1200);
     let hash = Hash256::from(block.block_hash());
-    assert_eq!(announcer.announce_pow_valid(&block, hash, 2).len(), 1);
+    assert_eq!(
+        announcer
+            .announce_pow_valid(&BlockImage::from_local(block.clone()), hash, 2)
+            .len(),
+        1
+    );
     while rx.try_recv().is_ok() {}
 
-    assert_eq!(announcer.announce_pow_valid(&block, hash, 2), []);
+    assert_eq!(
+        announcer.announce_pow_valid(&BlockImage::from_local(block.clone()), hash, 2),
+        []
+    );
     assert!(rx.try_recv().is_err());
 }
 
@@ -1642,7 +1650,10 @@ fn early_announce_without_parent_knowledge_sends_nothing() {
 
     let block = tip_child_block(chain.block_hash_at(1), 1200);
     let hash = Hash256::from(block.block_hash());
-    assert_eq!(announcer.announce_pow_valid(&block, hash, 2), []);
+    assert_eq!(
+        announcer.announce_pow_valid(&BlockImage::from_local(block.clone()), hash, 2),
+        []
+    );
     assert!(rx.try_recv().is_err());
 }
 
@@ -1667,7 +1678,12 @@ fn post_commit_process_tip_sends_no_second_cmpctblock() {
     mark_known(&table, &announcer, addr, chain.hash_at(1));
 
     let hash = Hash256::from(early.block_hash());
-    assert_eq!(announcer.announce_pow_valid(&early, hash, 2).len(), 1);
+    assert_eq!(
+        announcer
+            .announce_pow_valid(&BlockImage::from_local(early.clone()), hash, 2)
+            .len(),
+        1
+    );
     while rx.try_recv().is_ok() {}
     chain.set_committed_height(2);
 

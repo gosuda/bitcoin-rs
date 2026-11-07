@@ -3,7 +3,7 @@ use crate::packages::SendPackages;
 use crate::peer::{Peer, PeerState};
 use crate::wire::{Message, PeerError};
 
-pub fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerError> {
+pub(crate) fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerError> {
     match message {
         Message::Version(version) => receive_version(peer, version.clone()),
         Message::Verack => receive_verack(peer),
@@ -45,7 +45,7 @@ pub fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerError> {
         | Message::MemPool
         | Message::Tx(_)
         | Message::Block(_)
-        | Message::BlockPayload(_)
+        | Message::BlockBytes(_)
         | Message::Headers(_)
         | Message::GetAddr
         | Message::FeeFilter(_)

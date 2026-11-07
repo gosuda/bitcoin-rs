@@ -14,7 +14,7 @@ pub use checker::check_signature_encoding;
 pub use eval::{MAX_SCRIPT_SIZE, is_op_success};
 pub use interpreter::{
     Interpreter, PreparedTransaction, PrevoutError, ScriptErrCode, ScriptError, VerifyFlags,
-    validate_prevouts,
+    validate_prevouts, validate_prevouts_view,
 };
 pub(crate) use script::minimal_push;
 pub use script::{
@@ -24,4 +24,4 @@ pub use script::{
     witness_program,
 };
 pub use signature_cache::SignatureCache;
-pub use sigops::{count_segwit, count_tx_legacy};
+pub use sigops::{count_segwit, count_segwit_last, count_tx_legacy, count_tx_legacy_view};

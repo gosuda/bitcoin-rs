@@ -7,7 +7,7 @@ use crate::chain::regtest_fixture::{
 use crate::chain::{LatchReader, LatchWriter, TipSnapshot, validate_pow};
 use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_consensus::primitives::{
-    Block, BlockPayload, Hash256, Network, Script, Witness, consensus_bytes, deserialize,
+    Block, BlockImage, Hash256, Network, Script, Witness, consensus_bytes, deserialize,
 };
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
@@ -128,7 +128,7 @@ fn fixture(children: u32) -> Result<Fixture> {
     chain.retention = MandatoryRetention::new(Arc::clone(&retention));
     chain.history = HistoryAccess::new(Arc::clone(&retention), RetentionBudget::from_blocks(288));
     let genesis = Network::Regtest.genesis_block();
-    chain.apply_block(&BlockPayload::from_local(genesis.clone()))?;
+    chain.apply_block(&BlockImage::from_local(genesis.clone()))?;
     let mut blocks = vec![genesis];
     for height in 1..=children {
         let previous = blocks
@@ -136,7 +136,7 @@ fn fixture(children: u32) -> Result<Fixture> {
             .ok_or(TestError::Missing("no parent"))?
             .block_hash();
         let block = mined_regtest_child_at(previous, height)?;
-        chain.apply_block(&BlockPayload::from_local(block.clone()))?;
+        chain.apply_block(&BlockImage::from_local(block.clone()))?;
         blocks.push(block);
     }
     Ok(Fixture {

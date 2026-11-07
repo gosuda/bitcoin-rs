@@ -8,7 +8,7 @@ use crate::mining::{
     witness_commitment_script,
 };
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
-use bitcoin_rs_consensus::primitives::{BlockPayload, Header, Network, Tx, Txid, deserialize};
+use bitcoin_rs_consensus::primitives::{BlockImage, Header, Network, Tx, Txid, deserialize};
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bytes::Bytes;
 use compact_str::CompactString;
@@ -90,10 +90,10 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
     }
 }
 
-fn decode_submitted_block(hex: &str) -> Result<(BlockPayload, usize), RpcError> {
+fn decode_submitted_block(hex: &str) -> Result<(BlockImage, usize), RpcError> {
     let raw = Vec::<u8>::from_hex(hex).map_err(|_| block_decode_failed())?;
     let (payload, consumed) =
-        BlockPayload::from_prefix(Bytes::from(raw)).map_err(|_| block_decode_failed())?;
+        BlockImage::from_prefix(Bytes::from(raw)).map_err(|_| block_decode_failed())?;
     Ok((payload, consumed))
 }
 

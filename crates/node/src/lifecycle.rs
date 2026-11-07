@@ -52,7 +52,7 @@ const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 struct RpcChainControl {
     handles: Arc<bitcoin_rs_execution::Chainstate>,
     followers: crate::chain_effects::ChainFollowers,
-    sync: Arc<crate::BlockSync>,
+    sync: Arc<crate::p2p::sync::BlockSync>,
     snapshots: Arc<crate::snapshot::SnapshotControl>,
 }
 
@@ -965,7 +965,7 @@ fn unsize_tx_policy(
 }
 
 fn unsize_block_sync(
-    sync: Arc<crate::BlockSync>,
+    sync: Arc<crate::p2p::sync::BlockSync>,
 ) -> Arc<dyn bitcoin_rs_wire::listener::BlockSyncObserver> {
     sync
 }

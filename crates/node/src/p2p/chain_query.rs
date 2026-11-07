@@ -9,7 +9,7 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
 use bitcoin_rs_consensus::primitives::layout::{ParsedBlock, ParsedTransaction};
 use bitcoin_rs_consensus::primitives::{
-    Block, BlockHash, Hash256, Header, Network, consensus_bytes, deserialize,
+    BlockHash, BlockImage, Hash256, Header, Network, deserialize,
 };
 use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, ChainWork, NodeStatus, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
@@ -38,7 +38,7 @@ enum ServingPolicy {
     BlockTransactions,
 }
 
-type HeldBlock = (Hash256, Arc<Block>);
+type HeldBlock = (Hash256, Arc<BlockImage>);
 
 #[derive(Clone, Default)]
 pub struct RecentBlockSlot {
@@ -46,12 +46,12 @@ pub struct RecentBlockSlot {
 }
 
 impl RecentBlockSlot {
-    pub fn store(&self, hash: Hash256, block: Arc<Block>) {
+    pub fn store(&self, hash: Hash256, block: Arc<BlockImage>) {
         *self.inner.lock() = Some((hash, block));
     }
 
     #[must_use]
-    pub fn load(&self) -> Option<(Hash256, Arc<Block>)> {
+    pub fn load(&self) -> Option<(Hash256, Arc<BlockImage>)> {
         self.inner.lock().clone()
     }
 }
@@ -182,10 +182,10 @@ impl ActiveChainQuery {
         witness: WitnessInclusion,
     ) -> Option<Message> {
         self.load_block(height, hash, witness, ServingPolicy::Inventory)
-            .map(|(body, _)| Message::BlockPayload(body))
+            .map(|(body, _)| Message::BlockBytes(body))
     }
 
-    fn recent_body(&self, hash: BlockHash) -> Option<Arc<Block>> {
+    fn recent_body(&self, hash: BlockHash) -> Option<Arc<BlockImage>> {
         let (slot_hash, body) = self.recent.load()?;
         (BlockHash::from(slot_hash) == hash).then_some(body)
     }
@@ -578,7 +578,7 @@ impl ChainQuery for ActiveChainQuery {
                         outcome.halted = true;
                         return Ok(outcome);
                     }
-                    match cmpct_message_from_native(&body, version) {
+                    match cmpct_message_from_image(&body, version) {
                         Some(message) => serve(message)?,
                         None => outcome.not_found.push(*item),
                     }
@@ -611,11 +611,7 @@ impl ChainQuery for ActiveChainQuery {
             if !headroom() {
                 return Ok(None);
             }
-            return Self::blocktxn_message(
-                &consensus_bytes(body.as_ref()),
-                request,
-                compact_version,
-            );
+            return Self::blocktxn_message(body.bytes().as_ref(), request, compact_version);
         }
         let Some((tip_height, height)) =
             self.serving_position(hash, ServingPolicy::BlockTransactions)
@@ -637,7 +633,7 @@ impl ChainQuery for ActiveChainQuery {
             return Ok(None);
         };
         if deep || beyond_depth(tip_height, height, MAX_BLOCKTXN_DEPTH) {
-            return Ok(Some(Message::BlockPayload(payload)));
+            return Ok(Some(Message::BlockBytes(payload)));
         }
         Self::blocktxn_message(payload.as_ref(), request, compact_version)
     }
@@ -741,7 +737,7 @@ impl ActiveChainQuery {
         policy: ServingPolicy,
     ) -> Option<Message> {
         if let Some(body) = self.recent_body(hash) {
-            return cmpct_message_from_native(&body, compact_version?);
+            return cmpct_message_from_image(&body, compact_version?);
         }
         self.serving_position(hash, policy)?;
         let version = u32::try_from(compact_version?).ok()?;
@@ -751,14 +747,10 @@ impl ActiveChainQuery {
         let (payload, tip_height) =
             self.load_block(height, hash, WitnessInclusion::Include, policy)?;
         if beyond_depth(tip_height, height, MAX_CMPCTBLOCK_DEPTH) {
-            return Some(Message::BlockPayload(payload));
+            return Some(Message::BlockBytes(payload));
         }
-        let block =
-            bitcoin::consensus::encode::deserialize::<RegistryBlock>(payload.as_ref()).ok()?;
-        let cmpct = HeaderAndShortIds::from_block(&block, fresh_nonce(), version, &[]).ok()?;
-        Some(Message::CmpctBlock(CmpctBlock {
-            compact_block: cmpct,
-        }))
+        let image = BlockImage::from_raw(payload).ok()?;
+        cmpct_message_from_image(&image, u64::from(version))
     }
 
     fn response_for(
@@ -854,13 +846,12 @@ fn fresh_nonce() -> u64 {
         .finish()
 }
 
-pub(crate) fn cmpct_message_from_native(block: &Block, version: u64) -> Option<Message> {
+pub(crate) fn cmpct_message_from_image(image: &BlockImage, version: u64) -> Option<Message> {
     let version = u32::try_from(version).ok()?;
     if version != 1 && version != 2 {
         return None;
     }
-    let bytes = consensus_bytes(block);
-    let registry = bitcoin::consensus::encode::deserialize::<RegistryBlock>(bytes.as_ref()).ok()?;
+    let registry = bitcoin::consensus::encode::deserialize::<RegistryBlock>(image.bytes()).ok()?;
     let cmpct = HeaderAndShortIds::from_block(&registry, fresh_nonce(), version, &[]).ok()?;
     Some(Message::CmpctBlock(CmpctBlock {
         compact_block: cmpct,

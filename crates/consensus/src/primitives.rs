@@ -25,7 +25,7 @@ pub mod units;
 pub mod varint;
 pub mod version;
 
-pub use block::{Block, BlockBodyMetadata, BlockImage, BlockPayload, TransactionView};
+pub use block::{Block, BlockBodyMetadata, BlockImage, TransactionView};
 pub use encode::{
     ConsensusDecode, ConsensusEncode, DecodeError, Sink, consensus_bytes, deserialize,
 };
@@ -39,7 +39,7 @@ pub use network::{AssumeUtxoData, ChainTxData, HeadersSyncParams, Network};
 pub use outpoint::OutPoint;
 pub use script::{Script, Witness, WitnessItems};
 pub use sighash::{
-    AnnexError, CODESEPARATOR_POSITION, Sighash, SighashCache, SighashError, tapleaf_hash,
+    AnnexError, CODESEPARATOR_POSITION, Sighash, SighashCache, SighashError, TxView, tapleaf_hash,
 };
 pub use tx::{Tx, TxIn, TxOut};
 pub use units::{

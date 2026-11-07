@@ -455,8 +455,8 @@ wallet interoperability remain unverified.
 ### `API-15`: `submitblock` decode
 
 - Owner: `decode_submitted_block` in `crates/serving/src/handlers/mining.rs`.
-- Admission stays on the single `MiningControl::submit_block(BlockPayload)`.
-- The decoder hex-decodes the input and runs one shared decode via `BlockPayload::from_prefix`.
+- Admission stays on the single `MiningControl::submit_block(BlockImage)`.
+- The decoder hex-decodes the input and runs one shared decode via `BlockImage::from_prefix`.
 - It retains only the consumed prefix and discards the remainder.
 - Invalid hex or an incomplete block returns Core `-22` (`Block decode failed`, Core `DecodeHexBlk`).
 - Extra bytes after a complete block are ignored.

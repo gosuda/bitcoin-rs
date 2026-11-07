@@ -24,7 +24,7 @@ impl From<crate::script::PrevoutError> for ConsensusError {
 }
 
 #[cfg(not(feature = "kernel"))]
-fn kernel_not_compiled() -> ConsensusError {
+pub fn kernel_not_compiled() -> ConsensusError {
     ConsensusError::UnsupportedEngine {
         engine: ValidationEngine::Kernel,
     }
@@ -184,9 +184,24 @@ pub enum BlockParse {
     #[cfg(feature = "kernel")]
     Kernel(kernel_backend::KernelBlock),
 }
+#[cfg(any(test, feature = "test-seam"))]
+static PARSE_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(any(test, feature = "test-seam"))]
+#[must_use]
+pub fn block_parse_call_count() -> usize {
+    PARSE_CALLS.load(core::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+pub fn reset_block_parse_call_count() {
+    PARSE_CALLS.store(0, core::sync::atomic::Ordering::SeqCst);
+}
 
 impl BlockParse {
     pub fn parse(raw_block: &[u8], engine: ValidationEngine) -> Result<Self, ConsensusError> {
+        #[cfg(any(test, feature = "test-seam"))]
+        PARSE_CALLS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         match engine {
             ValidationEngine::Native => {
                 let parsed = crate::primitives::layout::ParsedBlock::parse_exact(raw_block)
@@ -222,6 +237,14 @@ impl BlockParse {
             }
         }
     }
+    #[must_use]
+    pub fn into_script_source(self) -> BlockScriptSource {
+        match self {
+            Self::Native(_) => BlockScriptSource::Native,
+            #[cfg(feature = "kernel")]
+            Self::Kernel(block) => BlockScriptSource::Kernel(block),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -235,16 +258,28 @@ impl BlockScriptSource {
     pub(crate) fn prepare_tx<'b>(
         &'b self,
         #[cfg_attr(not(feature = "kernel"), expect(unused_variables))] index: usize,
-        tx: &'b Tx,
+        tx: crate::primitives::TxView<'b>,
         spent_outputs: Vec<(OutPoint, TxOut)>,
     ) -> Result<PreparedTx<'b>, ConsensusError> {
         match self {
-            Self::Native => Ok(PreparedTx::Native(
-                crate::script::PreparedTransaction::from_owned(tx, spent_outputs)?,
-            )),
+            Self::Native => {
+                let prep = match tx {
+                    crate::primitives::TxView::Owned(t) => {
+                        crate::script::PreparedTransaction::from_owned(t, spent_outputs)?
+                    }
+                    crate::primitives::TxView::View(v) => {
+                        crate::script::PreparedTransaction::from_view(v, spent_outputs)?
+                    }
+                };
+                Ok(PreparedTx::Native(prep))
+            }
             #[cfg(feature = "kernel")]
             Self::Kernel(block) => {
-                crate::script::validate_prevouts(tx, &spent_outputs)?;
+                let tx_mat = match tx {
+                    crate::primitives::TxView::Owned(t) => t.clone(),
+                    crate::primitives::TxView::View(v) => v.materialize(),
+                };
+                crate::script::validate_prevouts(&tx_mat, &spent_outputs)?;
                 block.prepare_tx(index, spent_outputs)
             }
         }
@@ -309,9 +344,26 @@ pub fn verify_tx_scripts(
     engine: ValidationEngine,
     signature_cache: Option<&crate::script::SignatureCache>,
 ) -> Result<(), ConsensusError> {
+    verify_tx_scripts_view(tx.into(), spent_outputs, flags, engine, signature_cache)
+}
+
+pub fn verify_tx_scripts_view(
+    tx: crate::primitives::TxView<'_>,
+    spent_outputs: &[(OutPoint, TxOut)],
+    flags: VerifyFlags,
+    engine: ValidationEngine,
+    signature_cache: Option<&crate::script::SignatureCache>,
+) -> Result<(), ConsensusError> {
     match engine {
         ValidationEngine::Native => {
-            let prepared = crate::script::PreparedTransaction::new(tx, spent_outputs)?;
+            let prepared = match tx {
+                crate::primitives::TxView::Owned(t) => {
+                    crate::script::PreparedTransaction::from_owned(t, spent_outputs.to_vec())?
+                }
+                crate::primitives::TxView::View(v) => {
+                    crate::script::PreparedTransaction::from_view(v, spent_outputs.to_vec())?
+                }
+            };
             for (input_index, _) in spent_outputs.iter().enumerate() {
                 crate::verify_tx::verify_input_script_native(
                     &prepared,
@@ -323,8 +375,12 @@ pub fn verify_tx_scripts(
             Ok(())
         }
         ValidationEngine::Kernel => {
-            crate::script::validate_prevouts(tx, spent_outputs)?;
-            verify_tx_scripts_kernel(tx, spent_outputs, flags)
+            let tx_mat = match tx {
+                crate::primitives::TxView::Owned(t) => t.clone(),
+                crate::primitives::TxView::View(v) => v.materialize(),
+            };
+            crate::script::validate_prevouts(&tx_mat, spent_outputs)?;
+            verify_tx_scripts_kernel(&tx_mat, spent_outputs, flags)
         }
     }
 }
@@ -349,7 +405,7 @@ fn verify_tx_scripts_kernel(
 
 #[cfg(test)]
 mod tests {
-    use crate::primitives::{BlockPayload, Network};
+    use crate::primitives::{BlockImage, Network};
 
     use super::*;
 
@@ -372,15 +428,15 @@ mod tests {
             .copied()
             .filter(|engine| engine.is_supported())
         {
-            let payload = BlockPayload::from_local(block.clone());
+            let payload = BlockImage::from_local(block.clone());
             let parsed = BlockParse::parse(payload.bytes(), engine)
                 .unwrap_or_else(|error| panic!("fixture parse: {error}"));
             let (parsed, _) = parsed
                 .into_parts(&block.txs)
                 .unwrap_or_else(|error| panic!("fixture facts: {error}"));
-            assert!(parsed.prepare_tx(0, tx, rows.clone()).is_ok());
+            assert!(parsed.prepare_tx(0, tx.into(), rows.clone()).is_ok());
             assert!(matches!(
-                parsed.prepare_tx(0, tx, swapped.clone()),
+                parsed.prepare_tx(0, tx.into(), swapped.clone()),
                 Err(ConsensusError::PrevoutMismatch { input_index: 0 })
             ));
         }

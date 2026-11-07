@@ -3,7 +3,7 @@ use super::chain::{
     WindowApplyDisposition, WindowCommitError,
 };
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Header, Network, Tx, Txid};
+use bitcoin_rs_consensus::primitives::{Block, BlockImage, Hash256, Header, Network, Txid};
 use bitcoin_rs_execution::chain::{
     BlockTree, ChainWork, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot, regtest_fixture,
 };
@@ -60,7 +60,7 @@ impl TestChain {
 }
 
 impl TestChain {
-    fn body_binding(&self, tree: &BlockTree, block: &Block) -> Result<(), SyncChainError> {
+    fn body_binding(&self, tree: &BlockTree, block: &BlockImage) -> Result<(), SyncChainError> {
         let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
         let segwit_active = tree
             .lookup(hash)
@@ -74,7 +74,7 @@ impl TestChain {
                 )
                 .segwit_active
             });
-        bitcoin_rs_consensus::check_block_body_binding(
+        bitcoin_rs_consensus::check_image_body_binding(
             block,
             bitcoin_rs_consensus::BlockRuleContext { segwit_active },
         )
@@ -112,8 +112,8 @@ impl SyncChain for TestChain {
             }))
     }
 
-    fn connect_historical(&self, payload: &BlockPayload) -> Result<(), SyncChainError> {
-        let hash = payload.block().block_hash().0;
+    fn connect_historical(&self, payload: &BlockImage) -> Result<(), SyncChainError> {
+        let hash = payload.block_hash().0;
         assert_eq!(
             self.historical.lock().pop_front().map(|(_, hash)| hash),
             Some(hash)
@@ -206,7 +206,7 @@ impl SyncChain for TestChain {
         }
     }
 
-    fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError> {
+    fn check_body_binding(&self, block: &BlockImage) -> Result<(), SyncChainError> {
         let tree = self.block_tree.read();
         self.body_binding(&tree, block)
     }
@@ -230,12 +230,11 @@ impl SyncChain for TestChain {
         count
     }
 
-    fn commit_window(&self, payloads: &[&BlockPayload]) -> Result<usize, WindowCommitError> {
+    fn commit_window(&self, payloads: &[&BlockImage]) -> Result<usize, WindowCommitError> {
         let mut tree = self.block_tree.write();
         let mut applied = 0_usize;
         for payload in payloads {
-            let block = payload.block();
-            let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
+            let hash = Hash256::from_le_bytes(payload.block_hash().as_bytes());
             let scripted = *self.scripted_commit_failure.lock();
             let failure = match scripted {
                 Some((fail_hash, _)) if fail_hash == hash => {
@@ -263,12 +262,13 @@ impl SyncChain for TestChain {
                     source: std::io::Error::other("commit block not in tree").into(),
                 });
             };
-            let coinbase_shaped = |tx: &Tx| {
-                tx.inputs.len() == 1
-                    && tx.inputs[0].previous_output.txid == Txid::default()
-                    && tx.inputs[0].previous_output.vout == u32::MAX
-            };
-            if !block.txs.is_empty() && block.txs.iter().skip(1).any(coinbase_shaped) {
+            if payload.tx_count() > 1
+                && (1..payload.tx_count()).any(|index| {
+                    payload.tx(index).input_count() == 1
+                        && payload.tx(index).input_outpoint(0).txid == Txid::default()
+                        && payload.tx(index).input_outpoint(0).vout == u32::MAX
+                })
+            {
                 let invalidated = tree
                     .invalidate_subtree(node_id)
                     .map(|outcome| outcome.invalid.into_boxed_slice())
@@ -280,8 +280,8 @@ impl SyncChain for TestChain {
                     source: std::io::Error::other("extra coinbase").into(),
                 });
             }
-            if !block.txs.is_empty() {
-                if let Err(source) = self.body_binding(&tree, block) {
+            if payload.tx_count() > 0 {
+                if let Err(source) = self.body_binding(&tree, payload) {
                     return Err(WindowCommitError {
                         applied,
                         disposition: WindowApplyDisposition::BodyMutated,
@@ -313,7 +313,7 @@ impl SyncChain for TestChain {
     fn switch_to_branch(
         &self,
         _target: NodeId,
-        _staged_body: &mut dyn FnMut(Hash256) -> Option<BlockPayload>,
+        _staged_body: &mut dyn FnMut(Hash256) -> Option<BlockImage>,
         connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), ReorgError> {
         let scripted = self.scripted_branch_switch.lock().take();

@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::test_support::TestError;
-use bitcoin_rs_consensus::primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockImage;
 
 #[test]
 fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> Result<(), TestError> {
@@ -11,10 +11,9 @@ fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> Result
     config.p2p.listen.clear();
     config.storage.prune_target_mb = 0;
     let state = NodeState::open(config, None)?;
-    let payload = BlockPayload::from_local(
-        bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
-    );
-    let hash = Hash256::from_le_bytes(payload.block().block_hash().as_bytes());
+    let payload =
+        BlockImage::from_local(bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block());
+    let hash = Hash256::from_le_bytes(payload.block_hash().as_bytes());
 
     assert!(state.prune_service().is_none());
     state.apply_block(&payload)?;
@@ -41,11 +40,10 @@ fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> Result
 
 #[test]
 fn preserved_bytes_apply_matches_lazy_serialization() -> Result<(), TestError> {
-    let local = BlockPayload::from_local(
-        bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
-    );
-    let hash = Hash256::from_le_bytes(local.block().block_hash().as_bytes());
-    let preserved = BlockPayload::from_raw(local.bytes().clone())
+    let local =
+        BlockImage::from_local(bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block());
+    let hash = Hash256::from_le_bytes(local.block_hash().as_bytes());
+    let preserved = BlockImage::from_raw(local.bytes().clone())
         .map_err(|error| TestError::message(format!("genesis bytes are canonical: {error}")))?;
 
     let dir_a = tempfile::tempdir()?;
@@ -245,7 +243,6 @@ fn prune_to_height_advances_published_height() -> Result<(), TestError> {
 fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> Result<(), TestError> {
     use bitcoin_rs_consensus::primitives::Network;
     use bitcoin_rs_execution::AssumeUtxoManager;
-    use bitcoin_rs_serving::context::PruneService;
     use bitcoin_rs_storage::FlatFileBlockStore;
     use std::sync::atomic::AtomicU32;
 

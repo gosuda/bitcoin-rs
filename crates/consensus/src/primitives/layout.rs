@@ -190,19 +190,28 @@ fn slice_at(image: &[u8], span: ByteSpan) -> &[u8] {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WitnessItemLayout {
-    len_prefix: ByteSpan,
     item: ByteSpan,
 }
 
 impl WitnessItemLayout {
     #[must_use]
-    pub const fn new(len_prefix: ByteSpan, item: ByteSpan) -> Self {
-        Self { len_prefix, item }
+    pub const fn new(_len_prefix: ByteSpan, item: ByteSpan) -> Self {
+        Self { item }
     }
 
     #[must_use]
     pub const fn len_prefix(&self) -> ByteSpan {
-        self.len_prefix
+        let prefix_len = if self.item.len() < 0xfd {
+            1
+        } else if self.item.len() <= 0xffff {
+            3
+        } else {
+            5
+        };
+        ByteSpan {
+            start: self.item.start().saturating_sub(prefix_len),
+            len: prefix_len,
+        }
     }
 
     #[must_use]
@@ -338,6 +347,28 @@ impl TxLayout {
     pub const fn is_segwit(&self) -> bool {
         self.segwit
     }
+    #[must_use]
+    pub fn retained_heap_bytes(&self) -> usize {
+        self.inputs
+            .len()
+            .saturating_mul(core::mem::size_of::<InputLayout>())
+            .saturating_add(
+                self.outputs
+                    .len()
+                    .saturating_mul(core::mem::size_of::<OutputLayout>()),
+            )
+            .saturating_add(
+                self.inputs
+                    .iter()
+                    .map(|input| {
+                        input
+                            .witness_items
+                            .len()
+                            .saturating_mul(core::mem::size_of::<WitnessItemLayout>())
+                    })
+                    .fold(0_usize, usize::saturating_add),
+            )
+    }
 
     pub fn parse_at(image: &[u8], cursor: &mut u64) -> Result<(Self, TxIdentity), DecodeError> {
         Self::parse_at_internal(image, cursor, true)
@@ -423,10 +454,7 @@ impl TxLayout {
                     let (item_len, len_span) = cur.read_compact()?;
                     let item_span = cur.take(item_len)?;
                     if record_witness_spans {
-                        items.push(WitnessItemLayout {
-                            len_prefix: len_span,
-                            item: item_span,
-                        });
+                        items.push(WitnessItemLayout::new(len_span, item_span));
                     }
                 }
                 input.witness =
@@ -577,6 +605,18 @@ impl BlockLayout {
     #[must_use]
     pub fn consumed_len(&self) -> usize {
         widen(self.consumed)
+    }
+    #[must_use]
+    pub fn retained_heap_bytes(&self) -> usize {
+        self.txs
+            .len()
+            .saturating_mul(core::mem::size_of::<TxLayout>())
+            .saturating_add(
+                self.txs
+                    .iter()
+                    .map(TxLayout::retained_heap_bytes)
+                    .fold(0_usize, usize::saturating_add),
+            )
     }
 
     pub fn parse_exact(bytes: &[u8]) -> Result<(Self, Box<[TxIdentity]>), DecodeError> {
@@ -905,6 +945,8 @@ impl<'a> ParsedBlock<'a> {
     }
 
     pub fn parse_exact(bytes: &'a [u8]) -> Result<Self, DecodeError> {
+        #[cfg(any(test, feature = "test-seam"))]
+        PARSE_EXACT_CALLS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         let mut cursor = 0_u64;
         let parsed = Self::parse_at(bytes, &mut cursor)?;
         let consumed = usize::try_from(cursor)
@@ -1027,4 +1069,17 @@ impl<'a> ParsedBlock<'a> {
                 .collect(),
         }
     }
+}
+#[cfg(any(test, feature = "test-seam"))]
+static PARSE_EXACT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(any(test, feature = "test-seam"))]
+#[must_use]
+pub fn parse_exact_call_count() -> usize {
+    PARSE_EXACT_CALLS.load(core::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+pub fn reset_parse_exact_call_count() {
+    PARSE_EXACT_CALLS.store(0, core::sync::atomic::Ordering::SeqCst);
 }

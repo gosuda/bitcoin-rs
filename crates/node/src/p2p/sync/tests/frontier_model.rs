@@ -640,7 +640,7 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement() -> TestResult {
             vec![super::transaction(0xEE)],
         )
         .or_fail("regtest fixture block");
-        let payload = BlockPayload::from_local(block);
+        let payload = BlockImage::from_local(block);
         scheduler.window.seed_front_cadence_for_test(50, now);
         scheduler.stager.insert(
             tail,

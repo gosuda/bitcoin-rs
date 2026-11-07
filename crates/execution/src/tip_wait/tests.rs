@@ -1,13 +1,13 @@
 use super::*;
 use crate::chain::LatchWriter;
 use crate::chain::regtest_fixture::mined_regtest_child_at;
-use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Network};
 use bitcoin_rs_storage::utxo::UtxoSet;
 use std::sync::mpsc;
 
 fn owner() -> Chainstate {
     let owner = crate::test_fixtures::handles(Network::Regtest, Arc::new(UtxoSet::new()));
-    let genesis_payload = BlockPayload::from_local(Network::Regtest.genesis_block());
+    let genesis_payload = BlockImage::from_local(Network::Regtest.genesis_block());
     owner.apply_block(&genesis_payload).expect("genesis");
     owner
 }
@@ -45,7 +45,7 @@ fn registration_races_never_lose_durable_publication() {
         );
         let child = mined_regtest_child_at(Network::Regtest.genesis_block().block_hash(), 1)
             .expect("child");
-        let child_payload = BlockPayload::from_local(child.clone());
+        let child_payload = BlockImage::from_local(child.clone());
         owner.apply_block(&child_payload).expect("durable connect");
         let observed = rx
             .recv_timeout(Duration::from_secs(1))
@@ -117,10 +117,10 @@ fn grouped_publication_returns_settled_tip_and_transient_round_trip_keeps_waitin
     );
     {
         let transition = owner.begin_transition().expect("transition");
-        let first_payload = BlockPayload::from_local(first.clone());
+        let first_payload = BlockImage::from_local(first.clone());
         transition.connect(&first_payload).expect("first commit");
         assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
-        let second_payload = BlockPayload::from_local(second.clone());
+        let second_payload = BlockImage::from_local(second.clone());
         transition.connect(&second_payload).expect("second commit");
     }
     assert_eq!(
@@ -141,7 +141,7 @@ fn grouped_publication_returns_settled_tip_and_transient_round_trip_keeps_waitin
         let transition = owner.begin_transition().expect("transition");
         transition.disconnect(&second).expect("disconnect second");
         transition.disconnect(&first).expect("disconnect first");
-        let first_payload = BlockPayload::from_local(first);
+        let first_payload = BlockImage::from_local(first);
         transition.connect(&first_payload).expect("reconnect first");
     }
     assert!(
@@ -179,7 +179,7 @@ fn headers_spurious_wakes_and_other_chainstates_do_not_change_active_tip() {
     owner
         .admit_headers(&[child.header])
         .expect("header admission");
-    let historical_payload = BlockPayload::from_local(child);
+    let historical_payload = BlockImage::from_local(child);
     historical
         .apply_block(&historical_payload)
         .expect("separate chainstate");
@@ -204,7 +204,7 @@ fn rejection_and_spurious_wakes_do_not_extend_absolute_deadline() {
     let mut invalid =
         mined_regtest_child_at(Network::Regtest.genesis_block().block_hash(), 1).expect("child");
     invalid.txs.clear();
-    let invalid_payload = BlockPayload::from_local(invalid.clone());
+    let invalid_payload = BlockImage::from_local(invalid.clone());
     assert!(owner.apply_block(&invalid_payload).is_err());
     let notifier = owner.clone();
     let noise = std::thread::spawn(move || {
@@ -230,7 +230,7 @@ fn timeout_and_cancellation_return_a_durable_reorg_prefix_without_waiting_for_co
     let owner = owner();
     let first =
         mined_regtest_child_at(Network::Regtest.genesis_block().block_hash(), 1).expect("first");
-    let first_payload = BlockPayload::from_local(first.clone());
+    let first_payload = BlockImage::from_local(first.clone());
     owner.apply_block(&first_payload).expect("first commit");
     let transition = owner.begin_transition().expect("transition");
     transition
@@ -278,7 +278,7 @@ fn shutdown_and_recovery_wake_parked_waiters_at_the_committed_reorg_prefix() {
         let owner = owner();
         let first = mined_regtest_child_at(Network::Regtest.genesis_block().block_hash(), 1)
             .expect("first");
-        let first_payload = BlockPayload::from_local(first.clone());
+        let first_payload = BlockImage::from_local(first.clone());
         owner.apply_block(&first_payload).expect("first commit");
         let observer = owner.clone();
         let (tx, rx) = mpsc::channel();
@@ -334,7 +334,7 @@ fn omitted_current_tip_captures_after_an_in_flight_transition() {
     let second = mined_regtest_child_at(first.block_hash(), 2).expect("second");
     let third = mined_regtest_child_at(second.block_hash(), 3).expect("third");
     let transition = owner.begin_transition().expect("transition");
-    let first_payload = BlockPayload::from_local(first);
+    let first_payload = BlockImage::from_local(first);
     transition.connect(&first_payload).expect("first");
     let (rx, task) = spawn_wait(
         &owner,
@@ -342,7 +342,7 @@ fn omitted_current_tip_captures_after_an_in_flight_transition() {
         LatchReader::fixture_never(),
     );
     assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
-    let second_payload = BlockPayload::from_local(second);
+    let second_payload = BlockImage::from_local(second);
     transition.connect(&second_payload).expect("second");
     drop(transition);
     let deadline = Instant::now() + Duration::from_secs(1);
@@ -351,7 +351,7 @@ fn omitted_current_tip_captures_after_an_in_flight_transition() {
         std::thread::yield_now();
     }
     assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
-    let third_payload = BlockPayload::from_local(third);
+    let third_payload = BlockImage::from_local(third);
     owner.apply_block(&third_payload).expect("third");
     assert_eq!(
         rx.recv_timeout(Duration::from_secs(1))

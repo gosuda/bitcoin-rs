@@ -1,11 +1,11 @@
 use crate::primitives::{
-    Amount, Block, Header, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
-    Witness, varint,
+    Amount, Header, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    varint,
 };
 use crate::script::{PreparedTransaction, VerifyFlags, push_data};
 
 use crate::ConsensusError;
-use crate::verify_block::{compute_merkle_root, witness_commitment_index};
+use crate::verify_block::compute_merkle_root;
 
 const SIGNET_HEADER: [u8; 4] = [0xec, 0xc7, 0xda, 0xa2];
 
@@ -20,11 +20,14 @@ const OP_PUSHDATA2: u8 = 0x4d;
 const OP_PUSHDATA4: u8 = 0x4e;
 use crate::script::opcode::OP_RETURN;
 
-pub fn check_signet_block_solution(block: &Block, challenge: &[u8]) -> Result<(), ConsensusError> {
-    if block.block_hash().0 == Network::Signet.genesis_block_hash() {
+pub fn check_signet_block_solution(
+    image: &crate::primitives::BlockImage,
+    challenge: &[u8],
+) -> Result<(), ConsensusError> {
+    if image.block_hash().0 == Network::Signet.genesis_block_hash() {
         return Ok(());
     }
-    if signet_spend(block, challenge).is_some_and(|spend| verify_solution(&spend)) {
+    if signet_spend(image, challenge).is_some_and(|spend| verify_solution(&spend)) {
         Ok(())
     } else {
         Err(ConsensusError::SignetSolution)
@@ -36,23 +39,31 @@ struct SolutionSpend {
     prevout: (OutPoint, TxOut),
 }
 
-fn signet_spend(block: &Block, challenge: &[u8]) -> Option<SolutionSpend> {
-    let coinbase = block.txs.first()?;
-    let commitment_index = witness_commitment_index(coinbase)?;
-    let commitment = &coinbase.outputs.get(commitment_index)?.script_pubkey;
+fn signet_spend(image: &crate::primitives::BlockImage, challenge: &[u8]) -> Option<SolutionSpend> {
+    if image.tx_count() == 0 {
+        return None;
+    }
+    let coinbase = image.tx(0);
+    let commitment_index = crate::verify_block::image_witness_commitment_index(&coinbase)?;
+    let commitment = coinbase.output_script(commitment_index);
     let section = fetch_and_clear_commitment_section(commitment);
     let (script_sig, witness) = match &section {
         Some(found) => decode_solution(found.solution)?,
         None => (Script::new(), Witness::new()),
     };
     let coinbase_txid = match section {
-        Some(found) => coinbase_txid_with_commitment(coinbase, commitment_index, found.rewritten),
+        Some(found) => coinbase_txid_with_commitment(
+            &coinbase.materialize(),
+            commitment_index,
+            found.rewritten,
+        ),
         None => coinbase.txid(),
     };
-    let merkle_root = modified_merkle_root(block, coinbase_txid)?;
+    let header = image.header();
+    let merkle_root = modified_merkle_root(image, coinbase_txid)?;
 
     let mut to_spend_script_sig = vec![OP_0];
-    to_spend_script_sig.extend(push_data(&signet_block_data(&block.header, &merkle_root)));
+    to_spend_script_sig.extend(push_data(&signet_block_data(&header, &merkle_root)));
     let challenge_output = TxOut {
         value: Amount::from_sat(0),
         script_pubkey: Script::from_bytes(challenge.to_vec()),
@@ -107,10 +118,19 @@ fn signet_block_data(header: &Header, modified_root: &[u8; 32]) -> Vec<u8> {
     data
 }
 
-fn modified_merkle_root(block: &Block, coinbase_txid: Txid) -> Option<[u8; 32]> {
-    let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(block.txs.len());
+fn modified_merkle_root(
+    image: &crate::primitives::BlockImage,
+    coinbase_txid: Txid,
+) -> Option<[u8; 32]> {
+    let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(image.tx_count());
     leaves.push(*coinbase_txid.as_bytes());
-    leaves.extend(block.txs.iter().skip(1).map(|tx| *tx.txid().as_bytes()));
+    leaves.extend(
+        image
+            .identities()
+            .iter()
+            .skip(1)
+            .map(|identity| *identity.txid().as_bytes()),
+    );
     compute_merkle_root(&mut leaves)
 }
 

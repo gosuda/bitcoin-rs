@@ -5,11 +5,8 @@ use super::{
 };
 use crate::error::ApplyError;
 use bitcoin_rs_consensus::UtxoView;
-use bitcoin_rs_consensus::primitives::{
-    Block, BlockPayload, ConsensusEncode, OutPoint, Tx, TxOut, Txid,
-};
+use bitcoin_rs_consensus::primitives::{Block, BlockImage, ConsensusEncode, OutPoint, TxOut, Txid};
 use hashbrown::HashSet;
-use rayon::prelude::*;
 use std::sync::Arc;
 
 pub fn bytes_are_block(raw: &[u8], block: &Block) -> bool {
@@ -26,7 +23,7 @@ pub fn bytes_are_block(raw: &[u8], block: &Block) -> bool {
 /// that decoded, `from_local` retains its own single encode, and
 /// `from_prefix` retains only the consumed prefix.
 pub(super) fn parse_block_for_apply(
-    payload: &BlockPayload,
+    payload: &BlockImage,
     engine: bitcoin_rs_consensus::ValidationEngine,
 ) -> core::result::Result<
     (
@@ -35,28 +32,34 @@ pub(super) fn parse_block_for_apply(
     ),
     ApplyError,
 > {
-    let block = payload.block();
-    let parsed = bitcoin_rs_consensus::kernel::BlockParse::parse(payload.bytes(), engine)
-        .map_err(ApplyError::Consensus)?;
-    if parsed.transaction_count() != block.txs.len() {
-        return Err(ApplyError::TxidCountMismatch {
-            transactions: block.txs.len(),
-            txids: parsed.transaction_count(),
-        });
+    let facts = bitcoin_rs_consensus::BlockFacts::from_image(payload);
+    match engine {
+        bitcoin_rs_consensus::ValidationEngine::Native => Ok((
+            bitcoin_rs_consensus::kernel::BlockScriptSource::Native,
+            facts,
+        )),
+        #[cfg(feature = "kernel")]
+        bitcoin_rs_consensus::ValidationEngine::Kernel => {
+            let parsed = bitcoin_rs_consensus::kernel::BlockParse::parse(payload.bytes(), engine)
+                .map_err(ApplyError::Consensus)?;
+            Ok((parsed.into_script_source(), facts))
+        }
+        #[cfg(not(feature = "kernel"))]
+        bitcoin_rs_consensus::ValidationEngine::Kernel => Err(ApplyError::Consensus(
+            bitcoin_rs_consensus::kernel::kernel_not_compiled(),
+        )),
     }
-    parsed.into_parts(&block.txs).map_err(ApplyError::Consensus)
 }
 
 pub(super) fn prepare_apply<'b, S: bitcoin_rs_storage::utxo::contract::OutputSource + ?Sized>(
-    payload: &'b BlockPayload,
+    payload: &'b BlockImage,
     source: &S,
     engine: bitcoin_rs_consensus::ValidationEngine,
 ) -> core::result::Result<PreparedApply<'b>, ApplyError> {
-    let block = payload.block();
     let (script_source, facts) = parse_block_for_apply(payload, engine)?;
-    let tx_plan = plan_block_transactions(block, facts.txids());
-    let view = bitcoin_rs_consensus::BlockView::from_facts(&block.txs, facts);
-    let resolved = Arc::new(ResolvedUtxoView::resolve(source, block, &tx_plan));
+    let tx_plan = plan_block_transactions(payload, facts.txids());
+    let view = bitcoin_rs_consensus::BlockView::from_image(payload, facts);
+    let resolved = Arc::new(ResolvedUtxoView::resolve(source, payload, &tx_plan));
     Ok(PreparedApply {
         script_source,
         view,
@@ -65,7 +68,7 @@ pub(super) fn prepare_apply<'b, S: bitcoin_rs_storage::utxo::contract::OutputSou
     })
 }
 
-pub(super) fn plan_block_transactions(block: &Block, txids: &[Txid]) -> BlockTxPlan {
+pub(super) fn plan_block_transactions(image: &BlockImage, txids: &[Txid]) -> BlockTxPlan {
     let mut only_coinbase = true;
     let mut needs_local_utxo_overlay = false;
     let mut overlay_capacity = 0usize;
@@ -77,51 +80,54 @@ pub(super) fn plan_block_transactions(block: &Block, txids: &[Txid]) -> BlockTxP
     let mut same_block_spent_input_count = 0usize;
     let mut created_txids: Option<HashSet<Txid>> = None;
     let mut spent_outpoints: Option<HashSet<OutPoint>> = None;
-    let track_spent_conflicts = block.txs.len() > 2;
+    let tx_count = image.tx_count();
+    let track_spent_conflicts = tx_count > 2;
     let mut saw_non_coinbase = false;
 
-    for (tx_index, (tx, txid)) in block.txs.iter().zip(txids.iter().copied()).enumerate() {
+    for tx_index in 0..tx_count {
+        let tx = image.tx(tx_index);
+        let txid = txids[tx_index];
         let is_coinbase = tx.is_coinbase();
-        let output_count = tx.outputs.len();
+        let output_count = tx.output_count();
         only_coinbase &= is_coinbase;
         created_output_count = created_output_count.saturating_add(output_count);
         if is_coinbase {
-            has_witness |= tx.inputs.iter().any(|input| !input.witness.is_empty());
+            has_witness |= (0..tx.input_count()).any(|i| tx.witness_item_count(i) > 0);
             overlay_capacity = overlay_capacity.saturating_add(output_count);
         } else {
-            let input_count = tx.inputs.len();
-            for input in &tx.inputs {
-                has_witness |= !input.witness.is_empty();
+            let input_count = tx.input_count();
+            for i in 0..input_count {
+                has_witness |= tx.witness_item_count(i) > 0;
+                let prevout = tx.input_outpoint(i);
                 let prior_txids = &txids[..tx_index];
                 let spends_created_output = if prior_txids.len() <= LOCAL_OVERLAY_TXID_SET_THRESHOLD
                 {
-                    prior_txids.contains(&input.previous_output.txid)
+                    prior_txids.contains(&prevout.txid)
                 } else {
                     let created_txids = created_txids.get_or_insert_with(|| {
-                        let mut set = HashSet::with_capacity(block.txs.len());
+                        let mut set = HashSet::with_capacity(tx_count);
                         set.extend(prior_txids.iter().copied());
                         set
                     });
-                    created_txids.contains(&input.previous_output.txid)
+                    created_txids.contains(&prevout.txid)
                 };
                 if spends_created_output {
                     same_block_spent
                         .get_or_insert_with(|| HashSet::with_capacity(input_count))
-                        .insert(input.previous_output);
+                        .insert(prevout);
                     same_block_spent_input_count = same_block_spent_input_count.saturating_add(1);
                 }
                 let repeats_prior_spend = if track_spent_conflicts {
-                    let spent_outpoints = spent_outpoints.get_or_insert_with(|| {
-                        HashSet::with_capacity(input_count.max(block.txs.len()))
-                    });
-                    !spent_outpoints.insert(input.previous_output)
+                    let spent_outpoints = spent_outpoints
+                        .get_or_insert_with(|| HashSet::with_capacity(input_count.max(tx_count)));
+                    !spent_outpoints.insert(prevout)
                 } else {
                     saw_non_coinbase
                 };
                 needs_local_utxo_overlay |= spends_created_output || repeats_prior_spend;
             }
             saw_non_coinbase = true;
-            has_bip68_sequence_locks |= tx_has_bip68_sequence_locks(tx);
+            has_bip68_sequence_locks |= tx_view_has_bip68_sequence_locks(&tx);
             spent_input_count = spent_input_count.saturating_add(input_count);
             overlay_capacity =
                 overlay_capacity.saturating_add(output_count.saturating_add(input_count));
@@ -144,49 +150,54 @@ pub(super) fn plan_block_transactions(block: &Block, txids: &[Txid]) -> BlockTxP
     }
 }
 
-fn tx_has_bip68_sequence_locks(tx: &Tx) -> bool {
-    tx.version >= 2
-        && tx.inputs.iter().any(|input| {
-            input.sequence & bitcoin_rs_consensus::primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG == 0
+fn tx_view_has_bip68_sequence_locks(
+    tx: &bitcoin_rs_consensus::primitives::TransactionView<'_>,
+) -> bool {
+    tx.version() >= 2
+        && (0..tx.input_count()).any(|i| {
+            tx.input_sequence(i).to_consensus()
+                & bitcoin_rs_consensus::primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG
+                == 0
         })
 }
 
 pub(super) fn resolve_block_prevouts(
     resolved: Arc<ResolvedUtxoView>,
-    txs: &[Tx],
+    image: &BlockImage,
     tx_plan: &BlockTxPlan,
     height: u32,
     txids: &[Txid],
 ) -> core::result::Result<Vec<Vec<Option<TxOut>>>, ApplyError> {
+    let tx_count = image.tx_count();
     if tx_plan.needs_local_utxo_overlay {
-        let mut view = BlockLocalUtxoView::new(resolved, txs, height, tx_plan.overlay_capacity);
-        let mut resolved = Vec::with_capacity(txs.len());
-        for (tx_index, (tx, txid)) in (0_u32..).zip(txs.iter().zip(txids)) {
+        let mut view = BlockLocalUtxoView::new(resolved, image, height, tx_plan.overlay_capacity);
+        let mut resolved = Vec::with_capacity(tx_count);
+        for (tx_index, &txid) in txids.iter().enumerate() {
+            let tx = image.tx(tx_index);
+            let tx_index_u32 =
+                u32::try_from(tx_index).map_err(|_| ApplyError::VoutOverflow { txid })?;
             if tx.is_coinbase() {
                 resolved.push(Vec::new());
-                view.add_outputs(tx_index, *txid, tx.outputs.len())?;
+                view.add_outputs(tx_index_u32, txid, tx.output_count())?;
                 continue;
             }
-            let inputs = tx
-                .inputs
-                .iter()
-                .map(|input| view.lookup(&input.previous_output))
+            let inputs = (0..tx.input_count())
+                .map(|i| view.lookup(&tx.input_outpoint(i)))
                 .collect();
             resolved.push(inputs);
-            view.spend_inputs(tx);
-            view.add_outputs(tx_index, *txid, tx.outputs.len())?;
+            view.spend_inputs(&tx);
+            view.add_outputs(tx_index_u32, txid, tx.output_count())?;
         }
         Ok(resolved)
     } else {
-        Ok(txs
-            .iter()
-            .map(|tx| {
+        Ok((0..tx_count)
+            .map(|tx_index| {
+                let tx = image.tx(tx_index);
                 if tx.is_coinbase() {
                     return Vec::new();
                 }
-                tx.inputs
-                    .iter()
-                    .map(|input| resolved.lookup(&input.previous_output))
+                (0..tx.input_count())
+                    .map(|i| resolved.lookup(&tx.input_outpoint(i)))
                     .collect()
             })
             .collect())
@@ -194,7 +205,7 @@ pub(super) fn resolve_block_prevouts(
 }
 
 fn run_non_script_checks_only(
-    txs: &[Tx],
+    view: &bitcoin_rs_consensus::BlockView<'_>,
     tx_plan: &BlockTxPlan,
     resolved: Arc<ResolvedUtxoView>,
     txids: &[Txid],
@@ -202,36 +213,44 @@ fn run_non_script_checks_only(
     locktime_cutoff: u32,
     flags: bitcoin_rs_consensus::script::VerifyFlags,
 ) -> core::result::Result<(), ApplyError> {
+    let tx_count = view.tx_count();
     if !tx_plan.needs_local_utxo_overlay {
-        txs.par_iter().try_for_each(|tx| {
+        for tx_index in 0..tx_count {
+            let tx = view.tx_view(tx_index);
             if tx.is_coinbase() {
-                return Ok(());
+                continue;
             }
-            bitcoin_rs_consensus::verify_tx::verify_transaction_non_script(
+            bitcoin_rs_consensus::verify_tx::verify_transaction_non_script_view(
                 tx,
                 &*resolved,
                 height,
                 locktime_cutoff,
                 flags,
-            )
-        })?;
+            )?;
+        }
         return Ok(());
     }
-    let mut view = BlockLocalUtxoView::new(resolved, txs, height, tx_plan.overlay_capacity);
-    for (tx_index, (tx, txid)) in (0_u32..).zip(txs.iter().zip(txids)) {
+    let Some(image) = view.image() else {
+        return Ok(());
+    };
+    let mut local_view = BlockLocalUtxoView::new(resolved, image, height, tx_plan.overlay_capacity);
+    for (tx_index, &txid) in txids.iter().enumerate() {
+        let tx = image.tx(tx_index);
+        let tx_index_u32 =
+            u32::try_from(tx_index).map_err(|_| ApplyError::VoutOverflow { txid })?;
         if tx.is_coinbase() {
-            view.add_outputs(tx_index, *txid, tx.outputs.len())?;
+            local_view.add_outputs(tx_index_u32, txid, tx.output_count())?;
             continue;
         }
-        bitcoin_rs_consensus::verify_tx::verify_transaction_non_script(
-            tx,
-            &view,
+        bitcoin_rs_consensus::verify_tx::verify_transaction_non_script_view(
+            bitcoin_rs_consensus::primitives::TxView::View(tx),
+            &local_view,
             height,
             locktime_cutoff,
             flags,
         )?;
-        view.spend_inputs(tx);
-        view.add_outputs(tx_index, *txid, tx.outputs.len())?;
+        local_view.spend_inputs(&tx);
+        local_view.add_outputs(tx_index_u32, txid, tx.output_count())?;
     }
     Ok(())
 }
@@ -256,14 +275,14 @@ pub(super) fn verify_block_transactions(
     script_source: &bitcoin_rs_consensus::kernel::BlockScriptSource,
     script_cache: Option<&bitcoin_rs_consensus::ScriptExecutionCache>,
 ) -> core::result::Result<ScriptsRan, ApplyError> {
-    debug_assert_eq!(view.txs().len(), view.txids().len());
+    debug_assert_eq!(view.tx_count(), view.txids().len());
     if tx_plan.only_coinbase {
         return Ok(ScriptsRan::Executed);
     }
     let skip_scripts = handles.scripts_verified_upstream(provenance, context.height, context.hash);
     if skip_scripts {
         run_non_script_checks_only(
-            view.txs(),
+            view,
             tx_plan,
             resolved,
             view.txids(),
@@ -274,8 +293,11 @@ pub(super) fn verify_block_transactions(
         return Ok(ScriptsRan::Skipped);
     }
     let resolution_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
-    let resolution_result =
-        resolve_block_prevouts(resolved, view.txs(), tx_plan, context.height, view.txids());
+    let resolution_result = if let Some(image) = view.image() {
+        resolve_block_prevouts(resolved, image, tx_plan, context.height, view.txids())
+    } else {
+        Ok(Vec::new())
+    };
     tracing::debug!(
         height = context.height,
         script_resolution_us = resolution_started.map(|start| start.elapsed().as_micros()),

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::chain::ChainTxCount;
 use crate::chain::regtest_fixture::mined_regtest_child_at as mined_child;
-use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256, Network, Witness};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Network, Witness};
 use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::{CommitRecords, DurableHead};
 use parking_lot::Mutex;
@@ -43,9 +43,9 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count() -> TestResult {
             crate::chain::HeaderValidationMode::LiveAdmission,
         )?;
     }
-    let first_payload = BlockPayload::from_local(first);
-    let second_payload = BlockPayload::from_local(second);
-    let third_payload = BlockPayload::from_local(third);
+    let first_payload = BlockImage::from_local(first);
+    let second_payload = BlockImage::from_local(second);
+    let third_payload = BlockImage::from_local(third);
     let payloads = [&first_payload, &second_payload, &third_payload];
 
     let transition = handles.begin_transition()?;
@@ -128,9 +128,9 @@ fn a_grouped_window_stages_only_its_newest_block_before_the_sync() -> TestResult
             crate::chain::HeaderValidationMode::LiveAdmission,
         )?;
     }
-    let first_payload = BlockPayload::from_local(first);
-    let second_payload = BlockPayload::from_local(second);
-    let third_payload = BlockPayload::from_local(third);
+    let first_payload = BlockImage::from_local(first);
+    let second_payload = BlockImage::from_local(second);
+    let third_payload = BlockImage::from_local(third);
     let payloads = [&first_payload, &second_payload, &third_payload];
 
     let fires: Arc<Mutex<Vec<StagedFire>>> = Arc::new(Mutex::new(Vec::new()));
@@ -171,20 +171,20 @@ fn corrupted_window_bytes_fail_payload_construction() -> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let genesis = Network::Regtest.genesis_block();
     seed_genesis(&handles)?;
-    let payload = BlockPayload::from_local(mined_child(genesis.block_hash(), 1)?);
+    let payload = BlockImage::from_local(mined_child(genesis.block_hash(), 1)?);
     let raw = payload.bytes().to_vec();
 
     let mut truncated = raw.clone();
     truncated.pop();
     assert!(
-        BlockPayload::from_raw(bytes::Bytes::from(truncated)).is_err(),
+        BlockImage::from_raw(bytes::Bytes::from(truncated)).is_err(),
         "a truncated stream must fail construction, before any count is consulted"
     );
 
     let mut trailed = raw;
     trailed.push(0x00);
     assert!(
-        BlockPayload::from_raw(bytes::Bytes::from(trailed)).is_err(),
+        BlockImage::from_raw(bytes::Bytes::from(trailed)).is_err(),
         "trailing bytes must fail construction, before any count is consulted"
     );
 
@@ -213,13 +213,13 @@ fn witness_only_mutation_fails_payload_construction() -> TestResult {
         "witness data stays outside the txid"
     );
 
-    let raw = BlockPayload::from_local(changed).bytes().to_vec();
+    let raw = BlockImage::from_local(changed).bytes().to_vec();
     let count_at = raw.len() - 38;
     assert_eq!(raw[count_at], 0x01, "witness item-count site");
     let mut broken = raw;
     broken[count_at] = 0x02;
     assert!(
-        BlockPayload::from_raw(bytes::Bytes::from(broken)).is_err(),
+        BlockImage::from_raw(bytes::Bytes::from(broken)).is_err(),
         "a witness count the stream cannot back must fail construction"
     );
 

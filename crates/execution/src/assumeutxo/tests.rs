@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::chain::{ChainWork, NodeStatus};
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_consensus::primitives::{AssumeUtxoData, Block, BlockPayload, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{AssumeUtxoData, Block, BlockImage, Hash256, Network};
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_storage::utxo::{
     SnapshotLoad, UtxoSet, read_snapshot_strict_v4, write_snapshot_observed,
@@ -103,7 +103,7 @@ impl Fixture {
             source
                 .lock_transition()?
                 .into_transition()
-                .connect(&BlockPayload::from_local((*block).clone()))?;
+                .connect(&BlockImage::from_local((*block).clone()))?;
         }
         let tip = source
             .applied_tip_snapshot()
@@ -493,7 +493,7 @@ fn snapshot_work_branch(
     for block in &blocks {
         source
             .begin_transition()?
-            .connect(&BlockPayload::from_local((*block).clone()))?;
+            .connect(&BlockImage::from_local((*block).clone()))?;
     }
     for index in 1..blocks.len() {
         blocks[index].header.prev_blockhash = blocks[index - 1].block_hash();
@@ -880,7 +880,7 @@ fn historical_replay_preserves_active_durable_head_and_notifications() -> TestRe
         Err(ApplyError::PruneDuringHistoricalValidation { .. })
     ));
     for block in &fixture.blocks {
-        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+        manager.step_historical(&BlockImage::from_local((*block).clone()))?;
         let head = fixture
             .active
             .durable_head
@@ -918,11 +918,11 @@ fn snapshot_advances_partial_state_but_refuses_to_replace_an_equal_or_newer_tip(
     fixture
         .active
         .begin_transition()?
-        .connect(&BlockPayload::from_local(fixture.blocks[0].clone()))?;
+        .connect(&BlockImage::from_local(fixture.blocks[0].clone()))?;
     fixture
         .active
         .begin_transition()?
-        .connect(&BlockPayload::from_local(fixture.blocks[1].clone()))?;
+        .connect(&BlockImage::from_local(fixture.blocks[1].clone()))?;
     let manager = fixture.manager(dir.path())?;
     fixture.activate(&manager)?;
     assert_eq!(fixture.active.coin_stats.snapshot(), fixture.stats);
@@ -932,7 +932,7 @@ fn snapshot_advances_partial_state_but_refuses_to_replace_an_equal_or_newer_tip(
         fixture
             .active
             .begin_transition()?
-            .connect(&BlockPayload::from_local((*block).clone()))?;
+            .connect(&BlockImage::from_local((*block).clone()))?;
     }
     let manager = fixture.manager(dir.path())?;
     let before = fixture.active.durable_head.load()?;
@@ -957,12 +957,12 @@ fn out_of_order_historical_input_does_not_persist_or_close_admission() -> TestRe
     fixture.activate(&manager)?;
     let before = fixture.active.durable_head.load()?;
     assert!(matches!(
-        manager.step_historical(&BlockPayload::from_local(fixture.blocks[1].clone())),
+        manager.step_historical(&BlockImage::from_local(fixture.blocks[1].clone())),
         Err(AssumeUtxoError::Apply(ApplyError::PrevHashMismatch { .. }))
     ));
     assert_eq!(fixture.active.durable_head.load()?, before);
     assert!(!fixture.active.is_closed_for_recovery());
-    manager.step_historical(&BlockPayload::from_local(fixture.blocks[0].clone()))?;
+    manager.step_historical(&BlockImage::from_local(fixture.blocks[0].clone()))?;
     Ok(())
 }
 
@@ -973,7 +973,7 @@ fn historical_restart_replays_coins_from_genesis_instead_of_fabricating_a_tip() 
     let manager = fixture.manager(dir.path())?;
     fixture.activate(&manager)?;
     for block in &fixture.blocks[..2] {
-        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+        manager.step_historical(&BlockImage::from_local((*block).clone()))?;
     }
     assert!(
         manager
@@ -992,7 +992,7 @@ fn historical_restart_replays_coins_from_genesis_instead_of_fabricating_a_tip() 
     assert!(historical.applied_tip_snapshot().is_none());
     assert_eq!(historical.coin_stats.snapshot(), CoinStats::default());
     for block in &fixture.blocks {
-        reopened.step_historical(&BlockPayload::from_local((*block).clone()))?;
+        reopened.step_historical(&BlockImage::from_local((*block).clone()))?;
     }
     assert!(matches!(
         reopened.status()?,
@@ -1019,7 +1019,7 @@ fn finalized_replay_attests_full_so_a_full_start_skips_revalidation() -> TestRes
         "an activated snapshot has not executed the scripts below its base yet"
     );
     for block in &fixture.blocks {
-        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+        manager.step_historical(&BlockImage::from_local((*block).clone()))?;
     }
     assert!(matches!(
         manager.status()?,
@@ -1082,7 +1082,7 @@ fn finalized_replay_keeps_an_assume_valid_suffix_below_full() -> TestResult {
         "a block above the base that skipped scripts must lower the suffix level"
     );
     for block in &fixture.blocks {
-        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+        manager.step_historical(&BlockImage::from_local((*block).clone()))?;
     }
     let finalized = fixture
         .active
@@ -1128,9 +1128,7 @@ fn finalized_replay_attests_full_after_an_executed_suffix() -> TestResult {
         .block_tree
         .write()
         .insert_header(block.header, NodeStatus::HeaderValid)?;
-    fixture
-        .active
-        .apply_block(&BlockPayload::from_local(block))?;
+    fixture.active.apply_block(&BlockImage::from_local(block))?;
     let executed = fixture
         .active
         .durable_head
@@ -1146,7 +1144,7 @@ fn finalized_replay_attests_full_after_an_executed_suffix() -> TestResult {
         "a block above the base that executed scripts keeps the suffix level Full"
     );
     for block in &fixture.blocks {
-        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+        manager.step_historical(&BlockImage::from_local((*block).clone()))?;
     }
     let finalized = fixture
         .active
@@ -1194,13 +1192,13 @@ fn reconstructed_commitment_or_transaction_count_mismatch_fails_closed() -> Test
                 .commit(Some(&prior), &next, &CommitRecords::default())?;
         }
         for block in &fixture.blocks[..2] {
-            manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+            manager.step_historical(&BlockImage::from_local((*block).clone()))?;
         }
         let historical = manager
             .historical_chainstate()
             .ok_or(TestError::Missing("missing historical"))?;
         let Err(error) =
-            manager.step_historical(&BlockPayload::from_local(fixture.blocks[2].clone()))
+            manager.step_historical(&BlockImage::from_local(fixture.blocks[2].clone()))
         else {
             return Err(TestError::UnexpectedSuccess("divergence finalized"));
         };
@@ -1233,12 +1231,12 @@ fn target_hash_divergence_is_classified_and_persisted() -> TestResult {
     let manager = fixture.manager(dir.path())?;
     fixture.activate(&manager)?;
     for block in &fixture.blocks[..2] {
-        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+        manager.step_historical(&BlockImage::from_local((*block).clone()))?;
     }
     let mut wrong = fixture.blocks[2].clone();
     wrong.header.nonce = wrong.header.nonce.wrapping_add(1);
     assert!(matches!(
-        manager.step_historical(&BlockPayload::from_local(wrong)),
+        manager.step_historical(&BlockImage::from_local(wrong)),
         Err(AssumeUtxoError::HistoricalTargetHashMismatch { .. })
     ));
     assert!(fixture.active.is_closed_for_recovery());
@@ -1256,13 +1254,13 @@ fn mismatch_closes_admission_even_when_failure_record_cannot_be_written() -> Tes
     let manager = fixture.manager(dir.path())?;
     fixture.activate(&manager)?;
     for block in &fixture.blocks[..2] {
-        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+        manager.step_historical(&BlockImage::from_local((*block).clone()))?;
     }
     fixture.head.fail_terminal.store(true, Ordering::Release);
     let mut wrong = fixture.blocks[2].clone();
     wrong.header.nonce = wrong.header.nonce.wrapping_add(1);
     assert!(matches!(
-        manager.step_historical(&BlockPayload::from_local(wrong)),
+        manager.step_historical(&BlockImage::from_local(wrong)),
         Err(AssumeUtxoError::Storage(_))
     ));
     assert!(fixture.active.lock_transition().is_err());
@@ -1288,7 +1286,7 @@ fn finalization_io_failure_keeps_assumed_role_and_closes_both_admissions() -> Te
     )?;
     fixture.activate(&manager)?;
     for block in &fixture.blocks[..2] {
-        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+        manager.step_historical(&BlockImage::from_local((*block).clone()))?;
     }
     fixture.head.fail_terminal.store(true, Ordering::Release);
     let root = dir
@@ -1297,7 +1295,7 @@ fn finalization_io_failure_keeps_assumed_role_and_closes_both_admissions() -> Te
     let checkpoint_entries = std::fs::read_dir(&root)?.count();
     assert!(checkpoint_entries > 1);
     assert!(matches!(
-        manager.step_historical(&BlockPayload::from_local(fixture.blocks[2].clone())),
+        manager.step_historical(&BlockImage::from_local(fixture.blocks[2].clone())),
         Err(AssumeUtxoError::Storage(_))
     ));
     assert!(fixture.active.role().is_assumed_active());
@@ -1336,7 +1334,7 @@ fn assumed_reorg_and_historical_height_guards_remain_enforced() -> TestResult {
         .historical_chainstate()
         .ok_or(TestError::Missing("missing historical"))?;
     for block in &fixture.blocks {
-        manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
+        manager.step_historical(&BlockImage::from_local((*block).clone()))?;
     }
     let child =
         crate::chain::regtest_fixture::mined_regtest_child_at(fixture.blocks[2].block_hash(), 3)?;
@@ -1344,7 +1342,7 @@ fn assumed_reorg_and_historical_height_guards_remain_enforced() -> TestResult {
         historical
             .lock_transition()?
             .into_transition()
-            .connect(&BlockPayload::from_local(child)),
+            .connect(&BlockImage::from_local(child)),
         Err(ApplyError::ConnectPastHistoricalTarget { .. })
     ));
     Ok(())
@@ -1358,7 +1356,7 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
         .active
         .lock_transition()?
         .into_transition()
-        .connect(&BlockPayload::from_local(genesis))?;
+        .connect(&BlockImage::from_local(genesis))?;
     let before = fixture
         .active
         .applied_tip_snapshot()

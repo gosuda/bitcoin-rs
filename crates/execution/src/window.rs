@@ -8,7 +8,7 @@ use super::{
     PreparedApply, ProvenApply, ResolvedUtxoView, WindowApplyDisposition, WindowApplyError,
 };
 use crate::error::ApplyError;
-use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256};
 use bitcoin_rs_storage::CommitRecords;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -77,7 +77,7 @@ impl WindowGroup {
     fn flush(
         &mut self,
         handles: &Chainstate,
-        staged_block: Option<&Block>,
+        staged_block: Option<&BlockImage>,
     ) -> core::result::Result<Vec<ConnectOutcome>, ApplyError> {
         let (first, last) = match (self.pending.first(), self.pending.last()) {
             (Some(first), Some(last)) => (first, last),
@@ -188,7 +188,7 @@ fn restore_uncommitted_takes(
 #[expect(clippy::result_large_err)]
 pub(super) fn apply_window_admitted(
     handles: &Chainstate,
-    payloads: &[&BlockPayload],
+    payloads: &[&BlockImage],
 ) -> core::result::Result<Vec<ConnectOutcome>, WindowApplyError> {
     let window = prove_window(handles, payloads);
     let mut proven = window.proven.into_iter();
@@ -197,7 +197,7 @@ pub(super) fn apply_window_admitted(
     let mut group = WindowGroup::default();
     let mut committed: Vec<ConnectOutcome> = Vec::with_capacity(payloads.len());
     for &payload in payloads {
-        let block = payload.block();
+        let block_hash = payload.block_hash().0;
         match apply_committed_block_admitted(
             handles,
             payload,
@@ -221,7 +221,7 @@ pub(super) fn apply_window_admitted(
                 }
                 let (invalidated, disposition) = if disposition == WindowApplyDisposition::Permanent
                 {
-                    invalidate_permanent_failure(handles, block.block_hash().0)
+                    invalidate_permanent_failure(handles, block_hash)
                 } else {
                     (Box::default(), disposition)
                 };
@@ -273,7 +273,7 @@ fn flush_group(
     group: &mut WindowGroup,
     handles: &Chainstate,
     committed: &mut Vec<ConnectOutcome>,
-    payloads: &[&BlockPayload],
+    payloads: &[&BlockImage],
 ) -> core::result::Result<(), WindowApplyError> {
     if group.pending.is_empty() {
         return Ok(());
@@ -283,7 +283,7 @@ fn flush_group(
     } else {
         payloads
             .get(committed.len() + group.pending.len() - 1)
-            .map(|payload| payload.block())
+            .copied()
     };
     let flush_started = quanta::Instant::now();
     let pending_blocks = group.pending.len();
@@ -445,16 +445,16 @@ fn classify_consensus_error(
 fn window_contexts(
     handles: &Chainstate,
     applied: &crate::chain::TipSnapshot,
-    payloads: &[&BlockPayload],
+    payloads: &[&BlockImage],
 ) -> Option<Vec<BlockValidationContext>> {
     let tree = handles.block_tree.read();
     let mut contexts = Vec::with_capacity(payloads.len());
     let mut parent_id = applied.tip_id;
     let mut parent_hash = applied.hash;
     for (index, &payload) in payloads.iter().enumerate() {
-        let block = payload.block();
-        let hash = block.block_hash().0;
-        if block.header.prev_blockhash.0 != parent_hash {
+        let header = payload.header();
+        let hash = payload.block_hash().0;
+        if header.prev_blockhash.0 != parent_hash {
             return None;
         }
         let height = u32::try_from(index)
@@ -468,7 +468,7 @@ fn window_contexts(
         let cutoff = bitcoin_rs_consensus::locktime_cutoff(
             locktime_rule,
             tree.median_time_past_at(parent_id).unwrap_or(0),
-            block.header.time,
+            header.time,
         );
         let node_id = tree.lookup(hash)?;
         contexts.push(BlockValidationContext {
@@ -486,7 +486,7 @@ fn window_contexts(
 
 fn prepare_window<'a>(
     handles: &Chainstate,
-    payloads: &[&'a BlockPayload],
+    payloads: &[&'a BlockImage],
     contexts: &[BlockValidationContext],
 ) -> Option<Vec<PreparedApply<'a>>> {
     let parse_started = quanta::Instant::now();
@@ -504,16 +504,15 @@ fn prepare_window<'a>(
     );
     let mut prepared = Vec::with_capacity(payloads.len());
     for ((&payload, parsed), context) in payloads.iter().zip(parsed).zip(contexts) {
-        let block = payload.block();
         let Ok((script_source, facts)) = parsed else {
             return None;
         };
-        let tx_plan = plan_block_transactions(block, facts.txids());
-        let view = bitcoin_rs_consensus::BlockView::from_facts(&block.txs, facts);
-        let resolved = Arc::new(ResolvedUtxoView::resolve(&overlay, block, &tx_plan));
+        let tx_plan = plan_block_transactions(payload, facts.txids());
+        let view = bitcoin_rs_consensus::BlockView::from_image(payload, facts);
+        let resolved = Arc::new(ResolvedUtxoView::resolve(&overlay, payload, &tx_plan));
         if overlay
-            .advance(
-                block,
+            .advance_image(
+                payload,
                 view.txids(),
                 context.height,
                 tx_plan.same_block_spent_set(),
@@ -535,13 +534,12 @@ fn prepare_window<'a>(
 }
 
 fn window_commitments_match(
-    payloads: &[&BlockPayload],
+    payloads: &[&BlockImage],
     prepared: &mut [PreparedApply<'_>],
     contexts: &[BlockValidationContext],
 ) -> bool {
     for ((&payload, unit), context) in payloads.iter().zip(prepared.iter_mut()).zip(contexts) {
-        let block = payload.block();
-        if !unit.view.merkle_root_matches(block.header.merkle_root) {
+        if !unit.view.merkle_root_matches(payload.header().merkle_root) {
             return false;
         }
         if context
@@ -551,7 +549,7 @@ fn window_commitments_match(
         {
             let commitment_matches = {
                 let wtxids = unit.view.witness_ids();
-                bitcoin_rs_consensus::verify_block::block_witness_commitment_matches(block, wtxids)
+                bitcoin_rs_consensus::block_image_witness_commitment_matches(payload, wtxids)
             };
             if !commitment_matches {
                 return false;
@@ -569,7 +567,7 @@ type WindowScriptProof<'h> = (
 
 fn prove_window_scripts<'a, 'h>(
     handles: &'h Chainstate,
-    payloads: &[&'a BlockPayload],
+    payloads: &[&'a BlockImage],
     prepared: &mut [PreparedApply<'a>],
     contexts: &[BlockValidationContext],
 ) -> Option<WindowScriptProof<'h>> {
@@ -587,7 +585,6 @@ fn prove_window_scripts<'a, 'h>(
         .zip(contexts)
         .enumerate()
     {
-        let block = payload.block();
         if let Some(takes) = takes.as_ref() {
             take_starts.push(takes.checkpoint());
         }
@@ -598,7 +595,7 @@ fn prove_window_scripts<'a, 'h>(
         }
         let Ok(resolved) = resolve_block_prevouts(
             Arc::clone(&unit.resolved),
-            &block.txs,
+            payload,
             &unit.tx_plan,
             context.height,
             unit.view.txids(),
@@ -650,7 +647,7 @@ fn prove_window_scripts<'a, 'h>(
 
 fn prove_window<'a, 'h>(
     handles: &'h Chainstate,
-    payloads: &[&'a BlockPayload],
+    payloads: &[&'a BlockImage],
 ) -> ProvenWindow<'a, 'h> {
     if payloads.is_empty() {
         return ProvenWindow::default();

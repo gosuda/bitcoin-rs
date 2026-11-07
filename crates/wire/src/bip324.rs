@@ -79,7 +79,7 @@ mod vector_tests {
     #[test]
     fn block_admission_runs_before_v2_typed_decode() -> TestResult {
         let mut sender = super::packet::SendCipher::new([1; 32], [2; 32]);
-        let command = crate::Message::BlockPayload(bytes::Bytes::new()).command();
+        let command = crate::Message::BlockBytes(bytes::Bytes::new()).command();
         let contents = super::msg_type::encode(&command, &bytes::Bytes::from(vec![0; 80]));
         let frame = sender.seal(&contents, &[], false)?;
         let reader =

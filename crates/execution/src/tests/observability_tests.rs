@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bitcoin_rs_consensus::primitives::{BlockPayload, Network};
+use bitcoin_rs_consensus::primitives::{BlockImage, Network};
 use bitcoin_rs_storage::utxo::UtxoSet;
 use hashbrown::HashSet;
 use metrics::{
@@ -124,7 +124,7 @@ fn retired_apply_stage_timings_stay_off_caller_thread_metrics() -> TestResult {
         let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
         seed_genesis(&handles)?;
         let first = mined_child(genesis.block_hash(), 1)?;
-        handles.apply_block(&BlockPayload::from_local(first))?;
+        handles.apply_block(&BlockImage::from_local(first))?;
         Ok(())
     })?;
     assert_names_absent(&recorder, RETIRED_APPLY_METRICS);
@@ -158,8 +158,8 @@ fn retired_group_and_check_timings_stay_off_caller_thread_metrics() -> TestResul
                 crate::chain::HeaderValidationMode::LiveAdmission,
             )?;
         }
-        let first_payload = BlockPayload::from_local(first);
-        let second_payload = BlockPayload::from_local(second);
+        let first_payload = BlockImage::from_local(first);
+        let second_payload = BlockImage::from_local(second);
         let payloads = [&first_payload, &second_payload];
         let transition = handles.begin_transition()?;
         transition.connect_window(&payloads)?;
@@ -192,8 +192,8 @@ fn window_commit_emits_transition_and_flush_diagnostics() -> TestResult {
                 crate::chain::HeaderValidationMode::LiveAdmission,
             )?;
         }
-        let first_payload = BlockPayload::from_local(first);
-        let second_payload = BlockPayload::from_local(second);
+        let first_payload = BlockImage::from_local(first);
+        let second_payload = BlockImage::from_local(second);
         let payloads = [&first_payload, &second_payload];
         let transition = handles.begin_transition()?;
         transition.connect_window(&payloads)?;
@@ -255,7 +255,7 @@ fn proposal_emits_completed_validation_timings() -> TestResult {
     seed_genesis(&handles)?;
     let block = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
     let fields = ProfileFields::default();
-    let payload = bitcoin_rs_consensus::primitives::BlockPayload::from_local(block);
+    let payload = bitcoin_rs_consensus::primitives::BlockImage::from_local(block);
     capture_profile(&fields, || handles.validate_block(&payload))?;
     for field in [
         "contextual_header_us",
@@ -282,7 +282,7 @@ fn rejected_header_emits_only_completed_validation_timings() -> TestResult {
     let mut block = mined_child(genesis.block_hash(), 1)?;
     block.header.time = genesis.header.time;
     let fields = ProfileFields::default();
-    let payload = bitcoin_rs_consensus::primitives::BlockPayload::from_local(block);
+    let payload = bitcoin_rs_consensus::primitives::BlockImage::from_local(block);
     let result = capture_profile(&fields, || handles.validate_block(&payload));
     assert!(matches!(
         result,
@@ -311,7 +311,7 @@ fn rejected_spend_keeps_resolution_and_dispatch_timings() -> TestResult {
         .ok_or(TestError::Missing("test merkle root missing"))?;
     block.header.merkle_root = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&root);
     let fields = ProfileFields::default();
-    let payload = bitcoin_rs_consensus::primitives::BlockPayload::from_local(block);
+    let payload = bitcoin_rs_consensus::primitives::BlockImage::from_local(block);
     let result = capture_profile(&fields, || handles.validate_block(&payload));
     assert!(matches!(
         result,

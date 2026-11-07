@@ -1507,7 +1507,7 @@ fn reorg_mine_and_apply(
     block.header.merkle_root =
         regtest_fixture::merkle_root(&block.txs).ok_or("mined block must have a merkle root")?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         block.clone(),
     ))?;
     Ok(block)
@@ -1572,7 +1572,7 @@ fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_t
 -> Result<(), crate::support::TestError> {
     let (state, _dir) = open_regtest_state()?;
     let genesis = Network::Regtest.genesis_block();
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis,
     ))?;
     for height in 1..=REORG_SEED_BLOCKS {

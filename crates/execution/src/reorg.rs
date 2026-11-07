@@ -2,7 +2,7 @@ use crate::chain::{InvalidationOutcome, NodeId, ReorgPlan, plan_reorg};
 use crate::{
     ApplyError, ChainTransition, Chainstate, ConnectOutcome, DisconnectError, DisconnectOutcome,
 };
-use bitcoin_rs_consensus::primitives::{Block, BlockPayload, DecodeError, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockImage, DecodeError, Hash256};
 use bitcoin_rs_storage::StorageError;
 
 /// Maximum number of disconnect-side block bodies held in memory at once
@@ -13,9 +13,9 @@ const CONNECT_STREAM_WINDOW: usize = DISCONNECT_STREAM_WINDOW;
 pub trait ReorgObserver {
     fn disconnected(&mut self, outcome: &DisconnectOutcome);
 
-    fn connected(&mut self, block: &Block, outcome: &ConnectOutcome);
+    fn connected(&mut self, block: &BlockImage, outcome: &ConnectOutcome);
 
-    fn reconsider_disconnected(&mut self, block: &Block);
+    fn reconsider_disconnected(&mut self, block: &BlockImage);
 }
 
 pub fn invalidate_block<O, S>(
@@ -353,7 +353,7 @@ fn prepare_branches<F>(
     staged_body: &mut F,
 ) -> core::result::Result<PreparedBranches, ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockImage>,
 {
     let Some(plan) = plan else {
         return Ok(PreparedBranches {
@@ -394,7 +394,7 @@ pub fn switch_to_branch<F, O, S>(
     mut settle: S,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockImage>,
     O: ReorgObserver + ?Sized,
     S: FnMut(&mut O, core::result::Result<(), ReorgError>) -> core::result::Result<(), ReorgError>,
 {
@@ -473,7 +473,7 @@ fn finish_reorg_attempt<F, O>(
     staged_body: &mut F,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockImage>,
     O: ReorgObserver + ?Sized,
 {
     let outcome = match outcome {
@@ -525,7 +525,7 @@ struct LoadedPlanProgress {
 
 struct LoadedBranchBody {
     hash: Hash256,
-    payload: BlockPayload,
+    payload: BlockImage,
     height: u32,
 }
 
@@ -537,7 +537,7 @@ fn load_available_branch_prefix<F>(
     staged_body: &mut F,
 ) -> core::result::Result<LoadedBranchPrefix, ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockImage>,
 {
     let window = &nodes[..nodes.len().min(CONNECT_STREAM_WINDOW)];
     let mut loaded = Vec::with_capacity(window.len());
@@ -573,7 +573,7 @@ fn load_branch_body<F>(
     staged_body: &mut F,
 ) -> core::result::Result<LoadedBranchBody, ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockImage>,
 {
     if let Some(payload) = staged_body(hash) {
         return validate_branch_body(hash, height, payload);
@@ -598,7 +598,7 @@ fn decode_branch_body(
     height: u32,
     serialized: bytes::Bytes,
 ) -> core::result::Result<LoadedBranchBody, ReorgError> {
-    let payload = BlockPayload::from_raw(serialized).map_err(|source| ReorgError::BodyDecode {
+    let payload = BlockImage::from_raw(serialized).map_err(|source| ReorgError::BodyDecode {
         hash,
         height,
         source,
@@ -609,9 +609,9 @@ fn decode_branch_body(
 fn validate_branch_body(
     expected: Hash256,
     height: u32,
-    payload: BlockPayload,
+    payload: BlockImage,
 ) -> core::result::Result<LoadedBranchBody, ReorgError> {
-    let actual = payload.block().block_hash().0;
+    let actual = payload.block_hash().0;
     if actual != expected {
         return Err(ReorgError::BodyHashMismatch {
             expected,
@@ -619,7 +619,7 @@ fn validate_branch_body(
             height,
         });
     }
-    if !crate::bytes_are_block(payload.bytes().as_ref(), payload.block()) {
+    if !crate::bytes_are_block(payload.bytes().as_ref(), &payload.materialize()) {
         return Err(ReorgError::BodyBytesMismatch {
             hash: expected,
             height,
@@ -638,7 +638,7 @@ fn preflight_disconnect_bodies<F>(
     staged_body: &mut F,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockImage>,
 {
     for (hash, height) in nodes {
         load_branch_body(handles, *hash, *height, staged_body)?;
@@ -657,14 +657,14 @@ fn restore_disconnected_branch<F, O>(
     staged_body: &mut F,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockImage>,
     O: ReorgObserver + ?Sized,
 {
     let handles = transition.chainstate();
     for (connected, &(hash, height)) in disconnected.iter().rev().enumerate() {
         let body = load_branch_body(handles, hash, height, staged_body)?;
         match transition.connect(&body.payload) {
-            Ok(outcome) => observer.connected(body.payload.block(), &outcome),
+            Ok(outcome) => observer.connected(&body.payload, &outcome),
             Err(source) => {
                 return Err(ReorgError::ConnectFailed {
                     disconnected: disconnected.len(),
@@ -691,7 +691,7 @@ fn execute_streamed_plan<F, O>(
     staged_body: &mut F,
 ) -> (LoadedPlanProgress, core::result::Result<(), ReorgError>)
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockImage>,
     O: ReorgObserver + ?Sized,
 {
     let handles = transition.chainstate();
@@ -718,7 +718,7 @@ where
             }
         }
         for body in bodies {
-            match transition.disconnect(body.payload.block()) {
+            match transition.disconnect(&body.payload.materialize()) {
                 Ok(outcome) => {
                     observer.disconnected(&outcome);
                     progress.disconnected += 1;
@@ -762,7 +762,7 @@ fn execute_connect_stream<F, O>(
     progress: &mut LoadedPlanProgress,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockImage>,
     O: ReorgObserver + ?Sized,
 {
     let handles = transition.chainstate();
@@ -802,7 +802,7 @@ where
 {
     match transition.connect(&body.payload) {
         Ok(outcome) => {
-            observer.connected(body.payload.block(), &outcome);
+            observer.connected(&body.payload, &outcome);
             progress.connected += 1;
             Ok(())
         }
@@ -859,12 +859,12 @@ fn revisit_disconnected_blocks<F, O>(
     staged_body: &mut F,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockImage>,
     O: ReorgObserver + ?Sized,
 {
     for (hash, block_height) in disconnect_nodes[..disconnected_count].iter().rev() {
         let body = load_branch_body(handles, *hash, *block_height, staged_body)?;
-        observer.reconsider_disconnected(body.payload.block());
+        observer.reconsider_disconnected(&body.payload);
     }
     Ok(())
 }
@@ -947,9 +947,9 @@ mod tests {
     impl ReorgObserver for NoopObserver {
         fn disconnected(&mut self, _: &DisconnectOutcome) {}
 
-        fn connected(&mut self, _: &Block, _: &ConnectOutcome) {}
+        fn connected(&mut self, _: &BlockImage, _: &ConnectOutcome) {}
 
-        fn reconsider_disconnected(&mut self, _: &Block) {}
+        fn reconsider_disconnected(&mut self, _: &BlockImage) {}
     }
 
     #[test]

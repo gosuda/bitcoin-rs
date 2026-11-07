@@ -50,7 +50,7 @@ fn invalidate_block_settles_disconnect_debt() -> Result<(), TestError> {
     config.chainstate_journal.enabled = false;
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis.clone(),
     ))?;
     let block_one = regtest_fixture::mined_regtest_child_at_time(
@@ -58,7 +58,7 @@ fn invalidate_block_settles_disconnect_debt() -> Result<(), TestError> {
         genesis.header.time + 1,
         1,
     )?;
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         block_one.clone(),
     ))?;
     state.publish_checkpoint()?;
@@ -74,7 +74,7 @@ fn invalidate_block_settles_disconnect_debt() -> Result<(), TestError> {
         genesis.header.time + 2,
         2,
     )?;
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         block_two.clone(),
     ))?;
 
@@ -104,7 +104,7 @@ fn below_base_invalidate_settles_debt_and_reopens_journal() -> Result<(), TestEr
     config.storage.backend = crash_test_backend(config.storage.backend);
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis.clone(),
     ))?;
     let block_one = regtest_fixture::mined_regtest_child_at_time(
@@ -112,7 +112,7 @@ fn below_base_invalidate_settles_debt_and_reopens_journal() -> Result<(), TestEr
         genesis.header.time + 1,
         1,
     )?;
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         block_one.clone(),
     ))?;
     state.publish_checkpoint()?;
@@ -121,7 +121,7 @@ fn below_base_invalidate_settles_debt_and_reopens_journal() -> Result<(), TestEr
         genesis.header.time + 2,
         2,
     )?;
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         block_two,
     ))?;
 
@@ -173,7 +173,7 @@ fn below_base_invalidate_settles_debt_and_reopens_journal() -> Result<(), TestEr
             height,
         )?;
         previous = replacement.block_hash();
-        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
             replacement,
         ))?;
     }
@@ -195,7 +195,7 @@ fn invalidate_preflights_first_replacement_body_before_disconnect() -> Result<()
     config.storage.backend = crash_test_backend(config.storage.backend);
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis.clone(),
     ))?;
     let block_one = regtest_fixture::mined_regtest_child_at_time(
@@ -203,7 +203,7 @@ fn invalidate_preflights_first_replacement_body_before_disconnect() -> Result<()
         genesis.header.time + 1,
         1,
     )?;
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         block_one.clone(),
     ))?;
     let block_two = regtest_fixture::mined_regtest_child_at_time(
@@ -211,7 +211,7 @@ fn invalidate_preflights_first_replacement_body_before_disconnect() -> Result<()
         genesis.header.time + 2,
         2,
     )?;
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         block_two,
     ))?;
     let before = state
@@ -274,7 +274,7 @@ fn switch_to_branch_settles_disconnect_debt() -> Result<(), TestError> {
     config.chainstate_journal.enabled = false;
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis.clone(),
     ))?;
     let block_one = regtest_fixture::mined_regtest_child_at_time(
@@ -282,7 +282,7 @@ fn switch_to_branch_settles_disconnect_debt() -> Result<(), TestError> {
         genesis.header.time + 1,
         1,
     )?;
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         block_one,
     ))?;
     state.publish_checkpoint()?;
@@ -317,7 +317,7 @@ fn switch_to_branch_settles_disconnect_debt() -> Result<(), TestError> {
         )?;
         fork_bodies.insert(
             Hash256::from(block.block_hash()),
-            bitcoin_rs_consensus::primitives::BlockPayload::from_local(block.clone()),
+            bitcoin_rs_consensus::primitives::BlockImage::from_local(block.clone()),
         );
         parent = node_id;
         previous_hash = block.block_hash();
@@ -353,7 +353,7 @@ fn witness_is_published_only_after_current_root_sync() -> Result<(), TestError> 
 
     let state = NodeState::open(config.clone(), None)?;
     let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
-    let tip = state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    let tip = state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis,
     ))?;
 
@@ -385,7 +385,7 @@ fn stale_checkpoint_restore_surfaces_warning_not_silence() -> Result<(), TestErr
 
     let state = NodeState::open(config.clone(), None)?;
     let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis,
     ))?;
     assert!(state.publish_checkpoint()?.is_some());
@@ -426,7 +426,7 @@ type ForkFixture = (
     bitcoin_rs_execution::chain::NodeId,
     HashMap<
         bitcoin_rs_consensus::primitives::Hash256,
-        bitcoin_rs_consensus::primitives::BlockPayload,
+        bitcoin_rs_consensus::primitives::BlockImage,
     >,
 );
 
@@ -440,7 +440,7 @@ fn forked_regtest_state() -> Result<ForkFixture, TestError> {
     config.chainstate_journal.enabled = false;
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis.clone(),
     ))?;
     let block_one = regtest_fixture::mined_regtest_child_at_time(
@@ -448,7 +448,7 @@ fn forked_regtest_state() -> Result<ForkFixture, TestError> {
         genesis.header.time + 1,
         1,
     )?;
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         block_one,
     ))?;
     state.publish_checkpoint()?;
@@ -476,7 +476,7 @@ fn forked_regtest_state() -> Result<ForkFixture, TestError> {
         )?;
         fork_bodies.insert(
             Hash256::from(block.block_hash()),
-            bitcoin_rs_consensus::primitives::BlockPayload::from_local(block.clone()),
+            bitcoin_rs_consensus::primitives::BlockImage::from_local(block.clone()),
         );
         parent = node_id;
         previous_hash = block.block_hash();
@@ -544,7 +544,7 @@ fn applied_regtest_chain(
     config.storage.prune_target_mb = 1;
     let state = NodeState::open(config.clone(), None)?;
     let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis.clone(),
     ))?;
     let mut previous = genesis.block_hash();
@@ -552,7 +552,7 @@ fn applied_regtest_chain(
     for height in 1..=heights {
         time += 1;
         let block = regtest_fixture::mined_regtest_child_at_time(previous, time, height)?;
-        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
             block.clone(),
         ))?;
         previous = block.block_hash();
@@ -814,7 +814,7 @@ type ForkPlan = (
     bitcoin_rs_execution::chain::NodeId,
     HashMap<
         bitcoin_rs_consensus::primitives::Hash256,
-        bitcoin_rs_consensus::primitives::BlockPayload,
+        bitcoin_rs_consensus::primitives::BlockImage,
     >,
     Vec<(u32, bitcoin_rs_consensus::primitives::Hash256)>,
 );
@@ -852,7 +852,7 @@ fn plan_fork(
         )?;
         bodies.insert(
             hash,
-            bitcoin_rs_consensus::primitives::BlockPayload::from_local(block.clone()),
+            bitcoin_rs_consensus::primitives::BlockImage::from_local(block.clone()),
         );
         ordered.push((height, hash));
         parent = node_id;

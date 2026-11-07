@@ -43,7 +43,7 @@ fn reopen(config: NodeConfig) -> Result<NodeState> {
 }
 
 fn apply_genesis(state: &NodeState) -> Result<()> {
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         Network::Regtest.genesis_block(),
     ))?;
     Ok(())
@@ -142,7 +142,7 @@ fn mine_and_apply(
         .ok_or_else(|| TestError::message("block must have a merkle root"))?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
     state
-        .apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        .apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
             block.clone(),
         ))
         .map_err(|error| TestError::message(format!("apply failed at height {height}: {error}")))?;

@@ -1,6 +1,6 @@
 use super::*;
 
-use bitcoin_rs_consensus::primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockImage;
 
 #[test]
 fn tick_sends_getdata_from_next_applied_height_when_gap_exceeds_batch() -> TestResult {
@@ -156,7 +156,7 @@ fn drain_inbound_blocks_prunes_stale_received_blocks_without_new_arrivals() -> T
     let received_at = Instant::now()
         .checked_sub(super::super::RECEIVED_BLOCK_TIMEOUT + Duration::from_secs(1))
         .ok_or_else(|| std::io::Error::other("test instant underflow"))?;
-    let payload = BlockPayload::from_local(block);
+    let payload = BlockImage::from_local(block);
     let staged = sync
         .scheduler
         .lock()

@@ -4,7 +4,7 @@ use crate::chain::NodeStatus;
 use crate::chain::regtest_fixture::mined_regtest_child_at as mined_child;
 use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_consensus::primitives::{
-    Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, LockTime, Network,
+    Amount, Block, BlockHash, BlockImage, CompactTarget, Hash256, Header, LockTime, Network,
     OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 use bitcoin_rs_storage::utxo::UtxoSet;
@@ -86,7 +86,7 @@ fn deliver_coinbase_less_body(
             ))?
     };
 
-    let payload = BlockPayload::from_local(block);
+    let payload = BlockImage::from_local(block);
     let error = chainstate
         .apply_window(&[&payload])
         .err()
@@ -180,7 +180,7 @@ fn window_invalidation_reevaluates_assume_valid() -> TestResult {
         "the anchor on the active header chain must start trusted"
     );
 
-    let anchor_payload = BlockPayload::from_local(anchor);
+    let anchor_payload = BlockImage::from_local(anchor);
     let outcome = handles.apply_window(&[&anchor_payload]);
     let error = outcome.err().ok_or(TestError::UnexpectedSuccess(
         "an empty block must not commit",
@@ -234,9 +234,9 @@ fn a_failing_window_stages_only_its_last_successful_block() -> TestResult {
             crate::chain::HeaderValidationMode::LiveAdmission,
         )?;
     }
-    let first_payload = BlockPayload::from_local(first);
-    let second_payload = BlockPayload::from_local(second);
-    let bad_payload = BlockPayload::from_local(bad);
+    let first_payload = BlockImage::from_local(first);
+    let second_payload = BlockImage::from_local(second);
+    let bad_payload = BlockImage::from_local(bad);
     let payloads = [&first_payload, &second_payload, &bad_payload];
 
     let fires: Arc<Mutex<Vec<StagedFire>>> = Arc::new(Mutex::new(Vec::new()));

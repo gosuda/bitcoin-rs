@@ -8,7 +8,7 @@ use bitcoin::transaction::Version;
 use bitcoin::{
     Amount, Block, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_consensus::primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_consensus::primitives::layout::decode_reservation;
 use bytes::Bytes;
 
@@ -175,9 +175,9 @@ fn assert_decode_heap_stays_bounded(label: &str, wire: Vec<u8>) {
     let raw = Bytes::from(wire);
     PEAK.store(LIVE.load(Ordering::SeqCst), Ordering::SeqCst);
     let payload =
-        BlockPayload::from_raw(raw).unwrap_or_else(|error| panic!("{label} must decode: {error}"));
+        BlockImage::from_raw(raw).unwrap_or_else(|error| panic!("{label} must decode: {error}"));
     let peak = PEAK.load(Ordering::SeqCst) - baseline;
-    let retained = wire_len + payload.block().retained_heap_bytes();
+    let retained = wire_len + payload.retained_heap_bytes();
     let reservation = decode_reservation(wire_len);
     assert!(
         peak <= reservation && retained <= reservation,

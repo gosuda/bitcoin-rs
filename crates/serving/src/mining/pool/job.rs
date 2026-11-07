@@ -7,8 +7,8 @@ use crate::mining::{
     MiningError, STALE_PARENT_REASON,
 };
 use bitcoin_rs_consensus::primitives::{
-    Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, Script, Tx, TxOut,
-    Txid, Witness,
+    Amount, Block, BlockHash, BlockImage, CompactTarget, Hash256, Header, Script, Tx, TxOut, Txid,
+    Witness,
     encode::{consensus_bytes, double_sha256},
     varint,
 };
@@ -427,7 +427,7 @@ pub struct FoundBlock {
 
 impl FoundBlock {
     pub fn submit(&self, control: &dyn MiningControl) -> Result<BlockReceipt, MiningControlError> {
-        let payload = BlockPayload::from_raw(self.raw.clone().into())
+        let payload = BlockImage::from_raw(self.raw.clone().into())
             .map_err(|err| MiningControlError::Failed(CompactString::from(err.to_string())))?;
         let result = control.submit_block(payload)?;
         Ok(BlockReceipt {

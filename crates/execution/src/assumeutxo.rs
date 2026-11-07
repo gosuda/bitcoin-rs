@@ -5,7 +5,7 @@ use crate::assumeutxo_snapshot::SnapshotArchiveError;
 use crate::chain::TipSnapshot;
 use crate::error::{ApplyError, DisconnectError};
 use crate::{Chainstate, ConnectOutcome};
-use bitcoin_rs_consensus::primitives::{AssumeUtxoData, Block, BlockPayload, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{AssumeUtxoData, BlockImage, Hash256, Network};
 use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::utxo::core_snapshot::{StateVerifyError, VerifiedSnapshotState};
 use parking_lot::{Mutex, MutexGuard, RwLock};
@@ -678,10 +678,7 @@ impl AssumeUtxoManager {
         self.pending_activation_mint.lock().take()
     }
 
-    pub fn step_historical(
-        &self,
-        payload: &BlockPayload,
-    ) -> Result<ConnectOutcome, AssumeUtxoError> {
+    pub fn step_historical(&self, payload: &BlockImage) -> Result<ConnectOutcome, AssumeUtxoError> {
         let _lifecycle = self.lifecycle.lock();
         let historical = self
             .historical_chainstate
@@ -700,20 +697,21 @@ impl AssumeUtxoManager {
     fn connect_historical_block(
         &self,
         historical: &Arc<Chainstate>,
-        payload: &BlockPayload,
+        payload: &BlockImage,
     ) -> Result<(ConnectOutcome, bool), AssumeUtxoError> {
         let expected_prev = historical
             .applied_tip_snapshot()
             .map_or_else(Hash256::default, |tip| tip.hash);
-        if payload.block().header.prev_blockhash.0 != expected_prev {
+        let header = payload.header();
+        if header.prev_blockhash.0 != expected_prev {
             return Err(ApplyError::PrevHashMismatch {
                 tip: expected_prev,
-                prev: payload.block().header.prev_blockhash.0,
+                prev: header.prev_blockhash.0,
             }
             .into());
         }
         let archived = self
-            .begin_historical(payload.block(), historical)
+            .begin_historical(payload, historical)
             .inspect_err(|_| {
                 self.active_chainstate.fail_closed_for_recovery();
                 historical.fail_closed_for_recovery();
@@ -751,7 +749,7 @@ impl AssumeUtxoManager {
     fn record_historical_progress(
         &self,
         historical: &Arc<Chainstate>,
-        payload: &BlockPayload,
+        payload: &BlockImage,
         outcome: &ConnectOutcome,
     ) -> Result<(), AssumeUtxoError> {
         let current_status = self.status().inspect_err(|_| {
@@ -802,7 +800,7 @@ impl AssumeUtxoManager {
     fn finalize_historical_progress(
         &self,
         historical: &Arc<Chainstate>,
-        payload: &BlockPayload,
+        payload: &BlockImage,
         base: ValidatingBase,
         outcome_hash: Hash256,
     ) -> Result<(), AssumeUtxoError> {
@@ -895,7 +893,7 @@ impl AssumeUtxoManager {
                 return Ok(HistoricalAdvance::Complete);
             };
             if height == 0 {
-                let genesis_payload = BlockPayload::from_local(self.network.genesis_block());
+                let genesis_payload = BlockImage::from_local(self.network.genesis_block());
                 self.step_historical(&genesis_payload)?;
                 continue;
             }
@@ -906,9 +904,9 @@ impl AssumeUtxoManager {
             let Some(bytes) = bytes else {
                 return Ok(HistoricalAdvance::MissingBody { height, hash });
             };
-            let payload = BlockPayload::from_raw(bytes::Bytes::from(bytes))
+            let payload = BlockImage::from_raw(bytes::Bytes::from(bytes))
                 .map_err(|error| AssumeUtxoError::Archive(SnapshotArchiveError::from(error)))?;
-            if payload.block().block_hash().0 != hash {
+            if payload.block_hash().0 != hash {
                 return Err(AssumeUtxoError::HistoricalBodyIdentityMismatch);
             }
             self.step_historical(&payload)?;
@@ -1037,7 +1035,7 @@ impl AssumeUtxoManager {
 
     fn begin_historical(
         &self,
-        block: &Block,
+        image: &BlockImage,
         historical: &Chainstate,
     ) -> Result<bool, AssumeUtxoError> {
         let active = &self.active_chainstate;
@@ -1055,7 +1053,7 @@ impl AssumeUtxoManager {
         let height = historical
             .applied_tip_snapshot()
             .map_or(0, |tip| tip.height + 1);
-        let hash = block.block_hash().0;
+        let hash = image.block_hash().0;
         if height < *base_height
             && height <= *historical_height
             && self.next_historical_block()? == Some((height, hash))
@@ -1072,11 +1070,7 @@ impl AssumeUtxoManager {
             .ok_or(AssumeUtxoError::MissingDurableAnchor)?;
         let position = match &active.block_body_store {
             Some(store) => {
-                let position = store.stage_block_body(
-                    height,
-                    hash,
-                    &bitcoin_rs_consensus::primitives::consensus_bytes(block),
-                )?;
+                let position = store.stage_block_body(height, hash, image.bytes().as_ref())?;
                 store.sync()?;
                 position
             }
@@ -1133,7 +1127,7 @@ impl AssumeUtxoManager {
                 .next_historical_block()?
                 .ok_or(AssumeUtxoError::NoHistoricalChainstate)?;
             let payload = if height == 0 {
-                BlockPayload::from_local(self.network.genesis_block())
+                BlockImage::from_local(self.network.genesis_block())
             } else {
                 let bytes = self
                     .active_chainstate
@@ -1142,10 +1136,10 @@ impl AssumeUtxoManager {
                     .ok_or(AssumeUtxoError::MissingHistoricalBodyStore)?
                     .load_block_body(height, hash)?
                     .ok_or(AssumeUtxoError::MissingHistoricalDependencyBody)?;
-                BlockPayload::from_raw(bytes::Bytes::from(bytes))
+                BlockImage::from_raw(bytes::Bytes::from(bytes))
                     .map_err(|error| AssumeUtxoError::Archive(SnapshotArchiveError::from(error)))?
             };
-            if payload.block().block_hash().0 != hash {
+            if payload.block_hash().0 != hash {
                 return Err(AssumeUtxoError::HistoricalDependencyIdentityMismatch);
             }
             historical
@@ -1155,7 +1149,7 @@ impl AssumeUtxoManager {
             self.historical_undo.remove_archived(height, hash);
         }
         let payload = if pending.height == 0 && pending.hash == self.network.genesis_block_hash() {
-            BlockPayload::from_local(self.network.genesis_block())
+            BlockImage::from_local(self.network.genesis_block())
         } else {
             let bytes = self
                 .active_chainstate
@@ -1164,10 +1158,10 @@ impl AssumeUtxoManager {
                 .ok_or(AssumeUtxoError::MissingPendingBodyStore)?
                 .load_staged_body(pending.height, pending.hash, pending.position)?
                 .ok_or(AssumeUtxoError::MissingPendingBody)?;
-            BlockPayload::from_raw(bytes::Bytes::from(bytes))
+            BlockImage::from_raw(bytes::Bytes::from(bytes))
                 .map_err(|error| AssumeUtxoError::Archive(SnapshotArchiveError::from(error)))?
         };
-        if payload.block().block_hash().0 != pending.hash {
+        if payload.block_hash().0 != pending.hash {
             return Err(AssumeUtxoError::PendingBodyIdentityMismatch);
         }
         self.step_historical(&payload)?;
@@ -1177,7 +1171,7 @@ impl AssumeUtxoManager {
     fn persist_status(
         &self,
         mut status: AssumeUtxoDiskStatus,
-        historical_block: Option<(&BlockPayload, &Chainstate)>,
+        historical_block: Option<(&BlockImage, &Chainstate)>,
     ) -> Result<(), AssumeUtxoError> {
         let active = &self.active_chainstate;
         let _transition = active.chain_transition.lock();

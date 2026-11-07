@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use crate::chain::{BlockTree, ChainTxCount, TipSnapshot};
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_consensus::primitives::{Amount, Hash256, Network, OutPoint, TxOut, Txid};
+use bitcoin_rs_consensus::primitives::{
+    Amount, BlockImage, Hash256, Network, OutPoint, TxOut, Txid,
+};
 use bitcoin_rs_storage::chainstate_journal::Coin;
 use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
@@ -39,7 +41,7 @@ pub(crate) fn seed_genesis(handles: &Chainstate) -> Result<TipSnapshot, ApplyErr
     let tip = crate::connect::applied_header_tip(
         handles,
         Hash256::from(genesis.block_hash()),
-        &genesis,
+        &BlockImage::from_local(genesis),
         0,
     )?;
     let tip = TipSnapshot {

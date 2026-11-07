@@ -34,7 +34,7 @@ fn branch_switch_uses_staged_bodies_without_durable_store()
         fork_prev = block.block_hash();
         bodies.insert(
             Hash256::from_le_bytes(block.block_hash().as_bytes()),
-            BlockPayload::from_local(block.clone()),
+            BlockImage::from_local(block.clone()),
         );
         fork.push(block);
     }
@@ -120,7 +120,7 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
         fork_prev = block.block_hash();
         bodies.insert(
             Hash256::from_le_bytes(block.block_hash().as_bytes()),
-            BlockPayload::from_local(block.clone()),
+            BlockImage::from_local(block.clone()),
         );
         fork.push(block);
     }
@@ -141,7 +141,7 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
     )?;
     bodies.insert(
         Hash256::from_le_bytes(racing.block_hash().as_bytes()),
-        BlockPayload::from_local(racing.clone()),
+        BlockImage::from_local(racing.clone()),
     );
 
     let (preloaded_tx, preloaded_rx) = std::sync::mpsc::sync_channel(0);
@@ -170,7 +170,7 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
         preloaded_rx
             .recv()
             .map_err(|_| TestError::Timeout("branch switch pauses after preloading"))?;
-        handles.apply_block(&BlockPayload::from_local(racing))?;
+        handles.apply_block(&BlockImage::from_local(racing))?;
         continue_tx
             .send(())
             .map_err(|_| TestError::ExpectationFailed("branch switch replans"))?;

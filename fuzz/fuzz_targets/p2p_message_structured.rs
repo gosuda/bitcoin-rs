@@ -21,7 +21,7 @@ use bitcoin_rs_wire::wire::{
     MAX_MESSAGE_PAYLOAD, Message, encode_payload, read_message, write_message,
 };
 use bitcoin_rs_consensus::primitives::layout::decode_reservation;
-use bitcoin_rs_consensus::primitives::{BlockPayload, CompactTarget, Header, Network};
+use bitcoin_rs_consensus::primitives::{BlockImage, CompactTarget, Header, Network};
 use libfuzzer_sys::arbitrary::{self, Unstructured};
 use libfuzzer_sys::{fuzz_mutator, fuzz_target, fuzzer_mutate};
 
@@ -235,7 +235,7 @@ fn arbitrary_message(u: &mut Unstructured<'_>) -> arbitrary::Result<Message> {
             stop_hash: zero_hash,
         })),
         20 => Ok(Message::Tx(genesis.txs[0].clone())),
-        _ => Ok(Message::Block(BlockPayload::from_local(genesis))),
+        _ => Ok(Message::Block(BlockImage::from_local(genesis))),
     }
 }
 

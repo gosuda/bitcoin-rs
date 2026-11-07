@@ -1,11 +1,5 @@
 use crate::chain_effects::{ChainFollowers, ConnectMutationError};
 use alloc::sync::Arc;
-use bitcoin_rs_consensus::primitives::Block;
-use bitcoin_rs_consensus::primitives::BlockPayload;
-use bitcoin_rs_consensus::primitives::CompactTarget;
-use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_consensus::primitives::Header;
-use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_execution::ApplyError;
 use bitcoin_rs_execution::Chainstate;
 use bitcoin_rs_execution::chain::ChainError;
@@ -20,6 +14,12 @@ use bitcoin_rs_mempool::MutationResult;
 pub mod coordinator;
 pub use coordinator::*;
 
+use bitcoin_rs_consensus::primitives::Block;
+use bitcoin_rs_consensus::primitives::BlockImage;
+use bitcoin_rs_consensus::primitives::CompactTarget;
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Header;
+use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_serving::mining::AppliedTipSource;
 use bitcoin_rs_serving::mining::AvailableMiningRule;
 use bitcoin_rs_serving::mining::BlockTemplateMode;
@@ -46,7 +46,7 @@ use bitcoin_rs_serving::mining::MiningRule;
 use bitcoin_rs_serving::mining::PreparedTemplateBody;
 use bitcoin_rs_serving::mining::SelectedBody;
 use bitcoin_rs_serving::mining::header_reject_reason;
-use bitcoin_rs_serving::mining::needs_witness_reserved_value;
+use bitcoin_rs_serving::mining::image_needs_witness_reserved_value;
 use bitcoin_rs_serving::mining::select_template_body;
 use bitcoin_rs_serving::mining::select_template_body_after;
 use bitcoin_rs_serving::mining::solve_block;
@@ -114,8 +114,8 @@ impl MiningCoordinator {
         self.service.wait_for_prepared_candidate(tip_hash, timeout)
     }
 
-    fn propose(&self, payload: &BlockPayload) -> Result<BlockValidationResult, MiningControlError> {
-        if let Some(known) = self.known_block_result(payload.block().block_hash().into()) {
+    fn propose(&self, payload: &BlockImage) -> Result<BlockValidationResult, MiningControlError> {
+        if let Some(known) = self.known_block_result(payload.block_hash().into()) {
             return Ok(known);
         }
         match self.chainstate.validate_block(payload) {
@@ -172,8 +172,8 @@ impl MiningCoordinator {
                 .map(|input| input.witness.len())
     }
 
-    fn submit(&self, payload: &BlockPayload) -> Result<BlockValidationResult, MiningControlError> {
-        let block_hash: Hash256 = payload.block().block_hash().into();
+    fn submit(&self, payload: &BlockImage) -> Result<BlockValidationResult, MiningControlError> {
+        let block_hash: Hash256 = payload.block_hash().into();
         let lock = match self.chainstate.lock_transition() {
             Ok(lock) => lock,
             Err(error) => return map_apply_error(error),
@@ -379,7 +379,7 @@ impl MempoolSequenceWake for MiningCoordinator {
         self.service.publish_generation_from(sequence);
     }
 
-    fn stage_tip(&self, tip: &TipSnapshot, block: &Block) {
+    fn stage_tip(&self, tip: &TipSnapshot, block: &BlockImage) {
         self.service.stage_tip(tip, block);
     }
 
@@ -395,7 +395,7 @@ impl MiningControl for MiningCoordinator {
     ) -> Result<BlockTemplateResult, MiningControlError> {
         match request.mode {
             BlockTemplateMode::Proposal(block) => {
-                let payload = BlockPayload::from_local(block);
+                let payload = BlockImage::from_local(block);
                 Ok(BlockTemplateResult::Proposal(self.propose(&payload)?))
             }
             BlockTemplateMode::Template => Ok(BlockTemplateResult::Template(
@@ -441,11 +441,11 @@ impl MiningControl for MiningCoordinator {
     )]
     fn submit_block(
         &self,
-        payload: BlockPayload,
+        payload: BlockImage,
     ) -> Result<BlockValidationResult, MiningControlError> {
         let segwit_active = {
             let tree = self.block_tree.read();
-            tree.lookup(payload.block().header.prev_blockhash.into())
+            tree.lookup(payload.header().prev_blockhash.into())
                 .map(|prev_id| {
                     tree.node(prev_id)
                         .expect("node exists for looked-up id under block_tree read guard")
@@ -456,10 +456,10 @@ impl MiningControl for MiningCoordinator {
                         .is_segwit_active(prev.height.saturating_add(1))
                 })
         };
-        if needs_witness_reserved_value(payload.block(), segwit_active == Some(true)) {
-            let mut trial = payload.block().clone();
+        if image_needs_witness_reserved_value(&payload, segwit_active == Some(true)) {
+            let mut trial = payload.materialize();
             if self.fill_uncommitted_witness(&mut trial) {
-                let filled = BlockPayload::from_local(trial);
+                let filled = BlockImage::from_local(trial);
                 return self.submit(&filled);
             }
         }
@@ -527,7 +527,7 @@ impl MiningControl for MiningCoordinator {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
             })?;
             if matches!(request.selection, GenerateSelection::Ordered(_)) {
-                let payload = BlockPayload::from_local(block);
+                let payload = BlockImage::from_local(block);
                 self.chainstate
                     .validate_block(&payload)
                     .map_err(|error| test_block_validity_error(&error))?;
@@ -538,7 +538,7 @@ impl MiningControl for MiningCoordinator {
             })?;
             let hash = block.block_hash();
             if request.submit {
-                let payload = BlockPayload::from_local(block);
+                let payload = BlockImage::from_local(block);
                 let hex = bitcoin_rs_consensus::primitives::hex::hex_encode(payload.bytes());
                 match self.submit(&payload)? {
                     BlockValidationResult::Accepted => {}
@@ -550,7 +550,7 @@ impl MiningControl for MiningCoordinator {
                 }
                 generated.push(GeneratedBlock { hash, hex });
             } else {
-                let payload = BlockPayload::from_local(block);
+                let payload = BlockImage::from_local(block);
                 let validation = self.propose(&payload)?;
                 if validation != BlockValidationResult::Accepted {
                     return Err(MiningControlError::Failed(CompactString::from(format!(

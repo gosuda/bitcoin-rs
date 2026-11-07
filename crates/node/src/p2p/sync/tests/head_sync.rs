@@ -1,6 +1,6 @@
 use super::*;
 
-use bitcoin_rs_consensus::primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockImage;
 
 fn next_getheaders(
     rx: &bitcoin_rs_wire::test_support::MessageReceiver,
@@ -648,7 +648,7 @@ fn unrequested_body_at_the_count_budget_is_refused() -> TestResult {
             scheduler.stager.insert(
                 Hash256::from_le_bytes(&key),
                 None,
-                BlockPayload::from_local(block.clone()),
+                BlockImage::from_local(block.clone()),
                 None,
                 now,
             );

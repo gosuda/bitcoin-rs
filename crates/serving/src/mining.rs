@@ -19,8 +19,8 @@ pub use bip22::{
     ordered_assembly_error,
 };
 pub use coinbase::{
-    MiningError, WITNESS_RESERVED_VALUE, needs_witness_reserved_value,
-    update_uncommitted_block_structures, witness_commitment_script,
+    MiningError, WITNESS_RESERVED_VALUE, image_needs_witness_reserved_value,
+    needs_witness_reserved_value, update_uncommitted_block_structures, witness_commitment_script,
 };
 pub use context::{
     AppliedTipSource, ChainContextSource, MempoolSequenceWake, MempoolSnapshotSource,

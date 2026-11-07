@@ -397,7 +397,7 @@ fn test_context() -> (Arc<Context>, Arc<bitcoin_rs_execution::Chainstate>) {
         )),
     ));
     chainstate
-        .apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        .apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
             bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
         ))
         .expect("genesis");

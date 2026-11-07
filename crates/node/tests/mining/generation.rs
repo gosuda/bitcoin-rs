@@ -2,7 +2,7 @@ use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin_rs_consensus::primitives::{
-    Amount, BlockPayload, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
+    Amount, BlockImage, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
     Witness,
 };
 use bitcoin_rs_node::{MiningCoordinator, Network};
@@ -126,7 +126,7 @@ fn generateblock_raw_p2sh_costs_use_confirmed_prevouts() -> Result<()> {
             witness: Witness::new(),
         });
         assert_eq!(
-            mining.submit_block(BlockPayload::from_local(block))?,
+            mining.submit_block(BlockImage::from_local(block))?,
             BlockValidationResult::Accepted
         );
     }

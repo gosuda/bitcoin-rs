@@ -6,11 +6,11 @@ use std::time::Duration;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
-use bitcoin_rs_consensus::primitives::{Block, BlockHash, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockHash, BlockImage, Hash256};
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
-use crate::p2p::chain_query::{RecentBlockSlot, cmpct_message_from_native};
+use crate::p2p::chain_query::{RecentBlockSlot, cmpct_message_from_image};
 #[cfg(test)]
 use bitcoin_rs_wire::connection::PeerLease;
 use bitcoin_rs_wire::connection::PeerSource;
@@ -18,8 +18,8 @@ use bitcoin_rs_wire::dispatch::{ChainQuery, CommittedTip};
 use bitcoin_rs_wire::peer::COMPACT_BLOCK_VERSION;
 #[cfg(test)]
 use bitcoin_rs_wire::peer_info::PeerInfo;
+use bitcoin_rs_wire::peer_table::PeerTable;
 use bitcoin_rs_wire::wire::Message;
-use bitcoin_rs_wire::{PeerEndpoint, PeerSession, PeerTable};
 
 pub const MAX_BLOCKS_TO_ANNOUNCE: usize = 8;
 
@@ -116,7 +116,7 @@ pub struct BlockAnnouncer {
     )>,
     state: Mutex<AnnounceState>,
     recent: RecentBlockSlot,
-    stale_tips: Option<Arc<crate::p2p::sync::StaleTipRetainer>>,
+    stale_tips: Option<Arc<crate::p2p::sync::stale_tips::StaleTipRetainer>>,
     block_tree: Option<bitcoin_rs_execution::chain::BlockTreeReader>,
 }
 
@@ -142,7 +142,7 @@ impl BlockAnnouncer {
     #[must_use]
     pub fn with_stale_tips(
         mut self,
-        stale_tips: Arc<crate::p2p::sync::StaleTipRetainer>,
+        stale_tips: Arc<crate::p2p::sync::stale_tips::StaleTipRetainer>,
         block_tree: bitcoin_rs_execution::chain::BlockTreeReader,
     ) -> Self {
         self.stale_tips = Some(stale_tips);
@@ -172,7 +172,9 @@ impl BlockAnnouncer {
     }
 
     #[cfg(test)]
-    pub fn high_bandwidth_requested_peers(&self) -> Vec<PeerEndpoint> {
+    pub fn high_bandwidth_requested_peers(
+        &self,
+    ) -> Vec<bitcoin_rs_consensus::primitives::endpoint::PeerEndpoint> {
         let state = self.state.lock();
         state
             .high_bandwidth_requested_peers
@@ -182,7 +184,10 @@ impl BlockAnnouncer {
     }
 
     #[cfg(test)]
-    pub fn peer_known_block(&self, addr: PeerEndpoint) -> Option<Hash256> {
+    pub fn peer_known_block(
+        &self,
+        addr: bitcoin_rs_consensus::primitives::endpoint::PeerEndpoint,
+    ) -> Option<Hash256> {
         let source = self.peers.lease(addr)?.source(Some(addr));
         self.peers
             .announcement_state(source)
@@ -210,7 +215,10 @@ impl BlockAnnouncer {
         &self,
         state: &mut AnnounceState,
         eligible: &[(PeerSource, u64)],
-        sent: &mut Vec<(Option<PeerEndpoint>, Message)>,
+        sent: &mut Vec<(
+            Option<bitcoin_rs_consensus::primitives::endpoint::PeerEndpoint>,
+            Message,
+        )>,
     ) {
         let mut fill_order = eligible.to_vec();
         fill_order.sort_by_key(|&(_, sequence)| std::cmp::Reverse(sequence));
@@ -254,7 +262,10 @@ impl BlockAnnouncer {
         state: &mut AnnounceState,
         eligible: &[(PeerSource, u64)],
         selection_open: bool,
-        sent: &mut Vec<(Option<PeerEndpoint>, Message)>,
+        sent: &mut Vec<(
+            Option<bitcoin_rs_consensus::primitives::endpoint::PeerEndpoint>,
+            Message,
+        )>,
     ) {
         let selected = state.high_bandwidth_requested_peers.clone();
         for source in selected {
@@ -284,7 +295,10 @@ impl BlockAnnouncer {
         &self,
         state: &mut AnnounceState,
         eligible: &[(PeerSource, u64)],
-        sent: &mut Vec<(Option<PeerEndpoint>, Message)>,
+        sent: &mut Vec<(
+            Option<bitcoin_rs_consensus::primitives::endpoint::PeerEndpoint>,
+            Message,
+        )>,
     ) {
         while let Some(&(candidate, candidate_sequence)) = eligible
             .iter()
@@ -343,7 +357,12 @@ impl BlockAnnouncer {
         }
     }
 
-    pub fn reconcile_high_bandwidth_peers(&self) -> Vec<(Option<PeerEndpoint>, Message)> {
+    pub fn reconcile_high_bandwidth_peers(
+        &self,
+    ) -> Vec<(
+        Option<bitcoin_rs_consensus::primitives::endpoint::PeerEndpoint>,
+        Message,
+    )> {
         let eligible = self.eligible_high_bandwidth_peers();
         let selection_open = !self.config.blocksonly && !self.in_ibd();
         let mut state = self.state.lock();
@@ -363,7 +382,7 @@ impl BlockAnnouncer {
         sent
     }
 
-    fn ready_sessions(&self) -> Vec<PeerSession> {
+    fn ready_sessions(&self) -> Vec<bitcoin_rs_wire::peer_table::PeerSession> {
         self.peers
             .sessions()
             .into_iter()
@@ -391,7 +410,7 @@ impl BlockAnnouncer {
 
     fn peer_anchor(
         &self,
-        session: &PeerSession,
+        session: &bitcoin_rs_wire::peer_table::PeerSession,
     ) -> (
         PeerSource,
         bitcoin_rs_wire::peer_table::PeerAnnouncementState,
@@ -414,7 +433,7 @@ impl BlockAnnouncer {
 
     fn plan_compact_push(
         &self,
-        session: &PeerSession,
+        session: &bitcoin_rs_wire::peer_table::PeerSession,
         peer_state: bitcoin_rs_wire::peer_table::PeerAnnouncementState,
         known_position: Option<(Hash256, u32)>,
         tip_height: u32,
@@ -443,14 +462,17 @@ impl BlockAnnouncer {
 
     pub fn announce_pow_valid(
         &self,
-        block: &Block,
+        block: &BlockImage,
         hash: Hash256,
         height: u32,
-    ) -> Vec<(Option<PeerEndpoint>, Message)> {
+    ) -> Vec<(
+        Option<bitcoin_rs_consensus::primitives::endpoint::PeerEndpoint>,
+        Message,
+    )> {
         if self.in_ibd() {
             return Vec::new();
         }
-        let Some(prebuilt) = cmpct_message_from_native(block, COMPACT_BLOCK_VERSION) else {
+        let Some(prebuilt) = cmpct_message_from_image(block, COMPACT_BLOCK_VERSION) else {
             return Vec::new();
         };
         {
@@ -518,7 +540,7 @@ impl BlockAnnouncer {
 
     fn plan_session_announcement(
         &self,
-        session: &PeerSession,
+        session: &bitcoin_rs_wire::peer_table::PeerSession,
         tip: CommittedTip,
         tip_hash: Hash256,
     ) -> Option<PlannedAnnouncement> {
@@ -593,7 +615,7 @@ impl BlockAnnouncer {
     fn planned_announcements(
         &self,
         tip: CommittedTip,
-        live_sessions: &[PeerSession],
+        live_sessions: &[bitcoin_rs_wire::peer_table::PeerSession],
     ) -> Vec<PlannedAnnouncement> {
         let tip_hash = Hash256::from(tip.hash);
         live_sessions
@@ -602,7 +624,12 @@ impl BlockAnnouncer {
             .collect()
     }
 
-    pub fn process_tip(&self) -> Vec<(Option<PeerEndpoint>, Message)> {
+    pub fn process_tip(
+        &self,
+    ) -> Vec<(
+        Option<bitcoin_rs_consensus::primitives::endpoint::PeerEndpoint>,
+        Message,
+    )> {
         self.reconcile_high_bandwidth_peers();
         if self.in_ibd() {
             return Vec::new();
@@ -656,7 +683,12 @@ impl BlockAnnouncer {
         sent
     }
 
-    pub fn process_tip_retry(&self) -> Vec<(Option<PeerEndpoint>, Message)> {
+    pub fn process_tip_retry(
+        &self,
+    ) -> Vec<(
+        Option<bitcoin_rs_consensus::primitives::endpoint::PeerEndpoint>,
+        Message,
+    )> {
         if self.in_ibd() {
             return Vec::new();
         }
@@ -670,7 +702,12 @@ impl BlockAnnouncer {
         self.process_tip()
     }
 
-    pub fn process_stale_tips(&self) -> Vec<(Option<PeerEndpoint>, Message)> {
+    pub fn process_stale_tips(
+        &self,
+    ) -> Vec<(
+        Option<bitcoin_rs_consensus::primitives::endpoint::PeerEndpoint>,
+        Message,
+    )> {
         if self.in_ibd() {
             return Vec::new();
         }

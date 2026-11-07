@@ -82,9 +82,8 @@ fn context() -> (Arc<Context>, Arc<Chainstate>, Arc<ObservableTipWait>) {
             0,
         )),
     ));
-    let genesis_payload = bitcoin_rs_consensus::primitives::BlockPayload::from_local(
-        Network::Regtest.genesis_block(),
-    );
+    let genesis_payload =
+        bitcoin_rs_consensus::primitives::BlockImage::from_local(Network::Regtest.genesis_block());
     chainstate.apply_block(&genesis_payload).expect("genesis");
     let observable = ObservableTipWait::new(chainstate.clone());
     let mut ctx = Context::new();

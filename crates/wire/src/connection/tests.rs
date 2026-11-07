@@ -935,7 +935,7 @@ fn saturated_getdata_fourth_send_refuses_and_closes_lease() {
     let (tx, _undrained_rx) = crossbeam_channel::unbounded();
     let test_block = bitcoin_rs_consensus::primitives::Block::default();
     let block_wire_len = wire_len_of(&crate::Message::Block(
-        bitcoin_rs_consensus::primitives::BlockPayload::from_local(test_block.clone()),
+        bitcoin_rs_consensus::primitives::BlockImage::from_local(test_block.clone()),
     ));
     let lease = PeerLease::new_with_budget(
         tx,
@@ -947,14 +947,14 @@ fn saturated_getdata_fourth_send_refuses_and_closes_lease() {
         assert!(
             lease
                 .send(crate::Message::Block(
-                    bitcoin_rs_consensus::primitives::BlockPayload::from_local(test_block.clone()),
+                    bitcoin_rs_consensus::primitives::BlockImage::from_local(test_block.clone()),
                 ))
                 .is_ok()
         );
     }
     assert!(matches!(
         lease.send(crate::Message::Block(
-            bitcoin_rs_consensus::primitives::BlockPayload::from_local(test_block),
+            bitcoin_rs_consensus::primitives::BlockImage::from_local(test_block),
         )),
         Err(OutboundRefusal::Closed(_))
     ));

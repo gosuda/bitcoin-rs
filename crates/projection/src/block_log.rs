@@ -3,7 +3,7 @@ use parking_lot::RwLockWriteGuard;
 use parking_lot::{RwLock, RwLockReadGuard};
 use std::sync::Arc;
 
-use bitcoin_rs_consensus::primitives::{Block, BlockHash, Hash256};
+use bitcoin_rs_consensus::primitives::{Block, BlockHash, BlockImage, Hash256};
 
 #[derive(Clone, Debug)]
 pub struct BlockLogReader {
@@ -244,6 +244,17 @@ impl BlockRecord {
             header: None,
             tx_count: block.txs.len(),
             time: block.header.time,
+        }
+    }
+
+    pub fn from_image(height: u32, image: &BlockImage) -> Self {
+        Self {
+            hash: image.block_hash(),
+            height,
+            body_size: image.bytes().len(),
+            header: None,
+            tx_count: image.tx_count(),
+            time: image.header().time,
         }
     }
 

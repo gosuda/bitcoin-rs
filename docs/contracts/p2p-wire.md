@@ -91,7 +91,7 @@ Queue accounting:
 - `getdata` validates the stored body.
 - `getdata` answers a loose transaction from the mempool only. A held orphan answers `notfound`.
 - Deviation from Core `FindTxForGetData`: this node serves a mempool transaction before it announces the transaction to the peer. It does not answer from the most recent block's transactions.
-- `MSG_WITNESS_BLOCK` answers exact stored consensus bytes (`Message::BlockPayload`).
+- `MSG_WITNESS_BLOCK` answers exact stored consensus bytes (`Message::BlockBytes`).
 - `MSG_BLOCK` copies checked header, tx count, and stripped spans (BIP144).
 - Neither format materializes scripts or witnesses.
 - Malformed bodies are never forwarded.
@@ -100,8 +100,8 @@ Queue accounting:
 - Response depth uses the applied frontier.
 - Locator `getheaders` walks the applied chain (`ActiveChainQuery::headers_after`).
 - Empty-locator single-header lookup stays header-best.
-- Inbound `block` decodes once via `BlockPayload::from_raw` (`Message::Block(BlockPayload)`).
-- Serving `Message::BlockPayload(Bytes)` stays raw-only.
+- Inbound `block` decodes once via `BlockImage::from_raw` (`Message::Block(BlockImage)`).
+- Serving `Message::BlockBytes(Bytes)` stays raw-only.
 - Before typed decoding on either transport, the connection loop reserves the parser bound.
 - The primitive layout conservative parser and materialization bound is reserved from one shared 512 MiB `BlockMemory` budget per `ConnectionShared`.
 - This budget is shared by the connections of the service.
@@ -265,7 +265,7 @@ Queue accounting:
 - They consume no pending slot (otherwise every body would redeem a silent peer).
 - Their one release is the recovery path.
 - An unattachable body-carried header frees its owner's gate so the motivated ancestry request reaches the wire with the delivery (P2P-05).
-- The stager holds one `BlockPayload` per entry.
+- The stager holds one `BlockImage` per entry.
 - Staged retries carry the delivering connection (`ReceivedBlock::source`).
 - An admitting retry credits that peer (`note_announced_tip`).
 - A peer-fault rejection discards the staged body (never re-queued; window record released at drain).

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Weak};
 
-use bitcoin_rs_consensus::primitives::Block;
+use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_execution::chain::TipSnapshot;
 use bitcoin_rs_mempool::MempoolObserver;
@@ -45,7 +45,7 @@ impl MiningGenerationSignal {
         }
     }
 
-    pub fn stage_tip(&self, tip: &TipSnapshot, block: &Block) {
+    pub fn stage_tip(&self, tip: &TipSnapshot, block: &BlockImage) {
         if let Some(wake) = self.sequence_wake.read().as_ref().and_then(Weak::upgrade) {
             wake.stage_tip(tip, block);
         }

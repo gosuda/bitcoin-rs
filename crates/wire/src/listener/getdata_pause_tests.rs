@@ -107,7 +107,7 @@ impl ChainQuery for ScriptedChain {
                 outcome.halted = true;
                 return Ok(outcome);
             }
-            serve(Message::BlockPayload(payload.clone()))?;
+            serve(Message::BlockBytes(payload.clone()))?;
         }
         Ok(outcome)
     }
@@ -430,7 +430,7 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     let (block_a, block_b) = (block(1), block(2));
     let (entry_a, entry_b) = (scripted(&block_a), scripted(&block_b));
     let unknown_tx = Inventory::Transaction(bitcoin::Txid::from_byte_array([7; 32]));
-    let block_len = wire_len_of(&Message::BlockPayload(entry_a.1.clone()))?;
+    let block_len = wire_len_of(&Message::BlockBytes(entry_a.1.clone()))?;
     let notfound_len = wire_len_of(&Message::NotFound(vec![unknown_tx]))?;
     let ping_len = wire_len_of(&Message::Ping(3))?;
     // Sized so block A plus the miss's notfound fill the data lane while
@@ -476,11 +476,11 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     assert_eq!(
         drained,
         vec![
-            Message::Block(bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+            Message::Block(bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 block_a
             )),
             Message::NotFound(vec![unknown_tx]),
-            Message::Block(bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+            Message::Block(bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 block_b
             )),
             Message::Pong(7),
@@ -499,7 +499,7 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
 fn paused_peer_that_never_reads_ends_on_write_timeout() -> TestResult {
     let flood = block(3);
     let payload = bytes::Bytes::from(vec![0_u8; 1 << 20]);
-    let block_len = wire_len_of(&Message::BlockPayload(payload.clone()))?;
+    let block_len = wire_len_of(&Message::BlockBytes(payload.clone()))?;
     let budget = OutboundBudget::with_block_reserve(100_000, 3 * block_len, block_len);
     let chain = ScriptedChain {
         blocks: vec![(hash_of(&flood), payload)],
@@ -532,7 +532,7 @@ fn paused_peer_that_never_reads_ends_on_write_timeout() -> TestResult {
 fn lease_cancel_ends_a_parked_session() -> TestResult {
     let (block_a, block_b) = (block(4), block(5));
     let (entry_a, entry_b) = (scripted(&block_a), scripted(&block_b));
-    let block_len = wire_len_of(&Message::BlockPayload(entry_a.1.clone()))?;
+    let block_len = wire_len_of(&Message::BlockBytes(entry_a.1.clone()))?;
     let ping_len = wire_len_of(&Message::Ping(3))?;
     let budget = OutboundBudget::with_block_reserve(100, 2 * block_len - 1, block_len);
     let chain = ScriptedChain {
@@ -897,7 +897,7 @@ fn a_tail_expires_only_after_the_timeout_interval() {
 fn an_open_queue_resumes_notfound_first_and_reparks_what_the_gate_stops() -> TestResult {
     let (block_a, block_b) = (block(6), block(7));
     let (entry_a, entry_b) = (scripted(&block_a), scripted(&block_b));
-    let block_len = wire_len_of(&Message::BlockPayload(entry_a.1.clone()))?;
+    let block_len = wire_len_of(&Message::BlockBytes(entry_a.1.clone()))?;
     let (outbound_tx, outbound_rx) = crate::test_support::message_channel();
     let lease = PeerLease::new_with_budget(
         outbound_tx,
@@ -926,7 +926,7 @@ fn an_open_queue_resumes_notfound_first_and_reparks_what_the_gate_stops() -> Tes
         outbound_rx.try_iter().collect::<Vec<_>>(),
         vec![
             Message::NotFound(vec![miss]),
-            Message::BlockPayload(entry_a.1),
+            Message::BlockBytes(entry_a.1),
         ],
         "the earlier miss is reported before any resumed item"
     );

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use crate::chain::regtest_fixture::{
     merkle_root, mine_block_to_declared_target, mined_regtest_child_at as mined_child,
 };
-use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Network};
 use bitcoin_rs_storage::utxo::UtxoSet;
 
 use super::ApplyError;
@@ -34,7 +34,7 @@ fn pow_valid_hook_fires_once_for_tip_child_commit() -> TestResult {
     assert!(calls.lock().expect("hook calls").is_empty());
 
     let child = mined_child(genesis_tip.hash.into(), 1)?;
-    let outcome = handles.apply_block(&BlockPayload::from_local(child.clone()))?;
+    let outcome = handles.apply_block(&BlockImage::from_local(child.clone()))?;
     assert_eq!(outcome.height, 1);
     let fired = calls.lock().expect("hook calls").clone();
     assert_eq!(fired.len(), 1, "one early fire per committed tip child");
@@ -56,7 +56,7 @@ fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> TestResult {
             .applied_tip_snapshot()
             .ok_or(TestError::Missing("tip"))?;
         let block = mined_child(tip.hash.into(), height)?;
-        handles.apply_block(&BlockPayload::from_local(block))?;
+        handles.apply_block(&BlockImage::from_local(block))?;
     }
     assert_eq!(
         handles
@@ -68,7 +68,7 @@ fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> TestResult {
     calls.lock().expect("hook calls").clear();
 
     let stale = mined_child(genesis_tip.hash.into(), 1)?;
-    let _ = handles.apply_block(&BlockPayload::from_local(stale));
+    let _ = handles.apply_block(&BlockImage::from_local(stale));
     assert!(
         calls.lock().expect("hook calls").is_empty(),
         "a stale-parent block never announces early"
@@ -107,7 +107,7 @@ fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> TestResult {
         source,
     })?;
     let failed: Result<_, ApplyError> =
-        handles.apply_block(&BlockPayload::from_local(falling.clone()));
+        handles.apply_block(&BlockImage::from_local(falling.clone()));
     assert!(
         matches!(
             failed,
@@ -163,7 +163,7 @@ fn pow_valid_hook_skips_non_final_commit_intent_block() -> TestResult {
         what: "non-final",
         source,
     })?;
-    let failed: Result<_, ApplyError> = handles.apply_block(&BlockPayload::from_local(non_final));
+    let failed: Result<_, ApplyError> = handles.apply_block(&BlockImage::from_local(non_final));
     assert!(
         matches!(
             failed,
@@ -205,7 +205,7 @@ fn pow_valid_hook_requires_transaction_structure_and_legacy_sigop_budget() -> Te
             .ok_or(TestError::Missing("tip"))?;
         let head = handles.durable_head.load()?;
         let stats = handles.coin_stats.snapshot().to_bytes();
-        let result = handles.apply_block(&BlockPayload::from_local(block));
+        let result = handles.apply_block(&BlockImage::from_local(block));
         if sigops == 1_000 {
             result?;
             assert_eq!(calls.lock().expect("hook calls").len(), 1);
@@ -261,7 +261,7 @@ fn pow_valid_hook_skips_bip34_violating_commit_intent_block() -> TestResult {
     let mut tip_hash = seed_genesis(&handles)?.hash;
     for height in 1..=499 {
         let block = mined_child(tip_hash.into(), height)?;
-        handles.apply_block(&BlockPayload::from_local(block.clone()))?;
+        handles.apply_block(&BlockImage::from_local(block.clone()))?;
         tip_hash = Hash256::from(block.block_hash());
     }
     assert_eq!(
@@ -287,7 +287,7 @@ fn pow_valid_hook_skips_bip34_violating_commit_intent_block() -> TestResult {
         what: "violating",
         source,
     })?;
-    let failed: Result<_, ApplyError> = handles.apply_block(&BlockPayload::from_local(violating));
+    let failed: Result<_, ApplyError> = handles.apply_block(&BlockImage::from_local(violating));
     assert!(
         matches!(
             failed,
@@ -321,7 +321,7 @@ fn hook_installation_after_a_clone_is_visible_through_both_handles() -> TestResu
         .applied_tip_snapshot()
         .ok_or(TestError::Missing("tip"))?;
     let child = mined_child(tip.hash.into(), 1)?;
-    handles.apply_block(&BlockPayload::from_local(child.clone()))?;
+    handles.apply_block(&BlockImage::from_local(child.clone()))?;
     let fired = calls.lock().expect("hook calls").clone();
     assert_eq!(fired.len(), 1, "the clone-installed hook must announce");
     assert_eq!(fired[0].0, Hash256::from(child.block_hash()));
@@ -352,7 +352,7 @@ fn pow_valid_hook_skips_legacy_sigop_violating_block() -> TestResult {
         what: "legacy sigop",
         source,
     })?;
-    let failed: Result<_, ApplyError> = handles.apply_block(&BlockPayload::from_local(block));
+    let failed: Result<_, ApplyError> = handles.apply_block(&BlockImage::from_local(block));
     assert!(
         matches!(
             &failed,
@@ -396,7 +396,7 @@ fn proposal_intent_rejects_non_final_coinbase_parity() -> TestResult {
         what: "non-final",
         source,
     })?;
-    let payload = BlockPayload::from_local(non_final);
+    let payload = BlockImage::from_local(non_final);
     let failed = handles.validate_block(&payload);
     assert!(
         matches!(

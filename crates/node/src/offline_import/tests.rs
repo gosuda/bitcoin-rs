@@ -134,7 +134,7 @@ fn connect_batch_relieve_journal_retention_pressure() {
     let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
     let state = crate::state::NodeState::open(config.clone(), None).expect("open node");
     let genesis_tip = state
-        .apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        .apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
             genesis.clone(),
         ))
         .expect("genesis");
@@ -156,7 +156,7 @@ fn connect_batch_relieve_journal_retention_pressure() {
         regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1).expect("mine child");
     assert!(
         matches!(
-            state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+            state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 child.clone()
             )),
             Err(crate::ConnectMutationError::NotCommitted(
@@ -166,7 +166,7 @@ fn connect_batch_relieve_journal_retention_pressure() {
         "the fixture must prove retention pressure refuses the child"
     );
 
-    let mut batch = vec![bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    let mut batch = vec![bitcoin_rs_consensus::primitives::BlockImage::from_local(
         child,
     )];
     connect_batch(&state, &mut batch).expect("relief retries the refused block");
@@ -339,7 +339,7 @@ fn two_block_archive() -> TwoBlockArchive {
     let mut entries = Vec::new();
     let mut offset: u64 = 0;
     for (index, block) in blocks.iter().enumerate() {
-        let payload = bitcoin_rs_consensus::primitives::BlockPayload::from_local(block.clone());
+        let payload = bitcoin_rs_consensus::primitives::BlockImage::from_local(block.clone());
         let raw = payload.bytes();
         let mut framed = Vec::with_capacity(8 + raw.len());
         framed.extend_from_slice(&magic);
@@ -458,7 +458,7 @@ fn offline_import_refuses_tip_without_provenance() {
         let live = crate::state::NodeState::open(offline_import_config(&data_dir), None)
             .expect("open node");
         for block in &archive.blocks {
-            live.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+            live.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 block.clone(),
             ))
             .expect("connect");

@@ -56,6 +56,7 @@ sonic-rs.workspace = true
 
 [dev-dependencies]
 bitcoin-rs-execution = { workspace = true, default-features = false, features = ["test-seam"] }
+bitcoin-rs-consensus = { workspace = true, features = ["test-seam"] }
 bitcoin.workspace = true
 tempfile.workspace = true
 proptest.workspace = true

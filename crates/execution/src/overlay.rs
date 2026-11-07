@@ -1,4 +1,4 @@
-use bitcoin_rs_consensus::primitives::{Block, OutPoint, Txid};
+use bitcoin_rs_consensus::primitives::{BlockImage, OutPoint, TxOut, Txid};
 use hashbrown::{HashMap, HashSet};
 
 use bitcoin_rs_storage::utxo::UtxoCoin;
@@ -22,26 +22,28 @@ impl<'u> WindowOverlay<'u> {
         }
     }
 
-    pub(crate) fn advance(
+    pub(crate) fn advance_image(
         &mut self,
-        block: &Block,
+        image: &BlockImage,
         txids: &[Txid],
         height: u32,
         same_block_spent: &HashSet<OutPoint>,
     ) -> Result<(), WindowOverlayError> {
-        if block.txs.len() != txids.len() {
+        let tx_count = image.tx_count();
+        if tx_count != txids.len() {
             return Err(WindowOverlayError::TxidCountMismatch {
-                transactions: block.txs.len(),
+                transactions: tx_count,
                 txids: txids.len(),
             });
         }
         if height == 0 {
             return Ok(());
         }
-        for (tx, &txid) in block.txs.iter().zip(txids) {
+        for (tx_index, &txid) in txids.iter().enumerate() {
+            let tx = image.tx(tx_index);
             let coinbase = tx.is_coinbase();
-            for (vout, txout) in (0u32..).zip(&tx.outputs) {
-                let script = &txout.script_pubkey;
+            for (vout, _) in (0u32..).zip(0..tx.output_count()) {
+                let script = tx.output_script(usize::try_from(vout).unwrap_or(usize::MAX));
                 let outpoint = OutPoint::new(txid, vout);
                 if script.first() == Some(&0x6a)
                     || script.len() > self.max_script_size
@@ -49,7 +51,12 @@ impl<'u> WindowOverlay<'u> {
                 {
                     continue;
                 }
-                let txout = txout.clone();
+                let txout = TxOut {
+                    value: tx.output_value(usize::try_from(vout).unwrap_or(usize::MAX)),
+                    script_pubkey: bitcoin_rs_consensus::primitives::Script::from_bytes(
+                        script.to_vec(),
+                    ),
+                };
                 self.changed.insert(
                     outpoint,
                     Some(UtxoCoin {
@@ -63,9 +70,10 @@ impl<'u> WindowOverlay<'u> {
             if coinbase {
                 continue;
             }
-            for input in &tx.inputs {
-                if !same_block_spent.contains(&input.previous_output) {
-                    self.changed.insert(input.previous_output, None);
+            for input_index in 0..tx.input_count() {
+                let previous_output = tx.input_outpoint(input_index);
+                if !same_block_spent.contains(&previous_output) {
+                    self.changed.insert(previous_output, None);
                 }
             }
         }
@@ -95,7 +103,7 @@ mod tests {
     };
     use hashbrown::HashSet;
 
-    use super::{OutputSource, WindowOverlay, WindowOverlayError};
+    use super::{BlockImage, OutputSource, WindowOverlay, WindowOverlayError};
     use crate::test_fixtures::TestResult;
     use bitcoin_rs_storage::utxo::UtxoSet;
     use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
@@ -146,7 +154,12 @@ mod tests {
 
     fn advance(overlay: &mut WindowOverlay<'_>, txs: Vec<Tx>, height: u32) -> TestResult {
         let txids: Vec<Txid> = txs.iter().map(Tx::txid).collect();
-        overlay.advance(&block(txs), &txids, height, &HashSet::new())?;
+        overlay.advance_image(
+            &BlockImage::from_local(block(txs)),
+            &txids,
+            height,
+            &HashSet::new(),
+        )?;
         Ok(())
     }
 
@@ -212,8 +225,8 @@ mod tests {
 
         advance(&mut overlay, vec![genesis], 0)?;
         advance(&mut overlay, vec![op_return, at_limit, over_limit], HEIGHT)?;
-        overlay.advance(
-            &block(vec![netted.clone(), spend.clone()]),
+        overlay.advance_image(
+            &BlockImage::from_local(block(vec![netted.clone(), spend.clone()])),
             &[netted.txid(), spend.txid()],
             HEIGHT + 1,
             &HashSet::from([netted_out]),
@@ -233,7 +246,12 @@ mod tests {
         let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
         let txs = vec![paying(vec![0x51], 1), paying(vec![0x52], 2)];
 
-        let outcome = overlay.advance(&block(txs), &[Txid::default()], HEIGHT, &HashSet::new());
+        let outcome = overlay.advance_image(
+            &BlockImage::from_local(block(txs)),
+            &[Txid::default()],
+            HEIGHT,
+            &HashSet::new(),
+        );
 
         assert_eq!(
             outcome,

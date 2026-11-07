@@ -3,7 +3,7 @@ use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::SchedulerState;
 use super::chain::{WindowApplyDisposition, WindowCommitError};
-use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256};
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -23,13 +23,13 @@ struct CommitWindowErrorOutcome {
     failed_hash: Option<Hash256>,
     failed_permanent: bool,
     restore_from: usize,
-    failed_delivery: Option<(Option<bitcoin_rs_wire::PeerSource>, Hash256)>,
+    failed_delivery: Option<(Option<bitcoin_rs_wire::connection::PeerSource>, Hash256)>,
 }
 
 impl BlockSync {
     pub(super) fn punish_permanent_delivery_source(
         &self,
-        source: Option<bitcoin_rs_wire::PeerSource>,
+        source: Option<bitcoin_rs_wire::connection::PeerSource>,
         hash: bitcoin_rs_consensus::primitives::Hash256,
     ) {
         let Some(source) = source else {
@@ -101,7 +101,7 @@ impl BlockSync {
                 ),
             );
             let chunk = &drained[chunk_start..chunk_end];
-            let payloads: Vec<&BlockPayload> = chunk
+            let payloads: Vec<&BlockImage> = chunk
                 .iter()
                 .map(super::super::block_stager::DrainedBlock::payload)
                 .collect();

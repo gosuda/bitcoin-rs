@@ -1,5 +1,6 @@
 use super::*;
 use bitcoin_rs_consensus::primitives::Amount;
+use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_consensus::primitives::LockTime;
 use bitcoin_rs_consensus::primitives::Script;
 use bitcoin_rs_consensus::primitives::Tx;
@@ -880,7 +881,7 @@ fn stage_tip_is_idempotent_and_publishes_nothing() {
         Arc::new(ResolvedChain),
         bitcoin_rs_execution::chain::LatchReader::fixture_never(),
     );
-    let block = Network::Regtest.genesis_block();
+    let block = BlockImage::from_local(Network::Regtest.genesis_block());
     service.stage_tip(&tip, &block);
     wait_until_entered(&pool);
     service.stage_tip(&tip, &block);
@@ -944,7 +945,10 @@ fn empty_preparation_installs_against_matching_receipt() {
         Arc::new(StaticPool::new(5, 2)),
         Arc::new(ResolvedChain),
     );
-    service.stage_tip(&tip, &Network::Regtest.genesis_block());
+    service.stage_tip(
+        &tip,
+        &BlockImage::from_local(Network::Regtest.genesis_block()),
+    );
     wait_until_ready(&service, tip_hash);
     service.publish_block_generation(tip_hash, &MutationResult::empty());
     let key = GenerationKey {
@@ -984,7 +988,10 @@ fn empty_preparation_cannot_install_against_nonempty_receipt() {
         Arc::new(StaticPool::new(5, 2)),
         Arc::new(ResolvedChain),
     );
-    service.stage_tip(&tip, &Network::Regtest.genesis_block());
+    service.stage_tip(
+        &tip,
+        &BlockImage::from_local(Network::Regtest.genesis_block()),
+    );
     wait_until_ready(&service, tip_hash);
     let prepared = service
         .prep
@@ -1043,7 +1050,10 @@ fn fee_moved_preparation_discards_and_serves_live() {
         Arc::clone(&pool),
         Arc::new(ResolvedChain),
     );
-    service.stage_tip(&tip, &Network::Regtest.genesis_block());
+    service.stage_tip(
+        &tip,
+        &BlockImage::from_local(Network::Regtest.genesis_block()),
+    );
     wait_until_ready(&service, tip_hash);
     pool.set(5, 9);
     service.publish_block_generation(tip_hash, &MutationResult::empty());
@@ -1077,7 +1087,10 @@ fn matching_foreground_joins_running_preparation_without_duplicate_finish() {
         Arc::new(ResolvedChain),
         bitcoin_rs_execution::chain::LatchReader::fixture_never(),
     ));
-    service.stage_tip(&tip, &Network::Regtest.genesis_block());
+    service.stage_tip(
+        &tip,
+        &BlockImage::from_local(Network::Regtest.genesis_block()),
+    );
     wait_until_entered(&pool);
     service.publish_block_generation(tip_hash, &MutationResult::empty());
     let key = GenerationKey {
@@ -1123,7 +1136,10 @@ fn shutdown_releases_a_preparation_waiter() {
         Arc::new(ResolvedChain),
         shutdown.reader(),
     ));
-    service.stage_tip(&tip, &Network::Regtest.genesis_block());
+    service.stage_tip(
+        &tip,
+        &BlockImage::from_local(Network::Regtest.genesis_block()),
+    );
     wait_until_entered(&pool);
     let key = GenerationKey {
         tip_hash,
@@ -1162,12 +1178,15 @@ fn pending_stage_foreground_joins_without_duplicate_finish() {
         Vec::new(),
         bitcoin_rs_execution::chain::LatchReader::fixture_never(),
     ));
-    service.stage_tip(&tip_snapshot(first_hash), &Network::Regtest.genesis_block());
+    service.stage_tip(
+        &tip_snapshot(first_hash),
+        &BlockImage::from_local(Network::Regtest.genesis_block()),
+    );
     wait_until_entered(&pool);
     tip_source.set(Some(tip_snapshot(second_hash)));
     service.stage_tip(
         &tip_snapshot(second_hash),
-        &Network::Regtest.genesis_block(),
+        &BlockImage::from_local(Network::Regtest.genesis_block()),
     );
     service.publish_block_generation(second_hash, &MutationResult::empty());
     let key = GenerationKey {
@@ -1213,7 +1232,10 @@ fn worker_panic_releases_joined_waiter_to_lazy_fallback() {
         Arc::new(ResolvedChain),
         bitcoin_rs_execution::chain::LatchReader::fixture_never(),
     ));
-    service.stage_tip(&tip_snapshot(tip_hash), &Network::Regtest.genesis_block());
+    service.stage_tip(
+        &tip_snapshot(tip_hash),
+        &BlockImage::from_local(Network::Regtest.genesis_block()),
+    );
     wait_until_entered(&pool);
     let key = GenerationKey {
         tip_hash,
@@ -1260,7 +1282,10 @@ fn ready_preparation_parks_until_the_receipt_and_serves_the_prepared_arc() {
         Arc::new(ResolvedChain),
         bitcoin_rs_execution::chain::LatchReader::fixture_never(),
     ));
-    service.stage_tip(&tip, &Network::Regtest.genesis_block());
+    service.stage_tip(
+        &tip,
+        &BlockImage::from_local(Network::Regtest.genesis_block()),
+    );
     wait_until_ready(&service, tip_hash);
     let prepared = ready_candidate(&service, tip_hash);
     let key = GenerationKey {
@@ -1308,7 +1333,10 @@ fn stale_ready_without_a_receipt_serves_lazily_instead_of_parking() {
         Arc::new(ResolvedChain),
         shutdown.reader(),
     ));
-    service.stage_tip(&tip, &Network::Regtest.genesis_block());
+    service.stage_tip(
+        &tip,
+        &BlockImage::from_local(Network::Regtest.genesis_block()),
+    );
     wait_until_ready(&service, tip_hash);
     let prepared = ready_candidate(&service, tip_hash);
     *pool.counters.lock() = (5, 9);

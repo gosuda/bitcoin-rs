@@ -101,7 +101,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
         shared.send_block(
             &lease,
             flooded,
-            bitcoin_rs_consensus::primitives::BlockPayload::from_local(unrelated.clone()),
+            bitcoin_rs_consensus::primitives::BlockImage::from_local(unrelated.clone()),
             None,
         );
     }
@@ -114,7 +114,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
     shared.send_block(
         &lease,
         flooded,
-        bitcoin_rs_consensus::primitives::BlockPayload::from_local(block2),
+        bitcoin_rs_consensus::primitives::BlockImage::from_local(block2),
         None,
     );
     assert_eq!(
@@ -131,7 +131,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
     shared.send_block(
         &other_lease,
         other,
-        bitcoin_rs_consensus::primitives::BlockPayload::from_local(unrelated.clone()),
+        bitcoin_rs_consensus::primitives::BlockImage::from_local(unrelated.clone()),
         None,
     );
     assert_eq!(
@@ -144,7 +144,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
     shared.send_block(
         &lease,
         flooded,
-        bitcoin_rs_consensus::primitives::BlockPayload::from_local(unrelated),
+        bitcoin_rs_consensus::primitives::BlockImage::from_local(unrelated),
         None,
     );
     assert_eq!(

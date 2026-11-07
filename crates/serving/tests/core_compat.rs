@@ -7,7 +7,7 @@ use crate::mining_fixture;
 use alloc::sync::Arc;
 
 use bitcoin_rs_consensus::primitives::{
-    BlockPayload, Hash256, Network, client_version, consensus_bytes,
+    BlockImage, Hash256, Network, client_version, consensus_bytes,
 };
 use bitcoin_rs_execution::chain::{ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_serving::Handler;
@@ -323,7 +323,7 @@ impl MiningControl for CompatMiningControl {
 
     fn submit_block(
         &self,
-        _payload: BlockPayload,
+        _payload: BlockImage,
     ) -> Result<BlockValidationResult, MiningControlError> {
         Ok(BlockValidationResult::Accepted)
     }
@@ -474,7 +474,7 @@ fn submitblock_truncates_trailing_bytes_to_consumed_prefix() -> Result<(), crate
 
         fn submit_block(
             &self,
-            payload: BlockPayload,
+            payload: BlockImage,
         ) -> Result<BlockValidationResult, MiningControlError> {
             *self
                 .submitted

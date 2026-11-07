@@ -3,14 +3,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256, Header};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Header};
 use hashbrown::{HashMap, hash_map::Entry};
 
 use crate::p2p::download_window::SyncBudget;
-use bitcoin_rs_wire::PeerSource;
+use bitcoin_rs_wire::connection::PeerSource;
 
 #[derive(Debug)]
-pub struct BlockStager {
+pub(crate) struct BlockStager {
     budget: SyncBudget,
     received: HashMap<Hash256, ReceivedBlock>,
     received_order: VecDeque<Hash256>,
@@ -25,7 +25,7 @@ pub struct BlockStager {
 
 #[derive(Debug)]
 struct ReceivedBlock {
-    payload: BlockPayload,
+    payload: BlockImage,
     received_at: Instant,
     bytes: usize,
     decoded_bytes: usize,
@@ -36,7 +36,7 @@ struct ReceivedBlock {
 #[derive(Clone, Debug)]
 pub(crate) struct DrainedBlock {
     pub hash: Hash256,
-    payload: BlockPayload,
+    payload: BlockImage,
     received_at: Instant,
     bytes: usize,
     source: Option<PeerSource>,
@@ -50,7 +50,7 @@ impl DrainedBlock {
     }
 
     #[must_use]
-    pub(crate) const fn payload(&self) -> &BlockPayload {
+    pub(crate) const fn payload(&self) -> &BlockImage {
         &self.payload
     }
 }
@@ -136,7 +136,7 @@ impl BlockStager {
         &mut self,
         hash: Hash256,
         next_expected_hash: Option<Hash256>,
-        payload: BlockPayload,
+        payload: BlockImage,
         source: Option<PeerSource>,
         now: Instant,
     ) -> StagedBlock {
@@ -145,7 +145,7 @@ impl BlockStager {
             Entry::Vacant(entry) => entry,
         };
         let bytes = payload.bytes().len();
-        let decoded_bytes = payload.block().retained_heap_bytes();
+        let decoded_bytes = payload.retained_heap_bytes();
         let retained = bytes.saturating_add(decoded_bytes);
         if retained > self.budget.max_retained_bytes {
             return StagedBlock::DroppedForRetry { hash };
@@ -209,11 +209,11 @@ impl BlockStager {
     ) -> impl Iterator<Item = (Hash256, Header, Option<PeerSource>)> + '_ {
         self.received
             .iter()
-            .map(|(hash, entry)| (*hash, entry.payload.block().header, entry.source))
+            .map(|(hash, entry)| (*hash, entry.payload.header(), entry.source))
     }
 
     #[must_use]
-    pub(crate) fn staged_body(&self, hash: Hash256) -> Option<BlockPayload> {
+    pub(crate) fn staged_body(&self, hash: Hash256) -> Option<BlockImage> {
         self.received.get(&hash).map(|entry| entry.payload.clone())
     }
 
@@ -247,7 +247,7 @@ impl BlockStager {
     pub(crate) fn restore_many(&mut self, drained: impl IntoIterator<Item = DrainedBlock>) {
         for drained in drained {
             let gate_pending = drained.gate_pending;
-            let decoded_bytes = drained.payload.block().retained_heap_bytes();
+            let decoded_bytes = drained.payload.retained_heap_bytes();
             let previous = self.received.insert(
                 drained.hash,
                 ReceivedBlock {

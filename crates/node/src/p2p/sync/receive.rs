@@ -12,7 +12,8 @@ use bitcoin_rs_execution::chain::BlockTree;
 use bitcoin_rs_execution::chain::ChainError;
 use bitcoin_rs_execution::chain::NodeId;
 use bitcoin_rs_execution::chain::TipSnapshot;
-use bitcoin_rs_wire::{InboundBlock, PeerSource};
+use bitcoin_rs_wire::connection::PeerSource;
+use bitcoin_rs_wire::inbound::InboundBlock;
 use smallvec::SmallVec;
 use std::time::Instant;
 use std::vec::Vec;
@@ -129,7 +130,7 @@ impl BlockSync {
                 *apply_head_check = next_expected_hash
                     .as_ref()
                     .copied()
-                    .filter(|hash| *hash != Hash256::from(inbound.payload().block().block_hash()));
+                    .filter(|hash| *hash != Hash256::from(inbound.payload().block_hash()));
             }
             blocks.push(inbound);
             *saw_block = true;
@@ -151,8 +152,11 @@ impl BlockSync {
         .then_some(active_tip.tip_id)
     }
 
-    fn discard_inadmissible_header_bodies(&self, invalid: &[(Hash256, Option<PeerSource>)]) {
-        let blamed: Vec<PeerSource> = invalid
+    fn discard_inadmissible_header_bodies(
+        &self,
+        invalid: &[(Hash256, Option<bitcoin_rs_wire::connection::PeerSource>)],
+    ) {
+        let blamed: Vec<bitcoin_rs_wire::connection::PeerSource> = invalid
             .iter()
             .filter_map(|(_, source)| *source)
             .filter(|source| {
@@ -180,7 +184,11 @@ impl BlockSync {
     }
 
     fn admit_staged_headers(&self) {
-        let unadmitted: Vec<(Hash256, Header, Option<PeerSource>)> = {
+        let unadmitted: Vec<(
+            Hash256,
+            Header,
+            Option<bitcoin_rs_wire::connection::PeerSource>,
+        )> = {
             let tree = self.chain.block_tree();
             let scheduler = self.scheduler.lock();
             scheduler
@@ -191,7 +199,8 @@ impl BlockSync {
         };
         let mut missing_parent = false;
         let mut credit_refresh_needed = false;
-        let mut invalid: Vec<(Hash256, Option<PeerSource>)> = Vec::new();
+        let mut invalid: Vec<(Hash256, Option<bitcoin_rs_wire::connection::PeerSource>)> =
+            Vec::new();
         for (hash, header, source) in unadmitted {
             let Some(admission) = self.route_headers_batch(&[header], source, false, 1) else {
                 continue;
@@ -341,7 +350,7 @@ impl BlockSync {
             let tree = self.chain.block_tree();
             let indexed_tip = Self::indexed_applied_ancestry_tip(&tree, &applied_tip);
             blocks.retain(|inbound| {
-                let hash = Hash256::from(inbound.payload().block().block_hash());
+                let hash = Hash256::from(inbound.payload().block_hash());
                 let Some(node_id) = tree.lookup(hash) else {
                     return true;
                 };
@@ -365,7 +374,7 @@ impl BlockSync {
         let offered = blocks.len();
         let mut admission_plan = Vec::with_capacity(offered);
         blocks.retain(|inbound| {
-            let hash = Hash256::from(inbound.payload().block().block_hash());
+            let hash = Hash256::from(inbound.payload().block_hash());
             if scheduler.stager.contains(&hash) {
                 admission_plan.push(BodyAdmission::Staged);
                 return true;
@@ -414,7 +423,7 @@ impl BlockSync {
                 if matches!(admission, BodyAdmission::Staged) {
                     Ok(())
                 } else {
-                    self.chain.check_body_binding(inbound.payload().block())
+                    self.chain.check_body_binding(inbound.payload())
                 }
             })
             .collect()
@@ -439,7 +448,7 @@ impl BlockSync {
                 .drain(..)
                 .zip(admission_plan.into_iter().zip(binding_results))
             {
-                let hash = Hash256::from(inbound.payload().block().block_hash());
+                let hash = Hash256::from(inbound.payload().block_hash());
                 let source = inbound.source;
                 let _ = inbound.forward_credit;
                 let _memory_credit = inbound.memory_credit.take();
@@ -450,18 +459,23 @@ impl BlockSync {
                 }
                 if let Err(error) = binding_result {
                     metrics::counter!("node.sync.body_binding_drops").increment(1);
-                    let witness = payload
-                        .block()
-                        .txs
-                        .first()
-                        .and_then(|tx| tx.inputs.first())
-                        .map(|input| &input.witness);
+                    let coinbase_witness_items =
+                        if payload.tx_count() > 0 && payload.tx(0).input_count() > 0 {
+                            payload.tx(0).witness_item_count(0)
+                        } else {
+                            0
+                        };
+                    let coinbase_witness_first_bytes = if coinbase_witness_items > 0 {
+                        payload.tx(0).witness_item(0, 0).len()
+                    } else {
+                        0
+                    };
                     tracing::warn!(
                         %hash, %error, ?source,
                         serialized_bytes = payload.bytes().len(),
-                        transactions = payload.block().txs.len(),
-                        coinbase_witness_items = witness.map_or(0, bitcoin_rs_consensus::primitives::Witness::len),
-                        coinbase_witness_first_bytes = witness.and_then(|stack| stack.first()).map_or(0, <[u8]>::len),
+                        transactions = payload.tx_count(),
+                        coinbase_witness_items,
+                        coinbase_witness_first_bytes,
                         "block sync: body/header binding failed; rejecting delivery"
                     );
                     reject_deliveries.push((hash, source));

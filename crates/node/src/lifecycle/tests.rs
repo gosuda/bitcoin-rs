@@ -1,5 +1,5 @@
 use bitcoin_rs_consensus::ValidationEngine;
-use bitcoin_rs_consensus::primitives::{BlockBodyMetadata, BlockPayload, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockBodyMetadata, BlockImage, Hash256};
 use bitcoin_rs_storage::block_body::{BlockBodyReader, BlockBodyStore};
 use bitcoin_rs_storage::{BlockFilePosition, BodyExtent, BoundedReadError, StorageError};
 use std::io::{Read, Write};
@@ -195,17 +195,16 @@ fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> Re
 {
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
-    let genesis = BlockPayload::from_local(
-        bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
-    );
+    let genesis =
+        BlockImage::from_local(bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block());
     state.apply_block(&genesis)?;
-    let mut previous = genesis.block().block_hash();
+    let mut previous = genesis.block_hash();
     for height in 1..=3 {
-        let block = BlockPayload::from_local(
+        let block = BlockImage::from_local(
             bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
         );
         state.apply_block(&block)?;
-        previous = block.block().block_hash();
+        previous = block.block_hash();
     }
     let control = RpcChainControl {
         handles: state.chainstate(),
@@ -234,7 +233,7 @@ fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> Resul
 
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
-    state.apply_block(&BlockPayload::from_local(
+    state.apply_block(&BlockImage::from_local(
         bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
     ))?;
     assert_eq!(
@@ -309,7 +308,7 @@ fn verify_chain_reports_cancellation_and_recovery_closure() -> Result<(), TestEr
 }
 
 fn seed_checkpoint(state: &NodeState) -> Result<(PathBuf, Vec<u8>), TestError> {
-    state.apply_block(&BlockPayload::from_local(
+    state.apply_block(&BlockImage::from_local(
         bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
     ))?;
     let _ = state.publish_checkpoint()?;
@@ -1160,17 +1159,16 @@ fn assert_socket_error(response: &str, message: &str) -> Result<(), TestError> {
 }
 
 fn apply_regtest_chain(state: &NodeState) -> Result<(), TestError> {
-    let genesis = BlockPayload::from_local(
-        bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
-    );
+    let genesis =
+        BlockImage::from_local(bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block());
     state.apply_block(&genesis)?;
-    let mut previous = genesis.block().block_hash();
+    let mut previous = genesis.block_hash();
     for height in 1..=3 {
-        let block = BlockPayload::from_local(
+        let block = BlockImage::from_local(
             bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
         );
         state.apply_block(&block)?;
-        previous = block.block().block_hash();
+        previous = block.block_hash();
     }
     Ok(())
 }

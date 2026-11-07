@@ -8,7 +8,6 @@ use super::durable::{
     ConnectCommitFacts, commit_connect_head, stored_body_row, sync_appended_blocks,
 };
 use super::prepare::{ScriptsRan, prepare_apply, verify_block_transactions};
-use super::tx_count_delta_for;
 use super::window::{PendingBlockCommit, PublishMode};
 use super::{
     ApplyFinish, ApplyIntent, Bip68Context, BlockLocalUtxoView, BlockProvenance, BlockTxPlan,
@@ -18,7 +17,7 @@ use super::{
 use crate::chain::TipSnapshot;
 use crate::chain::node::NodeId;
 use crate::error::ApplyError;
-use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Txid, consensus_bytes};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Header, Txid};
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, UtxoView};
 use bitcoin_rs_storage::utxo::contract::{
     BlockChangeError, BlockChangeInputs, BlockChanges, BlockValueTotals, UndoBatch, UndoRecord,
@@ -30,7 +29,7 @@ use std::sync::Arc;
 
 pub(super) fn apply_committed_block_admitted<'b>(
     handles: &Chainstate,
-    payload: &'b BlockPayload,
+    payload: &'b BlockImage,
     proven: Option<ProvenApply<'b>>,
     provenance: BlockProvenance,
     publication: PublishMode<'_>,
@@ -105,14 +104,14 @@ fn check_historical_target(
 
 fn check_contextual_header(
     handles: &Chainstate,
-    block: &Block,
+    header: &Header,
     height: u32,
     prior: Option<&TipSnapshot>,
     block_hash: Hash256,
 ) -> core::result::Result<(), ApplyError> {
     let contextual_header_started =
         tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
-    let contextual_header_result = validate_contextual_block_header(handles, block, height, prior);
+    let contextual_header_result = validate_contextual_block_header(handles, header, height, prior);
     tracing::debug!(
         height,
         %block_hash,
@@ -145,7 +144,7 @@ fn prepare_journal_for_apply(
 
 fn check_self_pow(
     handles: &Chainstate,
-    block: &Block,
+    header: &Header,
     block_hash: Hash256,
     height: u32,
     intent: ApplyIntent,
@@ -155,7 +154,7 @@ fn check_self_pow(
     }
     let pow_self_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let pow_self_result =
-        crate::chain::header_sync::validate_pow(&block.header, block_hash, handles.network);
+        crate::chain::header_sync::validate_pow(header, block_hash, handles.network);
     tracing::debug!(
         height,
         %block_hash,
@@ -173,7 +172,7 @@ struct ValidationContexts {
 
 fn validation_contexts(
     handles: &Chainstate,
-    block: &Block,
+    header: &Header,
     height: u32,
     block_hash: Hash256,
     prior: Option<&TipSnapshot>,
@@ -193,17 +192,14 @@ fn validation_contexts(
     };
     let locktime_rule =
         bitcoin_rs_consensus::LocktimeRule::from_csv_active(softfork_state.csv_active);
-    let locktime_cutoff = bitcoin_rs_consensus::locktime_cutoff(
-        locktime_rule,
-        prev_median_time_past,
-        block.header.time,
-    );
+    let locktime_cutoff =
+        bitcoin_rs_consensus::locktime_cutoff(locktime_rule, prev_median_time_past, header.time);
     let verify_flags =
         bitcoin_rs_consensus::verify_flags(handles.network, height, block_hash, softfork_state);
     ValidationContexts {
         validation: BlockValidationContext {
             hash: block_hash,
-            parent: block.header.prev_blockhash.0,
+            parent: header.prev_blockhash.0,
             height,
             flags: verify_flags,
             locktime_cutoff,
@@ -215,7 +211,7 @@ fn validation_contexts(
 
 fn prepare_block<'b>(
     handles: &Chainstate,
-    payload: &'b BlockPayload,
+    payload: &'b BlockImage,
     proven: Option<ProvenApply<'b>>,
     context: &BlockValidationContext,
 ) -> core::result::Result<(PreparedApply<'b>, bool), ApplyError> {
@@ -231,7 +227,7 @@ fn prepare_block<'b>(
 
 struct BlockRules<'a, 'b> {
     handles: &'a Chainstate,
-    block: &'b Block,
+    image: &'b BlockImage,
     block_hash: Hash256,
     prev_hash: Hash256,
     context: &'b BlockValidationContext,
@@ -252,8 +248,8 @@ impl BlockRules<'_, '_> {
             view.witness_ids();
         }
         let block_rules_started = quanta::Instant::now();
-        let block_rules_result = bitcoin_rs_consensus::verify_block_rules_precomputed(
-            self.block,
+        let block_rules_result = bitcoin_rs_consensus::verify_block_image_rules(
+            self.image,
             bitcoin_rs_consensus::BlockRuleContext {
                 segwit_active: self.softfork.segwit_active,
             },
@@ -267,15 +263,15 @@ impl BlockRules<'_, '_> {
         if self.intent == ApplyIntent::Commit
             && let Some(challenge) = self.handles.network.signet_challenge()
         {
-            bitcoin_rs_consensus::check_signet_block_solution(self.block, challenge)?;
+            bitcoin_rs_consensus::check_signet_block_solution(self.image, challenge)?;
         }
         check_block_finality(
-            self.block,
+            self.image,
             self.context.height,
             self.context.locktime_cutoff,
         )?;
         if self.intent == ApplyIntent::Commit {
-            check_bip34(self.handles, self.block, self.context.height)?;
+            check_bip34(self.handles, self.image, self.context.height)?;
         }
         if self.intent == ApplyIntent::Commit
             && self.softfork.segwit_active
@@ -285,12 +281,12 @@ impl BlockRules<'_, '_> {
                 .applied_tip_snapshot()
                 .is_some_and(|tip| tip.hash == self.prev_hash)
         {
-            hook(self.block, self.block_hash, self.context.height);
+            hook(self.image, self.block_hash, self.context.height);
         }
         let bip30_bip34_started = quanta::Instant::now();
         let bip30_bip34_result = check_bip30_and_bip34(
             self.handles,
-            self.block,
+            self.image,
             self.context.height,
             view.txids(),
             self.prior_tip_id,
@@ -360,7 +356,7 @@ impl ScriptVerification<'_, '_> {
 
 struct BudgetChecks<'a, 'b> {
     handles: &'a Chainstate,
-    block: &'b Block,
+    image: &'b BlockImage,
     block_hash: Hash256,
     tx_plan: &'b BlockTxPlan,
     txids: &'b [Txid],
@@ -374,7 +370,7 @@ struct BudgetChecks<'a, 'b> {
 impl BudgetChecks<'_, '_> {
     fn run(&self) -> core::result::Result<(), ApplyError> {
         check_block_sigops(
-            self.block,
+            self.image,
             self.tx_plan,
             self.txids,
             Arc::clone(&self.resolved),
@@ -385,7 +381,7 @@ impl BudgetChecks<'_, '_> {
         let coinbase_maturity_started =
             tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
         let coinbase_maturity_result = check_coinbase_maturity(
-            self.block,
+            self.image,
             self.tx_plan,
             self.txids,
             Arc::clone(&self.resolved),
@@ -401,7 +397,7 @@ impl BudgetChecks<'_, '_> {
         let bip68_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
         let bip68_result = check_bip68_sequence_locks(
             self.handles,
-            self.block,
+            self.image,
             self.tx_plan,
             self.txids,
             Arc::clone(&self.resolved),
@@ -424,7 +420,7 @@ impl BudgetChecks<'_, '_> {
 
 struct ChangeRequest<'a, 'b> {
     handles: &'a Chainstate,
-    block: &'b Block,
+    image: &'b BlockImage,
     block_hash: Hash256,
     height: u32,
     txids: &'a [Txid],
@@ -432,11 +428,11 @@ struct ChangeRequest<'a, 'b> {
     resolved: &'a Arc<ResolvedUtxoView>,
 }
 
-fn build_block_changes_checked<'b>(
-    request: &ChangeRequest<'_, 'b>,
+fn build_block_changes_checked(
+    request: &ChangeRequest<'_, '_>,
 ) -> core::result::Result<
     (
-        BlockChanges<&'b bitcoin_rs_consensus::primitives::TxOut>,
+        BlockChanges<bitcoin_rs_consensus::primitives::TxOut>,
         UndoBatch,
         BlockValueTotals,
     ),
@@ -456,7 +452,7 @@ fn build_block_changes_checked<'b>(
     let utxo_changes_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let utxo_changes_result = build_block_changes(
         &BlockChangeInputs {
-            block: request.block,
+            block: request.image,
             height: request.height,
             txids: request.txids,
             same_block_spent,
@@ -501,8 +497,7 @@ fn check_coinbase_value(
 
 struct BlockOutcomeInputs<'a, 'b> {
     handles: &'a Chainstate,
-    payload: &'b BlockPayload,
-    block: &'b Block,
+    payload: &'b BlockImage,
     block_hash: Hash256,
     height: u32,
     txids: Vec<Txid>,
@@ -522,7 +517,7 @@ struct PersistedPayload {
 
 fn persist_payload(
     input: &BlockOutcomeInputs<'_, '_>,
-    changes: &BlockChanges<&bitcoin_rs_consensus::primitives::TxOut>,
+    changes: &BlockChanges<bitcoin_rs_consensus::primitives::TxOut>,
     timings: &mut ApplyTimings,
 ) -> core::result::Result<PersistedPayload, ApplyError> {
     let undo_persist_started = quanta::Instant::now();
@@ -561,7 +556,7 @@ fn persist_payload(
     block_body_persist_result?;
 
     let block_tree_insert_started = quanta::Instant::now();
-    let tip = applied_header_tip(input.handles, input.block_hash, input.block, input.height)?;
+    let tip = applied_header_tip(input.handles, input.block_hash, input.payload, input.height)?;
     let block_tree_insert_dur = block_tree_insert_started.elapsed();
     metrics::histogram!("node.apply_block.block_tree_insert_seconds")
         .record(block_tree_insert_dur.as_secs_f64());
@@ -606,7 +601,7 @@ fn finish_block_outcome(
          its header would be unrecoverable",
         input.block_hash.to_string_be()
     );
-    let tx_count_delta = tx_count_delta_for(input.block);
+    let tx_count_delta = u64::try_from(input.payload.tx_count()).unwrap_or(u64::MAX);
     let coin_stats_started = quanta::Instant::now();
     handles
         .coin_stats
@@ -619,7 +614,7 @@ fn finish_block_outcome(
     metrics::histogram!("node.apply_block.total_seconds").record(total_dur.as_secs_f64());
     metrics::counter!("node.apply_block.txs_applied").increment(tx_count_delta);
     emit_block_connected(
-        input.block,
+        input.payload,
         &input.block_hash,
         input.height,
         &input.txids,
@@ -630,7 +625,7 @@ fn finish_block_outcome(
     tracing::debug!(
         height = input.height,
         %input.block_hash,
-        tx_count = input.block.txs.len(),
+        tx_count = input.payload.tx_count(),
         block_rules_us = timings.block_rules.as_micros(),
         bip30_bip34_us = timings.bip30_bip34.as_micros(),
         script_verify_us = timings.script_verify.as_micros(),
@@ -642,11 +637,8 @@ fn finish_block_outcome(
         "apply_block: profile"
     );
     let raw_txs = handles.capture_rawtx.then(|| {
-        input
-            .block
-            .txs
-            .iter()
-            .map(consensus_bytes)
+        (0..input.payload.tx_count())
+            .map(|index| input.payload.tx(index).span_bytes().to_vec())
             .collect::<Vec<_>>()
     });
     let outcome = ConnectOutcome {
@@ -667,11 +659,11 @@ fn finish_block_outcome(
 
 struct Publication<'a, 'p, 'b> {
     handles: &'a Chainstate,
-    block: &'b Block,
+    image: &'b BlockImage,
     outcome: ConnectOutcome,
     publication: PublishMode<'p>,
     undo: UndoBatch,
-    changes: BlockChanges<&'b bitcoin_rs_consensus::primitives::TxOut>,
+    changes: BlockChanges<bitcoin_rs_consensus::primitives::TxOut>,
     undo_record: UndoRecord,
     attestation: Option<ScriptAttestation>,
     prev_hash: Hash256,
@@ -682,7 +674,7 @@ impl Publication<'_, '_, '_> {
     fn run(self) -> core::result::Result<ApplyFinish, ApplyError> {
         let Publication {
             handles,
-            block,
+            image,
             mut outcome,
             publication,
             undo,
@@ -695,7 +687,7 @@ impl Publication<'_, '_, '_> {
         let commit_id = match publication {
             PublishMode::Now => commit_now(
                 handles,
-                block,
+                image,
                 &mut outcome,
                 &undo_record,
                 attestation,
@@ -713,7 +705,7 @@ impl Publication<'_, '_, '_> {
             }
             PublishMode::Grouped(group) => {
                 let journal_record = build_journal_record(
-                    block,
+                    image,
                     outcome.height,
                     outcome.hash,
                     prev_hash,
@@ -734,7 +726,7 @@ impl Publication<'_, '_, '_> {
         emit_journal_record(
             handles,
             build_journal_record(
-                block,
+                image,
                 outcome.height,
                 outcome.hash,
                 prev_hash,
@@ -752,7 +744,7 @@ impl Publication<'_, '_, '_> {
 
 struct BlockValidation<'a, 'b, 'c> {
     handles: &'a Chainstate,
-    block: &'b Block,
+    image: &'b BlockImage,
     block_hash: Hash256,
     prev_hash: Hash256,
     context: &'c BlockValidationContext,
@@ -785,7 +777,7 @@ impl BlockValidation<'_, '_, '_> {
         } = self.prepared;
         BlockRules {
             handles: self.handles,
-            block: self.block,
+            image: self.image,
             block_hash: self.block_hash,
             prev_hash: self.prev_hash,
             context: self.context,
@@ -815,7 +807,7 @@ impl BlockValidation<'_, '_, '_> {
 
         BudgetChecks {
             handles: self.handles,
-            block: self.block,
+            image: self.image,
             block_hash: self.block_hash,
             tx_plan: &tx_plan,
             txids: view.txids(),
@@ -833,8 +825,7 @@ impl BlockValidation<'_, '_, '_> {
 
 struct CommitRequest<'a, 'p, 'b> {
     handles: &'a Chainstate,
-    payload: &'b BlockPayload,
-    block: &'b Block,
+    payload: &'b BlockImage,
     block_hash: Hash256,
     prev_hash: Hash256,
     height: u32,
@@ -855,7 +846,6 @@ fn commit_application(
     let CommitRequest {
         handles,
         payload,
-        block,
         block_hash,
         prev_hash,
         height,
@@ -870,7 +860,7 @@ fn commit_application(
     } = request;
     let (changes, undo, value_totals) = build_block_changes_checked(&ChangeRequest {
         handles,
-        block,
+        image: payload,
         block_hash,
         height,
         txids: &txids,
@@ -885,7 +875,6 @@ fn commit_application(
     let persist_input = BlockOutcomeInputs {
         handles,
         payload,
-        block,
         block_hash,
         height,
         txids,
@@ -899,7 +888,7 @@ fn commit_application(
         finish_block_outcome(persist_input, persisted, timings);
     Publication {
         handles,
-        block,
+        image: payload,
         outcome,
         publication,
         undo,
@@ -914,7 +903,7 @@ fn commit_application(
 
 fn commit_now(
     handles: &Chainstate,
-    block: &Block,
+    image: &BlockImage,
     outcome: &mut ConnectOutcome,
     undo_record: &UndoRecord,
     attestation: Option<ScriptAttestation>,
@@ -926,7 +915,7 @@ fn commit_now(
             .applied_tip_snapshot()
             .is_some_and(|tip| tip.hash == prev_hash)
     {
-        hook(&outcome.tip, block);
+        hook(&outcome.tip, image);
     }
     let durable_sync_started = quanta::Instant::now();
     sync_appended_blocks(handles)?;
@@ -964,21 +953,21 @@ fn commit_now(
 
 pub(super) fn apply_block_admitted<'b>(
     handles: &Chainstate,
-    payload: &'b BlockPayload,
+    payload: &'b BlockImage,
     proven: Option<ProvenApply<'b>>,
     provenance: BlockProvenance,
     intent: ApplyIntent,
     publication: PublishMode<'_>,
 ) -> core::result::Result<ApplyFinish, ApplyError> {
-    let block = payload.block();
+    let header = payload.header();
     let total_started = quanta::Instant::now();
-    let block_hash = block.block_hash().0;
-    let prev_hash = block.header.prev_blockhash.0;
+    let block_hash = payload.block_hash().0;
+    let prev_hash = header.prev_blockhash.0;
     let (prior, height) = application_predecessor(handles, block_hash, prev_hash, &publication)?;
     check_historical_target(handles, height, block_hash)?;
-    check_self_pow(handles, block, block_hash, height, intent)?;
+    check_self_pow(handles, &header, block_hash, height, intent)?;
     if !matches!(publication, PublishMode::Replay { .. }) {
-        check_contextual_header(handles, block, height, prior.as_deref(), block_hash)?;
+        check_contextual_header(handles, &header, height, prior.as_deref(), block_hash)?;
     }
     prepare_journal_for_apply(handles, height, intent)?;
 
@@ -986,12 +975,12 @@ pub(super) fn apply_block_admitted<'b>(
         validation,
         softfork,
         median_time_past,
-    } = validation_contexts(handles, block, height, block_hash, prior.as_deref());
+    } = validation_contexts(handles, &header, height, block_hash, prior.as_deref());
     let (prepared, transactions_proven) = prepare_block(handles, payload, proven, &validation)?;
     let mut timings = ApplyTimings::default();
     let (txids, tx_plan, resolved, attestation) = BlockValidation {
         handles,
-        block,
+        image: payload,
         block_hash,
         prev_hash,
         context: &validation,
@@ -1008,7 +997,6 @@ pub(super) fn apply_block_admitted<'b>(
         CommitRequest {
             handles,
             payload,
-            block,
             block_hash,
             prev_hash,
             height,
@@ -1026,7 +1014,7 @@ pub(super) fn apply_block_admitted<'b>(
 }
 
 fn emit_block_connected(
-    block: &Block,
+    image: &BlockImage,
     block_hash: &Hash256,
     height: u32,
     txids: &[Txid],
@@ -1035,32 +1023,34 @@ fn emit_block_connected(
     elapsed: std::time::Duration,
 ) {
     bitcoin_rs_consensus::trace::block_connected(move || {
-        let mut view = BlockLocalUtxoView::new(Arc::clone(resolved), &block.txs, height, 0);
+        let mut view = BlockLocalUtxoView::new(Arc::clone(resolved), image, height, 0);
         let mut inputs: u32 = 0;
         let mut sigops: u64 = 0;
-        for (index, tx) in block.txs.iter().enumerate() {
-            inputs = inputs.saturating_add(u32::try_from(tx.inputs.len()).unwrap_or(u32::MAX));
-            let mut prevouts = Vec::with_capacity(tx.inputs.len());
-            for input in &tx.inputs {
-                if let Some(output) = view.lookup(&input.previous_output) {
-                    prevouts.push((input.previous_output, output));
+        for index in 0..image.tx_count() {
+            let tx = image.tx(index);
+            inputs = inputs.saturating_add(u32::try_from(tx.input_count()).unwrap_or(u32::MAX));
+            let mut prevouts = Vec::with_capacity(tx.input_count());
+            for input_index in 0..tx.input_count() {
+                let previous_output = tx.input_outpoint(input_index);
+                if let Some(output) = view.lookup(&previous_output) {
+                    prevouts.push((previous_output, output));
                 }
             }
             sigops = sigops.saturating_add(u64::from(
-                bitcoin_rs_consensus::transaction_sigop_cost(tx, &prevouts, flags),
+                bitcoin_rs_consensus::transaction_sigop_cost_view(tx.into(), &prevouts, flags),
             ));
             if let Some(txid) = txids.get(index) {
                 let _ = view.add_outputs(
                     u32::try_from(index).unwrap_or(u32::MAX),
                     *txid,
-                    tx.outputs.len(),
+                    tx.output_count(),
                 );
             }
         }
         (
             block_hash.as_byte_array().as_ptr(),
             i32::try_from(height).unwrap_or(i32::MAX),
-            u64::try_from(block.txs.len()).unwrap_or(u64::MAX),
+            u64::try_from(image.tx_count()).unwrap_or(u64::MAX),
             i32::try_from(inputs).unwrap_or(i32::MAX),
             i64::try_from(sigops).unwrap_or(i64::MAX),
             i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX),
@@ -1069,26 +1059,28 @@ fn emit_block_connected(
 }
 
 fn check_block_sigops(
-    block: &Block,
+    image: &BlockImage,
     tx_plan: &BlockTxPlan,
     txids: &[Txid],
     resolved: Arc<ResolvedUtxoView>,
     height: u32,
     flags: bitcoin_rs_consensus::script::VerifyFlags,
 ) -> Result<(), ApplyError> {
-    let mut view = BlockLocalUtxoView::new(resolved, &block.txs, height, 0);
+    let mut view = BlockLocalUtxoView::new(resolved, image, height, 0);
     let mut cost = 0_u32;
-    for (index, (tx, txid)) in (0_u32..).zip(block.txs.iter().zip(txids)) {
-        let prevouts: Vec<_> = tx
-            .inputs
-            .iter()
-            .filter_map(|input| {
-                view.lookup(&input.previous_output)
-                    .map(|output| (input.previous_output, output))
+    for (index, txid) in txids.iter().enumerate() {
+        let tx = image.tx(index);
+        let prevouts: Vec<_> = (0..tx.input_count())
+            .filter_map(|input_index| {
+                let previous_output = tx.input_outpoint(input_index);
+                view.lookup(&previous_output)
+                    .map(|output| (previous_output, output))
             })
             .collect();
-        cost = cost.saturating_add(bitcoin_rs_consensus::transaction_sigop_cost(
-            tx, &prevouts, flags,
+        cost = cost.saturating_add(bitcoin_rs_consensus::transaction_sigop_cost_view(
+            tx.into(),
+            &prevouts,
+            flags,
         ));
         if cost > bitcoin_rs_consensus::MAX_BLOCK_SIGOPS_COST {
             return Err(bitcoin_rs_consensus::ConsensusError::SigopsLimit {
@@ -1098,28 +1090,37 @@ fn check_block_sigops(
             .into());
         }
         if tx_plan.needs_local_utxo_overlay {
-            view.spend_inputs(tx);
-            view.add_outputs(index, *txid, tx.outputs.len())?;
+            view.spend_inputs(&tx);
+            view.add_outputs(
+                u32::try_from(index).unwrap_or(u32::MAX),
+                *txid,
+                tx.output_count(),
+            )?;
         }
     }
     Ok(())
 }
 
 fn check_coinbase_maturity(
-    block: &Block,
+    image: &BlockImage,
     tx_plan: &BlockTxPlan,
     txids: &[Txid],
     resolved: Arc<ResolvedUtxoView>,
     height: u32,
 ) -> core::result::Result<(), ApplyError> {
-    debug_assert_eq!(block.txs.len(), txids.len());
+    debug_assert_eq!(image.tx_count(), txids.len());
     if tx_plan.only_coinbase {
         return Ok(());
     }
     if !tx_plan.needs_local_utxo_overlay {
-        for tx in block.txs.iter().filter(|tx| !tx.is_coinbase()) {
-            for input in &tx.inputs {
-                let Some(entry) = resolved.lookup_meta(&input.previous_output) else {
+        for index in 0..image.tx_count() {
+            let tx = image.tx(index);
+            if tx.is_coinbase() {
+                continue;
+            }
+            for input_index in 0..tx.input_count() {
+                let previous_output = tx.input_outpoint(input_index);
+                let Some(entry) = resolved.lookup_meta(&previous_output) else {
                     continue;
                 };
                 bitcoin_rs_consensus::check_coinbase_maturity(
@@ -1132,27 +1133,30 @@ fn check_coinbase_maturity(
         return Ok(());
     }
 
-    let mut view = BlockLocalUtxoView::new(resolved, &block.txs, height, tx_plan.overlay_capacity);
-    for (tx_index, (tx, txid)) in (0_u32..).zip(block.txs.iter().zip(txids)) {
+    let mut view = BlockLocalUtxoView::new(resolved, image, height, tx_plan.overlay_capacity);
+    for (tx_index, txid) in txids.iter().enumerate() {
+        let tx = image.tx(tx_index);
+        let tx_index_u32 = u32::try_from(tx_index).unwrap_or(u32::MAX);
         if tx.is_coinbase() {
-            view.add_outputs(tx_index, *txid, tx.outputs.len())?;
+            view.add_outputs(tx_index_u32, *txid, tx.output_count())?;
             continue;
         }
-        for input in &tx.inputs {
-            let Some(entry) = view.lookup_meta(&input.previous_output) else {
+        for input_index in 0..tx.input_count() {
+            let previous_output = tx.input_outpoint(input_index);
+            let Some(entry) = view.lookup_meta(&previous_output) else {
                 continue;
             };
             bitcoin_rs_consensus::check_coinbase_maturity(entry.coinbase, entry.height, height)?;
         }
-        view.spend_inputs(tx);
-        view.add_outputs(tx_index, *txid, tx.outputs.len())?;
+        view.spend_inputs(&tx);
+        view.add_outputs(tx_index_u32, *txid, tx.output_count())?;
     }
     Ok(())
 }
 
 fn check_bip68_sequence_locks(
     handles: &Chainstate,
-    block: &Block,
+    image: &BlockImage,
     tx_plan: &BlockTxPlan,
     txids: &[Txid],
     resolved: Arc<ResolvedUtxoView>,
@@ -1166,25 +1170,31 @@ fn check_bip68_sequence_locks(
     }
     let height = context.validation.height;
     let mtp = context.median_time_past;
-    debug_assert_eq!(block.txs.len(), txids.len());
-    let mut view = BlockLocalUtxoView::new(resolved, &block.txs, height, tx_plan.overlay_capacity);
+    debug_assert_eq!(image.tx_count(), txids.len());
+    let mut view = BlockLocalUtxoView::new(resolved, image, height, tx_plan.overlay_capacity);
     let mut prevout_mtp_by_height = HashMap::new();
-    for (tx_index, (tx, txid)) in (0_u32..).zip(block.txs.iter().zip(txids)) {
+    for (tx_index, txid) in txids.iter().enumerate() {
+        let tx = image.tx(tx_index);
+        let tx_index_u32 = u32::try_from(tx_index).unwrap_or(u32::MAX);
         if tx.is_coinbase() {
-            view.add_outputs(tx_index, *txid, tx.outputs.len())?;
+            view.add_outputs(tx_index_u32, *txid, tx.output_count())?;
             continue;
         }
-        if tx.version < 2 {
-            view.spend_inputs(tx);
-            view.add_outputs(tx_index, *txid, tx.outputs.len())?;
+        if tx.version() < 2 {
+            view.spend_inputs(&tx);
+            view.add_outputs(tx_index_u32, *txid, tx.output_count())?;
             continue;
         }
-        for tx_input in &tx.inputs {
-            let sequence = tx_input.sequence;
-            if sequence & bitcoin_rs_consensus::primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
+        for input_index in 0..tx.input_count() {
+            let sequence = tx.input_sequence(input_index);
+            if sequence.to_consensus()
+                & bitcoin_rs_consensus::primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG
+                != 0
+            {
                 continue;
             }
-            let Some(entry) = view.lookup_meta(&tx_input.previous_output) else {
+            let previous_output = tx.input_outpoint(input_index);
+            let Some(entry) = view.lookup_meta(&previous_output) else {
                 continue;
             };
             let prevout_mtp = if bitcoin_rs_consensus::bip68::sequence_lock_is_time_based(
@@ -1200,7 +1210,7 @@ fn check_bip68_sequence_locks(
                 0
             };
             bitcoin_rs_consensus::bip68::check_sequence_lock(
-                tx.version,
+                tx.version(),
                 sequence.to_consensus(),
                 entry.height,
                 prevout_mtp,
@@ -1208,8 +1218,8 @@ fn check_bip68_sequence_locks(
                 mtp,
             )?;
         }
-        view.spend_inputs(tx);
-        view.add_outputs(tx_index, *txid, tx.outputs.len())?;
+        view.spend_inputs(&tx);
+        view.add_outputs(tx_index_u32, *txid, tx.output_count())?;
     }
     Ok(())
 }
@@ -1253,7 +1263,7 @@ fn prevout_median_time_past(
 
 fn check_bip30_and_bip34(
     handles: &Chainstate,
-    block: &Block,
+    image: &BlockImage,
     height: u32,
     txids: &[Txid],
     previous_tip_id: Option<NodeId>,
@@ -1272,47 +1282,47 @@ fn check_bip30_and_bip34(
             }
         }
     }
-    let block_hash = block.block_hash().0;
+    let block_hash = image.block_hash().0;
     if has_duplicate {
         bitcoin_rs_consensus::bip30::check_duplicate_txid(height, block_hash)?;
     }
-    check_bip34(handles, block, height)?;
+    check_bip34(handles, image, height)?;
     Ok(())
 }
 
 fn check_bip34(
     handles: &Chainstate,
-    block: &Block,
+    image: &BlockImage,
     height: u32,
 ) -> core::result::Result<(), ApplyError> {
     if handles.network.is_bip34_active(height) {
-        let coinbase = block
-            .txs
-            .first()
-            .ok_or(bitcoin_rs_consensus::ConsensusError::EmptyBlock)?;
-        let coinbase_input = coinbase
-            .inputs
-            .first()
-            .ok_or(bitcoin_rs_consensus::ConsensusError::MissingCoinbase)?;
-        bitcoin_rs_consensus::bip34::check_bip34(height, &coinbase_input.script_sig)?;
+        if image.tx_count() == 0 {
+            return Err(bitcoin_rs_consensus::ConsensusError::EmptyBlock.into());
+        }
+        let coinbase = image.tx(0);
+        if coinbase.input_count() == 0 {
+            return Err(bitcoin_rs_consensus::ConsensusError::MissingCoinbase.into());
+        }
+        bitcoin_rs_consensus::bip34::check_bip34(height, coinbase.input_script_sig(0))?;
     }
     Ok(())
 }
 
 fn check_block_finality(
-    block: &Block,
+    image: &BlockImage,
     height: u32,
     locktime_cutoff: u32,
 ) -> core::result::Result<(), ApplyError> {
-    for tx in &block.txs {
-        if !bitcoin_rs_consensus::is_final_tx(tx, height, locktime_cutoff) {
+    for index in 0..image.tx_count() {
+        let tx = image.tx(index);
+        if !bitcoin_rs_consensus::is_final_tx_view(tx.into(), height, locktime_cutoff) {
             return Err(ApplyError::Consensus(
                 bitcoin_rs_consensus::ConsensusError::Bip {
                     bip: "BIP113",
                     reason: format!(
                         "non-final transaction at height {height} locktime cutoff \
                          {locktime_cutoff}: locktime {}",
-                        tx.lock_time,
+                        tx.lock_time(),
                     ),
                 },
             ));
@@ -1323,7 +1333,7 @@ fn check_block_finality(
 
 fn validate_contextual_block_header(
     handles: &Chainstate,
-    block: &Block,
+    header: &Header,
     height: u32,
     prior: Option<&TipSnapshot>,
 ) -> Result<(), ApplyError> {
@@ -1332,14 +1342,14 @@ fn validate_contextual_block_header(
     }
     let Some(prior) = prior else {
         return Err(ApplyError::Chain(crate::chain::ChainError::MissingParent {
-            prev_hash: block.header.prev_blockhash.0,
+            prev_hash: header.prev_blockhash.0,
         }));
     };
     let tree = handles.block_tree.read();
     crate::chain::validate_contextual_header(
         &tree,
         prior.tip_id,
-        &block.header,
+        header,
         handles.network,
         crate::chain::current_unix_seconds(),
         crate::chain::HeaderValidationMode::LiveAdmission,
@@ -1377,13 +1387,13 @@ fn applied_predecessor(
 pub(super) fn applied_header_tip(
     handles: &Chainstate,
     block_hash: Hash256,
-    block: &Block,
+    image: &BlockImage,
     height: u32,
 ) -> core::result::Result<TipSnapshot, ApplyError> {
     let mut tree = handles.block_tree.write();
     let node_id = match tree.lookup(block_hash) {
         Some(node_id) => node_id,
-        None => tree.insert_header(block.header, crate::chain::node::NodeStatus::Active)?,
+        None => tree.insert_header(image.header(), crate::chain::node::NodeStatus::Active)?,
     };
     let node = tree.node(node_id)?;
     if node.height != height {
@@ -1401,7 +1411,7 @@ pub(super) fn applied_header_tip(
         .parent
         .and_then(|parent| tree.node(parent).ok())
         .is_some_and(|parent| parent.chain_tx_count.get().is_some());
-    tree.record_applied_tx_count(node_id, tx_count_delta_for(block))?;
+    tree.record_applied_tx_count(node_id, u64::try_from(image.tx_count()).unwrap_or(u64::MAX))?;
     let node = tree.node(node_id)?;
     if parent_known && node.chain_tx_count.get().is_none() {
         tracing::warn!(
@@ -1445,13 +1455,13 @@ pub(super) type BuiltJournalRecord = Option<
 >;
 
 fn build_journal_record(
-    block: &Block,
+    image: &BlockImage,
     height: u32,
     block_hash: Hash256,
     prev_hash: Hash256,
     undo: &bitcoin_rs_storage::utxo::contract::UndoBatch,
     changes: &bitcoin_rs_storage::utxo::contract::BlockChanges<
-        &'_ bitcoin_rs_consensus::primitives::TxOut,
+        bitcoin_rs_consensus::primitives::TxOut,
     >,
     coin_stats_height_delta: i64,
 ) -> BuiltJournalRecord {
@@ -1467,11 +1477,9 @@ fn build_journal_record(
                 height: add.height,
                 coinbase: add.coinbase,
             });
-    let block_tx_count = tx_count_delta_for(block);
-    let mut raw_header = [0u8; 80];
-    let encoded = bitcoin_rs_consensus::primitives::consensus_bytes(&block.header);
-    debug_assert_eq!(encoded.len(), 80, "header consensus encoding is 80 bytes");
-    raw_header.copy_from_slice(&encoded);
+    let block_tx_count = u64::try_from(image.tx_count()).unwrap_or(u64::MAX);
+    let raw_header = image.header_bytes();
+
     Some(
         crate::journal::mutations_for_block(changes, undo_coins).map(|mutations| {
             bitcoin_rs_storage::chainstate_journal::JournalRecord {

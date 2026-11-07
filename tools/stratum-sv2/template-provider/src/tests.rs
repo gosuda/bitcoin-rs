@@ -4,7 +4,7 @@ use bitcoin_rs_serving::mining::{
     BlockValidationResult, CoinbaseBudget, GenerateRequest, GenerateSelection, solve_block,
 };
 use bitcoin_rs_consensus::primitives::{
-    Amount, BlockPayload, Hash256, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+    Amount, BlockImage, Hash256, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
     consensus_bytes,
 };
 use std::time::Instant;
@@ -288,7 +288,7 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
         tokio::task::spawn_blocking(move || submission_node
             .mining_control()
             .unwrap()
-            .submit_block(BlockPayload::from_local(assembled)))
+            .submit_block(BlockImage::from_local(assembled)))
         .await??,
         BlockValidationResult::Accepted
     );
@@ -297,7 +297,7 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
     assert!(Arc::ptr_eq(&hub.lookup(first.id).unwrap(), &first));
     assert_eq!(
         node.mining_control()?
-            .submit_block(BlockPayload::from_local(first.assemble_block(&solution)?))?,
+            .submit_block(BlockImage::from_local(first.assemble_block(&solution)?))?,
         BlockValidationResult::Duplicate
     );
     let funding = solved.txs[0].clone();
@@ -385,12 +385,12 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
     solve_block(&mut old_job, 1_000_000)?;
     assert_eq!(
         node.mining_control()?
-            .submit_block(BlockPayload::from_local(old_job))?,
+            .submit_block(BlockImage::from_local(old_job))?,
         BlockValidationResult::Accepted
     );
     assert!(matches!(
         node.mining_control()?
-            .submit_block(BlockPayload::from_local(projected))?,
+            .submit_block(BlockImage::from_local(projected))?,
         BlockValidationResult::Rejected(_)
     ));
 

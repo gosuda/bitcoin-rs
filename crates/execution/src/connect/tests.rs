@@ -12,8 +12,8 @@ use crate::chain::regtest_fixture::{
 };
 use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_consensus::primitives::{
-    Amount, Block, BlockHash, BlockPayload, LockTime, Network, OutPoint, Script, Sequence, Tx,
-    TxIn, TxOut, Witness, deserialize,
+    Amount, Block, BlockHash, BlockImage, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,
+    TxOut, Witness, consensus_bytes, deserialize,
 };
 
 use super::ApplyError;
@@ -37,7 +37,7 @@ fn apply_regtest_chain_to_height(
     let mut parent = genesis.block_hash();
     for current in 1..=height {
         let block = mined_child(parent, current)?;
-        handles.apply_block(&BlockPayload::from_local(block.clone()))?;
+        handles.apply_block(&BlockImage::from_local(block.clone()))?;
         parent = block.block_hash();
     }
     Ok(parent)
@@ -100,7 +100,7 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
             501,
             vec![coinbase(501), external.clone(), same_block.clone()],
         )?;
-        let outcome = handles.apply_block(&BlockPayload::from_local(block.clone()))?;
+        let outcome = handles.apply_block(&BlockImage::from_local(block.clone()))?;
 
         let utxo = handles.utxo();
         assert!(
@@ -172,7 +172,7 @@ fn version_max_tx_enforces_bip68_relative_lock() -> TestResult {
     let tip_hash = apply_regtest_chain_to_height(&handles, 500)?;
     let mut block = mined_block_with_prev_hash(tip_hash, 501, vec![coinbase(501), spend])?;
     let error = handles
-        .apply_block(&BlockPayload::from_local(block.clone()))
+        .apply_block(&BlockImage::from_local(block.clone()))
         .err()
         .ok_or(TestError::UnexpectedSuccess(
             "an unmet relative lock must reject the block",
@@ -190,7 +190,7 @@ fn version_max_tx_enforces_bip68_relative_lock() -> TestResult {
         501,
         vec![coinbase(501), version_max_spend(1000, 1)],
     )?;
-    handles.apply_block(&BlockPayload::from_local(block))?;
+    handles.apply_block(&BlockImage::from_local(block))?;
     Ok(())
 }
 
@@ -235,13 +235,13 @@ fn signet_solution_is_checked_on_commit_not_proposal() -> TestResult {
         Network::Signet,
         Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
     ));
-    handles.apply_block(&BlockPayload::from_local(Network::Signet.genesis_block()))?;
+    handles.apply_block(&BlockImage::from_local(Network::Signet.genesis_block()))?;
 
     let valid = signet_block_1()?;
     let invalid = with_invalid_solution(&valid)?;
     assert_ne!(invalid.block_hash(), valid.block_hash());
 
-    let invalid_payload = BlockPayload::from_local(invalid);
+    let invalid_payload = BlockImage::from_local(invalid);
     handles.validate_block(&invalid_payload)?;
     let error = handles
         .apply_block(&invalid_payload)
@@ -259,13 +259,12 @@ fn signet_solution_is_checked_on_commit_not_proposal() -> TestResult {
         "a bad solution invalidates the header branch; it is not retryable"
     );
 
-    let valid_payload = BlockPayload::from_local(valid);
+    let valid_payload = BlockImage::from_local(valid);
     handles.validate_block(&valid_payload)?;
     handles.apply_block(&valid_payload)?;
     Ok(())
 }
 
-use super::*;
 use crate::chain::regtest_fixture;
 use crate::test_support::MemoryBodies;
 use bitcoin_rs_consensus::primitives::encode::double_sha256;
@@ -304,22 +303,22 @@ fn preserved_witness_body_is_bound_before_commit_and_disconnect_keeps_exact_byte
         chain.block_body_store = Some(bodies.clone());
         chain.set_capture_flags(false, true);
         let genesis = Network::Regtest.genesis_block();
-        chain.apply_block(&BlockPayload::from_local(genesis.clone()))?;
+        chain.apply_block(&BlockImage::from_local(genesis.clone()))?;
         let child = witness_child(genesis.block_hash(), 1)?;
         let raw = bytes::Bytes::from(consensus_bytes(&child));
         let before = chain.chain_snapshot();
-        let valid = BlockPayload::from_raw(raw.clone())?;
-        assert_eq!(valid.block().block_hash(), child.block_hash());
+        let valid = BlockImage::from_raw(raw.clone())?;
+        assert_eq!(valid.block_hash(), child.block_hash());
         assert_eq!(valid.bytes(), &raw);
         let mut changed = child.clone();
         changed.txs[0].inputs[0].witness = Witness::from_stack(vec![vec![1; 32]]);
         assert_eq!(changed.txs[0].txid(), child.txs[0].txid());
-        let changed_payload = BlockPayload::from_local(changed);
+        let changed_payload = BlockImage::from_local(changed);
         assert_eq!(changed_payload.bytes().len(), raw.len());
         assert_ne!(changed_payload.bytes(), &raw);
         let mut truncated = raw.to_vec();
         truncated.pop();
-        assert!(BlockPayload::from_raw(bytes::Bytes::from(truncated)).is_err());
+        assert!(BlockImage::from_raw(bytes::Bytes::from(truncated)).is_err());
         assert!(matches!(
             chain.apply_block(&changed_payload),
             Err(ApplyError::Consensus(_))
@@ -336,7 +335,7 @@ fn preserved_witness_body_is_bound_before_commit_and_disconnect_keeps_exact_byte
 
         let mut bad_merkle = witness_child(child.block_hash(), 2)?;
         bad_merkle.txs[0].outputs[0].value = Amount::from_sat(1);
-        let bad_payload = BlockPayload::from_raw(bytes::Bytes::from(consensus_bytes(&bad_merkle)))?;
+        let bad_payload = BlockImage::from_raw(bytes::Bytes::from(consensus_bytes(&bad_merkle)))?;
         assert!(chain.apply_block(&bad_payload).is_err());
         assert_eq!(
             chain
@@ -352,7 +351,7 @@ fn preserved_witness_body_is_bound_before_commit_and_disconnect_keeps_exact_byte
         );
 
         chain.disconnect_block(&child)?;
-        let replayed = chain.apply_block(&BlockPayload::from_local(child.clone()))?;
+        let replayed = chain.apply_block(&BlockImage::from_local(child.clone()))?;
         assert_eq!(replayed.block_bytes, raw);
         assert_eq!(
             bodies.load_block_body(1, child.block_hash().0)?.as_deref(),

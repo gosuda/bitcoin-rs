@@ -23,11 +23,11 @@ fn funded_chain() -> TestResult<(crate::Chainstate, Tx, BlockHash)> {
         })
         .collect();
     remine(&mut funding)?;
-    chain.apply_block(&BlockPayload::from_local(funding.clone()))?;
+    chain.apply_block(&BlockImage::from_local(funding.clone()))?;
     let mut parent = funding.block_hash();
     for height in 2..=100 {
         let child = mined_child(parent, height)?;
-        chain.apply_block(&BlockPayload::from_local(child.clone()))?;
+        chain.apply_block(&BlockImage::from_local(child.clone()))?;
         parent = child.block_hash();
     }
     Ok((chain, funding.txs.remove(0), parent))
@@ -162,7 +162,7 @@ fn check_budget(
         .iter()
         .map(|tx| OutPoint::new(tx.txid(), 0))
         .collect();
-    let payload = BlockPayload::from_local(block);
+    let payload = BlockImage::from_local(block);
     let result = match path {
         Path::Proposal => chain.validate_block(&payload),
         Path::Direct | Path::AssumeValid => chain.apply_block(&payload).map(|_| ()),

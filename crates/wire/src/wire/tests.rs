@@ -149,12 +149,12 @@ fn receiver_restarts_at_a_frame_boundary_after_a_rejected_frame() -> Result<(), 
 
 #[test]
 fn block_message_roundtrip_preserves_wire_payload() -> Result<(), super::PeerError> {
-    use bitcoin_rs_consensus::primitives::BlockPayload;
+    use bitcoin_rs_consensus::primitives::BlockImage;
 
     let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let block_bytes = serialize(&block);
     let message = super::Message::Block(
-        BlockPayload::from_raw(bytes::Bytes::from(block_bytes.clone()))
+        BlockImage::from_raw(bytes::Bytes::from(block_bytes.clone()))
             .map_err(super::PeerError::NativeDecode)?,
     );
     let payload = encode_payload(&message)?;
@@ -175,7 +175,7 @@ fn block_message_roundtrip_preserves_wire_payload() -> Result<(), super::PeerErr
     assert_eq!(raw.as_ref(), decoded_payload.bytes().as_ref());
     assert_eq!(raw.as_ref(), payload.as_slice());
     assert_eq!(raw.as_ref(), block_bytes.as_slice());
-    let native_hash = decoded_payload.block().header.compute_hash();
+    let native_hash = decoded_payload.header().compute_hash();
     assert_eq!(native_hash.as_bytes(), &expected_hash.to_byte_array());
 
     Ok(())
@@ -222,15 +222,15 @@ fn read_message_accepts_payload_length_at_exact_cap() -> Result<(), PeerError> {
 
 #[test]
 fn block_payload_writes_the_same_frame_as_decoded_block() -> Result<(), PeerError> {
-    use bitcoin_rs_consensus::primitives::BlockPayload;
+    use bitcoin_rs_consensus::primitives::BlockImage;
 
     let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let block_bytes = serialize(&block);
     let payload_bytes = bytes::Bytes::from(block_bytes);
     let decoded = super::Message::Block(
-        BlockPayload::from_raw(payload_bytes.clone()).map_err(super::PeerError::NativeDecode)?,
+        BlockImage::from_raw(payload_bytes.clone()).map_err(super::PeerError::NativeDecode)?,
     );
-    let payload = super::Message::BlockPayload(payload_bytes);
+    let payload = super::Message::BlockBytes(payload_bytes);
 
     let mut decoded_wire = Vec::new();
     let mut payload_wire = Vec::new();
@@ -275,10 +275,10 @@ fn wire_len_matches_write_message_for_representative_messages() -> Result<(), Pe
             bitcoin_rs_consensus::primitives::Header::default();
             2_000
         ]),
-        super::Message::Block(bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        super::Message::Block(bitcoin_rs_consensus::primitives::BlockImage::from_local(
             bitcoin_rs_consensus::primitives::Block::default(),
         )),
-        super::Message::BlockPayload(bytes::Bytes::from(vec![0_u8; 80])),
+        super::Message::BlockBytes(bytes::Bytes::from(vec![0_u8; 80])),
         super::Message::Unknown {
             command: super::command_string("unknown")?,
             payload: vec![7; 61],

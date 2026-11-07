@@ -16,7 +16,7 @@ use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::bip34::check_bip34;
 use bitcoin_rs_consensus::header_rules::compact_is_met_by;
 use bitcoin_rs_consensus::primitives::{
-    Amount, BlockHash, BlockPayload, CompactTarget, Hash256, Header, LockTime, Network, OutPoint,
+    Amount, BlockHash, BlockImage, CompactTarget, Hash256, Header, LockTime, Network, OutPoint,
     Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, encode::consensus_bytes,
 };
 use bitcoin_rs_consensus::script::VerifyFlags;
@@ -1134,7 +1134,7 @@ struct RecordingControl {
     template: Option<BlockTemplate>,
     verdict: Mutex<Result<BlockValidationResult, MiningControlError>>,
     requests: Mutex<Vec<BlockTemplateRequest>>,
-    submitted: Mutex<Vec<BlockPayload>>,
+    submitted: Mutex<Vec<BlockImage>>,
 }
 
 impl RecordingControl {
@@ -1187,7 +1187,7 @@ impl MiningControl for RecordingControl {
 
     fn submit_block(
         &self,
-        payload: BlockPayload,
+        payload: BlockImage,
     ) -> Result<BlockValidationResult, MiningControlError> {
         lock(&self.submitted).push(payload);
         lock(&self.verdict).clone()

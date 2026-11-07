@@ -2,7 +2,7 @@ use super::error::ApplyError;
 use super::tx_count_delta_for;
 use super::{BlockProvenance, Chainstate, ProvenApply, PublishMode};
 use crate::chain::{ChainTxCount, TipSnapshot};
-use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, OutPoint};
+use bitcoin_rs_consensus::primitives::{Block, BlockImage, Hash256, OutPoint};
 use bitcoin_rs_storage::utxo::UtxoCoin;
 use bitcoin_rs_storage::utxo::contract::{
     OutputSource, RollbackError, UndoLoadError, load_block_undo, rollback_block_recovery,
@@ -507,14 +507,14 @@ fn replay_committed_gap(
     let Some(store) = handles.block_body_store.as_ref() else {
         return Err(unrecoverable("no block body store is attached"));
     };
-    let load_body = |height: u32, hash: Hash256| -> Result<BlockPayload, ApplyError> {
+    let load_body = |height: u32, hash: Hash256| -> Result<BlockImage, ApplyError> {
         let bytes = store
             .load_block_body(height, hash)
             .map_err(ApplyError::BlockBodyPersistence)?
             .ok_or_else(|| unrecoverable("a committed gap body is missing from storage"))?;
-        let payload = BlockPayload::from_raw(bytes::Bytes::from(bytes))
+        let payload = BlockImage::from_raw(bytes::Bytes::from(bytes))
             .map_err(|_| unrecoverable("a committed gap body does not decode"))?;
-        if payload.block().block_hash().0 != hash {
+        if payload.block_hash().0 != hash {
             return Err(unrecoverable(
                 "a stored body does not hash to its committed hash",
             ));
@@ -526,7 +526,7 @@ fn replay_committed_gap(
     let mut cursor = (head.height, head.tip);
     loop {
         let payload = load_body(cursor.0, cursor.1)?;
-        let parent = payload.block().header.prev_blockhash.0;
+        let parent = payload.header().prev_blockhash.0;
         chain.push(cursor);
         if cursor.0 == base_height {
             let expected_parent = restored.map_or_else(Hash256::default, |tip| tip.hash);
@@ -547,7 +547,7 @@ fn apply_replayed_gap_block(
     handles: &Chainstate,
     head: &DurableHead,
     restored: Option<&TipSnapshot>,
-    payload: &BlockPayload,
+    payload: &BlockImage,
     height: u32,
     hash: Hash256,
 ) -> Result<super::ConnectOutcome, ApplyError> {
@@ -629,7 +629,7 @@ fn replay_gap_chain(
     head: &DurableHead,
     chain: Vec<(u32, Hash256)>,
     restored: Option<&TipSnapshot>,
-    load_body: impl Fn(u32, Hash256) -> Result<BlockPayload, ApplyError>,
+    load_body: impl Fn(u32, Hash256) -> Result<BlockImage, ApplyError>,
 ) -> Result<(), ApplyError> {
     let unrecoverable = |reason: &'static str| gap_unrecoverable(head, restored, reason);
     let mut transition = Some(handles.begin_transition()?);

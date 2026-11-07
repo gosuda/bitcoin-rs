@@ -82,17 +82,17 @@ pub struct NodeState {
     prune_service: Option<Arc<dyn PruneService>>,
     mempool_gateway: Arc<bitcoin_rs_mempool::MempoolGateway>,
     p2p: Arc<bitcoin_rs_wire::P2pService>,
-    inbound_tx_tx: Sender<crate::p2p::InboundBody>,
-    inbound_tx_rx: Mutex<Option<Receiver<crate::p2p::InboundBody>>>,
-    package_capacity: crate::p2p::PackageCapacity,
-    pub tx_policy: Arc<crate::p2p::NodeTxPolicy>,
+    inbound_tx_tx: Sender<crate::p2p::tx_policy::ingress::InboundBody>,
+    inbound_tx_rx: Mutex<Option<Receiver<crate::p2p::tx_policy::ingress::InboundBody>>>,
+    package_capacity: crate::p2p::tx_policy::ingress::PackageCapacity,
+    pub tx_policy: Arc<crate::p2p::tx_policy::NodeTxPolicy>,
     transition: bitcoin_rs_execution::chain::TransitionDomain,
     chainstate: Arc<bitcoin_rs_execution::Chainstate>,
     followers: crate::chain_effects::ChainFollowers,
-    sync: Arc<crate::BlockSync>,
+    sync: Arc<crate::p2p::sync::BlockSync>,
     recovery_reporter: Arc<storage::RecoveryReporter>,
     pub(crate) snapshots: Arc<crate::snapshot::SnapshotControl>,
-    block_announce_rx: Mutex<Option<crate::p2p::BlockAnnounceReceiver>>,
+    block_announce_rx: Mutex<Option<crate::p2p::block_announce::BlockAnnounceReceiver>>,
     shutdown: Arc<bitcoin_rs_execution::chain::LatchWriter>,
     _p2p_shutdown_guard: bitcoin_rs_execution::chain::HookGuard,
 }
@@ -227,27 +227,31 @@ impl NodeState {
         Arc::clone(&self.recovery_reporter)
     }
 
-    pub fn inbound_tx_sender(&self) -> Sender<crate::p2p::InboundBody> {
+    pub fn inbound_tx_sender(&self) -> Sender<crate::p2p::tx_policy::ingress::InboundBody> {
         self.inbound_tx_tx.clone()
     }
 
     #[must_use]
-    pub fn take_inbound_tx_receiver(&self) -> Option<Receiver<crate::p2p::InboundBody>> {
+    pub fn take_inbound_tx_receiver(
+        &self,
+    ) -> Option<Receiver<crate::p2p::tx_policy::ingress::InboundBody>> {
         self.inbound_tx_rx.lock().take()
     }
 
     #[must_use]
-    pub fn package_capacity(&self) -> crate::p2p::PackageCapacity {
+    pub fn package_capacity(&self) -> crate::p2p::tx_policy::ingress::PackageCapacity {
         self.package_capacity.clone()
     }
 
     #[must_use]
-    pub fn take_block_announce_receiver(&self) -> Option<crate::p2p::BlockAnnounceReceiver> {
+    pub fn take_block_announce_receiver(
+        &self,
+    ) -> Option<crate::p2p::block_announce::BlockAnnounceReceiver> {
         self.block_announce_rx.lock().take()
     }
 
     #[must_use]
-    pub fn sync(&self) -> Arc<crate::BlockSync> {
+    pub fn sync(&self) -> Arc<crate::p2p::sync::BlockSync> {
         Arc::clone(&self.sync)
     }
 
@@ -289,7 +293,7 @@ impl NodeState {
     #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_block(
         &self,
-        payload: &bitcoin_rs_consensus::primitives::BlockPayload,
+        payload: &bitcoin_rs_consensus::primitives::BlockImage,
     ) -> core::result::Result<TipSnapshot, crate::chain_effects::ConnectMutationError> {
         let outcome = self.followers.apply_connect(&self.chainstate, payload)?;
         Ok(outcome.tip)

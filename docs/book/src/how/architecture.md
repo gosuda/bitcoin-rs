@@ -4,7 +4,7 @@ A block moves through six stages: the peer connection, the sync loop, the block 
 
 ```text
 peer read loop (crates/wire/src/listener.rs)
-  |  InboundBlock { BlockPayload, source, credits }
+  |  InboundBlock { BlockImage, source, credits }
   v
 bounded inbound-block channel (crates/wire/src/service.rs)
   |  wake

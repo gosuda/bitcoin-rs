@@ -781,7 +781,7 @@ mod tests {
 
     use parking_lot::Mutex;
 
-    use bitcoin_rs_consensus::primitives::{Block, BlockHash, BlockPayload, Network};
+    use bitcoin_rs_consensus::primitives::{Block, BlockHash, BlockImage, Network};
     use bitcoin_rs_storage::utxo::UtxoSet;
     use proptest::prelude::*;
     use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
@@ -1436,7 +1436,7 @@ mod tests {
                         let block = sut.take_prepared();
                         let error = match sut
                             .chainstate
-                            .apply_block(&BlockPayload::from_local(false_coinbase(&block)))
+                            .apply_block(&BlockImage::from_local(false_coinbase(&block)))
                         {
                             Err(e) => e,
                             Ok(_) => panic!("a block with a broken proof of work is refused"),
@@ -1464,7 +1464,7 @@ mod tests {
                     let block = sut.take_prepared();
                     let outcome = match sut
                         .chainstate
-                        .apply_block(&BlockPayload::from_local(block.clone()))
+                        .apply_block(&BlockImage::from_local(block.clone()))
                     {
                         Ok(o) => o,
                         Err(e) => panic!("a valid regtest block commits: {e}"),

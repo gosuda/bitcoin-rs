@@ -1,6 +1,6 @@
 use super::fee_revision::service_over;
 use super::*;
-use bitcoin_rs_consensus::primitives::{Sequence, TxIn, Witness};
+use bitcoin_rs_consensus::primitives::{BlockImage, Sequence, TxIn, Witness};
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_serving::mining::{MiningError, SelectedBody, assemble_candidate};
 use std::thread::JoinHandle;
@@ -306,7 +306,10 @@ fn budgeted_request_serves_an_installable_preparation_without_discarding_it() ->
     let (pool, _, _) = heavy_pool()?;
     let (source, service) = service_over(pool)?;
     let tip = source.tip.clone();
-    service.stage_tip(&tip, &Network::Regtest.genesis_block());
+    service.stage_tip(
+        &tip,
+        &BlockImage::from_local(Network::Regtest.genesis_block()),
+    );
     wait_until_ready(&service, tip.hash);
     service.publish_block_generation(tip.hash, &MutationResult::empty());
 
@@ -330,7 +333,10 @@ fn budgeted_request_before_the_receipt_leaves_the_preparation_for_the_ordinary_c
     let (pool, heavy, light) = heavy_pool()?;
     let (source, service) = service_over(pool)?;
     let tip = source.tip.clone();
-    service.stage_tip(&tip, &Network::Regtest.genesis_block());
+    service.stage_tip(
+        &tip,
+        &BlockImage::from_local(Network::Regtest.genesis_block()),
+    );
     wait_until_ready(&service, tip.hash);
 
     let served = service.get_block_template(None, Some(TIGHT))?.candidate;

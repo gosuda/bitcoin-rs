@@ -132,7 +132,7 @@ fn sinks_stamp_exact_connection_source() -> Result<(), TestError> {
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let block_bytes = bitcoin::consensus::encode::serialize(&genesis);
     let serialized = bytes::Bytes::from(block_bytes);
-    let payload = bitcoin_rs_consensus::primitives::BlockPayload::from_raw(serialized.clone())?;
+    let payload = bitcoin_rs_consensus::primitives::BlockImage::from_raw(serialized.clone())?;
     let source = lease.source(Some(addr));
 
     shared.send_headers_response(&lease, source, Vec::new());
@@ -156,8 +156,8 @@ fn send_block_forwards_the_blocks_header() -> Result<(), TestError> {
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let block_bytes = bitcoin::consensus::encode::serialize(&genesis);
     let payload =
-        bitcoin_rs_consensus::primitives::BlockPayload::from_raw(bytes::Bytes::from(block_bytes))?;
-    let header = payload.block().header;
+        bitcoin_rs_consensus::primitives::BlockImage::from_raw(bytes::Bytes::from(block_bytes))?;
+    let header = payload.header();
     let source = lease.source(Some(addr));
 
     shared.send_block(&lease, addr, payload, None);
@@ -185,9 +185,9 @@ fn send_block_unblocks_when_session_is_cancelled() -> Result<(), TestError> {
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let first_bytes = bitcoin::consensus::encode::serialize(&genesis);
     let first =
-        bitcoin_rs_consensus::primitives::BlockPayload::from_raw(bytes::Bytes::from(first_bytes))?;
+        bitcoin_rs_consensus::primitives::BlockImage::from_raw(bytes::Bytes::from(first_bytes))?;
     let second_bytes = first.bytes().clone();
-    let second = bitcoin_rs_consensus::primitives::BlockPayload::from_raw(second_bytes)?;
+    let second = bitcoin_rs_consensus::primitives::BlockImage::from_raw(second_bytes)?;
     shared.send_block(&lease, addr, first, None);
 
     let blocked = std::thread::spawn(move || {
@@ -917,7 +917,7 @@ fn collect_write_burst_coalesces_control_until_a_bulk_payload() {
     let (lease, rx) = queued(&[
         crate::Message::Ping(0),
         crate::Message::Pong(1),
-        crate::Message::Block(bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        crate::Message::Block(bitcoin_rs_consensus::primitives::BlockImage::from_local(
             bitcoin_rs_consensus::primitives::Block::default(),
         )),
         crate::Message::Ping(2),
@@ -955,7 +955,7 @@ fn collect_write_burst_coalesces_control_until_a_bulk_payload() {
 #[test]
 fn collect_write_burst_emits_a_bulk_payload_alone() {
     let (_lease, rx) = queued(&[
-        crate::Message::Block(bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        crate::Message::Block(bitcoin_rs_consensus::primitives::BlockImage::from_local(
             bitcoin_rs_consensus::primitives::Block::default(),
         )),
         crate::Message::Ping(1),
@@ -1121,7 +1121,7 @@ fn forward_block_cancels_promptly_on_latch() {
     let (outbound_tx, _outbound_rx) = crossbeam_channel::unbounded();
     let lease = crate::PeerLease::new(outbound_tx);
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-    let first = bitcoin_rs_consensus::primitives::BlockPayload::from_raw(bytes::Bytes::from(
+    let first = bitcoin_rs_consensus::primitives::BlockImage::from_raw(bytes::Bytes::from(
         bitcoin::consensus::encode::serialize(&genesis),
     ))
     .expect("payload");

@@ -14,7 +14,7 @@ use std::time::Instant;
 use arc_swap::ArcSwapOption;
 use bitcoin::hashes::Hash;
 use bitcoin_rs_consensus::primitives::{
-    Block, BlockHash, BlockPayload, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
+    Block, BlockHash, BlockImage, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
     consensus_bytes,
 };
 use bitcoin_rs_execution::chain::{
@@ -81,7 +81,7 @@ impl SyncChain for RefusingChain {
         self.0.minimum_chain_work()
     }
 
-    fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError> {
+    fn check_body_binding(&self, block: &BlockImage) -> Result<(), SyncChainError> {
         self.0.check_body_binding(block)
     }
 
@@ -89,14 +89,14 @@ impl SyncChain for RefusingChain {
         self.0.window_len(serialized_sizes)
     }
 
-    fn commit_window(&self, payloads: &[&BlockPayload]) -> Result<usize, WindowCommitError> {
+    fn commit_window(&self, payloads: &[&BlockImage]) -> Result<usize, WindowCommitError> {
         self.0.commit_window(payloads)
     }
 
     fn switch_to_branch(
         &self,
         target: NodeId,
-        staged_body: &mut dyn FnMut(Hash256) -> Option<BlockPayload>,
+        staged_body: &mut dyn FnMut(Hash256) -> Option<BlockImage>,
         connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), ReorgError> {
         self.0.switch_to_branch(target, staged_body, connected_body)
@@ -1046,7 +1046,7 @@ fn stage_body(sync: &BlockSync, block: &Block) {
     sync.scheduler.lock().stager.insert(
         hash,
         None,
-        BlockPayload::from_local(block.clone()),
+        BlockImage::from_local(block.clone()),
         None,
         Instant::now(),
     );
@@ -1389,7 +1389,7 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
 
     chain.bootstrap_genesis();
     for block in &blocks[..2] {
-        let fixture_payload = BlockPayload::from_local(block.clone());
+        let fixture_payload = BlockImage::from_local(block.clone());
         chain
             .commit_window(&[&fixture_payload])
             .map_err(|error| crate::test_support::TestError::Commit(format!("{error:?}")))?;
@@ -2938,7 +2938,7 @@ impl SyncChain for TreeReadHook {
         self.chain.minimum_chain_work()
     }
 
-    fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError> {
+    fn check_body_binding(&self, block: &BlockImage) -> Result<(), SyncChainError> {
         self.chain.check_body_binding(block)
     }
 
@@ -2946,14 +2946,14 @@ impl SyncChain for TreeReadHook {
         self.chain.window_len(serialized_sizes)
     }
 
-    fn commit_window(&self, payloads: &[&BlockPayload]) -> Result<usize, WindowCommitError> {
+    fn commit_window(&self, payloads: &[&BlockImage]) -> Result<usize, WindowCommitError> {
         self.chain.commit_window(payloads)
     }
 
     fn switch_to_branch(
         &self,
         target: NodeId,
-        staged_body: &mut dyn FnMut(Hash256) -> Option<BlockPayload>,
+        staged_body: &mut dyn FnMut(Hash256) -> Option<BlockImage>,
         connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), ReorgError> {
         self.chain

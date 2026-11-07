@@ -183,7 +183,7 @@ impl BlockSync {
 
     pub(super) fn receive_historical(&self, mut inbound: InboundBlock) -> Option<InboundBlock> {
         let _work = self.historical_work.lock();
-        let hash = inbound.payload().block().block_hash().0;
+        let hash = inbound.payload().block_hash().0;
         let Some(source) = inbound.source else {
             return Some(inbound);
         };
@@ -194,7 +194,7 @@ impl BlockSync {
             return None;
         }
         let now = Instant::now();
-        if let Err(error) = self.chain.check_body_binding(inbound.payload().block()) {
+        if let Err(error) = self.chain.check_body_binding(inbound.payload()) {
             tracing::warn!(%error, "historical body rejected");
             let mut historical = self.historical.lock();
             historical.window.reject_delivery(hash, Some(source), now);

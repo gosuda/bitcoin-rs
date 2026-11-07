@@ -18,7 +18,7 @@ use bitcoin::p2p::message_filter::{
 };
 use bitcoin::p2p::message_network::{Reject, VersionMessage};
 use bitcoin_rs_consensus::primitives::{
-    BlockPayload, ConsensusDecode, ConsensusEncode, Header, Tx, deserialize,
+    BlockImage, ConsensusDecode, ConsensusEncode, Header, Tx, deserialize,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -62,8 +62,8 @@ pub enum Message {
     GetHeaders(GetHeadersMessage),
     MemPool,
     Tx(Tx),
-    Block(BlockPayload),
-    BlockPayload(bytes::Bytes),
+    Block(BlockImage),
+    BlockBytes(bytes::Bytes),
     Headers(Vec<Header>),
     SendHeaders,
     GetAddr,
@@ -115,7 +115,7 @@ impl Message {
             Self::GetHeaders(_) => "getheaders",
             Self::MemPool => "mempool",
             Self::Tx(_) => "tx",
-            Self::Block(_) | Self::BlockPayload(_) => "block",
+            Self::Block(_) | Self::BlockBytes(_) => "block",
             Self::Headers(_) => "headers",
             Self::SendHeaders => "sendheaders",
             Self::GetAddr => "getaddr",
@@ -161,7 +161,7 @@ impl Message {
             self,
             Self::Tx(_)
                 | Self::Block(_)
-                | Self::BlockPayload(_)
+                | Self::BlockBytes(_)
                 | Self::Headers(_)
                 | Self::MerkleBlock(_)
                 | Self::CFilter(_)
@@ -188,7 +188,7 @@ impl Message {
             Self::MemPool => NetworkMessage::MemPool,
             Self::Tx(_)
             | Self::Block(_)
-            | Self::BlockPayload(_)
+            | Self::BlockBytes(_)
             | Self::Headers(_)
             | Self::Feature(_)
             | Self::SendPackages(_)
@@ -378,7 +378,7 @@ impl FramedMessage {
 pub(crate) fn message_payload(message: &Message) -> Result<bytes::Bytes, PeerError> {
     let payload = match message {
         Message::Block(block) => block.bytes().clone(),
-        Message::BlockPayload(bytes) | Message::PkgTxnsPayload(bytes) => bytes.clone(),
+        Message::BlockBytes(bytes) | Message::PkgTxnsPayload(bytes) => bytes.clone(),
         other => bytes::Bytes::from(encode_payload(other)?),
     };
     if payload.len() > MAX_MESSAGE_PAYLOAD {
@@ -570,7 +570,7 @@ fn pending_body(
 
 pub fn wire_len(message: &Message) -> Result<usize, PeerError> {
     let payload_len = match message {
-        Message::BlockPayload(payload) | Message::PkgTxnsPayload(payload) => payload.len(),
+        Message::BlockBytes(payload) | Message::PkgTxnsPayload(payload) => payload.len(),
         Message::Tx(tx) => tx.total_size(),
         Message::Block(block) => block.bytes().len(),
         Message::Headers(headers) => {
@@ -623,7 +623,7 @@ pub fn encode_payload(message: &Message) -> Result<Vec<u8>, PeerError> {
     match message {
         Message::Tx(tx) => tx.consensus_encode(&mut payload),
         Message::Block(block) => payload.extend_from_slice(block.bytes()),
-        Message::BlockPayload(bytes) | Message::PkgTxnsPayload(bytes) => {
+        Message::BlockBytes(bytes) | Message::PkgTxnsPayload(bytes) => {
             payload.extend_from_slice(bytes);
         }
         Message::Headers(headers) => {
@@ -699,7 +699,7 @@ pub(crate) fn decode_payload(command: &str, payload: &bytes::Bytes) -> Result<Me
         "getheaders" => Message::GetHeaders(decode_getheaders(payload)?),
         "mempool" => empty_payload(payload, Message::MemPool)?,
         "tx" => Message::Tx(deserialize::<Tx>(payload)?),
-        "block" => Message::Block(BlockPayload::from_raw(payload.clone())?),
+        "block" => Message::Block(BlockImage::from_raw(payload.clone())?),
         "headers" => Message::Headers(decode_headers(payload)?),
         "sendheaders" => empty_payload(payload, Message::SendHeaders)?,
         "getaddr" => empty_payload(payload, Message::GetAddr)?,

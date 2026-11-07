@@ -1,4 +1,4 @@
-use crate::primitives::{Tx, Witness};
+use crate::primitives::{Tx, TxView, Witness};
 
 use crate::script::{EarlyEndOfScript, Instruction, instructions, is_p2wpkh, is_p2wsh, opcode};
 
@@ -46,25 +46,37 @@ pub fn count_accurate(script: &[u8]) -> u32 {
     count
 }
 
-pub fn count_segwit(script: &[u8], witness: &Witness) -> u32 {
+#[must_use]
+pub fn count_segwit_last(script: &[u8], last_item: Option<&[u8]>) -> u32 {
     if is_p2wpkh(script) {
         return 1;
     }
     if !is_p2wsh(script) {
         return 0;
     }
-    witness.last().map_or(0, count_accurate)
+    last_item.map_or(0, count_accurate)
 }
 
-pub fn count_tx_legacy(tx: &Tx) -> u32 {
+#[must_use]
+pub fn count_segwit(script: &[u8], witness: &Witness) -> u32 {
+    count_segwit_last(script, witness.last())
+}
+
+#[must_use]
+pub fn count_tx_legacy_view(tx: TxView<'_>) -> u32 {
     let mut count = 0_u32;
-    for input in &tx.inputs {
-        count = count.saturating_add(count_legacy(&input.script_sig));
+    for i in 0..tx.input_count() {
+        count = count.saturating_add(count_legacy(tx.input_script_sig(i)));
     }
-    for output in &tx.outputs {
-        count = count.saturating_add(count_legacy(&output.script_pubkey));
+    for i in 0..tx.output_count() {
+        count = count.saturating_add(count_legacy(tx.output_script(i)));
     }
     count
+}
+
+#[must_use]
+pub fn count_tx_legacy(tx: &Tx) -> u32 {
+    count_tx_legacy_view(tx.into())
 }
 
 #[cfg(test)]

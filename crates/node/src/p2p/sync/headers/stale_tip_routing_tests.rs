@@ -83,7 +83,7 @@ impl SyncChain for RoutingStubChain {
 
     fn check_body_binding(
         &self,
-        _block: &bitcoin_rs_consensus::primitives::Block,
+        _block: &bitcoin_rs_consensus::primitives::BlockImage,
     ) -> Result<(), SyncChainError> {
         Ok(())
     }
@@ -94,7 +94,7 @@ impl SyncChain for RoutingStubChain {
 
     fn commit_window(
         &self,
-        _payloads: &[&bitcoin_rs_consensus::primitives::BlockPayload],
+        _payloads: &[&bitcoin_rs_consensus::primitives::BlockImage],
     ) -> Result<usize, WindowCommitError> {
         Ok(0)
     }
@@ -105,7 +105,7 @@ impl SyncChain for RoutingStubChain {
         _staged_body: &mut dyn FnMut(
             Hash256,
         )
-            -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
+            -> Option<bitcoin_rs_consensus::primitives::BlockImage>,
         _connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), bitcoin_rs_execution::reorg::ReorgError> {
         Ok(())

@@ -5,7 +5,7 @@ use crate::p2p::sync::chain::{
     HeaderAdmission, HistoricalAdvance, ReorgError, SyncChain, SyncChainError,
     WindowApplyDisposition, WindowCommitError,
 };
-use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Header, Network};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Header, Network};
 use bitcoin_rs_wire::{InboundHeaders, PeerTable};
 use crossbeam_channel::Receiver;
 
@@ -134,7 +134,7 @@ impl SyncChain for NodeSyncChain {
         })
     }
 
-    fn connect_historical(&self, payload: &BlockPayload) -> Result<(), SyncChainError> {
+    fn connect_historical(&self, payload: &BlockImage) -> Result<(), SyncChainError> {
         let manager = self
             .assumeutxo
             .as_ref()
@@ -189,7 +189,7 @@ impl SyncChain for NodeSyncChain {
         }
     }
 
-    fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError> {
+    fn check_body_binding(&self, block: &BlockImage) -> Result<(), SyncChainError> {
         let hash = Hash256::from(block.block_hash());
         let segwit_active = {
             let tree = self.block_tree.read();
@@ -205,7 +205,7 @@ impl SyncChain for NodeSyncChain {
                     .segwit_active
                 })
         };
-        bitcoin_rs_consensus::check_block_body_binding(
+        bitcoin_rs_consensus::check_image_body_binding(
             block,
             bitcoin_rs_consensus::BlockRuleContext { segwit_active },
         )
@@ -216,7 +216,7 @@ impl SyncChain for NodeSyncChain {
         bitcoin_rs_execution::window_len(serialized_sizes)
     }
 
-    fn commit_window(&self, payloads: &[&BlockPayload]) -> Result<usize, WindowCommitError> {
+    fn commit_window(&self, payloads: &[&BlockImage]) -> Result<usize, WindowCommitError> {
         let transition = self
             .handles
             .begin_transition()
@@ -238,14 +238,14 @@ impl SyncChain for NodeSyncChain {
         let result = match transition.connect_window(payloads) {
             Ok(outcomes) => {
                 for (payload, outcome) in payloads.iter().zip(&outcomes) {
-                    self.followers.on_connect(payload.block(), outcome);
+                    self.followers.on_connect(payload, outcome);
                 }
                 let applied = outcomes.len();
                 settle_window_success(transition, mempool_change, applied, outcomes)
             }
             Err(error) => {
                 for (payload, outcome) in payloads.iter().zip(&error.committed) {
-                    self.followers.on_connect(payload.block(), outcome);
+                    self.followers.on_connect(payload, outcome);
                 }
                 Err(settle_window_failure(transition, mempool_change, error))
             }
@@ -261,7 +261,7 @@ impl SyncChain for NodeSyncChain {
     fn switch_to_branch(
         &self,
         target: bitcoin_rs_execution::chain::NodeId,
-        staged_body: &mut dyn FnMut(Hash256) -> Option<BlockPayload>,
+        staged_body: &mut dyn FnMut(Hash256) -> Option<BlockImage>,
         connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), ReorgError> {
         crate::reorg::switch_to_branch(

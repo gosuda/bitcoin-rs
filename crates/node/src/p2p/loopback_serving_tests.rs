@@ -10,8 +10,8 @@ use bitcoin::blockdata::block::Block as RegistryBlock;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_consensus::primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint,
-    Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
+    Amount, Block, BlockHash, BlockImage, CompactTarget, Hash256, Header, LockTime, Network,
+    OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader};
 use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
@@ -411,7 +411,10 @@ fn a_held_block_answers_a_negotiated_compact_getdata_over_a_real_socket() -> Tes
     )?);
     let held_hash = held.block_hash();
     let slot = RecentBlockSlot::default();
-    slot.store(Hash256::from(held_hash), Arc::clone(&held));
+    slot.store(
+        Hash256::from(held_hash),
+        Arc::new(BlockImage::from_local((*held).clone())),
+    );
     let chain = chain_over(&[genesis, tip], slot)?;
     assert_eq!(
         chain.active_height(held_hash),
@@ -537,7 +540,7 @@ fn getblocktxn_survives_shared_saturation_without_resending() -> TestResult {
     let genesis = child_block(BlockHash::default(), 0, vec![coinbase(0, 1)])?;
     let hog_block = child_block(genesis.block_hash(), 1, vec![coinbase(1, HOG_OUTPUTS)])?;
     let victim_block = child_block(hog_block.block_hash(), 2, vec![coinbase(2, 1), payment(2)])?;
-    let frame_len = wire_len_of(&Message::BlockPayload(consensus_bytes(&hog_block).into()))?;
+    let frame_len = wire_len_of(&Message::BlockBytes(consensus_bytes(&hog_block).into()))?;
     let request = Message::GetBlockTxn(GetBlockTxn {
         txs_request: BlockTransactionsRequest {
             block_hash: wire_block_hash(victim_block.block_hash()),
@@ -612,7 +615,7 @@ fn the_saturated_aggregate_refuses_a_second_connection_until_the_first_closes() 
     let hog_item = Inventory::WitnessBlock(wire_block_hash(hog_block.block_hash()));
     let victim_item = Inventory::WitnessBlock(wire_block_hash(victim_block.block_hash()));
     let missing = Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array([0xee; 32]));
-    let frame_len = wire_len_of(&Message::BlockPayload(bytes::Bytes::from(consensus_bytes(
+    let frame_len = wire_len_of(&Message::BlockBytes(bytes::Bytes::from(consensus_bytes(
         &hog_block,
     ))))?;
     let victim_payload = consensus_bytes(&victim_block);
@@ -698,7 +701,7 @@ fn the_saturated_aggregate_refuses_a_second_connection_until_the_first_closes() 
             "the victim's body must precede its pong, got {received:?}"
         )));
     };
-    assert_eq!(block.block(), &blocks[2]);
+    assert_eq!(block.materialize(), blocks[2]);
     assert_eq!(&raw[..], victim_payload.as_slice());
     wait_until("the aggregate to drain once the victim was served", || {
         node.aggregate.pending() == 0

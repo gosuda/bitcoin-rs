@@ -20,8 +20,10 @@ pub(crate) enum JournalDeltaError {
     UnmatchedRestore(bitcoin_rs_consensus::primitives::OutPoint),
 }
 
-pub(crate) fn mutations_for_block(
-    changes: &BlockChanges<&'_ bitcoin_rs_consensus::primitives::TxOut>,
+pub(crate) fn mutations_for_block<
+    T: std::borrow::Borrow<bitcoin_rs_consensus::primitives::TxOut> + Clone,
+>(
+    changes: &BlockChanges<T>,
     undo_coins: impl IntoIterator<Item = Coin>,
 ) -> Result<Vec<Mutation>, JournalDeltaError> {
     let mut restores = HashMap::new();
@@ -35,7 +37,7 @@ pub(crate) fn mutations_for_block(
     for add in changes.adds() {
         let new_coin = Coin {
             outpoint: add.outpoint,
-            txout: add.txout.clone(),
+            txout: add.txout.borrow().clone(),
             height: add.height,
             coinbase: add.coinbase,
         };

@@ -29,7 +29,7 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
 
     let (seed_tip_hash, first_block_hash, first_block_bytes) = {
         let state = NodeState::open(seed_config(&data_dir), None)?;
-        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
             Network::Regtest.genesis_block(),
         ))?;
         let outcome = seed_chain(&state, SEED_BLOCKS)?;
@@ -92,7 +92,7 @@ fn clean_shutdown_and_reopen_preserve_rejected_fee_history() -> Result<()> {
     let data_dir = dir.path().join("node");
     {
         let state = NodeState::open(seed_config(&data_dir), None)?;
-        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
             Network::Regtest.genesis_block(),
         ))?;
         state.publish_checkpoint()?;
@@ -272,7 +272,7 @@ fn embedded_node_historical_prefix_queries() -> Result<()> {
 
     {
         let state = NodeState::open(seed_config(&data_dir), None)?;
-        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
             Network::Regtest.genesis_block(),
         ))?;
         let _ = seed_chain(&state, SEED_BLOCKS)?;
@@ -372,7 +372,7 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<(Hash256, Hash256, Vec<u8
         block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
             .ok_or_else(|| TestError::message("seed block must have a merkle root"))?;
         regtest_fixture::mine_block_to_declared_target(&mut block)?;
-        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
             block.clone(),
         ))?;
         tip = applied
@@ -431,7 +431,7 @@ fn dropped_node_releases_services_and_datadir_for_reopen() -> Result<()> {
 
     let (_seed_tip_hash, _first, _bytes) = {
         let state = NodeState::open(seed_config(&data_dir), None)?;
-        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
             Network::Regtest.genesis_block(),
         ))?;
         let outcome = seed_chain(&state, 1)?;

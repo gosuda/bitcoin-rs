@@ -5,7 +5,7 @@ use crate::chain::regtest_fixture::{
     mined_regtest_child_at as mined_child, mined_regtest_child_at_time,
 };
 use bitcoin_rs_consensus::primitives::{
-    Amount, Block, BlockPayload, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,
+    Amount, Block, BlockImage, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Witness,
 };
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
@@ -80,7 +80,7 @@ fn chain_to(height: u32) -> TestResult<Fixture> {
             pay_to_true(&mut block.txs[0]);
             remine(&mut block)?;
         }
-        chain.apply_block(&BlockPayload::from_local(block.clone()))?;
+        chain.apply_block(&BlockImage::from_local(block.clone()))?;
         parent = block.block_hash();
         blocks.push(block);
     }
@@ -112,7 +112,7 @@ fn coinbase_maturity_refuses_depth_99_and_accepts_depth_100() -> TestResult {
         100,
         vec![coinbase(100), spend_tx.clone()],
     )?;
-    let outcome = refused.chain.apply_block(&BlockPayload::from_local(block));
+    let outcome = refused.chain.apply_block(&BlockImage::from_local(block));
     assert!(
         matches!(
             outcome,
@@ -151,9 +151,7 @@ fn coinbase_maturity_refuses_depth_99_and_accepts_depth_100() -> TestResult {
         101,
         vec![coinbase(101), spend_tx.clone()],
     )?;
-    accepted
-        .chain
-        .apply_block(&BlockPayload::from_local(block))?;
+    accepted.chain.apply_block(&BlockImage::from_local(block))?;
     assert!(
         accepted
             .chain
@@ -320,7 +318,7 @@ fn a_block_with_a_duplicate_live_txid_is_refused_at_any_height() -> TestResult {
         3,
         vec![coinbase(3), spend_tx],
     )?;
-    let outcome = fixture.chain.apply_block(&BlockPayload::from_local(block));
+    let outcome = fixture.chain.apply_block(&BlockImage::from_local(block));
     assert!(
         matches!(
             outcome,
@@ -338,9 +336,14 @@ struct NoopObserver;
 impl crate::reorg::ReorgObserver for NoopObserver {
     fn disconnected(&mut self, _: &crate::DisconnectOutcome) {}
 
-    fn connected(&mut self, _: &Block, _: &crate::ConnectOutcome) {}
+    fn connected(
+        &mut self,
+        _: &bitcoin_rs_consensus::primitives::BlockImage,
+        _: &crate::ConnectOutcome,
+    ) {
+    }
 
-    fn reconsider_disconnected(&mut self, _: &Block) {}
+    fn reconsider_disconnected(&mut self, _: &bitcoin_rs_consensus::primitives::BlockImage) {}
 }
 
 // RCV-08
@@ -429,7 +432,7 @@ fn block_output_sums_at_the_money_boundary() -> TestResult {
         3,
         vec![coinbase(3), spend(funding, max_money + 1)],
     )?;
-    let outcome = fixture.chain.apply_block(&BlockPayload::from_local(above));
+    let outcome = fixture.chain.apply_block(&BlockImage::from_local(above));
     assert!(
         matches!(
             outcome,
@@ -445,7 +448,7 @@ fn block_output_sums_at_the_money_boundary() -> TestResult {
         3,
         vec![coinbase(3), spend(funding, max_money)],
     )?;
-    let outcome = fixture.chain.apply_block(&BlockPayload::from_local(exact));
+    let outcome = fixture.chain.apply_block(&BlockImage::from_local(exact));
     assert!(
         matches!(
             outcome,
@@ -491,7 +494,7 @@ fn a_block_may_spend_a_same_block_output_only_in_creation_order() -> TestResult 
     )?;
     let outcome = forward_fixture
         .chain
-        .apply_block(&BlockPayload::from_local(forward));
+        .apply_block(&BlockImage::from_local(forward));
     assert!(
         matches!(
             outcome,
@@ -525,7 +528,7 @@ fn a_block_may_spend_a_same_block_output_only_in_creation_order() -> TestResult 
     )?;
     ordered_fixture
         .chain
-        .apply_block(&BlockPayload::from_local(ordered))?;
+        .apply_block(&BlockImage::from_local(ordered))?;
     assert!(
         ordered_fixture
             .chain
@@ -556,7 +559,7 @@ fn a_block_cannot_spend_one_coin_twice() -> TestResult {
         3,
         vec![coinbase(3), first.clone(), second.clone()],
     )?;
-    let outcome = fixture.chain.apply_block(&BlockPayload::from_local(block));
+    let outcome = fixture.chain.apply_block(&BlockImage::from_local(block));
     assert!(
         matches!(
             outcome,

@@ -261,7 +261,9 @@ impl ForkFixture {
             if height > 0 {
                 let (_, undo, _) = bitcoin_rs_storage::utxo::contract::build_block_changes(
                     &bitcoin_rs_storage::utxo::contract::BlockChangeInputs {
-                        block: &block,
+                        block: &bitcoin_rs_consensus::primitives::BlockImage::from_local(
+                            block.clone(),
+                        ),
                         height,
                         txids: &txids,
                         same_block_spent: None,

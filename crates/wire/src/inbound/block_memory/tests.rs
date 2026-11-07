@@ -2,7 +2,7 @@ use super::*;
 use crate::Message;
 use crate::peer::Peer;
 use bitcoin::p2p::Magic;
-use bitcoin_rs_consensus::primitives::{BlockPayload, Network, varint};
+use bitcoin_rs_consensus::primitives::{BlockImage, Network, varint};
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -153,7 +153,7 @@ fn framed(bytes: Vec<u8>) -> Result<Vec<u8>, PeerError> {
     crate::wire::write_message(
         &mut frame,
         Magic::REGTEST,
-        &Message::BlockPayload(bytes.into()),
+        &Message::BlockBytes(bytes.into()),
     )?;
     Ok(frame)
 }
@@ -185,8 +185,8 @@ fn witness_amplification_is_reserved_before_decode_and_retained_through_queue_dr
     let Message::Block(payload) = message else {
         return Err(TestError::Missing("missing block message"));
     };
-    assert_eq!(payload.block().txs[0].inputs[0].witness.len(), 3_998_852);
-    let retained = payload.bytes().len() + payload.block().retained_heap_bytes();
+    assert_eq!(payload.tx(0).witness_item_count(0), 3_998_852);
+    let retained = payload.bytes().len() + payload.retained_heap_bytes();
     assert_eq!(*memory.used.lock(), retained);
     let mut inbound = crate::InboundBlock::new(payload, None, None);
     inbound.memory_credit = credit;
@@ -220,7 +220,7 @@ fn cancellation_precedes_typed_decode_and_malformed_decode_releases_credit() -> 
     crate::wire::write_message(
         &mut frame,
         Magic::REGTEST,
-        &Message::Block(BlockPayload::from_local(Network::Regtest.genesis_block())),
+        &Message::Block(BlockImage::from_local(Network::Regtest.genesis_block())),
     )?;
     let mut peer = Peer::new(Cursor::new(frame), Magic::REGTEST);
     drop(peer.read_message_bounded(&memory, || false)?);

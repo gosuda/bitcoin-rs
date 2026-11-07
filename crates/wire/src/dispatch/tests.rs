@@ -35,7 +35,7 @@ use crate::peer::{PackageRequest, Peer, PeerState};
 use crate::wire::{MAX_HEADERS_MESSAGE_COUNT, Message, PROTOCOL_VERSION, PeerError};
 
 fn block_payload(block: &Block) -> Message {
-    Message::BlockPayload(bytes::Bytes::from(
+    Message::BlockBytes(bytes::Bytes::from(
         bitcoin_rs_consensus::primitives::consensus_bytes(block),
     ))
 }
@@ -316,7 +316,7 @@ fn getdata_serves_available_blocks_and_reports_missing_inventory() -> Result<(),
 
     let responses = dispatch_collect(&mut peer, &message, Some(&chain))?;
 
-    let [Message::BlockPayload(found), Message::NotFound(not_found)] = responses.as_slice() else {
+    let [Message::BlockBytes(found), Message::NotFound(not_found)] = responses.as_slice() else {
         panic!("expected block payload plus notfound, got {responses:?}");
     };
     let found = deserialize::<Block>(found)

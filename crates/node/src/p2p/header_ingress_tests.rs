@@ -19,10 +19,10 @@ fn full_header_ingress_preserves_responses_and_body_first_order() -> TestResult 
     let source = lease.source(Some(addr));
     shared.send_headers_response(&lease, source, Vec::new());
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-    let payload = bitcoin_rs_consensus::primitives::BlockPayload::from_raw(bytes::Bytes::from(
+    let payload = bitcoin_rs_consensus::primitives::BlockImage::from_raw(bytes::Bytes::from(
         bitcoin::consensus::serialize(&genesis),
     ))?;
-    let expected = payload.block().header;
+    let expected = payload.materialize().header;
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
     let worker = std::thread::spawn(move || {
         shared.send_block(&lease, addr, payload, None);
@@ -30,7 +30,7 @@ fn full_header_ingress_preserves_responses_and_body_first_order() -> TestResult 
     });
 
     let body = blocks_rx.recv_timeout(Duration::from_secs(3))?;
-    assert_eq!(body.payload().block().header, expected);
+    assert_eq!(body.payload().materialize().header, expected);
     assert!(done_rx.recv_timeout(Duration::from_millis(30)).is_err());
     let response = headers_rx.recv()?;
     assert!(response.wire_response);
@@ -272,7 +272,7 @@ fn spawn_ingress_producer(
                 shared.send_block(
                     &lease,
                     addr,
-                    bitcoin_rs_consensus::primitives::BlockPayload::from_local(block),
+                    bitcoin_rs_consensus::primitives::BlockImage::from_local(block),
                     None,
                 );
             }

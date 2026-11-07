@@ -299,7 +299,7 @@ pub(crate) fn seed_fresh_chain(state: &NodeState, count: u32) -> Result<Hash256>
     if state.chainstate().applied_tip_snapshot().is_none() {
         let genesis = Network::Regtest.genesis_block();
         state
-            .apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+            .apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 genesis,
             ))
             .map_err(|error| TestError::message(format!("genesis apply failed: {error}")))?;
@@ -312,7 +312,7 @@ pub(crate) fn seed_fresh_chain(state: &NodeState, count: u32) -> Result<Hash256>
             .map_err(|_| TestError::message("fresh seed time out of u32 range"))?;
         let block = fresh_child(tip.hash, height, time, Vec::new())?;
         state
-            .apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+            .apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 block,
             ))
             .map_err(|error| {

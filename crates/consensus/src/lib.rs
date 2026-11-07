@@ -74,19 +74,21 @@ mod bip113_tests {
     }
 }
 
-pub use block_view::{BlockFacts, BlockView};
+pub use block_view::{BlockFacts, BlockView, BlockViewSource};
 pub use engine::ValidationEngine;
 pub use script_cache::{SCRIPT_EXECUTION_CACHE_ENTRIES, ScriptExecutionCache, WindowCacheTakes};
 pub use signet::check_signet_block_solution;
-pub use sigops::transaction_sigop_cost;
+pub use sigops::{transaction_sigop_cost, transaction_sigop_cost_view};
 pub use verify_block::{
     BlockRuleContext, MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_WEIGHT, WITNESS_SCALE_FACTOR,
-    check_block_body_binding, compute_merkle_root, is_sixty_four_byte_mutation, verify_block_rules,
+    block_image_witness_commitment_matches, check_block_body_binding, check_image_body_binding,
+    compute_merkle_root, is_sixty_four_byte_mutation, verify_block_image_rules, verify_block_rules,
     verify_block_rules_precomputed, verify_flags, verify_merkle_root_with_txids,
 };
 pub use verify_tx::{
-    ScriptStageTimings, check_coinbase_maturity, is_final_tx, verify_block_input_scripts,
-    verify_coinbase_script_sig_size, verify_transaction, verify_transaction_non_script,
+    ScriptStageTimings, check_coinbase_maturity, is_final_tx, is_final_tx_view,
+    verify_block_input_scripts, verify_coinbase_script_sig_size, verify_transaction,
+    verify_transaction_non_script,
 };
 
 use crate::primitives::{OutPoint, TxOut};

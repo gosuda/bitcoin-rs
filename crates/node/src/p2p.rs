@@ -47,7 +47,7 @@ pub use block_announce::{
     BlockAnnounceConfig, BlockAnnounceQueue, BlockAnnounceReceiver, BlockAnnouncer,
     MAX_BLOCKS_TO_ANNOUNCE, MAX_HIGH_BANDWIDTH_PEERS, spawn_block_announce_worker,
 };
-pub use block_stager::BlockStager;
+pub(crate) use block_stager::BlockStager;
 pub use chain_query::{ActiveChainQuery, RecentBlockSlot};
 pub use download_window::default_sync_budget;
 pub use sync::{BlockSync, StaleTipRetainer, SyncChain};

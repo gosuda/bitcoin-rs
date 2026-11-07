@@ -2,7 +2,7 @@ use super::*;
 use crate::test_support::TestError;
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::primitives::{
-    Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+    Amount, BlockImage, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
 };
 use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::{
@@ -108,16 +108,14 @@ fn noop_asks_for_no_payloads() {
     assert!(followers.block_log().read().is_empty());
 }
 
-fn connect_outcome(tip: &TipSnapshot, block: &Block) -> ConnectOutcome {
+fn connect_outcome(tip: &TipSnapshot, block: &BlockImage) -> ConnectOutcome {
     ConnectOutcome {
         commit_id: 0,
         height: tip.height,
         hash: tip.hash,
         tip: tip.clone(),
-        txids: block
-            .txs
-            .iter()
-            .map(bitcoin_rs_consensus::primitives::Tx::txid)
+        txids: (0..block.tx_count())
+            .map(|tx| block.identity(tx).txid())
             .collect(),
         block_bytes: bytes::Bytes::new(),
         raw_txs: None,
@@ -134,7 +132,8 @@ fn connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order() -> Result<()
     let followers = ChainFollowers::noop().with_zmq_publisher(zmq);
     let tip = genesis_tip(&genesis)?;
 
-    followers.on_connect(&genesis, &connect_outcome(&tip, &genesis));
+    let image = BlockImage::from_local(genesis.clone());
+    followers.on_connect(&image, &connect_outcome(&tip, &image));
     assert_eq!(followers.block_log().read().len(), 1);
     assert_eq!(
         publisher.events(),
@@ -164,7 +163,8 @@ fn disconnect_does_not_pop_a_different_tail() -> Result<(), TestError> {
     let genesis = Network::Regtest.genesis_block();
     let tip = genesis_tip(&genesis)?;
     let followers = ChainFollowers::noop();
-    followers.on_connect(&genesis, &connect_outcome(&tip, &genesis));
+    let image = BlockImage::from_local(genesis.clone());
+    followers.on_connect(&image, &connect_outcome(&tip, &image));
     followers.on_disconnect(&DisconnectOutcome {
         hash: Hash256::from_le_bytes(&[0xAB; 32]),
         restored_parents: Vec::new(),
@@ -181,7 +181,7 @@ struct ReceiptWake {
 impl bitcoin_rs_serving::mining::MempoolSequenceWake for ReceiptWake {
     fn publish_generation_from(&self, _: u64) {}
 
-    fn stage_tip(&self, _: &TipSnapshot, _: &Block) {}
+    fn stage_tip(&self, _: &TipSnapshot, _: &BlockImage) {}
 
     fn publish_block_generation(&self, tip_hash: Hash256, removals: &MutationResult) {
         self.receipts
@@ -200,7 +200,8 @@ fn gatewayless_connect_publishes_an_empty_receipt_for_the_tip() -> Result<(), Te
     followers.mining().attach_sequence_wake(&wake_handle);
     assert!(followers.mempool_gateway().is_none());
 
-    followers.on_connect(&genesis, &connect_outcome(&tip, &genesis));
+    let image = BlockImage::from_local(genesis.clone());
+    followers.on_connect(&image, &connect_outcome(&tip, &image));
     assert_eq!(
         *wake.receipts.lock(),
         vec![(tip.hash, 0)],
@@ -444,9 +445,10 @@ fn assert_admission_followers_after_chain_change(connect: bool) -> Result<(), Te
 
     let tip = genesis_tip(&block)?;
     let hash = tip.hash;
+    let image = BlockImage::from_local(block.clone());
     let change = gateway.begin_chain_change()?;
     if connect {
-        followers.on_connect(&block, &connect_outcome(&tip, &block));
+        followers.on_connect(&image, &connect_outcome(&tip, &image));
     } else {
         followers.on_disconnect(&DisconnectOutcome {
             hash,
@@ -533,8 +535,8 @@ fn committed_connect_settlement_failure_retains_outcome_and_forbids_retry() -> R
     config.p2p.listen.clear();
     let state = crate::state::NodeState::open(config, None)?;
     let followers = settlement_breaking_followers(state.mempool_gateway(), 3);
-    let genesis = BlockPayload::from_local(Network::Regtest.genesis_block());
-    let hash = Hash256::from(genesis.block().block_hash());
+    let genesis = BlockImage::from_local(Network::Regtest.genesis_block());
+    let hash = Hash256::from(genesis.block_hash());
 
     let error = match followers.apply_connect(&state.chainstate(), &genesis) {
         Ok(outcome) => panic!("forced generation move settled connect {outcome:?}"),
@@ -578,7 +580,7 @@ fn mining_reports_a_committed_settlement_failure_as_accepted() -> Result<(), Tes
     );
 
     assert_eq!(
-        mining.submit_block(BlockPayload::from_local(Network::Regtest.genesis_block()))?,
+        mining.submit_block(BlockImage::from_local(Network::Regtest.genesis_block()))?,
         BlockValidationResult::Accepted,
         "submitblock must not invite retry after authoritative commit"
     );

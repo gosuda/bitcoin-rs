@@ -50,7 +50,7 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
     for block in &fork_blocks {
         bodies.insert(
             Hash256::from_le_bytes(block.block_hash().as_bytes()),
-            BlockPayload::from_local(block.clone()),
+            BlockImage::from_local(block.clone()),
         );
     }
 
@@ -273,9 +273,9 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             ),
             role: bitcoin_rs_execution::ChainstateRole::Ordinary,
         });
-    handles.apply_block(&BlockPayload::from_local(genesis))?;
+    handles.apply_block(&BlockImage::from_local(genesis))?;
     for block in &blocks {
-        handles.apply_block(&BlockPayload::from_local(block.clone()))?;
+        handles.apply_block(&BlockImage::from_local(block.clone()))?;
     }
 
     let parent = parent_tx.ok_or(TestError::Missing("built package transaction"))?;

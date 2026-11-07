@@ -39,6 +39,47 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 ## 3. Clauses
 
+### `BLK-01`: Canonical block image ownership
+
+- One block image must own the canonical serialized bytes of a block.
+- All node components must borrow data from that block image.
+
+### `BLK-02`: Checked layout table ranges
+
+- The block layout table must record the byte span of each transaction, input, output, and witness item.
+- References must use checked integer offsets.
+- References must not use self-referential pointers.
+
+### `BLK-03`: Structural validation of spans
+
+- Structural validation must verify the bounds of every layout span before trusted processing starts.
+- Any out-of-bounds span or malformed header must fail decoding immediately.
+
+### `BLK-04`: Single object graph on normal path
+
+- The normal block processing path must not construct a second, fully owned transaction object graph.
+- Validation, admission, and persistence must read through transaction views over the canonical block image.
+
+### `BLK-05`: Single calculation of reusable facts
+
+- The node must compute each reusable block fact once.
+- Reusable facts include the transaction id, witness transaction id, serialized byte sizes, and shared signature-hash midstates.
+
+### `BLK-06`: Hash domain separation
+
+- The transaction id and witness transaction id must remain in distinct hash domains.
+- Coinbase witness commitment validation rules must not change.
+
+### `BLK-07`: Restricted witness routing
+
+- Witness bytes must flow only to script verification, to archival block storage, and to peer messages that request witnesses.
+- UTXO state mutation and standard indexing must consume only non-witness data.
+
+### `BLK-08`: Lifetime separation for block images
+
+- Long-lived consumers must copy small extracted records.
+- Long-lived consumers must not retain references to a complete block image.
+
 ### `SCR-01`: Taproot witness borrowing
 
 - The Taproot verifier must borrow the script, control block, annex, and signatures directly from the witness.

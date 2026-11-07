@@ -82,7 +82,7 @@ fn serve_collect(
 ) -> Result<(InventoryServing, Vec<Block>), PeerError> {
     let blocks = RefCell::new(Vec::new());
     let outcome = query.serve_inventory_blocks(items, None, &|| true, &mut |message| {
-        let Message::BlockPayload(payload) = message else {
+        let Message::BlockBytes(payload) = message else {
             return Ok(());
         };
         blocks.borrow_mut().push(deserialize::<Block>(&payload)?);
@@ -1528,7 +1528,7 @@ fn getblocktxn_depth_boundary_uses_full_block_beyond_ten() -> TestResult {
     assert_eq!(txn.transactions.transactions.len(), 1);
 
     let one_deeper = blocktxn_reply(&headers, 0)?;
-    let Message::BlockPayload(payload) = &one_deeper else {
+    let Message::BlockBytes(payload) = &one_deeper else {
         panic!("a deeper block is answered with the whole block, got {one_deeper:?}");
     };
     assert_eq!(payload_body(payload)?.txdata.len(), 2, "witnesses retained");
@@ -1546,7 +1546,7 @@ fn compact_depth_boundary_uses_full_block_beyond_five() -> TestResult {
     );
 
     let one_deeper = compact_reply(&headers, 5)?;
-    let Message::BlockPayload(payload) = &one_deeper else {
+    let Message::BlockBytes(payload) = &one_deeper else {
         panic!("a deeper block is served as the whole block, got {one_deeper:?}");
     };
     assert_eq!(payload_body(payload)?.txdata.len(), 2, "witnesses retained");
@@ -1913,7 +1913,7 @@ fn stored_stale_blocks_are_hash_addressed_without_becoming_announcements() -> Te
             })?;
             assert_eq!(result.not_found, []);
             match &messages[0] {
-                Message::BlockPayload(payload) => {
+                Message::BlockBytes(payload) => {
                     assert_eq!(payload_body(payload)?.block_hash(), wire);
                 }
                 Message::CmpctBlock(compact) => {
@@ -1978,7 +1978,7 @@ fn stale_serving_keeps_depth_headroom_and_unknown_rules() -> TestResult {
             .block_transactions(&request, Some(2), &|| true)?
             .ok_or("stale reply")?;
         assert_eq!(matches!(reply, Message::BlockTxn(_)), blocktxn);
-        if let Message::BlockPayload(payload) = reply {
+        if let Message::BlockBytes(payload) = reply {
             assert_eq!(payload_body(&payload)?.block_hash(), request.block_hash);
         }
         let unknown = BlockTransactionsRequest {
@@ -2238,7 +2238,7 @@ fn serving_rechecks_reorg_invalidation_and_age_after_io() -> TestResult {
         assert_eq!(source.loads.load(Ordering::Relaxed), 1);
         if change == 0 {
             assert_eq!(outcome.not_found, []);
-            let [Message::BlockPayload(payload)] = messages.as_slice() else {
+            let [Message::BlockBytes(payload)] = messages.as_slice() else {
                 panic!("reorg retains stored stale response");
             };
             assert_eq!(payload_body(payload)?.block_hash(), hash);
@@ -2325,7 +2325,7 @@ fn getblocktxn_rechecks_inventory_policy_when_io_crosses_depth_ten() -> TestResu
         let result = query.block_transactions(&request, Some(2), &|| true)?;
         assert_eq!(source.loads.load(Ordering::Relaxed), 1);
         if change == 0 {
-            let Some(Message::BlockPayload(payload)) = result else {
+            let Some(Message::BlockBytes(payload)) = result else {
                 panic!("crossing depth ten must use full-block inventory policy");
             };
             assert_eq!(payload_body(&payload)?.block_hash(), request.block_hash);
@@ -2383,7 +2383,10 @@ fn held_early_body_answers_before_the_store() -> TestResult {
     let headers = seed_headers(2);
     let block = block_at(&headers, 1)?;
     let slot = RecentBlockSlot::default();
-    slot.store(Hash256::from(block.block_hash()), Arc::new(block.clone()));
+    slot.store(
+        Hash256::from(block.block_hash()),
+        Arc::new(BlockImage::from_local(block.clone())),
+    );
     let query = query_with(headers)?.with_recent_block(slot);
     let request = bitcoin::bip152::BlockTransactionsRequest {
         block_hash: wire_block_hash(block.block_hash()),
@@ -2443,7 +2446,7 @@ fn held_body_without_serving_position_answers_compact_getdata() -> TestResult {
     block.header.nonce = 0x7a7a_7a7a;
     let hash = block.block_hash();
     let slot = RecentBlockSlot::default();
-    slot.store(Hash256::from(hash), Arc::new(block));
+    slot.store(Hash256::from(hash), Arc::new(BlockImage::from_local(block)));
     let query = query_with(headers)?.with_recent_block(slot);
     let compact = Inventory::CompactBlock(wire_block_hash(hash));
     let full = Inventory::Block(wire_block_hash(hash));
@@ -2489,7 +2492,10 @@ fn held_invalid_body_is_not_served_from_inventory() -> TestResult {
     let headers = seed_headers(2);
     let block = block_at(&headers, 1)?;
     let slot = RecentBlockSlot::default();
-    slot.store(Hash256::from(block.block_hash()), Arc::new(block.clone()));
+    slot.store(
+        Hash256::from(block.block_hash()),
+        Arc::new(BlockImage::from_local(block.clone())),
+    );
     let query = query_with(headers)?.with_recent_block(slot);
     {
         let mut tree = query.block_tree.write();
@@ -2521,7 +2527,10 @@ fn held_stale_body_past_policy_is_not_served_from_inventory() -> TestResult {
         tree.node_mut(tip)?.header.time = stale.header.time + 2_592_000;
     }
     let slot = RecentBlockSlot::default();
-    slot.store(Hash256::from(stale.block_hash()), Arc::new(stale.clone()));
+    slot.store(
+        Hash256::from(stale.block_hash()),
+        Arc::new(BlockImage::from_local(stale.clone())),
+    );
     query.recent = slot;
     let item = Inventory::CompactBlock(wire_block_hash(stale.block_hash()));
     let mut served = Vec::new();
@@ -2542,7 +2551,10 @@ fn held_tip_child_body_is_served_from_inventory() -> TestResult {
     let headers = seed_headers(3);
     let block = block_at(&headers, 2)?;
     let slot = RecentBlockSlot::default();
-    slot.store(Hash256::from(block.block_hash()), Arc::new(block.clone()));
+    slot.store(
+        Hash256::from(block.block_hash()),
+        Arc::new(BlockImage::from_local(block.clone())),
+    );
     let query = query_with(headers[..2].to_vec())?.with_recent_block(slot);
     {
         let mut tree = query.block_tree.write();
@@ -2576,7 +2588,10 @@ fn held_stale_tip_child_is_not_served_from_inventory() -> TestResult {
     };
     let parent_hash = headers[1].compute_hash();
     let slot = RecentBlockSlot::default();
-    slot.store(Hash256::from(block.block_hash()), Arc::new(block.clone()));
+    slot.store(
+        Hash256::from(block.block_hash()),
+        Arc::new(BlockImage::from_local(block.clone())),
+    );
     let query = query_with(headers)?.with_recent_block(slot);
     {
         let mut tree = query.block_tree.write();
@@ -2605,7 +2620,10 @@ fn held_deep_body_uses_full_block_inventory_policy() -> TestResult {
     let headers = seed_headers(8);
     let block = block_at(&headers, 1)?;
     let slot = RecentBlockSlot::default();
-    slot.store(Hash256::from(block.block_hash()), Arc::new(block.clone()));
+    slot.store(
+        Hash256::from(block.block_hash()),
+        Arc::new(BlockImage::from_local(block.clone())),
+    );
     let query = chain_at(&headers, 1, &block)?.with_recent_block(slot);
     let item = Inventory::CompactBlock(wire_block_hash(block.block_hash()));
     let mut served = Vec::new();
@@ -2615,7 +2633,7 @@ fn held_deep_body_uses_full_block_inventory_policy() -> TestResult {
     })?;
     assert!(outcome.not_found.is_empty(), "{outcome:?}");
     assert!(
-        matches!(served.as_slice(), [Message::BlockPayload(_)]),
+        matches!(served.as_slice(), [Message::BlockBytes(_)]),
         "a deep held body must fall back to the full block, got {served:?}"
     );
     Ok(())

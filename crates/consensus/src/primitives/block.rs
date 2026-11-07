@@ -1,13 +1,9 @@
-use std::sync::Arc;
-
 use bytes::Bytes;
 
 use crate::primitives::{
     Amount, BlockHash, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness, Wtxid,
-    encode::{
-        ConsensusDecode, ConsensusEncode, DecodeError, consensus_bytes, deserialize, double_sha256,
-    },
+    encode::{ConsensusDecode, ConsensusEncode, DecodeError, consensus_bytes, double_sha256},
     layout::{BlockLayout, ByteSpan, TxIdentity, TxLayout},
 };
 
@@ -63,60 +59,6 @@ impl Block {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BlockPayload {
-    block: Arc<Block>,
-    bytes: Bytes,
-}
-
-impl BlockPayload {
-    pub fn from_raw(raw: Bytes) -> Result<Self, DecodeError> {
-        let block = deserialize::<Block>(&raw)?;
-        Ok(Self {
-            block: Arc::new(block),
-            bytes: raw,
-        })
-    }
-
-    pub fn from_local(block: Block) -> Self {
-        let bytes = Bytes::from(consensus_bytes(&block));
-        Self {
-            block: Arc::new(block),
-            bytes,
-        }
-    }
-
-    /// The returned payload owns only the decoded prefix. The ignored suffix is not
-    /// retained.
-    pub fn from_prefix(raw: Bytes) -> Result<(Self, usize), DecodeError> {
-        let mut reader: &[u8] = &raw;
-        let block = Block::consensus_decode(&mut reader)?;
-        let consumed = raw.len() - reader.len();
-        let bytes = Bytes::copy_from_slice(&raw[..consumed]);
-        Ok((
-            Self {
-                block: Arc::new(block),
-                bytes,
-            },
-            consumed,
-        ))
-    }
-
-    #[must_use]
-    pub fn block(&self) -> &Block {
-        self.block.as_ref()
-    }
-
-    #[must_use]
-    pub fn bytes(&self) -> &Bytes {
-        &self.bytes
-    }
-
-    #[must_use]
-    pub fn into_block(self) -> Block {
-        Arc::try_unwrap(self.block).unwrap_or_else(|block| (*block).clone())
-    }
-}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockImage {
     bytes: Bytes,
@@ -230,6 +172,15 @@ impl BlockImage {
     #[must_use]
     pub fn into_block(self) -> Block {
         self.materialize()
+    }
+
+    #[must_use]
+    pub fn retained_heap_bytes(&self) -> usize {
+        self.layout.retained_heap_bytes().saturating_add(
+            self.identities
+                .len()
+                .saturating_mul(core::mem::size_of::<TxIdentity>()),
+        )
     }
 }
 

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::{
-    Block, BlockHash, BlockPayload, CompactTarget, Header, Network, Tx, Txid,
+    Block, BlockHash, BlockImage, CompactTarget, Header, Network, Tx, Txid,
 };
 use bitcoin_rs_mempool::SnapshotEntry;
 use compact_str::CompactString;
@@ -196,7 +196,7 @@ pub trait MiningControl: Send + Sync {
 
     fn submit_block(
         &self,
-        payload: BlockPayload,
+        payload: BlockImage,
     ) -> Result<BlockValidationResult, MiningControlError>;
 
     fn submit_header(&self, header: Header) -> Result<(), MiningControlError>;
@@ -341,7 +341,7 @@ impl MiningControl for FakeMiningControl {
 
     fn submit_block(
         &self,
-        _payload: BlockPayload,
+        _payload: BlockImage,
     ) -> Result<BlockValidationResult, MiningControlError> {
         self.submit_calls.fetch_add(1, Ordering::Relaxed);
         if let Some(error) = self.armed_failure() {
@@ -390,7 +390,7 @@ impl crate::mining::context::MempoolSequenceWake for FakeMiningControl {
         self.published_from.lock().push(sequence);
     }
 
-    fn stage_tip(&self, tip: &bitcoin_rs_execution::chain::TipSnapshot, _block: &Block) {
+    fn stage_tip(&self, tip: &bitcoin_rs_execution::chain::TipSnapshot, _block: &BlockImage) {
         self.staged_tips.lock().push(tip.hash);
     }
 

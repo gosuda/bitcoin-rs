@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bitcoin_rs_consensus::primitives::{Block, BlockHash, BlockPayload, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockHash, BlockImage, Hash256};
 use bitcoin_rs_projection::block_log::{BlockLog, BlockRecord};
 use parking_lot::RwLock;
 
@@ -31,7 +31,7 @@ pub struct ChainFollowers {
     derived_index: Option<Arc<DerivedIndexRuntime>>,
     mining: Arc<crate::mining::MiningGenerationSignal>,
     mempool: Option<Arc<MempoolGateway>>,
-    block_announcer: Option<crate::p2p::BlockAnnounceQueue>,
+    block_announcer: Option<crate::p2p::block_announce::BlockAnnounceQueue>,
 }
 
 impl ChainFollowers {
@@ -80,7 +80,7 @@ impl ChainFollowers {
     #[must_use]
     pub fn with_block_announcer(
         mut self,
-        block_announcer: Option<crate::p2p::BlockAnnounceQueue>,
+        block_announcer: Option<crate::p2p::block_announce::BlockAnnounceQueue>,
     ) -> Self {
         self.block_announcer = block_announcer;
         self
@@ -163,9 +163,10 @@ impl ChainFollowers {
         Ok(())
     }
 
-    pub(crate) fn on_connect(&self, block: &Block, outcome: &ConnectOutcome) {
+    pub(crate) fn on_connect(&self, payload: &BlockImage, outcome: &ConnectOutcome) {
         let on_connect_started = quanta::Instant::now();
         let block_removals = if let Some(gateway) = &self.mempool {
+            let block = payload.materialize();
             let block_txs: Vec<&bitcoin_rs_consensus::primitives::Tx> = block.txs.iter().collect();
             gateway.remove_for_block(
                 AdmissionOrigin::Block,
@@ -179,7 +180,7 @@ impl ChainFollowers {
         };
         self.blocks
             .write()
-            .push(BlockRecord::from_block(outcome.height, block));
+            .push(BlockRecord::from_image(outcome.height, payload));
         self.publish_block(outcome);
         self.wake_index();
         if self.zmq.wants_notifications() {
@@ -263,7 +264,7 @@ impl ChainFollowers {
     pub(crate) fn apply_connect(
         &self,
         handles: &bitcoin_rs_execution::Chainstate,
-        payload: &BlockPayload,
+        payload: &BlockImage,
     ) -> core::result::Result<ConnectOutcome, ConnectMutationError> {
         let transition = handles
             .begin_transition()
@@ -279,11 +280,11 @@ impl ChainFollowers {
         handles: &bitcoin_rs_execution::Chainstate,
         transition: bitcoin_rs_execution::ChainTransition<'_>,
         mempool_change: Option<ChainChangeGuard>,
-        payload: &BlockPayload,
+        payload: &BlockImage,
     ) -> core::result::Result<ConnectOutcome, ConnectMutationError> {
         match transition.connect(payload) {
             Ok(outcome) => {
-                self.on_connect(payload.block(), &outcome);
+                self.on_connect(payload, &outcome);
                 match Self::finish_transition(handles, transition, mempool_change) {
                     Ok(()) => Ok(outcome),
                     Err(source) => Err(ConnectMutationError::CommittedButSettlementFailed {
@@ -324,7 +325,7 @@ pub(crate) fn bootstrap_genesis(
         return Ok(());
     }
     let genesis = handles.network().genesis_block();
-    let payload = BlockPayload::from_local(genesis);
+    let payload = BlockImage::from_local(genesis);
     match followers.apply_connect(handles, &payload) {
         Ok(outcome) => handles.publish_genesis_tip(outcome.tip),
         Err(error) => {

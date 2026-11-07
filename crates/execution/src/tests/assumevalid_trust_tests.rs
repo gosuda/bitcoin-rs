@@ -6,7 +6,7 @@ use crate::chain::regtest_fixture::{
     merkle_root, mine_block_to_declared_target, mined_regtest_child_at as mined_child,
 };
 use bitcoin_rs_consensus::primitives::{
-    Amount, Block, BlockHash, BlockPayload, LockTime, Network, OutPoint, Sequence, Tx, TxIn, TxOut,
+    Amount, Block, BlockHash, BlockImage, LockTime, Network, OutPoint, Sequence, Tx, TxIn, TxOut,
     Witness,
 };
 use bitcoin_rs_consensus::script::{
@@ -42,13 +42,13 @@ fn funded_chain() -> TestResult<(Chainstate, OutPoint, TxOut, BlockHash)> {
         script_pubkey: vec![OP_PUSHNUM_1].into(),
     }];
     remine(&mut funding)?;
-    chain.apply_block(&BlockPayload::from_local(funding.clone()))?;
+    chain.apply_block(&BlockImage::from_local(funding.clone()))?;
     let outpoint = OutPoint::new(funding.txs[0].txid(), 0);
     let prevout = funding.txs[0].outputs[0].clone();
     let mut parent = funding.block_hash();
     for height in 2..=100 {
         let child = mined_child(parent, height)?;
-        chain.apply_block(&BlockPayload::from_local(child.clone()))?;
+        chain.apply_block(&BlockImage::from_local(child.clone()))?;
         parent = child.block_hash();
     }
     Ok((chain, outpoint, prevout, parent))
@@ -144,7 +144,7 @@ fn assume_valid_without_matching_pin_does_not_skip_scripts() -> TestResult {
         .applied_tip_snapshot()
         .ok_or(TestError::Missing("tip"))?
         .hash;
-    let failed = chain.apply_block(&BlockPayload::from_local(invalid));
+    let failed = chain.apply_block(&BlockImage::from_local(invalid));
     assert_rejected_unchanged(&chain, &failed, &funding, tip_before)?;
     Ok(())
 }
@@ -174,7 +174,7 @@ fn assume_valid_sibling_below_the_pin_runs_scripts() -> TestResult {
         .applied_tip_snapshot()
         .ok_or(TestError::Missing("tip"))?
         .hash;
-    let failed = chain.apply_block(&BlockPayload::from_local(sibling));
+    let failed = chain.apply_block(&BlockImage::from_local(sibling));
     assert_rejected_unchanged(&chain, &failed, &funding, tip_before)?;
     Ok(())
 }
@@ -198,7 +198,7 @@ fn assume_valid_pin_at_its_own_height_still_skips_scripts() -> TestResult {
         chain.scripts_verified_upstream(BlockProvenance::Network, 101, pin.block_hash().0),
         "the pin is on the best header chain and may skip"
     );
-    chain.apply_block(&BlockPayload::from_local(pin))?;
+    chain.apply_block(&BlockImage::from_local(pin))?;
     assert_eq!(
         chain
             .applied_tip_snapshot()
@@ -239,7 +239,7 @@ fn assume_valid_trust_is_revoked_when_a_reorg_drops_the_pin() -> TestResult {
         .applied_tip_snapshot()
         .ok_or(TestError::Missing("tip"))?
         .hash;
-    let failed = chain.apply_block(&BlockPayload::from_local(branch_block));
+    let failed = chain.apply_block(&BlockImage::from_local(branch_block));
     assert_rejected_unchanged(&chain, &failed, &funding, tip_before)?;
     Ok(())
 }

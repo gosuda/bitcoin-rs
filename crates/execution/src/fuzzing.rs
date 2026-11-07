@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::chain::{BlockTree, ChainError, NodeStatus, TipSnapshot};
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Header, Network};
+use bitcoin_rs_consensus::primitives::{Block, BlockImage, Hash256, Header, Network};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
@@ -98,7 +98,7 @@ impl FuzzChain {
     }
 
     pub fn apply(&self, block: &Block) -> Result<(), FuzzError> {
-        let payload = BlockPayload::from_local(block.clone());
+        let payload = BlockImage::from_local(block.clone());
         self.headers
             .write()
             .insert(Hash256::from(block.block_hash()), block.header);

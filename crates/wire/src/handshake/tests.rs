@@ -51,7 +51,7 @@ fn services() -> ServiceFlags {
 #[test]
 fn a_block_before_readiness_is_refused_before_materialization() -> Result<(), PeerError> {
     let (_, result) =
-        inbound_handshake_over(&[Message::BlockPayload(bytes::Bytes::from(vec![0; 80]))])?;
+        inbound_handshake_over(&[Message::BlockBytes(bytes::Bytes::from(vec![0; 80]))])?;
     assert!(
         matches!(result, Err(PeerError::Incoming(error)) if matches!(*error, PeerError::Misbehavior("message received before handshake completed")))
     );
@@ -67,7 +67,7 @@ fn expanding_commands_before_readiness_are_refused_before_materialization() -> R
         write_message(
             &mut frame,
             magic,
-            &Message::BlockPayload(bytes::Bytes::from(vec![0; 80])),
+            &Message::BlockBytes(bytes::Bytes::from(vec![0; 80])),
         )?;
         frame[4..16].fill(0);
         frame[4..4 + command.len()].copy_from_slice(command.as_bytes());

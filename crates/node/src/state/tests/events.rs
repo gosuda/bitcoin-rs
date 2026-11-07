@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::test_support::TestError;
-use bitcoin_rs_consensus::primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockImage;
 
 // EVT-01
 #[test]
@@ -68,7 +68,7 @@ fn active_chain_snapshot_anchors_at_restored_tip_after_restart() -> Result<(), T
     let (tip, first_epoch) = {
         let state = NodeState::open(config.clone(), None)?;
         let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
-        let tip = state.apply_block(&BlockPayload::from_local(genesis))?;
+        let tip = state.apply_block(&BlockImage::from_local(genesis))?;
         assert!(state.publish_checkpoint()?.is_some());
         (tip, state.chainstate().chain_snapshot().epoch)
     };

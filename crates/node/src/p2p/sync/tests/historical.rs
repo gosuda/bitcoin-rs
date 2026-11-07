@@ -189,12 +189,9 @@ fn historical_archive_replay_retires_overtaken_downloads() -> TestResult {
 fn late_retired_history_cannot_enter_foreground_staging() -> TestResult {
     let (harness, chain, blocks) = fixture(6)?;
     chain.bootstrap_genesis();
-    let owned_payloads: Vec<BlockPayload> = blocks
-        .iter()
-        .cloned()
-        .map(BlockPayload::from_local)
-        .collect();
-    let payloads: Vec<&BlockPayload> = owned_payloads.iter().collect();
+    let owned_payloads: Vec<BlockImage> =
+        blocks.iter().cloned().map(BlockImage::from_local).collect();
+    let payloads: Vec<&BlockImage> = owned_payloads.iter().collect();
     chain
         .commit_window(&payloads)
         .map_err(|error| crate::test_support::TestError::Commit(format!("{error:?}")))?;

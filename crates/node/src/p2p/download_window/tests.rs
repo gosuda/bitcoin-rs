@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use bitcoin_rs_consensus::primitives::{
-    Amount, Block, BlockPayload, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,
+    Amount, Block, BlockImage, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Witness,
 };
 
@@ -90,7 +90,7 @@ fn stage_body(
     now: Instant,
 ) {
     let block = padded_regtest_block(total_bytes);
-    match stager.insert(hash, None, BlockPayload::from_local(block), source, now) {
+    match stager.insert(hash, None, BlockImage::from_local(block), source, now) {
         crate::p2p::block_stager::StagedBlock::Memory { .. } => {}
         other => panic!("stage_body refused: {other:?}"),
     }

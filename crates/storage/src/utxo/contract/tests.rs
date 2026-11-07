@@ -1,7 +1,7 @@
 use crate::{DisconnectMarker, DisconnectPhase, InMemoryUndoStore, StorageError, UndoStore};
 use bitcoin_rs_consensus::primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness,
+    Amount, Block, BlockHash, BlockImage, CompactTarget, Hash256, Header, LockTime, OutPoint,
+    Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 
 use super::*;
@@ -559,7 +559,7 @@ fn a_short_txid_list_is_refused_at_every_height() {
     for height in [0, HEIGHT] {
         let outcome = build_block_changes(
             &BlockChangeInputs {
-                block: &block,
+                block: &BlockImage::from_local(block.clone()),
                 height,
                 txids: &txids,
                 same_block_spent: None,

@@ -305,16 +305,16 @@ fn retained_heap_bytes_synthetic_witness_heavy_capacity_variations() {
 }
 
 #[test]
-fn payload_from_raw_retains_exact_fixture_bytes() -> Result<()> {
-    use super::BlockPayload;
+fn image_from_raw_retains_exact_fixture_bytes() -> Result<()> {
+    use super::BlockImage;
 
     let bytes = read_test_fixture("363731.bin")?;
-    let payload = BlockPayload::from_raw(bytes::Bytes::from(bytes.clone()))?;
+    let payload = BlockImage::from_raw(bytes::Bytes::from(bytes.clone()))?;
 
     assert_eq!(payload.bytes().as_ref(), bytes.as_slice());
-    assert_eq!(payload.block(), &deserialize::<Block>(&bytes)?);
+    assert_eq!(payload.materialize(), deserialize::<Block>(&bytes)?);
     assert_eq!(
-        crate::primitives::encode::consensus_bytes(payload.block()),
+        crate::primitives::encode::consensus_bytes(&payload.materialize()),
         bytes
     );
     assert_eq!(payload.into_block(), deserialize::<Block>(&bytes)?);
@@ -322,16 +322,16 @@ fn payload_from_raw_retains_exact_fixture_bytes() -> Result<()> {
 }
 
 #[test]
-fn payload_from_raw_rejects_trailing_bytes() -> Result<()> {
-    use super::BlockPayload;
+fn image_from_raw_rejects_trailing_bytes() -> Result<()> {
+    use super::BlockImage;
 
     let mut bytes = read_test_fixture("0.bin")?;
-    assert!(BlockPayload::from_raw(bytes::Bytes::from(bytes.clone())).is_ok());
+    assert!(BlockImage::from_raw(bytes::Bytes::from(bytes.clone())).is_ok());
     bytes.push(0xFF);
 
     assert!(
         matches!(
-            BlockPayload::from_raw(bytes::Bytes::from(bytes)),
+            BlockImage::from_raw(bytes::Bytes::from(bytes)),
             Err(DecodeError::TrailingBytes { remaining: 1 })
         ),
         "exactly one trailing byte must be rejected"
@@ -340,19 +340,19 @@ fn payload_from_raw_rejects_trailing_bytes() -> Result<()> {
 }
 
 #[test]
-fn payload_from_raw_rejects_malformed_bytes() {
-    use super::BlockPayload;
+fn image_from_raw_rejects_malformed_bytes() {
+    use super::BlockImage;
 
     assert!(
         matches!(
-            BlockPayload::from_raw(bytes::Bytes::new()),
+            BlockImage::from_raw(bytes::Bytes::new()),
             Err(DecodeError::EndOfData { .. })
         ),
         "empty input must fail, not decode to a default block"
     );
     assert!(
         matches!(
-            BlockPayload::from_raw(bytes::Bytes::from(vec![0x01_u8; 100])),
+            BlockImage::from_raw(bytes::Bytes::from(vec![0x01_u8; 100])),
             Err(DecodeError::EndOfData { .. })
         ),
         "truncated body must fail instead of materializing a short block"
@@ -360,13 +360,13 @@ fn payload_from_raw_rejects_malformed_bytes() {
 }
 
 #[test]
-fn payload_from_prefix_returns_consumed_and_discards_remainder() -> Result<()> {
-    use super::BlockPayload;
+fn image_from_prefix_returns_consumed_and_discards_remainder() -> Result<()> {
+    use super::BlockImage;
 
     let mut bytes = read_test_fixture("0.bin")?;
     bytes.extend_from_slice(&[0xDE, 0xAD, 0xBE]);
 
-    let (payload, consumed) = BlockPayload::from_prefix(bytes::Bytes::from(bytes.clone()))?;
+    let (payload, consumed) = BlockImage::from_prefix(bytes::Bytes::from(bytes.clone()))?;
 
     assert_eq!(consumed, bytes.len() - 3);
     assert_eq!(payload.bytes().as_ref(), &bytes[..consumed]);
@@ -375,22 +375,22 @@ fn payload_from_prefix_returns_consumed_and_discards_remainder() -> Result<()> {
 
     let mut padded = read_test_fixture("0.bin")?;
     padded.extend_from_slice(&vec![0xA5; 1 << 20]);
-    let (payload, consumed) = BlockPayload::from_prefix(bytes::Bytes::from(padded.clone()))?;
+    let (payload, consumed) = BlockImage::from_prefix(bytes::Bytes::from(padded.clone()))?;
     assert_eq!(consumed, padded.len() - (1 << 20));
     assert_eq!(payload.bytes().len(), consumed);
     assert_eq!(payload.bytes().as_ref(), &padded[..consumed]);
 
     let exact = read_test_fixture("363731.bin")?;
     let exact_len = exact.len();
-    let (payload, consumed) = BlockPayload::from_prefix(bytes::Bytes::from(exact.clone()))?;
+    let (payload, consumed) = BlockImage::from_prefix(bytes::Bytes::from(exact.clone()))?;
     assert_eq!(consumed, exact_len);
     assert_eq!(payload.bytes().as_ref(), exact.as_slice());
     Ok(())
 }
 
 #[test]
-fn payload_from_local_encodes_witness_block_exactly() -> Result<()> {
-    use super::BlockPayload;
+fn image_from_local_encodes_witness_block_exactly() -> Result<()> {
+    use super::BlockImage;
 
     const GOLDEN: &str = concat!(
         "01000000",
@@ -425,39 +425,39 @@ fn payload_from_local_encodes_witness_block_exactly() -> Result<()> {
     let block = block_with_tx(witness_tx(
         vec![vec![0x21_u8; 64], vec![0x03_u8; 33]].into(),
     ));
-    let payload = BlockPayload::from_local(block.clone());
+    let payload = BlockImage::from_local(block.clone());
 
     let expected: Vec<u8> = <Vec<u8> as bitcoin::hex::FromHex>::from_hex(GOLDEN)
         .unwrap_or_else(|error| panic!("golden fixture hex: {error}"));
     assert_eq!(payload.bytes().as_ref(), expected.as_slice());
-    assert_eq!(payload.block(), &block);
+    assert_eq!(payload.materialize(), block);
     assert!(
         payload.bytes().windows(64).any(|w| w == [0x21_u8; 64]),
         "retained bytes must carry the full witness item"
     );
-    let roundtrip = BlockPayload::from_raw(payload.bytes().clone())?;
-    assert_eq!(roundtrip.block(), &block);
+    let roundtrip = BlockImage::from_raw(payload.bytes().clone())?;
+    assert_eq!(roundtrip.materialize(), block);
     assert_eq!(roundtrip.bytes(), payload.bytes());
     Ok(())
 }
 
 #[test]
-fn payload_witness_identity_is_byte_exact_not_txid_only() {
-    use super::BlockPayload;
+fn image_witness_identity_is_byte_exact_not_txid_only() {
+    use super::BlockImage;
 
     let left = block_with_tx(witness_tx(vec![vec![0x11_u8; 32]].into()));
     let right = block_with_tx(witness_tx(vec![vec![0x22_u8; 32]].into()));
     assert_eq!(left.txs[0].txid(), right.txs[0].txid());
 
-    let left_payload = BlockPayload::from_local(left.clone());
-    let right_payload = BlockPayload::from_local(right.clone());
+    let left_payload = BlockImage::from_local(left.clone());
+    let right_payload = BlockImage::from_local(right.clone());
     assert_ne!(
         left_payload.bytes().as_ref(),
         right_payload.bytes().as_ref()
     );
-    assert_ne!(left_payload.block(), right_payload.block());
-    assert_eq!(left_payload.block(), &left);
-    assert_eq!(right_payload.block(), &right);
+    assert_ne!(left_payload.materialize(), right_payload.materialize());
+    assert_eq!(left_payload.materialize(), left);
+    assert_eq!(right_payload.materialize(), right);
 }
 
 // BLK-02, BLK-03

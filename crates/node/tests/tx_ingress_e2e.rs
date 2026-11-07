@@ -12,7 +12,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_consensus::primitives::{
-    Amount, BlockPayload, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
+    Amount, BlockImage, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
     Witness,
 };
 use bitcoin_rs_mempool::MempoolGateway;
@@ -141,7 +141,7 @@ impl MiningControl for RecordingMining {
 
     fn submit_block(
         &self,
-        _payload: BlockPayload,
+        _payload: BlockImage,
     ) -> Result<BlockValidationResult, MiningControlError> {
         Err(MiningControlError::Failed(
             "not implemented".to_owned().into(),

@@ -8,7 +8,7 @@ pub use crate::error::{ApplyError, DisconnectError};
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_consensus::ScriptExecutionCache;
 use bitcoin_rs_consensus::UtxoView;
-use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Network, OutPoint, Tx, TxOut, Txid};
+use bitcoin_rs_consensus::primitives::{Block, BlockImage, Network, OutPoint, TxOut, Txid};
 use bitcoin_rs_consensus::primitives::{Hash256, Header};
 use bitcoin_rs_storage::DurableHeadStore;
 #[cfg(any(test, feature = "test-seam"))]
@@ -396,9 +396,9 @@ pub enum HeaderAdmissionError {
     Rejected(ChainError),
 }
 
-pub type PowValidBlockHook = Arc<dyn Fn(&Block, Hash256, u32) + Send + Sync>;
+pub type PowValidBlockHook = Arc<dyn Fn(&BlockImage, Hash256, u32) + Send + Sync>;
 
-pub type TipStagedHook = Arc<dyn Fn(&TipSnapshot, &Block) + Send + Sync>;
+pub type TipStagedHook = Arc<dyn Fn(&TipSnapshot, &BlockImage) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Chainstate {
@@ -485,7 +485,7 @@ impl<'a> ChainTransition<'a> {
 
     pub fn connect(
         &self,
-        payload: &BlockPayload,
+        payload: &BlockImage,
     ) -> core::result::Result<ConnectOutcome, ApplyError> {
         self.settle_apply(apply_committed_block_admitted(
             self.chainstate,
@@ -513,7 +513,7 @@ impl<'a> ChainTransition<'a> {
     #[expect(clippy::result_large_err)]
     pub fn connect_window(
         &self,
-        payloads: &[&BlockPayload],
+        payloads: &[&BlockImage],
     ) -> core::result::Result<Vec<ConnectOutcome>, WindowApplyError> {
         let mut result = apply_window_admitted(self.chainstate, payloads);
         if let Err(error) = &mut result
@@ -1215,7 +1215,7 @@ impl Chainstate {
     #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_block(
         &self,
-        payload: &BlockPayload,
+        payload: &BlockImage,
     ) -> core::result::Result<ConnectOutcome, ApplyError> {
         let transition = self.begin_transition()?;
         let result = transition.connect(payload);
@@ -1240,7 +1240,7 @@ impl Chainstate {
     #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_window(
         &self,
-        payloads: &[&BlockPayload],
+        payloads: &[&BlockImage],
     ) -> core::result::Result<Vec<ConnectOutcome>, WindowApplyError> {
         let transition = self.begin_transition().map_err(|source| WindowApplyError {
             applied: 0,
@@ -1254,7 +1254,7 @@ impl Chainstate {
         result
     }
 
-    pub fn validate_block(&self, payload: &BlockPayload) -> core::result::Result<(), ApplyError> {
+    pub fn validate_block(&self, payload: &BlockImage) -> core::result::Result<(), ApplyError> {
         let _lock = self.lock_transition()?;
         match apply_block_admitted(
             self,
@@ -1431,17 +1431,15 @@ struct ResolvedUtxoView {
 impl ResolvedUtxoView {
     fn resolve<S: bitcoin_rs_storage::utxo::contract::OutputSource + ?Sized>(
         utxo: &S,
-        block: &Block,
+        image: &BlockImage,
         tx_plan: &BlockTxPlan,
     ) -> Self {
         let same_block = tx_plan.same_block_spent.as_ref();
-        let candidates = block
-            .txs
-            .iter()
+        let candidates = (0..image.tx_count())
+            .map(|i| image.tx(i))
             .filter(|tx| !tx.is_coinbase())
-            .flat_map(|tx| &tx.inputs)
-            .filter(|input| same_block.is_none_or(|set| !set.contains(&input.previous_output)))
-            .map(|input| input.previous_output);
+            .flat_map(|tx| (0..tx.input_count()).map(move |j| tx.input_outpoint(j)))
+            .filter(|outpoint| same_block.is_none_or(|set| !set.contains(outpoint)));
         Self {
             external: candidates
                 .filter_map(|outpoint| utxo.get_entry(&outpoint).map(|entry| (outpoint, entry)))
@@ -1475,7 +1473,7 @@ impl SpentOutputLookup for ResolvedUtxoView {
 
 struct BlockLocalUtxoView<'b> {
     base: Arc<ResolvedUtxoView>,
-    txdata: &'b [Tx],
+    image: &'b BlockImage,
     height: u32,
     overlay: HashMap<OutPoint, Option<u32>>,
 }
@@ -1483,13 +1481,13 @@ struct BlockLocalUtxoView<'b> {
 impl<'b> BlockLocalUtxoView<'b> {
     fn new(
         base: Arc<ResolvedUtxoView>,
-        txdata: &'b [Tx],
+        image: &'b BlockImage,
         height: u32,
         overlay_capacity: usize,
     ) -> Self {
         Self {
             base,
-            txdata,
+            image,
             height,
             overlay: HashMap::with_capacity(overlay_capacity),
         }
@@ -1499,7 +1497,13 @@ impl<'b> BlockLocalUtxoView<'b> {
         if let Some(entry) = self.overlay.get(outpoint) {
             let derived_index = usize::try_from((*entry)?).ok()?;
             let vout = usize::try_from(outpoint.vout).ok()?;
-            self.txdata.get(derived_index)?.outputs.get(vout)?;
+            if derived_index >= self.image.tx_count() {
+                return None;
+            }
+            let tx = self.image.tx(derived_index);
+            if vout >= tx.output_count() {
+                return None;
+            }
             return Some(PrevoutMeta {
                 coinbase: derived_index == 0,
                 height: self.height,
@@ -1508,9 +1512,9 @@ impl<'b> BlockLocalUtxoView<'b> {
         self.base.lookup_meta(outpoint)
     }
 
-    fn spend_inputs(&mut self, tx: &Tx) {
-        for input in &tx.inputs {
-            self.overlay.insert(input.previous_output, None);
+    fn spend_inputs(&mut self, tx: &bitcoin_rs_consensus::primitives::TransactionView<'_>) {
+        for j in 0..tx.input_count() {
+            self.overlay.insert(tx.input_outpoint(j), None);
         }
     }
 
@@ -1534,7 +1538,19 @@ impl UtxoView for BlockLocalUtxoView<'_> {
         if let Some(entry) = self.overlay.get(outpoint) {
             let derived_index = usize::try_from((*entry)?).ok()?;
             let vout = usize::try_from(outpoint.vout).ok()?;
-            return self.txdata.get(derived_index)?.outputs.get(vout).cloned();
+            if derived_index >= self.image.tx_count() {
+                return None;
+            }
+            let tx = self.image.tx(derived_index);
+            if vout >= tx.output_count() {
+                return None;
+            }
+            return Some(TxOut {
+                value: tx.output_value(vout),
+                script_pubkey: bitcoin_rs_consensus::primitives::Script::from_bytes(
+                    tx.output_script(vout).to_vec(),
+                ),
+            });
         }
         self.base.lookup(outpoint)
     }

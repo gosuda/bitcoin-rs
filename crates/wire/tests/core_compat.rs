@@ -16,7 +16,7 @@ use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inven
 use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{BlockHash, Txid};
 use bitcoin_rs_consensus::primitives::{
-    Block, BlockHash as NativeBlockHash, BlockPayload, CompactTarget, Hash256, Header,
+    Block, BlockHash as NativeBlockHash, BlockImage, CompactTarget, Hash256, Header,
     consensus_bytes, deserialize,
 };
 use bitcoin_rs_consensus::primitives::{Network, USER_AGENT};
@@ -228,7 +228,7 @@ impl ChainQuery for FakeChain {
                     outcome.halted = true;
                     return Ok(outcome);
                 }
-                serve(Message::BlockPayload(
+                serve(Message::BlockBytes(
                     consensus_bytes(&self.bodies[&native]).into(),
                 ))?;
             } else {
@@ -789,7 +789,7 @@ fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(
         Some(&chain),
     )?;
     let (served, not_found) = match response.as_slice() {
-        [Message::BlockPayload(payload), Message::NotFound(items)] => {
+        [Message::BlockBytes(payload), Message::NotFound(items)] => {
             (deserialize::<Block>(payload)?, items)
         }
         other => return Err(format!("unexpected relay response {other:?}").into()),
@@ -808,7 +808,7 @@ fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(
     let Message::Block(payload) = decoded else {
         return Err("expected block on the wire".into());
     };
-    assert_eq!(payload.block().block_hash(), genesis.block_hash());
+    assert_eq!(payload.block_hash(), genesis.block_hash());
     assert_eq!(
         payload.bytes().as_ref(),
         consensus_bytes(&genesis).as_slice()
@@ -845,7 +845,7 @@ fn inbound_block_and_tx_messages_decode_and_leave_no_response() -> Result<(), Te
 
     let responses = dispatch_inbound(
         &mut peer,
-        &Message::Block(BlockPayload::from_local(genesis.clone())),
+        &Message::Block(BlockImage::from_local(genesis.clone())),
     )?;
     assert_eq!(responses, []);
 
@@ -930,7 +930,7 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Te
     write_message(
         &mut server,
         magic,
-        &Message::Block(BlockPayload::from_local(genesis.clone())),
+        &Message::Block(BlockImage::from_local(genesis.clone())),
     )?;
     let Ok(announced) = headers_rx.recv_timeout(Duration::from_secs(5)) else {
         return Err("a block must reach the scheduler on a block-relay connection".into());
@@ -1165,7 +1165,7 @@ fn reorg_switches_which_chain_a_peer_sees() -> Result<(), TestError> {
         ]),
         Some(&state),
     )?;
-    let [Message::BlockPayload(stale), Message::BlockPayload(winner)] = response.as_slice() else {
+    let [Message::BlockBytes(stale), Message::BlockBytes(winner)] = response.as_slice() else {
         return Err(format!("unexpected post-reorg relay response {response:?}").into());
     };
     assert_eq!(

@@ -8,7 +8,7 @@ use smallvec::SmallVec;
 use crate::p2p::BlockStager;
 use bitcoin_rs_wire::connection::PeerSource;
 
-mod policy;
+pub(crate) mod policy;
 
 pub use policy::*;
 

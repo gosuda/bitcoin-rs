@@ -1,6 +1,8 @@
 use crate::chain::current_unix_seconds;
 use crate::chain::regtest_fixture::mined_regtest_child_at as mined_child;
-use bitcoin_rs_consensus::primitives::{Block, BlockHash, Hash256, Network, consensus_bytes};
+use bitcoin_rs_consensus::primitives::{
+    Block, BlockHash, BlockImage, Hash256, Network, consensus_bytes,
+};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
@@ -160,7 +162,7 @@ fn replay_of_a_committed_gap_never_fires_the_staged_tip_hook() -> TestResult {
     let recorder = Arc::clone(&fires);
     handles
         .set_tip_staged(Arc::new(
-            move |staged: &crate::chain::TipSnapshot, block: &Block| {
+            move |staged: &crate::chain::TipSnapshot, block: &BlockImage| {
                 recorder
                     .lock()
                     .push((staged.hash, Hash256::from(block.block_hash())));
@@ -793,7 +795,7 @@ proptest! {
         chain.durable_head = crash_store;
         chain.block_body_store = Some(Arc::clone(&bodies));
 
-        let payload = bitcoin_rs_consensus::primitives::BlockPayload::from_local(child1);
+        let payload = bitcoin_rs_consensus::primitives::BlockImage::from_local(child1);
         let apply_result = chain.apply_block(&payload);
 
         let prior_head = genesis_head;

@@ -10,7 +10,7 @@ use crate::chain::regtest_fixture::{
 };
 use crate::chain::{ChainTxCount, NodeId};
 use bitcoin_rs_consensus::primitives::{
-    Amount, Block, BlockHash, BlockPayload, Hash256, LockTime, Network, OutPoint, Script, Sequence,
+    Amount, Block, BlockHash, BlockImage, Hash256, LockTime, Network, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness,
 };
 use bitcoin_rs_consensus::script::opcode::OP_PUSHNUM_1;
@@ -104,10 +104,10 @@ fn commit_genesis_head(chain: &Chainstate) -> TestResult {
     Ok(())
 }
 
-fn dump_payloads(blocks: &[Block]) -> Vec<BlockPayload> {
+fn dump_payloads(blocks: &[Block]) -> Vec<BlockImage> {
     blocks
         .iter()
-        .map(|block| BlockPayload::from_local(block.clone()))
+        .map(|block| BlockImage::from_local(block.clone()))
         .collect()
 }
 
@@ -177,9 +177,14 @@ struct NoopObserver;
 impl crate::reorg::ReorgObserver for NoopObserver {
     fn disconnected(&mut self, _: &crate::DisconnectOutcome) {}
 
-    fn connected(&mut self, _: &Block, _: &crate::ConnectOutcome) {}
+    fn connected(
+        &mut self,
+        _: &bitcoin_rs_consensus::primitives::BlockImage,
+        _: &crate::ConnectOutcome,
+    ) {
+    }
 
-    fn reconsider_disconnected(&mut self, _: &Block) {}
+    fn reconsider_disconnected(&mut self, _: &bitcoin_rs_consensus::primitives::BlockImage) {}
 }
 
 fn node_id(chain: &Chainstate, hash: BlockHash) -> TestResult<NodeId> {
@@ -207,7 +212,7 @@ fn a_window_commits_every_block_in_order() -> TestResult {
     let refs: Vec<&Block> = blocks.iter().collect();
     apply_headers(&chain, &refs)?;
     let payloads = dump_payloads(&blocks);
-    let window: Vec<&BlockPayload> = payloads.iter().collect();
+    let window: Vec<&BlockImage> = payloads.iter().collect();
 
     let outcomes = chain.apply_window(&window)?;
 
@@ -304,7 +309,7 @@ fn a_poisoned_undo_store_settles_the_window_fatal() -> TestResult {
     let block = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
     apply_headers(&chain, &[&block])?;
     let payloads = dump_payloads(&[block]);
-    let window: Vec<&BlockPayload> = payloads.iter().collect();
+    let window: Vec<&BlockImage> = payloads.iter().collect();
 
     let error = chain.apply_window(&window).err().ok_or(TestError::Missing(
         "a poisoned undo store must fail the window",
@@ -344,7 +349,7 @@ fn a_window_commits_a_block_that_spends_the_previous_blocks_output() -> TestResu
         if height == 1 {
             funding = Some(OutPoint::new(block.txs[0].txid(), 0));
         }
-        chain.apply_block(&BlockPayload::from_local(block.clone()))?;
+        chain.apply_block(&BlockImage::from_local(block.clone()))?;
         parent = block.block_hash();
     }
     let funding = funding.ok_or(TestError::Missing("the fixture mined the funding coinbase"))?;
@@ -361,7 +366,7 @@ fn a_window_commits_a_block_that_spends_the_previous_blocks_output() -> TestResu
     let refs: Vec<&Block> = blocks.iter().collect();
     apply_headers(&chain, &refs)?;
     let payloads = dump_payloads(&blocks);
-    let window: Vec<&BlockPayload> = payloads.iter().collect();
+    let window: Vec<&BlockImage> = payloads.iter().collect();
 
     let outcomes = chain.apply_window(&window)?;
 
@@ -411,7 +416,7 @@ fn a_window_with_an_invalid_middle_block_commits_only_the_valid_prefix() -> Test
     let refs: Vec<&Block> = blocks.iter().collect();
     apply_headers(&chain, &refs)?;
     let payloads = dump_payloads(&blocks);
-    let window: Vec<&BlockPayload> = payloads.iter().collect();
+    let window: Vec<&BlockImage> = payloads.iter().collect();
 
     let error = chain.apply_window(&window).err().ok_or(TestError::Missing(
         "a body without a coinbase must not commit",
@@ -496,7 +501,7 @@ fn a_window_prepared_against_a_replaced_tip_discards_the_stale_branch() -> TestR
     let old_refs: Vec<&Block> = old_blocks.iter().collect();
     apply_headers(&chain, &old_refs)?;
     let old_payloads = dump_payloads(&old_blocks);
-    let old_window: Vec<&BlockPayload> = old_payloads.iter().collect();
+    let old_window: Vec<&BlockImage> = old_payloads.iter().collect();
     chain.apply_window(&old_window)?;
 
     let new_first = mined_child_at_time(genesis.block_hash(), genesis_time + 20, 1)?;
@@ -507,7 +512,7 @@ fn a_window_prepared_against_a_replaced_tip_discards_the_stale_branch() -> TestR
     let new_refs: Vec<&Block> = new_blocks.iter().collect();
     apply_headers(&chain, &new_refs)?;
     let new_payloads = dump_payloads(&new_blocks);
-    let bodies: HashMap<Hash256, BlockPayload> = new_blocks
+    let bodies: HashMap<Hash256, BlockImage> = new_blocks
         .iter()
         .zip(&new_payloads)
         .map(|(block, payload)| (Hash256::from(block.block_hash()), payload.clone()))
@@ -535,7 +540,7 @@ fn a_window_prepared_against_a_replaced_tip_discards_the_stale_branch() -> TestR
     let mixed_refs: Vec<&Block> = mixed.iter().collect();
     apply_headers(&chain, &mixed_refs)?;
     let mixed_payloads = dump_payloads(&mixed);
-    let mixed_window: Vec<&BlockPayload> = mixed_payloads.iter().collect();
+    let mixed_window: Vec<&BlockImage> = mixed_payloads.iter().collect();
 
     let error = chain
         .apply_window(&mixed_window)
@@ -611,26 +616,28 @@ fn a_window_holds_its_transition_until_a_concurrent_shutdown_acquires_it() -> Te
         let chain = chain.clone();
         let requested = Arc::clone(&requested);
         let closer = Arc::clone(&closer);
-        Arc::new(move |_staged: &crate::chain::TipSnapshot, _block: &Block| {
-            let chain = chain.clone();
-            let closing = Arc::new(AtomicU64::new(0));
-            let closer_flag = Arc::clone(&closing);
-            let handle = std::thread::spawn(move || {
-                closer_flag.store(1, Ordering::SeqCst);
-                let _guard = chain.close();
-            });
-            while closing.load(Ordering::SeqCst) == 0 {
-                std::thread::yield_now();
-            }
-            requested.fetch_add(1, Ordering::SeqCst);
-            closer.lock().replace(handle);
-        })
+        Arc::new(
+            move |_staged: &crate::chain::TipSnapshot, _block: &BlockImage| {
+                let chain = chain.clone();
+                let closing = Arc::new(AtomicU64::new(0));
+                let closer_flag = Arc::clone(&closing);
+                let handle = std::thread::spawn(move || {
+                    closer_flag.store(1, Ordering::SeqCst);
+                    let _guard = chain.close();
+                });
+                while closing.load(Ordering::SeqCst) == 0 {
+                    std::thread::yield_now();
+                }
+                requested.fetch_add(1, Ordering::SeqCst);
+                closer.lock().replace(handle);
+            },
+        )
     };
     chain
         .set_tip_staged(hook)
         .map_err(|_| TestError::HookAlreadyInstalled("staged-tip"))?;
     let payloads = dump_payloads(&blocks);
-    let window: Vec<&BlockPayload> = payloads.iter().collect();
+    let window: Vec<&BlockImage> = payloads.iter().collect();
 
     let outcomes = chain.apply_window(&window)?;
 
@@ -700,7 +707,7 @@ fn a_window_crash_at_a_group_commit_boundary_keeps_the_last_complete_group() -> 
         commit_genesis_head(&chain)?;
         let refs: Vec<&Block> = blocks.iter().collect();
         apply_headers(&chain, &refs)?;
-        let window: Vec<&BlockPayload> = payloads.iter().collect();
+        let window: Vec<&BlockImage> = payloads.iter().collect();
 
         let error = chain.apply_window(&window).err().ok_or(TestError::Missing(
             "a failed durable head commit must abort the window",

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Network};
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT;
@@ -31,7 +31,7 @@ fn checkpoint_refuses_inflight_disconnect_and_preserves_state() -> TestResult {
     let network = Network::Regtest;
     let mut handles = crate::test_fixtures::handles(network, Arc::new(UtxoSet::new()));
     handles.block_body_store = Some(Arc::new(MemoryBodies::default()));
-    handles.apply_block(&BlockPayload::from_local(network.genesis_block()))?;
+    handles.apply_block(&BlockImage::from_local(network.genesis_block()))?;
     handles.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)), None)?;
     assert!(handles.publish_checkpoint()?.is_some());
 
@@ -68,7 +68,7 @@ fn checkpoint_refuses_a_closed_for_recovery_chainstate() -> TestResult {
     let network = Network::Regtest;
     let mut handles = crate::test_fixtures::handles(network, Arc::new(UtxoSet::new()));
     handles.block_body_store = Some(Arc::new(MemoryBodies::default()));
-    handles.apply_block(&BlockPayload::from_local(network.genesis_block()))?;
+    handles.apply_block(&BlockImage::from_local(network.genesis_block()))?;
     handles.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)), None)?;
     assert!(handles.publish_checkpoint()?.is_some());
 
@@ -134,7 +134,7 @@ fn recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication(
     });
     let mut chain = crate::test_fixtures::handles(Network::Regtest, Arc::new(UtxoSet::new()));
     chain.block_body_store = Some(bodies.clone());
-    chain.apply_block(&BlockPayload::from_local(Network::Regtest.genesis_block()))?;
+    chain.apply_block(&BlockImage::from_local(Network::Regtest.genesis_block()))?;
     chain.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)), None)?;
     assert!(chain.publish_checkpoint()?.is_some());
     let root = dir.path().join(CHECKPOINT_ROOT);

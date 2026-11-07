@@ -1,10 +1,10 @@
-use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Header, Tx};
+use bitcoin_rs_consensus::primitives::{Block, BlockImage, Header, Tx};
 
 pub mod block_memory;
 pub use block_memory::BlockMemoryCredit;
 
 pub struct InboundBlock {
-    payload: BlockPayload,
+    payload: BlockImage,
     pub source: Option<crate::PeerSource>,
     pub forward_credit: Option<crate::connection::BlockForwardCredit>,
     pub memory_credit: Option<block_memory::BlockMemoryCredit>,
@@ -42,7 +42,7 @@ impl InboundBlock {
     #[must_use]
     pub fn from_local(block: Block) -> Self {
         Self {
-            payload: BlockPayload::from_local(block),
+            payload: BlockImage::from_local(block),
             source: None,
             forward_credit: None,
             memory_credit: None,
@@ -50,7 +50,7 @@ impl InboundBlock {
     }
 
     pub(crate) fn new(
-        payload: BlockPayload,
+        payload: BlockImage,
         source: Option<crate::PeerSource>,
         forward_credit: Option<crate::connection::BlockForwardCredit>,
     ) -> Self {
@@ -63,12 +63,12 @@ impl InboundBlock {
     }
 
     #[must_use]
-    pub fn payload(&self) -> &BlockPayload {
+    pub fn payload(&self) -> &BlockImage {
         &self.payload
     }
 
     #[must_use]
-    pub fn into_payload(self) -> BlockPayload {
+    pub fn into_payload(self) -> BlockImage {
         self.payload
     }
 }

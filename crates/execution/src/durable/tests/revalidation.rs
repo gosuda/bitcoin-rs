@@ -10,7 +10,7 @@ use crate::{
     },
 };
 use bitcoin_rs_consensus::primitives::{
-    Amount, Block, BlockHash, BlockPayload, LockTime, Network, OutPoint, Sequence, Tx, TxIn, TxOut,
+    Amount, Block, BlockHash, BlockImage, LockTime, Network, OutPoint, Sequence, Tx, TxIn, TxOut,
     Witness, consensus_bytes,
 };
 use bitcoin_rs_consensus::script::{
@@ -54,13 +54,13 @@ fn chain_at_height_100() -> TestResult<(Chainstate, OutPoint, TxOut, BlockHash)>
     let genesis = Network::Regtest.genesis_block();
     bodies.persist_block_body(0, genesis.block_hash().0, &consensus_bytes(&genesis))?;
     chain.block_body_store = Some(bodies);
-    chain.apply_block(&BlockPayload::from_local(first.clone()))?;
+    chain.apply_block(&BlockImage::from_local(first.clone()))?;
     let funding = OutPoint::new(first.txs[0].txid(), 0);
     let funding_output = first.txs[0].outputs[0].clone();
     let mut parent = first.block_hash();
     for height in 2..=100 {
         let child = mined_child(parent, height)?;
-        chain.apply_block(&BlockPayload::from_local(child.clone()))?;
+        chain.apply_block(&BlockImage::from_local(child.clone()))?;
         parent = child.block_hash();
     }
     Ok((chain, funding, funding_output, parent))
@@ -141,8 +141,8 @@ fn commit_spent_script(
         successor.block_hash().0,
     ))));
     chain.assume_valid_gate.evaluate(&chain.block_tree.read());
-    chain.apply_block(&BlockPayload::from_local(spend_block.clone()))?;
-    chain.apply_block(&BlockPayload::from_local(successor))?;
+    chain.apply_block(&BlockImage::from_local(spend_block.clone()))?;
+    chain.apply_block(&BlockImage::from_local(successor))?;
     Ok((chain, spend_block, funding, checkpoint_dir))
 }
 

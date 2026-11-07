@@ -1,6 +1,6 @@
 use crate::primitives::{
-    Amount, Block, Hash256, Header, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, deserialize, encode::double_sha256,
+    Amount, Block, BlockImage, Hash256, Header, LockTime, Network, OutPoint, Script, Sequence, Tx,
+    TxIn, TxOut, Txid, Witness, deserialize, encode::double_sha256,
 };
 use crate::script::push_data;
 
@@ -14,6 +14,10 @@ use crate::verify_block::witness_commitment_index;
 use crate::test_error::TestError;
 
 type TestResult = Result<(), TestError>;
+
+fn check_solution(block: &Block, challenge: &[u8]) -> Result<(), ConsensusError> {
+    check_signet_block_solution(&BlockImage::from_local(block.clone()), challenge)
+}
 
 const CORE_SIGNET_BLOCKS: [&str; 10] = [
     "00000020f61eee3b63a380a477a063af32b2bbc97c9ff9f01f2c4225e973988108000000f575c83235984e7dc4afc1f30944c170462e84437ab6f2d52e16878a79e4678bd1914d5fae77031eccf4070001010000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff025151feffffff0200f2052a010000001600149243f727dd5343293eb83174324019ec16c2630f0000000000000000776a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf94c4fecc7daa2490047304402205e423a8754336ca99dbe16509b877ef1bf98d008836c725005b3c787c41ebe46022047246e4467ad7cc7f1ad98662afcaf14c115e0095a227c7b05c5182591c23e7e01000120000000000000000000000000000000000000000000000000000000000000000000000000",
@@ -145,11 +149,7 @@ fn core_signet_blocks_satisfy_the_default_challenge() -> TestResult {
             fetch_and_clear_commitment_section(&script).is_some(),
             "block {index} carries a solution, so the signature path is exercised"
         );
-        assert_eq!(
-            check_signet_block_solution(block, challenge),
-            Ok(()),
-            "block {index}"
-        );
+        assert_eq!(check_solution(block, challenge), Ok(()), "block {index}");
     }
     Ok(())
 }
@@ -158,12 +158,12 @@ fn core_signet_blocks_satisfy_the_default_challenge() -> TestResult {
 fn the_genesis_block_needs_no_solution() -> TestResult {
     let challenge = default_challenge()?;
     let genesis = Network::Signet.genesis_block();
-    assert_eq!(check_signet_block_solution(&genesis, challenge), Ok(()));
+    assert_eq!(check_solution(&genesis, challenge), Ok(()));
 
     let mut other = genesis;
     other.header.nonce ^= 1;
     assert_eq!(
-        check_signet_block_solution(&other, challenge),
+        check_solution(&other, challenge),
         Err(ConsensusError::SignetSolution)
     );
     Ok(())
@@ -199,12 +199,12 @@ fn any_change_to_a_signed_field_is_rejected() -> TestResult {
         ("coinbase output", repaid),
     ] {
         assert_eq!(
-            check_signet_block_solution(&block, challenge),
+            check_solution(&block, challenge),
             Err(ConsensusError::SignetSolution),
             "{changed}"
         );
     }
-    assert_eq!(check_signet_block_solution(valid, challenge), Ok(()));
+    assert_eq!(check_solution(valid, challenge), Ok(()));
     Ok(())
 }
 
@@ -248,24 +248,20 @@ fn solution_parsing_follows_core() {
         } else {
             Err(ConsensusError::SignetSolution)
         };
-        assert_eq!(
-            check_signet_block_solution(&block, &op_true),
-            expected,
-            "{name}"
-        );
+        assert_eq!(check_solution(&block, &op_true), expected, "{name}");
     }
 }
 
 #[test]
 fn the_challenge_decides_a_commitment_without_a_solution() -> TestResult {
     let block = block_with_coinbase_script(commitment_script(&[]));
-    assert_eq!(check_signet_block_solution(&block, &[0x51]), Ok(()));
+    assert_eq!(check_solution(&block, &[0x51]), Ok(()));
     assert_eq!(
-        check_signet_block_solution(&block, &[0x00]),
+        check_solution(&block, &[0x00]),
         Err(ConsensusError::SignetSolution)
     );
     assert_eq!(
-        check_signet_block_solution(&block, default_challenge()?),
+        check_solution(&block, default_challenge()?),
         Err(ConsensusError::SignetSolution)
     );
     Ok(())
@@ -439,7 +435,7 @@ fn the_modified_root_replaces_only_the_coinbase_leaf() {
     let second = *block.txs[2].txid().as_bytes();
     let right = pair_hash(&second, &second);
     assert_eq!(
-        modified_merkle_root(&block, coinbase_txid),
+        modified_merkle_root(&BlockImage::from_local(block), coinbase_txid),
         Some(pair_hash(&left, &right))
     );
 }

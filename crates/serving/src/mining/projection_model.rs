@@ -124,7 +124,7 @@ mod tests {
 
         fn submit_block(
             &self,
-            _payload: bitcoin_rs_consensus::primitives::BlockPayload,
+            _payload: bitcoin_rs_consensus::primitives::BlockImage,
         ) -> Result<crate::mining::control::BlockValidationResult, MiningControlError> {
             Err(unavailable())
         }

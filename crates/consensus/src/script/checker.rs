@@ -1,4 +1,4 @@
-use crate::primitives::{Amount, Hash256, Sighash, SighashCache, Tx, TxOut};
+use crate::primitives::{Amount, Hash256, Sighash, SighashCache, TxOut, TxView};
 use secp256k1::{Message, PublicKey, XOnlyPublicKey, ecdsa::Signature as EcdsaSig};
 
 use crate::script::eval::{OP_CODESEPARATOR, remove_all};
@@ -20,7 +20,7 @@ use crate::primitives::{
 const SIGHASH_ANYONECANPAY: u8 = 0x80;
 
 pub(crate) struct TxSignatureChecker<'a> {
-    tx: &'a Tx,
+    tx: TxView<'a>,
     input_index: usize,
     amount: Amount,
     prevouts: &'a [TxOut],
@@ -32,7 +32,7 @@ pub(crate) struct TxSignatureChecker<'a> {
 impl<'a> TxSignatureChecker<'a> {
     #[must_use]
     pub(crate) fn new(
-        tx: &'a Tx,
+        tx: impl Into<TxView<'a>>,
         input_index: usize,
         amount: Amount,
         prevouts: &'a [TxOut],
@@ -40,7 +40,7 @@ impl<'a> TxSignatureChecker<'a> {
         sig_cache: Option<&'a SignatureCache>,
     ) -> Self {
         Self {
-            tx,
+            tx: tx.into(),
             input_index,
             amount,
             prevouts,
@@ -216,7 +216,7 @@ impl<'a> TxSignatureChecker<'a> {
 
     #[must_use]
     pub(crate) fn check_locktime(&self, locktime: i64) -> bool {
-        let tx_locktime = i64::from(self.tx.lock_time.to_consensus());
+        let tx_locktime = i64::from(self.tx.lock_time().to_consensus());
 
         let same_type = (tx_locktime < i64::from(LOCKTIME_THRESHOLD))
             == (locktime < i64::from(LOCKTIME_THRESHOLD));
@@ -228,11 +228,11 @@ impl<'a> TxSignatureChecker<'a> {
             return false;
         }
 
-        let input = match self.tx.inputs.get(self.input_index) {
-            Some(inp) => inp,
-            None => return false,
-        };
-        if input.sequence.to_consensus() == SEQUENCE_FINAL {
+        if self.input_index >= self.tx.input_count() {
+            return false;
+        }
+        let input_sequence = self.tx.input_sequence(self.input_index);
+        if input_sequence.to_consensus() == SEQUENCE_FINAL {
             return false;
         }
 
@@ -241,17 +241,17 @@ impl<'a> TxSignatureChecker<'a> {
 
     #[must_use]
     pub(crate) fn check_sequence(&self, sequence: i64) -> bool {
-        let input = match self.tx.inputs.get(self.input_index) {
-            Some(inp) => inp,
-            None => return false,
-        };
-        let tx_sequence = i64::from(input.sequence.to_consensus());
+        if self.input_index >= self.tx.input_count() {
+            return false;
+        }
+        let input_sequence = self.tx.input_sequence(self.input_index);
+        let tx_sequence = i64::from(input_sequence.to_consensus());
 
-        if self.tx.version < 2 {
+        if self.tx.version() < 2 {
             return false;
         }
 
-        if (input.sequence.to_consensus() & SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0 {
+        if (input_sequence.to_consensus() & SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0 {
             return false;
         }
 

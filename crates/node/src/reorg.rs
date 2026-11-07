@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::chain_effects::ChainFollowers;
-use bitcoin_rs_consensus::primitives::{Block, Hash256, Tx, Txid};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Tx, Txid};
 use bitcoin_rs_execution::chain::{InvalidationOutcome, NodeId};
 pub use bitcoin_rs_execution::reorg::ReorgError;
 use bitcoin_rs_execution::reorg::ReorgObserver;
@@ -40,22 +40,19 @@ impl ReorgObserver for NodeReorgObserver<'_> {
         self.followers.on_disconnect(outcome);
     }
 
-    fn connected(&mut self, block: &Block, outcome: &ConnectOutcome) {
-        self.reconnected.extend(
-            block
-                .txs
-                .iter()
-                .map(bitcoin_rs_consensus::primitives::Tx::txid),
-        );
+    fn connected(&mut self, block: &BlockImage, outcome: &ConnectOutcome) {
+        self.reconnected
+            .extend((0..block.tx_count()).map(|tx| block.identity(tx).txid()));
         self.followers.on_connect(block, outcome);
         (self.connected_body)(outcome.hash);
     }
 
-    fn reconsider_disconnected(&mut self, block: &Block) {
+    fn reconsider_disconnected(&mut self, block: &BlockImage) {
         if self.disconnected_full {
             return;
         }
-        for tx in &block.txs {
+        for index in 0..block.tx_count() {
+            let tx = block.tx(index).materialize();
             let coinbase = tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null();
             if self.reconnected.contains(&tx.txid()) || coinbase {
                 continue;
@@ -66,7 +63,7 @@ impl ReorgObserver for NodeReorgObserver<'_> {
                 return;
             }
             self.disconnected_bytes += tx_size;
-            self.disconnected.push(Arc::new(tx.clone()));
+            self.disconnected.push(Arc::new(tx));
         }
     }
 }
@@ -196,7 +193,7 @@ pub fn switch_to_branch<F, G>(
     mut connected_body: G,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockImage>,
     G: FnMut(Hash256),
 {
     let mut mempool_change = followers

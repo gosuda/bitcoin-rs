@@ -110,7 +110,7 @@ fn core_headers() -> Result<Vec<bitcoin_rs_consensus::primitives::Header>, TestE
 
 fn snapshot_inputs(dir: &Path) -> Result<(crate::state::NodeState, PathBuf, PathBuf), TestError> {
     let state = crate::state::NodeState::open(node_config(dir), None)?;
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         Network::Regtest.genesis_block(),
     ))?;
     state.chainstate().admit_headers(&core_headers()?)?;

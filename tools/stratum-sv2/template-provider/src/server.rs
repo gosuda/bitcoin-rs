@@ -3,7 +3,7 @@ use bitcoin_rs_serving::mining::{
     BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, Candidate, CoinbaseBudget,
 };
 use bitcoin_rs_node::Node;
-use bitcoin_rs_consensus::primitives::BlockPayload;
+use bitcoin_rs_primitives::BlockImage;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -321,7 +321,7 @@ impl Session {
                         let block = template.assemble_block(&solution)?;
                         node.mining_control()
                             .map_err(|e| e.to_string())?
-                            .submit_block(BlockPayload::from_local(block))
+                            .submit_block(BlockImage::from_local(block))
                             .map_err(|e| e.to_string())
                     })
                     .await

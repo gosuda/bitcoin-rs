@@ -4,13 +4,155 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::primitives::{
-    Hash256, Tx, TxOut,
+    Amount, Hash256, LockTime, OutPoint, Sequence, Tx, TxOut,
+    block::TransactionView,
     encode::{
-        ConsensusEncode, Sha256Sink, Sink as _, compact_len, finalize_double_sha256, write_compact,
-        write_script,
+        ConsensusEncode, Sha256Sink, Sink as _, compact_len, consensus_bytes,
+        finalize_double_sha256, write_compact, write_script,
     },
     varint,
 };
+
+#[derive(Clone, Copy, Debug)]
+pub enum TxView<'t> {
+    Owned(&'t Tx),
+    View(TransactionView<'t>),
+}
+
+impl<'t> From<&'t Tx> for TxView<'t> {
+    fn from(tx: &'t Tx) -> Self {
+        Self::Owned(tx)
+    }
+}
+
+impl<'t> From<TransactionView<'t>> for TxView<'t> {
+    fn from(view: TransactionView<'t>) -> Self {
+        Self::View(view)
+    }
+}
+
+impl<'t> TxView<'t> {
+    #[must_use]
+    pub fn version(&self) -> u32 {
+        match self {
+            Self::Owned(tx) => tx.version,
+            Self::View(v) => v.version(),
+        }
+    }
+
+    #[must_use]
+    pub fn lock_time(&self) -> LockTime {
+        match self {
+            Self::Owned(tx) => tx.lock_time,
+            Self::View(v) => v.lock_time(),
+        }
+    }
+
+    #[must_use]
+    pub fn input_count(&self) -> usize {
+        match self {
+            Self::Owned(tx) => tx.inputs.len(),
+            Self::View(v) => v.input_count(),
+        }
+    }
+
+    #[must_use]
+    pub fn output_count(&self) -> usize {
+        match self {
+            Self::Owned(tx) => tx.outputs.len(),
+            Self::View(v) => v.output_count(),
+        }
+    }
+
+    #[must_use]
+    pub fn input_outpoint(&self, i: usize) -> OutPoint {
+        match self {
+            Self::Owned(tx) => tx.inputs[i].previous_output,
+            Self::View(v) => v.input_outpoint(i),
+        }
+    }
+
+    #[must_use]
+    pub fn input_sequence(&self, i: usize) -> Sequence {
+        match self {
+            Self::Owned(tx) => tx.inputs[i].sequence,
+            Self::View(v) => v.input_sequence(i),
+        }
+    }
+
+    #[must_use]
+    pub fn input_script_sig(&self, i: usize) -> &'t [u8] {
+        match self {
+            Self::Owned(tx) => &tx.inputs[i].script_sig,
+            Self::View(v) => v.input_script_sig(i),
+        }
+    }
+
+    #[must_use]
+    pub fn output_value(&self, i: usize) -> Amount {
+        match self {
+            Self::Owned(tx) => tx.outputs[i].value,
+            Self::View(v) => v.output_value(i),
+        }
+    }
+
+    #[must_use]
+    pub fn output_script(&self, i: usize) -> &'t [u8] {
+        match self {
+            Self::Owned(tx) => &tx.outputs[i].script_pubkey,
+            Self::View(v) => v.output_script(i),
+        }
+    }
+
+    pub fn encode_output<W: crate::primitives::encode::Sink>(&self, i: usize, writer: &mut W) {
+        match self {
+            Self::Owned(tx) => tx.outputs[i].consensus_encode(writer),
+            Self::View(v) => {
+                writer.write_all(&v.output_value(i).to_le_bytes());
+                write_script(writer, v.output_script(i));
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn output_consensus_bytes(&self, i: usize) -> Vec<u8> {
+        match self {
+            Self::Owned(tx) => consensus_bytes(&tx.outputs[i]),
+            Self::View(v) => {
+                let mut bytes = Vec::new();
+                bytes.extend_from_slice(&v.output_value(i).to_le_bytes());
+                let script = v.output_script(i);
+                bytes.extend_from_slice(varint::encode(compact_len(script.len())).as_slice());
+                bytes.extend_from_slice(script);
+                bytes
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn is_coinbase(&self) -> bool {
+        match self {
+            Self::Owned(tx) => tx.is_coinbase(),
+            Self::View(v) => v.is_coinbase(),
+        }
+    }
+
+    #[must_use]
+    pub fn witness_item_count(&self, input: usize) -> usize {
+        match self {
+            Self::Owned(tx) => tx.inputs[input].witness.len(),
+            Self::View(v) => v.witness_item_count(input),
+        }
+    }
+
+    #[must_use]
+    pub fn witness_item(&self, input: usize, item: usize) -> &'t [u8] {
+        match self {
+            Self::Owned(tx) => &tx.inputs[input].witness[item],
+            Self::View(v) => v.witness_item(input, item),
+        }
+    }
+}
 
 pub const CODESEPARATOR_POSITION: u32 = 0xFFFF_FFFF;
 
@@ -113,7 +255,7 @@ impl EcdsaType {
 }
 
 pub struct SighashCache<'t> {
-    tx: &'t Tx,
+    tx: TxView<'t>,
     segwit_prevouts: OnceLock<Hash256>,
     segwit_sequences: OnceLock<Hash256>,
     segwit_outputs: OnceLock<Hash256>,
@@ -126,9 +268,9 @@ pub struct SighashCache<'t> {
 
 impl<'t> SighashCache<'t> {
     #[must_use]
-    pub fn new(tx: &'t Tx) -> Self {
+    pub fn new(tx: impl Into<TxView<'t>>) -> Self {
         Self {
-            tx,
+            tx: tx.into(),
             segwit_prevouts: OnceLock::new(),
             segwit_sequences: OnceLock::new(),
             segwit_outputs: OnceLock::new(),
@@ -146,59 +288,60 @@ impl<'t> SighashCache<'t> {
         script_code: &[u8],
         sighash_type: u32,
     ) -> Result<Hash256, SighashError> {
-        let total = self.tx.inputs.len();
-        let input = self
-            .tx
-            .inputs
-            .get(input_index)
-            .ok_or(SighashError::InputOutOfRange {
+        let total = self.tx.input_count();
+        if input_index >= total {
+            return Err(SighashError::InputOutOfRange {
                 index: input_index,
                 total,
-            })?;
+            });
+        }
         let ty = EcdsaType::from_consensus(sighash_type);
-        if ty.is_single() && input_index >= self.tx.outputs.len() {
+        if ty.is_single() && input_index >= self.tx.output_count() {
             return Ok(uint256_one());
         }
 
         let mut engine = Sha256::new();
         let writer = &mut Sha256Sink(&mut engine);
-        writer.write_all(&self.tx.version.to_le_bytes());
+        writer.write_all(&self.tx.version().to_le_bytes());
         if ty.is_anyone_can_pay() {
             write_compact(writer, 1);
-            encode_legacy_input(writer, input, script_code, input.sequence);
+            let outpoint = self.tx.input_outpoint(input_index);
+            outpoint.consensus_encode(writer);
+            write_script(writer, script_code);
+            writer.write_all(&self.tx.input_sequence(input_index).to_le_bytes());
         } else {
             write_compact(writer, compact_len(total));
-            for (n, txin) in self.tx.inputs.iter().enumerate() {
+            for n in 0..total {
                 let sequence = if n != input_index && (ty.is_single() || ty.is_none()) {
                     crate::primitives::Sequence::ZERO
                 } else {
-                    txin.sequence
+                    self.tx.input_sequence(n)
                 };
                 let script: &[u8] = if n == input_index { script_code } else { &[] };
-                encode_legacy_input(writer, txin, script, sequence);
+                let outpoint = self.tx.input_outpoint(n);
+                outpoint.consensus_encode(writer);
+                write_script(writer, script);
+                writer.write_all(&sequence.to_le_bytes());
             }
         }
         match ty {
             EcdsaType::All | EcdsaType::AllAnyoneCanPay => {
-                write_compact(writer, compact_len(self.tx.outputs.len()));
-                for output in &self.tx.outputs {
-                    output.consensus_encode(writer);
+                write_compact(writer, compact_len(self.tx.output_count()));
+                for n in 0..self.tx.output_count() {
+                    self.tx.encode_output(n, writer);
                 }
             }
             EcdsaType::Single | EcdsaType::SingleAnyoneCanPay => {
                 write_compact(writer, compact_len(input_index + 1));
-                for (n, output) in self.tx.outputs.iter().enumerate().take(input_index + 1) {
-                    if n == input_index {
-                        output.consensus_encode(writer);
-                    } else {
-                        writer.write_all(&u64::MAX.to_le_bytes());
-                        write_compact(writer, 0);
-                    }
+                for _ in 0..input_index {
+                    writer.write_all(&u64::MAX.to_le_bytes());
+                    write_compact(writer, 0);
                 }
+                self.tx.encode_output(input_index, writer);
             }
             _ => write_compact(writer, 0),
         }
-        writer.write_all(&self.tx.lock_time.to_le_bytes());
+        writer.write_all(&self.tx.lock_time().to_consensus().to_le_bytes());
         writer.write_all(&sighash_type.to_le_bytes());
 
         Ok(finalize_double_sha256(engine))
@@ -223,15 +366,13 @@ impl<'t> SighashCache<'t> {
         sighash_type: u32,
     ) -> Result<Hash256, SighashError> {
         let ty = EcdsaType::from_consensus(sighash_type);
-        let total = self.tx.inputs.len();
-        let input = self
-            .tx
-            .inputs
-            .get(input_index)
-            .ok_or(SighashError::InputOutOfRange {
+        let total = self.tx.input_count();
+        if input_index >= total {
+            return Err(SighashError::InputOutOfRange {
                 index: input_index,
                 total,
-            })?;
+            });
+        }
 
         let zero = Hash256::default();
         let prevouts_hash = if ty.is_anyone_can_pay() {
@@ -254,14 +395,13 @@ impl<'t> SighashCache<'t> {
                 sha256_over(|writer| writer.write_all(self.outputs().as_byte_array()))
             })
         } else if ty.is_single() {
-            match self.tx.outputs.get(input_index) {
-                Some(output) => {
-                    let mut single = Sha256::new();
-                    let single_writer = &mut Sha256Sink(&mut single);
-                    output.consensus_encode(single_writer);
-                    finalize_double_sha256(single)
-                }
-                None => zero,
+            if input_index < self.tx.output_count() {
+                let mut single = Sha256::new();
+                let single_writer = &mut Sha256Sink(&mut single);
+                self.tx.encode_output(input_index, single_writer);
+                finalize_double_sha256(single)
+            } else {
+                zero
             }
         } else {
             zero
@@ -269,15 +409,15 @@ impl<'t> SighashCache<'t> {
 
         let mut engine = Sha256::new();
         let writer = &mut Sha256Sink(&mut engine);
-        writer.write_all(&self.tx.version.to_le_bytes());
+        writer.write_all(&self.tx.version().to_le_bytes());
         writer.write_all(prevouts_hash.as_byte_array());
         writer.write_all(sequences_hash.as_byte_array());
-        input.previous_output.consensus_encode(writer);
+        self.tx.input_outpoint(input_index).consensus_encode(writer);
         write_script(writer, script_code);
         writer.write_all(&value.to_le_bytes());
-        writer.write_all(&input.sequence.to_le_bytes());
+        writer.write_all(&self.tx.input_sequence(input_index).to_le_bytes());
         writer.write_all(outputs_hash.as_byte_array());
-        writer.write_all(&self.tx.lock_time.to_le_bytes());
+        writer.write_all(&self.tx.lock_time().to_consensus().to_le_bytes());
         writer.write_all(&sighash_type.to_le_bytes());
 
         Ok(finalize_double_sha256(engine))
@@ -300,25 +440,23 @@ impl<'t> SighashCache<'t> {
         let ty_byte = sighash_type.to_u8();
         let base = ty_byte & 0x03;
 
-        let total = self.tx.inputs.len();
-        let input = self
-            .tx
-            .inputs
-            .get(input_index)
-            .ok_or(SighashError::InputOutOfRange {
+        let total = self.tx.input_count();
+        if input_index >= total {
+            return Err(SighashError::InputOutOfRange {
                 index: input_index,
                 total,
-            })?;
+            });
+        }
         if prevouts.len() != total {
             return Err(SighashError::PrevoutsLength {
                 provided: prevouts.len(),
                 expected: total,
             });
         }
-        if base == 0x03 && input_index >= self.tx.outputs.len() {
+        if base == 0x03 && input_index >= self.tx.output_count() {
             return Err(SighashError::SingleMissingOutput {
                 input_index,
-                outputs_length: self.tx.outputs.len(),
+                outputs_length: self.tx.output_count(),
             });
         }
         let is_anyone_can_pay = ty_byte & 0x80 != 0;
@@ -327,8 +465,8 @@ impl<'t> SighashCache<'t> {
         let writer = &mut Sha256Sink(&mut engine);
         writer.write_all(&[0x00]);
         writer.write_all(&[ty_byte]);
-        writer.write_all(&self.tx.version.to_le_bytes());
-        writer.write_all(&self.tx.lock_time.to_le_bytes());
+        writer.write_all(&self.tx.version().to_le_bytes());
+        writer.write_all(&self.tx.lock_time().to_consensus().to_le_bytes());
         if !is_anyone_can_pay {
             writer.write_all(&self.prevouts().to_le_bytes());
             writer.write_all(&self.taproot_amounts(prevouts).to_le_bytes());
@@ -347,13 +485,13 @@ impl<'t> SighashCache<'t> {
         }
         writer.write_all(&[spend_type]);
         if is_anyone_can_pay {
-            input.previous_output.consensus_encode(writer);
+            self.tx.input_outpoint(input_index).consensus_encode(writer);
             let prevout = prevouts
                 .get(input_index)
                 .ok_or(SighashError::PrevoutsIndex { index: input_index })?;
             writer.write_all(&prevout.value.to_le_bytes());
             write_script(writer, &prevout.script_pubkey);
-            writer.write_all(&input.sequence.to_le_bytes());
+            writer.write_all(&self.tx.input_sequence(input_index).to_le_bytes());
         } else {
             let input_index =
                 u32::try_from(input_index).unwrap_or_else(|_| unreachable!("input index fits u32"));
@@ -364,8 +502,7 @@ impl<'t> SighashCache<'t> {
             writer.write_all(&sha256_parts(&[annex_len.as_slice(), annex]));
         }
         if base == 0x03 {
-            let output = &self.tx.outputs[input_index];
-            let output_hash = sha256_over(|w| output.consensus_encode(w));
+            let output_hash = sha256_over(|w| self.tx.encode_output(input_index, w));
             writer.write_all(&output_hash.to_le_bytes());
         }
         if let Some((leaf_hash, code_separator_position)) = leaf_hash_code_separator {
@@ -378,11 +515,10 @@ impl<'t> SighashCache<'t> {
     }
 
     fn prevouts(&self) -> Hash256 {
-        let tx = self.tx;
         *self.prevouts.get_or_init(|| {
             sha256_over(|writer| {
-                for input in &tx.inputs {
-                    input.previous_output.consensus_encode(writer);
+                for i in 0..self.tx.input_count() {
+                    self.tx.input_outpoint(i).consensus_encode(writer);
                 }
             })
         })
@@ -409,22 +545,20 @@ impl<'t> SighashCache<'t> {
     }
 
     fn sequences(&self) -> Hash256 {
-        let tx = self.tx;
         *self.sequences.get_or_init(|| {
             sha256_over(|writer| {
-                for input in &tx.inputs {
-                    writer.write_all(&input.sequence.to_le_bytes());
+                for i in 0..self.tx.input_count() {
+                    writer.write_all(&self.tx.input_sequence(i).to_le_bytes());
                 }
             })
         })
     }
 
     fn outputs(&self) -> Hash256 {
-        let tx = self.tx;
         *self.outputs.get_or_init(|| {
             sha256_over(|writer| {
-                for output in &tx.outputs {
-                    output.consensus_encode(writer);
+                for i in 0..self.tx.output_count() {
+                    self.tx.encode_output(i, writer);
                 }
             })
         })
@@ -492,17 +626,6 @@ const fn uint256_one() -> Hash256 {
     let mut bytes = [0_u8; 32];
     bytes[0] = 1;
     Hash256::from_le_bytes(&bytes)
-}
-
-fn encode_legacy_input(
-    writer: &mut Sha256Sink<'_>,
-    input: &crate::primitives::TxIn,
-    script: &[u8],
-    sequence: crate::primitives::Sequence,
-) {
-    input.previous_output.consensus_encode(writer);
-    write_script(writer, script);
-    writer.write_all(&sequence.to_le_bytes());
 }
 
 fn sha256_over(encode: impl FnOnce(&mut Sha256Sink<'_>)) -> Hash256 {

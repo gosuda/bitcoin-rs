@@ -33,7 +33,7 @@ impl BlockBodyStore for Bodies {
 type MaturedBodyStore = (
     Chainstate,
     Vec<Block>,
-    HashMap<Hash256, BlockPayload>,
+    HashMap<Hash256, BlockImage>,
     Arc<Bodies>,
 );
 
@@ -77,16 +77,16 @@ fn matured_chain_with_body_store() -> Result<MaturedBodyStore, crate::test_suppo
             ),
             role: bitcoin_rs_execution::ChainstateRole::Ordinary,
         });
-    handles.apply_block(&BlockPayload::from_local(genesis))?;
+    handles.apply_block(&BlockImage::from_local(genesis))?;
     for block in &main {
-        handles.apply_block(&BlockPayload::from_local(block.clone()))?;
+        handles.apply_block(&BlockImage::from_local(block.clone()))?;
     }
     let bodies = main
         .iter()
         .map(|block| {
             (
                 Hash256::from_le_bytes(block.block_hash().as_bytes()),
-                BlockPayload::from_local(block.clone()),
+                BlockImage::from_local(block.clone()),
             )
         })
         .collect();
@@ -133,7 +133,7 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
         }
         bodies.insert(
             Hash256::from_le_bytes(block.block_hash().as_bytes()),
-            BlockPayload::from_local(block.clone()),
+            BlockImage::from_local(block.clone()),
         );
         fork.push(block);
     }
@@ -237,7 +237,7 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), crate::test_s
         let staged = (*block).clone();
         bodies.insert(
             Hash256::from_le_bytes(staged.block_hash().as_bytes()),
-            BlockPayload::from_local(staged),
+            BlockImage::from_local(staged),
         );
     }
 
@@ -305,7 +305,7 @@ fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
     )?;
     bodies.insert(
         Hash256::from_le_bytes(invalid.block_hash().as_bytes()),
-        BlockPayload::from_local(invalid),
+        BlockImage::from_local(invalid),
     );
 
     let mut old_body_reads = 0;
@@ -373,7 +373,7 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
     let mut wrong_coinbase = regtest_fixture::coinbase(101);
     wrong_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
     let wrong = mined_block_with_prev_hash(fork_root_hash, 101, vec![wrong_coinbase]);
-    bodies.insert(target_hash, BlockPayload::from_local(wrong));
+    bodies.insert(target_hash, BlockImage::from_local(wrong));
 
     let outcome = crate::reorg::switch_to_branch(
         &handles,
@@ -430,7 +430,7 @@ fn branch_switch_rejects_malformed_body_before_mutation()
         NodeStatus::HeaderValid,
     )?;
     let target_hash = Hash256::from_le_bytes(target.block_hash().as_bytes());
-    let mut malformed = BlockPayload::from_local(target).bytes().clone();
+    let mut malformed = BlockImage::from_local(target).bytes().clone();
     malformed.truncate(malformed.len() - 1);
     bodies_store
         .persist_block_body(101, target_hash, &malformed)

@@ -8,7 +8,7 @@ mod historical;
 mod peers;
 mod receive;
 mod requests;
-mod stale_tips;
+pub(crate) mod stale_tips;
 mod telemetry;
 
 #[cfg(test)]

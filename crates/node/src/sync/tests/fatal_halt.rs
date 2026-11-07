@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{Block, BlockImage, Hash256, Network};
 use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, regtest_fixture};
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
 use bitcoin_rs_storage::undo::InMemoryUndoStore;
@@ -102,7 +102,7 @@ fn poisoned_chain(
         role: ChainstateRole::Ordinary,
     }));
     handles
-        .apply_block(&BlockPayload::from_local(genesis))
+        .apply_block(&BlockImage::from_local(genesis))
         .map_err(|error| TestError::Apply(Box::new(error)))?;
     Ok((handles, blocks))
 }

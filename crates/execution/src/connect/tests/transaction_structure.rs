@@ -68,7 +68,7 @@ fn zero_output_coinbase_never_publishes_under_any_script_policy() -> TestResult 
                         .skip(1)
                         .map(|tx| OutPoint::new(tx.txid(), 0))
                         .collect();
-                    let payload = BlockPayload::from_local(block);
+                    let payload = BlockImage::from_local(block);
                     let result = match path {
                         Path::Direct => chain.apply_block(&payload).map(|_| ()),
                         Path::Proposal => chain.validate_block(&payload),
@@ -129,7 +129,7 @@ fn proposal_and_commit_agree_on_coinbase_finality_without_proposal_side_effects(
         block.txs[0].lock_time = LockTime::from_consensus(locktime);
         block.txs[0].inputs[0].sequence = Sequence::ZERO;
         remine(&mut block)?;
-        let payload = BlockPayload::from_local(block);
+        let payload = BlockImage::from_local(block);
         let tip = chain.applied_tip_snapshot().ok_or("missing tip")?;
         let snapshot = chain.chain_snapshot();
         let head = chain.durable_head.load()?;

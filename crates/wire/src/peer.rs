@@ -445,7 +445,7 @@ impl<S: Read> Peer<S> {
                 payload
                     .bytes()
                     .len()
-                    .saturating_add(payload.block().retained_heap_bytes()),
+                    .saturating_add(payload.retained_heap_bytes()),
             )?,
             (Message::Tx(tx), Some(credit)) => {
                 credit.retain(tx.total_size().saturating_add(tx.retained_heap_bytes()))?;

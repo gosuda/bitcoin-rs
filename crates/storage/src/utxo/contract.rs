@@ -1,8 +1,10 @@
+use hashbrown::HashSet;
 use std::borrow::Borrow;
 
 use crate::{DisconnectPhase, StorageError, UndoStore};
-use bitcoin_rs_consensus::primitives::{Block, Hash256, OutPoint, Tx, TxOut, Txid};
-use hashbrown::HashSet;
+use bitcoin_rs_consensus::primitives::{
+    Block, BlockImage, Hash256, OutPoint, Script, TransactionView, Tx, TxOut, Txid,
+};
 
 use crate::utxo::set::{UtxoCoin, UtxoError, UtxoSet};
 use crate::utxo::stats::{CoinStatsListener, CoinStatsRewindError};
@@ -338,10 +340,10 @@ pub fn commit_block_changes<T: Borrow<TxOut>>(
 pub fn build_block_changes<'a>(
     inputs: &BlockChangeInputs<'a, '_>,
     resolved: &impl SpentOutputLookup,
-) -> Result<(BlockChanges<&'a TxOut>, UndoBatch, BlockValueTotals), BlockChangeError> {
-    if inputs.block.txs.len() != inputs.txids.len() {
+) -> Result<(BlockChanges<TxOut>, UndoBatch, BlockValueTotals), BlockChangeError> {
+    if inputs.block.tx_count() != inputs.txids.len() {
         return Err(BlockChangeError::TxidCountMismatch {
-            transactions: inputs.block.txs.len(),
+            transactions: inputs.block.tx_count(),
             txids: inputs.txids.len(),
         });
     }
@@ -355,17 +357,18 @@ pub fn build_block_changes<'a>(
 
     let mut builder =
         ChangeBuilder::with_capacity(inputs.add_capacity, inputs.remove_capacity, inputs.height);
-    for (tx, txid) in inputs.block.txs.iter().zip(inputs.txids) {
-        builder.add_outputs(tx, *txid, inputs)?;
+    for (tx_index, txid) in (0..inputs.block.tx_count()).zip(inputs.txids) {
+        let tx = inputs.block.tx(tx_index);
+        builder.add_outputs(&tx, *txid, inputs)?;
         if !tx.is_coinbase() {
-            builder.add_spends(tx, inputs, resolved)?;
+            builder.add_spends(&tx, inputs, resolved)?;
         }
     }
     Ok(builder.finish())
 }
 
 pub struct BlockChangeInputs<'a, 'b> {
-    pub block: &'a Block,
+    pub block: &'a BlockImage,
     pub height: u32,
     pub txids: &'b [Txid],
     pub same_block_spent: Option<&'b HashSet<OutPoint>>,
@@ -387,14 +390,14 @@ impl BlockChangeInputs<'_, '_> {
     }
 }
 
-struct ChangeBuilder<'a> {
-    changes: BlockChanges<&'a TxOut>,
+struct ChangeBuilder {
+    changes: BlockChanges<TxOut>,
     undo: UndoBatch,
     totals: BlockValueTotals,
     height: u32,
 }
 
-impl<'a> ChangeBuilder<'a> {
+impl ChangeBuilder {
     fn with_capacity(adds: usize, removes: usize, height: u32) -> Self {
         Self {
             changes: BlockChanges::with_capacity(adds, removes),
@@ -404,24 +407,29 @@ impl<'a> ChangeBuilder<'a> {
         }
     }
 
-    fn finish(self) -> (BlockChanges<&'a TxOut>, UndoBatch, BlockValueTotals) {
+    fn finish(self) -> (BlockChanges<TxOut>, UndoBatch, BlockValueTotals) {
         (self.changes, self.undo, self.totals)
     }
 
     fn add_outputs(
         &mut self,
-        tx: &'a Tx,
+        tx: &TransactionView<'_>,
         txid: Txid,
         inputs: &BlockChangeInputs<'_, '_>,
     ) -> Result<(), BlockChangeError> {
         let coinbase = tx.is_coinbase();
-        for (vout_idx, txout) in tx.outputs.iter().enumerate() {
+        for vout_idx in 0..tx.output_count() {
             let vout =
                 u32::try_from(vout_idx).map_err(|_| BlockChangeError::VoutOverflow { txid })?;
             let outpoint = OutPoint::new(txid, vout);
             let same_block = inputs.contains(outpoint);
-            self.account_output_value(coinbase, same_block, txout.value.to_sat())?;
-            if same_block || inputs.is_unstorable(txout) {
+            let value = tx.output_value(vout_idx);
+            self.account_output_value(coinbase, same_block, value.to_sat())?;
+            let txout = TxOut {
+                value,
+                script_pubkey: Script::from_bytes(tx.output_script(vout_idx).to_vec()),
+            };
+            if same_block || inputs.is_unstorable(&txout) {
                 continue;
             }
             self.stage_created(outpoint, txout, coinbase, inputs.overwritten);
@@ -451,7 +459,7 @@ impl<'a> ChangeBuilder<'a> {
     fn stage_created(
         &mut self,
         outpoint: OutPoint,
-        txout: &'a TxOut,
+        txout: TxOut,
         coinbase: bool,
         overwritten: Option<&UtxoSet>,
     ) {
@@ -471,12 +479,12 @@ impl<'a> ChangeBuilder<'a> {
 
     fn add_spends(
         &mut self,
-        tx: &Tx,
+        tx: &TransactionView<'_>,
         inputs: &BlockChangeInputs<'_, '_>,
         resolved: &impl SpentOutputLookup,
     ) -> Result<(), BlockChangeError> {
-        for tx_input in &tx.inputs {
-            let previous_output = tx_input.previous_output;
+        for input_index in 0..tx.input_count() {
+            let previous_output = tx.input_outpoint(input_index);
             if inputs.contains(previous_output) {
                 continue;
             }

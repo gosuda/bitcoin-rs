@@ -21,7 +21,7 @@ use binary_sv2::{B064K, B0255, Decodable, Encodable, GetSize, Seq0255, Str0255, 
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::header_rules::compact_is_met_by;
 use bitcoin_rs_consensus::primitives::{
-    Amount, BlockPayload, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
+    Amount, BlockImage, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
     Sequence, Tx, TxIn, TxOut, Txid, Witness, encode::double_sha256,
 };
 use bitcoin_rs_consensus::script::VerifyFlags;
@@ -2358,7 +2358,7 @@ impl MiningControl for StaleParentControl {
 
     fn submit_block(
         &self,
-        _payload: BlockPayload,
+        _payload: BlockImage,
     ) -> Result<BlockValidationResult, MiningControlError> {
         Ok(BlockValidationResult::Rejected(STALE_PARENT_REASON.into()))
     }

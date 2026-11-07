@@ -116,10 +116,10 @@ fn mutated_window_moves_the_uncommitted_tail_back_without_copying_decoded_blocks
     stage_body(&fixture.sync, &fixture.blocks[0]);
     stage_body(&fixture.sync, &mutated);
 
-    let payload = BlockPayload::from_local(fixture.blocks[2].clone());
-    let txs_ptr = payload.block().txs.as_ptr();
-    let script_ptr = payload.block().txs[0].inputs[0].script_sig.as_ptr();
-    let hash = payload.block().block_hash().0;
+    let payload = BlockImage::from_local(fixture.blocks[2].clone());
+    let bytes_ptr = payload.bytes().as_ptr();
+    let script_ptr = payload.tx(0).input_script_sig(0).as_ptr();
+    let hash = payload.block_hash().0;
     fixture
         .sync
         .scheduler
@@ -141,11 +141,9 @@ fn mutated_window_moves_the_uncommitted_tail_back_without_copying_decoded_blocks
         .stager
         .drain_expected_prefix(&hashes);
     assert_eq!(restored.len(), 2);
-    assert_eq!(restored[0].payload().block().txs.as_ptr(), txs_ptr);
+    assert_eq!(restored[0].payload().bytes().as_ptr(), bytes_ptr);
     assert_eq!(
-        restored[0].payload().block().txs[0].inputs[0]
-            .script_sig
-            .as_ptr(),
+        restored[0].payload().tx(0).input_script_sig(0).as_ptr(),
         script_ptr
     );
     assert_eq!(
