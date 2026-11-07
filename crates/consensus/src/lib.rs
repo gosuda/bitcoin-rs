@@ -215,4 +215,5 @@ pub mod undo;
 pub use coin_read::{CoinRead, UtxoCoin};
 pub use undo::{
     BlockSpends, BlockSpendsError, BlockUndoSource, BoundedReadError, HistoryUnavailable,
+    UndoReadError,
 };

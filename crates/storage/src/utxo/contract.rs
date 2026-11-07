@@ -215,11 +215,19 @@ pub enum UndoLoadError {
 
 pub use bitcoin_rs_consensus::{
     BlockSpends, BlockSpendsError, BlockUndoSource, BoundedReadError, HistoryUnavailable,
+    UndoReadError,
 };
 
 impl From<UndoLoadError> for BlockSpendsError {
     fn from(error: UndoLoadError) -> Self {
-        Self::Undo(error.to_string())
+        Self::Undo(match error {
+            UndoLoadError::Read(source) => UndoReadError::Store(source.to_string()),
+            UndoLoadError::Missing { hash, height } => UndoReadError::Missing {
+                block: hash,
+                height,
+            },
+            UndoLoadError::Unreadable { hash, .. } => UndoReadError::Unreadable { block: hash },
+        })
     }
 }
 

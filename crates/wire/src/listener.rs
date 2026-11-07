@@ -2399,6 +2399,9 @@ pub fn run_message_loop<S: std::io::Read + std::io::Write>(
                         .peer_table
                         .note_fee_filter(lease.source(peer_addr.endpoint()), rate);
                 }
+                if let Some(tp) = &shared.tx_policy {
+                    tp.receive_fee_filter(lease.source(peer_addr.endpoint()), *rate);
+                }
             }
             crate::Message::Tx(tx) => {
                 use bitcoin::hashes::Hash as _;

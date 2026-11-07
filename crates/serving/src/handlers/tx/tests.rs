@@ -440,13 +440,10 @@ fn getrawtransaction_explicit_coinbase_preserves_undo_failures_and_render_budget
         (|| BlockSpendsError::Corrupt("fixture"), -32603),
         (
             || {
-                BlockSpendsError::Undo(
-                    bitcoin_rs_storage::utxo::contract::UndoLoadError::Missing {
-                        hash: Hash256::default(),
-                        height: 1,
-                    }
-                    .to_string(),
-                )
+                BlockSpendsError::Undo(bitcoin_rs_storage::utxo::contract::UndoReadError::Missing {
+                    block: Hash256::default(),
+                    height: 1,
+                })
             },
             -32603,
         ),

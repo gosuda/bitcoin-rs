@@ -37,14 +37,24 @@ pub struct BlockSpends {
     pub spent: Result<Vec<Vec<UtxoCoin>>, HistoryUnavailable>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum UndoReadError {
+    #[error("missing undo record for block {block} at height {height}")]
+    Missing { block: Hash256, height: u32 },
+    #[error("undo record for block {block} is unreadable")]
+    Unreadable { block: Hash256 },
+    #[error("undo store read: {0}")]
+    Store(String),
+}
+
 #[derive(Debug, Error)]
 pub enum BlockSpendsError {
     #[error("Block not found")]
     UnknownBlock,
     #[error(transparent)]
     History(#[from] HistoryUnavailable),
-    #[error("undo load error: {0}")]
-    Undo(String),
+    #[error(transparent)]
+    Undo(#[from] UndoReadError),
     #[error("storage error: {0}")]
     Storage(String),
     #[error("block body read: {0}")]
