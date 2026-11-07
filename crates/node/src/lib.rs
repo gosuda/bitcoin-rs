@@ -38,6 +38,8 @@ pub mod test_support;
 #[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 pub use test_support::TestError;
+#[cfg(any(test, verification, kani))]
+pub(crate) mod budget_model;
 pub mod sync;
 #[cfg(not(feature = "test-seam"))]
 #[allow(
