@@ -20,6 +20,8 @@ mod pool;
 mod rbf;
 mod reader;
 mod rolling_min_fee;
+#[cfg(any(test, verification, kani))]
+pub(crate) mod settlement_model;
 pub mod snapshot;
 pub mod standardness;
 mod submit_package;
