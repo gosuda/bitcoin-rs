@@ -497,13 +497,13 @@ fn verify_script<'a>(
     Ok(())
 }
 
-fn verify_witness_program(
-    witness: &Witness,
+fn verify_witness_program<'a>(
+    witness: &'a Witness,
     version: u8,
     program: &[u8],
     flags: VerifyFlags,
     checker: &TxSignatureChecker<'_>,
-    stack: &mut Stack<'_>,
+    stack: &mut Stack<'a>,
 ) -> Result<(), ScriptError> {
     if version != 0 {
         if flags.contains(VerifyFlags::DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM) {
@@ -517,7 +517,7 @@ fn verify_witness_program(
     }
 
     let mut witness_stack = Stack::new();
-    let (witness_script, element_count) = match program.len() {
+    let (witness_script, element_count): (Cow<'a, [u8]>, usize) = match program.len() {
         32 => {
             let Some(script) = witness.last() else {
                 return Err(invalid(ScriptErrCode::WitnessProgramWitnessEmpty));
@@ -525,13 +525,13 @@ fn verify_witness_program(
             if Sha256::digest(script).as_slice() != program {
                 return Err(invalid(ScriptErrCode::WitnessProgramMismatch));
             }
-            (script.to_vec(), witness.len() - 1)
+            (Cow::Borrowed(script), witness.len() - 1)
         }
         20 => {
             if witness.len() != 2 {
                 return Err(invalid(ScriptErrCode::WitnessProgramMismatch));
             }
-            (p2wpkh_script_code(program), witness.len())
+            (Cow::Owned(p2wpkh_script_code(program)), witness.len())
         }
         _ => return Err(invalid(ScriptErrCode::WitnessProgramWrongLength)),
     };
@@ -541,7 +541,7 @@ fn verify_witness_program(
             return Err(invalid(ScriptErrCode::PushSize));
         }
         witness_stack
-            .push(ScriptItem::Bytes(element.into()))
+            .push(ScriptItem::Borrowed(element))
             .map_err(|_| invalid(ScriptErrCode::StackSize))?;
     }
 
