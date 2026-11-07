@@ -93,7 +93,7 @@ The [formal verification contract](https://github.com/gosuda/bitcoin-rs/blob/mai
 
 The default timeout is 3,600 seconds per solver invocation. This resource limit does not establish safety or progress.
 
-The tool pins are Apalache 0.62.4, its release archive, and the JAR digest. The contract records Java 26.0.2.1 as the observed runtime; provision that runtime before you treat a run as the pinned lane.
+The tool pins are Apalache 0.62.4, its release archive, and the JAR digest. The contract records Java 25.0.5 as the observed runtime; provision that runtime before you treat a run as the pinned lane.
 
 ## Differential oracle
 

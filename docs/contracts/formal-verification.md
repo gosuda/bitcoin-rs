@@ -10,7 +10,7 @@ This file owns the formal toolchain pins, the run rules, and the per-module chec
 | Archive | `apalache-0.62.4.zip`, SHA256 `3b6b7ebf24e778535bf47e0cb3f0799c9ab9048df41119c7d3091c6ca1760bc1` (matches the release `sha256sum.txt` and the GitHub asset digest) |
 | Jar | `lib/apalache.jar`, SHA256 `e5223915507b65cc5f1638bd037ede60f8a4fc1644aff46355779f9b05df9262` |
 | Apalache home | `${APALACHE_HOME}`, default `target/tools/apalache-0.62.4` (untracked) |
-| Java | `java -version` observed line: Java 26.0.2.1 |
+| Java | `java -version` observed line: Java 25.0.5 |
 | Solver | `SMT_SOLVER=z3`, `JVM_ARGS` default `-Xmx4096m` |
 | SMT encoding | `funArrays` (`--smt-encoding=funArrays`) |
 | Lean | `leanprover/lean4:v4.35.0` (`docs/lean/lean-toolchain`) |
