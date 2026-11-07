@@ -28,9 +28,9 @@ impl crate::context::DerivedIndexQuery for LoadTxIndex {
             synced: true,
             best_block_height: 0,
             applied_height: 0,
+            historical_height: 0,
             verified_height: 0,
             coverage_height: 0,
-            historical_height: 0,
         })
     }
 }
