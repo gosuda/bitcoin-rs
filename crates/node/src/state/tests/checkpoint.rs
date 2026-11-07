@@ -143,23 +143,14 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
 
 #[test]
 fn clean_checkpoint_lifecycle_is_backend_neutral() -> Result<(), TestError> {
-    let backends: Vec<&str> = vec![
-        #[cfg(feature = "fjall")]
-        "fjall",
-        #[cfg(feature = "rocksdb")]
-        "rocksdb",
-        #[cfg(feature = "redb")]
-        "redb",
-    ];
+    let backends: Vec<&str> = vec!["rocksdb"];
 
     for backend in backends {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join(backend);
         config.storage.backend = match backend {
-            "fjall" => bitcoin_rs_storage::StorageBackend::Fjall,
             "rocksdb" => bitcoin_rs_storage::StorageBackend::RocksDb,
-            "redb" => bitcoin_rs_storage::StorageBackend::Redb,
             _ => {
                 return Err(TestError::ExpectationFailed(
                     "a compiled-in storage backend",

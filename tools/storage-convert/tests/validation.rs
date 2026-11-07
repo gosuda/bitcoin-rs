@@ -1,0 +1,418 @@
+use std::fs;
+use tempfile::tempdir;
+
+use super::support::error::{TestError, TestResult};
+use super::support::harness::{recursive_dir_digest, run_converter};
+use super::support::oracle::write_schema_marker;
+
+#[test]
+fn nonempty_destination_is_rejected_without_modifying_source_or_destination() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let dest_temp = tempdir()?;
+    let from_path = source_temp.path();
+    let to_path = dest_temp.path();
+
+    write_schema_marker(from_path, 2)?;
+
+    let pre_existing_file = to_path.join("existing_file.txt");
+    fs::write(&pre_existing_file, b"pre-existing content")?;
+
+    let source_digest_before = recursive_dir_digest(from_path)?;
+
+    let output = run_converter(&[
+        "--from",
+        from_path.to_str().expect("valid utf8 path"),
+        "--to",
+        to_path.to_str().expect("valid utf8 path"),
+    ])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded when destination was nonempty".into(),
+        ));
+    }
+
+    let source_digest_after = recursive_dir_digest(from_path)?;
+    if source_digest_before != source_digest_after {
+        return Err(TestError::Assertion(
+            "source directory was modified on nonempty destination rejection".into(),
+        ));
+    }
+
+    let dest_content = fs::read(&pre_existing_file)?;
+    if dest_content != b"pre-existing content" {
+        return Err(TestError::Assertion(
+            "pre-existing destination file was mutated on rejection".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+// RCV-09
+#[test]
+fn unknown_schema_epoch_is_rejected() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let dest_temp = tempdir()?;
+    let from_path = source_temp.path();
+    let to_path = dest_temp.path().join("converted");
+
+    write_schema_marker(from_path, 9)?;
+
+    let source_digest_before = recursive_dir_digest(from_path)?;
+
+    let output = run_converter(&[
+        "--from",
+        from_path.to_str().expect("valid utf8 path"),
+        "--to",
+        to_path.to_str().expect("valid utf8 path"),
+    ])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded on unknown epoch 9".into(),
+        ));
+    }
+
+    let source_digest_after = recursive_dir_digest(from_path)?;
+    if source_digest_before != source_digest_after {
+        return Err(TestError::Assertion(
+            "source directory was modified on unknown epoch rejection".into(),
+        ));
+    }
+
+    if to_path.join("CURRENT_SCHEMA").exists() {
+        return Err(TestError::Assertion(
+            "destination CURRENT_SCHEMA was published on unknown epoch rejection".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+// RCV-09
+#[test]
+fn missing_schema_marker_is_rejected() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let dest_temp = tempdir()?;
+    let from_path = source_temp.path();
+    let to_path = dest_temp.path().join("converted");
+
+    fs::write(from_path.join("unrelated_file.txt"), b"some data")?;
+
+    let output = run_converter(&[
+        "--from",
+        from_path.to_str().expect("valid utf8 path"),
+        "--to",
+        to_path.to_str().expect("valid utf8 path"),
+    ])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded on missing schema marker".into(),
+        ));
+    }
+
+    if to_path.join("CURRENT_SCHEMA").exists() {
+        return Err(TestError::Assertion(
+            "destination CURRENT_SCHEMA was published on missing marker rejection".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn identical_from_and_to_paths_rejected() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let path = source_temp.path();
+
+    write_schema_marker(path, 2)?;
+
+    let source_digest_before = recursive_dir_digest(path)?;
+
+    let output = run_converter(&[
+        "--from",
+        path.to_str().expect("valid utf8 path"),
+        "--to",
+        path.to_str().expect("valid utf8 path"),
+    ])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded when --from and --to are identical".into(),
+        ));
+    }
+
+    let source_digest_after = recursive_dir_digest(path)?;
+    if source_digest_before != source_digest_after {
+        return Err(TestError::Assertion(
+            "source directory was modified on identical paths rejection".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn nested_destination_inside_source_rejected() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let from_path = source_temp.path();
+    let nested_to = from_path.join("nested_dest");
+
+    write_schema_marker(from_path, 2)?;
+
+    let source_digest_before = recursive_dir_digest(from_path)?;
+
+    let output = run_converter(&[
+        "--from",
+        from_path.to_str().expect("valid utf8 path"),
+        "--to",
+        nested_to.to_str().expect("valid utf8 path"),
+    ])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded when --to was nested inside --from".into(),
+        ));
+    }
+
+    let source_digest_after = recursive_dir_digest(from_path)?;
+    if source_digest_before != source_digest_after {
+        return Err(TestError::Assertion(
+            "source directory was modified on nested destination rejection".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn nested_source_inside_destination_rejected() -> TestResult<()> {
+    let parent_temp = tempdir()?;
+    let to_path = parent_temp.path();
+    let nested_from = to_path.join("nested_from");
+
+    write_schema_marker(&nested_from, 2)?;
+
+    let source_digest_before = recursive_dir_digest(&nested_from)?;
+
+    let output = run_converter(&[
+        "--from",
+        nested_from.to_str().expect("valid utf8 path"),
+        "--to",
+        to_path.to_str().expect("valid utf8 path"),
+    ])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded when --from was nested inside --to".into(),
+        ));
+    }
+
+    let source_digest_after = recursive_dir_digest(&nested_from)?;
+    if source_digest_before != source_digest_after {
+        return Err(TestError::Assertion(
+            "source directory was modified on nested source rejection".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn unpaired_pool_flags_rejected() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let dest_temp = tempdir()?;
+    let pool_temp = tempdir()?;
+
+    let from_path = source_temp.path();
+    let to_path = dest_temp.path().join("converted");
+    let pool_path = pool_temp.path();
+
+    write_schema_marker(from_path, 2)?;
+
+    let output_missing_to = run_converter(&[
+        "--from",
+        from_path.to_str().expect("valid utf8 path"),
+        "--to",
+        to_path.to_str().expect("valid utf8 path"),
+        "--pool-from",
+        pool_path.to_str().expect("valid utf8 path"),
+    ])?;
+
+    if output_missing_to.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded with --pool-from but no --pool-to".into(),
+        ));
+    }
+
+    let output_missing_from = run_converter(&[
+        "--from",
+        from_path.to_str().expect("valid utf8 path"),
+        "--to",
+        to_path.to_str().expect("valid utf8 path"),
+        "--pool-to",
+        pool_path.to_str().expect("valid utf8 path"),
+    ])?;
+
+    if output_missing_from.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded with --pool-to but no --pool-from".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn overlapping_pool_and_node_roots_rejected() -> TestResult<()> {
+    let node_temp = tempdir()?;
+    let dest_temp = tempdir()?;
+    let from_path = node_temp.path();
+    let to_path = dest_temp.path().join("converted");
+    let pool_to = dest_temp.path().join("converted_pool");
+
+    write_schema_marker(from_path, 2)?;
+
+    let output = run_converter(&[
+        "--from",
+        from_path.to_str().expect("valid utf8 path"),
+        "--to",
+        to_path.to_str().expect("valid utf8 path"),
+        "--pool-from",
+        from_path.to_str().expect("valid utf8 path"),
+        "--pool-to",
+        pool_to.to_str().expect("valid utf8 path"),
+    ])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded when --pool-from equaled --from".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_final_component_rejected() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let dest_temp = tempdir()?;
+    let link_temp = tempdir()?;
+
+    let from_path = source_temp.path();
+    let to_path = dest_temp.path().join("converted");
+
+    write_schema_marker(from_path, 2)?;
+
+    let symlink_from = link_temp.path().join("symlink_from");
+    std::os::unix::fs::symlink(from_path, &symlink_from)?;
+
+    let output = run_converter(&[
+        "--from",
+        symlink_from.to_str().expect("valid utf8 path"),
+        "--to",
+        to_path.to_str().expect("valid utf8 path"),
+    ])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded with symlink final component for --from".into(),
+        ));
+    }
+
+    if to_path.join("CURRENT_SCHEMA").exists() {
+        return Err(TestError::Assertion(
+            "destination CURRENT_SCHEMA was published on symlink rejection".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_inside_independent_files_rejected() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let dest_temp = tempdir()?;
+    let outside_temp = tempdir()?;
+
+    let from_path = source_temp.path();
+    let to_path = dest_temp.path().join("converted");
+
+    write_schema_marker(from_path, 2)?;
+
+    let blocks_dir = from_path.join("blocks");
+    fs::create_dir_all(&blocks_dir)?;
+
+    let outside_target = outside_temp.path().join("outside.dat");
+    fs::write(&outside_target, b"secret_data")?;
+
+    let symlink_in_blocks = blocks_dir.join("blk00000.dat");
+    std::os::unix::fs::symlink(&outside_target, &symlink_in_blocks)?;
+
+    let output = run_converter(&[
+        "--from",
+        from_path.to_str().expect("valid utf8 path"),
+        "--to",
+        to_path.to_str().expect("valid utf8 path"),
+    ])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded when symlink was present inside blocks/".into(),
+        ));
+    }
+
+    if to_path.join("CURRENT_SCHEMA").exists() {
+        return Err(TestError::Assertion(
+            "destination CURRENT_SCHEMA was published on internal symlink rejection".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+// RCV-09
+#[test]
+fn oversized_schema_marker_is_rejected() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let dest_temp = tempdir()?;
+    let from_path = source_temp.path();
+    let to_path = dest_temp.path().join("converted");
+
+    fs::create_dir_all(from_path)?;
+    fs::write(from_path.join("CURRENT_SCHEMA"), b"2\n               ")?;
+
+    let source_digest_before = recursive_dir_digest(from_path)?;
+
+    let output = run_converter(&[
+        "--from",
+        from_path.to_str().expect("valid utf8 path"),
+        "--to",
+        to_path.to_str().expect("valid utf8 path"),
+    ])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded on oversized schema marker".into(),
+        ));
+    }
+
+    let source_digest_after = recursive_dir_digest(from_path)?;
+    if source_digest_before != source_digest_after {
+        return Err(TestError::Assertion(
+            "source directory was modified on oversized schema marker rejection".into(),
+        ));
+    }
+
+    if to_path.join("CURRENT_SCHEMA").exists() {
+        return Err(TestError::Assertion(
+            "destination CURRENT_SCHEMA was published on oversized marker rejection".into(),
+        ));
+    }
+
+    Ok(())
+}

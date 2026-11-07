@@ -1,13 +1,4 @@
 #!/usr/bin/env bash
-# Check the named feature combinations bitcoin-rs actually supports.
-#
-#   scripts/check-feature-matrix.sh          # every row
-#   scripts/check-feature-matrix.sh pure     # fjall/redb/zmq, no kernel/rocksdb
-#   scripts/check-feature-matrix.sh native   # rows that need C++ or C engines
-#
-# Owner: scripts/feature-matrix.tsv (FEAT-01). This is not a feature powerset.
-# `cargo hack --each-feature` is the wrong tool: it enables empty markers and
-# illegal singles (zmq-only, kernel-only on node).
 
 set -euo pipefail
 

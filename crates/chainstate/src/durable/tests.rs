@@ -636,7 +636,6 @@ fn cold_replay_attestation_failure_fails_closed() -> TestResult {
 /// RCV-02 / JW-ORDER-1: retention relief must not turn append-gap poison into
 /// a progress checkpoint or a retry. The original writer error stays intact.
 // RCV-02, JW-ORDER-1
-#[cfg(feature = "fjall")]
 #[test]
 fn committed_gap_append_gap_does_not_enter_retention_relief() -> TestResult {
     use bitcoin_rs_storage::chainstate_journal::{
@@ -649,7 +648,7 @@ fn committed_gap_append_gap_does_not_enter_retention_relief() -> TestResult {
     bodies.persist_block_body(1, child.block_hash().0, &consensus_bytes(&child))?;
     let head = install_head(&mut handles, &child, bodies)?;
     let temp = tempfile::tempdir()?;
-    let store = Arc::new(bitcoin_rs_storage::FjallStore::open(
+    let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(
         temp.path().join("kv"),
     )?);
     let path = temp.path().join("journal");

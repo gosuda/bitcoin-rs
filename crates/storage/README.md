@@ -2,7 +2,7 @@
 
 This crate provides the backend-neutral storage layer that every persisted index and chain-state store sits on. It provides key-value access over named column families and atomic write batches with an explicit durability ladder. It also provides append-only flat files for immutable block bodies, and the streaming Core frame format.
 
-`KvStore` is the central trait. It provides `get`, ordered `iter_prefix` iteration, bounded `scan_prefix_bounded` scans under a `PrefixScanLimit`, and point-in-time `snapshot` reads. All mutations go through one backend-neutral `BufferedWriteBatch` record. The store applies that record by `write`, by `write_deferred` (visible immediately, crash durability deferred to `flush`), or by `write_durable`. `ColumnFamily` names the logical column families shared by every backend. `StorageError` is the common error type. Concrete backends are feature-gated and exported from the crate root: `FjallStore` (the default), `RocksDbStore`, and `RedbStore`. The implementation modules themselves are private. The specialized redb transaction index has no public concrete type. It is constructed only through the redb-gated `open_redb_tx_index_store` factory, which hides the store behind an opaque `impl KvStore`. Immutable block bodies bypass key-value storage entirely. `FlatFileBlockStore` manages the append-only flat files with `BlockFilePosition` addressing (reads go through the store's internal block reader).
+`KvStore` is the central trait. It provides `get`, ordered `iter_prefix` iteration, bounded `scan_prefix_bounded` scans under a `PrefixScanLimit`, and point-in-time `snapshot` reads. All mutations go through one backend-neutral `BufferedWriteBatch` record. The store applies that record by `write`, by `write_deferred` (visible immediately, crash durability deferred to `flush`), or by `write_durable`. `ColumnFamily` names the logical column families shared by every backend. `StorageError` is the common error type. RocksDB is the mandatory default storage engine, always compiled and exported as `RocksDbStore`. The implementation modules themselves are private. Retired runtime engines (`FjallStore`, `RedbStore`, and the specialized redb transaction index) have been removed from the node; legacy datadirs are migrated offline using `tools/storage-convert`. Immutable block bodies bypass key-value storage entirely. `FlatFileBlockStore` manages the append-only flat files with `BlockFilePosition` addressing (reads go through the store's internal block reader).
 
 All backends also implement `write_durable_if`. The call takes a conjunction
 of `WriteCondition`s: each key is `Absent`, or its value `Equals` an `expected`
@@ -45,19 +45,16 @@ divides it across the persistent namespaces: chainstate 80% and txindex 20%.
 `cache_budget::split_cache_budget_without_txindex` gives the whole budget to
 chainstate when the transaction index is disabled. Both floor the txindex share
 and hand the remainder to chainstate, so the shares always sum to at most the
-budget. Each backend accepts its namespace's share through `open_with_cache`
-(`open_redb_tx_index_store_with_cache` for the redb transaction index); fjall
-sizes its block cache, redb its page cache, and `RocksDB` its LRU block cache.
+budget. The backend accepts its namespace's share through `open_with_cache`; RocksDB
+sizes its LRU block cache.
 Clamping bounds: budgets land in
 `[16 MiB, 1 TiB]`, and the node logs the effective per-namespace capacities at
 startup.
 
 ## Store guard
 
-Every file-owning store (`FjallStore`, `RocksDbStore`, `RedbStore`, the redb
-transaction index, and `FlatFileBlockStore`) can keep one opaque `StoreGuard`
-through `guarded_by`. This is a builder method; the redb transaction index takes it
-as the `guard` argument of `open_redb_tx_index_store_with_cache`).
+Every file-owning store (`RocksDbStore` and `FlatFileBlockStore`) can keep one
+opaque `StoreGuard` through `guarded_by`. This is a builder method.
 The guard is the store's last field, so it drops only after the engine or file
 handle has closed. The node passes its data-directory lock this way: the lock
 lives exactly as long as the last handle that can still write the directory,
@@ -73,10 +70,7 @@ and has no dependency on this crate.
 
 ## Features
 
-- `fjall` (default): enables the fjall-backed `FjallStore`.
-- `rocksdb`: enables the Rust-RocksDB-backed `RocksDbStore`.
 - `test-seam`: exposes fixture persistence injection; not a production default.
-- `redb`: enables the redb-backed `RedbStore` and the `open_redb_tx_index_store` transaction-index factory.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

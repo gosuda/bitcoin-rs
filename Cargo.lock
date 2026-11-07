@@ -651,12 +651,10 @@ dependencies = [
  "bytes",
  "cap-fs-ext",
  "cap-std",
- "fjall",
  "hashbrown 0.17.1",
  "metrics",
  "parking_lot",
  "proptest",
- "redb",
  "rust-rocksdb",
  "rustix",
  "serde",
@@ -665,6 +663,23 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "bitcoin-rs-storage-convert"
+version = "0.15.0"
+dependencies = [
+ "bitcoin-rs-storage",
+ "cap-fs-ext",
+ "cap-std",
+ "clap",
+ "fjall",
+ "redb",
+ "serde",
+ "sha2",
+ "sonic-rs",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

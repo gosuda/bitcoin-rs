@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(all(test, feature = "fjall"))]
+#[cfg(test)]
 mod script_live_outage_engine_tests {
     use super::{DerivedIndexQuery, ScriptIndexQuery, TxQueryError, TxUnavailableCause};
     use crate::runtime::{
@@ -25,7 +25,7 @@ mod script_live_outage_engine_tests {
         TipReader, TipSnapshot,
     };
     use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Txid, deserialize};
-    use bitcoin_rs_storage::FjallStore;
+    use bitcoin_rs_storage::RocksDbStore;
     use parking_lot::RwLock;
     use sha2::{Digest, Sha256};
     use std::sync::Arc;
@@ -121,7 +121,7 @@ mod script_live_outage_engine_tests {
             chain_tx_count: ChainTxCount::established(1),
         });
 
-        let store = Arc::new(FjallStore::open(dir.path())?);
+        let store = Arc::new(RocksDbStore::open(dir.path())?);
         let mut index = IndexWriter::open(store, 1)?;
         let prepared = index.prepare_block_with_spent_scripts(
             IndexCapabilities::HISTORICAL,

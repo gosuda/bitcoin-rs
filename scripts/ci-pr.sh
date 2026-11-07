@@ -66,26 +66,26 @@ clippy_profiles() {
   profile "clippy: bitcoin-rs-consensus (native)" \
     cargo clippy --locked -p bitcoin-rs-consensus \
       --no-default-features --all-targets -- -D warnings
-  profile "clippy: bitcoin-rs-chainstate (native,fjall)" \
+  profile "clippy: bitcoin-rs-chainstate (native)" \
     cargo clippy --locked -p bitcoin-rs-chainstate \
-      --no-default-features --features fjall --all-targets -- -D warnings
-  profile "clippy: bitcoin-rs-node (fjall,zmq,silent-payments)" \
+      --all-targets -- -D warnings
+  profile "clippy: bitcoin-rs-node (zmq,silent-payments)" \
     cargo clippy --locked -p bitcoin-rs-node \
-      --no-default-features --features fjall,zmq,silent-payments --all-targets -- -D warnings
+      --no-default-features --features zmq,silent-payments --all-targets -- -D warnings
   # All-target builds unify test-seam features through dev-dependencies. Check
   # the operator build separately so test-only capabilities cannot hide here.
   profile "check: bitcoin-rs (production silent-payments)" \
     cargo check --locked -p bitcoin-rs \
-      --no-default-features --features fjall,silent-payments
+      --no-default-features --features silent-payments
 }
 
 test_crates_profiles() {
   profile "test: bitcoin-rs-rpc (silent-payments adapter)" \
     cargo_test -p bitcoin-rs-rpc --features silent-payments --lib handlers::silent_payments
   profile "test: bitcoin-rs (silent-payments process)" \
-    cargo_test -p bitcoin-rs --no-default-features --features fjall,silent-payments --test suite silent_payments::
+    cargo_test -p bitcoin-rs --no-default-features --features silent-payments --test suite silent_payments::
   profile "test: bitcoin-rs (certified inputs process)" \
-    cargo_test -p bitcoin-rs --no-default-features --features fjall,silent-payments --test suite block_inputs::
+    cargo_test -p bitcoin-rs --no-default-features --features silent-payments --test suite block_inputs::
   profile "test: bitcoin-rs-index (silent-payments codec)" \
     cargo_test -p bitcoin-rs-index --features silent-payments --test suite silent_payments::
   # Per-crate profiles may use checked-in fixtures but need no pinned Core
@@ -98,16 +98,17 @@ test_crates_profiles() {
   # The offline CLI uses the checked-in Core snapshot, not a running daemon.
   profile "test: bitcoin-rs-snapshot" \
     cargo_test -p bitcoin-rs-snapshot
+  profile "test: bitcoin-rs-storage-convert" \
+    cargo_test -p bitcoin-rs-storage-convert
   profile "test: bitcoin-rs-consensus (native)" \
     cargo_test -p bitcoin-rs-consensus --no-default-features
-  profile "test: bitcoin-rs-chainstate (native,fjall)" \
-    cargo_test -p bitcoin-rs-chainstate \
-      --no-default-features --features fjall
+  profile "test: bitcoin-rs-chainstate (native)" \
+    cargo_test -p bitcoin-rs-chainstate
   profile "test: bitcoin-rs-p2p" \
     cargo_test -p bitcoin-rs-p2p
-  profile "test: bitcoin-rs-node (fjall,zmq)" \
+  profile "test: bitcoin-rs-node (zmq)" \
     cargo_test -p bitcoin-rs-node \
-      --no-default-features --features fjall,zmq
+      --no-default-features --features zmq
   # Isolated so node's default zmq feature cannot unify this package on.
   profile "test: bitcoin-rs-rpc (no default features)" \
     cargo_test -p bitcoin-rs-rpc --no-default-features
@@ -115,14 +116,13 @@ test_crates_profiles() {
 
 test_binary_profiles() {
   # Requires the pinned Core fixture. Formal checks have their own workflow.
-  profile "test: bitcoin-rs binary (rocksdb,fjall,redb)" \
-    cargo_test -p bitcoin-rs \
-      --no-default-features --features "rocksdb,fjall,redb"
+  profile "test: bitcoin-rs binary" \
+    cargo_test -p bitcoin-rs
 }
 
 test_workspace_profiles() {
   # Also expects the pinned fixtures: bin/bitcoin-rs is a workspace member,
-  # so this profile runs its default-feature (fjall,redb,zmq) test binaries,
+  # so this profile runs its default-feature (zmq) test binaries,
   # including the process-harness suite that launches the pinned bitcoind.
   profile "test: workspace (kernel-free)" \
     cargo_test --workspace \
@@ -375,7 +375,7 @@ case "$1" in
     # Full dependency graph: every storage backend plus the kernel engine.
     # cargo-deny 0.20 takes the cargo metadata flags before the subcommand.
     cargo deny \
-      --workspace --no-default-features --features "rocksdb,fjall,redb,kernel" \
+      --workspace --features "kernel" \
       check
     ;;
 

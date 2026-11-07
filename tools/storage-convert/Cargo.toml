@@ -1,0 +1,40 @@
+[package]
+autotests = false
+name = "bitcoin-rs-storage-convert"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Offline datadir storage migration and format conversion tool"
+
+[lints]
+workspace = true
+
+[dependencies]
+bitcoin-rs-storage = { workspace = true }
+cap-std = { workspace = true }
+cap-fs-ext = { workspace = true }
+clap = { workspace = true }
+fjall = { workspace = true }
+redb = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+sonic-rs = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+sha2 = { workspace = true }
+fjall = { workspace = true }
+redb = { workspace = true }
+sonic-rs = { workspace = true }
+thiserror = { workspace = true }
+
+[[bin]]
+name = "bitcoin-rs-storage-convert"
+path = "src/main.rs"
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

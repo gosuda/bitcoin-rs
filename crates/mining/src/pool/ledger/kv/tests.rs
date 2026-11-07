@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_error::TestError;
-use bitcoin_rs_storage::{FjallStore, RedbStore};
+use bitcoin_rs_storage::RocksDbStore;
 
 const SHARES: TableDefinition<'static, u64, &'static [u8]> =
     TableDefinition::new("pplns_shares_v1");
@@ -58,16 +58,9 @@ fn exercise(store: &Arc<dyn KvStore>) -> Result<(), TestError> {
 }
 
 #[test]
-fn redb_snapshot_and_cross_handle_conditional_commit() -> Result<(), TestError> {
+fn rocksdb_snapshot_and_cross_handle_conditional_commit() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
-    let store: Arc<dyn KvStore> = Arc::new(RedbStore::open(dir.path().join("store.redb"))?);
-    exercise(&store)
-}
-
-#[test]
-fn fjall_snapshot_and_cross_handle_conditional_commit() -> Result<(), TestError> {
-    let dir = tempfile::tempdir()?;
-    let store: Arc<dyn KvStore> = Arc::new(FjallStore::open(dir.path().join("store"))?);
+    let store: Arc<dyn KvStore> = Arc::new(RocksDbStore::open(dir.path().join("store"))?);
     exercise(&store)
 }
 fn tail_cases(store: &Arc<dyn KvStore>) -> Result<(), TestError> {
@@ -127,15 +120,8 @@ fn tail_cases(store: &Arc<dyn KvStore>) -> Result<(), TestError> {
 }
 
 #[test]
-fn redb_last_merges_overlay_tail() -> Result<(), TestError> {
+fn rocksdb_last_merges_overlay_tail() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
-    let store: Arc<dyn KvStore> = Arc::new(RedbStore::open(dir.path().join("store.redb"))?);
-    tail_cases(&store)
-}
-
-#[test]
-fn fjall_last_merges_overlay_tail() -> Result<(), TestError> {
-    let dir = tempfile::tempdir()?;
-    let store: Arc<dyn KvStore> = Arc::new(FjallStore::open(dir.path().join("store"))?);
+    let store: Arc<dyn KvStore> = Arc::new(RocksDbStore::open(dir.path().join("store"))?);
     tail_cases(&store)
 }

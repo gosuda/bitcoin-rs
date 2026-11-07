@@ -1,9 +1,9 @@
 //! Executable reference model for schema admission and offline conversion.
 //!
 //! Models the lifecycle of node datadir schema verification and offline
-//! conversion targeting future storage epoch 3 (with epoch 2 retired) per RCV-09.
-//! Live storage (`checkpoint::fs`) remains at schema epoch 2; this is a standalone
-//! behavioral design model, not an implementation-refinement claim on `fs.rs`.
+//! conversion for implemented live storage epoch 3 (with epoch 2 retired) per RCV-09.
+//! These files specify epoch3 schema admission/conversion safety independently;
+//! they do not establish implementation refinement or physical filesystem durability.
 
 #[cfg(kani)]
 mod proofs;

@@ -81,17 +81,14 @@ fn sv2<E: std::fmt::Debug>(stage: &'static str) -> impl FnOnce(E) -> FixtureErro
     }
 }
 
-#[cfg(feature = "fjall")]
-type Store = bitcoin_rs_storage::FjallStore;
-#[cfg(all(feature = "redb", not(feature = "fjall")))]
-type Store = bitcoin_rs_storage::RedbStore;
+type Store = bitcoin_rs_storage::RocksDbStore;
 
 const LOGIN: &str = "42.rig";
 const PAYOUT: &[u8] = &[0x51];
 const EPOCH: u32 = 17;
 
 fn ledger_host(path: &Path) -> Result<Arc<LedgerHost>, FixtureError> {
-    let store: Arc<dyn KvStore> = Arc::new(Store::open(path)?);
+    let store: Arc<dyn KvStore> = Arc::new(Store::open_with_cache(path, 0)?);
     let ledger = Ledger::create(store, PoolConfig::new(1_000, PAYOUT.to_vec()))?;
     ledger.set_payout_script(MinerId(42), PAYOUT)?;
     Ok(Arc::new(LedgerHost::new(

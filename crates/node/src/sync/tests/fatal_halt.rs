@@ -24,7 +24,7 @@ impl UndoStore for PoisonedUndoStore {
         if height == 0 {
             return self.inner.persist_undo(height, hash, record);
         }
-        Err(StorageError::backend("FjallError: Poisoned"))
+        Err(StorageError::backend("RocksDbError: Poisoned"))
     }
 
     fn load_undo(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {

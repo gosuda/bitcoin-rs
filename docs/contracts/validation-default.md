@@ -115,10 +115,10 @@
 
 ### `VAL-03`: Default binary stays kernel-free
 
-- `bin/bitcoin-rs` default features MUST be `fjall`, `redb`, and `zmq`.
+- `bin/bitcoin-rs` default features MUST be `zmq`.
 - Default features MUST never include `kernel`.
 - `--features kernel` means bitcoinkernel support is compiled in on the binary.
-- The Compose image `Dockerfile` builds `fjall,kernel`.
+- The Compose image `Dockerfile` builds `kernel`.
 - Compiling `kernel` does not select the engine.
 - Selection is `validation.engine = "kernel"` (`--validation-engine kernel`, `BITCOIN_RS_VALIDATION_ENGINE=kernel`, or TOML `validation_engine = "kernel"`).
 - The shipped image selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`, handed to the node with `--config`).

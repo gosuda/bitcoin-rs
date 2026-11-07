@@ -16,18 +16,6 @@ workspace = true
 default = []
 test-seam = []
 silent-payments = ["dep:secp256k1"]
-rocksdb = [
-    "bitcoin-rs-storage/rocksdb",
-    "bitcoin-rs-utxo/rocksdb",
-]
-fjall = [
-    "bitcoin-rs-storage/fjall",
-    "bitcoin-rs-utxo/fjall",
-]
-redb = [
-    "bitcoin-rs-storage/redb",
-    "bitcoin-rs-utxo/redb",
-]
 
 [dependencies]
 bitcoin-rs-primitives.workspace = true

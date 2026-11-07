@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn enabled_handlers_use_the_real_durable_ledger() -> Result<(), crate::test_error::TestError> {
         let dir = tempfile::tempdir()?;
-        let store = Arc::new(bitcoin_rs_storage::FjallStore::open(dir.path())?);
+        let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(dir.path())?);
         let ledger = Ledger::create(store, pool_ledger::PoolConfig::new(100, vec![0x51]))?;
         let context = Arc::new(Context::from_handles(crate::context::ContextHandles {
             pool: crate::context::PoolHandles {
@@ -439,7 +439,7 @@ mod tests {
     fn funded_external_payout_round_trip_preserves_reservations_on_rejection()
     -> Result<(), crate::test_error::TestError> {
         let dir = tempfile::tempdir()?;
-        let store = Arc::new(bitcoin_rs_storage::FjallStore::open(dir.path())?);
+        let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(dir.path())?);
         let ledger = Ledger::create(store, pool_ledger::PoolConfig::new(100, vec![0x51]))?;
         ledger.record_found_block(&pool_ledger::BlockFound {
             share: pool_ledger::ShareCredit {

@@ -36,9 +36,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: 0
-  # Same production feature set as ci-main's full-node lane: all three
-  # storage backends plus the bitcoinkernel script-verification engine.
-  FULL_NODE_FEATURES: "rocksdb,fjall,redb,kernel"
+  # Production feature set for full-node verification.
+  FULL_NODE_FEATURES: "kernel"
 
 jobs:
   # Fastest signal for the #1276-class break: consensus is where the

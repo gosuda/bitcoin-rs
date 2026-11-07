@@ -73,7 +73,7 @@ fn apply_errors_classify_into_their_documented_dispositions() {
             Fatal,
         ),
         (
-            UndoPersistence(StorageError::backend("FjallError: Poisoned")),
+            UndoPersistence(StorageError::backend("RocksDbError: Poisoned")),
             Fatal,
         ),
         (

@@ -153,9 +153,9 @@ The retained segment was gone; `chainstate-journal/` held only `head.json`. The 
 - `committed_gap_with_missing_body_fails_closed`, `committed_gap_body_must_hash_to_the_head_identity`, `committed_gap_must_descend_from_restored_tip`, `committed_gap_replay_failure_fails_closed`, and `cold_replay_attestation_failure_fails_closed` in the same module prove the refusal paths.
 - `committed_gap_append_gap_does_not_enter_retention_relief` proves only `RetentionLimit` takes the checkpoint-and-retry path.
 - `crates/storage/src/chainstate_journal/writer/tests/segment_lifecycle.rs::partial_append_rolls_back_tail_and_restart_can_retry`, `torn_tail_beyond_head_is_ignored_on_reopen`, `rejects_reopen_when_active_segment_is_truncated`, and `rotation_head_never_names_a_missing_segment` prove the segment boundary rules; `crates/storage/src/chainstate_journal/writer/tests/durability_boundaries.rs::head_never_advances_without_counted_storage_flush` proves the flush precedes the marker.
-- `crates/storage/tests/overhaul_atomic_durability.rs::fjall_injected_faults_never_mix_families` proves an injected fault at apply, sync, or flush boundaries never leaves a mixed batch.
+- `crates/storage/tests/overhaul_atomic_durability.rs::rocksdb_injected_faults_never_mix_families` proves an injected fault at apply, sync, or flush boundaries never leaves a mixed batch.
 - `crates/node/tests/crash_recovery.rs::sigkill_restarts_at_valid_journal_frontier` and `pruned_frontier_survives_sigkill_and_preserves_boundary` prove the process-level kill path; `run_sigkill_scenario` is the driver.
-- Observed on this checkout: the chainstate test and the storage test above passed with `--nocapture`:
+- Historical output from before the RocksDB cutover:
 
 ```text
 test durable::tests::committed_gap_replays_to_head_without_recommitting_it ... ok

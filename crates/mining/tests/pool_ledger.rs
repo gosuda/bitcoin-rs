@@ -1,8 +1,4 @@
-mod redb {
-    const BACKEND: &str = "redb";
-    include!("support/pool_ledger_cases.rs");
-}
-mod fjall {
-    const BACKEND: &str = "fjall";
+mod rocksdb {
+    const BACKEND: &str = "rocksdb";
     include!("support/pool_ledger_cases.rs");
 }

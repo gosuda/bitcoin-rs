@@ -176,7 +176,6 @@ fn prune_refuses_after_apply_admission_closes() -> Result<(), TestError> {
     Ok(())
 }
 
-#[cfg(feature = "fjall")]
 #[test]
 fn prune_to_height_advances_published_height() -> Result<(), TestError> {
     use bitcoin_rs_rpc::context::PruneService;
@@ -193,8 +192,9 @@ fn prune_to_height_advances_published_height() -> Result<(), TestError> {
     publish_applied_tip_height(&authority_state, 12 + CORE_REORG_SAFETY_MARGIN);
     let data_dir = dir.path().join("node");
     std::fs::create_dir_all(data_dir.join("chainstate"))?;
-    let store = Arc::new(bitcoin_rs_storage::FjallStore::open(
+    let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
         data_dir.join("chainstate"),
+        0,
     )?);
     let block_files = Arc::new(FlatFileBlockStore::open(&data_dir)?);
     let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&[10_u8; 32]);
@@ -237,7 +237,6 @@ fn prune_to_height_advances_published_height() -> Result<(), TestError> {
     Ok(())
 }
 
-#[cfg(feature = "fjall")]
 #[test]
 fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> Result<(), TestError> {
     use bitcoin_rs_chainstate::AssumeUtxoManager;
@@ -253,8 +252,9 @@ fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> Resul
     let state = NodeState::open(config, None)?;
     publish_applied_tip_height(&state, 200 + CORE_REORG_SAFETY_MARGIN);
 
-    let store = Arc::new(bitcoin_rs_storage::FjallStore::open(
+    let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
         dir.path().join("chainstate"),
+        0,
     )?);
     let block_files = Arc::new(FlatFileBlockStore::open(dir.path())?);
 

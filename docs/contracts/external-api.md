@@ -163,7 +163,7 @@ wallet interoperability remain unverified.
 - It then searches the block for its row under the shared render permit.
 - No measurement claim is established here.
 - Storage boundaries provide bounded reads with safe unsupported defaults, never an unbounded fallback.
-- These include Fjall value checks, redb read guards, and RocksDB pinned values before the owned copy.
+- These include RocksDB pinned values and bounded read guards before the owned copy.
 - Backend pages, caches, and decompression remain outside the copy bound.
 - Block reads bound locator and frame length before allocation.
 - Custom stores MUST implement the bounded reads before serving this capability.

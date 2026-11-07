@@ -10,7 +10,6 @@ use bitcoin_rs_chainstate::events::ChainEventPublisher;
 pub(crate) use bitcoin_rs_chainstate::recovery::ResumeSource;
 use bitcoin_rs_index::runtime::DEFAULT_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::OpenDerivedIndex;
-use bitcoin_rs_index::runtime::REDB_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::open_derived_index_store_on_worker;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_mempool::Mempool;
@@ -99,17 +98,17 @@ pub struct NodeState {
 impl Drop for NodeState {
     fn drop(&mut self) {
         self.shutdown.trigger();
-        self.chainstate.request_shutdown();
-        let _admission = self.chainstate.close();
-        self.p2p.shutdown();
-        if let Err(error) = self.p2p.join() {
-            tracing::warn!(%error, "failed to join p2p workers during node state drop");
-        }
         if let Err(error) = self
             .derived_index
             .shutdown(core::time::Duration::from_secs(5))
         {
             tracing::warn!(%error, "failed to shut down derived index during node state drop");
+        }
+        self.chainstate.request_shutdown();
+        let _admission = self.chainstate.close();
+        self.p2p.shutdown();
+        if let Err(error) = self.p2p.join() {
+            tracing::warn!(%error, "failed to join p2p workers during node state drop");
         }
         self.storage.retention().shutdown();
     }
@@ -475,10 +474,8 @@ impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
     where
         S: KvStore,
     {
-        let batch_limits = match self.backend {
-            StorageBackend::RocksDb | StorageBackend::Fjall => DEFAULT_BATCH_LIMITS,
-            StorageBackend::Redb => REDB_BATCH_LIMITS,
-        };
+        let _ = self.backend;
+        let batch_limits = DEFAULT_BATCH_LIMITS;
         open_derived_index_store_on_worker(store, batch_limits, self.epoch)
     }
 }

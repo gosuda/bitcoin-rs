@@ -25,5 +25,5 @@ pub use state::{ConsumerCursorUpdate, IndexWriteFence};
 pub use write::IndexWriter;
 pub(crate) use write::{PortableImportRow, index_format_version};
 
-#[cfg(all(test, feature = "rocksdb"))]
+#[cfg(test)]
 mod tests;

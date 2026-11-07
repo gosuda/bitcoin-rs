@@ -13,9 +13,8 @@ mod tests;
 pub(crate) const ENGINE_CRATES: [&str; 3] = ["fjall", "redb", "rust-rocksdb"];
 pub(crate) const ZMQ_CRATE: &str = "zmq";
 
-pub(crate) const BACKEND_FEATURES: [&str; 3] = ["rocksdb", "fjall", "redb"];
-
 pub(crate) const STORAGE_CRATE: &str = "bitcoin-rs-storage";
+pub(crate) const CONVERTER_CRATE: &str = "bitcoin-rs-storage-convert";
 
 pub(crate) const RPC_CRATE: &str = "bitcoin-rs-rpc";
 
@@ -27,14 +26,6 @@ pub(crate) const CHAINSTATE_CRATE: &str = "bitcoin-rs-chainstate";
 
 pub(crate) const MEMPOOL_CONSUMER_CRATES: [&str; 4] =
     ["bitcoin-rs-p2p", RPC_CRATE, NODE_CRATE, BIN_CRATE];
-pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 6] = [
-    STORAGE_CRATE,
-    CHAINSTATE_CRATE,
-    "bitcoin-rs-utxo",
-    "bitcoin-rs-index",
-    NODE_CRATE,
-    BIN_CRATE,
-];
 
 pub(crate) fn approved_layer(crate_name: &str) -> u8 {
     match crate_name {
@@ -49,6 +40,7 @@ pub(crate) fn approved_layer(crate_name: &str) -> u8 {
         | "bitcoin-rs-storage-footprint"
         | "bitcoin-rs-snapshot"
         | "bitcoin-rs-p2pk-scan"
+        | CONVERTER_CRATE
         | "contract-index" => 4,
         other => panic!("unclassified workspace crate `{other}`: add it to the layer table"),
     }
@@ -224,13 +216,28 @@ impl WorkspaceGraph {
 
         let mut checked_engine_edges = 0_usize;
         for (name, engines) in &self.engine_deps {
-            if name != STORAGE_CRATE && !engines.is_empty() {
-                violations.push(format!(
-                    "engine dependencies {engines:?} must be named by `{STORAGE_CRATE}` only; \
-                     found on `{name}`"
-                ));
+            for engine in engines {
+                checked_engine_edges += 1;
+                match (name.as_str(), engine.as_str()) {
+                    (STORAGE_CRATE, "rust-rocksdb") => {}
+                    (CONVERTER_CRATE, "fjall" | "redb") => {}
+                    (STORAGE_CRATE, other) => {
+                        violations.push(format!(
+                            "`{STORAGE_CRATE}` may only name `rust-rocksdb` as an engine; found `{other}`"
+                        ));
+                    }
+                    (CONVERTER_CRATE, other) => {
+                        violations.push(format!(
+                            "`{CONVERTER_CRATE}` may only name `fjall` and `redb` to read retired datadirs; found `{other}`"
+                        ));
+                    }
+                    (other, engine) => {
+                        violations.push(format!(
+                            "engine dependency `{engine}` must not be named by `{other}`"
+                        ));
+                    }
+                }
             }
-            checked_engine_edges += engines.len();
         }
 
         if let Some(rpc_edges) = self.normal_deps.get(RPC_CRATE) {
@@ -251,12 +258,7 @@ impl WorkspaceGraph {
         let rpc_features = self.features.get(RPC_CRATE);
         if let Some(rpc_features) = rpc_features {
             for (feature, implies) in rpc_features {
-                let forwards = BACKEND_FEATURES.contains(&feature.as_str())
-                    || implies.iter().any(|entry| {
-                        BACKEND_FEATURES
-                            .iter()
-                            .any(|backend| entry.contains(backend))
-                    });
+                let forwards = implies.iter().any(|entry| entry.contains(STORAGE_CRATE));
                 if forwards {
                     violations.push(format!(
                         "rpc feature `{feature}` still forwards a storage backend"
@@ -266,8 +268,6 @@ impl WorkspaceGraph {
         }
 
         let mut checked_features = 0_usize;
-        checked_features += self.validate_backend_forwarding(&mut violations);
-
         checked_features += self.validate_zmq_surface(&mut violations);
 
         checked_features += self.validate_test_seam_isolation(&mut violations);
@@ -287,56 +287,6 @@ impl WorkspaceGraph {
         } else {
             Err(violations)
         }
-    }
-
-    fn validate_backend_forwarding(&self, violations: &mut Vec<String>) -> usize {
-        let mut checked_features = 0_usize;
-        for (name, feature_map) in &self.features {
-            for (feature, implies) in feature_map {
-                checked_features += 1;
-                if !BACKEND_FEATURES.contains(&feature.as_str()) {
-                    continue;
-                }
-                if !BACKEND_FORWARDING_CRATES.contains(&name.as_str()) {
-                    violations.push(format!(
-                        "`{name}` must not define or forward the backend feature `{feature}`"
-                    ));
-                    continue;
-                }
-                if implies.is_empty() {
-                    violations.push(format!(
-                        "`{name}` defines empty backend marker `{feature}`; backend features \
-                         must forward into storage or an approved adapter that does"
-                    ));
-                    continue;
-                }
-                let forwards = if name == STORAGE_CRATE {
-                    implies.iter().all(|entry| {
-                        let entry = entry.trim_start_matches("dep:");
-                        ENGINE_CRATES.contains(&entry)
-                    })
-                } else {
-                    implies.iter().all(|entry| {
-                        let entry = entry.trim_start_matches("dep:");
-                        let mut parts = entry.split('/');
-                        let target = parts.next().unwrap_or_default();
-                        let forwarded_feature = parts.next().unwrap_or_default();
-                        parts.next().is_none()
-                            && BACKEND_FORWARDING_CRATES.contains(&target)
-                            && forwarded_feature == feature.as_str()
-                    })
-                };
-                if !forwards {
-                    violations.push(format!(
-                        "`{name}` defines backend feature `{feature}` without matching \
-                         forwarding into an approved adapter or storage crate with the same \
-                         feature name"
-                    ));
-                }
-            }
-        }
-
-        checked_features
     }
 
     fn validate_zmq_surface(&self, violations: &mut Vec<String>) -> usize {

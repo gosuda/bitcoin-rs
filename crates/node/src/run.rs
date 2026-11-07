@@ -253,7 +253,7 @@ impl From<bitcoin_rs_chainstate::CheckpointError> for RunError {
     }
 }
 
-const DEFAULT_FILTER: &str = "info,fjall=warn,rocksdb=warn";
+const DEFAULT_FILTER: &str = "info,rocksdb=warn";
 
 fn install_tracing(level: &str) {
     let filter_directive = build_filter_directive(level);
@@ -284,7 +284,7 @@ fn build_filter_directive(level: &str) -> String {
     } else if level.contains(',') || level.contains('=') {
         level.to_owned()
     } else {
-        format!("{level},fjall=warn,rocksdb=warn")
+        format!("{level},rocksdb=warn")
     }
 }
 
@@ -317,13 +317,13 @@ mod tests {
     #[test]
     fn bare_levels_cap_storage_targets() {
         for (level, expected) in [
-            ("", "info,fjall=warn,rocksdb=warn"),
-            ("info", "info,fjall=warn,rocksdb=warn"),
-            ("debug", "debug,fjall=warn,rocksdb=warn"),
-            ("warn", "warn,fjall=warn,rocksdb=warn"),
-            ("error", "error,fjall=warn,rocksdb=warn"),
-            ("trace", "trace,fjall=warn,rocksdb=warn"),
-            ("off", "off,fjall=warn,rocksdb=warn"),
+            ("", "info,rocksdb=warn"),
+            ("info", "info,rocksdb=warn"),
+            ("debug", "debug,rocksdb=warn"),
+            ("warn", "warn,rocksdb=warn"),
+            ("error", "error,rocksdb=warn"),
+            ("trace", "trace,rocksdb=warn"),
+            ("off", "off,rocksdb=warn"),
         ] {
             let directive = build_filter_directive(level);
             assert_eq!(directive, expected, "bare level {level:?}");

@@ -1,6 +1,5 @@
 use crate::support::{TestError, common};
 
-#[cfg(any(feature = "redb", feature = "fjall"))]
 use bitcoin_rs_index::IndexReader;
 use common::MemoryStore;
 use std::sync::Arc;
@@ -181,7 +180,6 @@ impl Chain {
     }
 }
 
-#[cfg(any(feature = "redb", feature = "fjall"))]
 fn persistent_writer_live_roundtrip<S: KvStore>(
     open: impl Fn() -> Result<S, bitcoin_rs_storage::StorageError>,
     capabilities: IndexCapabilities,
@@ -289,7 +287,6 @@ fn persistent_writer_live_roundtrip<S: KvStore>(
     seed_live_and_reopen(open, store, writer, native, scripthash)
 }
 
-#[cfg(any(feature = "redb", feature = "fjall"))]
 fn tx_lookup_only_reopen<S: KvStore>(
     open: impl Fn() -> Result<S, bitcoin_rs_storage::StorageError>,
     store: Arc<S>,
@@ -327,7 +324,6 @@ fn tx_lookup_only_reopen<S: KvStore>(
     Ok(())
 }
 
-#[cfg(any(feature = "redb", feature = "fjall"))]
 fn seed_live_and_reopen<S: KvStore>(
     open: impl Fn() -> Result<S, bitcoin_rs_storage::StorageError>,
     store: Arc<S>,
@@ -368,9 +364,8 @@ fn seed_live_and_reopen<S: KvStore>(
     Ok(())
 }
 
-#[cfg(feature = "redb")]
 #[test]
-fn dedicated_redb_writer_live_roundtrip() -> Result<(), TestError> {
+fn rocksdb_writer_live_roundtrip() -> Result<(), TestError> {
     for capabilities in [
         IndexCapabilities::SCRIPT_LIVE,
         IndexCapabilities::TX_AND_SCRIPTS,
@@ -378,41 +373,7 @@ fn dedicated_redb_writer_live_roundtrip() -> Result<(), TestError> {
     ] {
         let temp = tempfile::TempDir::new()?;
         persistent_writer_live_roundtrip(
-            || bitcoin_rs_storage::open_redb_tx_index_store(temp.path()),
-            capabilities,
-        )?;
-    }
-    Ok(())
-}
-
-#[cfg(feature = "redb")]
-#[test]
-fn generic_redb_writer_live_roundtrip() -> Result<(), TestError> {
-    for capabilities in [
-        IndexCapabilities::SCRIPT_LIVE,
-        IndexCapabilities::TX_AND_SCRIPTS,
-        IndexCapabilities::TX_LOOKUP,
-    ] {
-        let temp = tempfile::TempDir::new()?;
-        persistent_writer_live_roundtrip(
-            || bitcoin_rs_storage::RedbStore::open(temp.path()),
-            capabilities,
-        )?;
-    }
-    Ok(())
-}
-
-#[cfg(feature = "fjall")]
-#[test]
-fn fjall_writer_live_roundtrip() -> Result<(), TestError> {
-    for capabilities in [
-        IndexCapabilities::SCRIPT_LIVE,
-        IndexCapabilities::TX_AND_SCRIPTS,
-        IndexCapabilities::TX_LOOKUP,
-    ] {
-        let temp = tempfile::TempDir::new()?;
-        persistent_writer_live_roundtrip(
-            || bitcoin_rs_storage::FjallStore::open(temp.path()),
+            || bitcoin_rs_storage::RocksDbStore::open(temp.path()),
             capabilities,
         )?;
     }

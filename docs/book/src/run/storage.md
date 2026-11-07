@@ -1,37 +1,38 @@
 # Storage and memory
 
-Three storage engines are selectable. `fjall` is the default, `redb` is compiled into the default binary, and `rocksdb` is a non-default feature. Transcripts below write `$DATA` for the data directory you pass to `--data-dir`.
+RocksDB is the mandatory default storage engine, always compiled into the binary. `fjall` and `redb` are removed from runtime; legacy epoch-2 datadirs are migrated offline using `tools/storage-convert` (see the [datadir format policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/db-migration.md)). Transcripts below write `$DATA` for the data directory you pass to `--data-dir`.
 
 ## Choose a backend
 
 ```sh
 $ timeout 5 ./target/release/bitcoin-rs --network regtest --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --dns-seeds-enabled=false \
-  --storage-backend redb
+  --storage-backend rocksdb
 ```
 
-It starts and names `"backend":"redb"` in the storage line.
+It starts and names `"backend":"rocksdb"` in the storage line.
 
-The accepted values are `fjall`, `redb`, and `rocksdb`. An unknown name is rejected before startup:
+The accepted value is `rocksdb`. An unknown name is rejected before startup:
 
 ```sh
 $ ./target/release/bitcoin-rs --storage-backend bogus --network regtest --data-dir $DATA
 error: invalid value 'bogus' for '--storage-backend <STORAGE_BACKEND>': unsupported storage backend bogus
 ```
+Retired backends `fjall` and `redb` are rejected before startup with the same `unsupported storage backend <value>` error.
 
-A known name that this build does not include fails config validation:
+In prior builds where `rocksdb` was an optional feature, running without `--features rocksdb` produced:
 
 ```sh
 $ ./target/release/bitcoin-rs --storage-backend rocksdb --network regtest --data-dir $DATA
 Error: unsupported storage backend rocksdb
 ```
 
-`rocksdb` needs a build with `--features rocksdb`. Giving each engine its own data directory when you compare them avoids mixing on-disk layouts; `fjall` writes `chainstate/0.jnl` plus numbered `chainstate/keyspaces/`, while `redb` writes `chainstate/redb.db`.
+In the current runtime, RocksDB is always compiled in, so a separate `--features rocksdb` flag is no longer required. Historical epoch-2 datadirs wrote `chainstate/0.jnl` plus numbered `chainstate/keyspaces/` (`fjall`) or `chainstate/redb.db` (`redb`); current epoch-3 datadirs write native RocksDB files (including `chainstate/CURRENT`).
 
 The backend appears in the startup line:
 
 ```
-{"timestamp":"...","level":"INFO","fields":{"message":"opened storage backend with effective cache capacities","backend":"fjall","chainstate_dir":"$DATA/chainstate","chainstate_cache_bytes":471859200,"txindex_cache_bytes":0,"total_cache_bytes":471859200},"target":"bitcoin_rs_node::state::open"}
+{"timestamp":"...","level":"INFO","fields":{"message":"opened storage backend with effective cache capacities","backend":"rocksdb","chainstate_dir":"$DATA/chainstate","chainstate_cache_bytes":471859200,"txindex_cache_bytes":0,"total_cache_bytes":471859200},"target":"bitcoin_rs_node::state::open"}
 ```
 
 ## dbcache
@@ -86,7 +87,7 @@ The process exits with status 1. Pruning keeps a reorg safety margin of 288 bloc
 
 ## Schema and migrations
 
-The authoritative format has one current epoch, `2`, recorded in `CURRENT_SCHEMA`. The node does not migrate, translate, or repair an incompatible directory in place. It refuses to open it and:
+The authoritative format has one current epoch, `3`, recorded in `CURRENT_SCHEMA`. The node does not migrate, translate, or repair an incompatible directory in place. It refuses to open it and:
 
 - preserves the directory untouched,
 - reports `incompatible_schema` when the marker, epoch, or referenced bytes do not match,
@@ -94,7 +95,7 @@ The authoritative format has one current epoch, `2`, recorded in `CURRENT_SCHEMA
 
 Owner-local state carries its own versions. Rejected mempool snapshots move intact to a `mempool-snapshot-rejected-*` directory; a fee estimator with no usable history reports insufficient data. Those cases never move `CURRENT_SCHEMA`.
 
-> **Warning** An epoch change is not an in-place upgrade. Keep the old directory, create a new one, sync it, then switch. The [datadir format policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/db-migration.md) owns the procedure, and [`RCV-09`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md) owns the fresh-replay and schema-refusal rule.
+> **Warning** An epoch change is not an in-place upgrade. Keep the old directory, create a new one, sync it, then switch (or migrate retired epoch-2 datadirs using `tools/storage-convert`). The [datadir format policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/db-migration.md) owns the procedure, and [`RCV-09`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md) owns the fresh-replay and schema-refusal rule.
 
 ## Next
 

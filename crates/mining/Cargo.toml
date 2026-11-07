@@ -56,7 +56,7 @@ bitcoin.workspace = true
 # way bitcoin-rs-p2p and bitcoin-rs-rpc opt in.
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
-bitcoin-rs-storage = { workspace = true, features = ["test-seam", "redb", "fjall"] }
+bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
 tempfile.workspace = true
 # Miner-side key generation uses the same version as the optional Noise graph.
 secp256k1 = { version = "=0.28.2", default-features = false, features = ["std", "rand-std"] }

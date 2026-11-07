@@ -286,7 +286,7 @@ fn apply_journal_overrides(
     }
 }
 
-const DEFAULT_STORAGE_BACKEND: StorageBackend = StorageBackend::Fjall;
+const DEFAULT_STORAGE_BACKEND: StorageBackend = StorageBackend::RocksDb;
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_DBCACHE_MB: u64 = 450;
 

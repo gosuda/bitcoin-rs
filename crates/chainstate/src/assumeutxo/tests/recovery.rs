@@ -6,7 +6,7 @@ use arc_swap::ArcSwapOption;
 use bitcoin_rs_primitives::BlockPayload;
 use bitcoin_rs_storage::assumeutxo::HistoricalCheckpointRef;
 use bitcoin_rs_storage::block_body::IndexedBlockBodyStore;
-use bitcoin_rs_storage::{FjallStore, FlatFileBlockStore, KvDurableHeadStore, KvUndoStore};
+use bitcoin_rs_storage::{FlatFileBlockStore, KvDurableHeadStore, KvUndoStore, RocksDbStore};
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::atomic::AtomicU32;
@@ -14,7 +14,7 @@ use std::sync::atomic::AtomicU32;
 fn open_persistent(dir: &Path, pinned: &AssumeUtxoData) -> TestResult<Arc<Chainstate>> {
     std::fs::create_dir_all(dir)?;
     crate::events::initialize_data_dir(dir)?;
-    let store = Arc::new(FjallStore::open(dir.join("chainstate"))?);
+    let store = Arc::new(RocksDbStore::open(dir.join("chainstate"))?);
     let head_store = Arc::new(KvDurableHeadStore::new(store.clone()));
     let head = head_store.load()?;
     let files = Arc::new(match head.and_then(|head| head.body_extent) {
@@ -79,7 +79,7 @@ fn snapshot_lower_height_work_commit_survives_durable_record_reopen() -> TestRes
             .durable_head
             .load()?
             .ok_or(TestError::Missing("prior head missing"))?;
-        let store = Arc::new(FjallStore::open(dir.path())?);
+        let store = Arc::new(RocksDbStore::open(dir.path())?);
         let head = Arc::new(KvDurableHeadStore::new(store));
         head.commit(None, &prior, &CommitRecords::default())?;
         Arc::get_mut(&mut fixture.active)
@@ -112,7 +112,7 @@ fn snapshot_lower_height_work_commit_survives_durable_record_reopen() -> TestRes
         );
         next
     };
-    let reopened = KvDurableHeadStore::new(Arc::new(FjallStore::open(dir.path())?));
+    let reopened = KvDurableHeadStore::new(Arc::new(RocksDbStore::open(dir.path())?));
     assert_eq!(reopened.load()?, Some(committed));
     Ok(())
 }
@@ -1038,7 +1038,7 @@ fn finalized_checkpoint_recovers_without_replaying_pruned_foreground_history() -
     let stats = active.coin_stats.snapshot();
     drop(manager);
     drop(active);
-    let store = FjallStore::open(dir.path().join("chainstate"))?;
+    let store = RocksDbStore::open(dir.path().join("chainstate"))?;
     let mut batch = store.new_batch();
     batch.delete(
         bitcoin_rs_storage::pruning::BLOCK_DATA_CF,

@@ -49,14 +49,14 @@ mio.workspace = true
 zmq = { workspace = true, optional = true }
 
 [dev-dependencies]
-bitcoin-rs-storage = { workspace = true, default-features = false, features = ["fjall"] }
+bitcoin-rs-storage = { workspace = true, default-features = false }
 bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }
 toml.workspace = true
 bitcoin-rs-e2e.workspace = true
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-chainstate = { workspace = true, features = ["test-seam"] }
-bitcoin-rs-node = { workspace = true, default-features = false, features = ["fjall", "test-seam"] }
+bitcoin-rs-node = { workspace = true, default-features = false, features = ["test-seam"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-utxo = { workspace = true, features = ["test-seam"] }

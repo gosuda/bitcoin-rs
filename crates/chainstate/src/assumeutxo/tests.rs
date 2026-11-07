@@ -910,7 +910,6 @@ fn historical_replay_preserves_active_durable_head_and_notifications() -> TestRe
     Ok(())
 }
 
-#[cfg(feature = "fjall")]
 mod recovery;
 
 #[test]

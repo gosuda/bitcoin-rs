@@ -1,9 +1,7 @@
-#![cfg(feature = "fjall")]
-
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions};
-use bitcoin_rs_storage::{FjallStore, KvUndoStore, UndoStore};
+use bitcoin_rs_storage::{KvUndoStore, RocksDbStore, UndoStore};
 use sonic_rs::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -56,7 +54,10 @@ fn valid_large_undo_reopens_and_verifies() -> Result {
     println!("D peak_after_verify_bytes={}", peak_rss(native.pid())?);
     let directory = native.stop_keep_datadir()?;
     {
-        let store = Arc::new(FjallStore::open(directory.path().join("node/chainstate"))?);
+        let store = Arc::new(RocksDbStore::open_with_cache(
+            directory.path().join("node/chainstate"),
+            0,
+        )?);
         let undo = KvUndoStore::new(store);
         let hash =
             bitcoin_rs_primitives::Hash256::from_le_bytes(&candidate.block_hash().to_byte_array());

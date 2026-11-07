@@ -1,5 +1,3 @@
-#![cfg(feature = "fjall")]
-
 use std::sync::Arc;
 
 use bitcoin_rs_primitives::Hash256;
@@ -23,7 +21,7 @@ fn head(commit_id: u64, height: u32) -> DurableHead {
 fn run_reopen_and_fence_laws() -> Result<(), StorageError> {
     let temp = tempfile::tempdir()?;
     let store = Arc::new(KvDurableHeadStore::new(Arc::new(
-        bitcoin_rs_storage::FjallStore::open(temp.path())?,
+        bitcoin_rs_storage::RocksDbStore::open(temp.path())?,
     )));
 
     let first = head(1, 1);
@@ -41,24 +39,23 @@ fn run_reopen_and_fence_laws() -> Result<(), StorageError> {
     store.commit(Some(&first), &second, &CommitRecords::default())?;
 
     drop(store);
-    let reopened =
-        KvDurableHeadStore::new(Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?));
+    let reopened = KvDurableHeadStore::new(Arc::new(bitcoin_rs_storage::RocksDbStore::open(
+        temp.path(),
+    )?));
     assert_eq!(reopened.load()?.map(|h| h.commit_id), Some(2));
     Ok(())
 }
 
-#[cfg(feature = "fjall")]
 #[test]
-fn fjall_durable_head_reopen_and_fence_laws() -> Result<(), StorageError> {
+fn rocksdb_durable_head_reopen_and_fence_laws() -> Result<(), StorageError> {
     run_reopen_and_fence_laws()?;
     Ok(())
 }
 
-#[cfg(feature = "fjall")]
 #[test]
 fn malformed_file_maximum_refuses_the_entire_head_batch() -> Result<(), StorageError> {
     let temp = tempfile::tempdir()?;
-    let backend = Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?);
+    let backend = Arc::new(bitcoin_rs_storage::RocksDbStore::open(temp.path())?);
     let store = KvDurableHeadStore::new(backend.clone());
     let first = head(1, 20);
     store.commit(None, &first, &CommitRecords::default())?;
@@ -98,7 +95,7 @@ fn malformed_file_maximum_refuses_the_entire_head_batch() -> Result<(), StorageE
 }
 
 #[test]
-fn fjall_durable_head_faults_never_tear_the_state() -> Result<(), StorageError> {
+fn rocksdb_durable_head_faults_never_tear_the_state() -> Result<(), StorageError> {
     for fault in [
         PersistFault::FailApply,
         PersistFault::LostApply,
@@ -118,7 +115,7 @@ fn fault_leaves_an_intact_head(fault: PersistFault) -> Result<(), StorageError> 
     let first = head(1, 1);
     let next = head(2, 2);
     let outcome = {
-        let backend = Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?);
+        let backend = Arc::new(bitcoin_rs_storage::RocksDbStore::open(temp.path())?);
         let store = KvDurableHeadStore::new(Arc::clone(&backend));
 
         store.commit(None, &first, &CommitRecords::default())?;
@@ -126,8 +123,9 @@ fn fault_leaves_an_intact_head(fault: PersistFault) -> Result<(), StorageError> 
         store.commit(Some(&first), &next, &CommitRecords::default())
     };
 
-    let reopened =
-        KvDurableHeadStore::new(Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?));
+    let reopened = KvDurableHeadStore::new(Arc::new(bitcoin_rs_storage::RocksDbStore::open(
+        temp.path(),
+    )?));
     let recovered = reopened
         .load()?
         .ok_or_else(|| StorageError::Backend("head row vanished".to_owned()))?;
@@ -142,12 +140,12 @@ fn open_store(
     path: &std::path::Path,
 ) -> Result<
     (
-        Arc<bitcoin_rs_storage::FjallStore>,
-        KvDurableHeadStore<bitcoin_rs_storage::FjallStore>,
+        Arc<bitcoin_rs_storage::RocksDbStore>,
+        KvDurableHeadStore<bitcoin_rs_storage::RocksDbStore>,
     ),
     StorageError,
 > {
-    let backend = Arc::new(bitcoin_rs_storage::FjallStore::open(path)?);
+    let backend = Arc::new(bitcoin_rs_storage::RocksDbStore::open(path)?);
     Ok((backend.clone(), KvDurableHeadStore::new(backend)))
 }
 
@@ -350,7 +348,7 @@ fn crash_windows_failing_backend_writer_at_each_write_index_preserves_atomic_reo
         let temp = tempfile::tempdir()?;
         let present;
         {
-            let backend = Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?);
+            let backend = Arc::new(bitcoin_rs_storage::RocksDbStore::open(temp.path())?);
             let mut prefix_batch = backend.new_batch();
             for i in 0..fail_index {
                 prefix_batch.put(cf, &[i], &[i, i]);
@@ -376,7 +374,7 @@ fn crash_windows_failing_backend_writer_at_each_write_index_preserves_atomic_reo
             }
             present = key_states(&backend, cf)?;
         }
-        let reopened = Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?);
+        let reopened = Arc::new(bitcoin_rs_storage::RocksDbStore::open(temp.path())?);
         let reopened_present = key_states(&reopened, cf)?;
         let pre_batch: Vec<u8> = (0..fail_index).collect();
         let post_batch: Vec<u8> = (0..5).collect();
@@ -416,12 +414,11 @@ fn validating_head(commit_id: u64, height: u32) -> DurableHead {
     }
 }
 
-#[cfg(feature = "fjall")]
 #[test]
-fn fjall_suffix_attestation_tracks_only_pending_validation_commits() -> Result<(), StorageError> {
+fn rocksdb_suffix_attestation_tracks_only_pending_validation_commits() -> Result<(), StorageError> {
     let temp = tempfile::tempdir()?;
     let store = Arc::new(KvDurableHeadStore::new(Arc::new(
-        bitcoin_rs_storage::FjallStore::open(temp.path())?,
+        bitcoin_rs_storage::RocksDbStore::open(temp.path())?,
     )));
     let base = validating_head(1, 2);
     store.commit(None, &base, &CommitRecords::default())?;
@@ -475,7 +472,7 @@ fn fjall_suffix_attestation_tracks_only_pending_validation_commits() -> Result<(
 }
 
 fn key_states(
-    store: &Arc<bitcoin_rs_storage::FjallStore>,
+    store: &Arc<bitcoin_rs_storage::RocksDbStore>,
     cf: bitcoin_rs_storage::ColumnFamily,
 ) -> Result<Vec<u8>, StorageError> {
     let mut present = Vec::new();

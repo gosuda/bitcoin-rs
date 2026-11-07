@@ -15,7 +15,6 @@ use bitcoin_rs_primitives::{
 };
 use parking_lot::{Mutex, RwLock};
 
-#[cfg(feature = "redb")]
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_index::types::{
     HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, TX_POSITION_SIZE, TxPosition, TxPositionValue,
@@ -1837,11 +1836,10 @@ fn rollback_rejects_prev_at_genesis() -> Result<(), TestError> {
     Ok(())
 }
 
-#[cfg(feature = "redb")]
 #[test]
-fn redb_snapshot_preserves_position_values() -> Result<(), TestError> {
+fn rocksdb_snapshot_preserves_position_values() -> Result<(), TestError> {
     let temp = tempfile::TempDir::new()?;
-    let store = Arc::new(bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?);
+    let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(temp.path())?);
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     let block = deserialize::<Block>(&body)?;

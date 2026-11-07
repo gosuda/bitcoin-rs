@@ -149,22 +149,21 @@ fn observe(utxo: &UtxoSet, coin_stats: &CoinStatsListener) -> Result<State, Utxo
     ))
 }
 
-#[cfg(feature = "fjall")]
 #[test]
 fn persisted_record_survives_reopening_the_store() -> TestResult {
     use std::sync::Arc;
 
-    use bitcoin_rs_storage::{FjallStore, KvUndoStore};
+    use bitcoin_rs_storage::{KvUndoStore, RocksDbStore};
 
     let dir = tempfile::tempdir()?;
     let (.., undo) = connected()?;
     persist_block_undo(
-        &KvUndoStore::new(Arc::new(FjallStore::open(dir.path())?)),
+        &KvUndoStore::new(Arc::new(RocksDbStore::open(dir.path())?)),
         HEIGHT,
         HASH,
         &undo,
     )?;
-    let reopened = KvUndoStore::new(Arc::new(FjallStore::open(dir.path())?));
+    let reopened = KvUndoStore::new(Arc::new(RocksDbStore::open(dir.path())?));
     assert_eq!(load_block_undo(&reopened, HEIGHT, HASH)?, undo);
     Ok(())
 }

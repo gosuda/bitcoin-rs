@@ -1,5 +1,3 @@
-#![cfg(any(feature = "redb", feature = "fjall"))]
-
 use std::{path::Path, sync::Arc};
 
 use bitcoin_rs_mining::pool::ledger as pool_ledger;
@@ -451,7 +449,7 @@ macro_rules! backend_tests {
             use super::*;
 
             fn open(path: &Path) -> Result<Arc<dyn KvStore>, bitcoin_rs_storage::StorageError> {
-                Ok(Arc::new(<$store>::open(path)?))
+                Ok(Arc::new(<$store>::open_with_cache(path, 0)?))
             }
 
             #[test]
@@ -503,10 +501,7 @@ macro_rules! backend_tests {
     };
 }
 
-#[cfg(feature = "redb")]
-backend_tests!(redb, bitcoin_rs_storage::RedbStore);
-#[cfg(feature = "fjall")]
-backend_tests!(fjall, bitcoin_rs_storage::FjallStore);
+backend_tests!(rocksdb, bitcoin_rs_storage::RocksDbStore);
 
 // POOL-03
 #[test]
@@ -607,17 +602,9 @@ fn ledger_create_open_and_epoch_under_guard(
 }
 
 // POOL-02
-#[cfg(feature = "redb")]
 #[test]
-fn pool_prepare_create_open_and_epoch_run_under_the_directory_lock_redb() -> TestResult {
-    ledger_create_open_and_epoch_under_guard(bitcoin_rs_storage::StorageBackend::Redb)
-}
-
-// POOL-02
-#[cfg(feature = "fjall")]
-#[test]
-fn pool_prepare_create_open_and_epoch_run_under_the_directory_lock_fjall() -> TestResult {
-    ledger_create_open_and_epoch_under_guard(bitcoin_rs_storage::StorageBackend::Fjall)
+fn pool_prepare_create_open_and_epoch_run_under_the_directory_lock_rocksdb() -> TestResult {
+    ledger_create_open_and_epoch_under_guard(bitcoin_rs_storage::StorageBackend::RocksDb)
 }
 
 #[test]
@@ -678,14 +665,7 @@ fn pool_prepare_holds_directory_lock_for_service_lifetime() -> TestResult {
     config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
     config.p2p.listen.clear();
     config.observability.metrics_bind = None;
-    #[cfg(feature = "redb")]
-    {
-        config.storage.backend = bitcoin_rs_storage::StorageBackend::Redb;
-    }
-    #[cfg(all(not(feature = "redb"), feature = "fjall"))]
-    {
-        config.storage.backend = bitcoin_rs_storage::StorageBackend::Fjall;
-    }
+    config.storage.backend = bitcoin_rs_storage::StorageBackend::RocksDb;
     config.mining.payout_script = vec![0x51];
     config.pool = Some(crate::config::PoolConfig {
         datadir: pool_datadir.clone(),

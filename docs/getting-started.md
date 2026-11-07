@@ -4,12 +4,12 @@
 
 The repository development toolchain is `stable`; the workspace MSRV is Rust `1.99.0`. See [policies/source-compatibility.md](policies/source-compatibility.md).
 
-The default build compiles bundled ZeroMQ from source, so it needs C and C++ compilers plus `ar` (`build-essential` on Debian/Ubuntu); no system ZeroMQ headers, `pkg-config`, `cmake`, or `libsodium` are needed. A C compiler stays required without the `zmq` feature (vendored secp256k1 and mimalloc).
+The default build compiles bundled ZeroMQ from source, so it needs C and C++ compilers plus `ar` (`build-essential` on Debian/Ubuntu); no system ZeroMQ headers, `pkg-config`, or `libsodium` are needed. A C compiler stays required without the `zmq` feature (vendored secp256k1 and mimalloc). Building RocksDB requires a C++17 compiler (such as `g++`), `clang`, `libclang-dev`, and `cmake` (`sudo apt-get install -y build-essential clang libclang-dev cmake`).
 
-The default binary is kernel-free. Building the optional `kernel` lane also needs CMake and Boost on Debian/Ubuntu:
+The default binary is kernel-free. Building the optional `kernel` lane also needs Boost on Debian/Ubuntu:
 
 ```sh
-sudo apt-get install -y cmake libboost-dev
+sudo apt-get install -y libboost-dev
 ```
 
 ## Build
@@ -18,8 +18,8 @@ Use a lane deliberately:
 
 | Lane | Command | Purpose |
 | --- | --- | --- |
-| Default | `cargo build --locked --release -p bitcoin-rs` | Normal binary: `fjall`, `redb`, `zmq`; no kernel |
-| Minimal native | `cargo build --locked --release -p bitcoin-rs --no-default-features --features fjall` | One storage backend, optional extensions off |
+| Default | `cargo build --locked --release -p bitcoin-rs` | Normal binary: RocksDB, `zmq`; no kernel |
+| Minimal native | `cargo build --locked --release -p bitcoin-rs --no-default-features` | RocksDB storage, ZeroMQ off |
 | Kernel | `CARGO_TARGET_DIR=target/oracle cargo build --locked --release -p bitcoin-rs --features kernel` | Optional `bitcoinkernel` validation/oracle lane |
 
 Keep the kernel lane in a separate `CARGO_TARGET_DIR` when proving a kernel-free build. BIP324 v2 transport is on by default, as in Bitcoin Core; `--v2transport=false` keeps every connection on v1. See [bip-support.md](bip-support.md).
@@ -117,17 +117,15 @@ from deterministic local protocol fixtures.
 
 ## Storage
 
-`fjall` is the default backend; `redb` is also compiled into the default binary.
+RocksDB is the mandatory default storage engine, always compiled into the binary. `fjall` and `redb` are removed from runtime; legacy epoch-2 datadirs are migrated offline using `tools/storage-convert` (see [policies/db-migration.md](policies/db-migration.md)).
 
 ```sh
-./target/release/bitcoin-rs --storage-backend redb
+./target/release/bitcoin-rs --storage-backend rocksdb
 ```
 
 ```sh
-export BITCOIN_RS_STORAGE_BACKEND=fjall
+export BITCOIN_RS_STORAGE_BACKEND=rocksdb
 ```
-
-RocksDB is a non-default backend used as a shipped alternative and comparison engine.
 
 ## Mempool persistence
 
@@ -182,7 +180,7 @@ Important defaults:
 | --- | --- |
 | network | `mainnet` |
 | data dir | `.bitcoin-rs` |
-| storage backend | `fjall` |
+| storage backend | `rocksdb` |
 | RPC bind | `127.0.0.1:8332` on mainnet |
 | REST | off |
 | RPC authentication | Fresh `.cookie` in the data directory (mode `0600` on Unix) |
@@ -370,7 +368,7 @@ Direct `bitcoin-rs-consensus` library callers have no config file, environment, 
 - `crates/consensus`, `crates/chainstate`, and `crates/node` library builds changed behavior. Their defaults used to compile **and implicitly select** `kernel`. They now compile nothing kernel-related and default to `native`. A library user who relied on the old kernel default must enable the `kernel` feature and select `validation_engine = "kernel"` (binary config, env, or CLI). A direct `bitcoin-rs-consensus` caller instead passes `ValidationEngine::Kernel` to the verify/parse entries described above.
 - To use bitcoinkernel, do both: build with `--features kernel` and set `validation_engine = "kernel"` (TOML), `BITCOIN_RS_VALIDATION_ENGINE=kernel` (env), or `--validation-engine kernel` (CLI).
 - Setting `kernel` without the feature fails at startup with the unsupported-build error above.
-- Bare `bitcoin-rs` runs native. The shipped Docker image compiles kernel support (`--features fjall,kernel`) and selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`). Bare `docker run` therefore keeps today's kernel behavior. `BITCOIN_RS_VALIDATION_ENGINE=native` or a config file mounted over that one still overrides it without touching CMD. A CLI override (`--validation-engine`) replaces CMD wholesale under docker semantics, where `docker run IMAGE args` runs `bitcoin-rs args`. Going that route means repeating the whole argument list (`--config --data-dir --p2p-listen` included).
+- Bare `bitcoin-rs` runs native. The shipped Docker image compiles kernel support (`--features kernel`) and selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`). Bare `docker run` therefore keeps today's kernel behavior. `BITCOIN_RS_VALIDATION_ENGINE=native` or a config file mounted over that one still overrides it without touching CMD. A CLI override (`--validation-engine`) replaces CMD wholesale under docker semantics, where `docker run IMAGE args` runs `bitcoin-rs args`. Going that route means repeating the whole argument list (`--config --data-dir --p2p-listen` included).
 - `--validation-mode fast` was removed. The supported modes are `full` and `assume-valid` (also `BITCOIN_RS_VALIDATION_MODE` or `validation_mode` in TOML). Starting in `full` mode forces a cold rebuild from block files if the stored chain has a durable attestation weaker than `Full`. This cold rebuild validates every script and requires an unpruned datadir. If your datadir was pruned, restart with `--validation-mode assume-valid` or resync.
 
 ## More

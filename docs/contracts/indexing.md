@@ -184,7 +184,7 @@ Owners:
 - Idle versions MUST remain monotonic generations to prevent ABA races.
 - Obsolete or malformed claims return `InvalidResetMarker` without modifying derived rows.
 - The worker reports failure through its existing startup boundary.
-- The dedicated redb store opens only the canonical 43-byte ScriptLive table.
+- The store opens only the canonical 43-byte ScriptLive table.
 - An incompatible declaration, empty or populated, MUST refuse open without changing data.
 - The operator MUST rebuild the derived index in a separately named directory, with no live-row conversion.
 - Current writers emit position values only for nonempty transaction groups.
@@ -629,7 +629,7 @@ That document gives consumer usage and defers to this clause for every consisten
 
 - **Full-stack crash convergence**: the recovery model across chainstate, checkpoints, block bodies, and derived indexes is normative in [recovery.md](recovery.md) (`RCV-01` to `RCV-04`).
 - A `kill -9` gate that re-applies real block bodies through it is not yet exercised.
-- **Portable bundle cross-process scope**: `crates/index/tests/portable_bundle.rs` proves export/restore equality, damage refusal, existing-destination preservation, cancellation, missing-body withhold, restore-below-tip reconciliation, and reset over real Fjall stores (`IDX-11`).
+- **Portable bundle cross-process scope**: `crates/index/tests/portable_bundle.rs` proves export/restore equality, damage refusal, existing-destination preservation, cancellation, missing-body withhold, restore-below-tip reconciliation, and reset over real RocksDB stores (`IDX-11`).
 - The live Core200/C150/withheld receipts are private external runs, not a repository portable process suite.
 - One scoped live run (`.outline/evidence/snapshot-stage2-live/runs/20261026T200208Z-remaining-1850397/`, binary SHA-256 `9406226483c7ac4c29f822e133a1f36bea82cc2c1078b8f16388a4e5df2`, PASS 64/0, error null, survivors empty) covers four selected cases:
   - base-200 bundle into same-chain receiver at 202 restores and serves all 202 txid/blockhash/sample queries.

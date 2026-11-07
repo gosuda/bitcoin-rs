@@ -42,10 +42,7 @@ windows-sys.workspace = true
 [features]
 usdt = ["bitcoin-rs-consensus/usdt"]
 
-default = ["fjall", "redb", "zmq"]
-rocksdb = ["bitcoin-rs-node/rocksdb"]
-fjall = ["bitcoin-rs-node/fjall"]
-redb = ["bitcoin-rs-node/redb"]
+default = ["zmq"]
 kernel = ["bitcoin-rs-node/kernel"]
 zmq = ["bitcoin-rs-node/zmq"]
 silent-payments = ["bitcoin-rs-node/silent-payments"]

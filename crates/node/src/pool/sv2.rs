@@ -787,5 +787,5 @@ fn wait_until_finished(
     Ok(())
 }
 
-#[cfg(all(test, any(feature = "fjall", feature = "redb")))]
+#[cfg(test)]
 mod tests;

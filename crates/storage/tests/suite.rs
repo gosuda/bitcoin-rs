@@ -10,5 +10,5 @@ mod durable_head_store;
 mod kv_store_object_safety;
 mod overhaul_atomic_durability;
 mod prune_then_reorg;
-mod redb_txindex;
+mod rocksdb_txindex;
 mod store_guard;

@@ -29,16 +29,17 @@ const ALL_FAULTS: &[PersistFault] = &[
 ];
 
 struct ChainFamily {
-    store: Arc<bitcoin_rs_storage::FjallStore>,
+    store: Arc<bitcoin_rs_storage::RocksDbStore>,
     _files: Arc<FlatFileBlockStore>,
-    bodies: Arc<IndexedBlockBodyStore<bitcoin_rs_storage::FjallStore>>,
-    undo: KvUndoStore<bitcoin_rs_storage::FjallStore>,
-    head: KvDurableHeadStore<bitcoin_rs_storage::FjallStore>,
+    bodies: Arc<IndexedBlockBodyStore<bitcoin_rs_storage::RocksDbStore>>,
+    undo: KvUndoStore<bitcoin_rs_storage::RocksDbStore>,
+    head: KvDurableHeadStore<bitcoin_rs_storage::RocksDbStore>,
 }
 
 fn open_family(data_dir: &std::path::Path) -> Result<ChainFamily> {
-    let store = Arc::new(bitcoin_rs_storage::FjallStore::open(
+    let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
         data_dir.join("chainstate"),
+        0,
     )?);
     let head = KvDurableHeadStore::new(Arc::clone(&store));
     let files = Arc::new(match head.load()?.and_then(|head| head.body_extent) {
@@ -303,8 +304,9 @@ fn corrupt_head_rows_fail_startup_fail_closed() -> Result<()> {
         state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
         drop(state);
 
-        let raw = Arc::new(bitcoin_rs_storage::FjallStore::open(
+        let raw = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
             data_dir.join("chainstate"),
+            0,
         )?);
         let frame = raw
             .get(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY)?

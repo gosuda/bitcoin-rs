@@ -11,7 +11,7 @@ Install the repository-pinned Bitcoin Core 31.1 using the existing
 `scripts/install-bitcoind.sh` installer, then:
 
 ```sh
-cargo build -p bitcoin-rs --features fjall
+cargo build -p bitcoin-rs
 cargo build --locked --manifest-path tools/compact-filter-interop/Cargo.toml
 python3 tools/compact-filter-interop/run.py \
   --bitcoind /path/to/bitcoin-core-31.1/bin/bitcoind \

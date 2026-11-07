@@ -6,11 +6,9 @@ Anchors: Tony Hoare, Edsger W. Dijkstra
 
 Target Design Notice:
 This module models the target Epoch 3 datadir schema lifecycle and the planned
-offline converter (`tools/storage-convert`), which does not exist yet in the codebase.
-The current node implementation (`crates/storage/src/checkpoint/fs.rs`) remains on
-Epoch 2 (`CURRENT_SCHEMA_VERSION = 2`), as proofs are established ahead of the storage
-engine cutover. This model represents target design safety and must not be represented
-as an implementation refinement proof of current `fs.rs` behavior.
+offline converter (`tools/storage-convert`). These files specify epoch3
+schema admission/conversion safety independently; they do not establish
+implementation refinement or physical filesystem durability.
 
 Two execution modes are modeled with disjoint phase domains:
 1. Node admission:
@@ -46,8 +44,8 @@ Honest assumptions:
   exact comparison of identity bytes; collision resistance is an external property.
 - Filesystem Atomicity: Rename of `CURRENT_SCHEMA.tmp` to `CURRENT_SCHEMA` is atomic
   in filesystem metadata.
-- Target Epoch 3 Design: Models target Epoch 3 lifecycle requirements under RCV-09.
-  Current node implementation retains `CURRENT_SCHEMA_VERSION = 2`. The model is
+- Implemented Epoch 3 Design: Models implemented live Epoch 3 lifecycle requirements under RCV-09.
+  Live node implementation uses `CURRENT_SCHEMA_VERSION = 3`. The model is
   an independent design model, not an implementation refinement proof.
 - Failure and Visibility Model: Pre-rename I/O errors abort without marker publication.
   Post-rename directory sync failures leave a visible marker in state, not a proven

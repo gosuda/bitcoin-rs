@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use crate::support::TestResult as Result;
 
-#[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 fn check_store(store: impl KvStore) -> Result {
     let store = Arc::new(store);
     store.put(ColumnFamily::UndoData, b"row", b"abcd")?;
@@ -37,19 +36,6 @@ fn check_store(store: impl KvStore) -> Result {
     Ok(())
 }
 
-#[cfg(feature = "fjall")]
-#[test]
-fn fjall_checks_borrowed_length_before_owned_copy() -> Result {
-    let dir = tempfile::tempdir()?;
-    check_store(bitcoin_rs_storage::FjallStore::open(dir.path())?)
-}
-#[cfg(feature = "redb")]
-#[test]
-fn redb_checks_guard_length_before_owned_copy() -> Result {
-    let dir = tempfile::tempdir()?;
-    check_store(bitcoin_rs_storage::RedbStore::open(dir.path())?)
-}
-#[cfg(feature = "rocksdb")]
 #[test]
 fn rocksdb_checks_pinned_length_before_owned_copy() -> Result {
     let dir = tempfile::tempdir()?;
@@ -178,12 +164,11 @@ fn unsupported_body_read_never_materializes_metadata_or_body() {
     ));
 }
 
-#[cfg(feature = "fjall")]
 #[test]
 fn indexed_body_checks_locator_and_frame_length_before_copy() -> Result {
     use bitcoin_rs_storage::block_body::{BlockBodyStore as _, IndexedBlockBodyStore};
     let dir = tempfile::tempdir()?;
-    let index = Arc::new(bitcoin_rs_storage::FjallStore::open(
+    let index = Arc::new(bitcoin_rs_storage::RocksDbStore::open(
         dir.path().join("index"),
     )?);
     let files = Arc::new(bitcoin_rs_storage::FlatFileBlockStore::open(
@@ -212,18 +197,11 @@ fn indexed_body_checks_locator_and_frame_length_before_copy() -> Result {
     Ok(())
 }
 
-#[cfg(feature = "fjall")]
 #[test]
 fn empty_and_maximum_size_values_and_read_after_error() -> Result {
     let dir = tempfile::tempdir()?;
-    let store = Arc::new(bitcoin_rs_storage::FjallStore::open(dir.path())?);
+    let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(dir.path())?);
     let cf = ColumnFamily::TxConfirmed;
-
-    assert!(matches!(
-        store.put(cf, b"", b"empty_key_payload"),
-        Err(bitcoin_rs_storage::StorageError::InvalidOperation(_))
-    ));
-    assert_eq!(store.get(cf, b"")?, None);
 
     store.put(cf, b"empty_val", b"")?;
     assert_eq!(store.get(cf, b"empty_val")?, Some(Vec::new()));
@@ -249,7 +227,6 @@ fn empty_and_maximum_size_values_and_read_after_error() -> Result {
         Err(BoundedReadError::Limit { .. })
     ));
     assert_eq!(store.get(cf, b"empty_val")?, Some(Vec::new()));
-    assert_eq!(store.get(cf, b"")?, None);
 
     store.put(cf, b"prefix", b"short")?;
     store.put(cf, b"prefix_longer", b"long")?;

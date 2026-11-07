@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use bitcoin_rs_mining::pool::ledger::*;
-use bitcoin_rs_storage::{ColumnFamily, FjallStore, KvStore, RedbStore};
+use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -389,11 +389,7 @@ struct Fund {
 }
 
 fn backend(path: impl AsRef<Path>) -> Arc<dyn KvStore> {
-    if BACKEND == "fjall" {
-        Arc::new(FjallStore::open(path).fixture("open fjall"))
-    } else {
-        Arc::new(RedbStore::open(path).fixture("open redb"))
-    }
+    Arc::new(RocksDbStore::open(path).fixture("open rocksdb"))
 }
 
 fn create(path: impl AsRef<Path>, config: PoolConfig) -> Result<Ledger, LedgerError> {
@@ -405,7 +401,7 @@ fn open(path: impl AsRef<Path>, config: PoolConfig) -> Result<Ledger, LedgerErro
 }
 
 fn ledger_path(dir: &TempDir) -> PathBuf {
-    dir.path().join("pool.redb")
+    dir.path().join("pool.db")
 }
 
 fn staged_at(
@@ -2984,7 +2980,7 @@ mod process_death {
             return;
         };
         let mode = std::env::var("POOL_CRASH_MODE").unwrap_or_default();
-        let ledger = open(PathBuf::from(dir).join("pool.redb"), config(100, 0)).fixture("open");
+        let ledger = open(PathBuf::from(dir).join("pool.db"), config(100, 0)).fixture("open");
         let abort = |op: &'static str, point: FailPoint| FailPlan {
             op,
             point,

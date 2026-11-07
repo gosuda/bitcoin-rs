@@ -21,6 +21,7 @@ members = [
     "tools/snapshot",
     "tools/contract-index",
     "tools/p2pk-scan",
+    "tools/storage-convert",
 ]
 
 [workspace.package]
@@ -182,12 +183,14 @@ zerocopy = { version = "0.8.57", default-features = false, features = ["derive",
 # --- Storage backends ---------------------------------------------------------
 # rust-rocksdb 0.54 line.
 # `default = [snappy, lz4, zstd, zlib, bzip2, bindgen-runtime]` — disable to
-# pick only what the explicit rocksdb feature uses.
+# pick only what storage uses.
 rust-rocksdb = { version = ">=0.54, <0.55", default-features = false, features = [
     "mt_static", "snappy", "lz4", "zstd",
 ] }
 
-
+# Retired storage engines: retained in workspace dependencies ONLY for the
+# offline converter (tools/storage-convert, ARCH-02). The node itself keeps
+# RocksDB as the sole engine in epoch 3.
 # fjall 3.x line.
 fjall = { version = ">=3.1.4, <4", default-features = false, features = ["lz4"] }
 

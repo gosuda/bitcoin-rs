@@ -539,6 +539,23 @@ fn commit_rejects_manifest_for_wrong_generation() -> TestResult {
     Ok(())
 }
 
+fn assert_schema_refusal(error: std::io::Error, reason_tokens: &[&str]) {
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    let message = error.to_string();
+    assert!(
+        message.ends_with(
+            "; convert it with bitcoin-rs-storage-convert --from <old> --to <new>, or resync into a new datadir"
+        ),
+        "refusal message must end with operator conversion guidance: {message}"
+    );
+    for token in reason_tokens {
+        assert!(
+            message.contains(token),
+            "refusal message must contain {token:?}: {message}"
+        );
+    }
+}
+
 #[test]
 fn format_and_schema_helpers_round_trip() -> TestResult {
     assert_eq!(HEADER_CODEC, "bitcoin-rs-canonical-headers");
@@ -556,7 +573,7 @@ fn format_and_schema_helpers_round_trip() -> TestResult {
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     ensure_current_schema(&data)?;
-    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"2\n");
+    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"3\n");
     let mut oversized = data.create("oversized")?;
     oversized.write_all(&[0_u8; 17])?;
     oversized.sync_all()?;
@@ -565,11 +582,19 @@ fn format_and_schema_helpers_round_trip() -> TestResult {
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData
     ));
     data.remove_file(CURRENT_SCHEMA_FILE)?;
-    for epoch in [b"0\n", b"1\n"] {
+    for epoch in [b"0\n", b"1\n", b"2\n"] {
         let mut stale_schema = data.create(CURRENT_SCHEMA_FILE)?;
         stale_schema.write_all(epoch)?;
         stale_schema.sync_all()?;
-        assert!(ensure_current_schema(&data).is_err());
+        let error = match ensure_current_schema(&data) {
+            Ok(()) => {
+                return Err(TestError::UnexpectedSuccess(
+                    "stale schema epoch must be refused",
+                ));
+            }
+            Err(error) => error,
+        };
+        assert_schema_refusal(error, &["CURRENT_SCHEMA", "schema epoch"]);
         assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, epoch);
     }
     Ok(())
@@ -586,17 +611,43 @@ fn schema_init_exempts_only_a_regular_lock_file() -> TestResult {
         lock.sync_all()?;
     }
     ensure_current_schema(&data)?;
+    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"3\n");
     {
         let mut other = data.create("other")?;
         other.write_all(b"data")?;
         other.sync_all()?;
     }
     data.remove_file(CURRENT_SCHEMA_FILE)?;
-    assert!(ensure_current_schema(&data).is_err());
+    let error = match ensure_current_schema(&data) {
+        Ok(()) => {
+            return Err(TestError::UnexpectedSuccess(
+                "unmarked datadir with other entry must be refused",
+            ));
+        }
+        Err(error) => error,
+    };
+    assert_schema_refusal(error, &["CURRENT_SCHEMA", "epoch 0"]);
+    assert_eq!(read_file(&data, "other", 16)?, b"data");
+    assert!(matches!(
+        read_file(&data, CURRENT_SCHEMA_FILE, 16),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound
+    ));
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     data.create_dir(super::fs::DATA_DIR_LOCK_FILE)?;
-    assert!(ensure_current_schema(&data).is_err());
+    let error = match ensure_current_schema(&data) {
+        Ok(()) => {
+            return Err(TestError::UnexpectedSuccess(
+                "directory lock path must be refused",
+            ));
+        }
+        Err(error) => error,
+    };
+    assert_schema_refusal(error, &["CURRENT_SCHEMA", "epoch 0"]);
+    assert!(matches!(
+        read_file(&data, CURRENT_SCHEMA_FILE, 16),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound
+    ));
     Ok(())
 }
 

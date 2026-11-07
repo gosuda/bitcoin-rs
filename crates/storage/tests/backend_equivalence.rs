@@ -1,5 +1,3 @@
-#![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
-
 use bitcoin_rs_storage::{ColumnFamily, KvIter, KvPair, KvStore, StorageError, WriteCondition};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -283,12 +281,11 @@ fn collect_iter(iterator: KvIter<'_>) -> Result<Vec<KvPair>, StorageError> {
     iterator.collect()
 }
 
-#[cfg(feature = "redb")]
 #[test]
-fn redb_flush_persists_deferred_write_after_reopen() -> TestResult<()> {
+fn rocksdb_flush_persists_deferred_write_after_reopen() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
     {
-        let store = bitcoin_rs_storage::RedbStore::open(temp.path())?;
+        let store = bitcoin_rs_storage::RocksDbStore::open(temp.path())?;
         let mut batch = store.new_batch();
         batch.put(
             ColumnFamily::BlockBodies,
@@ -303,7 +300,7 @@ fn redb_flush_persists_deferred_write_after_reopen() -> TestResult<()> {
         store.flush()?;
     }
 
-    let reopened = bitcoin_rs_storage::RedbStore::open(temp.path())?;
+    let reopened = bitcoin_rs_storage::RocksDbStore::open(temp.path())?;
     assert_eq!(
         reopened.get(ColumnFamily::BlockBodies, b"deferred-key")?,
         Some(b"deferred-value".to_vec())
@@ -343,41 +340,29 @@ fn run_reopen_pool_ledger_suite<S: KvStore>(
     Ok(())
 }
 
-#[cfg(feature = "rocksdb")]
 #[test]
 fn rocksdb_reopen_preserves_rows_and_serves_pool_ledger() -> TestResult<()> {
     run_reopen_pool_ledger_suite(|path| bitcoin_rs_storage::RocksDbStore::open(path))
 }
-
-#[cfg(feature = "fjall")]
 #[test]
-fn fjall_reopen_preserves_rows_and_serves_pool_ledger() -> TestResult<()> {
-    run_reopen_pool_ledger_suite(|path| bitcoin_rs_storage::FjallStore::open(path))
-}
-
-#[cfg(feature = "redb")]
-#[test]
-fn redb_reopen_preserves_rows_and_serves_pool_ledger() -> TestResult<()> {
-    run_reopen_pool_ledger_suite(|path| bitcoin_rs_storage::RedbStore::open(path))
-}
-
-#[cfg(feature = "redb")]
-#[test]
-fn redb_open_creates_missing_pool_ledger_table_without_reset() -> TestResult<()> {
+fn rocksdb_open_creates_missing_column_families_without_reset() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let path = temp.path().join("redb.db");
-    let legacy: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("block_headers");
     {
-        let db = redb::Database::create(&path)?;
-        let txn = db.begin_write()?;
-        {
-            let mut table = txn.open_table(legacy)?;
-            table.insert(b"legacy-header".as_slice(), b"legacy-value".as_slice())?;
-        }
-        txn.commit()?;
+        let mut db_opts = rust_rocksdb::Options::default();
+        db_opts.create_if_missing(true);
+        let mut db =
+            rust_rocksdb::DB::open(&db_opts, temp.path()).map_err(StorageError::backend)?;
+        let cf_opts = rust_rocksdb::Options::default();
+        db.create_cf(ColumnFamily::BlockHeaders.name(), &cf_opts)
+            .map_err(StorageError::backend)?;
+        let handle = db.cf_handle(ColumnFamily::BlockHeaders.name()).ok_or(
+            StorageError::UnknownColumnFamily(ColumnFamily::BlockHeaders),
+        )?;
+        db.put_cf(handle, b"legacy-header", b"legacy-value")
+            .map_err(StorageError::backend)?;
     }
 
-    let store = bitcoin_rs_storage::RedbStore::open(&path)?;
+    let store = bitcoin_rs_storage::RocksDbStore::open(temp.path())?;
     assert_eq!(
         store.get(ColumnFamily::BlockHeaders, b"legacy-header")?,
         Some(b"legacy-value".to_vec())
@@ -390,35 +375,20 @@ fn redb_open_creates_missing_pool_ledger_table_without_reset() -> TestResult<()>
     Ok(())
 }
 
-#[cfg(any(feature = "rocksdb", feature = "fjall", feature = "redb"))]
 #[test]
-fn portable_backends_have_identical_aggregate_hashes() -> TestResult<()> {
-    let hashes = [
-        #[cfg(feature = "rocksdb")]
-        {
-            let temp = tempfile::TempDir::new()?;
-            let store = bitcoin_rs_storage::RocksDbStore::open(temp.path())?;
-            ("rocksdb", run_equivalence_suite(store)?)
-        },
-        #[cfg(feature = "fjall")]
-        {
-            let temp = tempfile::TempDir::new()?;
-            let store = bitcoin_rs_storage::FjallStore::open(temp.path())?;
-            ("fjall", run_equivalence_suite(store)?)
-        },
-        #[cfg(feature = "redb")]
-        {
-            let temp = tempfile::TempDir::new()?;
-            let store = bitcoin_rs_storage::RedbStore::open(temp.path())?;
-            ("redb", run_equivalence_suite(store)?)
-        },
-    ];
-    for (backend, hash) in &hashes {
-        eprintln!("{backend} aggregate hash: {hash:02x?}");
-    }
-    for ((left_backend, left), (right_backend, right)) in hashes.iter().zip(hashes.iter().skip(1)) {
-        assert_eq!(left, right, "{left_backend} and {right_backend} differ");
-    }
+fn rocksdb_equivalence_suite() -> TestResult<()> {
+    let temp1 = tempfile::TempDir::new()?;
+    let store1 = bitcoin_rs_storage::RocksDbStore::open(temp1.path())?;
+    let hash1 = run_equivalence_suite(store1)?;
+
+    let temp2 = tempfile::TempDir::new()?;
+    let store2 = bitcoin_rs_storage::RocksDbStore::open(temp2.path())?;
+    let hash2 = run_equivalence_suite(store2)?;
+
+    assert_eq!(
+        hash1, hash2,
+        "deterministic RocksDb equivalence suite must produce identical aggregate hashes"
+    );
     Ok(())
 }
 
@@ -658,7 +628,6 @@ where
     Ok(())
 }
 
-#[cfg(feature = "rocksdb")]
 #[test]
 fn rocksdb_write_durable_if_laws() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
@@ -670,31 +639,6 @@ fn rocksdb_write_durable_if_laws() -> TestResult<()> {
     Ok(())
 }
 
-#[cfg(feature = "fjall")]
-#[test]
-fn fjall_write_durable_if_laws() -> TestResult<()> {
-    let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::FjallStore::open(temp.path())?;
-    run_write_condition_laws(&store)?;
-    run_competing_writer_laws(&store)?;
-    drop(store);
-    run_reopen_durability_law(|| bitcoin_rs_storage::FjallStore::open(temp.path()))?;
-    Ok(())
-}
-
-#[cfg(feature = "redb")]
-#[test]
-fn redb_write_durable_if_laws() -> TestResult<()> {
-    let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::RedbStore::open(temp.path())?;
-    run_write_condition_laws(&store)?;
-    run_competing_writer_laws(&store)?;
-    drop(store);
-    run_reopen_durability_law(|| bitcoin_rs_storage::RedbStore::open(temp.path()))?;
-    Ok(())
-}
-
-#[cfg(feature = "rocksdb")]
 #[test]
 fn rocksdb_rejects_second_writable_primary_open_on_same_path() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;

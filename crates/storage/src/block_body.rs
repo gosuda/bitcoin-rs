@@ -537,7 +537,7 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
     }
 }
 
-#[cfg(all(test, feature = "fjall"))]
+#[cfg(test)]
 mod body_position_prefetch_tests {
     use super::*;
     use crate::BoundedReadError;
@@ -546,7 +546,7 @@ mod body_position_prefetch_tests {
     #[test]
     fn verification_distinguishes_corrupt_frames_from_missing_bodies() -> TestResult {
         let temp = tempfile::tempdir()?;
-        let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
+        let index = Arc::new(crate::RocksDbStore::open(temp.path().join("index"))?);
         let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
         let store = IndexedBlockBodyStore::new(index, files.clone());
         let hash = Hash256::from_le_bytes(&[7_u8; 32]);
@@ -606,7 +606,7 @@ mod body_position_prefetch_tests {
     #[test]
     fn prefetched_positions_stream_bodies_in_exact_request_order() -> TestResult {
         let temp = tempfile::tempdir()?;
-        let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
+        let index = Arc::new(crate::RocksDbStore::open(temp.path().join("index"))?);
         let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
         let store = IndexedBlockBodyStore::new(index, files);
         let hash1 = Hash256::from_le_bytes(&[1_u8; 32]);
@@ -638,7 +638,7 @@ mod body_position_prefetch_tests {
     #[test]
     fn persisting_same_block_body_twice_appends_once() -> TestResult {
         let temp = tempfile::tempdir()?;
-        let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
+        let index = Arc::new(crate::RocksDbStore::open(temp.path().join("index"))?);
         let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
         let store = IndexedBlockBodyStore::new(index, files);
         let hash = Hash256::from_le_bytes(&[7_u8; 32]);
@@ -662,7 +662,7 @@ mod body_position_prefetch_tests {
     #[test]
     fn malformed_body_row_is_incompatible_not_missing() -> TestResult {
         let temp = tempfile::tempdir()?;
-        let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
+        let index = Arc::new(crate::RocksDbStore::open(temp.path().join("index"))?);
         let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
         let store = IndexedBlockBodyStore::new(index.clone(), files);
         let hash = Hash256::from_le_bytes(&[9_u8; 32]);
@@ -691,7 +691,7 @@ mod body_position_prefetch_tests {
     #[test]
     fn missing_prefetched_body_row_is_missing_not_incompatible() -> TestResult {
         let temp = tempfile::tempdir()?;
-        let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
+        let index = Arc::new(crate::RocksDbStore::open(temp.path().join("index"))?);
         let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
         let store = IndexedBlockBodyStore::new(index, files);
         let hash = Hash256::from_le_bytes(&[8_u8; 32]);
@@ -705,7 +705,7 @@ mod body_position_prefetch_tests {
     #[test]
     fn malformed_prefetched_body_row_is_incompatible_not_missing() -> TestResult {
         let temp = tempfile::tempdir()?;
-        let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
+        let index = Arc::new(crate::RocksDbStore::open(temp.path().join("index"))?);
         let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
         let store = IndexedBlockBodyStore::new(index.clone(), files);
         let hash = Hash256::from_le_bytes(&[7_u8; 32]);

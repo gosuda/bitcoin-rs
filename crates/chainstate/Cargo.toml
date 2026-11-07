@@ -24,18 +24,6 @@ default = []
 # select it and the g17 gate fails if it leaks into a shipped target.
 test-seam = ["bitcoin-rs-storage/test-seam"]
 kernel = ["bitcoin-rs-consensus/kernel"]
-rocksdb = [
-    "bitcoin-rs-storage/rocksdb",
-    "bitcoin-rs-utxo/rocksdb",
-]
-fjall = [
-    "bitcoin-rs-storage/fjall",
-    "bitcoin-rs-utxo/fjall",
-]
-redb = [
-    "bitcoin-rs-storage/redb",
-    "bitcoin-rs-utxo/redb",
-]
 
 [dependencies]
 bitcoin-rs-primitives.workspace = true

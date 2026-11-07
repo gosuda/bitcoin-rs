@@ -13,10 +13,7 @@ description = "bitcoin-rs :: storage"
 workspace = true
 
 [features]
-default = ["fjall"]
-rocksdb = ["dep:rust-rocksdb"]
-fjall = ["dep:fjall"]
-redb = ["dep:redb"]
+default = []
 # Explicit fixture/fault-injection surface; never a production default.
 test-seam = []
 
@@ -35,9 +32,7 @@ serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-rust-rocksdb = { workspace = true, optional = true }
-fjall = { workspace = true, optional = true }
-redb = { workspace = true, optional = true }
+rust-rocksdb.workspace = true
 
 [target.'cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", target_os = "redox"))'.dependencies]
 rustix.workspace = true

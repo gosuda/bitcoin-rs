@@ -48,23 +48,11 @@ pub use durable_head::{
     KvDurableHeadStore, SCRIPT_ATTESTATION_KEY, ScriptAttestation,
 };
 
-#[cfg(feature = "fjall")]
-pub use fjall_impl::{FJALL_DEFAULT_CACHE_BYTES, FjallStore};
-
-#[cfg(feature = "redb")]
-pub use redb_impl::{
-    REDB_DEFAULT_CACHE_BYTES, REDB_TXINDEX_DEFAULT_CACHE_BYTES, RedbStore,
-    open_redb_tx_index_store, open_redb_tx_index_store_with_cache,
-};
-
-#[cfg(feature = "rocksdb")]
 pub use rocksdb_impl::{ROCKSDB_DEFAULT_CACHE_BYTES, RocksDbStore};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum StorageBackend {
     RocksDb,
-    Fjall,
-    Redb,
 }
 
 impl StorageBackend {
@@ -72,17 +60,13 @@ impl StorageBackend {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RocksDb => "rocksdb",
-            Self::Fjall => "fjall",
-            Self::Redb => "redb",
         }
     }
 
     #[must_use]
     pub const fn is_compiled_in(self) -> bool {
         match self {
-            Self::RocksDb => cfg!(feature = "rocksdb"),
-            Self::Fjall => cfg!(feature = "fjall"),
-            Self::Redb => cfg!(feature = "redb"),
+            Self::RocksDb => true,
         }
     }
 }
@@ -93,8 +77,6 @@ impl FromStr for StorageBackend {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
             "rocksdb" => Ok(Self::RocksDb),
-            "fjall" => Ok(Self::Fjall),
-            "redb" => Ok(Self::Redb),
             _ => Err(format!("unsupported storage backend {value}")),
         }
     }
@@ -119,11 +101,6 @@ pub mod recovery_evidence;
 mod trait_;
 pub mod undo;
 
-#[cfg(feature = "fjall")]
-mod fjall_impl;
-#[cfg(feature = "redb")]
-mod redb_impl;
-#[cfg(feature = "rocksdb")]
 mod rocksdb_impl;
 
 pub mod chainstate_journal;

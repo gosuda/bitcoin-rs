@@ -78,10 +78,6 @@ impl PersistFault {
         }
     }
 
-    #[cfg_attr(
-        not(any(feature = "fjall", feature = "redb", feature = "rocksdb")),
-        allow(dead_code)
-    )]
     pub(crate) fn injected_error(self) -> StorageError {
         let boundary = self.boundary();
         StorageError::Io(std::io::Error::other(format!(
@@ -97,18 +93,10 @@ pub(crate) struct PersistFaultSlot(parking_lot::Mutex<Option<PersistFault>>);
 
 #[cfg(any(test, feature = "test-seam"))]
 impl PersistFaultSlot {
-    #[cfg_attr(
-        not(any(feature = "fjall", feature = "redb", feature = "rocksdb")),
-        allow(dead_code)
-    )]
     pub(crate) fn arm(&self, fault: PersistFault) {
         *self.0.lock() = Some(fault);
     }
 
-    #[cfg_attr(
-        not(any(feature = "fjall", feature = "redb", feature = "rocksdb")),
-        allow(dead_code)
-    )]
     pub(crate) fn take_at(&self, boundary: PersistBoundary) -> Option<PersistFault> {
         let mut guard = self.0.lock();
         match *guard {

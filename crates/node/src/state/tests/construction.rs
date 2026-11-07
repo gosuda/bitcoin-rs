@@ -241,7 +241,7 @@ fn mismatched_datadir_schema_is_refused_before_storage_opens() -> Result<(), Tes
     };
     let message = source.to_string();
     assert!(message.contains("CURRENT_SCHEMA is not the current datadir schema epoch"));
-    assert!(message.contains("full resync"));
+    assert!(message.contains("resync into a new datadir"));
     assert!(!data_dir.join("chainstate").exists());
     Ok(())
 }

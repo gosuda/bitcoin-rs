@@ -1,6 +1,6 @@
 //! Kani formal verification harnesses for schema admission and conversion lifecycle.
 //!
-//! Models the future schema epoch 3 target while live storage remains at epoch 2 per `fs.rs`.
+//! Models the implemented live schema epoch 3 design (`CURRENT_SCHEMA_VERSION = 3` in `fs.rs`).
 //! Standalone design model proofs under Hoare/Dijkstra contracts, not an
 //! implementation-refinement claim.
 

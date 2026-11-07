@@ -40,9 +40,8 @@ env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
-  # Full-node production feature set: all three storage backends plus the
-  # bitcoinkernel script-verification engine (built from C++).
-  FULL_NODE_FEATURES: "rocksdb,fjall,redb,kernel"
+  # Full-node production feature set with bitcoinkernel engine.
+  FULL_NODE_FEATURES: "kernel"
 
 jobs:
   full-node:
@@ -288,7 +287,7 @@ jobs:
       - name: Build bitcoin-rs (quickstart, portable)
         run: |
           cargo build --locked -p bitcoin-rs --profile quickstart \
-            --no-default-features --features fjall,zmq \
+            --no-default-features --features zmq \
             2>&1 | tee target/core-differential/build.log
       - name: Core vs bitcoin-rs P2P and chain-identity differential
         run: |

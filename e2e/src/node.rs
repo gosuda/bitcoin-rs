@@ -286,8 +286,6 @@ fn launch_command(
                 .arg("--config")
                 .arg(config_path)
                 .args([
-                    "--storage-backend",
-                    "fjall",
                     "--rpc-user",
                     AUTH_USER,
                     "--rpc-password",

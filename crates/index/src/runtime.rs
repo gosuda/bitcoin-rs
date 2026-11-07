@@ -36,11 +36,11 @@ use std::sync::atomic::AtomicU64;
 
 use crossbeam_channel::{Receiver, Sender};
 
-#[cfg(all(test, feature = "fjall"))]
+#[cfg(test)]
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 
-#[cfg(all(test, feature = "fjall"))]
+#[cfg(test)]
 use startup::open_derived_index_with_timeout;
 
 use std::path::Path;
@@ -170,7 +170,7 @@ impl DerivedIndexRuntime {
         self.script_live_failure.write().take();
     }
 
-    #[cfg(all(test, feature = "fjall"))]
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn script_live_failure(&self) -> Option<CompactString> {
         self.script_live_failure.read().clone()
@@ -316,11 +316,6 @@ const BATCH_BYTE_LIMIT: usize = 256 << 20;
 
 pub const DEFAULT_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_rows: 1_000_000,
-    max_bytes: BATCH_BYTE_LIMIT,
-};
-
-pub const REDB_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
-    max_rows: 16_000_000,
     max_bytes: BATCH_BYTE_LIMIT,
 };
 
@@ -510,10 +505,10 @@ impl crate::SpentCoinScripts for UndoScripts {
     }
 }
 
-#[cfg(all(test, feature = "fjall"))]
+#[cfg(test)]
 pub(crate) struct TestChainCursor;
 
-#[cfg(all(test, feature = "fjall"))]
+#[cfg(test)]
 impl crate::reconcile::ChainCursorSource for TestChainCursor {
     fn cursor(&self) -> crate::reconcile::ConsumerCursor {
         crate::reconcile::ConsumerCursor {
@@ -525,13 +520,13 @@ impl crate::reconcile::ChainCursorSource for TestChainCursor {
     }
 }
 
-#[cfg(all(test, feature = "fjall"))]
+#[cfg(test)]
 pub(crate) struct RecordedIndexAhead {
     #[expect(clippy::type_complexity)]
     pub(crate) calls: Mutex<Vec<(String, u32, u32, String, String, u32, u64)>>,
 }
 
-#[cfg(all(test, feature = "fjall"))]
+#[cfg(test)]
 impl RecordedIndexAhead {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -540,7 +535,7 @@ impl RecordedIndexAhead {
     }
 }
 
-#[cfg(all(test, feature = "fjall"))]
+#[cfg(test)]
 impl IndexAheadSink for RecordedIndexAhead {
     fn report_index_ahead(
         &self,
@@ -701,12 +696,12 @@ impl DerivedIndexWorkerError {
 #[cfg(test)]
 mod query_tests;
 
-#[cfg(all(test, feature = "fjall"))]
+#[cfg(test)]
 mod supervisor_tests;
 
-#[cfg(all(test, feature = "fjall"))]
+#[cfg(test)]
 #[expect(clippy::expect_used, clippy::panic)]
 mod recovery_tests;
 
-#[cfg(all(test, feature = "fjall"))]
+#[cfg(test)]
 mod tests;

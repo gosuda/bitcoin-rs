@@ -10,7 +10,7 @@ use cap_std::fs::{Dir, File, OpenOptions};
 pub const CURRENT_SCHEMA_FILE: &str = "CURRENT_SCHEMA";
 pub const DATA_DIR_LOCK_FILE: &str = ".lock";
 const CURRENT_SCHEMA_TEMP_FILE: &str = ".CURRENT_SCHEMA.tmp";
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 pub fn open_data_dir(path: &Path) -> io::Result<Dir> {
     Dir::open_ambient_dir(path, ambient_authority())
@@ -77,7 +77,7 @@ fn incompatible_schema(reason: impl Into<String>) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "{}; remove or replace the datadir and restart to perform a full resync",
+            "{}; convert it with bitcoin-rs-storage-convert --from <old> --to <new>, or resync into a new datadir",
             reason.into()
         ),
     )

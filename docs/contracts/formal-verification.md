@@ -118,7 +118,7 @@ This table shows the status of each Kani harness and each property that moved to
 | storage schema | 7 lifecycle harnesses (`RCV-09`) | Kani verified; independent Lean model compiled | `docs/lean/Storage/Schema.lean::invariant_step` |
 | index startup | 8 lifecycle harnesses (`EMB-01`) | Kani verified; independent Lean model compiled | `docs/lean/IndexOpen/Safety.lean::safety_inductive` |
 
-The storage schema models specify the target Epoch 3 admission and offline conversion design. The current node uses Epoch 2, and `tools/storage-convert` is not implemented. These design models MUST NOT be reported as implementation refinement proofs. Lean phase constructors encode required-file and scratch ordering. Source contents and final directory sync observations are independent state fields; they do not establish physical durability.
+The storage schema models specify the Epoch 3 admission and offline conversion design. The node uses Epoch 3 and `tools/storage-convert` provides offline conversion from Epoch 2 to Epoch 3. These design models MUST NOT be reported as implementation refinement proofs. Lean phase constructors encode required-file and scratch ordering. Source contents and final directory sync observations are independent state fields; they do not establish physical durability.
 
 The index startup models specify helper thread ownership, joined cancellation, startup timeout abandonment, host teardown deadlines, and checkpoint gating under EMB-01. These design models MUST NOT be reported as implementation refinement proofs or OS durability proofs. Lean phase definitions specify the sequential transition system; they do not establish physical thread execution guarantees.
 

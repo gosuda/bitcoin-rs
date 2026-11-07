@@ -44,7 +44,7 @@ jobs:
       - uses: taiki-e/install-action@39fa37110d4f0b0312682d675dbf52e40db30cb4 # cargo-deny
         with:
           tool: cargo-deny@0.20.2
-      - run: cargo deny --workspace --no-default-features --features "rocksdb,fjall,redb,kernel" check
+      - run: cargo deny --workspace --features "kernel" check
 
   contracts:
     runs-on: ubuntu-latest

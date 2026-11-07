@@ -1,9 +1,6 @@
-#![cfg(feature = "redb")]
-
 use bitcoin_rs_storage::{
-    ColumnFamily, KvStore, PrefixScan, PrefixScanLimit, StorageError, WriteCondition,
+    ColumnFamily, KvStore, PrefixScan, PrefixScanLimit, RocksDbStore, StorageError, WriteCondition,
 };
-use redb::ReadableDatabase;
 
 use crate::support::TestResult;
 
@@ -37,46 +34,10 @@ fn row_count<S: KvStore>(store: &S, cf: ColumnFamily) -> Result<usize, StorageEr
         .map(|scan| scan.rows.len())
 }
 
-fn assert_invalid<T>(result: Result<T, StorageError>) {
-    match result {
-        Err(StorageError::InvalidOperation(_)) => {}
-        Err(error) => panic!("expected InvalidOperation, got {error}"),
-        Ok(_) => panic!("expected InvalidOperation, got success"),
-    }
-}
-
-#[test]
-fn txindex_refuses_incompatible_live_table_without_mutating_it() -> TestResult<()> {
-    let old: redb::TableDefinition<&[u8; 44], ()> =
-        redb::TableDefinition::new("txindex_v1_script_live");
-    for populated in [false, true] {
-        let temp = tempfile::TempDir::new()?;
-        let path = temp.path().join("redb.db");
-        {
-            let db = redb::Database::create(&path)?;
-            let txn = db.begin_write()?;
-            {
-                let mut table = txn.open_table(old)?;
-                if populated {
-                    table.insert(&[7_u8; 44], ())?;
-                }
-            }
-            txn.commit()?;
-        }
-        let result = bitcoin_rs_storage::open_redb_tx_index_store(temp.path());
-        assert!(matches!(result, Err(StorageError::IncompatibleData(_))));
-        let db = redb::Database::open(&path)?;
-        let txn = db.begin_read()?;
-        let table = txn.open_table(old)?;
-        assert_eq!(table.get(&[7_u8; 44])?.is_some(), populated);
-    }
-    Ok(())
-}
-
 #[test]
 fn txindex_all_six_family_roundtrips() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
 
     let confirmed = key_12(1);
     store.put(ColumnFamily::TxConfirmed, &confirmed, b"")?;
@@ -146,45 +107,13 @@ fn txindex_all_six_family_roundtrips() -> TestResult<()> {
 #[test]
 fn txindex_script_live_roundtrips_with_empty_value() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
 
     let live = script_live_43(1);
     store.put(ColumnFamily::ScriptLive, &live, b"")?;
     assert_eq!(
         store.get(ColumnFamily::ScriptLive, &live)?,
         Some(Vec::new())
-    );
-
-    assert_invalid(store.put(ColumnFamily::ScriptLive, &script_live_43(2), b"value"));
-
-    assert_invalid(store.put(ColumnFamily::ScriptLive, &live[..12], b""));
-    assert_invalid(store.put(ColumnFamily::ScriptLive, &[0; 44], b""));
-
-    Ok(())
-}
-
-#[test]
-fn generic_redb_store_enforces_script_live_row_contract() -> TestResult<()> {
-    let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::RedbStore::open(temp.path())?;
-
-    let live = script_live_43(1);
-    store.put(ColumnFamily::ScriptLive, &live, b"")?;
-    assert_eq!(
-        store.get(ColumnFamily::ScriptLive, &live)?,
-        Some(Vec::new())
-    );
-
-    assert_invalid(store.put(ColumnFamily::ScriptLive, &script_live_43(2), b"value"));
-    assert_invalid(store.put(ColumnFamily::ScriptLive, &live[..12], b""));
-    assert_invalid(store.put(ColumnFamily::ScriptLive, &[0; 44], b""));
-
-    let mut batch = store.new_batch();
-    batch.put(ColumnFamily::ScriptLive, &script_live_43(3), b"value");
-    assert_invalid(store.write(batch));
-    assert_eq!(
-        store.get(ColumnFamily::ScriptLive, &script_live_43(3))?,
-        None
     );
 
     Ok(())
@@ -193,7 +122,7 @@ fn generic_redb_store_enforces_script_live_row_contract() -> TestResult<()> {
 #[test]
 fn txindex_position_values_follow_authoritative_rows() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
     let confirmed = key_12(1);
     let funding = key_12(2);
 
@@ -263,7 +192,7 @@ fn txindex_position_values_follow_authoritative_rows() -> TestResult<()> {
 #[test]
 fn spending_rows_round_trip_values() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
     let spending = key_12(3);
     let value = b"position";
 
@@ -295,7 +224,7 @@ fn spending_rows_round_trip_values() -> TestResult<()> {
 #[test]
 fn txindex_fixed_prefix_boundaries_12() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
 
     let zero = [0u8; 12];
     let mut zero_one = zero;
@@ -340,16 +269,13 @@ fn txindex_fixed_prefix_boundaries_12() -> TestResult<()> {
     assert!(exact.complete);
     assert_eq!(exact.rows.len(), 1);
 
-    assert_invalid(store.iter_prefix(ColumnFamily::TxConfirmed, &[0x00; 13]));
-    assert_invalid(store.scan_prefix_bounded(ColumnFamily::TxConfirmed, &[0x00; 13], MAX_SCAN));
-
     Ok(())
 }
 
 #[test]
 fn txindex_fixed_prefix_boundaries_80() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
 
     let zero = [0u8; 80];
     let mut zero_one = zero;
@@ -390,16 +316,13 @@ fn txindex_fixed_prefix_boundaries_80() -> TestResult<()> {
     assert!(exact.complete);
     assert_eq!(exact.rows.len(), 1);
 
-    assert_invalid(store.iter_prefix(ColumnFamily::BlockHeaders, &[0x00; 81]));
-    assert_invalid(store.scan_prefix_bounded(ColumnFamily::BlockHeaders, &[0x00; 81], MAX_SCAN));
-
     Ok(())
 }
 
 #[test]
 fn txindex_bounded_scan_empty_values() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
 
     let mut batch = store.new_batch();
     for i in 0..5u32 {
@@ -515,7 +438,6 @@ fn assert_fixed_width_continuation(
     check(prefix, &[], 2, &[low, mid], false)?;
     check(prefix, &past_mid, 1, &[high], true)?;
 
-    assert_invalid(scan(&vec![0x01; width + 1][..], &[], MAX_SCAN));
     Ok(())
 }
 
@@ -564,7 +486,7 @@ fn txindex_continuation_seeks_every_fixed_width_family() -> TestResult<()> {
     ];
     for (cf, width, value) in families {
         let temp = tempfile::TempDir::new()?;
-        let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+        let store = RocksDbStore::open(temp.path())?;
         let mut batch = store.new_batch();
         for key in fixed_width_keys(width) {
             batch.put(cf, &key, value);
@@ -590,7 +512,7 @@ fn txindex_continuation_seeks_every_fixed_width_family() -> TestResult<()> {
 #[test]
 fn txindex_continuation_snapshot_is_point_in_time() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::TxConfirmed, &key_12(1), b"one");
     batch.put(ColumnFamily::TxConfirmed, &key_12(3), b"three");
@@ -624,7 +546,7 @@ fn txindex_continuation_snapshot_is_point_in_time() -> TestResult<()> {
 #[test]
 fn txindex_mixed_batch_ordering_and_interleaved_cf() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
 
     let k1 = key_12(1);
     let k2 = key_12(2);
@@ -666,91 +588,9 @@ fn txindex_mixed_batch_ordering_and_interleaved_cf() -> TestResult<()> {
 }
 
 #[test]
-fn txindex_invalid_operation_aborts_transaction() -> TestResult<()> {
-    let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
-
-    let mut batch = store.new_batch();
-    let valid = key_12(1);
-    batch.put(ColumnFamily::TxConfirmed, &valid, b"");
-    batch.put(ColumnFamily::TxConfirmed, &[0u8; 11], b"");
-    assert_invalid(store.write(batch));
-    assert!(store.get(ColumnFamily::TxConfirmed, &valid)?.is_none());
-
-    let mut batch = store.new_batch();
-    batch.put(ColumnFamily::TxConfirmed, &valid, b"");
-    batch.put(ColumnFamily::Spending, &key_12(2), b"non-empty");
-    batch.put(ColumnFamily::ScriptLive, &script_live_43(2), b"non-empty");
-    assert_invalid(store.write(batch));
-    assert!(store.get(ColumnFamily::TxConfirmed, &valid)?.is_none());
-    assert!(store.get(ColumnFamily::Spending, &key_12(2))?.is_none());
-    assert!(
-        store
-            .get(ColumnFamily::ScriptLive, &script_live_43(2))?
-            .is_none()
-    );
-
-    let mut batch = store.new_batch();
-    batch.put(ColumnFamily::TxConfirmed, &valid, b"");
-    let header = header_80(2);
-    batch.put(ColumnFamily::BlockHeaders, &header, b"non-empty");
-    assert_invalid(store.write(batch));
-    assert!(store.get(ColumnFamily::TxConfirmed, &valid)?.is_none());
-    assert!(store.get(ColumnFamily::BlockHeaders, &header)?.is_none());
-
-    let mut batch = store.new_batch();
-    batch.put(ColumnFamily::Spending, &key_12(3), b"");
-    batch.delete(ColumnFamily::Spending, &[0u8; 13]);
-    assert_invalid(store.write(batch));
-    assert!(store.get(ColumnFamily::Spending, &key_12(3))?.is_none());
-
-    let mut batch = store.new_batch();
-    batch.put(ColumnFamily::BlockHeaders, &header_80(1), b"");
-    batch.delete_range(ColumnFamily::BlockHeaders, &[0u8; 79], &[0u8; 80]);
-    assert_invalid(store.write(batch));
-    assert!(
-        store
-            .get(ColumnFamily::BlockHeaders, &header_80(1))?
-            .is_none()
-    );
-
-    Ok(())
-}
-
-#[test]
-fn txindex_unsupported_column_families_rejected() -> TestResult<()> {
-    let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
-
-    for cf in [
-        ColumnFamily::TxMempool,
-        ColumnFamily::Coinstats,
-        ColumnFamily::BlockTree,
-        ColumnFamily::BlockBodies,
-        ColumnFamily::UndoData,
-    ] {
-        assert_invalid(store.get(cf, b"key"));
-        assert_invalid(store.put(cf, b"key", b"value"));
-        assert_invalid(store.iter_prefix(cf, b"key"));
-        assert_invalid(store.scan_prefix_bounded(cf, b"key", MAX_SCAN));
-        assert_invalid(store.scan_prefix_from_bounded(cf, b"key", b"key", MAX_SCAN));
-        assert_invalid(store.write_durable_if(
-            &[WriteCondition::Equals {
-                cf,
-                key: b"key",
-                expected: b"value",
-            }],
-            store.new_batch(),
-        ));
-    }
-
-    Ok(())
-}
-
-#[test]
 fn txindex_snapshot_isolation() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
 
     let k1 = key_12(1);
     store.put(ColumnFamily::TxConfirmed, &k1, b"old")?;
@@ -790,7 +630,7 @@ fn txindex_durable_reopen() -> TestResult<()> {
     let meta_value = b"123:abcd";
 
     {
-        let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+        let store = RocksDbStore::open(temp.path())?;
         let mut batch = store.new_batch();
         batch.put(ColumnFamily::TxConfirmed, &k, b"");
         batch.put(ColumnFamily::BlockHeaders, &h, b"");
@@ -798,7 +638,7 @@ fn txindex_durable_reopen() -> TestResult<()> {
         store.write(batch)?;
     }
 
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
     assert!(store.get(ColumnFamily::TxConfirmed, &k)?.is_some());
     assert!(store.get(ColumnFamily::BlockHeaders, &h)?.is_some());
     assert_eq!(
@@ -812,7 +652,7 @@ fn txindex_durable_reopen() -> TestResult<()> {
 #[test]
 fn txindex_deferred_write_flush_and_reopen() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
 
     let k = key_12(7);
     let mut batch = store.new_batch();
@@ -823,7 +663,7 @@ fn txindex_deferred_write_flush_and_reopen() -> TestResult<()> {
     store.flush()?;
     drop(store);
 
-    let reopened = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let reopened = RocksDbStore::open(temp.path())?;
     assert!(reopened.get(ColumnFamily::Funding, &k)?.is_some());
 
     Ok(())
@@ -832,7 +672,7 @@ fn txindex_deferred_write_flush_and_reopen() -> TestResult<()> {
 #[test]
 fn txindex_write_durable_if_roundtrip() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
 
     let confirmed = key_12(1);
     store.put(ColumnFamily::TxConfirmed, &confirmed, b"position")?;
@@ -886,7 +726,7 @@ fn txindex_write_durable_if_roundtrip() -> TestResult<()> {
 #[test]
 fn txindex_write_durable_if_unit_tables() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
 
     let funding = key_12(2);
     store.put(ColumnFamily::Funding, &funding, b"")?;
@@ -958,7 +798,7 @@ fn txindex_write_durable_if_unit_tables() -> TestResult<()> {
 #[test]
 fn txindex_write_durable_if_metadata_and_widths() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let store = RocksDbStore::open(temp.path())?;
 
     let meta_key = b"cursor";
     store.put(ColumnFamily::UtxoMeta, meta_key, b"52-bytes-of-cursor")?;
@@ -996,104 +836,6 @@ fn txindex_write_durable_if_metadata_and_widths() -> TestResult<()> {
         store.get(ColumnFamily::TxConfirmed, &absent)?,
         Some(Vec::new())
     );
-
-    assert_invalid(store.write_durable_if(
-        &[WriteCondition::Equals {
-            cf: ColumnFamily::Spending,
-            key: &[0u8; 11],
-            expected: b"",
-        }],
-        store.new_batch(),
-    ));
-    assert_invalid(store.write_durable_if(
-        &[WriteCondition::Equals {
-            cf: ColumnFamily::BlockHeaders,
-            key: &[0u8; 79],
-            expected: b"",
-        }],
-        store.new_batch(),
-    ));
-    assert_invalid(store.write_durable_if(
-        &[WriteCondition::Equals {
-            cf: ColumnFamily::ScriptLive,
-            key: &[0u8; 44],
-            expected: b"",
-        }],
-        store.new_batch(),
-    ));
-
-    let untouched = key_12(6);
-    let mut batch = store.new_batch();
-    batch.put(ColumnFamily::TxConfirmed, &untouched, b"touched");
-    assert_invalid(store.write_durable_if(
-        &[
-            WriteCondition::Absent {
-                cf: ColumnFamily::TxConfirmed,
-                key: &untouched,
-            },
-            WriteCondition::Equals {
-                cf: ColumnFamily::Spending,
-                key: &[0u8; 11],
-                expected: b"",
-            },
-        ],
-        batch,
-    ));
-    assert_eq!(store.get(ColumnFamily::TxConfirmed, &untouched)?, None);
-
-    Ok(())
-}
-
-#[test]
-fn txindex_isolated_from_legacy_redb_store() -> TestResult<()> {
-    let temp = tempfile::TempDir::new()?;
-
-    {
-        let store = bitcoin_rs_storage::RedbStore::open(temp.path())?;
-        store.put(
-            ColumnFamily::BlockBodies,
-            b"old-body-key",
-            b"old-body-value",
-        )?;
-        store.put(ColumnFamily::UtxoMeta, b"old-meta-key", b"old-meta-value")?;
-    }
-
-    {
-        let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
-        let k = key_12(9);
-        let h = header_80(9);
-        let mut batch = store.new_batch();
-        batch.put(ColumnFamily::TxConfirmed, &k, b"");
-        batch.put(ColumnFamily::BlockHeaders, &h, b"");
-        batch.put(ColumnFamily::UtxoMeta, b"txindex-meta", b"txindex-value");
-        store.write(batch)?;
-    }
-
-    {
-        let store = bitcoin_rs_storage::RedbStore::open(temp.path())?;
-        assert_eq!(
-            store.get(ColumnFamily::BlockBodies, b"old-body-key")?,
-            Some(b"old-body-value".to_vec())
-        );
-        assert_eq!(
-            store.get(ColumnFamily::UtxoMeta, b"old-meta-key")?,
-            Some(b"old-meta-value".to_vec())
-        );
-    }
-
-    {
-        let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
-        assert!(store.get(ColumnFamily::TxConfirmed, &key_12(9))?.is_some());
-        assert!(
-            store
-                .get(ColumnFamily::BlockHeaders, &header_80(9))?
-                .is_some()
-        );
-        assert_eq!(
-            store.get(ColumnFamily::UtxoMeta, b"txindex-meta")?,
-            Some(b"txindex-value".to_vec())
-        );
-    }
 
     Ok(())
 }

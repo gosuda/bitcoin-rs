@@ -17,7 +17,9 @@ use crate::IndexCapabilities;
 use bitcoin_rs_primitives::Hash256;
 
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget, RetentionRegistry};
-use bitcoin_rs_storage::{FjallStore, InMemoryUndoStore, StorageError, block_body::BlockBodyStore};
+use bitcoin_rs_storage::{
+    InMemoryUndoStore, RocksDbStore, StorageError, block_body::BlockBodyStore,
+};
 
 use hashbrown::{HashMap, HashSet};
 
@@ -352,7 +354,7 @@ impl Harness {
         enabled: IndexCapabilities,
     ) -> Self {
         let index_dir = tempfile::tempdir().expect("index dir");
-        let store = Arc::new(FjallStore::open(index_dir.path()).expect("fjall open"));
+        let store = Arc::new(RocksDbStore::open(index_dir.path()).expect("rocksdb open"));
         let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(
             crate::IndexWriter::open(store, 1).expect("index writer open"),
         ));
@@ -1172,7 +1174,7 @@ struct SeedCellHarness {
 impl SeedCellHarness {
     fn new(fixture: &ForkFixture, enabled: IndexCapabilities) -> Self {
         let index_dir = tempfile::tempdir().expect("index dir");
-        let store = Arc::new(FjallStore::open(index_dir.path()).expect("fjall open"));
+        let store = Arc::new(RocksDbStore::open(index_dir.path()).expect("rocksdb open"));
         let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(
             crate::IndexWriter::open(store, 1).expect("index writer open"),
         ));

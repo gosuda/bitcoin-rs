@@ -14,7 +14,7 @@ use bitcoin_rs_storage::pruning::{
     HistoryAccess, HistoryUnavailable, RetentionBudget, RetentionRegistry,
 };
 use bitcoin_rs_storage::{
-    ColumnFamily, FjallStore, InMemoryUndoStore, KvStore, PrefixScanLimit, StorageError,
+    ColumnFamily, InMemoryUndoStore, KvStore, PrefixScanLimit, RocksDbStore, StorageError,
 };
 use bitcoin_rs_utxo::contract::{BlockChanges, SpentOutputLookup, UtxoAdd, commit_block_changes};
 use bitcoin_rs_utxo::{
@@ -109,7 +109,7 @@ fn expected_live_keys(coins: &[(OutPoint, Vec<u8>)]) -> Vec<Vec<u8>> {
     keys
 }
 
-fn scan_live_keys(store: &FjallStore) -> Vec<Vec<u8>> {
+fn scan_live_keys(store: &RocksDbStore) -> Vec<Vec<u8>> {
     let scan = store
         .scan_prefix_bounded(
             ColumnFamily::ScriptLive,
@@ -528,7 +528,7 @@ impl SeedFixture {
 
 struct SeedHarness {
     _index_dir: tempfile::TempDir,
-    store: Arc<FjallStore>,
+    store: Arc<RocksDbStore>,
     writer: Arc<dyn TxIndexWriter>,
     applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     runtime: Arc<DerivedIndexRuntime>,
@@ -542,7 +542,7 @@ struct SeedHarness {
 impl SeedHarness {
     fn new(fixture: &SeedFixture, enabled: IndexCapabilities, source: Arc<UtxoSet>) -> Self {
         let index_dir = tempfile::tempdir().expect("index dir");
-        let store = Arc::new(FjallStore::open(index_dir.path()).expect("fjall open"));
+        let store = Arc::new(RocksDbStore::open(index_dir.path()).expect("rocksdb open"));
         let inner: Arc<dyn TxIndexWriter> = Arc::new(RwLock::new(
             crate::IndexWriter::open(Arc::clone(&store), 1).expect("index writer open"),
         ));
@@ -1415,7 +1415,7 @@ fn seed_offer_skipped_without_demand() {
 #[test]
 fn seed_stream_polls_cancellation_and_leaves_no_watermark() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = Arc::new(FjallStore::open(dir.path()).expect("fjall open"));
+    let store = Arc::new(RocksDbStore::open(dir.path()).expect("rocksdb open"));
     let mut writer = crate::IndexWriter::open(Arc::clone(&store), 1).expect("writer open");
     let scripthash = ScriptHash::from_script_bytes(&[0x51]);
     let tip = IndexWatermark {

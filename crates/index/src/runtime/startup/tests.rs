@@ -145,7 +145,7 @@ fn shutdown_before_thread_creation_never_touches_the_store() -> std::io::Result<
         scripthash_limit: crate::runtime::DEFAULT_SCRIPTHASH_LIMIT,
         data_dir: dir.path().to_path_buf(),
         namespace: "txindex",
-        storage_backend: bitcoin_rs_storage::StorageBackend::Fjall,
+        storage_backend: bitcoin_rs_storage::StorageBackend::RocksDb,
         epoch: 1,
         enabled: crate::IndexCapabilities::default(),
         rollback_rebuild_cutover: 0,
@@ -175,7 +175,7 @@ fn heartbeat_cancellation_wakes_and_joins_promptly() {
     let heartbeat = Heartbeat::start(
         "txindex",
         "test".to_owned(),
-        "fjall".to_owned(),
+        "rocksdb".to_owned(),
         HEARTBEAT_INTERVAL,
     );
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
@@ -193,18 +193,67 @@ const TEST_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(20);
 #[derive(Clone)]
 struct RecoveryHeartbeatCounter {
     count: Arc<AtomicUsize>,
+    line2_tx: crossbeam_channel::Sender<()>,
+    line2_rx: crossbeam_channel::Receiver<()>,
 }
 
 impl RecoveryHeartbeatCounter {
+    fn new() -> Self {
+        let (line2_tx, line2_rx) = crossbeam_channel::bounded(1);
+        Self {
+            count: Arc::new(AtomicUsize::new(0)),
+            line2_tx,
+            line2_rx,
+        }
+    }
+
     fn lines(&self) -> usize {
         self.count.load(Ordering::SeqCst)
+    }
+
+    fn wait_for_line2(&self, timeout: Duration) -> bool {
+        let start = std::time::Instant::now();
+        while self.lines() < 2 {
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return self.lines() >= 2;
+            }
+            let remaining = timeout.checked_sub(elapsed).unwrap_or(Duration::ZERO);
+            match self.line2_rx.recv_timeout(remaining) {
+                Ok(()) => {
+                    if self.lines() >= 2 {
+                        return true;
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    return self.lines() >= 2;
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    return self.lines() >= 2;
+                }
+            }
+        }
+        true
+    }
+
+    fn on_line(&self) {
+        let previous = self.count.fetch_add(1, Ordering::SeqCst);
+        if previous + 1 >= 2 {
+            let _ = self.line2_tx.try_send(());
+        }
+    }
+}
+
+impl Default for RecoveryHeartbeatCounter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl tracing::field::Visit for RecoveryHeartbeatCounter {
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         if field.name() == "message" && value == "index store recovery in progress" {
-            self.count.fetch_add(1, Ordering::SeqCst);
+            self.on_line();
         }
     }
 
@@ -212,7 +261,7 @@ impl tracing::field::Visit for RecoveryHeartbeatCounter {
         if field.name() == "message"
             && format!("{value:?}").contains("index store recovery in progress")
         {
-            self.count.fetch_add(1, Ordering::SeqCst);
+            self.on_line();
         }
     }
 }
@@ -231,9 +280,7 @@ impl tracing::Subscriber for RecoveryHeartbeatCounter {
     fn record_follows_from(&self, _id: &tracing::span::Id, _follows: &tracing::span::Id) {}
 
     fn event(&self, event: &tracing::Event<'_>) {
-        event.record(&mut RecoveryHeartbeatCounter {
-            count: Arc::clone(&self.count),
-        });
+        event.record(&mut self.clone());
     }
 
     fn enter(&self, _id: &tracing::span::Id) {}
@@ -246,7 +293,7 @@ fn recovery_open_spec(dir: &Path) -> DerivedIndexOpenSpec {
         scripthash_limit: crate::runtime::DEFAULT_SCRIPTHASH_LIMIT,
         data_dir: dir.to_path_buf(),
         namespace: "txindex",
-        storage_backend: bitcoin_rs_storage::StorageBackend::Fjall,
+        storage_backend: bitcoin_rs_storage::StorageBackend::RocksDb,
         epoch: 1,
         enabled: crate::IndexCapabilities::default(),
         rollback_rebuild_cutover: 0,
@@ -290,14 +337,16 @@ fn recovery_heartbeat_stops_when_the_open_phase_fails() -> std::io::Result<()> {
         let _ = release_rx.recv();
         Err(DerivedIndexWorkerError::Stopped)
     });
-    let counter = RecoveryHeartbeatCounter {
-        count: Arc::new(AtomicUsize::new(0)),
-    };
+    let counter = RecoveryHeartbeatCounter::new();
     let dispatch = tracing::Dispatch::new(counter.clone());
+    let releaser_counter = counter.clone();
     let releaser = thread::spawn(move || {
         let started = started_rx.recv_timeout(Duration::from_secs(5));
         assert!(started.is_ok(), "open phase must start within 5 s deadline");
-        thread::sleep(TEST_HEARTBEAT_INTERVAL * 6);
+        assert!(
+            releaser_counter.wait_for_line2(Duration::from_secs(5)),
+            "heartbeat must emit at least two lines within 5 s deadline"
+        );
         let _ = release_tx.send(());
     });
     let cancel = LatchWriter::new();
@@ -321,27 +370,28 @@ fn recovery_heartbeat_stops_when_the_open_phase_fails() -> std::io::Result<()> {
 }
 
 #[test]
-#[cfg(feature = "fjall")]
 fn recovery_heartbeat_stops_after_a_successful_open() -> std::io::Result<()> {
     let dir = tempfile::tempdir()?;
     let (started_tx, _started_rx) = crossbeam_channel::bounded(1);
     let mut spec = recovery_open_spec(dir.path());
     let store_dir = dir.path().join("store");
+    let counter = RecoveryHeartbeatCounter::new();
+    let open_counter = counter.clone();
     spec.open_store = Arc::new(move |_| {
         assert!(
             started_tx.send(()).is_ok(),
             "open phase must report that it started"
         );
-        thread::sleep(TEST_HEARTBEAT_INTERVAL * 6);
+        assert!(
+            open_counter.wait_for_line2(Duration::from_secs(5)),
+            "heartbeat must emit at least two lines within 5 s deadline"
+        );
         let store = Arc::new(
-            bitcoin_rs_storage::FjallStore::open_with_cache(&store_dir, 8 * 1024 * 1024)
+            bitcoin_rs_storage::RocksDbStore::open_with_cache(&store_dir, 8 * 1024 * 1024)
                 .map_err(DerivedIndexWorkerError::Storage)?,
         );
         open_derived_index_store_on_worker(store, crate::runtime::DEFAULT_BATCH_LIMITS, 1)
     });
-    let counter = RecoveryHeartbeatCounter {
-        count: Arc::new(AtomicUsize::new(0)),
-    };
     let dispatch = tracing::Dispatch::new(counter.clone());
     let cancel = LatchWriter::new();
     let txindex_dir = dir.path().join("txindex");
@@ -360,7 +410,6 @@ fn recovery_heartbeat_stops_after_a_successful_open() -> std::io::Result<()> {
 }
 
 #[test]
-#[cfg(feature = "rocksdb")]
 fn cancellation_after_spawn_joins_helper_and_returns_stopped() -> std::io::Result<()> {
     struct DropProbe(crossbeam_channel::Sender<()>);
     impl Drop for DropProbe {

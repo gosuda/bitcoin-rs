@@ -121,4 +121,4 @@ jobs:
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: |
           cargo check --locked -p bitcoin-rs-node \
-            --no-default-features --features fjall,zmq
+            --no-default-features --features zmq

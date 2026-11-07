@@ -20,7 +20,7 @@ impl ProductionConsumer {
             .open(consumer.directory.path().join("Cargo.toml"))?;
         writeln!(
             manifest,
-            "bitcoin-rs-node = {{ path = {node}, default-features = false, features = [\"fjall\"] }}"
+            "bitcoin-rs-node = {{ path = {node}, default-features = false }}"
         )?;
         Ok(consumer)
     }

@@ -132,15 +132,14 @@ fn filter_rows_and_cursor_publish_atomically_and_reset_preserves_txindex() -> Re
     Ok(())
 }
 
-#[cfg(feature = "redb")]
 #[test]
-fn compact_filters_survive_redb_index_reopen() -> Result<(), TestError> {
+fn compact_filters_survive_rocksdb_index_reopen() -> Result<(), TestError> {
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("index.redb");
+    let path = directory.path().join("index");
     let block = bitcoin::constants::genesis_block(bitcoin::Network::Testnet);
     let hash = block.block_hash().to_byte_array();
     {
-        let store = Arc::new(bitcoin_rs_storage::open_redb_tx_index_store(&path)?);
+        let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(&path)?);
         let mut writer = IndexWriter::open(store, 1)?;
         writer.commit_forward(prepare(
             &writer,
@@ -149,7 +148,7 @@ fn compact_filters_survive_redb_index_reopen() -> Result<(), TestError> {
             IndexCapabilities::COMPACT_FILTERS,
         )?)?;
     }
-    let store = Arc::new(bitcoin_rs_storage::open_redb_tx_index_store(&path)?);
+    let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(&path)?);
     let writer = IndexWriter::open(store, 2)?;
     assert_eq!(
         writer

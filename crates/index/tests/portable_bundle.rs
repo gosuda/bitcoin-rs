@@ -1,4 +1,3 @@
-#![cfg(feature = "fjall")]
 #![expect(
     clippy::expect_used,
     reason = "test: fixture setup failures abort the test with context"
@@ -39,8 +38,8 @@ use bitcoin_rs_primitives::{BlockHash, Hash256, Network, Txid};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget, RetentionRegistry};
 use bitcoin_rs_storage::{
-    BatchOp, BufferedWriteBatch, ColumnFamily, FjallStore, KvIter, KvPair, KvSnapshot, KvStore,
-    PrefixScan, PrefixScanLimit, StorageBackend, StorageError, WriteCondition,
+    BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvPair, KvSnapshot, KvStore, PrefixScan,
+    PrefixScanLimit, RocksDbStore, StorageBackend, StorageError, WriteCondition,
 };
 use parking_lot::RwLock;
 
@@ -348,7 +347,7 @@ impl BlockBodyStore for StoreBodies {
 }
 
 struct CrashAfterBulkImport {
-    inner: FjallStore,
+    inner: RocksDbStore,
     crashed: AtomicBool,
 }
 
@@ -518,13 +517,13 @@ impl Node {
             scripthash_limit: bitcoin_rs_index::runtime::DEFAULT_SCRIPTHASH_LIMIT,
             data_dir: data_dir.to_path_buf(),
             namespace: "txindex",
-            storage_backend: StorageBackend::Fjall,
+            storage_backend: StorageBackend::RocksDb,
             epoch,
             enabled: IndexCapabilities::TX_LOOKUP,
             rollback_rebuild_cutover: u32::MAX,
             canonical_data_root: data_dir.to_path_buf(),
             open_store: Arc::new(move |dir| {
-                let inner = FjallStore::open_with_cache(dir, STORE_CACHE_BYTES)
+                let inner = RocksDbStore::open_with_cache(dir, STORE_CACHE_BYTES)
                     .map_err(bitcoin_rs_index::runtime::DerivedIndexWorkerError::Storage)?;
                 if crash {
                     let store = Arc::new(CrashAfterBulkImport {
@@ -663,7 +662,7 @@ struct Durable {
 
 fn durable(data_dir: &Path) -> Durable {
     let store = Arc::new(
-        FjallStore::open_with_cache(data_dir.join("txindex"), STORE_CACHE_BYTES)
+        RocksDbStore::open_with_cache(data_dir.join("txindex"), STORE_CACHE_BYTES)
             .expect("reopen txindex store"),
     );
     let rows = |cf| {

@@ -26,36 +26,10 @@ test-seam = [
     "dep:toml",
 ]
 
-# A node is non-functional without a storage backend, and its `NodeStorage` /
-# `TxIndexStorage` enums are entirely backend-cfg-gated — with zero backends the
-# `match self` arms are non-exhaustive and the crate fails to compile.  fjall
-# is the performance-oriented default backend so per-crate `cargo publish` / `cargo check`
-# works out of the box.  CI and local dev build via `bin/bitcoin-rs`, whose
-# default features are `fjall,redb,zmq` (pure-Rust storage; rocksdb and kernel
-# stay selectable but non-default). Full-matrix lanes request the other
-# backends explicitly through `bin/bitcoin-rs`'s feature table.
-# Note: `--workspace --features "..."` in a virtual workspace (no root [package])
-# does NOT forward CLI features to library crates; always use -p when features
-# must reach a specific crate.
 # `kernel` is capability ("bitcoinkernel support is compiled in"), not
 # selection: the engine a run uses is `validation.engine` at runtime. The
-# default is kernel-free so the C++ toolchain is opt-in.
-default = ["fjall", "zmq"]
-# Component crates own the storage-backend fan-out: each of chainstate's and
-# index's backend features already forwards to storage + utxo under the same
-# feature name, so listing storage/utxo here duplicates those edges.
-rocksdb = [
-    "bitcoin-rs-chainstate/rocksdb",
-    "bitcoin-rs-index/rocksdb",
-]
-fjall = [
-    "bitcoin-rs-chainstate/fjall",
-    "bitcoin-rs-index/fjall",
-]
-redb = [
-    "bitcoin-rs-chainstate/redb",
-    "bitcoin-rs-index/redb",
-]
+# default is kernel-free so the bitcoinkernel C++ engine is opt-in.
+default = ["zmq"]
 # chainstate's kernel feature is the kernel-capability propagator for the
 # chain stack and already forwards to `bitcoin-rs-consensus/kernel`.
 kernel = ["bitcoin-rs-chainstate/kernel"]
