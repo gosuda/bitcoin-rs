@@ -268,13 +268,23 @@ fn compact_filters_wait_for_publication_without_replaying_sent_payloads() -> Tes
             emit: &mut dyn FnMut(Hash256, BasicFilter) -> bool,
         ) -> Result<Option<[u8; 32]>, TxQueryError> {
             if !self.ready.load(Ordering::Acquire) {
-                return Err(TxQueryError::Retry);
+                return Err(TxQueryError::Retry(
+                    bitcoin_rs_projection::RetryReason::TipMoved {
+                        expected_commit: 0,
+                        current_commit: 1,
+                    },
+                ));
             }
             if !emit(stop, canned_filter()) {
                 return Ok(None);
             }
             if self.moves_after_delivery {
-                Err(TxQueryError::Retry)
+                Err(TxQueryError::Retry(
+                    bitcoin_rs_projection::RetryReason::TipMoved {
+                        expected_commit: 0,
+                        current_commit: 1,
+                    },
+                ))
             } else {
                 Ok(Some([0; 32]))
             }
@@ -664,7 +674,16 @@ fn a_resumed_filter_range_that_stops_before_its_first_filter_is_interrupted() ->
     }
 
     assert_eq!(
-        serve(Err(TxQueryError::Retry), &resumed, true)?,
+        serve(
+            Err(TxQueryError::Retry(
+                bitcoin_rs_projection::RetryReason::TipMoved {
+                    expected_commit: 0,
+                    current_commit: 1,
+                }
+            )),
+            &resumed,
+            true,
+        )?,
         FilterServing::Pending(resumed.clone())
     );
     assert_eq!(

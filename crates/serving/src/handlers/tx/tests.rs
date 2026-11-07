@@ -1316,7 +1316,14 @@ fn gettxoutproof_maps_a_transient_index_error_instead_of_reporting_absence() {
     };
     let mut ctx = Context::new();
     ctx.indexes.derived_index = Some(Arc::new(HeightQuery(
-        |_: &Txid| -> Result<Option<u32>, TxQueryError> { Err(TxQueryError::Retry) },
+        |_: &Txid| -> Result<Option<u32>, TxQueryError> {
+            Err(TxQueryError::Retry(
+                bitcoin_rs_projection::RetryReason::TipMoved {
+                    expected_commit: 0,
+                    current_commit: 1,
+                },
+            ))
+        },
     )));
     install_blocks(&mut ctx, std::slice::from_ref(&block));
     let ctx = Arc::new(ctx);

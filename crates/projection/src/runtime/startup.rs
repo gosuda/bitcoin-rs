@@ -243,7 +243,8 @@ fn publish_serving_query_engine(open: &OpenDerivedIndex, setup: &WorkerSetup<'_>
             setup.body_source.clone(),
             QueryEngineLive {
                 enabled: setup.spec.enabled,
-                utxo: setup.spec.utxo.clone(),
+                generation: std::sync::Arc::new(setup.generation.clone()),
+                historical_verified: None,
                 #[cfg(any(test, feature = "test-seam"))]
                 chain_transition: None,
             },

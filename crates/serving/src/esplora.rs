@@ -15,10 +15,6 @@ mod public;
 use crate::context::Context;
 use crate::handlers::Handler;
 use crate::rest::Response;
-
-use self::projection::Projection;
-
-/// Aggregate allowance shared by all listeners of a node.
 pub const DEFAULT_MAX_QUERIES: std::num::NonZeroUsize =
     std::num::NonZeroUsize::MIN.saturating_add(1);
 
@@ -43,13 +39,7 @@ pub fn route(handler: &Handler, surface: Surface, path: &str, query: &str) -> Re
     } else {
         None
     };
-    let projection = Projection::new(&ctx);
-    let chain_view = projection.capture_chain_view();
-    let response = dispatch_get(handler, &ctx, surface, path, query);
-    match projection.ensure_chain_view(chain_view.as_ref()) {
-        Ok(()) => response,
-        Err(response) => response,
-    }
+    dispatch_get(handler, &ctx, surface, path, query)
 }
 
 fn dispatch_get(
@@ -69,16 +59,10 @@ fn dispatch_get(
 
 #[must_use]
 pub(crate) fn route_post(handler: &Handler, surface: Surface, path: &str, body: &[u8]) -> Response {
-    if surface == Surface::Backend {
-        let ctx = handler.context();
-        let projection = Projection::new(&ctx);
-        let chain_view = projection.capture_chain_view();
-        if let Some(response) = backend::post(handler, path, body) {
-            return match projection.ensure_chain_view(chain_view.as_ref()) {
-                Ok(()) => response,
-                Err(response) => response,
-            };
-        }
+    if surface == Surface::Backend
+        && let Some(response) = backend::post(handler, path, body)
+    {
+        return response;
     }
     public::post(handler, path, body)
 }

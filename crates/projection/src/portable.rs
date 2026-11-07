@@ -209,8 +209,6 @@ pub(crate) enum TestError {
     Bip158(#[from] bitcoin::bip158::Error),
     #[error(transparent)]
     Query(#[from] crate::query_api::TxQueryError),
-    #[error(transparent)]
-    Historical(#[from] crate::query_api::HistoricalQueryError),
     #[error("missing {0}")]
     Missing(&'static str),
 }

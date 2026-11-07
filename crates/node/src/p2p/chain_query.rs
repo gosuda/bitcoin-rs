@@ -436,7 +436,7 @@ impl ChainQuery for ActiveChainQuery {
         let progress = StreamProgress {
             emitted,
             halted,
-            retry: matches!(result, Err(bitcoin_rs_projection::TxQueryError::Retry)),
+            retry: matches!(result, Err(bitcoin_rs_projection::TxQueryError::Retry(_))),
         };
         if let Some(serving) = evaluate_stream_progress(pending, &bounds, end, progress)? {
             return Ok(serving);

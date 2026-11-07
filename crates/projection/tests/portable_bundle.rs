@@ -565,8 +565,6 @@ impl Node {
                     open_derived_index_store_on_worker(Arc::new(inner), DEFAULT_BATCH_LIMITS, epoch)
                 }
             }),
-            utxo: None,
-            chain_transition: None,
             bundle: start.bundle,
             facts_rx: None,
             facts_bytes: None,

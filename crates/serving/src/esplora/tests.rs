@@ -937,7 +937,7 @@ fn esplora_is_the_mempool_backend_superset() -> Result<(), TestError> {
 }
 
 #[test]
-fn composed_response_retries_when_the_applied_tip_identity_changes() {
+fn composed_response_stays_valid_when_the_applied_tip_identity_changes() {
     let block = fixture_genesis();
     let mut context = Context::new();
     context
@@ -963,7 +963,7 @@ fn composed_response_retries_when_the_applied_tip_identity_changes() {
             &format!("/scripthash/{0}{suffix}", "00".repeat(32)),
             "",
         );
-        assert_eq!(response.status, 503);
+        assert_eq!(response.status, 200);
     }
 }
 
@@ -2326,7 +2326,13 @@ fn block_page_reuses_parent_outside_the_selected_page() {
         .expect_err("stale body cannot supply parents");
     assert_eq!(response.status, 503);
     for (error, status) in [
-        (TxQueryError::Retry, 503),
+        (
+            TxQueryError::Retry(bitcoin_rs_projection::RetryReason::TipMoved {
+                expected_commit: 0,
+                current_commit: 1,
+            }),
+            503,
+        ),
         (TxQueryError::Storage("corrupt".into()), 500),
     ] {
         ctx.indexes.esplora_tx_index = Some(Arc::new(FailingParentIndex {
@@ -2447,7 +2453,12 @@ fn block_parent_reuse_checks_readiness_only_when_needed() {
             if self.synced {
                 Ok(Some(self.parent.clone()))
             } else {
-                Err(TxQueryError::Retry)
+                Err(TxQueryError::Retry(
+                    bitcoin_rs_projection::RetryReason::TipMoved {
+                        expected_commit: 0,
+                        current_commit: 1,
+                    },
+                ))
             }
         }
         fn outpoint_value(&self, _: &OutPoint) -> Result<Option<u64>, TxQueryError> {
@@ -2757,7 +2768,15 @@ impl crate::context::DerivedIndexQuery for FailingParentIndex {
         Ok(Some(0))
     }
     fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
-        self.error.clone().map_or(Err(TxQueryError::Retry), Err)
+        self.error.clone().map_or(
+            Err(TxQueryError::Retry(
+                bitcoin_rs_projection::RetryReason::TipMoved {
+                    expected_commit: 0,
+                    current_commit: 1,
+                },
+            )),
+            Err,
+        )
     }
 }
 
@@ -2779,7 +2798,15 @@ fn parent_query_errors_and_republication_never_yield_a_cached_success() {
     };
     ctx.chain.applied_tip.store(Some(tip));
     for (error, status) in [
-        (Some(TxQueryError::Retry), 503),
+        (
+            Some(TxQueryError::Retry(
+                bitcoin_rs_projection::RetryReason::TipMoved {
+                    expected_commit: 0,
+                    current_commit: 1,
+                },
+            )),
+            503,
+        ),
         (
             Some(TxQueryError::Unavailable(TxUnavailableCause::Other(
                 "pruned".into(),
@@ -2811,13 +2838,13 @@ fn parent_query_errors_and_republication_never_yield_a_cached_success() {
         .insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 0, 0))
         .expect("child");
     let handler = Handler::new(Arc::new(ctx));
-    assert_eq!(route(&handler, &format!("/tx/{child_id}"), "").status, 503);
+    assert_eq!(route(&handler, &format!("/tx/{child_id}"), "").status, 200);
     let response = backend_route_post(
         &handler,
         "/internal/txs",
         &sonic_rs::to_vec(&[parent.txid().to_string()]).expect("request"),
     );
-    assert_eq!(response.status, 503);
+    assert_eq!(response.status, 200);
 }
 
 #[test]

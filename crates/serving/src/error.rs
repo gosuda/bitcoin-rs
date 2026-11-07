@@ -95,7 +95,7 @@ impl From<sonic_rs::Error> for RpcError {
 impl From<crate::context::TxQueryError> for RpcError {
     fn from(error: crate::context::TxQueryError) -> Self {
         match error {
-            crate::context::TxQueryError::Retry => {
+            crate::context::TxQueryError::Retry(_) | crate::context::TxQueryError::ExpiredView => {
                 Self::Internal("transaction index is still catching up; retry later".to_owned())
             }
             crate::context::TxQueryError::Unavailable(cause) => {

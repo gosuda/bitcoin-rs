@@ -7,7 +7,7 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_consensus::script::{instructions, is_p2sh, is_p2wsh};
 use bitcoin_rs_consensus::{BlockRuleContext, check_block_body_binding};
-use bitcoin_rs_execution::chain::{TipSnapshot, softfork_state};
+use bitcoin_rs_execution::chain::softfork_state;
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
 use bitcoin_rs_projection::ScriptHash;
 
@@ -593,27 +593,6 @@ impl<'a> Projection<'a> {
         Ok(outputs)
     }
 
-    pub(super) fn capture_chain_view(&self) -> Option<Arc<TipSnapshot>> {
-        self.ctx.chain.applied_tip.load_full()
-    }
-
-    pub(super) fn ensure_chain_view(
-        &self,
-        expected: Option<&Arc<TipSnapshot>>,
-    ) -> Result<(), Response> {
-        let current = self.ctx.chain.applied_tip.load_full();
-        let unchanged = match (expected, current.as_ref()) {
-            (Some(expected), Some(current)) => Arc::ptr_eq(expected, current),
-            (None, None) => true,
-            _ => false,
-        };
-        if unchanged {
-            Ok(())
-        } else {
-            Err(query_error(TxQueryError::Retry))
-        }
-    }
-
     fn mempool_activity(
         &self,
         script_hash: ScriptHash,
@@ -642,8 +621,14 @@ impl<'a> Projection<'a> {
         }
         let spenders = {
             let pool = self.ctx.mempool.gateway.read();
-            if pool.sequence_number() != sequence {
-                return Err(query_error(TxQueryError::Retry));
+            let current_sequence = pool.sequence_number();
+            if current_sequence != sequence {
+                return Err(query_error(TxQueryError::Retry(
+                    bitcoin_rs_projection::RetryReason::TipMoved {
+                        expected_commit: sequence,
+                        current_commit: current_sequence,
+                    },
+                )));
             }
             outputs
                 .iter()

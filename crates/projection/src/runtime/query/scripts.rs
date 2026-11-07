@@ -1,7 +1,7 @@
 use super::{
-    DerivedIndexQueryEngine, OutPoint, QueryBudget, ReadPrefix, ScriptHash, ScriptHistoryPage,
-    ScriptHistoryRecord, ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord,
-    TipSnapshot, Tx, TxIndexScanRow, TxIndexSnapshot, TxQueryError, TxUnavailableCause, Txid,
+    DerivedIndexQueryEngine, OccurrenceCursor, OutPoint, QueryBudget, ReadPrefix, ScriptHash,
+    ScriptHistoryPage, ScriptHistoryRecord, ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan,
+    SpendingRecord, Tx, TxIndexScanRow, TxIndexSnapshot, TxQueryError, TxUnavailableCause, Txid,
 };
 use crate::types::ScriptHistoryOccurrence;
 
@@ -78,14 +78,15 @@ impl DerivedIndexQueryEngine {
         snapshot: &dyn TxIndexSnapshot,
         budget: &mut QueryBudget,
         scripthash: ScriptHash,
-    ) -> Result<Vec<crate::ScriptLiveRow>, TxQueryError> {
+    ) -> Result<ScriptLiveScan, TxQueryError> {
         let mut limit = budget.next_scan_limit()?;
         limit.max_rows = limit.max_rows.min(self.scripthash_limit.saturating_add(1));
         let scan: ScriptLiveScan = snapshot
             .live_rows(scripthash, limit)
             .map_err(storage_error)?;
         self.check_script_limit(scan.rows.len())?;
-        budget.accept_live_scan(scan)
+        budget.accept_live_scan(&scan)?;
+        Ok(scan)
     }
 
     fn occurrences(value: &[u8]) -> Result<Vec<ScriptHistoryOccurrence>, TxQueryError> {
@@ -302,12 +303,15 @@ impl DerivedIndexQueryEngine {
         budget: &mut QueryBudget,
         script: ScriptHash,
         last: Option<Txid>,
+        view_id: u64,
         limit: usize,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
-        let page = Self::confirmed_history_page_for(snapshot, prefix, budget, script, last, limit)?;
+        let page = Self::confirmed_history_page_for(
+            snapshot, prefix, budget, script, last, view_id, limit,
+        )?;
         if last.is_some() && !page.cursor_found {
             return Ok(Self::confirmed_history_page_for(
-                snapshot, prefix, budget, script, None, limit,
+                snapshot, prefix, budget, script, None, view_id, limit,
             )?
             .records);
         }
@@ -409,6 +413,7 @@ impl DerivedIndexQueryEngine {
         budget: &mut QueryBudget,
         scripthash: ScriptHash,
         cursor: Option<Txid>,
+        view_id: u64,
         limit: usize,
     ) -> Result<ScriptHistoryPage, TxQueryError> {
         Self::require_full_history(prefix)?;
@@ -418,7 +423,11 @@ impl DerivedIndexQueryEngine {
             None => None,
         };
         let cursor_found = cursor.is_none() || resolved.is_some();
-        let cursor = resolved.filter(|_| cursor_found);
+        let occurrence_cursor = resolved.map(|(height, tx_pos)| OccurrenceCursor {
+            view_id,
+            height,
+            tx_pos,
+        });
         if limit == 0 {
             return Ok(ScriptHistoryPage {
                 records: Vec::new(),
@@ -428,7 +437,7 @@ impl DerivedIndexQueryEngine {
 
         let mut records: Vec<ScriptHistoryRecord> = Vec::with_capacity(limit);
         let mut listed = std::collections::BTreeSet::<Txid>::new();
-        let mut start_height = cursor.map_or(u32::MAX, |(height, _)| height);
+        let mut start_height = occurrence_cursor.map_or(u32::MAX, |cursor| cursor.height);
         'scan: loop {
             let scan_limit = budget.next_page_scan_limit(PAGE_SCAN_ROWS, PAGE_SCAN_BYTES)?;
             let scan = snapshot
@@ -459,9 +468,9 @@ impl DerivedIndexQueryEngine {
                 });
                 occurrences.dedup_by(|left, right| left.txid == right.txid);
                 for occurrence in occurrences {
-                    if let Some((cursor_height, cursor_offset)) = cursor
-                        && height == cursor_height
-                        && occurrence.position.offset() >= cursor_offset
+                    if let Some(cursor) = occurrence_cursor
+                        && height == cursor.height
+                        && occurrence.position.offset() >= cursor.tx_pos
                     {
                         continue;
                     }
@@ -469,7 +478,7 @@ impl DerivedIndexQueryEngine {
                     if !listed.insert(txid) {
                         continue;
                     }
-                    if cursor.is_some()
+                    if occurrence_cursor.is_some()
                         && !Self::lists_newest_covered_occurrence(
                             snapshot, prefix, budget, scripthash, &txid, height,
                         )?
@@ -496,43 +505,27 @@ impl DerivedIndexQueryEngine {
     pub(super) fn unspent_outputs_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
-        _tip: &TipSnapshot,
+        prefix: &ReadPrefix,
         budget: &mut QueryBudget,
         scripthash: ScriptHash,
     ) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
-        let Some(utxo) = self.utxo.as_ref() else {
-            return Err(TxQueryError::Unavailable(
-                TxUnavailableCause::MissingAuthority(
-                    "authoritative UTXO view is unavailable for ScriptLive",
-                ),
-            ));
-        };
-        let rows = self.scan_live_rows(snapshot, budget, scripthash)?;
-        utxo.with_stable_view(|view| {
-            let mut records = Vec::with_capacity(rows.len());
-            for row in rows {
-                let outpoint = row.outpoint();
-                let Some(entry) = view.get_entry(&outpoint) else {
-                    return Err(TxQueryError::Unavailable(
-                        TxUnavailableCause::MissingAuthority(
-                            "ScriptLive locator is absent from authoritative UTXO",
-                        ),
-                    ));
-                };
-                if ScriptHash::new(&entry.txout.script_pubkey) != scripthash {
-                    continue;
-                }
-                records.push(ScriptIndexRecord {
-                    txid: outpoint.txid,
-                    height: entry.height,
-                    value: entry.txout.value.to_sat(),
-                    vout: outpoint.vout,
-                });
+        let scan = self.scan_live_rows(snapshot, budget, scripthash)?;
+        let mut records = Vec::with_capacity(scan.rows.len());
+        for (row, coin) in scan.rows.iter().zip(&scan.coins) {
+            if coin.scripthash != scripthash || !prefix.covers(coin.height) {
+                continue;
             }
-            records.sort_by(order_by_height_txid_vout);
-            records.dedup_by(|a, b| a.txid == b.txid && a.vout == b.vout);
-            Ok(records)
-        })
+            let outpoint = row.outpoint();
+            records.push(ScriptIndexRecord {
+                txid: outpoint.txid,
+                height: coin.height,
+                value: coin.value,
+                vout: outpoint.vout,
+            });
+        }
+        records.sort_by(order_by_height_txid_vout);
+        records.dedup_by(|a, b| a.txid == b.txid && a.vout == b.vout);
+        Ok(records)
     }
 }
 
@@ -692,7 +685,7 @@ mod tests {
             height: u32::MAX,
             hash: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[0; 32]),
             floor: 0,
-            bound: super::super::PrefixBound::ExactTip,
+            is_historical: true,
         }
     }
 
@@ -737,6 +730,7 @@ mod tests {
                 &mut QueryBudget::new(),
                 script,
                 None,
+                0,
                 25,
             )
             .unwrap_or_else(|error| panic!("bounded page failed: {error}"));
@@ -768,6 +762,7 @@ mod tests {
             budget,
             script,
             None,
+            0,
             25,
         )
         .unwrap_or_else(|error| panic!("first page failed: {error}"));
@@ -778,6 +773,7 @@ mod tests {
             budget,
             script,
             cursor,
+            0,
             25,
         )
         .unwrap_or_else(|error| panic!("cursor page failed: {error}"));
@@ -790,6 +786,7 @@ mod tests {
             budget,
             script,
             cursor,
+            0,
             0,
         )
         .unwrap_or_else(|error| panic!("empty page failed: {error}"));
@@ -809,6 +806,7 @@ mod tests {
             Some(Txid(
                 bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[200; 32]),
             )),
+            0,
             25,
         )
         .unwrap_or_else(|error| panic!("cursor restart failed: {error}"));
@@ -837,6 +835,7 @@ mod tests {
             &mut QueryBudget::new(),
             script,
             None,
+            0,
             25,
         )
         .unwrap_or_else(|error| panic!("collision page failed: {error}"));
@@ -862,6 +861,7 @@ mod tests {
             &mut QueryBudget::new(),
             script,
             None,
+            0,
             25,
         )
         .unwrap_or_else(|error| panic!("duplicate page failed: {error}"));
@@ -1019,6 +1019,7 @@ mod tests {
                 budget,
                 script,
                 cursor,
+                0,
                 limit,
             )
             .unwrap_or_else(|error| panic!("history page failed: {error}"));
@@ -1055,6 +1056,7 @@ mod tests {
                 budget,
                 script,
                 cursor,
+                0,
                 2,
             )
             .unwrap_or_else(|error| panic!("cursor page failed: {error}"));
@@ -1096,6 +1098,7 @@ mod tests {
             &mut QueryBudget::new(),
             script,
             None,
+            0,
             25,
         )
         .unwrap_or_else(|error| panic!("dedup page failed: {error}"));

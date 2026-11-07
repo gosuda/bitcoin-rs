@@ -20,7 +20,11 @@ pub(super) fn query_error(e: TxQueryError) -> Response {
             content_type: "text/plain",
             body: e.to_string().into_bytes(),
         },
-        TxQueryError::Retry | TxQueryError::Unavailable(_) => service_unavailable(e.to_string()),
+        TxQueryError::Retry(_) => service_unavailable(e.to_string()),
+        TxQueryError::ExpiredView => {
+            service_unavailable("transaction index changed during query; retry")
+        }
+        TxQueryError::Unavailable(_) => service_unavailable(e.to_string()),
         TxQueryError::Storage(_) => internal_error(e.to_string()),
     }
 }
@@ -75,7 +79,16 @@ mod tests {
             String::from_utf8_lossy(&response.body)
                 .contains("scripthash limit exceeded (25000 entries)")
         );
-        assert_eq!(super::query_error(TxQueryError::Retry).status, 503);
+        assert_eq!(
+            super::query_error(TxQueryError::Retry(
+                bitcoin_rs_projection::RetryReason::TipMoved {
+                    expected_commit: 0,
+                    current_commit: 1,
+                }
+            ))
+            .status,
+            503
+        );
         assert_eq!(
             super::query_error(TxQueryError::Unavailable(
                 TxUnavailableCause::BodyReadBudgetExhausted

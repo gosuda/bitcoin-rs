@@ -1,7 +1,7 @@
 use arc_swap::ArcSwap;
 
 use bitcoin_rs_execution::chain::{
-    BlockTree, BlockTreeReader, LatchReader, LatchWriter, TipReader, TipSnapshot,
+    BlockTree, BlockTreeReader, LatchReader, LatchWriter, TipReader,
 };
 use bitcoin_rs_storage::block_body::BlockBodySource;
 
@@ -20,9 +20,8 @@ use crate::capabilities::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
 };
 use crate::query_api::{
-    AtPrefix, DerivedIndexInfo, DerivedIndexQuery, HistoricalQueryError, ScriptHistoryRecord,
-    ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError,
-    TxUnavailableCause,
+    Answer, DerivedIndexInfo, DerivedIndexQuery, ScriptHistoryRecord, ScriptIndexQuery,
+    ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause,
 };
 
 use bitcoin_rs_storage::utxo::snapshot::{SeedOfferCell, VerifiedSnapshotArtifact};
@@ -67,9 +66,9 @@ mod startup;
 pub use startup::open_derived_index_store_on_worker;
 
 pub use capability::DerivedIndexCapability;
+use query::IndexProgress;
 pub(crate) use query::QueryEngineLive;
 pub use query::{DEFAULT_SCRIPTHASH_LIMIT, DerivedIndexQueryEngine};
-use query::{IndexProgress, map_historical_error};
 
 #[derive(Debug)]
 pub struct DerivedIndexRuntime {
@@ -390,25 +389,25 @@ impl DerivedIndexQueryAdapter {
     pub fn transaction_at_prefix(
         &self,
         txid: &Txid,
-    ) -> Result<AtPrefix<Option<(u32, Tx)>>, HistoricalQueryError> {
-        let engine = self.load_engine().map_err(map_historical_error)?;
-        engine.transaction_at_prefix(txid)
+    ) -> Result<Answer<Option<(u32, Tx)>>, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.transaction_at_answer(txid)
     }
 
     pub fn script_history_at_prefix(
         &self,
         script: ScriptHash,
-    ) -> Result<AtPrefix<ScriptIndexSnapshot>, HistoricalQueryError> {
-        let engine = self.load_engine().map_err(map_historical_error)?;
-        engine.script_history_at_prefix(script)
+    ) -> Result<Answer<ScriptIndexSnapshot>, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.script_history_at_answer(script)
     }
 
     pub fn spender_at_prefix(
         &self,
         outpoint: OutPoint,
-    ) -> Result<AtPrefix<Option<SpendingRecord>>, HistoricalQueryError> {
-        let engine = self.load_engine().map_err(map_historical_error)?;
-        engine.spender_at_prefix(outpoint)
+    ) -> Result<Answer<Option<SpendingRecord>>, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.spender_at_answer(outpoint)
     }
 
     fn load_engine(&self) -> Result<Arc<DerivedIndexQueryEngine>, TxQueryError> {
@@ -441,8 +440,6 @@ pub struct DerivedIndexOpenSpec {
     pub open_store:
         Arc<dyn Fn(&Path) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> + Send + Sync>,
     pub seed_slot: Option<SeedOfferCell>,
-    pub utxo: Option<bitcoin_rs_storage::utxo::UtxoReader>,
-    pub chain_transition: Option<bitcoin_rs_execution::chain::StableRead>,
     pub bundle: crate::portable::IndexBundleDirective,
     pub facts_rx:
         Option<crossbeam_channel::Receiver<std::sync::Arc<bitcoin_rs_storage::CommittedFacts>>>,

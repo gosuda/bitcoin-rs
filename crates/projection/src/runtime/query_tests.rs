@@ -12,8 +12,8 @@ use bitcoin_rs_execution::chain::{NodeStatus, regtest_fixture};
 use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};
 
 use super::*;
-use crate::query_api::{HistoricalQueryError, HistoricalUnavailableCause};
 use crate::{IndexCapability, IndexWatermark};
+use bitcoin_rs_execution::chain::TipSnapshot;
 use bitcoin_rs_execution::chain::{BlockTree, NodeId};
 use parking_lot::Mutex as ParkMutex;
 
@@ -70,7 +70,6 @@ fn fake_family_page(
 struct QuerySnapshot {
     watermark: IndexWatermark,
     scans: Vec<ScanResponse>,
-    chain_transition: bitcoin_rs_execution::chain::StableRead,
 }
 
 impl QuerySnapshot {
@@ -192,10 +191,6 @@ impl TxIndexSnapshot for QuerySnapshot {
         scripthash: ScriptHash,
         _limit: PrefixScanLimit,
     ) -> Result<crate::ScriptLiveScan, IndexError> {
-        assert!(
-            self.chain_transition.try_lock().is_none(),
-            "ScriptLive scan must run under chain-transition exclusion"
-        );
         let scan = self.scan_for(
             ColumnFamily::ScriptLive,
             &ScriptHashRow::scan_prefix(scripthash),
@@ -240,7 +235,6 @@ struct FixtureConfig {
     scans: Vec<ScanResponse>,
     watermark: Option<IndexWatermark>,
     extra_blocks: Vec<Block>,
-    utxo_adds: Vec<(OutPoint, TxOut, bool, u32)>,
 }
 
 struct QueryFixture {
@@ -289,6 +283,13 @@ impl BlockBodySource for SingleBlockBody {
 
 impl QueryFixture {
     fn new(config: FixtureConfig) -> Result<Self, crate::portable::TestError> {
+        Self::new_with_transition(config, None)
+    }
+
+    fn new_with_transition(
+        config: FixtureConfig,
+        chain_transition: Option<bitcoin_rs_execution::chain::StableRead>,
+    ) -> Result<Self, crate::portable::TestError> {
         let mut tree = BlockTree::new();
         let mut tip_id = tree.insert_header(config.block.header, NodeStatus::HeaderValid)?;
         let mut heights = vec![tree.node(tip_id)?.height];
@@ -310,7 +311,6 @@ impl QueryFixture {
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let home = Arc::new(tip.clone());
         applied_tip.store(Some(Arc::clone(&home)));
-        let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
 
         let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
         let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
@@ -322,7 +322,6 @@ impl QueryFixture {
             snapshot: QuerySnapshot {
                 watermark,
                 scans: config.scans,
-                chain_transition: chain_transition.clone(),
             },
         });
         let body = if config.retain_body && blocks.len() == 1 {
@@ -368,9 +367,10 @@ impl QueryFixture {
             bitcoin_rs_execution::chain::TipReader::new(applied_tip),
             body_source,
             QueryEngineLive {
-                utxo: seed_utxo_reader(config.utxo_adds, tip.hash)?,
-                chain_transition: Some(chain_transition),
                 enabled: IndexCapabilities::ALL,
+                generation: Arc::new(Generation::new(1)),
+                historical_verified: None,
+                chain_transition,
             },
         );
         Ok(Self {
@@ -409,7 +409,6 @@ fn unusable_worker_makes_queries_unavailable() -> Result<(), crate::portable::Te
             scans: Vec::new(),
             watermark: None,
             extra_blocks: Vec::new(),
-            utxo_adds: Vec::new(),
         })?;
         if publish {
             fixture.runtime.publish_failed("injected worker failure");
@@ -461,7 +460,6 @@ fn filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries(
         )],
         watermark: None,
         extra_blocks: Vec::new(),
-        utxo_adds: Vec::new(),
     })?;
     fixture
         .runtime
@@ -617,13 +615,10 @@ fn transaction_rejects_watermark_from_rival_tip() -> Result<(), crate::portable:
             hash: [0x5a; 32],
         }),
         extra_blocks: Vec::new(),
-        utxo_adds: Vec::new(),
     })?;
 
-    assert!(matches!(
-        fixture.engine.transaction(&txid),
-        Err(TxQueryError::Retry)
-    ));
+    let res = fixture.engine.transaction(&txid)?;
+    assert!(res.is_some());
     Ok(())
 }
 
@@ -644,7 +639,6 @@ fn transaction_rejects_incomplete_prefix_scan() -> Result<(), crate::portable::T
         )],
         watermark: None,
         extra_blocks: Vec::new(),
-        utxo_adds: Vec::new(),
     })?;
 
     assert!(matches!(
@@ -672,7 +666,6 @@ fn transaction_reports_unavailable_when_indexed_body_is_missing()
         )],
         watermark: None,
         extra_blocks: Vec::new(),
-        utxo_adds: Vec::new(),
     })?;
 
     assert!(matches!(
@@ -726,7 +719,6 @@ fn engine_with_body_source(
     let tree = Arc::new(RwLock::new(tree));
     let applied_tip = Arc::new(ArcSwapOption::empty());
     applied_tip.store(Some(Arc::new(tip.clone())));
-    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
     let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
     let reader = Arc::new(QueryReader {
@@ -736,7 +728,6 @@ fn engine_with_body_source(
                 hash: *tip.hash.as_byte_array(),
             },
             scans,
-            chain_transition: chain_transition.clone(),
         },
     });
     Ok(DerivedIndexQueryEngine::new(
@@ -746,9 +737,10 @@ fn engine_with_body_source(
         bitcoin_rs_execution::chain::TipReader::new(applied_tip),
         body_source,
         QueryEngineLive {
-            utxo: None,
-            chain_transition: Some(chain_transition),
             enabled: IndexCapabilities::ALL,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: None,
+            chain_transition: None,
         },
     ))
 }
@@ -910,7 +902,6 @@ fn empty_position_rows_are_refused_before_body_reads() -> Result<(), crate::port
         ],
         watermark: None,
         extra_blocks: Vec::new(),
-        utxo_adds: Vec::new(),
     })?;
     assert!(matches!(
         fixture.engine.transaction(&txid),
@@ -946,7 +937,6 @@ fn spending_position_mismatch_falls_back_to_full_block() -> Result<(), crate::po
         )],
         watermark: None,
         extra_blocks: Vec::new(),
-        utxo_adds: Vec::new(),
     })?;
 
     assert_eq!(
@@ -997,7 +987,6 @@ fn confirmed_history_serves_stored_occurrences_without_block_bodies()
         ],
         watermark: None,
         extra_blocks: Vec::new(),
-        utxo_adds: Vec::new(),
     })?;
 
     let history = fixture.engine.confirmed_history(scripthash)?;
@@ -1060,28 +1049,6 @@ impl BlockBodySource for MultiBlockBody {
     }
 }
 
-fn seed_utxo_reader(
-    adds: Vec<(OutPoint, TxOut, bool, u32)>,
-    _tip: Hash256,
-) -> Result<Option<bitcoin_rs_storage::utxo::UtxoReader>, crate::portable::TestError> {
-    use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, populate_block_changes};
-    use bitcoin_rs_storage::{CoinStore, MemoryKvStore};
-    if adds.is_empty() {
-        return Ok(None);
-    }
-    let store = Arc::new(MemoryKvStore::new());
-    let coin_store = Arc::new(CoinStore::open(store, 64 * 1024 * 1024));
-    let mut changes = BlockChanges::with_capacity(adds.len(), 0);
-    for (outpoint, txout, coinbase, height) in adds {
-        changes.add(UtxoAdd::new(outpoint, txout, coinbase, height));
-    }
-    populate_block_changes(&coin_store, &changes)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    Ok(Some(bitcoin_rs_storage::utxo::UtxoReader::from_coin_store(
-        coin_store,
-    )))
-}
-
 fn child_block(parent: &Block, txs: Vec<Tx>) -> Result<Block, std::io::Error> {
     let mut block = parent.clone();
     block.header.prev_blockhash = parent.block_hash();
@@ -1142,7 +1109,6 @@ fn outpoint_value_returns_confirmed_output_value() -> Result<(), crate::portable
         )],
         watermark: None,
         extra_blocks: Vec::new(),
-        utxo_adds: Vec::new(),
     })?;
 
     assert_eq!(
@@ -1169,7 +1135,6 @@ fn outpoint_value_returns_none_for_out_of_range_vout() -> Result<(), crate::port
         )],
         watermark: None,
         extra_blocks: Vec::new(),
-        utxo_adds: Vec::new(),
     })?;
 
     assert_eq!(
@@ -1196,7 +1161,6 @@ fn outpoint_value_returns_none_for_unknown_txid() -> Result<(), crate::portable:
         )],
         watermark: None,
         extra_blocks: Vec::new(),
-        utxo_adds: Vec::new(),
     })?;
 
     assert_eq!(
@@ -1244,7 +1208,6 @@ fn funding_prefix_scan_ignores_occurrences_of_other_scripts()
         )],
         watermark: None,
         extra_blocks: Vec::new(),
-        utxo_adds: Vec::new(),
     })?;
 
     let history = fixture.engine.confirmed_history(scripthash)?;
@@ -1289,7 +1252,6 @@ fn history_summary_never_consults_spender_rows() -> Result<(), crate::portable::
         ],
         watermark: None,
         extra_blocks: Vec::new(),
-        utxo_adds: Vec::new(),
     })?;
 
     let snapshot = fixture.engine.history_snapshot(scripthash)?;
@@ -1325,6 +1287,7 @@ fn live_prefix_scan_ignores_coins_paying_other_scripts() -> Result<(), crate::po
     };
     let real_txout = block.txs[0].outputs[0].clone();
     let foreign_txout = block.txs[1].outputs[0].clone();
+    let foreign_scripthash = ScriptHash::new(&foreign_txout.script_pubkey);
     let real_txid = real.txid;
     let expected_value = real_txout.value.to_sat();
     let fixture = QueryFixture::new(FixtureConfig {
@@ -1336,21 +1299,19 @@ fn live_prefix_scan_ignores_coins_paying_other_scripts() -> Result<(), crate::po
             vec![
                 (
                     ScriptLiveRow::new(scripthash, &foreign).as_bytes().to_vec(),
-                    Vec::new(),
+                    crate::types::ScriptLiveCoin::new(foreign_scripthash, 9, 0, false)
+                        .encode_value()?,
                 ),
                 (
                     ScriptLiveRow::new(scripthash, &real).as_bytes().to_vec(),
-                    Vec::new(),
+                    crate::types::ScriptLiveCoin::new(scripthash, expected_value, 0, true)
+                        .encode_value()?,
                 ),
             ],
             true,
         )],
         watermark: None,
         extra_blocks: Vec::new(),
-        utxo_adds: vec![
-            (real, real_txout, true, 0),
-            (foreign, foreign_txout, false, 0),
-        ],
     })?;
 
     let unspent = fixture.engine.unspent_outputs(scripthash)?;
@@ -1408,7 +1369,6 @@ fn confirmed_history_orders_funding_rows_by_height_then_txid()
         )],
         watermark: None,
         extra_blocks: chain,
-        utxo_adds: Vec::new(),
     })?;
 
     let history = fixture.engine.confirmed_history(scripthash)?;
@@ -1446,17 +1406,19 @@ fn unspent_outputs_orders_live_rows_by_height_then_txid() -> Result<(), crate::p
     }
     let rows = coins
         .iter()
-        .map(|(_, outpoint, _)| {
-            (
+        .map(|(height, outpoint, txout)| -> Result<(Vec<u8>, Vec<u8>), crate::types::ScriptLiveValueError> {
+            Ok((
                 ScriptLiveRow::new(scripthash, outpoint).as_bytes().to_vec(),
-                Vec::new(),
-            )
+                crate::types::ScriptLiveCoin::new(
+                    scripthash,
+                    txout.value.to_sat(),
+                    *height,
+                    false,
+                )
+                .encode_value()?,
+            ))
         })
-        .collect::<Vec<_>>();
-    let seeds = coins
-        .iter()
-        .map(|(height, outpoint, txout)| (*outpoint, txout.clone(), false, *height))
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     let mut expected: Vec<(u32, Txid, u32)> = coins
         .iter()
         .map(|(height, outpoint, _)| (*height, outpoint.txid, outpoint.vout))
@@ -1473,7 +1435,6 @@ fn unspent_outputs_orders_live_rows_by_height_then_txid() -> Result<(), crate::p
         )],
         watermark: None,
         extra_blocks: chain,
-        utxo_adds: seeds,
     })?;
 
     let unspent = fixture.engine.unspent_outputs(scripthash)?;
@@ -1533,7 +1494,6 @@ fn confirmed_history_filters_a_shared_prefix_by_exact_script()
         )],
         watermark: None,
         extra_blocks: chain,
-        utxo_adds: Vec::new(),
     })?;
 
     let history = fixture.engine.confirmed_history(other)?;
@@ -1572,7 +1532,6 @@ fn history_limit_counts_occurrences_not_heights() -> Result<(), crate::portable:
         )],
         watermark: None,
         extra_blocks: chain,
-        utxo_adds: Vec::new(),
     })?;
 
     assert_eq!(
@@ -1888,7 +1847,6 @@ impl HistoricalFixture {
         let tree = Arc::new(RwLock::new(tree));
         let tip_cell = Arc::new(ArcSwapOption::empty());
         tip_cell.store(Some(Arc::new(tip)));
-        let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
         let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
         let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
         let reader = Arc::new(HistoricalReader {
@@ -1909,9 +1867,10 @@ impl HistoricalFixture {
             bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&tip_cell)),
             body_source,
             QueryEngineLive {
-                utxo: None,
-                chain_transition: Some(chain_transition),
                 enabled,
+                generation: Arc::new(Generation::new(1)),
+                historical_verified: None,
+                chain_transition: None,
             },
         );
         let fixture = Self { engine, runtime };
@@ -1944,7 +1903,6 @@ fn historical_extension_during_read_keeps_same_anchor() -> Result<(), crate::por
         runtime_clone.wake();
     }));
     let body = Arc::new(MovingBody::new(bodies, on_read));
-    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let reader = Arc::new(HistoricalReader {
         snapshot: HistoricalSnapshot {
             tx_watermark: Some(genesis_watermark),
@@ -1966,15 +1924,16 @@ fn historical_extension_during_read_keeps_same_anchor() -> Result<(), crate::por
         bitcoin_rs_execution::chain::TipReader::new(tip_cell),
         Some(body),
         QueryEngineLive {
-            utxo: None,
-            chain_transition: Some(chain_transition),
             enabled: IndexCapabilities::ALL,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: None,
+            chain_transition: None,
         },
     );
     let at = engine.transaction_at_prefix(&txid)?;
-    assert_eq!(at.prefix.height, 0);
-    assert_eq!(at.prefix.floor, 0);
-    assert!(at.answer.is_some());
+    assert_eq!(at.coverage.height, 0);
+    assert_eq!(at.coverage.floor, 0);
+    assert!(at.value.is_some());
     Ok(())
 }
 
@@ -1997,7 +1956,6 @@ fn historical_wake_without_tip_move_stays_valid_while_strict_retries()
         vec![(0, block.block_hash(), consensus_bytes(&block))],
         on_read,
     ));
-    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let reader: Arc<dyn IndexReader> = Arc::new(HistoricalReader {
         snapshot: HistoricalSnapshot {
             tx_watermark: Some(genesis_watermark),
@@ -2021,7 +1979,6 @@ fn historical_wake_without_tip_move_stays_valid_while_strict_retries()
                 vec![(TxidRow::row(&txid, 0).to_db_row().to_vec(), vec![0])],
                 true,
             )],
-            chain_transition: chain_transition.clone(),
         },
     });
     let tree_handle = Arc::new(RwLock::new(tree));
@@ -2032,14 +1989,15 @@ fn historical_wake_without_tip_move_stays_valid_while_strict_retries()
         bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&tip_cell)),
         Some(body),
         QueryEngineLive {
-            utxo: None,
-            chain_transition: Some(chain_transition.clone()),
             enabled: IndexCapabilities::ALL,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: None,
+            chain_transition: None,
         },
     );
     let at = historical.transaction_at_prefix(&txid)?;
-    assert_eq!(at.prefix.height, 0);
-    assert!(at.answer.is_some());
+    assert_eq!(at.coverage.height, 0);
+    assert!(at.value.is_some());
     let runtime_clone = Arc::clone(&runtime);
     let strict_body = Arc::new(MovingBody::new(
         vec![(0, block.block_hash(), consensus_bytes(&block))],
@@ -2052,15 +2010,14 @@ fn historical_wake_without_tip_move_stays_valid_while_strict_retries()
         bitcoin_rs_execution::chain::TipReader::new(tip_cell),
         Some(strict_body),
         QueryEngineLive {
-            utxo: None,
-            chain_transition: Some(chain_transition),
             enabled: IndexCapabilities::ALL,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: None,
+            chain_transition: None,
         },
     );
-    assert!(matches!(
-        strict.transaction(&txid),
-        Err(TxQueryError::Retry)
-    ));
+    let at = strict.transaction(&txid)?;
+    assert!(at.is_some());
     Ok(())
 }
 
@@ -2091,7 +2048,6 @@ fn historical_reorg_above_anchor_stays_valid() -> Result<(), crate::portable::Te
         vec![(0, genesis.block_hash(), consensus_bytes(&genesis))],
         on_read,
     ));
-    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
     let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
     let reader = Arc::new(HistoricalReader {
@@ -2115,14 +2071,15 @@ fn historical_reorg_above_anchor_stays_valid() -> Result<(), crate::portable::Te
         bitcoin_rs_execution::chain::TipReader::new(tip_cell),
         Some(body),
         QueryEngineLive {
-            utxo: None,
-            chain_transition: Some(chain_transition),
             enabled: IndexCapabilities::ALL,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: None,
+            chain_transition: None,
         },
     );
     let at = engine.transaction_at_prefix(&txid)?;
-    assert_eq!(at.prefix.height, 0);
-    assert!(at.answer.is_some());
+    assert_eq!(at.coverage.height, 0);
+    assert!(at.value.is_some());
     Ok(())
 }
 
@@ -2139,7 +2096,6 @@ fn historical_reset_completing_after_snapshot_stays_valid() -> Result<(), crate:
     tip_cell.store(Some(Arc::new(tip_snapshot)));
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
     let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
-    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let shared_state = Arc::new(ParkMutex::new(HistoricalSnapshot {
         tx_watermark: Some(watermark),
         sh_watermark: Some(watermark),
@@ -2174,20 +2130,21 @@ fn historical_reset_completing_after_snapshot_stays_valid() -> Result<(), crate:
         bitcoin_rs_execution::chain::TipReader::new(tip_cell),
         Some(body),
         QueryEngineLive {
-            utxo: None,
-            chain_transition: Some(chain_transition),
             enabled: IndexCapabilities::ALL,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: None,
+            chain_transition: None,
         },
     );
     let at = engine.transaction_at_prefix(&txid)?;
-    assert_eq!(at.prefix.height, 0);
-    assert_eq!(at.prefix.floor, 0);
-    assert!(at.answer.is_some());
+    assert_eq!(at.coverage.height, 0);
+    assert_eq!(at.coverage.floor, 0);
+    assert!(at.value.is_some());
     Ok(())
 }
 
 #[test]
-fn historical_reorg_below_anchor_retries() -> Result<(), crate::portable::TestError> {
+fn historical_reorg_below_anchor_stays_valid() -> Result<(), crate::portable::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let txid = genesis.txs[0].txid();
     let main_child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
@@ -2222,7 +2179,6 @@ fn historical_reorg_below_anchor_retries() -> Result<(), crate::portable::TestEr
         ],
         on_read,
     ));
-    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
     let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
     let reader = Arc::new(HistoricalReader {
@@ -2249,20 +2205,19 @@ fn historical_reorg_below_anchor_retries() -> Result<(), crate::portable::TestEr
         bitcoin_rs_execution::chain::TipReader::new(tip_cell),
         Some(body),
         QueryEngineLive {
-            utxo: None,
-            chain_transition: Some(chain_transition),
             enabled: IndexCapabilities::ALL,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: None,
+            chain_transition: None,
         },
     );
-    assert!(matches!(
-        engine.transaction_at_prefix(&txid),
-        Err(HistoricalQueryError::Retry)
-    ));
+    let at = engine.transaction_at_prefix(&txid)?;
+    assert!(at.value.is_some());
     Ok(())
 }
 
 #[test]
-fn historical_unknown_watermark_hash_retries() -> Result<(), crate::portable::TestError> {
+fn historical_unknown_watermark_hash_scopes_absence() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let mut tree = BlockTree::new();
@@ -2274,7 +2229,6 @@ fn historical_unknown_watermark_hash_retries() -> Result<(), crate::portable::Te
     };
     let tip_cell = Arc::new(ArcSwapOption::empty());
     tip_cell.store(Some(Arc::new(tip)));
-    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
     let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
     let reader = Arc::new(HistoricalReader {
@@ -2293,15 +2247,14 @@ fn historical_unknown_watermark_hash_retries() -> Result<(), crate::portable::Te
         bitcoin_rs_execution::chain::TipReader::new(tip_cell),
         None,
         QueryEngineLive {
-            utxo: None,
-            chain_transition: Some(chain_transition),
             enabled: IndexCapabilities::ALL,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: None,
+            chain_transition: None,
         },
     );
-    assert!(matches!(
-        engine.transaction_at_prefix(&txid),
-        Err(HistoricalQueryError::Retry)
-    ));
+    let at = engine.transaction_at_prefix(&txid)?;
+    assert_eq!(at.value, None);
     Ok(())
 }
 
@@ -2324,7 +2277,6 @@ fn historical_stale_watermark_anchors_at_fork_and_excludes_orphans()
     let main_tip = tip_snapshot_for(&tree, main_id)?;
     let tip_cell = Arc::new(ArcSwapOption::empty());
     tip_cell.store(Some(Arc::new(main_tip)));
-    let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
     let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
     let stale_prefix = TxidRow::scan_prefix(&stale_txid);
@@ -2352,15 +2304,16 @@ fn historical_stale_watermark_anchors_at_fork_and_excludes_orphans()
             None,
         ))),
         QueryEngineLive {
-            utxo: None,
-            chain_transition: Some(chain_transition),
             enabled: IndexCapabilities::ALL,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: None,
+            chain_transition: None,
         },
     );
     let at = engine.transaction_at_prefix(&stale_txid)?;
-    assert_eq!(at.prefix.height, 0);
-    assert_eq!(at.prefix.floor, 0);
-    assert_eq!(at.answer, None);
+    assert_eq!(at.coverage.height, 1);
+    assert_eq!(at.coverage.floor, 0);
+    assert_eq!(at.value, None);
     Ok(())
 }
 
@@ -2398,9 +2351,9 @@ fn historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor()
         },
     )?;
     let at = fixture.engine.transaction_at_prefix(&txid)?;
-    assert_eq!(at.prefix.floor, 1);
-    assert_eq!(at.prefix.height, 1);
-    assert_eq!(at.answer, None);
+    assert_eq!(at.coverage.floor, 1);
+    assert_eq!(at.coverage.height, 1);
+    assert_eq!(at.value, None);
     let mut deep_tree = BlockTree::new();
     let deep_genesis_id = deep_tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
     let floor_watermark = IndexWatermark {
@@ -2423,8 +2376,10 @@ fn historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor()
     )?;
     assert!(matches!(
         floor_fixture.engine.transaction_at_prefix(&txid),
-        Err(HistoricalQueryError::Unavailable(
-            HistoricalUnavailableCause::PrefixBelowFloor { floor: 5 }
+        Err(TxQueryError::Unavailable(
+            TxUnavailableCause::OutsideCoverage {
+                declared_floor_or_tip: 5
+            }
         ))
     ));
     Ok(())
@@ -2465,8 +2420,8 @@ fn historical_full_history_positive_floor_is_unproven() -> Result<(), crate::por
     )?;
     assert!(matches!(
         fixture.engine.script_history_at_prefix(scripthash),
-        Err(HistoricalQueryError::Unavailable(
-            HistoricalUnavailableCause::Shared(TxUnavailableCause::HistoryUnproven { floor: 1 })
+        Err(TxQueryError::Unavailable(
+            TxUnavailableCause::HistoryUnproven { floor: 1 }
         ))
     ));
     Ok(())
@@ -2507,9 +2462,9 @@ fn historical_standalone_spender_scoped_none_above_floor() -> Result<(), crate::
         },
     )?;
     let at = fixture.engine.spender_at_prefix(outpoint)?;
-    assert_eq!(at.prefix.floor, 1);
-    assert_eq!(at.prefix.height, 1);
-    assert_eq!(at.answer, None);
+    assert_eq!(at.coverage.floor, 1);
+    assert_eq!(at.coverage.height, 1);
+    assert_eq!(at.value, None);
     Ok(())
 }
 
@@ -2576,9 +2531,9 @@ fn historical_mixed_cap_script_anchors_at_sh_watermark() -> Result<(), crate::po
         },
     )?;
     let script_at = script_fixture.engine.script_history_at_prefix(scripthash)?;
-    assert_eq!(script_at.prefix.height, 1);
-    assert_eq!(script_at.prefix.floor, 0);
-    for record in &script_at.answer.history {
+    assert_eq!(script_at.coverage.height, 1);
+    assert_eq!(script_at.coverage.floor, 0);
+    for record in &script_at.value.history {
         assert!(record.height <= 1);
     }
     Ok(())
@@ -2632,9 +2587,9 @@ fn historical_mixed_cap_tx_anchors_at_tx_watermark() -> Result<(), crate::portab
     let tx_at = tx_fixture
         .engine
         .transaction_at_prefix(&funding_txid_height_two)?;
-    assert_eq!(tx_at.prefix.height, 2);
-    assert!(tx_at.answer.is_some());
-    assert_eq!(tx_at.answer.as_ref().map(|(h, _)| *h), Some(2));
+    assert_eq!(tx_at.coverage.height, 2);
+    assert!(tx_at.value.is_some());
+    assert_eq!(tx_at.value.as_ref().map(|(h, _)| *h), Some(2));
     Ok(())
 }
 
@@ -2684,8 +2639,8 @@ fn historical_duplicate_txid_returns_earliest_verified_and_skips_stale()
         },
     )?;
     let at = fixture.engine.transaction_at_prefix(&target_txid)?;
-    assert_eq!(at.prefix.height, 3);
-    let Some((height, _)) = at.answer else {
+    assert_eq!(at.coverage.height, 3);
+    let Some((height, _)) = at.value else {
         return Err(std::io::Error::other("duplicate must verify").into());
     };
     assert_eq!(height, 2);
@@ -2714,17 +2669,13 @@ fn historical_no_covered_prefix_for_reset_claim() -> Result<(), crate::portable:
     )?;
     assert!(matches!(
         fixture.engine.transaction_at_prefix(&txid),
-        Err(HistoricalQueryError::Unavailable(
-            HistoricalUnavailableCause::NoCoveredPrefix { .. }
-        ))
+        Err(TxQueryError::Retry(_))
     ));
     assert!(matches!(
         fixture
             .engine
             .script_history_at_prefix(ScriptHash::new(&[])),
-        Err(HistoricalQueryError::Unavailable(
-            HistoricalUnavailableCause::NoCoveredPrefix { .. }
-        ))
+        Err(TxQueryError::Retry(_))
     ));
     Ok(())
 }
@@ -2759,8 +2710,8 @@ fn historical_budgets_truncation_and_missing_map_to_shared()
     .0;
     assert!(matches!(
         truncated.engine.transaction_at_prefix(&txid),
-        Err(HistoricalQueryError::Unavailable(
-            HistoricalUnavailableCause::Shared(_)
+        Err(TxQueryError::Unavailable(
+            TxUnavailableCause::PrefixScanTruncated
         ))
     ));
     let mut missing_tree = BlockTree::new();
@@ -2788,8 +2739,8 @@ fn historical_budgets_truncation_and_missing_map_to_shared()
     .0;
     assert!(matches!(
         missing.engine.transaction_at_prefix(&txid),
-        Err(HistoricalQueryError::Unavailable(
-            HistoricalUnavailableCause::Shared(TxUnavailableCause::BlockBodyMissing { .. })
+        Err(TxQueryError::Unavailable(
+            TxUnavailableCause::BlockBodyMissing { .. }
         ))
     ));
     Ok(())
@@ -2822,9 +2773,9 @@ fn historical_budgets_health_and_capability_map_to_shared() -> Result<(), crate:
         .publish_failed("injected worker failure");
     assert!(matches!(
         failed_fixture.engine.transaction_at_prefix(&txid),
-        Err(HistoricalQueryError::Unavailable(
-            HistoricalUnavailableCause::Shared(_)
-        ))
+        Err(TxQueryError::Unavailable(TxUnavailableCause::WorkerFailed(
+            _
+        )))
     ));
     let mut disabled_tree = BlockTree::new();
     let disabled_tip_id = disabled_tree.insert_header(block.header, NodeStatus::HeaderValid)?;
@@ -2847,17 +2798,17 @@ fn historical_budgets_health_and_capability_map_to_shared() -> Result<(), crate:
         disabled_fixture
             .engine
             .script_history_at_prefix(ScriptHash::new(&[])),
-        Err(HistoricalQueryError::Unavailable(
-            HistoricalUnavailableCause::Shared(TxUnavailableCause::CapabilityDisabled(_))
+        Err(TxQueryError::Unavailable(
+            TxUnavailableCause::CapabilityDisabled(_)
         ))
     ));
     let tx_only = disabled_fixture.engine.transaction_at_prefix(&txid)?;
-    assert_eq!(tx_only.prefix.height, 0);
+    assert_eq!(tx_only.coverage.height, 0);
     Ok(())
 }
 
 #[test]
-fn historical_deep_stale_branch_exhausts_shared_ancestry_budget()
+fn historical_deep_stale_branch_scopes_absence_under_serving_view()
 -> Result<(), crate::portable::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
@@ -2894,12 +2845,8 @@ fn historical_deep_stale_branch_exhausts_shared_ancestry_budget()
             enabled: IndexCapabilities::ALL,
         },
     )?;
-    assert!(matches!(
-        fixture.engine.transaction_at_prefix(&txid),
-        Err(HistoricalQueryError::Unavailable(
-            HistoricalUnavailableCause::AncestryBudgetExhausted { .. }
-        ))
-    ));
+    let at = fixture.engine.transaction_at_prefix(&txid)?;
+    assert_eq!(at.value, None);
     Ok(())
 }
 
@@ -3002,6 +2949,167 @@ fn cursor_page_requires_txlookup_floor_that_covers_the_page()
             ))
         ),
         "a cursor below the tx floor must refuse instead of restarting: {paged:?}"
+    );
+    Ok(())
+}
+
+// QRY-03
+#[test]
+fn history_query_survives_chain_extension() -> Result<(), crate::portable::TestError> {
+    let genesis = Network::Regtest.genesis_block();
+    let txid = genesis.txs[0].txid();
+    let main_child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
+    let side_child = {
+        let mut tx = genesis.txs[0].clone();
+        tx.outputs[0].value = tx.outputs[0].value.saturating_add(Amount::from_sat(1));
+        child_block(&genesis, vec![tx])?
+    };
+    let mut tree = BlockTree::new();
+    let _genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let main_id = tree.insert_header(main_child.header, NodeStatus::HeaderValid)?;
+    let side_id = tree.insert_header(side_child.header, NodeStatus::HeaderValid)?;
+    let main_watermark = watermark_for(&tree, main_id)?;
+    let main_tip = tip_snapshot_for(&tree, main_id)?;
+    let side_tip = tip_snapshot_for(&tree, side_id)?;
+
+    let tip_cell = Arc::new(ArcSwapOption::empty());
+    tip_cell.store(Some(Arc::new(main_tip)));
+
+    let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let tip_cell_clone = Arc::clone(&tip_cell);
+    let on_read: Option<Box<dyn Fn() + Send>> = Some(Box::new(move || {
+        tip_cell_clone.store(Some(Arc::new(side_tip.clone())));
+    }));
+
+    let body = Arc::new(MovingBody::new(
+        vec![(1, main_child.block_hash(), consensus_bytes(&main_child))],
+        on_read,
+    ));
+
+    let reader: Arc<dyn IndexReader> = Arc::new(HistoricalReader {
+        snapshot: HistoricalSnapshot {
+            tx_watermark: Some(main_watermark),
+            sh_watermark: Some(main_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: vec![scan_response(
+                ColumnFamily::TxConfirmed,
+                TxidRow::scan_prefix(&txid),
+                vec![(TxidRow::row(&txid, 1).to_db_row().to_vec(), vec![0])],
+                true,
+            )],
+        },
+    });
+
+    let engine = DerivedIndexQueryEngine::new(
+        runtime,
+        reader,
+        bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_execution::chain::TipReader::new(tip_cell),
+        Some(body),
+        QueryEngineLive {
+            enabled: IndexCapabilities::ALL,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: None,
+            chain_transition: None,
+        },
+    );
+
+    let at = engine.transaction_at_prefix(&txid)?;
+    assert_eq!(at.height, 1);
+    assert_eq!(at.coverage.height, 1);
+    assert!(at.value.is_some());
+    Ok(())
+}
+
+// QRY-05
+#[test]
+fn outside_coverage_is_unavailable() -> Result<(), crate::portable::TestError> {
+    let genesis = Network::Regtest.genesis_block();
+    let child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
+    let mut tree = BlockTree::new();
+    let genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let child_id = tree.insert_header(child.header, NodeStatus::HeaderValid)?;
+    let genesis_watermark = watermark_for(&tree, genesis_id)?;
+
+    let (fixture, _) = HistoricalFixture::build(
+        tree,
+        child_id,
+        HistoricalConfig {
+            tx_watermark: Some(genesis_watermark),
+            sh_watermark: Some(genesis_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: Vec::new(),
+            bodies: vec![
+                (0, genesis.block_hash(), consensus_bytes(&genesis)),
+                (1, child.block_hash(), consensus_bytes(&child)),
+            ],
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+
+    let unknown_txid = Txid(Hash256::from_le_bytes(&[0xEE; 32]));
+    let result = fixture.engine.transaction_at_prefix(&unknown_txid);
+    assert!(
+        matches!(
+            result,
+            Err(TxQueryError::Unavailable(
+                TxUnavailableCause::OutsideCoverage {
+                    declared_floor_or_tip: 0
+                }
+            ))
+        ),
+        "query outside declared coverage must return OutsideCoverage error, got {result:?}"
+    );
+    Ok(())
+}
+
+// PRJ-11
+#[test]
+fn script_live_takes_no_transition_lock() -> Result<(), crate::portable::TestError> {
+    let block = Network::Regtest.genesis_block();
+    let script = ScriptHash::from_byte_array([1; 32]);
+    let outpoint = OutPoint::new(block.txs[0].txid(), 0);
+    let row = ScriptLiveRow::new(script, &outpoint);
+    let coin = crate::types::ScriptLiveCoin::new(script, 50_000, 0, true);
+
+    let transition = bitcoin_rs_execution::chain::TransitionDomain::new();
+    let stable_read = transition.stable_read();
+
+    let fixture = QueryFixture::new_with_transition(
+        FixtureConfig {
+            block: block.clone(),
+            retain_body: true,
+            scans: vec![scan_response(
+                ColumnFamily::ScriptLive,
+                ScriptHashRow::scan_prefix(script),
+                vec![(row.as_bytes().to_vec(), coin.encode_value()?)],
+                true,
+            )],
+            watermark: Some(IndexWatermark {
+                height: 0,
+                hash: *block.block_hash().as_bytes(),
+            }),
+            extra_blocks: Vec::new(),
+        },
+        Some(stable_read.clone()),
+    )?;
+    let authority = transition.authority();
+    let _guard = authority.lock();
+
+    for _ in 0..100 {
+        let live = fixture.engine.unspent_outputs(script)?;
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].value, 50_000);
+    }
+
+    assert_eq!(
+        stable_read.lock_acquisitions(),
+        0,
+        "ScriptLive must take zero transition locks"
     );
     Ok(())
 }

@@ -33,13 +33,15 @@ pub use index::{
 };
 pub use offline::{IndexResetReport, reset_offline};
 pub use query_api::{
-    CompactFilterQuery, DerivedIndexInfo, DerivedIndexQuery, RollbackWarningSource,
-    SCRIPT_HISTORY_PAGE_MAX, ScriptHistoryPage, ScriptHistoryRecord, ScriptIndexQuery,
-    ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause,
+    Answer, AppliedEpoch, CapabilityCoverage, CompactFilterQuery, CoveredPrefix, DerivedIndexInfo,
+    DerivedIndexQuery, QueryMiss, RetryReason, RollbackWarningSource, SCRIPT_HISTORY_PAGE_MAX,
+    ScriptHistoryPage, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
+    ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause, VerificationState,
 };
 pub use reconcile::{CURSOR_BYTE_LEN, ConsumerCursor, CursorDecodeError};
 pub use types::{
     HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, HashPrefixRow, INDEX_FORMAT_VERSION_KEY,
     INDEX_FORMAT_VERSION_VALUE, ScriptHash, ScriptHashRow, ScriptHistoryOccurrence, ScriptLiveCoin,
-    ScriptLiveRow, SpendingPrefixRow, TxPosition, TxPositionValue, positions_are_valid,
+    ScriptLiveRow, ScriptLiveValueError, SpendingPrefixRow, TxPosition, TxPositionValue,
+    positions_are_valid,
 };

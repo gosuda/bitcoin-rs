@@ -1,14 +1,19 @@
 use super::{
-    Arc, AtPrefix, Block, BlockBodySource, BlockTree, DerivedIndexInfo, DerivedIndexQuery,
-    DerivedIndexRuntime, Hash256, HistoricalQueryError, IndexCapabilities, IndexCapability,
-    IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES, Ordering, OutPoint, PrefixScanLimit,
+    Arc, Block, BlockBodySource, BlockTree, DerivedIndexInfo, DerivedIndexQuery,
+    DerivedIndexRuntime, Generation, Hash256, IndexCapabilities, IndexCapability, IndexReader,
+    IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES, Ordering, OutPoint, PrefixScanLimit,
     QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT, QUERY_SCAN_COUNT_LIMIT, QUERY_SCAN_ROW_LIMIT,
     ScriptHash, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
-    ScriptLiveScan, SpendingRecord, TipSnapshot, Tx, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
-    TxPosition, TxPositionValue, TxQueryError, TxUnavailableCause, Txid, deserialize,
+    ScriptLiveScan, SpendingRecord, Tx, TxIndexScan, TxIndexScanRow, TxIndexSnapshot, TxPosition,
+    TxPositionValue, TxQueryError, TxUnavailableCause, Txid, deserialize,
 };
-use crate::query_api::{CoveredPrefix, HistoricalUnavailableCause, ScriptHistoryPage};
-use bitcoin_rs_execution::chain::{AncestryBudgetExceeded, NodeId};
+use crate::query_api::{
+    Answer, AppliedEpoch, CapabilityCoverage, CoveredPrefix, QueryMiss, RetryReason,
+    ScriptHistoryPage, VerificationState,
+};
+use bitcoin_rs_execution::chain::{NodeId, TipReader};
+
+use std::time::{Duration, Instant};
 
 mod filters;
 #[cfg(any(test, verification, kani))]
@@ -83,17 +88,13 @@ impl QueryBudget {
         Ok(scan.rows)
     }
 
-    pub(super) fn accept_live_scan(
-        &mut self,
-        scan: ScriptLiveScan,
-    ) -> Result<Vec<crate::ScriptLiveRow>, TxQueryError> {
+    pub(super) fn accept_live_scan(&mut self, scan: &ScriptLiveScan) -> Result<(), TxQueryError> {
         self.accept_completed_scan(
             scan.complete,
             TxUnavailableCause::LivePrefixScanTruncated,
             scan.rows.len(),
             scan.encoded_bytes,
-        )?;
-        Ok(scan.rows)
+        )
     }
 
     fn accept_completed_scan(
@@ -161,34 +162,51 @@ impl QueryBudget {
     }
 }
 
+/// View lifetime bound (`QRY-07`): a captured view stops serving after this
+/// deadline so a long reader cannot pin a stale generation indefinitely.
+pub(crate) const VIEW_DEADLINE: Duration = Duration::from_secs(60);
+
 pub(crate) struct QueryEngineLive {
-    pub(crate) utxo: Option<bitcoin_rs_storage::utxo::UtxoReader>,
-    pub(crate) chain_transition: Option<bitcoin_rs_execution::chain::StableRead>,
     pub(crate) enabled: IndexCapabilities,
+    pub(crate) generation: Arc<Generation>,
+    pub(crate) historical_verified: Option<(u32, Hash256)>,
+    #[cfg(any(test, feature = "test-seam"))]
+    pub(crate) chain_transition: Option<bitcoin_rs_execution::chain::StableRead>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct CapabilityFloors {
-    pub(crate) tx_lookup: u32,
-    pub(crate) script_history: u32,
-}
-
-impl CapabilityFloors {
-    pub(crate) fn set(&mut self, capability: IndexCapability, floor: u32) {
-        match capability {
-            IndexCapability::TxLookup => self.tx_lookup = floor,
-            IndexCapability::ScriptHistory => self.script_history = floor,
-            IndexCapability::ScriptLive | IndexCapability::CompactFilters => {}
-        }
-    }
-}
-
-pub(super) const HISTORICAL_ANCESTRY_BUDGET: usize = 256;
-
+/// View-qualified pagination position (`QRY-06`): the generation that issued
+/// the cursor plus the funding-row position it resolved to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum PrefixBound {
-    ExactTip,
-    AtMost,
+pub(crate) struct OccurrenceCursor {
+    pub(crate) view_id: u64,
+    pub(crate) height: u32,
+    pub(crate) tx_pos: u32,
+}
+
+impl DerivedIndexQueryEngine {
+    fn require_cursor_tx_lookup_coverage_on_view(
+        view: &ServingView,
+        cursor: Option<Txid>,
+    ) -> Result<(), TxQueryError> {
+        let Some(_) = cursor else {
+            return Ok(());
+        };
+        let Some(tx_lookup) = view.coverage_for(IndexCapability::TxLookup) else {
+            return Ok(());
+        };
+        let Some(script_history) = view.coverage_for(IndexCapability::ScriptHistory) else {
+            return Ok(());
+        };
+        if tx_lookup.floor > script_history.floor {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::PrunedPrefixUnproven {
+                    family: "transaction index",
+                    floor: tx_lookup.floor,
+                },
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,25 +215,14 @@ pub(super) struct ReadPrefix {
     pub(super) height: u32,
     pub(super) hash: Hash256,
     pub(super) floor: u32,
-    pub(super) bound: PrefixBound,
+    pub(super) is_historical: bool,
 }
 
 impl ReadPrefix {
+    /// A row serves the view only inside the declared coverage window:
+    /// rows written after the view was captured are not part of it.
     pub(super) fn covers(&self, height: u32) -> bool {
-        match self.bound {
-            PrefixBound::ExactTip => true,
-            PrefixBound::AtMost => height >= self.floor && height <= self.height,
-        }
-    }
-}
-
-pub(super) fn map_historical_error(error: TxQueryError) -> HistoricalQueryError {
-    match error {
-        TxQueryError::Retry => HistoricalQueryError::Retry,
-        TxQueryError::Storage(message) => HistoricalQueryError::Storage(message),
-        TxQueryError::Unavailable(cause) => {
-            HistoricalQueryError::Unavailable(HistoricalUnavailableCause::Shared(cause))
-        }
+        height >= self.floor && height <= self.height
     }
 }
 
@@ -225,11 +232,67 @@ pub struct DerivedIndexQueryEngine {
     runtime: Arc<DerivedIndexRuntime>,
     reader: Arc<dyn IndexReader>,
     block_tree: bitcoin_rs_execution::chain::BlockTreeReader,
-    applied_tip: bitcoin_rs_execution::chain::TipReader,
+    applied_tip: TipReader,
     body_source: Option<Arc<dyn BlockBodySource>>,
-    utxo: Option<bitcoin_rs_storage::utxo::UtxoReader>,
-    chain_transition: Option<bitcoin_rs_execution::chain::StableRead>,
     enabled: IndexCapabilities,
+    generation: Arc<Generation>,
+    historical_verified: Option<(u32, Hash256)>,
+    #[cfg(any(test, feature = "test-seam"))]
+    #[expect(dead_code, reason = "test seam field")]
+    pub(crate) chain_transition: Option<bitcoin_rs_execution::chain::StableRead>,
+}
+
+/// One immutable serving view (`QRY-01`, `QRY-07`): the captured epoch,
+/// generation pin, coverage window, and verification provenance of a read.
+/// One owner, one bounded lifetime; methods return `ExpiredView` after the
+/// deadline or once the generation is retired.
+pub(crate) struct ServingView {
+    pub epoch: AppliedEpoch,
+    pub generation_id: u64,
+    pub coverage: [Option<CapabilityCoverage>; 4],
+    pub historical_verified_height: u32,
+    pub historical_verified_hash: Hash256,
+    pub(super) tip_id: NodeId,
+    segments: Arc<dyn IndexReader>,
+    deadline: Instant,
+}
+
+impl ServingView {
+    fn expired(&self) -> bool {
+        Instant::now() >= self.deadline
+    }
+
+    fn coverage_for(&self, capability: IndexCapability) -> Option<CapabilityCoverage> {
+        self.coverage[capability.index()]
+    }
+
+    fn prefix_for(
+        &self,
+        capability: IndexCapability,
+        is_historical: bool,
+    ) -> Result<ReadPrefix, TxQueryError> {
+        let coverage = self.coverage_for(capability).ok_or_else(|| {
+            TxQueryError::Retry(RetryReason::TipMoved {
+                expected_commit: self.epoch.commit_id,
+                current_commit: self.epoch.commit_id,
+            })
+        })?;
+        if coverage.floor > self.epoch.height {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::OutsideCoverage {
+                    declared_floor_or_tip: coverage.floor,
+                },
+            ));
+        }
+        let height = coverage.last_height.min(self.epoch.height);
+        Ok(ReadPrefix {
+            anchor_id: self.tip_id,
+            height,
+            hash: coverage.last_hash,
+            floor: coverage.floor,
+            is_historical,
+        })
+    }
 }
 
 impl core::fmt::Debug for DerivedIndexQueryEngine {
@@ -245,7 +308,7 @@ impl DerivedIndexQueryEngine {
         runtime: Arc<DerivedIndexRuntime>,
         reader: Arc<dyn IndexReader>,
         block_tree: bitcoin_rs_execution::chain::BlockTreeReader,
-        applied_tip: bitcoin_rs_execution::chain::TipReader,
+        applied_tip: TipReader,
         body_source: Option<Arc<dyn BlockBodySource>>,
         live: QueryEngineLive,
     ) -> Self {
@@ -256,9 +319,11 @@ impl DerivedIndexQueryEngine {
             block_tree,
             applied_tip,
             body_source,
-            utxo: live.utxo,
-            chain_transition: live.chain_transition,
             enabled: live.enabled,
+            generation: live.generation,
+            historical_verified: live.historical_verified,
+            #[cfg(any(test, feature = "test-seam"))]
+            chain_transition: live.chain_transition,
         }
     }
 
@@ -278,21 +343,6 @@ impl DerivedIndexQueryEngine {
         } else {
             IndexCapabilities::SCRIPT_HISTORY
         }
-    }
-
-    fn require_cursor_tx_lookup_coverage(
-        cursor: Option<Txid>,
-        floors: &CapabilityFloors,
-    ) -> Result<(), TxQueryError> {
-        if cursor.is_some() && floors.tx_lookup > floors.script_history {
-            return Err(TxQueryError::Unavailable(
-                TxUnavailableCause::PrunedPrefixUnproven {
-                    family: "transaction index",
-                    floor: floors.tx_lookup,
-                },
-            ));
-        }
-        Ok(())
     }
 
     fn query_health(&self) -> Result<(), TxQueryError> {
@@ -320,257 +370,256 @@ impl DerivedIndexQueryEngine {
         Ok(())
     }
 
-    fn with_snapshot<F, T>(&self, required: IndexCapabilities, f: F) -> Result<T, TxQueryError>
-    where
-        F: for<'s> FnOnce(
-            &'s dyn TxIndexSnapshot,
-            &TipSnapshot,
-            &mut QueryBudget,
-            CapabilityFloors,
-        ) -> Result<T, TxQueryError>,
-    {
+    /// Reads the applied epoch, generation, and coverage once and pins the
+    /// generation for the view's bounded lifetime (`QRY-01`, `QRY-07`).
+    pub(crate) fn capture_view(
+        &self,
+        required: IndexCapabilities,
+    ) -> Result<ServingView, TxQueryError> {
         self.query_health()?;
         self.require_enabled(required)?;
         self.check_capability_failures(required)?;
-
-        let _chain_transition = if required.contains(IndexCapability::ScriptLive) {
-            Some(
-                self.chain_transition
-                    .as_ref()
-                    .ok_or_else(|| {
-                        TxQueryError::Unavailable(TxUnavailableCause::MissingAuthority(
-                            "chain transition authority missing for ScriptLive",
-                        ))
-                    })?
-                    .lock(),
-            )
-        } else {
-            None
-        };
-
-        let tip_before = self.applied_tip.load_full().ok_or(TxQueryError::Retry)?;
-        let revision_before = self.runtime.revision();
+        if self.generation.is_revoked() {
+            return Err(TxQueryError::ExpiredView);
+        }
+        let revision = self.runtime.revision();
+        let tip = self.applied_tip.load_full().ok_or_else(|| {
+            TxQueryError::Retry(RetryReason::TipMoved {
+                expected_commit: revision,
+                current_commit: revision,
+            })
+        })?;
 
         let reader: &dyn IndexReader = self.reader.as_ref();
         let snapshot = reader
             .snapshot()
             .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
 
-        let floors =
-            Self::load_snapshot_floors_and_watermarks(snapshot.as_ref(), required, &tip_before)?;
-
-        let mut budget = QueryBudget::new();
-        let result = f(snapshot.as_ref(), &tip_before, &mut budget, floors);
-
-        self.query_health()?;
-        self.check_capability_failures(required)?;
-        let tip_after = self.applied_tip.load_full();
-        let revision_after = self.runtime.revision();
-        if revision_before != revision_after
-            || tip_after
-                .as_ref()
-                .is_none_or(|tip| tip.height != tip_before.height || tip.hash != tip_before.hash)
-        {
-            return Err(TxQueryError::Retry);
+        let mut coverage = [None; 4];
+        for capability in required.iter() {
+            let watermark = snapshot
+                .capability_watermark(capability)
+                .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
+            let Some(watermark) = watermark else {
+                return Err(TxQueryError::Retry(RetryReason::TipMoved {
+                    expected_commit: revision,
+                    current_commit: revision,
+                }));
+            };
+            let floor = snapshot
+                .capability_floor(capability)
+                .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
+            coverage[capability.index()] = Some(CapabilityCoverage {
+                floor,
+                last_height: watermark.height,
+                last_hash: Hash256::from_le_bytes(&watermark.hash),
+            });
         }
 
-        result
+        let (historical_verified_height, historical_verified_hash) =
+            self.historical_verified.unwrap_or((tip.height, tip.hash));
+        Ok(ServingView {
+            epoch: AppliedEpoch {
+                hash: tip.hash,
+                height: tip.height,
+                commit_id: self.runtime.revision(),
+            },
+            generation_id: self.generation.id(),
+            coverage,
+            historical_verified_height,
+            historical_verified_hash,
+            tip_id: tip.tip_id,
+            segments: Arc::clone(&self.reader),
+            deadline: Instant::now() + VIEW_DEADLINE,
+        })
     }
 
-    fn bounded_common_ancestor(
-        tree: &BlockTree,
-        a: NodeId,
-        b: NodeId,
-        remaining: &mut usize,
-    ) -> Result<Option<NodeId>, AncestryBudgetExceeded> {
-        let a_node = tree.node(a).map_err(|_| AncestryBudgetExceeded)?;
-        let b_node = tree.node(b).map_err(|_| AncestryBudgetExceeded)?;
-        let (mut cursor_a, mut cursor_b) = (a, b);
-        let (mut height_a, mut height_b) = (a_node.height, b_node.height);
-        if height_a > height_b {
-            let aligned = tree.node_at_height_from_bounded(cursor_a, height_b, remaining)?;
-            let Some(aligned) = aligned else {
-                return Ok(None);
-            };
-            cursor_a = aligned;
-            height_a = height_b;
-        } else if height_b > height_a {
-            let aligned = tree.node_at_height_from_bounded(cursor_b, height_a, remaining)?;
-            let Some(aligned) = aligned else {
-                return Ok(None);
-            };
-            cursor_b = aligned;
-            height_b = height_a;
-        }
-        debug_assert_eq!(height_a, height_b);
-        if cursor_a == cursor_b {
-            return Ok(Some(cursor_a));
-        }
-        loop {
-            let node_a = tree.node(cursor_a).map_err(|_| AncestryBudgetExceeded)?;
-            let node_b = tree.node(cursor_b).map_err(|_| AncestryBudgetExceeded)?;
-            let (Some(parent_a), Some(parent_b)) = (node_a.parent, node_b.parent) else {
-                return Ok(None);
-            };
-            *remaining = remaining.checked_sub(1).ok_or(AncestryBudgetExceeded)?;
-            if parent_a == parent_b {
-                return Ok(Some(parent_a));
-            }
-            cursor_a = parent_a;
-            cursor_b = parent_b;
-        }
+    fn snapshot_of(view: &ServingView) -> Result<Box<dyn TxIndexSnapshot + '_>, TxQueryError> {
+        let reader: &dyn IndexReader = view.segments.as_ref();
+        reader
+            .snapshot()
+            .map_err(|e| TxQueryError::Storage(e.to_string().into()))
     }
 
-    fn covered_anchor(
-        &self,
-        tip_id: NodeId,
-        watermarks: &[(IndexCapability, IndexWatermark)],
-        remaining: &mut usize,
-    ) -> Result<(NodeId, u32, Hash256), HistoricalQueryError> {
-        let tree = self.block_tree.read();
-        tree.node(tip_id).map_err(|_| HistoricalQueryError::Retry)?;
-        let mut anchor_id = tip_id;
-        for (capability, watermark) in watermarks {
-            let hash = Hash256::from_le_bytes(&watermark.hash);
-            let Some(watermark_id) = tree.lookup(hash) else {
-                return Err(HistoricalQueryError::Retry);
-            };
-            let watermark_node = tree
-                .node(watermark_id)
-                .map_err(|_| HistoricalQueryError::Retry)?;
-            if watermark_node.height != watermark.height {
-                return Err(HistoricalQueryError::Retry);
-            }
-            match Self::bounded_common_ancestor(&tree, anchor_id, watermark_id, remaining) {
-                Ok(Some(joined)) => anchor_id = joined,
-                Ok(None) => return Err(HistoricalQueryError::Retry),
-                Err(_) => {
-                    return Err(HistoricalQueryError::Unavailable(
-                        HistoricalUnavailableCause::AncestryBudgetExhausted {
-                            capability: *capability,
-                            watermark_height: watermark.height,
-                        },
-                    ));
-                }
-            }
+    fn check_view(&self, view: &ServingView) -> Result<(), TxQueryError> {
+        if view.generation_id != self.generation.id() || self.generation.is_revoked() {
+            return Err(TxQueryError::ExpiredView);
         }
-        let anchor = tree
-            .node(anchor_id)
-            .map_err(|_| HistoricalQueryError::Retry)?;
-        Ok((anchor_id, anchor.height, anchor.hash))
+        if view.expired() {
+            return Err(TxQueryError::ExpiredView);
+        }
+        Ok(())
     }
 
-    fn require_anchor_still_covers(&self, anchor: &ReadPrefix) -> Result<(), HistoricalQueryError> {
-        let tip_after = self
-            .applied_tip
-            .load_full()
-            .ok_or(HistoricalQueryError::Retry)?;
-        let tree = self.block_tree.read();
-        let mut remaining = HISTORICAL_ANCESTRY_BUDGET;
-        let found = tree
-            .node_at_height_from_bounded(tip_after.tip_id, anchor.height, &mut remaining)
-            .map_err(|_| HistoricalQueryError::Retry)?;
-        match found {
-            Some(id) if id == anchor.anchor_id => Ok(()),
-            _ => Err(HistoricalQueryError::Retry),
-        }
-    }
-
-    fn with_prefix<F, T>(
+    fn with_view<F, T>(
         &self,
         required: IndexCapabilities,
+        view: &ServingView,
         f: F,
-    ) -> Result<AtPrefix<T>, HistoricalQueryError>
+    ) -> Result<T, TxQueryError>
     where
         F: for<'s> FnOnce(
             &'s dyn TxIndexSnapshot,
-            &ReadPrefix,
+            &ServingView,
             &mut QueryBudget,
         ) -> Result<T, TxQueryError>,
     {
-        self.query_health().map_err(map_historical_error)?;
-        self.require_enabled(required)
-            .map_err(map_historical_error)?;
-        if required.contains(IndexCapability::CompactFilters)
-            && let Some(reason) = self.runtime.compact_filter_failure.read().clone()
-        {
-            return Err(HistoricalQueryError::Unavailable(
-                HistoricalUnavailableCause::Shared(TxUnavailableCause::CompactFilterFailed(reason)),
-            ));
-        }
-        let tip_before = self
-            .applied_tip
-            .load_full()
-            .ok_or(HistoricalQueryError::Retry)?;
-        let reader: &dyn IndexReader = self.reader.as_ref();
-        let snapshot = reader
-            .snapshot()
-            .map_err(|e| HistoricalQueryError::Storage(e.to_string().into()))?;
-        let (floor, watermarks) = Self::load_prefix_watermarks(snapshot.as_ref(), required)?;
-        let mut remaining = HISTORICAL_ANCESTRY_BUDGET;
-        let (anchor_id, anchor_height, anchor_hash) =
-            self.covered_anchor(tip_before.tip_id, &watermarks, &mut remaining)?;
-        if anchor_height < floor {
-            return Err(HistoricalQueryError::Unavailable(
-                HistoricalUnavailableCause::PrefixBelowFloor { floor },
-            ));
-        }
-        let prefix = ReadPrefix {
-            anchor_id,
-            height: anchor_height,
-            hash: anchor_hash,
-            floor,
-            bound: PrefixBound::AtMost,
-        };
+        self.query_health()?;
+        self.require_enabled(required)?;
+        self.check_capability_failures(required)?;
+        self.check_view(view)?;
+
+        let snapshot = Self::snapshot_of(view)?;
         let mut budget = QueryBudget::new();
-        let answer = f(snapshot.as_ref(), &prefix, &mut budget).map_err(map_historical_error)?;
-        self.query_health().map_err(map_historical_error)?;
-        if required.contains(IndexCapability::CompactFilters)
-            && let Some(reason) = self.runtime.compact_filter_failure.read().clone()
-        {
-            return Err(HistoricalQueryError::Unavailable(
-                HistoricalUnavailableCause::Shared(TxUnavailableCause::CompactFilterFailed(reason)),
-            ));
-        }
-        self.require_anchor_still_covers(&prefix)?;
-        self.query_health().map_err(map_historical_error)?;
-        Ok(AtPrefix {
-            prefix: CoveredPrefix {
-                floor: prefix.floor,
-                height: prefix.height,
-                hash: prefix.hash,
-            },
-            answer,
-        })
+        let result = f(snapshot.as_ref(), view, &mut budget);
+
+        self.query_health()?;
+        self.check_capability_failures(required)?;
+        result
     }
 
+    fn answer<T>(&self, view: &ServingView, capability: IndexCapability, value: T) -> Answer<T> {
+        let coverage = view.coverage_for(capability);
+        let (floor, height, hash) = coverage.map_or((0, view.epoch.height, view.epoch.hash), |c| {
+            (c.floor, c.last_height, c.last_hash)
+        });
+        let verification_state = if view.historical_verified_height >= view.epoch.height {
+            VerificationState::ChainVerified
+        } else {
+            VerificationState::AssumedHistory {
+                verified_height: view.historical_verified_height,
+                verified_hash: view.historical_verified_hash,
+            }
+        };
+        Answer {
+            value,
+            block_hash: view.epoch.hash,
+            height: view.epoch.height,
+            coverage: CoveredPrefix {
+                floor,
+                height,
+                hash,
+            },
+            verification_state,
+        }
+    }
+
+    /// Absence inside complete declared coverage is scoped absence (`QRY-05`);
+    /// absence above the coverage tip means the answer would mislead.
+    fn scoped_or_outside<T>(
+        &self,
+        view: &ServingView,
+        capability: IndexCapability,
+        value: Option<T>,
+    ) -> Result<Option<T>, TxQueryError> {
+        if value.is_some() {
+            return Ok(value);
+        }
+        let in_coverage = view
+            .coverage_for(capability)
+            .is_some_and(|coverage| coverage.last_height >= view.epoch.height);
+        if in_coverage {
+            QueryMiss::Absent.into_scoped()
+        } else {
+            let declared_floor_or_tip = view
+                .coverage_for(capability)
+                .map_or(0, |coverage| coverage.last_height);
+            QueryMiss::Unavailable {
+                capability,
+                declared_floor_or_tip,
+            }
+            .into_scoped()
+        }
+    }
+
+    /// Historical queries stay answerable under ordinary chain extension
+    /// (`QRY-03`): the view pins its epoch, so extension cannot invalidate it.
+    pub(crate) fn transaction_at_answer(
+        &self,
+        txid: &Txid,
+    ) -> Result<Answer<Option<(u32, Tx)>>, TxQueryError> {
+        let view = self.capture_view(IndexCapabilities::TX_LOOKUP)?;
+        let value = self.with_view(
+            IndexCapabilities::TX_LOOKUP,
+            &view,
+            |snapshot, view, budget| {
+                let prefix = Self::require_prefix(view, IndexCapability::TxLookup)?;
+                let located = self.locate_transaction_for(snapshot, &prefix, budget, txid)?;
+                self.scoped_or_outside(view, IndexCapability::TxLookup, located)
+            },
+        )?;
+        Ok(self.answer(&view, IndexCapability::TxLookup, value))
+    }
+
+    pub(crate) fn script_history_at_answer(
+        &self,
+        script: ScriptHash,
+    ) -> Result<Answer<ScriptIndexSnapshot>, TxQueryError> {
+        let view = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
+        let value = self.with_view(
+            IndexCapabilities::SCRIPT_HISTORY,
+            &view,
+            |snapshot, view, budget| {
+                self.script_budget(budget);
+                let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
+                self.history_snapshot_for(snapshot, &prefix, budget, script)
+            },
+        )?;
+        Ok(self.answer(&view, IndexCapability::ScriptHistory, value))
+    }
+
+    pub(crate) fn spender_at_answer(
+        &self,
+        outpoint: OutPoint,
+    ) -> Result<Answer<Option<SpendingRecord>>, TxQueryError> {
+        let view = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
+        let value = self.with_view(
+            IndexCapabilities::SCRIPT_HISTORY,
+            &view,
+            |snapshot, view, budget| {
+                let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
+                let spent = self.spender_for(snapshot, &prefix, budget, &outpoint)?;
+                self.scoped_or_outside(view, IndexCapability::ScriptHistory, spent)
+            },
+        )?;
+        Ok(self.answer(&view, IndexCapability::ScriptHistory, value))
+    }
+    fn require_prefix(
+        view: &ServingView,
+        capability: IndexCapability,
+    ) -> Result<ReadPrefix, TxQueryError> {
+        view.prefix_for(capability, true)
+    }
+
+    fn require_tip_prefix(
+        view: &ServingView,
+        capability: IndexCapability,
+    ) -> Result<ReadPrefix, TxQueryError> {
+        view.prefix_for(capability, false)
+    }
+
+    #[cfg(test)]
     pub(crate) fn transaction_at_prefix(
         &self,
         txid: &Txid,
-    ) -> Result<AtPrefix<Option<(u32, Tx)>>, HistoricalQueryError> {
-        self.with_prefix(IndexCapabilities::TX_LOOKUP, |snapshot, prefix, budget| {
-            self.locate_transaction_for(snapshot, prefix, budget, txid)
-        })
+    ) -> Result<Answer<Option<(u32, Tx)>>, TxQueryError> {
+        self.transaction_at_answer(txid)
     }
 
+    #[cfg(test)]
     pub(crate) fn script_history_at_prefix(
         &self,
         script: ScriptHash,
-    ) -> Result<AtPrefix<ScriptIndexSnapshot>, HistoricalQueryError> {
-        self.with_prefix(
-            IndexCapabilities::SCRIPT_HISTORY,
-            |snapshot, prefix, budget| self.history_snapshot_for(snapshot, prefix, budget, script),
-        )
+    ) -> Result<Answer<ScriptIndexSnapshot>, TxQueryError> {
+        self.script_history_at_answer(script)
     }
 
+    #[cfg(test)]
     pub(crate) fn spender_at_prefix(
         &self,
         outpoint: OutPoint,
-    ) -> Result<AtPrefix<Option<SpendingRecord>>, HistoricalQueryError> {
-        self.with_prefix(
-            IndexCapabilities::SCRIPT_HISTORY,
-            |snapshot, prefix, budget| self.spender_for(snapshot, prefix, budget, &outpoint),
-        )
+    ) -> Result<Answer<Option<SpendingRecord>>, TxQueryError> {
+        self.spender_at_answer(outpoint)
     }
 
     pub(crate) fn index_progress_for(
@@ -579,8 +628,13 @@ impl DerivedIndexQueryEngine {
     ) -> Result<IndexProgress, TxQueryError> {
         self.query_health()?;
 
-        let tip_before = self.applied_tip.load_full().ok_or(TxQueryError::Retry)?;
         let revision_before = self.runtime.revision();
+        let tip_before = self.applied_tip.load_full().ok_or_else(|| {
+            TxQueryError::Retry(RetryReason::TipMoved {
+                expected_commit: revision_before,
+                current_commit: revision_before,
+            })
+        })?;
 
         let reader: &dyn IndexReader = self.reader.as_ref();
         let snapshot = reader
@@ -619,7 +673,10 @@ impl DerivedIndexQueryEngine {
                 .as_ref()
                 .is_none_or(|tip| tip.height != tip_before.height || tip.hash != tip_before.hash)
         {
-            return Err(TxQueryError::Retry);
+            return Err(TxQueryError::Retry(RetryReason::TipMoved {
+                expected_commit: revision_before,
+                current_commit: revision_after,
+            }));
         }
 
         Ok(IndexProgress {
@@ -639,51 +696,42 @@ pub(crate) struct IndexProgress {
 
 impl DerivedIndexQuery for DerivedIndexQueryEngine {
     fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
-        self.with_snapshot(
+        let view = self.capture_view(IndexCapabilities::TX_LOOKUP)?;
+        self.with_view(
             IndexCapabilities::TX_LOOKUP,
-            |snapshot, tip, budget, floors| {
-                let prefix = ReadPrefix {
-                    anchor_id: tip.tip_id,
-                    height: tip.height,
-                    hash: tip.hash,
-                    floor: floors.tx_lookup,
-                    bound: PrefixBound::ExactTip,
-                };
-                self.transaction_for(snapshot, &prefix, budget, txid)
+            &view,
+            |snapshot, view, budget| {
+                let prefix = Self::require_tip_prefix(view, IndexCapability::TxLookup)?;
+                let found = self.transaction_for(snapshot, &prefix, budget, txid)?;
+                self.scoped_or_outside(view, IndexCapability::TxLookup, found)
             },
         )
     }
 
     fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
-        self.with_snapshot(
+        let view = self.capture_view(IndexCapabilities::TX_LOOKUP)?;
+        self.with_view(
             IndexCapabilities::TX_LOOKUP,
-            |snapshot, tip, budget, floors| {
-                let prefix = ReadPrefix {
-                    anchor_id: tip.tip_id,
-                    height: tip.height,
-                    hash: tip.hash,
-                    floor: floors.tx_lookup,
-                    bound: PrefixBound::ExactTip,
-                };
-                self.outpoint_value_for(snapshot, &prefix, budget, outpoint)
+            &view,
+            |snapshot, view, budget| {
+                let prefix = Self::require_tip_prefix(view, IndexCapability::TxLookup)?;
+                let value = self.outpoint_value_for(snapshot, &prefix, budget, outpoint)?;
+                self.scoped_or_outside(view, IndexCapability::TxLookup, value)
             },
         )
     }
 
     fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
-        self.with_snapshot(
+        let view = self.capture_view(IndexCapabilities::TX_LOOKUP)?;
+        self.with_view(
             IndexCapabilities::TX_LOOKUP,
-            |snapshot, tip, budget, floors| {
-                let prefix = ReadPrefix {
-                    anchor_id: tip.tip_id,
-                    height: tip.height,
-                    hash: tip.hash,
-                    floor: floors.tx_lookup,
-                    bound: PrefixBound::ExactTip,
-                };
-                Ok(self
+            &view,
+            |snapshot, view, budget| {
+                let prefix = Self::require_tip_prefix(view, IndexCapability::TxLookup)?;
+                let height = self
                     .locate_transaction_for(snapshot, &prefix, budget, txid)?
-                    .map(|(height, _)| height))
+                    .map(|(height, _)| height);
+                self.scoped_or_outside(view, IndexCapability::TxLookup, height)
             },
         )
     }
@@ -716,34 +764,33 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         limit: usize,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
         let required = self.script_page_requirements(last);
-        self.with_snapshot(required, |snapshot, tip, budget, floors| {
+        let view = self.capture_view(required)?;
+        self.with_view(required, &view, |snapshot, view, budget| {
             self.script_budget(budget);
-            Self::require_cursor_tx_lookup_coverage(last, &floors)?;
-            let prefix = ReadPrefix {
-                anchor_id: tip.tip_id,
-                height: tip.height,
-                hash: tip.hash,
-                floor: floors.script_history,
-                bound: PrefixBound::ExactTip,
-            };
-            Self::history_page_for(snapshot, &prefix, budget, script, last, limit)
+            Self::require_cursor_tx_lookup_coverage_on_view(view, last)?;
+            let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
+            Self::history_page_for(
+                snapshot,
+                &prefix,
+                budget,
+                script,
+                last,
+                view.generation_id,
+                limit,
+            )
         })
     }
     fn history_snapshot(
         &self,
         scripthash: ScriptHash,
     ) -> Result<ScriptIndexSnapshot, TxQueryError> {
-        self.with_snapshot(
+        let view = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
+        self.with_view(
             IndexCapabilities::SCRIPT_HISTORY,
-            |snapshot, tip, budget, floors| {
+            &view,
+            |snapshot, view, budget| {
                 self.script_budget(budget);
-                let prefix = ReadPrefix {
-                    anchor_id: tip.tip_id,
-                    height: tip.height,
-                    hash: tip.hash,
-                    floor: floors.script_history,
-                    bound: PrefixBound::ExactTip,
-                };
+                let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
                 self.history_snapshot_for(snapshot, &prefix, budget, scripthash)
             },
         )
@@ -753,17 +800,13 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         &self,
         scripthash: ScriptHash,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
-        self.with_snapshot(
+        let view = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
+        self.with_view(
             IndexCapabilities::SCRIPT_HISTORY,
-            |snapshot, tip, budget, floors| {
+            &view,
+            |snapshot, view, budget| {
                 self.script_budget(budget);
-                let prefix = ReadPrefix {
-                    anchor_id: tip.tip_id,
-                    height: tip.height,
-                    hash: tip.hash,
-                    floor: floors.script_history,
-                    bound: PrefixBound::ExactTip,
-                };
+                let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
                 self.confirmed_history_for(snapshot, &prefix, budget, scripthash)
             },
         )
@@ -776,16 +819,19 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         limit: usize,
     ) -> Result<ScriptHistoryPage, TxQueryError> {
         let required = self.script_page_requirements(cursor);
-        self.with_snapshot(required, |snapshot, tip, budget, floors| {
-            Self::require_cursor_tx_lookup_coverage(cursor, &floors)?;
-            let prefix = ReadPrefix {
-                anchor_id: tip.tip_id,
-                height: tip.height,
-                hash: tip.hash,
-                floor: floors.script_history,
-                bound: PrefixBound::ExactTip,
-            };
-            Self::confirmed_history_page_for(snapshot, &prefix, budget, scripthash, cursor, limit)
+        let view = self.capture_view(required)?;
+        self.with_view(required, &view, |snapshot, view, budget| {
+            Self::require_cursor_tx_lookup_coverage_on_view(view, cursor)?;
+            let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
+            Self::confirmed_history_page_for(
+                snapshot,
+                &prefix,
+                budget,
+                scripthash,
+                cursor,
+                view.generation_id,
+                limit,
+            )
         })
     }
 
@@ -793,26 +839,26 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         &self,
         scripthash: ScriptHash,
     ) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
-        self.with_snapshot(
+        let view = self.capture_view(IndexCapabilities::SCRIPT_LIVE)?;
+        self.with_view(
             IndexCapabilities::SCRIPT_LIVE,
-            |snapshot, tip, budget, _floors| {
-                self.unspent_outputs_for(snapshot, tip, budget, scripthash)
+            &view,
+            |snapshot, view, budget| {
+                let prefix = Self::require_prefix(view, IndexCapability::ScriptLive)?;
+                self.unspent_outputs_for(snapshot, &prefix, budget, scripthash)
             },
         )
     }
 
     fn spender(&self, outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError> {
-        self.with_snapshot(
+        let view = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
+        self.with_view(
             IndexCapabilities::SCRIPT_HISTORY,
-            |snapshot, tip, budget, floors| {
-                let prefix = ReadPrefix {
-                    anchor_id: tip.tip_id,
-                    height: tip.height,
-                    hash: tip.hash,
-                    floor: floors.script_history,
-                    bound: PrefixBound::ExactTip,
-                };
-                self.spender_for(snapshot, &prefix, budget, &outpoint)
+            &view,
+            |snapshot, view, budget| {
+                let prefix = Self::require_tip_prefix(view, IndexCapability::ScriptHistory)?;
+                let spent = self.spender_for(snapshot, &prefix, budget, &outpoint)?;
+                self.scoped_or_outside(view, IndexCapability::ScriptHistory, spent)
             },
         )
     }
@@ -843,63 +889,6 @@ impl DerivedIndexQueryEngine {
         }
         Ok(())
     }
-
-    fn load_snapshot_floors_and_watermarks(
-        snapshot: &dyn TxIndexSnapshot,
-        required: IndexCapabilities,
-        tip: &TipSnapshot,
-    ) -> Result<CapabilityFloors, TxQueryError> {
-        let mut floors = CapabilityFloors::default();
-        for capability in [IndexCapability::TxLookup, IndexCapability::ScriptHistory] {
-            if !required.contains(capability) {
-                continue;
-            }
-            let floor = snapshot
-                .capability_floor(capability)
-                .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
-            floors.set(capability, floor);
-        }
-
-        for capability in IndexCapability::ALL {
-            if !required.contains(capability) {
-                continue;
-            }
-            let watermark = snapshot
-                .capability_watermark(capability)
-                .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
-            let Some(watermark) = watermark else {
-                return Err(TxQueryError::Retry);
-            };
-            if watermark.height != tip.height || watermark.hash != *tip.hash.as_byte_array() {
-                return Err(TxQueryError::Retry);
-            }
-        }
-        Ok(floors)
-    }
-
-    fn load_prefix_watermarks(
-        snapshot: &dyn TxIndexSnapshot,
-        required: IndexCapabilities,
-    ) -> Result<(u32, Vec<(IndexCapability, IndexWatermark)>), HistoricalQueryError> {
-        let mut floor: u32 = 0;
-        let mut watermarks = Vec::new();
-        for capability in required.iter() {
-            let capability_floor = snapshot
-                .capability_floor(capability)
-                .map_err(|e| HistoricalQueryError::Storage(e.to_string().into()))?;
-            floor = floor.max(capability_floor);
-            let watermark = snapshot
-                .capability_watermark(capability)
-                .map_err(|e| HistoricalQueryError::Storage(e.to_string().into()))?;
-            let Some(watermark) = watermark else {
-                return Err(HistoricalQueryError::Unavailable(
-                    HistoricalUnavailableCause::NoCoveredPrefix { capability },
-                ));
-            };
-            watermarks.push((capability, watermark));
-        }
-        Ok((floor, watermarks))
-    }
 }
 #[cfg(test)]
 mod tests {
@@ -913,7 +902,7 @@ mod tests {
             encoded_bytes: 2,
             complete: true,
         })?;
-        budget.accept_live_scan(ScriptLiveScan {
+        budget.accept_live_scan(&ScriptLiveScan {
             rows: Vec::new(),
             coins: Vec::new(),
             encoded_bytes: 3,
@@ -942,7 +931,7 @@ mod tests {
                 TxUnavailableCause::PrefixScanTruncated
             ))
         ));
-        let live = budget.accept_live_scan(ScriptLiveScan {
+        let live = budget.accept_live_scan(&ScriptLiveScan {
             rows: Vec::new(),
             coins: Vec::new(),
             encoded_bytes: 3,
@@ -1030,7 +1019,7 @@ mod tests {
             Err(TxQueryError::Unavailable(_))
         ));
         assert_eq!(budget.remaining_bytes, 2);
-        budget.accept_live_scan(ScriptLiveScan {
+        budget.accept_live_scan(&ScriptLiveScan {
             rows: Vec::new(),
             coins: Vec::new(),
             encoded_bytes: 2,
@@ -1068,79 +1057,5 @@ mod tests {
         assert!(weak_b.upgrade().is_some());
         drop(budget);
         assert!(weak_b.upgrade().is_none());
-    }
-
-    struct UnreachableReader;
-
-    impl IndexReader for UnreachableReader {
-        fn snapshot(&self) -> Result<Box<dyn TxIndexSnapshot + '_>, crate::IndexError> {
-            unreachable!("covered_anchor never snapshots the index")
-        }
-    }
-
-    fn anchor_test_engine(tree: bitcoin_rs_execution::chain::BlockTree) -> DerivedIndexQueryEngine {
-        use parking_lot::RwLock;
-
-        let tree = Arc::new(RwLock::new(tree));
-        let tip_cell = Arc::new(arc_swap::ArcSwapOption::empty());
-        let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-        let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
-        DerivedIndexQueryEngine::new(
-            runtime,
-            Arc::new(UnreachableReader),
-            bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(&tree)),
-            bitcoin_rs_execution::chain::TipReader::new(tip_cell),
-            None,
-            QueryEngineLive {
-                utxo: None,
-                chain_transition: None,
-                enabled: IndexCapabilities::ALL,
-            },
-        )
-    }
-
-    #[test]
-    fn covered_anchor_rejects_watermark_height_mismatch() {
-        use bitcoin_rs_execution::chain::NodeStatus;
-
-        let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
-        let mut tree = bitcoin_rs_execution::chain::BlockTree::new();
-        let genesis_id = tree
-            .insert_header(genesis.header, NodeStatus::HeaderValid)
-            .unwrap_or_else(|error| panic!("genesis header: {error:?}"));
-        let node = tree
-            .node(genesis_id)
-            .unwrap_or_else(|error| panic!("genesis node: {error:?}"));
-        let (height, hash) = (node.height, node.hash);
-        let engine = anchor_test_engine(tree);
-
-        let mut remaining = HISTORICAL_ANCESTRY_BUDGET;
-        let matching = IndexWatermark {
-            height,
-            hash: *hash.as_byte_array(),
-        };
-        let (anchor_id, anchor_height, _) = engine
-            .covered_anchor(
-                genesis_id,
-                &[(IndexCapability::TxLookup, matching)],
-                &mut remaining,
-            )
-            .unwrap_or_else(|error| panic!("matching watermark joins: {error:?}"));
-        assert_eq!(anchor_id, genesis_id);
-        assert_eq!(anchor_height, height);
-
-        let mut remaining = HISTORICAL_ANCESTRY_BUDGET;
-        let mismatched = IndexWatermark {
-            height: height.saturating_add(1),
-            hash: *hash.as_byte_array(),
-        };
-        assert!(matches!(
-            engine.covered_anchor(
-                genesis_id,
-                &[(IndexCapability::TxLookup, mismatched)],
-                &mut remaining
-            ),
-            Err(HistoricalQueryError::Retry)
-        ));
     }
 }

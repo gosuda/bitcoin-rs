@@ -466,8 +466,6 @@ fn build_derived_index_open_spec(
         facts_bytes: None,
         facts_gap: None,
         seed_slot,
-        utxo: None,
-        chain_transition: None,
     }))
 }
 

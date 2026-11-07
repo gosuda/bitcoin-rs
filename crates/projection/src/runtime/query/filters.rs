@@ -6,18 +6,23 @@ use crate::{BasicFilter, CompactFilterQuery};
 
 impl CompactFilterQuery for DerivedIndexQueryEngine {
     fn block_filter(&self, hash: Hash256) -> Result<Option<BasicFilter>, TxQueryError> {
-        self.with_snapshot(IndexCapabilities::COMPACT_FILTERS, |snapshot, tip, _, _| {
-            if self
-                .block_tree
-                .read()
-                .active_height_of(tip.tip_id, hash)
-                .is_none()
-            {
-                return Ok(None);
-            }
-            let filter = read_filter(snapshot, hash)?;
-            Ok(Some(filter))
-        })
+        let view = self.capture_view(IndexCapabilities::COMPACT_FILTERS)?;
+        self.with_view(
+            IndexCapabilities::COMPACT_FILTERS,
+            &view,
+            |snapshot, view, _| {
+                if self
+                    .block_tree
+                    .read()
+                    .active_height_of(view.tip_id, hash)
+                    .is_none()
+                {
+                    return Ok(None);
+                }
+                let filter = read_filter(snapshot, hash)?;
+                Ok(Some(filter))
+            },
+        )
     }
 
     fn for_each_filter(
@@ -30,50 +35,60 @@ impl CompactFilterQuery for DerivedIndexQueryEngine {
         if step != 1 && step != 1000 {
             return Ok(None);
         }
-        self.with_snapshot(IndexCapabilities::COMPACT_FILTERS, |snapshot, tip, _, _| {
-            let (previous, hashes) = {
-                let tree = self.block_tree.read();
-                let Some(end) = tree.active_height_of(tip.tip_id, stop) else {
-                    return Ok(None);
+        let view = self.capture_view(IndexCapabilities::COMPACT_FILTERS)?;
+        self.with_view(
+            IndexCapabilities::COMPACT_FILTERS,
+            &view,
+            |snapshot, view, _| {
+                let (previous, hashes) = {
+                    let tree = self.block_tree.read();
+                    let Some(end) = tree.active_height_of(view.tip_id, stop) else {
+                        return Ok(None);
+                    };
+                    if start > end {
+                        return Ok((step == 1000 && start == 1000).then_some([0; 32]));
+                    }
+                    let count = (end - start) / step + 1;
+                    if (step == 1 && count > 2000) || count > 100_000 {
+                        return Ok(None);
+                    }
+                    let hash_at = |height| {
+                        tree.node_at_height_from(view.tip_id, height)
+                            .and_then(|id| tree.node(id).ok())
+                            .map(|node| node.hash)
+                            .ok_or_else(|| {
+                                TxQueryError::Unavailable(TxUnavailableCause::BlockBodyMissing {
+                                    height,
+                                })
+                            })
+                    };
+                    let previous = if start == 0 {
+                        None
+                    } else {
+                        Some(hash_at(start - 1)?)
+                    };
+                    let mut hashes = Vec::with_capacity(usize::try_from(count).map_err(|_| {
+                        TxQueryError::Unavailable(TxUnavailableCause::FilterDataMissing)
+                    })?);
+                    for height in (start..=end).step_by(usize::try_from(step).map_err(|_| {
+                        TxQueryError::Unavailable(TxUnavailableCause::FilterDataMissing)
+                    })?) {
+                        hashes.push(hash_at(height)?);
+                    }
+                    (previous, hashes)
                 };
-                if start > end {
-                    return Ok((step == 1000 && start == 1000).then_some([0; 32]));
-                }
-                let count = (end - start) / step + 1;
-                if (step == 1 && count > 2000) || count > 100_000 {
-                    return Ok(None);
-                }
-                let hash_at = |height| {
-                    tree.node_at_height_from(tip.tip_id, height)
-                        .and_then(|id| tree.node(id).ok())
-                        .map(|node| node.hash)
-                        .ok_or(TxQueryError::Retry)
+                let previous_header = match previous {
+                    None => [0; 32],
+                    Some(hash) => read_filter(snapshot, hash)?.header,
                 };
-                let previous = if start == 0 {
-                    None
-                } else {
-                    Some(hash_at(start - 1)?)
-                };
-                let mut hashes =
-                    Vec::with_capacity(usize::try_from(count).map_err(|_| TxQueryError::Retry)?);
-                for height in
-                    (start..=end).step_by(usize::try_from(step).map_err(|_| TxQueryError::Retry)?)
-                {
-                    hashes.push(hash_at(height)?);
+                for hash in hashes {
+                    if !emit(hash, read_filter(snapshot, hash)?) {
+                        return Ok(None);
+                    }
                 }
-                (previous, hashes)
-            };
-            let previous_header = match previous {
-                None => [0; 32],
-                Some(hash) => read_filter(snapshot, hash)?.header,
-            };
-            for hash in hashes {
-                if !emit(hash, read_filter(snapshot, hash)?) {
-                    return Ok(None);
-                }
-            }
-            Ok(Some(previous_header))
-        })
+                Ok(Some(previous_header))
+            },
+        )
     }
 
     fn filter_index_info(&self) -> Result<DerivedIndexInfo, TxQueryError> {

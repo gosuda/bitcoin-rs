@@ -260,7 +260,7 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> Result<(), Test
                 }
                 break;
             }
-            Err(TxQueryError::Retry | TxQueryError::Unavailable(_)) => {
+            Err(TxQueryError::Retry(_) | TxQueryError::Unavailable(_)) => {
                 assert!(
                     std::time::Instant::now() < deadline,
                     "utxo mode must converge on the live view"
@@ -296,7 +296,7 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> Result<(), Test
                 );
                 break;
             }
-            Err(TxQueryError::Retry | TxQueryError::Unavailable(_)) => {
+            Err(TxQueryError::Retry(_) | TxQueryError::Unavailable(_)) => {
                 assert!(
                     std::time::Instant::now() < deadline,
                     "full mode must converge on a concrete answer, not retry forever"

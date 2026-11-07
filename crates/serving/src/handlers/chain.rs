@@ -1224,7 +1224,7 @@ pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let filter = index.block_filter(hash).map_err(|error| {
         use bitcoin_rs_projection::TxQueryError;
         match error {
-            TxQueryError::Retry => RpcError::Misc("Block filter index is still catching up; retry later".into()),
+            TxQueryError::Retry(_) | TxQueryError::ExpiredView => RpcError::Misc("Block filter index is still catching up; retry later".into()),
             TxQueryError::Unavailable(cause) =>
                 RpcError::Misc(format!("Block filter index unavailable: {cause}")),
             TxQueryError::Storage(reason) =>

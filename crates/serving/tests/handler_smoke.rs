@@ -54,7 +54,12 @@ fn compact_filter_rpc_exposes_only_enabled_ready_data() -> Result<(), TestError>
     impl CompactFilterQuery for Filters {
         fn block_filter(&self, _: Hash256) -> Result<Option<BasicFilter>, TxQueryError> {
             if !self.0.load(Ordering::Acquire) {
-                return Err(TxQueryError::Retry);
+                return Err(TxQueryError::Retry(
+                    bitcoin_rs_projection::RetryReason::TipMoved {
+                        expected_commit: 0,
+                        current_commit: 1,
+                    },
+                ));
             }
             let mut header = [0; 32];
             header[0] = 1;

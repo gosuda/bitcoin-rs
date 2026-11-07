@@ -169,9 +169,10 @@ mod script_live_outage_engine_tests {
                 body,
             })),
             QueryEngineLive {
-                utxo: None,
-                chain_transition: None,
                 enabled: IndexCapabilities::TX_AND_SCRIPTS,
+                generation: std::sync::Arc::new(crate::runtime::Generation::new(1)),
+                historical_verified: None,
+                chain_transition: None,
             },
         );
 
@@ -320,4 +321,36 @@ fn default_history_pages_are_bounded_by_the_page_max() -> Result<(), crate::port
         "a legacy page never exceeds the script-history page maximum"
     );
     Ok(())
+}
+
+// QRY-05
+#[test]
+fn query_miss_absent_maps_to_scoped_none() {
+    let absent = QueryMiss::Absent;
+    let scoped: Result<Option<u32>, TxQueryError> = absent.into_scoped();
+    assert_eq!(scoped, Ok(None));
+
+    let from_result: Result<Option<String>, TxQueryError> = QueryMiss::Absent.into();
+    assert_eq!(from_result, Ok(None));
+
+    let try_err = TxQueryError::try_from(QueryMiss::Absent);
+    assert!(try_err.is_err(), "Absent inside coverage is not an error");
+
+    let unavailable = QueryMiss::Unavailable {
+        capability: IndexCapability::TxLookup,
+        declared_floor_or_tip: 42,
+    };
+    let unavail_scoped: Result<Option<u32>, TxQueryError> = unavailable.into_scoped();
+    assert_eq!(
+        unavail_scoped,
+        Err(TxQueryError::Unavailable(
+            TxUnavailableCause::OutsideCoverage {
+                declared_floor_or_tip: 42,
+            }
+        ))
+    );
+
+    let expired = QueryMiss::ExpiredView;
+    let expired_scoped: Result<Option<u32>, TxQueryError> = expired.into_scoped();
+    assert_eq!(expired_scoped, Err(TxQueryError::ExpiredView));
 }

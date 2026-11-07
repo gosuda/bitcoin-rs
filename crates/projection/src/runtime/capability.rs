@@ -142,7 +142,7 @@ impl DerivedIndexCapability {
         loop {
             attempts += 1;
             match engine.index_progress_for(required) {
-                Err(TxQueryError::Retry) if attempts < PROGRESS_READ_ATTEMPTS => {}
+                Err(TxQueryError::Retry(_)) if attempts < PROGRESS_READ_ATTEMPTS => {}
                 result => return result,
             }
         }
