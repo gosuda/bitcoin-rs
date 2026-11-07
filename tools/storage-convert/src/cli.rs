@@ -1,3 +1,4 @@
+use bitcoin_rs_storage::StorageBackend;
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -17,7 +18,7 @@ pub(crate) struct CliArgs {
     #[arg(long = "to", value_name = "DIR")]
     pub(crate) to: PathBuf,
 
-    /// Target storage engine (accepts only 'rocksdb').
+    /// Target storage engine (rocksdb, surrealkv, mdbx).
     #[arg(long = "to-engine", value_name = "ENGINE", default_value = "rocksdb")]
     pub(crate) to_engine: String,
 
@@ -31,13 +32,52 @@ pub(crate) struct CliArgs {
 }
 
 impl CliArgs {
-    pub(crate) fn validate(&self) -> Result<(), ConvertError> {
-        if !self.to_engine.eq_ignore_ascii_case("rocksdb") {
-            return Err(ConvertError::InvalidOperation(format!(
-                "unsupported target storage engine '{}'; accepts only 'rocksdb'",
-                self.to_engine
-            )));
+    pub(crate) fn target_backend(&self) -> Result<StorageBackend, ConvertError> {
+        let backend = match self.to_engine.trim().to_ascii_lowercase().as_str() {
+            "rocksdb" => StorageBackend::RocksDb,
+            "surrealkv" => StorageBackend::SurrealKv,
+            "mdbx" => StorageBackend::Mdbx,
+            _ => {
+                return Err(ConvertError::InvalidOperation(format!(
+                    "unsupported target storage engine '{}'; accepts rocksdb, surrealkv, or mdbx",
+                    self.to_engine
+                )));
+            }
+        };
+
+        match backend {
+            StorageBackend::RocksDb => Ok(backend),
+            StorageBackend::SurrealKv => {
+                #[cfg(feature = "surrealkv")]
+                {
+                    Ok(backend)
+                }
+                #[cfg(not(feature = "surrealkv"))]
+                {
+                    Err(ConvertError::EngineNotCompiled {
+                        engine: "surrealkv".to_string(),
+                        feature: "surrealkv",
+                    })
+                }
+            }
+            StorageBackend::Mdbx => {
+                #[cfg(feature = "mdbx")]
+                {
+                    Ok(backend)
+                }
+                #[cfg(not(feature = "mdbx"))]
+                {
+                    Err(ConvertError::EngineNotCompiled {
+                        engine: "mdbx".to_string(),
+                        feature: "mdbx",
+                    })
+                }
+            }
         }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ConvertError> {
+        self.target_backend()?;
 
         match (&self.pool_from, &self.pool_to) {
             (Some(_), None) => {

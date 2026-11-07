@@ -1,7 +1,7 @@
 use std::io::Read;
 use std::path::Path;
 
-use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore};
+use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore, StorageBackend};
 use cap_fs_ext::DirExt;
 use cap_std::fs::Dir;
 use redb::{
@@ -14,14 +14,26 @@ use crate::fs_util::open_file_read_no_follow;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DetectedEngine {
     RocksDb,
+    SurrealKv,
+    Mdbx,
     Fjall,
     Redb,
 }
 
 pub(crate) fn detect_engine(
+    scratch_path: &Path,
     dir: &Dir,
     source_epoch: u32,
 ) -> Result<Option<DetectedEngine>, ConvertError> {
+    if source_epoch != 2 {
+        let detected = bitcoin_rs_storage::detect_engine(scratch_path)?;
+        return match detected {
+            None => Ok(None),
+            Some(StorageBackend::RocksDb) => Ok(Some(DetectedEngine::RocksDb)),
+            Some(StorageBackend::SurrealKv) => Ok(Some(DetectedEngine::SurrealKv)),
+            Some(StorageBackend::Mdbx) => Ok(Some(DetectedEngine::Mdbx)),
+        };
+    }
     let mut has_entries = false;
     let mut has_redb_file = false;
     let mut has_current = false;
@@ -150,7 +162,7 @@ fn check_keyspaces_zero(dir: &Dir) -> bool {
 
 pub(crate) enum SourceNamespace {
     Empty,
-    RocksDb(RocksDbStore),
+    Kv(Box<dyn KvStore>),
     Fjall(fjall::Database),
     RedbGeneric(redb::Database),
     RedbTxIndex(redb::Database),
@@ -190,7 +202,40 @@ impl SourceNamespace {
             DetectedEngine::RocksDb => {
                 let store = RocksDbStore::open(path)
                     .map_err(|e| ConvertError::EngineOpen(EngineOpenError::Storage(e)))?;
-                Ok((Self::RocksDb(store), "rocksdb"))
+                Ok((Self::Kv(Box::new(store)), "rocksdb"))
+            }
+            DetectedEngine::SurrealKv => {
+                #[cfg(feature = "surrealkv")]
+                {
+                    let store =
+                        bitcoin_rs_storage::SurrealKvStore::open_with_cache(path, 64 * 1024 * 1024)
+                            .map_err(|e| ConvertError::EngineOpen(EngineOpenError::Storage(e)))?;
+                    Ok((Self::Kv(Box::new(store)), "surrealkv"))
+                }
+                #[cfg(not(feature = "surrealkv"))]
+                {
+                    let _ = path;
+                    Err(ConvertError::EngineNotCompiled {
+                        engine: "surrealkv".to_string(),
+                        feature: "surrealkv",
+                    })
+                }
+            }
+            DetectedEngine::Mdbx => {
+                #[cfg(feature = "mdbx")]
+                {
+                    let store = bitcoin_rs_storage::MdbxStore::open_with_cache(path, 0)
+                        .map_err(|e| ConvertError::EngineOpen(EngineOpenError::Storage(e)))?;
+                    Ok((Self::Kv(Box::new(store)), "mdbx"))
+                }
+                #[cfg(not(feature = "mdbx"))]
+                {
+                    let _ = path;
+                    Err(ConvertError::EngineNotCompiled {
+                        engine: "mdbx".to_string(),
+                        feature: "mdbx",
+                    })
+                }
             }
             DetectedEngine::Fjall => {
                 let db = fjall::Database::builder(path)
@@ -273,7 +318,7 @@ impl SourceNamespace {
 
         match self {
             Self::Empty => Ok(0),
-            Self::RocksDb(store) => {
+            Self::Kv(store) => {
                 let iter = store.iter_prefix(cf, b"")?;
                 for item in iter {
                     let (key, value) = item?;

@@ -10,6 +10,11 @@ description = "Offline datadir storage migration and format conversion tool"
 
 [lints]
 workspace = true
+[features]
+default = []
+surrealkv = ["bitcoin-rs-storage/surrealkv"]
+mdbx = ["bitcoin-rs-storage/mdbx"]
+
 
 [dependencies]
 bitcoin-rs-storage = { workspace = true }

@@ -9,8 +9,10 @@ use crate::fs_util::{
 };
 use crate::report::{ConversionReport, CopiedFileReport, FamilyReport, NamespaceReport};
 use crate::source::{SourceNamespace, detect_engine};
-use crate::target::{BatchWriter, FamilyDigest, compute_destination_digest};
-use bitcoin_rs_storage::{ColumnFamily, RocksDbStore};
+use crate::target::{
+    BatchWriter, FamilyDigest, compute_destination_digest, open_destination_store,
+};
+use bitcoin_rs_storage::{ColumnFamily, StorageBackend};
 use cap_fs_ext::DirExt;
 use cap_std::fs::Dir;
 
@@ -25,6 +27,7 @@ struct NamespacePaths<'a> {
 }
 
 pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertError> {
+    let target_engine = args.target_backend()?;
     let roots = validate_and_open_roots(&args)?;
 
     let source_epoch = read_source_epoch(&roots.from_dir)?;
@@ -47,7 +50,7 @@ pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertE
             from_root: &roots.from_dir,
             to_root: &roots.to_dir,
         };
-        let report = convert_namespace(paths, source_epoch)?;
+        let report = convert_namespace(paths, source_epoch, target_engine)?;
         namespaces_report.push(report);
     }
 
@@ -70,7 +73,7 @@ pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertE
             from_root: pool_from_dir,
             to_root: pool_to_dir,
         };
-        let report = convert_namespace(paths, source_epoch)?;
+        let report = convert_namespace(paths, source_epoch, target_engine)?;
         namespaces_report.push(report);
     }
 
@@ -127,6 +130,7 @@ fn read_source_epoch(from_dir: &Dir) -> Result<u32, ConvertError> {
 fn convert_namespace(
     paths: NamespacePaths<'_>,
     source_epoch: u32,
+    target_engine: StorageBackend,
 ) -> Result<NamespaceReport, ConvertError> {
     let src_dir = match paths.from_root.open_dir_nofollow(paths.name) {
         Ok(dir) => dir,
@@ -162,7 +166,7 @@ fn convert_namespace(
     copy_dir_recursive(&src_dir, &scratch_dir)?;
     sync_dir(&scratch_dir)?;
 
-    let detected = detect_engine(&scratch_dir, source_epoch)?;
+    let detected = detect_engine(paths.scratch_path, &scratch_dir, source_epoch)?;
     let Some(engine) = detected else {
         return Ok(NamespaceReport {
             namespace: paths.name.to_string(),
@@ -181,13 +185,13 @@ fn convert_namespace(
     let dst_dir = paths.to_root.open_dir_nofollow(paths.name)?;
 
     let (source_ns, engine_label) = SourceNamespace::open(paths.scratch_path, Some(engine))?;
-    let dest_store = RocksDbStore::open(paths.dst_path)?;
+    let dest_store = open_destination_store(paths.dst_path, target_engine)?;
 
     let mut family_reports = Vec::new();
 
     for cf in ColumnFamily::ALL.iter().copied() {
         let mut source_digest = FamilyDigest::new();
-        let mut writer = BatchWriter::new(&dest_store);
+        let mut writer = BatchWriter::new(dest_store.as_ref());
 
         let row_count = source_ns.for_each_row(cf, |key, value| {
             source_digest.update(key, value)?;
@@ -198,7 +202,7 @@ fn convert_namespace(
 
         let src_digest_hex = source_digest.finalize_hex();
 
-        let (dst_count, dst_digest_hex) = compute_destination_digest(&dest_store, cf)?;
+        let (dst_count, dst_digest_hex) = compute_destination_digest(dest_store.as_ref(), cf)?;
         if row_count != dst_count || src_digest_hex != dst_digest_hex {
             return Err(ConvertError::DigestMismatch {
                 namespace: paths.name.to_string(),

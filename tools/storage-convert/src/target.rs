@@ -1,7 +1,9 @@
-use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvStore, RocksDbStore};
+use std::path::Path;
+
+use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvStore, RocksDbStore, StorageBackend};
 use sha2::{Digest, Sha256};
 
-use crate::error::ConvertError;
+use crate::error::{ConvertError, EngineOpenError};
 
 const BATCH_TARGET_BYTES: usize = 64 * 1024 * 1024;
 
@@ -49,8 +51,10 @@ pub(crate) struct BatchWriter<S> {
 }
 
 impl<'a> BatchWriter<Box<dyn FnMut(BufferedWriteBatch) -> Result<(), ConvertError> + 'a>> {
-    pub(crate) fn new(store: &'a RocksDbStore) -> Self {
-        Self::with_sink(Box::new(|batch| write_rocks_batch(store, batch)))
+    pub(crate) fn new(store: &'a dyn KvStore) -> Self {
+        Self::with_sink(Box::new(|batch| {
+            store.write_durable(batch).map_err(ConvertError::Storage)
+        }))
     }
 }
 
@@ -127,13 +131,8 @@ where
     }
 }
 
-fn write_rocks_batch(store: &RocksDbStore, batch: BufferedWriteBatch) -> Result<(), ConvertError> {
-    store.write_durable(batch)?;
-    Ok(())
-}
-
 pub(crate) fn compute_destination_digest(
-    store: &RocksDbStore,
+    store: &dyn KvStore,
     cf: ColumnFamily,
 ) -> Result<(u64, String), ConvertError> {
     let mut digest = FamilyDigest::new();
@@ -147,6 +146,52 @@ pub(crate) fn compute_destination_digest(
     }
 
     Ok((count, digest.finalize_hex()))
+}
+
+pub(crate) fn open_destination_store(
+    path: &Path,
+    engine: StorageBackend,
+) -> Result<Box<dyn KvStore>, ConvertError> {
+    match engine {
+        StorageBackend::RocksDb => {
+            let store = RocksDbStore::open(path)
+                .map_err(|e| ConvertError::EngineOpen(EngineOpenError::Storage(e)))?;
+            Ok(Box::new(store))
+        }
+        StorageBackend::SurrealKv => {
+            #[cfg(feature = "surrealkv")]
+            {
+                let store =
+                    bitcoin_rs_storage::SurrealKvStore::open_with_cache(path, 64 * 1024 * 1024)
+                        .map_err(|e| ConvertError::EngineOpen(EngineOpenError::Storage(e)))?;
+                Ok(Box::new(store))
+            }
+            #[cfg(not(feature = "surrealkv"))]
+            {
+                let _ = path;
+                Err(ConvertError::EngineNotCompiled {
+                    engine: "surrealkv".to_string(),
+                    feature: "surrealkv",
+                })
+            }
+        }
+        StorageBackend::Mdbx => {
+            #[cfg(feature = "mdbx")]
+            {
+                let store = bitcoin_rs_storage::MdbxStore::open_with_cache(path, 0)
+                    .map_err(|e| ConvertError::EngineOpen(EngineOpenError::Storage(e)))?;
+                Ok(Box::new(store))
+            }
+            #[cfg(not(feature = "mdbx"))]
+            {
+                let _ = path;
+                Err(ConvertError::EngineNotCompiled {
+                    engine: "mdbx".to_string(),
+                    feature: "mdbx",
+                })
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -416,3 +416,114 @@ fn oversized_schema_marker_is_rejected() -> TestResult<()> {
 
     Ok(())
 }
+
+#[test]
+fn unsupported_engine_string_rejected() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let dest_temp = tempdir()?;
+    let from_path = source_temp.path();
+    let to_path = dest_temp.path().join("converted");
+
+    write_schema_marker(from_path, 3)?;
+
+    let from_str = from_path
+        .to_str()
+        .ok_or_else(|| TestError::Assertion("invalid utf-8 path".into()))?;
+    let to_str = to_path
+        .to_str()
+        .ok_or_else(|| TestError::Assertion("invalid utf-8 path".into()))?;
+
+    let output = run_converter(&[
+        "--from",
+        from_str,
+        "--to",
+        to_str,
+        "--to-engine",
+        "unsupported_engine",
+    ])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded with unsupported engine string".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "mdbx"))]
+#[test]
+fn uncompiled_mdbx_fails_with_missing_feature() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let dest_temp = tempdir()?;
+    let from_path = source_temp.path();
+    let to_path = dest_temp.path().join("converted");
+
+    write_schema_marker(from_path, 3)?;
+
+    let from_str = from_path
+        .to_str()
+        .ok_or_else(|| TestError::Assertion("invalid utf-8 path".into()))?;
+    let to_str = to_path
+        .to_str()
+        .ok_or_else(|| TestError::Assertion("invalid utf-8 path".into()))?;
+
+    let output = run_converter(&["--from", from_str, "--to", to_str, "--to-engine", "mdbx"])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded when mdbx feature was not compiled".into(),
+        ));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.contains("mdbx") {
+        return Err(TestError::Assertion(format!(
+            "stderr did not mention missing feature mdbx: {stderr}"
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "surrealkv"))]
+#[test]
+fn uncompiled_surrealkv_fails_with_missing_feature() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let dest_temp = tempdir()?;
+    let from_path = source_temp.path();
+    let to_path = dest_temp.path().join("converted");
+
+    write_schema_marker(from_path, 3)?;
+
+    let from_str = from_path
+        .to_str()
+        .ok_or_else(|| TestError::Assertion("invalid utf-8 path".into()))?;
+    let to_str = to_path
+        .to_str()
+        .ok_or_else(|| TestError::Assertion("invalid utf-8 path".into()))?;
+
+    let output = run_converter(&[
+        "--from",
+        from_str,
+        "--to",
+        to_str,
+        "--to-engine",
+        "surrealkv",
+    ])?;
+
+    if output.status.success() {
+        return Err(TestError::Assertion(
+            "converter unexpectedly succeeded when surrealkv feature was not compiled".into(),
+        ));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.contains("surrealkv") {
+        return Err(TestError::Assertion(format!(
+            "stderr did not mention missing feature surrealkv: {stderr}"
+        )));
+    }
+
+    Ok(())
+}

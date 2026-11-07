@@ -29,6 +29,12 @@ pub(crate) enum ConvertError {
 
     #[error("failed to open storage engine: {0}")]
     EngineOpen(#[from] EngineOpenError),
+    #[cfg(any(not(feature = "surrealkv"), not(feature = "mdbx")))]
+    #[error("storage engine '{engine}' requires feature '{feature}'")]
+    EngineNotCompiled {
+        engine: String,
+        feature: &'static str,
+    },
 
     #[error("digest mismatch in namespace '{namespace}', family '{family}'")]
     DigestMismatch { namespace: String, family: String },
