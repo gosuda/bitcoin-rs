@@ -167,6 +167,66 @@ impl KvStore for MemoryStore {
     }
 
     fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {}
+
+    fn multi_get(
+        &self,
+        cf: ColumnFamily,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<bitcoin_rs_storage::Bytes>>, StorageError> {
+        let guard = self.cfs.read();
+        let map = &guard[cf.index()];
+        Ok(keys
+            .iter()
+            .map(|k| {
+                map.get(*k)
+                    .map(|v| bitcoin_rs_storage::Bytes::copy_from_slice(v))
+            })
+            .collect())
+    }
+
+    fn ingest_sorted(
+        &self,
+        cf: ColumnFamily,
+        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        _scratch: &std::path::Path,
+    ) -> Result<u64, StorageError> {
+        let mut count = 0u64;
+        let mut prev_key: Option<Vec<u8>> = None;
+        let mut to_insert = Vec::new();
+        for (k, v) in rows {
+            if let Some(prev) = &prev_key {
+                if k.as_slice() <= prev.as_slice() {
+                    return Err(StorageError::InvalidOperation(
+                        "keys not strictly ascending",
+                    ));
+                }
+            }
+            prev_key = Some(k.clone());
+            to_insert.push((k, v));
+            count += 1;
+        }
+        let mut guard = self.cfs.write();
+        let map = &mut guard[cf.index()];
+        for (k, v) in to_insert {
+            map.insert(k, v);
+        }
+        Ok(count)
+    }
+
+    fn delete_range(&self, cf: ColumnFamily, start: &[u8], end: &[u8]) -> Result<(), StorageError> {
+        let mut guard = self.cfs.write();
+        let map = &mut guard[cf.index()];
+        map.retain(|k, _| k.as_slice() < start || k.as_slice() >= end);
+        Ok(())
+    }
+
+    fn checkpoint(&self, dir: &std::path::Path) -> Result<(), StorageError> {
+        std::fs::create_dir_all(dir).map_err(StorageError::Io)
+    }
+
+    fn engine_cache_bytes(&self) -> u64 {
+        0
+    }
 }
 
 pub(crate) struct MemorySnapshot {

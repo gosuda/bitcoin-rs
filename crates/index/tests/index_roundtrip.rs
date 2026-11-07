@@ -310,6 +310,40 @@ impl KvStore for CallTrackingStore {
     }
 
     fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {}
+
+    fn multi_get(
+        &self,
+        cf: ColumnFamily,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<bitcoin_rs_storage::Bytes>>, StorageError> {
+        keys.iter()
+            .map(|key| {
+                self.get(cf, key)
+                    .map(|opt| opt.map(bitcoin_rs_storage::Bytes::from))
+            })
+            .collect()
+    }
+
+    fn ingest_sorted(
+        &self,
+        cf: ColumnFamily,
+        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        scratch: &std::path::Path,
+    ) -> Result<u64, StorageError> {
+        self.inner.ingest_sorted(cf, rows, scratch)
+    }
+
+    fn delete_range(&self, cf: ColumnFamily, start: &[u8], end: &[u8]) -> Result<(), StorageError> {
+        self.inner.delete_range(cf, start, end)
+    }
+
+    fn checkpoint(&self, dir: &std::path::Path) -> Result<(), StorageError> {
+        self.inner.checkpoint(dir)
+    }
+
+    fn engine_cache_bytes(&self) -> u64 {
+        self.inner.engine_cache_bytes()
+    }
 }
 
 struct CallTrackingSnapshot<'a> {
@@ -1543,6 +1577,35 @@ impl KvStore for ForeignFenceStore {
     }
 
     fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {}
+
+    fn multi_get(
+        &self,
+        cf: ColumnFamily,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<bitcoin_rs_storage::Bytes>>, StorageError> {
+        self.inner.multi_get(cf, keys)
+    }
+
+    fn ingest_sorted(
+        &self,
+        cf: ColumnFamily,
+        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        scratch: &std::path::Path,
+    ) -> Result<u64, StorageError> {
+        self.inner.ingest_sorted(cf, rows, scratch)
+    }
+
+    fn delete_range(&self, cf: ColumnFamily, start: &[u8], end: &[u8]) -> Result<(), StorageError> {
+        self.inner.delete_range(cf, start, end)
+    }
+
+    fn checkpoint(&self, dir: &std::path::Path) -> Result<(), StorageError> {
+        self.inner.checkpoint(dir)
+    }
+
+    fn engine_cache_bytes(&self) -> u64 {
+        self.inner.engine_cache_bytes()
+    }
 }
 
 #[test]

@@ -304,6 +304,44 @@ impl bitcoin_rs_storage::KvStore for FailingWriteStore {
     {
         self.0.snapshot()
     }
+
+    fn multi_get(
+        &self,
+        cf: ColumnFamily,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<bitcoin_rs_storage::Bytes>>, bitcoin_rs_storage::StorageError> {
+        self.0.multi_get(cf, keys)
+    }
+
+    fn ingest_sorted(
+        &self,
+        _cf: ColumnFamily,
+        _rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        _scratch: &std::path::Path,
+    ) -> Result<u64, bitcoin_rs_storage::StorageError> {
+        Err(bitcoin_rs_storage::StorageError::Backend(
+            "injected write failure".to_owned(),
+        ))
+    }
+
+    fn delete_range(
+        &self,
+        _cf: ColumnFamily,
+        _start: &[u8],
+        _end: &[u8],
+    ) -> Result<(), bitcoin_rs_storage::StorageError> {
+        Err(bitcoin_rs_storage::StorageError::Backend(
+            "injected write failure".to_owned(),
+        ))
+    }
+
+    fn checkpoint(&self, dir: &std::path::Path) -> Result<(), bitcoin_rs_storage::StorageError> {
+        self.0.checkpoint(dir)
+    }
+
+    fn engine_cache_bytes(&self) -> u64 {
+        self.0.engine_cache_bytes()
+    }
 }
 
 #[test]

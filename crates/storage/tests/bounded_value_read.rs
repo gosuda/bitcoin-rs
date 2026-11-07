@@ -115,6 +115,38 @@ impl KvStore for Unsupported {
     fn arm_persist_fault(&self, _: bitcoin_rs_storage::PersistFault) {
         panic!("unused")
     }
+    fn multi_get(
+        &self,
+        _: ColumnFamily,
+        _: &[&[u8]],
+    ) -> std::result::Result<Vec<Option<bytes::Bytes>>, bitcoin_rs_storage::StorageError> {
+        panic!("unused")
+    }
+    fn ingest_sorted(
+        &self,
+        _: ColumnFamily,
+        _: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        _: &std::path::Path,
+    ) -> std::result::Result<u64, bitcoin_rs_storage::StorageError> {
+        panic!("unused")
+    }
+    fn delete_range(
+        &self,
+        _: ColumnFamily,
+        _: &[u8],
+        _: &[u8],
+    ) -> std::result::Result<(), bitcoin_rs_storage::StorageError> {
+        panic!("unused")
+    }
+    fn checkpoint(
+        &self,
+        _: &std::path::Path,
+    ) -> std::result::Result<(), bitcoin_rs_storage::StorageError> {
+        panic!("unused")
+    }
+    fn engine_cache_bytes(&self) -> u64 {
+        0
+    }
 }
 
 #[test]

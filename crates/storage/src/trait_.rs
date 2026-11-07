@@ -1,6 +1,7 @@
 use crate::batch::BufferedWriteBatch;
 use crate::{ColumnFamily, StorageError};
 use bytes::Bytes;
+use std::path::Path;
 
 pub type KvPair = (Vec<u8>, Vec<u8>);
 
@@ -179,6 +180,24 @@ pub trait KvStore: Send + Sync + 'static {
 
     fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError>;
 
+    fn multi_get(
+        &self,
+        cf: ColumnFamily,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<Bytes>>, StorageError>;
+
+    fn ingest_sorted(
+        &self,
+        cf: ColumnFamily,
+        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        scratch: &Path,
+    ) -> Result<u64, StorageError>;
+
+    fn delete_range(&self, cf: ColumnFamily, start: &[u8], end: &[u8]) -> Result<(), StorageError>;
+
+    fn checkpoint(&self, dir: &Path) -> Result<(), StorageError>;
+
+    fn engine_cache_bytes(&self) -> u64;
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-seam"))]
     fn arm_persist_fault(&self, fault: PersistFault);

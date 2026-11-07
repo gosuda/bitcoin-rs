@@ -651,3 +651,236 @@ fn rocksdb_rejects_second_writable_primary_open_on_same_path() -> TestResult<()>
     drop(first);
     Ok(())
 }
+
+macro_rules! engine_tests {
+    ($engine:ident, $open:expr) => {
+        mod $engine {
+            use super::*;
+
+            #[test]
+            fn multi_get_ordering_and_absence() -> TestResult<()> {
+                let temp = tempfile::TempDir::new()?;
+                let store = ($open)(temp.path())?;
+
+                let empty = store.multi_get(ColumnFamily::CoinRecords, &[])?;
+                assert!(empty.is_empty());
+
+                store.put(ColumnFamily::CoinRecords, b"apple", b"val_apple")?;
+                store.put(ColumnFamily::CoinRecords, b"banana", b"val_banana")?;
+                store.put(ColumnFamily::CoinRecords, b"cherry", b"val_cherry")?;
+
+                let sorted_keys: &[&[u8]] = &[b"apple", b"banana", b"cherry"];
+                let sorted_res = store.multi_get(ColumnFamily::CoinRecords, sorted_keys)?;
+                assert_eq!(
+                    sorted_res,
+                    vec![
+                        Some(Bytes::from_static(b"val_apple")),
+                        Some(Bytes::from_static(b"val_banana")),
+                        Some(Bytes::from_static(b"val_cherry")),
+                    ]
+                );
+
+                let unsorted_keys: &[&[u8]] = &[b"cherry", b"apple", b"date", b"banana", b"apple"];
+                let unsorted_res = store.multi_get(ColumnFamily::CoinRecords, unsorted_keys)?;
+                assert_eq!(
+                    unsorted_res,
+                    vec![
+                        Some(Bytes::from_static(b"val_cherry")),
+                        Some(Bytes::from_static(b"val_apple")),
+                        None,
+                        Some(Bytes::from_static(b"val_banana")),
+                        Some(Bytes::from_static(b"val_apple")),
+                    ]
+                );
+                Ok(())
+            }
+
+            #[test]
+            fn ingest_sorted_valid_and_queryable() -> TestResult<()> {
+                let temp = tempfile::TempDir::new()?;
+                let db_path = temp.path().join("db");
+                let scratch_path = temp.path().join("scratch");
+                let store = ($open)(&db_path)?;
+
+                let empty_rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+                let mut empty_iter = empty_rows.into_iter();
+                let count = store.ingest_sorted(
+                    ColumnFamily::CoinRecords,
+                    &mut empty_iter,
+                    &scratch_path,
+                )?;
+                assert_eq!(count, 0);
+
+                let rows: Vec<(Vec<u8>, Vec<u8>)> = (0..500u32)
+                    .map(|i| {
+                        let key = format!("k_{i:06}").into_bytes();
+                        let val = format!("v_{i:06}").into_bytes();
+                        (key, val)
+                    })
+                    .collect();
+
+                let mut row_iter = rows.into_iter();
+                let count =
+                    store.ingest_sorted(ColumnFamily::CoinRecords, &mut row_iter, &scratch_path)?;
+                assert_eq!(count, 500);
+
+                let val = store
+                    .get(ColumnFamily::CoinRecords, b"k_000042")?
+                    .expect("key must be present");
+                assert_eq!(val, b"v_000042");
+
+                let keys: &[&[u8]] = &[b"k_000499", b"k_000000", b"k_000250"];
+                let multi = store.multi_get(ColumnFamily::CoinRecords, keys)?;
+                assert_eq!(
+                    multi,
+                    vec![
+                        Some(Bytes::from_static(b"v_000499")),
+                        Some(Bytes::from_static(b"v_000000")),
+                        Some(Bytes::from_static(b"v_000250")),
+                    ]
+                );
+                Ok(())
+            }
+
+            #[test]
+            fn ingest_sorted_order_rejection_and_oversize_single_row() -> TestResult<()> {
+                let temp = tempfile::TempDir::new()?;
+                let db_path = temp.path().join("db");
+                let scratch_path = temp.path().join("scratch");
+                let store = ($open)(&db_path)?;
+
+                let unsorted_rows: Vec<(Vec<u8>, Vec<u8>)> = vec![
+                    (b"key_a".to_vec(), b"val_a".to_vec()),
+                    (b"key_c".to_vec(), b"val_c".to_vec()),
+                    (b"key_b".to_vec(), b"val_b".to_vec()),
+                ];
+                let mut iter = unsorted_rows.into_iter();
+                let err = store
+                    .ingest_sorted(ColumnFamily::CoinRecords, &mut iter, &scratch_path)
+                    .unwrap_err();
+                assert!(matches!(
+                    err,
+                    StorageError::InvalidOperation("keys not strictly ascending")
+                ));
+
+                let equal_rows: Vec<(Vec<u8>, Vec<u8>)> = vec![
+                    (b"key_a".to_vec(), b"val_a".to_vec()),
+                    (b"key_a".to_vec(), b"val_a2".to_vec()),
+                ];
+                let mut iter2 = equal_rows.into_iter();
+                let err2 = store
+                    .ingest_sorted(ColumnFamily::CoinRecords, &mut iter2, &scratch_path)
+                    .unwrap_err();
+                assert!(matches!(
+                    err2,
+                    StorageError::InvalidOperation("keys not strictly ascending")
+                ));
+
+                let scratch_files: Vec<_> = std::fs::read_dir(&scratch_path)?
+                    .filter_map(Result::ok)
+                    .collect();
+                assert!(scratch_files.is_empty());
+
+                let large_val = vec![0xaa; 256 * 1024 * 1024];
+                let mut oversize_stream = vec![
+                    (b"row1".to_vec(), b"val1".to_vec()),
+                    (b"row2".to_vec(), large_val),
+                    (b"row3".to_vec(), b"val3".to_vec()),
+                ]
+                .into_iter();
+                let count = store.ingest_sorted(
+                    ColumnFamily::CoinRecords,
+                    &mut oversize_stream,
+                    &scratch_path,
+                )?;
+                assert_eq!(count, 3);
+                assert_eq!(
+                    store.get(ColumnFamily::CoinRecords, b"row1")?,
+                    Some(b"val1".to_vec())
+                );
+                let r2 = store
+                    .get(ColumnFamily::CoinRecords, b"row2")?
+                    .expect("oversize row must be present");
+                assert_eq!(r2.len(), 256 * 1024 * 1024);
+                assert_eq!(r2[0], 0xaa);
+                assert_eq!(
+                    store.get(ColumnFamily::CoinRecords, b"row3")?,
+                    Some(b"val3".to_vec())
+                );
+                Ok(())
+            }
+
+            #[test]
+            fn delete_range_end_exclusive() -> TestResult<()> {
+                let temp = tempfile::TempDir::new()?;
+                let store = ($open)(temp.path())?;
+
+                for i in 0..10u8 {
+                    let key = [b'k', i];
+                    let val = [b'v', i];
+                    store.put(ColumnFamily::CoinRecords, &key, &val)?;
+                }
+
+                store.delete_range(ColumnFamily::CoinRecords, &[b'k', 3], &[b'k', 7])?;
+
+                for i in 0..10u8 {
+                    let key = [b'k', i];
+                    let val = store.get(ColumnFamily::CoinRecords, &key)?;
+                    if (3..7).contains(&i) {
+                        assert_eq!(val, None, "key k{i} should be deleted");
+                    } else {
+                        assert_eq!(val, Some(vec![b'v', i]), "key k{i} should remain");
+                    }
+                }
+                Ok(())
+            }
+
+            #[test]
+            fn checkpoint_reopen_equality() -> TestResult<()> {
+                let temp = tempfile::TempDir::new()?;
+                let original_dir = temp.path().join("original");
+                let checkpoint_dir = temp.path().join("checkpoint");
+
+                let store = ($open)(&original_dir)?;
+                store.put(ColumnFamily::CoinRecords, b"cp_key", b"cp_value")?;
+                store.flush()?;
+
+                store.checkpoint(&checkpoint_dir)?;
+
+                store.put(ColumnFamily::CoinRecords, b"post_cp_key", b"post_cp_value")?;
+                store.flush()?;
+
+                let reopened = ($open)(&checkpoint_dir)?;
+                assert_eq!(
+                    reopened.get(ColumnFamily::CoinRecords, b"cp_key")?,
+                    Some(b"cp_value".to_vec())
+                );
+                assert_eq!(
+                    reopened.get(ColumnFamily::CoinRecords, b"post_cp_key")?,
+                    None
+                );
+                Ok(())
+            }
+
+            #[test]
+            fn engine_cache_bytes_reported() -> TestResult<()> {
+                let temp = tempfile::TempDir::new()?;
+                let store = ($open)(temp.path())?;
+
+                for i in 0..100u32 {
+                    let key = format!("k_{i:04}").into_bytes();
+                    let val = vec![0xaa; 1024];
+                    store.put(ColumnFamily::CoinRecords, &key, &val)?;
+                }
+
+                let cache_bytes = store.engine_cache_bytes();
+                assert!(cache_bytes > 0 || stringify!($engine) == "mdbx");
+                Ok(())
+            }
+        }
+    };
+}
+
+engine_tests!(rocksdb, |path: &std::path::Path| {
+    bitcoin_rs_storage::RocksDbStore::open(path)
+});

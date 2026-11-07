@@ -90,6 +90,53 @@ impl KvStore for CountingStore {
     fn arm_persist_fault(&self, _fault: crate::PersistFault) {
         unreachable!("unused in writer tests")
     }
+
+    fn multi_get(
+        &self,
+        _cf: ColumnFamily,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<bytes::Bytes>>, StorageError> {
+        Ok(vec![None; keys.len()])
+    }
+
+    fn ingest_sorted(
+        &self,
+        _cf: ColumnFamily,
+        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        _scratch: &std::path::Path,
+    ) -> Result<u64, StorageError> {
+        let mut count = 0u64;
+        let mut prev_key: Option<Vec<u8>> = None;
+        for (k, _) in rows {
+            if let Some(prev) = &prev_key {
+                if k.as_slice() <= prev.as_slice() {
+                    return Err(StorageError::InvalidOperation(
+                        "keys not strictly ascending",
+                    ));
+                }
+            }
+            prev_key = Some(k);
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    fn delete_range(
+        &self,
+        _cf: ColumnFamily,
+        _start: &[u8],
+        _end: &[u8],
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    fn checkpoint(&self, dir: &std::path::Path) -> Result<(), StorageError> {
+        std::fs::create_dir_all(dir).map_err(StorageError::Io)
+    }
+
+    fn engine_cache_bytes(&self) -> u64 {
+        0
+    }
 }
 
 fn temp_dir(tag: &str) -> TestResult<cap_std::fs::Dir> {

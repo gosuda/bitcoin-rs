@@ -19,6 +19,7 @@ pub use cache_budget::{
 
 pub use column_families::ColumnFamily;
 
+pub use bytes::Bytes;
 pub use error::{BoundedReadError, StorageError};
 
 #[cfg(any(test, feature = "test-seam"))]
