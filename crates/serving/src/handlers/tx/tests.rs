@@ -360,6 +360,7 @@ fn getrawtransaction_checks_mempool_before_failing_txindex()
                 applied_height: 0,
                 verified_height: 0,
                 coverage_height: 0,
+                historical_height: 0,
             })
         }
     }
@@ -685,6 +686,7 @@ fn getrawtransaction_resolves_confirmed_transaction_from_txindex_without_cache()
                 applied_height: 1,
                 verified_height: 1,
                 coverage_height: 1,
+                historical_height: 1,
             })
         }
     }
@@ -1068,6 +1070,7 @@ where
             applied_height: 0,
             verified_height: 0,
             coverage_height: 0,
+            historical_height: 0,
         })
     }
 

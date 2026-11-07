@@ -257,6 +257,7 @@ fn compact_filters_wait_for_publication_without_replaying_sent_payloads() -> Tes
                 applied_height: 0,
                 verified_height: 0,
                 coverage_height: 0,
+                historical_height: 0,
             })
         }
         fn for_each_filter(
@@ -341,6 +342,7 @@ fn filter_backpressure_defers_unsent_responses_and_parks_the_remainder_of_a_part
                 applied_height: 2000,
                 verified_height: 2000,
                 coverage_height: 2000,
+                historical_height: 2000,
             })
         }
         fn for_each_filter(
@@ -426,6 +428,7 @@ fn compact_filters_follow_applied_chain_when_competing_headers_lead() -> TestRes
                 applied_height: 1,
                 verified_height: 1,
                 coverage_height: 1,
+                historical_height: 1,
             })
         }
         fn for_each_filter(
@@ -507,6 +510,7 @@ fn compact_filter_interruptions_that_are_not_backpressure_stay_errors() -> TestR
                 applied_height: 1,
                 verified_height: 1,
                 coverage_height: 1,
+                historical_height: 1,
             })
         }
         fn for_each_filter(
@@ -596,6 +600,7 @@ fn a_resumed_filter_range_that_stops_before_its_first_filter_is_interrupted() ->
                 applied_height: 1,
                 verified_height: 1,
                 coverage_height: 1,
+                historical_height: 1,
             })
         }
         fn for_each_filter(

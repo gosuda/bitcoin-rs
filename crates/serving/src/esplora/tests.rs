@@ -197,6 +197,7 @@ impl crate::context::DerivedIndexQuery for StaticTxIndex {
             applied_height: 0,
             verified_height: 0,
             coverage_height: 0,
+            historical_height: 0,
         })
     }
 }
@@ -235,6 +236,7 @@ impl crate::context::DerivedIndexQuery for CountingTxIndex {
             applied_height: 0,
             verified_height: 0,
             coverage_height: 0,
+            historical_height: 0,
         })
     }
 }
@@ -279,6 +281,7 @@ impl crate::context::DerivedIndexQuery for FixtureTxIndex {
             applied_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
             verified_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
             coverage_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
+            historical_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
         })
     }
 }
@@ -2458,6 +2461,7 @@ fn block_parent_reuse_checks_readiness_only_when_needed() {
                 applied_height: 0,
                 verified_height: 0,
                 coverage_height: 0,
+                historical_height: 0,
             })
         }
     }

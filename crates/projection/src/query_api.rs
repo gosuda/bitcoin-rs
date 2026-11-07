@@ -18,11 +18,13 @@ pub trait CompactFilterQuery: Send + Sync {
     fn filter_index_info(&self) -> Result<DerivedIndexInfo, TxQueryError>;
 }
 
+// PRJ-13
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DerivedIndexInfo {
     pub synced: bool,
     pub best_block_height: u32,
     pub applied_height: u32,
+    pub historical_height: u32,
     pub verified_height: u32,
     pub coverage_height: u32,
 }

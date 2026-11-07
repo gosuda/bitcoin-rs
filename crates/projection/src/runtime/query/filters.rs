@@ -91,6 +91,7 @@ impl CompactFilterQuery for DerivedIndexQueryEngine {
             best_block_height: progress.processed_height,
             applied_height,
             verified_height,
+            historical_height: progress.processed_height,
             coverage_height,
         })
     }
