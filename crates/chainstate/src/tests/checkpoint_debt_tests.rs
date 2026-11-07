@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_primitives::{BlockPayload, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256, Network};
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT;

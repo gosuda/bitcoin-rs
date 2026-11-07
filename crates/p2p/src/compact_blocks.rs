@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use bitcoin::bip152::{BlockTransactionsRequest, HeaderAndShortIds, ShortId};
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn};
-use bitcoin_rs_primitives::deserialize;
-use bitcoin_rs_primitives::{Block, BlockHash, Header, Tx, Txid, Wtxid};
+use bitcoin_rs_consensus::primitives::deserialize;
+use bitcoin_rs_consensus::primitives::{Block, BlockHash, Header, Tx, Txid, Wtxid};
 
 use crate::wire::MAX_BLOCK_TX_COUNT;
 

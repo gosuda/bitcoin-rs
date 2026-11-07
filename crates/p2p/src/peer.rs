@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
 use bitcoin::p2p::message_network::VersionMessage;
-use bitcoin_rs_primitives::Wtxid;
+use bitcoin_rs_consensus::primitives::Wtxid;
 use hashbrown::HashMap;
 
 use crate::feature::FeatureId;
@@ -429,7 +429,7 @@ impl<S: Read> Peer<S> {
         let Some((message, raw)) = self.read_message_admitted(|command, payload| {
             if crate::inbound::block_memory::expands_on_decode(command) {
                 credit = Some(memory.reserve(
-                    bitcoin_rs_primitives::layout::decode_reservation(payload.len()),
+                    bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len()),
                     cancelled,
                 )?);
             }
@@ -519,7 +519,7 @@ mod tests {
             0,
             crate::PeerRole::FullRelay,
             bitcoin::p2p::ServiceFlags::NETWORK,
-            bitcoin_rs_primitives::USER_AGENT,
+            bitcoin_rs_consensus::primitives::USER_AGENT,
         );
         version.version = crate::feature::FEATURE_VERSION - 1;
         peer.remote_version = Some(version.clone());
@@ -564,7 +564,7 @@ mod tests {
             0,
             crate::PeerRole::FullRelay,
             bitcoin::p2p::ServiceFlags::NETWORK,
-            bitcoin_rs_primitives::USER_AGENT,
+            bitcoin_rs_consensus::primitives::USER_AGENT,
         ));
         let feature = Message::Feature(crate::feature::FeatureAnnouncement::bip332(true));
         assert!(matches!(peer.send(&Message::Verack), Err(PeerError::Io(_))));

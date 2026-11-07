@@ -235,8 +235,8 @@ impl Write for HashingWriter<'_> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CheckpointIdentity {
-    pub network: bitcoin_rs_primitives::Network,
-    pub genesis: bitcoin_rs_primitives::Hash256,
+    pub network: bitcoin_rs_consensus::primitives::Network,
+    pub genesis: bitcoin_rs_consensus::primitives::Hash256,
 }
 
 pub use load::{

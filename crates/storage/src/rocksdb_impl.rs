@@ -73,7 +73,9 @@ impl RocksDbStore {
         };
         let cache_bytes = usize::try_from(cache_bytes).unwrap_or(usize::MAX);
         metrics::gauge!("storage.cache_capacity_bytes", "backend" => "rocksdb").set(
-            bitcoin_rs_primitives::u64_to_f64(u64::try_from(cache_bytes).unwrap_or(u64::MAX)),
+            bitcoin_rs_consensus::primitives::u64_to_f64(
+                u64::try_from(cache_bytes).unwrap_or(u64::MAX),
+            ),
         );
         let mut db_options = Options::default();
         db_options.create_if_missing(true);
@@ -563,7 +565,9 @@ fn count_write(durability: &'static str, encoded_bytes: usize) {
     metrics::counter!("storage.writes_total", "backend" => "rocksdb", "durability" => durability)
         .increment(1);
     metrics::histogram!("storage.write_bytes", "backend" => "rocksdb").record(
-        bitcoin_rs_primitives::u64_to_f64(u64::try_from(encoded_bytes).unwrap_or(u64::MAX)),
+        bitcoin_rs_consensus::primitives::u64_to_f64(
+            u64::try_from(encoded_bytes).unwrap_or(u64::MAX),
+        ),
     );
 }
 

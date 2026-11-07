@@ -2,7 +2,7 @@ use super::*;
 use crate::portable::TestError;
 use crate::types::ScriptHash;
 use crate::{ScriptLiveScan, TxIndexPage, TxIndexScan, TxIndexScanRow};
-use bitcoin_rs_primitives::{OutPoint, Txid};
+use bitcoin_rs_consensus::primitives::{OutPoint, Txid};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

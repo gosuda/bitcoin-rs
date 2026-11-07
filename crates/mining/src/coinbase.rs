@@ -1,7 +1,7 @@
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_script::push_int;
+use bitcoin_rs_consensus::script::push_int;
 use thiserror::Error;
 
 use crate::template::CoinbaseBudget;
@@ -115,7 +115,7 @@ mod uncommitted_witness_tests {
         WITNESS_RESERVED_VALUE, needs_witness_reserved_value, update_uncommitted_block_structures,
         witness_commitment_script,
     };
-    use bitcoin_rs_primitives::{
+    use bitcoin_rs_consensus::primitives::{
         Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
         Sequence, Tx, TxIn, TxOut, Witness,
     };
@@ -169,7 +169,10 @@ mod uncommitted_witness_tests {
         no_txs.txs.clear();
         assert!(!needs_witness_reserved_value(&no_txs, true));
         update_uncommitted_block_structures(&mut no_txs, true);
-        assert_eq!(no_txs.txs, Vec::<bitcoin_rs_primitives::Tx>::new());
+        assert_eq!(
+            no_txs.txs,
+            Vec::<bitcoin_rs_consensus::primitives::Tx>::new()
+        );
 
         let mut no_inputs = commitment_block(Vec::new(), true);
         no_inputs.txs[0].inputs.clear();
@@ -177,7 +180,7 @@ mod uncommitted_witness_tests {
         update_uncommitted_block_structures(&mut no_inputs, true);
         assert_eq!(
             no_inputs.txs[0].inputs,
-            Vec::<bitcoin_rs_primitives::TxIn>::new()
+            Vec::<bitcoin_rs_consensus::primitives::TxIn>::new()
         );
 
         let mut pre_segwit = commitment_block(Vec::new(), true);

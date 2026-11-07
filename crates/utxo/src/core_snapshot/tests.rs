@@ -2,7 +2,7 @@
 
 use std::io::{self, Cursor, Read};
 
-use bitcoin_rs_primitives::{Hash256, Network, OutPoint, varint};
+use bitcoin_rs_consensus::primitives::{Hash256, Network, OutPoint, varint};
 
 use super::{
     CoreV2Base, Decoder, SnapshotError, SnapshotLimits, read_and_verify, read_metadata,

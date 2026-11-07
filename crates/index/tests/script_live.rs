@@ -14,12 +14,12 @@ use bitcoin::{
     Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
     TxMerkleNode, TxOut, Txid, Witness,
 };
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint as NativeOutPoint, Txid as NativeTxid};
 use bitcoin_rs_index::{
     ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexWatermark,
     IndexWatermarks, IndexWriter, MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits,
     ScriptHash, ScriptLiveRow, SpentCoinScripts,
 };
-use bitcoin_rs_primitives::{Hash256, OutPoint as NativeOutPoint, Txid as NativeTxid};
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 
 fn commit_rollback_one_with_spent_scripts<S: KvStore>(

@@ -11,7 +11,7 @@ use bitcoin_rs_chain::regtest_fixture::{
     mined_regtest_child_at as mined_child,
 };
 use bitcoin_rs_consensus::ConsensusError;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, BlockPayload, LockTime, Network, OutPoint, Script, Sequence, Tx,
     TxIn, TxOut, Witness, deserialize,
 };
@@ -118,7 +118,7 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
             (Some(raw_txs), true) => {
                 assert_eq!(raw_txs.len(), block.txs.len());
                 for (raw, tx) in raw_txs.iter().zip(&block.txs) {
-                    assert_eq!(*raw, bitcoin_rs_primitives::consensus_bytes(tx));
+                    assert_eq!(*raw, bitcoin_rs_consensus::primitives::consensus_bytes(tx));
                 }
             }
             (raw, flag) => panic!("raw_txs presence must follow capture_rawtx={flag}: {raw:?}"),
@@ -265,12 +265,12 @@ fn signet_solution_is_checked_on_commit_not_proposal() -> TestResult {
 use super::*;
 use crate::test_support::MemoryBodies;
 use bitcoin_rs_chain::regtest_fixture;
-use bitcoin_rs_primitives::encode::double_sha256;
+use bitcoin_rs_consensus::primitives::encode::double_sha256;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_utxo::UtxoSet;
 
 fn witness_child(
-    parent: bitcoin_rs_primitives::BlockHash,
+    parent: bitcoin_rs_consensus::primitives::BlockHash,
     height: u32,
 ) -> Result<Block, regtest_fixture::RegtestFixtureError> {
     let mut coinbase = regtest_fixture::coinbase(height);

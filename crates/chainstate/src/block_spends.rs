@@ -1,5 +1,5 @@
 use bitcoin_rs_chain::BlockTree;
-use bitcoin_rs_primitives::{Block, Hash256, deserialize};
+use bitcoin_rs_consensus::primitives::{Block, Hash256, deserialize};
 use bitcoin_rs_storage::{DurableHead, pruning::HistoryLease};
 use bitcoin_rs_utxo::contract::{
     BlockSpends, BlockSpendsError, BlockUndoSource, HistoryUnavailable, UndoLoadError,

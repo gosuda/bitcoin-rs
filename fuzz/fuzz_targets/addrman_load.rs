@@ -10,7 +10,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::hashes::sha256;
 use bitcoin_rs_p2p::addrman::AddressBook;
 use bitcoin_rs_p2p::subnet::{BannedSubnet, IpSubnet, is_banned};
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use libfuzzer_sys::arbitrary::Unstructured;
 use libfuzzer_sys::fuzz_target;
 

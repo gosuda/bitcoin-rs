@@ -7,14 +7,14 @@ use crate::{
     MiningError, STALE_PARENT_REASON,
 };
 use bitcoin_rs_chain::{ChainWork, compact_is_met_by};
-use bitcoin_rs_consensus::transaction_sigop_cost;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, Script, Tx, TxOut,
     Txid, Witness,
     encode::{consensus_bytes, double_sha256},
     varint,
 };
-use bitcoin_rs_script::VerifyFlags;
+use bitcoin_rs_consensus::script::VerifyFlags;
+use bitcoin_rs_consensus::transaction_sigop_cost;
 use compact_str::CompactString;
 use ruint::Uint;
 use thiserror::Error;

@@ -24,6 +24,7 @@ use bitcoin_rs_chain::{
     BlockBodyReadError, BlockBodySource, BlockTree, BlockTreeReader, ChainTxCount, LatchWriter,
     NodeStatus, TipReader, TipSnapshot,
 };
+use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Network, Txid};
 use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
 use bitcoin_rs_index::reconcile::{ChainCursorSource, ConsumerCursor};
 use bitcoin_rs_index::runtime::{
@@ -34,7 +35,6 @@ use bitcoin_rs_index::runtime::{
 use bitcoin_rs_index::{
     DerivedIndexQuery, IndexCapabilities, IndexCapability, IndexReader, IndexWatermark, Indexer,
 };
-use bitcoin_rs_primitives::{BlockHash, Hash256, Network, Txid};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget, RetentionRegistry};
 use bitcoin_rs_storage::{
@@ -70,10 +70,11 @@ impl ChainFixture {
         for height in 0..=blocks {
             let block = mine_block(prev, height, if height == 0 { 0 } else { extra });
             let bytes = serialize(&block);
-            let parsed: bitcoin_rs_primitives::Block =
-                bitcoin_rs_primitives::deserialize(&bytes).expect("fixture block decodes");
-            let header: bitcoin_rs_primitives::Header =
-                bitcoin_rs_primitives::deserialize(&serialize(&block.header))
+            let parsed: bitcoin_rs_consensus::primitives::Block =
+                bitcoin_rs_consensus::primitives::deserialize(&bytes)
+                    .expect("fixture block decodes");
+            let header: bitcoin_rs_consensus::primitives::Header =
+                bitcoin_rs_consensus::primitives::deserialize(&serialize(&block.header))
                     .expect("80-byte header");
             let id = tree
                 .insert_header(header, NodeStatus::HeaderValid)

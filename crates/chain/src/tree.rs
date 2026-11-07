@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 use hashbrown::{HashMap, HashTable};
 use parking_lot::RwLock;
 use slab::Slab;

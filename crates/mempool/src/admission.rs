@@ -1,7 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 #[cfg(test)]
-use bitcoin_rs_primitives::unix_time_secs;
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxOut, Txid, Wtxid};
+use bitcoin_rs_consensus::primitives::unix_time_secs;
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Tx, TxOut, Txid, Wtxid};
 use hashbrown::{HashMap, HashSet};
 
 use crate::standardness::{AcceptanceRejectReason, StandardnessPolicy, is_standard_tx};
@@ -34,7 +34,7 @@ pub struct ChainAdmissionSnapshot {
     pub height: u32,
     pub locktime_cutoff: u32,
     pub csv_active: bool,
-    pub next_block_script_flags: bitcoin_rs_script::VerifyFlags,
+    pub next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags,
     pub confirmed: bool,
 }
 
@@ -161,7 +161,7 @@ fn build_admission_request(
                     0,
                     HashMap::new(),
                     false,
-                    bitcoin_rs_script::VerifyFlags::NONE,
+                    bitcoin_rs_consensus::script::VerifyFlags::NONE,
                 )
             },
             |snapshot| {

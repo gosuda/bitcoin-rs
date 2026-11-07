@@ -80,8 +80,8 @@ impl ZmqPublisher for RecordingPublisher {
     }
 }
 
-fn sequence_tx(label: u8) -> bitcoin_rs_primitives::Tx {
-    use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut};
+fn sequence_tx(label: u8) -> bitcoin_rs_consensus::primitives::Tx {
+    use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxIn, TxOut};
     Tx {
         version: 2,
         lock_time: LockTime::ZERO,
@@ -98,7 +98,7 @@ fn sequence_tx(label: u8) -> bitcoin_rs_primitives::Tx {
     }
 }
 
-fn sequence_entry(tx: &bitcoin_rs_primitives::Tx) -> bitcoin_rs_mempool::MempoolEntry {
+fn sequence_entry(tx: &bitcoin_rs_consensus::primitives::Tx) -> bitcoin_rs_mempool::MempoolEntry {
     bitcoin_rs_mempool::MempoolEntry::new(std::sync::Arc::new(tx.clone()), 100, 1_000, 1, 7, 0)
 }
 
@@ -138,13 +138,13 @@ fn admitted_unconfirmed_rawtx_is_exact_and_not_repeated() -> TestResult {
     impl bitcoin_rs_mempool::AdmissionChain for EmptyChain {
         fn snapshot(
             &self,
-            _: &bitcoin_rs_primitives::Tx,
+            _: &bitcoin_rs_consensus::primitives::Tx,
         ) -> Option<bitcoin_rs_mempool::ChainAdmissionSnapshot> {
             Some(bitcoin_rs_mempool::ChainAdmissionSnapshot::default())
         }
     }
+    use bitcoin_rs_consensus::primitives::encode::consensus_bytes;
     use bitcoin_rs_mempool::{AdmissionOrigin, Mempool, MempoolGateway, MempoolLimits};
-    use bitcoin_rs_primitives::encode::consensus_bytes;
     use std::sync::Arc;
     let dir = tempfile::tempdir()?;
     let address = format!("ipc://{}", dir.path().join("admission.sock").display());
@@ -266,11 +266,11 @@ fn rawtx_disabled_does_not_retain_admission_bodies() {
 
 #[test]
 fn mixed_package_changes_publish_only_their_indexed_admitted_bodies() {
+    use bitcoin_rs_consensus::primitives::encode::consensus_bytes;
     use bitcoin_rs_mempool::{
         AdmissionOrigin, MempoolObserver, MutationChange, MutationEnvelope, MutationOutcome,
         MutationResult, RemovalReason,
     };
-    use bitcoin_rs_primitives::encode::consensus_bytes;
     use std::sync::Arc;
     let first = Arc::new(sequence_tx(185));
     let second = Arc::new(sequence_tx(186));
@@ -346,8 +346,8 @@ fn admission_publishes_one_a_frame_with_core_payload_bytes() {
 
 #[test]
 fn policy_eviction_publishes_r_frames_in_commit_order() {
+    use bitcoin_rs_consensus::primitives::OutPoint;
     use bitcoin_rs_mempool::AdmissionOrigin;
-    use bitcoin_rs_primitives::OutPoint;
     let (gateway, publisher) = wired_sequence_gateway();
     let parent = sequence_tx(2);
     let parent_txid = parent.txid();

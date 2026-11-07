@@ -1,5 +1,5 @@
 use crate::ChainTxCount;
-use bitcoin_rs_primitives::{Hash256, Header};
+use bitcoin_rs_consensus::primitives::{Hash256, Header};
 use ruint::Uint;
 
 pub type ChainWork = Uint<256, 4>;

@@ -39,7 +39,7 @@ pub(crate) enum TestError {
     #[error(transparent)]
     Chain(#[from] bitcoin_rs_chain::ChainError),
     #[error(transparent)]
-    Primitives(#[from] bitcoin_rs_primitives::DecodeError),
+    Primitives(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
     Consensus(#[from] bitcoin::consensus::encode::Error),
     #[error(transparent)]

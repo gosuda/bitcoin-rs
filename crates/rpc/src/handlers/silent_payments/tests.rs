@@ -1,6 +1,6 @@
 use super::*;
 use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
-use bitcoin_rs_primitives::{Block, Network};
+use bitcoin_rs_consensus::primitives::{Block, Network};
 use bitcoin_rs_utxo::contract::{BlockSpends, BlockUndoSource, HistoryUnavailable};
 
 type Result<T = ()> = std::result::Result<T, crate::test_error::TestError>;
@@ -26,7 +26,7 @@ fn fixture() -> Result<(Context, Block)> {
     });
     ctx.chain.chain_network = Network::Regtest;
     let mut block = Network::Regtest.genesis_block();
-    block.header.time = u32::try_from(bitcoin_rs_primitives::unix_time_secs())?;
+    block.header.time = u32::try_from(bitcoin_rs_consensus::primitives::unix_time_secs())?;
     let tip = {
         let mut tree = ctx.chain.block_tree.write();
         let id = tree.insert_node(None, block.header, NodeStatus::Active)?;

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use arc_swap::ArcSwapOption;
 use bitcoin::bip152::HeaderAndShortIds;
 use bitcoin::p2p::message_compact_blocks::CmpctBlock;
-use bitcoin_rs_primitives::{Hash256, consensus_bytes};
+use bitcoin_rs_consensus::primitives::{Hash256, consensus_bytes};
 use parking_lot::RwLock;
 
 use super::{ConnectionShared, test_shared};
@@ -18,16 +18,16 @@ use crate::test_support::{
 };
 use bitcoin_rs_chain::regtest_fixture;
 
-fn genesis_body() -> bitcoin_rs_primitives::Block {
+fn genesis_body() -> bitcoin_rs_consensus::primitives::Block {
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let bytes = bitcoin::consensus::encode::serialize(&genesis);
-    bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Block>(&bytes)
+    bitcoin_rs_consensus::primitives::deserialize::<bitcoin_rs_consensus::primitives::Block>(&bytes)
         .expect("regtest genesis block must decode")
 }
 
 struct MinedSyncFixture {
     sync: Arc<BlockSync>,
-    blocks: Vec<bitcoin_rs_primitives::Block>,
+    blocks: Vec<bitcoin_rs_consensus::primitives::Block>,
     sync_headers_tx: crossbeam_channel::Sender<crate::InboundHeaders>,
 }
 
@@ -102,7 +102,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
         shared.send_block(
             &lease,
             flooded,
-            bitcoin_rs_primitives::BlockPayload::from_local(unrelated.clone()),
+            bitcoin_rs_consensus::primitives::BlockPayload::from_local(unrelated.clone()),
             None,
         );
     }
@@ -115,7 +115,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
     shared.send_block(
         &lease,
         flooded,
-        bitcoin_rs_primitives::BlockPayload::from_local(block2),
+        bitcoin_rs_consensus::primitives::BlockPayload::from_local(block2),
         None,
     );
     assert_eq!(
@@ -132,7 +132,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
     shared.send_block(
         &other_lease,
         other,
-        bitcoin_rs_primitives::BlockPayload::from_local(unrelated.clone()),
+        bitcoin_rs_consensus::primitives::BlockPayload::from_local(unrelated.clone()),
         None,
     );
     assert_eq!(
@@ -145,7 +145,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
     shared.send_block(
         &lease,
         flooded,
-        bitcoin_rs_primitives::BlockPayload::from_local(unrelated),
+        bitcoin_rs_consensus::primitives::BlockPayload::from_local(unrelated),
         None,
     );
     assert_eq!(
@@ -161,29 +161,32 @@ struct ScanCounter(std::sync::atomic::AtomicUsize);
 impl crate::compact_blocks::CompactBlockHints for ScanCounter {
     fn for_each_identity(
         &self,
-        _f: &mut dyn FnMut(bitcoin_rs_primitives::Txid, bitcoin_rs_primitives::Wtxid),
+        _f: &mut dyn FnMut(
+            bitcoin_rs_consensus::primitives::Txid,
+            bitcoin_rs_consensus::primitives::Wtxid,
+        ),
     ) {
         self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn get_tx_by_txid(
         &self,
-        _txid: bitcoin_rs_primitives::Txid,
-    ) -> Option<bitcoin_rs_primitives::Tx> {
+        _txid: bitcoin_rs_consensus::primitives::Txid,
+    ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
         None
     }
 
     fn get_tx_by_wtxid(
         &self,
-        _wtxid: bitcoin_rs_primitives::Wtxid,
-    ) -> Option<bitcoin_rs_primitives::Tx> {
+        _wtxid: bitcoin_rs_consensus::primitives::Wtxid,
+    ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
         None
     }
 }
 
 struct CompactTestFixture {
     sync: Arc<BlockSync>,
-    blocks: Vec<bitcoin_rs_primitives::Block>,
+    blocks: Vec<bitcoin_rs_consensus::primitives::Block>,
     addr: crate::PeerRemote,
     lease: crate::PeerLease,
     source: PeerSource,
@@ -239,7 +242,7 @@ fn test_sync_with_applied_chain(
 }
 
 fn deliver_compact_block(
-    block: &bitcoin_rs_primitives::Block,
+    block: &bitcoin_rs_consensus::primitives::Block,
     reconstruction: &mut crate::compact_blocks::Reconstruction,
     hints: &ScanCounter,
     lease: &crate::PeerLease,
@@ -281,7 +284,7 @@ fn compact_reconstruction_requires_an_earning_header() -> TestResult {
 
     let hints = ScanCounter(AtomicUsize::new(0));
     let mut reconstruction = crate::compact_blocks::Reconstruction::new();
-    let mut deliver = |block: &bitcoin_rs_primitives::Block| {
+    let mut deliver = |block: &bitcoin_rs_consensus::primitives::Block| {
         deliver_compact_block(block, &mut reconstruction, &hints, &lease, addr, &shared)
     };
     let scans = || hints.0.load(Ordering::Relaxed);
@@ -300,7 +303,8 @@ fn compact_reconstruction_requires_an_earning_header() -> TestResult {
     };
 
     let mut no_work = next(3)?;
-    no_work.header.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x1d00_ffff);
+    no_work.header.bits =
+        bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x1d00_ffff);
     deliver(&no_work)?;
 
     let orphan = regtest_fixture::mined_block_with_prev_hash(

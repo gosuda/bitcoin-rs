@@ -26,8 +26,16 @@ kernel = ["dep:bitcoinkernel"]
 usdt = ["dep:usdt", "dep:tracing"]
 
 [dependencies]
-bitcoin-rs-primitives.workspace = true
-bitcoin-rs-script.workspace = true
+bytemuck.workspace = true
+bytes.workspace = true
+ruint.workspace = true
+serde.workspace = true
+sha3.workspace = true
+tinyvec.workspace = true
+zerocopy.workspace = true
+secp256k1.workspace = true
+bitcoin_hashes.workspace = true
+smallvec.workspace = true
 hashbrown.workspace = true
 parking_lot.workspace = true
 sha2.workspace = true
@@ -38,10 +46,10 @@ usdt = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
-secp256k1.workspace = true
 bitcoin.workspace = true
 sonic-rs.workspace = true
-serde.workspace = true
+bitcoin-rs-e2e.workspace = true
+proptest.workspace = true
 
 
 [[test]]
@@ -52,3 +60,7 @@ path = "tests/suite.rs"
 [[test]]
 name = "sdt_notes"
 path = "tests/sdt_notes.rs"
+
+[[test]]
+name = "primitives_witness_heap_amplification"
+path = "tests/primitives_witness_heap_amplification.rs"

@@ -1,6 +1,6 @@
 use super::*;
 
-use bitcoin_rs_primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockPayload;
 
 #[test]
 fn tick_sends_getdata_from_next_applied_height_when_gap_exceeds_batch() -> TestResult {
@@ -141,7 +141,7 @@ fn successful_getdata_send_marks_requested_blocks_pending() -> TestResult {
     let window = &scheduler.window;
     assert_eq!(window.pending_len(), expected.len());
     for hash in expected {
-        let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(hash.as_bytes());
+        let hash = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(hash.as_bytes());
         assert!(window.contains_pending(&hash));
     }
     Ok(())
@@ -151,7 +151,8 @@ fn successful_getdata_send_marks_requested_blocks_pending() -> TestResult {
 fn drain_inbound_blocks_prunes_stale_received_blocks_without_new_arrivals() -> TestResult {
     let (sync, _peers, _block_tree, _applied_tip, _expected) = sync_with_header_chain(1)?;
     let block = Network::Regtest.genesis_block();
-    let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(block.block_hash().as_bytes());
+    let hash =
+        bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(block.block_hash().as_bytes());
     let received_at = Instant::now()
         .checked_sub(super::super::RECEIVED_BLOCK_TIMEOUT + Duration::from_secs(1))
         .ok_or_else(|| std::io::Error::other("test instant underflow"))?;

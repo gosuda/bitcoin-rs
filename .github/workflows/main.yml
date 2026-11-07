@@ -152,7 +152,7 @@ jobs:
             cargo -V
             sha256sum Cargo.lock
           } | tee target/script-kernel-evidence/context.txt
-          cargo test --locked -p bitcoin-rs-script --no-default-features \
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features \
             --features kernel --test suite segwit_v0_sighash_edges:: -- --nocapture \
             2>&1 | tee target/script-kernel-evidence/tests.log
       - name: Core-vectors kernel oracle
@@ -163,7 +163,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/script-kernel-evidence
-          cargo test --locked -p bitcoin-rs-script --no-default-features \
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features \
             --features kernel --test suite core_vectors:: -- --nocapture \
             2>&1 | tee target/script-kernel-evidence/core_vectors.log
       - name: SegWit-v0 kernel Clippy
@@ -174,7 +174,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/script-kernel-evidence
-          cargo clippy --locked -p bitcoin-rs-script --no-default-features \
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features \
             --features kernel --test suite -- -D warnings \
             2>&1 | tee target/script-kernel-evidence/clippy.log
       - name: Preserve kernel script evidence
@@ -217,7 +217,7 @@ jobs:
             cargo -V
             sha256sum Cargo.lock
           } | tee target/script-native-evidence/context.txt
-          cargo test --locked -p bitcoin-rs-script --no-default-features \
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features \
             --no-fail-fast -- --nocapture 2>&1 | tee target/script-native-evidence/tests.log
       - name: Native script Clippy
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
@@ -225,7 +225,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/script-native-evidence
-          cargo clippy --locked -p bitcoin-rs-script --no-default-features \
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features \
             --all-targets -- -D warnings 2>&1 | tee target/script-native-evidence/clippy.log
       - name: Preserve native script evidence
         if: ${{ always() }}

@@ -8,8 +8,8 @@ use bitcoin_rs_chain::{
 };
 use bitcoin_rs_consensus::ScriptExecutionCache;
 use bitcoin_rs_consensus::UtxoView;
-use bitcoin_rs_primitives::{Block, BlockPayload, Network, OutPoint, Tx, TxOut, Txid};
-use bitcoin_rs_primitives::{Hash256, Header};
+use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Network, OutPoint, Tx, TxOut, Txid};
+use bitcoin_rs_consensus::primitives::{Hash256, Header};
 use bitcoin_rs_storage::DurableHeadStore;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_storage::InMemoryUndoStore;
@@ -601,7 +601,7 @@ impl Chainstate {
         &self,
         snapshot_set: bitcoin_rs_utxo::UtxoSet,
         mut stats: bitcoin_rs_utxo::stats::CoinStats,
-        pinned: &bitcoin_rs_primitives::AssumeUtxoData,
+        pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
         persist: impl FnOnce(
             &BlockTree,
             &TipSnapshot,
@@ -658,7 +658,7 @@ impl Chainstate {
 
     fn snapshot_base_tip(
         tree: &BlockTree,
-        pinned: &bitcoin_rs_primitives::AssumeUtxoData,
+        pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
     ) -> Result<TipSnapshot, AssumeUtxoError> {
         let node_id = tree
             .lookup(pinned.block_hash)
@@ -1098,7 +1098,7 @@ impl Chainstate {
             history: bitcoin_rs_storage::pruning::HistoryAccess::new(
                 retention,
                 bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(
-                    bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
+                    bitcoin_rs_consensus::primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
                 ),
             ),
             role: Arc::new(RwLock::new(ChainstateRole::Ordinary)),
@@ -1339,7 +1339,7 @@ struct BlockValidationContext {
     hash: Hash256,
     parent: Hash256,
     height: u32,
-    flags: bitcoin_rs_script::VerifyFlags,
+    flags: bitcoin_rs_consensus::script::VerifyFlags,
     locktime_cutoff: u32,
 }
 
@@ -1374,7 +1374,7 @@ struct ByteEquality<'a> {
     equal: bool,
 }
 
-impl bitcoin_rs_primitives::Sink for ByteEquality<'_> {
+impl bitcoin_rs_consensus::primitives::Sink for ByteEquality<'_> {
     fn write_all(&mut self, buf: &[u8]) {
         if self.equal {
             match self

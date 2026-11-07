@@ -104,7 +104,7 @@ mod tests {
         fn persist_block_body(
             &self,
             _height: u32,
-            _hash: bitcoin_rs_primitives::Hash256,
+            _hash: bitcoin_rs_consensus::primitives::Hash256,
             _body: &[u8],
         ) -> Result<(), bitcoin_rs_storage::StorageError> {
             Ok(())
@@ -112,7 +112,7 @@ mod tests {
         fn load_block_body(
             &self,
             _height: u32,
-            _hash: bitcoin_rs_primitives::Hash256,
+            _hash: bitcoin_rs_consensus::primitives::Hash256,
         ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::StorageError> {
             Ok(None)
         }
@@ -124,7 +124,7 @@ mod tests {
     fn test_publisher(dir: &std::path::Path) -> Result<CheckpointPublisher, std::io::Error> {
         let checkpoint_data_dir =
             cap_std::fs::Dir::open_ambient_dir(dir, cap_std::ambient_authority())?;
-        let network = bitcoin_rs_primitives::Network::Regtest;
+        let network = bitcoin_rs_consensus::primitives::Network::Regtest;
         Ok(CheckpointPublisher {
             admission: Arc::new(crate::ApplyAdmission::new()),
             undo_store: Arc::new(bitcoin_rs_storage::InMemoryUndoStore::default()),

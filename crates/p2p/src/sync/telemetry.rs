@@ -50,7 +50,7 @@ impl BlockSync {
     ///   facts only.
     pub(super) fn in_initial_block_download(&self) -> bool {
         self.ibd.is_active(
-            bitcoin_rs_primitives::unix_time_secs(),
+            bitcoin_rs_consensus::primitives::unix_time_secs(),
             self.chain.network(),
         )
     }

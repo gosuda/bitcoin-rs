@@ -1,11 +1,11 @@
 use bitcoin::hashes::{Hash as _, hash160};
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, RecoveryId, Signature};
 use bitcoin::secp256k1::{Message, Secp256k1};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, LockTime, OutPoint, Script, Sequence, SighashCache, Tx, TxIn, TxOut, Txid, Witness,
     consensus_bytes, varint,
 };
-use bitcoin_rs_script::push_data;
+use bitcoin_rs_consensus::script::push_data;
 use hashbrown::HashMap;
 
 use crate::error::RpcError;
@@ -1412,7 +1412,9 @@ fn read_input_outpoint(
         txid_bytes.copy_from_slice(reader.take(32)?);
         let vout = read_u32_compact_size(reader)?;
         let outpoint = OutPoint::new(
-            Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&txid_bytes)),
+            Txid(bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
+                &txid_bytes,
+            )),
             vout,
         );
         Ok((None, Some(outpoint)))

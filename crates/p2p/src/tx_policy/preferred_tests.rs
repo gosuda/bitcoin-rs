@@ -338,10 +338,10 @@ impl TxInventory for EvictDuringRead<'_> {
         }
         false
     }
-    fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_primitives::Tx> {
+    fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
         None
     }
-    fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_primitives::Tx> {
+    fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
         None
     }
     fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
@@ -350,7 +350,7 @@ impl TxInventory for EvictDuringRead<'_> {
     fn resident_package(
         &self,
         _: &[Wtxid],
-    ) -> Option<Vec<std::sync::Arc<bitcoin_rs_primitives::Tx>>> {
+    ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
         None
     }
 }
@@ -460,7 +460,7 @@ fn registered_inbound(
         0,
         crate::PeerRole::FullRelay,
         bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
-        bitcoin_rs_primitives::USER_AGENT,
+        bitcoin_rs_consensus::primitives::USER_AGENT,
     );
     table.publish_info(
         addr,

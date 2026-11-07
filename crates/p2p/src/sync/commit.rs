@@ -3,7 +3,7 @@ use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::SchedulerState;
 use super::chain::{WindowApplyDisposition, WindowCommitError};
-use bitcoin_rs_primitives::{BlockPayload, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256};
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -30,7 +30,7 @@ impl BlockSync {
     pub(super) fn punish_permanent_delivery_source(
         &self,
         source: Option<crate::PeerSource>,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) {
         let Some(source) = source else {
             return;

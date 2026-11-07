@@ -2,7 +2,7 @@ use crate::{
     ApplyError, ChainTransition, Chainstate, ConnectOutcome, DisconnectError, DisconnectOutcome,
 };
 use bitcoin_rs_chain::{InvalidationOutcome, NodeId, ReorgPlan, plan_reorg};
-use bitcoin_rs_primitives::{Block, BlockPayload, DecodeError, Hash256};
+use bitcoin_rs_consensus::primitives::{Block, BlockPayload, DecodeError, Hash256};
 use bitcoin_rs_storage::StorageError;
 
 /// Maximum number of disconnect-side block bodies held in memory at once
@@ -353,7 +353,7 @@ fn prepare_branches<F>(
     staged_body: &mut F,
 ) -> core::result::Result<PreparedBranches, ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
 {
     let Some(plan) = plan else {
         return Ok(PreparedBranches {
@@ -394,7 +394,7 @@ pub fn switch_to_branch<F, O, S>(
     mut settle: S,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
     O: ReorgObserver + ?Sized,
     S: FnMut(&mut O, core::result::Result<(), ReorgError>) -> core::result::Result<(), ReorgError>,
 {
@@ -473,7 +473,7 @@ fn finish_reorg_attempt<F, O>(
     staged_body: &mut F,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
     O: ReorgObserver + ?Sized,
 {
     let outcome = match outcome {
@@ -537,7 +537,7 @@ fn load_available_branch_prefix<F>(
     staged_body: &mut F,
 ) -> core::result::Result<LoadedBranchPrefix, ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
 {
     let window = &nodes[..nodes.len().min(CONNECT_STREAM_WINDOW)];
     let mut loaded = Vec::with_capacity(window.len());
@@ -573,7 +573,7 @@ fn load_branch_body<F>(
     staged_body: &mut F,
 ) -> core::result::Result<LoadedBranchBody, ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
 {
     if let Some(payload) = staged_body(hash) {
         return validate_branch_body(hash, height, payload);
@@ -638,7 +638,7 @@ fn preflight_disconnect_bodies<F>(
     staged_body: &mut F,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
 {
     for (hash, height) in nodes {
         load_branch_body(handles, *hash, *height, staged_body)?;
@@ -657,7 +657,7 @@ fn restore_disconnected_branch<F, O>(
     staged_body: &mut F,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
     O: ReorgObserver + ?Sized,
 {
     let handles = transition.chainstate();
@@ -691,7 +691,7 @@ fn execute_streamed_plan<F, O>(
     staged_body: &mut F,
 ) -> (LoadedPlanProgress, core::result::Result<(), ReorgError>)
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
     O: ReorgObserver + ?Sized,
 {
     let handles = transition.chainstate();
@@ -762,7 +762,7 @@ fn execute_connect_stream<F, O>(
     progress: &mut LoadedPlanProgress,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
     O: ReorgObserver + ?Sized,
 {
     let handles = transition.chainstate();
@@ -859,7 +859,7 @@ fn revisit_disconnected_blocks<F, O>(
     staged_body: &mut F,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
     O: ReorgObserver + ?Sized,
 {
     for (hash, block_height) in disconnect_nodes[..disconnected_count].iter().rev() {
@@ -937,7 +937,7 @@ where
 mod tests {
     use super::*;
 
-    use bitcoin_rs_primitives::Network;
+    use bitcoin_rs_consensus::primitives::Network;
     use bitcoin_rs_utxo::UtxoSet;
 
     use std::sync::Arc;

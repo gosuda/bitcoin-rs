@@ -63,7 +63,7 @@ jobs:
       # consensus pass above does not compile script's own kernel-gated
       # targets (`core_vectors`, `segwit_v0_sighash_edges`).
       - name: Kernel-gated script targets Clippy
-        run: cargo clippy --locked -p bitcoin-rs-script --all-targets --features kernel -- -D warnings
+        run: cargo clippy --locked -p bitcoin-rs-consensus --all-targets --features kernel -- -D warnings
       # Focused kernel oracle parity tests at the merge-gate boundary (issue #1511).
       # The library and shared-sighash suite also exercise owned block-check
       # preparation; the oracle helpers below use the borrowed transaction API.
@@ -76,7 +76,7 @@ jobs:
             kernel_block_parity:: kernel_boundary_parity:: kernel_vector_parity:: --nocapture
       - name: Kernel script core-vectors oracle test
         run: |
-          cargo test --locked -p bitcoin-rs-script --features kernel \
+          cargo test --locked -p bitcoin-rs-consensus --features kernel \
             --test suite core_vectors:: -- --nocapture
 
   # Match ci-main's production binary lint graph exactly. A cargo check here

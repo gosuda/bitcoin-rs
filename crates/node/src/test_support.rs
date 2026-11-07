@@ -46,7 +46,7 @@ pub enum TestError {
     #[error(transparent)]
     Toml(#[from] toml::de::Error),
     #[error(transparent)]
-    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
     MiningControl(#[from] bitcoin_rs_mining::MiningControlError),
     #[error(transparent)]

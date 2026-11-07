@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 
 use crate::PeerInfo;
 use crate::connection::PeerSource;

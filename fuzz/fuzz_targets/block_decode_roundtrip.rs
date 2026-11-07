@@ -1,7 +1,7 @@
 #![no_main]
 
 use bitcoin_rs_consensus::compute_merkle_root;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize,
 };

@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_index::silent_payments::{BlockTweaks, block_tweaks};
-use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_utxo::contract::{BlockSpendsError, BoundedReadError};
 use sonic_rs::{JsonValueTrait as _, Value, json};
 
@@ -33,7 +33,7 @@ pub(crate) fn getblocktweaks(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let view = ctx.chain.applied_view();
     let tip = view.tip().ok_or_else(|| unavailable("no applied tip"))?;
     if ctx.chain.progress.initial_block_download(
-        bitcoin_rs_primitives::unix_time_secs(),
+        bitcoin_rs_consensus::primitives::unix_time_secs(),
         ctx.chain.chain_network,
     ) {
         return Err(RpcError::ClientInInitialDownload(

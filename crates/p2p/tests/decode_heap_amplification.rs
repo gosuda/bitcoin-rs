@@ -142,7 +142,7 @@ fn one_witness_input_blocktxn_payload() -> Vec<u8> {
 fn blocktxn_decode_allocation_stays_within_the_reservation() {
     let invalid_payload = one_witness_input_blocktxn_payload();
     let invalid_reservation =
-        bitcoin_rs_primitives::layout::decode_reservation(invalid_payload.len());
+        bitcoin_rs_consensus::primitives::layout::decode_reservation(invalid_payload.len());
     let invalid_frame = frame(b"blocktxn", &invalid_payload);
 
     let measurement = Measurement::start();
@@ -175,7 +175,7 @@ fn blocktxn_decode_allocation_stays_within_the_reservation() {
     payload.push(0x01);
     payload.extend_from_slice(&transaction);
 
-    let reservation = bitcoin_rs_primitives::layout::decode_reservation(payload.len());
+    let reservation = bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len());
     let frame = frame(b"blocktxn", &payload);
 
     let measurement = Measurement::start();
@@ -208,7 +208,7 @@ fn cmpctblock_prefilled_transaction_decode_allocation_stays_within_the_reservati
     payload.extend_from_slice(&[0x00]);
     payload.extend_from_slice(&[0xFE, 0x00, 0x09, 0x3D, 0x00]);
 
-    let reservation = bitcoin_rs_primitives::layout::decode_reservation(payload.len());
+    let reservation = bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len());
     let frame = frame(b"cmpctblock", &payload);
 
     let measurement = Measurement::start();

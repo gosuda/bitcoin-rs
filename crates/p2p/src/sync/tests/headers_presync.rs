@@ -6,7 +6,7 @@ use std::time::Instant;
 use super::TestError;
 use super::settlement_faults::deliver_headers;
 use super::settlement_faults::next_locator;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 
 use super::super::SyncBudget;
 use super::super::default_sync_budget;
@@ -24,7 +24,7 @@ fn mine_header(prev_blockhash: BlockHash, height: u32) -> Header {
 }
 
 fn test_header(prev_blockhash: BlockHash, height: u32) -> Header {
-    use bitcoin_rs_primitives::CompactTarget;
+    use bitcoin_rs_consensus::primitives::CompactTarget;
     let mut merkle = [0_u8; 32];
     merkle[..4].copy_from_slice(&height.to_le_bytes());
     let mut header = Header {
@@ -1353,7 +1353,8 @@ fn body_carried_low_work_bad_nbits_is_discarded_and_faults_peer() -> TestResult 
         1,
         vec![regtest_fixture::coinbase(2)],
     )?;
-    block.header.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x207f_fffe);
+    block.header.bits =
+        bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x207f_fffe);
     while !bitcoin_rs_chain::compact_is_met_by(block.header.bits, Hash256::from(block.block_hash()))
     {
         block.header.nonce = block.header.nonce.wrapping_add(1);

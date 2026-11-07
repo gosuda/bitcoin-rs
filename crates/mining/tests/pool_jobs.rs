@@ -5,6 +5,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::bip34::check_bip34;
+use bitcoin_rs_consensus::primitives::{
+    Amount, BlockHash, BlockPayload, CompactTarget, Hash256, Header, LockTime, Network, OutPoint,
+    Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, encode::consensus_bytes,
+};
+use bitcoin_rs_consensus::script::VerifyFlags;
 use bitcoin_rs_consensus::verify_block::verify_block_rules;
 use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolGateway,
@@ -20,11 +25,6 @@ use bitcoin_rs_mining::{
     BlockValidationResult, Candidate, CandidateContext, CoinbaseBudget, GenerateRequest,
     GeneratedBlock, MiningControl, MiningControlError, MiningError, MiningInfo, assemble_candidate,
 };
-use bitcoin_rs_primitives::{
-    Amount, BlockHash, BlockPayload, CompactTarget, Hash256, Header, LockTime, Network, OutPoint,
-    Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, encode::consensus_bytes,
-};
-use bitcoin_rs_script::VerifyFlags;
 use compact_str::CompactString;
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};

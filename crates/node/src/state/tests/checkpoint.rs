@@ -2,7 +2,7 @@ use super::*;
 use crate::test_support::TestError;
 use sonic_rs::JsonValueTrait as _;
 
-use bitcoin_rs_primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockPayload;
 
 #[test]
 fn the_chain_transaction_count_survives_a_checkpoint_restart() -> Result<(), TestError> {
@@ -19,7 +19,7 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> Result<(), Tes
             "a node that has applied nothing cannot know the count"
         );
 
-        let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
         let genesis_tx_count = u64::try_from(genesis.txs.len())?;
         let _tip = state.apply_block(&BlockPayload::from_local(genesis))?;
         let counted = applied_chain_tx_count(&state);
@@ -47,7 +47,7 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> Result<(), Tes
 fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError> {
     fn stable_hash(
         view: &bitcoin_rs_utxo::UtxoSetView<'_>,
-    ) -> Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
+    ) -> Result<bitcoin_rs_consensus::primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
         view.hash_serialized_3()
     }
     let dir = tempfile::tempdir()?;
@@ -56,7 +56,9 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
     config.data_dir = data_dir.clone();
     config.p2p.listen.clear();
     let state = NodeState::open(config, None)?;
-    let genesis = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
+    let genesis = BlockPayload::from_local(
+        bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
+    );
     let genesis_tip = state.apply_block(&genesis)?;
     let expected_utxo_hash = state
         .chainstate()
@@ -158,8 +160,9 @@ fn clean_checkpoint_lifecycle_is_backend_neutral() -> Result<(), TestError> {
             }
         };
         config.p2p.listen.clear();
-        let genesis =
-            BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
+        let genesis = BlockPayload::from_local(
+            bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
+        );
         let state = NodeState::open(config.clone(), None)?;
         state.apply_block(&genesis)?;
         let _ = state.publish_checkpoint()?;
@@ -178,7 +181,7 @@ fn clean_checkpoint_lifecycle_is_backend_neutral() -> Result<(), TestError> {
 fn journal_replay_restores_state_above_checkpoint() -> Result<(), TestError> {
     fn stable_hash(
         view: &bitcoin_rs_utxo::UtxoSetView<'_>,
-    ) -> Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
+    ) -> Result<bitcoin_rs_consensus::primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
         view.hash_serialized_3()
     }
 
@@ -189,7 +192,9 @@ fn journal_replay_restores_state_above_checkpoint() -> Result<(), TestError> {
     config.p2p.listen.clear();
     config.chainstate_journal.blocks = 1;
 
-    let genesis = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
+    let genesis = BlockPayload::from_local(
+        bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
+    );
     let first = NodeState::open(config.clone(), None)?;
     first.apply_block(&genesis)?;
     let _ = first.publish_checkpoint()?;
@@ -252,7 +257,7 @@ fn publish_checkpoint_returns_generation_and_reopens() -> Result<(), TestError> 
     config.data_dir = data_dir;
     config.p2p.listen.clear();
     let state = NodeState::open(config.clone(), None)?;
-    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
     let tip = state.apply_block(&BlockPayload::from_local(genesis))?;
     let generation = state.publish_checkpoint()?;
     assert!(

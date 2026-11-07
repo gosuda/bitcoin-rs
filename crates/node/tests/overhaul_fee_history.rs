@@ -8,15 +8,15 @@ type Result<T, E = TestError> = core::result::Result<T, E>;
 
 use crate::support::{p2sh_true_output, p2sh_true_spend_script_sig, parent_txid};
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
-use bitcoin_rs_mempool::{AdmissionOrigin, FeeEstimator, SubmitOutcome};
-use bitcoin_rs_node::state::NodeState;
-use bitcoin_rs_node::{Network, NodeConfig};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness, unix_time_secs,
 };
+use bitcoin_rs_consensus::script::push_int;
+use bitcoin_rs_mempool::{AdmissionOrigin, FeeEstimator, SubmitOutcome};
+use bitcoin_rs_node::state::NodeState;
+use bitcoin_rs_node::{Network, NodeConfig};
 use bitcoin_rs_rpc::context::ChainAdmissionView;
-use bitcoin_rs_script::push_int;
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 
 const BASE_TIME: u32 = 1_296_688_603;
@@ -43,7 +43,7 @@ fn reopen(config: NodeConfig) -> Result<NodeState> {
 }
 
 fn apply_genesis(state: &NodeState) -> Result<()> {
-    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         Network::Regtest.genesis_block(),
     ))?;
     Ok(())
@@ -126,9 +126,9 @@ fn mine_and_apply(
         lock_time: LockTime::ZERO,
     };
     let mut block = Block {
-        header: bitcoin_rs_primitives::Header {
+        header: bitcoin_rs_consensus::primitives::Header {
             version: 0x2000_0000,
-            prev_blockhash: bitcoin_rs_primitives::BlockHash::from(prev),
+            prev_blockhash: bitcoin_rs_consensus::primitives::BlockHash::from(prev),
             merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
             time: BASE_TIME
                 .saturating_add(BLOCK_INTERVAL.saturating_mul(height))
@@ -142,7 +142,7 @@ fn mine_and_apply(
         .ok_or_else(|| TestError::message("block must have a merkle root"))?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
     state
-        .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        .apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
             block.clone(),
         ))
         .map_err(|error| TestError::message(format!("apply failed at height {height}: {error}")))?;

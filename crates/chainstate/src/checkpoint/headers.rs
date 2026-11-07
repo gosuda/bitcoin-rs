@@ -18,7 +18,7 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use bitcoin_rs_chain::{BlockTree, ChainWork, NodeId, accept_headers};
-use bitcoin_rs_primitives::{ConsensusEncode, Hash256, Header, Network, deserialize};
+use bitcoin_rs_consensus::primitives::{ConsensusEncode, Hash256, Header, Network, deserialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -587,7 +587,7 @@ fn tip_from_node(
 
 struct ByteSliceSink<'a>(&'a mut [u8]);
 
-impl bitcoin_rs_primitives::Sink for ByteSliceSink<'_> {
+impl bitcoin_rs_consensus::primitives::Sink for ByteSliceSink<'_> {
     fn write_all(&mut self, bytes: &[u8]) {
         let len = bytes.len().min(self.0.len());
         let empty: &mut [u8] = &mut [];

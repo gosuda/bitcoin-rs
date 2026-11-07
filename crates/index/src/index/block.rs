@@ -8,7 +8,7 @@ use crate::{
     types::ScriptHistoryOccurrence, types::SpendingPrefixRow, types::TxidRow, types::U24_MAX,
     types::encode_height, types::encode_history_height,
 };
-use bitcoin_rs_primitives::{Hash256, OutPoint, Txid, encode, layout::ParsedBlock};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid, encode, layout::ParsedBlock};
 
 pub trait SpentCoinScripts {
     fn script_bytes(&self, txid: &[u8; 32], vout: u32) -> Option<&[u8]>;
@@ -22,7 +22,7 @@ impl SpentCoinScripts for NoSpentScripts {
     }
 }
 
-pub use bitcoin_rs_script::MAX_SCRIPT_SIZE as MAX_LIVE_SCRIPT_SIZE;
+pub use bitcoin_rs_consensus::script::MAX_SCRIPT_SIZE as MAX_LIVE_SCRIPT_SIZE;
 
 pub(super) fn pending_rows_for_block_with_header(
     block: &[u8],
@@ -88,7 +88,7 @@ struct TxContext {
 }
 
 fn process_transaction(
-    tx: &bitcoin_rs_primitives::layout::ParsedTransaction<'_>,
+    tx: &bitcoin_rs_consensus::primitives::layout::ParsedTransaction<'_>,
     ctx: &BlockContext<'_>,
     rows: &mut PendingRows,
     block_outputs: &mut hashbrown::HashMap<([u8; 32], u32), Option<ScriptHash>>,
@@ -127,7 +127,7 @@ fn process_transaction(
 }
 
 fn process_inputs(
-    tx: &bitcoin_rs_primitives::layout::ParsedTransaction<'_>,
+    tx: &bitcoin_rs_consensus::primitives::layout::ParsedTransaction<'_>,
     ctx: &BlockContext<'_>,
     tx_ctx: &TxContext,
     rows: &mut PendingRows,
@@ -194,7 +194,7 @@ fn process_inputs(
 }
 
 fn process_outputs(
-    tx: &bitcoin_rs_primitives::layout::ParsedTransaction<'_>,
+    tx: &bitcoin_rs_consensus::primitives::layout::ParsedTransaction<'_>,
     ctx: &BlockContext<'_>,
     tx_ctx: &TxContext,
     rows: &mut PendingRows,

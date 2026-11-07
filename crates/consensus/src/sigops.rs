@@ -1,7 +1,7 @@
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
-use bitcoin_rs_script::VerifyFlags;
-use bitcoin_rs_script::sigops::{count_accurate, count_segwit, count_tx_legacy};
-use bitcoin_rs_script::{Instruction, instructions, is_p2sh, is_push_only, is_witness_program};
+use crate::primitives::{OutPoint, Tx, TxOut};
+use crate::script::VerifyFlags;
+use crate::script::sigops::{count_accurate, count_segwit, count_tx_legacy};
+use crate::script::{Instruction, instructions, is_p2sh, is_push_only, is_witness_program};
 use hashbrown::HashMap;
 
 #[must_use]
@@ -70,8 +70,8 @@ fn last_push(script: &[u8]) -> Option<&[u8]> {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::{Amount, Hash256, LockTime, Script, Sequence, TxIn, Txid, Witness};
-    use bitcoin_rs_script::{opcode, push_data};
+    use crate::primitives::{Amount, Hash256, LockTime, Script, Sequence, TxIn, Txid, Witness};
+    use crate::script::{opcode, push_data};
 
     use super::*;
 
@@ -127,7 +127,7 @@ mod tests {
                 4,
             ),
             (
-                vec![bitcoin_rs_script::opcode::OP_DROP, opcode::OP_PUSHNUM_1],
+                vec![crate::script::opcode::OP_DROP, opcode::OP_PUSHNUM_1],
                 push_data(&p2wpkh),
                 Vec::new(),
                 4,

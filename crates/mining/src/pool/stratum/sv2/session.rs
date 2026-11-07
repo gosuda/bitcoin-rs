@@ -9,7 +9,7 @@ use crate::pool::{
 };
 use crate::{MiningControl, MiningControlError};
 use binary_sv2::{B032, B064K, Decodable, Encodable, GetSize, Seq0255, Str0255, Sv2Option, U256};
-use bitcoin_rs_primitives::{BlockHash, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockHash, Hash256};
 use common_messages_sv2::{
     CHANNEL_BIT_RECONNECT, CHANNEL_BIT_SETUP_CONNECTION, CHANNEL_BIT_SETUP_CONNECTION_ERROR,
     CHANNEL_BIT_SETUP_CONNECTION_SUCCESS, ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH,

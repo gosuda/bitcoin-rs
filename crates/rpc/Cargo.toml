@@ -21,7 +21,6 @@ test-seam = ["bitcoin-rs-index/test-seam"]
 zmq = ["dep:zmq"]
 
 [dependencies]
-bitcoin-rs-primitives.workspace = true
 bitcoin-rs-consensus.workspace = true
 bitcoin-rs-chain.workspace = true
 bitcoin-rs-index.workspace = true
@@ -29,7 +28,6 @@ bitcoin-rs-mempool.workspace = true
 bitcoin-rs-p2p.workspace = true
 bitcoin-rs-utxo.workspace = true
 bitcoin-rs-mining.workspace = true
-bitcoin-rs-script.workspace = true
 bitcoin.workspace = true
 miniscript.workspace = true
 sonic-rs.workspace = true

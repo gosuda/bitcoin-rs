@@ -1,11 +1,11 @@
 use std::sync::{Arc, Weak};
 
 use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_consensus::primitives::Block;
+use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_mempool::MempoolObserver;
 use bitcoin_rs_mempool::MutationEnvelope;
 use bitcoin_rs_mempool::MutationResult;
-use bitcoin_rs_primitives::Block;
-use bitcoin_rs_primitives::Hash256;
 use parking_lot::RwLock;
 
 use crate::MempoolSequenceWake;

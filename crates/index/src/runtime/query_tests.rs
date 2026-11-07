@@ -5,7 +5,7 @@ use crate::types::{TxPosition, TxPositionValue, TxidRow};
 use crate::{HashPrefixRow, IndexCapabilities, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow};
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{NodeStatus, regtest_fixture};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
     Witness, consensus_bytes,
 };

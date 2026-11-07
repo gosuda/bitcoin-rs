@@ -405,7 +405,8 @@ mod tests {
             stream.write_all(b"250 OK\r\n").expect("write AUTH OK");
             line.clear();
             reader.read_line(&mut line).expect("read ADD_ONION");
-            let service_id = bitcoin_rs_primitives::PeerEndpoint::tor_onion_hostname(&[7; 32]);
+            let service_id =
+                bitcoin_rs_consensus::primitives::PeerEndpoint::tor_onion_hostname(&[7; 32]);
             let private_key = format!(
                 "ED25519-V3:{}",
                 base64::engine::general_purpose::STANDARD.encode([7u8; 64])

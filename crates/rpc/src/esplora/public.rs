@@ -5,12 +5,12 @@ use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use bitcoin::merkle_tree::MerkleBlock;
-use bitcoin_rs_index::ScriptHash;
-use bitcoin_rs_mempool::LocalOrigin;
-use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::encode::double_sha256;
+use bitcoin_rs_consensus::primitives::{
     Block, Hash256, OutPoint, Tx, Txid, consensus_bytes, deserialize, unix_time_secs,
 };
+use bitcoin_rs_index::ScriptHash;
+use bitcoin_rs_mempool::LocalOrigin;
 use sonic_rs::json;
 
 use super::http::{admission_error, query_error};

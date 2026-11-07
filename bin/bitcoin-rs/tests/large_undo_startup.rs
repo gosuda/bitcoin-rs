@@ -59,8 +59,9 @@ fn valid_large_undo_reopens_and_verifies() -> Result {
             0,
         )?);
         let undo = KvUndoStore::new(store);
-        let hash =
-            bitcoin_rs_primitives::Hash256::from_le_bytes(&candidate.block_hash().to_byte_array());
+        let hash = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
+            &candidate.block_hash().to_byte_array(),
+        );
         let started = Instant::now();
         let record = undo
             .load_undo(189, hash)?

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{ChainWork, NodeStatus};
-use bitcoin_rs_primitives::{AssumeUtxoData, Block, BlockPayload, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{AssumeUtxoData, Block, BlockPayload, Hash256, Network};
 use bitcoin_rs_storage::{CommitRecords, DurableHead, DurableHeadStore, StorageError};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_utxo::{SnapshotLoad, UtxoSet, read_snapshot_strict_v4, write_snapshot_observed};
@@ -387,7 +387,8 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
 fn snapshot_rejects_base_above_shorter_best_work_header_chain() -> TestResult {
     let fixture = Fixture::new()?;
     let mut harder = competing_snapshot_headers()?.remove(0);
-    harder.header.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x2000_ffff);
+    harder.header.bits =
+        bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x2000_ffff);
     harder.header.nonce = 0;
     bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut harder)?;
     {
@@ -498,7 +499,8 @@ fn snapshot_work_branch(
     }
     for index in 1..blocks.len() {
         blocks[index].header.prev_blockhash = blocks[index - 1].block_hash();
-        blocks[index].header.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(bits);
+        blocks[index].header.bits =
+            bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(bits);
         blocks[index].header.nonce = 0;
         bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut blocks[index])?;
     }
@@ -605,7 +607,8 @@ fn snapshot_rejects_higher_base_with_less_work_than_applied_tip() -> TestResult 
         fixture.blocks[2].block_hash(),
         3,
     )?;
-    child.header.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x1f7f_ffff);
+    child.header.bits =
+        bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x1f7f_ffff);
     child.header.nonce = 0;
     bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut child)?;
     {
@@ -1377,8 +1380,10 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
             |_, _, _| {
                 let (sent, received) = std::sync::mpsc::sync_channel(1);
                 scope.spawn(move || {
-                    let progress =
-                        reader.progress(Network::Regtest, bitcoin_rs_primitives::unix_time_secs());
+                    let progress = reader.progress(
+                        Network::Regtest,
+                        bitcoin_rs_consensus::primitives::unix_time_secs(),
+                    );
                     let _ = sent.send(progress);
                 });
                 observed = received

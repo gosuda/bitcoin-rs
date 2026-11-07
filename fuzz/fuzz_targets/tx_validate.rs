@@ -8,11 +8,11 @@ use bitcoin_rs_consensus::{
     UtxoView, ValidationEngine, verify_transaction, verify_transaction_non_script,
 };
 use bitcoin_rs_mempool::{StandardnessPolicy, is_standard_tx};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
     deserialize as native_deserialize,
 };
-use bitcoin_rs_script::VerifyFlags;
+use bitcoin_rs_consensus::script::VerifyFlags;
 use libfuzzer_sys::fuzz_target;
 
 const HEIGHT: u32 = 800_001;
@@ -128,7 +128,7 @@ fn validate_tx(data: &[u8]) {
         let Ok(tx) = native_deserialize::<Tx>(&encoded) else {
             return;
         };
-        let consensus = bitcoin_rs_primitives::consensus_bytes(&tx);
+        let consensus = bitcoin_rs_consensus::primitives::consensus_bytes(&tx);
         assert_eq!(
             consensus,
             encoded,
@@ -137,7 +137,7 @@ fn validate_tx(data: &[u8]) {
         let re_decoded = native_deserialize::<Tx>(&consensus)
             .expect("native re-decode must succeed on consensus_bytes");
         assert_eq!(re_decoded, tx, "round-trip tx equality");
-        let re_consensus = bitcoin_rs_primitives::consensus_bytes(&re_decoded);
+        let re_consensus = bitcoin_rs_consensus::primitives::consensus_bytes(&re_decoded);
         assert_eq!(re_consensus, consensus, "canonical tx bytes idempotent");
         validate_native(tx);
         return;
@@ -160,7 +160,7 @@ fn validate_tx(data: &[u8]) {
         }],
         lock_time: LockTime::ZERO,
     };
-    let consensus = bitcoin_rs_primitives::consensus_bytes(&tx);
+    let consensus = bitcoin_rs_consensus::primitives::consensus_bytes(&tx);
     let re_decoded = native_deserialize::<Tx>(&consensus)
         .expect("synthetic tx deserialize");
     assert_eq!(re_decoded, tx, "round-trip synthetic tx equality");

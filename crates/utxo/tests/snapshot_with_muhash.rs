@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_utxo::{UtxoSet, write_snapshot_observed};

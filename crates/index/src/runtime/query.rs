@@ -1089,7 +1089,7 @@ mod tests {
     fn covered_anchor_rejects_watermark_height_mismatch() {
         use bitcoin_rs_chain::NodeStatus;
 
-        let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
         let mut tree = bitcoin_rs_chain::BlockTree::new();
         let genesis_id = tree
             .insert_header(genesis.header, NodeStatus::HeaderValid)

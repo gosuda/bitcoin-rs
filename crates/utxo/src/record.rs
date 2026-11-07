@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 use smallvec::SmallVec;
 
 use crate::{UtxoError, UtxoKey};

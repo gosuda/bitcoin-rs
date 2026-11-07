@@ -4,7 +4,7 @@ use crate::test_support::TestError;
 #[test]
 fn branch_switch_uses_staged_bodies_without_durable_store()
 -> Result<(), crate::test_support::TestError> {
-    use bitcoin_rs_primitives::Script;
+    use bitcoin_rs_consensus::primitives::Script;
     let (handles, main, mut bodies) = matured_chain(101)?;
     assert!(
         handles.block_body_store().is_none(),
@@ -94,7 +94,7 @@ fn branch_switch_uses_staged_bodies_without_durable_store()
 #[test]
 fn branch_switch_replans_after_a_competing_connect_before_transition()
 -> Result<(), crate::test_support::TestError> {
-    use bitcoin_rs_primitives::Script;
+    use bitcoin_rs_consensus::primitives::Script;
     let (handles, main, mut bodies) = matured_chain(101)?;
     let followers = crate::chain_effects::ChainFollowers::noop();
     let applied_tip = handles.applied_tip_reader();

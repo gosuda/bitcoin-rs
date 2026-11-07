@@ -92,7 +92,7 @@ fn applied_view_does_not_wait_for_transition() -> Result<(), crate::test_error::
         tip_id: bitcoin_rs_chain::NodeId::new(0),
         height: 5,
         chainwork: bitcoin_rs_chain::ChainWork::ZERO,
-        hash: bitcoin_rs_primitives::Hash256::default(),
+        hash: bitcoin_rs_consensus::primitives::Hash256::default(),
         chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(1),
     })));
 
@@ -277,7 +277,7 @@ fn from_handles_shares_chain_handles_with_caller() {
             peer_table: p2p.table(),
             p2p: Arc::clone(&p2p),
             local_services: 0x09,
-            user_agent: bitcoin_rs_primitives::USER_AGENT.to_owned(),
+            user_agent: bitcoin_rs_consensus::primitives::USER_AGENT.to_owned(),
             overlay: bitcoin_rs_p2p::overlay::OverlayConfig::default(),
             v2_transport: false,
         },
@@ -400,7 +400,7 @@ fn block_render_budget_releases_dropped_permits() {
 
 #[test]
 fn new_context_wires_utxo_commits_to_coin_stats() {
-    use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
+    use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, TxOut, Txid};
     use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 
     let ctx = Context::new();
@@ -472,7 +472,7 @@ fn header_hex_is_unchanged_by_sourcing_the_header_from_the_tree() {
     );
     assert_eq!(
         record.header_hex().len(),
-        bitcoin_rs_primitives::Header::LEN * 2
+        bitcoin_rs_consensus::primitives::Header::LEN * 2
     );
 }
 
@@ -529,7 +529,7 @@ fn synthetic_record_has_no_header_and_renders_empty_hex() {
 #[test]
 fn tree_derived_record_carries_the_header() {
     use bitcoin_rs_chain::NodeStatus;
-    use bitcoin_rs_primitives::Header;
+    use bitcoin_rs_consensus::primitives::Header;
 
     let ctx = Context::new();
     let header = Header {
@@ -567,7 +567,7 @@ fn tree_derived_record_carries_the_header() {
 #[test]
 fn height_for_hash_returns_none_when_tree_empty() {
     let ctx = Context::new();
-    let unknown = bitcoin_rs_primitives::Hash256::from_le_bytes(&[0xff_u8; 32]);
+    let unknown = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[0xff_u8; 32]);
 
     assert!(ctx.chain.height_for_hash(unknown).is_none());
 }
@@ -575,7 +575,7 @@ fn height_for_hash_returns_none_when_tree_empty() {
 fn block_by_height_prefers_tree_identity_over_stale_cache()
 -> Result<(), crate::test_error::TestError> {
     use bitcoin_rs_chain::NodeStatus;
-    use bitcoin_rs_primitives::Header;
+    use bitcoin_rs_consensus::primitives::Header;
 
     let ctx = Context::new();
     let (child_hash, stale_hash) = {
@@ -628,7 +628,7 @@ fn block_by_height_prefers_tree_identity_over_stale_cache()
 fn height_lookups_follow_applied_tip_when_header_fork_leads()
 -> Result<(), crate::test_error::TestError> {
     use bitcoin_rs_chain::NodeStatus;
-    use bitcoin_rs_primitives::Header;
+    use bitcoin_rs_consensus::primitives::Header;
 
     let ctx = Context::new();
     let (applied_tip, header_tip) = {

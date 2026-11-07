@@ -7,7 +7,7 @@ enum TestError {
     #[error(transparent)]
     StaleTip(#[from] StaleTipError),
     #[error(transparent)]
-    Hash(#[from] bitcoin_rs_primitives::HashError),
+    Hash(#[from] bitcoin_rs_consensus::primitives::HashError),
     #[error("missing: {0}")]
     Missing(&'static str),
 }

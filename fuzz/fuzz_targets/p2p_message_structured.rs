@@ -20,8 +20,8 @@ use bitcoin::{BlockHash, FilterHash, Txid, merkle_tree::MerkleBlock};
 use bitcoin_rs_p2p::wire::{
     MAX_MESSAGE_PAYLOAD, Message, encode_payload, read_message, write_message,
 };
-use bitcoin_rs_primitives::layout::decode_reservation;
-use bitcoin_rs_primitives::{BlockPayload, CompactTarget, Header, Network};
+use bitcoin_rs_consensus::primitives::layout::decode_reservation;
+use bitcoin_rs_consensus::primitives::{BlockPayload, CompactTarget, Header, Network};
 use libfuzzer_sys::arbitrary::{self, Unstructured};
 use libfuzzer_sys::{fuzz_mutator, fuzz_target, fuzzer_mutate};
 

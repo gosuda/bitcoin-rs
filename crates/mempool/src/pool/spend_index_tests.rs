@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut};
+use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxIn, TxOut};
 
 use super::*;
 

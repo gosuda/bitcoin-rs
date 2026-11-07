@@ -9,15 +9,15 @@ use bitcoin_rs_chain::{
 use bitcoin_rs_mempool::BodyInterest;
 use bitcoin_rs_mempool::{AdmissionChain, ChainAdmissionSnapshot, MempoolGateway, PrevoutMeta};
 
+use bitcoin_rs_consensus::primitives::{
+    BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    layout::ParsedBlock, unix_time_secs,
+};
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_mempool::{Mempool, MempoolLimits, MempoolObserver};
 use bitcoin_rs_mining::MiningControl;
 #[cfg(feature = "pool")]
 use bitcoin_rs_mining::pool::ledger as pool_ledger;
-use bitcoin_rs_primitives::{
-    BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    layout::ParsedBlock, unix_time_secs,
-};
 
 use crate::error::RpcError;
 
@@ -31,7 +31,7 @@ use bitcoin::hex::DisplayHex as _;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_consensus::ValidationEngine;
 #[cfg(test)]
-use bitcoin_rs_primitives::{Amount, Script};
+use bitcoin_rs_consensus::primitives::{Amount, Script};
 use core::fmt;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use hashbrown::HashMap;
@@ -174,7 +174,7 @@ pub trait ChainControl: Send + Sync {
 
     fn invalidate_block(
         &self,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<(), ChainControlError>;
 
     /// `check_level` is Core's `0..=4` level and `nblocks` counts back from the applied
@@ -585,7 +585,7 @@ impl Default for NetworkHandles {
             peer_table: p2p.table(),
             p2p,
             local_services: 0x09,
-            user_agent: bitcoin_rs_primitives::USER_AGENT.to_owned(),
+            user_agent: bitcoin_rs_consensus::primitives::USER_AGENT.to_owned(),
             overlay: bitcoin_rs_p2p::overlay::OverlayConfig::default(),
             v2_transport,
         }
@@ -1262,7 +1262,7 @@ impl ChainHandles {
     #[must_use]
     pub(crate) fn median_time_past_for_hash(
         &self,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Option<u32> {
         let tree = self.block_tree.read();
         let node_id = tree.lookup(hash)?;
@@ -1270,14 +1270,17 @@ impl ChainHandles {
     }
 
     #[must_use]
-    pub(crate) fn height_for_hash(&self, hash: bitcoin_rs_primitives::Hash256) -> Option<u32> {
+    pub(crate) fn height_for_hash(
+        &self,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
+    ) -> Option<u32> {
         self.block_tree.read().height_of_hash(hash)
     }
 
     #[must_use]
     pub(crate) fn chain_work_hex_for_hash(
         &self,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Option<String> {
         let tree = self.block_tree.read();
         let node = tree.node_by_hash(hash)?;

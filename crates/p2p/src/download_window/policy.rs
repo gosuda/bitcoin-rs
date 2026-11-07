@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use bitcoin::p2p::ServiceFlags;
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_consensus::primitives::Network;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -99,10 +99,10 @@ pub(crate) fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPol
     if peer.services & ServiceFlags::NETWORK_LIMITED.to_u64() == 0 {
         return false;
     }
-    if policy
-        .ibd
-        .is_active(bitcoin_rs_primitives::unix_time_secs(), policy.network)
-    {
+    if policy.ibd.is_active(
+        bitcoin_rs_consensus::primitives::unix_time_secs(),
+        policy.network,
+    ) {
         return false;
     }
     u32::try_from(peer.best_known_height).is_ok_and(|demonstrated| {
@@ -116,9 +116,10 @@ pub(crate) fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPol
 pub(crate) fn servable_floor(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> u32 {
     let network = ServiceFlags::NETWORK.to_u64();
     if peer.services & network != 0
-        || policy
-            .ibd
-            .is_active(bitcoin_rs_primitives::unix_time_secs(), policy.network)
+        || policy.ibd.is_active(
+            bitcoin_rs_consensus::primitives::unix_time_secs(),
+            policy.network,
+        )
     {
         return 0;
     }

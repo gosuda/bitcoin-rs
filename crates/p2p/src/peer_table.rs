@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use bitcoin::p2p::ServiceFlags;
-use bitcoin_rs_primitives::{Hash256, Txid, Wtxid};
+use bitcoin_rs_consensus::primitives::{Hash256, Txid, Wtxid};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::RwLock;
 

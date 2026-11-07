@@ -1,5 +1,5 @@
 use bitcoin::hex::DisplayHex as _;
-use bitcoin_rs_primitives::{Block, Header, Network, consensus_bytes};
+use bitcoin_rs_consensus::primitives::{Block, Header, Network, consensus_bytes};
 use sonic_rs::{JsonValueMutTrait as _, Value, json};
 
 use crate::tx_render::transaction_json;
@@ -12,7 +12,7 @@ pub(crate) struct BlockChainContext {
     pub difficulty: f64,
     pub chainwork_hex: String,
     pub n_tx: u32,
-    pub next_block_hash: Option<bitcoin_rs_primitives::BlockHash>,
+    pub next_block_hash: Option<bitcoin_rs_consensus::primitives::BlockHash>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

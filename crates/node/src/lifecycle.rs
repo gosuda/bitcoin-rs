@@ -101,7 +101,7 @@ impl ChainControl for RpcChainControl {
 
     fn invalidate_block(
         &self,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> core::result::Result<(), ChainControlError> {
         let outcome = crate::reorg::invalidate_block(&self.handles, &self.followers, hash)
             .map_err(|error| match error {

@@ -1,6 +1,6 @@
 use super::*;
 use crate::InboundBlock;
-use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
+use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
 
 const WITNESS_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 

@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use bitcoin_rs_consensus::is_final_tx;
+use bitcoin_rs_consensus::primitives::Tx;
 use bitcoin_rs_mempool::{ChunkView, EntryId, Mempool, MempoolEntry};
-use bitcoin_rs_primitives::Tx;
 
 use crate::MiningError;
 use crate::template::{

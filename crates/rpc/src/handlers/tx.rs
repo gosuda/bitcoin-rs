@@ -6,14 +6,14 @@ use bitcoin::consensus::encode::serialize as bitcoin_serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::hex::DisplayHex as _;
 use bitcoin::merkle_tree::MerkleBlock;
-use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
-use bitcoin_rs_mempool::{LocalOrigin, SubmitError};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block as NativeBlock, Hash256, Header as NativeHeader, LockTime, OutPoint, Script,
     Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize as native_deserialize,
     unix_time_secs,
 };
-use bitcoin_rs_script::{opcode, push_data};
+use bitcoin_rs_consensus::script::{opcode, push_data};
+use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
+use bitcoin_rs_mempool::{LocalOrigin, SubmitError};
 use miniscript::psbt::PsbtExt as _;
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value, json};
 
@@ -30,12 +30,12 @@ use corepc_types::v31;
 pub(crate) mod submit_package;
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>, RpcError> {
-    bitcoin_rs_primitives::hex::hex_decode(hex).map_err(|error| match error {
-        bitcoin_rs_primitives::hex::HexError::OddLength => {
+    bitcoin_rs_consensus::primitives::hex::hex_decode(hex).map_err(|error| match error {
+        bitcoin_rs_consensus::primitives::hex::HexError::OddLength => {
             RpcError::InvalidParameter("hex string must have even length".to_owned())
         }
-        bitcoin_rs_primitives::hex::HexError::InvalidDigit { .. }
-        | bitcoin_rs_primitives::hex::HexError::WrongLength { .. } => {
+        bitcoin_rs_consensus::primitives::hex::HexError::InvalidDigit { .. }
+        | bitcoin_rs_consensus::primitives::hex::HexError::WrongLength { .. } => {
             RpcError::InvalidParameter("invalid hex character".to_owned())
         }
     })
@@ -546,9 +546,9 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
     )?;
     for output in &tx.outputs {
         let script = output.script_pubkey.as_bytes();
-        if (script.len() > bitcoin_rs_script::MAX_SCRIPT_SIZE
-            || bitcoin_rs_script::is_op_return(script)
-            || !bitcoin_rs_script::has_valid_ops(script))
+        if (script.len() > bitcoin_rs_consensus::script::MAX_SCRIPT_SIZE
+            || bitcoin_rs_consensus::script::is_op_return(script)
+            || !bitcoin_rs_consensus::script::has_valid_ops(script))
             && output.value.to_sat() > max_burn
         {
             return Err(RpcError::TxVerifyError(

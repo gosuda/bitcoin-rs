@@ -1,5 +1,6 @@
 use std::{path::Path, sync::Arc};
 
+use bitcoin_rs_consensus::primitives::{Block, BlockHash, Hash256, Header, Txid};
 use bitcoin_rs_mining::pool::ledger as pool_ledger;
 use bitcoin_rs_mining::pool::ledger::{
     Balance, Ledger, MinerId, PayoutPolicy, PoolConfig, RoundState, ShareCredit, ShareReceipt,
@@ -10,7 +11,6 @@ use bitcoin_rs_mining::pool::{
     ShareClass, ShareLedger, ShareTarget, WorkerIdentity,
 };
 use bitcoin_rs_mining::{BlockValidationResult, MiningControlError};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Txid};
 use bitcoin_rs_rpc::context::PoolOperator;
 use bitcoin_rs_storage::KvStore;
 

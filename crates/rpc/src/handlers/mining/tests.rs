@@ -1,17 +1,17 @@
 use super::*;
 use alloc::sync::Arc;
-use bitcoin_rs_primitives::Block;
+use bitcoin_rs_consensus::primitives::Block;
 use core::sync::atomic::Ordering;
 
+use bitcoin_rs_consensus::primitives::{
+    Amount, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
+    Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
+};
 use bitcoin_rs_mining::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockValidationResult, Candidate,
     CandidateTransaction, FakeMiningControl, GenerateSelection, GenerateTx, LastCandidateInfo,
     MiningControl, MiningControlError, MiningInfo, MiningRule, SignetMiningInfo, TemplateId,
     TemplateMutation,
-};
-use bitcoin_rs_primitives::{
-    Amount, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
-    Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
 
 use crate::handlers::util::{

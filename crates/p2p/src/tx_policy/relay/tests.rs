@@ -2,10 +2,10 @@ use super::*;
 use crate::test_support::{MessageReceiver, message_channel_bounded};
 use bitcoin::secp256k1::rand::{SeedableRng, rngs::StdRng};
 use bitcoin_rs_consensus::ValidationEngine;
-use bitcoin_rs_mempool::{AdmissionOrigin, Mempool, MempoolEntry, MempoolLimits};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
 };
+use bitcoin_rs_mempool::{AdmissionOrigin, Mempool, MempoolEntry, MempoolLimits};
 use std::sync::Arc;
 
 fn gateway() -> MempoolGateway {
@@ -90,7 +90,7 @@ fn connect_at(
             0,
             crate::PeerRole::FullRelay,
             bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
-            bitcoin_rs_primitives::USER_AGENT,
+            bitcoin_rs_consensus::primitives::USER_AGENT,
         );
         let mut info = crate::PeerInfo::outbound_from_version(
             addr,
@@ -476,7 +476,7 @@ fn connect_on(
         0,
         crate::PeerRole::FullRelay,
         bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
-        bitcoin_rs_primitives::USER_AGENT,
+        bitcoin_rs_consensus::primitives::USER_AGENT,
     );
     let mut info = crate::PeerInfo::outbound_from_version(
         addr,

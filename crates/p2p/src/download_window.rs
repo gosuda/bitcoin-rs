@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 use hashbrown::{HashMap, HashSet};
 use smallvec::SmallVec;
 

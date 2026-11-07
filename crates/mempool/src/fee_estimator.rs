@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use bitcoin_rs_primitives::Txid;
+use bitcoin_rs_consensus::primitives::Txid;
 use hashbrown::HashMap;
 
 const BUCKET_GROWTH_NUM: u64 = 105;
@@ -248,7 +248,7 @@ mod history_codec {
         build_buckets,
     };
     use alloc::vec::Vec;
-    use bitcoin_rs_primitives::Txid;
+    use bitcoin_rs_consensus::primitives::Txid;
     use hashbrown::HashMap;
 
     pub(super) const HISTORY_MAGIC: [u8; 8] = *b"BRSEFEES";
@@ -311,7 +311,9 @@ mod history_codec {
                 .take(32)?
                 .try_into()
                 .map_err(|_| HistoryReject::Corrupt)?;
-            Ok(Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&raw)))
+            Ok(Txid(
+                bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&raw),
+            ))
         }
 
         fn finish(&self) -> Result<(), HistoryReject> {

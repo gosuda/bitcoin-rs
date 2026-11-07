@@ -1,4 +1,4 @@
-use bitcoin_rs_script::{opcode, push_data};
+use bitcoin_rs_consensus::script::{opcode, push_data};
 
 pub(crate) fn p2sh_true_script() -> Vec<u8> {
     [

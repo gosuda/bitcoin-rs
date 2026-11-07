@@ -2,7 +2,7 @@ use super::format::generation_name;
 use super::fs::CheckpointRoot;
 use super::load::read_current;
 use super::*;
-use bitcoin_rs_primitives::hex::hex_encode;
+use bitcoin_rs_consensus::primitives::hex::hex_encode;
 
 use crate::test_support::{TestError, TestResult};
 use cap_std::ambient_authority;
@@ -69,8 +69,8 @@ fn publish_fixture_at(
         },
     )?;
     let identity = CheckpointIdentity {
-        network: bitcoin_rs_primitives::Network::Regtest,
-        genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+        network: bitcoin_rs_consensus::primitives::Network::Regtest,
+        genesis: bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block_hash(),
     };
     let manifest = CheckpointManifestV1 {
         format: MANIFEST_FORMAT.to_owned(),
@@ -188,8 +188,8 @@ fn publication_failpoints_preserve_the_previous_current() -> TestResult {
         };
         assert!(current.generation == 1 || failpoint == CheckpointFailpoint::CurrentRootSync);
         let identity = CheckpointIdentity {
-            network: bitcoin_rs_primitives::Network::Regtest,
-            genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+            network: bitcoin_rs_consensus::primitives::Network::Regtest,
+            genesis: bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block_hash(),
         };
         let manifest = read_manifest(&generation_dir, &current, identity)?;
         verify_artifact(
@@ -255,8 +255,8 @@ fn historical_publication_retains_head_generation_until_explicit_retirement() ->
             &generation_dir,
             &current,
             CheckpointIdentity {
-                network: bitcoin_rs_primitives::Network::Regtest,
-                genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+                network: bitcoin_rs_consensus::primitives::Network::Regtest,
+                genesis: bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block_hash(),
             },
         )?;
         verify_artifact(
@@ -354,8 +354,9 @@ fn direct_and_current_selection_share_publication_digest_validation() -> TestRes
                 &generation_dir,
                 &reference,
                 CheckpointIdentity {
-                    network: bitcoin_rs_primitives::Network::Regtest,
-                    genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+                    network: bitcoin_rs_consensus::primitives::Network::Regtest,
+                    genesis: bitcoin_rs_consensus::primitives::Network::Regtest
+                        .genesis_block_hash(),
                 }
             ),
             Err(CheckpointError::Invalid(_))
@@ -406,8 +407,9 @@ fn current_and_manifest_validation_reject_tampering() -> TestResult {
                         &generation,
                         &stale.reference()?,
                         CheckpointIdentity {
-                            network: bitcoin_rs_primitives::Network::Regtest,
-                            genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+                            network: bitcoin_rs_consensus::primitives::Network::Regtest,
+                            genesis: bitcoin_rs_consensus::primitives::Network::Regtest
+                                .genesis_block_hash(),
                         }
                     )
                     .is_err()
@@ -429,8 +431,9 @@ fn current_and_manifest_validation_reject_tampering() -> TestResult {
                 &generation,
                 &authenticated.reference()?,
                 CheckpointIdentity {
-                    network: bitcoin_rs_primitives::Network::Regtest,
-                    genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+                    network: bitcoin_rs_consensus::primitives::Network::Regtest,
+                    genesis: bitcoin_rs_consensus::primitives::Network::Regtest
+                        .genesis_block_hash(),
                 }
             ),
             Err(CheckpointError::Invalid(_))
@@ -520,8 +523,8 @@ fn commit_rejects_manifest_for_wrong_generation() -> TestResult {
         "version": MANIFEST_VERSION,
         "generation": generation + 1,
         "network": "regtest",
-        "network_magic": hex_encode(&bitcoin_rs_primitives::Network::Regtest.magic()),
-        "genesis_hash": bitcoin_rs_primitives::Network::Regtest.genesis_block_hash().to_string_be(),
+        "network_magic": hex_encode(&bitcoin_rs_consensus::primitives::Network::Regtest.magic()),
+        "genesis_hash": bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block_hash().to_string_be(),
         "applied_tip": { "height": 0, "hash": "00".repeat(32), "chainwork": "00".repeat(32), "chain_tx_count": 0 },
         "best_header_tip": { "height": 0, "hash": "00".repeat(32), "chainwork": "00".repeat(32), "chain_tx_count": 0 },
         "headers": { "file": HEADERS_FILE, "codec": HEADER_CODEC, "version": 1, "bytes": 0, "sha256": "00".repeat(32), "header_count": 0, "best_chain_sha256": "00".repeat(32), "applied_chain_sha256": "00".repeat(32) },

@@ -10,7 +10,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
 use bitcoin::p2p::message_compact_blocks::BlockTxn;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Sequence, Tx, Txid,
     Witness, Wtxid, deserialize,
 };
@@ -38,9 +38,9 @@ use crate::peer::{PackageRequest, Peer, PeerState};
 use crate::wire::{MAX_HEADERS_MESSAGE_COUNT, Message, PROTOCOL_VERSION, PeerError};
 
 fn block_payload(block: &Block) -> Message {
-    Message::BlockPayload(bytes::Bytes::from(bitcoin_rs_primitives::consensus_bytes(
-        block,
-    )))
+    Message::BlockPayload(bytes::Bytes::from(
+        bitcoin_rs_consensus::primitives::consensus_bytes(block),
+    ))
 }
 
 #[derive(Default)]
@@ -1089,7 +1089,7 @@ impl TxInventory for FakeTxInventory {
 }
 
 fn dummy_tx(byte: u8) -> Tx {
-    use bitcoin_rs_primitives::{OutPoint, TxIn, TxOut, Witness};
+    use bitcoin_rs_consensus::primitives::{OutPoint, TxIn, TxOut, Witness};
     Tx {
         version: 2,
         inputs: vec![TxIn {
@@ -1113,10 +1113,10 @@ fn dummy_tx(byte: u8) -> Tx {
 fn getdata_completes_initial_broadcast_only_after_successful_send() -> Result<(), TestError> {
     use super::serve_getdata;
     use bitcoin_rs_consensus::ValidationEngine;
+    use bitcoin_rs_consensus::primitives::Witness;
     use bitcoin_rs_mempool::{
         AdmissionOrigin, Mempool, MempoolEntry, MempoolGateway, MempoolLimits,
     };
-    use bitcoin_rs_primitives::Witness;
     use std::sync::Arc;
     for kind in 0..3 {
         let gateway = MempoolGateway::new(
@@ -1186,7 +1186,7 @@ fn announced_transactions_request_witness_without_changing_hashes() {
                 0,
                 crate::peer_info::PeerRole::FullRelay,
                 bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
-                bitcoin_rs_primitives::USER_AGENT,
+                bitcoin_rs_consensus::primitives::USER_AGENT,
             );
             version.services = if witness {
                 bitcoin::p2p::ServiceFlags::WITNESS
@@ -1297,7 +1297,7 @@ fn inv_block_uses_headers_not_body_getdata() {
                 0,
                 crate::peer_info::PeerRole::FullRelay,
                 bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
-                bitcoin_rs_primitives::USER_AGENT,
+                bitcoin_rs_consensus::primitives::USER_AGENT,
             );
             version.services = if witness {
                 bitcoin::p2p::ServiceFlags::WITNESS
@@ -1399,7 +1399,7 @@ fn gateway_inventory_filters_and_serves_txid_and_wtxid() {
 }
 
 fn gateway_holding_witness_tx(orphan: bool) -> (bitcoin_rs_mempool::MempoolGateway, Arc<Tx>) {
-    use bitcoin_rs_primitives::Script;
+    use bitcoin_rs_consensus::primitives::Script;
 
     use bitcoin_rs_mempool::{
         AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolEntry,
@@ -1434,10 +1434,10 @@ fn gateway_holding_witness_tx(orphan: bool) -> (bitcoin_rs_mempool::MempoolGatew
     let tx = Arc::new(tx);
     if orphan {
         let source = PeerToken {
-            endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+            endpoint: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::Ip(
                 std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
             )),
-            addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
+            addr: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::from((
                 [127, 0, 0, 1],
                 8333,
             ))),
@@ -1885,7 +1885,7 @@ fn version_at(version: u32) -> Message {
             0,
             crate::peer_info::PeerRole::FullRelay,
             bitcoin::p2p::ServiceFlags::NETWORK,
-            bitcoin_rs_primitives::USER_AGENT,
+            bitcoin_rs_consensus::primitives::USER_AGENT,
         )
     })
 }

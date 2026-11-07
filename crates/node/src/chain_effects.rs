@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use bitcoin_rs_consensus::primitives::{Block, BlockHash, BlockPayload, Hash256};
 use bitcoin_rs_index::block_log::{BlockLog, BlockRecord};
-use bitcoin_rs_primitives::{Block, BlockHash, BlockPayload, Hash256};
 use parking_lot::RwLock;
 
 use bitcoin_rs_chainstate::{ConnectOutcome, DisconnectOutcome};
@@ -166,13 +166,13 @@ impl ChainFollowers {
     pub(crate) fn on_connect(&self, block: &Block, outcome: &ConnectOutcome) {
         let on_connect_started = quanta::Instant::now();
         let block_removals = if let Some(gateway) = &self.mempool {
-            let block_txs: Vec<&bitcoin_rs_primitives::Tx> = block.txs.iter().collect();
+            let block_txs: Vec<&bitcoin_rs_consensus::primitives::Tx> = block.txs.iter().collect();
             gateway.remove_for_block(
                 AdmissionOrigin::Block,
                 &block_txs,
                 &outcome.txids,
                 outcome.height,
-                bitcoin_rs_primitives::unix_time_secs(),
+                bitcoin_rs_consensus::primitives::unix_time_secs(),
             )
         } else {
             MutationResult::empty()

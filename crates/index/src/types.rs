@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{Hash256, OutPoint, Txid};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -6,7 +6,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 pub(crate) const HASH_PREFIX_LEN: usize = 8;
 pub(crate) const HEIGHT_SIZE: usize = 4;
 pub const HASH_PREFIX_ROW_SIZE: usize = HASH_PREFIX_LEN + HEIGHT_SIZE;
-pub const HEADER_ROW_SIZE: usize = bitcoin_rs_primitives::Header::LEN;
+pub const HEADER_ROW_SIZE: usize = bitcoin_rs_consensus::primitives::Header::LEN;
 pub const U24_MAX: u32 = 0x00FF_FFFF;
 
 #[must_use]
@@ -403,7 +403,7 @@ impl ScriptHistoryOccurrence {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::{Hash256, OutPoint, Txid};
+    use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
 
     use super::{HASH_PREFIX_LEN, HashPrefixRow, ScriptHash, ScriptLiveRow, SpendingPrefixRow};
 

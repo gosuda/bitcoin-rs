@@ -1,5 +1,5 @@
 use bitcoin_rs_consensus::MAX_TIMEWARP;
-use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{CompactTarget, Hash256, Network};
 
 use pow::target_to_compact;
 pub use pow::{compact_is_met_by, compact_to_target};
@@ -407,7 +407,7 @@ pub fn permitted_difficulty_transition(
 }
 
 pub mod pow {
-    use bitcoin_rs_primitives::{CompactTarget, Hash256};
+    use bitcoin_rs_consensus::primitives::{CompactTarget, Hash256};
 
     use crate::node::ChainWork;
 
@@ -491,7 +491,7 @@ pub mod pow {
 mod fixture {
     use super::compact_is_met_by;
     use crate::node::BlockHeader;
-    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256};
+    use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256};
 
     pub(super) fn mine_regtest(
         prev_blockhash: BlockHash,

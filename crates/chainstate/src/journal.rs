@@ -1,7 +1,7 @@
 //! Maps block changes into journal records and replays authenticated records at boot.
 
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, NodeStatus};
-use bitcoin_rs_primitives::{Hash256, Header, deserialize};
+use bitcoin_rs_consensus::primitives::{Hash256, Header, deserialize};
 use bitcoin_rs_storage::chainstate_journal::{
     Coin, JournalRecord, JournalReplayBase, JournalReplayError, Mutation, replay_committed_range,
 };
@@ -13,15 +13,15 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub(crate) enum JournalDeltaError {
     #[error("journal spend {0:?} has no undo coin")]
-    MissingSpend(bitcoin_rs_primitives::OutPoint),
+    MissingSpend(bitcoin_rs_consensus::primitives::OutPoint),
     #[error("journal undo restores duplicate outpoint {0:?}")]
-    DuplicateRestore(bitcoin_rs_primitives::OutPoint),
+    DuplicateRestore(bitcoin_rs_consensus::primitives::OutPoint),
     #[error("journal undo restore {0:?} matches no block mutation")]
-    UnmatchedRestore(bitcoin_rs_primitives::OutPoint),
+    UnmatchedRestore(bitcoin_rs_consensus::primitives::OutPoint),
 }
 
 pub(crate) fn mutations_for_block(
-    changes: &BlockChanges<&'_ bitcoin_rs_primitives::TxOut>,
+    changes: &BlockChanges<&'_ bitcoin_rs_consensus::primitives::TxOut>,
     undo_coins: impl IntoIterator<Item = Coin>,
 ) -> Result<Vec<Mutation>, JournalDeltaError> {
     let mut restores = HashMap::new();
@@ -213,7 +213,7 @@ fn insert_replayed_header(
             JournalReplayError::HeaderRebuildRejected(format!(
                 "height {}: parent {} missing from checkpoint tree",
                 record.height,
-                bitcoin_rs_primitives::hex::hex_encode(&record.prev_hash)
+                bitcoin_rs_consensus::primitives::hex::hex_encode(&record.prev_hash)
             ))
         })?;
     let node_id = match tree.lookup(Hash256::from_le_bytes(&record.block_hash)) {

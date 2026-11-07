@@ -382,7 +382,7 @@ fn named_parameter_errors_use_core_invalid_parameter_code() {
 
 fn test_context() -> (Arc<Context>, Arc<bitcoin_rs_chainstate::Chainstate>) {
     let chainstate = Arc::new(bitcoin_rs_chainstate::Chainstate::new(
-        bitcoin_rs_primitives::Network::Regtest,
+        bitcoin_rs_consensus::primitives::Network::Regtest,
         Arc::new(arc_swap::ArcSwapOption::empty()),
         Arc::new(arc_swap::ArcSwapOption::empty()),
         Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
@@ -393,8 +393,8 @@ fn test_context() -> (Arc<Context>, Arc<bitcoin_rs_chainstate::Chainstate>) {
         Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
     ));
     chainstate
-        .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
-            bitcoin_rs_primitives::Network::Regtest.genesis_block(),
+        .apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+            bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
         ))
         .expect("genesis");
     let mut ctx = Context::new();

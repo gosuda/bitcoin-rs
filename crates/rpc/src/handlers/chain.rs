@@ -3,14 +3,14 @@ use core::cell::OnceCell;
 use core::str::FromStr as _;
 
 use bitcoin_rs_chain::NodeStatus;
-use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
+use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, TxOut, consensus_bytes,
     deserialize, u64_to_f64,
 };
 
 #[cfg(test)]
-use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
+use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
 use corepc_types::v31::{self, ChainTips, ChainTipsStatus};
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value, json};
 
@@ -1962,7 +1962,7 @@ mod pruneblockchain_tests {
     use alloc::sync::Arc;
 
     use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_consensus::primitives::Hash256;
 
     use super::*;
 
@@ -2186,7 +2186,7 @@ mod verification_progress_wiring_tests {
     use alloc::sync::Arc;
 
     use bitcoin_rs_chain::{ChainWork, NodeStatus, TipSnapshot};
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_consensus::primitives::Hash256;
     use sonic_rs::{JsonValueTrait, json};
 
     use super::*;
@@ -2274,7 +2274,7 @@ mod dumptxoutset_tests {
     use std::path::PathBuf;
     use std::sync::{Mutex, PoisonError};
 
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_consensus::primitives::Hash256;
     use sonic_rs::{JsonValueTrait as _, json};
 
     use crate::context::{

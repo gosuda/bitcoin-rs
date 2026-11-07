@@ -363,7 +363,7 @@ mod tests {
                     let source = lease.source(None);
                     let Some(credit) = lease.admit_block_forward(
                         source,
-                        bitcoin_rs_primitives::Hash256::default(),
+                        bitcoin_rs_consensus::primitives::Hash256::default(),
                         false,
                     ) else {
                         panic!("a live session admits the first unsolicited body");
@@ -465,16 +465,22 @@ mod tests {
         let source = lease.source(None);
         let mut held = Vec::new();
         for _ in 0..MAX_UNSOLICITED_BLOCK_FORWARDS {
-            let Some(credit) =
-                lease.admit_block_forward(source, bitcoin_rs_primitives::Hash256::default(), false)
-            else {
+            let Some(credit) = lease.admit_block_forward(
+                source,
+                bitcoin_rs_consensus::primitives::Hash256::default(),
+                false,
+            ) else {
                 panic!("the per-connection forward bound admits every credit up to the limit");
             };
             held.push(credit);
         }
         assert!(
             lease
-                .admit_block_forward(source, bitcoin_rs_primitives::Hash256::default(), false)
+                .admit_block_forward(
+                    source,
+                    bitcoin_rs_consensus::primitives::Hash256::default(),
+                    false
+                )
                 .is_none(),
             "the real per-connection bound refuses the credit past MAX_UNSOLICITED_BLOCK_FORWARDS"
         );
@@ -482,7 +488,11 @@ mod tests {
         drop(held);
         assert!(
             lease
-                .admit_block_forward(source, bitcoin_rs_primitives::Hash256::default(), false)
+                .admit_block_forward(
+                    source,
+                    bitcoin_rs_consensus::primitives::Hash256::default(),
+                    false
+                )
                 .is_some(),
             "released credits return the allowance"
         );

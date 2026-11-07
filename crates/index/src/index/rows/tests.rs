@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use bitcoin_rs_primitives::{Hash256, OutPoint, Txid};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
 use bitcoin_rs_storage::{BatchOp, BufferedWriteBatch, ColumnFamily};
 
 use super::*;

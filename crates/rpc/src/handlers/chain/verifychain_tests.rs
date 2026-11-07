@@ -112,7 +112,7 @@ struct StubControl {
 impl ChainControl for StubControl {
     fn invalidate_block(
         &self,
-        _hash: bitcoin_rs_primitives::Hash256,
+        _hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<(), ChainControlError> {
         Err(ChainControlError::UnknownBlock)
     }

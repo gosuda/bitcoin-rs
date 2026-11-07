@@ -6,7 +6,7 @@ use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_chainstate::ApplyError;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
-use bitcoin_rs_primitives::{BlockHash, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockHash, Hash256};
 
 use std::time::{Duration, Instant};
 
@@ -26,14 +26,15 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
 
     let genesis = Network::Regtest.genesis_block();
     let initial = NodeState::open(config.clone(), None)?;
-    initial.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    initial.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         genesis.clone(),
     ))?;
     let _ = initial.publish_checkpoint()?;
 
     let child = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
-    let expected_tip =
-        initial.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(child))?;
+    let expected_tip = initial.apply_block(
+        &bitcoin_rs_consensus::primitives::BlockPayload::from_local(child),
+    )?;
     let expected_utxo = initial
         .chainstate()
         .utxo_handle()
@@ -94,7 +95,7 @@ fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
 
     let genesis = Network::Regtest.genesis_block();
     let initial = NodeState::open(config.clone(), None)?;
-    initial.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    initial.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         genesis.clone(),
     ))?;
     let _ = initial.publish_checkpoint()?;
@@ -102,9 +103,11 @@ fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
 
     let state = NodeState::open(config.clone(), None)?;
     let block1 = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
-    let tip1 = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block1))?;
+    let tip1 = state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        block1,
+    ))?;
     let block2 = regtest_fixture::mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
-    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         block2.clone(),
     ))?;
     state.chainstate().disconnect_block(&block2)?;
@@ -138,9 +141,9 @@ fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
     replacement.header.nonce = 0;
     regtest_fixture::mine_block_to_declared_target(&mut replacement)?;
     assert_ne!(replacement.block_hash(), block2.block_hash());
-    let replacement_tip = resumed.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
-        replacement,
-    ))?;
+    let replacement_tip = resumed.apply_block(
+        &bitcoin_rs_consensus::primitives::BlockPayload::from_local(replacement),
+    )?;
     drop(resumed);
 
     let replaced = NodeState::open(config, None)?;
@@ -163,9 +166,10 @@ fn disconnect_below_checkpoint_base_forces_full_validation() -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
     let block1 = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
     let initial = NodeState::open(config.clone(), None)?;
-    let genesis_tip =
-        initial.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
-    initial.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    let genesis_tip = initial.apply_block(
+        &bitcoin_rs_consensus::primitives::BlockPayload::from_local(genesis),
+    )?;
+    initial.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         block1.clone(),
     ))?;
     let _ = initial.publish_checkpoint()?;
@@ -197,8 +201,9 @@ fn disconnect_below_checkpoint_base_forces_full_validation() -> Result<()> {
         &genesis_tip,
         "full validation must remain sticky until a replacement checkpoint"
     );
-    let replacement_tip =
-        resumed_again.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block1))?;
+    let replacement_tip = resumed_again.apply_block(
+        &bitcoin_rs_consensus::primitives::BlockPayload::from_local(block1),
+    )?;
     let _ = resumed_again.publish_checkpoint()?;
     drop(resumed_again);
 
@@ -223,13 +228,14 @@ fn idle_journal_batch_flushes_on_wall_clock_deadline() -> Result<()> {
 
     let genesis = Network::Regtest.genesis_block();
     let state = NodeState::open(config.clone(), None)?;
-    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         genesis.clone(),
     ))?;
     state.publish_checkpoint()?;
     let child = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
-    let expected_tip =
-        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(child))?;
+    let expected_tip = state.apply_block(
+        &bitcoin_rs_consensus::primitives::BlockPayload::from_local(child),
+    )?;
     let worker = state.start_chainstate_maintenance()?;
     std::thread::sleep(Duration::from_secs(3));
     state.chainstate().request_shutdown();
@@ -258,7 +264,9 @@ fn maintenance_worker_drains_retention_pressure_with_a_publication() -> Result<(
 
     let genesis = Network::Regtest.genesis_block();
     let state = NodeState::open(config.clone(), None)?;
-    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        genesis,
+    ))?;
     assert!(
         state.publish_checkpoint()?.is_some(),
         "the baseline checkpoint must publish"
@@ -307,9 +315,9 @@ fn retention_pressure_stops_apply_before_tip_mutation() -> Result<()> {
 
     let genesis = Network::Regtest.genesis_block();
     let state = NodeState::open(config.clone(), None)?;
-    let genesis_tip = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
-        genesis.clone(),
-    ))?;
+    let genesis_tip = state.apply_block(
+        &bitcoin_rs_consensus::primitives::BlockPayload::from_local(genesis.clone()),
+    )?;
     let _ = state.publish_checkpoint()?;
     let pressure = config
         .data_dir
@@ -322,7 +330,9 @@ fn retention_pressure_stops_apply_before_tip_mutation() -> Result<()> {
 
     let child = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
     assert!(matches!(
-        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(child)),
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+            child
+        )),
         Err(bitcoin_rs_node::ConnectMutationError::NotCommitted(
             ApplyError::JournalBackpressure(_)
         ))

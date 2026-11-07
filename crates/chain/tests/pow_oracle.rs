@@ -1,6 +1,6 @@
 use crate::support::pow_oracle;
 
-use bitcoin_rs_primitives::{BlockHash, Network};
+use bitcoin_rs_consensus::primitives::{BlockHash, Network};
 use pow_oracle::pow_is_met;
 
 #[test]
@@ -10,7 +10,7 @@ fn oracle_accepts_genesis_and_rejects_a_far_hash() {
         pow_is_met(genesis.header.bits, &genesis.block_hash()),
         "the regtest genesis must meet its own compact target"
     );
-    let far_hash = BlockHash(bitcoin_rs_primitives::Hash256::from_le_bytes(
+    let far_hash = BlockHash(bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
         &[0xff_u8; 32],
     ));
     assert!(
@@ -19,7 +19,9 @@ fn oracle_accepts_genesis_and_rejects_a_far_hash() {
     );
     let mut le_bytes = [0_u8; 32];
     le_bytes[31] = 0x80;
-    let le_2_pow_255 = BlockHash(bitcoin_rs_primitives::Hash256::from_le_bytes(&le_bytes));
+    let le_2_pow_255 = BlockHash(bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
+        &le_bytes,
+    ));
     assert!(
         !pow_is_met(genesis.header.bits, &le_2_pow_255),
         "a hash encoding 2^255 little-endian must exceed the regtest target"

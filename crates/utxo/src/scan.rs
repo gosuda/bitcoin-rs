@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_primitives::{Amount, OutPoint, TxOut};
+use bitcoin_rs_consensus::primitives::{Amount, OutPoint, TxOut};
 use parking_lot::Mutex;
 
 use crate::{UtxoCoin, UtxoScan, UtxoSet};
@@ -228,7 +228,7 @@ mod tests {
     use super::*;
     use crate::UtxoReader;
     use crate::contract::{BlockChanges, UtxoAdd, commit_block_changes};
-    use bitcoin_rs_primitives::{Hash256, Txid};
+    use bitcoin_rs_consensus::primitives::{Hash256, Txid};
     use std::cell::Cell;
     use std::sync::Arc;
 

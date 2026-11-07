@@ -3,8 +3,8 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 
 use bitcoin::hex::DisplayHex as _;
+use bitcoin_rs_consensus::primitives::{OutPoint, consensus_bytes};
 use bitcoin_rs_mempool::MempoolEntry;
-use bitcoin_rs_primitives::{OutPoint, consensus_bytes};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use crate::context::Context;
@@ -21,7 +21,7 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let maxmempool = pool.limits.max_total_bytes;
     let live_min_relay_sat_per_kvb = pool.min_relay_fee_sat_per_kvb();
     let mempool_min_fee_sat_per_kvb =
-        pool.min_fee_sat_per_kvb(bitcoin_rs_primitives::unix_time_secs());
+        pool.min_fee_sat_per_kvb(bitcoin_rs_consensus::primitives::unix_time_secs());
     let info = v31::GetMempoolInfo {
         loaded: true,
         size: i64_saturated(stats.txs),
@@ -441,10 +441,10 @@ mod tests;
 mod usage_wiring_tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_mempool::MempoolEntry;
-    use bitcoin_rs_primitives::{
+    use bitcoin_rs_consensus::primitives::{
         Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
     };
+    use bitcoin_rs_mempool::MempoolEntry;
     use sonic_rs::{JsonValueTrait, json};
 
     use super::*;
@@ -502,10 +502,10 @@ mod spentby_tests {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
 
-    use bitcoin_rs_mempool::MempoolEntry;
-    use bitcoin_rs_primitives::{
+    use bitcoin_rs_consensus::primitives::{
         Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
     };
+    use bitcoin_rs_mempool::MempoolEntry;
     use sonic_rs::json;
 
     use super::*;

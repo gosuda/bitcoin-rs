@@ -1,5 +1,5 @@
 use super::{IndexError, SpentCoinScripts};
-use bitcoin_rs_primitives::{encode, layout::ParsedBlock};
+use bitcoin_rs_consensus::primitives::{encode, layout::ParsedBlock};
 use bitcoin_rs_storage::{ColumnFamily, KvSnapshot};
 
 pub(super) const PREFIX: &[u8] = &[1, b'F'];

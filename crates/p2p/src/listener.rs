@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::ServiceFlags;
-use bitcoin_rs_primitives::{Network, unix_time_secs};
+use bitcoin_rs_consensus::primitives::{Network, unix_time_secs};
 use crossbeam_channel::Sender;
 use thiserror::Error;
 
@@ -167,7 +167,7 @@ impl ConnectionShared {
             block_announcer: extras.block_announcer,
             max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
-            user_agent: bitcoin_rs_primitives::USER_AGENT.to_owned(),
+            user_agent: bitcoin_rs_consensus::primitives::USER_AGENT.to_owned(),
             v2_transport: false,
             relay_offers: RelayOffers::default(),
             overlay: Arc::new(crate::overlay::OverlayTransport::new(Arc::default())),
@@ -312,7 +312,11 @@ impl ConnectionShared {
         }
     }
 
-    fn announce_block(&self, source: crate::PeerSource, hash: bitcoin_rs_primitives::Hash256) {
+    fn announce_block(
+        &self,
+        source: crate::PeerSource,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
+    ) {
         let Some(sync) = self.block_sync.as_ref() else {
             return;
         };
@@ -382,7 +386,7 @@ impl ConnectionShared {
         &self,
         lease: &crate::PeerLease,
         source: crate::PeerSource,
-        headers: Vec<bitcoin_rs_primitives::Header>,
+        headers: Vec<bitcoin_rs_consensus::primitives::Header>,
     ) {
         if self.is_session_cancelled() || lease.is_cancelled() {
             return;
@@ -397,7 +401,7 @@ impl ConnectionShared {
         &self,
         lease: &crate::PeerLease,
         source: crate::PeerSource,
-        headers: Vec<bitcoin_rs_primitives::Header>,
+        headers: Vec<bitcoin_rs_consensus::primitives::Header>,
     ) {
         if self.is_session_cancelled() || lease.is_cancelled() {
             return;
@@ -409,7 +413,7 @@ impl ConnectionShared {
         &self,
         lease: &crate::PeerLease,
         source: crate::PeerSource,
-        headers: Vec<bitcoin_rs_primitives::Header>,
+        headers: Vec<bitcoin_rs_consensus::primitives::Header>,
         kind: HeaderKind,
     ) {
         let inbound = crate::InboundHeaders {
@@ -442,13 +446,13 @@ impl ConnectionShared {
         &self,
         lease: &crate::PeerLease,
         peer_addr: impl Into<crate::PeerRemote>,
-        payload: bitcoin_rs_primitives::BlockPayload,
+        payload: bitcoin_rs_consensus::primitives::BlockPayload,
         memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
     ) {
         let peer_addr = peer_addr.into();
         let source = lease.source(peer_addr.endpoint());
         let header = payload.block().header;
-        let hash = bitcoin_rs_primitives::Hash256::from(header.compute_hash());
+        let hash = bitcoin_rs_consensus::primitives::Hash256::from(header.compute_hash());
         let requested = self
             .block_sync
             .as_ref()
@@ -464,7 +468,7 @@ impl ConnectionShared {
 
     pub(crate) fn forward_block(
         &self,
-        payload: bitcoin_rs_primitives::BlockPayload,
+        payload: bitcoin_rs_consensus::primitives::BlockPayload,
         source: crate::PeerSource,
         forward_credit: Option<crate::connection::BlockForwardCredit>,
         memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
@@ -530,7 +534,7 @@ impl ConnectionShared {
     fn send_tx(
         &self,
         source: crate::PeerSource,
-        tx: bitcoin_rs_primitives::Tx,
+        tx: bitcoin_rs_consensus::primitives::Tx,
         memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
     ) {
         let body = crate::InboundBody::from(
@@ -1403,7 +1407,7 @@ fn run_handshake(
         info.network = identified.net();
     } else {
         info.endpoint = None;
-        info.network = bitcoin_rs_primitives::NetworkLabel::Onion;
+        info.network = bitcoin_rs_consensus::primitives::NetworkLabel::Onion;
     }
 
     run_connected_session(&mut peer, peer_addr, shared, lease, outbound_rx, info)
@@ -2488,8 +2492,9 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         staletip_budget -= 1;
                         let headers = announcement.reconstruct();
                         if let Some(tip_header) = headers.last() {
-                            let tip_hash =
-                                bitcoin_rs_primitives::Hash256::from(tip_header.compute_hash());
+                            let tip_hash = bitcoin_rs_consensus::primitives::Hash256::from(
+                                tip_header.compute_hash(),
+                            );
                             let source = lease.source(peer_addr.endpoint());
                             if let Some(sync) = &shared.block_sync {
                                 sync.stale_tips().note_heard(source, tip_hash);
@@ -2621,7 +2626,9 @@ fn advance_parked_getdata<S>(
 
 fn notfound_wire_bound(items: usize) -> usize {
     let count = u64::try_from(items).unwrap_or(u64::MAX);
-    crate::wire::HEADER_LEN + bitcoin_rs_primitives::varint::encode(count).len() + 36 * items
+    crate::wire::HEADER_LEN
+        + bitcoin_rs_consensus::primitives::varint::encode(count).len()
+        + 36 * items
 }
 
 fn report_parked_misses<S>(
@@ -2782,7 +2789,7 @@ fn handle_compact_outcome(
     sink: &ProductionSink<'_>,
     peer_addr: impl Into<crate::PeerRemote>,
     shared: &ConnectionShared,
-) -> Option<(bitcoin_rs_primitives::Hash256, crate::Message)> {
+) -> Option<(bitcoin_rs_consensus::primitives::Hash256, crate::Message)> {
     let peer_addr = peer_addr.into();
     let lease = sink.lease;
     match outcome {
@@ -2791,22 +2798,22 @@ fn handle_compact_outcome(
             shared.send_block(
                 lease,
                 peer_addr,
-                bitcoin_rs_primitives::BlockPayload::from_local(block),
+                bitcoin_rs_consensus::primitives::BlockPayload::from_local(block),
                 None,
             );
             None
         }
         crate::compact_blocks::Outcome::RequestMissing(request) => {
             tracing::info!(peer_addr = %peer_addr, "p2p compact reconstruction missing");
-            let hash = bitcoin_rs_primitives::Hash256::from(crate::inv::native_block_hash(
-                request.txs_request.block_hash,
-            ));
+            let hash = bitcoin_rs_consensus::primitives::Hash256::from(
+                crate::inv::native_block_hash(request.txs_request.block_hash),
+            );
             Some((hash, crate::Message::GetBlockTxn(request)))
         }
         crate::compact_blocks::Outcome::Fallback(hash) => {
             tracing::info!(peer_addr = %peer_addr, "p2p compact reconstruction fallback");
             Some((
-                bitcoin_rs_primitives::Hash256::from(hash),
+                bitcoin_rs_consensus::primitives::Hash256::from(hash),
                 crate::Message::GetData(vec![
                     bitcoin::p2p::message_blockdata::Inventory::WitnessBlock(
                         bitcoin::BlockHash::from_byte_array(*hash.as_bytes()),
@@ -3018,34 +3025,37 @@ fn test_shared(
 #[cfg(test)]
 mod transaction_poll_tests {
     use super::*;
-    use bitcoin_rs_primitives::USER_AGENT;
+    use bitcoin_rs_consensus::primitives::USER_AGENT;
     use std::sync::atomic::AtomicUsize;
 
     struct InventoryReads(AtomicUsize);
     impl crate::TxInventory for InventoryReads {
-        fn have_tx(&self, _: bitcoin_rs_primitives::Hash256, _: bool) -> bool {
+        fn have_tx(&self, _: bitcoin_rs_consensus::primitives::Hash256, _: bool) -> bool {
             self.0.fetch_add(1, Ordering::Relaxed);
             false
         }
-        fn get_tx(&self, _: bitcoin_rs_primitives::Txid) -> Option<bitcoin_rs_primitives::Tx> {
+        fn get_tx(
+            &self,
+            _: bitcoin_rs_consensus::primitives::Txid,
+        ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             None
         }
         fn get_tx_by_wtxid(
             &self,
-            _: bitcoin_rs_primitives::Wtxid,
-        ) -> Option<bitcoin_rs_primitives::Tx> {
+            _: bitcoin_rs_consensus::primitives::Wtxid,
+        ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             None
         }
         fn resident_ancestor_package(
             &self,
-            _: bitcoin_rs_primitives::Wtxid,
-        ) -> Option<Vec<bitcoin_rs_primitives::Wtxid>> {
+            _: bitcoin_rs_consensus::primitives::Wtxid,
+        ) -> Option<Vec<bitcoin_rs_consensus::primitives::Wtxid>> {
             None
         }
         fn resident_package(
             &self,
-            _: &[bitcoin_rs_primitives::Wtxid],
-        ) -> Option<Vec<Arc<bitcoin_rs_primitives::Tx>>> {
+            _: &[bitcoin_rs_consensus::primitives::Wtxid],
+        ) -> Option<Vec<Arc<bitcoin_rs_consensus::primitives::Tx>>> {
             None
         }
     }
@@ -3114,7 +3124,7 @@ mod transaction_poll_tests {
 
 #[cfg(test)]
 mod outbound_tests {
-    use bitcoin_rs_primitives::PeerEndpoint;
+    use bitcoin_rs_consensus::primitives::PeerEndpoint;
     use std::net::{Ipv4Addr, TcpListener};
     use std::sync::Arc;
 
@@ -3279,7 +3289,7 @@ static ACCEPT_ERROR_INJECT: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 #[expect(clippy::expect_used)]
 mod session_socket_tests {
-    use bitcoin_rs_primitives::PeerEndpoint;
+    use bitcoin_rs_consensus::primitives::PeerEndpoint;
     use std::net::{Ipv4Addr, TcpListener, TcpStream};
 
     use super::{HANDSHAKE_READ_POLL, HANDSHAKE_TIMEOUT, configure_peer_stream};
@@ -3318,7 +3328,7 @@ static WRITER_SETUP_FAIL: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 #[expect(clippy::expect_used)]
 mod resilient_accept_tests {
-    use bitcoin_rs_primitives::PeerEndpoint;
+    use bitcoin_rs_consensus::primitives::PeerEndpoint;
     use std::net::{Ipv4Addr, TcpStream};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -3362,7 +3372,7 @@ mod resilient_accept_tests {
 #[cfg(test)]
 #[expect(clippy::expect_used)]
 mod inbound_admission_tests {
-    use bitcoin_rs_primitives::PeerEndpoint;
+    use bitcoin_rs_consensus::primitives::PeerEndpoint;
     use std::io::Read;
     use std::net::{Ipv4Addr, TcpStream};
     use std::sync::Arc;
@@ -3418,7 +3428,7 @@ mod inbound_admission_tests {
 #[cfg(test)]
 #[expect(clippy::expect_used)]
 mod writer_setup_cleanup_tests {
-    use bitcoin_rs_primitives::PeerEndpoint;
+    use bitcoin_rs_consensus::primitives::PeerEndpoint;
     use std::net::{Ipv4Addr, TcpListener, TcpStream};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -3512,7 +3522,7 @@ mod writer_shutdown_tests;
 
 #[cfg(test)]
 mod ready_notify_tests {
-    use bitcoin_rs_primitives::PeerEndpoint;
+    use bitcoin_rs_consensus::primitives::PeerEndpoint;
     use std::net::Ipv4Addr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3896,7 +3906,7 @@ mod address_tests {
 #[expect(clippy::expect_used)]
 mod feeler_tests {
     use super::*;
-    use bitcoin_rs_primitives::USER_AGENT;
+    use bitcoin_rs_consensus::primitives::USER_AGENT;
     use std::sync::atomic::AtomicUsize;
 
     struct Scripted(std::io::Cursor<Vec<u8>>);

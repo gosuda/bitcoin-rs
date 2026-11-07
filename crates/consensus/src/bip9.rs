@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::Network;
+use crate::primitives::Network;
 
 const BIP9_PERIOD: u32 = 2016;
 pub const CSV_DEPLOYMENT_ID: u32 = 0;

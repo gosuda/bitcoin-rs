@@ -54,86 +54,86 @@ axiom core.slice.Slice.split_first
   {T : Type _} : Slice T → Result (Option (T × (Slice T)))
 
 /-- [bitcoin_rs_primitives::hash::Hash256]
-    Source: 'crates/primitives/src/hash.rs', lines 29:0-29:29
+    Source: 'crates/consensus/src/primitives/hash.rs', lines 29:0-29:29
     Visibility: public -/
 @[reducible]
 def hash.Hash256 := Array Std.U8 32#usize
 
 /-- [bitcoin_rs_primitives::ids::Txid]
-    Source: 'crates/primitives/src/ids.rs', lines 16:8-16:38; this code is generated from a macro invocation at: 'crates/primitives/src/ids.rs', lines 53:0-53:25
+    Source: 'crates/consensus/src/primitives/ids.rs', lines 16:8-16:38; this code is generated from a macro invocation at: 'crates/consensus/src/primitives/ids.rs', lines 53:0-53:25
     Visibility: public -/
 @[reducible]
 def ids.Txid := hash.Hash256
 
 /-- [bitcoin_rs_primitives::layout::MIN_TX_LEN]
-    Source: 'crates/primitives/src/layout.rs', lines 14:0-14:29 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 14:0-14:29 -/
 @[global_simps, irreducible] def layout.MIN_TX_LEN : Std.Usize := 10#usize
 
 /-- [bitcoin_rs_primitives::layout::MIN_INPUT_LEN]
-    Source: 'crates/primitives/src/layout.rs', lines 15:0-15:32 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 15:0-15:32 -/
 @[global_simps, irreducible] def layout.MIN_INPUT_LEN : Std.Usize := 41#usize
 
 /-- [bitcoin_rs_primitives::layout::MIN_OUTPUT_LEN]
-    Source: 'crates/primitives/src/layout.rs', lines 16:0-16:32 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 16:0-16:32 -/
 @[global_simps, irreducible] def layout.MIN_OUTPUT_LEN : Std.Usize := 9#usize
 
 /-- [bitcoin_rs_primitives::layout::MIN_WITNESS_ITEM_LEN]
-    Source: 'crates/primitives/src/layout.rs', lines 17:0-17:38 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 17:0-17:38 -/
 @[global_simps, irreducible]
 def layout.MIN_WITNESS_ITEM_LEN : Std.Usize := 1#usize
 
 /-- [bitcoin_rs_primitives::layout::MIN_SCRIPT_BYTE_LEN]
-    Source: 'crates/primitives/src/layout.rs', lines 18:0-18:37 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 18:0-18:37 -/
 @[global_simps, irreducible]
 def layout.MIN_SCRIPT_BYTE_LEN : Std.Usize := 1#usize
 
 /-- [bitcoin_rs_primitives::units::LockTime]
-    Source: 'crates/primitives/src/units.rs', lines 99:0-99:25
+    Source: 'crates/consensus/src/primitives/units.rs', lines 99:0-99:25
     Visibility: public -/
 @[reducible]
 def units.LockTime := Std.U32
 
 /-- [bitcoin_rs_primitives::units::Amount]
-    Source: 'crates/primitives/src/units.rs', lines 4:0-4:23
+    Source: 'crates/consensus/src/primitives/units.rs', lines 4:0-4:23
     Visibility: public -/
 @[reducible]
 def units.Amount := Std.U64
 
 /-- [bitcoin_rs_primitives::script::Script]
-    Source: 'crates/primitives/src/script.rs', lines 4:0-4:27
+    Source: 'crates/consensus/src/primitives/script.rs', lines 4:0-4:27
     Visibility: public -/
 @[reducible]
 def script.Script := alloc.vec.Vec Std.U8
 
 /-- [bitcoin_rs_primitives::tx::TxOut]
-    Source: 'crates/primitives/src/tx.rs', lines 17:0-20:1
+    Source: 'crates/consensus/src/primitives/tx.rs', lines 17:0-20:1
     Visibility: public -/
 structure tx.TxOut where
   value : units.Amount
   script_pubkey : script.Script
 
 /-- [bitcoin_rs_primitives::units::Sequence]
-    Source: 'crates/primitives/src/units.rs', lines 41:0-41:25
+    Source: 'crates/consensus/src/primitives/units.rs', lines 41:0-41:25
     Visibility: public -/
 @[reducible]
 def units.Sequence := Std.U32
 
 /-- [bitcoin_rs_primitives::script::Witness]
-    Source: 'crates/primitives/src/script.rs', lines 58:0-61:1
+    Source: 'crates/consensus/src/primitives/script.rs', lines 58:0-61:1
     Visibility: public -/
 structure script.Witness where
   bytes : alloc.vec.Vec Std.U8
   ends : alloc.vec.Vec Std.U32
 
 /-- [bitcoin_rs_primitives::outpoint::OutPoint]
-    Source: 'crates/primitives/src/outpoint.rs', lines 22:0-26:1
+    Source: 'crates/consensus/src/primitives/outpoint.rs', lines 22:0-26:1
     Visibility: public -/
 structure outpoint.OutPoint where
   txid : ids.Txid
   vout : Std.U32
 
 /-- [bitcoin_rs_primitives::tx::TxIn]
-    Source: 'crates/primitives/src/tx.rs', lines 9:0-14:1
+    Source: 'crates/consensus/src/primitives/tx.rs', lines 9:0-14:1
     Visibility: public -/
 structure tx.TxIn where
   previous_output : outpoint.OutPoint
@@ -142,7 +142,7 @@ structure tx.TxIn where
   witness : script.Witness
 
 /-- [bitcoin_rs_primitives::tx::Tx]
-    Source: 'crates/primitives/src/tx.rs', lines 23:0-28:1
+    Source: 'crates/consensus/src/primitives/tx.rs', lines 23:0-28:1
     Visibility: public -/
 structure tx.Tx where
   version : Std.U32
@@ -151,21 +151,21 @@ structure tx.Tx where
   lock_time : units.LockTime
 
 /-- [bitcoin_rs_primitives::layout::ByteSpan]
-    Source: 'crates/primitives/src/layout.rs', lines 62:0-65:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 62:0-65:1
     Visibility: public -/
 structure layout.ByteSpan where
   start : Std.U32
   len : Std.U32
 
 /-- [bitcoin_rs_primitives::layout::OutputLayout]
-    Source: 'crates/primitives/src/layout.rs', lines 224:0-227:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 224:0-227:1
     Visibility: public -/
 structure layout.OutputLayout where
   value : layout.ByteSpan
   script_pubkey : layout.ByteSpan
 
 /-- [bitcoin_rs_primitives::layout::InputLayout]
-    Source: 'crates/primitives/src/layout.rs', lines 191:0-197:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 191:0-197:1
     Visibility: public -/
 structure layout.InputLayout where
   outpoint : layout.ByteSpan
@@ -175,7 +175,7 @@ structure layout.InputLayout where
   witness_items : Std.U32
 
 /-- [bitcoin_rs_primitives::layout::ParsedTransaction]
-    Source: 'crates/primitives/src/layout.rs', lines 237:0-248:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 237:0-248:1
     Visibility: public -/
 structure layout.ParsedTransaction where
   bytes : Slice Std.U8
@@ -189,7 +189,7 @@ structure layout.ParsedTransaction where
   outputs : alloc.vec.Vec layout.OutputLayout
 
 /-- [bitcoin_rs_primitives::layout::TX_DECODE_BYTES]
-    Source: 'crates/primitives/src/layout.rs', lines 20:0-22:33 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 20:0-22:33 -/
 @[global_simps, irreducible]
 def layout.TX_DECODE_BYTES : Result Std.Usize := do
   let i ← core.mem.size_of layout.ParsedTransaction
@@ -199,7 +199,7 @@ def layout.TX_DECODE_BYTES : Result Std.Usize := do
   i2 + i3
 
 /-- [bitcoin_rs_primitives::layout::INPUT_DECODE_BYTES]
-    Source: 'crates/primitives/src/layout.rs', lines 23:0-24:71 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 23:0-24:71 -/
 @[global_simps, irreducible]
 def layout.INPUT_DECODE_BYTES : Result Std.Usize := do
   let i ← core.mem.size_of layout.InputLayout
@@ -207,7 +207,7 @@ def layout.INPUT_DECODE_BYTES : Result Std.Usize := do
   i + i1
 
 /-- [bitcoin_rs_primitives::layout::OUTPUT_DECODE_BYTES]
-    Source: 'crates/primitives/src/layout.rs', lines 25:0-26:73 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 25:0-26:73 -/
 @[global_simps, irreducible]
 def layout.OUTPUT_DECODE_BYTES : Result Std.Usize := do
   let i ← core.mem.size_of layout.OutputLayout
@@ -215,18 +215,18 @@ def layout.OUTPUT_DECODE_BYTES : Result Std.Usize := do
   i + i1
 
 /-- [bitcoin_rs_primitives::layout::WITNESS_ITEM_DECODE_BYTES]
-    Source: 'crates/primitives/src/layout.rs', lines 27:0-27:69 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 27:0-27:69 -/
 @[global_simps, irreducible]
 def layout.WITNESS_ITEM_DECODE_BYTES : Result Std.Usize :=
   core.mem.size_of Std.U32
 
 /-- [bitcoin_rs_primitives::layout::SCRIPT_BYTE_DECODE_BYTES]
-    Source: 'crates/primitives/src/layout.rs', lines 28:0-28:42 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 28:0-28:42 -/
 @[global_simps, irreducible]
 def layout.SCRIPT_BYTE_DECODE_BYTES : Std.Usize := 1#usize
 
 /-- [bitcoin_rs_primitives::layout::larger]:
-    Source: 'crates/primitives/src/layout.rs', lines 30:0-32:1 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 30:0-32:1 -/
 def layout.larger
   (left : Std.Usize) (right : Std.Usize) : Result Std.Usize := do
   if left > right
@@ -234,7 +234,7 @@ def layout.larger
   else ok right
 
 /-- [bitcoin_rs_primitives::layout::DECODE_EXPANSION]
-    Source: 'crates/primitives/src/layout.rs', lines 35:0-47:2 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 35:0-47:2 -/
 @[global_simps, irreducible]
 def layout.DECODE_EXPANSION : Result Std.Usize := do
   let i ← layout.TX_DECODE_BYTES
@@ -254,7 +254,7 @@ def layout.DECODE_EXPANSION : Result Std.Usize := do
   layout.larger i4 i11
 
 /-- [bitcoin_rs_primitives::layout::decode_reservation]:
-    Source: 'crates/primitives/src/layout.rs', lines 55:0-57:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 55:0-57:1
     Visibility: public -/
 def layout.decode_reservation (wire_len : Std.Usize) : Result Std.Usize := do
   let i ← layout.DECODE_EXPANSION
@@ -262,7 +262,7 @@ def layout.decode_reservation (wire_len : Std.Usize) : Result Std.Usize := do
   core.num.Usize.saturating_mul wire_len i1
 
 /-- [bitcoin_rs_primitives::varint::VarintError]
-    Source: 'crates/primitives/src/varint.rs', lines 5:0-16:1
+    Source: 'crates/consensus/src/primitives/varint.rs', lines 5:0-16:1
     Visibility: public -/
 @[discriminant isize]
 inductive varint.VarintError where
@@ -270,7 +270,7 @@ inductive varint.VarintError where
 | NonCanonical : Std.U64 → varint.VarintError
 
 /-- [bitcoin_rs_primitives::varint::read_array]:
-    Source: 'crates/primitives/src/varint.rs', lines 110:0-125:1 -/
+    Source: 'crates/consensus/src/primitives/varint.rs', lines 110:0-125:1 -/
 def varint.read_array
   (N : Std.Usize) («prefix» : Std.U8) (rest : Slice Std.U8)
   (available : Std.Usize) :
@@ -294,7 +294,7 @@ def varint.read_array
     ok (core.result.Result.Ok out1)
 
 /-- [bitcoin_rs_primitives::varint::decode]:
-    Source: 'crates/primitives/src/varint.rs', lines 18:0-54:1
+    Source: 'crates/consensus/src/primitives/varint.rs', lines 18:0-54:1
     Visibility: public -/
 def varint.decode
   (buf : Slice Std.U8) :
@@ -418,7 +418,7 @@ def varint.decode
       | _ => fail panic
 
 /-- [bitcoin_rs_primitives::varint::encode_into]:
-    Source: 'crates/primitives/src/varint.rs', lines 79:0-108:1
+    Source: 'crates/consensus/src/primitives/varint.rs', lines 79:0-108:1
     Visibility: public -/
 def varint.encode_into
   (value : Std.U64) (out : Array Std.U8 9#usize) :

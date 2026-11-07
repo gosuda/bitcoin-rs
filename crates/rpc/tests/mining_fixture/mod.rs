@@ -2,11 +2,11 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
+use bitcoin_rs_consensus::primitives::{
+    CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, Witness,
+};
 use bitcoin_rs_mining::{
     BlockTemplate, Candidate, MiningCapability, MiningInfo, TemplateId, TemplateMutation,
-};
-use bitcoin_rs_primitives::{
-    CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, Witness,
 };
 
 pub(crate) fn canned_template(

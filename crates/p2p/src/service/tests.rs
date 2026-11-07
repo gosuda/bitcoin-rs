@@ -1,6 +1,6 @@
 use super::*;
 use crate::PeerSource;
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 
@@ -1252,7 +1252,7 @@ fn anchors_require_automatic_block_relay_and_demonstrated_chain_evidence() {
             1_000_000,
             crate::PeerRole::FullRelay,
             ServiceFlags::NETWORK | ServiceFlags::WITNESS,
-            bitcoin_rs_primitives::USER_AGENT,
+            bitcoin_rs_consensus::primitives::USER_AGENT,
         );
         let info = crate::PeerInfo::outbound_from_version(
             address,
@@ -1269,7 +1269,7 @@ fn anchors_require_automatic_block_relay_and_demonstrated_chain_evidence() {
         if port != 1 {
             assert!(table.note_announced_tip(
                 lease.source(Some(address)),
-                bitcoin_rs_primitives::Hash256::from_le_bytes(&[7; 32]),
+                bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[7; 32]),
                 Some(2)
             ));
         }
@@ -1572,7 +1572,7 @@ fn register_ready_block_peer(table: &crate::PeerTable, addr: PeerEndpoint) -> cr
         0,
         crate::PeerRole::FullRelay,
         ServiceFlags::NETWORK | ServiceFlags::WITNESS,
-        bitcoin_rs_primitives::USER_AGENT,
+        bitcoin_rs_consensus::primitives::USER_AGENT,
     );
     let info = crate::PeerInfo::outbound_from_version(
         addr,
@@ -1587,7 +1587,7 @@ fn register_ready_block_peer(table: &crate::PeerTable, addr: PeerEndpoint) -> cr
     assert!(table.publish_info(addr, &lease, info));
     assert!(table.note_announced_tip(
         lease.source(Some(addr)),
-        bitcoin_rs_primitives::Hash256::from_le_bytes(&[7; 32]),
+        bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[7; 32]),
         Some(1)
     ));
     lease
@@ -1945,17 +1945,17 @@ struct ServiceTip {
 impl crate::ChainQuery for ServiceTip {
     fn stale_tip_announcement(
         &self,
-        _: bitcoin_rs_primitives::Hash256,
-        _: &[bitcoin_rs_primitives::Hash256],
+        _: bitcoin_rs_consensus::primitives::Hash256,
+        _: &[bitcoin_rs_consensus::primitives::Hash256],
     ) -> Option<crate::dispatch::StaleTipHeaders> {
         None
     }
     fn headers_after(
         &self,
-        _: &[bitcoin_rs_primitives::BlockHash],
-        _: bitcoin_rs_primitives::BlockHash,
+        _: &[bitcoin_rs_consensus::primitives::BlockHash],
+        _: bitcoin_rs_consensus::primitives::BlockHash,
         _: usize,
-    ) -> Vec<bitcoin_rs_primitives::Header> {
+    ) -> Vec<bitcoin_rs_consensus::primitives::Header> {
         Vec::new()
     }
     fn serve_inventory_blocks(
@@ -2261,10 +2261,10 @@ fn bootstrap_fixed_peer_endpoints_valid_typed_endpoints_bypass_resolver() {
     let peer_table = crate::PeerTable::new();
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
 
-    let good_tor_payload = bitcoin_rs_primitives::endpoint::tor_v3_payload(&[7u8; 32]);
+    let good_tor_payload = bitcoin_rs_consensus::primitives::endpoint::tor_v3_payload(&[7u8; 32]);
     let valid_onion = format!(
         "{}.onion:8333",
-        bitcoin_rs_primitives::endpoint::base32_encode(&good_tor_payload)
+        bitcoin_rs_consensus::primitives::endpoint::base32_encode(&good_tor_payload)
     );
     let valid_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
 
@@ -2314,10 +2314,10 @@ fn bootstrap_fixed_peer_endpoints_valid_typed_endpoints_bypass_resolver() {
 }
 
 fn malformed_reserved_overlay_targets_testdata() -> Vec<String> {
-    let good_tor_payload = bitcoin_rs_primitives::endpoint::tor_v3_payload(&[7u8; 32]);
+    let good_tor_payload = bitcoin_rs_consensus::primitives::endpoint::tor_v3_payload(&[7u8; 32]);
     let valid_onion = format!(
         "{}.onion:8333",
-        bitcoin_rs_primitives::endpoint::base32_encode(&good_tor_payload)
+        bitcoin_rs_consensus::primitives::endpoint::base32_encode(&good_tor_payload)
     );
     let valid_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
 
@@ -2325,9 +2325,9 @@ fn malformed_reserved_overlay_targets_testdata() -> Vec<String> {
     bad_payload[32] ^= 1;
     let invalid_checksum_onion = format!(
         "{}.onion:8333",
-        bitcoin_rs_primitives::endpoint::base32_encode(&bad_payload)
+        bitcoin_rs_consensus::primitives::endpoint::base32_encode(&bad_payload)
     );
-    let good_b32 = bitcoin_rs_primitives::endpoint::base32_encode(&good_tor_payload);
+    let good_b32 = bitcoin_rs_consensus::primitives::endpoint::base32_encode(&good_tor_payload);
 
     vec![
         invalid_checksum_onion,

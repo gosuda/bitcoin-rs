@@ -19,7 +19,7 @@ use crate::peer_info::PeerRole;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::NodeId;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -560,7 +560,7 @@ mod tests {
     use bitcoin_rs_chain::{
         BlockTree, ChainError, NodeId, NodeStatus, accept_headers, compact_is_met_by,
     };
-    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
+    use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
     use std::net::SocketAddr;
     fn body_candidate_impl(port: u16, height: i32, soft_blocked: bool) -> FanoutCandidate {
         FanoutCandidate {

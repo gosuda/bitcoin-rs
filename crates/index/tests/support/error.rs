@@ -9,7 +9,7 @@ pub(crate) enum TestError {
     #[error(transparent)]
     Sonic(#[from] sonic_rs::Error),
     #[error(transparent)]
-    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
     TryFromInt(#[from] std::num::TryFromIntError),
     #[error(transparent)]
@@ -26,7 +26,7 @@ pub(crate) enum TestError {
     #[error(transparent)]
     ConsensusEncode(#[from] bitcoin::consensus::encode::Error),
     #[error(transparent)]
-    Hash(#[from] bitcoin_rs_primitives::HashError),
+    Hash(#[from] bitcoin_rs_consensus::primitives::HashError),
     #[error("{0}")]
     Message(String),
     #[error("missing {0}")]

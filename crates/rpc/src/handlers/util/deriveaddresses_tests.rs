@@ -162,7 +162,7 @@ fn the_range_argument_must_match_the_descriptor() {
 #[test]
 fn combo_derives_core_regtest_addresses() {
     let mut ctx = Context::new();
-    ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
+    ctx.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Regtest;
     let ctx = Arc::new(ctx);
     let tprv = "tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK";
     let result = deriveaddresses(&ctx, &json!([checksummed(&format!("combo({tprv}/1/1/0)"))]))

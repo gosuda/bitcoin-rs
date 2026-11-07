@@ -6,7 +6,7 @@ use super::tx_count_delta_for;
 use super::{Chainstate, DisconnectOutcome, DisconnectPlan};
 use crate::error::ApplyError;
 use bitcoin_rs_chain::{ChainTxCount, TipSnapshot};
-use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid};
+use bitcoin_rs_consensus::primitives::{Block, Hash256, Tx, Txid};
 use bitcoin_rs_utxo::contract::{
     BlockUndoCheck, RollbackError, load_block_undo_for_block, rollback_block,
 };

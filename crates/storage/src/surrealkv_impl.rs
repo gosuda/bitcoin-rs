@@ -434,7 +434,7 @@ impl SurrealKvStore {
         let max_memtable = SURREALKV_DEFAULT_MAX_MEMTABLE_BYTES;
 
         metrics::gauge!("storage.cache_capacity_bytes", "backend" => "surrealkv")
-            .set(bitcoin_rs_primitives::u64_to_f64(cache_bytes));
+            .set(bitcoin_rs_consensus::primitives::u64_to_f64(cache_bytes));
 
         let (bridge, tree) = BridgeHandle::start(path.clone(), cache_bytes, max_memtable)?;
 
@@ -1201,6 +1201,8 @@ fn count_write(durability: &'static str, encoded_bytes: usize) {
     metrics::counter!("storage.writes_total", "backend" => "surrealkv", "durability" => durability)
         .increment(1);
     metrics::histogram!("storage.write_bytes", "backend" => "surrealkv").record(
-        bitcoin_rs_primitives::u64_to_f64(u64::try_from(encoded_bytes).unwrap_or(u64::MAX)),
+        bitcoin_rs_consensus::primitives::u64_to_f64(
+            u64::try_from(encoded_bytes).unwrap_or(u64::MAX),
+        ),
     );
 }

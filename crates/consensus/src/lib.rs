@@ -1,7 +1,9 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 /// Maximum consensus script size in bytes.
-pub use bitcoin_rs_script::MAX_SCRIPT_SIZE;
+pub mod primitives;
+pub mod script;
+pub use script::MAX_SCRIPT_SIZE;
 /// Maximum distance a BIP94 candidate timestamp may fall below its parent
 /// block's timestamp at a difficulty-adjustment boundary (`MAX_TIMEWARP`, Core
 pub const MAX_TIMEWARP: u32 = 600;
@@ -87,7 +89,7 @@ pub use verify_tx::{
     verify_coinbase_script_sig_size, verify_transaction, verify_transaction_non_script,
 };
 
-use bitcoin_rs_primitives::{OutPoint, TxOut};
+use crate::primitives::{OutPoint, TxOut};
 use thiserror::Error;
 
 pub trait UtxoView {

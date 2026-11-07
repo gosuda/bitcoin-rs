@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 
 use crate::{IndexCapabilities, IndexCapability};
 
@@ -55,7 +55,7 @@ pub enum CursorDecodeError {
 
 pub(crate) mod block_tree {
     use bitcoin_rs_chain::{BlockTree, NodeId};
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_consensus::primitives::Hash256;
 
     #[must_use]
     pub(crate) fn rollback_depth(
@@ -150,7 +150,7 @@ pub trait ChainCursorSource: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::{CURSOR_BYTE_LEN, ConsumerCursor, CursorDecodeError};
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_consensus::primitives::Hash256;
 
     // IDX-05
     #[test]

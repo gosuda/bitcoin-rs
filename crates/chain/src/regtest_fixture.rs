@@ -1,8 +1,8 @@
-use bitcoin_rs_consensus::{block_subsidy, compute_merkle_root};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
     Sequence, Tx, TxIn, TxOut, Witness,
 };
+use bitcoin_rs_consensus::{block_subsidy, compute_merkle_root};
 
 use crate::compact_is_met_by;
 

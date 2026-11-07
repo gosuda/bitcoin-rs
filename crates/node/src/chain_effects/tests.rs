@@ -2,14 +2,14 @@ use super::*;
 use crate::test_support::TestError;
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::ValidationEngine;
+use bitcoin_rs_consensus::primitives::{
+    Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+};
 use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolLimits,
     MutationOutcome, PeerToken, SubmitError, SubmitOutcome,
 };
 use bitcoin_rs_mining::{BlockValidationResult, MiningControl};
-use bitcoin_rs_primitives::{
-    Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
-};
 use parking_lot::Mutex;
 
 #[derive(Debug, Default)]
@@ -32,7 +32,7 @@ impl ZmqPublisher for RecordingPublisher {
         self.events.lock().push(format!("hashblock:{hash}"));
     }
 
-    fn publish_hashtx(&self, txid: bitcoin_rs_primitives::Txid) {
+    fn publish_hashtx(&self, txid: bitcoin_rs_consensus::primitives::Txid) {
         self.events.lock().push(format!("hashtx:{txid}"));
     }
 
@@ -70,7 +70,7 @@ impl ZmqPublisher for MoveGenerationOnBlockEvent {
 
     fn publish_hashblock(&self, _: Hash256) {}
 
-    fn publish_hashtx(&self, _: bitcoin_rs_primitives::Txid) {}
+    fn publish_hashtx(&self, _: bitcoin_rs_consensus::primitives::Txid) {}
 
     fn publish_rawblock(&self, _: &[u8]) {}
 
@@ -117,7 +117,7 @@ fn connect_outcome(tip: &TipSnapshot, block: &Block) -> ConnectOutcome {
         txids: block
             .txs
             .iter()
-            .map(bitcoin_rs_primitives::Tx::txid)
+            .map(bitcoin_rs_consensus::primitives::Tx::txid)
             .collect(),
         block_bytes: bytes::Bytes::new(),
         raw_txs: None,
@@ -222,7 +222,7 @@ impl AdmissionChain for AdmissionCoins {
             locktime_cutoff: 0,
             prevout_meta: hashbrown::HashMap::new(),
             csv_active: false,
-            next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+            next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
             confirmed: false,
         })
     }
@@ -250,7 +250,7 @@ fn orphan_child(outpoint: OutPoint) -> Arc<Tx> {
     })
 }
 
-fn genesis_tip(block: &bitcoin_rs_primitives::Block) -> Result<TipSnapshot, TestError> {
+fn genesis_tip(block: &bitcoin_rs_consensus::primitives::Block) -> Result<TipSnapshot, TestError> {
     let mut tree = BlockTree::new();
     let tip_id = tree.insert_node(None, block.header, NodeStatus::HeaderValid)?;
     let node = tree.node(tip_id)?;
@@ -310,7 +310,7 @@ fn snapshot_retries_each_resident_orphan_once_after_settlement() -> Result<(), T
         None,
     ));
     let followers = followers_with_gateway(&gateway);
-    let now = bitcoin_rs_primitives::unix_time_secs();
+    let now = bitcoin_rs_consensus::primitives::unix_time_secs();
     let parent = Network::Regtest.genesis_block().txs[0].txid();
     let available = orphan_child(OutPoint::new(parent, 0));
     let missing = orphan_child(OutPoint::new(Hash256::from_le_bytes(&[43; 32]).into(), 0));
@@ -401,7 +401,7 @@ fn assert_admission_followers_after_chain_change(connect: bool) -> Result<(), Te
         None,
     ));
     let followers = followers_with_gateway(&gateway);
-    let now = bitcoin_rs_primitives::unix_time_secs();
+    let now = bitcoin_rs_consensus::primitives::unix_time_secs();
     let block = Network::Regtest.genesis_block();
     let parent = block.txs[0].txid();
     let outpoint = OutPoint::new(parent, 0);

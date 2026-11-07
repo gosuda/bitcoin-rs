@@ -3,7 +3,7 @@ use super::*;
 use crate::assumeutxo::{DEFAULT_HISTORICAL_CHECKPOINT_INTERVAL, HistoricalAdvance};
 use crate::test_fixtures::{TestError, TestResult};
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockPayload;
 use bitcoin_rs_storage::assumeutxo::HistoricalCheckpointRef;
 use bitcoin_rs_storage::block_body::IndexedBlockBodyStore;
 use bitcoin_rs_storage::{FlatFileBlockStore, KvDurableHeadStore, KvUndoStore, RocksDbStore};
@@ -119,13 +119,13 @@ fn snapshot_lower_height_work_commit_survives_durable_record_reopen() -> TestRes
 
 #[derive(Default)]
 struct SnapshotRestart {
-    child: Option<bitcoin_rs_primitives::Block>,
+    child: Option<bitcoin_rs_consensus::primitives::Block>,
     stats: CoinStats,
 }
 
 #[derive(Default)]
 struct UnacceptedCheckpoint {
-    coins: Option<bitcoin_rs_primitives::Hash256>,
+    coins: Option<bitcoin_rs_consensus::primitives::Hash256>,
     stats: CoinStats,
 }
 
@@ -203,7 +203,7 @@ fn finalize_snapshot_after_foreground_restart(
 fn rewind_below_the_snapshot_base(
     dir: &Path,
     fixture: &Fixture,
-    child: &bitcoin_rs_primitives::Block,
+    child: &bitcoin_rs_consensus::primitives::Block,
     expected_stats: &CoinStats,
     rewound: &mut CoinStats,
 ) -> TestResult {
@@ -378,8 +378,8 @@ fn publish_two_historical_checkpoints(
     dir: &Path,
     historical: &Chainstate,
     checkpoint: HistoricalCheckpointRef,
-    unaccepted_coins: bitcoin_rs_primitives::Hash256,
-    expected_tip: bitcoin_rs_primitives::Hash256,
+    unaccepted_coins: bitcoin_rs_consensus::primitives::Hash256,
+    expected_tip: bitcoin_rs_consensus::primitives::Hash256,
 ) -> TestResult {
     let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(dir)?;
     let config = crate::checkpoint::headers::HeaderCheckpointConfig {
@@ -423,7 +423,7 @@ fn publish_two_historical_checkpoints(
 fn restart_from_historical_checkpoint(
     dir: &Path,
     fixture: &Fixture,
-    accepted_coins: bitcoin_rs_primitives::Hash256,
+    accepted_coins: bitcoin_rs_consensus::primitives::Hash256,
     accepted_stats: &CoinStats,
 ) -> TestResult {
     let active = open_persistent(dir, &fixture.pinned)?;
@@ -604,7 +604,7 @@ fn snapshot_base_checkpoint_is_bound_to_the_pinned_commitment() -> TestResult {
 
 #[test]
 fn snapshot_base_checkpoint_rejects_coin_height_alias() -> TestResult {
-    use bitcoin_rs_primitives::hex::hex_encode;
+    use bitcoin_rs_consensus::primitives::hex::hex_encode;
     use bitcoin_rs_storage::checkpoint::{
         CHECKPOINT_ROOT, CURRENT_FILE, CheckpointManifestV1, CurrentV1, MANIFEST_FILE,
     };
@@ -872,7 +872,7 @@ fn crash_writer() -> TestResult {
 fn publish_genesis_historical_checkpoint(
     dir: &Path,
     manager: &AssumeUtxoManager,
-    block: &bitcoin_rs_primitives::Block,
+    block: &bitcoin_rs_consensus::primitives::Block,
 ) -> TestResult {
     let historical = manager
         .historical_chainstate()
@@ -1129,7 +1129,7 @@ fn failed_pre_base_validation_cannot_be_forgotten_when_failure_receipt_is_lost()
     }?;
     manager.step_historical(&BlockPayload::from_local(fixture.blocks[0].clone()))?;
     let mut invalid = fixture.blocks[1].clone();
-    invalid.txs[0].inputs[0].script_sig = bitcoin_rs_primitives::Script::new();
+    invalid.txs[0].inputs[0].script_sig = bitcoin_rs_consensus::primitives::Script::new();
     invalid.header.merkle_root = bitcoin_rs_chain::regtest_fixture::merkle_root(&invalid.txs)
         .ok_or(TestError::Missing("merkle root"))?;
     bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut invalid)?;

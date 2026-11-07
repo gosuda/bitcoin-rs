@@ -121,7 +121,7 @@ pub(crate) fn evict_lowest_fee_packages(
 #[expect(clippy::expect_used)]
 mod tests {
     use alloc::sync::Arc;
-    use bitcoin_rs_primitives::{
+    use bitcoin_rs_consensus::primitives::{
         Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
     };
 

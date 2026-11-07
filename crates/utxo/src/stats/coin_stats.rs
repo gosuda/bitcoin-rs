@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 
 use crate::listener::{UtxoChangeEvents, UtxoCommittedEvent, UtxoInserted, UtxoRemoved};
 use crate::snapshot::{SnapshotCoin, SnapshotCoinObserver};
-use bitcoin_rs_primitives::{OutPoint, TxOut, varint};
+use bitcoin_rs_consensus::primitives::{OutPoint, TxOut, varint};
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use smallvec::SmallVec;
@@ -857,7 +857,7 @@ mod tests {
             let value = 50_000 + u64::try_from(len).unwrap_or(u64::MAX);
             let script = vec![0x51; len];
             let txout = TxOut {
-                value: bitcoin_rs_primitives::Amount::from_sat(value),
+                value: bitcoin_rs_consensus::primitives::Amount::from_sat(value),
                 script_pubkey: script.clone().into(),
             };
             let mut manual = Vec::new();
@@ -875,7 +875,7 @@ mod tests {
     fn scan_coin_stats_matches_rolling_listener() {
         use crate::contract::{BlockChanges, UtxoAdd};
         use crate::{SnapshotCoinObserver, UtxoSet};
-        use bitcoin_rs_primitives::{Hash256, OutPoint};
+        use bitcoin_rs_consensus::primitives::{Hash256, OutPoint};
 
         let mut utxo = UtxoSet::new();
         let listener = super::CoinStatsListener::new(super::CoinStats::new());
@@ -886,7 +886,7 @@ mod tests {
             txid_bytes[0] = u8::try_from(i + 1).unwrap_or(u8::MAX);
             let output = OutPoint::new(Hash256::from_le_bytes(&txid_bytes).into(), u32::MAX);
             let txout = TxOut {
-                value: bitcoin_rs_primitives::Amount::from_sat(if i == 4 {
+                value: bitcoin_rs_consensus::primitives::Amount::from_sat(if i == 4 {
                     u64::MAX
                 } else {
                     u64::try_from(i).unwrap_or(u64::MAX).saturating_mul(100_000)
@@ -940,7 +940,7 @@ mod tests {
     }
 
     struct TestCoin {
-        txid: bitcoin_rs_primitives::Hash256,
+        txid: bitcoin_rs_consensus::primitives::Hash256,
         vout: u32,
         value: u64,
         script_pubkey: Vec<u8>,
@@ -956,7 +956,7 @@ mod tests {
                 txid[8] = u8::try_from(index.rotate_left(7)).unwrap_or(u8::MAX);
                 let script_len = script_lens[index % script_lens.len()];
                 TestCoin {
-                    txid: bitcoin_rs_primitives::Hash256::from_le_bytes(&txid),
+                    txid: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&txid),
                     vout: u32::try_from(index).unwrap_or(u32::MAX),
                     value: 50_000_u64.saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
                     script_pubkey: (0..script_len)
@@ -1037,8 +1037,8 @@ mod tests {
         coins.extend(generated_coins(1, &[5]));
         coins[1].vout = 1;
         coins[2].vout = 2;
-        coins[1].txid = bitcoin_rs_primitives::Hash256::from_le_bytes(&[1; 32]);
-        coins[2].txid = bitcoin_rs_primitives::Hash256::from_le_bytes(&[2; 32]);
+        coins[1].txid = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[1; 32]);
+        coins[2].txid = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[2; 32]);
         assert_parallel_serialized_match(&coins);
     }
 

@@ -2,19 +2,19 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::time::Instant;
 
-use bitcoin_rs_primitives::{Amount, OutPoint, Sequence, Tx, TxOut, Wtxid};
+use crate::primitives::{Amount, OutPoint, Sequence, Tx, TxOut, Wtxid};
 
 use crate::block_view::BlockView;
+use crate::script::PreparedTransaction;
+use crate::script::VerifyFlags;
 use crate::sigops::transaction_sigop_cost;
-use bitcoin_rs_script::PreparedTransaction;
-use bitcoin_rs_script::VerifyFlags;
 use rayon::prelude::*;
 
 use crate::ScriptEngine;
 use crate::UtxoView;
 use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST, ValidationEngine};
 
-use bitcoin_rs_primitives::{LOCKTIME_THRESHOLD, SEQUENCE_FINAL};
+use crate::primitives::{LOCKTIME_THRESHOLD, SEQUENCE_FINAL};
 const MIN_COINBASE_SCRIPT_SIG_SIZE: usize = 2;
 const MAX_COINBASE_SCRIPT_SIG_SIZE: usize = 100;
 
@@ -86,7 +86,7 @@ pub fn verify_transaction(
     locktime_cutoff: u32,
     flags: VerifyFlags,
     engine: ValidationEngine,
-    signature_cache: Option<&bitcoin_rs_script::SignatureCache>,
+    signature_cache: Option<&crate::script::SignatureCache>,
 ) -> Result<(), ConsensusError> {
     verify_transaction_with_locktime_cutoff(
         tx,
@@ -124,7 +124,7 @@ fn verify_transaction_with_locktime_cutoff(
     locktime_cutoff: u32,
     flags: VerifyFlags,
     engine: Option<ValidationEngine>,
-    signature_cache: Option<&bitcoin_rs_script::SignatureCache>,
+    signature_cache: Option<&crate::script::SignatureCache>,
 ) -> Result<(), ConsensusError> {
     if let Some(engine) = engine
         && !engine.is_supported()
@@ -249,7 +249,7 @@ pub(crate) fn verify_input_script_native(
     prepared: &PreparedTransaction<'_>,
     input_index: usize,
     flags: VerifyFlags,
-    signature_cache: Option<&bitcoin_rs_script::SignatureCache>,
+    signature_cache: Option<&crate::script::SignatureCache>,
 ) -> Result<(), ConsensusError> {
     prepared
         .verify_input(input_index, flags, signature_cache)

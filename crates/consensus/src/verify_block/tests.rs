@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{
+use crate::primitives::{
     Amount, Block, BlockHash, Hash256, Header, LockTime, Network, OutPoint, Script, Sequence, Tx,
     TxIn, TxOut, Txid, Witness, encode::double_sha256,
 };
@@ -13,7 +13,7 @@ use super::{
 use crate::ConsensusError;
 use crate::bip9::SoftforkState;
 use crate::block_view::BlockFacts;
-use bitcoin_rs_script::VerifyFlags;
+use crate::script::VerifyFlags;
 
 type BindingCase = (Vec<[u8; 32]>, Vec<Vec<u8>>, Result<(), ConsensusError>);
 
@@ -171,12 +171,12 @@ fn non_contextual_size_and_aggregate_legacy_sigops_have_core_boundaries() {
     let mut txs = vec![coinbase_tx(), spend_tx(1, vec![])];
     for tx in &mut txs {
         tx.outputs[0].script_pubkey =
-            Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 10_000]);
+            Script::from_bytes(vec![crate::script::opcode::OP_CHECKSIG; 10_000]);
     }
     assert!(verify_block_non_contextual(&block_with_transactions(txs.clone())).is_ok());
     assert!(verify_block_rules(&block_with_transactions(txs.clone())).is_ok());
     txs[1].outputs[0].script_pubkey =
-        Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 10_001]);
+        Script::from_bytes(vec![crate::script::opcode::OP_CHECKSIG; 10_001]);
     let over_limit = block_with_transactions(txs);
     for result in [
         verify_block_non_contextual(&over_limit),
@@ -224,7 +224,7 @@ fn verify_block_rules_rejects_coinbase_empty_outputs() {
 fn verify_block_rules_enforces_legacy_sigop_budget_boundaries() {
     let mut coinbase = coinbase_tx();
     coinbase.outputs[0].script_pubkey =
-        Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 19_999]);
+        Script::from_bytes(vec![crate::script::opcode::OP_CHECKSIG; 19_999]);
     assert_eq!(
         verify_block_rules(&block_with_transactions(vec![coinbase.clone()])),
         Ok(()),
@@ -232,7 +232,7 @@ fn verify_block_rules_enforces_legacy_sigop_budget_boundaries() {
     );
 
     coinbase.outputs[0].script_pubkey =
-        Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 20_000]);
+        Script::from_bytes(vec![crate::script::opcode::OP_CHECKSIG; 20_000]);
     assert_eq!(
         verify_block_rules(&block_with_transactions(vec![coinbase.clone()])),
         Ok(()),
@@ -240,7 +240,7 @@ fn verify_block_rules_enforces_legacy_sigop_budget_boundaries() {
     );
 
     coinbase.outputs[0].script_pubkey =
-        Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 20_001]);
+        Script::from_bytes(vec![crate::script::opcode::OP_CHECKSIG; 20_001]);
     assert_eq!(
         verify_block_rules(&block_with_transactions(vec![coinbase])),
         Err(ConsensusError::SigopsLimit {

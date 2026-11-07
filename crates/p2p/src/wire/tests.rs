@@ -149,7 +149,7 @@ fn receiver_restarts_at_a_frame_boundary_after_a_rejected_frame() -> Result<(), 
 
 #[test]
 fn block_message_roundtrip_preserves_wire_payload() -> Result<(), super::PeerError> {
-    use bitcoin_rs_primitives::BlockPayload;
+    use bitcoin_rs_consensus::primitives::BlockPayload;
 
     let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let block_bytes = serialize(&block);
@@ -222,7 +222,7 @@ fn read_message_accepts_payload_length_at_exact_cap() -> Result<(), PeerError> {
 
 #[test]
 fn block_payload_writes_the_same_frame_as_decoded_block() -> Result<(), PeerError> {
-    use bitcoin_rs_primitives::BlockPayload;
+    use bitcoin_rs_consensus::primitives::BlockPayload;
 
     let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let block_bytes = serialize(&block);
@@ -268,12 +268,15 @@ fn wire_len_matches_write_message_for_representative_messages() -> Result<(), Pe
         return Err(PeerError::Protocol("expected valid advertised id"));
     };
     let messages = vec![
-        super::Message::Tx(bitcoin_rs_primitives::Tx::default()),
+        super::Message::Tx(bitcoin_rs_consensus::primitives::Tx::default()),
         super::Message::Ping(0x1234_5678_9abc_def0),
         super::Message::Verack,
-        super::Message::Headers(vec![bitcoin_rs_primitives::Header::default(); 2_000]),
-        super::Message::Block(bitcoin_rs_primitives::BlockPayload::from_local(
-            bitcoin_rs_primitives::Block::default(),
+        super::Message::Headers(vec![
+            bitcoin_rs_consensus::primitives::Header::default();
+            2_000
+        ]),
+        super::Message::Block(bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+            bitcoin_rs_consensus::primitives::Block::default(),
         )),
         super::Message::BlockPayload(bytes::Bytes::from(vec![0_u8; 80])),
         super::Message::Unknown {
@@ -334,11 +337,13 @@ fn feature_message_rejects_malformed_wire_payload() {
     ));
 }
 
-fn package_wtxid(tag: u8) -> bitcoin_rs_primitives::Wtxid {
-    bitcoin_rs_primitives::Wtxid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[tag; 32]))
+fn package_wtxid(tag: u8) -> bitcoin_rs_consensus::primitives::Wtxid {
+    bitcoin_rs_consensus::primitives::Wtxid(
+        bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[tag; 32]),
+    )
 }
 
-fn package_tx(tag: u8) -> Result<bitcoin_rs_primitives::Tx, PeerError> {
+fn package_tx(tag: u8) -> Result<bitcoin_rs_consensus::primitives::Tx, PeerError> {
     let mut raw = vec![1, 0, 0, 0, 1];
     raw.extend_from_slice(&[tag; 32]);
     raw.extend_from_slice(&0u32.to_le_bytes());
@@ -348,8 +353,8 @@ fn package_tx(tag: u8) -> Result<bitcoin_rs_primitives::Tx, PeerError> {
     raw.extend_from_slice(&1_000u64.to_le_bytes());
     raw.push(0);
     raw.extend_from_slice(&0u32.to_le_bytes());
-    Ok(bitcoin_rs_primitives::deserialize::<
-        bitcoin_rs_primitives::Tx,
+    Ok(bitcoin_rs_consensus::primitives::deserialize::<
+        bitcoin_rs_consensus::primitives::Tx,
     >(&raw)?)
 }
 
@@ -442,7 +447,7 @@ fn package_messages_share_the_codec_bounds_on_every_wire_path() {
     }
     assert!(matches!(
         wire_len(&super::Message::PkgTxns(PkgTxns {
-            txs: vec![bitcoin_rs_primitives::Tx::default(); over],
+            txs: vec![bitcoin_rs_consensus::primitives::Tx::default(); over],
         })),
         Err(PeerError::Package(PackageError::TooMany { .. }))
     ));
@@ -497,13 +502,13 @@ fn staletip_roundtrips_and_over_limit_is_ignored_not_punished() -> Result<(), Pe
     use crate::staletip::{CompressedHeader, StaleTipAnnouncement, StaleTipError};
 
     let announcement = StaleTipAnnouncement {
-        fork_point: bitcoin_rs_primitives::Hash256::from_le_bytes(&[7; 32]),
+        fork_point: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[7; 32]),
         headers: vec![
             CompressedHeader {
                 version: 0x2000_0000,
-                merkle_root: bitcoin_rs_primitives::Hash256::from_le_bytes(&[1; 32]),
+                merkle_root: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[1; 32]),
                 time: 1_700_000_000,
-                bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x1d00_ffff),
+                bits: bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x1d00_ffff),
                 nonce: 9,
             };
             2

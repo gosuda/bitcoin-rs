@@ -5,13 +5,13 @@ use crate::assumeutxo_snapshot::SnapshotArchiveError;
 use crate::error::{ApplyError, DisconnectError};
 use crate::{Chainstate, ConnectOutcome};
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_primitives::{AssumeUtxoData, Block, BlockPayload, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{AssumeUtxoData, Block, BlockPayload, Hash256, Network};
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::core_snapshot::{StateVerifyError, VerifiedSnapshotState};
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 mod serde_hash256 {
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_consensus::primitives::Hash256;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub(super) fn serialize<S>(hash: &Hash256, serializer: S) -> Result<S::Ok, S::Error>
@@ -31,7 +31,7 @@ mod serde_hash256 {
 }
 
 mod serde_opt_hash256 {
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_consensus::primitives::Hash256;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub(super) fn serialize<S>(hash: &Option<Hash256>, serializer: S) -> Result<S::Ok, S::Error>
@@ -940,7 +940,7 @@ impl AssumeUtxoManager {
         let _transition = self.active_chainstate.chain_transition.lock();
         let active_role = self.active_chainstate.role();
         let active_applied = self.active_chainstate.applied_tip_snapshot();
-        let now = bitcoin_rs_primitives::unix_time_secs();
+        let now = bitcoin_rs_consensus::primitives::unix_time_secs();
         let reader = self.active_chainstate.chain_progress_reader();
         let active_progress = reader.progress_at(active_applied.as_deref(), self.network, now);
         let active_summary = ActiveChainstateSummary {
@@ -1075,7 +1075,7 @@ impl AssumeUtxoManager {
                 let position = store.stage_block_body(
                     height,
                     hash,
-                    &bitcoin_rs_primitives::consensus_bytes(block),
+                    &bitcoin_rs_consensus::primitives::consensus_bytes(block),
                 )?;
                 store.sync()?;
                 position

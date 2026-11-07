@@ -3,7 +3,7 @@
     reason = "independent-oracle fixture construction"
 )]
 
-use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Network};
 
 use crate::{ChainError, ChainWork, NodeStatus, node::BlockHeader, validate_pow};
 

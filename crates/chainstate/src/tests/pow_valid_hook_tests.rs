@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use bitcoin_rs_chain::regtest_fixture::{
     merkle_root, mine_block_to_declared_target, mined_regtest_child_at as mined_child,
 };
-use bitcoin_rs_primitives::{BlockPayload, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256, Network};
 use bitcoin_rs_utxo::UtxoSet;
 
 use super::ApplyError;
@@ -93,7 +93,7 @@ fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> TestResult {
         .outputs
         .first_mut()
         .ok_or(TestError::Missing("coinbase output"))?;
-    coinbase.value = bitcoin_rs_primitives::Amount::from_sat(
+    coinbase.value = bitcoin_rs_consensus::primitives::Amount::from_sat(
         coinbase
             .value
             .to_sat()
@@ -151,12 +151,12 @@ fn pow_valid_hook_skips_non_final_commit_intent_block() -> TestResult {
         .txs
         .first_mut()
         .ok_or(TestError::Missing("coinbase"))?;
-    coinbase.lock_time = bitcoin_rs_primitives::LockTime::from_consensus(2);
+    coinbase.lock_time = bitcoin_rs_consensus::primitives::LockTime::from_consensus(2);
     coinbase
         .inputs
         .first_mut()
         .ok_or(TestError::Missing("coinbase input"))?
-        .sequence = bitcoin_rs_primitives::Sequence::from_consensus(0);
+        .sequence = bitcoin_rs_consensus::primitives::Sequence::from_consensus(0);
     non_final.header.merkle_root =
         merkle_root(&non_final.txs).ok_or(TestError::Missing("merkle root of non-empty block"))?;
     mine_block_to_declared_target(&mut non_final).map_err(|source| TestError::Regrind {
@@ -194,7 +194,7 @@ fn pow_valid_hook_requires_transaction_structure_and_legacy_sigop_budget() -> Te
             block.txs[0].outputs.clear();
         } else {
             block.txs[0].outputs[0].script_pubkey =
-                vec![bitcoin_rs_script::opcode::OP_CHECKMULTISIG; sigops].into();
+                vec![bitcoin_rs_consensus::script::opcode::OP_CHECKMULTISIG; sigops].into();
         }
         block.header.merkle_root =
             merkle_root(&block.txs).ok_or(TestError::Missing("merkle root"))?;
@@ -345,7 +345,7 @@ fn pow_valid_hook_skips_legacy_sigop_violating_block() -> TestResult {
     let genesis_tip = seed_genesis(&handles)?;
     let mut block = mined_child(genesis_tip.hash.into(), 1)?;
     block.txs[0].outputs[0].script_pubkey =
-        vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 20_001].into();
+        vec![bitcoin_rs_consensus::script::opcode::OP_CHECKSIG; 20_001].into();
     block.header.merkle_root =
         merkle_root(&block.txs).ok_or(TestError::Missing("merkle root of non-empty block"))?;
     mine_block_to_declared_target(&mut block).map_err(|source| TestError::Regrind {
@@ -384,12 +384,12 @@ fn proposal_intent_rejects_non_final_coinbase_parity() -> TestResult {
         .txs
         .first_mut()
         .ok_or(TestError::Missing("coinbase"))?;
-    coinbase.lock_time = bitcoin_rs_primitives::LockTime::from_consensus(2);
+    coinbase.lock_time = bitcoin_rs_consensus::primitives::LockTime::from_consensus(2);
     coinbase
         .inputs
         .first_mut()
         .ok_or(TestError::Missing("coinbase input"))?
-        .sequence = bitcoin_rs_primitives::Sequence::from_consensus(0);
+        .sequence = bitcoin_rs_consensus::primitives::Sequence::from_consensus(0);
     non_final.header.merkle_root =
         merkle_root(&non_final.txs).ok_or(TestError::Missing("merkle root of non-empty block"))?;
     mine_block_to_declared_target(&mut non_final).map_err(|source| TestError::Regrind {

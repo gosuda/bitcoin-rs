@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,7 +8,7 @@ use bitcoin::bip152::BlockTransactionsRequest;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_filter::{CFilter, GetCFilters};
-use bitcoin_rs_primitives::{BlockHash, Header};
+use bitcoin_rs_consensus::primitives::{BlockHash, Header};
 
 use super::getdata_pause_tests::{
     FAILSAFE, MAGIC, Served, TestResult, WriterKind, read_messages, shared_with_query,
@@ -48,8 +48,8 @@ impl FilterChain {
 impl ChainQuery for FilterChain {
     fn stale_tip_announcement(
         &self,
-        _: bitcoin_rs_primitives::Hash256,
-        _: &[bitcoin_rs_primitives::Hash256],
+        _: bitcoin_rs_consensus::primitives::Hash256,
+        _: &[bitcoin_rs_consensus::primitives::Hash256],
     ) -> Option<crate::dispatch::StaleTipHeaders> {
         None
     }

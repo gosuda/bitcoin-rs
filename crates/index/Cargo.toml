@@ -26,8 +26,7 @@ mdbx = [
 ]
 
 [dependencies]
-bitcoin-rs-primitives.workspace = true
-bitcoin-rs-script.workspace = true
+bitcoin-rs-consensus.workspace = true
 bitcoin-rs-storage = { workspace = true, default-features = false }
 bitcoin-rs-chain.workspace = true
 bitcoin-rs-utxo.workspace = true

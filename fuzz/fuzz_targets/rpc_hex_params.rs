@@ -119,8 +119,8 @@ fuzz_target!(|data: &[u8]| {
     };
 
     check_hex(s);
-    check_lower_hex_format::<bitcoin_rs_primitives::Txid>(s, "txid");
-    check_lower_hex_format::<bitcoin_rs_primitives::BlockHash>(s, "blockhash");
+    check_lower_hex_format::<bitcoin_rs_consensus::primitives::Txid>(s, "txid");
+    check_lower_hex_format::<bitcoin_rs_consensus::primitives::BlockHash>(s, "blockhash");
     check_scripthash(s);
     check_address(s);
     check_descriptor(s);

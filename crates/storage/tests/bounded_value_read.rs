@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_storage::{BoundedReadError, ColumnFamily, KvStore, KvUndoStore, UndoStore};
 use std::sync::Arc;
 

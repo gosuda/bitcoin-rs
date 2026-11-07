@@ -6,7 +6,7 @@ use bitcoin_rs_chain::regtest_fixture::{
 };
 use bitcoin_rs_chain::{LatchReader, LatchWriter, TipSnapshot, validate_pow};
 use bitcoin_rs_consensus::ConsensusError;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Block, BlockPayload, Hash256, Network, Script, Witness, consensus_bytes, deserialize,
 };
 use bitcoin_rs_storage::block_body::BlockBodyStore;

@@ -100,7 +100,7 @@ fn empty_header_probe_is_paced_then_rotates_to_another_peer() -> TestResult {
 
 #[test]
 fn staged_successors_behind_a_rejected_frontier_still_probe() -> TestResult {
-    use bitcoin_rs_primitives::Amount;
+    use bitcoin_rs_consensus::primitives::Amount;
     let (sync, peers, _, blocks, incoming) = sync_with_mined_chain(3)?;
     let peer = test_addr(9761, 0)?;
     let outbound = connect_peer(&peers, synthetic_peer(peer, 0));

@@ -3,7 +3,7 @@ use bitcoin_rs_chain::{BlockHeader, BlockTree, NodeId, NodeStatus, plan_reorg};
 use crate::support::error::TestError;
 use crate::support::pow_oracle;
 
-use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256};
 use pow_oracle::pow_is_met;
 
 #[test]

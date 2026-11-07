@@ -1,10 +1,10 @@
 use super::{GateResult, fail};
 use bitcoin_rs_chain::regtest_fixture;
-use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Witness,
 };
-use bitcoin_rs_script::push_int;
+use bitcoin_rs_consensus::script::push_int;
+use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
 pub(crate) const SEED_BASE_TIME: u32 = 1_296_688_603;
 pub(crate) const SEED_BLOCK_INTERVAL: u32 = 600;
@@ -13,7 +13,9 @@ pub(crate) const REGTEST_SUBSIDY_SATS: u64 = 50 * 100_000_000;
 pub(crate) fn apply_genesis(state: &NodeState) -> GateResult<()> {
     let genesis = Network::Regtest.genesis_block();
     state
-        .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))
+        .apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+            genesis,
+        ))
         .map_err(fail)?;
     Ok(())
 }
@@ -42,9 +44,9 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> GateResult<SeedChain>
             lock_time: LockTime::ZERO,
         };
         let mut block = Block {
-            header: bitcoin_rs_primitives::Header {
+            header: bitcoin_rs_consensus::primitives::Header {
                 version: 0x2000_0000,
-                prev_blockhash: bitcoin_rs_primitives::BlockHash::from(tip.hash),
+                prev_blockhash: bitcoin_rs_consensus::primitives::BlockHash::from(tip.hash),
                 merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
                 time: SEED_BASE_TIME.saturating_add(SEED_BLOCK_INTERVAL.saturating_mul(height)),
                 bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
@@ -56,7 +58,9 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> GateResult<SeedChain>
             .ok_or_else(|| fail("seed block must have a merkle root"))?;
         regtest_fixture::mine_block_to_declared_target(&mut block).map_err(fail)?;
         state
-            .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block))
+            .apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+                block,
+            ))
             .map_err(fail)?;
         tip = current_tip(state)?;
         if tip.height != height {

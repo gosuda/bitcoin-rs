@@ -6,8 +6,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::hex::DisplayHex;
+use bitcoin_rs_consensus::primitives::unix_time_secs;
 use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
-use bitcoin_rs_primitives::unix_time_secs;
 use sonic_rs::{JsonValueTrait, Value};
 
 use crate::context::Context;
@@ -131,7 +131,8 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         local_services |= bitcoin::p2p::ServiceFlags::COMPACT_FILTERS.to_u64();
     }
     typed_to_sonic(&v31::GetNetworkInfo {
-        version: usize::try_from(bitcoin_rs_primitives::client_version()).unwrap_or(usize::MAX),
+        version: usize::try_from(bitcoin_rs_consensus::primitives::client_version())
+            .unwrap_or(usize::MAX),
         subversion: ctx.network.user_agent.clone(),
         protocol_version: usize::try_from(bitcoin_rs_p2p::wire::PROTOCOL_VERSION)
             .unwrap_or(usize::MAX),
@@ -1075,7 +1076,7 @@ mod getnodeaddresses_tests {
         let mut info = peer("127.0.0.1:8333", 9);
         info.addr = remote;
         info.endpoint = None;
-        info.network = bitcoin_rs_primitives::NetworkLabel::Onion;
+        info.network = bitcoin_rs_consensus::primitives::NetworkLabel::Onion;
         info.inbound = true;
         ctx.network.peer_table.register(remote, lease.clone());
         ctx.network.peer_table.publish_info(remote, &lease, info);

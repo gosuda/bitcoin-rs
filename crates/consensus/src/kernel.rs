@@ -1,22 +1,22 @@
 //! Block parse backends and runtime-selected script preparation.
 
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
-use bitcoin_rs_script::VerifyFlags;
+use crate::primitives::{OutPoint, Tx, TxOut};
+use crate::script::VerifyFlags;
 
 use crate::ConsensusError;
 use crate::ValidationEngine;
 
-impl From<bitcoin_rs_script::PrevoutError> for ConsensusError {
-    fn from(error: bitcoin_rs_script::PrevoutError) -> Self {
+impl From<crate::script::PrevoutError> for ConsensusError {
+    fn from(error: crate::script::PrevoutError) -> Self {
         match error {
-            bitcoin_rs_script::PrevoutError::Count {
+            crate::script::PrevoutError::Count {
                 input_count,
                 prevout_count,
             } => Self::PrevoutCount {
                 input_count,
                 prevout_count,
             },
-            bitcoin_rs_script::PrevoutError::Mismatch { input_index } => {
+            crate::script::PrevoutError::Mismatch { input_index } => {
                 Self::PrevoutMismatch { input_index }
             }
         }
@@ -35,8 +35,8 @@ pub(crate) const KERNEL_SCRIPT_REJECT_PREFIX: &str = "kernel script verification
 
 #[cfg(feature = "kernel")]
 mod kernel_backend {
-    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxOut, Txid, consensus_bytes};
-    use bitcoin_rs_script::VerifyFlags;
+    use crate::primitives::{Hash256, OutPoint, Tx, TxOut, Txid, consensus_bytes};
+    use crate::script::VerifyFlags;
 
     use crate::{ConsensusError, ScriptEngine};
 
@@ -189,7 +189,7 @@ impl BlockParse {
     pub fn parse(raw_block: &[u8], engine: ValidationEngine) -> Result<Self, ConsensusError> {
         match engine {
             ValidationEngine::Native => {
-                let parsed = bitcoin_rs_primitives::layout::ParsedBlock::parse_exact(raw_block)
+                let parsed = crate::primitives::layout::ParsedBlock::parse_exact(raw_block)
                     .map_err(|error| ConsensusError::Encoding(error.to_string()))?;
                 Ok(Self::Native(crate::block_view::BlockFacts::from_parsed(
                     &parsed,
@@ -240,11 +240,11 @@ impl BlockScriptSource {
     ) -> Result<PreparedTx<'b>, ConsensusError> {
         match self {
             Self::Native => Ok(PreparedTx::Native(
-                bitcoin_rs_script::PreparedTransaction::from_owned(tx, spent_outputs)?,
+                crate::script::PreparedTransaction::from_owned(tx, spent_outputs)?,
             )),
             #[cfg(feature = "kernel")]
             Self::Kernel(block) => {
-                bitcoin_rs_script::validate_prevouts(tx, &spent_outputs)?;
+                crate::script::validate_prevouts(tx, &spent_outputs)?;
                 block.prepare_tx(index, spent_outputs)
             }
         }
@@ -269,7 +269,7 @@ fn kernel_block_parse(_raw_block: &[u8]) -> Result<BlockParse, ConsensusError> {
     )
 )]
 pub(crate) enum PreparedTx<'b> {
-    Native(bitcoin_rs_script::PreparedTransaction<'b>),
+    Native(crate::script::PreparedTransaction<'b>),
     #[cfg(feature = "kernel")]
     Kernel {
         state: kernel_backend::PreparedKernelTx<bitcoinkernel::TransactionRef<'b>>,
@@ -307,11 +307,11 @@ pub fn verify_tx_scripts(
     spent_outputs: &[(OutPoint, TxOut)],
     flags: VerifyFlags,
     engine: ValidationEngine,
-    signature_cache: Option<&bitcoin_rs_script::SignatureCache>,
+    signature_cache: Option<&crate::script::SignatureCache>,
 ) -> Result<(), ConsensusError> {
     match engine {
         ValidationEngine::Native => {
-            let prepared = bitcoin_rs_script::PreparedTransaction::new(tx, spent_outputs)?;
+            let prepared = crate::script::PreparedTransaction::new(tx, spent_outputs)?;
             for (input_index, _) in spent_outputs.iter().enumerate() {
                 crate::verify_tx::verify_input_script_native(
                     &prepared,
@@ -323,7 +323,7 @@ pub fn verify_tx_scripts(
             Ok(())
         }
         ValidationEngine::Kernel => {
-            bitcoin_rs_script::validate_prevouts(tx, spent_outputs)?;
+            crate::script::validate_prevouts(tx, spent_outputs)?;
             verify_tx_scripts_kernel(tx, spent_outputs, flags)
         }
     }
@@ -349,7 +349,7 @@ fn verify_tx_scripts_kernel(
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::{BlockPayload, Network};
+    use crate::primitives::{BlockPayload, Network};
 
     use super::*;
 
@@ -391,7 +391,7 @@ mod tests {
     fn kernel_verify_api_error_propagates_as_kernel_error() {
         let block = Network::Regtest.genesis_block();
         let tx = &block.txs[0];
-        let tx_bytes = bitcoin_rs_primitives::consensus_bytes(tx);
+        let tx_bytes = crate::primitives::consensus_bytes(tx);
         let kernel_tx = bitcoinkernel::Transaction::new(&tx_bytes)
             .unwrap_or_else(|error| panic!("genesis tx kernel parse: {error}"));
         let prevout = tx.outputs[0].clone();

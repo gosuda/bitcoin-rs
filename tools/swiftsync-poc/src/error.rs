@@ -1,7 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 
-use bitcoin_rs_primitives::DecodeError;
+use bitcoin_rs_consensus::primitives::DecodeError;
 use bitcoin_rs_utxo::UtxoError;
 
 #[derive(Debug, thiserror::Error)]

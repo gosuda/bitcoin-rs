@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{PeerAddress, PeerEndpoint, PeerNetwork};
+use bitcoin_rs_consensus::primitives::{PeerAddress, PeerEndpoint, PeerNetwork};
 use parking_lot::RwLock;
 use std::{
     io::{self, Read, Write},
@@ -113,8 +113,8 @@ impl OverlayConfig {
 
     #[must_use]
     pub fn dial_routes(&self) -> crate::DialRoutes {
-        fn label(network: PeerNetwork) -> bitcoin_rs_primitives::NetworkLabel {
-            use bitcoin_rs_primitives::NetworkLabel as Label;
+        fn label(network: PeerNetwork) -> bitcoin_rs_consensus::primitives::NetworkLabel {
+            use bitcoin_rs_consensus::primitives::NetworkLabel as Label;
             match network {
                 PeerNetwork::Ipv4 => Label::Ipv4,
                 PeerNetwork::Ipv6 => Label::Ipv6,

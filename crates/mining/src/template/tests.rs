@@ -1,6 +1,6 @@
 use super::*;
+use bitcoin_rs_consensus::primitives::{Amount, LockTime, OutPoint, Script, Sequence, TxIn, TxOut};
 use bitcoin_rs_mempool::{MempoolEntry, MempoolLimits};
-use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, TxIn, TxOut};
 
 use crate::test_error::TestError;
 

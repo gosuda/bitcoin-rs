@@ -1,5 +1,5 @@
 use crate::support::TestResult;
-use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut};
 use bitcoin_rs_utxo::stats::coin_stats::COIN_STATS_ENCODED_LEN;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsDecodeError, CoinStatsListener};
 

@@ -110,7 +110,7 @@ Each target scenario is evaluated across five distinct observable behaviors:
   - Serving lifecycle: `src/main.rs`, `src/service.rs` (binary daemon only, `pub(crate) struct NodeService`)
 - **Normal Zero-Fee-Default Mode**: Planned probe requires `bitcoin-rs` regtest configured with `--txindex=true`, `--scriptindex=full`, and `--rest=true` via standard `[bitcoind]` RPC. Intended to probe basic daemon lifecycle, block sync, transaction broadcast, and restart.
 - **Advanced Mode (`enable_zero_fee_commitments = true`)**:
-  - Requires `getnetworkinfo.version >= 290000` (Core 29.0+). `bitcoin-rs` truthfully reports `1500` from `PKG_VERSION = 0.15.0` (`crates/primitives/src/version.rs`, `crates/rpc/src/handlers/network.rs`). This is a version-identity gate failure, not a capability failure. `bitcoin-rs` strictly refuses version spoofing.
+  - Requires `getnetworkinfo.version >= 290000` (Core 29.0+). `bitcoin-rs` truthfully reports `1500` from `PKG_VERSION = 0.15.0` (`crates/consensus/src/primitives/version.rs`, `crates/rpc/src/handlers/network.rs`). This is a version-identity gate failure, not a capability failure. `bitcoin-rs` strictly refuses version spoofing.
   - Requires all-V3 `submitpackage` package relay, TRUC, P2A, and ephemeral dust (Issue #1574 / PR #1667).
   - Both gates are recorded separately in the matrix and JSON evidence.
 

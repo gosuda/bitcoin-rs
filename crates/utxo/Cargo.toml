@@ -21,7 +21,7 @@ surrealkv = ["bitcoin-rs-storage/surrealkv"]
 mdbx = ["bitcoin-rs-storage/mdbx"]
 
 [dependencies]
-bitcoin-rs-primitives.workspace = true
+bitcoin-rs-consensus.workspace = true
 bitcoin-rs-storage = { workspace = true, default-features = false }
 hashbrown.workspace = true
 parking_lot.workspace = true

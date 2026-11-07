@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use bitcoin_rs_chain::{ActiveTipWait, LatchReader, LatchWriter, TipSnapshot, TipWaitCondition};
 use bitcoin_rs_chainstate::Chainstate;
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_rpc::{Auth, Handler, RpcServer, context::Context};
 use parking_lot::{Condvar, Mutex};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
@@ -76,8 +76,9 @@ fn context() -> (Arc<Context>, Arc<Chainstate>, Arc<ObservableTipWait>) {
         )),
         Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
     ));
-    let genesis_payload =
-        bitcoin_rs_primitives::BlockPayload::from_local(Network::Regtest.genesis_block());
+    let genesis_payload = bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        Network::Regtest.genesis_block(),
+    );
     chainstate.apply_block(&genesis_payload).expect("genesis");
     let observable = ObservableTipWait::new(chainstate.clone());
     let mut ctx = Context::new();

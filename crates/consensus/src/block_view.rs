@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{
+use crate::primitives::{
     Header, Tx, TxOut, Txid, Wtxid,
     encode::{double_sha256, finalize_double_sha256},
     layout::{ParsedBlock, ParsedTransaction},
@@ -182,7 +182,7 @@ impl<'b> BlockView<'b> {
     }
 
     #[must_use]
-    pub fn merkle_root_matches(&self, merkle_root: bitcoin_rs_primitives::Hash256) -> bool {
+    pub fn merkle_root_matches(&self, merkle_root: crate::primitives::Hash256) -> bool {
         self.facts.merkle_root() == Some(Txid(merkle_root))
     }
 

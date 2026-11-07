@@ -7,7 +7,7 @@ mod restore;
 use crate::writer::TxIndexWriter;
 use crate::{IndexCapabilities, IndexError, IndexReader, IndexWatermark};
 use bitcoin_rs_chain::{BlockBodySource, BlockTreeReader, TipReader};
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_consensus::primitives::Network;
 use std::path::{Path, PathBuf};
 
 pub(crate) use restore::reset_interrupted_import;
@@ -193,7 +193,7 @@ pub(crate) enum TestError {
     #[error(transparent)]
     Chain(#[from] bitcoin_rs_chain::ChainError),
     #[error(transparent)]
-    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
     Sonic(#[from] sonic_rs::Error),
     #[error(transparent)]

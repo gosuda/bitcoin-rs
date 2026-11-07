@@ -5,7 +5,7 @@ use super::super::chain::SyncChainError;
 use super::super::chain::WindowCommitError;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::{BlockTree, ChainWork, NodeStatus};
-use bitcoin_rs_primitives::{Hash256, Header, Network};
+use bitcoin_rs_consensus::primitives::{Hash256, Header, Network};
 use parking_lot::RwLockReadGuard;
 use std::sync::Arc;
 
@@ -83,7 +83,7 @@ impl SyncChain for RoutingStubChain {
 
     fn check_body_binding(
         &self,
-        _block: &bitcoin_rs_primitives::Block,
+        _block: &bitcoin_rs_consensus::primitives::Block,
     ) -> Result<(), SyncChainError> {
         Ok(())
     }
@@ -94,7 +94,7 @@ impl SyncChain for RoutingStubChain {
 
     fn commit_window(
         &self,
-        _payloads: &[&bitcoin_rs_primitives::BlockPayload],
+        _payloads: &[&bitcoin_rs_consensus::primitives::BlockPayload],
     ) -> Result<usize, WindowCommitError> {
         Ok(0)
     }
@@ -102,7 +102,10 @@ impl SyncChain for RoutingStubChain {
     fn switch_to_branch(
         &self,
         _target: bitcoin_rs_chain::NodeId,
-        _staged_body: &mut dyn FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+        _staged_body: &mut dyn FnMut(
+            Hash256,
+        )
+            -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
         _connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), bitcoin_rs_chainstate::reorg::ReorgError> {
         Ok(())
@@ -214,7 +217,8 @@ fn low_work_stale_tip_page_defers_while_broken_page_admits() {
     )
     .is_ok()
     {
-        broken[1].bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x1d00_ffff);
+        broken[1].bits =
+            bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x1d00_ffff);
     }
     assert!(
         sync.body_carried_header_needs_admission(&broken),
@@ -242,8 +246,8 @@ fn partial_prefix_rejection_preserves_demoted_tip() {
         prev = header.compute_hash();
         batch.push(header);
     }
-    let garbage = bitcoin_rs_primitives::BlockHash::from(
-        bitcoin_rs_primitives::Hash256::from_le_bytes(&[0xFF_u8; 32]),
+    let garbage = bitcoin_rs_consensus::primitives::BlockHash::from(
+        bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[0xFF_u8; 32]),
     );
     batch.push(
         bitcoin_rs_chain::regtest_fixture::mined_regtest_header(garbage, 104)
@@ -284,7 +288,7 @@ fn duplicate_fetch_skips_owned_body() {
         .chain
         .chain_tip()
         .unwrap_or_else(|| panic!("tree has a tip"));
-    let prev = bitcoin_rs_primitives::BlockHash::from(tip.hash);
+    let prev = bitcoin_rs_consensus::primitives::BlockHash::from(tip.hash);
     let header = bitcoin_rs_chain::regtest_fixture::mined_regtest_header(prev, 3)
         .unwrap_or_else(|error| panic!("fixture mines: {error}"));
     let tip_hash = Hash256::from(header.compute_hash());
@@ -319,7 +323,7 @@ fn duplicate_fetch_skips_owned_body() {
         .chain
         .chain_tip()
         .unwrap_or_else(|| panic!("tree has a tip"));
-    let prev = bitcoin_rs_primitives::BlockHash::from(tip.hash);
+    let prev = bitcoin_rs_consensus::primitives::BlockHash::from(tip.hash);
     let control_header = bitcoin_rs_chain::regtest_fixture::mined_regtest_header(prev, 4)
         .unwrap_or_else(|error| panic!("fixture mines: {error}"));
     headers_tx

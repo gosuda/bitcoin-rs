@@ -19,7 +19,7 @@ mod transition;
 mod tree;
 mod view;
 
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 use thiserror::Error;
 
 pub use bitcoin_rs_consensus::SoftforkState;

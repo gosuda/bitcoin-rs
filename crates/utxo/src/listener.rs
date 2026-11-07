@@ -3,7 +3,7 @@
 //! arrive as one-element `RemoveBatch` events ahead of their replacement
 //! `InsertBatch`.
 
-use bitcoin_rs_primitives::{OutPoint, TxOut};
+use bitcoin_rs_consensus::primitives::{OutPoint, TxOut};
 use smallvec::SmallVec;
 
 #[derive(Debug)]

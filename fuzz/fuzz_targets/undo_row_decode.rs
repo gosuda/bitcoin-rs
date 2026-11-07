@@ -1,6 +1,6 @@
 #![no_main]
 
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_storage::chainstate_journal::{decode_record, encode_record};
 use bitcoin_rs_storage::{DisconnectMarker, InMemoryUndoStore, UndoStore};
 use bitcoin_rs_utxo::contract::{decode_undo_record, encode_undo_record};

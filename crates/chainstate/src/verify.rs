@@ -4,11 +4,11 @@ use std::sync::Arc;
 use bitcoin_rs_chain::{
     BlockTreeReader, ChainError, LatchReader, NodeId, softfork_state, validate_pow,
 };
+use bitcoin_rs_consensus::primitives::{Block, DecodeError, Hash256, deserialize};
 use bitcoin_rs_consensus::{
     BlockRuleContext, ConsensusError, check_block_body_binding,
     verify_block::verify_block_non_contextual,
 };
-use bitcoin_rs_primitives::{Block, DecodeError, Hash256, deserialize};
 use bitcoin_rs_storage::{
     BoundedReadError, StorageError,
     block_body::BlockBodyStore,
@@ -361,7 +361,7 @@ impl Walk<'_> {
         match self.chainstate.undo_store.load_undo_bounded(
             height,
             hash,
-            undo_record_size_limit(block, bitcoin_rs_script::MAX_SCRIPT_SIZE),
+            undo_record_size_limit(block, bitcoin_rs_consensus::script::MAX_SCRIPT_SIZE),
         ) {
             Ok(Some(record)) => Ok(record),
             Ok(None) => Err(self.absent(height, VerifyError::UndoMissing { height, hash })),

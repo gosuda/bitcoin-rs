@@ -13,7 +13,7 @@ use crate::pool::{
     BlockOutcome, JobId, PoolCore, SessionId, SessionOpenError, ShareClass, ShareError,
     ShareTarget, StaleReason, WorkerIdentity,
 };
-use bitcoin_rs_primitives::BlockHash;
+use bitcoin_rs_consensus::primitives::BlockHash;
 
 use super::{
     AccountResolver, Authorize, ClientRequest, Configure, Difficulty, DifficultyPolicy, Incoming,

@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::PeerAddress;
+use bitcoin_rs_consensus::primitives::PeerAddress;
 use std::net::{IpAddr, Ipv4Addr};
 
 pub(crate) fn canonical_ip(ip: IpAddr) -> IpAddr {

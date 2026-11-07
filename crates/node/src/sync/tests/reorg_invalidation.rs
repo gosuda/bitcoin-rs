@@ -94,7 +94,7 @@ fn matured_chain_with_body_store() -> Result<MaturedBodyStore, crate::test_suppo
 #[test]
 fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
 -> Result<(), crate::test_support::TestError> {
-    use bitcoin_rs_primitives::{Amount, Script};
+    use bitcoin_rs_consensus::primitives::{Amount, Script};
     let (handles, main, mut bodies) = matured_chain(101)?;
     let handles = Arc::new(handles);
     let followers = crate::chain_effects::ChainFollowers::noop();
@@ -343,7 +343,7 @@ fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
 #[test]
 fn branch_switch_rejects_a_body_for_another_header_before_mutation()
 -> Result<(), crate::test_support::TestError> {
-    use bitcoin_rs_primitives::Script;
+    use bitcoin_rs_consensus::primitives::Script;
     let (handles, main, mut bodies) = matured_chain(101)?;
     let followers = crate::chain_effects::ChainFollowers::noop();
     let applied_tip = handles.applied_tip_reader();
@@ -403,7 +403,7 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
 #[test]
 fn branch_switch_rejects_malformed_body_before_mutation()
 -> Result<(), crate::test_support::TestError> {
-    use bitcoin_rs_primitives::Script;
+    use bitcoin_rs_consensus::primitives::Script;
     let (handles, main, bodies, bodies_store) = matured_chain_with_body_store()?;
     let followers = crate::chain_effects::ChainFollowers::noop();
     let applied_tip = handles.applied_tip_reader();

@@ -125,16 +125,16 @@ fn connect_batch_relieve_journal_retention_pressure() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let mut config =
-        crate::NodeConfig::default_for_network(bitcoin_rs_primitives::Network::Regtest);
+        crate::NodeConfig::default_for_network(bitcoin_rs_consensus::primitives::Network::Regtest);
     config.data_dir = dir.path().join("backpressure-node");
     config.p2p.listen.clear();
     config.chainstate_journal.max_journal_mib = 1;
     config.chainstate_journal.rotate_mib = 1;
 
-    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
     let state = crate::state::NodeState::open(config.clone(), None).expect("open node");
     let genesis_tip = state
-        .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        .apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
             genesis.clone(),
         ))
         .expect("genesis");
@@ -156,7 +156,7 @@ fn connect_batch_relieve_journal_retention_pressure() {
         regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1).expect("mine child");
     assert!(
         matches!(
-            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
                 child.clone()
             )),
             Err(crate::ConnectMutationError::NotCommitted(
@@ -166,7 +166,9 @@ fn connect_batch_relieve_journal_retention_pressure() {
         "the fixture must prove retention pressure refuses the child"
     );
 
-    let mut batch = vec![bitcoin_rs_primitives::BlockPayload::from_local(child)];
+    let mut batch = vec![bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        child,
+    )];
     connect_batch(&state, &mut batch).expect("relief retries the refused block");
     assert!(
         batch.is_empty(),
@@ -249,7 +251,7 @@ fn manifest_reader_rejects_unsupported_corpus_version() {
 
 #[test]
 fn manifest_network_matches_configured_identity() {
-    let regtest = bitcoin_rs_primitives::Network::Regtest.identity_name();
+    let regtest = bitcoin_rs_consensus::primitives::Network::Regtest.identity_name();
     assert_eq!(regtest, "regtest");
     let doc = Manifest {
         network: "regtest".to_owned(),
@@ -283,7 +285,7 @@ fn binding_entry(height: u32, hash: &str) -> ManifestBlock {
 }
 
 fn header_hash_hex(header: &[u8; HEADER_LEN]) -> String {
-    bitcoin_rs_primitives::encode::double_sha256(header).to_string()
+    bitcoin_rs_consensus::primitives::encode::double_sha256(header).to_string()
 }
 
 #[test]
@@ -317,7 +319,7 @@ fn offline_import_refuses_stale_persisted_index_namespace() {
 }
 
 struct TwoBlockArchive {
-    blocks: Vec<bitcoin_rs_primitives::Block>,
+    blocks: Vec<bitcoin_rs_consensus::primitives::Block>,
     corpus: Vec<u8>,
     manifest: Vec<u8>,
     stop_hash: String,
@@ -325,16 +327,16 @@ struct TwoBlockArchive {
 
 fn two_block_archive() -> TwoBlockArchive {
     use sha2::Digest as _;
-    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
     let child = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)
         .expect("mine child");
     let blocks = vec![genesis, child];
-    let magic = bitcoin_rs_primitives::Network::Regtest.magic();
+    let magic = bitcoin_rs_consensus::primitives::Network::Regtest.magic();
     let mut corpus = Vec::new();
     let mut entries = Vec::new();
     let mut offset: u64 = 0;
     for (index, block) in blocks.iter().enumerate() {
-        let payload = bitcoin_rs_primitives::BlockPayload::from_local(block.clone());
+        let payload = bitcoin_rs_consensus::primitives::BlockPayload::from_local(block.clone());
         let raw = payload.bytes();
         let mut framed = Vec::with_capacity(8 + raw.len());
         framed.extend_from_slice(&magic);
@@ -357,7 +359,7 @@ fn two_block_archive() -> TwoBlockArchive {
     hasher.update(&corpus);
     let manifest = format!(
         r#"{{"schema":"core-framed-archive-manifest-v1","network":"regtest","network_magic":"fabfb5da","start_height":0,"stop_height":1,"archive_sha256":"{digest}","archive_bytes":{bytes},"blocks":[{blocks}]}}"#,
-        digest = bitcoin_rs_primitives::hex::hex_encode(&hasher.finalize()),
+        digest = bitcoin_rs_consensus::primitives::hex::hex_encode(&hasher.finalize()),
         bytes = corpus.len(),
         blocks = entries.join(",")
     );
@@ -372,7 +374,7 @@ fn two_block_archive() -> TwoBlockArchive {
 
 fn offline_import_config(data_dir: &std::path::Path) -> crate::NodeConfig {
     let mut config =
-        crate::NodeConfig::default_for_network(bitcoin_rs_primitives::Network::Regtest);
+        crate::NodeConfig::default_for_network(bitcoin_rs_consensus::primitives::Network::Regtest);
     config.data_dir = data_dir.to_path_buf();
     config.p2p.listen.clear();
     config
@@ -453,7 +455,7 @@ fn offline_import_refuses_tip_without_provenance() {
         let live = crate::state::NodeState::open(offline_import_config(&data_dir), None)
             .expect("open node");
         for block in &archive.blocks {
-            live.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            live.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
                 block.clone(),
             ))
             .expect("connect");

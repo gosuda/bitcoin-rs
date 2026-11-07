@@ -5,7 +5,7 @@ use bitcoin_rs_chain::ActiveTipWait as _;
 
 use bitcoin_rs_chain::regtest_fixture::{coinbase, mined_regtest_child_at as mined_child};
 use bitcoin_rs_consensus::MAX_SCRIPT_SIZE;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, Network, OutPoint,
     Script, Tx, TxOut,
 };

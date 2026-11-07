@@ -1,3 +1,6 @@
+use bitcoin_rs_consensus::primitives::{
+    Block, BlockHash, Hash256, OutPoint, Tx, Txid, deserialize, unix_time_secs,
+};
 use bitcoin_rs_index::CapabilitySnapshot;
 use bitcoin_rs_index::IndexCapability;
 use bitcoin_rs_index::ScriptHash;
@@ -6,9 +9,6 @@ use bitcoin_rs_index::query_api::{
     SpendingRecord, TxUnavailableCause,
 };
 use bitcoin_rs_mempool::{FeeRate, LocalOrigin, MempoolStats, MutationResult};
-use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, OutPoint, Tx, Txid, deserialize, unix_time_secs,
-};
 pub(crate) use bitcoin_rs_rpc::context::SyncProgress;
 use bitcoin_rs_rpc::context::{ChainAdmissionView, DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB};
 use std::sync::Arc;
@@ -268,11 +268,11 @@ mod tests {
 
     use super::*;
     use crate::NodeConfig;
-    use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
-    use bitcoin_rs_mempool::{MempoolEntry, MempoolObserver};
-    use bitcoin_rs_primitives::{
+    use bitcoin_rs_consensus::primitives::{
         Amount, LockTime, Network, OutPoint, Script, Sequence, TxIn, TxOut, Witness,
     };
+    use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
+    use bitcoin_rs_mempool::{MempoolEntry, MempoolObserver};
     use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
     use parking_lot::Mutex;
 

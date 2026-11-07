@@ -1,7 +1,7 @@
 use super::*;
 use bitcoin_rs_chain::LatchWriter;
 use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at;
-use bitcoin_rs_primitives::{BlockPayload, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256, Network};
 use bitcoin_rs_utxo::UtxoSet;
 use std::sync::mpsc;
 

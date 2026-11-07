@@ -235,10 +235,10 @@ impl TxInventory for TestInventoryView {
     fn have_tx(&self, _: Hash256, _: bool) -> bool {
         self.0.load(std::sync::atomic::Ordering::Relaxed)
     }
-    fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_primitives::Tx> {
+    fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
         None
     }
-    fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_primitives::Tx> {
+    fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
         None
     }
     fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
@@ -247,7 +247,7 @@ impl TxInventory for TestInventoryView {
     fn resident_package(
         &self,
         _: &[Wtxid],
-    ) -> Option<Vec<std::sync::Arc<bitcoin_rs_primitives::Tx>>> {
+    ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
         None
     }
 }
@@ -267,7 +267,7 @@ fn known_state_and_external_arrival_retire_requests_before_another_send() {
         0,
         crate::PeerRole::FullRelay,
         bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
-        bitcoin_rs_primitives::USER_AGENT,
+        bitcoin_rs_consensus::primitives::USER_AGENT,
     );
     table.publish_info(
         addr,
@@ -353,7 +353,7 @@ pub(super) fn register_ready(table: &PeerTable, port: u16, lease: &crate::PeerLe
         0,
         crate::PeerRole::FullRelay,
         bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
-        bitcoin_rs_primitives::USER_AGENT,
+        bitcoin_rs_consensus::primitives::USER_AGENT,
     );
     table.publish_info(
         addr,
@@ -392,10 +392,10 @@ impl TxInventory for CountingInventory {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(&key)
     }
-    fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_primitives::Tx> {
+    fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
         None
     }
-    fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_primitives::Tx> {
+    fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
         None
     }
     fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
@@ -404,7 +404,7 @@ impl TxInventory for CountingInventory {
     fn resident_package(
         &self,
         _: &[Wtxid],
-    ) -> Option<Vec<std::sync::Arc<bitcoin_rs_primitives::Tx>>> {
+    ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
         None
     }
 }
@@ -607,10 +607,10 @@ fn inventory_callbacks_never_observe_an_unsent_owner_reservation() {
             }
             false
         }
-        fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_primitives::Tx> {
+        fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             None
         }
-        fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_primitives::Tx> {
+        fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             None
         }
         fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
@@ -619,7 +619,7 @@ fn inventory_callbacks_never_observe_an_unsent_owner_reservation() {
         fn resident_package(
             &self,
             _: &[Wtxid],
-        ) -> Option<Vec<std::sync::Arc<bitcoin_rs_primitives::Tx>>> {
+        ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
             None
         }
     }
@@ -645,10 +645,10 @@ fn request_lifetime_starts_after_inventory_checks_and_commit_lock() {
             self.0.store(61, Ordering::Relaxed);
             false
         }
-        fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_primitives::Tx> {
+        fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             None
         }
-        fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_primitives::Tx> {
+        fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             None
         }
         fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
@@ -657,7 +657,7 @@ fn request_lifetime_starts_after_inventory_checks_and_commit_lock() {
         fn resident_package(
             &self,
             _: &[Wtxid],
-        ) -> Option<Vec<std::sync::Arc<bitcoin_rs_primitives::Tx>>> {
+        ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
             None
         }
     }

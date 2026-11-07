@@ -5,7 +5,7 @@ use super::{
     fetch_template,
 };
 use crate::{Candidate, CoinbaseBudget, MiningControl, MiningControlError};
-use bitcoin_rs_primitives::{BlockHash, Hash256, TxOut};
+use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, TxOut};
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;

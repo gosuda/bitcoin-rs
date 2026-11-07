@@ -5,15 +5,15 @@ use bitcoin_rs_node::test_support::TestError;
 type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_chain::{NodeStatus, compact_is_met_by};
+use bitcoin_rs_consensus::primitives::{
+    Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, LockTime, OutPoint,
+    Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_mining::{
     BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult,
     MiningControl, MiningControlError,
 };
 use bitcoin_rs_node::Network;
-use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, LockTime, OutPoint,
-    Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
-};
 
 use super::support::{
     WITNESS_COMMITMENT_PREFIX, WITNESS_RESERVED, coordinator, disconnect_applied,
@@ -132,7 +132,8 @@ fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> Result<()> {
 }
 
 fn signet_child_without_signet_section() -> Result<Block> {
-    let commitment = bitcoin_rs_primitives::encode::double_sha256(&[0_u8; 64]).to_le_bytes();
+    let commitment =
+        bitcoin_rs_consensus::primitives::encode::double_sha256(&[0_u8; 64]).to_le_bytes();
     let mut commitment_script = WITNESS_COMMITMENT_PREFIX.to_vec();
     commitment_script.extend_from_slice(&commitment);
     let genesis = Network::Signet.genesis_block();
@@ -324,7 +325,7 @@ fn accepted_submission_is_visible_before_return() -> Result<()> {
 
 #[test]
 fn truncated_payload_bytes_fail_construction_before_submit() -> Result<()> {
-    use bitcoin_rs_primitives::{BlockPayload, DecodeError, consensus_bytes};
+    use bitcoin_rs_consensus::primitives::{BlockPayload, DecodeError, consensus_bytes};
     use bytes::Bytes;
     let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
@@ -356,7 +357,7 @@ fn truncated_payload_bytes_fail_construction_before_submit() -> Result<()> {
 
 #[test]
 fn foreign_valid_bytes_apply_as_their_own_block() -> Result<()> {
-    use bitcoin_rs_primitives::{BlockPayload, consensus_bytes};
+    use bitcoin_rs_consensus::primitives::{BlockPayload, consensus_bytes};
     use bytes::Bytes;
     let (state, mining) = regtest_mining()?;
     mining.publish_generation();
@@ -415,7 +416,7 @@ fn submit_block_fills_omitted_coinbase_witness() -> Result<()> {
 
 #[test]
 fn submit_block_accepts_prefill_image_when_fill_applies() -> Result<()> {
-    use bitcoin_rs_primitives::{BlockPayload, consensus_bytes};
+    use bitcoin_rs_consensus::primitives::{BlockPayload, consensus_bytes};
     use bytes::Bytes;
     let (state, mining) = regtest_mining()?;
     mining.publish_generation();
@@ -494,7 +495,7 @@ fn submit_header_accepts_genesis_before_and_after_bootstrap() -> Result<()> {
     );
     assert!(state.chainstate().applied_tip_snapshot().is_none());
 
-    let _ = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    let _ = state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         Network::Regtest.genesis_block(),
     ))?;
     let before = state.chainstate().snapshot();

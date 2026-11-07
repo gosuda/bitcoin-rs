@@ -83,7 +83,7 @@ fn failure(error: &LedgerError) -> RpcError {
 }
 
 fn batch(batch: &PayoutBatch) -> Value {
-    json!({"batch_id": bitcoin_rs_primitives::hex::hex_encode(&batch.id), "sequence": batch.seq,
+    json!({"batch_id": bitcoin_rs_consensus::primitives::hex::hex_encode(&batch.id), "sequence": batch.seq,
     "state": match batch.state {
         pool_ledger::BatchState::Prepared => "prepared",
         pool_ledger::BatchState::ExternallySigned => "externally_signed",
@@ -93,13 +93,13 @@ fn batch(batch: &PayoutBatch) -> Value {
         pool_ledger::BatchState::Failed => "failed",
     }, "revision": batch.rev,
     "total_sat": batch.total_sat, "outputs": batch.outputs.iter().map(|output|
-        json!({"account": output.account.0, "script_pubkey": bitcoin_rs_primitives::hex::hex_encode(&output.script_pubkey),
+        json!({"account": output.account.0, "script_pubkey": bitcoin_rs_consensus::primitives::hex::hex_encode(&output.script_pubkey),
             "amount_sat": output.amount_sat})).collect::<Vec<_>>(),
-    "transactions": batch.transactions.iter().map(|tx| bitcoin_rs_primitives::hex::hex_encode(&tx.txid)).collect::<Vec<_>>(),
-    "broadcast_txid": batch.broadcast_txid.map(|id| bitcoin_rs_primitives::hex::hex_encode(&id)),
+    "transactions": batch.transactions.iter().map(|tx| bitcoin_rs_consensus::primitives::hex::hex_encode(&tx.txid)).collect::<Vec<_>>(),
+    "broadcast_txid": batch.broadcast_txid.map(|id| bitcoin_rs_consensus::primitives::hex::hex_encode(&id)),
     "confirmation": batch.confirmation.map(|value| json!({
-        "txid": bitcoin_rs_primitives::hex::hex_encode(&value.txid),
-        "block_hash": bitcoin_rs_primitives::hex::hex_encode(&value.block_hash), "height": value.height})),
+        "txid": bitcoin_rs_consensus::primitives::hex::hex_encode(&value.txid),
+        "block_hash": bitcoin_rs_consensus::primitives::hex::hex_encode(&value.block_hash), "height": value.height})),
     "closure": batch.closure.map(|value| match value {
         pool_ledger::Closure::Cancelled(basis) => json!({
             "state": "cancelled", "basis": match basis {
@@ -107,7 +107,7 @@ fn batch(batch: &PayoutBatch) -> Value {
                 CancelBasis::SignerRevoked => "signer_revoked",
             }}),
         pool_ledger::Closure::Failed { conflicting_txid } => json!({
-            "state": "failed", "conflicting_txid": bitcoin_rs_primitives::hex::hex_encode(&conflicting_txid)}),
+            "state": "failed", "conflicting_txid": bitcoin_rs_consensus::primitives::hex::hex_encode(&conflicting_txid)}),
     })})
 }
 
@@ -120,7 +120,7 @@ pub(crate) fn registerpoolaccount(ctx: &Arc<Context>, input: &Value) -> Result<V
         .set_payout_script(account, &script)
         .map_err(|error| failure(&error))?;
     Ok(
-        json!({"account": account.0, "script_pubkey": bitcoin_rs_primitives::hex::hex_encode(&script)}),
+        json!({"account": account.0, "script_pubkey": bitcoin_rs_consensus::primitives::hex::hex_encode(&script)}),
     )
 }
 
@@ -155,7 +155,7 @@ pub(crate) fn preparepayoutbatch(ctx: &Arc<Context>, input: &Value) -> Result<Va
         .request_for(&prepared.id)
         .map_err(|error| failure(&error))?;
     Ok(
-        json!({"batch": batch(&prepared), "request": bitcoin_rs_primitives::hex::hex_encode(&request.encode().map_err(|error| failure(&error))?)}),
+        json!({"batch": batch(&prepared), "request": bitcoin_rs_consensus::primitives::hex::hex_encode(&request.encode().map_err(|error| failure(&error))?)}),
     )
 }
 
@@ -166,8 +166,8 @@ pub(crate) fn getpayoutrequest(ctx: &Arc<Context>, input: &Value) -> Result<Valu
         .request_for(&hash(&p[0])?)
         .map_err(|error| failure(&error))?;
     Ok(
-        json!({"batch_id": bitcoin_rs_primitives::hex::hex_encode(&request.batch_id),
-        "request": bitcoin_rs_primitives::hex::hex_encode(&request.encode().map_err(|error| failure(&error))?)}),
+        json!({"batch_id": bitcoin_rs_consensus::primitives::hex::hex_encode(&request.batch_id),
+        "request": bitcoin_rs_consensus::primitives::hex::hex_encode(&request.encode().map_err(|error| failure(&error))?)}),
     )
 }
 
@@ -221,7 +221,7 @@ pub(crate) fn getpoolbalances(ctx: &Arc<Context>, input: &Value) -> Result<Value
         json!({"account": account.0, "available_sat": balance.available_sat,
         "reserved_sat": balance.reserved_sat, "paid_sat": balance.paid_sat,
         "deficit_sat": balance.deficit_sat,
-        "script_pubkey": ledger.payout_script(account).map_err(|error| failure(&error))?.map(|script| bitcoin_rs_primitives::hex::hex_encode(&script))}),
+        "script_pubkey": ledger.payout_script(account).map_err(|error| failure(&error))?.map(|script| bitcoin_rs_consensus::primitives::hex::hex_encode(&script))}),
     )
 }
 
@@ -243,7 +243,7 @@ pub(crate) fn getpoolrounds(ctx: &Arc<Context>, input: &Value) -> Result<Value, 
         let Some(round) = ledger.round(id).map_err(|error| failure(&error))? else {
             break;
         };
-        rounds.push(json!({"round": round.id, "block_hash": bitcoin_rs_primitives::hex::hex_encode(&round.block_hash),
+        rounds.push(json!({"round": round.id, "block_hash": bitcoin_rs_consensus::primitives::hex::hex_encode(&round.block_hash),
             "height": round.height, "state": match round.state {
                 pool_ledger::RoundState::Pending => "pending",
                 pool_ledger::RoundState::Immature => "immature",
@@ -281,8 +281,8 @@ pub(crate) fn getpoolinfo(ctx: &Arc<Context>, input: &Value) -> Result<Value, Rp
                 pool_ledger::AuditKind::BatchCancelled => "batch_cancelled",
                 pool_ledger::AuditKind::BatchFailed => "batch_failed",
             }, "subject": record.subject,
-            "hash": bitcoin_rs_primitives::hex::hex_encode(&record.hash), "hash2": bitcoin_rs_primitives::hex::hex_encode(&record.hash2),
-            "values": record.values, "chain": bitcoin_rs_primitives::hex::hex_encode(&record.chain)})).collect::<Vec<_>>() }))
+            "hash": bitcoin_rs_consensus::primitives::hex::hex_encode(&record.hash), "hash2": bitcoin_rs_consensus::primitives::hex::hex_encode(&record.hash2),
+            "values": record.values, "chain": bitcoin_rs_consensus::primitives::hex::hex_encode(&record.chain)})).collect::<Vec<_>>() }))
 }
 
 #[cfg(test)]
@@ -322,20 +322,32 @@ mod tests {
         assert!(
             preparepayoutbatch(
                 &context,
-                &json!([bitcoin_rs_primitives::hex::hex_encode(&[1; 32]), 545, 10])
+                &json!([
+                    bitcoin_rs_consensus::primitives::hex::hex_encode(&[1; 32]),
+                    545,
+                    10
+                ])
             )
             .is_err()
         );
         assert!(
             preparepayoutbatch(
                 &context,
-                &json!([bitcoin_rs_primitives::hex::hex_encode(&[1; 32]), 546, 11])
+                &json!([
+                    bitcoin_rs_consensus::primitives::hex::hex_encode(&[1; 32]),
+                    546,
+                    11
+                ])
             )
             .is_err()
         );
         let empty = preparepayoutbatch(
             &context,
-            &json!([bitcoin_rs_primitives::hex::hex_encode(&[1; 32]), 546, 10]),
+            &json!([
+                bitcoin_rs_consensus::primitives::hex::hex_encode(&[1; 32]),
+                546,
+                10
+            ]),
         )?;
         assert!(empty.is_null());
         let rounds = getpoolrounds(&context, &json!([1, 10]))?;
@@ -346,14 +358,14 @@ mod tests {
             info["audit_tail"].as_array().map(sonic_rs::Array::len),
             Some(1)
         );
-        let unknown = json!([bitcoin_rs_primitives::hex::hex_encode(&[2; 32])]);
+        let unknown = json!([bitcoin_rs_consensus::primitives::hex::hex_encode(&[2; 32])]);
         assert!(getpayoutbatch(&context, &unknown)?.is_null());
         assert!(getpayoutrequest(&context, &unknown).is_err());
         assert!(
             cancelpayoutbatch(
                 &context,
                 &json!([
-                    bitcoin_rs_primitives::hex::hex_encode(&[2; 32]),
+                    bitcoin_rs_consensus::primitives::hex::hex_encode(&[2; 32]),
                     "never_handed_to_signer"
                 ])
             )
@@ -367,7 +379,9 @@ mod tests {
         assert!(
             recordpayoutreceipt(
                 &context,
-                &json!([bitcoin_rs_primitives::hex::hex_encode(&receipt.encode()?)])
+                &json!([bitcoin_rs_consensus::primitives::hex::hex_encode(
+                    &receipt.encode()?
+                )])
             )
             .is_err()
         );
@@ -470,13 +484,17 @@ mod tests {
         );
         let prepared = preparepayoutbatch(
             &context,
-            &json!([bitcoin_rs_primitives::hex::hex_encode(&[8; 32]), 546, 10]),
+            &json!([
+                bitcoin_rs_consensus::primitives::hex::hex_encode(&[8; 32]),
+                546,
+                10
+            ]),
         )?;
         let request_hex = prepared["request"].as_str().ok_or("missing BRPR")?;
         let request = pool_ledger::PayoutRequest::decode(&bytes(&json!(request_hex), 100_000)?)?;
         assert_eq!(request.outputs.len(), 1);
         assert_eq!(request.outputs[0].amount_sat, 10_000);
-        let batch_id = bitcoin_rs_primitives::hex::hex_encode(&request.batch_id);
+        let batch_id = bitcoin_rs_consensus::primitives::hex::hex_encode(&request.batch_id);
         assert_eq!(
             getpayoutrequest(&context, &json!([batch_id]))?["request"].as_str(),
             Some(request_hex)
@@ -494,7 +512,9 @@ mod tests {
         let before_rejection = getpayoutbatch(&context, &json!([batch_id]))?;
         let rejected = recordpayoutreceipt(
             &context,
-            &json!([bitcoin_rs_primitives::hex::hex_encode(&receipt.encode()?)]),
+            &json!([bitcoin_rs_consensus::primitives::hex::hex_encode(
+                &receipt.encode()?
+            )]),
         );
         let error = match rejected {
             Err(error) => error,
@@ -513,7 +533,9 @@ mod tests {
         receipt.txid = pool_ledger::sha256d(&raw);
         let accepted = recordpayoutreceipt(
             &context,
-            &json!([bitcoin_rs_primitives::hex::hex_encode(&receipt.encode()?)]),
+            &json!([bitcoin_rs_consensus::primitives::hex::hex_encode(
+                &receipt.encode()?
+            )]),
         )?;
         assert_eq!(accepted["state"].as_str(), Some("externally_signed"));
         assert_eq!(getpoolbalances(&context, &json!([7]))?, reserved);
@@ -532,7 +554,9 @@ mod tests {
         assert_eq!(
             recordpayoutreceipt(
                 &context,
-                &json!([bitcoin_rs_primitives::hex::hex_encode(&receipt.encode()?)])
+                &json!([bitcoin_rs_consensus::primitives::hex::hex_encode(
+                    &receipt.encode()?
+                )])
             )?,
             accepted
         );
@@ -590,7 +614,7 @@ mod tests {
             panic!("bounded receipt must encode");
         };
         assert_eq!(&encoded[..5], b"BRPT\x01");
-        let encoded_hex = json!(bitcoin_rs_primitives::hex::hex_encode(&encoded));
+        let encoded_hex = json!(bitcoin_rs_consensus::primitives::hex::hex_encode(&encoded));
         let Ok(decoded_hex) = bytes(&encoded_hex, pool_ledger::MAX_RAW_TX_BYTES + 128) else {
             panic!("canonical hex must decode");
         };

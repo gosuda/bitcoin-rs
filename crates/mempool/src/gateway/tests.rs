@@ -10,7 +10,7 @@ use crate::test_fixtures::{p2sh_true_script, true_redeem_script_sig};
 use crate::{Mempool, MempoolEntry, MempoolLimits};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -378,7 +378,7 @@ fn admit_request(gateway: &MempoolGateway, tx: &Tx, origin: AdmissionOrigin) -> 
         )],
         prevout_meta: hashbrown::HashMap::new(),
         csv_active: false,
-        next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+        next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
         locktime_cutoff: 0,
         max_feerate_sat_per_kvb: None,
         time: 1,
@@ -1238,7 +1238,7 @@ fn admission_counts_resolved_sigops_before_verification() -> Result<(), crate::t
     let gateway = gateway_with(None);
     let mut tx = standard_tx(0x84);
     let witness_script = vec![0xae; 900];
-    tx.inputs[0].script_sig = Script::from_bytes(bitcoin_rs_script::push_data(
+    tx.inputs[0].script_sig = Script::from_bytes(bitcoin_rs_consensus::script::push_data(
         &[vec![0x00, 0x20], vec![1; 32]].concat(),
     ));
     tx.inputs[0].witness = Witness::from_stack(vec![witness_script]);
@@ -1247,7 +1247,7 @@ fn admission_counts_resolved_sigops_before_verification() -> Result<(), crate::t
         Script::from_bytes([vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat());
     request.context.sigop_cost = 0;
     let oracle: bitcoin::Transaction =
-        bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&tx))?;
+        bitcoin::consensus::deserialize(&bitcoin_rs_consensus::primitives::consensus_bytes(&tx))?;
     let previous = bitcoin::TxOut {
         value: bitcoin::Amount::from_sat(request.prevouts[0].1.value.to_sat()),
         script_pubkey: bitcoin::ScriptBuf::from_bytes(
@@ -1460,7 +1460,7 @@ fn multi_input_request(
         prevouts,
         prevout_meta: hashbrown::HashMap::new(),
         csv_active: false,
-        next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+        next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
         locktime_cutoff: 0,
         max_feerate_sat_per_kvb: None,
         time: 1,
@@ -1476,7 +1476,7 @@ fn oversize_multi_input_tx_is_rejected_before_prevout_resolution() {
     let gateway = gateway_with(None);
     let (tx, prevouts) = multi_input_tx(20_000);
     let oracle: bitcoin::Transaction =
-        bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&tx))
+        bitcoin::consensus::deserialize(&bitcoin_rs_consensus::primitives::consensus_bytes(&tx))
             .expect("the attack frame parses as a Core transaction");
     assert!(
         oracle.total_size() <= 4_000_000,
@@ -1519,7 +1519,7 @@ fn many_input_admission_probes_each_prevout_once() {
     let gateway = gateway_with(None);
     let (tx, prevouts) = multi_input_tx(2_400);
     let oracle: bitcoin::Transaction =
-        bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&tx))
+        bitcoin::consensus::deserialize(&bitcoin_rs_consensus::primitives::consensus_bytes(&tx))
             .expect("the attack frame parses as a Core transaction");
     let weight = oracle.weight().to_wu();
     assert!(
@@ -1633,7 +1633,7 @@ fn admit_transaction_publishes_ordered_removals_then_one_accept() {
         )],
         prevout_meta: hashbrown::HashMap::new(),
         csv_active: false,
-        next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+        next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
         locktime_cutoff: 0,
         max_feerate_sat_per_kvb: None,
         time: 1,
@@ -1690,7 +1690,7 @@ fn admit_transaction_publishes_ordered_removals_then_one_accept() {
 
 fn reconstruction_identities(
     gateway: &MempoolGateway,
-) -> Vec<(Txid, bitcoin_rs_primitives::Wtxid)> {
+) -> Vec<(Txid, bitcoin_rs_consensus::primitives::Wtxid)> {
     let mut seen = Vec::new();
     gateway.for_each_reconstruction_identity(|txid, wtxid| seen.push((txid, wtxid)));
     seen
@@ -2172,7 +2172,7 @@ fn admit_transaction_rejects_a_transaction_with_no_prevouts() {
         prevouts: Vec::new(),
         prevout_meta: hashbrown::HashMap::new(),
         csv_active: false,
-        next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+        next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
         locktime_cutoff: 0,
         max_feerate_sat_per_kvb: None,
         time: 1,
@@ -2220,7 +2220,7 @@ fn admit_transaction_rejects_duplicate_inputs_as_consensus() {
         )],
         prevout_meta: hashbrown::HashMap::new(),
         csv_active: false,
-        next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+        next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
         locktime_cutoff: 0,
         max_feerate_sat_per_kvb: None,
         time: 1,
@@ -2244,10 +2244,10 @@ fn input_structure_checks_follow_generation_and_sequence_guards() {
     candidate.inputs.push(candidate.inputs[0].clone());
     candidate.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
     let origin = AdmissionOrigin::Peer(crate::PeerToken {
-        endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+        endpoint: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::Ip(
             core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
         )),
-        addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
+        addr: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::from((
             [127, 0, 0, 1],
             8333,
         ))),
@@ -2305,10 +2305,10 @@ fn nonstandard_inputs_rejection_caches_the_txid_for_witness_transactions() {
     let mut candidate = standard_tx(95);
     candidate.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
     let origin = AdmissionOrigin::Peer(crate::PeerToken {
-        endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+        endpoint: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::Ip(
             core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
         )),
-        addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
+        addr: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::from((
             [127, 0, 0, 1],
             8333,
         ))),
@@ -2353,13 +2353,19 @@ fn admission_fills_script_cache_under_next_block_flags() {
     ));
     let candidate = standard_tx(0x60);
     let mut request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
-    request.next_block_script_flags = bitcoin_rs_script::VerifyFlags::MANDATORY;
+    request.next_block_script_flags = bitcoin_rs_consensus::script::VerifyFlags::MANDATORY;
     let outcome = gateway
         .admit_transaction(request)
         .expect("standard-shaped spend must admit");
     assert!(matches!(outcome, AdmitOutcome::Committed(_)));
-    assert!(cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::MANDATORY));
-    assert!(!cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::STANDARD));
+    assert!(cache.take(
+        candidate.wtxid(),
+        bitcoin_rs_consensus::script::VerifyFlags::MANDATORY
+    ));
+    assert!(!cache.take(
+        candidate.wtxid(),
+        bitcoin_rs_consensus::script::VerifyFlags::STANDARD
+    ));
 }
 
 #[test]
@@ -2374,10 +2380,13 @@ fn rejected_admission_fills_no_script_cache_entry() {
     let candidate = standard_tx(0x61);
     let mut request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
     request.prevouts = vec![(request.prevouts[0].0, p2sh_prevout())];
-    request.next_block_script_flags = bitcoin_rs_script::VerifyFlags::MANDATORY;
+    request.next_block_script_flags = bitcoin_rs_consensus::script::VerifyFlags::MANDATORY;
     let result = gateway.admit_transaction(request);
     assert!(matches!(result, Err(AdmitError::Consensus)));
-    assert!(!cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::MANDATORY));
+    assert!(!cache.take(
+        candidate.wtxid(),
+        bitcoin_rs_consensus::script::VerifyFlags::MANDATORY
+    ));
 }
 
 #[test]
@@ -2422,7 +2431,7 @@ fn fee_capped_admission_fills_no_script_cache_entry() {
     let candidate = standard_tx(0x62);
     let mut request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
     request.max_feerate_sat_per_kvb = Some(1);
-    request.next_block_script_flags = bitcoin_rs_script::VerifyFlags::MANDATORY;
+    request.next_block_script_flags = bitcoin_rs_consensus::script::VerifyFlags::MANDATORY;
     let result = gateway.admit_transaction(request);
     assert!(matches!(
         result,
@@ -2430,7 +2439,10 @@ fn fee_capped_admission_fills_no_script_cache_entry() {
             crate::standardness::AcceptanceRejectReason::MaxFeeExceeded
         ))
     ));
-    assert!(!cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::MANDATORY));
+    assert!(!cache.take(
+        candidate.wtxid(),
+        bitcoin_rs_consensus::script::VerifyFlags::MANDATORY
+    ));
 }
 
 #[test]
@@ -2444,7 +2456,7 @@ fn verify_without_commit_fills_nothing() {
     ));
     let candidate = standard_tx(0x63);
     let mut request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
-    request.next_block_script_flags = bitcoin_rs_script::VerifyFlags::MANDATORY;
+    request.next_block_script_flags = bitcoin_rs_consensus::script::VerifyFlags::MANDATORY;
     {
         let pool = gateway.read();
         let mut prepared = MempoolGateway::prepare_admission(
@@ -2456,12 +2468,18 @@ fn verify_without_commit_fills_nothing() {
         );
         prepared.verify(&request, gateway.script_cache());
     }
-    assert!(!cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::MANDATORY));
+    assert!(!cache.take(
+        candidate.wtxid(),
+        bitcoin_rs_consensus::script::VerifyFlags::MANDATORY
+    ));
     let outcome = gateway
         .admit_transaction(request)
         .expect("standard-shaped spend must admit");
     assert!(matches!(outcome, AdmitOutcome::Committed(_)));
-    assert!(cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::MANDATORY));
+    assert!(cache.take(
+        candidate.wtxid(),
+        bitcoin_rs_consensus::script::VerifyFlags::MANDATORY
+    ));
 }
 
 fn script_stage_rejection(engine: ValidationEngine) -> Option<(AdmitError, RejectScope)> {

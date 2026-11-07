@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::varint;
+use bitcoin_rs_consensus::primitives::varint;
 
 pub const FEATURE_VERSION: u32 = 70_017;
 

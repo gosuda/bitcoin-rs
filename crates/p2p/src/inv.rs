@@ -1,6 +1,6 @@
 use bitcoin::p2p::message_blockdata::Inventory;
+use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Txid};
 use bitcoin_rs_mempool::PeerToken;
-use bitcoin_rs_primitives::{BlockHash, Hash256, Txid};
 
 #[cfg(test)]
 use crate::wire::Message;
@@ -60,7 +60,7 @@ pub fn request_missing_parents(
 pub fn request_package_info(
     peers: &crate::PeerTable,
     source: PeerToken,
-    subject: bitcoin_rs_primitives::Wtxid,
+    subject: bitcoin_rs_consensus::primitives::Wtxid,
     parents: &[Txid],
 ) -> bool {
     peers.request_package_info_from_token(source, subject, parents)
@@ -164,7 +164,7 @@ mod tests {
                     0,
                     crate::peer_info::PeerRole::FullRelay,
                     bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
-                    bitcoin_rs_primitives::USER_AGENT,
+                    bitcoin_rs_consensus::primitives::USER_AGENT,
                 );
                 version.services = if witness {
                     ServiceFlags::NETWORK | ServiceFlags::WITNESS

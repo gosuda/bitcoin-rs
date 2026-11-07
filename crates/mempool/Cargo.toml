@@ -18,9 +18,7 @@ default = []
 test-seam = []
 
 [dependencies]
-bitcoin-rs-primitives.workspace = true
 bitcoin-rs-consensus.workspace = true
-bitcoin-rs-script.workspace = true
 sha2.workspace = true
 hashbrown.workspace = true
 parking_lot.workspace = true

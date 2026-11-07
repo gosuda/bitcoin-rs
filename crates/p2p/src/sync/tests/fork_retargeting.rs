@@ -195,7 +195,7 @@ fn retarget_purges_staged_off_branch_bodies() -> TestResult {
 
 #[test]
 fn outweighed_branch_target_accepts_shorter_higher_work_branch() -> TestResult {
-    use bitcoin_rs_primitives::CompactTarget;
+    use bitcoin_rs_consensus::primitives::CompactTarget;
     let genesis = genesis_header();
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;

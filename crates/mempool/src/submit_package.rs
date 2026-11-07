@@ -9,7 +9,7 @@ use crate::{
 };
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use bitcoin_rs_primitives::{Tx, Txid, Wtxid, unix_time_secs};
+use bitcoin_rs_consensus::primitives::{Tx, Txid, Wtxid, unix_time_secs};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PackageTxResult {

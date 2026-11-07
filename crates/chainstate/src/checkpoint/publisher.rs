@@ -2,7 +2,7 @@ use arc_swap::ArcSwapOption;
 
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 
 use bitcoin_rs_storage::DisconnectPhase;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
@@ -62,7 +62,7 @@ pub(crate) struct CheckpointPublisher {
     pub(crate) block_body_store: Arc<dyn BlockBodyStore>,
     pub(crate) applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     pub(crate) checkpoint_data_dir: cap_std::fs::Dir,
-    pub(crate) network: bitcoin_rs_primitives::Network,
+    pub(crate) network: bitcoin_rs_consensus::primitives::Network,
     pub(crate) genesis_hash: Hash256,
     pub(crate) block_tree: Arc<RwLock<BlockTree>>,
     pub(crate) utxo: Arc<UtxoSet>,
@@ -360,7 +360,7 @@ mod tests {
         use std::os::unix::fs::FileTypeExt as _;
 
         let set = bitcoin_rs_utxo::UtxoSet::new();
-        let tip = bitcoin_rs_primitives::Hash256::from_le_bytes(&[0_u8; 32]);
+        let tip = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[0_u8; 32]);
         let mut encoded = Vec::new();
         let (_, (), witness) =
             bitcoin_rs_utxo::snapshot::write_snapshot_witnessed(&set, &tip, 0, &mut encoded, ())?;

@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingHistoricalBlock {
@@ -17,7 +17,7 @@ pub struct HistoricalCheckpointRef {
 }
 
 mod serde_hash256 {
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_consensus::primitives::Hash256;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub(super) fn serialize<S>(hash: &Hash256, serializer: S) -> Result<S::Ok, S::Error>

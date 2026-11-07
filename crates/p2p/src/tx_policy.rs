@@ -18,7 +18,7 @@ use crate::packages::{
     GetPkgTxns, MAX_GETPKGTXNS, MSG_ANCPKGINFO, MSG_PKGTXNS, combined_package_hash,
 };
 use crate::{Message, PeerSource, PeerTable, TxInventory};
-use bitcoin_rs_primitives::{Hash256, Txid, Wtxid};
+use bitcoin_rs_consensus::primitives::{Hash256, Txid, Wtxid};
 
 pub(crate) const MAX_PEER_ANNOUNCEMENTS: usize = 5_000;
 pub(crate) const MAX_PEER_IN_FLIGHT: usize = 100;

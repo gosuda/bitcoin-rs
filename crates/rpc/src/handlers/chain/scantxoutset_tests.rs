@@ -5,7 +5,7 @@ fn scantxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
 use alloc::sync::Arc;
 
 use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
-use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, TxOut, Txid};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 
 use super::*;

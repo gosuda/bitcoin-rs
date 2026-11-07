@@ -8,7 +8,7 @@ use cap_std::ambient_authority;
 use parking_lot::Mutex;
 
 use super::*;
-use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut, Txid};
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut, Txid};
 
 use super::super::record::{Coin, Mutation};
 

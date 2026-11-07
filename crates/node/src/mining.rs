@@ -8,6 +8,12 @@ use bitcoin_rs_chain::signalling_deployments;
 use bitcoin_rs_chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_chainstate::ApplyError;
 use bitcoin_rs_chainstate::Chainstate;
+use bitcoin_rs_consensus::primitives::Block;
+use bitcoin_rs_consensus::primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::CompactTarget;
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Header;
+use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::MempoolReader;
 use bitcoin_rs_mempool::MutationResult;
@@ -44,12 +50,6 @@ use bitcoin_rs_mining::select_template_body_after;
 use bitcoin_rs_mining::snapshot_for_selection;
 use bitcoin_rs_mining::solve_block;
 use bitcoin_rs_mining::update_uncommitted_block_structures;
-use bitcoin_rs_primitives::Block;
-use bitcoin_rs_primitives::BlockPayload;
-use bitcoin_rs_primitives::CompactTarget;
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::Header;
-use bitcoin_rs_primitives::Network;
 use compact_str::CompactString;
 
 pub struct MiningCoordinator {
@@ -538,7 +538,7 @@ impl MiningControl for MiningCoordinator {
             let hash = block.block_hash();
             if request.submit {
                 let payload = BlockPayload::from_local(block);
-                let hex = bitcoin_rs_primitives::hex::hex_encode(payload.bytes());
+                let hex = bitcoin_rs_consensus::primitives::hex::hex_encode(payload.bytes());
                 match self.submit(&payload)? {
                     BlockValidationResult::Accepted => {}
                     other => {
@@ -556,7 +556,7 @@ impl MiningControl for MiningCoordinator {
                         "generated block failed validation: {validation:?}"
                     ))));
                 }
-                let hex = bitcoin_rs_primitives::hex::hex_encode(payload.bytes());
+                let hex = bitcoin_rs_consensus::primitives::hex::hex_encode(payload.bytes());
                 generated.push(GeneratedBlock { hash, hex });
             }
         }

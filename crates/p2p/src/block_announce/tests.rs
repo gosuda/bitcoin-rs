@@ -5,7 +5,7 @@ use bitcoin::bip152::HeaderAndShortIds;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_compact_blocks::CmpctBlock;
 use bitcoin_rs_chain::{BlockTree, BlockTreeReader, InitialBlockDownload, NodeStatus, TipReader};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, CompactTarget, Header, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Witness,
 };
@@ -1401,7 +1401,7 @@ fn a_disconnect_during_ibd_keeps_the_retry_armed_until_delivery() {
     let genesis = Network::Regtest.genesis_block();
     let recent = Header {
         prev_blockhash: genesis.block_hash(),
-        time: u32::try_from(bitcoin_rs_primitives::unix_time_secs()).unwrap_or(u32::MAX),
+        time: u32::try_from(bitcoin_rs_consensus::primitives::unix_time_secs()).unwrap_or(u32::MAX),
         ..genesis.header
     };
     {
@@ -1449,7 +1449,7 @@ fn peer_connected_during_ibd_is_promoted_after_exit() {
     let genesis = Network::Regtest.genesis_block();
     let recent = Header {
         prev_blockhash: genesis.block_hash(),
-        time: u32::try_from(bitcoin_rs_primitives::unix_time_secs()).unwrap_or(u32::MAX),
+        time: u32::try_from(bitcoin_rs_consensus::primitives::unix_time_secs()).unwrap_or(u32::MAX),
         ..genesis.header
     };
     {

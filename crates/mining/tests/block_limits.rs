@@ -3,13 +3,13 @@ use crate::support::fixtures as common;
 use crate::support::TestError;
 use std::sync::Arc;
 
+use bitcoin_rs_consensus::primitives::{
+    Amount, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    encode::consensus_bytes,
+};
 use bitcoin_rs_mempool::{Mempool, MempoolEntry};
 use bitcoin_rs_mining::{
     Candidate, CandidateContext, MiningError, assemble_candidate, assemble_ordered_candidate,
-};
-use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
-    encode::consensus_bytes,
 };
 use common::zero_fee_pool;
 

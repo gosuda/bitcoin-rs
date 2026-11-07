@@ -2,15 +2,15 @@ use crate::support::fixtures as common;
 
 use crate::support::TestError;
 
+use bitcoin_rs_consensus::primitives::{
+    Amount, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, consensus_bytes,
+};
+use bitcoin_rs_consensus::script::push_data;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_mining::{
     CandidateContext, GenerateSelection, GenerateTx, MiningError, assemble_ordered_candidate,
     snapshot_for_selection,
 };
-use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, consensus_bytes,
-};
-use bitcoin_rs_script::push_data;
 use common::{context, insert, oracle_transaction, p2pkh, zero_fee_pool};
 
 type TestResult = Result<(), TestError>;

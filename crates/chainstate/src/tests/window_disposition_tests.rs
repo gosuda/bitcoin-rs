@@ -1,6 +1,6 @@
 use bitcoin_rs_chain::ChainError;
+use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::{ConsensusError, ScriptEngine, ValidationEngine};
-use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::chainstate_journal::JournalWriterError;
 

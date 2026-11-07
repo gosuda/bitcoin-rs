@@ -4,7 +4,7 @@ use crate::rbf::LimitEnforcement;
 use crate::standardness::AcceptanceRejectReason;
 use crate::{MempoolEntry, MempoolError, MutationResult, PolicyError};
 use alloc::vec::Vec;
-use bitcoin_rs_primitives::Txid;
+use bitcoin_rs_consensus::primitives::Txid;
 use hashbrown::HashSet;
 
 pub(crate) struct PreparedPackage {

@@ -17,7 +17,7 @@ use bitcoin::p2p::message_filter::{
     CFCheckpt, CFHeaders, CFilter, GetCFCheckpt, GetCFHeaders, GetCFilters,
 };
 use bitcoin::p2p::message_network::{Reject, VersionMessage};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     BlockPayload, ConsensusDecode, ConsensusEncode, Header, Tx, deserialize,
 };
 use sha2::{Digest, Sha256};
@@ -238,9 +238,9 @@ pub enum PeerError {
     #[error("bitcoin consensus encoding error: {0}")]
     Encode(#[from] encode::Error),
     #[error("varint decode error: {0}")]
-    Varint(#[from] bitcoin_rs_primitives::varint::VarintError),
+    Varint(#[from] bitcoin_rs_consensus::primitives::varint::VarintError),
     #[error("native consensus decode error: {0}")]
-    NativeDecode(#[from] bitcoin_rs_primitives::DecodeError),
+    NativeDecode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error("feature error: {0}")]
     Feature(#[from] crate::feature::FeatureError),
     #[error("package error: {0}")]
@@ -262,9 +262,9 @@ pub enum PeerError {
     #[error("invalid inbound message: {0}")]
     Incoming(#[source] Box<Self>),
     #[error("discouraged destination {0}")]
-    DiscouragedDestination(bitcoin_rs_primitives::PeerAddress),
+    DiscouragedDestination(bitcoin_rs_consensus::primitives::PeerAddress),
     #[error("banned destination {0}")]
-    BannedDestination(bitcoin_rs_primitives::PeerAddress),
+    BannedDestination(bitcoin_rs_consensus::primitives::PeerAddress),
     #[error(transparent)]
     Transport(#[from] crate::transport::TransportFailure),
     #[error("self-connection detected")]
@@ -576,7 +576,7 @@ pub(crate) fn wire_len(message: &Message) -> Result<usize, PeerError> {
         Message::Headers(headers) => {
             let count = u64::try_from(headers.len())
                 .map_err(|_| PeerError::PayloadTooLarge(headers.len()))?;
-            let count_len = bitcoin_rs_primitives::varint::encode(count).len();
+            let count_len = bitcoin_rs_consensus::primitives::varint::encode(count).len();
             let entries_len = headers
                 .len()
                 .checked_mul(81)
@@ -597,10 +597,12 @@ pub(crate) fn wire_len(message: &Message) -> Result<usize, PeerError> {
                 u64::try_from(id_len).map_err(|_| PeerError::PayloadTooLarge(id_len))?;
             let data_len_u64 =
                 u64::try_from(data_len).map_err(|_| PeerError::PayloadTooLarge(data_len))?;
-            bitcoin_rs_primitives::varint::encoded_len(id_len_u64)
+            bitcoin_rs_consensus::primitives::varint::encoded_len(id_len_u64)
                 .checked_add(id_len)
                 .and_then(|l| {
-                    l.checked_add(bitcoin_rs_primitives::varint::encoded_len(data_len_u64))
+                    l.checked_add(bitcoin_rs_consensus::primitives::varint::encoded_len(
+                        data_len_u64,
+                    ))
                 })
                 .and_then(|l| l.checked_add(data_len))
                 .ok_or(PeerError::PayloadTooLarge(usize::MAX))?
@@ -664,7 +666,7 @@ fn pkgtxns_payload_len(package: &crate::packages::PkgTxns) -> Result<usize, Peer
         }
         .into());
     }
-    let mut total = bitcoin_rs_primitives::varint::encoded_len(count_u64);
+    let mut total = bitcoin_rs_consensus::primitives::varint::encoded_len(count_u64);
     for tx in &package.txs {
         total = total.saturating_add(tx.total_size());
     }
@@ -675,7 +677,7 @@ fn pkgtxns_payload_len(package: &crate::packages::PkgTxns) -> Result<usize, Peer
 }
 
 fn encode_varint(payload: &mut Vec<u8>, value: u64) {
-    payload.extend_from_slice(&bitcoin_rs_primitives::varint::encode(value));
+    payload.extend_from_slice(&bitcoin_rs_consensus::primitives::varint::encode(value));
 }
 
 pub(crate) fn decode_payload(command: &str, payload: &bytes::Bytes) -> Result<Message, PeerError> {
@@ -864,7 +866,7 @@ fn decode_locator_payload(
 
 fn decode_headers(payload: &[u8]) -> Result<Vec<Header>, PeerError> {
     let mut reader = payload;
-    let (count, consumed) = bitcoin_rs_primitives::varint::decode(reader)?;
+    let (count, consumed) = bitcoin_rs_consensus::primitives::varint::decode(reader)?;
     reader = &reader[consumed..];
     let capacity = usize::try_from(count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
     if capacity > MAX_HEADERS_MESSAGE_COUNT {
@@ -873,7 +875,7 @@ fn decode_headers(payload: &[u8]) -> Result<Vec<Header>, PeerError> {
     let mut headers = Vec::with_capacity(capacity);
     for _ in 0..count {
         headers.push(<Header as ConsensusDecode>::consensus_decode(&mut reader)?);
-        let (tx_count, consumed) = bitcoin_rs_primitives::varint::decode(reader)?;
+        let (tx_count, consumed) = bitcoin_rs_consensus::primitives::varint::decode(reader)?;
         reader = &reader[consumed..];
         if tx_count != 0 {
             return Err(PeerError::Misbehavior("headers entry carried transactions"));
@@ -1049,7 +1051,7 @@ fn decode_cmpctblock(payload: &bytes::Bytes) -> Result<Message, PeerError> {
 
 fn decode_bounded_transaction(reader: &mut &[u8]) -> Result<Transaction, PeerError> {
     let tx = Tx::consensus_decode(reader)?;
-    let raw = bitcoin_rs_primitives::consensus_bytes(&tx);
+    let raw = bitcoin_rs_consensus::primitives::consensus_bytes(&tx);
     Transaction::consensus_decode(&mut raw.as_slice()).map_err(PeerError::from)
 }
 

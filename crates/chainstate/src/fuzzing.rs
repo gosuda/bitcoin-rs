@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, ChainError, NodeStatus, TipSnapshot};
-use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, Header, Network};
+use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Header, Network};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::{InMemoryDurableHeadStore, InMemoryUndoStore, StorageError, UndoStore};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
@@ -256,7 +256,7 @@ mod tests {
     use bitcoin_rs_chain::regtest_fixture::{
         genesis_time, mined_regtest_child_at, mined_regtest_child_at_time,
     };
-    use bitcoin_rs_primitives::{Hash256, Network};
+    use bitcoin_rs_consensus::primitives::{Hash256, Network};
 
     use super::FuzzChain;
     use crate::test_fixtures::TestResult;

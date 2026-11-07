@@ -6,7 +6,7 @@ use crate::{
     types::HashPrefixRow, types::ScriptHash, types::ScriptHashRow, types::SpendingPrefixRow,
     types::TxidRow,
 };
-use bitcoin_rs_primitives::{OutPoint, Txid};
+use bitcoin_rs_consensus::primitives::{OutPoint, Txid};
 use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, KvStore, PrefixScanLimit};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

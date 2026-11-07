@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 
 use crate::{LatchReader, TipSnapshot};
 

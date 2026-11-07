@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_utxo::core_snapshot::{
     CoreV2Base, SnapshotLimits, read_and_verify, read_metadata, write_core_v2,
 };

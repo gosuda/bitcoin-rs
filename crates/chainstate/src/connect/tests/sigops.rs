@@ -5,8 +5,8 @@ use crate::test_fixtures::TestError;
 use crate::{AssumeValidGate, ValidationMode, WindowApplyDisposition};
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_chain::regtest_fixture::merkle_root;
-use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_script::{opcode::*, push_data};
+use bitcoin_rs_consensus::primitives::encode::double_sha256;
+use bitcoin_rs_consensus::script::{opcode::*, push_data};
 use sha2::{Digest, Sha256};
 
 fn funded_chain() -> TestResult<(crate::Chainstate, Tx, BlockHash)> {

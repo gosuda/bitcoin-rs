@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::OutPoint;
+use bitcoin_rs_consensus::primitives::OutPoint;
 use parking_lot::RwLock;
 
 use crate::{

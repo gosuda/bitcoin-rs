@@ -1,6 +1,6 @@
 use std::io::{BufReader, Read, Seek, Write};
 
-use bitcoin_rs_primitives::{Hash256, OutPoint, Txid, varint};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid, varint};
 use bitcoin_rs_storage::checkpoint::CheckpointReference;
 use hashbrown::HashSet;
 use parking_lot::Mutex;
@@ -969,7 +969,7 @@ mod seed_no_token_tests {
         UtxoError, UtxoKey, UtxoSet,
         contract::{BlockChanges, UtxoAdd, commit_block_changes},
     };
-    use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut, Txid};
+    use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, Script, TxOut, Txid};
     use std::io::Cursor;
 
     use crate::test_support::{TestError, TestResult};
@@ -1169,7 +1169,7 @@ mod walk_tests {
         UtxoError, UtxoSet,
         contract::{BlockChanges, UtxoAdd, commit_block_changes},
     };
-    use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
+    use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut};
     use std::cell::Cell;
 
     fn set_with_coins(count: usize) -> UtxoSet {

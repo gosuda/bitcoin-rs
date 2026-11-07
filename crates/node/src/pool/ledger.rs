@@ -5,6 +5,8 @@ use std::sync::{
 };
 
 use bitcoin_rs_chainstate::Chainstate;
+use bitcoin_rs_consensus::primitives::encode::deserialize;
+use bitcoin_rs_consensus::primitives::{Block, Hash256, OutPoint as NodeOutPoint, Txid};
 use bitcoin_rs_index::{DerivedIndexQuery, ScriptIndexQuery};
 use bitcoin_rs_mempool::MempoolReader;
 use bitcoin_rs_mining::pool::ledger as pool_ledger;
@@ -18,8 +20,6 @@ use bitcoin_rs_mining::pool::{
     AcceptedShare, BlockReceipt, FoundBlock, LedgerUnavailable, RecordOutcome, ShareLedger,
     WorkerIdentity,
 };
-use bitcoin_rs_primitives::encode::deserialize;
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint as NodeOutPoint, Txid};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 
 pub(crate) struct NodeChainView {
@@ -299,7 +299,7 @@ const RECOVERY_RELEASED: u8 = 3;
 
 #[derive(Clone)]
 struct PendingBlockRecord {
-    hash: bitcoin_rs_primitives::BlockHash,
+    hash: bitcoin_rs_consensus::primitives::BlockHash,
     block: LedgerBlockFound,
     bytes: usize,
     recovery: Option<Arc<AtomicU8>>,
@@ -745,7 +745,7 @@ impl LedgerHost {
 
     pub(crate) fn found_block_recorded(
         &self,
-        hash: bitcoin_rs_primitives::BlockHash,
+        hash: bitcoin_rs_consensus::primitives::BlockHash,
     ) -> Result<bool, pool_ledger::LedgerError> {
         self.ledger
             .round_for_block(&Hash256::from(hash).to_le_bytes())

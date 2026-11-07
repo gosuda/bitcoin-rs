@@ -9,7 +9,7 @@ use std::str::FromStr as _;
 
 use bitcoin::hex::FromHex as _;
 use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Sighash, SighashCache, Tx, TxIn, TxOut,
     Txid, Witness, consensus_bytes, deserialize, layout::ParsedBlock,
 };
@@ -269,7 +269,7 @@ fn registry_rows_are_extensions_at_package_version() {
                 .collect::<Vec<_>>()
         };
         assert!(
-            version(entry.since) <= version(bitcoin_rs_primitives::PKG_VERSION),
+            version(entry.since) <= version(bitcoin_rs_consensus::primitives::PKG_VERSION),
             "a row cannot describe a version later than the package"
         );
     }
@@ -1062,7 +1062,7 @@ fn production_resolver_resolves_through_block_bodies() {
         fn block_body(
             &self,
             height: u32,
-            _hash: bitcoin_rs_primitives::BlockHash,
+            _hash: bitcoin_rs_consensus::primitives::BlockHash,
         ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
             Ok((height == 100).then(|| self.0.clone()))
         }
@@ -1115,7 +1115,7 @@ fn production_resolver_resolves_through_block_bodies() {
         signer.compressed_pubkey(),
     ]);
 
-    let mut block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    let mut block = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
     block.txs = vec![prev_tx.clone()];
     let body = consensus_bytes(&block);
 
@@ -1125,8 +1125,8 @@ fn production_resolver_resolves_through_block_bodies() {
     ctx.indexes.derived_index = Some(Arc::new(StubTxIndex(prev_tx.txid())));
     ctx.chain
         .add_block(bitcoin_rs_index::block_log::BlockRecord {
-            hash: bitcoin_rs_primitives::BlockHash::from(
-                bitcoin_rs_primitives::Hash256::from_le_bytes(&[9_u8; 32]),
+            hash: bitcoin_rs_consensus::primitives::BlockHash::from(
+                bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[9_u8; 32]),
             ),
             height: 100,
             body_size: 0,
@@ -1578,7 +1578,7 @@ fn production_resolver_clones_only_the_requested_output() {
         fn block_body(
             &self,
             height: u32,
-            _hash: bitcoin_rs_primitives::BlockHash,
+            _hash: bitcoin_rs_consensus::primitives::BlockHash,
         ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
             Ok((height == 100).then(|| self.0.clone()))
         }
@@ -1637,7 +1637,7 @@ fn production_resolver_clones_only_the_requested_output() {
     };
     let txid = funding.txid();
 
-    let mut block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    let mut block = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
     block.txs = vec![funding.clone()];
     let body = consensus_bytes(&block);
 
@@ -1646,8 +1646,8 @@ fn production_resolver_clones_only_the_requested_output() {
     ctx.indexes.derived_index = Some(Arc::new(StubTxIndex(txid)));
     ctx.chain
         .add_block(bitcoin_rs_index::block_log::BlockRecord {
-            hash: bitcoin_rs_primitives::BlockHash::from(
-                bitcoin_rs_primitives::Hash256::from_le_bytes(&[9_u8; 32]),
+            hash: bitcoin_rs_consensus::primitives::BlockHash::from(
+                bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[9_u8; 32]),
             ),
             height: 100,
             body_size: 0,
@@ -1701,7 +1701,7 @@ impl bitcoin_rs_chain::BlockBodySource for CountingBodies {
     fn block_body(
         &self,
         height: u32,
-        _hash: bitcoin_rs_primitives::BlockHash,
+        _hash: bitcoin_rs_consensus::primitives::BlockHash,
     ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
         if let Some(body) = self.bodies.get(&height) {
             *self.loads.lock().unwrap().entry(height).or_default() += 1;
@@ -1731,7 +1731,7 @@ fn cycling_fixture(
             script_pubkey: Script::from_bytes(vec![0x6a, u8::try_from(slot).unwrap()]),
         });
         let txid = funding.txid();
-        let mut block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        let mut block = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
         block.txs = vec![funding.clone()];
         bodies.insert(height, consensus_bytes(&block));
         changes.add(bitcoin_rs_utxo::contract::UtxoAdd::new(
@@ -1742,8 +1742,8 @@ fn cycling_fixture(
         ));
         ctx.chain
             .add_block(bitcoin_rs_index::block_log::BlockRecord {
-                hash: bitcoin_rs_primitives::BlockHash::from(
-                    bitcoin_rs_primitives::Hash256::from_le_bytes(
+                hash: bitcoin_rs_consensus::primitives::BlockHash::from(
+                    bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
                         &[u8::try_from(height).unwrap(); 32],
                     ),
                 ),
@@ -1758,7 +1758,7 @@ fn cycling_fixture(
     bitcoin_rs_utxo::contract::commit_block_changes(
         &ctx.chain.utxo.fixture_set(),
         &changes,
-        &bitcoin_rs_primitives::Hash256::default(),
+        &bitcoin_rs_consensus::primitives::Hash256::default(),
     )
     .unwrap();
     let source = Arc::new(CountingBodies {

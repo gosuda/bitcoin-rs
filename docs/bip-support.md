@@ -20,19 +20,19 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 | :-- | :-- | :--: | :--: | :-- |
 | 9 | [Versionbits](../crates/consensus/src/bip9.rs) | ✅ | - | CSV/segwit deployment windows |
 | 125 | [Replacement policy](policies/mempool-policy.md) | ◐ | - | Full-RBF; signaling reported, not admission-gating |
-| 16 | [P2SH](../crates/consensus/src/verify_block.rs) | ✅ | - | Two [hash-pinned exceptions](../crates/primitives/src/network.rs) |
+| 16 | [P2SH](../crates/consensus/src/verify_block.rs) | ✅ | - | Two [hash-pinned exceptions](../crates/consensus/src/primitives/network.rs) |
 | 34 | [Coinbase height](../crates/consensus/src/bip34.rs) | ✅ | - | Core activation heights; BIP30 recheck limit |
 | 65 | [CLTV](../crates/consensus/src/verify_block.rs) | ✅ | - | Core activation heights |
 | 66 | [Strict DER](../crates/consensus/src/verify_block.rs) | ✅ | - | Core activation heights |
 | 68/112/113 | [Relative locks / MTP](../crates/consensus/src/bip68.rs) | ✅ | - | [Block connection](../crates/chainstate/src/connect.rs); BIP9 activation |
 | 94 | [Timewarp protection](../crates/chain/src/header_sync.rs) | ✅ | - | Testnet4 BIP94 candidate-timestamp floor at retarget boundaries |
 | 141 | [Segwit validation](../crates/consensus/tests/witness_commitment_rules.rs) | ✅ | - | Commitments, weight, [sigops](../crates/consensus/tests/witness_sigop_activation.rs) |
-| 143 | [Segwit v0 sighash](../crates/consensus/tests/shared_sighash.rs) | ✅ | - | [Reference vectors](../crates/primitives/tests/bip_vectors.rs) |
-| 147 | [NULLDUMMY](../crates/script/src/eval.rs) | ✅ | - | Enforced with WITNESS flag |
+| 143 | [Segwit v0 sighash](../crates/consensus/tests/shared_sighash.rs) | ✅ | - | [Reference vectors](../crates/consensus/tests/primitives_bip_vectors.rs) |
+| 147 | [NULLDUMMY](../crates/consensus/src/script/eval.rs) | ✅ | - | Enforced with WITNESS flag |
 | 320 | [General-purpose version bits](../crates/chain/src/deployment.rs) | ❌ | - | Candidates use versionbits; no general-purpose policy |
 | 325 | [Signet block solution](../crates/consensus/src/signet.rs) | ◐ | - | Default challenge only; custom challenges unsupported |
-| 341 | [Taproot](../crates/script/src/taproot.rs) | ✅ | - | Height-gated; key and script paths |
-| 342 | [Tapscript](../crates/script/src/eval.rs) | ✅ | - | OP_SUCCESSx; [tagged hashes](../crates/script/src/taproot.rs) |
+| 341 | [Taproot](../crates/consensus/src/script/taproot.rs) | ✅ | - | Height-gated; key and script paths |
+| 342 | [Tapscript](../crates/consensus/src/script/eval.rs) | ✅ | - | OP_SUCCESSx; [tagged hashes](../crates/consensus/src/script/taproot.rs) |
 | 431 | [TRUC v3](../crates/mempool/src/truc.rs) | ✅ | - | Topology, sibling and ephemeral-spend rules |
 
 ## P2P and network

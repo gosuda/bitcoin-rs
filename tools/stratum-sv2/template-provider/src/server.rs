@@ -3,7 +3,7 @@ use bitcoin_rs_mining::{
     BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, Candidate, CoinbaseBudget,
 };
 use bitcoin_rs_node::Node;
-use bitcoin_rs_primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockPayload;
 use std::{
     sync::Arc,
     time::{Duration, Instant},

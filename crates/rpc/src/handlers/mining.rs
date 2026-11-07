@@ -2,6 +2,7 @@ use alloc::sync::Arc;
 use core::str::FromStr as _;
 
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
+use bitcoin_rs_consensus::primitives::{BlockPayload, Header, Network, Tx, Txid, deserialize};
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mining::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
@@ -9,7 +10,6 @@ use bitcoin_rs_mining::{
     MiningCapability, MiningControlError, MiningInfo, MiningRule, TemplateMutation,
     witness_commitment_script,
 };
-use bitcoin_rs_primitives::{BlockPayload, Header, Network, Tx, Txid, deserialize};
 use bytes::Bytes;
 use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};

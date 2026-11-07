@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut, varint};
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut, varint};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_utxo::{UtxoError, UtxoSet};
 use sha2::{Digest, Sha256};

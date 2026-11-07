@@ -1,6 +1,6 @@
 //! Executable reference model and Kani verification harnesses for ServingView query lifecycle.
 
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_consensus::primitives::Network;
 
 pub(crate) const MAX_HEIGHT: u32 = 2;
 pub(crate) const MAX_VIEWS: usize = 2;

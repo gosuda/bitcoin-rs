@@ -13,7 +13,7 @@ fn full_header_ingress_preserves_responses_and_body_first_order() -> TestResult 
     let source = lease.source(Some(addr));
     shared.send_headers_response(&lease, source, Vec::new());
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-    let payload = bitcoin_rs_primitives::BlockPayload::from_raw(bytes::Bytes::from(
+    let payload = bitcoin_rs_consensus::primitives::BlockPayload::from_raw(bytes::Bytes::from(
         bitcoin::consensus::serialize(&genesis),
     ))?;
     let expected = payload.block().header;
@@ -182,7 +182,8 @@ fn run_sustained_ingress_case(delivery: HeaderDelivery) -> TestResult {
     } else {
         1
     };
-    let payload_bytes = peak_depth * headers_per_batch * size_of::<bitcoin_rs_primitives::Header>();
+    let payload_bytes =
+        peak_depth * headers_per_batch * size_of::<bitcoin_rs_consensus::primitives::Header>();
     let delivery_label = match delivery {
         HeaderDelivery::WireResponse => "wire_response",
         HeaderDelivery::EmbeddedBlock => "embedded_block",
@@ -234,7 +235,7 @@ fn drain_sustained_ingress(
 }
 
 fn spawn_ingress_producer(
-    blocks: Vec<bitcoin_rs_primitives::Block>,
+    blocks: Vec<bitcoin_rs_consensus::primitives::Block>,
     delivery: HeaderDelivery,
     shared: ConnectionShared,
     lease: crate::PeerLease,
@@ -252,12 +253,12 @@ fn spawn_ingress_producer(
                     vec![block.header; crate::wire::MAX_HEADERS_MESSAGE_COUNT],
                 );
             } else {
-                let hash = bitcoin_rs_primitives::Hash256::from(block.block_hash());
+                let hash = bitcoin_rs_consensus::primitives::Hash256::from(block.block_hash());
                 assert!(sync.enqueue_owned_body_fetch(source, hash, || true));
                 shared.send_block(
                     &lease,
                     addr,
-                    bitcoin_rs_primitives::BlockPayload::from_local(block),
+                    bitcoin_rs_consensus::primitives::BlockPayload::from_local(block),
                     None,
                 );
             }

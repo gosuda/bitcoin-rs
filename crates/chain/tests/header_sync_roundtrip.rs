@@ -6,7 +6,7 @@ use bitcoin_rs_chain::{
 use crate::support::error::TestError;
 
 use crate::support::pow_oracle;
-use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Network};
 use pow_oracle::pow_is_met;
 
 #[test]

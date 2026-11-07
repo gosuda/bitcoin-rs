@@ -1,7 +1,7 @@
 use core::cmp::Ordering;
 
 use crate::UtxoError;
-use bitcoin_rs_primitives::Amount;
+use bitcoin_rs_consensus::primitives::Amount;
 
 pub(crate) const VARINT_MAX_LEN: usize = 10;
 

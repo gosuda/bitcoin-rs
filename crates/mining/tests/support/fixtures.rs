@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
-use bitcoin_rs_consensus::transaction_sigop_cost;
-use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits, SnapshotEntry};
-use bitcoin_rs_mining::{Candidate, CandidateContext};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness, encode::consensus_bytes,
 };
-use bitcoin_rs_script::VerifyFlags;
+use bitcoin_rs_consensus::script::VerifyFlags;
+use bitcoin_rs_consensus::transaction_sigop_cost;
+use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits, SnapshotEntry};
+use bitcoin_rs_mining::{Candidate, CandidateContext};
 
 pub(crate) const PAYOUT: &[u8] = &[0x51];
 

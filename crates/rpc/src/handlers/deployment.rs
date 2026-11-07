@@ -2,9 +2,9 @@ use alloc::sync::Arc;
 use core::str::FromStr as _;
 
 use bitcoin_rs_chain::{DeploymentStatus, VersionBitsStatus, deployment_statuses};
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::script::VerifyFlags;
 use bitcoin_rs_consensus::{DeploymentState, SoftforkState};
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_script::VerifyFlags;
 use corepc_types::v31;
 use sonic_rs::{JsonValueTrait as _, Value};
 
@@ -153,7 +153,7 @@ const fn state_name(state: DeploymentState) -> &'static str {
 mod tests {
     use super::getdeploymentinfo;
     use crate::{Handler, context::Context};
-    use bitcoin_rs_primitives::Network;
+    use bitcoin_rs_consensus::primitives::Network;
     use sonic_rs::json;
     use std::sync::Arc;
 

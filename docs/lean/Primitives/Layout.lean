@@ -1,6 +1,6 @@
 /-
 Decode reservation bound for the borrowed wire layout in
-`crates/primitives/src/layout.rs`.
+`crates/consensus/src/primitives/layout.rs`.
 -/
 
 namespace Primitives.Layout

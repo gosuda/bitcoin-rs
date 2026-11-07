@@ -20,7 +20,7 @@ The unit is the locator row, not the byte range. The same line prunes undo rows 
 
 ## The line is bounded twice
 
-The RPC bound comes first. `pruneblockchain` refuses when pruning is disabled with `pruning is disabled`, refuses a height above the applied tip with `prune height cannot exceed applied tip`, and refuses a height above `applied - 288` with `prune height is within reorg safety margin` (`crates/rpc/src/handlers/chain.rs`). The constant is `CORE_REORG_SAFETY_MARGIN = 288` (`crates/primitives/src/lib.rs`).
+The RPC bound comes first. `pruneblockchain` refuses when pruning is disabled with `pruning is disabled`, refuses a height above the applied tip with `prune height cannot exceed applied tip`, and refuses a height above `applied - 288` with `prune height is within reorg safety margin` (`crates/rpc/src/handlers/chain.rs`). The constant is `CORE_REORG_SAFETY_MARGIN = 288` (`crates/consensus/src/primitives.rs`).
 
 The storage bound is separate and can be tighter. `prune_to_height` recomputes `safe_prune_height = applied_tip_height - 288` and refuses again, then builds the policy line (`crates/storage/src/pruning.rs:146-160`):
 

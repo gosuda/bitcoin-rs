@@ -3,7 +3,7 @@ use std::path::Path;
 
 use bitcoin::BlockHash;
 use bitcoin::OutPoint as BitcoinOutPoint;
-use bitcoin_rs_primitives::hex::{hex_decode, hex_encode};
+use bitcoin_rs_consensus::primitives::hex::{hex_decode, hex_encode};
 use bitcoin_rs_utxo::stats::CoinStats;
 
 use crate::chain::{Chain, ChainBlock};
@@ -51,8 +51,8 @@ pub struct SyncReport {
     pub spent: u64,
     pub body_bytes: u64,
     pub hint_coins: u64,
-    pub folded_muhash: bitcoin_rs_primitives::Hash256,
-    pub aggregate_muhash: bitcoin_rs_primitives::Hash256,
+    pub folded_muhash: bitcoin_rs_consensus::primitives::Hash256,
+    pub aggregate_muhash: bitcoin_rs_consensus::primitives::Hash256,
 }
 
 impl Fold {

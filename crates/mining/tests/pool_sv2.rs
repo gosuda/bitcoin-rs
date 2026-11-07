@@ -5,6 +5,11 @@ use std::time::{Duration, Instant};
 use binary_sv2::{B064K, B0255, Decodable, Encodable, GetSize, Seq0255, Str0255, U256};
 use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_consensus::ValidationEngine;
+use bitcoin_rs_consensus::primitives::{
+    Amount, BlockPayload, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
+    Sequence, Tx, TxIn, TxOut, Txid, Witness, encode::double_sha256,
+};
+use bitcoin_rs_consensus::script::VerifyFlags;
 use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolGateway,
     MempoolLimits, SubmitOutcome,
@@ -24,11 +29,6 @@ use bitcoin_rs_mining::{
     CoinbaseBudget, GenerateRequest, GeneratedBlock, MiningControl, MiningControlError, MiningInfo,
     STALE_PARENT_REASON, assemble_candidate,
 };
-use bitcoin_rs_primitives::{
-    Amount, BlockPayload, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
-    Sequence, Tx, TxIn, TxOut, Txid, Witness, encode::double_sha256,
-};
-use bitcoin_rs_script::VerifyFlags;
 use codec_sv2::{
     Decoded, Decrypted, Handshake, InitiatorSent, MessageFrame, NoiseDecoder, NoiseEncoder,
     TransportDecryptState, TransportEncryptState,

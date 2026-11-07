@@ -3,11 +3,11 @@ use std::str::FromStr as _;
 use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
+use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_node::{
     NetworkSelection, NodeConfig, NotificationConfig, P2pOverrides, ScriptIndexMode, UserConfig,
     ValidationOverrides, ZmqEndpointConfig, resolve,
 };
-use bitcoin_rs_primitives::Network;
 use bitcoin_rs_rpc::zmq::ZmqTopic;
 
 #[test]
@@ -100,19 +100,19 @@ fn overlay_routing_is_opt_in_and_layered_without_implicit_fallback() -> Result<(
         config
             .p2p
             .overlay
-            .allows(bitcoin_rs_primitives::PeerNetwork::Onion)
+            .allows(bitcoin_rs_consensus::primitives::PeerNetwork::Onion)
     );
     assert!(
         config
             .p2p
             .overlay
-            .allows(bitcoin_rs_primitives::PeerNetwork::I2p)
+            .allows(bitcoin_rs_consensus::primitives::PeerNetwork::I2p)
     );
     assert!(
         !config
             .p2p
             .overlay
-            .allows(bitcoin_rs_primitives::PeerNetwork::Ipv4)
+            .allows(bitcoin_rs_consensus::primitives::PeerNetwork::Ipv4)
     );
     assert!(!config.p2p.overlay.randomize_credentials);
     assert_eq!(config.p2p.overlay.port, 18445);
@@ -135,7 +135,7 @@ fn blank_onlynet_environment_clears_an_inherited_network_list() -> Result<()> {
     environment.apply_env("BITCOIN_RS_ONLYNET", std::ffi::OsStr::new("  "))?;
     assert_eq!(
         resolve(&[&file, &environment])?.p2p.overlay.onlynet,
-        Vec::<bitcoin_rs_primitives::PeerNetwork>::new()
+        Vec::<bitcoin_rs_consensus::primitives::PeerNetwork>::new()
     );
     assert!(
         environment

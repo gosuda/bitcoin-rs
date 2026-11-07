@@ -1,6 +1,6 @@
 use bitcoin_rs_chain::BlockTree;
 pub use bitcoin_rs_chainstate::events::ChainSnapshot;
-use bitcoin_rs_primitives::{BlockHash, Hash256, Header};
+use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Header};
 
 use crate::{Node, NodeError};
 

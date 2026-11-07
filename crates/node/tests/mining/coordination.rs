@@ -9,13 +9,13 @@ use std::time::Duration;
 use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
+use bitcoin_rs_consensus::primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_mining::{BlockTemplate, MempoolSequenceWake, MiningControl, MiningControlError};
 use bitcoin_rs_node::{
     MiningCoordinator, MiningOverrides, Network, NetworkSelection, UserConfig, resolve,
     state::NodeState,
-};
-use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 use compact_str::CompactString;
 use crossbeam_channel::bounded;
@@ -67,7 +67,7 @@ fn watch_only_payout_lands_in_candidate_coinbase() -> Result<()> {
     config.p2p.listen.clear();
     std::mem::forget(dir);
     let state = NodeState::open(config, None)?;
-    let _ = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    let _ = state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         Network::Regtest.genesis_block(),
     ))?;
     let mining = coordinator(&state);
@@ -211,7 +211,7 @@ fn long_poll_wakes_on_tip_change() -> Result<()> {
     thread::sleep(Duration::from_millis(50));
     let genesis = Network::Regtest.genesis_block();
     let child = mined_child(genesis.block_hash())?;
-    let _ = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    let _ = state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         child.clone(),
     ))?;
     mining.publish_generation();
@@ -817,7 +817,7 @@ fn staged_preparation_does_not_publish_before_commit() -> Result<()> {
         let _release = gate.release_guard();
         gate.arm();
         let apply = scope.spawn(|| {
-            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
                 block.clone(),
             ))
         });
@@ -881,7 +881,7 @@ fn prepared_candidate_installs_on_commit_with_arc_reuse() -> Result<()> {
         let _release = gate.release_guard();
         gate.arm();
         let apply = scope.spawn(|| {
-            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
                 block.clone(),
             ))
         });
@@ -954,7 +954,7 @@ fn fee_priority_race_discards_stale_preparation() -> Result<()> {
         let _release = gate.release_guard();
         gate.arm();
         let apply = scope.spawn(|| {
-            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
                 block.clone(),
             ))
         });
@@ -1037,7 +1037,7 @@ fn shutdown_with_staged_work_installs_nothing_and_answers_unavailable() -> Resul
         let _release = gate.release_guard();
         gate.arm();
         let apply = scope.spawn(|| {
-            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
                 block.clone(),
             ))
         });

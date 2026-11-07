@@ -648,25 +648,26 @@ fn received_extension_commands_count_under_their_own_names() {
     // frame charges its own receive bucket, not *other* the way Core
     // v31.1's known-command list would. All five `both`-classified
     // extension commands get a frame, one per bucket.
-    let wtxid =
-        bitcoin_rs_primitives::Wtxid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[1; 32]));
-    let tx = bitcoin_rs_primitives::Tx {
-        inputs: vec![bitcoin_rs_primitives::TxIn {
-            previous_output: bitcoin_rs_primitives::OutPoint::new(
-                bitcoin_rs_primitives::Txid(wtxid.0),
+    let wtxid = bitcoin_rs_consensus::primitives::Wtxid(
+        bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[1; 32]),
+    );
+    let tx = bitcoin_rs_consensus::primitives::Tx {
+        inputs: vec![bitcoin_rs_consensus::primitives::TxIn {
+            previous_output: bitcoin_rs_consensus::primitives::OutPoint::new(
+                bitcoin_rs_consensus::primitives::Txid(wtxid.0),
                 0,
             ),
-            ..bitcoin_rs_primitives::TxIn::default()
+            ..bitcoin_rs_consensus::primitives::TxIn::default()
         }],
-        ..bitcoin_rs_primitives::Tx::default()
+        ..bitcoin_rs_consensus::primitives::Tx::default()
     };
     let staletip = crate::staletip::StaleTipAnnouncement {
-        fork_point: bitcoin_rs_primitives::Hash256::from_le_bytes(&[3; 32]),
+        fork_point: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[3; 32]),
         headers: vec![crate::staletip::CompressedHeader {
             version: 0x2000_0000,
-            merkle_root: bitcoin_rs_primitives::Hash256::from_le_bytes(&[4; 32]),
+            merkle_root: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[4; 32]),
             time: 1_700_000_000,
-            bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x1703_4219),
+            bits: bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x1703_4219),
             nonce: 1,
         }],
         have_block: true,

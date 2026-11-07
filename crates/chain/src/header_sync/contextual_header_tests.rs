@@ -9,7 +9,7 @@ use crate::{
     tree::BlockTree,
 };
 
-use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Network};
 
 const TESTNET4_POW_LIMIT: u32 = 0x1d00_ffff;
 

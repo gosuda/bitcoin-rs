@@ -1,0 +1,263 @@
+use sha2::{Digest, Sha256};
+
+use crate::primitives::{
+    Amount, LockTime, OutPoint, Script, Sequence, Txid, Witness, Wtxid,
+    encode::{ConsensusEncode, Sha256Sink, encode_tx_base, finalize_double_sha256, tx_base_size},
+};
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TxIn {
+    pub previous_output: OutPoint,
+    pub script_sig: Script,
+    pub sequence: Sequence,
+    pub witness: Witness,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TxOut {
+    pub value: Amount,
+    pub script_pubkey: Script,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tx {
+    pub version: u32,
+    pub inputs: Vec<TxIn>,
+    pub outputs: Vec<TxOut>,
+    pub lock_time: LockTime,
+}
+
+impl Tx {
+    #[must_use]
+    pub fn is_coinbase(&self) -> bool {
+        self.inputs.len() == 1 && self.inputs[0].previous_output.is_null()
+    }
+
+    #[must_use]
+    pub fn has_witness(&self) -> bool {
+        self.inputs.iter().any(|input| !input.witness.is_empty())
+    }
+
+    /// Computes the transaction id: double-SHA256 of the non-witness serialization.
+    #[must_use]
+    pub fn txid(&self) -> Txid {
+        let mut engine: Sha256 = Sha256::new();
+        let mut writer = Sha256Sink(&mut engine);
+        encode_tx_base(self, &mut writer);
+        Txid(finalize_double_sha256(engine))
+    }
+
+    /// Computes the witness transaction id: double-SHA256 of the full serialization.
+    #[must_use]
+    pub fn wtxid(&self) -> Wtxid {
+        let mut engine = Sha256::new();
+        let mut writer = Sha256Sink(&mut engine);
+        ConsensusEncode::consensus_encode(self, &mut writer);
+        Wtxid(finalize_double_sha256(engine))
+    }
+
+    /// Consensus serialization length without BIP144 witness sections (the txid layout).
+    #[must_use]
+    pub fn base_size(&self) -> usize {
+        tx_base_size(self)
+    }
+
+    /// Full consensus serialization length, including BIP144 witness sections.
+    #[must_use]
+    pub fn total_size(&self) -> usize {
+        self.consensus_size()
+    }
+
+    /// BIP141 transaction weight: `base_size * 3 + total_size` weight units.
+    #[must_use]
+    pub fn weight(&self) -> u64 {
+        u64::try_from(self.base_size())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(3)
+            .saturating_add(u64::try_from(self.total_size()).unwrap_or(u64::MAX))
+    }
+
+    #[must_use]
+    pub const fn vsize_from_weight(weight: u64) -> u64 {
+        weight.div_ceil(4)
+    }
+
+    /// BIP141 virtual size: weight divided by four, rounded up.
+    #[must_use]
+    pub fn vsize(&self) -> u64 {
+        Self::vsize_from_weight(self.weight())
+    }
+
+    #[must_use]
+    pub fn retained_heap_bytes(&self) -> usize {
+        let mut total = self
+            .inputs
+            .capacity()
+            .saturating_mul(core::mem::size_of::<TxIn>())
+            .saturating_add(
+                self.outputs
+                    .capacity()
+                    .saturating_mul(core::mem::size_of::<TxOut>()),
+            );
+        for input in &self.inputs {
+            total = total
+                .saturating_add(input.script_sig.retained_heap_bytes())
+                .saturating_add(input.witness.retained_heap_bytes());
+        }
+        for output in &self.outputs {
+            total = total.saturating_add(output.script_pubkey.retained_heap_bytes());
+        }
+        total
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![expect(clippy::expect_used, reason = "test assertions")]
+    use std::str::FromStr;
+
+    use super::Tx;
+    use crate::primitives::deserialize;
+    use crate::primitives::{
+        DecodeError, Hash256, OutPoint, TxIn, TxOut, Txid, encode::consensus_bytes,
+    };
+
+    use crate::primitives::test_error::TestError;
+
+    type Result<T, E = TestError> = std::result::Result<T, E>;
+
+    fn native_tx() -> Tx {
+        Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid(Hash256::default()), 3),
+                script_sig: vec![0x51].into(),
+                sequence: crate::primitives::Sequence::from_consensus(0xffff_fffe),
+                witness: vec![vec![0xaa; 40]].into(),
+            }],
+            outputs: vec![TxOut {
+                value: crate::primitives::Amount::from_sat(50_000),
+                script_pubkey: vec![0x00, 0x14, 0xab].into(),
+            }],
+            lock_time: crate::primitives::LockTime::from_consensus(42),
+        }
+    }
+
+    #[test]
+    fn coinbase_shape_requires_one_input_and_the_exact_null_outpoint() {
+        let mut tx = Tx::default();
+        assert!(!tx.is_coinbase());
+        tx.inputs.push(TxIn {
+            previous_output: OutPoint::null(),
+            ..TxIn::default()
+        });
+        assert!(tx.is_coinbase());
+        tx.inputs.push(tx.inputs[0].clone());
+        assert!(!tx.is_coinbase());
+        tx.inputs.truncate(1);
+        tx.inputs[0].previous_output = OutPoint::new(Txid::default(), 0);
+        assert!(!tx.is_coinbase());
+        tx.inputs[0].previous_output =
+            OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), u32::MAX);
+        assert!(!tx.is_coinbase());
+    }
+
+    #[test]
+    fn fixture_txids_match_golden_list_and_reencode() -> Result<()> {
+        let bytes = std::fs::read("tests/testdata/363731.bin")?;
+        let block = crate::primitives::deserialize::<crate::primitives::Block>(&bytes)?;
+        let golden = std::fs::read_to_string("tests/testdata/363731.txids.txt")?;
+        let expected: Vec<Txid> = golden
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(Txid::from_str)
+            .collect::<Result<_, _>>()?;
+
+        assert_eq!(block.txs.len(), expected.len());
+        for (tx, expected_txid) in block.txs.iter().take(10).zip(expected.iter()) {
+            assert_eq!(tx.txid(), *expected_txid);
+            assert_eq!(deserialize::<Tx>(&consensus_bytes(tx))?, *tx);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn witness_free_tx_has_equal_txid_and_wtxid() {
+        let mut tx = native_tx();
+        tx.inputs[0].witness.clear();
+
+        assert!(!tx.has_witness());
+        assert_eq!(tx.txid(), Txid::from(tx.wtxid().0));
+    }
+
+    #[test]
+    fn witnessed_tx_serialization_carries_marker_and_witness() {
+        let tx = native_tx();
+
+        let bytes = consensus_bytes(&tx);
+        assert_eq!(&bytes[4..6], &[0x00, 0x01]);
+
+        let decoded = deserialize::<Tx>(&bytes).expect("roundtrip");
+        assert_eq!(decoded, tx);
+        assert_ne!(tx.txid(), Txid::from(tx.wtxid().0));
+    }
+
+    #[test]
+    fn valid_tx_followed_by_garbage_is_rejected() {
+        let tx = native_tx();
+        let mut bytes = consensus_bytes(&tx);
+        bytes.extend_from_slice(&[0xde, 0xad]);
+
+        let error = deserialize::<Tx>(&bytes).expect_err("trailing garbage must fail");
+        assert_eq!(error, DecodeError::TrailingBytes { remaining: 2 });
+
+        assert_eq!(deserialize::<Tx>(&consensus_bytes(&tx)), Ok(tx));
+    }
+
+    #[test]
+    fn tx_retained_heap_bytes_tracks_inputs_outputs_scripts_witnesses() {
+        let empty_tx = Tx {
+            version: 2,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            lock_time: crate::primitives::LockTime::ZERO,
+        };
+        assert_eq!(empty_tx.retained_heap_bytes(), 0);
+
+        let mut inputs = Vec::with_capacity(3);
+        let mut script_bytes = Vec::with_capacity(50);
+        script_bytes.extend_from_slice(&[0x04; 20]);
+        let mut witness = crate::primitives::Witness::with_capacity(4, 100);
+        witness.push(&[0x05; 32]);
+
+        inputs.push(TxIn {
+            previous_output: OutPoint::default(),
+            script_sig: crate::primitives::Script::from_bytes(script_bytes),
+            sequence: crate::primitives::Sequence::MAX,
+            witness,
+        });
+
+        let mut outputs = Vec::with_capacity(5);
+        let mut spk_bytes = Vec::with_capacity(70);
+        spk_bytes.extend_from_slice(&[0x51; 34]);
+        outputs.push(TxOut {
+            value: crate::primitives::Amount::from_sat(100_000),
+            script_pubkey: crate::primitives::Script::from_bytes(spk_bytes),
+        });
+
+        let tx = Tx {
+            version: 2,
+            inputs,
+            outputs,
+            lock_time: crate::primitives::LockTime::ZERO,
+        };
+
+        let expected = 3 * core::mem::size_of::<TxIn>()
+            + 50
+            + 4 * core::mem::size_of::<u32>()
+            + 100
+            + 5 * core::mem::size_of::<TxOut>()
+            + 70;
+        assert_eq!(tx.retained_heap_bytes(), expected);
+    }
+}

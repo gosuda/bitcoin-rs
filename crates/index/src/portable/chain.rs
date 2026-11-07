@@ -4,7 +4,7 @@ use crate::types::TxPosition;
 use bitcoin_rs_chain::{
     BlockBodySource, BlockTreeReader, ChainTxCount, ChainWork, NodeId, NodeStatus, TipSnapshot,
 };
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     BlockHash, Hash256, Header, Tx, deserialize, layout::ParsedBlock, varint,
 };
 use std::collections::{HashMap, VecDeque};
@@ -373,7 +373,7 @@ mod tests {
 
     use bitcoin::hashes::Hash as _;
     use bitcoin_rs_chain::{BlockBodyReadError, BlockTree};
-    use bitcoin_rs_primitives::CompactTarget;
+    use bitcoin_rs_consensus::primitives::CompactTarget;
 
     type TestResult = Result<(), crate::portable::TestError>;
 

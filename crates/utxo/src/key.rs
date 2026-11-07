@@ -1,6 +1,6 @@
 use core::hash::{BuildHasher, BuildHasherDefault};
 
-use bitcoin_rs_primitives::Txid;
+use bitcoin_rs_consensus::primitives::Txid;
 use nohash_hasher::NoHashHasher;
 
 pub(crate) type UtxoBuildHasher = BuildHasherDefault<NoHashHasher<u64>>;
@@ -60,8 +60,9 @@ mod tests {
             let mut bytes = [0_u8; 32];
             bytes[0] = first;
             bytes[1..9].copy_from_slice(&7_u64.to_le_bytes());
-            let key =
-                UtxoKey::from_txid(&Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&bytes)));
+            let key = UtxoKey::from_txid(&Txid(
+                bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&bytes),
+            ));
             assert_eq!(key.shard(), first);
         }
     }

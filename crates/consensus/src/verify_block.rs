@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{Block, Hash256, Network, Tx, Txid, Wtxid, encode::double_sha256};
+use crate::primitives::{Block, Hash256, Network, Tx, Txid, Wtxid, encode::double_sha256};
 
 use crate::ConsensusError;
 use crate::bip9::SoftforkState;
@@ -33,8 +33,8 @@ pub fn verify_flags(
     height: u32,
     block_hash: Hash256,
     softfork_state: SoftforkState,
-) -> bitcoin_rs_script::VerifyFlags {
-    use bitcoin_rs_script::VerifyFlags;
+) -> crate::script::VerifyFlags {
+    use crate::script::VerifyFlags;
 
     let mut flags = VerifyFlags::NONE;
     if !network.is_bip16_p2sh_exception(block_hash) {
@@ -178,8 +178,8 @@ fn verify_block_transactions_and_legacy_sigops(txs: &[Tx]) -> Result<(), Consens
     let mut sigop_cost = 0_u32;
     for tx in txs {
         crate::verify_tx::verify_transaction_structure(tx)?;
-        sigop_cost = sigop_cost
-            .saturating_add(bitcoin_rs_script::sigops::count_tx_legacy(tx).saturating_mul(4));
+        sigop_cost =
+            sigop_cost.saturating_add(crate::script::sigops::count_tx_legacy(tx).saturating_mul(4));
     }
     if sigop_cost > crate::MAX_BLOCK_SIGOPS_COST {
         return Err(ConsensusError::SigopsLimit {

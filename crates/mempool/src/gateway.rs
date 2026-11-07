@@ -5,13 +5,13 @@ use alloc::vec::Vec;
 
 use crate::entry::MempoolEntry;
 use crate::pool::{Mempool, transaction_heap_usage};
+use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxOut, Txid, Wtxid};
+use bitcoin_rs_consensus::script::VerifyFlags;
+use bitcoin_rs_consensus::script::{is_p2sh, is_witness_program};
 use bitcoin_rs_consensus::{
     ConsensusError, ScriptExecutionCache, UtxoView, ValidationEngine, transaction_sigop_cost,
     verify_transaction,
 };
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, Wtxid};
-use bitcoin_rs_script::VerifyFlags;
-use bitcoin_rs_script::{is_p2sh, is_witness_program};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -101,8 +101,8 @@ pub struct AdmissionRequest {
     pub tx: Arc<Tx>,
     pub context: crate::standardness::PackageTxContext,
     pub prevouts: Vec<(
-        bitcoin_rs_primitives::OutPoint,
-        bitcoin_rs_primitives::TxOut,
+        bitcoin_rs_consensus::primitives::OutPoint,
+        bitcoin_rs_consensus::primitives::TxOut,
     )>,
     pub prevout_meta: hashbrown::HashMap<OutPoint, crate::PrevoutMeta>,
     pub locktime_cutoff: u32,
@@ -278,7 +278,7 @@ impl PreparedAdmission {
             return;
         };
         let default_scope = rejection_scope(&request.tx, None);
-        let signature_cache = bitcoin_rs_script::SignatureCache::new();
+        let signature_cache = bitcoin_rs_consensus::script::SignatureCache::new();
         let standard_pass = {
             let chain = PrevoutMap::new(&self.prevouts);
             verify_transaction(
@@ -997,7 +997,7 @@ impl MempoolGateway {
             ) {
             None
         } else {
-            Some(pool.min_fee_sat_per_kvb(bitcoin_rs_primitives::unix_time_secs()))
+            Some(pool.min_fee_sat_per_kvb(bitcoin_rs_consensus::primitives::unix_time_secs()))
         };
         let next_height = request.height.saturating_add(1);
         let resolved_prevouts: HashSet<OutPoint> =
@@ -1276,19 +1276,19 @@ impl MempoolGateway {
         self.apply_prioritise(&mut pool, txid, fee_delta)
     }
 
-    pub fn mark_broadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
+    pub fn mark_broadcast(&self, wtxid: bitcoin_rs_consensus::primitives::Wtxid) {
         self.pool.write().mark_broadcast(wtxid);
     }
 
-    pub fn commit_broadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
+    pub fn commit_broadcast(&self, wtxid: bitcoin_rs_consensus::primitives::Wtxid) {
         self.pool.write().commit_broadcast(wtxid);
     }
 
-    pub fn restore_unbroadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
+    pub fn restore_unbroadcast(&self, wtxid: bitcoin_rs_consensus::primitives::Wtxid) {
         self.pool.write().restore_broadcast(wtxid);
     }
 
-    pub(crate) fn set_pending_broadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
+    pub(crate) fn set_pending_broadcast(&self, wtxid: bitcoin_rs_consensus::primitives::Wtxid) {
         self.pool.write().set_unbroadcast(wtxid, true);
     }
 

@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, BlockPayload, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
 };
-use bitcoin_rs_script::push_int;
+use bitcoin_rs_consensus::script::push_int;
 use bitcoin_rs_utxo::UtxoSet;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
@@ -124,7 +124,7 @@ fn apply_handles(
 const GENESIS_TIME: u32 = 1_296_688_602;
 
 fn mined_block_with_prev_hash(prev_blockhash: BlockHash, height: u32, txdata: Vec<Tx>) -> Block {
-    use bitcoin_rs_primitives::CompactTarget;
+    use bitcoin_rs_consensus::primitives::CompactTarget;
     let mut block = Block {
         header: Header {
             version: 1,
@@ -146,7 +146,7 @@ fn mined_block_with_prev_hash(prev_blockhash: BlockHash, height: u32, txdata: Ve
 type MaturedChain = (Chainstate, Vec<Block>, HashMap<Hash256, BlockPayload>);
 
 fn matured_chain(depth: u32) -> Result<MaturedChain, crate::test_support::TestError> {
-    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
+    use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
     let mut parent = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;

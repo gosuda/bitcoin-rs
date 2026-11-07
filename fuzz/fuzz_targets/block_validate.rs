@@ -5,8 +5,8 @@ use libfuzzer_sys::fuzz_target;
 
 use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_consensus::{verify_block_rules, verify_transaction_non_script};
-use bitcoin_rs_primitives::{Amount, Block, OutPoint, Script, TxOut};
-use bitcoin_rs_script::VerifyFlags;
+use bitcoin_rs_consensus::primitives::{Amount, Block, OutPoint, Script, TxOut};
+use bitcoin_rs_consensus::script::VerifyFlags;
 
 struct AnyCoinView {
     coin: TxOut,
@@ -23,24 +23,24 @@ fn validate_block(data: &[u8]) {
         return;
     };
     let encoded = serialize(&parsed);
-    let Ok(block) = bitcoin_rs_primitives::deserialize::<Block>(&encoded) else {
+    let Ok(block) = bitcoin_rs_consensus::primitives::deserialize::<Block>(&encoded) else {
         return;
     };
-    let consensus = bitcoin_rs_primitives::consensus_bytes(&block);
+    let consensus = bitcoin_rs_consensus::primitives::consensus_bytes(&block);
     assert_eq!(
         consensus,
         encoded,
         "native decode must re-encode to the rust-bitcoin serialization"
     );
-    let re_decoded = bitcoin_rs_primitives::deserialize::<Block>(&consensus)
+    let re_decoded = bitcoin_rs_consensus::primitives::deserialize::<Block>(&consensus)
         .expect("native re-decode must succeed on consensus_bytes");
     assert_eq!(re_decoded, block, "round-trip block equality");
-    let re_consensus = bitcoin_rs_primitives::consensus_bytes(&re_decoded);
+    let re_consensus = bitcoin_rs_consensus::primitives::consensus_bytes(&re_decoded);
     assert_eq!(re_consensus, consensus, "canonical block bytes idempotent");
 
     assert!(
         encoded.len() + block.retained_heap_bytes()
-            <= bitcoin_rs_primitives::layout::decode_reservation(encoded.len()),
+            <= bitcoin_rs_consensus::primitives::layout::decode_reservation(encoded.len()),
         "decoded block exceeds its decode reservation"
     );
 

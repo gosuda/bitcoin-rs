@@ -27,7 +27,7 @@ fn shutdown_closes_admission_and_waits_for_in_flight_apply() {
 #[test]
 fn is_closed_for_recovery_tracks_the_fatal_close() {
     let chainstate = crate::test_fixtures::handles(
-        bitcoin_rs_primitives::Network::Regtest,
+        bitcoin_rs_consensus::primitives::Network::Regtest,
         Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
     );
     assert!(
@@ -48,7 +48,7 @@ fn is_closed_for_recovery_tracks_the_fatal_close() {
 #[test]
 fn shutdown_reader_unblocks_select_on_request_shutdown() {
     let chainstate = crate::test_fixtures::handles(
-        bitcoin_rs_primitives::Network::Regtest,
+        bitcoin_rs_consensus::primitives::Network::Regtest,
         Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
     );
     let reader = chainstate.shutdown_reader();
@@ -75,7 +75,7 @@ fn shutdown_reader_unblocks_select_on_request_shutdown() {
 #[test]
 fn closed_for_recovery_reader_unblocks_select_on_fail_closed() {
     let chainstate = crate::test_fixtures::handles(
-        bitcoin_rs_primitives::Network::Regtest,
+        bitcoin_rs_consensus::primitives::Network::Regtest,
         Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
     );
     let reader = chainstate.closed_for_recovery_reader();
@@ -105,7 +105,7 @@ fn shutdown_hooks_run_without_the_tip_gate() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let chainstate = Arc::new(crate::test_fixtures::handles(
-        bitcoin_rs_primitives::Network::Regtest,
+        bitcoin_rs_consensus::primitives::Network::Regtest,
         Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
     ));
     let gate_free = Arc::new(AtomicBool::new(false));
@@ -147,7 +147,7 @@ fn recovery_closure_does_not_upgrade_an_apply_permit() {
 #[test]
 fn recovery_closure_hooks_can_reenter_after_publication_unlocks() {
     let chain = Arc::new(crate::test_fixtures::handles(
-        bitcoin_rs_primitives::Network::Regtest,
+        bitcoin_rs_consensus::primitives::Network::Regtest,
         Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
     ));
     let owner = Arc::clone(&chain);

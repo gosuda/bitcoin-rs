@@ -1,8 +1,8 @@
-use bitcoin_rs_primitives::{
+use crate::primitives::{
     Amount, Block, Hash256, Header, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness, deserialize, encode::double_sha256,
 };
-use bitcoin_rs_script::push_data;
+use crate::script::push_data;
 
 use super::{
     OP_RETURN, SIGNET_HEADER, check_signet_block_solution, coinbase_txid_with_commitment,

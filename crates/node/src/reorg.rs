@@ -5,7 +5,7 @@ use bitcoin_rs_chain::{InvalidationOutcome, NodeId};
 pub use bitcoin_rs_chainstate::reorg::ReorgError;
 use bitcoin_rs_chainstate::reorg::ReorgObserver;
 use bitcoin_rs_chainstate::{ApplyError, Chainstate, ConnectOutcome, DisconnectOutcome};
-use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid};
+use bitcoin_rs_consensus::primitives::{Block, Hash256, Tx, Txid};
 use hashbrown::HashSet;
 
 const MAX_DISCONNECTED_TX_BYTES: usize = 20_000_000;
@@ -41,8 +41,12 @@ impl ReorgObserver for NodeReorgObserver<'_> {
     }
 
     fn connected(&mut self, block: &Block, outcome: &ConnectOutcome) {
-        self.reconnected
-            .extend(block.txs.iter().map(bitcoin_rs_primitives::Tx::txid));
+        self.reconnected.extend(
+            block
+                .txs
+                .iter()
+                .map(bitcoin_rs_consensus::primitives::Tx::txid),
+        );
         self.followers.on_connect(block, outcome);
         (self.connected_body)(outcome.hash);
     }
@@ -72,7 +76,7 @@ fn trim_after_reorg(
 ) -> Result<(), bitcoin_rs_mempool::MempoolError> {
     let _ = gateway.expire(
         bitcoin_rs_mempool::AdmissionOrigin::Reorg,
-        bitcoin_rs_primitives::unix_time_secs(),
+        bitcoin_rs_consensus::primitives::unix_time_secs(),
     );
     let max_bytes = gateway.max_total_bytes();
     if max_bytes == 0 || gateway.read().dynamic_memory_usage() <= max_bytes {
@@ -118,7 +122,7 @@ fn settle_node_reorg(
                 let _ = gateway.reconsider_disconnected(
                     change,
                     &chain,
-                    bitcoin_rs_primitives::unix_time_secs(),
+                    bitcoin_rs_consensus::primitives::unix_time_secs(),
                     observer.disconnected.drain(..),
                 );
             }
@@ -192,7 +196,7 @@ pub fn switch_to_branch<F, G>(
     mut connected_body: G,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockPayload>,
     G: FnMut(Hash256),
 {
     let mut mempool_change = followers

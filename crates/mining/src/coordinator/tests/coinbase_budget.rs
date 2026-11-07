@@ -2,8 +2,8 @@ use super::fee_revision::service_over;
 use super::*;
 use crate::MiningError;
 use crate::template::assemble_candidate;
+use bitcoin_rs_consensus::primitives::{Sequence, TxIn, Witness};
 use bitcoin_rs_mempool::MempoolEntry;
-use bitcoin_rs_primitives::{Sequence, TxIn, Witness};
 use std::thread::JoinHandle;
 
 type TestResult<T = ()> = Result<T, TestError>;

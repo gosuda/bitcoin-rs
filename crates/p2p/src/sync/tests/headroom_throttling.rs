@@ -1,5 +1,5 @@
 use super::*;
-use bitcoin_rs_primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockPayload;
 
 #[test]
 fn tick_caps_requests_at_staged_byte_headroom() -> TestResult {

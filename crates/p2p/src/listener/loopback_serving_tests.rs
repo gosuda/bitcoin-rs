@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use std::io;
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_chain::{
     BlockBodyReadError, BlockBodySource, BlockTree, BlockTreeReader, NodeStatus, TipReader,
 };
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint,
     Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
@@ -42,7 +42,7 @@ enum TestError {
     #[error(transparent)]
     Chain(#[from] bitcoin_rs_chain::ChainError),
     #[error(transparent)]
-    Primitives(#[from] bitcoin_rs_primitives::DecodeError),
+    Primitives(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
     Consensus(#[from] bitcoin::consensus::encode::Error),
     #[error(transparent)]

@@ -1,5 +1,5 @@
 use bitcoin::hashes::Hash as _;
-use bitcoin_rs_primitives::{BlockHash, CompactTarget};
+use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget};
 
 pub(crate) fn pow_is_met(bits: CompactTarget, hash: &BlockHash) -> bool {
     let target = bitcoin::pow::Target::from_compact(bitcoin::pow::CompactTarget::from_consensus(

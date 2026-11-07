@@ -5,11 +5,11 @@ use arc_swap::ArcSwapOption;
 use bitcoin::hex::FromHex;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot, regtest_fixture};
 use bitcoin_rs_chainstate::Chainstate;
-use bitcoin_rs_node::Network;
-use bitcoin_rs_node::test_support::TestError;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, deserialize,
 };
+use bitcoin_rs_node::Network;
+use bitcoin_rs_node::test_support::TestError;
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use crossbeam_channel::unbounded;

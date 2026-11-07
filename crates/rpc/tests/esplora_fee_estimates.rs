@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
+use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::Context;
 use bitcoin_rs_rpc::esplora::{Surface, route};

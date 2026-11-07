@@ -5,10 +5,10 @@ extern crate alloc;
 use super::TestError;
 use alloc::sync::Arc;
 
-use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolError, MempoolLimits, PolicyError};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
+use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolError, MempoolLimits, PolicyError};
 
 #[test]
 fn cluster_weight_preserves_fractional_vbytes_at_the_exact_boundary() -> Result<(), TestError> {
@@ -26,8 +26,9 @@ fn cluster_weight_preserves_fractional_vbytes_at_the_exact_boundary() -> Result<
         let parent = weighted(chained_tx(2, outpoint(1, 0)), 401);
         let child = weighted(chained_tx(3, OutPoint::new(parent.txid(), 0)), child_weight);
         for (tx, weight) in [(&parent, 401), (&child, child_weight)] {
-            let oracle: bitcoin::Transaction =
-                bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(tx))?;
+            let oracle: bitcoin::Transaction = bitcoin::consensus::deserialize(
+                &bitcoin_rs_consensus::primitives::consensus_bytes(tx),
+            )?;
             assert_eq!(oracle.weight().to_wu(), weight);
             assert_eq!(oracle.vsize(), 101);
         }

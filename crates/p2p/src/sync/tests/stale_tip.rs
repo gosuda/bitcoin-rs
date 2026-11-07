@@ -7,7 +7,7 @@ use super::super::{StaleTipState, tip_may_be_stale};
 use super::*;
 use crate::listener::ListenerExtras;
 use crate::service::{P2pService, P2pServiceConfig};
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 
 const SPACING: Duration = Duration::from_mins(10);
 

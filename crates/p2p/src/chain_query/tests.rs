@@ -2,8 +2,8 @@ use super::*;
 use crate::inv::wire_block_hash;
 use bitcoin::{BlockHash as WireBlockHash, Txid as WireTxid};
 use bitcoin_rs_chain::NodeStatus;
-use bitcoin_rs_primitives::consensus_bytes;
-use bitcoin_rs_primitives::{Block, CompactTarget, Tx};
+use bitcoin_rs_consensus::primitives::consensus_bytes;
+use bitcoin_rs_consensus::primitives::{Block, CompactTarget, Tx};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1809,7 +1809,7 @@ fn dispatched_wire_response(
 }
 
 fn test_tx(byte: u8) -> Tx {
-    use bitcoin_rs_primitives::{
+    use bitcoin_rs_consensus::primitives::{
         Amount, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
     };
     Tx {

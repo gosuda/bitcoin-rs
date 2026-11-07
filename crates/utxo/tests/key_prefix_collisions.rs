@@ -1,7 +1,7 @@
 use std::io::Cursor;
 
 use crate::support::TestResult;
-use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut, Txid};
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut, Txid};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_utxo::{UtxoSet, read_snapshot_strict_v4, write_snapshot_observed};
 

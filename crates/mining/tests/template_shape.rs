@@ -4,11 +4,11 @@ use crate::support::TestError;
 
 use bitcoin::Wtxid as OracleWtxid;
 use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
+use bitcoin_rs_consensus::primitives::{CompactTarget, Hash256, Network, Txid};
 use bitcoin_rs_mining::{
     CandidateContext, TemplateId, WITNESS_RESERVED_VALUE, assemble_candidate,
     assemble_ordered_candidate, solve_block,
 };
-use bitcoin_rs_primitives::{CompactTarget, Hash256, Network, Txid};
 use common::{PAYOUT, context, insert, selected_fees, tx, zero_fee_pool};
 
 fn txids(transactions: &[bitcoin_rs_mining::CandidateTransaction]) -> Vec<Txid> {
@@ -98,8 +98,9 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Tes
         }
     }
     let block = candidate.into_unsolved_block()?;
-    let oracle: bitcoin::Block =
-        bitcoin::consensus::deserialize(&bitcoin_rs_primitives::encode::consensus_bytes(&block))?;
+    let oracle: bitcoin::Block = bitcoin::consensus::deserialize(
+        &bitcoin_rs_consensus::primitives::encode::consensus_bytes(&block),
+    )?;
     assert_eq!(candidate.weight, oracle.weight().to_wu());
     assert_eq!(
         candidate.coinbase_value,

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use bitcoin::secp256k1::rand::Rng;
 use bitcoin::secp256k1::rand::{RngCore, thread_rng};
-use bitcoin_rs_primitives::endpoint::base32_encode;
+use bitcoin_rs_consensus::primitives::endpoint::base32_encode;
 use sha2::{Digest, Sha256};
 
 const READINESS_WAIT: Duration = Duration::from_secs(120);

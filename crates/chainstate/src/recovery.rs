@@ -207,8 +207,8 @@ fn restored_initial(
 
 pub(crate) fn restore_snapshot(
     data_dir: &Path,
-    network: bitcoin_rs_primitives::Network,
-    pinned: &bitcoin_rs_primitives::AssumeUtxoData,
+    network: bitcoin_rs_consensus::primitives::Network,
+    pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
 ) -> Result<InitialChainstate, RecoveryError> {
     let config = header_checkpoint_config(network);
     let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)?;
@@ -245,7 +245,7 @@ pub(crate) fn restore_snapshot(
 }
 
 fn cold_initial_chainstate(
-    network: bitcoin_rs_primitives::Network,
+    network: bitcoin_rs_consensus::primitives::Network,
     journal_config: ChainstateJournalConfig,
 ) -> InitialChainstate {
     InitialChainstate {
@@ -269,7 +269,7 @@ fn cold_initial_chainstate(
 
 fn discard_journal_and_start_cold(
     data_dir: &Path,
-    network: bitcoin_rs_primitives::Network,
+    network: bitcoin_rs_consensus::primitives::Network,
     journal_config: ChainstateJournalConfig,
 ) -> Result<InitialChainstate, RecoveryError> {
     if journal_config.enabled {
@@ -296,7 +296,7 @@ fn open_checkpoint_data_dir(data_dir: &Path) -> Result<cap_std::fs::Dir, Recover
 }
 
 fn header_checkpoint_config(
-    network: bitcoin_rs_primitives::Network,
+    network: bitcoin_rs_consensus::primitives::Network,
 ) -> crate::checkpoint::headers::HeaderCheckpointConfig {
     crate::checkpoint::headers::HeaderCheckpointConfig {
         network,
@@ -305,7 +305,7 @@ fn header_checkpoint_config(
 }
 
 fn full_revalidation_cold_start(
-    network: bitcoin_rs_primitives::Network,
+    network: bitcoin_rs_consensus::primitives::Network,
     journal_config: ChainstateJournalConfig,
 ) -> InitialChainstate {
     metrics::counter!(
@@ -323,7 +323,7 @@ fn full_revalidation_cold_start(
 
 fn no_checkpoint_cold_start(
     data_dir: &Path,
-    network: bitcoin_rs_primitives::Network,
+    network: bitcoin_rs_consensus::primitives::Network,
     journal_config: ChainstateJournalConfig,
 ) -> Result<InitialChainstate, RecoveryError> {
     if journal_config.enabled {
@@ -485,7 +485,7 @@ fn replayed_initial(
 
 pub fn prepare_initial_chainstate(
     data_dir: &Path,
-    network: bitcoin_rs_primitives::Network,
+    network: bitcoin_rs_consensus::primitives::Network,
     journal_config: ChainstateJournalConfig,
     durable_head: Option<&bitcoin_rs_storage::DurableHead>,
 ) -> Result<InitialChainstate, RecoveryError> {

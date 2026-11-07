@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bitcoin_rs_primitives::{CompactTarget, Hash256, Network, i64_to_f64, u64_to_f64};
+use bitcoin_rs_consensus::primitives::{CompactTarget, Hash256, Network, i64_to_f64, u64_to_f64};
 
 use crate::TipSnapshot;
 use crate::ibd::InitialBlockDownload;
@@ -148,7 +148,7 @@ mod reader_tests {
     use std::sync::Arc;
 
     use arc_swap::ArcSwapOption;
-    use bitcoin_rs_primitives::{Hash256, Network};
+    use bitcoin_rs_consensus::primitives::{Hash256, Network};
     use parking_lot::RwLock;
 
     use super::ChainProgressReader;
@@ -218,7 +218,7 @@ mod reader_tests {
 #[cfg(test)]
 mod verification_progress_tests {
     use super::verification_progress;
-    use bitcoin_rs_primitives::Network;
+    use bitcoin_rs_consensus::primitives::Network;
 
     #[test]
     fn verification_progress_is_transactions_verified_over_transactions_estimated() {

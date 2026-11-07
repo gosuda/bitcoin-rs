@@ -8,6 +8,11 @@ use bitcoin_rs_node::test_support::TestError;
 type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin::hex::FromHex;
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
+use bitcoin_rs_consensus::primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness, deserialize as native_deserialize, encode::double_sha256,
+};
+use bitcoin_rs_consensus::script::push_int;
 use bitcoin_rs_mempool::{AdmissionOrigin, BodyInterest, MempoolEntry, SubmitOutcome};
 use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
@@ -15,10 +20,6 @@ use bitcoin_rs_mining::{
     MiningGenerationSignal, solve_block,
 };
 use bitcoin_rs_node::{MiningCoordinator, Network, NodeConfig, state::NodeState};
-use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness, deserialize as native_deserialize, encode::double_sha256,
-};
 use bitcoin_rs_rpc::{
     Handler,
     context::{
@@ -26,7 +27,6 @@ use bitcoin_rs_rpc::{
         MiningHandles, NetworkHandles,
     },
 };
-use bitcoin_rs_script::push_int;
 use bitcoin_rs_utxo::UtxoSet;
 use compact_str::CompactString;
 use crossbeam_channel::{Receiver, bounded};
@@ -64,11 +64,12 @@ pub(crate) fn open_network(network: Network) -> Result<NodeFixture> {
 
 pub(crate) fn open_at_genesis(network: Network) -> Result<NodeFixture> {
     let fixture = open_network(network)?;
-    let _ = fixture
-        .state
-        .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
-            network.genesis_block(),
-        ))?;
+    let _ =
+        fixture
+            .state
+            .apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+                network.genesis_block(),
+            ))?;
     Ok(fixture)
 }
 
@@ -263,7 +264,7 @@ pub(crate) fn disconnect_applied(state: &NodeState, block: &Block) -> Result<()>
         target,
         |hash| {
             (hash == block_hash)
-                .then(|| bitcoin_rs_primitives::BlockPayload::from_local(body.clone()))
+                .then(|| bitcoin_rs_consensus::primitives::BlockPayload::from_local(body.clone()))
         },
         |_| {},
     )
@@ -281,7 +282,9 @@ pub(crate) fn open_regtest() -> Result<(NodeState, tempfile::TempDir)> {
 
 pub(crate) fn apply_genesis(state: &NodeState) -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
-    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        genesis,
+    ))?;
     Ok(())
 }
 
@@ -316,7 +319,9 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
         block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
             .ok_or_else(|| TestError::message("seed block must have a merkle root"))?;
         regtest_fixture::mine_block_to_declared_target(&mut block)?;
-        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block))?;
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+            block,
+        ))?;
         tip = current_tip(state)?;
         assert_eq!(tip.height, height, "seed block must become the tip");
     }
@@ -450,7 +455,7 @@ pub(crate) fn admit_to_mempool(state: &NodeState, tx: &Tx) -> Result<()> {
         Arc::new(tx.clone()),
         AdmissionOrigin::Rpc,
         None,
-        bitcoin_rs_primitives::unix_time_secs(),
+        bitcoin_rs_consensus::primitives::unix_time_secs(),
         &view,
     );
     assert!(
@@ -494,7 +499,7 @@ pub(crate) fn mine_regtest_block(
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
         .ok_or_else(|| TestError::message("mined block must have a merkle root"))?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
-    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         block.clone(),
     ))?;
     Ok(block)

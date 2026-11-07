@@ -17,11 +17,11 @@ use bitcoin_rs_node::{
     state::NodeState,
 };
 
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness, consensus_bytes, unix_time_secs,
 };
-use bitcoin_rs_script::push_int;
+use bitcoin_rs_consensus::script::push_int;
 
 use bitcoin_rs_rpc::{
     Handler, RpcError,
@@ -1489,9 +1489,9 @@ fn reorg_mine_and_apply(
     txs: Vec<Tx>,
 ) -> Result<Block, crate::support::TestError> {
     let mut block = Block {
-        header: bitcoin_rs_primitives::Header {
+        header: bitcoin_rs_consensus::primitives::Header {
             version: 0x2000_0000,
-            prev_blockhash: bitcoin_rs_primitives::BlockHash::from(prev),
+            prev_blockhash: bitcoin_rs_consensus::primitives::BlockHash::from(prev),
             merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
             time: REORG_SEED_BASE_TIME
                 .saturating_add(REORG_SEED_BLOCK_INTERVAL.saturating_mul(height)),
@@ -1505,7 +1505,7 @@ fn reorg_mine_and_apply(
     block.header.merkle_root =
         regtest_fixture::merkle_root(&block.txs).ok_or("mined block must have a merkle root")?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
-    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         block.clone(),
     ))?;
     Ok(block)
@@ -1570,7 +1570,9 @@ fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_t
 -> Result<(), crate::support::TestError> {
     let (state, _dir) = open_regtest_state()?;
     let genesis = Network::Regtest.genesis_block();
-    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+        genesis,
+    ))?;
     for height in 1..=REORG_SEED_BLOCKS {
         let (prev, _) = applied_tip_pair(&state)?;
         reorg_mine_and_apply(&state, prev, height, Vec::new())?;

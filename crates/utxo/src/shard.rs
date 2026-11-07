@@ -1,6 +1,6 @@
 use std::borrow::Borrow;
 
-use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut};
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, Script, TxOut};
 use crossbeam_utils::CachePadded;
 use hashbrown::HashTable;
 use parking_lot::RwLock;
@@ -773,14 +773,17 @@ mod tests {
             script_pubkey: vec![0x51].into(),
         };
         let add = crate::contract::UtxoAdd::new(
-            OutPoint::new(bitcoin_rs_primitives::Txid::from(txid), 0),
+            OutPoint::new(bitcoin_rs_consensus::primitives::Txid::from(txid), 0),
             txout,
             false,
             1,
         );
         shard.commit_single_shard_batch(
             &[add],
-            &[OutPoint::new(bitcoin_rs_primitives::Txid::from(txid), 5)],
+            &[OutPoint::new(
+                bitcoin_rs_consensus::primitives::Txid::from(txid),
+                5,
+            )],
             0,
         )?;
         assert_eq!(shard.record_count(), 1);

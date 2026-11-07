@@ -4,14 +4,14 @@ use crate::support::common;
 
 use std::sync::Arc;
 
+use bitcoin_rs_consensus::primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize,
+};
 use bitcoin_rs_index::types::{TX_POSITION_SIZE, TxPosition, TxPositionValue, U24_MAX};
 use bitcoin_rs_index::{
     IndexCapabilities, IndexWriter, PreparedBatch, PreparedBatchLimits, ScriptHash,
     SpentCoinScripts,
-};
-use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize,
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use proptest::prelude::*;
@@ -31,7 +31,7 @@ impl SpentCoinScripts for FixtureScripts {
 fn commit_block(store: &Arc<MemoryStore>, height: u32, body: &[u8]) {
     let mut writer = IndexWriter::open(Arc::clone(store), 1).expect("open");
     let header = body.get(..80).expect("header present");
-    let hash = bitcoin_rs_primitives::encode::double_sha256(header).to_le_bytes();
+    let hash = bitcoin_rs_consensus::primitives::encode::double_sha256(header).to_le_bytes();
     let prepared = writer
         .prepare_block_with_spent_scripts(
             IndexCapabilities::HISTORICAL,

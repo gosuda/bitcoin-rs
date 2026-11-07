@@ -6,11 +6,11 @@ use bitcoin::consensus::encode::serialize as bitcoin_serialize;
 use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
 use bitcoin::opcodes::all::{OP_PUSHBYTES_36, OP_RETURN};
 use bitcoin::{block, pow};
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, Tx};
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_mining::{
     CandidateContext, WITNESS_RESERVED_VALUE, assemble_candidate, witness_commitment_script,
 };
-use bitcoin_rs_primitives::{Amount, Hash256, Tx};
 use common::{PAYOUT, insert, oracle_transaction, witnessed_tx};
 
 fn context() -> CandidateContext {

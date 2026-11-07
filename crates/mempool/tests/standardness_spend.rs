@@ -1,8 +1,8 @@
-use bitcoin_rs_mempool::standardness::{StandardnessError, is_standard_spend};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_script::{opcode, push_data};
+use bitcoin_rs_consensus::script::{opcode, push_data};
+use bitcoin_rs_mempool::standardness::{StandardnessError, is_standard_spend};
 
 const CORE_MAX_P2SH_SIGOPS: usize = 15;
 const CORE_MAX_TX_LEGACY_SIGOPS: u32 = 2_500;

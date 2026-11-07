@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{Block, OutPoint, Txid};
+use bitcoin_rs_consensus::primitives::{Block, OutPoint, Txid};
 use hashbrown::{HashMap, HashSet};
 
 use crate::UtxoSet;
@@ -90,7 +90,7 @@ impl OutputSource for WindowOverlay<'_> {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::{
+    use bitcoin_rs_consensus::primitives::{
         Amount, Block, CompactTarget, Hash256, Header, LockTime, OutPoint, Sequence, Tx, TxIn,
         TxOut, Txid, Witness,
     };
@@ -135,7 +135,7 @@ mod tests {
         Block {
             header: Header {
                 version: 1,
-                prev_blockhash: bitcoin_rs_primitives::BlockHash(Hash256::default()),
+                prev_blockhash: bitcoin_rs_consensus::primitives::BlockHash(Hash256::default()),
                 merkle_root: Hash256::default(),
                 time: 0,
                 bits: CompactTarget::from_consensus(0x2100_ffff),

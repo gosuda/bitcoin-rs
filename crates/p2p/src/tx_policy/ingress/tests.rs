@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::encode::ConsensusEncode;
+use bitcoin_rs_consensus::primitives::encode::ConsensusEncode;
 
 use super::*;
 use crate::tx_policy::tests::{CountingInventory, registered_source, source};

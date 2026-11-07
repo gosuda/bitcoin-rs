@@ -1,4 +1,5 @@
-use bitcoin_rs_primitives::{PeerEndpoint, USER_AGENT};
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::USER_AGENT;
 use std::io::{self, Read};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::sync::Arc;

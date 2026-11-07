@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::io::{Cursor, Seek, Write};
 
 use crate::support::{TestError, TestResult};
-use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut};
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, Script, TxOut};
 use bitcoin_rs_storage::checkpoint::CheckpointReference;
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
 use bitcoin_rs_utxo::{

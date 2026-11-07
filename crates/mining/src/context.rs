@@ -1,8 +1,8 @@
 use bitcoin_rs_chain::{
     BlockTree, ChainError, candidate_version, header_sync, node::NodeId, softfork_state,
 };
+use bitcoin_rs_consensus::primitives::{CompactTarget, Hash256, Network};
 use bitcoin_rs_consensus::{LocktimeRule, locktime_cutoff};
-use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MiningChainContext {
@@ -69,7 +69,7 @@ impl MiningChainContext {
 #[cfg(test)]
 mod tests {
     use bitcoin_rs_chain::{BlockTree, ChainError, header_sync, node::NodeStatus};
-    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
+    use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
 
     use super::MiningChainContext;
     use crate::test_error::TestError;

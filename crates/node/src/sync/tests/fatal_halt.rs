@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bitcoin_rs_chain::{BlockTree, NodeStatus, regtest_fixture};
-use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Network};
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
 use bitcoin_rs_storage::undo::InMemoryUndoStore;
 use bitcoin_rs_storage::{

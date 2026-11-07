@@ -7,7 +7,7 @@
 //!
 //! BIP331 publishes no test-vector section.
 
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     ConsensusDecode, ConsensusEncode, DecodeError, Hash256, Tx, Wtxid, varint,
 };
 use sha2::{Digest, Sha256};

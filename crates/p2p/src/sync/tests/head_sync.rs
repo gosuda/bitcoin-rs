@@ -1,6 +1,6 @@
 use super::*;
 
-use bitcoin_rs_primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockPayload;
 
 fn next_getheaders(
     rx: &crate::test_support::MessageReceiver,
@@ -406,7 +406,7 @@ fn headers_batch_too_far_ahead_does_not_replay_a_request() -> TestResult {
 
 #[test]
 fn staged_body_with_permanently_inadmissible_header_is_discarded() -> TestResult {
-    use bitcoin_rs_primitives::CompactTarget;
+    use bitcoin_rs_consensus::primitives::CompactTarget;
     let (tree, blocks) = mined_chain(1, 0)?;
     let SyncHarness {
         sync,
@@ -632,7 +632,7 @@ fn unrequested_body_at_the_count_budget_is_refused() -> TestResult {
         &sync,
         super::super::SyncBudget {
             max_received_blocks: 2,
-            ..super::super::default_sync_budget(bitcoin_rs_primitives::Network::Regtest)
+            ..super::super::default_sync_budget(bitcoin_rs_consensus::primitives::Network::Regtest)
         },
     );
     {
@@ -730,7 +730,7 @@ fn binding_failure_does_not_burn_the_last_staging_slot() -> TestResult {
         &sync,
         super::super::SyncBudget {
             max_received_blocks: 1,
-            ..super::super::default_sync_budget(bitcoin_rs_primitives::Network::Regtest)
+            ..super::super::default_sync_budget(bitcoin_rs_consensus::primitives::Network::Regtest)
         },
     );
 
@@ -1164,7 +1164,7 @@ fn compact_gate_fixture(port: usize) -> Result<CompactGateFixture, TestError> {
 fn tip_child(
     tip: &Block,
     coinbase_height: u32,
-) -> Result<bitcoin_rs_primitives::Header, TestError> {
+) -> Result<bitcoin_rs_consensus::primitives::Header, TestError> {
     Ok(regtest_fixture::mined_block_with_prev_hash(
         tip.block_hash(),
         3,
@@ -1193,14 +1193,15 @@ fn compact_reconstruction_admission_follows_cores_header_gate() -> TestResult {
         "a mined child of the applied tip"
     );
     let mut wrong_target = extending;
-    wrong_target.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x2000_ffff);
+    wrong_target.bits =
+        bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x2000_ffff);
     regtest_fixture::mine_header_to_declared_target(&mut wrong_target)?;
     assert!(
         !sync.compact_reconstruction_admissible(source, &wrong_target),
         "a target other than the required one"
     );
     let mut no_work = extending;
-    no_work.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x1d00_ffff);
+    no_work.bits = bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x1d00_ffff);
     assert!(
         !sync.compact_reconstruction_admissible(source, &no_work),
         "no proof of work"

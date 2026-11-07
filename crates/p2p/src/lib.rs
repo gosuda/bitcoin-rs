@@ -61,7 +61,7 @@ pub(crate) mod lease_model;
 #[cfg(test)]
 mod test_support;
 
-pub use bitcoin_rs_primitives::{
+pub use bitcoin_rs_consensus::primitives::{
     EndpointHost, NetworkLabel, PeerAddress, PeerEndpoint, PeerNetwork,
 };
 pub use block_announce::{

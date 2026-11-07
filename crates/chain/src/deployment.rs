@@ -1,10 +1,10 @@
 use bitcoin_rs_consensus::bip9::versionbits_block_version;
 use bitcoin_rs_consensus::bip30::BIP34_IMPLIES_BIP30_LIMIT;
+use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_consensus::{
     CSV_DEPLOYMENT_ID, DeploymentContext, DeploymentParams, DeploymentState, SEGWIT_DEPLOYMENT_ID,
     SoftforkState, compute_state, deployment_params,
 };
-use bitcoin_rs_primitives::Network;
 
 use crate::{BlockTree, NodeId};
 
@@ -374,7 +374,7 @@ fn cached_deployment_state(
 mod tests {
     use crate::node::NodeStatus;
     use bitcoin_rs_consensus::bip30::BIP34_IMPLIES_BIP30_LIMIT;
-    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
+    use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
 
     use super::softfork_state;
     use crate::test_error::TestError;

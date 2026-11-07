@@ -1,6 +1,6 @@
 #![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
 
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};

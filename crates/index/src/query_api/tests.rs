@@ -24,7 +24,7 @@ mod script_live_outage_engine_tests {
         BlockBodyReadError, BlockBodySource, BlockTree, BlockTreeReader, ChainTxCount, NodeStatus,
         TipReader, TipSnapshot,
     };
-    use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Txid, deserialize};
+    use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Header, Txid, deserialize};
     use bitcoin_rs_storage::RocksDbStore;
     use parking_lot::RwLock;
     use sha2::{Digest, Sha256};

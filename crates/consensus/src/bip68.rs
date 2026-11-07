@@ -1,6 +1,6 @@
 use crate::ConsensusError;
 
-use bitcoin_rs_primitives::{
+use crate::primitives::{
     SEQUENCE_LOCKTIME_DISABLE_FLAG, SEQUENCE_LOCKTIME_MASK, SEQUENCE_LOCKTIME_TYPE_FLAG,
 };
 

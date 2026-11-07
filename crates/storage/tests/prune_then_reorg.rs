@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 
 use crate::support::TestResult;
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_storage::pruning::{
     BLOCK_DATA_CF, ExecutedFrontier, HistoryAccess, HistoryUnavailable, PrunePolicy,
     RetentionBudget, RetentionRegistry, block_body_key, load_executed_frontier, load_pruneheight,

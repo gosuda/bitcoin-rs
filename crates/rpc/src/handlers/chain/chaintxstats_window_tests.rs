@@ -125,8 +125,8 @@ fn txrate_is_the_window_count_over_the_median_time_interval() {
     let Some(txrate) = result.get("txrate").and_then(JsonValueTrait::as_f64) else {
         panic!("txrate missing: {result:?}");
     };
-    let expected = bitcoin_rs_primitives::u64_to_f64(u64::try_from(count).unwrap_or(0))
-        / bitcoin_rs_primitives::u64_to_f64(u64::try_from(interval).unwrap_or(0));
+    let expected = bitcoin_rs_consensus::primitives::u64_to_f64(u64::try_from(count).unwrap_or(0))
+        / bitcoin_rs_consensus::primitives::u64_to_f64(u64::try_from(interval).unwrap_or(0));
     assert!(
         (txrate - expected).abs() < f64::EPSILON,
         "got {txrate}, expected {expected}"
@@ -167,9 +167,9 @@ fn txrate_keeps_counts_above_u32_max() {
     let Some(txrate) = result.get("txrate").and_then(JsonValueTrait::as_f64) else {
         panic!("txrate missing: {result:?}");
     };
-    let expected =
-        bitcoin_rs_primitives::u64_to_f64(count) / bitcoin_rs_primitives::u64_to_f64(interval);
-    let capped = f64::from(u32::MAX) / bitcoin_rs_primitives::u64_to_f64(interval);
+    let expected = bitcoin_rs_consensus::primitives::u64_to_f64(count)
+        / bitcoin_rs_consensus::primitives::u64_to_f64(interval);
+    let capped = f64::from(u32::MAX) / bitcoin_rs_consensus::primitives::u64_to_f64(interval);
     assert_ne!(
         expected.to_bits(),
         capped.to_bits(),

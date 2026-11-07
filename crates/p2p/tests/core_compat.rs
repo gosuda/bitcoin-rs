@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -15,6 +15,12 @@ use bitcoin::p2p::message::{CommandString, NetworkMessage, RawNetworkMessage};
 use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
 use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{BlockHash, Txid};
+use bitcoin_rs_consensus::primitives::Network;
+use bitcoin_rs_consensus::primitives::USER_AGENT;
+use bitcoin_rs_consensus::primitives::{
+    Block, BlockHash as NativeBlockHash, BlockPayload, CompactTarget, Hash256, Header,
+    consensus_bytes, deserialize,
+};
 use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::dispatch::{
     ChainQuery, InventoryServing, dispatch_inbound, dispatch_inbound_full,
@@ -30,11 +36,6 @@ use bitcoin_rs_p2p::{
     BannedSubnet, COMMANDS, CORE_UNTYPED_COMMANDS, FEATURE_VERSION, InboundBlock, InboundHeaders,
     ListenerExtras, Message, NetworkActivity, Peer, PeerState, PeerTable,
 };
-use bitcoin_rs_primitives::{
-    Block, BlockHash as NativeBlockHash, BlockPayload, CompactTarget, Hash256, Header,
-    consensus_bytes, deserialize,
-};
-use bitcoin_rs_primitives::{Network, USER_AGENT};
 use hashbrown::HashMap;
 
 const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
@@ -44,7 +45,7 @@ enum TestError {
     #[error(transparent)]
     Hex(#[from] bitcoin::hex::HexToBytesError),
     #[error(transparent)]
-    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -151,8 +152,8 @@ impl FakeChain {
 impl ChainQuery for FakeChain {
     fn stale_tip_announcement(
         &self,
-        _tip: bitcoin_rs_primitives::Hash256,
-        _peer_tips: &[bitcoin_rs_primitives::Hash256],
+        _tip: bitcoin_rs_consensus::primitives::Hash256,
+        _peer_tips: &[bitcoin_rs_consensus::primitives::Hash256],
     ) -> Option<bitcoin_rs_p2p::StaleTipHeaders> {
         None
     }

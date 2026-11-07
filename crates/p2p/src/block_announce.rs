@@ -6,7 +6,7 @@ use std::time::Duration;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256};
+use bitcoin_rs_consensus::primitives::{Block, BlockHash, Hash256};
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
@@ -30,11 +30,11 @@ const ANNOUNCE_POLL: Duration = Duration::from_millis(100);
 pub(crate) fn ibd_active(
     ibd: Option<&(
         Arc<bitcoin_rs_chain::InitialBlockDownload>,
-        bitcoin_rs_primitives::Network,
+        bitcoin_rs_consensus::primitives::Network,
     )>,
 ) -> bool {
     ibd.is_some_and(|(latch, network)| {
-        latch.is_active(bitcoin_rs_primitives::unix_time_secs(), *network)
+        latch.is_active(bitcoin_rs_consensus::primitives::unix_time_secs(), *network)
     })
 }
 
@@ -112,7 +112,7 @@ pub struct BlockAnnouncer {
     config: BlockAnnounceConfig,
     ibd: Option<(
         Arc<bitcoin_rs_chain::InitialBlockDownload>,
-        bitcoin_rs_primitives::Network,
+        bitcoin_rs_consensus::primitives::Network,
     )>,
     state: Mutex<AnnounceState>,
     recent: RecentBlockSlot,
@@ -160,7 +160,7 @@ impl BlockAnnouncer {
     pub fn with_ibd(
         mut self,
         ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
-        network: bitcoin_rs_primitives::Network,
+        network: bitcoin_rs_consensus::primitives::Network,
     ) -> Self {
         self.ibd = Some((ibd, network));
         self

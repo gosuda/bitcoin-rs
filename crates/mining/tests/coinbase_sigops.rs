@@ -2,12 +2,12 @@ use crate::support::fixtures as common;
 
 use crate::support::TestError;
 
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Tx, Txid};
+use bitcoin_rs_consensus::script::VerifyFlags;
 use bitcoin_rs_consensus::transaction_sigop_cost;
 use bitcoin_rs_mining::{
     Candidate, CandidateContext, MiningError, assemble_candidate, assemble_ordered_candidate,
 };
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, Txid};
-use bitcoin_rs_script::VerifyFlags;
 use common::{context, insert_with_cost, oracle_sigop_cost, p2pkh, tx, zero_fee_pool};
 
 type TestResult = Result<(), TestError>;

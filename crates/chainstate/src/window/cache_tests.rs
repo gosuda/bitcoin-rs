@@ -4,11 +4,11 @@ use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_chain::regtest_fixture::{
     coinbase, mined_block_with_prev_hash, mined_regtest_child_at as mined_child,
 };
-use bitcoin_rs_consensus::{ScriptExecutionCache, UtxoView, ValidationEngine};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, BlockHash, BlockPayload, Hash256, LockTime, Network, OutPoint, Sequence, Tx, TxIn,
     TxOut, Witness,
 };
+use bitcoin_rs_consensus::{ScriptExecutionCache, UtxoView, ValidationEngine};
 use bitcoin_rs_utxo::UtxoSet;
 
 use crate::Chainstate;

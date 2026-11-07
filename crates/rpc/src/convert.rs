@@ -2,8 +2,8 @@ use alloc::string::{String, ToString};
 
 use bitcoin::Address;
 use bitcoin::hex::DisplayHex;
-use bitcoin_rs_primitives::{CompactTarget, Network, Tx};
-use bitcoin_rs_script::{
+use bitcoin_rs_consensus::primitives::{CompactTarget, Network, Tx};
+use bitcoin_rs_consensus::script::{
     is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_push_only, multisig_key_count,
     witness_program,
 };
@@ -77,7 +77,7 @@ pub(crate) fn signed_sat_to_i64(sats: i128) -> i64 {
 #[must_use]
 pub(crate) fn signed_sat_to_btc(sats: i128) -> f64 {
     let clamped = signed_sat_to_i64(sats);
-    bitcoin_rs_primitives::i64_to_f64(clamped) / 100_000_000.0
+    bitcoin_rs_consensus::primitives::i64_to_f64(clamped) / 100_000_000.0
 }
 
 #[must_use]

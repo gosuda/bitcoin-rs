@@ -36,9 +36,9 @@ pub(crate) fn submitpackage(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         )?;
         for output in &tx.outputs {
             let script = output.script_pubkey.as_bytes();
-            if (script.len() > bitcoin_rs_script::MAX_SCRIPT_SIZE
-                || bitcoin_rs_script::is_op_return(script)
-                || !bitcoin_rs_script::has_valid_ops(script))
+            if (script.len() > bitcoin_rs_consensus::script::MAX_SCRIPT_SIZE
+                || bitcoin_rs_consensus::script::is_op_return(script)
+                || !bitcoin_rs_consensus::script::has_valid_ops(script))
                 && output.value.to_sat() > max_burn
             {
                 return Err(RpcError::TxVerifyError(

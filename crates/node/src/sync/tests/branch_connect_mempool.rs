@@ -5,7 +5,7 @@ use bitcoin_rs_consensus::ValidationEngine;
 #[test]
 fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
 -> Result<(), crate::test_support::TestError> {
-    use bitcoin_rs_primitives::{Amount, Script};
+    use bitcoin_rs_consensus::primitives::{Amount, Script};
     let (handles, main, mut bodies) = matured_chain(101)?;
     let fork_root_hash = main[49].block_hash();
     let mut fork_parent = handles
@@ -103,11 +103,13 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
 fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
 -> Result<(), crate::test_support::TestError> {
     use bitcoin::hashes::{Hash as _, hash160};
+    use bitcoin_rs_consensus::primitives::{
+        Amount, LockTime, Script, Sequence, TxIn, TxOut, Witness,
+    };
     use bitcoin_rs_mempool::{
         AdmissionOrigin, BodyInterest, Mempool, MempoolGateway, MempoolLimits, MempoolObserver,
         MutationEnvelope,
     };
-    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, TxIn, TxOut, Witness};
     use bitcoin_rs_storage::StorageError;
     use bitcoin_rs_storage::block_body::BlockBodyStore;
     use parking_lot::Mutex;
@@ -177,7 +179,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         ]
         .concat(),
     );
-    let redeem_sig = Script::from_bytes(bitcoin_rs_script::push_data(&redeem));
+    let redeem_sig = Script::from_bytes(bitcoin_rs_consensus::script::push_data(&redeem));
 
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
@@ -301,7 +303,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         Arc::new(nonfinal),
         bitcoin_rs_mempool::AdmissionOrigin::Rpc,
         None,
-        bitcoin_rs_primitives::unix_time_secs(),
+        bitcoin_rs_consensus::primitives::unix_time_secs(),
         &view,
     );
     assert!(

@@ -61,7 +61,7 @@ Header inspection succeeding with status 0 does not imply status 0 from
 ## Supported compiled bases and provenance
 
 Network parameters remain the single owner in
-[`crates/primitives/src/network.rs`](../../crates/primitives/src/network.rs).
+[`crates/consensus/src/primitives/network.rs`](../../crates/consensus/src/primitives/network.rs).
 Mainnet bases are 840,000, 880,000, 910,000, 935,000, and 965,000. The first
 four match [Bitcoin Core v31.1](https://github.com/bitcoin/bitcoin/blob/9be056a8a72b624dae9623b2f7bded92c2a21c91/src/kernel/chainparams.cpp),
 and 965,000 comes from

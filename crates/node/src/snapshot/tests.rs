@@ -28,8 +28,8 @@ impl From<SnapshotExportError> for TestError {
 
 #[test]
 fn active_origin_survives_failure_and_validated_provenance_survives_finalization() {
-    let base = bitcoin_rs_primitives::Hash256::from_le_bytes(&[7; 32]);
-    let absent = bitcoin_rs_primitives::Hash256::default();
+    let base = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[7; 32]);
+    let absent = bitcoin_rs_consensus::primitives::Hash256::default();
     let assumed = ChainstateRole::AssumedActive {
         base_height: 200,
         base_hash: base,
@@ -93,22 +93,24 @@ fn node_config(dir: &Path) -> crate::NodeConfig {
     config
 }
 
-fn core_headers() -> Result<Vec<bitcoin_rs_primitives::Header>, TestError> {
+fn core_headers() -> Result<Vec<bitcoin_rs_consensus::primitives::Header>, TestError> {
     let raw: Vec<String> = sonic_rs::from_str(include_str!(
         "../../../utxo/tests/fixtures/core-v2/blocks200.json"
     ))?;
     raw.iter()
         .map(|hex| {
             let block: bitcoin::Block = bitcoin::consensus::encode::deserialize_hex(hex)?;
-            bitcoin_rs_primitives::deserialize(&bitcoin::consensus::serialize(&block.header))
-                .map_err(TestError::from)
+            bitcoin_rs_consensus::primitives::deserialize(&bitcoin::consensus::serialize(
+                &block.header,
+            ))
+            .map_err(TestError::from)
         })
         .collect()
 }
 
 fn snapshot_inputs(dir: &Path) -> Result<(crate::state::NodeState, PathBuf, PathBuf), TestError> {
     let state = crate::state::NodeState::open(node_config(dir), None)?;
-    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         Network::Regtest.genesis_block(),
     ))?;
     state.chainstate().admit_headers(&core_headers()?)?;
@@ -171,8 +173,8 @@ fn native_embedding_contract_and_shared_import_budget() -> Result<(), TestError>
 
 #[test]
 fn successful_snapshot_import_preserves_nonresident_fee_prioritisation() -> Result<(), TestError> {
+    use bitcoin_rs_consensus::primitives::{Hash256, Txid};
     use bitcoin_rs_mempool::PrioritisedTransaction;
-    use bitcoin_rs_primitives::{Hash256, Txid};
 
     for native in [false, true] {
         let dir = tempfile::tempdir()?;
@@ -216,10 +218,10 @@ fn successful_snapshot_import_preserves_nonresident_fee_prioritisation() -> Resu
 
 #[test]
 fn nonempty_mempool_refuses_both_formats_without_changing_state() -> Result<(), TestError> {
-    use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry};
-    use bitcoin_rs_primitives::{
+    use bitcoin_rs_consensus::primitives::{
         Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
     };
+    use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry};
 
     let dir = tempfile::tempdir()?;
     let (state, core_path, native_path) = snapshot_inputs(dir.path())?;
@@ -493,7 +495,7 @@ fn concurrent_export_is_refused_while_the_permit_is_held() -> Result<(), TestErr
     Ok(())
 }
 
-fn regtest_pin() -> Result<&'static bitcoin_rs_primitives::AssumeUtxoData, TestError> {
+fn regtest_pin() -> Result<&'static bitcoin_rs_consensus::primitives::AssumeUtxoData, TestError> {
     Network::Regtest
         .assume_utxo_for_height(200)
         .ok_or(TestError::Missing("regtest height-200 anchor"))
@@ -501,8 +503,8 @@ fn regtest_pin() -> Result<&'static bitcoin_rs_primitives::AssumeUtxoData, TestE
 
 type ValidatingIdentity = (
     u32,
-    bitcoin_rs_primitives::Hash256,
-    bitcoin_rs_primitives::Hash256,
+    bitcoin_rs_consensus::primitives::Hash256,
+    bitcoin_rs_consensus::primitives::Hash256,
     u64,
 );
 
@@ -526,7 +528,9 @@ fn validating_identity(status: &AssumeUtxoDiskStatus) -> Result<ValidatingIdenti
     }
 }
 
-fn tip_identity(state: &crate::state::NodeState) -> Option<(u32, bitcoin_rs_primitives::Hash256)> {
+fn tip_identity(
+    state: &crate::state::NodeState,
+) -> Option<(u32, bitcoin_rs_consensus::primitives::Hash256)> {
     state
         .chainstate()
         .applied_tip_snapshot()

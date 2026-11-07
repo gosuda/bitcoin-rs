@@ -1,7 +1,7 @@
-use bitcoin_rs_primitives::{Hash256, Txid};
+use bitcoin_rs_consensus::primitives::{Hash256, Txid};
 
 #[cfg(test)]
-use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
+use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
 #[cfg(feature = "zmq")]
 use core::fmt;
 #[cfg(feature = "zmq")]
@@ -511,7 +511,7 @@ impl MempoolSequenceObserver {
 
 impl bitcoin_rs_mempool::MempoolObserver for MempoolSequenceObserver {
     fn on_mutation(&self, envelope: &bitcoin_rs_mempool::MutationEnvelope) {
-        use bitcoin_rs_primitives::encode::consensus_bytes;
+        use bitcoin_rs_consensus::primitives::encode::consensus_bytes;
         let result = &envelope.result;
         for (offset, change) in result.changes.iter().enumerate() {
             let Some(sequence) = result.sequence_of(offset) else {

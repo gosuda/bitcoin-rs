@@ -8,6 +8,7 @@ use std::time::Duration;
 use binary_sv2::{Encodable, GetSize, Str0255, U256};
 use bitcoin::secp256k1::{Keypair, Secp256k1};
 use bitcoin_rs_chain::compact_is_met_by;
+use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Network};
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_mining::pool::ledger::{Ledger, MinerId, PayoutPolicy, PoolConfig};
 use bitcoin_rs_mining::pool::stratum::sv2::{
@@ -21,7 +22,6 @@ use bitcoin_rs_mining::{
     Candidate, CandidateContext, CoinbaseBudget, FakeMiningControl, MiningControl,
     assemble_candidate,
 };
-use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
 use bitcoin_rs_rpc::context::PoolOperator as _;
 use bitcoin_rs_storage::KvStore;
 use codec_sv2::{

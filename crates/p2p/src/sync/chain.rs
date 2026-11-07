@@ -6,11 +6,11 @@ pub use bitcoin_rs_chain::HeaderAdmission;
 pub use bitcoin_rs_chainstate::WindowApplyDisposition;
 pub use bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance;
 pub use bitcoin_rs_chainstate::reorg::ReorgError;
-use bitcoin_rs_primitives::Block;
-use bitcoin_rs_primitives::BlockPayload;
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::Header;
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_consensus::primitives::Block;
+use bitcoin_rs_consensus::primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Header;
+use bitcoin_rs_consensus::primitives::Network;
 use parking_lot::RwLockReadGuard;
 use std::sync::Arc;
 

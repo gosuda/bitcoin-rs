@@ -1,10 +1,10 @@
 use alloc::sync::Arc;
 
 use bitcoin_rs_chain::{LatchReader, NodeId, NodeStatus, TipSnapshot};
-use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, arm_admission_park, reset_admission_park};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
 };
+use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, arm_admission_park, reset_admission_park};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 use std::sync::mpsc;
@@ -18,7 +18,9 @@ use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_index::block_log::BlockRecord;
 
 fn fixture_genesis() -> Block {
-    use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
+    use bitcoin_rs_consensus::primitives::{
+        Amount, CompactTarget, LockTime, Script, Sequence, Witness,
+    };
     let coinbase = Tx {
         version: 1,
         lock_time: LockTime::ZERO,
@@ -94,7 +96,7 @@ impl bitcoin_rs_utxo::contract::BlockUndoSource for SpentRows {
         _expected: Hash256,
     ) -> Result<bitcoin_rs_utxo::contract::BlockSpends, bitcoin_rs_utxo::contract::BlockSpendsError>
     {
-        use bitcoin_rs_primitives::{Amount, Script};
+        use bitcoin_rs_consensus::primitives::{Amount, Script};
         let Some(spend) = self.block.txs.get(1) else {
             return Err(bitcoin_rs_utxo::contract::BlockSpendsError::UnknownBlock);
         };
@@ -492,7 +494,7 @@ fn getrawtransaction_explicit_coinbase_preserves_undo_failures_and_render_budget
 
 #[test]
 fn getrawtransaction_detailed_read_omits_unavailable_undo_and_rejects_partial_rows() {
-    use bitcoin_rs_primitives::Amount;
+    use bitcoin_rs_consensus::primitives::Amount;
     use bitcoin_rs_utxo::contract::{
         BlockSpends, BlockSpendsError, BlockUndoSource, HistoryUnavailable,
     };
@@ -778,7 +780,8 @@ fn getrawtransaction_with_blockhash_reports_pruned_body_for_a_header_only_block(
 fn getrawtransaction_with_unknown_blockhash_errors() {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
-    let bogus_hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&[7_u8; 32]).to_string_be();
+    let bogus_hash =
+        bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[7_u8; 32]).to_string_be();
     let result = handler.dispatch(
         "getrawtransaction",
         &json!([
@@ -965,7 +968,7 @@ fn gettxoutproof_without_blockhash_answers_core_message_when_the_transaction_is_
 }
 
 fn many_output_tx(output_count: usize) -> Tx {
-    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
+    use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
     let mut script = vec![0x76, 0xa9, 0x14];
     script.extend_from_slice(&[0x11_u8; 20]);
     script.push(0x88);
@@ -991,7 +994,7 @@ fn many_output_tx(output_count: usize) -> Tx {
 }
 
 fn fund_coin(ctx: &Context, outpoint: OutPoint, value_sat: u64) {
-    use bitcoin_rs_primitives::{Amount, Script};
+    use bitcoin_rs_consensus::primitives::{Amount, Script};
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(
         outpoint,
@@ -1011,7 +1014,7 @@ fn fund_coin(ctx: &Context, outpoint: OutPoint, value_sat: u64) {
 }
 
 fn distinct_block(marker: u8) -> Block {
-    use bitcoin_rs_primitives::Script;
+    use bitcoin_rs_consensus::primitives::Script;
     let mut block = fixture_genesis();
     if let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) {
         input.script_sig = Script::from_bytes(vec![marker; 4]);
@@ -1022,7 +1025,7 @@ fn distinct_block(marker: u8) -> Block {
 }
 
 fn block_with_two_txs(marker: u8) -> Block {
-    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
+    use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
     let mut block = distinct_block(marker);
     let extra = Tx {
         version: 2,
@@ -1710,7 +1713,7 @@ fn retry_spendable_script() -> Vec<u8> {
 }
 
 fn retry_fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
-    use bitcoin_rs_primitives::{Amount, Script};
+    use bitcoin_rs_consensus::primitives::{Amount, Script};
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(
         OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
@@ -1731,7 +1734,7 @@ fn retry_fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
 }
 
 fn retry_tx(prevout: OutPoint, output_value: u64) -> Tx {
-    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
+    use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
     Tx {
         version: 2,
         lock_time: LockTime::ZERO,
@@ -1798,7 +1801,7 @@ fn sendrawtransaction_rebuilds_admission_context_after_transient_rejection() {
                 Arc::new(parent),
                 parent_vsize,
                 10_000,
-                bitcoin_rs_primitives::unix_time_secs(),
+                bitcoin_rs_consensus::primitives::unix_time_secs(),
                 1,
                 0,
             ),
@@ -1851,7 +1854,7 @@ fn verifytxoutproof_refuses_a_header_outside_the_active_chain()
 
     let proof = proof_for(&ctx, &[txid])?;
     let proof_hex = proof.as_str().expect("proof hex string");
-    let bytes = bitcoin_rs_primitives::hex::hex_decode(proof_hex).expect("proof hex");
+    let bytes = bitcoin_rs_consensus::primitives::hex::hex_decode(proof_hex).expect("proof hex");
     let mut merkle_block =
         bitcoin::consensus::encode::deserialize::<bitcoin::merkle_tree::MerkleBlock>(&bytes)
             .expect("proof decodes");

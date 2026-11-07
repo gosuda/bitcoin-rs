@@ -5,11 +5,11 @@ use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_primitives::BlockHash;
-use bitcoin_rs_primitives::CompactTarget;
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::Header;
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_consensus::primitives::BlockHash;
+use bitcoin_rs_consensus::primitives::CompactTarget;
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Header;
+use bitcoin_rs_consensus::primitives::Network;
 
 const BITS: u32 = 0x207f_ffff;
 

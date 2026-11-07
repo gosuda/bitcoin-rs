@@ -2,7 +2,7 @@ use super::*;
 use crate::test_fixtures::{p2sh_true_script, true_redeem_script_sig};
 use crate::{Mempool, MempoolEntry};
 use bitcoin_rs_consensus::ValidationEngine;
-use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, TxIn, Witness};
+use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, TxIn, Witness};
 use parking_lot::{Mutex, RwLock};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,7 +16,7 @@ impl AdmissionChain for Coins {
             locktime_cutoff: 0,
             prevout_meta: HashMap::new(),
             csv_active: false,
-            next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+            next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
             confirmed: false,
         })
     }
@@ -40,10 +40,10 @@ fn gateway() -> Arc<MempoolGateway> {
 
 fn source() -> PeerToken {
     PeerToken {
-        endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+        endpoint: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::Ip(
             core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
         )),
-        addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
+        addr: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::from((
             [127, 0, 0, 1],
             8333,
         ))),
@@ -1116,7 +1116,7 @@ impl AdmissionChain for TipChangesDuringPreparation {
             locktime_cutoff: 0,
             prevout_meta: HashMap::new(),
             csv_active: false,
-            next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+            next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
             confirmed: false,
         })
     }
@@ -1268,7 +1268,7 @@ impl AdmissionChain for ReplaceOrphanDuringSnapshot {
             locktime_cutoff: 0,
             prevout_meta: HashMap::new(),
             csv_active: false,
-            next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+            next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
             confirmed: false,
         })
     }
@@ -1445,7 +1445,7 @@ fn witness_spend() -> (Arc<Tx>, Coins) {
 #[test]
 fn package_prevouts_preserve_sigops_without_mutating_the_pool()
 -> Result<(), crate::test_error::TestError> {
-    use bitcoin_rs_primitives::consensus_bytes;
+    use bitcoin_rs_consensus::primitives::consensus_bytes;
     let gateway = gateway();
     let sequence = gateway.read().sequence_number();
     let p2sh = [vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat();
@@ -2613,7 +2613,7 @@ fn admission_state_accepts_only_the_current_generation() {
         prevouts: vec![],
         prevout_meta: HashMap::new(),
         csv_active: false,
-        next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+        next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
         locktime_cutoff: 0,
         max_feerate_sat_per_kvb: None,
         time: 1,

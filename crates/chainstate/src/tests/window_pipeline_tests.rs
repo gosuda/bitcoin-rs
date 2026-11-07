@@ -9,11 +9,11 @@ use bitcoin_rs_chain::regtest_fixture::{
     mined_regtest_child_at_time as mined_child_at_time,
 };
 use bitcoin_rs_chain::{ChainTxCount, NodeId};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, BlockPayload, Hash256, LockTime, Network, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_script::opcode::OP_PUSHNUM_1;
+use bitcoin_rs_consensus::script::opcode::OP_PUSHNUM_1;
 use bitcoin_rs_storage::{
     CommitRecords, DisconnectMarker, DurableHead, DurableHeadStore, InMemoryDurableHeadStore,
     InMemoryUndoStore, ScriptAttestation, StorageError, UndoStore,

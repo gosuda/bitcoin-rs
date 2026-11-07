@@ -7,7 +7,7 @@ use bitcoin::p2p::ServiceFlags;
 use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin::p2p::message_compact_blocks::{CmpctBlock, GetBlockTxn};
-use bitcoin_rs_primitives::Header;
+use bitcoin_rs_consensus::primitives::Header;
 
 use super::getdata_pause_tests::{
     FAILSAFE, MAGIC, ScriptedChain, Served, TestResult, WriterKind, block, inventory_of,
@@ -147,7 +147,7 @@ fn reply_bound_covers_actual_replies() -> TestResult {
     );
 
     assert_eq!(reply_bound(&Message::GetAddr, false), None);
-    let socket = bitcoin_rs_primitives::PeerEndpoint::from(([1, 2, 3, 4], 8333));
+    let socket = bitcoin_rs_consensus::primitives::PeerEndpoint::from(([1, 2, 3, 4], 8333));
     let addr_v1 = Message::Addr(vec![
         (
             0,
@@ -526,7 +526,7 @@ fn a_bulk_tail_parked_on_the_aggregate_leaves_the_margin_for_control() -> TestRe
     assert_eq!(
         read_messages(&mut served.client, 1)?,
         vec![Message::Block(
-            bitcoin_rs_primitives::BlockPayload::from_local(block_a),
+            bitcoin_rs_consensus::primitives::BlockPayload::from_local(block_a),
         )],
         "the tail is served once the aggregate has room"
     );
@@ -669,7 +669,7 @@ fn conditional_local_retry_defers_then_readies_with_no_reply() -> TestResult {
     assert!(matches!(outcome, crate::compact_blocks::Outcome::Idle));
     let sink = ProductionSink::new(&lease, Some(credit));
     let shared = shared_with(ScriptedChain { blocks: Vec::new() });
-    let addr = bitcoin_rs_primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
+    let addr = bitcoin_rs_consensus::primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
     assert!(super::handle_compact_outcome(outcome, &sink, addr, &shared).is_none());
     assert!(receiver.is_empty());
     assert!(!lease.is_cancelled());

@@ -77,14 +77,14 @@ axiom core.result.Result.ok
   {T : Type _} {E : Type _} : core.result.Result T E → Result (Option T)
 
 /-- [bitcoin_rs_primitives::units::Amount]
-    Source: 'crates/primitives/src/units.rs', lines 4:0-4:17
+    Source: 'crates/consensus/src/primitives/units.rs', lines 4:0-4:17
     Name pattern: [bitcoin_rs_primitives::units::Amount]
     Visibility: public -/
 @[rust_type "bitcoin_rs_primitives::units::Amount"]
 axiom bitcoin_rs_primitives.units.Amount : Type
 
 /-- [bitcoin_rs_primitives::units::{bitcoin_rs_primitives::units::Amount}::MAX_MONEY]
-    Source: 'crates/primitives/src/units.rs', lines 11:4-11:29
+    Source: 'crates/consensus/src/primitives/units.rs', lines 11:4-11:29
     Name pattern: [bitcoin_rs_primitives::units::{bitcoin_rs_primitives::units::Amount}::MAX_MONEY]
     Visibility: public -/
 @[rust_const
@@ -93,7 +93,7 @@ axiom bitcoin_rs_primitives.units.Amount.MAX_MONEY
   : Result bitcoin_rs_primitives.units.Amount
 
 /-- [bitcoin_rs_primitives::units::{bitcoin_rs_primitives::units::Amount}::to_sat]:
-    Source: 'crates/primitives/src/units.rs', lines 19:4-19:36
+    Source: 'crates/consensus/src/primitives/units.rs', lines 19:4-19:36
     Name pattern: [bitcoin_rs_primitives::units::{bitcoin_rs_primitives::units::Amount}::to_sat]
     Visibility: public -/
 @[rust_fun

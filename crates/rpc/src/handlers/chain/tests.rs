@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, Txid};
+use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxIn, Txid};
 
 use super::*;
 use bitcoin_rs_chain::{ChainWork, LatchReader, NodeId, TipSnapshot};
@@ -29,7 +29,7 @@ impl bitcoin_rs_chain::BlockBodySource for SingleBlockSource {
 }
 
 fn context_with_tip(
-    network: bitcoin_rs_primitives::Network,
+    network: bitcoin_rs_consensus::primitives::Network,
     bits: u32,
     times: &[u32],
 ) -> Arc<Context> {
@@ -455,9 +455,9 @@ impl bitcoin_rs_utxo::contract::BlockUndoSource for SpentSource {
             .iter()
             .map(|input| bitcoin_rs_utxo::UtxoCoin {
                 outpoint: input.previous_output,
-                txout: bitcoin_rs_primitives::TxOut {
-                    value: bitcoin_rs_primitives::Amount::from_sat(5_000_000_000),
-                    script_pubkey: bitcoin_rs_primitives::Script::new(),
+                txout: bitcoin_rs_consensus::primitives::TxOut {
+                    value: bitcoin_rs_consensus::primitives::Amount::from_sat(5_000_000_000),
+                    script_pubkey: bitcoin_rs_consensus::primitives::Script::new(),
                 },
                 coinbase: false,
                 height: 0,
@@ -714,7 +714,7 @@ fn gettxoutsetinfo_pairs_one_height_with_one_hash_across_a_swap() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let ctx = context_with_tip(
-        bitcoin_rs_primitives::Network::Regtest,
+        bitcoin_rs_consensus::primitives::Network::Regtest,
         0x207f_ffff,
         &[1_000_000; 6],
     );
@@ -1200,7 +1200,7 @@ fn getblockchaininfo_verificationprogress_follows_the_two_tips() {
 #[test]
 fn getblockchaininfo_names_testnet4_separately_from_testnet3() {
     let mut context = Context::new();
-    context.chain.chain_network = bitcoin_rs_primitives::Network::Testnet4;
+    context.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Testnet4;
     let result = getblockchaininfo(&Arc::new(context), &json!([]))
         .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
 
@@ -1238,7 +1238,7 @@ fn difficulty_matches_core_for_mainnet_and_regtest_targets() {
 #[test]
 fn getblockchaininfo_reports_tip_time_and_median_time_past() {
     let ctx = context_with_tip(
-        bitcoin_rs_primitives::Network::Regtest,
+        bitcoin_rs_consensus::primitives::Network::Regtest,
         0x207f_ffff,
         &[100, 300, 200],
     );
@@ -1268,7 +1268,7 @@ fn getblockchaininfo_uses_one_applied_tip_snapshot() {
     use bitcoin_rs_chain::ChainWork;
 
     let ctx = context_with_tip(
-        bitcoin_rs_primitives::Network::Regtest,
+        bitcoin_rs_consensus::primitives::Network::Regtest,
         0x207f_ffff,
         &[100, 300, 200],
     );

@@ -8,7 +8,7 @@ use super::{
     PreparedApply, ProvenApply, ResolvedUtxoView, WindowApplyDisposition, WindowApplyError,
 };
 use crate::error::ApplyError;
-use bitcoin_rs_primitives::{Block, BlockPayload, Hash256};
+use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256};
 use bitcoin_rs_storage::CommitRecords;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -546,7 +546,7 @@ fn window_commitments_match(
         }
         if context
             .flags
-            .contains(bitcoin_rs_script::VerifyFlags::WITNESS)
+            .contains(bitcoin_rs_consensus::script::VerifyFlags::WITNESS)
             && unit.view.facts().has_witness()
         {
             let commitment_matches = {

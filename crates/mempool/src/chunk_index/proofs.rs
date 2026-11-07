@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{Hash256, Txid};
+use bitcoin_rs_consensus::primitives::{Hash256, Txid};
 
 use super::{ChunkKey, MAX_CHUNK_FEE};
 

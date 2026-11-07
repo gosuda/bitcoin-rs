@@ -1,5 +1,5 @@
 #[cfg(test)]
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 use std::net::IpAddr;
@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::secp256k1::rand::{RngCore, SeedableRng as _};
+use bitcoin_rs_consensus::primitives::{Amount, Txid, Wtxid};
 use bitcoin_rs_mempool::MempoolGateway;
-use bitcoin_rs_primitives::{Amount, Txid, Wtxid};
 use hashbrown::{HashMap, HashSet};
 
 use super::{Identity, TxPolicy};
@@ -396,7 +396,8 @@ impl PeerTable {
         let (floor, minimum) = {
             let pool = gateway.read();
             let minimum = pool.min_relay_fee_sat_per_kvb();
-            let floor = pool.min_fee_sat_per_kvb(bitcoin_rs_primitives::unix_time_secs());
+            let floor =
+                pool.min_fee_sat_per_kvb(bitcoin_rs_consensus::primitives::unix_time_secs());
             (
                 if ibd {
                     Amount::MAX_MONEY.to_sat()

@@ -3,12 +3,12 @@ use crate::support::fixtures as common;
 use crate::support::TestError;
 use std::sync::Arc;
 
-use bitcoin_rs_mempool::{Mempool, MempoolEntry};
-use bitcoin_rs_mining::{CandidateContext, select_template_body_after};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
     Witness,
 };
+use bitcoin_rs_mempool::{Mempool, MempoolEntry};
+use bitcoin_rs_mining::{CandidateContext, select_template_body_after};
 use common::{PAYOUT, context, zero_fee_pool};
 
 const TIME_FLAG: u32 = 1 << 22;

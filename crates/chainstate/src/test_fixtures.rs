@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, TipSnapshot};
-use bitcoin_rs_primitives::{Amount, Hash256, Network, OutPoint, TxOut, Txid};
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, Network, OutPoint, TxOut, Txid};
 use bitcoin_rs_storage::chainstate_journal::Coin;
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
@@ -165,7 +165,7 @@ pub(crate) enum TestError {
     #[error("missing: {0}")]
     Missing(&'static str),
     #[error(transparent)]
-    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error("exhausted: {0}")]
     Exhausted(&'static str),
     #[error("worker panicked: {0}")]

@@ -1,6 +1,6 @@
 use super::*;
 use crate::{Message, PeerError, PeerLease, PeerRole};
-use bitcoin_rs_primitives::USER_AGENT;
+use bitcoin_rs_consensus::primitives::USER_AGENT;
 
 #[derive(Debug, thiserror::Error)]
 enum TestError {

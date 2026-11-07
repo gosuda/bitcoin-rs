@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::unix_time_secs;
+use bitcoin_rs_consensus::primitives::unix_time_secs;
 
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;

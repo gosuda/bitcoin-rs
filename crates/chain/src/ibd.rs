@@ -1,7 +1,7 @@
 use std::sync::atomic::AtomicBool;
 
 use crate::view::{BlockTreeReader, TipReader};
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_consensus::primitives::Network;
 
 const MAX_TIP_AGE_SECONDS: u64 = 24 * 60 * 60;
 
@@ -67,7 +67,7 @@ impl InitialBlockDownload {
 mod initial_block_download_tests {
     use std::sync::Arc;
 
-    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
+    use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Network};
 
     use parking_lot::RwLock;
 

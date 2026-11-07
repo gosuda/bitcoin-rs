@@ -8,7 +8,7 @@ use bitcoin_rs_chain::regtest_fixture::{
 };
 use bitcoin_rs_chainstate::fuzzing::{FuzzChain, FuzzCheckpoint};
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, block_subsidy};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, Hash256, Header, LockTime, Network, OutPoint, Script, Sequence, Tx,
     TxIn, TxOut, Witness,
 };

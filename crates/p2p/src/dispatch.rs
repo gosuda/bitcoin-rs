@@ -4,7 +4,9 @@ use std::sync::Arc;
 use bitcoin::bip152::BlockTransactionsRequest;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
-use bitcoin_rs_primitives::{BlockHash, ConsensusEncode, Hash256, Header, Tx, Txid, Wtxid};
+use bitcoin_rs_consensus::primitives::{
+    BlockHash, ConsensusEncode, Hash256, Header, Tx, Txid, Wtxid,
+};
 
 use crate::fsm::step;
 use crate::handshake::{feature_messages, negotiated_features};
@@ -540,7 +542,7 @@ fn serve_getpkgtxns(
 
 fn fits_one_frame(bodies: &[Arc<Tx>]) -> bool {
     let count = u64::try_from(bodies.len()).unwrap_or(u64::MAX);
-    let mut total = bitcoin_rs_primitives::varint::encoded_len(count);
+    let mut total = bitcoin_rs_consensus::primitives::varint::encoded_len(count);
     for tx in bodies {
         total = total.saturating_add(tx.consensus_size());
         if total > MAX_MESSAGE_PAYLOAD {

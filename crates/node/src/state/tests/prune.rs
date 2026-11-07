@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::test_support::TestError;
-use bitcoin_rs_primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockPayload;
 
 #[test]
 fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> Result<(), TestError> {
@@ -11,7 +11,9 @@ fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> Result
     config.p2p.listen.clear();
     config.storage.prune_target_mb = 0;
     let state = NodeState::open(config, None)?;
-    let payload = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
+    let payload = BlockPayload::from_local(
+        bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
+    );
     let hash = Hash256::from_le_bytes(payload.block().block_hash().as_bytes());
 
     assert!(state.prune_service().is_none());
@@ -39,7 +41,9 @@ fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> Result
 
 #[test]
 fn preserved_bytes_apply_matches_lazy_serialization() -> Result<(), TestError> {
-    let local = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
+    let local = BlockPayload::from_local(
+        bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
+    );
     let hash = Hash256::from_le_bytes(local.block().block_hash().as_bytes());
     let preserved = BlockPayload::from_raw(local.bytes().clone())
         .map_err(|error| TestError::message(format!("genesis bytes are canonical: {error}")))?;
@@ -197,7 +201,7 @@ fn prune_to_height_advances_published_height() -> Result<(), TestError> {
         0,
     )?);
     let block_files = Arc::new(FlatFileBlockStore::open(&data_dir)?);
-    let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&[10_u8; 32]);
+    let hash = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[10_u8; 32]);
     let mut seed = store.new_batch();
     seed.put(
         bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
@@ -240,7 +244,7 @@ fn prune_to_height_advances_published_height() -> Result<(), TestError> {
 #[test]
 fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> Result<(), TestError> {
     use bitcoin_rs_chainstate::AssumeUtxoManager;
-    use bitcoin_rs_primitives::Network;
+    use bitcoin_rs_consensus::primitives::Network;
     use bitcoin_rs_rpc::context::PruneService;
     use bitcoin_rs_storage::FlatFileBlockStore;
     use std::sync::atomic::AtomicU32;

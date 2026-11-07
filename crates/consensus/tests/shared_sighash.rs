@@ -5,15 +5,15 @@ use bitcoin::sighash::{
     Annex, EcdsaSighashType, Prevouts, SighashCache as OracleCache, TapSighashType,
 };
 use bitcoin_rs_consensus::kernel::{BlockParse, verify_tx_scripts};
-use bitcoin_rs_consensus::{
-    BlockView, ConsensusError, ScriptStageTimings, ValidationEngine, verify_block_input_scripts,
-};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, Network, OutPoint, Script, Sequence, Sighash, SighashCache,
     SighashError, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
-use bitcoin_rs_script::{
+use bitcoin_rs_consensus::script::{
     PreparedTransaction, PrevoutError, ScriptErrCode, ScriptError, VerifyFlags, opcode, push_data,
+};
+use bitcoin_rs_consensus::{
+    BlockView, ConsensusError, ScriptStageTimings, ValidationEngine, verify_block_input_scripts,
 };
 use secp256k1::{Keypair, Message, PublicKey, SECP256K1, SecretKey};
 
@@ -576,7 +576,7 @@ fn native_signature_cache_preserves_verdicts() {
         .zip(&prevouts)
         .map(|(input, output)| (input.previous_output, output.clone()))
         .collect();
-    let cache = bitcoin_rs_script::SignatureCache::new();
+    let cache = bitcoin_rs_consensus::script::SignatureCache::new();
     assert_eq!(
         verify_tx_scripts(
             &tx,

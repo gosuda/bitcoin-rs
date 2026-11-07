@@ -94,7 +94,7 @@ Core's script vectors pin zero native mismatches on runnable rows:
 | `tx_valid.json` | 0 | 0 | 121 | none |
 | `tx_invalid.json` | 0 | 9 | 84 | `BADTX` parse-stage rows only |
 
-The counts are constants in [`crates/script/tests/core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/script/tests/core_vectors.rs); the vectors themselves are the pinned Core corpus, so they do not run without it. Kernel builds also run the same catalog through the kernel column and the parity test `kernel_verdict_matches_mandatory_core_catalogs`.
+The counts are constants in [`crates/consensus/tests/script_core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/consensus/tests/script_core_vectors.rs); the vectors themselves are the pinned Core corpus, so they do not run without it. Kernel builds also run the same catalog through the kernel column and the parity test `kernel_verdict_matches_mandatory_core_catalogs`.
 
 The kernel is an oracle, not a second production default. A recorded proxy comparison (signed-spend apply p50) measured native about 9.2 percent slower than the kernel lane, and the recorded verdict kept the native default. Full-mainnet replay is blocked on issue #34 and is not measured here. The signed-spend proxy is engine diagnostics, not a daemon throughput result.
 
@@ -104,9 +104,9 @@ Do not read "zero mismatches" as blanket consensus parity. The claim covers the 
 
 | Invariant | Test | File |
 | --- | --- | --- |
-| Native column of `script_tests.json` passes | `script_tests_native_column` | [`crates/script/tests/core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/script/tests/core_vectors.rs) |
-| Native column of `tx_valid.json` passes | `tx_valid_native_column` | [`crates/script/tests/core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/script/tests/core_vectors.rs) |
-| Native column of `tx_invalid.json` passes | `tx_invalid_native_column` | [`crates/script/tests/core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/script/tests/core_vectors.rs) |
+| Native column of `script_tests.json` passes | `script_tests_native_column` | [`crates/consensus/tests/script_core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/consensus/tests/script_core_vectors.rs) |
+| Native column of `tx_valid.json` passes | `tx_valid_native_column` | [`crates/consensus/tests/script_core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/consensus/tests/script_core_vectors.rs) |
+| Native column of `tx_invalid.json` passes | `tx_invalid_native_column` | [`crates/consensus/tests/script_core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/consensus/tests/script_core_vectors.rs) |
 | An unmatched pin does not skip scripts | `assume_valid_without_matching_pin_does_not_skip_scripts` | [`crates/chainstate/src/tests/assumevalid_trust_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chainstate/src/tests/assumevalid_trust_tests.rs) |
 | A reorg that drops the pin revokes trust | `assume_valid_trust_is_revoked_when_a_reorg_drops_the_pin` | [`crates/chainstate/src/tests/assumevalid_trust_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chainstate/src/tests/assumevalid_trust_tests.rs) |
 | The engine defaults to native across layers | `validation_engine_defaults_to_native_and_layers_field_by_field` | [`crates/node/src/config/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/config/tests.rs) |

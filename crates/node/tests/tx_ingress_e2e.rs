@@ -11,6 +11,10 @@ use crate::support::{p2sh_true_output, p2sh_true_spend_script_sig, parent_txid};
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_blockdata::Inventory;
+use bitcoin_rs_consensus::primitives::{
+    Amount, BlockPayload, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
+    Witness,
+};
 use bitcoin_rs_mempool::MempoolGateway;
 use bitcoin_rs_mining::{
     BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, FakeMiningControl,
@@ -26,10 +30,6 @@ use bitcoin_rs_p2p::wire::{PeerError, read_message, write_message};
 use bitcoin_rs_p2p::{
     DEFAULT_TX_RELAY_QUEUE_CAPACITY, InboundBody, InboundTx, Message, Peer, PeerLease,
     PeerRelaySink, TxRelayQueue, spawn_tx_relay_worker,
-};
-use bitcoin_rs_primitives::{
-    Amount, BlockPayload, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
-    Witness,
 };
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use crossbeam_channel::Sender;
@@ -149,7 +149,7 @@ impl MiningControl for RecordingMining {
 
     fn submit_header(
         &self,
-        _header: bitcoin_rs_primitives::Header,
+        _header: bitcoin_rs_consensus::primitives::Header,
     ) -> Result<(), MiningControlError> {
         Err(MiningControlError::Failed(
             "not implemented".to_owned().into(),
@@ -305,7 +305,7 @@ fn serve_connection(
         1,
         0,
         bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
-        bitcoin_rs_primitives::USER_AGENT,
+        bitcoin_rs_consensus::primitives::USER_AGENT,
         lease,
         deadline,
     )
@@ -395,7 +395,7 @@ fn dial_handshake(dialer: &TcpStream, magic: Magic, wtxid_relay: bool) -> Result
             0,
             PeerRole::FullRelay,
             bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
-            bitcoin_rs_primitives::USER_AGENT,
+            bitcoin_rs_consensus::primitives::USER_AGENT,
         )),
     )?;
     loop {

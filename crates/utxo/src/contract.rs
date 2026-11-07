@@ -1,6 +1,6 @@
 use std::borrow::Borrow;
 
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxOut, Txid};
+use bitcoin_rs_consensus::primitives::{Block, Hash256, OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_storage::{DisconnectPhase, StorageError, UndoStore};
 use hashbrown::HashSet;
 

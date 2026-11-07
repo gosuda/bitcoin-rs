@@ -15,7 +15,7 @@ use crate::NoSpentScripts;
 use crate::ScriptHash;
 use crate::reconcile::ReconcileLeg;
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::pruning::{HistoryLease, HistoryUnavailable};
 use bitcoin_rs_utxo::snapshot::RawSeedError;

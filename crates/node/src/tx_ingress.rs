@@ -2,10 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bitcoin_rs_chain::{BlockTreeReader, TipReader};
+use bitcoin_rs_consensus::primitives::{Hash256, Network, Txid, Wtxid};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolGateway, PeerToken, SubmitError, SubmitOutcome};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_p2p::TxRelayQueue;
-use bitcoin_rs_primitives::{Hash256, Network, Txid, Wtxid};
 use bitcoin_rs_rpc::context::ChainAdmissionView;
 use bitcoin_rs_utxo::UtxoReader;
 use crossbeam_channel::Receiver;
@@ -112,7 +112,7 @@ impl TxIngressConsumer {
         let outcome = self.mempool_gateway.submit_peer_package(
             &txs,
             peer,
-            bitcoin_rs_primitives::unix_time_secs(),
+            bitcoin_rs_consensus::primitives::unix_time_secs(),
             &self.chain_view(),
         );
         drop(txs);
@@ -170,7 +170,7 @@ impl TxIngressConsumer {
             Arc::new(inbound.tx),
             AdmissionOrigin::Peer(source),
             None,
-            bitcoin_rs_primitives::unix_time_secs(),
+            bitcoin_rs_consensus::primitives::unix_time_secs(),
             &self.chain_view(),
         );
         self.peer_table
@@ -183,7 +183,7 @@ impl TxIngressConsumer {
     }
 
     fn process_retries(&self) -> bool {
-        let now = bitcoin_rs_primitives::unix_time_secs();
+        let now = bitcoin_rs_consensus::primitives::unix_time_secs();
         let live_peers = self
             .peer_table
             .live_sessions()

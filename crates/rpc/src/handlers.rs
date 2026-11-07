@@ -2,7 +2,7 @@ use alloc::borrow::Cow;
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
-use bitcoin_rs_primitives::Txid;
+use bitcoin_rs_consensus::primitives::Txid;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value};
 
 use crate::context::Context;

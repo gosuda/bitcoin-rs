@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
-use bitcoin_rs_primitives::Wtxid;
-use bitcoin_rs_script::VerifyFlags;
+use crate::primitives::Wtxid;
+use crate::script::VerifyFlags;
 use parking_lot::Mutex;
 
 /// Maximum live `(wtxid, flag-bits)` entries retained.
@@ -123,7 +123,7 @@ impl core::fmt::Debug for ScriptExecutionCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin_rs_primitives::Hash256;
+    use crate::primitives::Hash256;
 
     fn key(i: usize) -> Wtxid {
         let mut bytes = [0u8; 32];

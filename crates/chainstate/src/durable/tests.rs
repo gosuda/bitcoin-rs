@@ -1,6 +1,6 @@
 use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at as mined_child;
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Network, consensus_bytes};
+use bitcoin_rs_consensus::primitives::{Block, BlockHash, Hash256, Network, consensus_bytes};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::{
     CommitRecords, DurableHead, DurableHeadStore, InMemoryDurableHeadStore, StorageError,
@@ -793,7 +793,7 @@ proptest! {
         chain.durable_head = crash_store;
         chain.block_body_store = Some(Arc::clone(&bodies));
 
-        let payload = bitcoin_rs_primitives::BlockPayload::from_local(child1);
+        let payload = bitcoin_rs_consensus::primitives::BlockPayload::from_local(child1);
         let apply_result = chain.apply_block(&payload);
 
         let prior_head = genesis_head;

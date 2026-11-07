@@ -15,8 +15,8 @@ fn maximum_fee_uses_core_amount_rounding_including_one_satoshi_boundaries() {
         assert_eq!(exceeds_max_feerate(fee, vsize, Some(rate)), rejects);
     }
 }
-use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut};
-use bitcoin_rs_script::{is_multisig, minimal_non_dust, opcode, push_data};
+use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxIn, TxOut};
+use bitcoin_rs_consensus::script::{is_multisig, minimal_non_dust, opcode, push_data};
 
 const DUST_RELAY_FEE_SAT_PER_KVB: u64 = 3_000;
 const BROADCAST_MIN_FEE_SAT_PER_KVB: u64 = 1_000;
@@ -214,7 +214,7 @@ fn accepts_two_nulldata_outputs_within_the_aggregate_limit() {
         .into_iter()
         .fold(0_usize, |total, script| {
             total
-                + bitcoin_rs_primitives::varint::encoded_len(
+                + bitcoin_rs_consensus::primitives::varint::encoded_len(
                     u64::try_from(script.len()).unwrap_or(u64::MAX),
                 )
                 + script.len()
@@ -470,7 +470,9 @@ fn unfunded_dust_tx_answers_missing_inputs_before_ephemeral_dust() {
     let pool = Mempool::new(crate::MempoolLimits::default());
     let mut tx = standard_tx(1);
     tx.inputs[0].previous_output = OutPoint::new(
-        bitcoin_rs_primitives::Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[9; 32])),
+        bitcoin_rs_consensus::primitives::Txid(
+            bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[9; 32]),
+        ),
         0,
     );
     tx.outputs[0].value = Amount::from_sat(1);

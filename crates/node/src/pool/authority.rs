@@ -55,9 +55,9 @@ fn decode_key_into(text: &str, key: &mut [u8; KEY_BYTES]) -> Result<(), Authorit
     }
     let digits = text.as_bytes();
     for (index, destination) in key.iter_mut().enumerate() {
-        let high = bitcoin_rs_primitives::hex::hex_nibble(digits[index * 2])
+        let high = bitcoin_rs_consensus::primitives::hex::hex_nibble(digits[index * 2])
             .ok_or(AuthorityKeyError::InvalidFormat)?;
-        let low = bitcoin_rs_primitives::hex::hex_nibble(digits[index * 2 + 1])
+        let low = bitcoin_rs_consensus::primitives::hex::hex_nibble(digits[index * 2 + 1])
             .ok_or(AuthorityKeyError::InvalidFormat)?;
         *destination = (high << 4) | low;
     }

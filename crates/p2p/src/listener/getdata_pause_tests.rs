@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use std::io::{self, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use bitcoin::bip152::BlockTransactionsRequest;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, Hash256, Header, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid,
     Witness, Wtxid,
 };
@@ -68,8 +68,8 @@ pub(super) struct ScriptedChain {
 impl ChainQuery for ScriptedChain {
     fn stale_tip_announcement(
         &self,
-        _tip: bitcoin_rs_primitives::Hash256,
-        _peer_tips: &[bitcoin_rs_primitives::Hash256],
+        _tip: bitcoin_rs_consensus::primitives::Hash256,
+        _peer_tips: &[bitcoin_rs_consensus::primitives::Hash256],
     ) -> Option<crate::dispatch::StaleTipHeaders> {
         None
     }
@@ -139,7 +139,7 @@ pub(super) fn inventory_of(block: &Block) -> Inventory {
 pub(super) fn scripted(block: &Block) -> ([u8; 32], bytes::Bytes) {
     (
         hash_of(block),
-        bytes::Bytes::from(bitcoin_rs_primitives::consensus_bytes(block)),
+        bytes::Bytes::from(bitcoin_rs_consensus::primitives::consensus_bytes(block)),
     )
 }
 
@@ -476,9 +476,13 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     assert_eq!(
         drained,
         vec![
-            Message::Block(bitcoin_rs_primitives::BlockPayload::from_local(block_a)),
+            Message::Block(bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+                block_a
+            )),
             Message::NotFound(vec![unknown_tx]),
-            Message::Block(bitcoin_rs_primitives::BlockPayload::from_local(block_b)),
+            Message::Block(bitcoin_rs_consensus::primitives::BlockPayload::from_local(
+                block_b
+            )),
             Message::Pong(7),
         ],
         "request order, the miss before the tail, and the waiting ping last"

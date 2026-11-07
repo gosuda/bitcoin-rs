@@ -3,9 +3,9 @@
 #[path = "support/block_facts_fixture.rs"]
 mod fixtures;
 
+use bitcoin_rs_consensus::primitives::layout::ParsedBlock;
+use bitcoin_rs_consensus::primitives::{Block, LockTime, Tx, Witness, consensus_bytes};
 use bitcoin_rs_consensus::{BlockFacts, BlockView};
-use bitcoin_rs_primitives::layout::ParsedBlock;
-use bitcoin_rs_primitives::{Block, LockTime, Tx, Witness, consensus_bytes};
 
 fn facts(block: &Block) -> BlockFacts {
     let bytes = consensus_bytes(block);

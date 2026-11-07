@@ -3,17 +3,17 @@ use bitcoin_rs_node::test_support::TestError;
 type Result<T, E = TestError> = core::result::Result<T, E>;
 use crate::support::{block_on, p2sh_true_output, p2sh_true_spend_script_sig};
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
+use bitcoin_rs_consensus::primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn,
+    TxOut, Txid, Witness, consensus_bytes,
+};
+use bitcoin_rs_consensus::script::push_int;
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_index::query_api::HistoricalQueryError;
 use bitcoin_rs_mempool::MutationOutcome;
 use bitcoin_rs_node::ScriptIndexMode;
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, Node, NodeConfig, NodeError};
-use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn,
-    TxOut, Txid, Witness, consensus_bytes,
-};
-use bitcoin_rs_script::push_int;
 
 const SEED_BLOCKS: u32 = 100;
 const SEED_BASE_TIME: u32 = 1_296_688_603;
@@ -29,7 +29,7 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
 
     let (seed_tip_hash, first_block_hash, first_block_bytes) = {
         let state = NodeState::open(seed_config(&data_dir), None)?;
-        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
             Network::Regtest.genesis_block(),
         ))?;
         let outcome = seed_chain(&state, SEED_BLOCKS)?;
@@ -92,7 +92,7 @@ fn clean_shutdown_and_reopen_preserve_rejected_fee_history() -> Result<()> {
     let data_dir = dir.path().join("node");
     {
         let state = NodeState::open(seed_config(&data_dir), None)?;
-        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
             Network::Regtest.genesis_block(),
         ))?;
         state.publish_checkpoint()?;
@@ -272,7 +272,7 @@ fn embedded_node_historical_prefix_queries() -> Result<()> {
 
     {
         let state = NodeState::open(seed_config(&data_dir), None)?;
-        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
             Network::Regtest.genesis_block(),
         ))?;
         let _ = seed_chain(&state, SEED_BLOCKS)?;
@@ -359,7 +359,7 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<(Hash256, Hash256, Vec<u8
     for height in 1..=count {
         let coinbase = seed_coinbase(height);
         let mut block = Block {
-            header: bitcoin_rs_primitives::Header {
+            header: bitcoin_rs_consensus::primitives::Header {
                 version: 0x2000_0000,
                 prev_blockhash: BlockHash::from(tip.hash),
                 merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
@@ -372,7 +372,7 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<(Hash256, Hash256, Vec<u8
         block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
             .ok_or_else(|| TestError::message("seed block must have a merkle root"))?;
         regtest_fixture::mine_block_to_declared_target(&mut block)?;
-        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
             block.clone(),
         ))?;
         tip = applied
@@ -431,7 +431,7 @@ fn dropped_node_releases_services_and_datadir_for_reopen() -> Result<()> {
 
     let (_seed_tip_hash, _first, _bytes) = {
         let state = NodeState::open(seed_config(&data_dir), None)?;
-        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
             Network::Regtest.genesis_block(),
         ))?;
         let outcome = seed_chain(&state, 1)?;

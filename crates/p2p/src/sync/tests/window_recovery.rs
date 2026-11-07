@@ -112,7 +112,7 @@ fn restore_split_pins_off_by_one() {
 fn mutated_window_moves_the_uncommitted_tail_back_without_copying_decoded_blocks() -> TestResult {
     let fixture = apply_cache_fixture(4, 0)?;
     let mut mutated = fixture.blocks[1].clone();
-    mutated.txs[0].outputs[0].value = bitcoin_rs_primitives::Amount::from_sat(1);
+    mutated.txs[0].outputs[0].value = bitcoin_rs_consensus::primitives::Amount::from_sat(1);
     stage_body(&fixture.sync, &fixture.blocks[0]);
     stage_body(&fixture.sync, &mutated);
 

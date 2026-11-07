@@ -11,7 +11,7 @@ use crate::test_support::TestError;
 
 use bitcoin_rs_chain::{TipSnapshot, regtest_fixture};
 
-use bitcoin_rs_primitives::{Hash256, chain_constants::CORE_REORG_SAFETY_MARGIN};
+use bitcoin_rs_consensus::primitives::{Hash256, chain_constants::CORE_REORG_SAFETY_MARGIN};
 
 use bitcoin_rs_rpc::context::PruneServiceError;
 
@@ -27,7 +27,7 @@ use std::{
 };
 
 use super::*;
-use bitcoin_rs_primitives::LockTime;
+use bitcoin_rs_consensus::primitives::LockTime;
 
 fn applied_chain_tx_count(state: &NodeState) -> bitcoin_rs_chain::ChainTxCount {
     state
@@ -41,7 +41,7 @@ fn applied_chain_tx_count(state: &NodeState) -> bitcoin_rs_chain::ChainTxCount {
 
 use bitcoin_rs_index::IndexCapabilities;
 
-use bitcoin_rs_primitives::BlockHash;
+use bitcoin_rs_consensus::primitives::BlockHash;
 
 fn publish_applied_tip_height(state: &NodeState, height: u32) {
     let mut hash = [0_u8; 32];
@@ -53,7 +53,7 @@ fn publish_applied_tip_height(state: &NodeState, height: u32) {
             tip_id: bitcoin_rs_chain::node::NodeId::new(height),
             height,
             chainwork: bitcoin_rs_chain::node::ChainWork::ZERO,
-            hash: bitcoin_rs_primitives::Hash256::from_le_bytes(&hash),
+            hash: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&hash),
             chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         })));
 }

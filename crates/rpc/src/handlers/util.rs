@@ -8,7 +8,7 @@ use miniscript::ForEachKey as _;
 use miniscript::descriptor::{DescriptorPublicKey, DescriptorSecretKey, KeyMap};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_consensus::primitives::Network;
 use corepc_types::v31;
 
 use bitcoin::hex::DisplayHex as _;
@@ -1664,8 +1664,8 @@ mod tests {
                     hwm: 7,
                 }]
             }
-            fn publish_hashblock(&self, _hash: bitcoin_rs_primitives::Hash256) {}
-            fn publish_hashtx(&self, _txid: bitcoin_rs_primitives::Txid) {}
+            fn publish_hashblock(&self, _hash: bitcoin_rs_consensus::primitives::Hash256) {}
+            fn publish_hashtx(&self, _txid: bitcoin_rs_consensus::primitives::Txid) {}
             fn publish_rawblock(&self, _bytes: &[u8]) {}
             fn publish_rawtx(&self, _bytes: &[u8]) {}
         }

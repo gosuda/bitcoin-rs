@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, Txid};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Tx, Txid};
 use compact_str::CompactString;
 
 use crate::{IndexCapability, ScriptHash};
@@ -6,14 +6,14 @@ use crate::{IndexCapability, ScriptHash};
 pub trait CompactFilterQuery: Send + Sync {
     fn block_filter(
         &self,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<Option<crate::BasicFilter>, TxQueryError>;
     fn for_each_filter(
         &self,
         start: u32,
-        stop: bitcoin_rs_primitives::Hash256,
+        stop: bitcoin_rs_consensus::primitives::Hash256,
         step: u32,
-        emit: &mut dyn FnMut(bitcoin_rs_primitives::Hash256, crate::BasicFilter) -> bool,
+        emit: &mut dyn FnMut(bitcoin_rs_consensus::primitives::Hash256, crate::BasicFilter) -> bool,
     ) -> Result<Option<[u8; 32]>, TxQueryError>;
     fn filter_index_info(&self) -> Result<DerivedIndexInfo, TxQueryError>;
 }

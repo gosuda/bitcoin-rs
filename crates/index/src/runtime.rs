@@ -13,7 +13,7 @@ use crate::{
     writer::TxIndexWriter,
 };
 
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, Txid, deserialize};
+use bitcoin_rs_consensus::primitives::{Block, Hash256, OutPoint, Tx, Txid, deserialize};
 
 use crate::capabilities::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,

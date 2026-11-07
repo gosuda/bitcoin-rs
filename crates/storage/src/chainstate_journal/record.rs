@@ -1,4 +1,6 @@
-use bitcoin_rs_primitives::{ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};
+use bitcoin_rs_consensus::primitives::{
+    ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut,
+};
 use std::io::{self, Write};
 
 use thiserror::Error;
@@ -343,7 +345,7 @@ mod tests {
     use super::{
         Coin, JournalRecord, JournalRecordError, MAGIC, Mutation, decode_record, encode_record,
     };
-    use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut, Txid};
+    use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, Script, TxOut, Txid};
     use proptest::prelude::*;
 
     fn header_bytes(hash: [u8; 32]) -> [u8; 80] {

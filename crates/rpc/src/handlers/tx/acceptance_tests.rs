@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_chain::{BlockHeader, NodeId, NodeStatus, TipSnapshot};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Txid, Witness, consensus_bytes,
 };
@@ -382,7 +382,7 @@ fn standardness_is_enforced_on_mainnet() {
     let mainnet = Arc::new(Context::new());
     assert_eq!(
         mainnet.chain.chain_network,
-        bitcoin_rs_primitives::Network::Mainnet,
+        bitcoin_rs_consensus::primitives::Network::Mainnet,
         "the fixture assumes the default context is mainnet"
     );
     seed_utxo(&mainnet, 1, 100_000);

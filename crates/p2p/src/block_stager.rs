@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bitcoin_rs_primitives::{BlockPayload, Hash256, Header};
+use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256, Header};
 use hashbrown::{HashMap, hash_map::Entry};
 
 use crate::PeerSource;

@@ -2,7 +2,7 @@ use super::error::ApplyError;
 use super::tx_count_delta_for;
 use super::{BlockProvenance, Chainstate, ProvenApply, PublishMode};
 use bitcoin_rs_chain::{ChainTxCount, TipSnapshot};
-use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, OutPoint};
+use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, OutPoint};
 use bitcoin_rs_storage::{CommitRecords, DurableHead};
 use bitcoin_rs_utxo::UtxoCoin;
 use bitcoin_rs_utxo::contract::{
@@ -295,7 +295,7 @@ fn resolve_head_anchor(
                     "a durable head body is missing, so the head chain cannot be authenticated",
                 )
             })?;
-        let block: Block = bitcoin_rs_primitives::deserialize(&bytes)
+        let block: Block = bitcoin_rs_consensus::primitives::deserialize(&bytes)
             .map_err(|_| rewind_refused(handles, head, "a durable head body does not decode"))?;
         if block.block_hash().0 != cursor.1 {
             return Err(rewind_refused(
@@ -389,7 +389,7 @@ fn rewind_one_step(
         .load_block_body(height, hash)
         .map_err(ApplyError::BlockBodyPersistence)?
         .ok_or_else(|| rewind_refused(handles, head, "a rewound block body is missing"))?;
-    let block: Block = bitcoin_rs_primitives::deserialize(&bytes)
+    let block: Block = bitcoin_rs_consensus::primitives::deserialize(&bytes)
         .map_err(|_| rewind_refused(handles, head, "a rewound block body does not decode"))?;
     if block.block_hash().0 != hash {
         return Err(rewind_refused(
@@ -398,10 +398,10 @@ fn rewind_one_step(
             "a rewound block body does not hash to the applied tip",
         ));
     }
-    let txids: Vec<bitcoin_rs_primitives::Txid> = block
+    let txids: Vec<bitcoin_rs_consensus::primitives::Txid> = block
         .txs
         .iter()
-        .map(bitcoin_rs_primitives::Tx::txid)
+        .map(bitcoin_rs_consensus::primitives::Tx::txid)
         .collect();
     if bitcoin_rs_consensus::verify_merkle_root_with_txids(&block, &txids).is_err() {
         return Err(rewind_refused(

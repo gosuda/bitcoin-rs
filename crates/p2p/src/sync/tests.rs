@@ -16,7 +16,7 @@ use bitcoin_rs_chain::{
     BlockTree, ChainWork, HeaderRefusal, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot,
     regtest_fixture,
 };
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, BlockPayload, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
     consensus_bytes,
 };
@@ -1409,7 +1409,7 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
     );
     assert!(rx.try_iter().any(|message| matches!(message, Message::GetData(ref items) if items.contains(&Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array(blocks[0].block_hash().0.to_le_bytes()))))));
     let mut corrupt = blocks[0].clone();
-    corrupt.txs[0].outputs[0].value = bitcoin_rs_primitives::Amount::from_sat(1);
+    corrupt.txs[0].outputs[0].value = bitcoin_rs_consensus::primitives::Amount::from_sat(1);
     for block in [corrupt, blocks[2].clone()] {
         let mut inbound = crate::InboundBlock::from_local(block);
         inbound.source = Some(source);
@@ -1788,7 +1788,7 @@ fn witness_block_inventory(inventory: Vec<Inventory>) -> Result<Vec<BlockHash>, 
 }
 
 fn nbits_mismatch_header(prev_blockhash: BlockHash, height: u32) -> Header {
-    use bitcoin_rs_primitives::CompactTarget;
+    use bitcoin_rs_consensus::primitives::CompactTarget;
     let mut header = regtest_fixture::mined_regtest_header(prev_blockhash, height)
         .or_fail("regtest fixture header");
     header.bits = CompactTarget::from_consensus(0x207f_fffe);
@@ -1878,7 +1878,7 @@ fn header_sync_with_refusing_chain() -> Result<HeaderSyncFixture, TestError> {
 }
 
 fn transaction(seed: u8) -> Tx {
-    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
+    use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
     Tx {
         version: 2,
         inputs: vec![TxIn {
@@ -2348,7 +2348,7 @@ fn binding_and_operational_failures_do_not_disconnect() -> TestResult {
 
 #[test]
 fn telemetry_ibd_bit_agrees_with_the_shared_latch() -> TestResult {
-    let now = bitcoin_rs_primitives::unix_time_secs();
+    let now = bitcoin_rs_consensus::primitives::unix_time_secs();
 
     let syncing = SyncHarness::new(BlockTree::new());
 

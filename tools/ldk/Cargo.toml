@@ -11,7 +11,7 @@ description = "Experimental public-Node L1 adapter for a pinned LDK consumer"
 
 [dependencies]
 bitcoin-rs-node = { path = "../../crates/node", default-features = false }
-bitcoin-rs-primitives = { path = "../../crates/primitives" }
+bitcoin-rs-consensus = { path = "../../crates/consensus", default-features = false }
 bitcoin = { version = ">=0.32.9, <0.33", default-features = false, features = ["std"] }
 lightning = { version = "=0.2.7", default-features = false, features = ["std"] }
 lightning-block-sync = { version = "=0.2.0", default-features = false }

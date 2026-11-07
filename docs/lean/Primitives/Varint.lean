@@ -1,5 +1,5 @@
 /-
-Canonical CompactSize encoding, mirroring `crates/primitives/src/varint.rs`.
+Canonical CompactSize encoding, mirroring `crates/consensus/src/primitives/varint.rs`.
 -/
 
 namespace Primitives.Varint

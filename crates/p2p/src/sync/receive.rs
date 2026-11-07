@@ -11,9 +11,9 @@ use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::Header;
-use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Header;
+use bitcoin_rs_consensus::primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use smallvec::SmallVec;
 use std::time::Instant;
 use std::vec::Vec;
@@ -461,7 +461,7 @@ impl BlockSync {
                         %hash, %error, ?source,
                         serialized_bytes = payload.bytes().len(),
                         transactions = payload.block().txs.len(),
-                        coinbase_witness_items = witness.map_or(0, bitcoin_rs_primitives::Witness::len),
+                        coinbase_witness_items = witness.map_or(0, bitcoin_rs_consensus::primitives::Witness::len),
                         coinbase_witness_first_bytes = witness.and_then(|stack| stack.first()).map_or(0, <[u8]>::len),
                         "block sync: body/header binding failed; rejecting delivery"
                     );

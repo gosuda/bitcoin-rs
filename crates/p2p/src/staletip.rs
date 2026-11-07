@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, varint};
+use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Header, varint};
 
 pub const STALETIP_COMMAND: &str = "staletip";
 

@@ -1,8 +1,8 @@
-use bitcoin_rs_primitives::PeerAddress;
+use bitcoin_rs_consensus::primitives::PeerAddress;
 use std::collections::VecDeque;
 use std::net::IpAddr;
 
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use std::time::{Duration, Instant, SystemTime};
 
 use hashbrown::{HashMap, HashSet};
@@ -113,7 +113,7 @@ pub(crate) fn is_local(address: impl Into<PeerAddress>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin_rs_primitives::PeerEndpoint;
+    use bitcoin_rs_consensus::primitives::PeerEndpoint;
 
     #[derive(Debug, thiserror::Error)]
     enum TestError {

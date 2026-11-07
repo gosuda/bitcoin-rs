@@ -4,12 +4,12 @@ use std::time::Duration;
 
 #[cfg(test)]
 use crate::PeerLease;
+use bitcoin_rs_consensus::primitives::{Txid, Wtxid};
 #[cfg(test)]
 use bitcoin_rs_mempool::BodyInterest;
 use bitcoin_rs_mempool::{
     AdmissionOrigin, MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome,
 };
-use bitcoin_rs_primitives::{Txid, Wtxid};
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 
 pub const DEFAULT_TX_RELAY_QUEUE_CAPACITY: usize = 1024;
@@ -148,7 +148,7 @@ pub struct PeerRelaySink {
     peers: Arc<crate::PeerTable>,
     ibd: Option<(
         Arc<bitcoin_rs_chain::InitialBlockDownload>,
-        bitcoin_rs_primitives::Network,
+        bitcoin_rs_consensus::primitives::Network,
     )>,
 }
 
@@ -162,7 +162,7 @@ impl PeerRelaySink {
     pub fn with_ibd(
         mut self,
         ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
-        network: bitcoin_rs_primitives::Network,
+        network: bitcoin_rs_consensus::primitives::Network,
     ) -> Self {
         self.ibd = Some((ibd, network));
         self

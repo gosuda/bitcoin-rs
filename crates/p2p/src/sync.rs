@@ -15,7 +15,7 @@ mod telemetry;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::NodeId;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 use crossbeam_channel::Receiver;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
@@ -365,7 +365,7 @@ impl BlockSync {
     pub(crate) fn compact_reconstruction_admissible(
         &self,
         source: PeerSource,
-        header: &bitcoin_rs_primitives::Header,
+        header: &bitcoin_rs_consensus::primitives::Header,
     ) -> bool {
         let hash = Hash256::from(header.compute_hash());
         let network = self.chain.network();

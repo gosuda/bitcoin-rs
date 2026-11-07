@@ -7,12 +7,12 @@ use bitcoin::Wtxid as OracleWtxid;
 use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::bip34::check_bip34;
+use bitcoin_rs_consensus::primitives::{
+    Amount, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits};
 use bitcoin_rs_mining::{
     CandidateContext, MiningError, TemplateId, WITNESS_RESERVED_VALUE, assemble_candidate,
-};
-use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 use common::{PAYOUT, insert, witnessed_tx, zero_fee_pool};
 
@@ -286,7 +286,7 @@ fn reconsidered_sigop_fixture() -> Result<(Arc<MempoolGateway>, Tx, Tx), TestErr
         version: 2,
         inputs: vec![TxIn {
             previous_output: funding,
-            script_sig: Script::from_bytes(bitcoin_rs_script::push_data(&redeem)),
+            script_sig: Script::from_bytes(bitcoin_rs_consensus::script::push_data(&redeem)),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],

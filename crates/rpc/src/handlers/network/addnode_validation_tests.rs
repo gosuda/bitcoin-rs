@@ -520,7 +520,7 @@ fn disconnectnode_nodeid_addresses_an_anonymous_inbound_session()
         send_headers: false,
         addr: bitcoin_rs_p2p::PeerRemote::AnonymousTor(anon.connection_id()),
         endpoint: None,
-        network: bitcoin_rs_primitives::NetworkLabel::Onion,
+        network: bitcoin_rs_consensus::primitives::NetworkLabel::Onion,
         version: 70_016,
         services: 0,
         user_agent: "anon".to_owned(),

@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -930,7 +930,7 @@ impl PeerLease {
     pub(crate) fn admit_block_forward(
         &self,
         source: PeerSource,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
         requested: bool,
     ) -> Option<BlockForwardCredit> {
         if requested {

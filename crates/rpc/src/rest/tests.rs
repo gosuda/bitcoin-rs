@@ -1,7 +1,7 @@
 use super::*;
 use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
+use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxIn};
 use bitcoin_rs_index::block_log::BlockRecord;
-use bitcoin_rs_primitives::{OutPoint, Tx, TxIn};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait};
 
 fn publish_active_chain(ctx: &Context, headers: &[Header]) -> Vec<Hash256> {
@@ -1016,7 +1016,7 @@ fn getutxos_keeps_captured_tip_after_publication() {
 
 #[test]
 fn deploymentinfo_keeps_captured_tip_after_publication() {
-    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
     let ctx = Arc::new(Context::new());
     publish_active_chain(&ctx, &[genesis.header]);
     let applied_height = ctx

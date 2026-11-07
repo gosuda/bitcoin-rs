@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use std::collections::VecDeque;
 use std::io;
 #[cfg(test)]
@@ -71,7 +71,7 @@ pub struct P2pServiceConfig {
     pub outbound_full_relay_slots: usize,
     pub local_services: ServiceFlags,
     /// The subversion advertised in the version handshake and reported by
-    /// `getnetworkinfo`; defaults to [`bitcoin_rs_primitives::USER_AGENT`]
+    /// `getnetworkinfo`; defaults to [`bitcoin_rs_consensus::primitives::USER_AGENT`]
     /// and carries the composed `-uacomment` comments when configured.
     pub user_agent: String,
     pub v2_transport: bool,
@@ -101,7 +101,7 @@ impl Default for P2pServiceConfig {
             outbound_queue_limit: DEFAULT_OUTBOUND_QUEUE_LIMIT,
             inbound_block_queue_limit: DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT,
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
-            user_agent: bitcoin_rs_primitives::USER_AGENT.to_owned(),
+            user_agent: bitcoin_rs_consensus::primitives::USER_AGENT.to_owned(),
             v2_transport: false,
             relay_offers: crate::RelayOffers::default(),
             overlay: crate::overlay::OverlayConfig::default(),

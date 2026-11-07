@@ -5,8 +5,10 @@ use std::time::Duration;
 
 use bitcoin::p2p::ServiceFlags;
 use bitcoin::p2p::address::{AddrV2, AddrV2Message};
-use bitcoin_rs_primitives::endpoint::{base32_decode, tor_v3_key_from_payload, tor_v3_payload};
-use bitcoin_rs_primitives::{EndpointHost, NetworkLabel, PeerEndpoint};
+use bitcoin_rs_consensus::primitives::endpoint::{
+    base32_decode, tor_v3_key_from_payload, tor_v3_payload,
+};
+use bitcoin_rs_consensus::primitives::{EndpointHost, NetworkLabel, PeerEndpoint};
 use sha2::{Digest, Sha256};
 
 use crate::sam::SamSession;
@@ -369,7 +371,7 @@ pub fn connect_peer_stream(
             };
             let host = format!(
                 "{}.onion",
-                bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&key))
+                bitcoin_rs_consensus::primitives::endpoint::base32_encode(&tor_v3_payload(&key))
             );
             debug_assert_eq!(host.len(), 62);
             socks_connect_isolated(proxy, &SocksTarget::Domain(host, port), timeout)

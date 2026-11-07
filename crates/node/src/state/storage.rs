@@ -1,6 +1,6 @@
 use crate::NodeConfig;
 use bitcoin_rs_chain::BlockBodySource;
-use bitcoin_rs_primitives::BlockBodyMetadata;
+use bitcoin_rs_consensus::primitives::BlockBodyMetadata;
 use bitcoin_rs_rpc::context::{PruneResult, PruneService, PruneServiceError, PruneStatus};
 use bitcoin_rs_storage::DurableHeadStore as _;
 use bitcoin_rs_storage::FlatFileBlockStore;
@@ -144,7 +144,7 @@ impl NodeStorage {
         bitcoin_rs_storage::pruning::HistoryAccess::new(
             Arc::clone(&self.retention),
             bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(
-                bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
+                bitcoin_rs_consensus::primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
             ),
         )
     }
@@ -239,7 +239,7 @@ impl BlockBodySource for StoredBlockBodySource {
     fn block_body(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::BlockHash,
+        hash: bitcoin_rs_consensus::primitives::BlockHash,
     ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
         self.store
             .load_block_body_for_verification(height, hash.0)
@@ -258,7 +258,7 @@ impl BlockBodySource for StoredBlockBodySource {
     fn block_body_range(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::BlockHash,
+        hash: bitcoin_rs_consensus::primitives::BlockHash,
         offset: u32,
         len: u32,
     ) -> Option<Vec<u8>> {
@@ -283,7 +283,7 @@ impl BlockBodySource for StoredBlockBodySource {
     fn block_body_metadata(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::BlockHash,
+        hash: bitcoin_rs_consensus::primitives::BlockHash,
     ) -> Option<BlockBodyMetadata> {
         self.store
             .block_body_metadata(height, hash.0)
@@ -410,7 +410,7 @@ impl bitcoin_rs_index::RollbackWarningSource for RecoveryReporter {
 #[cfg(test)]
 mod body_read_tests {
     use super::*;
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_consensus::primitives::Hash256;
     use bitcoin_rs_storage::block_body::BlockBodyStore;
 
     struct UnreadableStore;

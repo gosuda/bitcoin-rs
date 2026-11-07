@@ -5,15 +5,15 @@ use std::sync::Arc;
 use bitcoin_rs_chain::regtest_fixture::{
     merkle_root, mine_block_to_declared_target, mined_regtest_child_at as mined_child,
 };
-use bitcoin_rs_consensus::{ConsensusError, ValidationEngine};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, BlockPayload, LockTime, Network, OutPoint, Sequence, Tx, TxIn, TxOut,
     Witness,
 };
-use bitcoin_rs_script::{
+use bitcoin_rs_consensus::script::{
     VerifyFlags,
     opcode::{OP_PUSHNUM_1, OP_RETURN},
 };
+use bitcoin_rs_consensus::{ConsensusError, ValidationEngine};
 use bitcoin_rs_utxo::UtxoSet;
 
 use super::{ApplyError, AssumeValidGate, BlockProvenance, Chainstate, ValidationMode};
@@ -108,7 +108,7 @@ fn assert_rejected_unchanged(
     chain: &Chainstate,
     result: &Result<crate::ConnectOutcome, ApplyError>,
     funding: &OutPoint,
-    tip_before: bitcoin_rs_primitives::Hash256,
+    tip_before: bitcoin_rs_consensus::primitives::Hash256,
 ) -> TestResult {
     assert!(
         matches!(

@@ -781,7 +781,7 @@ mod tests {
 
     use parking_lot::Mutex;
 
-    use bitcoin_rs_primitives::{Block, BlockHash, BlockPayload, Network};
+    use bitcoin_rs_consensus::primitives::{Block, BlockHash, BlockPayload, Network};
     use bitcoin_rs_utxo::UtxoSet;
     use proptest::prelude::*;
     use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
@@ -1288,7 +1288,7 @@ mod tests {
         let Some(output) = coinbase.outputs.first_mut() else {
             return broken;
         };
-        output.value = bitcoin_rs_primitives::Amount::from_sat(1);
+        output.value = bitcoin_rs_consensus::primitives::Amount::from_sat(1);
         broken
     }
 

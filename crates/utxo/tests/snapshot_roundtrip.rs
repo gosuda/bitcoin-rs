@@ -1,7 +1,7 @@
 use std::io::{Cursor, Seek};
 
 use crate::support::{TestError, TestResult};
-use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut};
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, Script, TxOut};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_utxo::{
     SnapshotCoin, SnapshotCoinObserver, UtxoError, UtxoSet, read_snapshot_strict_v4,

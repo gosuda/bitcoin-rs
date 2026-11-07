@@ -83,7 +83,7 @@ fn inbound_blocks_channel_is_bounded_against_flood() -> Result<(), TestError> {
     config.p2p.listen.clear();
     let state = NodeState::open(config, None)?;
     let tx = state.inbound_blocks_sender();
-    let block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    let block = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
     for _ in 0..super::INBOUND_BLOCK_CHANNEL_LIMIT {
         tx.try_send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
             .unwrap_or_else(|e| panic!("send within the bound must succeed: {e}"));
@@ -107,7 +107,7 @@ fn inbound_tx_channel_is_bounded_against_flood() -> Result<(), TestError> {
     let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
     let lease = bitcoin_rs_p2p::PeerLease::new(lease_tx);
     let source = lease.source_ip(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
-    let tx = bitcoin_rs_primitives::Tx {
+    let tx = bitcoin_rs_consensus::primitives::Tx {
         version: 1,
         inputs: Vec::new(),
         outputs: Vec::new(),

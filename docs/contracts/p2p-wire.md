@@ -128,7 +128,7 @@ Queue accounting:
 - Version reply sends offered sendpackages once pre-verack.
 - BIP434 windows preserve BIP332 and BIP331 on v1 and v2.
 - Local and loopback proofs apply, not live Core evidence.
-- Proof: `crates/primitives/src/version.rs` (`sub_version_composes_comments_in_cores_shape`, `ua_comment_safety_matches_cores_bip14_subset`) for the BIP-0014 formatter; `crates/node/src/config/tests.rs` (`ua_comments_are_validated_and_resolved_in_cores_shape`) for startup validation and resolution into the advertised subversion; `crates/p2p/src/listener.rs` handshake regressions (`ordinary_handshake_still_requires_services_and_verack`, `rejected_ordinary_version_updates_services_without_good`) drive `run_outbound_handshake`, which writes the version frame from the configured `shared.user_agent` through `handshake::version_message`.
+- Proof: `crates/consensus/src/primitives/version.rs` (`sub_version_composes_comments_in_cores_shape`, `ua_comment_safety_matches_cores_bip14_subset`) for the BIP-0014 formatter; `crates/node/src/config/tests.rs` (`ua_comments_are_validated_and_resolved_in_cores_shape`) for startup validation and resolution into the advertised subversion; `crates/p2p/src/listener.rs` handshake regressions (`ordinary_handshake_still_requires_services_and_verack`, `rejected_ordinary_version_updates_services_without_good`) drive `run_outbound_handshake`, which writes the version frame from the configured `shared.user_agent` through `handshake::version_message`.
 
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 

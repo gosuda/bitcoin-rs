@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use bitcoin::hex::DisplayHex;
 use bitcoin_rs_chain::{TipSnapshot, softfork_state};
+use bitcoin_rs_consensus::primitives::{
+    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxOut, Txid, deserialize,
+};
+use bitcoin_rs_consensus::script::{instructions, is_p2sh, is_p2wsh};
 use bitcoin_rs_consensus::{BlockRuleContext, check_block_body_binding};
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
-use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxOut, Txid, deserialize,
-};
-use bitcoin_rs_script::{instructions, is_p2sh, is_p2wsh};
 
 use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
 use crate::convert::{self};
@@ -439,7 +439,7 @@ impl<'a> Projection<'a> {
         &self,
         text_hash: &str,
     ) -> Result<bitcoin_rs_index::block_log::BlockRecord, Response> {
-        let hash = bitcoin_rs_primitives::Hash256::from_str(text_hash)
+        let hash = bitcoin_rs_consensus::primitives::Hash256::from_str(text_hash)
             .map_err(|_| bad_request("block hash must be 64 hex characters"))?;
         self.ctx.chain.block_by_hash(hash).ok_or_else(not_found)
     }
@@ -718,7 +718,7 @@ const fn esplora_type_name(shape: convert::ScriptShape) -> &'static str {
 }
 
 fn inner_scripts(
-    input: &bitcoin_rs_primitives::TxIn,
+    input: &bitcoin_rs_consensus::primitives::TxIn,
     prevout: Option<&TxOut>,
 ) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
     let redeem = prevout
@@ -726,8 +726,8 @@ fn inner_scripts(
         .and_then(|_| instructions(&input.script_sig).last())
         .and_then(Result::ok)
         .and_then(|instruction| match instruction {
-            bitcoin_rs_script::Instruction::PushBytes(bytes) => Some(bytes.to_vec()),
-            bitcoin_rs_script::Instruction::Op(_) => None,
+            bitcoin_rs_consensus::script::Instruction::PushBytes(bytes) => Some(bytes.to_vec()),
+            bitcoin_rs_consensus::script::Instruction::Op(_) => None,
         });
     let is_witness_script = prevout.is_some_and(|output| is_p2wsh(&output.script_pubkey))
         || redeem.as_deref().is_some_and(is_p2wsh);
@@ -742,7 +742,7 @@ fn inner_scripts(
 mod tests {
     use super::*;
     use crate::convert::fixtures;
-    use bitcoin_rs_primitives::Amount;
+    use bitcoin_rs_consensus::primitives::Amount;
 
     #[test]
     fn esplora_type_name_matches_dialect_for_every_shape() {

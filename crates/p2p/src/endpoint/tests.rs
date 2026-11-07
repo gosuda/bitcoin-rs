@@ -1,5 +1,5 @@
 use super::*;
-use bitcoin_rs_primitives::endpoint::tor_v3_payload;
+use bitcoin_rs_consensus::primitives::endpoint::tor_v3_payload;
 use std::net::{IpAddr, Ipv4Addr};
 
 #[derive(Debug, thiserror::Error)]
@@ -30,7 +30,9 @@ fn parse_format_round_trips() -> Result<(), TestError> {
             tor_endpoint(),
             format!(
                 "{}.onion:8333",
-                bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
+                bitcoin_rs_consensus::primitives::endpoint::base32_encode(&tor_v3_payload(
+                    &[3u8; 32]
+                ))
             ),
         ),
         (
@@ -53,7 +55,7 @@ fn parse_rejects_bad_tor_checksum_and_payload() {
     payload[32] ^= 1;
     let bad = format!(
         "{}.onion:8333",
-        bitcoin_rs_primitives::endpoint::base32_encode(&payload)
+        bitcoin_rs_consensus::primitives::endpoint::base32_encode(&payload)
     );
     assert_eq!(parse_endpoint(&bad), None);
     assert_eq!(parse_endpoint("abc.onion:8333"), None);
@@ -108,40 +110,40 @@ fn classification_matrix_invalid_overlay_cases() {
     bad_payload[32] ^= 1;
     let bad_checksum_onion = format!(
         "{}.onion:8333",
-        bitcoin_rs_primitives::endpoint::base32_encode(&bad_payload)
+        bitcoin_rs_consensus::primitives::endpoint::base32_encode(&bad_payload)
     );
 
     let wrong_len_i2p_51 = format!("{}.b32.i2p:8333", "a".repeat(51));
     let wrong_len_i2p_53 = format!("{}.b32.i2p:8333", "a".repeat(53));
     let missing_port_onion = format!(
         "{}.onion",
-        bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
+        bitcoin_rs_consensus::primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
     );
     let missing_port_i2p = format!("{}.b32.i2p", "a".repeat(52));
     let malformed_port_onion = format!(
         "{}.onion:notaport",
-        bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
+        bitcoin_rs_consensus::primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
     );
     let zero_port_onion = good_tor.replace("8333", "0");
     let overflow_port_onion = format!(
         "{}.onion:99999",
-        bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
+        bitcoin_rs_consensus::primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
     );
 
     let uppercase_onion = good_tor.to_uppercase();
     let mixedcase_onion = format!(
         "{}.ONION:8333",
-        bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
+        bitcoin_rs_consensus::primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
     );
     let uppercase_i2p = good_i2p.to_uppercase();
     let mixedcase_i2p = format!("{}.B32.I2P:8333", "a".repeat(52));
     let trailing_dot_onion = format!(
         "{}.onion.:8333",
-        bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
+        bitcoin_rs_consensus::primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
     );
     let trailing_dot_no_port = format!(
         "{}.onion.",
-        bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
+        bitcoin_rs_consensus::primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
     );
     let trailing_dot_i2p = format!("{}.b32.i2p.:8333", "a".repeat(52));
     let trailing_dot_i2p_no_port = format!("{}.b32.i2p.", "a".repeat(52));

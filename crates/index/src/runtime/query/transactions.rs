@@ -4,7 +4,7 @@ use super::{
     TxQueryError, TxUnavailableCause, Txid, deserialize,
 };
 use crate::types::positions_are_valid;
-use bitcoin_rs_primitives::BlockHash;
+use bitcoin_rs_consensus::primitives::BlockHash;
 
 impl DerivedIndexQueryEngine {
     pub(super) fn resolve_hash_at_height(

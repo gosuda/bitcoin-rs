@@ -4,7 +4,7 @@ use bitcoin_rs_chain::regtest_fixture::{
     coinbase, merkle_root, mine_block_to_declared_target, mined_block_with_prev_hash,
     mined_regtest_child_at as mined_child, mined_regtest_child_at_time,
 };
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockPayload, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Witness,
 };
@@ -67,7 +67,7 @@ fn chain_to(height: u32) -> TestResult<Fixture> {
     chain.history = HistoryAccess::new(
         Arc::clone(&retention),
         RetentionBudget::from_blocks(
-            bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
+            bitcoin_rs_consensus::primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
         ),
     );
     seed_genesis(&chain)?;

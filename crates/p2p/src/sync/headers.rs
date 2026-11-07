@@ -26,8 +26,8 @@ use crate::peer_info::PeerInfo;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
 use bitcoin_rs_chain::{ChainError, NodeId, NodeStatus, validate_pow};
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::Header;
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Header;
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -514,7 +514,7 @@ impl BlockSync {
 
     fn known_batch_outcome(
         &self,
-        headers: &[bitcoin_rs_primitives::Header],
+        headers: &[bitcoin_rs_consensus::primitives::Header],
     ) -> Option<(Hash256, Option<i32>)> {
         let tree = self.chain.block_tree();
         let last_hash = Hash256::from(headers.last()?.compute_hash());

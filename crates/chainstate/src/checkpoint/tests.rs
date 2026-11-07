@@ -6,7 +6,7 @@ use std::path::Path;
 
 use bitcoin_rs_chain::regtest_fixture::mined_regtest_header;
 use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot, accept_headers, compact_is_met_by};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, BlockHash, CompactTarget, Hash256, Header, Network, OutPoint, Script, TxOut, Txid,
     deserialize,
 };

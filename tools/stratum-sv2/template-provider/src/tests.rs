@@ -3,7 +3,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin_rs_mining::{
     BlockValidationResult, CoinbaseBudget, GenerateRequest, GenerateSelection, solve_block,
 };
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, BlockPayload, Hash256, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
     consensus_bytes,
 };
@@ -138,7 +138,7 @@ pub(super) fn empty_candidate(parent: u8) -> Arc<Candidate> {
                 previous_block_hash: Hash256::from_le_bytes(&[parent; 32]),
                 height: 1,
                 version: 0x20000000,
-                bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x207fffff),
+                bits: bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x207fffff),
                 min_time: 1,
                 current_time: 1,
                 locktime_cutoff: 1,
@@ -318,7 +318,7 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
     .await??;
     let tx = Tx {
         version: 2,
-        lock_time: bitcoin_rs_primitives::LockTime::ZERO,
+        lock_time: bitcoin_rs_consensus::primitives::LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(funding.txid(), 0),
             script_sig: Script::new(),

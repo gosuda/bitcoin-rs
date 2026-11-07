@@ -224,7 +224,7 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> Result<(), Test
     config.indexes.txindex = false;
     config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
     let state = NodeState::open(config, None)?;
-    let _ = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    let _ = state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         crate::Network::Regtest.genesis_block(),
     ))?;
     assert!(
@@ -241,7 +241,7 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> Result<(), Test
     config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
     let mut state = NodeState::open(config, None)?;
     state.start_index_workers()?;
-    let _ = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    let _ = state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         crate::Network::Regtest.genesis_block(),
     ))?;
     let Some(query) = state.script_index_query() else {
@@ -279,7 +279,7 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> Result<(), Test
     config.indexes.script_index = crate::config::ScriptIndexMode::Full;
     let mut state = NodeState::open(config, None)?;
     state.start_index_workers()?;
-    let _ = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    let _ = state.apply_block(&bitcoin_rs_consensus::primitives::BlockPayload::from_local(
         crate::Network::Regtest.genesis_block(),
     ))?;
     let Some(query) = state.script_index_query() else {

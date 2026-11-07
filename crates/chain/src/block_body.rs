@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{BlockBodyMetadata, BlockHash};
+use bitcoin_rs_consensus::primitives::{BlockBodyMetadata, BlockHash};
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum BlockBodyReadError {

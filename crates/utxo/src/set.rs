@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::{borrow::Borrow, io, time::Instant};
 
-use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, TxOut, Txid};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use rayon::prelude::*;
 use smallvec::SmallVec;
@@ -843,7 +843,7 @@ fn active_shards(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin_rs_primitives::Amount;
+    use bitcoin_rs_consensus::primitives::Amount;
 
     #[test]
     fn memory_report_accounts_payload_plus_table_bytes() -> Result<(), UtxoError> {

@@ -11,7 +11,7 @@ use super::{
 use crate::feature::{FEATURE_VERSION, FeatureAnnouncement, FeatureId};
 use crate::packages::{PKG_RELAY_ANC, PKG_RELAY_PKGTXNS, SendPackages};
 use crate::wire::{PROTOCOL_VERSION, read_message, write_message};
-use bitcoin_rs_primitives::USER_AGENT;
+use bitcoin_rs_consensus::primitives::USER_AGENT;
 
 struct ScriptedStream {
     inbound: Cursor<Vec<u8>>,

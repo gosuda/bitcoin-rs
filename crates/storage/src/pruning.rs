@@ -1,5 +1,5 @@
 use alloc::sync::Arc;
-use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
+use bitcoin_rs_consensus::primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use core::mem::size_of;
 
 mod block_pruner;

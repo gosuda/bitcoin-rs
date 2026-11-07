@@ -124,14 +124,14 @@ mod tests {
 
         fn submit_block(
             &self,
-            _payload: bitcoin_rs_primitives::BlockPayload,
+            _payload: bitcoin_rs_consensus::primitives::BlockPayload,
         ) -> Result<crate::control::BlockValidationResult, MiningControlError> {
             Err(unavailable())
         }
 
         fn submit_header(
             &self,
-            _header: bitcoin_rs_primitives::Header,
+            _header: bitcoin_rs_consensus::primitives::Header,
         ) -> Result<(), MiningControlError> {
             Err(unavailable())
         }

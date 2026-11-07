@@ -1,9 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/primitives",
     "crates/consensus",
-    "crates/script",
     "crates/storage",
     "crates/utxo",
     "crates/chain",
@@ -42,9 +40,7 @@ authors      = ["metaphorics"]
 
 # Internal crates — `version` must match `[workspace.package].version` (gate g15).
 # Cargo cannot inherit `version` into `[workspace.dependencies]`; bump both together.
-bitcoin-rs-primitives = { path = "crates/primitives", version = "0.15.0" }
 bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.15.0", default-features = false }
-bitcoin-rs-script     = { path = "crates/script",     version = "0.15.0", default-features = false }
 bitcoin-rs-storage    = { path = "crates/storage",    version = "0.15.0", default-features = false }
 bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.15.0", default-features = false }
 bitcoin-rs-chain      = { path = "crates/chain",      version = "0.15.0", default-features = false }

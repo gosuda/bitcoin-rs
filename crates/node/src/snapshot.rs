@@ -11,7 +11,7 @@ use bitcoin_rs_chainstate::{
     ApplyError, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, Chainstate,
     ChainstateRole,
 };
-use bitcoin_rs_primitives::{Hash256, Network};
+use bitcoin_rs_consensus::primitives::{Hash256, Network};
 use bitcoin_rs_rpc::context::{
     ChainstateInfo, ChainstatesInfo, SnapshotControlError, SnapshotExport, SnapshotImport,
 };
@@ -565,7 +565,7 @@ impl SnapshotControl {
         let _ = self.manager.take_pending_activation_witness();
     }
 
-    fn offer_activation_seed(&self, base_hash: bitcoin_rs_primitives::Hash256) {
+    fn offer_activation_seed(&self, base_hash: bitcoin_rs_consensus::primitives::Hash256) {
         let Some(witness) = self.manager.take_pending_activation_witness() else {
             return;
         };
@@ -581,7 +581,7 @@ impl SnapshotControl {
         seed_offer: Option<&SeedOfferCell>,
         data_dir: &Path,
         witness: &V4Witness,
-        base_hash: bitcoin_rs_primitives::Hash256,
+        base_hash: bitcoin_rs_consensus::primitives::Hash256,
     ) {
         let Some(cell) = seed_offer else {
             return;
@@ -635,7 +635,7 @@ impl SnapshotControl {
         }
         let active = summary.active_chainstate;
         let snapshot_blockhash = active_snapshot_base(active.role, &summary.status)
-            .map(bitcoin_rs_primitives::Hash256::to_string_be);
+            .map(bitcoin_rs_consensus::primitives::Hash256::to_string_be);
         chainstates.push(ChainstateInfo {
             blocks: active.height.unwrap_or(0),
             bestblockhash: active
@@ -660,7 +660,7 @@ fn micros(elapsed: Duration) -> u64 {
 fn active_snapshot_base(
     role: ChainstateRole,
     status: &AssumeUtxoDiskStatus,
-) -> Option<bitcoin_rs_primitives::Hash256> {
+) -> Option<bitcoin_rs_consensus::primitives::Hash256> {
     match role {
         ChainstateRole::AssumedActive { base_hash, .. } => Some(base_hash),
         ChainstateRole::Ordinary => match status {

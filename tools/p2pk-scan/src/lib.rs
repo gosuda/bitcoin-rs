@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 use std::io::{self, BufRead, Read};
 
-use bitcoin_rs_primitives::hex::{HexError, hex_decode, hex_encode};
-use bitcoin_rs_primitives::layout::ParsedBlock;
-use bitcoin_rs_primitives::{Block, BlockHash, OutPoint, Tx, TxOut, Txid};
+use bitcoin_rs_consensus::primitives::hex::{HexError, hex_decode, hex_encode};
+use bitcoin_rs_consensus::primitives::layout::ParsedBlock;
+use bitcoin_rs_consensus::primitives::{Block, BlockHash, OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_utxo::UtxoError;
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
@@ -59,7 +59,7 @@ pub enum ScanError {
     Decode {
         line: u64,
         #[source]
-        source: bitcoin_rs_primitives::DecodeError,
+        source: bitcoin_rs_consensus::primitives::DecodeError,
     },
     #[error("line {line}: UTXO apply failed: {source}")]
     Apply {
@@ -87,7 +87,7 @@ enum ApplyFailure {
 
 #[must_use]
 pub fn p2pk_pubkey(script: &[u8]) -> Option<(&[u8], KeyShape)> {
-    if !bitcoin_rs_script::is_p2pk(script) {
+    if !bitcoin_rs_consensus::script::is_p2pk(script) {
         return None;
     }
     let key = script.get(1..script.len().checked_sub(1)?)?;
@@ -165,8 +165,8 @@ fn apply_block(set: &UtxoSet, block: &Block, height: u32) -> Result<(), ApplyFai
                 continue;
             }
             let script = txout.script_pubkey.as_bytes();
-            if bitcoin_rs_script::is_op_return(script)
-                || script.len() > bitcoin_rs_script::MAX_SCRIPT_SIZE
+            if bitcoin_rs_consensus::script::is_op_return(script)
+                || script.len() > bitcoin_rs_consensus::script::MAX_SCRIPT_SIZE
             {
                 continue;
             }

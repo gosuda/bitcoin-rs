@@ -18,8 +18,8 @@ use super::{
 use crate::error::ApplyError;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::node::NodeId;
+use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Txid, consensus_bytes};
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, UtxoView};
-use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, Txid, consensus_bytes};
 use bitcoin_rs_storage::{CommitRecords, ScriptAttestation};
 use bitcoin_rs_utxo::contract::{
     BlockChangeError, BlockChangeInputs, BlockChanges, BlockValueTotals, UndoBatch, UndoRecord,
@@ -436,7 +436,7 @@ fn build_block_changes_checked<'b>(
     request: &ChangeRequest<'_, 'b>,
 ) -> core::result::Result<
     (
-        BlockChanges<&'b bitcoin_rs_primitives::TxOut>,
+        BlockChanges<&'b bitcoin_rs_consensus::primitives::TxOut>,
         UndoBatch,
         BlockValueTotals,
     ),
@@ -507,7 +507,7 @@ struct BlockOutcomeInputs<'a, 'b> {
     height: u32,
     txids: Vec<Txid>,
     resolved: Arc<ResolvedUtxoView>,
-    flags: bitcoin_rs_script::VerifyFlags,
+    flags: bitcoin_rs_consensus::script::VerifyFlags,
     undo: &'b UndoBatch,
     total_started: quanta::Instant,
 }
@@ -522,7 +522,7 @@ struct PersistedPayload {
 
 fn persist_payload(
     input: &BlockOutcomeInputs<'_, '_>,
-    changes: &BlockChanges<&bitcoin_rs_primitives::TxOut>,
+    changes: &BlockChanges<&bitcoin_rs_consensus::primitives::TxOut>,
     timings: &mut ApplyTimings,
 ) -> core::result::Result<PersistedPayload, ApplyError> {
     let undo_persist_started = quanta::Instant::now();
@@ -671,7 +671,7 @@ struct Publication<'a, 'p, 'b> {
     outcome: ConnectOutcome,
     publication: PublishMode<'p>,
     undo: UndoBatch,
-    changes: BlockChanges<&'b bitcoin_rs_primitives::TxOut>,
+    changes: BlockChanges<&'b bitcoin_rs_consensus::primitives::TxOut>,
     undo_record: UndoRecord,
     attestation: Option<ScriptAttestation>,
     prev_hash: Hash256,
@@ -839,7 +839,7 @@ struct CommitRequest<'a, 'p, 'b> {
     prev_hash: Hash256,
     height: u32,
     intent: ApplyIntent,
-    flags: bitcoin_rs_script::VerifyFlags,
+    flags: bitcoin_rs_consensus::script::VerifyFlags,
     txids: Vec<Txid>,
     resolved: Arc<ResolvedUtxoView>,
     tx_plan: BlockTxPlan,
@@ -1031,7 +1031,7 @@ fn emit_block_connected(
     height: u32,
     txids: &[Txid],
     resolved: &Arc<ResolvedUtxoView>,
-    flags: bitcoin_rs_script::VerifyFlags,
+    flags: bitcoin_rs_consensus::script::VerifyFlags,
     elapsed: std::time::Duration,
 ) {
     bitcoin_rs_consensus::trace::block_connected(move || {
@@ -1074,7 +1074,7 @@ fn check_block_sigops(
     txids: &[Txid],
     resolved: Arc<ResolvedUtxoView>,
     height: u32,
-    flags: bitcoin_rs_script::VerifyFlags,
+    flags: bitcoin_rs_consensus::script::VerifyFlags,
 ) -> Result<(), ApplyError> {
     let mut view = BlockLocalUtxoView::new(resolved, &block.txs, height, 0);
     let mut cost = 0_u32;
@@ -1181,7 +1181,7 @@ fn check_bip68_sequence_locks(
         }
         for tx_input in &tx.inputs {
             let sequence = tx_input.sequence;
-            if sequence & bitcoin_rs_primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
+            if sequence & bitcoin_rs_consensus::primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
                 continue;
             }
             let Some(entry) = view.lookup_meta(&tx_input.previous_output) else {
@@ -1351,8 +1351,8 @@ fn validate_contextual_block_header(
 
 fn applied_predecessor(
     handles: &Chainstate,
-    block_hash: bitcoin_rs_primitives::Hash256,
-    prev_hash: bitcoin_rs_primitives::Hash256,
+    block_hash: bitcoin_rs_consensus::primitives::Hash256,
+    prev_hash: bitcoin_rs_consensus::primitives::Hash256,
 ) -> core::result::Result<(Option<Arc<TipSnapshot>>, u32), ApplyError> {
     let prior = handles.applied_tip.load_full();
     let height = if let Some(tip) = prior.as_deref() {
@@ -1452,7 +1452,7 @@ fn build_journal_record(
     block_hash: Hash256,
     prev_hash: Hash256,
     undo: &bitcoin_rs_utxo::contract::UndoBatch,
-    changes: &bitcoin_rs_utxo::contract::BlockChanges<&'_ bitcoin_rs_primitives::TxOut>,
+    changes: &bitcoin_rs_utxo::contract::BlockChanges<&'_ bitcoin_rs_consensus::primitives::TxOut>,
     coin_stats_height_delta: i64,
 ) -> BuiltJournalRecord {
     if height == 0 {
@@ -1469,7 +1469,7 @@ fn build_journal_record(
             });
     let block_tx_count = tx_count_delta_for(block);
     let mut raw_header = [0u8; 80];
-    let encoded = bitcoin_rs_primitives::consensus_bytes(&block.header);
+    let encoded = bitcoin_rs_consensus::primitives::consensus_bytes(&block.header);
     debug_assert_eq!(encoded.len(), 80, "header consensus encoding is 80 bytes");
     raw_header.copy_from_slice(&encoded);
     Some(

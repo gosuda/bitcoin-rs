@@ -462,7 +462,8 @@ impl NodeState {
                 listen_addrs: config.p2p.listen.clone(),
                 address_book_path: Some(config.data_dir.join("peers.dat")),
                 asmap_path: config.p2p.asmap.clone(),
-                allow_local_addresses: config.network == bitcoin_rs_primitives::Network::Regtest,
+                allow_local_addresses: config.network
+                    == bitcoin_rs_consensus::primitives::Network::Regtest,
                 magic: bitcoin::p2p::Magic::from_bytes(config.p2p.magic),
                 dns_seeds_enabled: config.p2p.dns_seeds_enabled,
                 dns_seeds: config
@@ -478,7 +479,7 @@ impl NodeState {
                 outbound_block_relay_slots: P2P_OUTBOUND_BLOCK_RELAY_SLOTS,
                 outbound_queue_limit: outbound_full_relay_slots,
                 inbound_block_queue_limit: INBOUND_BLOCK_CHANNEL_LIMIT,
-                user_agent: bitcoin_rs_primitives::sub_version(&config.p2p.ua_comments),
+                user_agent: bitcoin_rs_consensus::primitives::sub_version(&config.p2p.ua_comments),
                 local_services: {
                     let history = if config.storage.prune_target_mb > 0 {
                         bitcoin::p2p::ServiceFlags::WITNESS
@@ -515,7 +516,10 @@ impl NodeState {
         let staged_network = config.network;
         chainstate
             .set_tip_staged(Arc::new(move |tip, block| {
-                if !staged_ibd.is_active(bitcoin_rs_primitives::unix_time_secs(), staged_network) {
+                if !staged_ibd.is_active(
+                    bitcoin_rs_consensus::primitives::unix_time_secs(),
+                    staged_network,
+                ) {
                     staged_mining.stage_tip(tip, block);
                 }
             }))

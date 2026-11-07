@@ -7,7 +7,7 @@ pub enum IndexError {
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
     #[error("invalid serialized block: {0:?}")]
-    BlockParse(bitcoin_rs_primitives::DecodeError),
+    BlockParse(bitcoin_rs_consensus::primitives::DecodeError),
     #[error("a watermark anchor cannot cover ScriptLive or an empty capability set")]
     AnchorUnsupportedSelection,
     #[error("invalid block header length {len}")]

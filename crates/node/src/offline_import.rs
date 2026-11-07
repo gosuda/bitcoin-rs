@@ -213,22 +213,22 @@ pub enum OfflineImportError {
     #[error("block at height {height} does not decode: {decode_error}")]
     BlockDecode {
         height: u32,
-        decode_error: bitcoin_rs_primitives::DecodeError,
+        decode_error: bitcoin_rs_consensus::primitives::DecodeError,
     },
     #[error("connect at block {hash} failed: {connect_error}")]
     ConnectFailed {
-        hash: bitcoin_rs_primitives::BlockHash,
+        hash: bitcoin_rs_consensus::primitives::BlockHash,
         connect_error: Box<crate::ConnectMutationError>,
     },
     #[error("journal backpressure relief checkpoint failed at block {hash}")]
     BackpressureCheckpointFailed {
-        hash: bitcoin_rs_primitives::BlockHash,
+        hash: bitcoin_rs_consensus::primitives::BlockHash,
         #[source]
         source: Box<bitcoin_rs_chainstate::CheckpointError>,
     },
     #[error("journal backpressure relief checkpoint skipped at block {hash}: no applied tip")]
     BackpressureCheckpointSkipped {
-        hash: bitcoin_rs_primitives::BlockHash,
+        hash: bitcoin_rs_consensus::primitives::BlockHash,
     },
     #[error("cannot check archive trailing bytes: {io_error}")]
     TrailingBytesCheck { io_error: std::io::Error },
@@ -493,7 +493,7 @@ fn import_corpus_archive(
     let mut stream = open_corpus(task.corpus)?;
     let mut hasher = sha2::Sha256::new();
     let mut total: u64 = 0;
-    let mut payloads: Vec<bitcoin_rs_primitives::BlockPayload> = Vec::new();
+    let mut payloads: Vec<bitcoin_rs_consensus::primitives::BlockPayload> = Vec::new();
     for (index, entry) in task.manifest.blocks.iter().enumerate() {
         let record = read_record(&mut stream, task.expected_magic, entry)?;
         check_payload_against_entry(entry, &record.payload)?;
@@ -503,8 +503,9 @@ fn import_corpus_archive(
         if index < task.skip {
             continue;
         }
-        let payload = bitcoin_rs_primitives::BlockPayload::from_raw(Bytes::from(record.payload))
-            .map_err(|decode_error| OfflineImportError::BlockDecode {
+        let payload =
+            bitcoin_rs_consensus::primitives::BlockPayload::from_raw(Bytes::from(record.payload))
+                .map_err(|decode_error| OfflineImportError::BlockDecode {
                 height: entry.height,
                 decode_error,
             })?;
@@ -540,7 +541,7 @@ fn import_corpus_archive(
     if total != task.manifest.archive_bytes {
         return Err(OfflineImportError::ArchiveSizeMismatch);
     }
-    let digest = bitcoin_rs_primitives::hex::hex_encode(&hasher.finalize());
+    let digest = bitcoin_rs_consensus::primitives::hex::hex_encode(&hasher.finalize());
     if digest != task.manifest.archive_sha256.to_ascii_lowercase() {
         return Err(OfflineImportError::ArchiveDigestMismatch);
     }
@@ -619,7 +620,7 @@ fn read_record(
 
 fn connect_batch(
     node: &crate::state::NodeState,
-    batch: &mut Vec<bitcoin_rs_primitives::BlockPayload>,
+    batch: &mut Vec<bitcoin_rs_consensus::primitives::BlockPayload>,
 ) -> Result<(), OfflineImportError> {
     let chainstate = node.chainstate();
     let followers = node.chain_followers();
@@ -880,7 +881,7 @@ fn check_payload_against_entry(
         .ok_or(OfflineImportError::PayloadShorterThanHeader {
             height: entry.height,
         })?;
-    let hash = bitcoin_rs_primitives::encode::double_sha256(header);
+    let hash = bitcoin_rs_consensus::primitives::encode::double_sha256(header);
     if !hash.to_string().eq_ignore_ascii_case(&entry.hash) {
         return Err(OfflineImportError::BlockHeaderHashDiverged {
             height: entry.height,
@@ -905,7 +906,7 @@ fn namespace_has_content(path: &Path) -> bool {
 }
 
 fn parse_magic_hex(text: &str) -> Result<[u8; 4], OfflineImportError> {
-    bitcoin_rs_primitives::hex::hex_decode_array(text)
+    bitcoin_rs_consensus::primitives::hex::hex_decode_array(text)
         .map_err(|_| OfflineImportError::ManifestMagicHex)
 }
 

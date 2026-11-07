@@ -7,12 +7,12 @@ use std::time::Duration;
 
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_chain::{NodeStatus, regtest_fixture::merkle_root};
-use bitcoin_rs_index::ScriptHash;
-use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, MempoolObserver, MutationEnvelope};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
+use bitcoin_rs_index::ScriptHash;
+use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, MempoolObserver, MutationEnvelope};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
@@ -432,7 +432,7 @@ fn contract_fixture() -> Result<(Handler, Tx, Block, String), TestError> {
     let record = bitcoin_rs_index::block_log::BlockRecord::from_block(0, &block);
     let txid = transaction.txid();
     let mut context = Context::new();
-    context.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
+    context.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Regtest;
     context.chain.block_body_source = Some(Arc::new(BlockBodies {
         bodies: vec![(0, record.hash, consensus_bytes(&block))],
     }));
@@ -962,7 +962,7 @@ fn composed_response_retries_when_the_applied_tip_identity_changes() {
 #[test]
 fn block_status_and_block_list_never_straddle_two_applied_branches() -> Result<(), TestError> {
     use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
-    use bitcoin_rs_primitives::Header;
+    use bitcoin_rs_consensus::primitives::Header;
 
     let header = |prev: BlockHash, nonce: u32, time: u32| Header {
         version: 1,
@@ -995,7 +995,7 @@ fn block_status_and_block_list_never_straddle_two_applied_branches() -> Result<(
     );
 
     let mut context = Context::new();
-    context.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
+    context.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Regtest;
     let (a_tip, b_tip) = {
         let mut tree = context.chain.block_tree.write();
         let genesis_id = tree.insert_node(None, genesis_header, NodeStatus::Active)?;
@@ -1385,7 +1385,7 @@ fn history_cursors_follow_api_09_on_both_esplora_surfaces() -> Result<(), TestEr
         .to_byte_array()
         .to_lower_hex_string();
     let mut unavailable = Context::new();
-    unavailable.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
+    unavailable.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Regtest;
     let unavailable = Handler::new(Arc::new(unavailable));
     for prefix in ["/api", "/esplora"] {
         for target in [
@@ -2338,7 +2338,7 @@ fn block_page_reuses_parent_outside_the_selected_page() {
 
 #[test]
 fn block_transactions_reject_corrupt_witness_commitments() {
-    use bitcoin_rs_primitives::encode::double_sha256;
+    use bitcoin_rs_consensus::primitives::encode::double_sha256;
     let parent = paying_transaction(&[OutPoint::null()], &[(125, vec![0x51])]);
     let mut child = paying_transaction(&[OutPoint::new(parent.txid(), 0)], &[(100, vec![0x52])]);
     child.inputs[0].witness = vec![vec![0x42]].into();
@@ -2360,7 +2360,7 @@ fn block_transactions_reject_corrupt_witness_commitments() {
     block.header.merkle_root = merkle_root(&block.txs).expect("merkle root");
     let record = bitcoin_rs_index::block_log::BlockRecord::from_block(0, &block);
     let mut ctx = Context::new();
-    ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
+    ctx.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Regtest;
     ctx.chain.add_block(record.clone());
     let tip = {
         let mut tree = ctx.chain.block_tree.write();
@@ -2414,8 +2414,8 @@ fn block_witness_binding_observes_activation() {
         bodies: vec![(0, record.hash, consensus_bytes(&block))],
     }));
     for (network, expected) in [
-        (bitcoin_rs_primitives::Network::Mainnet, true),
-        (bitcoin_rs_primitives::Network::Regtest, false),
+        (bitcoin_rs_consensus::primitives::Network::Mainnet, true),
+        (bitcoin_rs_consensus::primitives::Network::Regtest, false),
     ] {
         ctx.chain.chain_network = network;
         let projection = Projection::new(&ctx);

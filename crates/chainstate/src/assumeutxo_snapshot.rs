@@ -9,7 +9,9 @@ use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _, OpenOpt
 use cap_std::fs::Dir;
 
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, TipSnapshot};
-use bitcoin_rs_primitives::{AssumeUtxoData, DecodeError, Network, consensus_bytes, deserialize};
+use bitcoin_rs_consensus::primitives::{
+    AssumeUtxoData, DecodeError, Network, consensus_bytes, deserialize,
+};
 use bitcoin_rs_storage::checkpoint::fs::{create_file, open_data_dir, sync_dir};
 use bitcoin_rs_utxo::core_snapshot::VerifiedSnapshotState;
 use bitcoin_rs_utxo::snapshot::{SeedProvenance, VerifiedSnapshotArtifact};
@@ -59,7 +61,7 @@ pub enum SnapshotArchiveError {
 
 fn archive_directory(
     data_dir: &Path,
-    base: bitcoin_rs_primitives::Hash256,
+    base: bitcoin_rs_consensus::primitives::Hash256,
 ) -> Result<Dir, SnapshotArchiveError> {
     fn child(parent: &Dir, name: &str) -> std::io::Result<Dir> {
         if let Err(error) = parent.create_dir(name)

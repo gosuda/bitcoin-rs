@@ -689,7 +689,7 @@ mod tests {
         ReadPrefix {
             anchor_id: NodeId::new(0),
             height: u32::MAX,
-            hash: bitcoin_rs_primitives::Hash256::from_le_bytes(&[0; 32]),
+            hash: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[0; 32]),
             floor: 0,
             bound: super::super::PrefixBound::ExactTip,
         }
@@ -805,9 +805,9 @@ mod tests {
             &prefix(),
             &mut QueryBudget::new(),
             script,
-            Some(Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(
-                &[200; 32],
-            ))),
+            Some(Txid(
+                bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[200; 32]),
+            )),
             25,
         )
         .unwrap_or_else(|error| panic!("cursor restart failed: {error}"));
@@ -842,7 +842,9 @@ mod tests {
         assert_eq!(page.records.len(), 1, "only the exact script is served");
         assert_eq!(
             page.records[0].txid,
-            Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[1; 32]))
+            Txid(bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
+                &[1; 32]
+            ))
         );
     }
 
@@ -866,7 +868,9 @@ mod tests {
         assert_eq!(page.records[0].height, 20);
         assert_eq!(
             page.records[0].txid,
-            Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[9; 32]))
+            Txid(bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
+                &[9; 32]
+            ))
         );
     }
 
@@ -884,7 +888,9 @@ mod tests {
             &prefix(),
             &mut QueryBudget::new(),
             script,
-            &Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[9; 32])),
+            &Txid(bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
+                &[9; 32],
+            )),
         )
         .unwrap_or_else(|error| panic!("cursor resolution failed: {error}"));
         assert_eq!(
@@ -986,7 +992,7 @@ mod tests {
                 }
                 seen.push(occurrence.txid);
                 listed.push(ScriptHistoryRecord {
-                    txid: Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(
+                    txid: Txid(bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
                         &occurrence.txid,
                     )),
                     height: *height,
@@ -1067,7 +1073,9 @@ mod tests {
         assert_eq!(
             seen.first(),
             Some(&ScriptHistoryRecord {
-                txid: Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[9; 32])),
+                txid: Txid(bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
+                    &[9; 32]
+                )),
                 height: 20,
             }),
             "the first page starts at the newest occurrence"
@@ -1097,7 +1105,9 @@ mod tests {
         );
         assert_eq!(
             page.records[0].txid,
-            Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[10; 32]))
+            Txid(bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
+                &[10; 32]
+            ))
         );
     }
 }

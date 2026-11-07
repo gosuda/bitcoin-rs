@@ -10,8 +10,8 @@ use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
 use bitcoin_rs_chain::{
     BlockBodySource, BlockTree, BlockTreeReader, ChainWork, NodeStatus, TipReader,
 };
-use bitcoin_rs_primitives::layout::{ParsedBlock, ParsedTransaction};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::layout::{ParsedBlock, ParsedTransaction};
+use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, Hash256, Header, Network, consensus_bytes, deserialize,
 };
 use parking_lot::Mutex;

@@ -14,7 +14,7 @@ use crate::download_window::statically_fanout_eligible;
 use crate::download_window::{peer_can_serve_height, servable_floor, serves_requested_height};
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 use smallvec::SmallVec;
 use std::sync::Arc;
 use std::time::Duration;
@@ -495,7 +495,7 @@ mod tests {
     use crate::connection::PeerSource;
     use crate::download_window::DownloadWindow;
     use crate::download_window::RefusalFilter;
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_consensus::primitives::Hash256;
     use std::net::IpAddr;
     use std::net::Ipv4Addr;
     use std::net::SocketAddr;
@@ -508,10 +508,13 @@ mod tests {
 
     fn test_chain() -> (
         bitcoin_rs_chain::BlockTree,
-        Vec<(bitcoin_rs_chain::NodeId, bitcoin_rs_primitives::Header)>,
+        Vec<(
+            bitcoin_rs_chain::NodeId,
+            bitcoin_rs_consensus::primitives::Header,
+        )>,
     ) {
-        use bitcoin_rs_primitives::Header;
-        let genesis = bitcoin_rs_primitives::Network::Regtest
+        use bitcoin_rs_consensus::primitives::Header;
+        let genesis = bitcoin_rs_consensus::primitives::Network::Regtest
             .genesis_block()
             .header;
         let headers: Vec<Header> = std::iter::successors(Some(genesis), |prev| {
@@ -520,7 +523,7 @@ mod tests {
             merkle[..4].copy_from_slice(&height.to_le_bytes());
             Some(Header {
                 prev_blockhash: prev.compute_hash(),
-                merkle_root: bitcoin_rs_primitives::Hash256::from_le_bytes(&merkle),
+                merkle_root: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&merkle),
                 time: prev.time.saturating_add(1),
                 ..*prev
             })
@@ -542,9 +545,13 @@ mod tests {
 
     fn scheduler_with_owner_pending(
         owner: PeerSource,
-    ) -> (super::super::SchedulerState, bitcoin_rs_primitives::Hash256) {
+    ) -> (
+        super::super::SchedulerState,
+        bitcoin_rs_consensus::primitives::Hash256,
+    ) {
         use bitcoin_rs_chain::{ChainTxCount, ChainWork, TipSnapshot};
-        let budget = crate::sync::default_sync_budget(bitcoin_rs_primitives::Network::Regtest);
+        let budget =
+            crate::sync::default_sync_budget(bitcoin_rs_consensus::primitives::Network::Regtest);
         let mut window = DownloadWindow::new(budget);
         let mut stager = crate::BlockStager::new(budget);
         let (tree, nodes) = test_chain();
@@ -555,9 +562,9 @@ mod tests {
             chain_tx_count: ChainTxCount::UNKNOWN,
             height: 10,
             chainwork: ChainWork::from(11_u64),
-            hash: bitcoin_rs_primitives::Hash256::from(tip_header.compute_hash()),
+            hash: bitcoin_rs_consensus::primitives::Hash256::from(tip_header.compute_hash()),
         };
-        let never_refused = |_: bitcoin_rs_primitives::Hash256| false;
+        let never_refused = |_: bitcoin_rs_consensus::primitives::Hash256| false;
         let mut refusals = RefusalFilter::new(&never_refused);
         let request = window
             .next_peer_request(
@@ -602,7 +609,7 @@ mod tests {
         assert!(scheduler.body_unavailable.refuses(racer, hash, now));
         assert_eq!(scheduler.window.pending_owner(&hash), Some(owner));
 
-        let unknown = bitcoin_rs_primitives::Hash256::from_le_bytes(&[0xab; 32]);
+        let unknown = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[0xab; 32]);
         assert!(!scheduler.window.contains_pending(&unknown));
         assert!(!release_unavailable_body(
             &mut scheduler,

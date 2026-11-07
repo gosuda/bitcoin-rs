@@ -2,12 +2,14 @@ use alloc::sync::Arc;
 use std::str::FromStr;
 
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, Hash256, Header, TxOut, Txid, consensus_bytes, deserialize,
 };
 
 #[cfg(test)]
-use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
+use bitcoin_rs_consensus::primitives::{
+    Amount, CompactTarget, LockTime, Script, Sequence, Witness,
+};
 use sonic_rs::{JsonValueTrait as _, Value, json};
 
 use crate::context::{AppliedView, Context};
@@ -392,7 +394,7 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str, body: &[u8]) -> Response {
     let mut outs = Vec::with_capacity(outpoints.len());
     let mut hits = Vec::with_capacity(outpoints.len());
     for (txid, vout) in &outpoints {
-        let outpoint = bitcoin_rs_primitives::OutPoint::new(*txid, *vout);
+        let outpoint = bitcoin_rs_consensus::primitives::OutPoint::new(*txid, *vout);
         let mempool_spent = pool
             .as_ref()
             .is_some_and(|pool| pool.is_outpoint_spent(&outpoint));
@@ -424,7 +426,7 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str, body: &[u8]) -> Response {
 }
 
 fn getutxos_response(
-    network: bitcoin_rs_primitives::Network,
+    network: bitcoin_rs_consensus::primitives::Network,
     view: &AppliedView,
     format: &str,
     hits: &[bool],
@@ -824,7 +826,7 @@ fn append_compact_size(body: &mut Vec<u8>, len: usize) {
     let Ok(value) = u64::try_from(len) else {
         panic!("compact-size length exceeds u64");
     };
-    body.extend_from_slice(bitcoin_rs_primitives::varint::encode(value).as_slice());
+    body.extend_from_slice(bitcoin_rs_consensus::primitives::varint::encode(value).as_slice());
 }
 
 fn build_chain_context(

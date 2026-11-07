@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockPayload, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Witness,
 };
@@ -16,14 +16,14 @@ fn test_stager(window: &DownloadWindow) -> BlockStager {
     BlockStager::new(window.budget)
 }
 
-static TEST_CHAIN: std::sync::LazyLock<Vec<bitcoin_rs_primitives::Header>> =
+static TEST_CHAIN: std::sync::LazyLock<Vec<bitcoin_rs_consensus::primitives::Header>> =
     std::sync::LazyLock::new(|| {
         let genesis = Network::Regtest.genesis_block().header;
         std::iter::successors(Some(genesis), |prev| {
             let height = prev.time.saturating_sub(genesis.time).saturating_add(1);
             let mut merkle = [0_u8; 32];
             merkle[..4].copy_from_slice(&height.to_le_bytes());
-            Some(bitcoin_rs_primitives::Header {
+            Some(bitcoin_rs_consensus::primitives::Header {
                 prev_blockhash: prev.compute_hash(),
                 merkle_root: Hash256::from_le_bytes(&merkle),
                 time: prev.time.saturating_add(1),

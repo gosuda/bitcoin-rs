@@ -1,5 +1,7 @@
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, NodeStatus, TipSnapshot};
-use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, consensus_bytes};
+use bitcoin_rs_consensus::primitives::{
+    BlockHash, CompactTarget, Hash256, Header, consensus_bytes,
+};
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};

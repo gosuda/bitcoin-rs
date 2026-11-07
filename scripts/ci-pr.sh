@@ -91,10 +91,6 @@ test_crates_profiles() {
   # Per-crate profiles may use checked-in fixtures but need no pinned Core
   # daemon. Tests launching that daemon run in the workspace lane below.
   # Smallest first.
-  # primitives owns the QAC-05 corpus-decoder gate (BITCOIN_RS_FUZZ_CORPUS);
-  # it must run in the PR lane, not only the merge-only workspace lane.
-  profile "test: bitcoin-rs-primitives" \
-    cargo_test -p bitcoin-rs-primitives
   # The offline CLI uses the checked-in Core snapshot, not a running daemon.
   profile "test: bitcoin-rs-snapshot" \
     cargo_test -p bitcoin-rs-snapshot

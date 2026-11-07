@@ -3,7 +3,7 @@ use super::{
     capability::SCRIPT_LIVE_WATERMARK_KEY, error::IndexError,
 };
 use crate::{types::ScriptHashRow, types::SpendingPrefixRow};
-use bitcoin_rs_primitives::OutPoint;
+use bitcoin_rs_consensus::primitives::OutPoint;
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 
 pub struct Indexer<S: KvStore> {

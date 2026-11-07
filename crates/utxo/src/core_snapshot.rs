@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 
-use bitcoin_rs_primitives::{AssumeUtxoData, Hash256, Network, varint};
+use bitcoin_rs_consensus::primitives::{AssumeUtxoData, Hash256, Network, varint};
 use thiserror::Error;
 
 use crate::{

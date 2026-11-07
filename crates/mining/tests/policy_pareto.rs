@@ -5,12 +5,12 @@ use crate::support::fixtures as common;
 use crate::support::TestError;
 use std::collections::{HashMap, HashSet};
 
+use bitcoin_rs_consensus::primitives::{Block, Hash256, Header, LockTime, Network, Sequence, Txid};
 use bitcoin_rs_mempool::{ChunkView, EntryId, Mempool};
 use bitcoin_rs_mining::{
     Candidate, CandidateContext, MiningError, assemble_candidate, select_template_body,
     select_template_body_after,
 };
-use bitcoin_rs_primitives::{Block, Hash256, Header, LockTime, Network, Sequence, Txid};
 use common::{
     Forged, PAYOUT, insert, insert_forged, selected_fees, serialized_size, total_sigop_cost, tx,
     zero_fee_pool,

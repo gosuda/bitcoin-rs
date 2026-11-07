@@ -4,12 +4,12 @@ use crate::options::{
 };
 use bitcoin_rs_chainstate::{ChainstateJournalConfig, ValidationMode};
 use bitcoin_rs_consensus::ValidationEngine;
+use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_index::IndexCapabilities;
 #[cfg(feature = "pool")]
 use bitcoin_rs_mining::pool::ledger as pool_ledger;
 use bitcoin_rs_p2p::PeerNetwork;
 use bitcoin_rs_p2p::endpoint::{ClassifiedEndpoint, classify_endpoint};
-use bitcoin_rs_primitives::Network;
 use bitcoin_rs_storage::StorageBackend;
 use core::fmt;
 use crossbeam_channel::Receiver;
@@ -803,12 +803,12 @@ impl NodeConfig {
     /// `MAX_SUBVERSION_LENGTH`, or startup fails with Core's messages.
     fn validate_ua_comments(&self) -> Result<(), ConfigError> {
         for comment in &self.p2p.ua_comments {
-            if !bitcoin_rs_primitives::ua_comment_is_safe(comment) {
+            if !bitcoin_rs_consensus::primitives::ua_comment_is_safe(comment) {
                 return Err(ConfigError::UaCommentUnsafe(comment.clone()));
             }
         }
-        let sub_version = bitcoin_rs_primitives::sub_version(&self.p2p.ua_comments);
-        let max = bitcoin_rs_primitives::MAX_SUBVERSION_LENGTH;
+        let sub_version = bitcoin_rs_consensus::primitives::sub_version(&self.p2p.ua_comments);
+        let max = bitcoin_rs_consensus::primitives::MAX_SUBVERSION_LENGTH;
         if sub_version.len() > max {
             return Err(ConfigError::SubVersionTooLong {
                 length: sub_version.len(),
@@ -841,19 +841,23 @@ impl NodeConfig {
                         target: target.clone(),
                     });
                 }
-                ClassifiedEndpoint::Valid(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
-                    ..
-                }) => {
+                ClassifiedEndpoint::Valid(
+                    bitcoin_rs_consensus::primitives::PeerEndpoint::TorV3 { .. },
+                ) => {
                     if !onion_route {
                         return Err(ConfigError::ConnectOnionRequiresRoute);
                     }
                 }
-                ClassifiedEndpoint::Valid(bitcoin_rs_primitives::PeerEndpoint::I2p { .. }) => {
+                ClassifiedEndpoint::Valid(
+                    bitcoin_rs_consensus::primitives::PeerEndpoint::I2p { .. },
+                ) => {
                     if overlay.i2p_sam.is_none() {
                         return Err(ConfigError::ConnectI2pRequiresSam);
                     }
                 }
-                ClassifiedEndpoint::Valid(bitcoin_rs_primitives::PeerEndpoint::Ip(..)) => {}
+                ClassifiedEndpoint::Valid(bitcoin_rs_consensus::primitives::PeerEndpoint::Ip(
+                    ..,
+                )) => {}
                 ClassifiedEndpoint::NonOverlay => {
                     if privacy_route {
                         return Err(ConfigError::ConnectHostnameWithProxy {

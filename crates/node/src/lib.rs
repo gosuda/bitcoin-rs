@@ -50,7 +50,7 @@ mod tx_ingress;
 #[cfg(feature = "test-seam")]
 #[doc(hidden)]
 pub mod tx_ingress;
-pub use bitcoin_rs_primitives::Network;
+pub use bitcoin_rs_consensus::primitives::Network;
 
 pub(crate) use bitcoin_rs_rpc::zmq::NoOpZmqPublisher;
 pub use bitcoin_rs_rpc::zmq::ZmqEndpointConfig;

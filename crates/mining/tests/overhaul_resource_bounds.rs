@@ -5,17 +5,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bitcoin::hashes::{Hash as _, sha256};
+use bitcoin_rs_consensus::primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    unix_time_secs,
+};
+use bitcoin_rs_consensus::script::VerifyFlags;
 use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
 use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolEntry, MempoolGateway,
     MempoolLimits, PolicyError, ReplacementCandidate, SubmitError, SubmitOutcome,
 };
 use bitcoin_rs_mining::{Candidate, CandidateContext, assemble_candidate};
-use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
-    unix_time_secs,
-};
-use bitcoin_rs_script::VerifyFlags;
 use parking_lot::RwLock;
 use sonic_rs::{JsonValueTrait as _, Value, json};
 
@@ -255,8 +255,9 @@ fn weight_fixture(extra: u8) -> TestResult<(MempoolGateway, Chain, Tx, u64)> {
             witness: Witness::from_stack(vec![heavy_script.clone()]),
         })
         .collect();
-    let oracle: bitcoin::Transaction =
-        bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&parent))?;
+    let oracle: bitcoin::Transaction = bitcoin::consensus::deserialize(
+        &bitcoin_rs_consensus::primitives::consensus_bytes(&parent),
+    )?;
     let sigops = oracle.total_sigop_cost(|_| {
         Some(bitcoin::TxOut {
             value: bitcoin::Amount::from_sat(100_000),
@@ -312,7 +313,7 @@ fn weight_fixture(extra: u8) -> TestResult<(MempoolGateway, Chain, Tx, u64)> {
     ];
     last.inputs[0].witness = Witness::from_stack(vec![last_script]);
     let oracle: bitcoin::Transaction =
-        bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&last))?;
+        bitcoin::consensus::deserialize(&bitcoin_rs_consensus::primitives::consensus_bytes(&last))?;
     assert_eq!(oracle.weight().to_wu(), 85_199 + u64::from(extra));
     Ok((gateway, chain, last, wire_weight))
 }

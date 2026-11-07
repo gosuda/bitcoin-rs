@@ -2,7 +2,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::script::Builder;
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_chain::validate_pow;
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{Block, BlockHash, Hash256, Network};
 
 use crate::support::error::TestError;
 
@@ -73,9 +73,9 @@ fn mined_children_bind_transactions_and_meet_the_declared_target_deterministical
 fn mined_block_binds_an_odd_transaction_count() -> Result<(), TestError> {
     let coinbase = regtest_fixture::coinbase(3);
     let mut tx2 = coinbase.clone();
-    tx2.lock_time = bitcoin_rs_primitives::LockTime::from_consensus(1);
+    tx2.lock_time = bitcoin_rs_consensus::primitives::LockTime::from_consensus(1);
     let mut tx3 = coinbase.clone();
-    tx3.lock_time = bitcoin_rs_primitives::LockTime::from_consensus(2);
+    tx3.lock_time = bitcoin_rs_consensus::primitives::LockTime::from_consensus(2);
     let block = regtest_fixture::mined_block_with_prev_hash(
         BlockHash::from(Network::Regtest.genesis_block_hash()),
         3,

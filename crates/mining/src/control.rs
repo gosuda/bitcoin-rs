@@ -2,12 +2,12 @@ use std::sync::Arc;
 #[cfg(any(test, feature = "test-seam"))]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use bitcoin_rs_mempool::SnapshotEntry;
 #[cfg(any(test, feature = "test-seam"))]
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, BlockPayload, CompactTarget, Header, Network, Tx, Txid,
 };
+use bitcoin_rs_mempool::SnapshotEntry;
 use compact_str::CompactString;
 #[cfg(any(test, feature = "test-seam"))]
 use parking_lot::Mutex;
@@ -417,9 +417,9 @@ mod tests {
 
     #[test]
     fn difficulty_one_is_the_difficulty_1_target() {
-        let difficulty = difficulty_for_bits(bitcoin_rs_primitives::CompactTarget::from_consensus(
-            0x1d00_ffff,
-        ));
+        let difficulty = difficulty_for_bits(
+            bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x1d00_ffff),
+        );
         assert!(
             (difficulty - 1.0).abs() < f64::EPSILON,
             "0x1d00ffff must be difficulty 1, got {difficulty}"

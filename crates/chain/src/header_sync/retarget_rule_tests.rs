@@ -10,7 +10,7 @@ use crate::{
     node::{BlockHeader, ChainWork, NodeId, NodeStatus},
     tree::BlockTree,
 };
-use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Network};
 
 const RETARGET_INTERVAL: u32 = 2016;
 const TARGET_TIMESPAN: u32 = 14 * 24 * 60 * 60;

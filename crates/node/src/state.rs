@@ -287,7 +287,7 @@ impl NodeState {
     #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_block(
         &self,
-        payload: &bitcoin_rs_primitives::BlockPayload,
+        payload: &bitcoin_rs_consensus::primitives::BlockPayload,
     ) -> core::result::Result<TipSnapshot, crate::chain_effects::ConnectMutationError> {
         let outcome = self.followers.apply_connect(&self.chainstate, payload)?;
         Ok(outcome.tip)

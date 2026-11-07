@@ -1,5 +1,5 @@
 use super::*;
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 
 #[test]
 fn request_publication_precedes_receipt_callbacks() -> crate::test_support::TestResult {

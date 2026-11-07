@@ -52,7 +52,6 @@ mdbx = [
 
 [dependencies]
 hashbrown.workspace = true
-bitcoin-rs-primitives.workspace = true
 bitcoin-rs-consensus.workspace = true
 bitcoin-rs-storage.workspace = true
 bitcoin-rs-utxo.workspace = true
@@ -103,7 +102,6 @@ bitcoin-rs-chainstate = { workspace = true, features = ["test-seam"] }
 sonic-rs.workspace = true
 toml.workspace = true
 rustix.workspace = true
-bitcoin-rs-script.workspace = true
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
 # Miner side of the SV2 host-path regression in `pool/sv2.rs`: the same pinned

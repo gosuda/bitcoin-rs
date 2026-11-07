@@ -58,7 +58,7 @@ fuzz_target!(|data: &[u8]| {
                 let decoded = payload_block.block().retained_heap_bytes();
                 assert!(
                     payload.len() + decoded
-                        <= bitcoin_rs_primitives::layout::decode_reservation(payload.len()),
+                        <= bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len()),
                     "{command} decoded beyond its decode reservation"
                 );
             }
@@ -66,21 +66,21 @@ fuzz_target!(|data: &[u8]| {
                 let decoded = tx.retained_heap_bytes();
                 assert!(
                     payload.len() + decoded
-                        <= bitcoin_rs_primitives::layout::decode_reservation(payload.len()),
+                        <= bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len()),
                     "{command} decoded beyond its decode reservation"
                 );
             }
             bitcoin_rs_p2p::Message::Headers(headers) => {
-                let heap = headers.capacity() * core::mem::size_of::<bitcoin_rs_primitives::Header>();
+                let heap = headers.capacity() * core::mem::size_of::<bitcoin_rs_consensus::primitives::Header>();
                 assert!(
-                    heap <= bitcoin_rs_primitives::layout::decode_reservation(payload.len()) + 1024,
+                    heap <= bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len()) + 1024,
                     "{command} headers heap beyond reservation"
                 );
             }
             bitcoin_rs_p2p::Message::Addr(addrs) => {
                 let heap = addrs.capacity() * 32;
                 assert!(
-                    heap <= bitcoin_rs_primitives::layout::decode_reservation(payload.len()) + 1024,
+                    heap <= bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len()) + 1024,
                     "{command} addr heap beyond reservation"
                 );
             }
@@ -89,7 +89,7 @@ fuzz_target!(|data: &[u8]| {
             | bitcoin_rs_p2p::Message::NotFound(inv) => {
                 let heap = inv.capacity() * 36;
                 assert!(
-                    heap <= bitcoin_rs_primitives::layout::decode_reservation(payload.len()) + 1024,
+                    heap <= bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len()) + 1024,
                     "{command} inv heap beyond reservation"
                 );
             }

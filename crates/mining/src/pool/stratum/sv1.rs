@@ -6,8 +6,10 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::pool::{Job, JobError, JobId, ShareTarget, WorkerIdentity};
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::hex::{hex_decode, hex_encode as primitives_hex_encode, hex_nibble};
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::primitives::hex::{
+    hex_decode, hex_encode as primitives_hex_encode, hex_nibble,
+};
 use sonic_rs::{Array, JsonContainerTrait, JsonValueTrait, Value};
 
 pub use crate::pool::{BlockOutcome, PoolCore, RefreshError, Refreshed};

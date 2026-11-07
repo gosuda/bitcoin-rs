@@ -1,6 +1,6 @@
 use super::*;
 use bitcoin_rs_consensus::ValidationEngine;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 use crossbeam_channel::bounded;
 use parking_lot::Mutex;
 
@@ -481,10 +481,10 @@ fn mutation_envelope(
 
 #[test]
 fn local_tx_relay_uses_committed_wtxid_and_ignores_peer_and_removed_entries() {
-    use bitcoin_rs_mempool::{CompositeObserver, Mempool, MempoolEntry, MempoolLimits, PeerToken};
-    use bitcoin_rs_primitives::{
+    use bitcoin_rs_consensus::primitives::{
         Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
     };
+    use bitcoin_rs_mempool::{CompositeObserver, Mempool, MempoolEntry, MempoolLimits, PeerToken};
     use parking_lot::RwLock;
 
     let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
@@ -573,8 +573,8 @@ fn local_tx_relay_uses_committed_wtxid_and_ignores_peer_and_removed_entries() {
     assert!(rx.try_recv().is_err());
 }
 
-fn relay_identity_tx() -> Arc<bitcoin_rs_primitives::Tx> {
-    use bitcoin_rs_primitives::{
+fn relay_identity_tx() -> Arc<bitcoin_rs_consensus::primitives::Tx> {
+    use bitcoin_rs_consensus::primitives::{
         Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
     };
     Arc::new(Tx {
@@ -593,8 +593,11 @@ fn relay_identity_tx() -> Arc<bitcoin_rs_primitives::Tx> {
     })
 }
 
-fn admit_live_tx(marker: u8, gateway: &MempoolGateway) -> (Arc<bitcoin_rs_primitives::Tx>, u64) {
-    use bitcoin_rs_primitives::OutPoint;
+fn admit_live_tx(
+    marker: u8,
+    gateway: &MempoolGateway,
+) -> (Arc<bitcoin_rs_consensus::primitives::Tx>, u64) {
+    use bitcoin_rs_consensus::primitives::OutPoint;
 
     let mut tx = (*relay_identity_tx()).clone();
     tx.inputs[0].previous_output = OutPoint::new(dummy_txid(marker), 0);
@@ -603,7 +606,7 @@ fn admit_live_tx(marker: u8, gateway: &MempoolGateway) -> (Arc<bitcoin_rs_primit
     (tx, sequence)
 }
 
-fn admit_entry(tx: &Arc<bitcoin_rs_primitives::Tx>, gateway: &MempoolGateway) -> u64 {
+fn admit_entry(tx: &Arc<bitcoin_rs_consensus::primitives::Tx>, gateway: &MempoolGateway) -> u64 {
     use bitcoin_rs_mempool::MempoolEntry;
 
     gateway
@@ -670,8 +673,8 @@ impl MempoolObserver for MutateBeforeLocalRelay {
 
 fn delayed_relay_fixture(
     origin: AdmissionOrigin,
-    original: Arc<bitcoin_rs_primitives::Tx>,
-    next: Arc<bitcoin_rs_primitives::Tx>,
+    original: Arc<bitcoin_rs_consensus::primitives::Tx>,
+    next: Arc<bitcoin_rs_consensus::primitives::Tx>,
     clear_first: bool,
 ) -> (Arc<MempoolGateway>, Receiver<RelayRequest>) {
     use bitcoin_rs_mempool::MempoolEntry;
@@ -713,7 +716,7 @@ fn delayed_local_relay_does_not_adopt_a_reinserted_body() {
             let next = if alternate_witness {
                 let mut variant = (*original).clone();
                 variant.inputs[0].witness =
-                    bitcoin_rs_primitives::Witness::from_stack(vec![vec![2]]);
+                    bitcoin_rs_consensus::primitives::Witness::from_stack(vec![vec![2]]);
                 Arc::new(variant)
             } else {
                 Arc::clone(&original)
@@ -738,7 +741,8 @@ fn delayed_local_relay_does_not_adopt_a_reinserted_body() {
 fn delayed_local_relay_survives_unrelated_mutations() {
     let original = relay_identity_tx();
     let mut unrelated = (*original).clone();
-    unrelated.inputs[0].previous_output = bitcoin_rs_primitives::OutPoint::new(dummy_txid(91), 0);
+    unrelated.inputs[0].previous_output =
+        bitcoin_rs_consensus::primitives::OutPoint::new(dummy_txid(91), 0);
     let (gateway, rx) = delayed_relay_fixture(
         AdmissionOrigin::Rpc,
         Arc::clone(&original),
@@ -777,7 +781,7 @@ fn local_replacement_relay_uses_the_accepted_change_sequence() {
         .expect("original peer admission");
     assert!(rx.try_recv().is_err());
     let mut replacement = (*original).clone();
-    replacement.outputs[0].value = bitcoin_rs_primitives::Amount::from_sat(900);
+    replacement.outputs[0].value = bitcoin_rs_consensus::primitives::Amount::from_sat(900);
     let replacement = Arc::new(replacement);
     let outcome = gateway
         .replace_transaction(

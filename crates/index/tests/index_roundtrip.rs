@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Block, DecodeError, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
     consensus_bytes, deserialize, encode::double_sha256,
 };

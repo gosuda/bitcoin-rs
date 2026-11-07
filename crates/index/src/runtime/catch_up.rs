@@ -19,7 +19,7 @@ use crate::NoSpentScripts;
 use crate::PreparedBatch;
 use crate::PreparedBlock;
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::block_body::BlockBodyReader;
 use bitcoin_rs_storage::pruning::{HistoryLease, HistoryUnavailable};

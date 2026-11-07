@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::Amount;
+use bitcoin_rs_consensus::primitives::Amount;
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 
 use super::{Mutation, mutations_for_block};

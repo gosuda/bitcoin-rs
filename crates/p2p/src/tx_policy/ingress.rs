@@ -1,13 +1,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use bitcoin_rs_mempool::package_heap_usage;
-use bitcoin_rs_mempool::standardness::{MAX_PACKAGE_COUNT, MAX_PACKAGE_WEIGHT};
-use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::encode::double_sha256;
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, Wtxid,
     varint,
 };
+use bitcoin_rs_mempool::package_heap_usage;
+use bitcoin_rs_mempool::standardness::{MAX_PACKAGE_COUNT, MAX_PACKAGE_WEIGHT};
 use hashbrown::HashSet;
 use parking_lot::Mutex;
 

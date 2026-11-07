@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use bitcoin::consensus::encode::serialize;
-use bitcoin_rs_primitives::{Block as PrimitiveBlock, OutPoint, deserialize};
+use bitcoin_rs_consensus::primitives::{Block as PrimitiveBlock, OutPoint, deserialize};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener, scan_coin_stats};
 use bitcoin_rs_utxo::{UtxoError, UtxoSet, write_snapshot_observed};
@@ -13,7 +13,7 @@ use crate::error::Error;
 #[derive(Clone, Debug)]
 pub struct ReconstructReport {
     pub stats: CoinStats,
-    pub muhash: bitcoin_rs_primitives::Hash256,
+    pub muhash: bitcoin_rs_consensus::primitives::Hash256,
     pub blocks: u32,
     pub coins: u64,
     pub tx_count: u64,
@@ -109,8 +109,8 @@ fn collect_created(
     changes: &mut BlockChanges,
     carried: &crate::chain::ChainBlock,
     counters: &mut Counters,
-    tx: &bitcoin_rs_primitives::Tx,
-    txid: bitcoin_rs_primitives::Txid,
+    tx: &bitcoin_rs_consensus::primitives::Tx,
+    txid: bitcoin_rs_consensus::primitives::Txid,
     coinbase: bool,
 ) -> Result<(), Error> {
     for (index, txout) in tx.outputs.iter().enumerate() {
@@ -136,7 +136,7 @@ fn collect_spent(
     changes: &mut BlockChanges,
     carried: &crate::chain::ChainBlock,
     counters: &mut Counters,
-    tx: &bitcoin_rs_primitives::Tx,
+    tx: &bitcoin_rs_consensus::primitives::Tx,
 ) -> Result<(), Error> {
     for input in &tx.inputs {
         if set.get_entry(&input.previous_output).is_none() {
@@ -193,7 +193,7 @@ fn counted_outputs(carried: &crate::chain::ChainBlock) -> u64 {
 }
 
 fn check_txids(
-    txids: &[bitcoin_rs_primitives::Txid],
+    txids: &[bitcoin_rs_consensus::primitives::Txid],
     carried: &crate::chain::ChainBlock,
 ) -> Result<(), Error> {
     if txids.len() != carried.block.txdata.len() {

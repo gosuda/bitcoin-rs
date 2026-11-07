@@ -7,13 +7,14 @@ use crate::mining_fixture;
 use alloc::sync::Arc;
 
 use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+use bitcoin_rs_consensus::primitives::client_version;
+use bitcoin_rs_consensus::primitives::{BlockPayload, Hash256, Network, consensus_bytes};
 use bitcoin_rs_mining::{
     BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, MiningCapability,
     MiningControl, MiningControlError, MiningInfo, TemplateMutation,
 };
 use bitcoin_rs_p2p::FEATURE_VERSION;
 use bitcoin_rs_p2p::wire::PROTOCOL_VERSION;
-use bitcoin_rs_primitives::{BlockPayload, Hash256, Network, client_version, consensus_bytes};
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::Context;
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait as _, json};
@@ -328,7 +329,7 @@ impl MiningControl for CompatMiningControl {
 
     fn submit_header(
         &self,
-        _header: bitcoin_rs_primitives::Header,
+        _header: bitcoin_rs_consensus::primitives::Header,
     ) -> Result<(), MiningControlError> {
         Ok(())
     }
@@ -484,7 +485,7 @@ fn submitblock_truncates_trailing_bytes_to_consumed_prefix() -> Result<(), crate
 
         fn submit_header(
             &self,
-            _header: bitcoin_rs_primitives::Header,
+            _header: bitcoin_rs_consensus::primitives::Header,
         ) -> Result<(), MiningControlError> {
             Err(MiningControlError::Unavailable("not wired".into()))
         }

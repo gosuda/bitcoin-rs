@@ -2,7 +2,7 @@ use super::{
     OutboundBudget, OutboundCredit, OutboundRefusal, PeerLease, QueuedFrame, Refusal,
     SharedOutboundBudget,
 };
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use crossbeam_channel::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -933,9 +933,9 @@ fn release_replenishes_budget() {
 #[test]
 fn saturated_getdata_fourth_send_refuses_and_closes_lease() {
     let (tx, _undrained_rx) = crossbeam_channel::unbounded();
-    let test_block = bitcoin_rs_primitives::Block::default();
+    let test_block = bitcoin_rs_consensus::primitives::Block::default();
     let block_wire_len = wire_len_of(&crate::Message::Block(
-        bitcoin_rs_primitives::BlockPayload::from_local(test_block.clone()),
+        bitcoin_rs_consensus::primitives::BlockPayload::from_local(test_block.clone()),
     ));
     let lease = PeerLease::new_with_budget(
         tx,
@@ -947,14 +947,14 @@ fn saturated_getdata_fourth_send_refuses_and_closes_lease() {
         assert!(
             lease
                 .send(crate::Message::Block(
-                    bitcoin_rs_primitives::BlockPayload::from_local(test_block.clone()),
+                    bitcoin_rs_consensus::primitives::BlockPayload::from_local(test_block.clone()),
                 ))
                 .is_ok()
         );
     }
     assert!(matches!(
         lease.send(crate::Message::Block(
-            bitcoin_rs_primitives::BlockPayload::from_local(test_block),
+            bitcoin_rs_consensus::primitives::BlockPayload::from_local(test_block),
         )),
         Err(OutboundRefusal::Closed(_))
     ));

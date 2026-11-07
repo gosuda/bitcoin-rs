@@ -8,9 +8,9 @@ use crate::support::fixtures as common;
 use std::collections::HashSet;
 use std::ops::Range;
 
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, LockTime, OutPoint, Sequence, Tx, Txid};
 use bitcoin_rs_mempool::{Mempool, SnapshotEntry};
 use bitcoin_rs_mining::{Candidate, CandidateContext, assemble_candidate};
-use bitcoin_rs_primitives::{Amount, Hash256, LockTime, OutPoint, Sequence, Tx, Txid};
 use common::{
     Forged, PAYOUT, insert_forged, selected_fees, serialized_size, total_sigop_cost, tx,
     zero_fee_pool,

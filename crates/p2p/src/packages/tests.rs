@@ -1,12 +1,12 @@
 use super::*;
-use bitcoin_rs_primitives::{Script, TxOut, deserialize};
+use bitcoin_rs_consensus::primitives::{Script, TxOut, deserialize};
 
 #[derive(Debug, thiserror::Error)]
 enum TestError {
     #[error(transparent)]
     ParseInt(#[from] std::num::ParseIntError),
     #[error(transparent)]
-    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
     Package(#[from] PackageError),
     #[error("displayed hash is not 32 bytes")]

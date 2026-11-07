@@ -9,7 +9,7 @@ use super::{
     state::FORMAT_VERSION_VALUE, state::IndexWriteFence, state::capture_write_fence,
     state::commit_ordinary, state::ensure_fence_live, state::resume_capability_reset,
 };
-use bitcoin_rs_primitives::{OutPoint, encode};
+use bitcoin_rs_consensus::primitives::{OutPoint, encode};
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvStore, PrefixScanLimit};
 
 pub struct IndexWriter<S: KvStore> {
@@ -536,7 +536,7 @@ pub(crate) const FAMILY_FILTERS: &str = "filters";
 
 #[expect(clippy::expect_used, reason = "usize metric value fits in u64")]
 fn metric_f64_from_usize(val: usize) -> f64 {
-    bitcoin_rs_primitives::u64_to_f64(u64::try_from(val).expect("usize fits in u64"))
+    bitcoin_rs_consensus::primitives::u64_to_f64(u64::try_from(val).expect("usize fits in u64"))
 }
 
 pub(crate) fn record_family_byte_histograms(family_bytes: &IndexRowBytes) {

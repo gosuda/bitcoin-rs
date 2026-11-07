@@ -1,7 +1,7 @@
 use super::block::is_op_return_script;
 use std::sync::Arc;
 
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
@@ -33,7 +33,7 @@ fn commit_block<S: KvStore>(
     let header = body
         .get(..crate::types::HEADER_ROW_SIZE)
         .ok_or(IndexError::InvalidHeaderLength { len: body.len() })?;
-    let hash = bitcoin_rs_primitives::encode::double_sha256(header).to_le_bytes();
+    let hash = bitcoin_rs_consensus::primitives::encode::double_sha256(header).to_le_bytes();
     let prepared = writer.prepare_block_with_spent_scripts(
         crate::IndexCapabilities::HISTORICAL,
         height,

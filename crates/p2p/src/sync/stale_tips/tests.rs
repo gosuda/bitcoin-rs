@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use bitcoin_rs_chain::regtest_fixture::mined_regtest_header;
-use bitcoin_rs_primitives::{BlockHash, Network};
+use bitcoin_rs_consensus::primitives::{BlockHash, Network};
 
 use super::*;
 

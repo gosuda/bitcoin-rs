@@ -1,12 +1,12 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Header, Network};
 use bitcoin_rs_p2p::sync::chain::{
     HeaderAdmission, HistoricalAdvance, ReorgError, SyncChain, SyncChainError,
     WindowApplyDisposition, WindowCommitError,
 };
 use bitcoin_rs_p2p::{InboundHeaders, PeerTable};
-use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, Header, Network};
 use crossbeam_channel::Receiver;
 
 pub use bitcoin_rs_p2p::sync::{BlockSync, default_sync_budget};
@@ -103,7 +103,7 @@ fn settle_window_success(
 pub(crate) fn fixture_insert_header_node(
     handles: &bitcoin_rs_chainstate::Chainstate,
     parent: bitcoin_rs_chain::NodeId,
-    header: bitcoin_rs_primitives::Header,
+    header: bitcoin_rs_consensus::primitives::Header,
     status: bitcoin_rs_chain::NodeStatus,
 ) -> Result<bitcoin_rs_chain::NodeId, bitcoin_rs_chain::ChainError> {
     let mut tree = handles.block_tree().write();

@@ -5,11 +5,11 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 use bitcoin::hex::{DisplayHex, FromHex};
-use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
     consensus_bytes, deserialize,
 };
+use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry};
 use bitcoin_rs_rpc::context::Context;
 use bitcoin_rs_rpc::{Handler, RpcError};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
@@ -466,7 +466,7 @@ fn createrawtransaction_builds_valid_hex_tx() -> Result<(), TestError> {
 #[test]
 fn createrawtransaction_creates_op_return_data_output() -> Result<(), TestError> {
     let mut ctx = Context::new();
-    ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
+    ctx.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Regtest;
     let handler = Handler::new(Arc::new(ctx));
 
     let inputs = json!([{
@@ -498,7 +498,7 @@ fn createrawtransaction_creates_op_return_data_output() -> Result<(), TestError>
 #[test]
 fn createrawtransaction_rejects_duplicate_input() {
     let mut ctx = Context::new();
-    ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
+    ctx.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Regtest;
     let handler = Handler::new(Arc::new(ctx));
 
     let inputs = json!([

@@ -80,7 +80,7 @@ fn stale_invalid_headers_cannot_evict_or_clear_replacement() -> TestResult {
 
 #[test]
 fn mutated_forward_body_preserves_descendant_for_retry() -> TestResult {
-    use bitcoin_rs_primitives::Amount;
+    use bitcoin_rs_consensus::primitives::Amount;
     let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
     sync.chain.bootstrap_genesis();
     stage_body(&sync, &main[0]);

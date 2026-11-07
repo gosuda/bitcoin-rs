@@ -3,7 +3,7 @@ use parking_lot::RwLockWriteGuard;
 use parking_lot::{RwLock, RwLockReadGuard};
 use std::sync::Arc;
 
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256};
+use bitcoin_rs_consensus::primitives::{Block, BlockHash, Hash256};
 
 #[derive(Clone, Debug)]
 pub struct BlockLogReader {
@@ -49,7 +49,7 @@ pub struct BlockRecord {
     pub hash: BlockHash,
     pub height: u32,
     pub body_size: usize,
-    pub header: Option<Box<[u8; bitcoin_rs_primitives::Header::LEN]>>,
+    pub header: Option<Box<[u8; bitcoin_rs_consensus::primitives::Header::LEN]>>,
     pub tx_count: usize,
     pub time: u32,
 }
@@ -260,14 +260,14 @@ impl BlockRecord {
     }
 
     #[must_use]
-    pub fn header_bytes(&self) -> Option<&[u8; bitcoin_rs_primitives::Header::LEN]> {
+    pub fn header_bytes(&self) -> Option<&[u8; bitcoin_rs_consensus::primitives::Header::LEN]> {
         self.header.as_deref()
     }
 
     #[must_use]
     pub fn header_hex(&self) -> String {
         self.header.as_ref().map_or_else(String::new, |bytes| {
-            bitcoin_rs_primitives::hex::hex_encode(bytes.as_slice())
+            bitcoin_rs_consensus::primitives::hex::hex_encode(bytes.as_slice())
         })
     }
 }
@@ -275,7 +275,7 @@ impl BlockRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin_rs_primitives::{BlockHash, Hash256};
+    use bitcoin_rs_consensus::primitives::{BlockHash, Hash256};
 
     fn hash(v: u8) -> BlockHash {
         BlockHash::from(Hash256::from_le_bytes(&[v; 32]))

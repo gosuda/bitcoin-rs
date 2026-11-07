@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{BlockHash, CompactTarget};
+use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget};
 
 use super::{BlockTree, Hash256};
 use crate::test_error::TestError;

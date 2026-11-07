@@ -3,15 +3,15 @@ use arc_swap::ArcSwapOption;
 use bitcoin::hashes::Hash as _;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_consensus::ValidationEngine;
+use bitcoin_rs_consensus::primitives::{
+    Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+};
 use bitcoin_rs_mempool::{
     BodyInterest, Mempool, MempoolEntry, MempoolLimits, MempoolObserver, MutationEnvelope,
     MutationOutcome,
 };
 use bitcoin_rs_mining::FakeMiningControl;
 use bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY;
-use bitcoin_rs_primitives::{
-    Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
-};
 use bitcoin_rs_utxo::UtxoSet;
 use parking_lot::{Mutex, RwLock};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -405,8 +405,8 @@ fn retry_poll_evicts_an_orphan_after_its_connection_is_gone() {
 
 #[test]
 fn consumer_processes_admitted_package_and_publishes_generation() {
+    use bitcoin_rs_consensus::primitives::encode::ConsensusEncode;
     use bitcoin_rs_p2p::{InboundBody, PackageCapacity};
-    use bitcoin_rs_primitives::encode::ConsensusEncode;
 
     let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
@@ -483,7 +483,7 @@ fn consumer_processes_admitted_package_and_publishes_generation() {
     ));
 
     let mut payload = Vec::new();
-    payload.extend_from_slice(&bitcoin_rs_primitives::varint::encode(2));
+    payload.extend_from_slice(&bitcoin_rs_consensus::primitives::varint::encode(2));
     parent.consensus_encode(&mut payload);
     child.consensus_encode(&mut payload);
     let payload = bytes::Bytes::from(payload);

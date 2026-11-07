@@ -1,8 +1,8 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
+use bitcoin_rs_consensus::primitives::{OutPoint, Txid};
 use bitcoin_rs_mempool::MempoolEntry;
-use bitcoin_rs_primitives::{OutPoint, Txid};
 
 use super::http::{dispatch_error, query_limit};
 use super::model::{Outspend, TransactionValue};
@@ -264,10 +264,10 @@ fn block_template(handler: &Handler) -> Response {
 mod pagination_tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_mempool::MempoolEntry;
-    use bitcoin_rs_primitives::{
+    use bitcoin_rs_consensus::primitives::{
         Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
     };
+    use bitcoin_rs_mempool::MempoolEntry;
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
     use super::{internal_mempool_txs, select_mempool_page};

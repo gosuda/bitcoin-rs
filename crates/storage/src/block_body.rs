@@ -1,5 +1,5 @@
 use crate::durable_head::BodyExtent;
-use bitcoin_rs_primitives::{BlockBodyMetadata, Hash256, varint};
+use bitcoin_rs_consensus::primitives::{BlockBodyMetadata, Hash256, varint};
 
 use crate::block_file::FlatFileBlockReader;
 use crate::{
@@ -9,10 +9,11 @@ use crate::{
 
 use std::sync::Arc;
 
-const SERIALIZED_BLOCK_METADATA_PREFIX_LEN: usize = bitcoin_rs_primitives::Header::LEN + 9;
+const SERIALIZED_BLOCK_METADATA_PREFIX_LEN: usize =
+    bitcoin_rs_consensus::primitives::Header::LEN + 9;
 
 fn decode_block_tx_count(bytes: &[u8]) -> Option<usize> {
-    let cursor = bytes.get(bitcoin_rs_primitives::Header::LEN..)?;
+    let cursor = bytes.get(bitcoin_rs_consensus::primitives::Header::LEN..)?;
     let (count, _) = varint::decode(cursor).ok()?;
     usize::try_from(count).ok()
 }
@@ -20,7 +21,7 @@ fn decode_block_tx_count(bytes: &[u8]) -> Option<usize> {
 pub trait BlockBodyReader {
     fn prefetch_positions(
         &mut self,
-        requests: &[(u32, bitcoin_rs_primitives::Hash256)],
+        requests: &[(u32, bitcoin_rs_consensus::primitives::Hash256)],
     ) -> Result<(), StorageError> {
         let _ = requests;
         Ok(())
@@ -29,7 +30,7 @@ pub trait BlockBodyReader {
     fn load_block_body(
         &mut self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<Option<Vec<u8>>, StorageError>;
 }
 
@@ -41,7 +42,7 @@ impl<S: BlockBodyStore + ?Sized> BlockBodyReader for DirectBlockBodyReader<'_, S
     fn load_block_body(
         &mut self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.store.load_block_body(height, hash)
     }
@@ -69,14 +70,14 @@ pub trait BlockBodyStore: Send + Sync {
     fn persist_block_body(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
         body: &[u8],
     ) -> Result<(), StorageError>;
 
     fn persist_block_body_value(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
         body: bytes::Bytes,
     ) -> Result<(), StorageError> {
         self.persist_block_body(height, hash, &body)
@@ -85,7 +86,7 @@ pub trait BlockBodyStore: Send + Sync {
     fn load_block_body(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<Option<Vec<u8>>, StorageError>;
 
     /// Reads for integrity verification.
@@ -124,7 +125,7 @@ pub trait BlockBodyStore: Send + Sync {
     fn undo_record(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         let _ = (height, hash);
         Ok(None)
@@ -133,7 +134,7 @@ pub trait BlockBodyStore: Send + Sync {
     fn load_block_body_range(
         &self,
         _height: u32,
-        _hash: bitcoin_rs_primitives::Hash256,
+        _hash: bitcoin_rs_consensus::primitives::Hash256,
         _offset: u32,
         _len: u32,
     ) -> Result<Option<Vec<u8>>, StorageError> {
@@ -143,7 +144,7 @@ pub trait BlockBodyStore: Send + Sync {
     fn block_body_metadata(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<Option<BlockBodyMetadata>, StorageError> {
         let Some(body) = self.load_block_body(height, hash)? else {
             return Ok(None);
@@ -164,7 +165,7 @@ pub trait BlockBodyStore: Send + Sync {
     fn block_position(
         &self,
         _height: u32,
-        _hash: bitcoin_rs_primitives::Hash256,
+        _hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<Option<crate::block_file::BlockFilePosition>, StorageError> {
         Ok(None)
     }
@@ -253,7 +254,7 @@ impl BlockBodyReader for IndexedBlockBodyReader<'_> {
     fn load_block_body(
         &mut self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         let position = match &mut self.positions {
             PositionLookup::Direct => {
@@ -298,7 +299,7 @@ impl<S: KvStore> IndexedBlockBodyStore<S> {
     fn body_position(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<Option<BlockFilePosition>, StorageError> {
         let key = crate::pruning::block_body_key(height, hash);
         decode_body_position(
@@ -391,7 +392,7 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
     fn undo_record(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.index.get(
             crate::ColumnFamily::UndoData,
@@ -406,7 +407,7 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
     fn persist_block_body(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
         body: &[u8],
     ) -> Result<(), StorageError> {
         let key = crate::pruning::block_body_key(height, hash);
@@ -451,7 +452,7 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
     fn load_block_body(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         let Some(position) = self.body_position(height, hash)? else {
             return Ok(None);
@@ -474,7 +475,7 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
     fn load_block_body_range(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
         offset: u32,
         len: u32,
     ) -> Result<Option<Vec<u8>>, StorageError> {
@@ -488,7 +489,7 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
     fn block_body_metadata(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<Option<BlockBodyMetadata>, StorageError> {
         let Some(position) = self.body_position(height, hash)? else {
             return Ok(None);
@@ -523,7 +524,7 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
     fn block_position(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
+        hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<Option<crate::block_file::BlockFilePosition>, StorageError> {
         self.body_position(height, hash)
     }
@@ -727,15 +728,15 @@ mod body_position_prefetch_tests {
 #[cfg(test)]
 mod metadata_tests {
     use super::*;
-    use bitcoin_rs_primitives::Network;
-    use bitcoin_rs_primitives::consensus_bytes;
+    use bitcoin_rs_consensus::primitives::Network;
+    use bitcoin_rs_consensus::primitives::consensus_bytes;
     #[test]
     fn decode_block_tx_count_reads_the_varint_after_the_header() {
         let block = Network::Regtest.genesis_block();
         let bytes = consensus_bytes(&block);
         assert_eq!(decode_block_tx_count(&bytes), Some(block.txs.len()));
         assert_eq!(
-            decode_block_tx_count(&bytes[..bitcoin_rs_primitives::Header::LEN]),
+            decode_block_tx_count(&bytes[..bitcoin_rs_consensus::primitives::Header::LEN]),
             None
         );
     }

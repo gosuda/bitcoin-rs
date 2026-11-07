@@ -6,7 +6,7 @@ use bitcoin::bip152::{BlockTransactions, PrefilledTransaction};
 use bitcoin::blockdata::block::Block as RegistryBlock;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Sequence, TxIn, TxOut, Witness, consensus_bytes,
     unix_time_secs,
 };
@@ -187,7 +187,7 @@ fn conforming_block(txs: Vec<Tx>) -> Block {
             prev_blockhash: BlockHash::from(Hash256::from_le_bytes(&[0xab; 32])),
             merkle_root: Hash256::default(),
             time: 7,
-            bits: bitcoin_rs_primitives::CompactTarget::from_consensus(
+            bits: bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(
                 bitcoin_rs_chain::regtest_fixture::REGTEST_BITS,
             ),
             nonce: 9,
@@ -573,7 +573,7 @@ fn compact_completion_merkle_mismatch_falls_back() {
         prev_blockhash: BlockHash::from(Hash256::from_le_bytes(&[0xab; 32])),
         merkle_root: Hash256::from_le_bytes(&[0; 32]),
         time: 7,
-        bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x207f_ffff),
+        bits: bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x207f_ffff),
         nonce: 9,
     };
     let bridged =
@@ -946,10 +946,10 @@ fn test_gateway() -> bitcoin_rs_mempool::MempoolGateway {
 
 fn peer_source(connection_id: u64) -> bitcoin_rs_mempool::PeerToken {
     bitcoin_rs_mempool::PeerToken {
-        endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+        endpoint: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::Ip(
             std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
         )),
-        addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
+        addr: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::from((
             [127, 0, 0, 1],
             8333,
         ))),
@@ -1240,7 +1240,7 @@ fn gateway_hints_do_not_rescue_merkle_mismatch() {
         prev_blockhash: BlockHash::from(Hash256::from_le_bytes(&[0xab; 32])),
         merkle_root: Hash256::from_le_bytes(&[0; 32]),
         time: 7,
-        bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x207f_ffff),
+        bits: bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x207f_ffff),
         nonce: 9,
     };
     let bridged =

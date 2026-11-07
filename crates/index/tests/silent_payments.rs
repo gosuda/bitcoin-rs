@@ -3,11 +3,13 @@
 use crate::support::error::TestError;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use bitcoin_hashes::{Hash as _, hash160};
+use bitcoin_rs_consensus::primitives::{
+    Amount, Block, OutPoint, Script, Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_index::silent_payments::{
     MAX_BODY_BYTES, MAX_PREVOUT_BYTES, TransactionTweak, TweakError, block_tweaks,
     transaction_tweak,
 };
-use bitcoin_rs_primitives::{Amount, Block, OutPoint, Script, Tx, TxIn, TxOut, Txid, Witness};
 use bitcoin_rs_utxo::{
     UtxoCoin,
     contract::{BlockSpends, BlockSpendsError, HistoryUnavailable},

@@ -1,5 +1,5 @@
 use bitcoin_rs_chain::NodeStatus;
-use bitcoin_rs_primitives::{Header, LockTime, Sequence, TxIn, TxOut, Witness};
+use bitcoin_rs_consensus::primitives::{Header, LockTime, Sequence, TxIn, TxOut, Witness};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use sha2::{Digest as _, Sha256};
 
@@ -125,7 +125,7 @@ fn unconfirmed_transaction_is_admitted_from_a_peer() -> TestResult {
     let result = ctx.mempool.gateway.submit_transaction(
         Arc::new(tx),
         AdmissionOrigin::Peer(PeerToken {
-            endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+            endpoint: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::Ip(
                 std::net::SocketAddr::from(([127, 0, 0, 1], 18444)),
             )),
             addr: Some(std::net::SocketAddr::from(([127, 0, 0, 1], 18444)).into()),

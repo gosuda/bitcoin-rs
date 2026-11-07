@@ -5,7 +5,9 @@ use super::{
 };
 use crate::error::ApplyError;
 use bitcoin_rs_consensus::UtxoView;
-use bitcoin_rs_primitives::{Block, BlockPayload, ConsensusEncode, OutPoint, Tx, TxOut, Txid};
+use bitcoin_rs_consensus::primitives::{
+    Block, BlockPayload, ConsensusEncode, OutPoint, Tx, TxOut, Txid,
+};
 use hashbrown::HashSet;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -145,7 +147,7 @@ pub(super) fn plan_block_transactions(block: &Block, txids: &[Txid]) -> BlockTxP
 fn tx_has_bip68_sequence_locks(tx: &Tx) -> bool {
     tx.version >= 2
         && tx.inputs.iter().any(|input| {
-            input.sequence & bitcoin_rs_primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG == 0
+            input.sequence & bitcoin_rs_consensus::primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG == 0
         })
 }
 
@@ -198,7 +200,7 @@ fn run_non_script_checks_only(
     txids: &[Txid],
     height: u32,
     locktime_cutoff: u32,
-    flags: bitcoin_rs_script::VerifyFlags,
+    flags: bitcoin_rs_consensus::script::VerifyFlags,
 ) -> core::result::Result<(), ApplyError> {
     if !tx_plan.needs_local_utxo_overlay {
         txs.par_iter().try_for_each(|tx| {

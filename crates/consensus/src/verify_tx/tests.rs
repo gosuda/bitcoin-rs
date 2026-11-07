@@ -1,13 +1,13 @@
-use bitcoin::hashes::Hash as _;
-use bitcoin_rs_primitives::{
+use crate::primitives::{
     Amount, Block, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Txid, Witness, Wtxid, consensus_bytes, deserialize,
 };
 #[cfg(not(feature = "kernel"))]
-use bitcoin_rs_primitives::{Sighash, SighashCache};
-use bitcoin_rs_script::opcode::{OP_EQUAL, OP_HASH160};
-use bitcoin_rs_script::push_data;
-use bitcoin_rs_script::{VerifyFlags, push_int};
+use crate::primitives::{Sighash, SighashCache};
+use crate::script::opcode::{OP_EQUAL, OP_HASH160};
+use crate::script::push_data;
+use crate::script::{VerifyFlags, push_int};
+use bitcoin::hashes::Hash as _;
 
 use super::{ScriptStageTimings, is_final_tx, verify_coinbase_script_sig_size, verify_transaction};
 use crate::ValidationEngine;

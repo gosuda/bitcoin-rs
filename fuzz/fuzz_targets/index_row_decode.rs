@@ -4,7 +4,7 @@ use bitcoin_rs_index::block_log::{BlockLog, BlockRecord, cumulative_tx_count_thr
 use bitcoin_rs_index::{
     ConsumerCursor, ScriptHistoryOccurrence, ScriptLiveRow, TxPositionValue, positions_are_valid,
 };
-use bitcoin_rs_primitives::{BlockHash, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockHash, Hash256};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

@@ -7,7 +7,7 @@ use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{
     BlockTree, ChainWork, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot, regtest_fixture,
 };
-use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, Header, Network, Tx, Txid};
+use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Hash256, Header, Network, Tx, Txid};
 use parking_lot::{Mutex, RwLock};
 use std::sync::Arc;
 
@@ -356,7 +356,7 @@ pub(crate) fn synced_ibd_latch() -> Arc<InitialBlockDownload> {
     let genesis = Network::Regtest.genesis_block();
     let recent = Header {
         prev_blockhash: genesis.block_hash(),
-        time: u32::try_from(bitcoin_rs_primitives::unix_time_secs()).unwrap_or(u32::MAX),
+        time: u32::try_from(bitcoin_rs_consensus::primitives::unix_time_secs()).unwrap_or(u32::MAX),
         ..genesis.header
     };
     {

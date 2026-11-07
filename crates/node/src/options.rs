@@ -14,8 +14,8 @@ use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_storage::StorageBackend;
 
+pub use bitcoin_rs_consensus::primitives::NetworkLabel;
 pub use bitcoin_rs_p2p::{IpSubnet, PeerNetwork};
-pub use bitcoin_rs_primitives::NetworkLabel;
 
 pub fn parse_network(value: &str) -> std::result::Result<NetworkSelection, OptionParseError> {
     NetworkSelection::from_str(value)
@@ -183,12 +183,12 @@ fn parse_connect_list(value: &str) -> Result<Vec<String>, OptionParseError> {
 
 pub fn parse_network_label(
     value: &str,
-) -> std::result::Result<bitcoin_rs_primitives::NetworkLabel, OptionParseError> {
+) -> std::result::Result<bitcoin_rs_consensus::primitives::NetworkLabel, OptionParseError> {
     match value {
-        "ipv4" => Ok(bitcoin_rs_primitives::NetworkLabel::Ipv4),
-        "ipv6" => Ok(bitcoin_rs_primitives::NetworkLabel::Ipv6),
-        "onion" => Ok(bitcoin_rs_primitives::NetworkLabel::Onion),
-        "i2p" => Ok(bitcoin_rs_primitives::NetworkLabel::I2p),
+        "ipv4" => Ok(bitcoin_rs_consensus::primitives::NetworkLabel::Ipv4),
+        "ipv6" => Ok(bitcoin_rs_consensus::primitives::NetworkLabel::Ipv6),
+        "onion" => Ok(bitcoin_rs_consensus::primitives::NetworkLabel::Onion),
+        "i2p" => Ok(bitcoin_rs_consensus::primitives::NetworkLabel::I2p),
         other => Err(OptionParseError::NetworkLabel {
             value: other.to_owned(),
         }),

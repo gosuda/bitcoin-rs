@@ -3,7 +3,7 @@ pub(crate) enum TestError {
     #[error("consensus error: {0}")]
     Consensus(#[from] crate::ConsensusError),
     #[error("decode error: {0}")]
-    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    Decode(#[from] crate::primitives::DecodeError),
     #[error("try-from-int error: {0}")]
     TryFromInt(#[from] core::num::TryFromIntError),
     #[error("parse-int error: {0}")]

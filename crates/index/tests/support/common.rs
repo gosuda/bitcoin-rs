@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use bitcoin_rs_consensus::primitives::OutPoint;
 use bitcoin_rs_index::{
     PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptHash, ScriptHashRow, SpendingPrefixRow,
 };
-use bitcoin_rs_primitives::OutPoint;
 use bitcoin_rs_storage::{
     BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, PrefixScan,
     PrefixScanLimit, StorageError, WriteCondition,

@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use bitcoin_rs_primitives::{ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};
+use bitcoin_rs_consensus::primitives::{
+    ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut,
+};
 use thiserror::Error;
 
 use crate::contract::{UndoBatch, UtxoAdd};
@@ -18,7 +20,10 @@ const RESTORE_COUNT_OFFSET: usize = VERSION_BYTES + BLOCK_HASH_BYTES;
 #[cfg(test)]
 const RESTORE_TRAILER_BYTES: usize = 1 + core::mem::size_of::<u32>() + COUNT_BYTES;
 
-pub fn record_size_limit(block: &bitcoin_rs_primitives::Block, max_spent_script: usize) -> usize {
+pub fn record_size_limit(
+    block: &bitcoin_rs_consensus::primitives::Block,
+    max_spent_script: usize,
+) -> usize {
     let inputs = block
         .txs
         .iter()
@@ -261,7 +266,7 @@ mod tests {
         UndoCodecError, UtxoAdd, decode, encode,
     };
     use crate::contract::UndoBatch;
-    use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
+    use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut};
 
     fn hash(byte: u8) -> Hash256 {
         Hash256::from_le_bytes(&[byte; 32])
@@ -290,7 +295,7 @@ mod tests {
 
     #[test]
     fn read_bound_covers_spent_scripts_and_bip30_overwrite_bytes() {
-        let mut block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        let mut block = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
         block.txs[0].outputs[0].script_pubkey = vec![0x51; 20_000].into();
         let mut spend = block.txs[0].clone();
         spend.inputs[0].previous_output = outpoint(1, 0);

@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::support::{TestError, common::MemoryStore};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid, encode};
 use bitcoin_rs_index::types::ScriptHistoryOccurrence;
 use bitcoin_rs_index::{
     IndexCapabilities, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer, ScriptHash,
     ScriptHashRow, SpendingPrefixRow, SpentCoinScripts,
 };
-use bitcoin_rs_primitives::{Hash256, OutPoint, Txid, encode};
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit};
 
 const BLOCKS: u32 = 12;

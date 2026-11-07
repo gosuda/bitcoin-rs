@@ -1,12 +1,14 @@
-use bitcoin_rs_primitives::{BlockHash, Network, Tx, TxIn, TxOut, consensus_bytes};
+use bitcoin_rs_consensus::primitives::{BlockHash, Network, Tx, TxIn, TxOut, consensus_bytes};
 
 #[cfg(test)]
-use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, Txid, Witness};
+use bitcoin_rs_consensus::primitives::{
+    Amount, LockTime, OutPoint, Script, Sequence, Txid, Witness,
+};
 use sonic_rs::{JsonValueMutTrait as _, Value, json};
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::hex::DisplayHex;
-use bitcoin_rs_script::{Instruction, instructions};
+use bitcoin_rs_consensus::script::{Instruction, instructions};
 
 use crate::convert::{self};
 
@@ -277,9 +279,9 @@ fn format_script_asm(script: &[u8], decode: SighashDecode) -> String {
             Ok(Instruction::PushBytes(data)) => {
                 if decode == SighashDecode::Attempt
                     && !unspendable(script)
-                    && bitcoin_rs_script::check_signature_encoding(
+                    && bitcoin_rs_consensus::script::check_signature_encoding(
                         data,
-                        bitcoin_rs_script::VerifyFlags::STRICTENC,
+                        bitcoin_rs_consensus::script::VerifyFlags::STRICTENC,
                     )
                     .is_ok()
                 {
@@ -318,8 +320,8 @@ fn format_script_asm(script: &[u8], decode: SighashDecode) -> String {
 }
 
 fn unspendable(script: &[u8]) -> bool {
-    script.first() == Some(&bitcoin_rs_script::opcode::OP_RETURN)
-        || script.len() > bitcoin_rs_script::MAX_SCRIPT_SIZE
+    script.first() == Some(&bitcoin_rs_consensus::script::opcode::OP_RETURN)
+        || script.len() > bitcoin_rs_consensus::script::MAX_SCRIPT_SIZE
 }
 
 #[must_use]
@@ -412,8 +414,8 @@ pub(crate) fn decoded_script_json(script: &[u8], network: Network) -> Value {
             | ScriptShape::WitnessV0KeyHash
             | ScriptShape::WitnessV0ScriptHash
     );
-    if !eligible || !bitcoin_rs_script::has_valid_ops(script) || unspendable(script)
-        || instructions(script).any(|instruction| matches!(instruction, Ok(Instruction::Op(op)) if bitcoin_rs_script::is_op_success(op)))
+    if !eligible || !bitcoin_rs_consensus::script::has_valid_ops(script) || unspendable(script)
+        || instructions(script).any(|instruction| matches!(instruction, Ok(Instruction::Op(op)) if bitcoin_rs_consensus::script::is_op_success(op)))
     { return result; }
     let p2sh = bitcoin::ScriptBuf::new_p2sh(&bitcoin::ScriptHash::hash(script));
     if let Some(address) = convert::script_address(p2sh.as_bytes(), network) {
@@ -459,7 +461,7 @@ pub(crate) fn decoded_script_json(script: &[u8], network: Network) -> Value {
 #[expect(clippy::expect_used)]
 mod tests {
     use super::*;
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_consensus::primitives::Hash256;
     use core::str::FromStr as _;
 
     use sonic_rs::JsonValueTrait;

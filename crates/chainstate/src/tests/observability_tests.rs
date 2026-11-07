@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bitcoin_rs_primitives::{BlockPayload, Network};
+use bitcoin_rs_consensus::primitives::{BlockPayload, Network};
 use bitcoin_rs_utxo::UtxoSet;
 use hashbrown::HashSet;
 use metrics::{
@@ -255,7 +255,7 @@ fn proposal_emits_completed_validation_timings() -> TestResult {
     seed_genesis(&handles)?;
     let block = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
     let fields = ProfileFields::default();
-    let payload = bitcoin_rs_primitives::BlockPayload::from_local(block);
+    let payload = bitcoin_rs_consensus::primitives::BlockPayload::from_local(block);
     capture_profile(&fields, || handles.validate_block(&payload))?;
     for field in [
         "contextual_header_us",
@@ -282,7 +282,7 @@ fn rejected_header_emits_only_completed_validation_timings() -> TestResult {
     let mut block = mined_child(genesis.block_hash(), 1)?;
     block.header.time = genesis.header.time;
     let fields = ProfileFields::default();
-    let payload = bitcoin_rs_primitives::BlockPayload::from_local(block);
+    let payload = bitcoin_rs_consensus::primitives::BlockPayload::from_local(block);
     let result = capture_profile(&fields, || handles.validate_block(&payload));
     assert!(matches!(
         result,
@@ -304,14 +304,14 @@ fn rejected_spend_keeps_resolution_and_dispatch_timings() -> TestResult {
     let mut block = mined_child(genesis.block_hash(), 1)?;
     let mut spend = block.txs[0].clone();
     spend.inputs[0].previous_output =
-        bitcoin_rs_primitives::OutPoint::new(genesis.txs[0].txid(), 0);
+        bitcoin_rs_consensus::primitives::OutPoint::new(genesis.txs[0].txid(), 0);
     block.txs.push(spend);
     let mut leaves: Vec<_> = block.txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
     let root = bitcoin_rs_consensus::verify_block::compute_merkle_root(&mut leaves)
         .ok_or(TestError::Missing("test merkle root missing"))?;
-    block.header.merkle_root = bitcoin_rs_primitives::Hash256::from_le_bytes(&root);
+    block.header.merkle_root = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&root);
     let fields = ProfileFields::default();
-    let payload = bitcoin_rs_primitives::BlockPayload::from_local(block);
+    let payload = bitcoin_rs_consensus::primitives::BlockPayload::from_local(block);
     let result = capture_profile(&fields, || handles.validate_block(&payload));
     assert!(matches!(
         result,

@@ -9,15 +9,15 @@ use crate::{
         requires_full_revalidation,
     },
 };
-use bitcoin_rs_consensus::{ConsensusError, ValidationEngine};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, BlockPayload, LockTime, Network, OutPoint, Sequence, Tx, TxIn, TxOut,
     Witness, consensus_bytes,
 };
-use bitcoin_rs_script::{
+use bitcoin_rs_consensus::script::{
     VerifyFlags,
     opcode::{OP_PUSHNUM_1, OP_RETURN},
 };
+use bitcoin_rs_consensus::{ConsensusError, ValidationEngine};
 use bitcoin_rs_storage::chainstate_journal::{FULL_REVALIDATION_MARKER, JOURNAL_DIR_NAME};
 use bitcoin_rs_utxo::stats::CoinStatsListener;
 
@@ -603,7 +603,9 @@ fn full_start_over_a_validating_assumeutxo_head_names_the_way_out() -> TestResul
         assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Validating {
             base_height: head.height,
             base_hash: head.tip,
-            expected_hash_serialized: bitcoin_rs_primitives::Hash256::from_le_bytes(&[0x52; 32]),
+            expected_hash_serialized: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
+                &[0x52; 32],
+            ),
             chain_tx_count: head.chain_tx_count,
             historical_height: 0,
             historical_hash: Network::Regtest.genesis_block_hash(),

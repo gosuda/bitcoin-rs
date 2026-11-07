@@ -14,7 +14,7 @@ use bitcoin_rs_chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
 
 use crate::IndexCapabilities;
 
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget, RetentionRegistry};
 use bitcoin_rs_storage::{
@@ -84,7 +84,7 @@ struct BranchCoins(Vec<bitcoin_rs_utxo::UtxoCoin>);
 impl bitcoin_rs_utxo::contract::SpentOutputLookup for BranchCoins {
     fn entry(
         &self,
-        outpoint: &bitcoin_rs_primitives::OutPoint,
+        outpoint: &bitcoin_rs_consensus::primitives::OutPoint,
     ) -> Option<&bitcoin_rs_utxo::UtxoCoin> {
         self.0.iter().find(|coin| coin.outpoint == *outpoint)
     }
@@ -94,13 +94,13 @@ impl BranchCoins {
     fn connect(
         &mut self,
         height: u32,
-        block: &bitcoin_rs_primitives::Block,
-        txids: &[bitcoin_rs_primitives::Txid],
+        block: &bitcoin_rs_consensus::primitives::Block,
+        txids: &[bitcoin_rs_consensus::primitives::Txid],
     ) {
         for (tx, txid) in block.txs.iter().zip(txids) {
             for (vout, txout) in tx.outputs.iter().enumerate() {
                 self.0.push(bitcoin_rs_utxo::UtxoCoin {
-                    outpoint: bitcoin_rs_primitives::OutPoint::new(
+                    outpoint: bitcoin_rs_consensus::primitives::OutPoint::new(
                         *txid,
                         u32::try_from(vout).expect("vout"),
                     ),
@@ -133,9 +133,11 @@ fn coinbase_tx(height: u32, extra: i64) -> Transaction {
     }
 }
 
-fn tree_header(block: &Block) -> bitcoin_rs_primitives::Header {
-    bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Header>(&serialize(&block.header))
-        .expect("80-byte header")
+fn tree_header(block: &Block) -> bitcoin_rs_consensus::primitives::Header {
+    bitcoin_rs_consensus::primitives::deserialize::<bitcoin_rs_consensus::primitives::Header>(
+        &serialize(&block.header),
+    )
+    .expect("80-byte header")
 }
 
 fn mine_block(prev_hash: Hash256, height: u32, extra: i64) -> (Block, Hash256) {
@@ -250,8 +252,10 @@ impl ForkFixture {
             let key = self.branch_key(branch, height);
             let block = {
                 let bodies = self.bodies.bodies.lock();
-                bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Block>(&bodies[&key])
-                    .expect("fixture block")
+                bitcoin_rs_consensus::primitives::deserialize::<
+                    bitcoin_rs_consensus::primitives::Block,
+                >(&bodies[&key])
+                .expect("fixture block")
             };
             let txids = block.txids();
             if height > 0 {
@@ -1275,9 +1279,9 @@ fn cell_seed_artifact(
         bytes[..8].copy_from_slice(&i.to_le_bytes());
         let txid = Hash256::from_le_bytes(&bytes);
         changes.add(bitcoin_rs_utxo::contract::UtxoAdd::new(
-            bitcoin_rs_primitives::OutPoint::new(txid.into(), 0),
-            bitcoin_rs_primitives::TxOut {
-                value: bitcoin_rs_primitives::Amount::from_sat(1_000 + i),
+            bitcoin_rs_consensus::primitives::OutPoint::new(txid.into(), 0),
+            bitcoin_rs_consensus::primitives::TxOut {
+                value: bitcoin_rs_consensus::primitives::Amount::from_sat(1_000 + i),
                 script_pubkey: vec![0x51].into(),
             },
             false,

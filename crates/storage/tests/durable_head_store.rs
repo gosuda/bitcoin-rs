@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_storage::{
     CommitRecords, DurableHead, DurableHeadStore, KvDurableHeadStore, KvStore, PersistFault,
     ScriptAttestation, StorageError,

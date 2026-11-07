@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness,
 };
@@ -60,7 +60,7 @@ fn spent_output_projection_orders_inputs_and_ignores_bip30_restorations() -> Tes
     undo.restore(UtxoAdd::new(OutPoint::new(cb.txid(), 0), coin(60), true, 1));
     undo.restore(UtxoAdd::new(FUNDED, coin(900), true, 2));
     let block = Block {
-        header: bitcoin_rs_primitives::Network::Regtest
+        header: bitcoin_rs_consensus::primitives::Network::Regtest
             .genesis_block()
             .header,
         txs: vec![cb.clone(), parent, child],
@@ -610,7 +610,7 @@ fn shaped_block() -> Block {
     let parent = spending(FUNDED, vec![coin(90), coin(5)]);
     let child = spending(OutPoint::new(parent.txid(), 0), vec![coin(80)]);
     Block {
-        header: bitcoin_rs_primitives::Network::Regtest
+        header: bitcoin_rs_consensus::primitives::Network::Regtest
             .genesis_block()
             .header,
         txs: vec![coinbase_tx, parent, child],

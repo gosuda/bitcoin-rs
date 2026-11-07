@@ -42,7 +42,7 @@ const FUNDING_HEIGHT: u32 = 101;
 const TIP_HEIGHT: u32 = 102;
 
 fn bytes(hex: &str) -> Vec<u8> {
-    bitcoin_rs_primitives::hex::hex_decode(hex).expect("fixture hex is valid")
+    bitcoin_rs_consensus::primitives::hex::hex_decode(hex).expect("fixture hex is valid")
 }
 
 fn p2pk(pubkey: &str) -> ScriptBuf {
@@ -356,7 +356,7 @@ fn refuses_a_file_that_starts_after_genesis() {
         matches!(
             error,
             ScanError::BrokenChain { line: 1, expected, .. }
-                if expected == bitcoin_rs_primitives::BlockHash::default()
+                if expected == bitcoin_rs_consensus::primitives::BlockHash::default()
         ),
         "oracle is header linkage: file line 1 must hold the genesis block, whose \
          prev_blockhash is all zeros; got {error}"
@@ -367,7 +367,7 @@ fn refuses_a_file_that_starts_after_genesis() {
 fn p2pk_shape_requires_key_prefix_and_checksig() {
     assert!(
         p2pk_pubkey(&p2pk(KEY_WRONG_PREFIX).to_bytes()).is_none(),
-        "oracle is the workspace P2PK rule in bitcoin_rs_script::is_p2pk: a 33-byte push \
+        "oracle is the workspace P2PK rule in bitcoin_rs_consensus::script::is_p2pk: a 33-byte push \
          must start with 0x02 or 0x03"
     );
     assert!(

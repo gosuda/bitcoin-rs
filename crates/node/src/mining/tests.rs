@@ -4,10 +4,10 @@ use bitcoin_rs_chain::ChainWork;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chainstate::ApplyError;
 use bitcoin_rs_consensus::ConsensusError;
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Txid;
 use bitcoin_rs_mining::BlockValidationResult;
 use bitcoin_rs_mining::MiningControlError;
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::Txid;
 use compact_str::CompactString;
 
 #[test]

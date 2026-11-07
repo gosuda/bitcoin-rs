@@ -23,7 +23,7 @@ This chapter covers the Bitcoin Core-format reader, the activation flow, the two
 7. No trailing bytes.
 8. The Core `hash_serialized` commitment, computed over the staged record stream, must equal the pinned anchor's `hash_serialized`; otherwise `CommitmentMismatch { expected, actual }`.
 
-Step 8 is the load-bearing check: steps 1 through 7 bound resource use and reject structural garbage, but only the commitment binds the bytes to the pinned UTXO set. The pins live in `AssumeUtxoData` entries in `crates/primitives/src/network.rs`: mainnet ships heights 840,000 through 965,000; regtest ships height 110 and height 200 (block `385901ccbd69dff6bbd00065d01fb8a9e464dede7cfe0372443884f9b1dcf6b9`, commitment `17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a`, 201 chain transactions). Testnet3 and Signet ship no pins, so snapshot loading is unavailable there.
+Step 8 is the load-bearing check: steps 1 through 7 bound resource use and reject structural garbage, but only the commitment binds the bytes to the pinned UTXO set. The pins live in `AssumeUtxoData` entries in `crates/consensus/src/primitives/network.rs`: mainnet ships heights 840,000 through 965,000; regtest ships height 110 and height 200 (block `385901ccbd69dff6bbd00065d01fb8a9e464dede7cfe0372443884f9b1dcf6b9`, commitment `17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a`, 201 chain transactions). Testnet3 and Signet ship no pins, so snapshot loading is unavailable there.
 
 ## Activation
 

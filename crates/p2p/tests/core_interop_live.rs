@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use bitcoin_rs_primitives::USER_AGENT;
+use bitcoin_rs_consensus::primitives::USER_AGENT;
 use sonic_rs::{JsonValueTrait, Value};
 
 const EVIDENCE_ENV: &str = "P2P_CORE_INTEROP_EVIDENCE";

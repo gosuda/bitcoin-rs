@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bitcoin::p2p::message_network::VersionMessage;
-use bitcoin_rs_primitives::{NetworkLabel, PeerEndpoint};
+use bitcoin_rs_consensus::primitives::{NetworkLabel, PeerEndpoint};
 
 use crate::counters::PeerCounters;
 use crate::endpoint::TransportRemote;

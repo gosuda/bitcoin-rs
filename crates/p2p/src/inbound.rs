@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{Block, BlockPayload, Header, Tx};
+use bitcoin_rs_consensus::primitives::{Block, BlockPayload, Header, Tx};
 
 pub(crate) mod block_memory;
 

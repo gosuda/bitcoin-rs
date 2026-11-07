@@ -45,7 +45,7 @@ pub(crate) enum TestError {
     #[error(transparent)]
     HexToBytes(#[from] bitcoin::hex::HexToBytesError),
     #[error(transparent)]
-    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
     TryFromInt(#[from] std::num::TryFromIntError),
     #[error(transparent)]

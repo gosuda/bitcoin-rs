@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bitcoin_rs_consensus::primitives::{Hash256, encode};
 use bitcoin_rs_index::types::{ScriptHash, ScriptHashRow, TxPosition};
 use bitcoin_rs_index::{
     ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexReader, IndexWatermark, IndexWriter,
     Indexer, PreparedBatch, PreparedBatchLimits, SpentCoinScripts,
 };
-use bitcoin_rs_primitives::{Hash256, encode};
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit};
 
 use crate::support::TestError;

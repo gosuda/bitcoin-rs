@@ -2,10 +2,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::{Bound, RangeInclusive};
 
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
+use bitcoin_rs_consensus::primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
 
 #[cfg(test)]
-use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
+use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
 use hashbrown::{HashMap, HashSet};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
@@ -984,12 +984,16 @@ impl Mempool {
         self.entry(self.entry_id_by_txid(txid)?)
     }
 
-    pub(crate) fn set_unbroadcast(&mut self, wtxid: bitcoin_rs_primitives::Wtxid, pending: bool) {
+    pub(crate) fn set_unbroadcast(
+        &mut self,
+        wtxid: bitcoin_rs_consensus::primitives::Wtxid,
+        pending: bool,
+    ) {
         self.broadcast_transition(wtxid, |entry| entry.broadcast_pending = pending);
     }
 
     /// Records a serve attempt's mark, taken before its bytes are sent.
-    pub(crate) fn mark_broadcast(&mut self, wtxid: bitcoin_rs_primitives::Wtxid) {
+    pub(crate) fn mark_broadcast(&mut self, wtxid: bitcoin_rs_consensus::primitives::Wtxid) {
         self.broadcast_transition(wtxid, |entry| {
             entry.broadcast_marks = entry.broadcast_marks.saturating_add(1);
         });
@@ -998,7 +1002,7 @@ impl Mempool {
     /// A marked serve attempt committed: initial broadcast completed. A
     /// commit without a live mark belongs to a replaced entry and is
     /// ignored.
-    pub(crate) fn commit_broadcast(&mut self, wtxid: bitcoin_rs_primitives::Wtxid) {
+    pub(crate) fn commit_broadcast(&mut self, wtxid: bitcoin_rs_consensus::primitives::Wtxid) {
         self.broadcast_transition(wtxid, |entry| {
             if entry.broadcast_marks > 0 {
                 entry.broadcast_marks -= 1;
@@ -1011,7 +1015,7 @@ impl Mempool {
     /// is still pending and no send ever committed or remains in flight, so
     /// an earlier failure cannot overwrite a peer's successful send or
     /// revive a replaced entry.
-    pub(crate) fn restore_broadcast(&mut self, wtxid: bitcoin_rs_primitives::Wtxid) {
+    pub(crate) fn restore_broadcast(&mut self, wtxid: bitcoin_rs_consensus::primitives::Wtxid) {
         self.broadcast_transition(wtxid, |entry| {
             entry.broadcast_marks = entry.broadcast_marks.saturating_sub(1);
         });
@@ -1022,7 +1026,7 @@ impl Mempool {
     /// evicted or replaced — is left alone.
     fn broadcast_transition(
         &mut self,
-        wtxid: bitcoin_rs_primitives::Wtxid,
+        wtxid: bitcoin_rs_consensus::primitives::Wtxid,
         transition: impl FnOnce(&mut MempoolEntry),
     ) {
         let Some(&id) = self.derived.by_wtxid.get(&wtxid) else {
@@ -1036,7 +1040,7 @@ impl Mempool {
 
     /// Recomputes `entry.unbroadcast` from pending intent, in-flight marks,
     /// and the done latch, keeping the derived index in step.
-    fn sync_unbroadcast(&mut self, id: EntryId, wtxid: bitcoin_rs_primitives::Wtxid) {
+    fn sync_unbroadcast(&mut self, id: EntryId, wtxid: bitcoin_rs_consensus::primitives::Wtxid) {
         let Some(unbroadcast) = self.entry_mut(id).map(|entry| {
             entry.unbroadcast =
                 entry.broadcast_pending && !entry.broadcast_done && entry.broadcast_marks == 0;
@@ -2397,7 +2401,9 @@ fn outpoint_range(outpoint: OutPoint) -> RangeInclusive<(SpendingKey, EntryId)> 
 
 #[cfg(test)]
 fn txid_of(bytes: [u8; 32]) -> Txid {
-    Txid::from(bitcoin_rs_primitives::Hash256::from_le_bytes(&bytes))
+    Txid::from(bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
+        &bytes,
+    ))
 }
 #[cfg(test)]
 mod package_tests {
@@ -2551,7 +2557,7 @@ mod spend_index_tests;
 mod dynamic_memory_usage_tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut};
+    use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Tx, TxIn, TxOut};
 
     use super::*;
 
@@ -2655,7 +2661,7 @@ mod dynamic_memory_usage_tests {
 mod entry_overhead_tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_primitives::Tx;
+    use bitcoin_rs_consensus::primitives::Tx;
 
     use super::*;
 

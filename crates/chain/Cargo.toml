@@ -18,7 +18,6 @@ default = []
 test-seam = []
 
 [dependencies]
-bitcoin-rs-primitives.workspace = true
 bitcoin-rs-consensus.workspace = true
 slab.workspace = true
 hashbrown.workspace = true

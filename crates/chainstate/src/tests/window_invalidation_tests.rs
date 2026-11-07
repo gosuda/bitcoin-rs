@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at as mined_child;
 use bitcoin_rs_consensus::ConsensusError;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, LockTime, Network,
     OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
