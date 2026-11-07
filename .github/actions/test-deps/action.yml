@@ -13,15 +13,15 @@ runs:
     - name: mold linker
       shell: bash
       run: command -v mold >/dev/null || { sudo apt-get update && sudo apt-get install -y mold; }
-    - name: cargo-nextest 0.9.143
+    - name: cargo-nextest 0.9.151
       shell: bash
       run: |
-        if ! cargo nextest --version 2>/dev/null | grep -q 'cargo-nextest 0.9.143'; then
+        if ! cargo nextest --version 2>/dev/null | grep -q 'cargo-nextest 0.9.151'; then
           tmp="$(mktemp -d)"
           curl -sSfL \
-            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-unknown-linux-gnu.tar.gz" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.151/cargo-nextest-0.9.151-x86_64-unknown-linux-gnu.tar.gz" \
             -o "$tmp/nextest.tar.gz"
-          echo "66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e  $tmp/nextest.tar.gz" \
+          echo "1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4  $tmp/nextest.tar.gz" \
             | sha256sum --check
           tar xzf "$tmp/nextest.tar.gz" -C "$tmp"
           mkdir -p "$HOME/.cargo/bin"

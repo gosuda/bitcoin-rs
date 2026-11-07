@@ -23,7 +23,7 @@ From the repository root, install and select stable:
 rustup toolchain install stable --component rustfmt --component clippy
 rustup override set stable
 cargo install --locked cargo-deny
-cargo install --locked cargo-nextest --version 0.9.143  # optional: speeds the test lanes up; ci-pr.sh falls back to cargo test
+cargo install --locked cargo-nextest --version 0.9.151  # optional: speeds the test lanes up; ci-pr.sh falls back to cargo test
 ```
 
 [`rust-toolchain.toml`](rust-toolchain.toml), CI, pre-commit hooks, and the
