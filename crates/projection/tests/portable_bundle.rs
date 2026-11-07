@@ -568,6 +568,9 @@ impl Node {
             utxo: None,
             chain_transition: None,
             bundle: start.bundle,
+            facts_rx: None,
+            facts_bytes: None,
+            facts_gap: None,
             seed_slot: None,
         };
         let body_store: Arc<dyn BlockBodyStore> = Arc::new(StoreBodies {

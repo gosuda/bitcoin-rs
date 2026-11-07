@@ -1,7 +1,7 @@
 use super::{
     block::NoSpentScripts, block::SpentCoinScripts, block::pending_rows_for_block_with_header,
-    capability::IndexCapabilities, capability::IndexCapability, capability::IndexWatermark,
-    capability::IndexWatermarks, capability::SCRIPT_LIVE_WATERMARK_KEY,
+    block::pending_rows_for_facts, capability::IndexCapabilities, capability::IndexCapability,
+    capability::IndexWatermark, capability::IndexWatermarks, capability::SCRIPT_LIVE_WATERMARK_KEY,
     capability::put_selected_watermarks, error::IndexError, prepared::PreparedBatch,
     prepared::PreparedBatchLimits, prepared::PreparedBlock, reader::Indexer, rows::IndexRowBytes,
     rows::PendingRows, rows::delete_rows, rows::delete_rows_with_headers, rows::put_rows,
@@ -296,6 +296,33 @@ impl<S: KvStore> IndexWriter<S> {
             height,
             hash,
             parent_hash,
+            row_count,
+            encoded_bytes,
+            family_bytes,
+            capabilities,
+            rows,
+        })
+    }
+
+    pub fn prepare_block_from_facts(
+        &self,
+        capabilities: IndexCapabilities,
+        block: &bitcoin_rs_storage::CommittedBlock,
+    ) -> Result<PreparedBlock, IndexError> {
+        if capabilities.is_empty() {
+            return Err(IndexError::NonContiguousPrepared {
+                watermark: self.watermark()?,
+            });
+        }
+        let (mut rows, _header) = pending_rows_for_facts(block, capabilities)?;
+        rows.sort();
+        let row_count = rows.total();
+        let family_bytes = rows.encoded_bytes_by_family()?;
+        let encoded_bytes = family_bytes.total()?;
+        Ok(PreparedBlock {
+            height: block.height,
+            hash: block.hash,
+            parent_hash: block.parent_hash,
             row_count,
             encoded_bytes,
             family_bytes,

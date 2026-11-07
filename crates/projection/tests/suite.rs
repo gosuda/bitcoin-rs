@@ -2,6 +2,7 @@ mod adversarial_index;
 mod be_order;
 mod compact_filters;
 mod index_roundtrip;
+mod live_handoff;
 mod portable_bundle;
 mod script_history_occurrences;
 mod script_live;

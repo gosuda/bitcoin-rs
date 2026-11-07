@@ -168,6 +168,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         )),
         Arc::new(crate::NoOpZmqPublisher),
         None,
+        None,
         Arc::new(crate::mining::MiningGenerationSignal::new()),
         Some(Arc::clone(&gateway)),
     );

@@ -613,8 +613,7 @@ theorem step_env (s : State) (a : Action) :
     dsimp [step]
     repeat (first | split | rfl | cases s.phase)
 
--- RCV-09
--- RCV-10
+-- RCV-09, RCV-10
 theorem invariant_step (s : State) (a : Action) (h : invariant s) :
     invariant (step s a) := by
   cases a
@@ -1148,8 +1147,7 @@ theorem invariant_step (s : State) (a : Action) (h : invariant s) :
   case stutter =>
     exact h
 
--- RCV-09
--- RCV-10
+-- RCV-09, RCV-10
 theorem invariant_foldl (tr : List Action) (s : State) (h : invariant s) :
     invariant (tr.foldl step s) := by
   induction tr generalizing s with
@@ -1159,8 +1157,7 @@ theorem invariant_foldl (tr : List Action) (s : State) (h : invariant s) :
     apply ih
     exact invariant_step s a h
 
--- RCV-09
--- RCV-10
+-- RCV-09, RCV-10
 theorem trace_invariant (mode : Mode) (env : Env) (hwf : envWellFormed env)
     (tr : List Action) :
     invariant (tr.foldl step (init mode env)) :=
@@ -1248,8 +1245,7 @@ theorem node_never_opens_wrong_marker (s : State) (h : invariant s)
       rcases hbad with h1 | h2 | h3 <;> contradiction
     | _ => contradiction
 
--- RCV-09
--- RCV-10
+-- RCV-09, RCV-10
 theorem unsafe_destination_rejected_before_writes (s : State) (h : invariant s)
     (hunsafe : s.env.dstEmptyDir = false ∨ s.env.disjointPaths = false ∨
       (s.env.srcMarker ≠ .retired3 ∧ s.env.srcMarker ≠ .current4) ∨
@@ -1507,8 +1503,7 @@ theorem coins_replay_derived (s : State) (h : invariant s) :
       exact hcoins
     | ioErrorPrePublish => simp only [dstCoins, hphase]
 
--- RCV-09
--- RCV-10
+-- RCV-09, RCV-10
 theorem output_marker_soundness (s : State) (h : invariant s) (m : Marker)
     (hm : dstMarker s = some m) :
     m = .current4 ∧ dstCells s = s.env.srcContents.toList ∧

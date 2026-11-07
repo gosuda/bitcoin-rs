@@ -1257,9 +1257,17 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         .filter(|_| index_name.as_deref().is_none_or(|name| name == "txindex"))
         .map(|derived_index| derived_index.index_info())
         .transpose()?;
-    let txindex_entry = txindex_entry.map(|info| v31::GetIndexInfoName {
-        synced: info.synced,
-        best_block_height: info.best_block_height,
+    let txindex_entry = txindex_entry.map(|info| {
+        tracing::debug!(
+            applied_height = info.applied_height,
+            verified_height = info.verified_height,
+            coverage_height = info.coverage_height,
+            "txindex three positions"
+        );
+        v31::GetIndexInfoName {
+            synced: info.synced,
+            best_block_height: info.best_block_height,
+        }
     });
     let mut indexes = alloc::collections::BTreeMap::new();
     if let Some(entry) = txindex_entry {

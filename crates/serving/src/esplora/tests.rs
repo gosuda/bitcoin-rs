@@ -194,6 +194,9 @@ impl crate::context::DerivedIndexQuery for StaticTxIndex {
         Ok(crate::context::DerivedIndexInfo {
             synced: true,
             best_block_height: 0,
+            applied_height: 0,
+            verified_height: 0,
+            coverage_height: 0,
         })
     }
 }
@@ -229,6 +232,9 @@ impl crate::context::DerivedIndexQuery for CountingTxIndex {
         Ok(crate::context::DerivedIndexInfo {
             synced: true,
             best_block_height: 0,
+            applied_height: 0,
+            verified_height: 0,
+            coverage_height: 0,
         })
     }
 }
@@ -270,6 +276,9 @@ impl crate::context::DerivedIndexQuery for FixtureTxIndex {
         Ok(crate::context::DerivedIndexInfo {
             synced: true,
             best_block_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
+            applied_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
+            verified_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
+            coverage_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
         })
     }
 }
@@ -2446,6 +2455,9 @@ fn block_parent_reuse_checks_readiness_only_when_needed() {
             Ok(crate::context::DerivedIndexInfo {
                 synced: self.synced,
                 best_block_height: 0,
+                applied_height: 0,
+                verified_height: 0,
+                coverage_height: 0,
             })
         }
     }

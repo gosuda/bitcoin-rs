@@ -23,6 +23,11 @@ pub(crate) trait TxIndexWriter: Send + Sync {
         body: &[u8],
         spent_scripts: &dyn SpentCoinScripts,
     ) -> Result<PreparedBlock, IndexError>;
+    fn prepare_block_from_facts(
+        &self,
+        capabilities: IndexCapabilities,
+        block: &bitcoin_rs_storage::CommittedBlock,
+    ) -> Result<PreparedBlock, IndexError>;
     fn seed_script_live_stream(
         &self,
         produce: &mut ScriptLiveSeedProduce<'_>,
@@ -90,6 +95,14 @@ where
             body,
             spent_scripts,
         )
+    }
+
+    fn prepare_block_from_facts(
+        &self,
+        capabilities: IndexCapabilities,
+        block: &bitcoin_rs_storage::CommittedBlock,
+    ) -> Result<PreparedBlock, IndexError> {
+        self.read().prepare_block_from_facts(capabilities, block)
     }
 
     fn commit_forward_with_cursor(

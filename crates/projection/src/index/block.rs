@@ -75,6 +75,177 @@ pub(super) fn pending_rows_for_block_with_header(
     Ok((rows, header_row))
 }
 
+pub(crate) struct CommittedBlockSpentScripts<'a> {
+    map: hashbrown::HashMap<([u8; 32], u32), &'a [u8]>,
+}
+
+impl<'a> CommittedBlockSpentScripts<'a> {
+    #[must_use]
+    pub(crate) fn new(block: &'a bitcoin_rs_storage::CommittedBlock) -> Self {
+        let mut map = hashbrown::HashMap::new();
+        for tx in &block.txs {
+            for out in &tx.outputs {
+                map.insert((tx.txid, out.vout), out.script.as_ref());
+            }
+            for input in &tx.inputs {
+                map.insert((input.txid, input.vout), input.script.as_ref());
+            }
+        }
+        Self { map }
+    }
+}
+
+impl SpentCoinScripts for CommittedBlockSpentScripts<'_> {
+    fn script_bytes(&self, txid: &[u8; 32], vout: u32) -> Option<&[u8]> {
+        self.map.get(&(*txid, vout)).copied()
+    }
+}
+
+// PRJ-01
+pub(super) fn pending_rows_for_facts(
+    block: &bitcoin_rs_storage::CommittedBlock,
+    capabilities: IndexCapabilities,
+) -> Result<(PendingRows, [u8; crate::types::HEADER_ROW_SIZE]), IndexError> {
+    let header_row = block.header;
+    let height_bytes = encode_height(block.height);
+    let mut rows = PendingRows::default();
+    rows.header_rows.push(header_row);
+
+    let mut live_created: Vec<([u8; 32], u32, Option<ScriptHash>)> = Vec::new();
+    let mut live_spent: Vec<([u8; 32], u32)> = Vec::new();
+    let spent_scripts = CommittedBlockSpentScripts::new(block);
+
+    for tx in &block.txs {
+        let position = crate::types::TxPosition::new(tx.offset, tx.len);
+        if capabilities.contains(IndexCapability::TxLookup) {
+            rows.txid_rows.push(PositionedRow {
+                row: TxidRow::row_bytes(&tx.txid, height_bytes),
+                position,
+            });
+        }
+        process_facts_inputs(
+            tx,
+            block.height,
+            height_bytes,
+            capabilities,
+            position,
+            &mut rows,
+            &mut live_spent,
+        );
+        process_facts_outputs(
+            tx,
+            block.height,
+            height_bytes,
+            capabilities,
+            position,
+            &mut rows,
+            &mut live_created,
+        );
+    }
+
+    if capabilities.contains(IndexCapability::ScriptLive) {
+        push_live_ops(
+            &mut rows,
+            live_created,
+            live_spent,
+            block.height,
+            &spent_scripts,
+        )?;
+    }
+    if capabilities.contains(IndexCapability::CompactFilters) {
+        rows.filter_rows.push((
+            block.hash,
+            super::filters::build_from_facts(&block.hash, &block.txs)?,
+        ));
+    }
+    Ok((rows, header_row))
+}
+
+fn process_facts_inputs(
+    tx: &bitcoin_rs_storage::TxFacts,
+    block_height: u32,
+    height_bytes: [u8; crate::types::HEIGHT_SIZE],
+    capabilities: IndexCapabilities,
+    position: crate::types::TxPosition,
+    rows: &mut PendingRows,
+    live_spent: &mut Vec<([u8; 32], u32)>,
+) {
+    if !capabilities.contains(IndexCapability::ScriptHistory)
+        && !capabilities.contains(IndexCapability::ScriptLive)
+    {
+        return;
+    }
+    let mut spent_in_tx = hashbrown::HashSet::<ScriptHash>::new();
+    for input in &tx.inputs {
+        if capabilities.contains(IndexCapability::ScriptHistory) {
+            rows.spending_rows.push(PositionedRow {
+                row: SpendingPrefixRow::row_parts(&input.txid, input.vout, height_bytes),
+                position,
+            });
+            let scripthash = ScriptHash::from_script_bytes(&input.script);
+            if spent_in_tx.insert(scripthash) {
+                rows.funding_rows.push(PositionedHistory {
+                    row: HashPrefixRow {
+                        prefix: scripthash.prefix(),
+                        height: encode_history_height(block_height),
+                    },
+                    occurrence: ScriptHistoryOccurrence {
+                        scripthash,
+                        txid: tx.txid,
+                        position,
+                        flags: ScriptHistoryOccurrence::SPENDING,
+                    },
+                });
+            }
+        }
+        if capabilities.contains(IndexCapability::ScriptLive) {
+            live_spent.push((input.txid, input.vout));
+        }
+    }
+}
+
+fn process_facts_outputs(
+    tx: &bitcoin_rs_storage::TxFacts,
+    block_height: u32,
+    height_bytes: [u8; crate::types::HEIGHT_SIZE],
+    capabilities: IndexCapabilities,
+    position: crate::types::TxPosition,
+    rows: &mut PendingRows,
+    live_created: &mut Vec<([u8; 32], u32, Option<ScriptHash>)>,
+) {
+    if !capabilities.contains(IndexCapability::ScriptHistory)
+        && !capabilities.contains(IndexCapability::ScriptLive)
+    {
+        return;
+    }
+    let mut funded_in_tx = hashbrown::HashSet::<ScriptHash>::new();
+    for output in &tx.outputs {
+        let script = output.script.as_ref();
+        if capabilities.contains(IndexCapability::ScriptHistory) && !is_op_return_script(script) {
+            let scripthash = ScriptHash::from_script_bytes(script);
+            if funded_in_tx.insert(scripthash) {
+                rows.funding_rows.push(PositionedHistory {
+                    row: HashPrefixRow {
+                        prefix: scripthash.prefix(),
+                        height: encode_history_height(block_height),
+                    },
+                    occurrence: ScriptHistoryOccurrence {
+                        scripthash,
+                        txid: tx.txid,
+                        position,
+                        flags: ScriptHistoryOccurrence::FUNDING,
+                    },
+                });
+            }
+        }
+        if capabilities.contains(IndexCapability::ScriptLive)
+            && height_bytes != [0_u8; crate::types::HEIGHT_SIZE]
+        {
+            live_created.push((tx.txid, output.vout, live_admission(script)));
+        }
+    }
+}
+
 struct BlockContext<'a> {
     height: u32,
     height_bytes: [u8; crate::types::HEIGHT_SIZE],

@@ -22,6 +22,9 @@ pub trait CompactFilterQuery: Send + Sync {
 pub struct DerivedIndexInfo {
     pub synced: bool,
     pub best_block_height: u32,
+    pub applied_height: u32,
+    pub verified_height: u32,
+    pub coverage_height: u32,
 }
 
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]

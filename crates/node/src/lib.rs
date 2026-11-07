@@ -8,7 +8,9 @@ mod chain_effects;
 pub mod config;
 mod embed;
 mod event_loop;
+pub mod facts_queue;
 pub mod options;
+pub use facts_queue::{DEFAULT_FACTS_QUEUE_BUDGET_BYTES, FactsQueue, Gap};
 
 mod lifecycle;
 pub mod metrics;

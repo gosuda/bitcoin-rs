@@ -79,9 +79,19 @@ impl CompactFilterQuery for DerivedIndexQueryEngine {
     fn filter_index_info(&self) -> Result<DerivedIndexInfo, TxQueryError> {
         self.require_enabled(IndexCapabilities::COMPACT_FILTERS)?;
         let progress = self.index_progress_for(IndexCapabilities::COMPACT_FILTERS)?;
+        let applied_height = self
+            .applied_tip
+            .load_full()
+            .as_ref()
+            .map_or(0, |tip| tip.height);
+        let coverage_height = progress.processed_height;
+        let verified_height = progress.processed_height.min(applied_height);
         Ok(DerivedIndexInfo {
             synced: progress.synced && self.runtime.compact_filter_failure.read().is_none(),
             best_block_height: progress.processed_height,
+            applied_height,
+            verified_height,
+            coverage_height,
         })
     }
 }

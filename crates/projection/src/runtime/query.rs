@@ -690,9 +690,19 @@ impl DerivedIndexQuery for DerivedIndexQueryEngine {
 
     fn index_info(&self) -> Result<DerivedIndexInfo, TxQueryError> {
         let progress = self.index_progress_for(IndexCapabilities::TX_LOOKUP)?;
+        let applied_height = self
+            .applied_tip
+            .load_full()
+            .as_ref()
+            .map_or(0, |tip| tip.height);
+        let coverage_height = progress.processed_height;
+        let verified_height = progress.processed_height.min(applied_height);
         Ok(DerivedIndexInfo {
             synced: progress.synced,
             best_block_height: progress.processed_height,
+            applied_height,
+            verified_height,
+            coverage_height,
         })
     }
 }

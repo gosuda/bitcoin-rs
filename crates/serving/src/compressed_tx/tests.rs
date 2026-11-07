@@ -1095,6 +1095,9 @@ fn production_resolver_resolves_through_block_bodies() {
             Ok(bitcoin_rs_projection::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 100,
+                applied_height: 100,
+                verified_height: 100,
+                coverage_height: 100,
             })
         }
     }
@@ -1615,6 +1618,9 @@ fn production_resolver_clones_only_the_requested_output() {
             Ok(bitcoin_rs_projection::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 100,
+                applied_height: 100,
+                verified_height: 100,
+                coverage_height: 100,
             })
         }
     }

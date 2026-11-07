@@ -1,3 +1,4 @@
+use crate::facts_queue::FactsQueue;
 use std::sync::Arc;
 
 use bitcoin_rs_consensus::primitives::{BlockHash, BlockImage, Hash256};
@@ -29,6 +30,7 @@ pub struct ChainFollowers {
     blocks: Arc<RwLock<BlockLog>>,
     zmq: Arc<dyn ZmqPublisher>,
     derived_index: Option<Arc<DerivedIndexRuntime>>,
+    facts_queue: Option<Arc<FactsQueue>>,
     mining: Arc<crate::mining::MiningGenerationSignal>,
     mempool: Option<Arc<MempoolGateway>>,
     block_announcer: Option<crate::p2p::block_announce::BlockAnnounceQueue>,
@@ -40,6 +42,7 @@ impl ChainFollowers {
         blocks: Arc<RwLock<BlockLog>>,
         zmq: Arc<dyn ZmqPublisher>,
         derived_index: Option<Arc<DerivedIndexRuntime>>,
+        facts_queue: Option<Arc<FactsQueue>>,
         mining: Arc<crate::mining::MiningGenerationSignal>,
         mempool: Option<Arc<MempoolGateway>>,
     ) -> Self {
@@ -47,6 +50,7 @@ impl ChainFollowers {
             blocks,
             zmq,
             derived_index,
+            facts_queue,
             mining,
             mempool,
             block_announcer: None,
@@ -58,6 +62,7 @@ impl ChainFollowers {
         Self::new(
             Arc::new(RwLock::new(BlockLog::new())),
             Arc::new(crate::NoOpZmqPublisher),
+            None,
             None,
             Arc::new(crate::mining::MiningGenerationSignal::new()),
             None,
@@ -74,6 +79,11 @@ impl ChainFollowers {
     #[must_use]
     pub fn with_tx_index(mut self, derived_index: Option<Arc<DerivedIndexRuntime>>) -> Self {
         self.derived_index = derived_index;
+        self
+    }
+    #[must_use]
+    pub fn with_facts_queue(mut self, facts_queue: Option<Arc<FactsQueue>>) -> Self {
+        self.facts_queue = facts_queue;
         self
     }
 
@@ -93,7 +103,7 @@ impl ChainFollowers {
 
     #[must_use]
     pub fn needs_block_bytes(&self) -> bool {
-        self.derived_index.is_some() || self.zmq.wants_rawblock()
+        self.zmq.wants_rawblock()
     }
 
     #[must_use]
@@ -182,6 +192,11 @@ impl ChainFollowers {
             .write()
             .push(BlockRecord::from_image(outcome.height, payload));
         self.publish_block(outcome);
+        if let Some(facts_queue) = &self.facts_queue {
+            if let Some(facts) = &outcome.committed_facts {
+                facts_queue.try_push(Arc::clone(facts));
+            }
+        }
         self.wake_index();
         if self.zmq.wants_notifications() {
             self.zmq
@@ -204,6 +219,9 @@ impl ChainFollowers {
     }
 
     pub(crate) fn on_disconnect(&self, outcome: &DisconnectOutcome) {
+        if let Some(facts_queue) = &self.facts_queue {
+            facts_queue.set_gap();
+        }
         self.pop_matching_tail(outcome.hash);
         self.wake_index();
         if self.zmq.wants_notifications() {

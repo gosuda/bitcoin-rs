@@ -1,6 +1,4 @@
-\* RCV-09
-\* RCV-10
-\* RCV-04
+\* RCV-09, RCV-10, RCV-04
 ----------------------------- MODULE MarkerEpoch4 -----------------------------
 (***************************************************************************)
 (* Datadir schema marker and migration lifecycle model for schema epoch 4. *)

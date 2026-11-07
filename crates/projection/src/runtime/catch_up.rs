@@ -195,6 +195,21 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
 
+        if !self.has_facts_gap() {
+            if let Some(prepared) = self.try_prepare_from_facts(identities, capabilities)? {
+                let loaded = prepared.len();
+                let sub_chunk = &identities[..loaded];
+                if self.runtime.should_stop() {
+                    return Ok(ChunkAction::Stalled);
+                }
+                if let Some(action) = self.admit_prepared(prepared, sub_chunk, state, history)? {
+                    return Ok(action);
+                }
+                *identities = &identities[loaded..];
+                return Ok(ChunkAction::Continue);
+            }
+        }
+
         let (bodies, missing_body) = self
             .load_body_prefix(body_reader.as_mut(), identities)
             .map_err(DerivedIndexWorkerError::Storage)?;
@@ -318,6 +333,72 @@ impl Worker {
             )
             .map_err(DerivedIndexWorkerError::Index)?;
         Ok(ReconcileAction::Progressed)
+    }
+
+    pub(super) fn has_facts_gap(&self) -> bool {
+        self.facts_gap
+            .as_ref()
+            .is_some_and(|gap| gap.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    pub(super) fn clear_buffered_facts(&self) {
+        if let Some(rx) = &self.facts_rx {
+            while let Ok(facts) = rx.try_recv() {
+                if let Some(bytes) = &self.facts_bytes {
+                    bytes.fetch_sub(facts.size_bytes(), std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        self.buffered_facts.lock().clear();
+    }
+
+    fn drain_facts_into_buffer(&self) {
+        if let Some(rx) = &self.facts_rx {
+            while let Ok(facts) = rx.try_recv() {
+                if let Some(bytes) = &self.facts_bytes {
+                    bytes.fetch_sub(facts.size_bytes(), std::sync::atomic::Ordering::SeqCst);
+                }
+                let mut guard = self.buffered_facts.lock();
+                for block in &facts.blocks {
+                    guard.insert((block.hash, block.height), block.clone());
+                }
+            }
+        }
+    }
+
+    fn try_prepare_from_facts(
+        &self,
+        identities: &[BlockIdentity],
+        capabilities: IndexCapabilities,
+    ) -> Result<Option<Vec<Result<PreparedBlock, IndexError>>>, DerivedIndexWorkerError> {
+        if self.facts_rx.is_none() {
+            return Ok(None);
+        }
+        self.drain_facts_into_buffer();
+        let guard = self.buffered_facts.lock();
+        if guard.is_empty() {
+            return Ok(None);
+        }
+        let mut count = 0;
+        for identity in identities {
+            if guard.contains_key(&(identity.hash, identity.height)) {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        if count == 0 {
+            return Ok(None);
+        }
+        drop(guard);
+        let mut guard = self.buffered_facts.lock();
+        let mut prepared = Vec::with_capacity(count);
+        for identity in &identities[..count] {
+            if let Some(block) = guard.remove(&(identity.hash, identity.height)) {
+                prepared.push(self.writer.prepare_block_from_facts(capabilities, &block));
+            }
+        }
+        Ok(Some(prepared))
     }
 
     fn load_body_prefix(

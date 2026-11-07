@@ -94,6 +94,7 @@ fn settlement_breaking_followers(gateway: Arc<MempoolGateway>, generation: u64) 
             generation,
         }),
         None,
+        None,
         Arc::new(crate::mining::MiningGenerationSignal::new()),
         Some(gateway),
     )
@@ -119,6 +120,7 @@ fn connect_outcome(tip: &TipSnapshot, block: &BlockImage) -> ConnectOutcome {
             .collect(),
         block_bytes: bytes::Bytes::new(),
         raw_txs: None,
+        committed_facts: None,
     }
 }
 
@@ -268,6 +270,7 @@ fn followers_with_gateway(gateway: &Arc<MempoolGateway>) -> ChainFollowers {
     ChainFollowers::new(
         Arc::new(RwLock::new(BlockLog::new())),
         Arc::new(crate::NoOpZmqPublisher),
+        None,
         None,
         Arc::new(crate::mining::MiningGenerationSignal::new()),
         Some(Arc::clone(gateway)),

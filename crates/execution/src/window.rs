@@ -199,6 +199,11 @@ impl WindowGroup {
     fn finish_commit(&mut self, handles: &Chainstate, commit_id: u64) -> Vec<ConnectOutcome> {
         for pending in &mut self.pending {
             pending.outcome.commit_id = commit_id;
+            if let Some(facts) = &mut pending.outcome.committed_facts {
+                if let Some(facts_mut) = std::sync::Arc::get_mut(facts) {
+                    facts_mut.commit_id = commit_id;
+                }
+            }
         }
         self.staged_bytes = 0;
         let published = self
@@ -1001,6 +1006,7 @@ mod workspace_guard_tests {
                 txids: b1.txs.iter().map(|tx| tx.txid()).collect(),
                 block_bytes: Default::default(),
                 raw_txs: None,
+                committed_facts: None,
             },
             undo_record: UndoRecord::new(Vec::new()),
             prev_hash: Hash256::from(genesis.block_hash()),

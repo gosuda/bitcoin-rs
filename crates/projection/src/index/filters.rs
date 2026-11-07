@@ -129,6 +129,44 @@ pub(super) fn build(
     })
 }
 
+// PRJ-12
+pub(super) fn build_from_facts(
+    hash: &[u8; 32],
+    txs: &[bitcoin_rs_storage::TxFacts],
+) -> Result<BasicFilter, IndexError> {
+    let k0 = u64::from_le_bytes(
+        hash[..8]
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("SipHash keys are eight bytes")),
+    );
+    let k1 = u64::from_le_bytes(
+        hash[8..16]
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("SipHash keys are eight bytes")),
+    );
+    let mut filter = Vec::new();
+    let mut writer = bitcoin::bip158::GcsFilterWriter::new(&mut filter, k0, k1, 784_931, 19);
+    for tx in txs {
+        for input in &tx.inputs {
+            writer.add_element(&input.script);
+        }
+        for output in &tx.outputs {
+            if !output.script.is_empty() && output.script[0] != 0x6a {
+                writer.add_element(&output.script);
+            }
+        }
+    }
+    writer
+        .finish()
+        .map_err(|_| IndexError::InvalidCompactFilter)?;
+    let filter_hash = encode::double_sha256(&filter).to_le_bytes();
+    Ok(BasicFilter {
+        filter,
+        hash: filter_hash,
+        header: [0; 32],
+    })
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -137,6 +175,7 @@ pub(super) fn build(
 mod tests {
     use super::*;
     use bitcoin::{consensus::deserialize, hashes::Hash as _, hex::FromHex as _};
+    use bitcoin_rs_storage::Bytes;
 
     struct Scripts(hashbrown::HashMap<([u8; 32], u32), Vec<u8>>);
     impl SpentCoinScripts for Scripts {
@@ -180,6 +219,59 @@ mod tests {
             filter.chain(previous.to_byte_array());
             let expected: bitcoin::bip158::FilterHeader = expected_header.parse()?;
             assert_eq!(filter.header, expected.to_byte_array(), "{note}");
+            let mut created_outputs = hashbrown::HashMap::<([u8; 32], u32), Bytes>::new();
+            let mut tx_facts = Vec::new();
+            for (idx, tx) in block.txdata.iter().enumerate() {
+                let txid = tx.compute_txid().to_byte_array();
+                let mut inputs = Vec::new();
+                if idx > 0 {
+                    for input in &tx.input {
+                        let prev_txid = input.previous_output.txid.to_byte_array();
+                        let prev_vout = input.previous_output.vout;
+                        let script = created_outputs
+                            .get(&(prev_txid, prev_vout))
+                            .cloned()
+                            .or_else(|| {
+                                scripts
+                                    .script_bytes(&prev_txid, prev_vout)
+                                    .map(Bytes::copy_from_slice)
+                            })
+                            .expect("prevout script must exist");
+                        inputs.push(bitcoin_rs_storage::SpentPrevout {
+                            txid: prev_txid,
+                            vout: prev_vout,
+                            value: 0,
+                            script,
+                        });
+                    }
+                }
+                let mut outputs = Vec::new();
+                for (vout, out) in tx.output.iter().enumerate() {
+                    let vout_u32 = u32::try_from(vout).expect("vout fits u32");
+                    let script = Bytes::copy_from_slice(out.script_pubkey.as_bytes());
+                    created_outputs.insert((txid, vout_u32), script.clone());
+                    outputs.push(bitcoin_rs_storage::CreatedOutput {
+                        vout: vout_u32,
+                        value: out.value.to_sat(),
+                        script,
+                    });
+                }
+                tx_facts.push(bitcoin_rs_storage::TxFacts {
+                    txid,
+                    offset: 0,
+                    len: 0,
+                    inputs,
+                    outputs,
+                });
+            }
+            let mut filter_from_facts = build_from_facts(&hash, &tx_facts)?;
+            assert_eq!(
+                filter_from_facts.filter,
+                Vec::from_hex(&expected_filter)?,
+                "{note}"
+            );
+            filter_from_facts.chain(previous.to_byte_array());
+            assert_eq!(filter_from_facts.header, expected.to_byte_array(), "{note}");
         }
         Ok(())
     }

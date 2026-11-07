@@ -406,8 +406,22 @@ impl NodeState {
                 let _ = cell.offer(artifact);
             }
         }
+        let (facts_queue, facts_parts) = if derived_index_open_spec.is_some() {
+            let queue = Arc::new(crate::facts_queue::FactsQueue::with_default_budget());
+            let rx = queue.receiver();
+            let bytes = queue.bytes_handle();
+            let gap = queue.gap_handle();
+            (Some(queue), Some((rx, bytes, gap)))
+        } else {
+            (None, None)
+        };
         let derived_index_parts = match derived_index_open_spec {
             Some(mut spec) => {
+                if let Some((rx, bytes, gap)) = facts_parts {
+                    spec.facts_rx = Some(rx);
+                    spec.facts_bytes = Some(bytes);
+                    spec.facts_gap = Some(gap);
+                }
                 spec.utxo = Some(bitcoin_rs_storage::utxo::UtxoReader::with_coin_store(
                     Arc::clone(&utxo),
                     storage.coins(),
@@ -557,6 +571,7 @@ impl NodeState {
             derived_index_parts
                 .as_ref()
                 .map(|(runtime, _, _, _)| Arc::clone(runtime)),
+            facts_queue,
             Arc::clone(&mining_generation),
             Some(Arc::clone(&mempool_gateway)),
         )

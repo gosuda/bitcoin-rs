@@ -319,6 +319,7 @@ pub struct ConnectOutcome {
     pub txids: Vec<Txid>,
     pub block_bytes: bytes::Bytes,
     pub raw_txs: Option<Vec<Vec<u8>>>,
+    pub committed_facts: Option<std::sync::Arc<bitcoin_rs_storage::CommittedFacts>>,
 }
 
 #[derive(Debug)]

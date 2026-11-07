@@ -334,6 +334,10 @@ fn build_worker(
         batch_delay: FORWARD_BATCH_DELAY,
         seed_slot: setup.spec.seed_slot.clone(),
         seed_bundle: parking_lot::Mutex::new(None),
+        facts_rx: setup.spec.facts_rx.clone(),
+        facts_bytes: setup.spec.facts_bytes.clone(),
+        facts_gap: setup.spec.facts_gap.clone(),
+        buffered_facts: parking_lot::Mutex::new(hashbrown::HashMap::new()),
     }
 }
 

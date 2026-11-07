@@ -77,6 +77,9 @@ fn compact_filter_rpc_exposes_only_enabled_ready_data() -> Result<(), TestError>
             Ok(DerivedIndexInfo {
                 synced: self.0.load(Ordering::Acquire),
                 best_block_height: 0,
+                applied_height: 0,
+                verified_height: 0,
+                coverage_height: 0,
             })
         }
     }
@@ -577,6 +580,9 @@ fn getindexinfo_returns_txindex_when_indexer_is_available() -> Result<(), TestEr
         info: bitcoin_rs_serving::context::DerivedIndexInfo {
             synced: true,
             best_block_height: 7,
+            applied_height: 7,
+            verified_height: 7,
+            coverage_height: 7,
         },
     }));
     let handler = Handler::new(Arc::new(ctx));
@@ -632,6 +638,9 @@ fn getindexinfo_named_request_returns_only_that_index() -> Result<(), TestError>
         info: bitcoin_rs_serving::context::DerivedIndexInfo {
             synced: true,
             best_block_height: 7,
+            applied_height: 7,
+            verified_height: 7,
+            coverage_height: 7,
         },
     }));
     let handler = Handler::new(Arc::new(ctx));
@@ -884,6 +893,9 @@ fn fee_stats_context(values: Option<HashMap<OutPoint, u64>>) -> (Arc<Context>, T
             info: bitcoin_rs_serving::context::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 7,
+                applied_height: 7,
+                verified_height: 7,
+                coverage_height: 7,
             },
         }));
     }
@@ -1047,6 +1059,9 @@ impl Fixture {
             info: bitcoin_rs_serving::context::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 7,
+                applied_height: 7,
+                verified_height: 7,
+                coverage_height: 7,
             },
         }));
         let block_hex = consensus_bytes(&block).to_lower_hex_string();

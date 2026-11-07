@@ -22,6 +22,9 @@ fn test_open_spec(dir: &std::path::Path, epoch: u64) -> DerivedIndexOpenSpec {
         utxo: None,
         chain_transition: None,
         bundle: crate::portable::IndexBundleDirective::None,
+        facts_rx: None,
+        facts_bytes: None,
+        facts_gap: None,
         seed_slot: None,
         open_store: Arc::new(move |dir| {
             let store = Arc::new(
@@ -471,6 +474,10 @@ fn revision_quiet_cancellation_wakes_and_joins_promptly() {
         rollback_rebuild_cutover: 0,
         seed_slot: None,
         seed_bundle: parking_lot::Mutex::new(None),
+        facts_rx: None,
+        facts_bytes: None,
+        facts_gap: None,
+        buffered_facts: parking_lot::Mutex::new(hashbrown::HashMap::new()),
     };
 
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
@@ -523,6 +530,10 @@ fn batch_deadline_cancellation_wakes_and_joins_promptly() {
         rollback_rebuild_cutover: 0,
         seed_slot: None,
         seed_bundle: parking_lot::Mutex::new(None),
+        facts_rx: None,
+        facts_bytes: None,
+        facts_gap: None,
+        buffered_facts: parking_lot::Mutex::new(hashbrown::HashMap::new()),
     };
 
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);

@@ -24,6 +24,7 @@ pub use coins::{COIN_KEY_LEN, CoinCache, CoinKey, CoinStore, WindowDelta};
 #[cfg(any(test, feature = "test-seam"))]
 pub use commit::CommitFault;
 pub use commit::{AcceptedPrefix, CommitAuthority, CommitError, DurableReceipt};
+pub use committed_facts::{CommittedBlock, CommittedFacts, CreatedOutput, SpentPrevout, TxFacts};
 pub use error::{BoundedReadError, StorageError};
 pub use memory_kv::MemoryKvStore;
 pub use snapshot_activation::{
@@ -138,6 +139,7 @@ mod rocksdb_impl;
 mod surrealkv_impl;
 
 pub mod checkpoint;
+pub mod committed_facts;
 #[cfg(any(test, verification, kani))]
 pub mod schema_model;
 #[cfg(test)]

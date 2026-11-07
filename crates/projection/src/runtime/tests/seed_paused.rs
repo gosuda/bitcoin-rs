@@ -164,6 +164,13 @@ impl TxIndexWriter for GatedWriter {
         self.inner
             .prepare_block_with_spent_scripts(capabilities, height, hash, body, spent_scripts)
     }
+    fn prepare_block_from_facts(
+        &self,
+        capabilities: IndexCapabilities,
+        block: &bitcoin_rs_storage::CommittedBlock,
+    ) -> Result<PreparedBlock, IndexError> {
+        self.inner.prepare_block_from_facts(capabilities, block)
+    }
 
     fn seed_script_live_stream(
         &self,
@@ -583,6 +590,10 @@ impl SeedHarness {
             batch_delay: Duration::ZERO,
             rollback_rebuild_cutover: u32::MAX,
             seed_slot: Some(cell.clone()),
+            facts_rx: None,
+            facts_bytes: None,
+            facts_gap: None,
+            buffered_facts: parking_lot::Mutex::new(hashbrown::HashMap::new()),
             seed_bundle: Mutex::new(None),
         };
         Self {

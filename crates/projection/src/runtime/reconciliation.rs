@@ -124,6 +124,11 @@ impl Worker {
             return Ok(ReconcileAction::Progressed);
         }
         self.runtime.publish_phase(ReconcilePhase::FORWARD);
+        if self.has_facts_gap() {
+            if let Some(gap) = &self.facts_gap {
+                gap.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
         Ok(ReconcileAction::CaughtUp)
     }
 
@@ -132,6 +137,9 @@ impl Worker {
         pending: &mut Option<PendingForward>,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
         let (target, fence, watermarks) = self.capture_target_watermarks()?;
+        if self.has_facts_gap() {
+            self.clear_buffered_facts();
+        }
         let leftover = self.enabled.leftover(watermarks);
         if !leftover.is_empty() {
             self.writer
