@@ -271,7 +271,6 @@ pub(crate) struct ServingView {
     pub historical_verified_height: u32,
     pub historical_verified_hash: Hash256,
     pub(super) tip_id: NodeId,
-    segments: Arc<dyn IndexReader>,
     deadline: Instant,
 }
 
@@ -389,11 +388,12 @@ impl DerivedIndexQueryEngine {
     }
 
     /// Reads the applied epoch, generation, and coverage once and pins the
-    /// generation for the view's bounded lifetime (`QRY-01`, `QRY-07`).
+    /// generation and the capture-time snapshot for the view's bounded
+    /// lifetime (`QRY-01`, `QRY-07`).
     pub(crate) fn capture_view(
         &self,
         required: IndexCapabilities,
-    ) -> Result<ServingView, TxQueryError> {
+    ) -> Result<(ServingView, Box<dyn TxIndexSnapshot + '_>), TxQueryError> {
         self.query_health()?;
         self.require_enabled(required)?;
         self.check_capability_failures(required)?;
@@ -436,27 +436,22 @@ impl DerivedIndexQueryEngine {
 
         let (historical_verified_height, historical_verified_hash) =
             self.historical_verified.unwrap_or((tip.height, tip.hash));
-        Ok(ServingView {
-            epoch: AppliedEpoch {
-                hash: tip.hash,
-                height: tip.height,
-                commit_id: self.runtime.revision(),
+        Ok((
+            ServingView {
+                epoch: AppliedEpoch {
+                    hash: tip.hash,
+                    height: tip.height,
+                    commit_id: self.runtime.revision(),
+                },
+                generation_id: self.generation.id(),
+                coverage,
+                historical_verified_height,
+                historical_verified_hash,
+                tip_id: tip.tip_id,
+                deadline: Instant::now() + VIEW_DEADLINE,
             },
-            generation_id: self.generation.id(),
-            coverage,
-            historical_verified_height,
-            historical_verified_hash,
-            tip_id: tip.tip_id,
-            segments: Arc::clone(&self.reader),
-            deadline: Instant::now() + VIEW_DEADLINE,
-        })
-    }
-
-    fn snapshot_of(view: &ServingView) -> Result<Box<dyn TxIndexSnapshot + '_>, TxQueryError> {
-        let reader: &dyn IndexReader = view.segments.as_ref();
-        reader
-            .snapshot()
-            .map_err(|e| TxQueryError::Storage(e.to_string().into()))
+            snapshot,
+        ))
     }
 
     fn check_view(&self, view: &ServingView) -> Result<(), TxQueryError> {
@@ -469,10 +464,11 @@ impl DerivedIndexQueryEngine {
         Ok(())
     }
 
-    fn with_view<F, T>(
+    pub(crate) fn with_view<F, T>(
         &self,
         required: IndexCapabilities,
         view: &ServingView,
+        snapshot: &dyn TxIndexSnapshot,
         f: F,
     ) -> Result<T, TxQueryError>
     where
@@ -487,9 +483,8 @@ impl DerivedIndexQueryEngine {
         self.check_capability_failures(required)?;
         self.check_view(view)?;
 
-        let snapshot = Self::snapshot_of(view)?;
         let mut budget = QueryBudget::new();
-        let result = f(snapshot.as_ref(), view, &mut budget);
+        let result = f(snapshot, view, &mut budget);
 
         self.query_health()?;
         self.check_capability_failures(required)?;
@@ -556,10 +551,11 @@ impl DerivedIndexQueryEngine {
         &self,
         txid: &Txid,
     ) -> Result<Answer<Option<(u32, Tx)>>, TxQueryError> {
-        let view = self.capture_view(IndexCapabilities::TX_LOOKUP)?;
+        let (view, snapshot) = self.capture_view(IndexCapabilities::TX_LOOKUP)?;
         let value = self.with_view(
             IndexCapabilities::TX_LOOKUP,
             &view,
+            snapshot.as_ref(),
             |snapshot, view, budget| {
                 let prefix = Self::require_prefix(view, IndexCapability::TxLookup)?;
                 let located = self.locate_transaction_for(snapshot, &prefix, budget, txid)?;
@@ -573,10 +569,11 @@ impl DerivedIndexQueryEngine {
         &self,
         script: ScriptHash,
     ) -> Result<Answer<ScriptIndexSnapshot>, TxQueryError> {
-        let view = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
+        let (view, snapshot) = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
         let value = self.with_view(
             IndexCapabilities::SCRIPT_HISTORY,
             &view,
+            snapshot.as_ref(),
             |snapshot, view, budget| {
                 self.script_budget(budget);
                 let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
@@ -590,10 +587,11 @@ impl DerivedIndexQueryEngine {
         &self,
         outpoint: OutPoint,
     ) -> Result<Answer<Option<SpendingRecord>>, TxQueryError> {
-        let view = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
+        let (view, snapshot) = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
         let value = self.with_view(
             IndexCapabilities::SCRIPT_HISTORY,
             &view,
+            snapshot.as_ref(),
             |snapshot, view, budget| {
                 let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
                 let spent = self.spender_for(snapshot, &prefix, budget, &outpoint)?;
@@ -714,10 +712,11 @@ pub(crate) struct IndexProgress {
 
 impl DerivedIndexQuery for DerivedIndexQueryEngine {
     fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
-        let view = self.capture_view(IndexCapabilities::TX_LOOKUP)?;
+        let (view, snapshot) = self.capture_view(IndexCapabilities::TX_LOOKUP)?;
         self.with_view(
             IndexCapabilities::TX_LOOKUP,
             &view,
+            snapshot.as_ref(),
             |snapshot, view, budget| {
                 let prefix = Self::require_tip_prefix(view, IndexCapability::TxLookup)?;
                 let found = self.transaction_for(snapshot, &prefix, budget, txid)?;
@@ -727,10 +726,11 @@ impl DerivedIndexQuery for DerivedIndexQueryEngine {
     }
 
     fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
-        let view = self.capture_view(IndexCapabilities::TX_LOOKUP)?;
+        let (view, snapshot) = self.capture_view(IndexCapabilities::TX_LOOKUP)?;
         self.with_view(
             IndexCapabilities::TX_LOOKUP,
             &view,
+            snapshot.as_ref(),
             |snapshot, view, budget| {
                 let prefix = Self::require_tip_prefix(view, IndexCapability::TxLookup)?;
                 let value = self.outpoint_value_for(snapshot, &prefix, budget, outpoint)?;
@@ -740,10 +740,11 @@ impl DerivedIndexQuery for DerivedIndexQueryEngine {
     }
 
     fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
-        let view = self.capture_view(IndexCapabilities::TX_LOOKUP)?;
+        let (view, snapshot) = self.capture_view(IndexCapabilities::TX_LOOKUP)?;
         self.with_view(
             IndexCapabilities::TX_LOOKUP,
             &view,
+            snapshot.as_ref(),
             |snapshot, view, budget| {
                 let prefix = Self::require_tip_prefix(view, IndexCapability::TxLookup)?;
                 let height = self
@@ -782,31 +783,37 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         limit: usize,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
         let required = self.script_page_requirements(last);
-        let view = self.capture_view(required)?;
-        self.with_view(required, &view, |snapshot, view, budget| {
-            Self::require_tip_coverage_on_view(view, required)?;
-            self.script_budget(budget);
-            Self::require_cursor_tx_lookup_coverage_on_view(view, last)?;
-            let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
-            Self::history_page_for(
-                snapshot,
-                &prefix,
-                budget,
-                script,
-                last,
-                view.generation_id,
-                limit,
-            )
-        })
+        let (view, snapshot) = self.capture_view(required)?;
+        self.with_view(
+            required,
+            &view,
+            snapshot.as_ref(),
+            |snapshot, view, budget| {
+                Self::require_tip_coverage_on_view(view, required)?;
+                self.script_budget(budget);
+                Self::require_cursor_tx_lookup_coverage_on_view(view, last)?;
+                let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
+                Self::history_page_for(
+                    snapshot,
+                    &prefix,
+                    budget,
+                    script,
+                    last,
+                    view.generation_id,
+                    limit,
+                )
+            },
+        )
     }
     fn history_snapshot(
         &self,
         scripthash: ScriptHash,
     ) -> Result<ScriptIndexSnapshot, TxQueryError> {
-        let view = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
+        let (view, snapshot) = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
         self.with_view(
             IndexCapabilities::SCRIPT_HISTORY,
             &view,
+            snapshot.as_ref(),
             |snapshot, view, budget| {
                 Self::require_tip_coverage_on_view(view, IndexCapabilities::SCRIPT_HISTORY)?;
                 self.script_budget(budget);
@@ -820,10 +827,11 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         &self,
         scripthash: ScriptHash,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
-        let view = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
+        let (view, snapshot) = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
         self.with_view(
             IndexCapabilities::SCRIPT_HISTORY,
             &view,
+            snapshot.as_ref(),
             |snapshot, view, budget| {
                 Self::require_tip_coverage_on_view(view, IndexCapabilities::SCRIPT_HISTORY)?;
                 self.script_budget(budget);
@@ -840,31 +848,37 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         limit: usize,
     ) -> Result<ScriptHistoryPage, TxQueryError> {
         let required = self.script_page_requirements(cursor);
-        let view = self.capture_view(required)?;
-        self.with_view(required, &view, |snapshot, view, budget| {
-            Self::require_tip_coverage_on_view(view, required)?;
-            Self::require_cursor_tx_lookup_coverage_on_view(view, cursor)?;
-            let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
-            Self::confirmed_history_page_for(
-                snapshot,
-                &prefix,
-                budget,
-                scripthash,
-                cursor,
-                view.generation_id,
-                limit,
-            )
-        })
+        let (view, snapshot) = self.capture_view(required)?;
+        self.with_view(
+            required,
+            &view,
+            snapshot.as_ref(),
+            |snapshot, view, budget| {
+                Self::require_tip_coverage_on_view(view, required)?;
+                Self::require_cursor_tx_lookup_coverage_on_view(view, cursor)?;
+                let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
+                Self::confirmed_history_page_for(
+                    snapshot,
+                    &prefix,
+                    budget,
+                    scripthash,
+                    cursor,
+                    view.generation_id,
+                    limit,
+                )
+            },
+        )
     }
 
     fn unspent_outputs(
         &self,
         scripthash: ScriptHash,
     ) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
-        let view = self.capture_view(IndexCapabilities::SCRIPT_LIVE)?;
+        let (view, snapshot) = self.capture_view(IndexCapabilities::SCRIPT_LIVE)?;
         self.with_view(
             IndexCapabilities::SCRIPT_LIVE,
             &view,
+            snapshot.as_ref(),
             |snapshot, view, budget| {
                 Self::require_tip_coverage_on_view(view, IndexCapabilities::SCRIPT_LIVE)?;
                 let prefix = Self::require_prefix(view, IndexCapability::ScriptLive)?;
@@ -874,10 +888,11 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
     }
 
     fn spender(&self, outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError> {
-        let view = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
+        let (view, snapshot) = self.capture_view(IndexCapabilities::SCRIPT_HISTORY)?;
         self.with_view(
             IndexCapabilities::SCRIPT_HISTORY,
             &view,
+            snapshot.as_ref(),
             |snapshot, view, budget| {
                 let prefix = Self::require_tip_prefix(view, IndexCapability::ScriptHistory)?;
                 let spent = self.spender_for(snapshot, &prefix, budget, &outpoint)?;

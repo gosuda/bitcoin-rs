@@ -6,10 +6,11 @@ use crate::{BasicFilter, CompactFilterQuery};
 
 impl CompactFilterQuery for DerivedIndexQueryEngine {
     fn block_filter(&self, hash: Hash256) -> Result<Option<BasicFilter>, TxQueryError> {
-        let view = self.capture_view(IndexCapabilities::COMPACT_FILTERS)?;
+        let (view, snapshot) = self.capture_view(IndexCapabilities::COMPACT_FILTERS)?;
         self.with_view(
             IndexCapabilities::COMPACT_FILTERS,
             &view,
+            snapshot.as_ref(),
             |snapshot, view, _| {
                 if self
                     .block_tree
@@ -35,10 +36,11 @@ impl CompactFilterQuery for DerivedIndexQueryEngine {
         if step != 1 && step != 1000 {
             return Ok(None);
         }
-        let view = self.capture_view(IndexCapabilities::COMPACT_FILTERS)?;
+        let (view, snapshot) = self.capture_view(IndexCapabilities::COMPACT_FILTERS)?;
         self.with_view(
             IndexCapabilities::COMPACT_FILTERS,
             &view,
+            snapshot.as_ref(),
             |snapshot, view, _| {
                 let (previous, hashes) = {
                     let tree = self.block_tree.read();

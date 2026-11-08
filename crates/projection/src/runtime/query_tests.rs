@@ -1711,6 +1711,22 @@ impl IndexReader for HistoricalReader {
     }
 }
 
+struct SnapshotCountingReader {
+    initial: HistoricalSnapshot,
+    rewritten: HistoricalSnapshot,
+    calls: AtomicUsize,
+}
+
+impl IndexReader for SnapshotCountingReader {
+    fn snapshot(&self) -> Result<Box<dyn TxIndexSnapshot + '_>, IndexError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(Box::new(self.initial.clone()))
+        } else {
+            Ok(Box::new(self.rewritten.clone()))
+        }
+    }
+}
+
 struct ResetReader {
     state: Arc<ParkMutex<HistoricalSnapshot>>,
 }
@@ -3020,6 +3036,82 @@ fn history_query_survives_chain_extension() -> Result<(), crate::portable::TestE
     assert_eq!(at.height, 1);
     assert_eq!(at.coverage.height, 1);
     assert!(at.value.is_some());
+    Ok(())
+}
+
+// QRY-01
+#[test]
+fn answer_reads_the_captured_snapshot_when_tail_rows_are_rewritten()
+-> Result<(), crate::portable::TestError> {
+    let genesis = Network::Regtest.genesis_block();
+    let mut tx_a = genesis.txs[0].clone();
+    tx_a.outputs.push(TxOut {
+        value: Amount::from_sat(1),
+        script_pubkey: genesis.txs[0].outputs[0].script_pubkey.clone(),
+    });
+    let child = child_block(&genesis, vec![tx_a.clone()])?;
+    let mut tree = BlockTree::new();
+    let _genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let child_id = tree.insert_header(child.header, NodeStatus::HeaderValid)?;
+    let tip_watermark = watermark_for(&tree, child_id)?;
+    let tip = tip_snapshot_for(&tree, child_id)?;
+    let txid_a = tx_a.txid();
+
+    let initial = HistoricalSnapshot {
+        tx_watermark: Some(tip_watermark),
+        sh_watermark: Some(tip_watermark),
+        tx_floor: 0,
+        sh_floor: 0,
+        scans: vec![scan_response(
+            ColumnFamily::TxConfirmed,
+            TxidRow::scan_prefix(&txid_a),
+            vec![(TxidRow::row(&txid_a, 1).to_db_row().to_vec(), vec![0_u8])],
+            true,
+        )],
+    };
+    let rewritten = HistoricalSnapshot {
+        tx_watermark: Some(tip_watermark),
+        sh_watermark: Some(tip_watermark),
+        tx_floor: 0,
+        sh_floor: 0,
+        scans: Vec::new(),
+    };
+
+    let tip_cell = Arc::new(ArcSwapOption::empty());
+    tip_cell.store(Some(Arc::new(tip)));
+    let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let body = Arc::new(MovingBody::new(
+        vec![(1, child.block_hash(), consensus_bytes(&child))],
+        None,
+    ));
+
+    let engine = DerivedIndexQueryEngine::new(
+        runtime,
+        Arc::new(SnapshotCountingReader {
+            initial,
+            rewritten,
+            calls: AtomicUsize::new(0),
+        }),
+        bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_execution::chain::TipReader::new(tip_cell),
+        Some(body),
+        QueryEngineLive {
+            enabled: IndexCapabilities::ALL,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: None,
+            chain_transition: None,
+        },
+    );
+
+    let at = engine.transaction_at_prefix(&txid_a)?;
+    assert!(
+        at.value.is_some(),
+        "the answer must come from the capture-time snapshot even though the read rewrote the tail rows, got value {:?}",
+        at.value
+    );
+    assert_eq!(at.height, 1);
+    assert_eq!(at.coverage.height, 1);
     Ok(())
 }
 
