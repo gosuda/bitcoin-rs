@@ -75,6 +75,10 @@ pub enum IndexError {
     StateRevisionOverflow,
     #[error("TxIndex state changed; discard derived state and re-derive")]
     StaleIndexState,
+    #[error("segment fault injected at {stage} stage")]
+    InjectedFault { stage: &'static str },
+    #[error("segment seal marker is corrupt")]
+    InvalidSealMarker,
     #[error("operation cancelled")]
     Cancelled,
 }

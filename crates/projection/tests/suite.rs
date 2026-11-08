@@ -9,6 +9,7 @@ mod query_answers;
 mod reorg_retirement;
 mod script_history_occurrences;
 mod script_live;
+mod segment_recovery;
 mod silent_payments;
 mod tx_positions;
 

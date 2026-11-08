@@ -1163,9 +1163,9 @@ fn reset_claim_carries_mask_epoch_and_base_version() -> Result<(), TestError> {
         "claim value is mask(1) || process_epoch(8 LE) || base_version(8 LE)"
     );
     assert_eq!(
-        marker_puts[0].deletes, 3,
+        marker_puts[0].deletes, 4,
         "the claim atomically deletes the selected watermark, its coverage \
-         floor, and the global cursor"
+         floor, the global cursor, and the capability's segment descriptor"
     );
     assert_eq!(
         marker_puts[1].marker_put.as_deref(),
@@ -2703,9 +2703,9 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state() -> Resul
         "growth changes byte zero only; width, process epoch, and base survive raw"
     );
     assert_eq!(
-        markers[0].deletes, 5,
-        "the claim deletes the union watermarks, their coverage floors, and \
-         the consumer cursor"
+        markers[0].deletes, 7,
+        "the claim deletes the union watermarks, their coverage floors, the \
+         consumer cursor, and both capabilities' segment descriptors"
     );
     assert_eq!(
         markers[1].marker_put.as_deref(),
