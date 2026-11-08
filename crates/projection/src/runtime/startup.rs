@@ -335,7 +335,6 @@ fn build_worker(
         reporter,
         batch_delay: FORWARD_BATCH_DELAY,
         seed_history_lease: parking_lot::Mutex::new(None),
-        seed_rows: parking_lot::Mutex::new(None),
         facts_rx: setup.spec.facts_rx.clone(),
         facts_bytes: setup.spec.facts_bytes.clone(),
         facts_gap: setup.spec.facts_gap.clone(),

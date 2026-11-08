@@ -615,7 +615,6 @@ struct Worker {
     batch_delay: Duration,
     rollback_rebuild_cutover: u32,
     seed_history_lease: parking_lot::Mutex<Option<HistoryLease>>,
-    seed_rows: parking_lot::Mutex<Option<Receiver<Vec<u8>>>>,
     facts_rx: Option<Receiver<std::sync::Arc<bitcoin_rs_storage::CommittedFacts>>>,
     facts_bytes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     facts_gap: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,

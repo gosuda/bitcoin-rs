@@ -116,16 +116,35 @@ impl Worker {
     }
 
     fn seed_pass_stage_rows(&self) -> Result<SeedPass, DerivedIndexWorkerError> {
+        self.prepare_seed_rows()?;
         loop {
-            match self.collect_seed_batch() {
+            match self.collect_seed_batch()? {
                 SeedBatch::Rows(rows) => self.stage_seed_rows(rows)?,
                 SeedBatch::Empty => return Ok(SeedPass::Stall),
-                SeedBatch::Disconnected => {
-                    self.drop_seed_receiver();
-                    return Ok(SeedPass::Stall);
-                }
+                SeedBatch::Disconnected => return Ok(SeedPass::Stall),
             }
         }
+    }
+
+    fn prepare_seed_rows(&self) -> Result<(), DerivedIndexWorkerError> {
+        if !self.runtime.script_live_seed().claim_row_reset() {
+            return Ok(());
+        }
+        self.clear_interrupted_seed_rows()
+    }
+
+    fn clear_interrupted_seed_rows(&self) -> Result<(), DerivedIndexWorkerError> {
+        if !self.enabled.contains(IndexCapability::ScriptLive) {
+            return Ok(());
+        }
+        if self
+            .writer
+            .reset_interrupted_script_live_seed()
+            .map_err(DerivedIndexWorkerError::Index)?
+        {
+            tracing::warn!("cleared ScriptLive rows left by an interrupted seed before staging");
+        }
+        Ok(())
     }
 
     fn seed_pass_publish(
@@ -135,14 +154,14 @@ impl Worker {
         fence: &mut IndexWriteFence,
         watermarks: &mut IndexWatermarks,
     ) -> Result<SeedPass, DerivedIndexWorkerError> {
+        self.prepare_seed_rows()?;
         loop {
-            match self.collect_seed_batch() {
+            match self.collect_seed_batch()? {
                 SeedBatch::Rows(rows) => self.stage_seed_rows(rows)?,
                 SeedBatch::Empty => return Ok(SeedPass::Stall),
                 SeedBatch::Disconnected => break,
             }
         }
-        self.drop_seed_receiver();
         self.writer
             .publish_script_live_seed(tip)
             .map_err(DerivedIndexWorkerError::Index)?;
@@ -162,13 +181,12 @@ impl Worker {
         seed: &Arc<crate::snapshot_seed::ScriptLiveSeedState>,
     ) -> Result<SeedPass, DerivedIndexWorkerError> {
         loop {
-            match self.collect_seed_batch() {
+            match self.collect_seed_batch()? {
                 SeedBatch::Rows(_) => {}
                 SeedBatch::Empty => return Ok(SeedPass::Stall),
                 SeedBatch::Disconnected => break,
             }
         }
-        self.drop_seed_receiver();
         self.writer
             .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
             .map_err(DerivedIndexWorkerError::Index)?;
@@ -183,43 +201,19 @@ impl Worker {
         Ok(())
     }
 
-    fn collect_seed_batch(&self) -> SeedBatch {
-        let mut guard = self.seed_rows.lock();
-        if guard.is_none()
-            && let Some(receiver) = self.runtime.script_live_seed().take_receiver()
-        {
-            *guard = Some(receiver);
+    fn collect_seed_batch(&self) -> Result<SeedBatch, DerivedIndexWorkerError> {
+        let seed = self.runtime.script_live_seed();
+        let rows = seed
+            .take_backlog(SEED_DRAIN_BATCH_ROWS)
+            .map_err(DerivedIndexWorkerError::Index)?;
+        if rows.is_empty() {
+            return Ok(if seed.is_closed() {
+                SeedBatch::Disconnected
+            } else {
+                SeedBatch::Empty
+            });
         }
-        let Some(receiver) = guard.as_ref() else {
-            return SeedBatch::Disconnected;
-        };
-        let mut rows = Vec::new();
-        loop {
-            if rows.len() >= SEED_DRAIN_BATCH_ROWS {
-                return SeedBatch::Rows(rows);
-            }
-            match receiver.try_recv() {
-                Ok(row) => rows.push(row),
-                Err(crossbeam_channel::TryRecvError::Empty) => {
-                    return if rows.is_empty() {
-                        SeedBatch::Empty
-                    } else {
-                        SeedBatch::Rows(rows)
-                    };
-                }
-                Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                    return if rows.is_empty() {
-                        SeedBatch::Disconnected
-                    } else {
-                        SeedBatch::Rows(rows)
-                    };
-                }
-            }
-        }
-    }
-
-    fn drop_seed_receiver(&self) {
-        self.seed_rows.lock().take();
+        Ok(SeedBatch::Rows(rows))
     }
 
     pub(super) fn reset_for_rebuild(

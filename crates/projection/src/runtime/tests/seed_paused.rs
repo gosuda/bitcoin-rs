@@ -133,11 +133,10 @@ fn an_aborted_session_discards_the_staged_base() {
 }
 
 #[test]
-fn a_closed_channel_is_a_sticky_stage_error() {
+fn a_closed_session_is_a_sticky_stage_error() {
     let (_dir, _store, _writer, seed) = harness();
     let session = seed.begin_session().expect("session");
-    let receiver = seed.take_receiver().expect("receiver parked");
-    drop(receiver);
+    seed.close_session();
     {
         let mut observer = session.observer();
         observer.observe_coin(coin(1, 1));
@@ -146,6 +145,60 @@ fn a_closed_channel_is_a_sticky_stage_error() {
         session.take_error(),
         Some(IndexError::SeedChannelClosed)
     ));
+}
+
+// SNP-07
+#[test]
+fn a_new_session_publishes_only_its_own_rows() {
+    let (_dir, store, writer, seed) = harness();
+    let first = seed.begin_session().expect("first session");
+    {
+        let mut observer = first.observer();
+        for index in 0..4 {
+            observer.observe_coin(coin(index, 10));
+        }
+    }
+    assert!(first.take_error().is_none());
+    drop(first);
+    let stale = seed.take_backlog(usize::MAX).expect("stale rows");
+    writer
+        .read()
+        .stage_script_live_rows(&mut stale.into_iter())
+        .expect("stage stale rows");
+    assert_eq!(count_live_rows(&store), 4);
+    seed.complete_abort();
+
+    let second = seed.begin_session().expect("second session");
+    assert!(
+        seed.claim_row_reset(),
+        "a fresh session must claim exactly one reset"
+    );
+    let cleared = writer
+        .read()
+        .reset_interrupted_script_live_seed()
+        .expect("interrupted probe");
+    assert!(cleared, "rows without a watermark are stale staging");
+    {
+        let mut observer = second.observer();
+        observer.observe_coin(coin(99, 20));
+    }
+    assert!(second.take_error().is_none());
+    drop(second);
+    let rows = seed.take_backlog(usize::MAX).expect("second rows");
+    writer
+        .read()
+        .stage_script_live_rows(&mut rows.into_iter())
+        .expect("stage second rows");
+    writer
+        .write()
+        .publish_script_live_seed(watermark(20))
+        .expect("publish one row");
+    seed.complete_publish();
+    assert_eq!(
+        count_live_rows(&store),
+        1,
+        "the published base must hold exactly the second session's row"
+    );
 }
 
 #[test]
