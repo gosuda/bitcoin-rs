@@ -1251,8 +1251,8 @@ fn verifychain_socket_cancels_in_flight_walk_on_node_shutdown() -> Result<(), Te
         ));
     }
     state.request_shutdown();
-    witness.finish_server()?;
     gate.release();
+    witness.finish_server()?;
     let response = witness.finish_client()?;
     assert_socket_error(&response, "Block verification interrupted")
 }
