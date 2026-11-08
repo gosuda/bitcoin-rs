@@ -1,8 +1,7 @@
-use super::{
-    BudgetCaps, BudgetError, BudgetOwner, BudgetRefusal, NodeBudget, STAGED_IMAGE_BUDGET_BYTES,
-};
+use super::{BudgetCaps, NodeBudget, STAGED_IMAGE_BUDGET_BYTES};
 use crate::budget_model::{self, Action, AllocationOwner};
 use bitcoin_rs_execution::WindowLimits;
+use bitcoin_rs_storage::budget::{BudgetError, BudgetOwner, BudgetRefusal};
 
 const AMOUNT_CAP: u32 = 20_000;
 const OWNER_CAP: u64 = 20_000;

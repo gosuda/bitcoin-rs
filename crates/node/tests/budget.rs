@@ -1,9 +1,8 @@
 use bitcoin_rs_execution::chain::NodeStatus;
-use bitcoin_rs_node::budget::{
-    BudgetError, BudgetOwner, BudgetRefusal, BudgetedIngressLedger, NodeBudget,
-};
+use bitcoin_rs_node::budget::{BudgetedIngressLedger, NodeBudget};
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, NodeConfig};
+use bitcoin_rs_storage::budget::{BudgetError, BudgetOwner, BudgetRefusal};
 use bitcoin_rs_wire::inbound::block_memory::BlockMemory;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

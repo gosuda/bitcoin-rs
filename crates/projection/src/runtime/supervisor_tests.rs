@@ -21,8 +21,9 @@ fn test_open_spec(dir: &std::path::Path, epoch: u64) -> DerivedIndexOpenSpec {
         canonical_data_root: dir.to_path_buf(),
         bundle: crate::portable::IndexBundleDirective::None,
         facts_rx: None,
-        facts_bytes: None,
+        facts_charge: None,
         facts_gap: None,
+        cpu: None,
         open_store: Arc::new(move |dir| {
             let store = Arc::new(
                 bitcoin_rs_storage::RocksDbStore::open_with_cache(dir, 8 * 1024 * 1024)
@@ -471,8 +472,9 @@ fn revision_quiet_cancellation_wakes_and_joins_promptly() {
         rollback_rebuild_cutover: 0,
         seed_history_lease: parking_lot::Mutex::new(None),
         facts_rx: None,
-        facts_bytes: None,
+        facts_charge: None,
         facts_gap: None,
+        cpu: None,
         buffered_facts: parking_lot::Mutex::new(hashbrown::HashMap::new()),
     };
 
@@ -526,8 +528,9 @@ fn batch_deadline_cancellation_wakes_and_joins_promptly() {
         rollback_rebuild_cutover: 0,
         seed_history_lease: parking_lot::Mutex::new(None),
         facts_rx: None,
-        facts_bytes: None,
+        facts_charge: None,
         facts_gap: None,
+        cpu: None,
         buffered_facts: parking_lot::Mutex::new(hashbrown::HashMap::new()),
     };
 

@@ -134,8 +134,14 @@ impl ChargeHandle {
         self.charge.allocate_bytes(self.owner, bytes)
     }
 
+    /// BUD-01: reserve before materializing, then charge the allocation.
     pub fn charge(&self, bytes: u64) -> Result<(), BudgetError> {
-        self.charge.allocate_bytes(self.owner, bytes)
+        self.reserve(bytes)?;
+        if let Err(error) = self.allocate(bytes) {
+            self.release(bytes);
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn ensure(&self, bytes: u64) -> Result<(), BudgetError> {

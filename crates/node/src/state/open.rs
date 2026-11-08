@@ -217,8 +217,6 @@ impl NodeState {
             cache_budget,
             crate::lifecycle::worker_shares(),
         ));
-        budget.set_engine_cache_source(Some(Box::new(move || cache_budget)));
-        budget.sample_engine_cache();
         let window_limits_source: bitcoin_rs_execution::WindowLimitsSource = {
             let budget = Arc::clone(&budget);
             Arc::new(move || budget.window_limits())
@@ -232,6 +230,10 @@ impl NodeState {
         let txindex_cache_bytes = cache_shares[1].bytes;
         let (storage, block_files) =
             NodeStorage::open(&config, chainstate_cache_bytes, &data_dir_guard)?;
+        budget.set_mdbx(storage.kind() == bitcoin_rs_storage::StorageBackend::Mdbx.as_str());
+        let engine_cache_probe = storage.engine_cache_probe();
+        budget.set_engine_cache_source(Some(Box::new(move || engine_cache_probe())));
+        budget.sample_engine_cache();
         let undo_store = storage.undo_store();
         let durable_head = storage.durable_head();
 
@@ -398,21 +400,29 @@ impl NodeState {
         let derived_index_open_spec =
             build_derived_index_open_spec(&config, txindex_cache_bytes, epoch, &data_dir_guard)?;
         let (facts_queue, facts_parts) = if derived_index_open_spec.is_some() {
-            let queue = Arc::new(crate::facts_queue::FactsQueue::with_default_budget());
+            let charge = bitcoin_rs_storage::budget::ChargeHandle::new(
+                Arc::clone(&budget) as Arc<dyn bitcoin_rs_storage::budget::BudgetCharge>,
+                bitcoin_rs_storage::budget::BudgetOwner::FactsQueue,
+            );
+            let queue = Arc::new(crate::facts_queue::FactsQueue::new(
+                crate::facts_queue::DEFAULT_FACTS_QUEUE_CAPACITY,
+                charge,
+            ));
             let rx = queue.receiver();
-            let bytes = queue.bytes_handle();
+            let charge = queue.charge_handle();
             let gap = queue.gap_handle();
-            (Some(queue), Some((rx, bytes, gap)))
+            (Some(queue), Some((rx, charge, gap)))
         } else {
             (None, None)
         };
         let derived_index_parts = match derived_index_open_spec {
             Some(mut spec) => {
-                if let Some((rx, bytes, gap)) = facts_parts {
+                if let Some((rx, charge, gap)) = facts_parts {
                     spec.facts_rx = Some(rx);
-                    spec.facts_bytes = Some(bytes);
+                    spec.facts_charge = Some(charge);
                     spec.facts_gap = Some(gap);
                 }
+                spec.cpu = Some(budget.cpu());
 
                 let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
                 let runtime = bitcoin_rs_projection::runtime::DerivedIndexRuntime::new(wake_tx);

@@ -2593,6 +2593,7 @@ pub fn run_message_loop<S: std::io::Read + std::io::Write>(
                     &sink,
                     peer_addr,
                     shared,
+                    memory_credit,
                 );
             }
             _ => {}
@@ -2775,6 +2776,7 @@ pub fn process_compact_wire_message(
     sink: &ProductionSink<'_>,
     peer_addr: impl Into<crate::PeerRemote>,
     shared: &ConnectionShared,
+    memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
 ) {
     let peer_addr = peer_addr.into();
     let lease = sink.lease;
@@ -2809,7 +2811,8 @@ pub fn process_compact_wire_message(
         None
     };
     let source = lease.source(peer_addr.endpoint());
-    if let Some((hash, follow_up)) = handle_compact_outcome(outcome, sink, peer_addr, shared)
+    if let Some((hash, follow_up)) =
+        handle_compact_outcome(outcome, sink, peer_addr, shared, memory_credit)
         && let Some(sync) = shared.block_sync.as_ref()
     {
         sync.enqueue_owned_body_fetch(source, hash, &mut || sink.send(follow_up.clone()).is_ok());
@@ -2824,13 +2827,14 @@ fn handle_compact_outcome(
     sink: &ProductionSink<'_>,
     peer_addr: impl Into<crate::PeerRemote>,
     shared: &ConnectionShared,
+    memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
 ) -> Option<(bitcoin_rs_consensus::primitives::Hash256, crate::Message)> {
     let peer_addr = peer_addr.into();
     let lease = sink.lease;
     match outcome {
         crate::compact_blocks::Outcome::Complete(image) => {
             tracing::info!(peer_addr = %peer_addr, hash = %image.block_hash(), "p2p compact block reconstructed");
-            shared.send_block(lease, peer_addr, image, None);
+            shared.send_block(lease, peer_addr, image, memory_credit);
             None
         }
         crate::compact_blocks::Outcome::RequestMissing(request) => {

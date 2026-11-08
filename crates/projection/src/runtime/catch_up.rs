@@ -363,8 +363,8 @@ impl Worker {
     pub(super) fn clear_buffered_facts(&self) {
         if let Some(rx) = &self.facts_rx {
             while let Ok(facts) = rx.try_recv() {
-                if let Some(bytes) = &self.facts_bytes {
-                    bytes.fetch_sub(facts.size_bytes(), std::sync::atomic::Ordering::SeqCst);
+                if let Some(charge) = &self.facts_charge {
+                    charge.release(facts.size_bytes());
                 }
             }
         }
@@ -374,8 +374,8 @@ impl Worker {
     fn drain_facts_into_buffer(&self) {
         if let Some(rx) = &self.facts_rx {
             while let Ok(facts) = rx.try_recv() {
-                if let Some(bytes) = &self.facts_bytes {
-                    bytes.fetch_sub(facts.size_bytes(), std::sync::atomic::Ordering::SeqCst);
+                if let Some(charge) = &self.facts_charge {
+                    charge.release(facts.size_bytes());
                 }
                 let mut guard = self.buffered_facts.lock();
                 for block in &facts.blocks {
@@ -734,25 +734,26 @@ impl Worker {
             || capabilities.contains(IndexCapability::ScriptLive)
             || capabilities.contains(IndexCapability::CompactFilters);
 
+        let prepare = |identity: &BlockIdentity, body: &[u8]| -> AnchoredPreparation {
+            let prepare = |spent: &dyn crate::SpentCoins| {
+                self.writer.prepare_block_with_spent_scripts(
+                    capabilities,
+                    identity.height,
+                    identity.hash,
+                    body,
+                    spent,
+                )
+            };
+            if !needs_anchor {
+                return Ok(prepare(&NoSpentScripts));
+            }
+            let anchor = self.live_anchor(identity.height, identity.hash)?;
+            Ok(prepare(&anchor))
+        };
         let outcomes: Vec<AnchoredPreparation> = sub_chunk
             .par_iter()
             .zip(bodies.par_iter())
-            .map(|(identity, body)| -> AnchoredPreparation {
-                let prepare = |spent: &dyn crate::SpentCoins| {
-                    self.writer.prepare_block_with_spent_scripts(
-                        capabilities,
-                        identity.height,
-                        identity.hash,
-                        body.as_slice(),
-                        spent,
-                    )
-                };
-                if !needs_anchor {
-                    return Ok(prepare(&NoSpentScripts));
-                }
-                let anchor = self.live_anchor(identity.height, identity.hash)?;
-                Ok(prepare(&anchor))
-            })
+            .map(|(identity, body)| prepare(identity, body))
             .collect();
 
         match outcomes.into_iter().collect::<Result<Vec<_>, _>>() {

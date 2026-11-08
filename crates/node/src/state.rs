@@ -493,8 +493,9 @@ fn build_derived_index_open_spec(
         }),
         bundle: index_bundle_directive(config)?,
         facts_rx: None,
-        facts_bytes: None,
+        facts_charge: None,
         facts_gap: None,
+        cpu: None,
     }))
 }
 

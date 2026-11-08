@@ -210,13 +210,14 @@ impl BlockSync {
                 ..
             } = &mut *historical;
             let _ = inbound.forward_credit;
-            let _memory_credit = inbound.memory_credit.take();
-            match stager.insert(
+            let memory_credit = inbound.memory_credit.take();
+            match stager.insert_with_credit(
                 hash,
                 *next_expected,
                 inbound.into_payload(),
                 Some(source),
                 now,
+                memory_credit,
             ) {
                 StagedBlock::Memory { bytes, dropped } => {
                     window.mark_received_from(hash, bytes, Some(source), now);

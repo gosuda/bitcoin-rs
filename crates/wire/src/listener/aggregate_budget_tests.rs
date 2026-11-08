@@ -670,7 +670,7 @@ fn conditional_local_retry_defers_then_readies_with_no_reply() -> TestResult {
     let sink = ProductionSink::new(&lease, Some(credit));
     let shared = shared_with(ScriptedChain { blocks: Vec::new() });
     let addr = bitcoin_rs_consensus::primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
-    assert!(super::handle_compact_outcome(outcome, &sink, addr, &shared).is_none());
+    assert!(super::handle_compact_outcome(outcome, &sink, addr, &shared, None).is_none());
     assert!(receiver.is_empty());
     assert!(!lease.is_cancelled());
     drop(sink);

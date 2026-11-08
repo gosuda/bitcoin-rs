@@ -23,6 +23,7 @@ pub(super) struct NodeStorage {
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     prune_height: Option<u32>,
+    engine_cache_probe: Arc<dyn Fn() -> u64 + Send + Sync>,
     pub(super) deferred: Arc<dyn DeferredChainstateServices>,
     pub(super) coins: Arc<bitcoin_rs_storage::CoinStore>,
     pub(super) commit_authority: Arc<bitcoin_rs_storage::CommitAuthority>,
@@ -72,6 +73,14 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
             }
             .guarded_by(Arc::clone(self.guard)),
         );
+        let engine_store: Arc<dyn KvStore> = store.clone();
+        let engine_weak = Arc::downgrade(&engine_store);
+        drop(engine_store);
+        let engine_cache_probe: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(move || {
+            engine_weak
+                .upgrade()
+                .map_or(0, |store| store.engine_cache_bytes())
+        });
         let deferred: Arc<dyn DeferredChainstateServices> = Arc::new(ChainstateStoreServices {
             store: Arc::clone(&store),
         });
@@ -85,6 +94,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
             )),
             retention,
             prune_height,
+            engine_cache_probe,
             deferred,
             coins,
             commit_authority,
@@ -130,6 +140,10 @@ impl NodeStorage {
 
     pub(super) const fn stored_prune_height(&self) -> Option<u32> {
         self.prune_height
+    }
+
+    pub(super) fn engine_cache_probe(&self) -> Arc<dyn Fn() -> u64 + Send + Sync> {
+        Arc::clone(&self.engine_cache_probe)
     }
 
     pub(super) fn block_body_store(

@@ -153,8 +153,9 @@ fn shutdown_before_thread_creation_never_touches_the_store() -> std::io::Result<
         open_store: std::sync::Arc::new(|_| Err(DerivedIndexWorkerError::Stopped)),
         bundle: crate::portable::IndexBundleDirective::None,
         facts_rx: None,
-        facts_bytes: None,
+        facts_charge: None,
         facts_gap: None,
+        cpu: None,
     };
     let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     shutdown.trigger();
@@ -288,8 +289,9 @@ fn recovery_open_spec(dir: &Path) -> DerivedIndexOpenSpec {
         open_store: Arc::new(|_| Err(DerivedIndexWorkerError::Stopped)),
         bundle: crate::portable::IndexBundleDirective::None,
         facts_rx: None,
-        facts_bytes: None,
+        facts_charge: None,
         facts_gap: None,
+        cpu: None,
     }
 }
 

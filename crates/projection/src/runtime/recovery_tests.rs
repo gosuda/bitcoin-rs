@@ -390,8 +390,9 @@ impl Harness {
             rollback_rebuild_cutover,
             seed_history_lease: parking_lot::Mutex::new(None),
             facts_rx: None,
-            facts_bytes: None,
+            facts_charge: None,
             facts_gap: None,
+            cpu: None,
             buffered_facts: parking_lot::Mutex::new(hashbrown::HashMap::new()),
         };
         Self {
@@ -1177,8 +1178,9 @@ impl SeedCellHarness {
             rollback_rebuild_cutover: u32::MAX,
             seed_history_lease: parking_lot::Mutex::new(None),
             facts_rx: None,
-            facts_bytes: None,
+            facts_charge: None,
             facts_gap: None,
+            cpu: None,
             buffered_facts: parking_lot::Mutex::new(hashbrown::HashMap::new()),
         };
         Self {

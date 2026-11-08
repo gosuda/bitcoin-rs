@@ -343,7 +343,10 @@ fn live_index_path_reads_zero_block_bodies() {
     let shutdown = Arc::new(LatchWriter::new());
 
     let (facts_tx, facts_rx) = crossbeam_channel::bounded(16);
-    let facts_bytes = Arc::new(AtomicU64::new(0));
+    let facts_charge = bitcoin_rs_storage::budget::ChargeHandle::new(
+        Arc::new(bitcoin_rs_storage::budget::UnboundedBudget),
+        bitcoin_rs_storage::budget::BudgetOwner::FactsQueue,
+    );
     let facts_gap = Arc::new(AtomicBool::new(false));
 
     let spec = DerivedIndexOpenSpec {
@@ -362,8 +365,9 @@ fn live_index_path_reads_zero_block_bodies() {
         }),
         bundle: IndexBundleDirective::None,
         facts_rx: Some(facts_rx),
-        facts_bytes: Some(facts_bytes),
+        facts_charge: Some(facts_charge),
         facts_gap: Some(facts_gap),
+        cpu: None,
     };
 
     let worker = DerivedIndexWorker::spawn_with_open(

@@ -499,8 +499,9 @@ pub struct DerivedIndexOpenSpec {
     pub bundle: crate::portable::IndexBundleDirective,
     pub facts_rx:
         Option<crossbeam_channel::Receiver<std::sync::Arc<bitcoin_rs_storage::CommittedFacts>>>,
-    pub facts_bytes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    pub facts_charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
     pub facts_gap: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub cpu: Option<Arc<bitcoin_rs_storage::budget::CpuShares>>,
 }
 
 pub struct DerivedIndexWorker {
@@ -660,8 +661,9 @@ struct Worker {
     rollback_rebuild_cutover: u32,
     seed_history_lease: parking_lot::Mutex<Option<HistoryLease>>,
     facts_rx: Option<Receiver<std::sync::Arc<bitcoin_rs_storage::CommittedFacts>>>,
-    facts_bytes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    facts_charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
     facts_gap: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    cpu: Option<Arc<bitcoin_rs_storage::budget::CpuShares>>,
     buffered_facts:
         parking_lot::Mutex<hashbrown::HashMap<([u8; 32], u32), bitcoin_rs_storage::CommittedBlock>>,
 }

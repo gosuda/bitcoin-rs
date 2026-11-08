@@ -4,9 +4,14 @@
 //! its single ledger lock, so every reader observes a whole reservation or
 //! none of it. Per-owner caps subdivide the total budget. Background owners
 //! stay inside the budget minus the foreground reserve (`BUD-05`), and a
-//! refusal is never a consensus invalidation (`BUD-03`).
+//! refusal is never a consensus invalidation (`BUD-03`). The owner vocabulary
+//! and charge interface live in `bitcoin_rs_storage::budget` so projection,
+//! storage, and offline tools charge the same ledger.
 
 use bitcoin_rs_execution::WindowLimits;
+use bitcoin_rs_storage::budget::{
+    BudgetCharge, BudgetError, BudgetOwner, BudgetReclaimer, CpuShares,
+};
 use parking_lot::{Condvar, Mutex, RwLock};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,72 +24,6 @@ pub const QUERY_VIEW_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 pub const FOREGROUND_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
 
 const INGRESS_WAIT_POLL: Duration = Duration::from_millis(100);
-
-/// `BUD-06`: one owner per retained allocation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
-pub enum BudgetOwner {
-    CoinCache = 0,
-    EngineCache = 1,
-    FactsQueue = 2,
-    IndexBuilder = 3,
-    StagedImages = 4,
-    QueryViews = 5,
-}
-
-impl BudgetOwner {
-    #[must_use]
-    pub const fn index(self) -> usize {
-        match self {
-            Self::CoinCache => 0,
-            Self::EngineCache => 1,
-            Self::FactsQueue => 2,
-            Self::IndexBuilder => 3,
-            Self::StagedImages => 4,
-            Self::QueryViews => 5,
-        }
-    }
-
-    /// `BUD-05`
-    #[must_use]
-    pub const fn is_background(self) -> bool {
-        matches!(
-            self,
-            Self::FactsQueue | Self::IndexBuilder | Self::QueryViews
-        )
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum BudgetError {
-    #[error("allocation attempted without prior reservation")]
-    UnreservedAllocation,
-    #[error("budget exhausted; request refused")]
-    BudgetExhausted,
-    #[error("insufficient charge to release")]
-    InsufficientCharge,
-    #[error("engine cache accounting is unsupported for this backend")]
-    EngineCacheUnsupported,
-    #[error("budget reservation cancelled")]
-    Cancelled,
-}
-
-/// `BUD-03`: a refusal is retry-later backpressure, not a consensus verdict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum BudgetRefusal {
-    #[error("resource budget is full; retry later")]
-    RetryLater,
-}
-
-impl BudgetError {
-    /// `BUD-03`: an exhaustion refusal maps to retry-later backpressure.
-    #[must_use]
-    pub const fn refusal(&self) -> Option<BudgetRefusal> {
-        match self {
-            Self::BudgetExhausted | Self::EngineCacheUnsupported => Some(BudgetRefusal::RetryLater),
-            Self::Cancelled | Self::UnreservedAllocation | Self::InsufficientCharge => None,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BudgetCaps {
@@ -137,107 +76,11 @@ impl BudgetCaps {
     }
 }
 
-/// Frees charged bytes on another thread when the budget is full (`BUD-07`).
-pub trait BudgetReclaimer: Send + Sync {
-    fn reclaim(&self, bytes: u64) -> u64;
-}
-
-/// The single charge interface every subsystem owner integrates against.
-pub trait BudgetCharge: Send + Sync {
-    fn reserve_bytes(&self, owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError>;
-    fn allocate_bytes(&self, owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError>;
-    fn release_bytes(&self, owner: BudgetOwner, bytes: u64);
-    fn available_bytes(&self, owner: BudgetOwner) -> u64;
-}
-
 #[derive(Default)]
 struct Ledger {
     charges: [u64; 6],
     reserved: [u64; 6],
     ingress_refused: bool,
-}
-
-struct CpuLedger {
-    background_in_flight: u32,
-    foreground_active: u32,
-}
-
-/// Bounded CPU share accounting over the one scheduling domain (`BUD-04`).
-///
-/// All counters live behind one lock, so share decisions are linearizable
-/// with each other.
-pub struct CpuShares {
-    total_workers: u32,
-    foreground_reserve: u32,
-    ledger: Mutex<CpuLedger>,
-}
-
-impl CpuShares {
-    #[must_use]
-    pub fn new(total_workers: u32, foreground_reserve: u32) -> Self {
-        Self {
-            total_workers: total_workers.max(1),
-            foreground_reserve: foreground_reserve.min(total_workers.max(1)),
-            ledger: Mutex::new(CpuLedger {
-                background_in_flight: 0,
-                foreground_active: 0,
-            }),
-        }
-    }
-
-    #[must_use]
-    pub fn try_acquire_background(self: &Arc<Self>) -> Option<BackgroundCpuPermit> {
-        let mut ledger = self.ledger.lock();
-        let ceiling = self.total_workers.saturating_sub(self.foreground_reserve);
-        if ledger.background_in_flight >= ceiling {
-            return None;
-        }
-        ledger.background_in_flight = ledger.background_in_flight.saturating_add(1);
-        Some(BackgroundCpuPermit {
-            shares: Arc::clone(self),
-        })
-    }
-
-    #[must_use]
-    pub fn acquire_foreground(self: &Arc<Self>) -> ForegroundCpuPermit {
-        let mut ledger = self.ledger.lock();
-        ledger.foreground_active = ledger.foreground_active.saturating_add(1);
-        ForegroundCpuPermit {
-            shares: Arc::clone(self),
-        }
-    }
-
-    #[must_use]
-    pub fn background_in_flight(&self) -> u32 {
-        self.ledger.lock().background_in_flight
-    }
-
-    #[must_use]
-    pub fn foreground_active(&self) -> u32 {
-        self.ledger.lock().foreground_active
-    }
-}
-
-pub struct BackgroundCpuPermit {
-    shares: Arc<CpuShares>,
-}
-
-impl Drop for BackgroundCpuPermit {
-    fn drop(&mut self) {
-        let mut ledger = self.shares.ledger.lock();
-        ledger.background_in_flight = ledger.background_in_flight.saturating_sub(1);
-    }
-}
-
-pub struct ForegroundCpuPermit {
-    shares: Arc<CpuShares>,
-}
-
-impl Drop for ForegroundCpuPermit {
-    fn drop(&mut self) {
-        let mut ledger = self.shares.ledger.lock();
-        ledger.foreground_active = ledger.foreground_active.saturating_sub(1);
-    }
 }
 
 type EngineCacheSource = Box<dyn Fn() -> u64 + Send + Sync>;
@@ -260,6 +103,7 @@ pub struct NodeBudget {
 impl NodeBudget {
     #[must_use]
     pub fn new(caps: BudgetCaps, total_workers: u32) -> Self {
+        let total_workers = total_workers.max(1);
         let foreground_workers = total_workers / 4;
         Self {
             caps,
@@ -431,6 +275,7 @@ impl NodeBudget {
 
     /// `BUD-07`: reclaim from optional owners, then reserve, then refuse.
     pub fn ensure_available(&self, owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
+        self.sample_engine_cache();
         if self.reserve(owner, bytes).is_ok() {
             return Ok(());
         }
@@ -487,6 +332,7 @@ impl NodeBudget {
 
     #[must_use]
     pub fn window_limits(&self) -> WindowLimits {
+        self.sample_engine_cache();
         let defaults = WindowLimits::durable_head_defaults();
         WindowLimits {
             max_blocks: defaults.max_blocks,
@@ -499,6 +345,7 @@ impl NodeBudget {
 
     #[must_use]
     pub fn script_batch_limits(&self) -> WindowLimits {
+        self.sample_engine_cache();
         let defaults = WindowLimits::script_batch_defaults();
         WindowLimits {
             max_blocks: defaults.max_blocks,
@@ -557,6 +404,10 @@ impl BudgetCharge for NodeBudget {
     fn available_bytes(&self, owner: BudgetOwner) -> u64 {
         self.available(owner)
     }
+
+    fn ensure_available_bytes(&self, owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
+        self.ensure_available(owner, bytes)
+    }
 }
 
 pub struct BudgetedIngressLedger {
@@ -577,20 +428,13 @@ impl bitcoin_rs_wire::inbound::block_memory::IngressLedger for BudgetedIngressLe
 
     fn try_take(&self, bytes: usize) -> bool {
         let bytes_u64 = u64::try_from(bytes).unwrap_or(u64::MAX);
-        if self
-            .budget
+        self.budget
             .reserve(BudgetOwner::StagedImages, bytes_u64)
             .is_ok()
-        {
-            if self
+            && self
                 .budget
                 .allocate(BudgetOwner::StagedImages, bytes_u64)
                 .is_ok()
-            {
-                return true;
-            }
-        }
-        false
     }
 
     fn give_back(&self, bytes: usize) {
