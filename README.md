@@ -152,7 +152,7 @@ See the [BIP adoption policy](docs/policies/bip-adoption.md) for the research-to
 
 ## Architecture
 
-The workspace is a five-layer, one-way dependency graph. `bin/bitcoin-rs` and `crates/node` compose the runtime. `crates/rpc` owns the external protocols. `chain`, `chainstate`, `utxo`, `p2p`, `mempool`, `index`, and `mining` own domain state. `crates/storage` confines every storage engine (RocksDB mandatory default; `fjall` and `redb` retired to `tools/storage-convert`). `primitives`, `script`, and `consensus` stay free of I/O. The daemon and `Node::start` share one lifecycle, and `libbitcoinkernel` FFI stays behind the optional `kernel` feature. Details live in the [architecture contract](docs/contracts/architecture.md) and [embedding contract](docs/contracts/embedding.md).
+The workspace is a five-layer, one-way dependency graph. `bin/bitcoin-rs` and `crates/node` compose the runtime. `crates/serving` owns the external protocols. `execution`, `projection`, `wire`, and `mempool` own domain state. `crates/storage` confines every storage engine (RocksDB mandatory default; `fjall` and `redb` retired to `tools/storage-convert`; `surrealkv` and `mdbx` optional). `consensus` stays free of I/O. The daemon and `Node::start` share one lifecycle, and `libbitcoinkernel` FFI stays behind the optional `kernel` feature. The layer model and permitted edges live in the [architecture contract](docs/contracts/architecture.md#arch-01-five-layer-one-way-dependency-direction) and the [embedding contract](docs/contracts/embedding.md).
 
 ---
 

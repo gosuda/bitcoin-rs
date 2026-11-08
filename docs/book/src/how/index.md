@@ -2,7 +2,7 @@
 
 Indexes are optional derived state. Every index is off by default, and when one is enabled a single worker thread maintains all of them from committed chain events. The node's applied tip never waits for index writes.
 
-The index lives in [`crates/index`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/index). Its contract is [docs/contracts/indexing.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/indexing.md).
+The index lives in [`crates/projection`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/projection). Its contract is [docs/contracts/indexing.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/indexing.md).
 
 | Index | Enabled by | What it answers |
 | --- | --- | --- |

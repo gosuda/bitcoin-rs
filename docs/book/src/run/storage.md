@@ -1,6 +1,6 @@
 # Storage and memory
 
-RocksDB is the mandatory default storage engine, always compiled into the binary. `fjall` and `redb` are removed from runtime; legacy epoch-2 datadirs are migrated offline using `tools/storage-convert` (see the [datadir format policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/db-migration.md)). Transcripts below write `$DATA` for the data directory you pass to `--data-dir`.
+RocksDB is the mandatory default storage engine, always compiled into the binary. `fjall` and `redb` are removed from runtime; legacy epoch-2 datadirs are migrated offline using `tools/storage-convert` (see the [datadir format policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/db-migration.md)). Engine crate ownership and feature-forwarding rules are owned by `ARCH-02` and `ARCH-03` in the [architecture contract](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/architecture.md). Transcripts below write `$DATA` for the data directory you pass to `--data-dir`.
 
 ## Choose a backend
 

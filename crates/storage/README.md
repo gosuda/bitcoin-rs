@@ -28,6 +28,8 @@ evaluation and commit.
 
 The storage engine is selected at runtime with `--storage-backend`, `BITCOIN_RS_STORAGE_BACKEND`, or TOML `storage_backend`, which accepts `rocksdb`, `surrealkv`, or `mdbx`.
 
+The engine crate allow-list and backend feature-forwarding rules are owned by `ARCH-02` and `ARCH-03` in the [architecture contract](../../docs/contracts/architecture.md). This section describes the adapters and their runtime selection only.
+
 ## Pruning
 
 `pruning` deletes historical block bodies and undo records once the active chain no longer needs them. It lives here rather than in a crate of its own, because it is a retention policy over rows this crate already owns.

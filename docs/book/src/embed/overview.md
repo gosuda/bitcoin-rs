@@ -33,12 +33,14 @@ Historical prefix reads are blocking and take no live UTXO or chain-transition l
 
 ## Feature flags
 
-The node crate's default features are `["zmq"]`. RocksDB is always compiled as the mandatory default storage engine; no runtime backend features exist.
+The node crate's default features are `["zmq"]`. RocksDB is always compiled as the mandatory default storage engine. `surrealkv` and `mdbx` are optional backend features, off by default.
 
 | Feature | Effect | Use |
 | --- | --- | --- |
 | `zmq` | Compiles the ZeroMQ publisher surface | Only when notifications are needed |
 | `kernel` | Compiles bitcoinkernel support in | Oracle runs; never selects the engine by itself |
+| `surrealkv` | Forwards the optional SurrealKV backend feature to `bitcoin-rs-storage` | Only when that engine is selected |
+| `mdbx` | Forwards the optional libmdbx backend feature to `bitcoin-rs-storage` | Only when that engine is selected |
 | `silent-payments` | Enables the silent-payments RPC subset | Only when that surface is needed |
 | `pool` | Enables the native pool surface | Pool operators |
 | `pool-sv2` | Adds Stratum V2 transport on top of `pool` | Pool operators |

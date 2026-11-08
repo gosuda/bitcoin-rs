@@ -104,6 +104,6 @@ After a snapshot load, the node must backfill and fully validate the block range
 
 ## Limits
 
-- The exact `minimum_chain_work` byte values per network live in `crates/primitives` network parameters; this page does not restate them.
+- The exact `minimum_chain_work` byte values per network live in `crates/consensus/src/primitives` network parameters; this page does not restate them.
 - The `staletip` relay behavior against real Core peers is UNMEASURED; Core does not implement this message, so it only helps bitcoin-rs peers.
 - Per-peer EWMA stall recovery is exercised by `crates/node/src/p2p/sync/tests/pending_retries.rs` and `window_recovery.rs`, not by a live multi-peer run on this page.

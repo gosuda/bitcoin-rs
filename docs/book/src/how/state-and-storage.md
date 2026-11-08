@@ -2,7 +2,7 @@
 
 One row decides what survives a crash: the durable head. A committed block is real only after the head row names it and the batch that wrote it returns. Persistent chain state either supports that row or can be rebuilt from the block bodies.
 
-The storage contract is owned by [`crates/storage`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/storage), the coin set by [`crates/utxo`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/utxo), and the transition order by [`crates/chainstate`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/chainstate). The normative commit protocol is [docs/contracts/recovery.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md).
+The storage contract is owned by [`crates/storage`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/storage), the coin set by [`crates/storage/src/utxo`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/storage/src/utxo), and the transition order by [`crates/execution`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/execution). The normative commit protocol is [docs/contracts/recovery.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md).
 
 ## What is stored
 

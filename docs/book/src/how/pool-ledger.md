@@ -4,7 +4,7 @@ The ledger is the pool's only financial memory. A share earns credit once, a rou
 
 The runtime that drives the ledger, including the Stratum listeners and the external signer, is described in [mining and the native pool](../use/mining-and-pool.md). Financial rules are owned by [docs/contracts/pool.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/pool.md) (`POOL-01` to `POOL-09`).
 
-The HEAD build used for this book was compiled without the `pool` feature, so no pool run appears here. The evidence is the mining crate's tests with `--features pool,test-seam`, run against this tree. Two of them appear in the worked trace.
+The HEAD build used for this book was compiled without the `pool` feature, so no pool run appears here. The evidence is the node pool-ledger tests in `crates/node/tests/pool_ledger.rs` with `--features pool,test-seam`, run against this tree. Two of them appear in the worked trace.
 
 ## What the ledger stores
 

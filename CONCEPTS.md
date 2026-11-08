@@ -196,7 +196,7 @@ The two cost regimes a sync measurement must name before its numbers mean anythi
 ## Consensus validation
 
 ### Native protocol primitives
-The owned Bitcoin protocol vocabulary in `crates/primitives`: `Tx`, `Block`,
+The owned Bitcoin protocol vocabulary in `crates/consensus/src/primitives`: `Tx`, `Block`,
 `Header`, `OutPoint`, `Amount`, `Sequence`, `LockTime`, `CompactTarget`,
 `Script`, `Witness`, hashes, sighash, compact-size encoding, and network
 constants. These types are implemented here; they are not `rust-bitcoin`
@@ -210,7 +210,7 @@ may still use `rust-bitcoin` at the RPC boundary only.
 Bitcoin Core's C++ consensus engine (`libbitcoinkernel`), compiled in when the `kernel` Cargo feature is enabled. The `kernel` feature is a capability ("bitcoinkernel support is compiled in"), not a selection. The engine that runs is chosen at runtime by `validation.engine` (`native` by default, `kernel` to route input-script verification and the one-shot block parse through `bitcoinkernel`). Rust performs the surrounding non-script transaction and block checks. `native` is the default engine in every build. The `bin/bitcoin-rs` binary and all library crates default to kernel-free, so `cargo build -p bitcoin-rs` uses the native interpreter and links no C++ engine. Builds with `kernel` need `cmake` and `libboost-dev`. Selecting `kernel` without the feature fails at startup with an unsupported-build error, never with silent engine substitution (`docs/contracts/validation-default.md`).
 
 ### Native Rust interpreter
-The pure-Rust script path in `crates/script`, the default `validation.engine` in every build, including `kernel` builds where `validation.engine = "native"` still reaches it. It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends through the opcode evaluator. Core's `script_tests`, `tx_valid`, and `tx_invalid` vectors currently pin zero native mismatches. Signature checks reuse the process-wide `secp256k1::SECP256K1` context. It is the C++-free quickstart engine and the default production engine.
+The pure-Rust script path in `crates/consensus/src/script`, the default `validation.engine` in every build, including `kernel` builds where `validation.engine = "native"` still reaches it. It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends through the opcode evaluator. Core's `script_tests`, `tx_valid`, and `tx_invalid` vectors currently pin zero native mismatches. Signature checks reuse the process-wide `secp256k1::SECP256K1` context. It is the C++-free quickstart engine and the default production engine.
 
 ### One-shot block parse
 Parsing each block exactly once on the apply path, then reusing that parse downstream for txids. On the `Kernel` arm only, it also reuses the borrowed `TransactionRef` objects that script preparation reuses. The `Native` arm reads the view's decoded transactions. `kernel::BlockParse` (`crates/consensus/src/kernel.rs`) is the one-shot parse. Its parse engine follows the selected `validation.engine`, so `Native` parses with the Rust parser and `Kernel` with `bitcoinkernel::Block::new`. The `Native` variant is compiled in every build. The `Kernel` variant exists only in `kernel`-feature builds, where selecting `validation.engine = "kernel"` reaches it. Any other selection fails closed with the unsupported-build error.

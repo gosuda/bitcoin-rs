@@ -3,7 +3,7 @@
 This contract specifies how the node recovers an authoritative chainstate.
 Recovery handles crashes, lost writes, reorganizations, and incompatible datadirs.
 The chainstate is the single durable authority.
-`crates/chainstate` owns the ordered commit protocol over the storage durable head.
+`crates/execution` owns the ordered commit protocol over the storage durable head.
 That head certifies ordering and high-water bounds, not coin contents.
 If startup restores no chainstate while a durable head still exists, `reconcile_at_boot` replays the head chain.
 Replay starts from the newest accepted checkpoint out of the durable bodies it certifies.
@@ -42,7 +42,7 @@ R = (tip, height, CommitId, coins_version, coins, body_extent, undo_extent, refs
 - `height` is the block height as a compact big-endian integer.
 - `CommitId` is a strictly monotonic durable serial advancing on every committed connect and every committed disconnect.
 - `coins_version` equals the current `CommitId` at commit time, never derived from coin contents.
-- `coins` is the authoritative UTXO set, keyed and valued as defined in `crates/utxo`.
+- `coins` is the authoritative UTXO set, keyed and valued as defined in `crates/storage/src/utxo`.
 - `body_extent` and `undo_extent` are the committed durable high-water bounds for body and undo segment files.
 - `refs` maps `(height, block_hash, Body|Undo)` to the durable byte range in the matching segment file.
 - Undo and body references include the block hash, never `height` alone.
@@ -64,7 +64,7 @@ struct DurableHead {
 
 - The row carries a format version byte and a checksum over its payload.
 - Any malformed row MUST fail closed at load instead of decoding to absence.
-- The head record lives in the chainstate key-value store and the ordered protocol is owned by `crates/chainstate`.
+- The head record lives in the chainstate key-value store and the ordered protocol is owned by `crates/execution`.
 - One connect or disconnect commits one atomic named-family batch.
 - The `write_durable_if` receipt covers the head row, the block undo row, its body locator row, and block-file maximum-height rows.
 - Appended body bytes and the blocks directory are synced before the batch MAY name them.
@@ -133,7 +133,7 @@ struct DurableHead {
 ### `RCV-01`: Authority and identity
 
 - The chainstate is the only authoritative position.
-- `crates/chainstate` owns that position and its commit/recovery protocol.
+- `crates/execution` owns that position and its commit/recovery protocol.
 - Block bodies, `txindex`, `scriptindex`, and undo or lookup metadata are derived.
 - Every derived position is a `(height, block_hash)` pair, never height alone.
 - Off the active chain, stale pairs rewind to the common ancestor, not to a height.

@@ -27,7 +27,7 @@ The log line for a group flush is `durable_head: group commit` with `blocks`, `s
 
 1. Locate the predecessor: `application_predecessor` (`connect.rs:62`) resolves the parent tip and height, from the staged group when grouped.
 2. Historical-target guard (`connect.rs:79`): under the assumeutxo historical role, blocks past `base_height` fail with `ConnectPastHistoricalTarget` and a height-equal mismatch fails with `HistoricalTargetHashMismatch`.
-3. Contextual header check (`connect.rs:106`): median-time-past, nbits, version gates, reusing `validate_contextual_header` from the chain crate (see the next chapter).
+3. Contextual header check (`connect.rs:106`): median-time-past, nbits, version gates, reusing `validate_contextual_header` from the execution chain module (`crates/execution/src/chain/header_sync.rs`) (see the next chapter).
 4. Journal preparation (`connect.rs:125`).
 5. Self proof of work (`connect.rs:146`).
 6. `BlockRules::check` (`connect.rs:252`): block rules from `verify_block_rules_precomputed` (merkle roots, size, weight, coinbase structure), signet solution, block finality (`check_block_finality`, `connect.rs:1310`), an early BIP34 check, the optional pow-valid announce hook, and the combined BIP30/BIP34 scan (`check_bip30_and_bip34`, `connect.rs:1262`).

@@ -83,7 +83,7 @@ Queue accounting:
 ### `P2P-01`: Protocol wire framing and handshake compatibility
 
 - **Owner**: `crates/wire/src/compat.rs`: 42-command inventory (36 Core commands plus `feature`, four BIP331 package messages, `staletip`) and `PINNED_CORE_VERSION` (Core 31.1).
-- **Scope**: `crates/p2p` wire/handshake/FSM/policy, `chain_query.rs`, and node network flags.
+- **Scope**: `crates/wire` wire/handshake/FSM/policy, `crates/node/src/p2p/chain_query.rs`, and node network flags.
 - Package ingress charges the lower bound of the heap that a decoded package owns.
 - It sets no hard allocator ceiling.
 - Compact block responses draw a fresh BIP152 serving nonce for each block.
@@ -132,7 +132,7 @@ Queue accounting:
 
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 
-- `crates/p2p` owns sessions and `PeerLease`.
+- `crates/wire` owns sessions and `PeerLease`; `crates/node/src/p2p` owns orchestration over them.
 - `PeerRemote` distinguishes a destination from an anonymous inbound Tor circuit (keeps `ConnectionId`).
 - Address book and dial take only `PeerEndpoint`.
 - Netgroup classification MUST NOT rewrite a dial endpoint.

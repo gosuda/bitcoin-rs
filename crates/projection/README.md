@@ -52,9 +52,9 @@ Public paths and on-disk encodings do not depend on this layout.
   complete prevout scripts or a certified `BlockSpends`. No startup scan,
   durable rows, wallet keys or network endpoints. See the
   [feasibility note](../../docs/silent-payments.md).
-- `rocksdb`: enables the `RocksDB` backend in `bitcoin-rs-storage`
-- `fjall`: enables the fjall backend in `bitcoin-rs-storage`
-- `redb`: enables the redb backend in `bitcoin-rs-storage`
+- `surrealkv`: forwards the optional SurrealKV backend feature to `bitcoin-rs-storage`
+- `mdbx`: forwards the optional libmdbx backend feature to `bitcoin-rs-storage`
+- `test-seam`: exposes in-workspace test composition; production dependencies never enable it
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.
