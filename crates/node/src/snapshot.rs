@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read as _, Write};
+use std::io::{BufReader, BufWriter, Read as _, Seek as _, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -713,6 +713,40 @@ impl SnapshotControl {
         let seed = session.as_ref();
         let mut refused = None;
         let started = Instant::now();
+        {
+            let anchor = bitcoin_rs_storage::utxo::core_snapshot::CoreSnapshotStream::open(
+                &mut file,
+                self.network,
+            )?
+            .anchor();
+            if anchor.height != manifest.base_height
+                || anchor.block_hash.to_le_bytes() != manifest.base_hash
+            {
+                if let Some(session) = session.as_ref() {
+                    session.abort();
+                }
+                return Err(SnapshotImportError::Manifest(
+                    bitcoin_rs_execution::manifest::ManifestError::SnapshotBaseMismatch {
+                        expected_height: manifest.base_height,
+                        expected: Hash256::from_le_bytes(&manifest.base_hash),
+                        found_height: anchor.height,
+                        found: anchor.block_hash,
+                    },
+                ));
+            }
+            if anchor.hash_serialized.to_le_bytes() != manifest.utxo_commitment {
+                if let Some(session) = session.as_ref() {
+                    session.abort();
+                }
+                return Err(SnapshotImportError::Manifest(
+                    bitcoin_rs_execution::manifest::ManifestError::SnapshotCommitmentMismatch {
+                        expected: Hash256::from_le_bytes(&manifest.utxo_commitment),
+                        found: anchor.hash_serialized,
+                    },
+                ));
+            }
+            file.seek(std::io::SeekFrom::Start(0))?;
+        }
         let outcome = self.activate(|manager| {
             let mut observer = seed.map(ScriptLiveSeedSession::observer);
             manager.activate_core_snapshot(

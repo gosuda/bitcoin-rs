@@ -66,6 +66,19 @@ pub enum ManifestError {
     SchemaMismatch { expected: u32, found: u32 },
     #[error("manifest UTXO commitment {found} does not match the anchor commitment {expected}")]
     UtxoCommitmentMismatch { expected: Hash256, found: Hash256 },
+    #[error(
+        "decoded snapshot base {found} at height {found_height} does not match the manifest base {expected} at height {expected_height}"
+    )]
+    SnapshotBaseMismatch {
+        expected_height: u32,
+        expected: Hash256,
+        found_height: u32,
+        found: Hash256,
+    },
+    #[error(
+        "decoded snapshot UTXO commitment {found} does not match the manifest commitment {expected}"
+    )]
+    SnapshotCommitmentMismatch { expected: Hash256, found: Hash256 },
     #[error("manifest artifact table is malformed: {0}")]
     Artifacts(&'static str),
     #[error("manifest artifact file {} not found", .path.display())]

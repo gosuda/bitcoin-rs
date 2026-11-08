@@ -1324,3 +1324,39 @@ fn a_manifest_on_a_foreign_schema_is_refused_at_activation() -> Result<(), TestE
     assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
     Ok(())
 }
+
+// SNP-03
+#[test]
+fn a_snapshot_file_from_another_base_is_refused_before_activation() -> Result<(), TestError> {
+    let other = Network::Regtest
+        .assume_utxo_for_height(110)
+        .ok_or(TestError::Missing("regtest height-110 anchor"))?;
+    let dir = tempfile::tempdir()?;
+    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let core_bytes = std::fs::read(&core_path)?;
+    let manifest_path = write_manifest_bytes(
+        dir.path(),
+        other.height,
+        other.block_hash.to_le_bytes(),
+        other.hash_serialized.to_le_bytes(),
+        &core_bytes,
+    )?;
+
+    let result = state.import_manifest(&manifest_path);
+    assert!(matches!(
+        result,
+        Err(SnapshotImportError::Manifest(
+            bitcoin_rs_execution::manifest::ManifestError::SnapshotBaseMismatch {
+                expected_height: 110,
+                found_height: 200,
+                ..
+            }
+        ))
+    ));
+    assert!(matches!(
+        state.snapshots.manager.status()?,
+        AssumeUtxoDiskStatus::Uninitialized
+    ));
+    assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
+    Ok(())
+}
