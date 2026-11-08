@@ -23,7 +23,6 @@ fn test_open_spec(dir: &std::path::Path, epoch: u64) -> DerivedIndexOpenSpec {
         facts_rx: None,
         facts_bytes: None,
         facts_gap: None,
-        seed_slot: None,
         open_store: Arc::new(move |dir| {
             let store = Arc::new(
                 bitcoin_rs_storage::RocksDbStore::open_with_cache(dir, 8 * 1024 * 1024)
@@ -48,7 +47,7 @@ struct WorkerInputs {
 
 fn build_worker_inputs(dir: &std::path::Path, epoch: u64) -> WorkerInputs {
     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime = DerivedIndexRuntime::new(wake_tx);
     let spec = test_open_spec(dir, epoch);
     let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
     let generation = Generation::new(epoch);
@@ -470,8 +469,8 @@ fn revision_quiet_cancellation_wakes_and_joins_promptly() {
         quiet_period: Duration::from_secs(30),
         batch_delay: Duration::ZERO,
         rollback_rebuild_cutover: 0,
-        seed_slot: None,
-        seed_bundle: parking_lot::Mutex::new(None),
+        seed_history_lease: parking_lot::Mutex::new(None),
+        seed_rows: parking_lot::Mutex::new(None),
         facts_rx: None,
         facts_bytes: None,
         facts_gap: None,
@@ -526,8 +525,8 @@ fn batch_deadline_cancellation_wakes_and_joins_promptly() {
         quiet_period: Duration::from_secs(30),
         batch_delay: Duration::ZERO,
         rollback_rebuild_cutover: 0,
-        seed_slot: None,
-        seed_bundle: parking_lot::Mutex::new(None),
+        seed_history_lease: parking_lot::Mutex::new(None),
+        seed_rows: parking_lot::Mutex::new(None),
         facts_rx: None,
         facts_bytes: None,
         facts_gap: None,

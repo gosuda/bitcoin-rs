@@ -17,6 +17,7 @@ use crate::IndexCapabilities;
 use bitcoin_rs_consensus::primitives::Hash256;
 
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget, RetentionRegistry};
+use bitcoin_rs_storage::utxo::SnapshotCoinObserver as _;
 use bitcoin_rs_storage::{
     InMemoryUndoStore, RocksDbStore, StorageError, block_body::BlockBodyStore,
 };
@@ -258,12 +259,11 @@ impl ForkFixture {
                 .expect("fixture block")
             };
             let txids = block.txids();
+            let image = bitcoin_rs_consensus::primitives::BlockImage::from_local(block.clone());
             if height > 0 {
                 let (_, undo, _) = bitcoin_rs_storage::utxo::contract::build_block_changes(
                     &bitcoin_rs_storage::utxo::contract::BlockChangeInputs {
-                        block: &bitcoin_rs_consensus::primitives::BlockImage::from_local(
-                            block.clone(),
-                        ),
+                        block: &image,
                         height,
                         txids: &txids,
                         same_block_spent: None,
@@ -365,7 +365,7 @@ impl Harness {
         ));
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(16);
-        let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+        let runtime = DerivedIndexRuntime::new(wake_tx);
         let evidence = RecordedIndexAhead::new();
         let reporter: Arc<dyn IndexAheadSink> = evidence.clone();
         let body_store: Arc<dyn BlockBodyStore> = fixture.bodies.clone();
@@ -388,8 +388,8 @@ impl Harness {
             quiet_period: Duration::ZERO,
             batch_delay: Duration::ZERO,
             rollback_rebuild_cutover,
-            seed_slot: None,
-            seed_bundle: parking_lot::Mutex::new(None),
+            seed_history_lease: parking_lot::Mutex::new(None),
+            seed_rows: parking_lot::Mutex::new(None),
             facts_rx: None,
             facts_bytes: None,
             facts_gap: None,
@@ -698,12 +698,7 @@ fn held_prefix() -> (ForkFixture, SeedCellHarness, BodyMap) {
     let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
     let lost = f.take_bodies(2);
     let tip = f.tip(f.a[1]);
-    let (artifact, _keep) = cell_seed_artifact(tip.hash, tip.height, 32);
-    h.cell.want();
-    assert_eq!(
-        h.cell.offer(artifact),
-        bitcoin_rs_storage::utxo::OfferOutcome::Stored
-    );
+    h.stage_seed_rows(&tip, 32);
     h.set_tip(&tip);
     h.settle_stalled(&mut None);
     assert_eq!(h.watermarks().script_live, Some(at(&tip)));
@@ -784,12 +779,7 @@ fn retained_prefix() -> (ForkFixture, SeedCellHarness, AbsentBody) {
     f.persist_undo();
     let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
     let tip = f.tip(f.a[289]);
-    let (artifact, _keep) = cell_seed_artifact(tip.hash, tip.height, 32);
-    h.cell.want();
-    assert_eq!(
-        h.cell.offer(artifact),
-        bitcoin_rs_storage::utxo::OfferOutcome::Stored
-    );
+    h.stage_seed_rows(&tip, 32);
     h.set_tip(&tip);
     assert!(matches!(
         h.worker.reconcile_once(&mut None),
@@ -896,12 +886,7 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
         f.persist_undo();
         let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
         let (a2, a5) = (f.tip(f.a[1]), f.tip(f.a[4]));
-        let (artifact, _keep) = cell_seed_artifact(a5.hash, a5.height, 32);
-        h.cell.want();
-        assert_eq!(
-            h.cell.offer(artifact),
-            bitcoin_rs_storage::utxo::OfferOutcome::Stored
-        );
+        h.stage_seed_rows(&a5, 32);
         h.set_tip(&a2);
         h.settle(&mut None);
 
@@ -935,12 +920,7 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
                 "ScriptHistory keeps its rows and watermark"
             );
             assert!(h.runtime.script_history_failure.read().is_some());
-            let (artifact, _keep) = cell_seed_artifact(a5.hash, a5.height, 32);
-            h.cell.want();
-            assert_eq!(
-                h.cell.offer(artifact),
-                bitcoin_rs_storage::utxo::OfferOutcome::Stored
-            );
+            h.stage_seed_rows(&a5, 32);
         }
         h.settle(&mut pending);
         assert_eq!(h.watermarks().tx_lookup, Some(at(&a5)));
@@ -1067,7 +1047,6 @@ fn script_live_pruned_terminal_keeps_worker_alive() {
         None,
         "live waits for a replacement artifact after the old view is reset"
     );
-    assert!(h.cell.is_wanted(), "D keeps Wanted while flagged");
     let mut converged_once = false;
     for _ in 0..16 {
         match h.worker.reconcile_once(&mut pending).expect("replay pass") {
@@ -1088,12 +1067,7 @@ fn script_live_pruned_terminal_keeps_worker_alive() {
     }
     assert!(converged_once, "other groups converge");
 
-    let (token, _keep) = cell_seed_artifact(t.hash, t.height, 32);
-    h.cell.want();
-    assert_eq!(
-        h.cell.offer(token),
-        bitcoin_rs_storage::utxo::OfferOutcome::Stored
-    );
+    h.stage_seed_rows(&t, 32);
     h.settle(&mut pending);
     assert!(
         h.runtime.script_live_failure().is_none(),
@@ -1120,12 +1094,7 @@ fn seed_first_leg_consumes_held_lease() {
     f.persist_undo();
     let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
     let h_tip = f.tip(f.a[1]);
-    let (token, _keep) = cell_seed_artifact(h_tip.hash, h_tip.height, 32);
-    h.cell.want();
-    assert_eq!(
-        h.cell.offer(token),
-        bitcoin_rs_storage::utxo::OfferOutcome::Stored
-    );
+    h.stage_seed_rows(&h_tip, 32);
     h.set_tip(&f.tip(f.a[3]));
     let absent = f.a_key(3);
     let withheld = f
@@ -1140,23 +1109,11 @@ fn seed_first_leg_consumes_held_lease() {
         !matches!(first, ReconcileAction::CaughtUp),
         "take plus seed never completes the pass"
     );
-    assert!(h.cell.take().is_none(), "one take consumes the token");
     assert_eq!(
         h.watermarks().script_live,
         Some(at(&h_tip)),
         "seed commits H before the first leg"
     );
-    let lease_floor = {
-        let guard = h.worker.seed_bundle.lock();
-        let bundle = guard.as_ref().expect("bundle held");
-        bundle.lease.as_ref().expect("pin held").floor()
-    };
-    assert_eq!(
-        lease_floor,
-        Some(h_tip.height),
-        "the first leg runs under the held pin"
-    );
-    assert_eq!(h.retention.active_leases(), 1);
     for _ in 0..16 {
         match h.worker.reconcile_once(&mut pending).expect("stalled leg") {
             ReconcileAction::CaughtUp
@@ -1169,10 +1126,6 @@ fn seed_first_leg_consumes_held_lease() {
             "stalled legs put the single pin back, never a second one"
         );
         assert!(h.runtime.failure_message().is_none());
-        assert!(
-            h.worker.seed_bundle.lock().is_some(),
-            "stalls keep the bundle instead of re-taking"
-        );
     }
     f.bodies.bodies.lock().insert(absent, withheld);
     h.settle(&mut pending);
@@ -1189,7 +1142,6 @@ struct SeedCellHarness {
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     runtime: Arc<DerivedIndexRuntime>,
     retention: Arc<RetentionRegistry>,
-    cell: bitcoin_rs_storage::utxo::SeedOfferCell,
     worker: Worker,
 }
 
@@ -1202,12 +1154,10 @@ impl SeedCellHarness {
         ));
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(16);
-        let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+        let runtime = DerivedIndexRuntime::new(wake_tx);
         let reporter: Arc<dyn IndexAheadSink> = RecordedIndexAhead::new();
         let body_store: Arc<dyn BlockBodyStore> = fixture.bodies.clone();
         let retention = Arc::new(RetentionRegistry::new());
-        let cell: bitcoin_rs_storage::utxo::SeedOfferCell =
-            Arc::new(bitcoin_rs_storage::utxo::SeedSlot::new());
         let worker = Worker {
             runtime: Arc::clone(&runtime),
             writer: Arc::clone(&writer),
@@ -1226,8 +1176,8 @@ impl SeedCellHarness {
             quiet_period: Duration::ZERO,
             batch_delay: Duration::ZERO,
             rollback_rebuild_cutover: u32::MAX,
-            seed_slot: Some(cell.clone()),
-            seed_bundle: parking_lot::Mutex::new(None),
+            seed_history_lease: parking_lot::Mutex::new(None),
+            seed_rows: parking_lot::Mutex::new(None),
             facts_rx: None,
             facts_bytes: None,
             facts_gap: None,
@@ -1239,9 +1189,36 @@ impl SeedCellHarness {
             applied_tip,
             runtime,
             retention,
-            cell,
             worker,
         }
+    }
+
+    fn stage_seed_rows(&self, tip: &TipSnapshot, count: u64) {
+        let session = self
+            .runtime
+            .script_live_seed()
+            .begin_session()
+            .expect("seed session open");
+        {
+            let mut observer = session.observer();
+            for i in 0..count {
+                let mut txid = [0_u8; 32];
+                txid[..8].copy_from_slice(&i.to_le_bytes());
+                observer.observe_coin(bitcoin_rs_storage::utxo::SnapshotCoin {
+                    txid: Hash256::from_le_bytes(&txid),
+                    vout: 0,
+                    value: 1_000 + i,
+                    script_pubkey: &[0x51],
+                    height: tip.height,
+                    coinbase: false,
+                });
+            }
+        }
+        assert!(session.take_error().is_none(), "staging must not fail");
+        session.publish(IndexWatermark {
+            height: tip.height,
+            hash: tip.hash.to_le_bytes(),
+        });
     }
 
     fn set_tip(&self, tip: &Arc<TipSnapshot>) {
@@ -1292,51 +1269,6 @@ impl SeedCellHarness {
     }
 }
 
-fn cell_seed_artifact(
-    tip: Hash256,
-    height: u32,
-    n: u64,
-) -> (
-    bitcoin_rs_storage::utxo::VerifiedSnapshotArtifact,
-    tempfile::TempDir,
-) {
-    let set = bitcoin_rs_storage::utxo::UtxoSet::new();
-    for i in 0..n {
-        let mut bytes = [0_u8; 32];
-        bytes[..8].copy_from_slice(&i.to_le_bytes());
-        let txid = Hash256::from_le_bytes(&bytes);
-        let out = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
-            vout: 0,
-            value: 1_000 + i,
-            script_pubkey: vec![0x51],
-            coinbase: false,
-            height,
-        };
-        let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(txid, &[out])
-            .expect("record");
-        set.insert_parsed_record(record);
-    }
-    let mut bytes = Vec::new();
-    let (_, (), witness) =
-        bitcoin_rs_storage::utxo::write_snapshot_witnessed(&set, &tip, height, &mut bytes, ())
-            .expect("witnessed encode");
-    let witness = witness.expect("valid encode mints a witness");
-    let dir = tempfile::tempdir().expect("artifact dir");
-    let path = dir.path().join("seed-v4.dat");
-    std::fs::write(&path, &bytes).expect("stage artifact");
-    let mut file = std::fs::File::open(&path).expect("open artifact");
-    let (_, (), read_witness) =
-        bitcoin_rs_storage::utxo::read_snapshot_strict_v4_witnessed(&mut file, ()).expect("decode");
-    assert_eq!(read_witness.sha256(), witness.sha256());
-    let artifact = bitcoin_rs_storage::utxo::VerifiedSnapshotArtifact::seal(
-        file,
-        read_witness,
-        bitcoin_rs_storage::utxo::SeedProvenance::AssumeUtxoArchive {
-            base: tip.to_le_bytes(),
-        },
-    );
-    (artifact, dir)
-}
 // EVT-03
 #[test]
 fn malformed_stored_consumer_cursor_never_causes_panic_and_overwrites_cleanly() {

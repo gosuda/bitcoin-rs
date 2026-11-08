@@ -67,45 +67,37 @@ impl<S: KvStore> IndexWriter<S> {
         resume_capability_reset(store, generation, IndexCapabilities::ALL.to_mask())
     }
 
-    pub(crate) fn seed_script_live_stream<F>(
+    pub fn stage_script_live_rows(
         &self,
-        mut produce: F,
-        seed_tip: IndexWatermark,
-        cancelled: &dyn Fn() -> bool,
-    ) -> Result<usize, IndexError>
-    where
-        F: FnMut(
-            &mut dyn FnMut(OutPoint, crate::types::ScriptLiveCoin) -> Result<(), IndexError>,
-        ) -> Result<(), IndexError>,
-    {
-        const SEED_BATCH_ROWS: usize = 4_096;
-        if cancelled() {
-            return Err(IndexError::Cancelled);
-        }
-        let existing = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
-        if existing.watermarks.script_live.is_some() {
-            return Err(IndexError::LiveAlreadySeeded);
-        }
-        self.reset_capabilities(IndexCapabilities::SCRIPT_LIVE)?;
+        rows: &mut dyn Iterator<Item = Vec<u8>>,
+    ) -> Result<usize, IndexError> {
+        const SEED_STAGE_BATCH_ROWS: usize = 4_096;
         let mut fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
         if fence.watermarks.script_live.is_some() {
             return Err(IndexError::LiveAlreadySeeded);
         }
-        let mut written: usize = 0;
+        let mut written = 0usize;
+        let mut in_batch = 0usize;
         let mut batch = self.indexer.store.new_batch();
-        batch.put(
-            ColumnFamily::UtxoMeta,
-            FORMAT_VERSION_KEY,
-            &FORMAT_VERSION_VALUE,
-        );
-        let mut in_batch = 0;
-        let mut add = |outpoint, coin: crate::types::ScriptLiveCoin| -> Result<(), IndexError> {
-            let row = crate::types::ScriptLiveRow::new(coin.scripthash, &outpoint);
-            let value = coin.encode_value()?;
-            batch.put(ColumnFamily::ScriptLive, row.as_bytes(), &value);
+        for row in rows {
+            if in_batch == 0 {
+                batch.put(
+                    ColumnFamily::UtxoMeta,
+                    FORMAT_VERSION_KEY,
+                    &FORMAT_VERSION_VALUE,
+                );
+            }
+            if row.len() < crate::types::SCRIPT_LIVE_ROW_SIZE {
+                return Err(IndexError::InvalidLiveRowValue { len: row.len() });
+            }
+            let key = &row[..crate::types::SCRIPT_LIVE_ROW_SIZE];
+            let value = &row[crate::types::SCRIPT_LIVE_ROW_SIZE..];
+            crate::types::ScriptLiveCoin::decode_value(value)
+                .map_err(|_| IndexError::InvalidLiveRowValue { len: row.len() })?;
+            batch.put(ColumnFamily::ScriptLive, key, value);
             written += 1;
             in_batch += 1;
-            if in_batch >= SEED_BATCH_ROWS {
+            if in_batch >= SEED_STAGE_BATCH_ROWS {
                 let next = self.indexer.store.new_batch();
                 let old = std::mem::replace(&mut batch, next);
                 commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, old)?;
@@ -113,22 +105,21 @@ impl<S: KvStore> IndexWriter<S> {
                 if fence.watermarks.script_live.is_some() {
                     return Err(IndexError::LiveAlreadySeeded);
                 }
-                batch.put(
-                    ColumnFamily::UtxoMeta,
-                    FORMAT_VERSION_KEY,
-                    &FORMAT_VERSION_VALUE,
-                );
                 in_batch = 0;
             }
-            if written.is_multiple_of(SEED_BATCH_ROWS) && cancelled() {
-                return Err(IndexError::Cancelled);
-            }
-            Ok(())
-        };
-        produce(&mut add)?;
-        if cancelled() {
-            return Err(IndexError::Cancelled);
         }
+        if in_batch > 0 {
+            commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, batch)?;
+        }
+        Ok(written)
+    }
+
+    pub fn publish_script_live_seed(&self, seed_tip: IndexWatermark) -> Result<(), IndexError> {
+        let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        if fence.watermarks.script_live.is_some() {
+            return Err(IndexError::LiveAlreadySeeded);
+        }
+        let mut batch = self.indexer.store.new_batch();
         batch.put(
             ColumnFamily::UtxoMeta,
             FORMAT_VERSION_KEY,
@@ -139,8 +130,7 @@ impl<S: KvStore> IndexWriter<S> {
             SCRIPT_LIVE_WATERMARK_KEY,
             &seed_tip.to_bytes(),
         );
-        commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, batch)?;
-        Ok(written)
+        commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, batch)
     }
 
     pub(crate) fn reset_interrupted_script_live_seed(&self) -> Result<bool, IndexError> {
@@ -170,17 +160,18 @@ impl<S: KvStore> IndexWriter<S> {
     where
         I: IntoIterator<Item = (OutPoint, crate::types::ScriptLiveCoin)>,
     {
-        let mut coins = coins.into_iter();
-        self.seed_script_live_stream(
-            |emit| {
-                for (outpoint, scripthash) in coins.by_ref() {
-                    emit(outpoint, scripthash)?;
-                }
-                Ok(())
-            },
-            seed_tip,
-            &|| false,
-        )
+        let mut rows = Vec::new();
+        for (outpoint, coin) in coins {
+            let row = crate::types::ScriptLiveRow::new(coin.scripthash, &outpoint);
+            let value = coin.encode_value()?;
+            let mut bytes = Vec::with_capacity(crate::types::SCRIPT_LIVE_ROW_SIZE + value.len());
+            bytes.extend_from_slice(row.as_bytes());
+            bytes.extend_from_slice(&value);
+            rows.push(bytes);
+        }
+        let written = self.stage_script_live_rows(&mut rows.into_iter())?;
+        self.publish_script_live_seed(seed_tip)?;
+        Ok(written)
     }
 
     pub(crate) fn import_tx_lookup_stream<F>(

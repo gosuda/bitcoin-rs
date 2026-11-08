@@ -18,9 +18,10 @@ use bitcoin_rs_consensus::primitives::{Hash256, OutPoint as NativeOutPoint, Txid
 use bitcoin_rs_projection::{
     ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexWatermark,
     IndexWatermarks, IndexWriter, MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits,
-    ScriptHash, ScriptLiveRow, SpentCoin, SpentCoins,
+    ScriptHash, ScriptLiveCoin, ScriptLiveRow, ScriptLiveValueError, SpentCoin, SpentCoins,
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
+use proptest::prelude::*;
 
 fn commit_rollback_one_with_spent_scripts<S: KvStore>(
     writer: &mut IndexWriter<S>,
@@ -389,13 +390,23 @@ fn seed_live_and_reopen<S: KvStore>(
             bitcoin_rs_projection::ScriptLiveCoin::new(scripthash, 2, 7, false),
         ),
     ];
-    assert_eq!(writer.seed_script_live(coins, seed_tip)?, 2);
+    let rows = coins
+        .into_iter()
+        .map(|(outpoint, coin)| -> Result<Vec<u8>, TestError> {
+            let row = ScriptLiveRow::new(coin.scripthash, &outpoint);
+            let mut bytes = row.as_bytes().to_vec();
+            bytes.extend_from_slice(&coin.encode_value()?);
+            Ok(bytes)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(writer.stage_script_live_rows(&mut rows.into_iter())?, 2);
+    writer.publish_script_live_seed(seed_tip)?;
     let (_, after_seed) = writer.fenced_watermarks()?;
     assert_eq!(after_seed.script_live, Some(seed_tip));
     assert_eq!(after_seed.tx_lookup, before_seed.tx_lookup);
     assert_eq!(after_seed.script_history, before_seed.script_history);
     assert!(matches!(
-        writer.seed_script_live(coins, seed_tip),
+        writer.publish_script_live_seed(seed_tip),
         Err(IndexError::LiveAlreadySeeded)
     ));
     store.flush()?;
@@ -831,7 +842,7 @@ fn live_and_history_watermarks_advance_independently() -> Result<(), TestError> 
 #[test]
 fn seeding_resets_partial_rows_and_stamps_once() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
-    let mut writer = IndexWriter::open(Arc::clone(&store), 0)?;
+    let writer = IndexWriter::open(Arc::clone(&store), 0)?;
 
     let wallet = script(0x44);
     let scripthash = ScriptHash::from_script_bytes(wallet.as_bytes());
@@ -839,9 +850,19 @@ fn seeding_resets_partial_rows_and_stamps_once() -> Result<(), TestError> {
     let stale_scripthash = ScriptHash::from_script_bytes(stale_script.as_bytes());
     let stale_outpoint = NativeOutPoint::new(NativeTxid(Hash256::from_le_bytes(&[0x32_u8; 32])), 0);
     let stale_row = ScriptLiveRow::new(stale_scripthash, &stale_outpoint);
+    let stale_coin = bitcoin_rs_projection::ScriptLiveCoin::new(stale_scripthash, 500, 1, false);
     let mut partial = store.new_batch();
-    partial.put(ColumnFamily::ScriptLive, stale_row.as_bytes(), &[]);
+    partial.put(
+        ColumnFamily::ScriptLive,
+        stale_row.as_bytes(),
+        &stale_coin.encode_value()?,
+    );
     store.write(partial)?;
+    let bare_row = stale_row.as_bytes().to_vec();
+    assert!(matches!(
+        writer.stage_script_live_rows(&mut [bare_row].into_iter()),
+        Err(IndexError::InvalidLiveRowValue { len: 43 })
+    ));
     assert!(
         writer
             .indexer()
@@ -884,8 +905,25 @@ fn seeding_resets_partial_rows_and_stamps_once() -> Result<(), TestError> {
         hash: [0x42_u8; 32],
     };
 
-    let written = writer.seed_script_live(coins.clone(), seed_tip)?;
+    let rows = coins
+        .iter()
+        .map(|(outpoint, coin)| -> Result<Vec<u8>, TestError> {
+            let row = ScriptLiveRow::new(coin.scripthash, outpoint);
+            let mut bytes = row.as_bytes().to_vec();
+            bytes.extend_from_slice(&coin.encode_value()?);
+            Ok(bytes)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let written = writer.stage_script_live_rows(&mut rows.into_iter())?;
     assert_eq!(written, 3);
+    assert_eq!(
+        writer
+            .indexer()
+            .capability_watermark(IndexCapability::ScriptLive)?,
+        None,
+        "SNP-07: staged rows stay unpublished until the seed tip commits"
+    );
+    writer.publish_script_live_seed(seed_tip)?;
     assert_eq!(
         writer
             .indexer()
@@ -894,7 +932,7 @@ fn seeding_resets_partial_rows_and_stamps_once() -> Result<(), TestError> {
     );
     assert_eq!(writer.indexer().iter_live_outpoints(scripthash)?.len(), 3);
 
-    let again = writer.seed_script_live(coins, seed_tip);
+    let again = writer.publish_script_live_seed(seed_tip);
     assert!(
         matches!(again, Err(IndexError::LiveAlreadySeeded)),
         "re-seeding over a stamped watermark must be refused: {again:?}"
@@ -905,7 +943,7 @@ fn seeding_resets_partial_rows_and_stamps_once() -> Result<(), TestError> {
 #[test]
 fn seed_stream_fenced_write_failure_does_not_publish_watermark() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
-    let mut writer = IndexWriter::open(Arc::clone(&store), 0)?;
+    let writer = IndexWriter::open(Arc::clone(&store), 0)?;
     store.fail_next_fenced_write.store(true, Ordering::SeqCst);
     let scripthash = ScriptHash::from_script_bytes(script(0x46).as_bytes());
     let coins = (0_u32..4_096)
@@ -916,12 +954,21 @@ fn seed_stream_fenced_write_failure_does_not_publish_watermark() -> Result<(), T
             )
         })
         .collect::<Vec<_>>();
-    let seed_tip = IndexWatermark {
+    let _seed_tip = IndexWatermark {
         height: 7,
         hash: [0x07_u8; 32],
     };
 
-    let result = writer.seed_script_live(coins, seed_tip);
+    let rows = coins
+        .iter()
+        .map(|(outpoint, coin)| -> Result<Vec<u8>, TestError> {
+            let row = ScriptLiveRow::new(coin.scripthash, outpoint);
+            let mut bytes = row.as_bytes().to_vec();
+            bytes.extend_from_slice(&coin.encode_value()?);
+            Ok(bytes)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let result = writer.stage_script_live_rows(&mut rows.into_iter());
     assert!(
         matches!(result, Err(IndexError::Storage(_))),
         "a fenced batch failure must surface: {result:?}"
@@ -967,4 +1014,158 @@ fn leftover_capabilities_are_persisted_families_outside_the_selection() {
             .leftover(watermarks)
             .is_empty()
     );
+}
+
+const COIN: u64 = 100_000_000;
+const MAX_MONEY: u64 = 21_000_000 * COIN;
+
+fn row_codec() -> impl proptest::strategy::Strategy<Value = ScriptLiveCoin> {
+    (
+        proptest::array::uniform32(proptest::arbitrary::any::<u8>()),
+        0..=MAX_MONEY,
+        proptest::arbitrary::any::<u32>(),
+        proptest::arbitrary::any::<bool>(),
+    )
+        .prop_map(|(scripthash, value, height, coinbase)| {
+            ScriptLiveCoin::new(
+                ScriptHash::from_byte_array(scripthash),
+                value,
+                height,
+                coinbase,
+            )
+        })
+}
+
+// PRJ-11
+#[test]
+fn script_live_value_matches_core_compress_amount_vectors() -> Result<(), TestError> {
+    let vectors: [(u64, &[u8]); 6] = [
+        (0, &[0x00]),
+        (1, &[0x01]),
+        (1_000_000, &[0x07]),
+        (COIN, &[0x09]),
+        (50 * COIN, &[0x32]),
+        (21_000_000 * COIN, &[0xC0, 0xDE, 0x81, 0x0A]),
+    ];
+    for (amount, compressed) in vectors {
+        let coin = ScriptLiveCoin::new(ScriptHash::from_byte_array([7; 32]), amount, 0, false);
+        let encoded = coin.encode_value()?;
+        let mut expected = vec![7_u8; 32];
+        expected.extend_from_slice(compressed);
+        expected.push(0x00);
+        assert_eq!(encoded, expected, "compress_amount({amount}) vector");
+        assert_eq!(ScriptLiveCoin::decode_value(&encoded)?, coin);
+    }
+    Ok(())
+}
+
+// PRJ-11
+#[test]
+fn script_live_value_round_trips_core_test_encode_sweeps() -> Result<(), TestError> {
+    fn assert_round_trip(amount: u64) -> Result<(), TestError> {
+        let coin = ScriptLiveCoin::new(ScriptHash::from_byte_array([9; 32]), amount, 842_113, true);
+        let encoded = coin.encode_value()?;
+        assert_eq!(ScriptLiveCoin::decode_value(&encoded)?, coin);
+        Ok(())
+    }
+    for amount in 1..=100_000 {
+        assert_round_trip(amount)?;
+    }
+    for amount in 1..=10_000 {
+        assert_round_trip(amount * 1_000_000)?;
+    }
+    for amount in 1..=10_000 {
+        assert_round_trip(amount * COIN)?;
+    }
+    for amount in 1..=420_000 {
+        assert_round_trip(amount * 50 * COIN)?;
+    }
+    for compressed in 0_u64..100_000 {
+        let mut bytes = vec![0_u8; 32];
+        let mut value = compressed;
+        loop {
+            let byte = u8::try_from(value & 0x7f).unwrap_or(0);
+            value >>= 7;
+            bytes.push(if value == 0 { byte } else { byte | 0x80 });
+            if value == 0 {
+                break;
+            }
+        }
+        bytes.push(0x00);
+        match ScriptLiveCoin::decode_value(&bytes) {
+            Ok(coin) => assert!(coin.value <= MAX_MONEY, "decoded value stays in range"),
+            Err(error) => assert!(
+                matches!(
+                    error,
+                    ScriptLiveValueError::Truncated
+                        | ScriptLiveValueError::MalformedVarint
+                        | ScriptLiveValueError::AmountOverflow
+                        | ScriptLiveValueError::HeightOverflow
+                ),
+                "refusal is typed: {error:?}"
+            ),
+        }
+    }
+    Ok(())
+}
+
+// PRJ-11
+#[test]
+fn script_live_value_refuses_out_of_range_amounts() {
+    let coin = ScriptLiveCoin::new(
+        ScriptHash::from_byte_array([1; 32]),
+        MAX_MONEY + 1,
+        0,
+        false,
+    );
+    assert_eq!(
+        coin.encode_value(),
+        Err(ScriptLiveValueError::AmountOutOfRange {
+            value: MAX_MONEY + 1,
+        })
+    );
+    assert_eq!(coin.encoded_value_len(), None);
+}
+
+// PRJ-11
+proptest! {
+    #![proptest_config(proptest::test_runner::Config {
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(1024),
+        ..proptest::test_runner::Config::default()
+    })]
+    #[test]
+    fn script_live_value_round_trips_and_refuses_mutation(
+        coin in row_codec(),
+        cut in 0_usize..76,
+        filler in proptest::collection::vec(proptest::arbitrary::any::<u8>(), 1..=8),
+    ) {
+        let encoded = coin.encode_value().map_err(|error| {
+            proptest::test_runner::TestCaseError::fail(format!("encode failed: {error}"))
+        })?;
+        prop_assert!(encoded.len() >= 33);
+        let expected_len = match coin.encoded_value_len() {
+            Some(len) => len,
+            None => {
+                return Err(proptest::test_runner::TestCaseError::fail(
+                    "in-range amount must have an encoded length",
+                ));
+            }
+        };
+        prop_assert_eq!(encoded.len(), expected_len);
+        prop_assert_eq!(ScriptLiveCoin::decode_value(&encoded), Ok(coin));
+
+        let cut = cut % encoded.len();
+        let truncated = &encoded[..cut];
+        prop_assert!(
+            ScriptLiveCoin::decode_value(truncated).is_err(),
+            "truncated value must be refused"
+        );
+
+        let mut overlong = encoded.clone();
+        overlong.extend_from_slice(&filler);
+        prop_assert_eq!(
+            ScriptLiveCoin::decode_value(&overlong),
+            Err(ScriptLiveValueError::TrailingBytes)
+        );
+    }
 }

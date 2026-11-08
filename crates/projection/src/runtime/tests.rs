@@ -1,2 +1,2 @@
-#[expect(clippy::expect_used, clippy::panic)]
+#[expect(clippy::expect_used)]
 mod seed_paused;

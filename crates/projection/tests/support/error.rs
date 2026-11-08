@@ -3,6 +3,8 @@ pub(crate) enum TestError {
     #[error(transparent)]
     Index(#[from] bitcoin_rs_projection::IndexError),
     #[error(transparent)]
+    LiveValue(#[from] bitcoin_rs_projection::ScriptLiveValueError),
+    #[error(transparent)]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(transparent)]
     Io(#[from] std::io::Error),

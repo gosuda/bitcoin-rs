@@ -130,16 +130,24 @@ fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), crate::p
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
 
     let outpoint = spent_outpoint(5, 0);
-    writer.seed_script_live(
-        [(
-            outpoint,
-            crate::types::ScriptLiveCoin::new(scripthash, 0, 0, false),
-        )],
-        IndexWatermark {
-            height: 7,
-            hash: [0x07; 32],
-        },
-    )?;
+    let row = crate::types::ScriptLiveRow::new(scripthash, &outpoint);
+    let coin = crate::types::ScriptLiveCoin::new(scripthash, 1_000, 1, false);
+    let mut bytes = row.as_bytes().to_vec();
+    bytes.extend_from_slice(&coin.encode_value()?);
+    let rows = [bytes];
+    writer.stage_script_live_rows(&mut rows.into_iter())?;
+    let bare_43 = crate::types::ScriptLiveRow::new(scripthash, &outpoint)
+        .as_bytes()
+        .to_vec();
+    assert_eq!(bare_43.len(), 43);
+    assert!(matches!(
+        writer.stage_script_live_rows(&mut [bare_43].into_iter()),
+        Err(IndexError::InvalidLiveRowValue { len: 43 })
+    ));
+    writer.publish_script_live_seed(IndexWatermark {
+        height: 7,
+        hash: [0x07; 32],
+    })?;
 
     let mut malformed = ScriptLiveRow::new(scripthash, &outpoint)
         .as_bytes()

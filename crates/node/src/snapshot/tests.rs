@@ -135,6 +135,172 @@ fn snapshot_inputs(dir: &Path) -> Result<(crate::state::NodeState, PathBuf, Path
     Ok((state, core_path, native_path))
 }
 
+fn engine_coin_rows(state: &crate::state::NodeState) -> Result<Vec<(Vec<u8>, Vec<u8>)>, TestError> {
+    let mut rows = Vec::new();
+    for row in state
+        .chainstate()
+        .coin_store()
+        .store()
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+    {
+        let (key, value) = row?;
+        rows.push((key.to_vec(), value.to_vec()));
+    }
+    Ok(rows)
+}
+
+fn first_coin_value(set: &bitcoin_rs_storage::utxo::UtxoSet) -> Result<u64, TestError> {
+    let records = set.all_records();
+    let record = records
+        .first()
+        .ok_or(TestError::Missing("snapshot coin record"))?;
+    let output = record
+        .outputs()
+        .next()
+        .ok_or(TestError::Missing("snapshot coin output"))?;
+    Ok(output.value)
+}
+
+fn coin_value_offset(native: &[u8], value: u64) -> Result<usize, TestError> {
+    let pattern = value.to_le_bytes();
+    native
+        .windows(pattern.len())
+        .enumerate()
+        .skip(100)
+        .find(|(_, window)| *window == pattern.as_slice())
+        .map(|(offset, _)| offset)
+        .ok_or(TestError::Missing("coin value bytes in the native image"))
+}
+
+struct TamperOnRewind {
+    bytes: Vec<u8>,
+    position: usize,
+    rewound: bool,
+    flip_at: usize,
+}
+
+impl std::io::Read for TamperOnRewind {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let available = self.bytes.len().saturating_sub(self.position);
+        let count = buf.len().min(available);
+        let start = self.position;
+        buf[..count].copy_from_slice(&self.bytes[start..start + count]);
+        if self.rewound && (start..start + count).contains(&self.flip_at) {
+            buf[self.flip_at - start] ^= 1;
+        }
+        self.position += count;
+        Ok(count)
+    }
+}
+
+impl std::io::Seek for TamperOnRewind {
+    fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+        match from {
+            std::io::SeekFrom::Start(to) => {
+                self.position = usize::try_from(to).map_err(std::io::Error::other)?;
+                self.rewound = true;
+            }
+            std::io::SeekFrom::Current(0) => {}
+            _ => {
+                return Err(std::io::Error::other(
+                    "tamper reader supports Start and Current(0)",
+                ));
+            }
+        }
+        Ok(u64::try_from(self.position).map_err(std::io::Error::other)?)
+    }
+}
+
+#[test]
+fn rejected_import_with_a_prior_head_leaves_head_and_coins_untouched() -> Result<(), TestError> {
+    let source = tempfile::tempdir()?;
+    let (_source, _core_path, native_path) = snapshot_inputs(source.path())?;
+    let dir = tempfile::tempdir()?;
+    let state = prior_state_with_coins(dir.path())?;
+    let core_bytes = include_bytes!("../../../storage/tests/fixtures/core-v2/core200.dat");
+    let loaded = read_and_verify(
+        &mut core_bytes.as_slice(),
+        Network::Regtest,
+        SnapshotLimits::default(),
+    )?;
+    let before_tip = tip_identity(&state);
+    let before_coins = engine_coin_rows(&state)?;
+    assert!(before_tip.is_some(), "the prior state has a durable head");
+    assert!(!before_coins.is_empty(), "the prior state holds coins");
+    let native = std::fs::read(&native_path)?;
+    let offset = coin_value_offset(&native, first_coin_value(&loaded.set)?)?;
+    let mut forged = native;
+    forged[offset] ^= 1;
+    let forged_path = dir.path().join("forged-native.dat");
+    std::fs::write(&forged_path, &forged)?;
+
+    assert!(matches!(
+        state.snapshots.import_native(&forged_path),
+        Err(SnapshotImportError::Activation(
+            AssumeUtxoError::SnapshotCommitmentMismatch { .. }
+        ))
+    ));
+    assert_eq!(tip_identity(&state), before_tip);
+    assert_eq!(engine_coin_rows(&state)?, before_coins);
+    assert!(!state.chainstate().is_closed_for_recovery());
+    assert!(matches!(
+        state.snapshots.manager.status()?,
+        AssumeUtxoDiskStatus::Uninitialized
+    ));
+    Ok(())
+}
+
+#[test]
+fn failure_after_the_wipe_with_a_prior_head_fails_closed() -> Result<(), TestError> {
+    let dir = tempfile::tempdir()?;
+    let (state, core_path, native_path) = snapshot_inputs(dir.path())?;
+    let core_bytes = std::fs::read(&core_path)?;
+    let loaded = read_and_verify(
+        &mut core_bytes.as_slice(),
+        Network::Regtest,
+        SnapshotLimits::default(),
+    )?;
+    assert!(
+        tip_identity(&state).is_some(),
+        "the prior state has a durable head"
+    );
+    let native = std::fs::read(&native_path)?;
+    let flip_at = coin_value_offset(&native, first_coin_value(&loaded.set)?)?;
+    let mut reader = TamperOnRewind {
+        bytes: native,
+        position: 0,
+        rewound: false,
+        flip_at,
+    };
+    assert!(matches!(
+        state
+            .snapshots
+            .manager
+            .activate_native_snapshot(&mut reader, |_, _| {}, || true),
+        Err(AssumeUtxoError::SnapshotCommitmentMismatch { .. })
+    ));
+    assert!(
+        state.chainstate().is_closed_for_recovery(),
+        "a file that changed between the verification pass and the ingest pass fails closed"
+    );
+    Ok(())
+}
+
+fn prior_state_with_coins(dir: &Path) -> Result<crate::state::NodeState, TestError> {
+    let state = crate::state::NodeState::open(node_config(dir), None)?;
+    let genesis = Network::Regtest.genesis_block();
+    let genesis_hash = genesis.block_hash();
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+        genesis,
+    ))?;
+    let child =
+        bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(genesis_hash, 1)?;
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+        child,
+    ))?;
+    Ok(state)
+}
+
 #[test]
 fn native_embedding_contract_and_shared_import_budget() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
@@ -665,10 +831,18 @@ fn mutating_an_unproven_set_is_caught_by_the_single_verification() -> Result<(),
     let empty_set = bitcoin_rs_storage::utxo::UtxoSet::new();
     let before_tip = state.chainstate().applied_tip_snapshot();
     let before_stats = state.chainstate().coin_stats_handle().snapshot();
-    let result = state.snapshots.manager.activate_snapshot_state(
-        empty_set,
-        loaded.metadata.base_block_hash,
+    let mut snapshot_bytes = Vec::new();
+    bitcoin_rs_storage::utxo::write_snapshot_observed(
+        &empty_set,
+        &loaded.metadata.base_block_hash,
         loaded.anchor.height,
+        &mut snapshot_bytes,
+        (),
+    )?;
+    let result = state.snapshots.manager.activate_native_snapshot(
+        &mut std::io::Cursor::new(snapshot_bytes),
+        |_, _| {},
+        || true,
     );
     assert!(matches!(
         result,

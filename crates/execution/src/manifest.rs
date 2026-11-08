@@ -1,0 +1,355 @@
+use bitcoin_rs_consensus::primitives::{
+    AssumeUtxoData, Hash256, IndexArtifactCapability, IndexArtifactCommitment, Network,
+};
+
+#[derive(Clone, Debug, PartialEq, Eq, sonic_rs::Deserialize, sonic_rs::Serialize)]
+pub struct SnapshotManifest {
+    pub manifest_version: u32,
+    pub network: String,
+    pub genesis: [u8; 32],
+    pub base_hash: [u8; 32],
+    pub base_height: u32,
+    pub schema: u32,
+    pub utxo_commitment: [u8; 32],
+    pub index_commitments: [Option<ManifestIndexCommitment>; 4],
+    pub coverage: [Option<u32>; 4],
+    pub sizes: [u64; 5],
+    pub hashes: [[u8; 32]; 5],
+    pub historical_verified_height: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, sonic_rs::Deserialize, sonic_rs::Serialize)]
+pub struct ManifestIndexCommitment {
+    pub sha256: [u8; 32],
+    pub size_bytes: u64,
+}
+
+pub const ARTIFACT_SLOTS: usize = 5;
+pub const UTXO_SLOT: usize = 0;
+
+pub const fn capability_slot(capability: IndexArtifactCapability) -> usize {
+    match capability {
+        IndexArtifactCapability::TxLookup => 1,
+        IndexArtifactCapability::ScriptHistory => 2,
+        IndexArtifactCapability::ScriptLive => 3,
+        IndexArtifactCapability::CompactFilters => 4,
+    }
+}
+
+pub const fn capability_at_slot(slot: usize) -> Option<IndexArtifactCapability> {
+    match slot {
+        1 => Some(IndexArtifactCapability::TxLookup),
+        2 => Some(IndexArtifactCapability::ScriptHistory),
+        3 => Some(IndexArtifactCapability::ScriptLive),
+        4 => Some(IndexArtifactCapability::CompactFilters),
+        _ => None,
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ManifestError {
+    #[error("manifest format invalid: {0}")]
+    Format(&'static str),
+    #[error("manifest names network {found}, the node runs {expected}")]
+    NetworkMismatch {
+        expected: &'static str,
+        found: String,
+    },
+    #[error("manifest genesis {found} does not match the node genesis {expected}")]
+    GenesisMismatch { expected: Hash256, found: Hash256 },
+    #[error("manifest base {found} at height {height} is not a compiled anchor")]
+    UnknownAnchor { found: Hash256, height: u32 },
+    #[error("manifest base identity does not match the anchor at height {height}")]
+    AnchorMismatch { height: u32 },
+    #[error("manifest UTXO commitment {found} does not match the anchor commitment {expected}")]
+    UtxoCommitmentMismatch { expected: Hash256, found: Hash256 },
+    #[error("manifest artifact table is malformed: {0}")]
+    Artifacts(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapabilityTrust {
+    Trusted(IndexArtifactCommitment),
+    Untrusted,
+}
+
+#[derive(Clone, Debug)]
+pub struct ManifestTrust {
+    pub base_height: u32,
+    pub base_hash: [u8; 32],
+    pub capability_trust: [CapabilityTrust; 4],
+}
+
+impl SnapshotManifest {
+    pub fn parse(bytes: &[u8]) -> Result<Self, ManifestError> {
+        let manifest: Self = sonic_rs::from_slice(bytes)
+            .map_err(|_| ManifestError::Format("manifest is not valid JSON"))?;
+        manifest.check_shape()?;
+        Ok(manifest)
+    }
+
+    fn check_shape(&self) -> Result<(), ManifestError> {
+        if self.manifest_version != 1 {
+            return Err(ManifestError::Format("unsupported manifest_version"));
+        }
+        if self.schema == 0 {
+            return Err(ManifestError::Format("schema must be nonzero"));
+        }
+        if self.sizes.len() != ARTIFACT_SLOTS || self.hashes.len() != ARTIFACT_SLOTS {
+            return Err(ManifestError::Artifacts(
+                "size and hash tables need 5 slots",
+            ));
+        }
+        if self.sizes[UTXO_SLOT] == 0 {
+            return Err(ManifestError::Artifacts("the UTXO artifact has no size"));
+        }
+        for slot in 1..ARTIFACT_SLOTS {
+            let committed = self.index_commitments[slot - 1].is_some();
+            let sized = self.sizes[slot] != 0;
+            match (committed, sized) {
+                (true, true) | (false, false) => {}
+                (true, false) => {
+                    return Err(ManifestError::Artifacts(
+                        "a committed capability names no artifact size",
+                    ));
+                }
+                (false, true) => {
+                    return Err(ManifestError::Artifacts(
+                        "an artifact size is declared without a commitment",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn verify_against_anchor(
+        &self,
+        network: Network,
+        genesis: [u8; 32],
+        anchor: &AssumeUtxoData,
+    ) -> Result<ManifestTrust, ManifestError> {
+        if self.network != network.identity_name() {
+            return Err(ManifestError::NetworkMismatch {
+                expected: network.identity_name(),
+                found: self.network.clone(),
+            });
+        }
+        if self.genesis != genesis {
+            return Err(ManifestError::GenesisMismatch {
+                expected: Hash256::from_le_bytes(&genesis),
+                found: Hash256::from_le_bytes(&self.genesis),
+            });
+        }
+        if self.base_height != anchor.height || self.base_hash != anchor.block_hash.to_le_bytes() {
+            return Err(ManifestError::AnchorMismatch {
+                height: anchor.height,
+            });
+        }
+        if self.utxo_commitment != anchor.hash_serialized.to_le_bytes() {
+            return Err(ManifestError::UtxoCommitmentMismatch {
+                expected: anchor.hash_serialized,
+                found: Hash256::from_le_bytes(&self.utxo_commitment),
+            });
+        }
+        let mut capability_trust = [CapabilityTrust::Untrusted; 4];
+        for (slot_index, trust_slot) in capability_trust.iter_mut().enumerate() {
+            let Some(commitment) = &self.index_commitments[slot_index] else {
+                continue;
+            };
+            let capability = match IndexArtifactCapability::from_index(slot_index) {
+                Some(capability) => capability,
+                None => continue,
+            };
+            let compiled = anchor.index_commitment(capability);
+            let verified = compiled.is_some_and(|compiled| {
+                compiled.sha256 == commitment.sha256 && compiled.size_bytes == commitment.size_bytes
+            });
+            if verified {
+                *trust_slot = CapabilityTrust::Trusted(IndexArtifactCommitment {
+                    capability,
+                    sha256: commitment.sha256,
+                    size_bytes: commitment.size_bytes,
+                });
+            }
+        }
+        Ok(ManifestTrust {
+            base_height: self.base_height,
+            base_hash: self.base_hash,
+            capability_trust,
+        })
+    }
+
+    pub fn artifact_size(&self, capability: IndexArtifactCapability) -> u64 {
+        self.sizes[capability_slot(capability)]
+    }
+
+    pub fn artifact_sha256(&self, capability: IndexArtifactCapability) -> [u8; 32] {
+        self.hashes[capability_slot(capability)]
+    }
+
+    pub fn utxo_size(&self) -> u64 {
+        self.sizes[UTXO_SLOT]
+    }
+
+    pub fn utxo_sha256(&self) -> [u8; 32] {
+        self.hashes[UTXO_SLOT]
+    }
+}
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    const GENESIS: [u8; 32] = [0; 32];
+    const BASE_HASH: [u8; 32] = [1; 32];
+    const UTXO_COMMITMENT: [u8; 32] = [2; 32];
+
+    fn anchor_with(compiled: [Option<IndexArtifactCommitment>; 4]) -> AssumeUtxoData {
+        AssumeUtxoData {
+            height: 840_000,
+            block_hash: Hash256::from_le_bytes(&BASE_HASH),
+            hash_serialized: Hash256::from_le_bytes(&UTXO_COMMITMENT),
+            chain_tx_count: 991_032_194,
+            index_commitments: compiled,
+        }
+    }
+
+    fn plain_anchor() -> AssumeUtxoData {
+        anchor_with([None; 4])
+    }
+
+    fn compiled(capability: IndexArtifactCapability, sha: [u8; 32]) -> IndexArtifactCommitment {
+        IndexArtifactCommitment {
+            capability,
+            sha256: sha,
+            size_bytes: 11,
+        }
+    }
+
+    fn committed(sha: [u8; 32]) -> ManifestIndexCommitment {
+        ManifestIndexCommitment {
+            sha256: sha,
+            size_bytes: 11,
+        }
+    }
+
+    fn manifest_with(commitments: [Option<ManifestIndexCommitment>; 4]) -> SnapshotManifest {
+        let mut sizes = [0_u64; ARTIFACT_SLOTS];
+        let mut hashes = [[0_u8; 32]; ARTIFACT_SLOTS];
+        sizes[UTXO_SLOT] = 7;
+        hashes[UTXO_SLOT] = [9; 32];
+        for (index, commitment) in commitments.iter().enumerate() {
+            let slot = capability_at_slot(index + 1).expect("capability slot");
+            let slot = capability_slot(slot);
+            if let Some(commitment) = commitment {
+                sizes[slot] = commitment.size_bytes;
+                hashes[slot] = commitment.sha256;
+            }
+        }
+        SnapshotManifest {
+            manifest_version: 1,
+            network: "mainnet".to_owned(),
+            genesis: GENESIS,
+            base_hash: BASE_HASH,
+            base_height: 840_000,
+            schema: 1,
+            utxo_commitment: UTXO_COMMITMENT,
+            index_commitments: commitments,
+            coverage: [None; 4],
+            sizes,
+            hashes,
+            historical_verified_height: 0,
+        }
+    }
+
+    fn verify(
+        manifest: &SnapshotManifest,
+        anchor: &AssumeUtxoData,
+    ) -> Result<ManifestTrust, ManifestError> {
+        manifest.verify_against_anchor(Network::Mainnet, GENESIS, anchor)
+    }
+
+    #[test]
+    fn manifest_index_commitments_are_untrusted_without_compiled_entries() {
+        let manifest = manifest_with([Some(committed([5; 32])), None, None, None]);
+        let trust = verify(&manifest, &plain_anchor()).expect("manifest is well formed");
+        assert_eq!(
+            trust.capability_trust[0],
+            CapabilityTrust::Untrusted,
+            "a manifest-only commitment never activates"
+        );
+    }
+
+    #[test]
+    fn manifest_commitment_matching_the_compiled_table_is_trusted() {
+        let compiled = compiled(IndexArtifactCapability::TxLookup, [5; 32]);
+        let manifest = manifest_with([Some(committed([5; 32])), None, None, None]);
+        let trust = verify(&manifest, &anchor_with([Some(compiled), None, None, None]))
+            .expect("manifest is well formed");
+        assert_eq!(
+            trust.capability_trust[0],
+            CapabilityTrust::Trusted(compiled)
+        );
+    }
+
+    #[test]
+    fn a_wrong_manifest_commitment_stays_untrusted_against_a_compiled_entry() {
+        let compiled = compiled(IndexArtifactCapability::TxLookup, [6; 32]);
+        let manifest = manifest_with([Some(committed([5; 32])), None, None, None]);
+        let trust = verify(&manifest, &anchor_with([Some(compiled), None, None, None]))
+            .expect("manifest is well formed");
+        assert_eq!(trust.capability_trust[0], CapabilityTrust::Untrusted);
+    }
+
+    #[test]
+    fn an_untrusted_capability_does_not_affect_the_others() {
+        let live_compiled = compiled(IndexArtifactCapability::ScriptLive, [7; 32]);
+        let anchor = anchor_with([None, None, Some(live_compiled), None]);
+        let manifest = manifest_with([
+            Some(committed([5; 32])),
+            None,
+            Some(committed([7; 32])),
+            None,
+        ]);
+        let trust = verify(&manifest, &anchor).expect("manifest is well formed");
+        assert_eq!(trust.capability_trust[0], CapabilityTrust::Untrusted);
+        assert_eq!(
+            trust.capability_trust[2],
+            CapabilityTrust::Trusted(live_compiled)
+        );
+    }
+
+    #[test]
+    fn a_manifest_on_an_unknown_anchor_is_refused() {
+        let manifest = manifest_with([None; 4]);
+        let unknown = AssumeUtxoData {
+            height: 1,
+            block_hash: Hash256::from_le_bytes(&[3; 32]),
+            hash_serialized: Hash256::from_le_bytes(&[4; 32]),
+            chain_tx_count: 1,
+            index_commitments: [None; 4],
+        };
+        let error = verify(&manifest, &unknown).expect_err("anchor mismatch must refuse");
+        assert!(matches!(error, ManifestError::AnchorMismatch { height: 1 }));
+    }
+
+    #[test]
+    fn parse_round_trips_and_rejects_bad_json() {
+        let manifest = manifest_with([None; 4]);
+        let bytes = sonic_rs::to_vec(&manifest).expect("serialize");
+        let parsed = SnapshotManifest::parse(&bytes).expect("parse");
+        assert_eq!(parsed, manifest);
+        assert!(matches!(
+            SnapshotManifest::parse(b"{"),
+            Err(ManifestError::Format(_))
+        ));
+        let mut empty_utxo = manifest_with([None; 4]);
+        empty_utxo.sizes[UTXO_SLOT] = 0;
+        let bytes = sonic_rs::to_vec(&empty_utxo).expect("serialize");
+        assert!(matches!(
+            SnapshotManifest::parse(&bytes),
+            Err(ManifestError::Artifacts(_))
+        ));
+    }
+}

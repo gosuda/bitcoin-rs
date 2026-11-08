@@ -667,9 +667,6 @@ impl Worker {
                 } else if capabilities.contains(IndexCapability::ScriptLive) {
                     self.runtime
                         .fail_script_live(&DerivedIndexWorkerError::ScriptLiveHistoryPruned);
-                    if let Some(slot) = self.seed_slot.as_ref() {
-                        slot.want();
-                    }
                     ReconcileAction::Stalled
                 } else {
                     self.rebuild_from_pruned(capabilities, below, target)?
@@ -741,9 +738,6 @@ impl Worker {
                     .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
                     .map_err(DerivedIndexWorkerError::Index)?;
                 self.runtime.fail_script_live(&error);
-                if let Some(slot) = self.seed_slot.as_ref() {
-                    slot.want();
-                }
                 tracing::warn!(error = %error, "ScriptLive unavailable after missing undo; awaiting verified seed");
                 Ok(ControlFlow::Break(ChunkAction::MissingBody))
             }

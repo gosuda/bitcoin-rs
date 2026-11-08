@@ -290,7 +290,7 @@ fn snapshot_reconciles_empty_pool_and_index_without_fabricating_block_events()
     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
     let followers = followers_with_gateway(&gateway)
         .with_zmq_publisher(publisher.clone())
-        .with_tx_index(Some(Arc::new(DerivedIndexRuntime::new(wake_tx))));
+        .with_tx_index(Some(DerivedIndexRuntime::new(wake_tx)));
     let fence = followers
         .begin_mempool_change()?
         .ok_or(TestError::Missing("fence"))?;

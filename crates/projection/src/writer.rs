@@ -7,11 +7,6 @@ use crate::{
     index::PortableImportRow,
 };
 
-pub(crate) type ScriptLiveSeedProduce<'a> = dyn FnMut(
-        &mut dyn FnMut(OutPoint, crate::types::ScriptLiveCoin) -> Result<(), IndexError>,
-    ) -> Result<(), IndexError>
-    + 'a;
-
 pub(crate) type PortableImportProduce<'a> = dyn FnMut(&mut dyn FnMut(PortableImportRow<'_>) -> Result<(), IndexError>) -> Result<(), IndexError>
     + 'a;
 
@@ -30,12 +25,11 @@ pub(crate) trait TxIndexWriter: Send + Sync {
         capabilities: IndexCapabilities,
         block: &bitcoin_rs_storage::CommittedBlock,
     ) -> Result<PreparedBlock, IndexError>;
-    fn seed_script_live_stream(
+    fn stage_script_live_rows(
         &self,
-        produce: &mut ScriptLiveSeedProduce<'_>,
-        tip: IndexWatermark,
-        cancelled: &dyn Fn() -> bool,
+        rows: &mut dyn Iterator<Item = Vec<u8>>,
     ) -> Result<usize, IndexError>;
+    fn publish_script_live_seed(&self, seed_tip: IndexWatermark) -> Result<(), IndexError>;
     fn import_tx_lookup_stream(
         &self,
         produce: &mut PortableImportProduce<'_>,
@@ -117,14 +111,15 @@ where
             .commit_forward_with_cursor(fence, batch, cursor)
     }
 
-    fn seed_script_live_stream(
+    fn stage_script_live_rows(
         &self,
-        produce: &mut ScriptLiveSeedProduce<'_>,
-        tip: IndexWatermark,
-        cancelled: &dyn Fn() -> bool,
+        rows: &mut dyn Iterator<Item = Vec<u8>>,
     ) -> Result<usize, IndexError> {
-        self.write()
-            .seed_script_live_stream(produce, tip, cancelled)
+        self.write().stage_script_live_rows(rows)
+    }
+
+    fn publish_script_live_seed(&self, seed_tip: IndexWatermark) -> Result<(), IndexError> {
+        self.write().publish_script_live_seed(seed_tip)
     }
 
     fn import_tx_lookup_stream(

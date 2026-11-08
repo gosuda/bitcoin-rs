@@ -24,7 +24,6 @@ use crate::query_api::{
     ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause,
 };
 
-use bitcoin_rs_storage::utxo::snapshot::{SeedOfferCell, VerifiedSnapshotArtifact};
 use bitcoin_rs_storage::{
     PrefixScanLimit,
     block_body::BlockBodyStore,
@@ -70,7 +69,6 @@ use query::IndexProgress;
 pub(crate) use query::QueryEngineLive;
 pub use query::{DEFAULT_SCRIPTHASH_LIMIT, DerivedIndexQueryEngine};
 
-#[derive(Debug)]
 pub struct DerivedIndexRuntime {
     revision: AtomicU64,
     pub(super) shutdown: AtomicBool,
@@ -82,12 +80,14 @@ pub struct DerivedIndexRuntime {
     script_live_failure: RwLock<Option<CompactString>>,
     script_history_failure: RwLock<Option<CompactString>>,
     phase: arc_swap::ArcSwap<ReconcilePhase>,
+    script_live_seed: Arc<crate::snapshot_seed::ScriptLiveSeedState>,
 }
 
 impl DerivedIndexRuntime {
     #[must_use]
-    pub fn new(wake_tx: Sender<()>) -> Self {
-        Self {
+    pub fn new(wake_tx: Sender<()>) -> Arc<Self> {
+        let script_live_seed = Arc::new(crate::snapshot_seed::ScriptLiveSeedState::new());
+        let runtime = Arc::new(Self {
             revision: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             cancel: LatchWriter::new(),
@@ -98,7 +98,20 @@ impl DerivedIndexRuntime {
             script_live_failure: RwLock::new(None),
             script_history_failure: RwLock::new(None),
             phase: arc_swap::ArcSwap::from_pointee(ReconcilePhase::FORWARD),
-        }
+            script_live_seed,
+        });
+        let weak = Arc::downgrade(&runtime);
+        runtime.script_live_seed.set_wake(Arc::new(move || {
+            if let Some(runtime) = weak.upgrade() {
+                runtime.wake();
+            }
+        }));
+        runtime
+    }
+
+    #[must_use]
+    pub fn script_live_seed(&self) -> &Arc<crate::snapshot_seed::ScriptLiveSeedState> {
+        &self.script_live_seed
     }
 
     pub(crate) fn publish_phase(&self, phase: ReconcilePhase) {
@@ -439,7 +452,6 @@ pub struct DerivedIndexOpenSpec {
     #[expect(clippy::type_complexity)]
     pub open_store:
         Arc<dyn Fn(&Path) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> + Send + Sync>,
-    pub seed_slot: Option<SeedOfferCell>,
     pub bundle: crate::portable::IndexBundleDirective,
     pub facts_rx:
         Option<crossbeam_channel::Receiver<std::sync::Arc<bitcoin_rs_storage::CommittedFacts>>>,
@@ -596,18 +608,13 @@ struct Worker {
     quiet_period: Duration,
     batch_delay: Duration,
     rollback_rebuild_cutover: u32,
-    seed_slot: Option<SeedOfferCell>,
-    seed_bundle: parking_lot::Mutex<Option<SeedBundle>>,
+    seed_history_lease: parking_lot::Mutex<Option<HistoryLease>>,
+    seed_rows: parking_lot::Mutex<Option<Receiver<Vec<u8>>>>,
     facts_rx: Option<Receiver<std::sync::Arc<bitcoin_rs_storage::CommittedFacts>>>,
     facts_bytes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     facts_gap: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     buffered_facts:
         parking_lot::Mutex<hashbrown::HashMap<([u8; 32], u32), bitcoin_rs_storage::CommittedBlock>>,
-}
-
-pub(crate) struct SeedBundle {
-    pub(crate) artifact: Option<VerifiedSnapshotArtifact>,
-    pub(crate) lease: Option<HistoryLease>,
 }
 
 struct PendingForward {

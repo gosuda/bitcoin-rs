@@ -153,7 +153,7 @@ mod script_live_outage_engine_tests {
         tip_reader.store(Some(Arc::clone(&tip)));
 
         let (wake_tx, _wake_rx) = crossbeam_channel::bounded::<()>(16);
-        let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+        let runtime = DerivedIndexRuntime::new(wake_tx);
         let outage = DerivedIndexWorkerError::ScriptLiveHistoryPruned;
         runtime.fail_script_live(&outage);
         assert!(runtime.script_live_failure().is_some());

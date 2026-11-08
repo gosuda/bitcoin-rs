@@ -260,7 +260,6 @@ impl NodeState {
             tree: mut block_tree_value,
             applied_tip: restored_applied_tip,
             resume_source,
-            script_live_seed,
         } = initial;
         if block_tree_value.is_empty() {
             let genesis = config.network.genesis_block();
@@ -383,29 +382,8 @@ impl NodeState {
             history: storage.bounded_history(),
             role: bitcoin_rs_execution::ChainstateRole::Ordinary,
         });
-        let seed_offer: Option<bitcoin_rs_storage::utxo::SeedOfferCell> =
-            if !derived_index_capabilities(&config).is_empty()
-                && config.indexes.script_index.is_enabled()
-            {
-                Some(std::sync::Arc::new(
-                    bitcoin_rs_storage::utxo::SeedSlot::new(),
-                ))
-            } else {
-                None
-            };
-        let derived_index_open_spec = build_derived_index_open_spec(
-            &config,
-            txindex_cache_bytes,
-            epoch,
-            &data_dir_guard,
-            seed_offer.clone(),
-        )?;
-        if let Some(cell) = seed_offer.as_ref() {
-            cell.want();
-            if let Some(artifact) = script_live_seed {
-                let _ = cell.offer(artifact);
-            }
-        }
+        let derived_index_open_spec =
+            build_derived_index_open_spec(&config, txindex_cache_bytes, epoch, &data_dir_guard)?;
         let (facts_queue, facts_parts) = if derived_index_open_spec.is_some() {
             let queue = Arc::new(crate::facts_queue::FactsQueue::with_default_budget());
             let rx = queue.receiver();
@@ -424,9 +402,7 @@ impl NodeState {
                 }
 
                 let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-                let runtime = Arc::new(bitcoin_rs_projection::runtime::DerivedIndexRuntime::new(
-                    wake_tx,
-                ));
+                let runtime = bitcoin_rs_projection::runtime::DerivedIndexRuntime::new(wake_tx);
                 let body_source: Arc<dyn BlockBodySource> =
                     Arc::new(StoredBlockBodySource::new(Arc::clone(&block_body_store)));
                 let lifecycle: Arc<
@@ -581,11 +557,11 @@ impl NodeState {
                 .map_or(0, |tip| tip.height),
         ));
         chainstate.configure_checkpointing(&config.data_dir, Arc::clone(&durable_tip_height))?;
-        bitcoin_rs_execution::recover_snapshot_activation(&chainstate).map_err(|error| {
-            NodeOpenError::AssumeUtxoOpen {
+        bitcoin_rs_execution::recover_snapshot_activation(&chainstate, &config.data_dir).map_err(
+            |error| NodeOpenError::AssumeUtxoOpen {
                 error: Box::new(error),
-            }
-        })?;
+            },
+        )?;
         if engine.is_some() {
             bitcoin_rs_execution::recovery::install_engine_checkpoint(
                 &chainstate,
@@ -736,13 +712,20 @@ impl NodeState {
             total_cache_bytes = cache_budget,
             "opened storage backend with effective cache capacities"
         );
+        let script_live_seed = derived_index_parts
+            .as_ref()
+            .filter(|_| {
+                derived_index_capabilities(&config)
+                    .contains(bitcoin_rs_projection::IndexCapability::ScriptLive)
+            })
+            .map(|(runtime, _, _, _)| Arc::clone(runtime.script_live_seed()));
         let snapshots = Arc::new(crate::snapshot::SnapshotControl::new(
             assumeutxo,
             Arc::clone(&chainstate),
             followers.clone(),
             config.data_dir.clone(),
             config.network,
-            seed_offer,
+            script_live_seed,
         ));
         verify_startup_window(&chainstate, &config.data_dir)?;
         let shutdown = Arc::new(chainstate.shutdown_reader().child());

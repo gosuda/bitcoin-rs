@@ -231,6 +231,15 @@ pub fn read_verified(
     network: Network,
     limits: SnapshotLimits,
 ) -> Result<VerifiedCoreSnapshot, SnapshotError> {
+    read_verified_observed(reader, network, limits, ()).map(|(snapshot, ())| snapshot)
+}
+
+pub fn read_verified_observed<O: SnapshotCoinObserver>(
+    reader: &mut impl Read,
+    network: Network,
+    limits: SnapshotLimits,
+    mut observer: O,
+) -> Result<(VerifiedCoreSnapshot, O), SnapshotError> {
     let authenticated = authenticate(reader, network, limits)?;
     let anchor = authenticated.anchor;
     let mut accumulator = CoinStatsAccumulator::with_parallel_muhash(anchor.height);
@@ -238,29 +247,117 @@ pub fn read_verified(
     for record in authenticated.records {
         let txid = record.txid();
         for output in record.outputs() {
-            accumulator.observe_coin(SnapshotCoin {
+            let coin = SnapshotCoin {
                 txid,
                 vout: output.vout,
                 value: output.value,
                 script_pubkey: output.script_pubkey,
                 height: output.height,
                 coinbase: output.coinbase,
-            });
+            };
+            accumulator.observe_coin(coin);
+            observer.observe_coin(coin);
         }
         set.insert_parsed_record(record);
     }
-    Ok(VerifiedCoreSnapshot {
-        metadata: authenticated.metadata,
-        anchor,
-        bytes_read: authenticated.bytes_read,
-        state: VerifiedSnapshotState {
-            set,
-            base_hash: anchor.block_hash,
-            height: anchor.height,
-            hash_serialized: authenticated.hash_serialized,
-            stats: accumulator.into_stats(),
+    Ok((
+        VerifiedCoreSnapshot {
+            metadata: authenticated.metadata,
+            anchor,
+            bytes_read: authenticated.bytes_read,
+            state: VerifiedSnapshotState {
+                set,
+                base_hash: anchor.block_hash,
+                height: anchor.height,
+                hash_serialized: authenticated.hash_serialized,
+                stats: accumulator.into_stats(),
+            },
         },
-    })
+        observer,
+    ))
+}
+
+pub struct CoreSnapshotStream<'a, R> {
+    decoder: Decoder<'a, R>,
+    metadata: SnapshotMetadata,
+    anchor: &'static AssumeUtxoData,
+}
+
+pub struct StreamedCoreSnapshot {
+    pub bytes_read: u64,
+    pub coin_stats: CoinStats,
+}
+
+impl<'a, R: Read> CoreSnapshotStream<'a, R> {
+    pub fn open(reader: &'a mut R, network: Network) -> Result<Self, SnapshotError> {
+        let mut decoder = Decoder::new(reader, SnapshotLimits::default().max_file_bytes);
+        let metadata = decoder.metadata()?;
+        let anchor = anchor_for(&metadata, network)?;
+        Ok(Self {
+            decoder,
+            metadata,
+            anchor,
+        })
+    }
+
+    #[must_use]
+    pub const fn metadata(&self) -> &SnapshotMetadata {
+        &self.metadata
+    }
+
+    #[must_use]
+    pub const fn anchor(&self) -> &'static AssumeUtxoData {
+        self.anchor
+    }
+
+    pub fn stream<E>(
+        mut self,
+        mut sink: impl FnMut(Hash256, &UtxoRecord) -> Result<(), E>,
+    ) -> Result<StreamedCoreSnapshot, E>
+    where
+        E: From<SnapshotError>,
+    {
+        let anchor = self.anchor;
+        let mut accumulator = CoinStatsAccumulator::with_parallel_muhash(anchor.height);
+        let mut sink_error: Option<E> = None;
+        let coins = self.decoder.coins_into(
+            self.metadata.coins_count,
+            anchor.height,
+            SnapshotLimits::default(),
+            |txid, record| {
+                for output in record.outputs() {
+                    accumulator.observe_coin(SnapshotCoin {
+                        txid,
+                        vout: output.vout,
+                        value: output.value,
+                        script_pubkey: output.script_pubkey,
+                        height: output.height,
+                        coinbase: output.coinbase,
+                    });
+                }
+                sink(txid, &record).map_err(|error| {
+                    sink_error = Some(error);
+                    SnapshotError::Interrupted
+                })
+            },
+        );
+        let hash_serialized = match coins {
+            Ok(hash) => hash,
+            Err(error) => return Err(sink_error.unwrap_or_else(|| error.into())),
+        };
+        self.decoder.end()?;
+        if hash_serialized != anchor.hash_serialized {
+            return Err(SnapshotError::CommitmentMismatch {
+                expected: anchor.hash_serialized,
+                actual: hash_serialized,
+            }
+            .into());
+        }
+        Ok(StreamedCoreSnapshot {
+            bytes_read: self.decoder.consumed,
+            coin_stats: accumulator.into_stats(),
+        })
+    }
 }
 
 struct Authenticated {
@@ -271,6 +368,24 @@ struct Authenticated {
     bytes_read: u64,
 }
 
+fn anchor_for(
+    metadata: &SnapshotMetadata,
+    network: Network,
+) -> Result<&'static AssumeUtxoData, SnapshotError> {
+    if metadata.network_magic != network.magic() {
+        return Err(SnapshotError::WrongNetwork {
+            expected: network.magic(),
+            actual: metadata.network_magic,
+        });
+    }
+    network
+        .assume_utxo_for_hash(metadata.base_block_hash)
+        .ok_or(SnapshotError::UnsupportedAnchor {
+            network,
+            base_hash: metadata.base_block_hash,
+        })
+}
+
 fn authenticate(
     reader: &mut impl Read,
     network: Network,
@@ -278,19 +393,13 @@ fn authenticate(
 ) -> Result<Authenticated, SnapshotError> {
     let mut decoder = Decoder::new(reader, limits.max_file_bytes);
     let metadata = decoder.metadata()?;
-    if metadata.network_magic != network.magic() {
-        return Err(SnapshotError::WrongNetwork {
-            expected: network.magic(),
-            actual: metadata.network_magic,
-        });
-    }
-    let anchor = network
-        .assume_utxo_for_hash(metadata.base_block_hash)
-        .ok_or(SnapshotError::UnsupportedAnchor {
-            network,
-            base_hash: metadata.base_block_hash,
+    let anchor = anchor_for(&metadata, network)?;
+    let mut records = Vec::new();
+    let hash_serialized =
+        decoder.coins_into(metadata.coins_count, anchor.height, limits, |_, record| {
+            records.push(record);
+            Ok(())
         })?;
-    let (records, hash_serialized) = decoder.coins(metadata.coins_count, anchor.height, limits)?;
     decoder.end()?;
     if hash_serialized != anchor.hash_serialized {
         return Err(SnapshotError::CommitmentMismatch {
@@ -755,19 +864,34 @@ impl<'a, R: Read> Decoder<'a, R> {
         Ok(script)
     }
 
+    #[cfg(test)]
     fn coins(
         &mut self,
         count: u64,
         base_height: u32,
         limits: SnapshotLimits,
     ) -> Result<(Vec<UtxoRecord>, Hash256), SnapshotError> {
+        let mut records = Vec::new();
+        let hash_serialized = self.coins_into(count, base_height, limits, |_, record| {
+            records.push(record);
+            Ok(())
+        })?;
+        Ok((records, hash_serialized))
+    }
+
+    fn coins_into(
+        &mut self,
+        count: u64,
+        base_height: u32,
+        limits: SnapshotLimits,
+        mut sink: impl FnMut(Hash256, UtxoRecord) -> Result<(), SnapshotError>,
+    ) -> Result<Hash256, SnapshotError> {
         check_limit("coins", count, limits.max_coins)?;
         check_limit(
             "addressable coins",
             count,
             u64::try_from(usize::MAX).unwrap_or(u64::MAX),
         )?;
-        let mut records = Vec::new();
         let mut commitment = SerializedUtxoHasher::new();
         let mut remaining = count;
         let mut previous_txid: Option<[u8; 32]> = None;
@@ -828,10 +952,10 @@ impl<'a, R: Read> Decoder<'a, R> {
             for output in record.outputs() {
                 commitment.add(txid_bytes, output, Some(base_height))?;
             }
-            records.push(record);
+            sink(txid, record)?;
             remaining -= group;
         }
-        Ok((records, commitment.finish()))
+        Ok(commitment.finish())
     }
 
     fn end(&mut self) -> Result<(), SnapshotError> {

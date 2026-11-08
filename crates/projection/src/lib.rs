@@ -16,6 +16,7 @@ pub mod runtime;
 pub mod segment;
 #[cfg(feature = "silent-payments")]
 pub mod silent_payments;
+pub mod snapshot_seed;
 pub mod types;
 mod writer;
 

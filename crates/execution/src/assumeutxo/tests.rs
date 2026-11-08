@@ -110,6 +110,7 @@ impl Fixture {
             block_hash: tip.hash,
             hash_serialized: snapshot_set.lock_stable_view().hash_serialized_3()?,
             chain_tx_count: tip.chain_tx_count.to_wire(),
+            index_commitments: [None; 4],
         };
         let mut stats = snapshot_set.with_stable_view(|view| {
             bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, tip.height, true)
@@ -183,42 +184,45 @@ fn engine_coin_set(chain: &Chainstate) -> TestResult<UtxoSet> {
 
 #[test]
 fn untrusted_snapshot_cannot_assert_its_own_commitment() -> TestResult {
-    let active = chainstate();
+    let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
-    let manager = AssumeUtxoManager::open(
-        Network::Regtest,
-        Arc::clone(&active),
-        dir.path().to_path_buf(),
-    )?;
-    let pinned = Network::Regtest
-        .assume_utxo_for_height(110)
-        .ok_or(TestError::Missing("missing pin"))?;
-    for (height, hash) in [
-        (1234, pinned.block_hash),
-        (110, Hash256::default()),
-        (110, pinned.block_hash),
-    ] {
-        let Err(error) = manager.activate_snapshot_state(UtxoSet::new(), hash, height) else {
-            return Err(TestError::UnexpectedSuccess("untrusted snapshot accepted"));
-        };
-        match height {
-            1234 => assert!(matches!(
-                error,
-                AssumeUtxoError::UntrustedSnapshotHeight(1234)
-            )),
-            _ if hash == pinned.block_hash => assert!(matches!(
-                error,
-                AssumeUtxoError::SnapshotCommitmentMismatch { .. }
-            )),
-            _ => assert!(matches!(
-                error,
-                AssumeUtxoError::SnapshotBlockHashMismatch { .. }
-            )),
-        }
-        assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
-        assert!(active.applied_tip_snapshot().is_none());
-        assert_eq!(active.role(), ChainstateRole::Ordinary);
-    }
+    let manager = fixture.manager(dir.path())?;
+    let untrusted =
+        manager.activate_native_snapshot(&mut Cursor::new(&fixture.snapshot), |_, _| {}, || true);
+    assert!(matches!(
+        untrusted,
+        Err(AssumeUtxoError::UntrustedSnapshotHeight(height)) if height == fixture.pinned.height
+    ));
+    let pin = |block_hash, hash_serialized| AssumeUtxoData {
+        height: fixture.pinned.height,
+        block_hash,
+        hash_serialized,
+        chain_tx_count: fixture.pinned.chain_tx_count,
+        index_commitments: [None; 4],
+    };
+    let wrong_base = manager.activate_native_pinned(
+        &mut Cursor::new(&fixture.snapshot),
+        &pin(Hash256::default(), fixture.pinned.hash_serialized),
+        |_, _| {},
+        || true,
+    );
+    assert!(matches!(
+        wrong_base,
+        Err(AssumeUtxoError::SnapshotBlockHashMismatch { .. })
+    ));
+    let forged = manager.activate_native_pinned(
+        &mut Cursor::new(&fixture.snapshot),
+        &pin(fixture.pinned.block_hash, Hash256::default()),
+        |_, _| {},
+        || true,
+    );
+    assert!(matches!(
+        forged,
+        Err(AssumeUtxoError::SnapshotCommitmentMismatch { .. })
+    ));
+    assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
+    assert!(fixture.active.applied_tip_snapshot().is_none());
+    assert_eq!(fixture.active.role(), ChainstateRole::Ordinary);
     Ok(())
 }
 
@@ -266,24 +270,17 @@ fn snapshot_rejects_invalid_base_and_descendant_before_persistence() -> TestResu
         }
         let before_stats = fixture.active.coin_stats.snapshot();
         let before_coins = fixture.active.utxo.lock_stable_view().hash_serialized_3()?;
-        let persisted = AtomicBool::new(false);
         let loaded = fixture.load()?;
-        let result = fixture.active.install_snapshot(
-            loaded.set,
-            fixture.stats.clone(),
-            &fixture.pinned,
-            |_, _, _, _| {
-                persisted.store(true, Ordering::Relaxed);
-                Ok(())
-            },
-        );
+        let dir = tempfile::tempdir()?;
+        let manager = fixture.manager(dir.path())?;
+        let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
         assert!(matches!(
             result,
             Err(AssumeUtxoError::Apply(ApplyError::Chain(
                 crate::chain::ChainError::KnownInvalidHeader { hash }
             ))) if hash == fixture.pinned.block_hash
         ));
-        assert!(!persisted.load(Ordering::Relaxed));
+        assert!(!dir.path().join("assumeutxo").exists());
         assert!(fixture.active.durable_head.load()?.is_none());
         assert!(fixture.active.applied_tip_snapshot().is_none());
         assert_eq!(fixture.active.role(), ChainstateRole::Ordinary);
@@ -326,12 +323,9 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
         (loaded.tip_hash, loaded.height),
         (fixture.pinned.block_hash, fixture.pinned.height)
     );
-    let (commitment, verified_stats) = loaded.set.with_stable_view(|view| {
-        Ok::<_, bitcoin_rs_storage::utxo::UtxoError>((
-            view.hash_serialized_3_at_height(fixture.pinned.height)?,
-            bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, fixture.pinned.height, true)?,
-        ))
-    })?;
+    let commitment = loaded
+        .set
+        .with_stable_view(|view| view.hash_serialized_3_at_height(fixture.pinned.height))?;
     assert_eq!(commitment, fixture.pinned.hash_serialized);
     let fork = competing_snapshot_headers()?;
     let fork_root = {
@@ -352,16 +346,7 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
     };
     let before_stats = fixture.active.coin_stats.snapshot();
     let before_coins = fixture.active.utxo.lock_stable_view().hash_serialized_3()?;
-    let persisted = AtomicBool::new(false);
-    let result = fixture.active.install_snapshot(
-        loaded.set,
-        verified_stats,
-        &fixture.pinned,
-        |_, _, _, _| {
-            persisted.store(true, Ordering::Relaxed);
-            Ok(())
-        },
-    );
+    let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
     assert!(matches!(
         result,
         Err(AssumeUtxoError::SnapshotBaseNotOnBestHeaderChain {
@@ -372,7 +357,7 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
             && base_height == fixture.pinned.height
             && best == fork[2].block_hash().0
     ));
-    assert!(!persisted.load(Ordering::Relaxed));
+    assert!(!dir.path().join("assumeutxo").exists());
     assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
     assert!(manager.historical_chainstate().is_none());
     assert!(fixture.active.durable_head.load()?.is_none());
@@ -424,17 +409,10 @@ fn snapshot_rejects_base_above_shorter_best_work_header_chain() -> TestResult {
         assert!(tip.chainwork > base.chainwork);
         assert_eq!(tip.hash, harder.block_hash().0);
     }
-    let persisted = AtomicBool::new(false);
     let loaded = fixture.load()?;
-    let result = fixture.active.install_snapshot(
-        loaded.set,
-        fixture.stats.clone(),
-        &fixture.pinned,
-        |_, _, _, _| {
-            persisted.store(true, Ordering::Relaxed);
-            Ok(())
-        },
-    );
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
     assert!(matches!(
         result,
         Err(AssumeUtxoError::SnapshotBaseNotOnBestHeaderChain {
@@ -445,7 +423,7 @@ fn snapshot_rejects_base_above_shorter_best_work_header_chain() -> TestResult {
             && base_height == fixture.pinned.height
             && best == harder.block_hash().0
     ));
-    assert!(!persisted.load(Ordering::Relaxed));
+    assert!(!dir.path().join("assumeutxo").exists());
     assert!(fixture.active.durable_head.load()?.is_none());
     assert!(fixture.active.applied_tip_snapshot().is_none());
     assert_eq!(fixture.active.role(), ChainstateRole::Ordinary);
@@ -613,6 +591,7 @@ fn snapshot_work_fixture(
         block_hash: snapshot.tip_hash,
         hash_serialized: snapshot.set.lock_stable_view().hash_serialized_3()?,
         chain_tx_count: stats.tx_count,
+        index_commitments: [None; 4],
     };
     let mut encoded = Vec::new();
     write_snapshot_observed(
@@ -1433,14 +1412,18 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
         .applied_tip_snapshot()
         .ok_or(TestError::Missing("genesis missing"))?;
     let reader = fixture.active.chain_progress_reader();
-    let loaded = fixture.load()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    let mut reader = Some(reader);
     let mut observed = None;
     let result = std::thread::scope(|scope| {
-        fixture.active.install_snapshot(
-            loaded.set,
-            fixture.stats.clone(),
+        manager.activate_native_pinned(
+            &mut std::io::Cursor::new(&fixture.snapshot),
             &fixture.pinned,
-            |_, _, _, _| {
+            |_, _| {
+                let Some(reader) = reader.take() else {
+                    return;
+                };
                 let (sent, received) = std::sync::mpsc::sync_channel(1);
                 scope.spawn(move || {
                     let progress = reader.progress(
@@ -1452,12 +1435,8 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
                 observed = received
                     .recv_timeout(std::time::Duration::from_secs(1))
                     .ok();
-                Err(AssumeUtxoError::Storage(
-                    bitcoin_rs_storage::StorageError::InvalidOperation(
-                        "simulated persistence refusal",
-                    ),
-                ))
             },
+            || false,
         )
     });
     assert!(result.is_err());
@@ -1615,6 +1594,12 @@ fn activation_offer_only_on_full_success() -> TestResult {
         manager.activate_pinned_snapshot(retry.set, retry.tip_hash, &fixture.pinned),
         Err(AssumeUtxoError::AlreadyActive)
     ));
+    let initial =
+        crate::assumeutxo_snapshot::load_verified(dir.path(), Network::Regtest, &fixture.pinned)?;
+    assert!(matches!(
+        initial.resume_source,
+        crate::recovery::ResumeSource::Snapshot
+    ));
     assert!(manager.take_pending_activation_witness().is_none());
 
     drop(manager);
@@ -1623,9 +1608,13 @@ fn activation_offer_only_on_full_success() -> TestResult {
         reopened.status()?,
         AssumeUtxoDiskStatus::Validating { .. }
     ));
-    let initial =
+    drop(reopened);
+    let restored =
         crate::assumeutxo_snapshot::load_verified(dir.path(), Network::Regtest, &fixture.pinned)?;
-    assert!(initial.script_live_seed.is_some());
+    assert!(matches!(
+        restored.resume_source,
+        crate::recovery::ResumeSource::Snapshot
+    ));
     Ok(())
 }
 
@@ -1649,4 +1638,77 @@ fn rejects_assumeutxo_snapshot_with_truncated_headers() -> TestResult {
         Err(crate::assumeutxo_snapshot::SnapshotArchiveError::HeaderArchiveLength)
     ));
     Ok(())
+}
+
+fn engine_coin_records(
+    chain: &Chainstate,
+) -> TestResult<std::collections::BTreeMap<Vec<u8>, Vec<u8>>> {
+    let mut records = std::collections::BTreeMap::new();
+    for item in chain
+        .commit_authority
+        .store()
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+    {
+        let (key, value) = item?;
+        records.insert(key.to_vec(), value.to_vec());
+    }
+    Ok(records)
+}
+
+fn assert_engine_matches_snapshot(chain: &Chainstate, fixture: &Fixture) -> TestResult {
+    let file = read_snapshot_strict_v4(&mut Cursor::new(&fixture.snapshot))?;
+    let file_records = file.set.all_records();
+    let engine = engine_coin_records(chain)?;
+    assert_eq!(
+        engine.len(),
+        file_records.len(),
+        "one engine row per snapshot record"
+    );
+    for record in &file_records {
+        let txid = record.txid().to_le_bytes();
+        let stored = engine
+            .get(txid.as_slice())
+            .ok_or(TestError::Missing("snapshot coin absent from the engine"))?;
+        assert_eq!(
+            stored.as_slice(),
+            record.bytes(),
+            "engine row equals file record"
+        );
+    }
+    let mut outputs = 0_u64;
+    let mut amount = 0_u64;
+    for stored in engine.values() {
+        let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
+            stored.clone().into_boxed_slice(),
+        )
+        .map_err(|_| TestError::Missing("bad coin record"))?;
+        for output in record.outputs() {
+            outputs += 1;
+            amount += output.value;
+        }
+    }
+    assert_eq!(
+        outputs, fixture.stats.utxo_count,
+        "coin count equals manifest"
+    );
+    assert_eq!(
+        amount, fixture.stats.total_amount,
+        "total amount equals manifest"
+    );
+    Ok(())
+}
+
+#[test]
+fn activation_streams_every_snapshot_coin_into_the_engine() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    let activated = manager.activate_native_pinned(
+        &mut Cursor::new(&fixture.snapshot),
+        &fixture.pinned,
+        |_, _| {},
+        || true,
+    )?;
+    assert_eq!(activated.base_hash, fixture.pinned.block_hash);
+    assert_engine_matches_snapshot(&fixture.active, &fixture)
 }

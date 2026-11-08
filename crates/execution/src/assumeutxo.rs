@@ -1,13 +1,22 @@
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::assumeutxo_snapshot::SnapshotArchiveError;
+use crate::assumeutxo_snapshot::{
+    SnapshotArchiveError, StagedCoins, StreamedCoins, finish_stage, stage_record,
+    write_coins_archive, write_headers,
+};
 use crate::chain::TipSnapshot;
 use crate::error::{ApplyError, DisconnectError};
 use crate::{Chainstate, ConnectOutcome};
 use bitcoin_rs_consensus::primitives::{AssumeUtxoData, BlockImage, Hash256, Network};
+#[cfg(test)]
 use bitcoin_rs_storage::utxo::UtxoSet;
-use bitcoin_rs_storage::utxo::core_snapshot::{StateVerifyError, VerifiedSnapshotState};
+use bitcoin_rs_storage::utxo::core_snapshot::{CoreSnapshotStream, StateVerifyError};
+use bitcoin_rs_storage::utxo::record::UtxoRecord;
+use bitcoin_rs_storage::utxo::snapshot::{read_snapshot_metadata_v4, stream_snapshot_v4_body};
+#[cfg(test)]
+use bitcoin_rs_storage::utxo::write_snapshot_observed;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 mod serde_hash256 {
@@ -91,6 +100,17 @@ impl ChainstateRole {
 
 pub use bitcoin_rs_storage::assumeutxo::{AssumeUtxoDiskStatus, HistoricalCheckpointRef};
 
+fn storage_io(error: std::io::Error) -> AssumeUtxoError {
+    AssumeUtxoError::Storage(bitcoin_rs_storage::StorageError::Io(error))
+}
+
+fn rewind_to<R: Seek>(reader: &mut R, position: u64) -> Result<(), AssumeUtxoError> {
+    reader
+        .seek(SeekFrom::Start(position))
+        .map(|_| ())
+        .map_err(storage_io)
+}
+
 pub(crate) fn commit_error(error: bitcoin_rs_storage::CommitError) -> AssumeUtxoError {
     match error {
         bitcoin_rs_storage::CommitError::Storage(storage) => AssumeUtxoError::Storage(storage),
@@ -144,7 +164,10 @@ pub(crate) fn engine_coin_stats(
 /// Callers must run this before installing a checkpoint engine image and
 /// before boot replay, so the wipe cannot erase rows the replay cannot
 /// rebuild.
-pub fn recover_snapshot_activation(active: &Chainstate) -> Result<(), AssumeUtxoError> {
+pub fn recover_snapshot_activation(
+    active: &Chainstate,
+    data_dir: &Path,
+) -> Result<(), AssumeUtxoError> {
     match active
         .commit_authority
         .recover_snapshot_activation()
@@ -152,6 +175,8 @@ pub fn recover_snapshot_activation(active: &Chainstate) -> Result<(), AssumeUtxo
     {
         bitcoin_rs_storage::SnapshotActivationRecovery::Clean => Ok(()),
         bitcoin_rs_storage::SnapshotActivationRecovery::RolledBack { marker } => {
+            crate::assumeutxo_snapshot::discard_uncommitted_archive(data_dir, marker.base_hash)
+                .map_err(AssumeUtxoError::Archive)?;
             tracing::warn!(
                 base_hash = %marker.base_hash.to_string_be(),
                 coin_count = marker.coin_count,
@@ -162,6 +187,14 @@ pub fn recover_snapshot_activation(active: &Chainstate) -> Result<(), AssumeUtxo
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActivatedSnapshot {
+    pub base_hash: Hash256,
+    pub height: u32,
+    pub declared_coins: u64,
+}
+
+const DEFAULT_INGEST_CHUNK_BYTES: usize = 8 << 20;
 const DEFAULT_HISTORICAL_CHECKPOINT_INTERVAL: u32 = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,6 +223,17 @@ pub enum AssumeUtxoError {
     MissingHistoricalUndo,
     #[error("snapshot storage: {0}")]
     Storage(#[from] bitcoin_rs_storage::StorageError),
+    #[error("snapshot codec: {0}")]
+    Codec(#[from] bitcoin_rs_storage::utxo::core_snapshot::SnapshotError),
+    #[error("snapshot observer refused the activation; the staged coins were discarded")]
+    ObserverRefused,
+    #[error(
+        "snapshot activation failed ({ingest}) and its staged coins could not be discarded ({discard}); the datadir refuses to open until the activation marker is recovered"
+    )]
+    PartialIngestNotDiscarded {
+        ingest: Box<AssumeUtxoError>,
+        discard: String,
+    },
     #[error("snapshot archive: {0}")]
     Archive(SnapshotArchiveError),
     #[error("open historical checkpoint data directory: {error}")]
@@ -359,6 +403,7 @@ pub struct AssumeUtxoManager {
     data_dir: PathBuf,
     historical_checkpoint_interval: u32,
     pending_activation_mint: Mutex<Option<bitcoin_rs_storage::utxo::V4Witness>>,
+    ingest_chunk_bytes: usize,
 }
 
 impl std::fmt::Debug for AssumeUtxoManager {
@@ -409,7 +454,7 @@ impl AssumeUtxoManager {
         data_dir: PathBuf,
         historical_checkpoint_interval: u32,
     ) -> Result<Self, AssumeUtxoError> {
-        crate::recover_snapshot_activation(&active_chainstate)?;
+        crate::recover_snapshot_activation(&active_chainstate, &data_dir)?;
         let loaded_status = active_chainstate
             .durable_head
             .load()?
@@ -425,9 +470,16 @@ impl AssumeUtxoManager {
             data_dir,
             historical_checkpoint_interval: historical_checkpoint_interval.max(1),
             pending_activation_mint: Mutex::new(None),
+            ingest_chunk_bytes: DEFAULT_INGEST_CHUNK_BYTES,
         };
         manager.finish_open()?;
         Ok(manager)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_ingest_chunk_bytes(mut self, bytes: usize) -> Self {
+        self.ingest_chunk_bytes = bytes.max(1);
+        self
     }
 
     fn restore_historical(
@@ -628,31 +680,133 @@ impl AssumeUtxoManager {
         )
     }
 
-    pub fn activate_snapshot_state(
+    pub fn activate_native_snapshot<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        observe: impl FnMut(Hash256, &UtxoRecord),
+        admit: impl FnOnce() -> bool,
+    ) -> Result<ActivatedSnapshot, AssumeUtxoError> {
+        let identity = read_snapshot_metadata_v4(reader)?;
+        let pinned = self
+            .network
+            .assume_utxo_for_height(identity.height)
+            .ok_or(AssumeUtxoError::UntrustedSnapshotHeight(identity.height))?;
+        self.activate_native_identified(reader, identity, pinned, observe, admit)
+    }
+
+    fn activate_native_identified<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        identity: bitcoin_rs_storage::utxo::snapshot::NativeSnapshotMetadata,
+        pinned: &AssumeUtxoData,
+        observe: impl FnMut(Hash256, &UtxoRecord),
+        admit: impl FnOnce() -> bool,
+    ) -> Result<ActivatedSnapshot, AssumeUtxoError> {
+        if pinned.block_hash != identity.tip_hash {
+            return Err(AssumeUtxoError::SnapshotBlockHashMismatch {
+                expected: pinned.block_hash,
+                found: identity.tip_hash,
+            });
+        }
+        let body_start = reader.stream_position().map_err(storage_io)?;
+        if self.active_chainstate.has_durable_head()? {
+            let verified =
+                stream_snapshot_v4_body(reader, identity, |_, _| Ok::<(), AssumeUtxoError>(()))?;
+            if verified.hash_serialized != pinned.hash_serialized {
+                return Err(AssumeUtxoError::SnapshotCommitmentMismatch {
+                    expected: pinned.hash_serialized,
+                    found: verified.hash_serialized,
+                });
+            }
+            rewind_to(reader, body_start)?;
+        }
+        let declared_coins = identity.record_count;
+        let limit = self.ingest_chunk_bytes;
+        self.activate_streamed(pinned, declared_coins, move |coins| {
+            let mut observe = observe;
+            let mut staged = StagedCoins::new(limit);
+            let streamed = stream_snapshot_v4_body(reader, identity, |txid, record| {
+                observe(txid, record);
+                stage_record(&mut staged, coins, txid, record).map_err(AssumeUtxoError::Storage)
+            })?;
+            finish_stage(&mut staged, coins)?;
+            if streamed.hash_serialized != pinned.hash_serialized {
+                return Err(AssumeUtxoError::SnapshotCommitmentMismatch {
+                    expected: pinned.hash_serialized,
+                    found: streamed.hash_serialized,
+                });
+            }
+            if !admit() {
+                return Err(AssumeUtxoError::ObserverRefused);
+            }
+            Ok(StreamedCoins {
+                coin_stats: streamed.coin_stats,
+                record_count: streamed.record_count,
+            })
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn activate_pinned_snapshot(
         &self,
         set: UtxoSet,
         base_hash: Hash256,
-        height: u32,
+        pinned: &AssumeUtxoData,
     ) -> Result<(), AssumeUtxoError> {
-        let pinned = self
-            .network
-            .assume_utxo_for_height(height)
-            .ok_or(AssumeUtxoError::UntrustedSnapshotHeight(height))?;
-
-        self.activate_pinned_snapshot(set, base_hash, pinned)
+        let mut reader = std::io::Cursor::new(Vec::new());
+        write_snapshot_observed(&set, &base_hash, pinned.height, reader.get_mut(), ())?;
+        reader.set_position(0);
+        let identity = read_snapshot_metadata_v4(&mut reader)?;
+        self.activate_native_identified(&mut reader, identity, pinned, |_, _| {}, || true)
+            .map(|_| ())
     }
 
-    pub fn activate_verified_snapshot(
+    #[cfg(test)]
+    pub(crate) fn activate_native_pinned<R: Read + Seek>(
         &self,
-        state: VerifiedSnapshotState,
-    ) -> Result<(), AssumeUtxoError> {
-        let _lifecycle = self.lifecycle.lock();
-        let pinned = self
-            .network
-            .assume_utxo_for_height(state.height())
-            .ok_or_else(|| AssumeUtxoError::UntrustedSnapshotHeight(state.height()))?;
-        self.require_unactivated()?;
-        self.install_verified(state, pinned)
+        reader: &mut R,
+        pinned: &AssumeUtxoData,
+        observe: impl FnMut(Hash256, &UtxoRecord),
+        admit: impl FnOnce() -> bool,
+    ) -> Result<ActivatedSnapshot, AssumeUtxoError> {
+        let identity = read_snapshot_metadata_v4(reader)?;
+        self.activate_native_identified(reader, identity, pinned, observe, admit)
+    }
+
+    pub fn activate_core_snapshot<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        observe: impl FnMut(Hash256, &UtxoRecord),
+        admit: impl FnOnce() -> bool,
+    ) -> Result<ActivatedSnapshot, AssumeUtxoError> {
+        let body_start = reader.stream_position().map_err(storage_io)?;
+        if self.active_chainstate.has_durable_head()? {
+            CoreSnapshotStream::open(reader, self.network)?
+                .stream(|_, _| Ok::<(), AssumeUtxoError>(()))?;
+            rewind_to(reader, body_start)?;
+        }
+        let snapshot = CoreSnapshotStream::open(reader, self.network)?;
+        let pinned = snapshot.anchor();
+        let declared_coins = snapshot.metadata().coins_count;
+        let limit = self.ingest_chunk_bytes;
+        self.activate_streamed(pinned, declared_coins, move |coins| {
+            let mut observe = observe;
+            let mut staged = StagedCoins::new(limit);
+            let mut record_count = 0_u64;
+            let streamed = snapshot.stream(|txid, record| {
+                observe(txid, record);
+                record_count += 1;
+                stage_record(&mut staged, coins, txid, record).map_err(AssumeUtxoError::Storage)
+            })?;
+            finish_stage(&mut staged, coins)?;
+            if !admit() {
+                return Err(AssumeUtxoError::ObserverRefused);
+            }
+            Ok(StreamedCoins {
+                coin_stats: streamed.coin_stats,
+                record_count,
+            })
+        })
     }
 
     fn require_unactivated(&self) -> Result<(), AssumeUtxoError> {
@@ -665,44 +819,17 @@ impl AssumeUtxoManager {
         Ok(())
     }
 
-    fn activate_pinned_snapshot(
+    fn activate_streamed<S>(
         &self,
-        set: UtxoSet,
-        base_hash: Hash256,
         pinned: &AssumeUtxoData,
-    ) -> Result<(), AssumeUtxoError> {
+        declared_coins: u64,
+        stream: S,
+    ) -> Result<ActivatedSnapshot, AssumeUtxoError>
+    where
+        S: FnOnce(&bitcoin_rs_storage::CoinStore) -> Result<StreamedCoins, AssumeUtxoError>,
+    {
         let _lifecycle = self.lifecycle.lock();
         self.require_unactivated()?;
-        if pinned.block_hash != base_hash {
-            return Err(AssumeUtxoError::SnapshotBlockHashMismatch {
-                expected: pinned.block_hash,
-                found: base_hash,
-            });
-        }
-        let state = VerifiedSnapshotState::verify(set, pinned)?;
-        self.install_verified(state, pinned)
-    }
-
-    fn install_verified(
-        &self,
-        state: VerifiedSnapshotState,
-        pinned: &AssumeUtxoData,
-    ) -> Result<(), AssumeUtxoError> {
-        if state.height() != pinned.height {
-            return Err(AssumeUtxoError::UntrustedSnapshotHeight(state.height()));
-        }
-        if state.base_hash() != pinned.block_hash {
-            return Err(AssumeUtxoError::SnapshotBlockHashMismatch {
-                expected: pinned.block_hash,
-                found: state.base_hash(),
-            });
-        }
-        if state.hash_serialized() != pinned.hash_serialized {
-            return Err(AssumeUtxoError::SnapshotCommitmentMismatch {
-                expected: pinned.hash_serialized,
-                found: state.hash_serialized(),
-            });
-        }
         let genesis_hash = self.network.genesis_block_hash();
         let new_status = AssumeUtxoDiskStatus::Validating {
             base_height: pinned.height,
@@ -714,21 +841,24 @@ impl AssumeUtxoManager {
             pending: None,
             checkpoint: None,
         };
-
-        let (set, stats, staging_witness) =
-            crate::assumeutxo_snapshot::write_coins_sealed(&self.data_dir, state, pinned)
-                .map_err(AssumeUtxoError::Archive)?;
         let activation_authority = Arc::clone(&self.active_chainstate.commit_authority);
-        self.active_chainstate.install_snapshot(
-            set,
-            stats,
+        let witness = self.active_chainstate.install_snapshot(
             pinned,
-            |tree, tip, prior, marker| {
+            declared_coins,
+            stream,
+            |coins, tree, tip, prior, marker, streamed| {
                 if crate::recovery::requires_full_revalidation(&self.data_dir) {
                     return Err(AssumeUtxoError::FullRevalidationRequired);
                 }
-                crate::assumeutxo_snapshot::write_headers(&self.data_dir, tree, tip)
-                    .map_err(AssumeUtxoError::Archive)?;
+                let witness = write_coins_archive(
+                    &self.data_dir,
+                    coins,
+                    pinned,
+                    &streamed.coin_stats,
+                    streamed.record_count,
+                )
+                .map_err(AssumeUtxoError::Archive)?;
+                write_headers(&self.data_dir, tree, tip).map_err(AssumeUtxoError::Archive)?;
                 let next = bitcoin_rs_storage::DurableHead {
                     assumeutxo: new_status,
                     commit_id: prior.map_or(1, |head| head.commit_id + 1),
@@ -751,10 +881,10 @@ impl AssumeUtxoManager {
                         marker,
                     )
                     .map_err(commit_error)?;
-                Ok(())
+                Ok(witness)
             },
         )?;
-        *self.pending_activation_mint.lock() = staging_witness;
+        *self.pending_activation_mint.lock() = witness;
 
         let historical = self.active_chainstate.create_historical_counterpart(
             pinned.height,
@@ -765,7 +895,11 @@ impl AssumeUtxoManager {
 
         *self.historical_chainstate.write() = Some(historical);
 
-        Ok(())
+        Ok(ActivatedSnapshot {
+            base_hash: pinned.block_hash,
+            height: pinned.height,
+            declared_coins,
+        })
     }
 
     pub fn take_pending_activation_witness(&self) -> Option<bitcoin_rs_storage::utxo::V4Witness> {
@@ -781,26 +915,7 @@ impl AssumeUtxoManager {
             .ok_or(AssumeUtxoError::NoHistoricalChainstate)?;
         let (outcome, archived) = self.connect_historical_block(&historical, payload)?;
         if !archived {
-            let scratch = UtxoSet::new();
-            for item in historical
-                .commit_authority
-                .store()
-                .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
-            {
-                let (_, value) = item?;
-                let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
-                    value.into_boxed_slice(),
-                )
-                .map_err(|_| {
-                    AssumeUtxoError::Storage(bitcoin_rs_storage::StorageError::InvalidOperation(
-                        "bad coin record",
-                    ))
-                })?;
-                scratch.insert_parsed_record(record);
-            }
-            let mut stats = scratch.with_stable_view(|view| {
-                bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, outcome.height, true)
-            })?;
+            let mut stats = historical.coins.commitment(outcome.height, None)?.stats;
             stats.tx_count = outcome.tip.chain_tx_count.to_wire();
             historical.coin_stats.reset(stats);
             self.record_historical_progress(&historical, payload, &outcome)?;
@@ -929,31 +1044,14 @@ impl AssumeUtxoManager {
                 found: outcome_hash,
             });
         }
-        let scratch = UtxoSet::new();
-        for item in historical
-            .commit_authority
-            .store()
-            .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
-        {
-            let (_, value) = item?;
-            let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
-                value.into_boxed_slice(),
-            )
-            .map_err(|_| {
-                AssumeUtxoError::Storage(bitcoin_rs_storage::StorageError::InvalidOperation(
-                    "bad coin record",
-                ))
-            })?;
-            scratch.insert_parsed_record(record);
-        }
-        let actual_hash_serialized =
-            scratch
-                .lock_stable_view()
-                .hash_serialized_3()
-                .inspect_err(|_| {
-                    self.active_chainstate.fail_closed_for_recovery();
-                    historical.fail_closed_for_recovery();
-                })?;
+        let actual_hash_serialized = historical
+            .coins
+            .commitment(base.base_height, None)
+            .inspect_err(|_| {
+                self.active_chainstate.fail_closed_for_recovery();
+                historical.fail_closed_for_recovery();
+            })?
+            .hash_serialized;
         let actual_count = historical
             .applied_tip_snapshot()
             .map_or(0, |tip| tip.chain_tx_count.to_wire());
@@ -1155,24 +1253,10 @@ impl AssumeUtxoManager {
             ..
         } = self.status()?
         {
-            let scratch = UtxoSet::new();
-            for item in historical
-                .commit_authority
-                .store()
-                .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
-            {
-                let (_, value) = item?;
-                let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
-                    value.into_boxed_slice(),
-                )
-                .map_err(|_| {
-                    AssumeUtxoError::Storage(bitcoin_rs_storage::StorageError::InvalidOperation(
-                        "bad coin record",
-                    ))
-                })?;
-                scratch.insert_parsed_record(record);
-            }
-            let actual_hash_serialized = scratch.lock_stable_view().hash_serialized_3()?;
+            let actual_hash_serialized = historical
+                .coins
+                .commitment(base_height, None)?
+                .hash_serialized;
             let failed = AssumeUtxoDiskStatus::Failed {
                 base_height,
                 base_hash,

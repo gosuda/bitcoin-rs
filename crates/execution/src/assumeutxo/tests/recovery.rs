@@ -6,6 +6,7 @@ use arc_swap::ArcSwapOption;
 use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_storage::assumeutxo::HistoricalCheckpointRef;
 use bitcoin_rs_storage::block_body::IndexedBlockBodyStore;
+use bitcoin_rs_storage::write_fault::WriteFaultStore;
 use bitcoin_rs_storage::{
     DurableHeadStore, FlatFileBlockStore, KvDurableHeadStore, KvUndoStore, RocksDbStore,
 };
@@ -13,10 +14,23 @@ use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU32;
 
-fn open_persistent(dir: &Path, pinned: &AssumeUtxoData) -> TestResult<Arc<Chainstate>> {
+fn chainstate_store(dir: &Path) -> TestResult<Arc<WriteFaultStore>> {
     std::fs::create_dir_all(dir)?;
     crate::events::initialize_data_dir(dir)?;
-    let store = Arc::new(RocksDbStore::open(dir.join("chainstate"))?);
+    Ok(Arc::new(WriteFaultStore::new(Arc::new(
+        RocksDbStore::open(dir.join("chainstate"))?,
+    ))))
+}
+
+fn open_persistent(dir: &Path, pinned: &AssumeUtxoData) -> TestResult<Arc<Chainstate>> {
+    open_persistent_over(dir, pinned, chainstate_store(dir)?)
+}
+
+fn open_persistent_over(
+    dir: &Path,
+    pinned: &AssumeUtxoData,
+    store: Arc<WriteFaultStore>,
+) -> TestResult<Arc<Chainstate>> {
     let head_store = Arc::new(KvDurableHeadStore::new(store.clone()));
     let head = head_store.load()?;
     let files = Arc::new(match head.and_then(|head| head.body_extent) {
@@ -87,7 +101,7 @@ fn open_persistent(dir: &Path, pinned: &AssumeUtxoData) -> TestResult<Arc<Chains
     active.commit_authority = Arc::new(bitcoin_rs_storage::CommitAuthority::new(dyn_store, coins));
     active.block_body_store = Some(Arc::new(IndexedBlockBodyStore::new(store, files)));
     active.configure_checkpointing(dir, Arc::new(AtomicU32::new(0)))?;
-    crate::recover_snapshot_activation(&active)?;
+    crate::recover_snapshot_activation(&active, dir)?;
     crate::recover_disconnect_marker(&active)?;
     Ok(Arc::new(active))
 }
@@ -1507,9 +1521,6 @@ fn import_finalize_remove_archive_seed_completes() -> TestResult {
         initial.resume_source,
         crate::recovery::ResumeSource::Snapshot
     ));
-    let mut seed = initial
-        .script_live_seed
-        .ok_or(TestError::Missing("restart recovery must mint a seed"))?;
     for block in &fixture.blocks {
         manager.step_historical(&BlockImage::from_local((*block).clone()))?;
     }
@@ -1518,18 +1529,130 @@ fn import_finalize_remove_archive_seed_completes() -> TestResult {
         AssumeUtxoDiskStatus::Finalized { .. }
     ));
     let _ = std::fs::remove_dir_all(&archive);
-    assert!(!archive.exists(), "the seed must not need its path");
+    assert!(
+        !archive.exists(),
+        "the snapshot decode needs no staged archive"
+    );
+    assert_engine_matches_snapshot(&fixture.active, &fixture)?;
 
-    let expected = u64::try_from(initial.utxo.len())?;
-    assert!(expected > 0, "the fixture must hold live coins");
-    let mut seen = 0_u64;
-    seed.for_each_coin_raw(
-        &mut |_, _, _, _, _| {
-            seen += 1;
-            Ok::<(), std::convert::Infallible>(())
-        },
-        &|| false,
-    )?;
-    assert_eq!(seen, expected);
     Ok(())
+}
+
+#[test]
+fn crash_mid_ingest_is_rolled_back_by_the_marker_and_the_retry_matches_the_snapshot() -> TestResult
+{
+    let mut fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let set = read_snapshot_strict_v4(&mut Cursor::new(&fixture.snapshot))?.set;
+    for seed in 0x40_u8..0x44 {
+        let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
+            Hash256::from_le_bytes(&[seed; 32]),
+            &[bitcoin_rs_storage::utxo::record::OwnedUtxoOut::new(
+                0,
+                1_000,
+                vec![0x51],
+                false,
+                1,
+            )],
+        )
+        .map_err(|_| TestError::Missing("synthetic coin record"))?;
+        set.insert_parsed_record(record);
+    }
+    let records = set.all_records();
+    assert!(
+        records.len() >= 3,
+        "the fixture must span at least three batches"
+    );
+    fixture.pinned.hash_serialized = set.lock_stable_view().hash_serialized_3()?;
+    let mut bytes = Cursor::new(Vec::new());
+    write_snapshot_observed(
+        &set,
+        &fixture.pinned.block_hash,
+        fixture.pinned.height,
+        &mut bytes,
+        (),
+    )?;
+    fixture.snapshot = bytes.into_inner();
+    let mut stats = set.with_stable_view(|view| {
+        bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, fixture.pinned.height, true)
+    })?;
+    stats.tx_count = fixture.pinned.chain_tx_count;
+    fixture.stats = stats;
+    let record_bytes: usize = records
+        .iter()
+        .map(|record| bitcoin_rs_storage::COIN_KEY_LEN + record.bytes().len())
+        .sum();
+    let chunk = (record_bytes / 6).max(1);
+    let headers = fixture
+        .blocks
+        .iter()
+        .map(|block| block.header)
+        .collect::<Vec<_>>();
+    {
+        let store = chainstate_store(dir.path())?;
+        let active = open_persistent_over(dir.path(), &fixture.pinned, Arc::clone(&store))?;
+        active.admit_headers(&headers)?;
+        let manager =
+            AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?
+                .with_ingest_chunk_bytes(chunk);
+        let before = store.durable_batches();
+        store.fail_durable_batch(2);
+        let outcome = manager.activate_native_pinned(
+            &mut Cursor::new(&fixture.snapshot),
+            &fixture.pinned,
+            |_, _| {},
+            || true,
+        );
+        assert!(
+            matches!(
+                outcome,
+                Err(AssumeUtxoError::PartialIngestNotDiscarded { .. })
+            ),
+            "the crashed store cannot discard its staged coins: {outcome:?}"
+        );
+        assert!(store.is_dead());
+        assert!(active.is_closed_for_recovery());
+        assert_eq!(store.durable_batches() - before, 2);
+        assert!(!engine_coin_records(&active)?.is_empty());
+        assert!(
+            active
+                .commit_authority
+                .store()
+                .get(
+                    bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+                    bitcoin_rs_storage::SNAPSHOT_ACTIVATION_KEY,
+                )?
+                .is_some()
+        );
+    }
+    let store = chainstate_store(dir.path())?;
+    let reopened = open_persistent_over(dir.path(), &fixture.pinned, Arc::clone(&store))?;
+    assert!(engine_coin_records(&reopened)?.is_empty());
+    assert!(
+        reopened
+            .commit_authority
+            .store()
+            .get(
+                bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+                bitcoin_rs_storage::SNAPSHOT_ACTIVATION_KEY,
+            )?
+            .is_none()
+    );
+    reopened.admit_headers(&headers)?;
+    let manager =
+        AssumeUtxoManager::open(Network::Regtest, reopened.clone(), dir.path().to_path_buf())?
+            .with_ingest_chunk_bytes(chunk);
+    manager.activate_native_pinned(
+        &mut Cursor::new(&fixture.snapshot),
+        &fixture.pinned,
+        |_, _| {},
+        || true,
+    )?;
+    assert!(
+        store.durable_batches() >= 3,
+        "the retry ingests in at least three batches: {} batches for {} records of {record_bytes} bytes at chunk {chunk}",
+        store.durable_batches(),
+        records.len(),
+    );
+    assert_engine_matches_snapshot(&reopened, &fixture)
 }

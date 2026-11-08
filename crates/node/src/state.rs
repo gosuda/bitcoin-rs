@@ -426,7 +426,6 @@ fn build_derived_index_open_spec(
     txindex_cache_bytes: u64,
     epoch: u64,
     guard: &bitcoin_rs_storage::StoreGuard,
-    seed_slot: Option<bitcoin_rs_storage::utxo::SeedOfferCell>,
 ) -> core::result::Result<Option<bitcoin_rs_projection::runtime::DerivedIndexOpenSpec>, ConfigError>
 {
     let enabled = derived_index_capabilities(config);
@@ -465,7 +464,6 @@ fn build_derived_index_open_spec(
         facts_rx: None,
         facts_bytes: None,
         facts_gap: None,
-        seed_slot,
     }))
 }
 

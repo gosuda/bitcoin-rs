@@ -364,7 +364,6 @@ fn live_index_path_reads_zero_block_bodies() {
         facts_rx: Some(facts_rx),
         facts_bytes: Some(facts_bytes),
         facts_gap: Some(facts_gap),
-        seed_slot: None,
     };
 
     let worker = DerivedIndexWorker::spawn_with_open(

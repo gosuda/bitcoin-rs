@@ -10,14 +10,17 @@ use cap_std::fs::Dir;
 
 use crate::chain::{BlockTree, ChainTxCount, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{
-    AssumeUtxoData, DecodeError, Network, consensus_bytes, deserialize,
+    AssumeUtxoData, DecodeError, Hash256, Network, consensus_bytes, deserialize,
 };
 use bitcoin_rs_storage::checkpoint::fs::{create_file, open_data_dir, sync_dir};
-use bitcoin_rs_storage::utxo::core_snapshot::VerifiedSnapshotState;
-use bitcoin_rs_storage::utxo::snapshot::{SeedProvenance, VerifiedSnapshotArtifact};
+use bitcoin_rs_storage::utxo::snapshot::{
+    StreamedSnapshot, V4Declaration, V4Witness, stream_snapshot_v4_records,
+    write_snapshot_records_v4,
+};
 use bitcoin_rs_storage::utxo::stats::CoinStats;
-use bitcoin_rs_storage::utxo::{
-    SnapshotCoin, SnapshotCoinObserver, SnapshotLoad, UtxoSet, read_snapshot_strict_v4_witnessed,
+use bitcoin_rs_storage::utxo::{UtxoError, UtxoRecord, UtxoSet};
+use bitcoin_rs_storage::{
+    Bytes, COIN_KEY_LEN, CoinKey, CoinStore, ColumnFamily, StorageError, WindowDelta,
 };
 
 use crate::AssumeUtxoDiskStatus;
@@ -270,41 +273,36 @@ pub(super) fn write_coins(
     })
 }
 
-struct SealedTrailer([u8; 384]);
-
-impl SnapshotCoinObserver for SealedTrailer {
-    fn observe_coin(&mut self, _: SnapshotCoin<'_>) {}
-    fn select_trailer(&mut self, _: [u8; 384]) -> [u8; 384] {
-        self.0
-    }
-}
-
-pub(super) fn write_coins_sealed(
+pub(super) fn write_coins_archive(
     data_dir: &Path,
-    state: VerifiedSnapshotState,
+    coins: &CoinStore,
     pinned: &AssumeUtxoData,
-) -> Result<
-    (
-        UtxoSet,
-        CoinStats,
-        Option<bitcoin_rs_storage::utxo::V4Witness>,
-    ),
-    SnapshotArchiveError,
-> {
+    stats: &CoinStats,
+    record_count: u64,
+) -> Result<Option<V4Witness>, SnapshotArchiveError> {
     let directory = archive_directory(data_dir, pinned.block_hash)?;
-    let (set, stats) = state.into_parts();
     let trailer = stats.muhash.finalize();
-    let witness = write_archive(&directory, "coins.dat", |writer| {
-        let (_, _, witness) = bitcoin_rs_storage::utxo::snapshot::write_snapshot_witnessed(
-            &set,
-            &pinned.block_hash,
-            pinned.height,
+    write_archive(&directory, "coins.dat", |writer| {
+        let records = coins
+            .store()
+            .iter_prefix(ColumnFamily::Coins, &[])
+            .map_err(UtxoError::Storage)?
+            .map(|item| {
+                let (_, value) = item.map_err(UtxoError::Storage)?;
+                UtxoRecord::from_encoded(value.into_boxed_slice())
+            });
+        let declaration = V4Declaration {
+            tip_hash: &pinned.block_hash,
+            height: pinned.height,
+            record_count,
+        };
+        Ok(write_snapshot_records_v4(
+            records,
+            declaration,
             writer,
-            SealedTrailer(trailer),
-        )?;
-        Ok(witness)
-    })?;
-    Ok((set, stats, witness))
+            &trailer,
+        )?)
+    })
 }
 
 pub(super) fn write_headers(
@@ -356,6 +354,69 @@ pub(crate) fn trusted_anchor(
     Ok(Some(pinned))
 }
 
+pub(super) struct StagedCoins {
+    delta: WindowDelta,
+    bytes: usize,
+    limit: usize,
+}
+
+impl StagedCoins {
+    pub(super) fn new(limit: usize) -> Self {
+        Self {
+            delta: WindowDelta::default(),
+            bytes: 0,
+            limit,
+        }
+    }
+
+    fn stage(&mut self, txid: Hash256, record: &UtxoRecord) {
+        let encoded = Bytes::copy_from_slice(record.bytes());
+        self.bytes += COIN_KEY_LEN + encoded.len();
+        self.delta
+            .push_final(CoinKey(txid.to_le_bytes()), Some(encoded));
+    }
+
+    fn flush(&mut self, coins: &CoinStore) -> Result<(), StorageError> {
+        coins.ingest_chunk(&self.delta)?;
+        self.delta = WindowDelta::default();
+        self.bytes = 0;
+        Ok(())
+    }
+}
+
+pub(super) fn stage_record(
+    staged: &mut StagedCoins,
+    coins: &CoinStore,
+    txid: Hash256,
+    record: &UtxoRecord,
+) -> Result<(), StorageError> {
+    staged.stage(txid, record);
+    if staged.bytes >= staged.limit {
+        staged.flush(coins)?;
+    }
+    Ok(())
+}
+
+pub(super) fn finish_stage(
+    staged: &mut StagedCoins,
+    coins: &CoinStore,
+) -> Result<(), StorageError> {
+    if staged.bytes > 0 {
+        staged.flush(coins)?;
+    }
+    Ok(())
+}
+
+pub(super) struct StreamedCoins {
+    pub(super) coin_stats: CoinStats,
+    pub(super) record_count: u64,
+}
+
+fn verify_archive_coins(path: &Path) -> Result<StreamedSnapshot, UtxoError> {
+    let mut reader = BufReader::new(File::open(path.join("coins.dat"))?);
+    stream_snapshot_v4_records(&mut reader, |_, _| Ok::<(), UtxoError>(()))
+}
+
 pub(super) fn load_verified(
     data_dir: &Path,
     network: Network,
@@ -394,42 +455,37 @@ pub(super) fn load_verified(
         chain_tx_count: ChainTxCount::established(pinned.chain_tx_count),
     };
     tree.restore_chain_tx_count(id, tip.chain_tx_count)?;
-    let mut coins = BufReader::new(File::open(path.join("coins.dat"))?);
-    let (
-        SnapshotLoad {
-            set,
-            height,
-            tip_hash,
-            ..
-        },
-        (),
-        witness,
-    ) = read_snapshot_strict_v4_witnessed(&mut coins, ())?;
-    if height != pinned.height || tip_hash != pinned.block_hash {
+    let streamed = verify_archive_coins(&path)?;
+    if streamed.height != pinned.height || streamed.tip_hash != pinned.block_hash {
         return Err(SnapshotArchiveError::CoinArchiveIdentity);
     }
-    let mut stats = set.with_stable_view(|view| {
-        if view.hash_serialized_3_at_height(pinned.height)? != pinned.hash_serialized {
-            return Err(bitcoin_rs_storage::utxo::UtxoError::CorruptRecord);
-        }
-        bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, pinned.height, true)
-    })?;
+    if streamed.hash_serialized != pinned.hash_serialized {
+        return Err(SnapshotArchiveError::Utxo(UtxoError::CorruptRecord));
+    }
+    let mut stats = streamed.coin_stats;
     stats.tx_count = pinned.chain_tx_count;
-    let seed = VerifiedSnapshotArtifact::seal(
-        coins.into_inner(),
-        witness,
-        SeedProvenance::AssumeUtxoArchive {
-            base: pinned.block_hash.to_le_bytes(),
-        },
-    );
     Ok(InitialChainstate {
-        utxo: set,
+        utxo: UtxoSet::new(),
         coin_stats: stats,
         tree,
         applied_tip: Some(tip),
         resume_source: ResumeSource::Snapshot,
-        script_live_seed: Some(seed),
     })
+}
+
+pub(super) fn discard_uncommitted_archive(
+    data_dir: &Path,
+    base: Hash256,
+) -> Result<(), SnapshotArchiveError> {
+    let directory = archive_directory(data_dir, base)?;
+    for name in ["coins.dat", "headers.dat"] {
+        match directory.remove_file(name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -577,9 +633,8 @@ mod tests {
         }
         Ok(())
     }
-
     #[test]
-    fn sealed_archive_matches_recomputed_archive_byte_for_byte() -> TestResult {
+    fn engine_archive_verifies_against_pinned_commitment() -> TestResult {
         let core = include_bytes!("../../storage/tests/fixtures/core-v2/core200.dat");
         let bare = bitcoin_rs_storage::utxo::core_snapshot::read_and_verify(
             &mut core.as_slice(),
@@ -587,29 +642,35 @@ mod tests {
             bitcoin_rs_storage::utxo::core_snapshot::SnapshotLimits::default(),
         )?;
         let pinned = bare.anchor;
-        let dir_old = tempfile::tempdir()?;
-        write_coins(dir_old.path(), &bare.set, pinned)?;
+        let coins = bitcoin_rs_storage::CoinStore::open(
+            std::sync::Arc::new(bitcoin_rs_storage::MemoryKvStore::new()),
+            64 * 1024 * 1024,
+        );
+        let mut staged = StagedCoins::new(usize::MAX);
+        let mut records = 0_u64;
+        for record in bare.set.all_records() {
+            records += 1;
+            stage_record(&mut staged, &coins, record.txid(), &record)?;
+        }
+        finish_stage(&mut staged, &coins)?;
         let state = bitcoin_rs_storage::utxo::core_snapshot::VerifiedSnapshotState::verify(
             bare.set, pinned,
         )?;
-        let dir_new = tempfile::tempdir()?;
-        write_coins_sealed(dir_new.path(), state, pinned)?;
-        let archive_name = pinned.block_hash.to_string();
-        let old_bytes = std::fs::read(
-            dir_old
-                .path()
-                .join(DIRECTORY)
-                .join(&archive_name)
-                .join("coins.dat"),
-        )?;
-        let new_bytes = std::fs::read(
-            dir_new
-                .path()
-                .join(DIRECTORY)
-                .join(&archive_name)
-                .join("coins.dat"),
-        )?;
-        assert_eq!(old_bytes, new_bytes);
+        let (_, stats) = state.into_parts();
+        let dir = tempfile::tempdir()?;
+        let witness = write_coins_archive(dir.path(), &coins, pinned, &stats, records)?;
+        assert!(
+            witness.is_some(),
+            "a complete engine archive yields a witness"
+        );
+        let archive = dir
+            .path()
+            .join(DIRECTORY)
+            .join(pinned.block_hash.to_string());
+        let streamed = verify_archive_coins(&archive)?;
+        assert_eq!(streamed.hash_serialized, pinned.hash_serialized);
+        assert_eq!(streamed.record_count, records);
+        assert_eq!(streamed.coin_stats.total_amount, stats.total_amount);
         Ok(())
     }
 }

@@ -136,7 +136,7 @@ impl IndexCapabilities {
         Self(IndexCapability::TxLookup.bit() | IndexCapability::ScriptHistory.bit());
 
     #[must_use]
-    pub(crate) const fn contains(self, capability: IndexCapability) -> bool {
+    pub const fn contains(self, capability: IndexCapability) -> bool {
         self.0 & capability.bit() != 0
     }
 

@@ -42,10 +42,11 @@ pub use prepare::bytes_are_block;
 pub use window::classify_apply_error;
 
 pub mod assumeutxo;
+pub mod manifest;
 pub use assumeutxo::{
-    ActiveChainstateSummary, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager,
-    ChainstateRole, ChainstatesReport, ChainstatesSummary, HistoricalChainstateSummary,
-    HistoricalCheckpointRef, recover_snapshot_activation,
+    ActivatedSnapshot, ActiveChainstateSummary, AssumeUtxoDiskStatus, AssumeUtxoError,
+    AssumeUtxoManager, ChainstateRole, ChainstatesReport, ChainstatesSummary,
+    HistoricalChainstateSummary, HistoricalCheckpointRef, recover_snapshot_activation,
 };
 
 mod assumeutxo_snapshot;
@@ -564,18 +565,26 @@ impl Chainstate {
         *self.role.write() = role;
     }
 
-    fn install_snapshot(
+    fn install_snapshot<S, P>(
         &self,
-        snapshot_set: bitcoin_rs_storage::utxo::UtxoSet,
-        mut stats: bitcoin_rs_storage::utxo::stats::CoinStats,
         pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
-        persist: impl FnOnce(
+        declared_coins: u64,
+        stream: S,
+        persist: P,
+    ) -> Result<Option<bitcoin_rs_storage::utxo::V4Witness>, AssumeUtxoError>
+    where
+        S: FnOnce(
+            &bitcoin_rs_storage::CoinStore,
+        ) -> Result<assumeutxo_snapshot::StreamedCoins, AssumeUtxoError>,
+        P: FnOnce(
+            &bitcoin_rs_storage::CoinStore,
             &BlockTree,
             &TipSnapshot,
             Option<&bitcoin_rs_storage::DurableHead>,
             &bitcoin_rs_storage::SnapshotActivationMarker,
-        ) -> Result<(), AssumeUtxoError>,
-    ) -> Result<(), AssumeUtxoError> {
+            &assumeutxo_snapshot::StreamedCoins,
+        ) -> Result<Option<bitcoin_rs_storage::utxo::V4Witness>, AssumeUtxoError>,
+    {
         let _guard = self.admission.enter()?;
         let _transition = self.chain_transition.lock();
         let tree = self.block_tree.read();
@@ -601,23 +610,9 @@ impl Chainstate {
         {
             return Err(AssumeUtxoError::ActivationBehindTip);
         }
-        let mut coin_records: Vec<(bitcoin_rs_storage::CoinKey, bytes::Bytes)> = snapshot_set
-            .all_records()
-            .into_iter()
-            .map(|record| {
-                let key = bitcoin_rs_storage::CoinKey(record.txid().to_le_bytes());
-                let value = bytes::Bytes::copy_from_slice(record.bytes());
-                (key, value)
-            })
-            .collect();
-        coin_records.sort_by_key(|(k, _)| *k);
         let marker = bitcoin_rs_storage::SnapshotActivationMarker {
             base_hash: pinned.block_hash,
-            coin_count: u64::try_from(coin_records.len()).map_err(|_| {
-                AssumeUtxoError::Storage(bitcoin_rs_storage::StorageError::InvalidOperation(
-                    "snapshot coin count exceeds u64",
-                ))
-            })?,
+            coin_count: declared_coins,
             coin_digest: pinned.hash_serialized,
         };
         self.commit_authority
@@ -628,21 +623,27 @@ impl Chainstate {
             .wipe()
             .inspect_err(|_| self.fail_closed_for_recovery())
             .map_err(AssumeUtxoError::Storage)?;
-        self.coins
-            .ingest_sorted(coin_records.into_iter())
-            .inspect_err(|_| self.fail_closed_for_recovery())
-            .map_err(AssumeUtxoError::Storage)?;
-
-        persist(&tree, &tip_snapshot, prior.as_ref(), &marker).inspect_err(|error| {
-            if !matches!(error, AssumeUtxoError::FullRevalidationRequired) {
-                self.fail_closed_for_recovery();
-            }
-        })?;
+        let streamed = match stream(&self.coins) {
+            Ok(streamed) => streamed,
+            Err(error) => return Err(self.discard_partial_ingest(error, prior.as_ref())),
+        };
+        let witness = match persist(
+            &self.coins,
+            &tree,
+            &tip_snapshot,
+            prior.as_ref(),
+            &marker,
+            &streamed,
+        ) {
+            Ok(witness) => witness,
+            Err(error) => return Err(self.discard_partial_ingest(error, prior.as_ref())),
+        };
         drop(tree);
         let mut tree = self.block_tree.write();
         tree.restore_chain_tx_count(tip_snapshot.tip_id, tip_snapshot.chain_tx_count)
             .map_err(ApplyError::from)
             .inspect_err(|_| self.fail_closed_for_recovery())?;
+        let mut stats = streamed.coin_stats;
         stats.tx_count = pinned.chain_tx_count;
         self.coin_stats.reset(stats);
         self.publish_applied(&tip_snapshot, crate::events::HintKind::Connected);
@@ -650,8 +651,40 @@ impl Chainstate {
             base_height: pinned.height,
             base_hash: pinned.block_hash,
         };
+        Ok(witness)
+    }
 
-        Ok(())
+    fn discard_partial_ingest(
+        &self,
+        error: AssumeUtxoError,
+        prior: Option<&bitcoin_rs_storage::DurableHead>,
+    ) -> AssumeUtxoError {
+        match self.commit_authority.recover_snapshot_activation() {
+            Ok(_) => {
+                let rejected = matches!(
+                    error,
+                    AssumeUtxoError::SnapshotCommitmentMismatch { .. }
+                        | AssumeUtxoError::Codec(
+                            bitcoin_rs_storage::utxo::core_snapshot::SnapshotError::CommitmentMismatch { .. }
+                        )
+                );
+                if prior.is_some() || !rejected {
+                    self.fail_closed_for_recovery();
+                }
+                error
+            }
+            Err(discard) => {
+                self.fail_closed_for_recovery();
+                AssumeUtxoError::PartialIngestNotDiscarded {
+                    ingest: Box::new(error),
+                    discard: discard.to_string(),
+                }
+            }
+        }
+    }
+
+    pub(crate) fn has_durable_head(&self) -> Result<bool, AssumeUtxoError> {
+        Ok(self.durable_head.load()?.is_some())
     }
 
     fn snapshot_base_tip(

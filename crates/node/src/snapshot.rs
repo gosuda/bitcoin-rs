@@ -7,22 +7,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bitcoin_rs_consensus::primitives::{Hash256, Network};
+use bitcoin_rs_execution::ActivatedSnapshot;
 use bitcoin_rs_execution::chain::LatchReader;
 use bitcoin_rs_execution::{
     ApplyError, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, Chainstate,
     ChainstateRole,
 };
+use bitcoin_rs_projection::IndexError;
+use bitcoin_rs_projection::IndexWatermark;
+use bitcoin_rs_projection::snapshot_seed::{ScriptLiveSeedObserver, ScriptLiveSeedSession};
 use bitcoin_rs_serving::context::{
     ChainstateInfo, ChainstatesInfo, SnapshotControlError, SnapshotExport, SnapshotImport,
 };
 use bitcoin_rs_storage::checkpoint::fs::{HAS_ATOMIC_NOREPLACE_RENAME, rename_noreplace};
 use bitcoin_rs_storage::checkpoint::{create_file, open_data_dir, sync_dir};
+#[cfg(test)]
+use bitcoin_rs_storage::utxo::core_snapshot::SnapshotLimits;
 use bitcoin_rs_storage::utxo::core_snapshot::{
-    CoreV2Base, CoreV2WriteReport, SnapshotError, SnapshotLimits, read_verified, write_core_v2,
+    CoreV2Base, CoreV2WriteReport, SnapshotError, write_core_v2,
 };
-use bitcoin_rs_storage::utxo::{
-    SeedOfferCell, SeedProvenance, V4Witness, VerifiedSnapshotArtifact,
-};
+use bitcoin_rs_storage::utxo::record::UtxoRecord;
+use bitcoin_rs_storage::utxo::{SnapshotCoin, SnapshotCoinObserver};
 use parking_lot::Mutex;
 
 use crate::chain_effects::ChainFollowers;
@@ -48,7 +53,7 @@ pub(crate) struct SnapshotControl {
     followers: ChainFollowers,
     data_dir: PathBuf,
     network: Network,
-    seed_offer: Option<SeedOfferCell>,
+    script_live_seed: Option<Arc<bitcoin_rs_projection::snapshot_seed::ScriptLiveSeedState>>,
     import: Mutex<()>,
     export: Mutex<()>,
 }
@@ -175,6 +180,8 @@ pub enum SnapshotImportError {
     RecoveryInput,
     #[error("invalid Core snapshot: {0}")]
     Codec(#[from] bitcoin_rs_storage::utxo::core_snapshot::SnapshotError),
+    #[error("ScriptLive snapshot seed staging failed: {0}")]
+    Seed(#[from] bitcoin_rs_projection::IndexError),
     #[error("snapshot activation failed: {0}")]
     Activation(#[from] AssumeUtxoError),
     #[error("invalid native snapshot: {0}")]
@@ -244,7 +251,7 @@ impl SnapshotControl {
         followers: ChainFollowers,
         data_dir: PathBuf,
         network: Network,
-        seed_offer: Option<SeedOfferCell>,
+        script_live_seed: Option<Arc<bitcoin_rs_projection::snapshot_seed::ScriptLiveSeedState>>,
     ) -> Self {
         Self {
             manager,
@@ -252,7 +259,7 @@ impl SnapshotControl {
             followers,
             data_dir,
             network,
-            seed_offer,
+            script_live_seed,
             import: Mutex::new(()),
             export: Mutex::new(()),
         }
@@ -471,53 +478,83 @@ impl SnapshotControl {
             return Err(SnapshotImportError::RecoveryInput);
         }
         let mut file = BufReader::new(open_regular_input(&path)?);
-        let read_started = Instant::now();
-        let snapshot = read_verified(&mut file, self.network, SnapshotLimits::default())?;
-        let read_verify = read_started.elapsed();
-        let result = SnapshotImport {
-            coins_loaded: snapshot.metadata.coins_count,
-            tip_hash: snapshot.anchor.block_hash.to_string_be(),
-            base_height: snapshot.anchor.height,
-            path: path.to_string_lossy().into_owned(),
-        };
-        let file_bytes = snapshot.bytes_read;
-        let base_hash = snapshot.anchor.block_hash;
-        let state = snapshot.into_state();
-        let activate_started = Instant::now();
-        self.activate(base_hash, |manager| {
-            manager.activate_verified_snapshot(state)
-        })?;
+        let file_bytes = path.metadata()?.len();
+        let session = self.begin_decode_seed()?;
+        let seed = session.as_ref();
+        let mut refused = None;
+        let started = Instant::now();
+        let outcome = self.activate(|manager| {
+            let mut observer = seed.map(ScriptLiveSeedSession::observer);
+            manager.activate_core_snapshot(
+                &mut file,
+                |txid, record| {
+                    if let Some(observer) = observer.as_mut() {
+                        observe_outputs(observer, txid, record);
+                    }
+                },
+                || admit_seed(seed, &mut refused),
+            )
+        });
+        let activated = settle_seed(seed, outcome, refused).map_err(codec_import_error)?;
         tracing::info!(
             target: "bitcoin_rs::snapshot_import",
-            coins = result.coins_loaded,
+            coins = activated.declared_coins,
             file_bytes,
-            base_height = result.base_height,
-            read_verify_micros = micros(read_verify),
-            activate_micros = micros(activate_started.elapsed()),
+            base_height = activated.height,
+            activate_micros = micros(started.elapsed()),
             "snapshot import phases"
         );
-        Ok(result)
+        Ok(SnapshotImport {
+            coins_loaded: activated.declared_coins,
+            tip_hash: activated.base_hash.to_string_be(),
+            base_height: activated.height,
+            path: path.to_string_lossy().into_owned(),
+        })
+    }
+
+    fn begin_decode_seed(
+        &self,
+    ) -> Result<
+        Option<bitcoin_rs_projection::snapshot_seed::ScriptLiveSeedSession>,
+        SnapshotImportError,
+    > {
+        match self.script_live_seed.as_ref() {
+            Some(seed) => seed.begin_session().map(Some).map_err(|error| {
+                tracing::warn!(%error, "ScriptLive decode seed session unavailable");
+                SnapshotImportError::Seed(error)
+            }),
+            None => Ok(None),
+        }
     }
 
     pub(crate) fn import_native(&self, path: &Path) -> Result<(), SnapshotImportError> {
         let _permit = self.claim_import()?;
         let mut file = BufReader::new(open_regular_input(path)?);
-        let snapshot = bitcoin_rs_storage::utxo::read_snapshot_strict_v4(&mut file)?;
-        let base_hash = snapshot.tip_hash;
-        self.activate(base_hash, |manager| {
-            manager.activate_snapshot_state(snapshot.set, snapshot.tip_hash, snapshot.height)
-        })
+        let session = self.begin_decode_seed()?;
+        let seed = session.as_ref();
+        let mut refused = None;
+        let outcome = self.activate(|manager| {
+            let mut observer = seed.map(ScriptLiveSeedSession::observer);
+            manager.activate_native_snapshot(
+                &mut file,
+                |txid, record| {
+                    if let Some(observer) = observer.as_mut() {
+                        observe_outputs(observer, txid, record);
+                    }
+                },
+                || admit_seed(seed, &mut refused),
+            )
+        });
+        settle_seed(seed, outcome, refused).map(|_| ())
     }
 
-    fn activate(
+    fn activate<T>(
         &self,
-        base_hash: Hash256,
-        activation: impl FnOnce(&AssumeUtxoManager) -> Result<(), AssumeUtxoError>,
-    ) -> Result<(), SnapshotImportError> {
+        activation: impl FnOnce(&AssumeUtxoManager) -> Result<T, AssumeUtxoError>,
+    ) -> Result<T, SnapshotImportError> {
         let change = match self.followers.begin_mempool_change() {
             Ok(change) => change,
             Err(error) => {
-                self.drop_activation_witness();
                 return Err(SnapshotImportError::Admission(error));
             }
         };
@@ -530,10 +567,8 @@ impl SnapshotControl {
                 && let Err(error) = change.finish()
             {
                 self.chainstate.fail_closed_for_recovery();
-                self.drop_activation_witness();
                 return Err(SnapshotImportError::Settlement(error));
             }
-            self.drop_activation_witness();
             return Err(SnapshotImportError::MempoolNotEmpty);
         }
         let result = activation(self.manager.as_ref());
@@ -545,75 +580,15 @@ impl SnapshotControl {
             && let Err(settlement) = change.finish()
         {
             self.chainstate.fail_closed_for_recovery();
-            self.drop_activation_witness();
             return match result {
                 Err(activation) => Err(SnapshotImportError::ActivationAndSettlement {
                     activation: Box::new(activation),
                     settlement,
                 }),
-                Ok(()) => Err(SnapshotImportError::Settlement(settlement)),
+                Ok(_) => Err(SnapshotImportError::Settlement(settlement)),
             };
         }
-        if let Err(activation) = result {
-            self.drop_activation_witness();
-            Err(SnapshotImportError::Activation(activation))
-        } else {
-            self.offer_activation_seed(base_hash);
-            Ok(())
-        }
-    }
-
-    fn drop_activation_witness(&self) {
-        let _ = self.manager.take_pending_activation_witness();
-    }
-
-    fn offer_activation_seed(&self, base_hash: bitcoin_rs_consensus::primitives::Hash256) {
-        let Some(witness) = self.manager.take_pending_activation_witness() else {
-            return;
-        };
-        Self::offer_witness_file(
-            self.seed_offer.as_ref(),
-            &self.data_dir,
-            &witness,
-            base_hash,
-        );
-    }
-
-    fn offer_witness_file(
-        seed_offer: Option<&SeedOfferCell>,
-        data_dir: &Path,
-        witness: &V4Witness,
-        base_hash: bitcoin_rs_consensus::primitives::Hash256,
-    ) {
-        let Some(cell) = seed_offer else {
-            return;
-        };
-        if !cell.is_wanted() {
-            return;
-        }
-        let path = data_dir
-            .join("assumeutxo")
-            .join(base_hash.to_string())
-            .join("coins.dat");
-        let file = match open_regular_input(&path) {
-            Ok(file) => file,
-            Err(_) => return,
-        };
-        let len = match file.metadata() {
-            Ok(metadata) => metadata.len(),
-            Err(_) => return,
-        };
-        if len != witness.byte_len() {
-            return;
-        }
-        let artifact = VerifiedSnapshotArtifact::seal(
-            file,
-            *witness,
-            SeedProvenance::AssumeUtxoArchive {
-                base: base_hash.to_le_bytes(),
-            },
-        );
-        let _ = cell.offer(artifact);
+        result.map_err(SnapshotImportError::Activation)
     }
 
     pub(crate) fn chainstates(&self) -> Result<ChainstatesInfo, SnapshotControlError> {
@@ -675,3 +650,61 @@ fn active_snapshot_base(
 
 #[cfg(test)]
 mod tests;
+
+fn observe_outputs(observer: &mut ScriptLiveSeedObserver<'_>, txid: Hash256, record: &UtxoRecord) {
+    for output in record.outputs() {
+        observer.observe_coin(SnapshotCoin {
+            txid,
+            vout: output.vout,
+            value: output.value,
+            script_pubkey: output.script_pubkey,
+            height: output.height,
+            coinbase: output.coinbase,
+        });
+    }
+}
+
+fn admit_seed(seed: Option<&ScriptLiveSeedSession>, refused: &mut Option<IndexError>) -> bool {
+    match seed.and_then(ScriptLiveSeedSession::take_error) {
+        Some(error) => {
+            *refused = Some(error);
+            false
+        }
+        None => true,
+    }
+}
+
+fn codec_import_error(error: SnapshotImportError) -> SnapshotImportError {
+    match error {
+        SnapshotImportError::Activation(AssumeUtxoError::Codec(error)) => {
+            SnapshotImportError::Codec(error)
+        }
+        other => other,
+    }
+}
+
+fn settle_seed(
+    seed: Option<&ScriptLiveSeedSession>,
+    outcome: Result<ActivatedSnapshot, SnapshotImportError>,
+    refused: Option<IndexError>,
+) -> Result<ActivatedSnapshot, SnapshotImportError> {
+    let Some(session) = seed else {
+        return outcome;
+    };
+    match outcome {
+        Ok(activated) => {
+            session.publish(IndexWatermark {
+                height: activated.height,
+                hash: activated.base_hash.to_le_bytes(),
+            });
+            Ok(activated)
+        }
+        Err(error) => {
+            session.abort();
+            Err(match refused {
+                Some(seed_error) => SnapshotImportError::Seed(seed_error),
+                None => error,
+            })
+        }
+    }
+}

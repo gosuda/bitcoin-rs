@@ -537,7 +537,7 @@ impl Node {
     fn start(fixture: &ChainFixture, data_dir: &Path, start: Start) -> Self {
         let epoch = NEXT_EPOCH.fetch_add(1, Ordering::Relaxed);
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-        let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+        let runtime = DerivedIndexRuntime::new(wake_tx);
         let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
         let adapter = DerivedIndexQueryAdapter::new(Arc::clone(&lifecycle));
         let probe = Arc::new(Probe::default());
@@ -569,7 +569,6 @@ impl Node {
             facts_rx: None,
             facts_bytes: None,
             facts_gap: None,
-            seed_slot: None,
         };
         let body_store: Arc<dyn BlockBodyStore> = Arc::new(StoreBodies {
             bodies: Arc::clone(&fixture.bodies),

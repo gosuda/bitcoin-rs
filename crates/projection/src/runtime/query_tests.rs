@@ -313,7 +313,7 @@ impl QueryFixture {
         applied_tip.store(Some(Arc::clone(&home)));
 
         let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-        let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+        let runtime = DerivedIndexRuntime::new(wake_tx);
         let watermark = config.watermark.unwrap_or(IndexWatermark {
             height: tip.height,
             hash: *tip.hash.as_byte_array(),
@@ -720,7 +720,7 @@ fn engine_with_body_source(
     let applied_tip = Arc::new(ArcSwapOption::empty());
     applied_tip.store(Some(Arc::new(tip.clone())));
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime = DerivedIndexRuntime::new(wake_tx);
     let reader = Arc::new(QueryReader {
         snapshot: QuerySnapshot {
             watermark: IndexWatermark {
@@ -1864,7 +1864,7 @@ impl HistoricalFixture {
         let tip_cell = Arc::new(ArcSwapOption::empty());
         tip_cell.store(Some(Arc::new(tip)));
         let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-        let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+        let runtime = DerivedIndexRuntime::new(wake_tx);
         let reader = Arc::new(HistoricalReader {
             snapshot: HistoricalSnapshot {
                 tx_watermark,
@@ -1912,7 +1912,7 @@ fn historical_extension_during_read_keeps_same_anchor() -> Result<(), crate::por
     tip_cell.store(Some(Arc::new(tip_snapshot)));
     let tip_cell_clone = Arc::clone(&tip_cell);
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime = DerivedIndexRuntime::new(wake_tx);
     let runtime_clone = Arc::clone(&runtime);
     let on_read: Option<Box<dyn Fn() + Send>> = Some(Box::new(move || {
         tip_cell_clone.store(Some(Arc::new(extension_tip.clone())));
@@ -1965,7 +1965,7 @@ fn historical_wake_without_tip_move_stays_valid_while_strict_retries()
     let tip_cell = Arc::new(ArcSwapOption::empty());
     tip_cell.store(Some(Arc::new(tip_snapshot)));
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime = DerivedIndexRuntime::new(wake_tx);
     let runtime_clone = Arc::clone(&runtime);
     let on_read: Option<Box<dyn Fn() + Send>> = Some(Box::new(move || runtime_clone.wake()));
     let body = Arc::new(MovingBody::new(
@@ -2065,7 +2065,7 @@ fn historical_reorg_above_anchor_stays_valid() -> Result<(), crate::portable::Te
         on_read,
     ));
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime = DerivedIndexRuntime::new(wake_tx);
     let reader = Arc::new(HistoricalReader {
         snapshot: HistoricalSnapshot {
             tx_watermark: Some(genesis_watermark),
@@ -2111,7 +2111,7 @@ fn historical_reset_completing_after_snapshot_stays_valid() -> Result<(), crate:
     let tip_cell = Arc::new(ArcSwapOption::empty());
     tip_cell.store(Some(Arc::new(tip_snapshot)));
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime = DerivedIndexRuntime::new(wake_tx);
     let shared_state = Arc::new(ParkMutex::new(HistoricalSnapshot {
         tx_watermark: Some(watermark),
         sh_watermark: Some(watermark),
@@ -2196,7 +2196,7 @@ fn historical_reorg_below_anchor_stays_valid() -> Result<(), crate::portable::Te
         on_read,
     ));
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime = DerivedIndexRuntime::new(wake_tx);
     let reader = Arc::new(HistoricalReader {
         snapshot: HistoricalSnapshot {
             tx_watermark: Some(main_watermark),
@@ -2246,7 +2246,7 @@ fn historical_unknown_watermark_hash_scopes_absence() -> Result<(), crate::porta
     let tip_cell = Arc::new(ArcSwapOption::empty());
     tip_cell.store(Some(Arc::new(tip)));
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime = DerivedIndexRuntime::new(wake_tx);
     let reader = Arc::new(HistoricalReader {
         snapshot: HistoricalSnapshot {
             tx_watermark: Some(unknown),
@@ -2294,7 +2294,7 @@ fn historical_stale_watermark_anchors_at_fork_and_excludes_orphans()
     let tip_cell = Arc::new(ArcSwapOption::empty());
     tip_cell.store(Some(Arc::new(main_tip)));
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime = DerivedIndexRuntime::new(wake_tx);
     let stale_prefix = TxidRow::scan_prefix(&stale_txid);
     let reader = Arc::new(HistoricalReader {
         snapshot: HistoricalSnapshot {
@@ -2987,7 +2987,7 @@ fn history_query_survives_chain_extension() -> Result<(), crate::portable::TestE
     tip_cell.store(Some(Arc::new(main_tip)));
 
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime = DerivedIndexRuntime::new(wake_tx);
     let tip_cell_clone = Arc::clone(&tip_cell);
     let on_read: Option<Box<dyn Fn() + Send>> = Some(Box::new(move || {
         tip_cell_clone.store(Some(Arc::new(side_tip.clone())));
@@ -3075,7 +3075,7 @@ fn answer_reads_the_captured_snapshot_when_tail_rows_are_rewritten()
     let tip_cell = Arc::new(ArcSwapOption::empty());
     tip_cell.store(Some(Arc::new(tip)));
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime = DerivedIndexRuntime::new(wake_tx);
     let body = Arc::new(MovingBody::new(
         vec![(1, child.block_hash(), consensus_bytes(&child))],
         None,
@@ -3355,7 +3355,7 @@ fn expired_revoked_and_replaced_views_fail_closed() -> Result<(), crate::portabl
     let tip_cell = Arc::new(ArcSwapOption::empty());
     tip_cell.store(Some(Arc::new(tip)));
     let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime = DerivedIndexRuntime::new(wake_tx);
     let reader: Arc<dyn IndexReader> = Arc::new(ResetReader {
         state: Arc::new(ParkMutex::new(HistoricalSnapshot {
             tx_watermark: Some(watermark),

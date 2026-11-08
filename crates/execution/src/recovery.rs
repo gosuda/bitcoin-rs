@@ -3,7 +3,6 @@ use bitcoin_rs_storage::ScriptAttestation;
 use bitcoin_rs_storage::checkpoint::CheckpointLoadError;
 use bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER;
 use bitcoin_rs_storage::utxo::UtxoSet;
-use bitcoin_rs_storage::utxo::snapshot::VerifiedSnapshotArtifact;
 use std::path::{Path, PathBuf};
 
 use crate::assumeutxo_snapshot::SnapshotArchiveError;
@@ -121,7 +120,6 @@ pub struct InitialChainstate {
     pub tree: crate::chain::BlockTree,
     pub applied_tip: Option<TipSnapshot>,
     pub resume_source: ResumeSource,
-    pub script_live_seed: Option<VerifiedSnapshotArtifact>,
 }
 
 /// Restore source plus the checkpoint generation's engine snapshot.
@@ -246,7 +244,6 @@ fn restored_initial(
         tree: restored.tree,
         applied_tip: Some(restored.applied_tip),
         resume_source: ResumeSource::Checkpoint,
-        script_live_seed: None,
     })
 }
 
@@ -337,7 +334,6 @@ fn cold_initial_chainstate(
         tree: crate::chain::BlockTree::new(),
         applied_tip: None,
         resume_source: ResumeSource::Cold,
-        script_live_seed: None,
     }
 }
 

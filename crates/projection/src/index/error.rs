@@ -57,6 +57,12 @@ pub enum IndexError {
     },
     #[error("ScriptLive is already seeded; reset the capability first")]
     LiveAlreadySeeded,
+    #[error("a ScriptLive snapshot seed session is already active")]
+    SeedAlreadyActive,
+    #[error("ScriptLive snapshot seed staging stalled; the store writer is not draining")]
+    SeedBacklogStalled,
+    #[error("ScriptLive snapshot seed channel closed before publication")]
+    SeedChannelClosed,
     #[error(
         "TxIndex tables are present without a versioned watermark; run bitcoin-rs-storage-convert rebuild-index to rebuild"
     )]

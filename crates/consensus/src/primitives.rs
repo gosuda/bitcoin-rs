@@ -35,7 +35,10 @@ pub use ids::{BlockHash, Txid, Wtxid};
 pub use layout::{
     BlockLayout, ByteSpan, InputLayout, OutputLayout, TxIdentity, TxLayout, WitnessItemLayout,
 };
-pub use network::{AssumeUtxoData, ChainTxData, HeadersSyncParams, Network};
+pub use network::{
+    AssumeUtxoData, ChainTxData, HeadersSyncParams, IndexArtifactCapability,
+    IndexArtifactCommitment, Network,
+};
 pub use outpoint::OutPoint;
 pub use script::{Script, Witness, WitnessItems};
 pub use sighash::{

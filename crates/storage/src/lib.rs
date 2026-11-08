@@ -147,3 +147,5 @@ pub mod schema_model;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod utxo;
+#[cfg(any(test, feature = "test-seam"))]
+pub mod write_fault;

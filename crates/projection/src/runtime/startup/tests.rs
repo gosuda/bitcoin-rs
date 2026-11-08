@@ -155,7 +155,6 @@ fn shutdown_before_thread_creation_never_touches_the_store() -> std::io::Result<
         facts_rx: None,
         facts_bytes: None,
         facts_gap: None,
-        seed_slot: None,
     };
     let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     shutdown.trigger();
@@ -291,7 +290,6 @@ fn recovery_open_spec(dir: &Path) -> DerivedIndexOpenSpec {
         facts_rx: None,
         facts_bytes: None,
         facts_gap: None,
-        seed_slot: None,
     }
 }
 
