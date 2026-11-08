@@ -31,6 +31,14 @@ pub struct BlockSyncInputs {
     pub budget: Arc<crate::budget::NodeBudget>,
 }
 
+fn with_historical_background_permit<T>(
+    budget: &crate::budget::NodeBudget,
+    validate: impl FnOnce() -> T,
+) -> T {
+    let _permit = budget.cpu().try_acquire_background();
+    validate()
+}
+
 #[must_use]
 pub fn block_sync(inputs: BlockSyncInputs) -> BlockSync {
     let block_tree = inputs.handles.block_tree_reader();
@@ -144,8 +152,7 @@ impl SyncChain for NodeSyncChain {
             .assumeutxo
             .as_ref()
             .ok_or("historical validation is not configured")?;
-        manager
-            .step_historical(payload)
+        with_historical_background_permit(&self.budget, || manager.step_historical(payload))
             .map(|_| ())
             .map_err(SyncChainError::from)
     }
@@ -240,6 +247,7 @@ impl SyncChain for NodeSyncChain {
                     invalidated: Box::default(),
                     source: source.into(),
                 })?;
+        let _foreground = self.budget.cpu().acquire_foreground();
         let result = match transition.connect_window(payloads) {
             Ok(outcomes) => {
                 for (payload, outcome) in payloads.iter().zip(&outcomes) {

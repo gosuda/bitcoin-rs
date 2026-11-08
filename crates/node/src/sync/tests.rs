@@ -216,3 +216,20 @@ mod branch_connect_mempool;
 
 #[cfg(test)]
 mod fatal_halt;
+
+// BUD-04
+#[test]
+fn historical_validation_runs_under_a_background_cpu_permit() {
+    let budget = crate::budget::NodeBudget::from_dbcache_bytes(16, 4);
+    let cpu = budget.cpu();
+    let observed = super::with_historical_background_permit(&budget, || cpu.background_in_flight());
+    assert_eq!(
+        observed, 1,
+        "historical validation must hold one background CPU permit"
+    );
+    assert_eq!(
+        cpu.background_in_flight(),
+        0,
+        "the permit releases on return"
+    );
+}

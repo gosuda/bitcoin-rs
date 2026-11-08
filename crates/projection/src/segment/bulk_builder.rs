@@ -902,3 +902,96 @@ impl Iterator for SortedRows {
 #[expect(clippy::unwrap_used)]
 #[path = "bulk_builder_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod cpu_reserve_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    struct RecordingBudget {
+        cpu: Arc<CpuShares>,
+        observed_background: AtomicU32,
+    }
+
+    impl BudgetCharge for RecordingBudget {
+        fn reserve_bytes(&self, _owner: BudgetOwner, _bytes: u64) -> Result<(), BudgetError> {
+            self.observed_background
+                .store(self.cpu.background_in_flight(), Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn allocate_bytes(&self, _owner: BudgetOwner, _bytes: u64) -> Result<(), BudgetError> {
+            Ok(())
+        }
+
+        fn release_bytes(&self, _owner: BudgetOwner, _bytes: u64) {}
+
+        fn available_bytes(&self, _owner: BudgetOwner) -> u64 {
+            u64::MAX
+        }
+    }
+
+    fn sample_block() -> CommittedBlock {
+        CommittedBlock {
+            height: 0,
+            hash: [1u8; 32],
+            parent_hash: [0u8; 32],
+            header: [0u8; 80],
+            txs: Vec::new(),
+        }
+    }
+
+    // BUD-04
+    #[test]
+    #[expect(clippy::expect_used)]
+    fn background_scoring_runs_under_a_cpu_permit() {
+        let cpu = Arc::new(CpuShares::new(2, 1));
+        let budget = Arc::new(RecordingBudget {
+            cpu: Arc::clone(&cpu),
+            observed_background: AtomicU32::new(0),
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let builder = BulkSegmentBuilder::new(
+            budget.clone(),
+            Some(Arc::clone(&cpu)),
+            dir.path().to_path_buf(),
+        );
+        let rows = builder
+            .build_generation_rows(1, &[sample_block()])
+            .expect("rows build");
+        assert_eq!(
+            budget.observed_background.load(Ordering::SeqCst),
+            1,
+            "the bulk build must hold one background CPU permit while it runs"
+        );
+        assert_eq!(
+            cpu.background_in_flight(),
+            0,
+            "the permit releases on return"
+        );
+        drop(rows);
+    }
+
+    // BUD-05
+    #[test]
+    #[expect(clippy::expect_used)]
+    fn single_worker_host_runs_background_scoring_without_a_permit() {
+        let cpu = Arc::new(CpuShares::new(1, 1));
+        let budget = Arc::new(RecordingBudget {
+            cpu: Arc::clone(&cpu),
+            observed_background: AtomicU32::new(0),
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let builder = BulkSegmentBuilder::new(
+            budget.clone(),
+            Some(Arc::clone(&cpu)),
+            dir.path().to_path_buf(),
+        );
+        let rows = builder
+            .build_generation_rows(1, &[sample_block()])
+            .expect("rows build");
+        assert_eq!(cpu.foreground_reserve(), 1);
+        assert_eq!(budget.observed_background.load(Ordering::SeqCst), 0);
+        drop(rows);
+    }
+}

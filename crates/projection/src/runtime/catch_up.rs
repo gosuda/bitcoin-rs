@@ -734,6 +734,11 @@ impl Worker {
             || capabilities.contains(IndexCapability::ScriptLive)
             || capabilities.contains(IndexCapability::CompactFilters);
 
+        let permit = self
+            .cpu
+            .as_ref()
+            .and_then(|cpu| cpu.try_acquire_background());
+        let parallel = self.cpu.is_none() || permit.is_some();
         let prepare = |identity: &BlockIdentity, body: &[u8]| -> AnchoredPreparation {
             let prepare = |spent: &dyn crate::SpentCoins| {
                 self.writer.prepare_block_with_spent_scripts(
@@ -750,11 +755,19 @@ impl Worker {
             let anchor = self.live_anchor(identity.height, identity.hash)?;
             Ok(prepare(&anchor))
         };
-        let outcomes: Vec<AnchoredPreparation> = sub_chunk
-            .par_iter()
-            .zip(bodies.par_iter())
-            .map(|(identity, body)| prepare(identity, body))
-            .collect();
+        let outcomes: Vec<AnchoredPreparation> = if parallel {
+            sub_chunk
+                .par_iter()
+                .zip(bodies.par_iter())
+                .map(|(identity, body)| prepare(identity, body))
+                .collect()
+        } else {
+            sub_chunk
+                .iter()
+                .zip(bodies.iter())
+                .map(|(identity, body)| prepare(identity, body))
+                .collect()
+        };
 
         match outcomes.into_iter().collect::<Result<Vec<_>, _>>() {
             Ok(prepared) => Ok(ControlFlow::Continue(prepared)),

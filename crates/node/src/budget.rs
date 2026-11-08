@@ -104,7 +104,7 @@ impl NodeBudget {
     #[must_use]
     pub fn new(caps: BudgetCaps, total_workers: u32) -> Self {
         let total_workers = total_workers.max(1);
-        let foreground_workers = total_workers / 4;
+        let foreground_workers = (total_workers / 4).max(1).min(total_workers);
         Self {
             caps,
             ledger: Mutex::new(Ledger::default()),
