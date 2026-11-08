@@ -164,6 +164,16 @@ fn attach_manifest_artifact(
     if !host.enabled.contains(IndexCapability::TxLookup) {
         return Err(IndexBundleError::TxLookupDisabled);
     }
+    let (_, watermarks) = host
+        .writer
+        .fenced_watermarks()
+        .map_err(IndexBundleError::Index)?;
+    if watermarks
+        .tx_lookup
+        .is_some_and(|existing| existing.height >= target.base_height)
+    {
+        return Ok(None);
+    }
     let base = IndexWatermark {
         height: target.base_height,
         hash: target.base_hash,
