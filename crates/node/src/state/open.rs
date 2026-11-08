@@ -738,7 +738,7 @@ impl NodeState {
             Some(Arc::clone(&derived_index_status)),
         ));
         if let Some(manifest_path) = config.assumeutxo_manifest.as_ref() {
-            snapshots.import_manifest(manifest_path)?;
+            snapshots.admit_startup_manifest(manifest_path)?;
         }
         verify_startup_window(&chainstate, &config.data_dir)?;
         let shutdown = Arc::new(chainstate.shutdown_reader().child());

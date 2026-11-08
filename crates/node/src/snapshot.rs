@@ -694,17 +694,6 @@ impl SnapshotControl {
         let genesis = self.network.genesis_block_hash().to_le_bytes();
         let trust = manifest.verify_against_anchor(self.network, genesis, anchor)?;
         let dir = path.parent().unwrap_or(path);
-        for slot in 1..bitcoin_rs_execution::manifest::ARTIFACT_SLOTS {
-            if manifest.sizes[slot] == 0 {
-                continue;
-            }
-            if let Err(err) = manifest.verify_index_artifact(dir, slot) {
-                if let Some(runtime) = self.derived_index_runtime.as_ref() {
-                    runtime.publish_failed(format!("index artifact verification failed: {err}"));
-                }
-                return Err(SnapshotImportError::Manifest(err));
-            }
-        }
 
         let utxo_path = manifest.artifact_path(dir, bitcoin_rs_execution::manifest::UTXO_SLOT)?;
         let mut file = BufReader::new(open_regular_input(&utxo_path)?);
@@ -778,22 +767,35 @@ impl SnapshotControl {
             else {
                 continue;
             };
-            match cap_trust {
-                bitcoin_rs_execution::manifest::CapabilityTrust::Trusted(_) => {
-                    tracing::info!(
-                        capability = %cap.name(),
-                        base_height,
-                        "verified index artifact attached as generation"
-                    );
-                }
-                bitcoin_rs_execution::manifest::CapabilityTrust::Untrusted => {
-                    if manifest.index_commitments[slot_idx].is_some() {
-                        self.fail_untrusted_capability(cap, base_height);
+            if manifest.index_commitments[slot_idx].is_none() {
+                continue;
+            }
+            let verified = manifest
+                .verify_index_artifact(dir, slot_idx + 1)
+                .and_then(|()| match cap_trust {
+                    bitcoin_rs_execution::manifest::CapabilityTrust::Trusted(_) => Ok(()),
+                    bitcoin_rs_execution::manifest::CapabilityTrust::Untrusted => {
+                        Err(bitcoin_rs_execution::manifest::ManifestError::Artifacts(
+                            "the manifest index commitment is not compiled into this node",
+                        ))
                     }
+                });
+            match verified {
+                Ok(()) => tracing::info!(
+                    capability = %cap.name(),
+                    base_height,
+                    "index artifact verified against its compiled commitment"
+                ),
+                Err(error) => {
+                    tracing::warn!(
+                        capability = %cap.name(),
+                        %error,
+                        "index artifact unavailable; other capabilities continue"
+                    );
+                    self.fail_capability(cap, base_height, &error);
                 }
             }
         }
-
         tracing::info!(
             target: "bitcoin_rs::snapshot_manifest_import",
             coins = result.coins_loaded,
@@ -805,17 +807,57 @@ impl SnapshotControl {
         Ok(result)
     }
 
-    fn fail_untrusted_capability(
+    pub(crate) fn admit_startup_manifest(&self, path: &Path) -> Result<(), SnapshotImportError> {
+        match self.manager.status()? {
+            AssumeUtxoDiskStatus::Uninitialized => self.import_manifest(path).map(|_| ()),
+            AssumeUtxoDiskStatus::Validating {
+                base_height,
+                base_hash,
+                ..
+            }
+            | AssumeUtxoDiskStatus::Finalized {
+                base_height,
+                base_hash,
+                ..
+            } => {
+                let bytes = read_bounded_manifest(path)?;
+                let manifest = bitcoin_rs_execution::manifest::SnapshotManifest::parse(&bytes)?;
+                if manifest.base_height == base_height
+                    && manifest.base_hash == base_hash.to_le_bytes()
+                {
+                    Ok(())
+                } else {
+                    Err(AssumeUtxoError::AlreadyActive.into())
+                }
+            }
+            AssumeUtxoDiskStatus::Failed {
+                base_height,
+                expected_hash_serialized,
+                actual_hash_serialized,
+                ..
+            } => Err(SnapshotImportError::Activation(
+                AssumeUtxoError::PreviouslyFailed {
+                    base_height,
+                    expected_hash_serialized,
+                    actual_hash_serialized,
+                },
+            )),
+        }
+    }
+
+    /// SNP-10: an index artifact failure invalidates that projection only.
+    fn fail_capability(
         &self,
         cap: bitcoin_rs_consensus::primitives::IndexArtifactCapability,
         base_height: u32,
+        error: &bitcoin_rs_execution::manifest::ManifestError,
     ) {
         let Some(runtime) = self.derived_index_runtime.as_ref() else {
             return;
         };
         match cap {
             bitcoin_rs_consensus::primitives::IndexArtifactCapability::TxLookup => {
-                runtime.publish_failed("TxLookup index artifact commitment is untrusted");
+                runtime.fail_tx_lookup(&error.to_string());
             }
             bitcoin_rs_consensus::primitives::IndexArtifactCapability::ScriptHistory => {
                 runtime.fail_script_history(

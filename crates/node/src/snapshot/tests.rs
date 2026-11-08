@@ -1103,10 +1103,9 @@ fn node_from_manifest_serves_covered_queries_before_historical_sync() -> Result<
 
     Ok(())
 }
-// SNP-04, SNP-07, SNP-10
+// SNP-10
 #[test]
-fn manifest_with_invalid_index_commitment_rejects_and_keeps_coin_store_unpublished()
--> Result<(), TestError> {
+fn bad_index_artifact_keeps_the_coin_store_import() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
     let dir = tempfile::tempdir()?;
     let (state, core_path, _) = snapshot_inputs(dir.path())?;
@@ -1114,30 +1113,29 @@ fn manifest_with_invalid_index_commitment_rejects_and_keeps_coin_store_unpublish
     let manifest_path =
         write_manifest_with_mismatched_index_artifact(dir.path(), pinned, &core_bytes)?;
 
-    let result = state.import_manifest(&manifest_path);
-    assert!(matches!(
-        result,
-        Err(SnapshotImportError::Manifest(
-            bitcoin_rs_execution::manifest::ManifestError::ArtifactHashMismatch { .. }
-        ))
-    ));
-
-    assert!(matches!(
-        state.snapshots.manager.status()?,
-        AssumeUtxoDiskStatus::Uninitialized
-    ));
-    assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
-    assert_eq!(
-        tip_identity(&state),
-        Some((0, Network::Regtest.genesis_block_hash()))
+    let result = state
+        .import_manifest(&manifest_path)
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    assert!(
+        result.is_ok(),
+        "an index artifact failure blocked the UTXO bootstrap: {result:?}"
     );
-
-    let utxo_len = state
+    assert_eq!(
+        state.chainstates_summary()?.active_chainstate.height,
+        Some(pinned.height)
+    );
+    let mut coin_rows = 0_usize;
+    for row in state
         .chainstate()
-        .utxo()
-        .with_stable_view(|view| Ok::<_, TestError>(view.len()))?;
-    assert_eq!(utxo_len, 0);
-
+        .coin_store()
+        .store()
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+    {
+        row?;
+        coin_rows += 1;
+    }
+    assert_eq!(coin_rows, 200);
     Ok(())
 }
 
@@ -1363,5 +1361,44 @@ fn a_snapshot_file_from_another_base_is_refused_before_activation() -> Result<()
         AssumeUtxoDiskStatus::Uninitialized
     ));
     assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
+    Ok(())
+}
+
+// SNP-07
+#[test]
+fn reopening_with_the_manifest_configuration_succeeds() -> Result<(), TestError> {
+    let pinned = regtest_pin()?;
+    let dir = tempfile::tempdir()?;
+    let mut config = node_config(dir.path());
+    let manifest_path = {
+        let state = crate::state::NodeState::open(config.clone(), None)?;
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+            Network::Regtest.genesis_block(),
+        ))?;
+        state.chainstate().admit_headers(&core_headers()?)?;
+        let core_path = dir.path().join("core.dat");
+        std::fs::write(
+            &core_path,
+            include_bytes!("../../../storage/tests/fixtures/core-v2/core200.dat"),
+        )?;
+        let core_bytes = std::fs::read(&core_path)?;
+        let manifest_path = write_valid_manifest(dir.path(), pinned, &core_bytes)?;
+        state.import_manifest(&manifest_path)?;
+        manifest_path
+    };
+    config.assumeutxo_manifest = Some(manifest_path);
+
+    let state = crate::state::NodeState::open(config, None)?;
+    assert_eq!(
+        state.chainstates_summary()?.active_chainstate.height,
+        Some(pinned.height)
+    );
+    assert!(
+        matches!(
+            state.snapshots.manager.status()?,
+            AssumeUtxoDiskStatus::Validating { .. } | AssumeUtxoDiskStatus::Finalized { .. }
+        ),
+        "the restart must keep the imported base instead of failing on AlreadyActive"
+    );
     Ok(())
 }
