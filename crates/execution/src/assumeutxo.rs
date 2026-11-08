@@ -395,6 +395,8 @@ pub struct HistoricalChainstateSummary {
     pub validated_utxo_count: u64,
 }
 
+pub type HistoricalFactsHook = Arc<dyn Fn(&BlockImage, &ConnectOutcome) + Send + Sync>;
+
 pub struct AssumeUtxoManager {
     lifecycle: Mutex<()>,
     network: Network,
@@ -404,6 +406,7 @@ pub struct AssumeUtxoManager {
     historical_checkpoint_interval: u32,
     pending_activation_mint: Mutex<Option<bitcoin_rs_storage::utxo::V4Witness>>,
     ingest_chunk_bytes: usize,
+    historical_facts_hook: RwLock<Option<HistoricalFactsHook>>,
 }
 
 impl std::fmt::Debug for AssumeUtxoManager {
@@ -471,6 +474,7 @@ impl AssumeUtxoManager {
             historical_checkpoint_interval: historical_checkpoint_interval.max(1),
             pending_activation_mint: Mutex::new(None),
             ingest_chunk_bytes: DEFAULT_INGEST_CHUNK_BYTES,
+            historical_facts_hook: RwLock::new(None),
         };
         manager.finish_open()?;
         Ok(manager)
@@ -906,6 +910,14 @@ impl AssumeUtxoManager {
         self.pending_activation_mint.lock().take()
     }
 
+    pub fn set_historical_facts_hook(&self, hook: HistoricalFactsHook) {
+        *self.historical_facts_hook.write() = Some(hook);
+    }
+
+    pub fn clear_historical_facts_hook(&self) {
+        self.historical_facts_hook.write().take();
+    }
+
     pub fn step_historical(&self, payload: &BlockImage) -> Result<ConnectOutcome, AssumeUtxoError> {
         let _lifecycle = self.lifecycle.lock();
         let historical = self
@@ -923,9 +935,11 @@ impl AssumeUtxoManager {
         historical
             .undo_store
             .remove_archived(outcome.height, outcome.hash)?;
+        if let Some(hook) = self.historical_facts_hook.read().as_ref() {
+            hook(payload, &outcome);
+        }
         Ok(outcome)
     }
-
     fn connect_historical_block(
         &self,
         historical: &Arc<Chainstate>,

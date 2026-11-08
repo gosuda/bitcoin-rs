@@ -1712,3 +1712,25 @@ fn activation_streams_every_snapshot_coin_into_the_engine() -> TestResult {
     assert_eq!(activated.base_hash, fixture.pinned.block_hash);
     assert_engine_matches_snapshot(&fixture.active, &fixture)
 }
+
+// SNP-08
+#[test]
+fn historical_facts_hook_receives_facts_on_step_historical() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let called = Arc::new(AtomicBool::new(false));
+    let called_clone = Arc::clone(&called);
+    manager.set_historical_facts_hook(Arc::new(move |_payload, outcome| {
+        if outcome.height == 0 {
+            called_clone.store(true, Ordering::Release);
+        }
+    }));
+    let genesis = BlockImage::from_local(Network::Regtest.genesis_block());
+    let outcome = manager.step_historical(&genesis)?;
+    assert_eq!(outcome.height, 0);
+    assert!(called.load(Ordering::Acquire));
+    manager.clear_historical_facts_hook();
+    Ok(())
+}
