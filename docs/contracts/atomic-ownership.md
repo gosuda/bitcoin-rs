@@ -452,3 +452,38 @@ Nothing below the owner facade can interpret or copy the same data again.
 - Notifications describe committed blocks.
 - Notifications do not guarantee availability of intermediate UTXO states.
 - Event observers must use bounded delivery channels with explicit gap detection.
+
+### `MOD-01`: Owner crates and exclusive responsibilities
+
+- Each node concern has one owner crate. The owner crate holds the exclusive responsibility for that concern.
+- `wire` owns transport framing, peer admission, and immutable byte ownership.
+- `consensus` owns validation rules, script execution, and cryptographic checks.
+- `execution` owns ordered resolution, window transitions, prefix selection, and the window delta.
+- `storage` owns coin persistence, append streams, the commit authority, and checkpoint recovery.
+- `projection` owns index construction, generation publication, and coverage.
+- `mempool` owns policy admission, dependency state, and settlement.
+- `serving` owns snapshot-bound queries, mining views, and protocol serialization.
+- `node` owns lifecycle, shared budgets, and composition.
+
+### `MOD-02`: Ownership types encode pipeline stages
+
+- Rust ownership types must encode the pipeline stages: parsed input, resolved work, accepted prefix, durable receipt, and published view.
+- A function that needs an accepted prefix must take the accepted-prefix type.
+- The function must not take a block instead.
+
+### `MOD-03`: Backend and wire detail confinement
+
+- Storage backend details stay inside the storage owner.
+- Wire types stay at the protocol boundaries.
+- An optional projection cannot call authoritative mutation.
+
+### `MOD-04`: No second frameworks on the hot path
+
+- The hot path must not contain a generic event bus.
+- The hot path must not contain a per-record serialization layer.
+- The hot path must not contain a capability-independent row-building framework.
+
+### `MOD-05`: Five-layer dependency direction
+
+- The five-layer dependency direction stays in force (`ARCH-01`).
+- The CI gate `g17_dependency_direction` must pass.
