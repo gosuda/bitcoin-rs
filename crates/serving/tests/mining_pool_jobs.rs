@@ -1246,7 +1246,7 @@ fn found_blocks_reach_the_authoritative_submit_path_and_receipts_map_verdicts() 
     {
         let submitted = lock(&control.submitted);
         assert_eq!(submitted.len(), 1);
-        assert_eq!(submitted[0].block(), &found.block);
+        assert_eq!(&submitted[0].materialize(), &found.block);
         assert_eq!(submitted[0].bytes().as_ref(), found.raw.as_slice());
     }
 

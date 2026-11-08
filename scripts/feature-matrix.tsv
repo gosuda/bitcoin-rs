@@ -20,6 +20,7 @@ storage-surrealkv	bitcoin-rs-storage	native	--features surrealkv --all-targets
 storage-mdbx	bitcoin-rs-storage	native	--features mdbx --all-targets
 serving-default	bitcoin-rs-serving	native	--all-targets
 serving-no-defaults	bitcoin-rs-serving	native	--no-default-features --all-targets
+serving-pool	bitcoin-rs-serving	native	--features pool,pool-sv2 --all-targets
 node-no-zmq	bitcoin-rs-node	native	--no-default-features --all-targets
 node-zmq	bitcoin-rs-node	native	--no-default-features --features zmq --all-targets
 node-default	bitcoin-rs-node	native	--all-targets

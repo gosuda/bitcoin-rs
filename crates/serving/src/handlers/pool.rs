@@ -348,6 +348,7 @@ mod tests {
             Ok(self.state.lock().audits.clone())
         }
         fn set_payout_script(&self, account: MinerId, script: Vec<u8>) -> Result<(), LedgerError> {
+            pool_ledger::validate_script(&script)?;
             self.state.lock().scripts.insert(account.0, script);
             Ok(())
         }
@@ -355,15 +356,18 @@ mod tests {
             &self,
             idempotency_key: Hash32,
             policy: PayoutPolicy,
-        ) -> Result<PayoutBatch, LedgerError> {
-            let mut state = self.state.lock();
+        ) -> Result<Option<PayoutBatch>, LedgerError> {
+            let mut guard = self.state.lock();
+            let state = &mut *guard;
             let mut outputs = Vec::new();
+            let mut total_sat = 0u64;
             for (&acc, bal) in state.balances.iter_mut() {
                 if bal.available_sat >= policy.min_payout_sat && outputs.len() < policy.max_outputs
                 {
                     let amount = bal.available_sat;
                     bal.reserved_sat = bal.reserved_sat.saturating_add(amount);
                     bal.available_sat = 0;
+                    total_sat = total_sat.saturating_add(amount);
                     let script_pubkey = state.scripts.get(&acc).cloned().unwrap_or(vec![0x51]);
                     outputs.push(pool_ledger::PayoutOutput {
                         account: MinerId(acc),
@@ -372,25 +376,32 @@ mod tests {
                     });
                 }
             }
+            if outputs.is_empty() {
+                return Ok(None);
+            }
             let batch_id = idempotency_key;
             let request = pool_ledger::PayoutRequest {
                 batch_id,
                 outputs: outputs.clone(),
-                fee_sat: 0,
+                total_sat,
+                allowed_change_scripts: Vec::new(),
             };
             state.requests.insert(batch_id, request);
             let batch = PayoutBatch {
                 id: batch_id,
                 seq: 1,
                 idempotency_key,
-                batch_policy: policy,
-                created_at_tip: 100,
                 state: pool_ledger::BatchState::Prepared,
+                rev: 1,
                 outputs,
-                txs: Vec::new(),
+                total_sat,
+                transactions: Vec::new(),
+                broadcast_txid: None,
+                confirmation: None,
+                closure: None,
             };
             state.batches.insert(batch_id, batch.clone());
-            Ok(batch)
+            Ok(Some(batch))
         }
         fn request_for(
             &self,
@@ -411,13 +422,16 @@ mod tests {
                 .ok_or(LedgerError::UnknownBatch(receipt.batch_id))?;
             if receipt.txid != pool_ledger::sha256d(&receipt.raw_tx) {
                 return Err(LedgerError::Receipt(
-                    pool_ledger::ReceiptError::MismatchedTxid,
+                    pool_ledger::ReceiptError::TxidMismatch,
                 ));
             }
+            if batch.transactions.iter().any(|tx| tx.txid == receipt.txid) {
+                return Ok(batch.clone());
+            }
             batch.state = pool_ledger::BatchState::ExternallySigned;
-            batch.txs.push(pool_ledger::SignedTx {
+            batch.transactions.push(pool_ledger::SignedTx {
                 txid: receipt.txid,
-                raw_tx: receipt.raw_tx.clone(),
+                inputs: Vec::new(),
             });
             Ok(batch.clone())
         }
@@ -429,7 +443,8 @@ mod tests {
             id: &Hash32,
             basis: CancelBasis,
         ) -> Result<PayoutBatch, LedgerError> {
-            let mut state = self.state.lock();
+            let mut guard = self.state.lock();
+            let state = &mut *guard;
             let batch = state
                 .batches
                 .get_mut(id)
@@ -441,14 +456,20 @@ mod tests {
                     action: "cancel",
                 });
             }
-            batch.state = pool_ledger::BatchState::Cancelled(basis);
-            for out in &batch.outputs {
+            batch.state = pool_ledger::BatchState::Cancelled;
+            batch.closure = Some(pool_ledger::Closure::Cancelled(basis));
+            let outputs = batch.outputs.clone();
+            for out in &outputs {
                 if let Some(bal) = state.balances.get_mut(&out.account.0) {
                     bal.reserved_sat = bal.reserved_sat.saturating_sub(out.amount_sat);
                     bal.available_sat = bal.available_sat.saturating_add(out.amount_sat);
                 }
             }
-            Ok(batch.clone())
+            state
+                .batches
+                .get(id)
+                .cloned()
+                .ok_or(LedgerError::UnknownBatch(*id))
         }
         fn record_found_block(
             &self,
@@ -459,12 +480,17 @@ mod tests {
                     id: 1,
                     block_hash: [4; 32],
                     height: 100,
-                    state: pool_ledger::RoundState::Matured,
-                    gross_reward_sat: 10_000,
-                    net_reward_sat: 10_000,
+                    solving_seq: 1,
+                    coinbase_txid: [5; 32],
+                    claimed_coinbase_value_sat: 10_000,
+                    window_work_total: 100,
+                    reward_fixed: true,
+                    gross_sat: 10_000,
                     pool_fee_sat: 0,
+                    net_sat: 10_000,
+                    state: pool_ledger::RoundState::Matured,
                 },
-                share: pool_ledger::ShareReceipt { seq: 1, work: 100 },
+                share: pool_ledger::ShareReceipt::Credited { seq: 1 },
                 newly_recorded: true,
             })
         }
@@ -478,6 +504,7 @@ mod tests {
                     available_sat: 10_000,
                     reserved_sat: 0,
                     paid_sat: 0,
+                    deficit_sat: 0,
                 },
             );
             Ok(pool_ledger::RoundReconcileReport::default())

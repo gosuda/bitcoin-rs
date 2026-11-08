@@ -11,6 +11,7 @@ pub(crate) enum TestError {
     #[error(transparent)]
     Prioritise(#[from] bitcoin_rs_mempool::PrioritiseError),
     #[cfg(feature = "pool")]
+    #[error(transparent)]
     Ledger(#[from] crate::mining::pool::ledger::LedgerError),
     #[error(transparent)]
     BitcoinDecode(#[from] bitcoin::consensus::encode::Error),

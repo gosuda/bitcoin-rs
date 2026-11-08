@@ -116,6 +116,8 @@ test_crates_profiles() {
   # Isolated so node's default zmq feature cannot unify this package on.
   profile "test: bitcoin-rs-serving (no default features)" \
     cargo_test -p bitcoin-rs-serving --no-default-features
+  profile "test: bitcoin-rs-serving (pool, pool-sv2)" \
+    cargo_test -p bitcoin-rs-serving --features pool,pool-sv2
 }
 
 test_binary_profiles() {

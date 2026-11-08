@@ -518,6 +518,7 @@ pub(crate) struct LedgerHost {
 }
 
 impl LedgerHost {
+    #[cfg(test)]
     pub(crate) fn ledger_store(&self) -> &Ledger {
         &self.ledger
     }
