@@ -7,8 +7,8 @@ use super::manifest::{
     BundleFamily, IndexBundleManifestV1, MANIFEST_FILE, MAX_MANIFEST_BYTES, ValidatedManifest,
 };
 use super::{
-    BundleHost, BundleOutcome, IndexBundleError, IndexBundleRequest, RestoreReport, Withheld,
-    io_error,
+    BundleHost, BundleOutcome, IndexBundleError, IndexBundleRequest, ManifestArtifactTarget,
+    RestoreReport, Withheld, io_error,
 };
 use crate::types::TxPosition;
 use crate::writer::TxIndexWriter;
@@ -88,47 +88,80 @@ pub(super) fn restore(
 }
 pub fn attach_tx_lookup_artifact(
     writer: &dyn TxIndexWriter,
-    artifact_path: &Path,
+    target: &ManifestArtifactTarget,
     headers: &[&[u8; crate::types::HEADER_ROW_SIZE]],
-    base: IndexWatermark,
-    floor: u32,
     scratch: &Path,
 ) -> Result<u64, IndexBundleError> {
-    let mut hashed = open_hashed(artifact_path).map_err(|error| io_error(artifact_path, error))?;
+    const NAME: &str = "txlookup.artifact";
+    let path = &target.artifact_path;
+    let fail = |error| io_error(path, error);
+    let length = fs::metadata(path).map_err(fail)?.len();
+    if length != target.size_bytes {
+        return Err(IndexBundleError::ArtifactLength {
+            name: NAME,
+            expected: target.size_bytes,
+            actual: length,
+        });
+    }
+    let mut hashed = open_hashed(path).map_err(fail)?;
     let mut header_bytes = [0_u8; HEADER_LEN];
-    hashed
-        .read_exact(&mut header_bytes)
-        .map_err(|error| io_error(artifact_path, error))?;
-    let header = ArtifactHeader::decode(&header_bytes).map_err(|reason| {
-        IndexBundleError::ArtifactHeader {
-            name: "tx_lookup",
-            reason,
+    let header = match hashed.read_exact(&mut header_bytes) {
+        Ok(()) => ArtifactHeader::decode(&header_bytes),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            Err("file ends inside the header")
         }
-    })?;
-    let mut records = RecordReader::new(&mut hashed, &header, floor);
+        Err(error) => return Err(fail(error)),
+    };
+    let expectation = ArtifactExpectation {
+        family: BundleFamily::TxLookup,
+        index_format: target.index_format,
+        network_magic: target.network.magic(),
+        base_height: target.base_height,
+        base_hash: target.base_hash,
+        records: None,
+        payload_bytes: target
+            .size_bytes
+            .checked_sub(u64::try_from(HEADER_LEN).unwrap_or(u64::MAX)),
+    };
+    let header =
+        match header.and_then(|header| check_header(&header, &expectation).map(|()| header)) {
+            Ok(header) => header,
+            Err(reason) => return Err(IndexBundleError::ArtifactHeader { name: NAME, reason }),
+        };
     let mut rows = Vec::new();
     let mut assembler = RowAssembler::default();
-    while let Some(record) = records.next_record().map_err(|fault| match fault {
-        ReadFault::Io(error) => io_error(artifact_path, error),
-        ReadFault::Framing { record, reason } => IndexBundleError::ArtifactFraming {
-            name: "tx_lookup",
-            record,
-            reason,
-        },
-    })? {
-        assembler.push(&record, &mut |row, value| {
-            rows.push((row.to_db_row().to_vec(), value.to_vec()));
-            Ok(())
-        })?;
+    {
+        let mut records = RecordReader::new(&mut hashed, &header, target.floor);
+        while let Some(record) = records.next_record().map_err(|fault| match fault {
+            ReadFault::Io(error) => io_error(path, error),
+            ReadFault::Framing { record, reason } => IndexBundleError::ArtifactFraming {
+                name: NAME,
+                record,
+                reason,
+            },
+        })? {
+            assembler.push(&record, &mut |row, value| {
+                rows.push((row.to_db_row().to_vec(), value.to_vec()));
+                Ok(())
+            })?;
+        }
     }
     assembler.flush::<IndexError>(&mut |row, value| {
         rows.push((row.to_db_row().to_vec(), value.to_vec()));
         Ok(())
     })?;
+    drain_remaining_for_hash(&mut hashed, &|| false, path)?;
+    if into_digest(hashed) != target.sha256 {
+        return Err(IndexBundleError::ArtifactHash { name: NAME });
+    }
+    let base = IndexWatermark {
+        height: target.base_height,
+        hash: target.base_hash,
+    };
     let attachment = crate::writer::TxLookupAttachment {
         headers,
         base,
-        floor,
+        floor: target.floor,
         scratch,
     };
     let count = writer.attach_tx_lookup_rows(&mut rows.into_iter(), &attachment)?;
@@ -364,11 +397,12 @@ fn validate_artifact(
 ) -> Result<(ArtifactHeader, LocatorOutcome), IndexBundleError> {
     let name = BundleFamily::TxLookup.file_name();
     let fail = |error| io_error(path, error);
+    let expectation = manifest_artifact_expectation(manifest)?;
     let mut reader = open_hashed(path).map_err(fail)?;
     let mut header_bytes = [0_u8; HEADER_LEN];
     let header = match reader.read_exact(&mut header_bytes) {
         Ok(()) => ArtifactHeader::decode(&header_bytes)
-            .and_then(|header| check_header(&header, manifest).map(|()| header)),
+            .and_then(|header| check_header(&header, &expectation).map(|()| header)),
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
             Err("file ends inside the header")
         }
@@ -424,31 +458,67 @@ fn validate_artifact(
     Ok((header, outcome))
 }
 
-fn check_header(header: &ArtifactHeader, manifest: &ValidatedManifest) -> Result<(), &'static str> {
+pub(super) struct ArtifactExpectation {
+    pub(super) family: BundleFamily,
+    pub(super) index_format: u32,
+    pub(super) network_magic: [u8; 4],
+    pub(super) base_height: u32,
+    pub(super) base_hash: [u8; 32],
+    pub(super) records: Option<u64>,
+    pub(super) payload_bytes: Option<u64>,
+}
+
+fn manifest_artifact_expectation(
+    manifest: &ValidatedManifest,
+) -> Result<ArtifactExpectation, IndexBundleError> {
     let identity = &manifest.identity;
-    if header.family != BundleFamily::TxLookup {
+    let payload_bytes = manifest
+        .tx_lookup
+        .bytes
+        .checked_sub(u64::try_from(HEADER_LEN).unwrap_or(u64::MAX));
+    if payload_bytes.is_none() {
+        return Err(IndexBundleError::ArtifactHeader {
+            name: BundleFamily::TxLookup.file_name(),
+            reason: "manifest declares an artifact shorter than its header",
+        });
+    }
+    Ok(ArtifactExpectation {
+        family: BundleFamily::TxLookup,
+        index_format: identity.format_version,
+        network_magic: identity.network.magic(),
+        base_height: identity.base_height,
+        base_hash: identity.base_hash,
+        records: Some(manifest.tx_lookup.records),
+        payload_bytes,
+    })
+}
+
+fn check_header(
+    header: &ArtifactHeader,
+    expected: &ArtifactExpectation,
+) -> Result<(), &'static str> {
+    if header.family != expected.family {
         return Err("family is not tx_lookup");
     }
     if header.artifact_version != ARTIFACT_VERSION {
         return Err("artifact version is not supported");
     }
-    if header.index_format != identity.format_version {
+    if header.index_format != expected.index_format {
         return Err("index format differs from the manifest");
     }
-    if header.network_magic != identity.network.magic() {
+    if header.network_magic != expected.network_magic {
         return Err("network magic differs from the manifest");
     }
-    if header.base_height != identity.base_height || header.base_hash != identity.base_hash {
+    if header.base_height != expected.base_height || header.base_hash != expected.base_hash {
         return Err("base differs from the manifest");
     }
-    if header.records != manifest.tx_lookup.records {
+    if expected
+        .records
+        .is_some_and(|records| header.records != records)
+    {
         return Err("record count differs from the manifest");
     }
-    let payload = manifest
-        .tx_lookup
-        .bytes
-        .checked_sub(u64::try_from(HEADER_LEN).unwrap_or(u64::MAX));
-    if payload != Some(header.payload_bytes) {
+    if expected.payload_bytes != Some(header.payload_bytes) {
         return Err("payload length differs from the manifest");
     }
     Ok(())

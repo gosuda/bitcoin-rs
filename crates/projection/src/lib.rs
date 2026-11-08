@@ -32,7 +32,7 @@ pub use index::{
     IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, Indexer,
     MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptLiveScan,
     SpentCoin, SpentCoins, TxIndexFamily, TxIndexPage, TxIndexScan, TxIndexScanRow,
-    TxIndexSnapshot,
+    TxIndexSnapshot, index_format_version,
 };
 pub use offline::{IndexResetReport, reset_offline};
 pub use query_api::{

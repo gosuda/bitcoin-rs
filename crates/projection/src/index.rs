@@ -23,7 +23,7 @@ pub use snapshot::{
 };
 pub use state::{ConsumerCursorUpdate, IndexWriteFence};
 pub use write::IndexWriter;
-pub(crate) use write::index_format_version;
+pub use write::index_format_version;
 
 #[cfg(test)]
 mod tests;

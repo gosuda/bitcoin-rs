@@ -26,7 +26,7 @@ pub enum IndexBundleDirective {
     None,
     Restore(IndexBundleRequest),
     Export(IndexBundleRequest),
-    AttachManifestArtifact(ManifestArtifactTarget),
+    AttachManifestArtifact(Box<ManifestArtifactTarget>),
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +35,10 @@ pub struct ManifestArtifactTarget {
     pub base_height: u32,
     pub base_hash: [u8; 32],
     pub floor: u32,
+    pub network: Network,
+    pub index_format: u32,
+    pub sha256: [u8; 32],
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -192,14 +196,7 @@ fn attach_manifest_artifact(
         .parent()
         .unwrap_or(&target.artifact_path);
     let header_refs: Vec<&[u8; 80]> = headers.iter().collect();
-    let records = restore::attach_tx_lookup_artifact(
-        host.writer,
-        &target.artifact_path,
-        &header_refs,
-        base,
-        target.floor,
-        scratch,
-    )?;
+    let records = restore::attach_tx_lookup_artifact(host.writer, target, &header_refs, scratch)?;
     Ok(Some(BundleOutcome::Restored(RestoreReport {
         base,
         records,

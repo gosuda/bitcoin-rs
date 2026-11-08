@@ -24,7 +24,9 @@ use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Network, Txid};
 use bitcoin_rs_execution::chain::{
     BlockTree, BlockTreeReader, ChainTxCount, LatchWriter, NodeStatus, TipReader, TipSnapshot,
 };
-use bitcoin_rs_projection::portable::{IndexBundleDirective, IndexBundleRequest};
+use bitcoin_rs_projection::portable::{
+    IndexBundleDirective, IndexBundleRequest, ManifestArtifactTarget, attach_tx_lookup_artifact,
+};
 use bitcoin_rs_projection::reconcile::{ChainCursorSource, ConsumerCursor};
 use bitcoin_rs_projection::runtime::{
     DEFAULT_BATCH_LIMITS, DerivedIndexLifecycle, DerivedIndexOpenSpec, DerivedIndexQueryAdapter,
@@ -33,6 +35,7 @@ use bitcoin_rs_projection::runtime::{
 };
 use bitcoin_rs_projection::{
     DerivedIndexQuery, IndexCapabilities, IndexCapability, IndexReader, IndexWatermark, Indexer,
+    index_format_version,
 };
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
@@ -1029,6 +1032,151 @@ fn flip_byte(path: &Path, offset: u64) {
     let index = usize::try_from(offset).expect("offset fits usize");
     bytes[index] ^= 0x01;
     fs::write(path, bytes).expect("rewrite artifact");
+}
+
+fn digest_of(path: &Path) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(fs::read(path).expect("read artifact")).into()
+}
+
+fn chain_headers(fixture: &ChainFixture, base_height: u32, base_hash: [u8; 32]) -> Vec<[u8; 80]> {
+    let tree = fixture.tree.read();
+    let tip = tree
+        .lookup(Hash256::from_le_bytes(&base_hash))
+        .expect("base header");
+    (0..=base_height)
+        .map(|height| {
+            let id = tree
+                .node_at_height_from(tip, height)
+                .expect("header on the active chain");
+            let node = tree.node(id).expect("header node");
+            let mut bytes = [0_u8; 80];
+            bytes.copy_from_slice(
+                &bitcoin_rs_consensus::primitives::consensus_bytes(&node.header)[..80],
+            );
+            bytes
+        })
+        .collect()
+}
+
+fn manifest_target(
+    artifact: &Path,
+    base: IndexWatermark,
+    sha256: [u8; 32],
+    size_bytes: u64,
+) -> ManifestArtifactTarget {
+    ManifestArtifactTarget {
+        artifact_path: artifact.to_path_buf(),
+        base_height: base.height,
+        base_hash: base.hash,
+        floor: 0,
+        network: Network::Regtest,
+        index_format: index_format_version(),
+        sha256,
+        size_bytes,
+    }
+}
+
+fn open_receiver(root: &Path, name: &str) -> bitcoin_rs_projection::runtime::OpenDerivedIndex {
+    let store = Arc::new(
+        RocksDbStore::open_with_cache(root.join(name).join("txindex"), STORE_CACHE_BYTES)
+            .expect("receiver store"),
+    );
+    open_derived_index_store_on_worker(
+        store,
+        DEFAULT_BATCH_LIMITS,
+        NEXT_EPOCH.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("open receiver index")
+}
+
+// SNP-03, SNP-04, SNP-05
+#[test]
+fn manifest_artifact_attach_verifies_digest_header_and_base_before_ingest() {
+    let fixture = ChainFixture::new(5, 30);
+    let root = tempfile::tempdir().expect("tempdir");
+    let (source, bundle) = (root.path().join("source"), root.path().join("bundle"));
+    backfilled_source(&fixture, &source);
+    exported_bundle(&fixture, &source, &bundle);
+    let base = fixture.tip_watermark();
+    let exported = bundle.join(ARTIFACT);
+    let size = fs::metadata(&exported)
+        .expect("exported artifact metadata")
+        .len();
+    let headers = chain_headers(&fixture, base.height, base.hash);
+    let header_refs: Vec<&[u8; 80]> = headers.iter().collect();
+
+    let attach = root.path().join("attach");
+    fs::create_dir_all(&attach).expect("attach dir");
+    fs::copy(&exported, attach.join(ARTIFACT)).expect("stage manifest artifact");
+    let good = open_receiver(root.path(), "receiver-good");
+    let records = attach_tx_lookup_artifact(
+        good.writer(),
+        &manifest_target(
+            &attach.join(ARTIFACT),
+            base,
+            digest_of(&attach.join(ARTIFACT)),
+            size,
+        ),
+        &header_refs,
+        &attach,
+    )
+    .expect("a verified manifest artifact attaches");
+    assert!(records > 0, "the attached artifact produced no rows");
+    let (_, watermarks) = good
+        .writer()
+        .fenced_watermarks()
+        .expect("receiver watermarks");
+    assert_eq!(watermarks.tx_lookup, Some(base));
+
+    let poisoned = root.path().join("attach-poisoned");
+    fs::create_dir_all(&poisoned).expect("attach dir");
+    fs::copy(&exported, poisoned.join(ARTIFACT)).expect("stage manifest artifact");
+    let mut forged = digest_of(&poisoned.join(ARTIFACT));
+    forged[0] ^= 0x01;
+    let receiver = open_receiver(root.path(), "receiver-bad");
+    let error = attach_tx_lookup_artifact(
+        receiver.writer(),
+        &manifest_target(&poisoned.join(ARTIFACT), base, forged, size),
+        &header_refs,
+        &poisoned,
+    )
+    .expect_err("a manifest artifact with a forged digest must be refused");
+    assert!(
+        matches!(
+            error,
+            bitcoin_rs_projection::portable::IndexBundleError::ArtifactHash { .. }
+        ),
+        "got {error:?}"
+    );
+
+    let wrong_base = IndexWatermark {
+        height: base.height - 1,
+        hash: base.hash,
+    };
+    let error = attach_tx_lookup_artifact(
+        receiver.writer(),
+        &manifest_target(
+            &poisoned.join(ARTIFACT),
+            wrong_base,
+            digest_of(&poisoned.join(ARTIFACT)),
+            size,
+        ),
+        &header_refs,
+        &poisoned,
+    )
+    .expect_err("a manifest artifact from another base must be refused");
+    assert!(
+        matches!(
+            error,
+            bitcoin_rs_projection::portable::IndexBundleError::ArtifactHeader { .. }
+        ),
+        "got {error:?}"
+    );
+
+    drop(good);
+    drop(receiver);
+    assert_untouched_fresh(&root.path().join("receiver-bad"));
 }
 
 #[test]

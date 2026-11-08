@@ -536,7 +536,7 @@ impl<S: KvStore> IndexWriter<S> {
     }
 }
 
-pub(crate) const fn index_format_version() -> u32 {
+pub const fn index_format_version() -> u32 {
     u32::from_le_bytes(FORMAT_VERSION_VALUE)
 }
 

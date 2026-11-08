@@ -473,6 +473,12 @@ pub struct OpenDerivedIndex {
     pub(crate) batch_limits: PreparedBatchLimits,
 }
 
+impl OpenDerivedIndex {
+    pub fn writer(&self) -> &dyn TxIndexWriter {
+        self.writer.as_ref()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum IndexAheadError {
     #[error(transparent)]

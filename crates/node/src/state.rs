@@ -508,7 +508,7 @@ fn manifest_attach_directive(
 ) -> Result<bitcoin_rs_projection::portable::IndexBundleDirective, ConfigError> {
     use bitcoin_rs_execution::manifest::CapabilityTrust;
     use bitcoin_rs_projection::portable::{IndexBundleDirective, ManifestArtifactTarget};
-    let bytes = match std::fs::read(manifest_path) {
+    let bytes = match read_bounded_manifest(manifest_path) {
         Ok(b) => b,
         Err(err) => {
             tracing::debug!(path = %manifest_path.display(), %err, "could not read manifest for index directive");
@@ -522,6 +522,14 @@ fn manifest_attach_directive(
             return Ok(IndexBundleDirective::None);
         }
     };
+    if manifest.schema != bitcoin_rs_projection::index_format_version() {
+        tracing::debug!(
+            path = %manifest_path.display(),
+            manifest_schema = manifest.schema,
+            "manifest schema differs from the node index format; no index artifact attach"
+        );
+        return Ok(IndexBundleDirective::None);
+    }
     let Some(anchor) = network.assume_utxo_for_height(manifest.base_height) else {
         return Ok(IndexBundleDirective::None);
     };
@@ -536,14 +544,38 @@ fn manifest_attach_directive(
     let Ok(artifact_path) = manifest.artifact_path(dir, 1) else {
         return Ok(IndexBundleDirective::None);
     };
-    Ok(IndexBundleDirective::AttachManifestArtifact(
+    Ok(IndexBundleDirective::AttachManifestArtifact(Box::new(
         ManifestArtifactTarget {
             artifact_path,
             base_height: manifest.base_height,
             base_hash: manifest.base_hash,
             floor: manifest.coverage[0].unwrap_or(0),
+            network,
+            index_format: manifest.schema,
+            sha256: manifest.artifact_sha256(
+                bitcoin_rs_consensus::primitives::IndexArtifactCapability::TxLookup,
+            ),
+            size_bytes: manifest
+                .artifact_size(bitcoin_rs_consensus::primitives::IndexArtifactCapability::TxLookup),
         },
-    ))
+    )))
+}
+
+fn read_bounded_manifest(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    const MAX_MANIFEST_BYTES: u64 = 1 << 20;
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_or(true, |len| len > MAX_MANIFEST_BYTES) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "manifest is larger than 1 MiB",
+        ));
+    }
+    Ok(bytes)
 }
 
 struct DerivedIndexComposer {
