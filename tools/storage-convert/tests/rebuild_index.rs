@@ -1,12 +1,31 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
 
+use bitcoin::absolute::LockTime;
+use bitcoin::hashes::{Hash as _, sha256d};
+use bitcoin::transaction::Version;
+use bitcoin::{
+    Amount, BlockHash, CompactTarget, ScriptBuf, Sequence, Transaction, TxIn, TxMerkleNode, Witness,
+};
+use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
-use bitcoin_rs_projection::{IndexWatermark, IndexWriter};
-use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore};
+use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
+use bitcoin_rs_projection::segment::{
+    Coverage, GenerationDescriptor, IndexGeneration, TailDescriptor, TailWriterState,
+    append_tail_block, meta_gen_key, seal_tail_generation,
+};
+use bitcoin_rs_projection::{IndexCapability, IndexWatermark, IndexWriter};
+use bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus;
+use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
+use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
+use bitcoin_rs_storage::utxo::contract::decode_undo_record;
+use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore, block_undo_key};
+use bytes::Bytes;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::support::error::{TestError, TestResult};
 use crate::support::harness::run_converter;
@@ -251,5 +270,788 @@ fn rebuild_index_empty_txindex_follows_detected_chainstate_engine() -> TestResul
     assert!(!desc.is_empty());
     let idx_meta_marker = store.get(ColumnFamily::IdxMeta, &[0x00, b'V'])?;
     assert!(idx_meta_marker.is_none());
+    Ok(())
+}
+
+const BULK_GEN_ID: u64 = 1;
+
+type CoinLedger = HashMap<([u8; 32], u32), (u64, Vec<u8>, u32, bool)>;
+
+type RestoreSpec = ([u8; 32], u32, u64, Vec<u8>, bool, u32);
+
+type CreatedCoin = (u64, Bytes, u32, bool);
+
+#[derive(Clone)]
+struct FixtureBlock {
+    height: u32,
+    hash: [u8; 32],
+    body: Vec<u8>,
+    facts: CommittedBlock,
+    undo: Vec<u8>,
+}
+
+fn push_compact_size(out: &mut Vec<u8>, value: usize) {
+    let value = u64::try_from(value).expect("fixture size fits u64");
+    assert!(value < 0xFD, "fixture count stays in one compact-size byte");
+    out.push(u8::try_from(value).expect("fixture count fits u8"));
+}
+
+fn fixture_outputs(spec: &[(u64, Vec<u8>)]) -> Vec<bitcoin::TxOut> {
+    spec.iter()
+        .map(|(value, script)| bitcoin::TxOut {
+            value: Amount::from_sat(*value),
+            script_pubkey: ScriptBuf::from_bytes(script.clone()),
+        })
+        .collect()
+}
+
+fn coinbase_tx(tag: u8, outputs: &[(u64, Vec<u8>)]) -> Transaction {
+    Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: bitcoin::OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(vec![tag]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: fixture_outputs(outputs),
+    }
+}
+
+fn spending_tx(prev: ([u8; 32], u32), witness: Witness, outputs: &[(u64, Vec<u8>)]) -> Transaction {
+    Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: bitcoin::OutPoint {
+                txid: bitcoin::Txid::from_byte_array(prev.0),
+                vout: prev.1,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness,
+        }],
+        output: fixture_outputs(outputs),
+    }
+}
+
+fn encode_undo(
+    block_hash: [u8; 32],
+    restores: &[RestoreSpec],
+    removes: &[([u8; 32], u32)],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(1);
+    out.extend_from_slice(&block_hash);
+    out.extend_from_slice(&u32::try_from(restores.len()).expect("fits").to_le_bytes());
+    for (txid, vout, value, script, coinbase, height) in restores {
+        out.extend_from_slice(txid);
+        out.extend_from_slice(&vout.to_le_bytes());
+        out.extend_from_slice(&value.to_le_bytes());
+        push_compact_size(&mut out, script.len());
+        out.extend_from_slice(script);
+        out.push(u8::from(*coinbase));
+        out.extend_from_slice(&height.to_le_bytes());
+    }
+    out.extend_from_slice(&u32::try_from(removes.len()).expect("fits").to_le_bytes());
+    for (txid, vout) in removes {
+        out.extend_from_slice(txid);
+        out.extend_from_slice(&vout.to_le_bytes());
+    }
+    out
+}
+
+struct BlockSpec {
+    height: u32,
+    parent: [u8; 32],
+    nonce: u32,
+    txs: Vec<Transaction>,
+}
+
+// PRJ-09
+fn assemble_block(spec: BlockSpec, ledger: &mut CoinLedger) -> FixtureBlock {
+    let BlockSpec {
+        height,
+        parent,
+        nonce,
+        txs,
+    } = spec;
+    let merkle_root =
+        bitcoin::merkle_tree::calculate_root(txs.iter().map(bitcoin::Transaction::compute_txid))
+            .map_or_else(
+                || TxMerkleNode::from_byte_array([0u8; 32]),
+                |root| TxMerkleNode::from_byte_array(root.to_byte_array()),
+            );
+    let header = bitcoin::block::Header {
+        version: bitcoin::block::Version::ONE,
+        prev_blockhash: BlockHash::from_byte_array(parent),
+        merkle_root,
+        time: height,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
+        nonce,
+    };
+    let header_bytes = bitcoin::consensus::serialize(&header);
+    assert_eq!(header_bytes.len(), 80);
+    let hash = sha256d::Hash::hash(&header_bytes).to_byte_array();
+
+    let mut body = Vec::new();
+    body.extend_from_slice(&header_bytes);
+    push_compact_size(&mut body, txs.len());
+    let mut spans = Vec::with_capacity(txs.len());
+    for tx in &txs {
+        let encoded = bitcoin::consensus::serialize(tx);
+        let start = body.len();
+        body.extend_from_slice(&encoded);
+        spans.push((start, encoded.len()));
+    }
+
+    let image = BlockImage::from_raw(Bytes::copy_from_slice(&body)).expect("fixture block parses");
+    assert_eq!(image.block_hash().0.to_le_bytes(), hash);
+    assert_eq!(&image.header_bytes()[..], header_bytes.as_slice());
+    assert_eq!(
+        image.header().merkle_root.to_le_bytes(),
+        merkle_root.to_byte_array()
+    );
+    assert_eq!(image.tx_count(), txs.len());
+
+    let mut created: HashMap<([u8; 32], u32), CreatedCoin> = HashMap::new();
+    let mut restores: Vec<RestoreSpec> = Vec::new();
+    let mut removes: Vec<([u8; 32], u32)> = Vec::new();
+    let mut facts_txs = Vec::with_capacity(txs.len());
+    for (tx, (start, len)) in txs.iter().zip(spans.iter()) {
+        let txid = tx.compute_txid().to_byte_array();
+        let is_coinbase = tx.is_coinbase();
+        let mut inputs = Vec::new();
+        if !is_coinbase {
+            for input in &tx.input {
+                let prev_txid = input.previous_output.txid.to_byte_array();
+                let prev_vout = input.previous_output.vout;
+                let (value, script, coin_height, coinbase) =
+                    if let Some((value, script, coin_height, coinbase)) =
+                        created.get(&(prev_txid, prev_vout))
+                    {
+                        removes.push((prev_txid, prev_vout));
+                        (*value, script.clone(), *coin_height, *coinbase)
+                    } else {
+                        let (value, script, coin_height, coinbase) = ledger
+                            .get(&(prev_txid, prev_vout))
+                            .expect("fixture spends a known coin")
+                            .clone();
+                        restores.push((
+                            prev_txid,
+                            prev_vout,
+                            value,
+                            script.clone(),
+                            coinbase,
+                            coin_height,
+                        ));
+                        (value, Bytes::from(script), coin_height, coinbase)
+                    };
+                inputs.push(SpentPrevout {
+                    txid: prev_txid,
+                    vout: prev_vout,
+                    value,
+                    script,
+                    height: coin_height,
+                    coinbase,
+                });
+            }
+        }
+        let mut outputs = Vec::new();
+        for (vout, output) in tx.output.iter().enumerate() {
+            let vout = u32::try_from(vout).expect("fixture vout fits u32");
+            let script = output.script_pubkey.as_bytes().to_vec();
+            let value = output.value.to_sat();
+            let script_bytes = Bytes::copy_from_slice(&script);
+            outputs.push(CreatedOutput {
+                vout,
+                value,
+                script: script_bytes.clone(),
+            });
+            created.insert((txid, vout), (value, script_bytes, height, is_coinbase));
+            ledger.insert((txid, vout), (value, script, height, is_coinbase));
+        }
+        facts_txs.push(TxFacts {
+            txid,
+            offset: u32::try_from(*start).expect("fixture offset fits u32"),
+            len: u32::try_from(*len).expect("fixture length fits u32"),
+            inputs,
+            outputs,
+        });
+    }
+
+    let undo = encode_undo(hash, &restores, &removes);
+    let decoded = decode_undo_record(&undo, Hash256::from_le_bytes(&hash))
+        .expect("fixture undo record decodes");
+    assert_eq!(decoded.restores().len(), restores.len());
+    assert_eq!(decoded.removes().len(), removes.len());
+    for (add, (txid, vout, value, script, coinbase, coin_height)) in
+        decoded.restores().iter().zip(restores.iter())
+    {
+        let decoded_txid = add.outpoint.txid;
+        let decoded_vout = add.outpoint.vout;
+        assert_eq!(decoded_txid.as_bytes(), txid);
+        assert_eq!(decoded_vout, *vout);
+        assert_eq!(add.txout.value.to_sat(), *value);
+        assert_eq!(
+            &Bytes::copy_from_slice(&add.txout.script_pubkey)[..],
+            script
+        );
+        assert_eq!(add.coinbase, *coinbase);
+        assert_eq!(add.height, *coin_height);
+    }
+
+    FixtureBlock {
+        height,
+        hash,
+        body,
+        facts: CommittedBlock {
+            height,
+            hash,
+            parent_hash: parent,
+            header: image.header_bytes(),
+            txs: facts_txs,
+        },
+        undo,
+    }
+}
+
+fn p2wpkh_script(tag: u8) -> Vec<u8> {
+    let mut script = vec![0x00, 0x14];
+    script.extend_from_slice(&[tag; 20]);
+    script
+}
+
+fn p2pkh_script(tag: u8) -> Vec<u8> {
+    let mut script = vec![0x76, 0xa9, 0x14];
+    script.extend_from_slice(&[tag; 20]);
+    script.push(0x88);
+    script.push(0xac);
+    script
+}
+
+fn creating_chain() -> Vec<FixtureBlock> {
+    let mut ledger = CoinLedger::new();
+    let mut blocks = Vec::new();
+    let mut parent = [0u8; 32];
+
+    let coinbase = coinbase_tx(1, &[(50_000, p2wpkh_script(0xA1))]);
+    let block = assemble_block(
+        BlockSpec {
+            height: 0,
+            parent,
+            nonce: 0,
+            txs: vec![coinbase],
+        },
+        &mut ledger,
+    );
+    parent = block.hash;
+    blocks.push(block);
+
+    let coinbase = coinbase_tx(2, &[(50_000, p2pkh_script(0xB1))]);
+    let coinbase_txid = coinbase.compute_txid().to_byte_array();
+    let spend = spending_tx(
+        (coinbase_txid, 0),
+        Witness::new(),
+        &[(49_000, p2pkh_script(0xB2))],
+    );
+    let block = assemble_block(
+        BlockSpec {
+            height: 1,
+            parent,
+            nonce: 1,
+            txs: vec![coinbase, spend],
+        },
+        &mut ledger,
+    );
+    parent = block.hash;
+    blocks.push(block);
+
+    let coinbase = coinbase_tx(3, &[(50_000, p2wpkh_script(0xC1))]);
+    let block = assemble_block(
+        BlockSpec {
+            height: 2,
+            parent,
+            nonce: 2,
+            txs: vec![coinbase],
+        },
+        &mut ledger,
+    );
+    parent = block.hash;
+    blocks.push(block);
+
+    let coinbase = coinbase_tx(4, &[(50_000, p2pkh_script(0xD1))]);
+    let coinbase_txid = coinbase.compute_txid().to_byte_array();
+    let spend = spending_tx(
+        (coinbase_txid, 0),
+        Witness::from_slice(&[vec![0x30; 71], vec![0x02; 33]]),
+        &[(49_500, p2pkh_script(0xD2))],
+    );
+    let block = assemble_block(
+        BlockSpec {
+            height: 3,
+            parent,
+            nonce: 3,
+            txs: vec![coinbase, spend],
+        },
+        &mut ledger,
+    );
+    blocks.push(block);
+    blocks
+}
+
+fn crossing_chain() -> Vec<FixtureBlock> {
+    let mut ledger = CoinLedger::new();
+    let mut blocks = Vec::new();
+    let mut parent = [0u8; 32];
+
+    let coinbase = coinbase_tx(11, &[(50_000, p2wpkh_script(0xE1))]);
+    let coinbase_txid = coinbase.compute_txid().to_byte_array();
+    let block = assemble_block(
+        BlockSpec {
+            height: 0,
+            parent,
+            nonce: 0,
+            txs: vec![coinbase],
+        },
+        &mut ledger,
+    );
+    parent = block.hash;
+    blocks.push(block);
+
+    let coinbase = coinbase_tx(12, &[(50_000, p2pkh_script(0xE2))]);
+    let spend = spending_tx(
+        (coinbase_txid, 0),
+        Witness::from_slice(&[vec![0x30; 72], vec![0x02; 33]]),
+        &[(30_000, p2pkh_script(0xE3)), (19_000, p2wpkh_script(0xE4))],
+    );
+    let spend_txid = spend.compute_txid().to_byte_array();
+    let block = assemble_block(
+        BlockSpec {
+            height: 1,
+            parent,
+            nonce: 1,
+            txs: vec![coinbase, spend],
+        },
+        &mut ledger,
+    );
+    parent = block.hash;
+    blocks.push(block);
+
+    let coinbase = coinbase_tx(13, &[(50_000, p2wpkh_script(0xF1))]);
+    let coinbase_txid = coinbase.compute_txid().to_byte_array();
+    let external = spending_tx(
+        (spend_txid, 0),
+        Witness::new(),
+        &[(29_000, p2pkh_script(0xF2))],
+    );
+    let same_block = spending_tx(
+        (coinbase_txid, 0),
+        Witness::new(),
+        &[(49_000, p2wpkh_script(0xF3))],
+    );
+    let block = assemble_block(
+        BlockSpec {
+            height: 2,
+            parent,
+            nonce: 2,
+            txs: vec![coinbase, external, same_block],
+        },
+        &mut ledger,
+    );
+    parent = block.hash;
+    blocks.push(block);
+
+    let coinbase = coinbase_tx(14, &[(50_000, p2pkh_script(0xF4))]);
+    let block = assemble_block(
+        BlockSpec {
+            height: 3,
+            parent,
+            nonce: 3,
+            txs: vec![coinbase],
+        },
+        &mut ledger,
+    );
+    blocks.push(block);
+    blocks
+}
+
+fn prepare_datadir(root: &Path) -> TestResult<PathBuf> {
+    let datadir = root.join("datadir");
+    fs::create_dir_all(datadir.join("txindex"))?;
+    fs::create_dir_all(datadir.join("blocks"))?;
+    fs::write(datadir.join("CURRENT_SCHEMA"), "3\n")?;
+    let store = RocksDbStore::open(datadir.join("txindex"))?;
+    drop(store);
+    Ok(datadir)
+}
+
+fn write_chainstate(
+    datadir: &Path,
+    undo_blocks: &[&FixtureBlock],
+    tip: Option<&FixtureBlock>,
+    chain_blocks: &[&FixtureBlock],
+) -> TestResult<()> {
+    let store = RocksDbStore::open(datadir.join("chainstate"))?;
+    let mut batch = store.new_batch();
+    for block in undo_blocks {
+        batch.put(
+            ColumnFamily::UndoData,
+            &block_undo_key(block.height, Hash256::from_le_bytes(&block.hash)),
+            &block.undo,
+        );
+    }
+    if let Some(tip) = tip {
+        let chain_tx_count = chain_blocks
+            .iter()
+            .map(|block| u64::try_from(block.facts.txs.len()).expect("fits"))
+            .sum();
+        let head = DurableHead {
+            assumeutxo: AssumeUtxoDiskStatus::Uninitialized,
+            commit_id: 1,
+            height: tip.height,
+            tip: Hash256::from_le_bytes(&tip.hash),
+            chain_tx_count,
+            body_extent: None,
+            undo_extent: Some((tip.height, Hash256::from_le_bytes(&tip.hash))),
+        };
+        batch.put(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY, &head.encode());
+    }
+    store.write_durable(batch)?;
+    drop(store);
+    Ok(())
+}
+
+fn write_block_records(datadir: &Path, records: &[&FixtureBlock]) -> TestResult<()> {
+    let store = bitcoin_rs_storage::FlatFileBlockStore::open(datadir)?;
+    for block in records {
+        store.append(block.height, block.hash, &block.body)?;
+    }
+    drop(store);
+    Ok(())
+}
+
+fn coverage_for(blocks: &[FixtureBlock]) -> Coverage {
+    let first = blocks.first().expect("fixture chain is not empty");
+    let last = blocks.last().expect("fixture chain is not empty");
+    Coverage::new(first.height, last.height, last.hash)
+}
+
+fn hash_cf_entry(hasher: &mut Sha256, key: &[u8], value: &[u8]) {
+    hasher.update(u32::try_from(key.len()).expect("fits").to_le_bytes());
+    hasher.update(key);
+    hasher.update(u32::try_from(value.len()).expect("fits").to_le_bytes());
+    hasher.update(value);
+}
+
+fn family_digest(store: &RocksDbStore, cf: ColumnFamily, gen_id: u64) -> [u8; 32] {
+    let start = gen_id.to_be_bytes();
+    let end = gen_id.saturating_add(1).to_be_bytes();
+    let mut hasher = Sha256::new();
+    let snapshot = store.snapshot().expect("snapshot");
+    let iter = snapshot.iter_prefix(cf, &start).expect("prefix scan");
+    for item in iter {
+        let (key, value) = item.expect("scan row");
+        if key.as_slice() >= end.as_slice() {
+            break;
+        }
+        hash_cf_entry(&mut hasher, &key, &value);
+    }
+    hasher.finalize().into()
+}
+
+struct Reference {
+    store: RocksDbStore,
+    _dir: tempfile::TempDir,
+}
+
+fn bulk_reference(blocks: &[FixtureBlock]) -> TestResult<Reference> {
+    let dir = tempfile::tempdir()?;
+    let scratch = tempfile::tempdir()?;
+    let store = RocksDbStore::open(dir.path())?;
+    let facts = blocks
+        .iter()
+        .map(|block| block.facts.clone())
+        .collect::<Vec<_>>();
+    let builder = BulkSegmentBuilder::new(64 * 1024 * 1024, scratch.path().to_path_buf());
+    builder
+        .build_and_ingest(&store, BULK_GEN_ID, &facts)
+        .map_err(|error| TestError::Assertion(error.to_string()))?;
+    Ok(Reference { store, _dir: dir })
+}
+
+fn live_reference(blocks: &[FixtureBlock]) -> TestResult<Reference> {
+    let dir = tempfile::tempdir()?;
+    let scratch = tempfile::tempdir()?;
+    let store = RocksDbStore::open(dir.path())?;
+    let mut state = TailWriterState::new();
+    for block in blocks {
+        let mut batch = store.new_batch();
+        append_tail_block(&mut batch, &block.facts, &mut state);
+        store.write_durable(batch)?;
+    }
+    seal_tail_generation(&store, BULK_GEN_ID, coverage_for(blocks), scratch.path())?;
+    Ok(Reference { store, _dir: dir })
+}
+
+fn assert_generation_matches(converter: &RocksDbStore, reference: &RocksDbStore) {
+    for cf in [
+        ColumnFamily::TxDir,
+        ColumnFamily::ScriptDict,
+        ColumnFamily::ScriptPost,
+        ColumnFamily::SpendDir,
+        ColumnFamily::ScriptStats,
+        ColumnFamily::Filters,
+    ] {
+        assert_eq!(
+            family_digest(converter, cf, BULK_GEN_ID),
+            family_digest(reference, cf, BULK_GEN_ID),
+            "family {cf:?} differs between the converter rebuild and the reference build"
+        );
+    }
+}
+
+fn assert_descriptors(store: &RocksDbStore, blocks: &[FixtureBlock]) -> TestResult<()> {
+    let coverage = coverage_for(blocks);
+    let expected = IndexGeneration::encode_meta_value(&GenerationDescriptor {
+        gen_id: BULK_GEN_ID,
+        coverage,
+        tail: TailDescriptor {
+            tail_lo: coverage.last_height.saturating_add(1),
+            tail_hi: coverage.last_height,
+            tail_hash: coverage.last_hash,
+        },
+    });
+    for capability in IndexCapability::ALL {
+        let actual = store
+            .get(ColumnFamily::IdxMeta, &meta_gen_key(capability))?
+            .expect("generation descriptor");
+        assert_eq!(actual, expected, "descriptor for {capability:?}");
+    }
+    Ok(())
+}
+
+fn rebuild(datadir: &Path) -> TestResult<Output> {
+    Ok(run_converter(&[
+        "rebuild-index",
+        "--datadir",
+        datadir.to_string_lossy().as_ref(),
+    ])?)
+}
+
+// PRJ-09
+#[test]
+fn rebuild_index_refuses_a_block_without_its_undo_row() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let datadir = prepare_datadir(root.path())?;
+    let blocks = crossing_chain();
+    let refs = blocks.iter().collect::<Vec<_>>();
+    let undo_blocks = refs
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(index, _)| *index != 1)
+        .map(|(_, block)| block)
+        .collect::<Vec<_>>();
+    write_chainstate(&datadir, &undo_blocks, refs.last().copied(), &refs)?;
+    write_block_records(&datadir, &refs)?;
+
+    let output = rebuild(&datadir)?;
+    assert!(
+        !output.status.success(),
+        "a missing undo row must abort the rebuild"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no undo row"),
+        "refusal must name the missing undo row: {stderr}"
+    );
+    Ok(())
+}
+
+// PRJ-09
+#[test]
+fn rebuild_index_refuses_a_truncated_block_record() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let datadir = prepare_datadir(root.path())?;
+    let blocks = creating_chain();
+    let refs = blocks.iter().collect::<Vec<_>>();
+    write_chainstate(&datadir, &refs, refs.last().copied(), &refs)?;
+    write_block_records(&datadir, &refs)?;
+
+    let path = datadir.join("blocks").join("blk00000.dat");
+    let mut bytes = fs::read(&path)?;
+    let len = bytes.len();
+    bytes.truncate(len - 3);
+    fs::write(&path, bytes)?;
+
+    let output = rebuild(&datadir)?;
+    assert!(
+        !output.status.success(),
+        "a truncated block record must abort the rebuild"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("truncated"),
+        "refusal must name the truncation: {stderr}"
+    );
+    Ok(())
+}
+
+// PRJ-09
+#[test]
+fn rebuild_index_refuses_a_record_with_bad_magic() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let datadir = prepare_datadir(root.path())?;
+    let blocks = creating_chain();
+    let refs = blocks.iter().collect::<Vec<_>>();
+    write_chainstate(&datadir, &refs, refs.last().copied(), &refs)?;
+    write_block_records(&datadir, &refs)?;
+
+    let path = datadir.join("blocks").join("blk00000.dat");
+    let mut bytes = fs::read(&path)?;
+    let second_record = 44 + blocks[0].body.len();
+    bytes[second_record] = b'X';
+    fs::write(&path, bytes)?;
+
+    let output = rebuild(&datadir)?;
+    assert!(
+        !output.status.success(),
+        "a record with bad magic must abort the rebuild"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("magic"),
+        "refusal must name the bad magic: {stderr}"
+    );
+    Ok(())
+}
+
+// PRJ-09
+#[test]
+fn rebuild_index_refuses_an_oversize_block_record() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let datadir = prepare_datadir(root.path())?;
+    let blocks = creating_chain();
+    let refs = blocks.iter().collect::<Vec<_>>();
+    write_chainstate(&datadir, &refs, refs.last().copied(), &refs)?;
+    write_block_records(&datadir, &refs)?;
+
+    let path = datadir.join("blocks").join("blk00000.dat");
+    let mut bytes = fs::read(&path)?;
+    bytes[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    fs::write(&path, bytes)?;
+
+    let output = rebuild(&datadir)?;
+    assert!(
+        !output.status.success(),
+        "an oversize block record must abort the rebuild"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("record limit"),
+        "refusal must name the record limit: {stderr}"
+    );
+    Ok(())
+}
+
+// PRJ-05, PRJ-09
+#[test]
+fn rebuild_index_excludes_orphan_blocks() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let datadir = prepare_datadir(root.path())?;
+    let blocks = crossing_chain();
+    let refs = blocks.iter().collect::<Vec<_>>();
+    let mut orphan_ledger = CoinLedger::new();
+    let orphan = assemble_block(
+        BlockSpec {
+            height: 1,
+            parent: blocks[0].hash,
+            nonce: 1000,
+            txs: vec![coinbase_tx(99, &[(7_000, p2pkh_script(0x99))])],
+        },
+        &mut orphan_ledger,
+    );
+    write_chainstate(&datadir, &refs, refs.last().copied(), &refs)?;
+    let records = vec![refs[0], refs[1], &orphan, refs[2], refs[3]];
+    write_block_records(&datadir, &records)?;
+
+    let output = rebuild(&datadir)?;
+    parse_rebuild_report(&output)?;
+    let store = RocksDbStore::open(datadir.join("txindex"))?;
+    let reference = bulk_reference(&blocks)?;
+    assert_generation_matches(&store, &reference.store);
+    assert_descriptors(&store, &blocks)?;
+    Ok(())
+}
+
+// PRJ-05, PRJ-09
+#[test]
+fn rebuild_index_matches_the_bulk_generation_for_the_same_chain() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let datadir = prepare_datadir(root.path())?;
+    let blocks = crossing_chain();
+    let refs = blocks.iter().collect::<Vec<_>>();
+    write_chainstate(&datadir, &refs, refs.last().copied(), &refs)?;
+    write_block_records(&datadir, &refs)?;
+
+    let output = rebuild(&datadir)?;
+    parse_rebuild_report(&output)?;
+    let store = RocksDbStore::open(datadir.join("txindex"))?;
+    let reference = bulk_reference(&blocks)?;
+    assert_generation_matches(&store, &reference.store);
+    assert_descriptors(&store, &blocks)?;
+    Ok(())
+}
+
+// PRJ-05
+#[test]
+fn rebuild_index_matches_the_live_tail_and_seal_generation() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let datadir = prepare_datadir(root.path())?;
+    let blocks = creating_chain();
+    let refs = blocks.iter().collect::<Vec<_>>();
+    write_chainstate(&datadir, &refs, refs.last().copied(), &refs)?;
+    write_block_records(&datadir, &refs)?;
+
+    let output = rebuild(&datadir)?;
+    parse_rebuild_report(&output)?;
+    let store = RocksDbStore::open(datadir.join("txindex"))?;
+    let reference = live_reference(&blocks)?;
+    assert_generation_matches(&store, &reference.store);
+    Ok(())
+}
+
+// PRJ-05, PRJ-09
+#[test]
+fn rebuild_index_replaces_stale_generations_instead_of_overlaying() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let datadir = prepare_datadir(root.path())?;
+    let blocks = crossing_chain();
+    let refs = blocks.iter().collect::<Vec<_>>();
+    write_chainstate(&datadir, &refs, refs.last().copied(), &refs)?;
+    write_block_records(&datadir, &refs)?;
+
+    let stale_key = [BULK_GEN_ID.to_be_bytes().as_slice(), &[0xDE, 0xAD]].concat();
+    {
+        let store = RocksDbStore::open(datadir.join("txindex"))?;
+        let mut batch = store.new_batch();
+        batch.put(ColumnFamily::TxDir, &stale_key, b"stale");
+        store.write_durable(batch)?;
+    }
+
+    for _ in 0..2 {
+        let output = rebuild(&datadir)?;
+        parse_rebuild_report(&output)?;
+        let store = RocksDbStore::open(datadir.join("txindex"))?;
+        assert!(
+            store.get(ColumnFamily::TxDir, &stale_key)?.is_none(),
+            "a stale generation row must be removed before the rebuild"
+        );
+        let reference = bulk_reference(&blocks)?;
+        assert_generation_matches(&store, &reference.store);
+        assert_descriptors(&store, &blocks)?;
+    }
     Ok(())
 }

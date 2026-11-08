@@ -1,10 +1,10 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use bitcoin::consensus::deserialize;
-use bitcoin::hashes::Hash as _;
+use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_projection::IndexCapability;
 use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
@@ -12,8 +12,11 @@ use bitcoin_rs_projection::segment::{
     Coverage, GenerationDescriptor, IndexGeneration, TailDescriptor, meta_gen_key,
 };
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
-use bitcoin_rs_storage::{ColumnFamily, KvStore, block_undo_key};
+use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
+use bitcoin_rs_storage::utxo::contract::decode_undo_record;
+use bitcoin_rs_storage::{ColumnFamily, KvStore, StorageBackend, block_undo_key};
 use bytes::Bytes;
+use sha2::{Digest, Sha256};
 
 use crate::error::ConvertError;
 use crate::report::{FamilyResetReport, RebuildIndexReport};
@@ -23,7 +26,11 @@ const CURRENT_EPOCH: u32 = 3;
 const CURRENT_SCHEMA_MAX_BYTES: u64 = 16;
 const BLOCK_FILE_MAGIC: [u8; 4] = *b"BRSB";
 const RECORD_HEADER_LEN: usize = 44;
+const RECORD_HEADER_LEN_U64: u64 = 44;
+const BLOCK_HEADER_LEN: usize = 80;
 const MAX_BLOCK_RECORD_BYTES: usize = 4 * 1024 * 1024;
+const MAX_BLOCK_RECORD_BYTES_U64: u64 = 4 * 1024 * 1024;
+const ZERO_HASH: [u8; 32] = [0u8; 32];
 
 struct ScratchGuard {
     path: PathBuf,
@@ -43,7 +50,58 @@ impl Drop for ScratchGuard {
     }
 }
 
-pub(crate) fn run_rebuild_index(datadir: &Path) -> Result<RebuildIndexReport, ConvertError> {
+struct RecordRef {
+    parent: [u8; 32],
+    height: u32,
+    file: usize,
+    offset: u64,
+    len: u32,
+}
+
+struct BlockArchive {
+    files: Vec<PathBuf>,
+    records: HashMap<[u8; 32], RecordRef>,
+}
+
+struct Frame {
+    len: u32,
+    height: u32,
+    hash: [u8; 32],
+    parent: [u8; 32],
+    record_end: u64,
+}
+
+type PrevoutMap = HashMap<([u8; 32], u32), (u64, Bytes, u32, bool)>;
+
+const GENERATION_FAMILIES: [ColumnFamily; 6] = [
+    ColumnFamily::TxDir,
+    ColumnFamily::ScriptDict,
+    ColumnFamily::ScriptPost,
+    ColumnFamily::SpendDir,
+    ColumnFamily::ScriptStats,
+    ColumnFamily::Filters,
+];
+
+const GENERATION_KEY_LIMIT: [u8; 32] = [0xFF; 32];
+const GENERATION_META_START: &[u8] = b"gen/";
+const GENERATION_META_END: &[u8] = b"gen0";
+
+fn clear_generations(store: &dyn KvStore) -> Result<(), ConvertError> {
+    store.delete_range(
+        ColumnFamily::IdxMeta,
+        GENERATION_META_START,
+        GENERATION_META_END,
+    )?;
+    for cf in GENERATION_FAMILIES {
+        store.delete_range(cf, &[], &GENERATION_KEY_LIMIT)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn run_rebuild_index(
+    datadir: &Path,
+    budget_bytes: usize,
+) -> Result<RebuildIndexReport, ConvertError> {
     if !datadir.is_dir() {
         return Err(ConvertError::InvalidOperation(format!(
             "datadir '{}' is not a directory",
@@ -58,48 +116,38 @@ pub(crate) fn run_rebuild_index(datadir: &Path) -> Result<RebuildIndexReport, Co
             datadir.display()
         )));
     }
-    let engine = match bitcoin_rs_storage::detect_engine(&txindex_dir)? {
-        Some(engine) => engine,
-        None => {
-            let chainstate_dir = datadir.join("chainstate");
-            match bitcoin_rs_storage::detect_engine(&chainstate_dir)? {
-                Some(engine) => engine,
-                None => {
-                    return Err(ConvertError::IncompatibleData(format!(
-                        "cannot detect storage engine for datadir '{}': txindex is empty and chainstate engine is missing or unrecognized",
-                        datadir.display()
-                    )));
-                }
-            }
-        }
-    };
+    let chainstate_dir = datadir.join("chainstate");
+    let engine = detect_engine(&txindex_dir, &chainstate_dir, datadir)?;
     let store = open_destination_store(&txindex_dir, engine)?;
     let reset = bitcoin_rs_projection::reset_offline(store.as_ref())
         .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
+    clear_generations(store.as_ref())?;
+    let gen_id = 1u64;
 
-    let scratch_guard = ScratchGuard::create(datadir.join("txindex_rebuild_scratch"))?;
-    let chainstate_dir = datadir.join("chainstate");
     let chainstate_store: Option<Box<dyn KvStore>> = if chainstate_dir.is_dir() {
-        open_destination_store(&chainstate_dir, engine).ok()
+        Some(open_destination_store(&chainstate_dir, engine)?)
     } else {
         None
     };
+    let head = load_durable_head(chainstate_store.as_deref())?;
+    let archive = scan_archive(&datadir.join("blocks"))?;
+    let canonical = canonical_chain(&archive, head)?;
 
-    let blocks = scan_retained_blocks(&datadir.join("blocks"), chainstate_store.as_deref())?;
+    let mut blocks = Vec::with_capacity(canonical.len());
+    for hash in &canonical {
+        blocks.push(committed_block(
+            chainstate_store.as_deref(),
+            &archive,
+            hash,
+        )?);
+    }
 
-    let builder = BulkSegmentBuilder::new(64 * 1024 * 1024, scratch_guard.path.clone());
-    let gen_id = 1u64;
-
+    let scratch_guard = ScratchGuard::create(datadir.join("txindex_rebuild_scratch"))?;
+    let builder = BulkSegmentBuilder::new(budget_bytes, scratch_guard.path.clone());
     let coverage = if blocks.is_empty() {
         Coverage::new(0, 0, [0u8; 32])
     } else {
-        builder
-            .build_and_ingest(store.as_ref(), gen_id, &blocks)
-            .map_err(|_| {
-                ConvertError::Storage(bitcoin_rs_storage::StorageError::InvalidOperation(
-                    "rebuild index build failed",
-                ))
-            })?
+        builder.build_and_ingest(store.as_ref(), gen_id, &blocks)?
     };
 
     let desc = GenerationDescriptor {
@@ -125,13 +173,14 @@ pub(crate) fn run_rebuild_index(datadir: &Path) -> Result<RebuildIndexReport, Co
             &IndexGeneration::encode_meta_value(&desc),
         );
     }
-    store.write_durable(batch).map_err(ConvertError::Storage)?;
+    store.write_durable(batch)?;
     drop(scratch_guard);
 
     Ok(RebuildIndexReport {
         datadir: datadir.display().to_string(),
         engine: engine.as_str().to_owned(),
         format_version: reset.format_version,
+        blocks: u64::try_from(blocks.len()).unwrap_or(u64::MAX),
         families: reset
             .families
             .into_iter()
@@ -141,6 +190,23 @@ pub(crate) fn run_rebuild_index(datadir: &Path) -> Result<RebuildIndexReport, Co
             })
             .collect(),
     })
+}
+
+fn detect_engine(
+    txindex_dir: &Path,
+    chainstate_dir: &Path,
+    datadir: &Path,
+) -> Result<StorageBackend, ConvertError> {
+    if let Some(engine) = bitcoin_rs_storage::detect_engine(txindex_dir)? {
+        return Ok(engine);
+    }
+    if let Some(engine) = bitcoin_rs_storage::detect_engine(chainstate_dir)? {
+        return Ok(engine);
+    }
+    Err(ConvertError::IncompatibleData(format!(
+        "cannot detect storage engine for datadir '{}': txindex is empty and chainstate engine is missing or unrecognized",
+        datadir.display()
+    )))
 }
 
 fn read_datadir_epoch(datadir: &Path) -> Result<(), ConvertError> {
@@ -168,182 +234,424 @@ fn read_datadir_epoch(datadir: &Path) -> Result<(), ConvertError> {
     Ok(())
 }
 
-fn scan_retained_blocks(
-    blocks_dir: &Path,
-    chainstate_store: Option<&dyn KvStore>,
-) -> Result<Vec<CommittedBlock>, ConvertError> {
-    if !blocks_dir.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let mut entries = std::fs::read_dir(blocks_dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name();
-            let s = name.to_string_lossy();
-            s.starts_with("blk") && s.ends_with(".dat")
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|e| e.file_name());
-
-    let mut blocks = Vec::new();
-    for entry in entries {
-        read_blocks_from_file(&entry.path(), chainstate_store, &mut blocks)?;
-    }
-
-    blocks.sort_by_key(|b| b.height);
-    Ok(blocks)
+fn load_durable_head(store: Option<&dyn KvStore>) -> Result<Option<DurableHead>, ConvertError> {
+    let Some(store) = store else {
+        return Ok(None);
+    };
+    let Some(bytes) = store.get(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY)? else {
+        return Ok(None);
+    };
+    DurableHead::decode(&bytes).map(Some).ok_or_else(|| {
+        ConvertError::IncompatibleData("chainstate durable head is unreadable".to_owned())
+    })
 }
 
-fn read_blocks_from_file(
+fn scan_archive(blocks_dir: &Path) -> Result<BlockArchive, ConvertError> {
+    let mut files = Vec::new();
+    if blocks_dir.is_dir() {
+        let mut entries = std::fs::read_dir(blocks_dir)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with("blk") && name.ends_with(".dat")
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        files = entries
+            .into_iter()
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+    }
+    let mut records = HashMap::new();
+    for (file_no, path) in files.iter().enumerate() {
+        scan_block_file(path, file_no, &mut records)?;
+    }
+    Ok(BlockArchive { files, records })
+}
+
+fn scan_block_file(
     path: &Path,
-    chainstate_store: Option<&dyn KvStore>,
-    blocks: &mut Vec<CommittedBlock>,
+    file_no: usize,
+    records: &mut HashMap<[u8; 32], RecordRef>,
 ) -> Result<(), ConvertError> {
+    let file_name = path.display().to_string();
     let file = File::open(path)?;
+    let file_len = file.metadata()?.len();
     let mut reader = BufReader::new(file);
-    let mut header_buf = [0u8; RECORD_HEADER_LEN];
-
-    while reader.read_exact(&mut header_buf).is_ok() {
-        if header_buf[..4] != BLOCK_FILE_MAGIC {
-            break;
-        }
-        let len_u32 = u32::from_le_bytes(header_buf[4..8].try_into().unwrap_or([0u8; 4]));
-        let height = u32::from_le_bytes(header_buf[8..12].try_into().unwrap_or([0u8; 4]));
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&header_buf[12..44]);
-
-        let Ok(body_len) = usize::try_from(len_u32) else {
-            break;
-        };
-        if body_len > MAX_BLOCK_RECORD_BYTES {
-            break;
-        }
-
-        let mut body = vec![0u8; body_len];
-        reader.read_exact(&mut body)?;
-
-        let undo_scripts = load_undo_scripts(chainstate_store, height, hash);
-
-        if let Some(block) = parse_committed_block(&body, height, hash, &undo_scripts) {
-            blocks.push(block);
-        }
+    let mut offset = 0u64;
+    let mut index = 0u64;
+    while offset < file_len {
+        let frame = read_frame(&mut reader, &file_name, index, offset, file_len)?;
+        index_record(records, file_no, offset, &frame)?;
+        offset = frame.record_end;
+        index += 1;
     }
     Ok(())
 }
 
-type UndoMap = HashMap<([u8; 32], u32), (u64, Vec<u8>)>;
-
-fn load_undo_scripts(store: Option<&dyn KvStore>, height: u32, hash: [u8; 32]) -> UndoMap {
-    let mut map = HashMap::new();
-    let Some(store) = store else {
-        return map;
-    };
-    let block_hash = Hash256::from_le_bytes(&hash);
-    let key = block_undo_key(height, block_hash);
-    let Ok(Some(bytes)) = store.get(ColumnFamily::UndoData, &key) else {
-        return map;
-    };
-    let Ok(batch) = bitcoin_rs_storage::utxo::contract::decode_undo_record(&bytes, block_hash)
-    else {
-        return map;
-    };
-    for add in batch.restores() {
-        let prev_txid = add.outpoint.txid.0.to_le_bytes();
-        let prev_vout = add.outpoint.vout;
-        let script = add.txout.script_pubkey.as_bytes().to_vec();
-        map.insert((prev_txid, prev_vout), (add.txout.value.to_sat(), script));
-    }
-    map
-}
-
-fn parse_committed_block(
-    body: &[u8],
-    height: u32,
-    hash: [u8; 32],
-    undo_scripts: &UndoMap,
-) -> Option<CommittedBlock> {
-    let parsed: bitcoin::Block = deserialize(body).ok()?;
-    let parent_hash = parsed.header.prev_blockhash.to_byte_array();
-    let header_bytes: [u8; 80] = bitcoin::consensus::serialize(&parsed.header)
-        .try_into()
-        .ok()?;
-
-    let mut same_block_created: HashMap<([u8; 32], u32), (u64, Bytes)> = HashMap::new();
-    for tx in &parsed.txdata {
-        let txid = tx.compute_txid().to_byte_array();
-        for (vout, out) in tx.output.iter().enumerate() {
-            if let Ok(vout_u32) = u32::try_from(vout) {
-                same_block_created.insert(
-                    (txid, vout_u32),
-                    (
-                        out.value.to_sat(),
-                        Bytes::copy_from_slice(out.script_pubkey.as_bytes()),
-                    ),
-                );
-            }
-        }
-    }
-
-    let mut txs = Vec::with_capacity(parsed.txdata.len());
-    for (tx_idx, tx) in parsed.txdata.iter().enumerate() {
-        let txid = tx.compute_txid().to_byte_array();
-        let inputs = if tx_idx == 0 {
-            Vec::new()
-        } else {
-            tx.input
-                .iter()
-                .map(|inp| {
-                    let prev_txid = inp.previous_output.txid.to_byte_array();
-                    let prev_vout = inp.previous_output.vout;
-                    let (val, script) =
-                        if let Some((v, s)) = same_block_created.get(&(prev_txid, prev_vout)) {
-                            (*v, s.clone())
-                        } else if let Some((v, s)) = undo_scripts.get(&(prev_txid, prev_vout)) {
-                            (*v, Bytes::copy_from_slice(s))
-                        } else {
-                            (0, Bytes::copy_from_slice(inp.script_sig.as_bytes()))
-                        };
-                    SpentPrevout {
-                        txid: prev_txid,
-                        vout: prev_vout,
-                        value: val,
-                        script,
-                        height: 0,
-                        coinbase: false,
-                    }
-                })
-                .collect()
-        };
-
-        let outputs = tx
-            .output
-            .iter()
-            .enumerate()
-            .filter_map(|(vout, out)| {
-                let vout_u32 = u32::try_from(vout).ok()?;
-                Some(CreatedOutput {
-                    vout: vout_u32,
-                    value: out.value.to_sat(),
-                    script: Bytes::copy_from_slice(out.script_pubkey.as_bytes()),
-                })
-            })
-            .collect();
-
-        txs.push(TxFacts {
-            txid,
-            offset: 0,
-            len: 0,
-            inputs,
-            outputs,
+fn read_frame(
+    reader: &mut BufReader<File>,
+    file_name: &str,
+    index: u64,
+    offset: u64,
+    file_len: u64,
+) -> Result<Frame, ConvertError> {
+    if file_len - offset < RECORD_HEADER_LEN_U64 {
+        return Err(ConvertError::TruncatedBlockRecord {
+            file: file_name.to_owned(),
+            index,
         });
     }
-
-    Some(CommittedBlock {
+    let mut header = [0u8; RECORD_HEADER_LEN];
+    reader.read_exact(&mut header)?;
+    if header[..4] != BLOCK_FILE_MAGIC {
+        return Err(ConvertError::BadBlockMagic {
+            file: file_name.to_owned(),
+            index,
+        });
+    }
+    let len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+    let height = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&header[12..44]);
+    let len_usize = usize::try_from(len).map_err(|_| ConvertError::OversizeBlockRecord {
+        file: file_name.to_owned(),
+        index,
+        len,
+        max: MAX_BLOCK_RECORD_BYTES_U64,
+    })?;
+    if len_usize > MAX_BLOCK_RECORD_BYTES {
+        return Err(ConvertError::OversizeBlockRecord {
+            file: file_name.to_owned(),
+            index,
+            len,
+            max: MAX_BLOCK_RECORD_BYTES_U64,
+        });
+    }
+    if len_usize < BLOCK_HEADER_LEN {
+        return Err(ConvertError::UnparseableBlock {
+            height,
+            hash: hex(&hash),
+            reason: "record body is shorter than a block header".to_owned(),
+        });
+    }
+    let record_end = offset
+        .checked_add(RECORD_HEADER_LEN_U64)
+        .and_then(|header_end| header_end.checked_add(u64::from(len)))
+        .filter(|end| *end <= file_len)
+        .ok_or_else(|| ConvertError::TruncatedBlockRecord {
+            file: file_name.to_owned(),
+            index,
+        })?;
+    let mut body_header = [0u8; BLOCK_HEADER_LEN];
+    reader.read_exact(&mut body_header)?;
+    let computed = double_sha256(&body_header);
+    if computed != hash {
+        return Err(ConvertError::BlockHashMismatch {
+            height,
+            recorded: hex(&hash),
+            computed: hex(&computed),
+        });
+    }
+    let mut parent = [0u8; 32];
+    parent.copy_from_slice(&body_header[4..36]);
+    reader.seek(SeekFrom::Start(record_end))?;
+    Ok(Frame {
+        len,
         height,
         hash,
-        parent_hash,
-        header: header_bytes,
+        parent,
+        record_end,
+    })
+}
+
+fn index_record(
+    records: &mut HashMap<[u8; 32], RecordRef>,
+    file: usize,
+    offset: u64,
+    frame: &Frame,
+) -> Result<(), ConvertError> {
+    match records.entry(frame.hash) {
+        Entry::Occupied(existing) => {
+            let existing = existing.get();
+            if existing.parent != frame.parent
+                || existing.height != frame.height
+                || existing.len != frame.len
+            {
+                return Err(ConvertError::ConflictingBlockRecord {
+                    height: frame.height,
+                    hash: hex(&frame.hash),
+                });
+            }
+            Ok(())
+        }
+        Entry::Vacant(slot) => {
+            slot.insert(RecordRef {
+                parent: frame.parent,
+                height: frame.height,
+                file,
+                offset,
+                len: frame.len,
+            });
+            Ok(())
+        }
+    }
+}
+
+fn canonical_chain(
+    archive: &BlockArchive,
+    head: Option<DurableHead>,
+) -> Result<Vec<[u8; 32]>, ConvertError> {
+    let Some(head) = head else {
+        if archive.records.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(ConvertError::MissingDurableHead);
+    };
+    if head.height == 0 {
+        return Ok(Vec::new());
+    }
+    let mut chain = Vec::new();
+    let mut cursor = head.tip.to_le_bytes();
+    let mut height = head.height;
+    loop {
+        let Some(record) = archive.records.get(&cursor) else {
+            if chain.is_empty() {
+                return Err(ConvertError::MissingTipRecord {
+                    height,
+                    hash: hex(&cursor),
+                });
+            }
+            if archive.records.values().any(|other| other.height <= height) {
+                return Err(ConvertError::CanonicalChainBroken {
+                    height,
+                    hash: hex(&cursor),
+                    reason: "the archived parent is missing while earlier blocks remain",
+                });
+            }
+            break;
+        };
+        if record.height != height {
+            return Err(ConvertError::BlockHeightMismatch {
+                recorded: record.height,
+                expected: height,
+                hash: hex(&cursor),
+            });
+        }
+        chain.push(cursor);
+        if record.parent == ZERO_HASH {
+            if height != 0 {
+                return Err(ConvertError::CanonicalChainBroken {
+                    height,
+                    hash: hex(&cursor),
+                    reason: "the record claims the zero parent above height zero",
+                });
+            }
+            break;
+        }
+        if height == 0 {
+            return Err(ConvertError::CanonicalChainBroken {
+                height,
+                hash: hex(&cursor),
+                reason: "the record claims a parent below height zero",
+            });
+        }
+        height -= 1;
+        cursor = record.parent;
+    }
+    chain.reverse();
+    Ok(chain)
+}
+
+fn committed_block(
+    store: Option<&dyn KvStore>,
+    archive: &BlockArchive,
+    hash: &[u8; 32],
+) -> Result<CommittedBlock, ConvertError> {
+    let record = archive.records.get(hash).ok_or_else(|| {
+        ConvertError::IncompatibleData(
+            "canonical block is absent from the archive index".to_owned(),
+        )
+    })?;
+    let body = read_record_body(archive, record)?;
+    let image = BlockImage::from_raw(Bytes::from(body)).map_err(|error| {
+        ConvertError::UnparseableBlock {
+            height: record.height,
+            hash: hex(hash),
+            reason: error.to_string(),
+        }
+    })?;
+    let computed = image.block_hash().0.to_le_bytes();
+    if computed != *hash {
+        return Err(ConvertError::BlockHashMismatch {
+            height: record.height,
+            recorded: hex(hash),
+            computed: hex(&computed),
+        });
+    }
+    let mut prevouts = load_undo_prevouts(store, record.height, *hash)?;
+    let txs = (0..image.tx_count())
+        .map(|index| tx_facts(&image, index, record.height, hash, &mut prevouts))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CommittedBlock {
+        height: record.height,
+        hash: *hash,
+        parent_hash: image.header().prev_blockhash.0.to_le_bytes(),
+        header: image.header_bytes(),
         txs,
     })
+}
+
+fn tx_facts(
+    image: &BlockImage,
+    index: usize,
+    height: u32,
+    block_hash: &[u8; 32],
+    prevouts: &mut PrevoutMap,
+) -> Result<TxFacts, ConvertError> {
+    let tx = image.tx(index);
+    let txid = *tx.txid().as_bytes();
+    let coinbase = tx.is_coinbase();
+    let inputs = if coinbase {
+        Vec::new()
+    } else {
+        tx_inputs(&tx, height, block_hash, prevouts)?
+    };
+    let outputs = tx_outputs(&tx, txid, height, coinbase, prevouts)?;
+    Ok(TxFacts {
+        txid,
+        offset: tx.layout().span().start(),
+        len: tx.layout().span().len(),
+        inputs,
+        outputs,
+    })
+}
+
+fn tx_inputs(
+    tx: &bitcoin_rs_consensus::primitives::TransactionView<'_>,
+    height: u32,
+    block_hash: &[u8; 32],
+    prevouts: &PrevoutMap,
+) -> Result<Vec<SpentPrevout>, ConvertError> {
+    let mut inputs = Vec::with_capacity(tx.input_count());
+    for index in 0..tx.input_count() {
+        let outpoint = tx.input_outpoint(index);
+        let prev_txid = *outpoint.txid.as_bytes();
+        let (value, script, coin_height, coinbase) = prevouts
+            .get(&(prev_txid, outpoint.vout))
+            .cloned()
+            .ok_or_else(|| ConvertError::MissingUndoRow {
+                height,
+                hash: hex(block_hash),
+                txid: hex(&prev_txid),
+                vout: outpoint.vout,
+            })?;
+        inputs.push(SpentPrevout {
+            txid: prev_txid,
+            vout: outpoint.vout,
+            value,
+            script,
+            height: coin_height,
+            coinbase,
+        });
+    }
+    Ok(inputs)
+}
+
+fn tx_outputs(
+    tx: &bitcoin_rs_consensus::primitives::TransactionView<'_>,
+    txid: [u8; 32],
+    height: u32,
+    coinbase: bool,
+    prevouts: &mut PrevoutMap,
+) -> Result<Vec<CreatedOutput>, ConvertError> {
+    let mut outputs = Vec::with_capacity(tx.output_count());
+    for index in 0..tx.output_count() {
+        let vout = u32::try_from(index).map_err(|_| span_overflow())?;
+        let script = Bytes::copy_from_slice(tx.output_script(index));
+        let value = tx.output_value(index).to_sat();
+        prevouts.insert((txid, vout), (value, script.clone(), height, coinbase));
+        outputs.push(CreatedOutput {
+            vout,
+            value,
+            script,
+        });
+    }
+    Ok(outputs)
+}
+
+fn span_overflow() -> ConvertError {
+    ConvertError::IncompatibleData("transaction span exceeds u32".to_owned())
+}
+
+fn read_record_body(archive: &BlockArchive, record: &RecordRef) -> Result<Vec<u8>, ConvertError> {
+    let path = archive.files.get(record.file).ok_or_else(|| {
+        ConvertError::IncompatibleData("archive record names an absent block file".to_owned())
+    })?;
+    let mut file = File::open(path)?;
+    let body_offset = record
+        .offset
+        .checked_add(RECORD_HEADER_LEN_U64)
+        .ok_or_else(|| ConvertError::IncompatibleData("archive offset overflow".to_owned()))?;
+    file.seek(SeekFrom::Start(body_offset))?;
+    let mut body = vec![
+        0u8;
+        usize::try_from(record.len).map_err(|_| {
+            ConvertError::IncompatibleData("archive record length exceeds usize".to_owned())
+        })?
+    ];
+    file.read_exact(&mut body)?;
+    Ok(body)
+}
+
+fn load_undo_prevouts(
+    store: Option<&dyn KvStore>,
+    height: u32,
+    hash: [u8; 32],
+) -> Result<PrevoutMap, ConvertError> {
+    let mut prevouts = PrevoutMap::new();
+    let Some(store) = store else {
+        return Ok(prevouts);
+    };
+    let block_hash = Hash256::from_le_bytes(&hash);
+    let Some(bytes) = store.get(ColumnFamily::UndoData, &block_undo_key(height, block_hash))?
+    else {
+        return Ok(prevouts);
+    };
+    let batch = decode_undo_record(&bytes, block_hash).map_err(|source| {
+        ConvertError::UnreadableUndoRow {
+            height,
+            hash: hex(&hash),
+            source,
+        }
+    })?;
+    for add in batch.restores() {
+        prevouts.insert(
+            (*add.outpoint.txid.as_bytes(), add.outpoint.vout),
+            (
+                add.txout.value.to_sat(),
+                Bytes::copy_from_slice(&add.txout.script_pubkey),
+                add.height,
+                add.coinbase,
+            ),
+        );
+    }
+    Ok(prevouts)
+}
+
+fn double_sha256(bytes: &[u8]) -> [u8; 32] {
+    let digest = Sha256::digest(Sha256::digest(bytes));
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }

@@ -36,12 +36,16 @@ pub(crate) struct CliArgs {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
-    /// Reset the derived-index projection in a datadir so the node rebuilds
-    /// it from retained chainstate on its next start.
+    /// Rebuild the derived-index projection from the retained block archive
+    /// and its undo rows, then publish one sealed generation.
     RebuildIndex {
-        /// Datadir whose `txindex` namespace is reset in place.
+        /// Datadir whose `txindex` namespace is rebuilt in place.
         #[arg(long = "datadir", value_name = "DIR")]
         datadir: PathBuf,
+
+        /// Builder memory budget in MiB; the builder spills sorted runs beyond it.
+        #[arg(long = "budget-mb", value_name = "MIB", default_value_t = 64)]
+        budget_mb: u64,
     },
 }
 

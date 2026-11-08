@@ -19,9 +19,13 @@ fn main() -> ExitCode {
     let args = CliArgs::parse();
 
     let outcome = match &args.command {
-        Some(Command::RebuildIndex { datadir }) => run_rebuild_index(datadir).map(|report| {
-            sonic_rs::to_string_pretty(&report).map(|json| (json, "rebuild-index report"))
-        }),
+        Some(Command::RebuildIndex { datadir, budget_mb }) => {
+            let budget_bytes =
+                usize::try_from(budget_mb.saturating_mul(1024 * 1024)).unwrap_or(usize::MAX);
+            run_rebuild_index(datadir, budget_bytes).map(|report| {
+                sonic_rs::to_string_pretty(&report).map(|json| (json, "rebuild-index report"))
+            })
+        }
         None => run_conversion(args).map(|report| {
             sonic_rs::to_string_pretty(&report).map(|json| (json, "conversion report"))
         }),
