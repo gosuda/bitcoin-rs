@@ -219,6 +219,64 @@ impl<S: KvStore> IndexWriter<S> {
         Ok(count)
     }
 
+    pub fn attach_script_history_rows(
+        &self,
+        funding: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        spending: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        attachment: &crate::writer::ScriptHistoryAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        refuse_script_history_populated(self.indexer.store.as_ref(), &fence)?;
+        match self.install_script_history(funding, spending, &fence, attachment) {
+            Ok(rows) => Ok(rows),
+            Err(IndexError::StaleIndexState) => Err(IndexError::StaleIndexState),
+            Err(error) => Err(
+                match self.reset_capabilities(IndexCapabilities::SCRIPT_HISTORY) {
+                    Ok(()) => error,
+                    Err(cleanup) => cleanup,
+                },
+            ),
+        }
+    }
+
+    fn install_script_history(
+        &self,
+        funding: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        spending: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        fence: &IndexWriteFence,
+        attachment: &crate::writer::ScriptHistoryAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        let funding_rows =
+            self.indexer
+                .store
+                .ingest_sorted(ColumnFamily::Funding, funding, attachment.scratch)?;
+        let spending_rows = self.indexer.store.ingest_sorted(
+            ColumnFamily::Spending,
+            spending,
+            attachment.scratch,
+        )?;
+        let mut batch = self.indexer.store.new_batch();
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            FORMAT_VERSION_KEY,
+            &FORMAT_VERSION_VALUE,
+        );
+        put_selected_watermarks(
+            &mut batch,
+            IndexCapabilities::SCRIPT_HISTORY,
+            Some(attachment.base),
+        );
+        crate::index::capability::put_selected_floors(
+            &mut batch,
+            IndexCapabilities::SCRIPT_HISTORY,
+            attachment.floor,
+        );
+        commit_ordinary(self.indexer.store.as_ref(), self.generation, fence, batch)?;
+        funding_rows
+            .checked_add(spending_rows)
+            .ok_or(IndexError::MutationSizeOverflow)
+    }
+
     pub fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
         if capabilities.is_empty() {
             return Err(IndexError::InvalidResetMarker);
@@ -608,6 +666,25 @@ fn refuse_tx_lookup_populated(fence: &IndexWriteFence) -> Result<(), IndexError>
         }),
         None => Ok(()),
     }
+}
+
+fn refuse_script_history_populated<S: KvStore>(
+    store: &S,
+    fence: &IndexWriteFence,
+) -> Result<(), IndexError> {
+    if let Some(actual) = fence.watermarks.script_history {
+        return Err(IndexError::WatermarkMismatch {
+            expected: None,
+            actual: Some(actual),
+        });
+    }
+    for cf in [ColumnFamily::Funding, ColumnFamily::Spending] {
+        if let Some(entry) = store.iter_prefix(cf, &[])?.next() {
+            let _ = entry?;
+            return Err(IndexError::ScriptHistoryPopulated);
+        }
+    }
+    Ok(())
 }
 
 impl<S: KvStore> IndexWriter<S> {

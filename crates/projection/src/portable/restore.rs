@@ -1,6 +1,6 @@
 use super::artifact::{
     ARTIFACT_VERSION, ArtifactHeader, CANCEL_POLL_RECORDS, HEADER_LEN, ReadFault, RecordReader,
-    RowAssembler, TxLookupRecord, into_digest, open_hashed,
+    RowAssembler, ScriptFamily, ScriptRecordReader, TxLookupRecord, into_digest, open_hashed,
 };
 use super::chain::{BaseCount, BodyReader, ChainBase, Located};
 use super::manifest::{
@@ -166,6 +166,88 @@ pub fn attach_tx_lookup_artifact(
     };
     let count = writer.attach_tx_lookup_rows(&mut rows.into_iter(), &attachment)?;
     Ok(count)
+}
+
+pub fn attach_script_history_artifact(
+    writer: &dyn TxIndexWriter,
+    target: &ManifestArtifactTarget,
+    scratch: &Path,
+) -> Result<u64, IndexBundleError> {
+    const NAME: &str = "scripthistory.artifact";
+    let path = &target.artifact_path;
+    let fail = |error| io_error(path, error);
+    let length = fs::metadata(path).map_err(fail)?.len();
+    if length != target.size_bytes {
+        return Err(IndexBundleError::ArtifactLength {
+            name: NAME,
+            expected: target.size_bytes,
+            actual: length,
+        });
+    }
+    let mut hashed = open_hashed(path).map_err(fail)?;
+    let mut header_bytes = [0_u8; HEADER_LEN];
+    let header = match hashed.read_exact(&mut header_bytes) {
+        Ok(()) => ArtifactHeader::decode(&header_bytes),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            Err("file ends inside the header")
+        }
+        Err(error) => return Err(fail(error)),
+    };
+    let expectation = ArtifactExpectation {
+        family: BundleFamily::ScriptHistory,
+        index_format: target.index_format,
+        network_magic: target.network.magic(),
+        base_height: target.base_height,
+        base_hash: target.base_hash,
+        records: None,
+        payload_bytes: target
+            .size_bytes
+            .checked_sub(u64::try_from(HEADER_LEN).unwrap_or(u64::MAX)),
+    };
+    let header =
+        match header.and_then(|header| check_header(&header, &expectation).map(|()| header)) {
+            Ok(header) => header,
+            Err(reason) => return Err(IndexBundleError::ArtifactHeader { name: NAME, reason }),
+        };
+    let mut funding = Vec::new();
+    let mut spending = Vec::new();
+    {
+        let mut records = ScriptRecordReader::new(&mut hashed, &header, target.floor);
+        while let Some(record) = records.next_record().map_err(|fault| match fault {
+            ReadFault::Io(error) => io_error(path, error),
+            ReadFault::Framing { record, reason } => IndexBundleError::ArtifactFraming {
+                name: NAME,
+                record,
+                reason,
+            },
+        })? {
+            let row = (record.key.to_vec(), record.value);
+            match record.family {
+                ScriptFamily::Funding => funding.push(row),
+                ScriptFamily::Spending => spending.push(row),
+            }
+        }
+    }
+    drain_remaining_for_hash(&mut hashed, &|| false, path)?;
+    if into_digest(hashed) != target.sha256 {
+        return Err(IndexBundleError::ArtifactHash { name: NAME });
+    }
+    let base = IndexWatermark {
+        height: target.base_height,
+        hash: target.base_hash,
+    };
+    let attachment = crate::writer::ScriptHistoryAttachment {
+        base,
+        floor: target.floor,
+        scratch,
+    };
+    writer
+        .attach_script_history_rows(
+            &mut funding.into_iter(),
+            &mut spending.into_iter(),
+            &attachment,
+        )
+        .map_err(IndexBundleError::Index)
 }
 
 pub(crate) fn reset_interrupted_import(
@@ -498,7 +580,7 @@ fn check_header(
     expected: &ArtifactExpectation,
 ) -> Result<(), &'static str> {
     if header.family != expected.family {
-        return Err("family is not tx_lookup");
+        return Err("family differs from the expected family");
     }
     if header.artifact_version != ARTIFACT_VERSION {
         return Err("artifact version is not supported");

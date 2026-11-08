@@ -14,6 +14,12 @@ pub struct TxLookupAttachment<'a> {
     pub scratch: &'a Path,
 }
 
+pub struct ScriptHistoryAttachment<'a> {
+    pub base: IndexWatermark,
+    pub floor: u32,
+    pub scratch: &'a Path,
+}
+
 pub trait TxIndexWriter: Send + Sync {
     fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError>;
     fn prepare_block_with_spent_scripts(
@@ -38,6 +44,12 @@ pub trait TxIndexWriter: Send + Sync {
         &self,
         rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
         attachment: &TxLookupAttachment<'_>,
+    ) -> Result<u64, IndexError>;
+    fn attach_script_history_rows(
+        &self,
+        funding: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        spending: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        attachment: &ScriptHistoryAttachment<'_>,
     ) -> Result<u64, IndexError>;
     fn commit_forward_with_cursor(
         &self,
@@ -131,6 +143,16 @@ where
         attachment: &TxLookupAttachment<'_>,
     ) -> Result<u64, IndexError> {
         self.write().attach_tx_lookup_rows(rows, attachment)
+    }
+
+    fn attach_script_history_rows(
+        &self,
+        funding: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        spending: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        attachment: &ScriptHistoryAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        self.write()
+            .attach_script_history_rows(funding, spending, attachment)
     }
 
     fn commit_rollback_one_for_with_cursor_with_spent_scripts(

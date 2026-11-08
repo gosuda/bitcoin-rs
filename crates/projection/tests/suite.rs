@@ -7,6 +7,7 @@ mod live_handoff;
 mod portable_bundle;
 mod query_answers;
 mod reorg_retirement;
+mod script_history_artifact;
 mod script_history_occurrences;
 mod script_live;
 mod segment_recovery;

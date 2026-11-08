@@ -18,8 +18,8 @@ pub use prepared::{PreparedBatch, PreparedBatchLimits, PreparedBlock};
 pub use reader::Indexer;
 pub use rows::IndexRowCounts;
 pub use snapshot::{
-    IndexReader, ScriptLiveScan, TxIndexFamily, TxIndexPage, TxIndexScan, TxIndexScanRow,
-    TxIndexSnapshot,
+    IndexReader, ScriptHistoryFamily, ScriptLiveScan, TxIndexFamily, TxIndexPage, TxIndexScan,
+    TxIndexScanRow, TxIndexSnapshot,
 };
 pub use state::{ConsumerCursorUpdate, IndexWriteFence};
 pub use write::IndexWriter;

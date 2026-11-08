@@ -3,6 +3,7 @@ mod chain;
 mod export;
 mod manifest;
 mod restore;
+mod script_history;
 
 use crate::writer::TxIndexWriter;
 use crate::{IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark};
@@ -11,8 +12,9 @@ use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use std::path::{Path, PathBuf};
 
-pub use restore::attach_tx_lookup_artifact;
 pub(crate) use restore::reset_interrupted_import;
+pub use restore::{attach_script_history_artifact, attach_tx_lookup_artifact};
+pub use script_history::{ScriptHistoryArtifact, write_script_history_artifact};
 
 #[derive(Clone, Debug)]
 pub struct IndexBundleRequest {
@@ -27,6 +29,7 @@ pub enum IndexBundleDirective {
     Restore(IndexBundleRequest),
     Export(IndexBundleRequest),
     AttachManifestArtifact(Box<ManifestArtifactTarget>),
+    AttachManifestScriptHistory(Box<ManifestArtifactTarget>),
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +48,8 @@ pub struct ManifestArtifactTarget {
 pub enum IndexBundleError {
     #[error("portable index bundles need the txindex capability enabled")]
     TxLookupDisabled,
+    #[error("portable script history bundles need the script history capability enabled")]
+    ScriptHistoryDisabled,
     #[error("bundle I/O at {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -154,6 +159,9 @@ pub(crate) fn run(
         IndexBundleDirective::AttachManifestArtifact(target) => {
             attach_manifest_artifact(host, target)
         }
+        IndexBundleDirective::AttachManifestScriptHistory(target) => {
+            attach_manifest_script_history(host, target)
+        }
     }
 }
 
@@ -211,6 +219,39 @@ fn attach_manifest_artifact(
         base,
         records,
         rows: usize::try_from(records).unwrap_or(usize::MAX),
+    })))
+}
+
+fn attach_manifest_script_history(
+    host: &BundleHost<'_>,
+    target: &ManifestArtifactTarget,
+) -> Result<Option<BundleOutcome>, IndexBundleError> {
+    if !host.enabled.contains(IndexCapability::ScriptHistory) {
+        return Err(IndexBundleError::ScriptHistoryDisabled);
+    }
+    let (_, watermarks) = host
+        .writer
+        .fenced_watermarks()
+        .map_err(IndexBundleError::Index)?;
+    if watermarks
+        .script_history
+        .is_some_and(|existing| existing.height >= target.base_height)
+    {
+        return Ok(None);
+    }
+    let base = IndexWatermark {
+        height: target.base_height,
+        hash: target.base_hash,
+    };
+    let scratch = target
+        .artifact_path
+        .parent()
+        .unwrap_or(&target.artifact_path);
+    let rows = restore::attach_script_history_artifact(host.writer, target, scratch)?;
+    Ok(Some(BundleOutcome::Restored(RestoreReport {
+        base,
+        records: rows,
+        rows: usize::try_from(rows).unwrap_or(usize::MAX),
     })))
 }
 

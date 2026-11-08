@@ -141,7 +141,7 @@ impl Drop for Publication {
     }
 }
 
-fn create_new_file(path: &Path) -> Result<File, IndexBundleError> {
+pub(super) fn create_new_file(path: &Path) -> Result<File, IndexBundleError> {
     OpenOptions::new()
         .write(true)
         .create_new(true)

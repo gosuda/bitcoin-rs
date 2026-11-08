@@ -18,7 +18,7 @@ pub mod segment;
 #[cfg(feature = "silent-payments")]
 pub mod silent_payments;
 pub mod snapshot_seed;
-pub use writer::{TxIndexWriter, TxLookupAttachment};
+pub use writer::{ScriptHistoryAttachment, TxIndexWriter, TxLookupAttachment};
 pub mod types;
 mod writer;
 
@@ -30,8 +30,8 @@ pub(crate) use index::NoSpentScripts;
 pub use index::{
     BasicFilter, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
     IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, Indexer,
-    MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptLiveScan,
-    SpentCoin, SpentCoins, TxIndexFamily, TxIndexPage, TxIndexScan, TxIndexScanRow,
+    MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptHistoryFamily,
+    ScriptLiveScan, SpentCoin, SpentCoins, TxIndexFamily, TxIndexPage, TxIndexScan, TxIndexScanRow,
     TxIndexSnapshot, index_format_version,
 };
 pub use offline::{IndexResetReport, reset_offline};

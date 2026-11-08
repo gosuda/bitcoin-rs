@@ -57,6 +57,8 @@ pub enum IndexError {
     },
     #[error("ScriptLive is already seeded; reset the capability first")]
     LiveAlreadySeeded,
+    #[error("ScriptHistory already holds rows; attach needs an empty family")]
+    ScriptHistoryPopulated,
     #[error("a ScriptLive snapshot seed session is already active")]
     SeedAlreadyActive,
     #[error("ScriptLive snapshot seed staging stalled; the store writer is not draining")]

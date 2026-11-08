@@ -7,7 +7,7 @@ use crate::{
     types::TxidRow,
 };
 use bitcoin_rs_consensus::primitives::{OutPoint, Txid};
-use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, KvStore, PrefixScanLimit};
+use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, KvStore, PrefixScanLimit, StorageError};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum TxIndexFamily {
@@ -18,6 +18,21 @@ impl TxIndexFamily {
     const fn column_family(self) -> ColumnFamily {
         match self {
             Self::TxConfirmed => ColumnFamily::TxConfirmed,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ScriptHistoryFamily {
+    Funding,
+    Spending,
+}
+
+impl ScriptHistoryFamily {
+    const fn column_family(self) -> ColumnFamily {
+        match self {
+            Self::Funding => ColumnFamily::Funding,
+            Self::Spending => ColumnFamily::Spending,
         }
     }
 }
@@ -63,6 +78,17 @@ pub trait TxIndexSnapshot: Send + Sync {
         start_after: Option<&[u8]>,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexPage, IndexError>;
+    fn scan_script_history_page(
+        &self,
+        family: ScriptHistoryFamily,
+        start_after: Option<&[u8]>,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexPage, IndexError> {
+        let _ = (family, start_after, limit);
+        Err(IndexError::from(StorageError::InvalidOperation(
+            "this snapshot does not serve script history pages",
+        )))
+    }
     fn capability_floor(&self, capability: IndexCapability) -> Result<u32, IndexError> {
         let _ = capability;
         Ok(0)
@@ -155,6 +181,33 @@ fn decode_row(key: &[u8]) -> Result<HashPrefixRow, IndexError> {
         .map_err(|_| IndexError::InvalidPrefixRowLength { len: key.len() })
 }
 
+fn column_page(
+    snapshot: &dyn KvSnapshot,
+    cf: ColumnFamily,
+    start_after: Option<&[u8]>,
+    limit: PrefixScanLimit,
+) -> Result<TxIndexPage, IndexError> {
+    let start: Vec<u8> = match start_after {
+        Some(cursor) => {
+            let mut start = Vec::with_capacity(cursor.len().saturating_add(1));
+            start.extend_from_slice(cursor);
+            start.push(0);
+            start
+        }
+        None => Vec::new(),
+    };
+    let scan = snapshot.scan_prefix_from_bounded(cf, &[], &start, limit)?;
+    let mut rows = Vec::with_capacity(scan.rows.len());
+    for (key, value) in scan.rows {
+        let row = decode_row(&key)?;
+        rows.push(TxIndexScanRow { row, value });
+    }
+    Ok(TxIndexPage {
+        rows,
+        complete: scan.complete,
+    })
+}
+
 impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
     fn compact_filter(&self, hash: &[u8; 32]) -> Result<Option<super::BasicFilter>, IndexError> {
         super::filters::read(self.snapshot.as_ref(), hash)
@@ -178,27 +231,26 @@ impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
         start_after: Option<&[u8]>,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexPage, IndexError> {
-        let start: Vec<u8> = match start_after {
-            Some(cursor) => {
-                let mut start = Vec::with_capacity(cursor.len().saturating_add(1));
-                start.extend_from_slice(cursor);
-                start.push(0);
-                start
-            }
-            None => Vec::new(),
-        };
-        let scan =
-            self.snapshot
-                .scan_prefix_from_bounded(family.column_family(), &[], &start, limit)?;
-        let mut rows = Vec::with_capacity(scan.rows.len());
-        for (key, value) in scan.rows {
-            let row = decode_row(&key)?;
-            rows.push(TxIndexScanRow { row, value });
-        }
-        Ok(TxIndexPage {
-            rows,
-            complete: scan.complete,
-        })
+        column_page(
+            self.snapshot.as_ref(),
+            family.column_family(),
+            start_after,
+            limit,
+        )
+    }
+
+    fn scan_script_history_page(
+        &self,
+        family: ScriptHistoryFamily,
+        start_after: Option<&[u8]>,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexPage, IndexError> {
+        column_page(
+            self.snapshot.as_ref(),
+            family.column_family(),
+            start_after,
+            limit,
+        )
     }
 
     fn transaction_rows(
