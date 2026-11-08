@@ -207,6 +207,24 @@ impl DerivedIndexQueryEngine {
         }
         Ok(())
     }
+    // QRY-03
+    fn require_tip_coverage_on_view(
+        view: &ServingView,
+        required: IndexCapabilities,
+    ) -> Result<(), TxQueryError> {
+        for capability in required.iter() {
+            let covers_tip = view
+                .coverage_for(capability)
+                .is_some_and(|coverage| coverage.last_height == view.epoch.height);
+            if !covers_tip {
+                return Err(TxQueryError::Retry(RetryReason::TipMoved {
+                    expected_commit: view.epoch.commit_id,
+                    current_commit: view.epoch.commit_id,
+                }));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -766,6 +784,7 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         let required = self.script_page_requirements(last);
         let view = self.capture_view(required)?;
         self.with_view(required, &view, |snapshot, view, budget| {
+            Self::require_tip_coverage_on_view(view, required)?;
             self.script_budget(budget);
             Self::require_cursor_tx_lookup_coverage_on_view(view, last)?;
             let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
@@ -789,6 +808,7 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
             IndexCapabilities::SCRIPT_HISTORY,
             &view,
             |snapshot, view, budget| {
+                Self::require_tip_coverage_on_view(view, IndexCapabilities::SCRIPT_HISTORY)?;
                 self.script_budget(budget);
                 let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
                 self.history_snapshot_for(snapshot, &prefix, budget, scripthash)
@@ -805,6 +825,7 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
             IndexCapabilities::SCRIPT_HISTORY,
             &view,
             |snapshot, view, budget| {
+                Self::require_tip_coverage_on_view(view, IndexCapabilities::SCRIPT_HISTORY)?;
                 self.script_budget(budget);
                 let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
                 self.confirmed_history_for(snapshot, &prefix, budget, scripthash)
@@ -821,6 +842,7 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         let required = self.script_page_requirements(cursor);
         let view = self.capture_view(required)?;
         self.with_view(required, &view, |snapshot, view, budget| {
+            Self::require_tip_coverage_on_view(view, required)?;
             Self::require_cursor_tx_lookup_coverage_on_view(view, cursor)?;
             let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
             Self::confirmed_history_page_for(
@@ -844,6 +866,7 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
             IndexCapabilities::SCRIPT_LIVE,
             &view,
             |snapshot, view, budget| {
+                Self::require_tip_coverage_on_view(view, IndexCapabilities::SCRIPT_LIVE)?;
                 let prefix = Self::require_prefix(view, IndexCapability::ScriptLive)?;
                 self.unspent_outputs_for(snapshot, &prefix, budget, scripthash)
             },

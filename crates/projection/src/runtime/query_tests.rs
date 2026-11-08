@@ -3067,6 +3067,65 @@ fn outside_coverage_is_unavailable() -> Result<(), crate::portable::TestError> {
     Ok(())
 }
 
+// QRY-03
+#[test]
+fn tip_promising_script_pages_refuse_while_watermark_lags_the_tip()
+-> Result<(), crate::portable::TestError> {
+    let genesis = Network::Regtest.genesis_block();
+    let child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
+    let mut tree = BlockTree::new();
+    let genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let child_id = tree.insert_header(child.header, NodeStatus::HeaderValid)?;
+    let genesis_watermark = watermark_for(&tree, genesis_id)?;
+    let scripthash = ScriptHash::new(&genesis.txs[0].outputs[0].script_pubkey);
+    let funding = history_row(
+        scripthash,
+        0,
+        &[(
+            genesis.txs[0].txid(),
+            position_of_transaction(&genesis, 0)?,
+            crate::types::ScriptHistoryOccurrence::FUNDING,
+        )],
+    );
+
+    let (fixture, _) = HistoricalFixture::build(
+        tree,
+        child_id,
+        HistoricalConfig {
+            tx_watermark: Some(genesis_watermark),
+            sh_watermark: Some(genesis_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: vec![scan_response(
+                ColumnFamily::Funding,
+                ScriptHashRow::scan_prefix(scripthash),
+                vec![funding],
+                true,
+            )],
+            bodies: vec![(0, genesis.block_hash(), consensus_bytes(&genesis))],
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+
+    let page = fixture.engine.confirmed_history_page(scripthash, None, 10);
+    assert!(
+        matches!(&page, Err(TxQueryError::Retry(_))),
+        "a tip-promising history page must refuse while the watermark lags the tip: {page:?}"
+    );
+
+    let live = fixture.engine.unspent_outputs(scripthash);
+    assert!(
+        matches!(&live, Err(TxQueryError::Retry(_))),
+        "a tip-promising utxo listing must refuse while the watermark lags the tip: {live:?}"
+    );
+
+    let embed = fixture.engine.script_history_at_answer(scripthash)?;
+    assert_eq!(embed.coverage.height, 0);
+    assert_eq!(embed.value.history.len(), 1);
+    Ok(())
+}
+
 // PRJ-11
 #[test]
 fn script_live_takes_no_transition_lock() -> Result<(), crate::portable::TestError> {
