@@ -157,9 +157,13 @@ impl DerivedIndexQueryEngine {
             return Self::scoped_absence(prefix, "transaction index");
         }
 
+        let mut below_floor = false;
         for row in rows {
             let height = row.row.height();
             if !prefix.covers(height) {
+                if height < prefix.floor {
+                    below_floor = true;
+                }
                 continue;
             }
             let Some(positions) = Self::validated_positions(&row.value)? else {
@@ -185,6 +189,13 @@ impl DerivedIndexQueryEngine {
                     }
                 }
             }
+        }
+        if below_floor {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::OutsideCoverage {
+                    declared_floor_or_tip: prefix.floor,
+                },
+            ));
         }
         Self::scoped_absence(prefix, "transaction index")
     }

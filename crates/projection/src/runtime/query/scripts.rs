@@ -133,6 +133,7 @@ impl DerivedIndexQueryEngine {
     ) -> Result<Option<SpendingRecord>, TxQueryError> {
         let rows = Self::scan_spending_rows(snapshot, budget, outpoint)?;
         let mut last_height = None;
+        let mut below_floor = false;
         for row in rows {
             let height = row.row.height();
             if last_height == Some(height) {
@@ -140,6 +141,9 @@ impl DerivedIndexQueryEngine {
             }
             last_height = Some(height);
             if !prefix.covers(height) {
+                if height < prefix.floor {
+                    below_floor = true;
+                }
                 continue;
             }
             let hash = self.resolve_hash_at_height(height, prefix)?;
@@ -161,6 +165,13 @@ impl DerivedIndexQueryEngine {
                     return Ok(Some(record));
                 }
             }
+        }
+        if below_floor {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::OutsideCoverage {
+                    declared_floor_or_tip: prefix.floor,
+                },
+            ));
         }
         Self::scoped_absence(prefix, "script history")
     }

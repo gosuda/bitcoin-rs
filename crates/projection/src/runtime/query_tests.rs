@@ -2352,12 +2352,7 @@ fn historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor()
             sh_watermark: Some(tip_watermark),
             tx_floor: 1,
             sh_floor: 0,
-            scans: vec![scan_response(
-                ColumnFamily::TxConfirmed,
-                TxidRow::scan_prefix(&txid),
-                vec![(TxidRow::row(&txid, 0).to_db_row().to_vec(), vec![0])],
-                true,
-            )],
+            scans: Vec::new(),
             bodies: vec![
                 (0, genesis.block_hash(), consensus_bytes(&genesis)),
                 (1, child.block_hash(), consensus_bytes(&child)),
@@ -2464,7 +2459,7 @@ fn historical_standalone_spender_scoped_none_above_floor() -> Result<(), crate::
                 ColumnFamily::Spending,
                 SpendingPrefixRow::scan_prefix(&outpoint),
                 vec![(
-                    SpendingPrefixRow::row(&outpoint, 0).to_db_row().to_vec(),
+                    SpendingPrefixRow::row(&outpoint, 1).to_db_row().to_vec(),
                     vec![0],
                 )],
                 true,
@@ -3112,6 +3107,81 @@ fn answer_reads_the_captured_snapshot_when_tail_rows_are_rewritten()
     );
     assert_eq!(at.height, 1);
     assert_eq!(at.coverage.height, 1);
+    Ok(())
+}
+
+// QRY-05
+#[test]
+fn below_floor_point_lookups_refuse_with_outside_coverage() -> Result<(), crate::portable::TestError>
+{
+    let genesis = Network::Regtest.genesis_block();
+    let child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
+    let mut tree = BlockTree::new();
+    let _genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let child_id = tree.insert_header(child.header, NodeStatus::HeaderValid)?;
+    let tip_watermark = watermark_for(&tree, child_id)?;
+    let genesis_txid = genesis.txs[0].txid();
+    let outpoint = OutPoint::new(genesis_txid, 0);
+
+    let (fixture, _) = HistoricalFixture::build(
+        tree,
+        child_id,
+        HistoricalConfig {
+            tx_watermark: Some(tip_watermark),
+            sh_watermark: Some(tip_watermark),
+            tx_floor: 1,
+            sh_floor: 1,
+            scans: vec![
+                scan_response(
+                    ColumnFamily::TxConfirmed,
+                    TxidRow::scan_prefix(&genesis_txid),
+                    vec![(
+                        TxidRow::row(&genesis_txid, 0).to_db_row().to_vec(),
+                        vec![0_u8],
+                    )],
+                    true,
+                ),
+                scan_response(
+                    ColumnFamily::Spending,
+                    SpendingPrefixRow::scan_prefix(&outpoint),
+                    vec![(
+                        SpendingPrefixRow::row(&outpoint, 0).to_db_row().to_vec(),
+                        Vec::new(),
+                    )],
+                    true,
+                ),
+            ],
+            bodies: Vec::new(),
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+
+    let located = fixture.engine.transaction_at_prefix(&genesis_txid);
+    assert!(
+        matches!(
+            &located,
+            Err(TxQueryError::Unavailable(
+                TxUnavailableCause::OutsideCoverage {
+                    declared_floor_or_tip: 1,
+                }
+            ))
+        ),
+        "a below-floor txid must refuse instead of returning scoped absence: {located:?}"
+    );
+
+    let spent = fixture.engine.spender_at_prefix(outpoint);
+    assert!(
+        matches!(
+            &spent,
+            Err(TxQueryError::Unavailable(
+                TxUnavailableCause::OutsideCoverage {
+                    declared_floor_or_tip: 1,
+                }
+            ))
+        ),
+        "a below-floor spender must refuse instead of returning scoped absence: {spent:?}"
+    );
     Ok(())
 }
 
