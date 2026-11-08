@@ -961,3 +961,5 @@ fn coinbase_maturity_boundaries() {
     assert_eq!(super::check_coinbase_maturity(true, 10, 110), Ok(()));
     assert_eq!(super::check_coinbase_maturity(false, 10, 10), Ok(()));
 }
+// SCR-06
+// SCR-06

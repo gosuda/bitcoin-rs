@@ -76,6 +76,7 @@ mod tests {
         [byte; 32]
     }
 
+    // SCR-06
     #[test]
     fn distinct_fields_miss() {
         let cache = SignatureCache::new();

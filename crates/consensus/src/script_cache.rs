@@ -139,6 +139,7 @@ mod tests {
         cache.inner.lock().queue.len()
     }
 
+    // SCR-06
     #[test]
     fn insert_then_take_hits_exactly_once() {
         let cache = ScriptExecutionCache::new();
@@ -147,6 +148,7 @@ mod tests {
         assert!(!cache.take(key(1), VerifyFlags::MANDATORY));
     }
 
+    // SCR-06
     #[test]
     fn different_flags_miss_and_leave_the_entry_live() {
         let cache = ScriptExecutionCache::new();
@@ -166,6 +168,7 @@ mod tests {
         assert!(cache.take(key(3), VerifyFlags::MANDATORY));
     }
 
+    // SCR-06
     #[test]
     fn capacity_plus_one_evicts_the_oldest() {
         let cache = ScriptExecutionCache::new();
