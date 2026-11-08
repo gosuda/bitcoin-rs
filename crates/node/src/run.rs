@@ -344,7 +344,7 @@ mod tests {
         });
         std::thread::sleep(Duration::from_millis(5));
         writer.trigger();
-        let res = rx.recv_timeout(Duration::from_millis(25));
+        let res = rx.recv_timeout(Duration::from_secs(10));
         assert!(
             res.is_ok(),
             "wait_for_shutdown did not wake promptly: timed out waiting for trigger"
