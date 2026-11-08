@@ -521,8 +521,7 @@ impl ChainHandles {
         let coin_stats_listener = bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
             bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         );
-        let mut utxo = bitcoin_rs_storage::utxo::UtxoSet::new();
-        utxo.track_coin_stats(coin_stats_listener.clone());
+        let utxo = bitcoin_rs_storage::utxo::UtxoReader::fixture_new();
         let chain_tip = TipReader::new(Arc::new(ArcSwapOption::empty()));
         let applied_tip = TipReader::new(Arc::new(ArcSwapOption::empty()));
         let block_tree = BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(
@@ -544,7 +543,7 @@ impl ChainHandles {
             progress,
             closed_for_recovery: bitcoin_rs_execution::chain::LatchWriter::new().reader(),
             blocks: BlockLogReader::fixture_empty(),
-            utxo: bitcoin_rs_storage::utxo::UtxoReader::new(Arc::new(utxo)),
+            utxo,
             coin_stats: Arc::new(coin_stats_listener),
             block_tree,
             chain_network: Network::Mainnet,
@@ -639,6 +638,15 @@ impl Context {
             },
             ..ContextHandles::default()
         })
+    }
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn populate_fixture_coins<
+        T: std::borrow::Borrow<bitcoin_rs_consensus::primitives::TxOut>,
+    >(
+        &self,
+        changes: &bitcoin_rs_storage::utxo::contract::BlockChanges<T>,
+    ) -> Result<(), bitcoin_rs_storage::utxo::UtxoError> {
+        self.chain.utxo.populate_fixture_coins(changes)
     }
 
     #[must_use]

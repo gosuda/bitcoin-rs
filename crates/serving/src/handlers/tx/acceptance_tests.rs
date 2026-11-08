@@ -37,12 +37,8 @@ fn seed_utxo(ctx: &Context, tag: u8, value: u64) {
         false,
         7,
     ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )
-    .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+    ctx.populate_fixture_coins(&changes)
+        .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
 }
 
 fn spending_tx(tag: u8, output_value: u64) -> Tx {

@@ -14,8 +14,8 @@ use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_FORMAT_VERSION, DURABLE_HEAD
 use bitcoin_rs_storage::pruning::block_undo_key;
 use bitcoin_rs_storage::undo::UndoStore;
 use bitcoin_rs_storage::{
-    ColumnFamily, CommitRecords, DurableHead, DurableHeadStore, FlatFileBlockStore,
-    KvDurableHeadStore, KvStore, KvUndoStore, PersistFault,
+    ColumnFamily, DurableHead, DurableHeadStore, FlatFileBlockStore, KvDurableHeadStore, KvStore,
+    KvUndoStore, PersistFault,
 };
 
 const ALL_FAULTS: &[PersistFault] = &[
@@ -34,6 +34,7 @@ struct ChainFamily {
     bodies: Arc<IndexedBlockBodyStore<bitcoin_rs_storage::RocksDbStore>>,
     undo: KvUndoStore<bitcoin_rs_storage::RocksDbStore>,
     head: KvDurableHeadStore<bitcoin_rs_storage::RocksDbStore>,
+    authority: bitcoin_rs_storage::CommitAuthority,
 }
 
 fn open_family(data_dir: &std::path::Path) -> Result<ChainFamily> {
@@ -51,12 +52,19 @@ fn open_family(data_dir: &std::path::Path) -> Result<ChainFamily> {
         Arc::clone(&files),
     ));
     let undo = KvUndoStore::new(Arc::clone(&store));
+    let dyn_store: Arc<dyn KvStore> = store.clone();
+    let coins = Arc::new(bitcoin_rs_storage::CoinStore::open(
+        Arc::clone(&dyn_store),
+        1024 * 1024,
+    ));
+    let authority = bitcoin_rs_storage::CommitAuthority::new(dyn_store, coins);
     Ok(ChainFamily {
         store,
         _files: files,
         bodies,
         undo,
         head,
+        authority,
     })
 }
 
@@ -115,15 +123,17 @@ fn connect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
             undo_extent: Some((1, hash_of(1))),
         };
         let undo_one = vec![1_u8; 8];
-        family.head.commit(
-            None,
-            &old_head,
-            &CommitRecords {
-                undo_rows: vec![(1, hash_of(1), undo_one.as_slice())],
+        family
+            .authority
+            .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+                expected_head: None,
+                next_head: old_head,
+                undo_rows: vec![(1, hash_of(1), bytes::Bytes::from(undo_one.clone()))],
                 body_rows: vec![(1, hash_of(1), position_one)],
                 attestation: None,
-            },
-        )?;
+                coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+            })
+            .map_err(|error| TestError::message(error.to_string()))?;
 
         let body_two = b"body-two";
         family.bodies.persist_block_body(2, hash_of(2), body_two)?;
@@ -142,15 +152,16 @@ fn connect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
         };
         let undo_two = vec![2_u8; 8];
         family.store.arm_persist_fault(*fault);
-        let outcome = family.head.commit(
-            Some(&old_head),
-            &new_head,
-            &CommitRecords {
-                undo_rows: vec![(2, hash_of(2), undo_two.as_slice())],
+        let outcome = family
+            .authority
+            .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+                expected_head: Some(old_head),
+                next_head: new_head,
+                undo_rows: vec![(2, hash_of(2), bytes::Bytes::from(undo_two.clone()))],
                 body_rows: vec![(2, hash_of(2), position_two)],
                 attestation: None,
-            },
-        );
+                coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+            });
         drop(family);
 
         let _ = outcome;
@@ -188,8 +199,16 @@ fn disconnect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
             undo_extent: Some((1, hash_of(1))),
         };
         family
-            .head
-            .commit(None, &committed, &CommitRecords::default())?;
+            .authority
+            .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+                expected_head: None,
+                next_head: committed,
+                undo_rows: Vec::new(),
+                body_rows: Vec::new(),
+                attestation: None,
+                coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+            })
+            .map_err(|error| TestError::message(error.to_string()))?;
 
         let parent = DurableHead {
             assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
@@ -200,10 +219,16 @@ fn disconnect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
             body_extent: committed.body_extent,
             undo_extent: committed.undo_extent,
         };
-        family.store.arm_persist_fault(*fault);
         let outcome = family
-            .head
-            .commit(Some(&committed), &parent, &CommitRecords::default());
+            .authority
+            .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+                expected_head: Some(committed),
+                next_head: parent,
+                undo_rows: Vec::new(),
+                body_rows: Vec::new(),
+                attestation: None,
+                coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+            });
         drop(family);
 
         let _ = outcome;
@@ -222,7 +247,6 @@ fn test_config(data_dir: std::path::PathBuf) -> NodeConfig {
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = data_dir;
     config.p2p.listen.clear();
-    config.chainstate_journal.blocks = 1;
     config
 }
 

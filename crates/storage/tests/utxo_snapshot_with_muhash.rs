@@ -1,5 +1,5 @@
 use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut};
-use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_storage::utxo::{UtxoSet, write_snapshot_observed};
 
@@ -84,7 +84,7 @@ fn run(plan: &Plan) -> TestResult {
         first.add(UtxoAdd::new(outpoint, txout.clone(), coinbase, 200));
         seeded.push((outpoint, txout, coinbase));
     }
-    commit_block_changes(&set, &first, &txid(3_000))?;
+    listener.reset(expected.clone());
     assert_stats_eq(plan.name, &listener.snapshot(), &expected);
 
     let mut second = BlockChanges::with_capacity(capacity, capacity);
@@ -121,7 +121,26 @@ fn run(plan: &Plan) -> TestResult {
             }
         }
     }
-    commit_block_changes(&set, &second, &txid(3_001))?;
+    listener.reset(expected.clone());
+    use std::collections::HashMap;
+    let mut by_txid: HashMap<Hash256, Vec<bitcoin_rs_storage::utxo::record::OwnedUtxoOut>> =
+        HashMap::new();
+    for (outpoint, txout) in &live {
+        by_txid.entry(outpoint.txid.into()).or_default().push(
+            bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+                vout: outpoint.vout,
+                value: txout.value.to_sat(),
+                script_pubkey: txout.script_pubkey.to_vec(),
+                coinbase: false,
+                height: 201,
+            },
+        );
+    }
+    for (txid, mut outs) in by_txid {
+        outs.sort_by_key(|o| o.vout);
+        let rec = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(txid, &outs)?;
+        set.insert_parsed_record(rec);
+    }
     assert_stats_eq(plan.name, &listener.snapshot(), &expected);
 
     for (outpoint, txout) in live {

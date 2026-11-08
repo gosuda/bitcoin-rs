@@ -19,7 +19,7 @@
 - [p2p-wire.md](p2p-wire.md): `P2P-01`–`P2P-11`.
 - [pool.md](pool.md): `POOL-01`–`POOL-09`.
 - [qa-corpus.md](qa-corpus.md): `QAC-01`–`QAC-05`.
-- [recovery.md](recovery.md): `RCV-01`–`RCV-15`, `JW-BOOT-1`, `JW-REC-1`, `JW-ORDER-1`, `JW-DUR-1`, `JW-ROT-1`, `JW-RET-1`, `JW-LIFE-1`, `JW-MARK-1`–`JW-MARK-2`, `JW-FAIL-1`.
+- [recovery.md](recovery.md): `RCV-01`–`RCV-15`.
 - [reference-set.md](reference-set.md): `REF-01`–`REF-04`, `REF-06`–`REF-07`.
 - [storage-footprint.md](storage-footprint.md): `FP-01`–`FP-04`.
 - [synchronization.md](synchronization.md): `CONV-1`, `SYNC-01`–`SYNC-07`.

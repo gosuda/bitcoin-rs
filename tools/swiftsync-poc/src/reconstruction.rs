@@ -2,7 +2,7 @@ use std::path::Path;
 
 use bitcoin::consensus::encode::serialize;
 use bitcoin_rs_consensus::primitives::{Block as PrimitiveBlock, OutPoint, deserialize};
-use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, populate_block_changes};
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener, scan_coin_stats};
 use bitcoin_rs_storage::utxo::{UtxoError, UtxoSet, write_snapshot_observed};
 
@@ -26,12 +26,27 @@ pub struct ReconstructReport {
 }
 
 pub fn reconstruct(chain: &Chain, snapshot: Option<&Path>) -> Result<ReconstructReport, Error> {
-    let mut set = UtxoSet::new();
-    let listener = CoinStatsListener::new(CoinStats::new());
-    set.track_coin_stats(listener.clone());
+    let store = std::sync::Arc::new(bitcoin_rs_storage::MemoryKvStore::new());
+    let coin_store = bitcoin_rs_storage::CoinStore::open(store.clone(), 64 * 1024 * 1024);
+    let mut listener = CoinStats::new();
     let mut counters = Counters::default();
     for carried in &chain.blocks {
-        replay_block(&set, carried, &mut counters)?;
+        replay_block(&coin_store, carried, &mut counters, &mut listener)?;
+    }
+    let mut set = UtxoSet::new();
+    let coin_stats_listener = CoinStatsListener::new(listener);
+    set.track_coin_stats(coin_stats_listener.clone());
+    use bitcoin_rs_storage::KvStore;
+    for pair in store
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])
+        .map_err(|e| Error::from(UtxoError::Storage(e)))?
+    {
+        let (_key, val) = pair.map_err(|e| Error::from(UtxoError::Storage(e)))?;
+        let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
+            val.to_vec().into_boxed_slice(),
+        )
+        .map_err(Error::from)?;
+        set.insert_parsed_record(record);
     }
     let height = chain.height();
     let (stats, accounted_bytes) = set
@@ -42,7 +57,7 @@ pub fn reconstruct(chain: &Chain, snapshot: Option<&Path>) -> Result<Reconstruct
             Ok::<_, UtxoError>((stats, accounted))
         })
         .map_err(Error::from)?;
-    let listener_muhash = listener.snapshot().muhash.finalize_hash();
+    let listener_muhash = coin_stats_listener.snapshot().muhash.finalize_hash();
     let scan_muhash = stats.muhash.finalize_hash();
     if listener_muhash != scan_muhash {
         return Err(Error::StatsDivergence {
@@ -70,9 +85,10 @@ pub fn reconstruct(chain: &Chain, snapshot: Option<&Path>) -> Result<Reconstruct
 }
 
 fn replay_block(
-    set: &UtxoSet,
+    coin_store: &bitcoin_rs_storage::CoinStore,
     carried: &crate::chain::ChainBlock,
     counters: &mut Counters,
+    listener: &mut CoinStats,
 ) -> Result<(), Error> {
     let wire = serialize(&carried.block);
     counters.body_bytes = counters
@@ -93,22 +109,37 @@ fn replay_block(
         usize::try_from(counted_outputs(carried)).unwrap_or(0),
         carried.undo.len(),
     );
+    let mut ctx = ReplayContext {
+        carried,
+        counters,
+        listener,
+    };
     for (tx, txid) in decoded.txs.iter().zip(&txids) {
         let coinbase = tx.is_coinbase();
-        collect_created(&mut changes, carried, counters, tx, *txid, coinbase)?;
+        collect_created(&mut changes, &mut ctx, tx, *txid, coinbase)?;
         if coinbase {
             continue;
         }
-        collect_spent(set, &mut changes, carried, counters, tx)?;
+        collect_spent(coin_store, &mut changes, tx, &mut ctx)?;
     }
-    commit_block_changes(set, &changes, &convert::block_hash(carried.hash()))?;
+    for add in changes.adds() {
+        ctx.listener
+            .insert_utxo(&add.outpoint, &add.txout, add.height, add.coinbase);
+    }
+    populate_block_changes(coin_store, &changes).map_err(Error::from)?;
+    ctx.listener.finish_block(carried.height, tx_count);
     Ok(())
+}
+
+struct ReplayContext<'a> {
+    carried: &'a crate::chain::ChainBlock,
+    counters: &'a mut Counters,
+    listener: &'a mut CoinStats,
 }
 
 fn collect_created(
     changes: &mut BlockChanges,
-    carried: &crate::chain::ChainBlock,
-    counters: &mut Counters,
+    ctx: &mut ReplayContext<'_>,
     tx: &bitcoin_rs_consensus::primitives::Tx,
     txid: bitcoin_rs_consensus::primitives::Txid,
     coinbase: bool,
@@ -116,7 +147,7 @@ fn collect_created(
     for (index, txout) in tx.outputs.iter().enumerate() {
         let Ok(vout) = u32::try_from(index) else {
             return Err(Error::InvalidBlock {
-                height: carried.height,
+                height: ctx.carried.height,
                 check: "output index",
             });
         };
@@ -124,32 +155,55 @@ fn collect_created(
             OutPoint::new(txid, vout),
             txout.clone(),
             coinbase,
-            carried.height,
+            ctx.carried.height,
         ));
-        counters.coins_written = counters.coins_written.saturating_add(1);
+        ctx.counters.coins_written = ctx.counters.coins_written.saturating_add(1);
     }
     Ok(())
 }
 
 fn collect_spent(
-    set: &UtxoSet,
+    coin_store: &bitcoin_rs_storage::CoinStore,
     changes: &mut BlockChanges,
-    carried: &crate::chain::ChainBlock,
-    counters: &mut Counters,
     tx: &bitcoin_rs_consensus::primitives::Tx,
+    ctx: &mut ReplayContext<'_>,
 ) -> Result<(), Error> {
     for input in &tx.inputs {
-        if set.get_entry(&input.previous_output).is_none() {
+        let key = bitcoin_rs_storage::CoinKey(input.previous_output.txid.0.to_le_bytes());
+        let coin = coin_store
+            .get(&key)
+            .map_err(|e| Error::from(UtxoError::Storage(e)))?
+            .and_then(|bytes| {
+                bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
+                    bytes.to_vec().into_boxed_slice(),
+                )
+                .ok()
+            })
+            .and_then(|rec| {
+                rec.find_output(input.previous_output.vout).map(|out| {
+                    (
+                        bitcoin_rs_consensus::primitives::TxOut {
+                            value: bitcoin_rs_consensus::primitives::Amount::from_sat(out.value),
+                            script_pubkey: out.script_pubkey.to_vec().into(),
+                        },
+                        out.height,
+                        out.coinbase,
+                    )
+                })
+            });
+        let Some((txout, height, coinbase)) = coin else {
             let previous = input.previous_output;
             let txid = previous.txid;
             let vout = previous.vout;
             return Err(Error::UnknownPrevout {
-                height: carried.height,
+                height: ctx.carried.height,
                 outpoint: format!("{txid}:{vout}"),
             });
-        }
-        counters.prevout_reads = counters.prevout_reads.saturating_add(1);
-        counters.undo_entries = counters.undo_entries.saturating_add(1);
+        };
+        ctx.listener
+            .remove_utxo(&input.previous_output, &txout, height, coinbase);
+        ctx.counters.prevout_reads = ctx.counters.prevout_reads.saturating_add(1);
+        ctx.counters.undo_entries = ctx.counters.undo_entries.saturating_add(1);
         changes.remove(input.previous_output);
     }
     Ok(())

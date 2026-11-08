@@ -15,8 +15,6 @@ pub(crate) enum TestError {
     #[error(transparent)]
     UndoLoad(#[from] crate::utxo::contract::UndoLoadError),
     #[error(transparent)]
-    Rollback(#[from] crate::utxo::contract::RollbackError),
-    #[error(transparent)]
     Snapshot(#[from] crate::utxo::core_snapshot::SnapshotError),
     #[error(transparent)]
     StateVerify(#[from] crate::utxo::core_snapshot::StateVerifyError),

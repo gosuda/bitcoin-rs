@@ -904,12 +904,8 @@ fn gettxoutproof_without_blockhash_answers_from_the_utxo_set() {
         false,
         0,
     ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )
-    .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+    ctx.populate_fixture_coins(&changes)
+        .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
     install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
     let ctx = Arc::new(ctx);
     let handler = Handler::new(Arc::clone(&ctx));
@@ -1007,12 +1003,8 @@ fn fund_coin(ctx: &Context, outpoint: OutPoint, value_sat: u64) {
         false,
         0,
     ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )
-    .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+    ctx.populate_fixture_coins(&changes)
+        .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
 }
 
 fn distinct_block(marker: u8) -> Block {
@@ -1726,12 +1718,8 @@ fn retry_fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
         false,
         1,
     ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::from_le_bytes(&[0xaa; 32]),
-    )
-    .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+    ctx.populate_fixture_coins(&changes)
+        .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
     OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0)
 }
 

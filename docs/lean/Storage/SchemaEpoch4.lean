@@ -6,11 +6,11 @@ Safety invariants of the datadir schema lifecycle for schema epoch 4
 Anchors: Tony Hoare, Edsger W. Dijkstra
 
 Target Design Notice:
-This module models the target Epoch 4 datadir schema lifecycle and the
-planned converter step `3 -> 4`, ahead of the stateful Phase 3
-implementation. The live node implementation
-(`crates/storage/src/checkpoint/fs.rs`) remains at
-`CURRENT_SCHEMA_VERSION = 3`. This is an independent design model and
+This module models the Epoch 4 datadir schema lifecycle and the
+converter step `3 -> 4`, after the stateful Phase 3 implementation.
+The live node implementation
+(`crates/storage/src/checkpoint/fs.rs`) sets
+`CURRENT_SCHEMA_VERSION = 4`. This is an independent design model and
 must not be reported as an implementation refinement proof.
 
 Epoch 4 target facts modeled here:
@@ -18,7 +18,7 @@ Epoch 4 target facts modeled here:
    `bitcoin-rs-storage-convert` in the refusal (message text is outside
    the state space).
 2. Coins live in the engine `coins` keyspace; the converter derives coin
-   content from the newest complete checkpoint `utxo-v4.dat` image plus
+   content from the newest complete checkpoint UTXO snapshot image plus
    replay of heights `checkpoint + 1 .. durable head` from block bodies
    and undo rows. The checkpoint image is consumed, never retained as a
    resident authority.

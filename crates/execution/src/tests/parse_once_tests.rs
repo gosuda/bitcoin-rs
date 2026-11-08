@@ -6,18 +6,18 @@ use bitcoin_rs_consensus::primitives::layout::{
     parse_exact_call_count, reset_parse_exact_call_count,
 };
 use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Network};
+use bitcoin_rs_storage::DurableHead;
 use bitcoin_rs_storage::utxo::UtxoSet;
-use bitcoin_rs_storage::{CommitRecords, DurableHead, assumeutxo::AssumeUtxoDiskStatus};
 
 use super::Chainstate;
-use crate::test_fixtures::{TestResult, handles, seed_genesis};
+use crate::test_fixtures::{TestResult, handles, seed_durable_head, seed_genesis};
 
 fn commit_genesis_head(chain: &Chainstate) -> TestResult {
     let genesis = Network::Regtest.genesis_block();
-    chain.durable_head.commit(
-        None,
-        &DurableHead {
-            assumeutxo: AssumeUtxoDiskStatus::Uninitialized,
+    seed_durable_head(
+        chain,
+        DurableHead {
+            assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id: 1,
             height: 0,
             tip: Hash256::from(genesis.block_hash()),
@@ -25,7 +25,6 @@ fn commit_genesis_head(chain: &Chainstate) -> TestResult {
             body_extent: None,
             undo_extent: None,
         },
-        &CommitRecords::default(),
     )?;
     Ok(())
 }

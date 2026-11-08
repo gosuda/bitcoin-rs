@@ -108,12 +108,7 @@ impl EvidenceIdentity {
     pub fn of_process(config: &crate::config::NodeConfig) -> std::io::Result<Self> {
         let executable = std::env::current_exe()?;
         let binary_sha256 = Sha256Hex::digest(&std::fs::read(&executable)?);
-        let journal = config.chainstate_journal;
-        let durability = if journal.enabled {
-            format!("journal:{}b/{}s", journal.blocks, journal.seconds)
-        } else {
-            "checkpoint-only".into()
-        };
+        let durability = "atomic-batch".to_owned();
         Ok(Self {
             binary_sha256,
             version: env!("CARGO_PKG_VERSION").into(),

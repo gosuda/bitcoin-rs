@@ -127,12 +127,12 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
         .get("directory")
         .and_then(|value| value.as_str())
         .ok_or_else(|| std::io::Error::other("CURRENT has no generation directory"))?;
-    let snapshot_file = std::fs::File::open(root.join(directory).join("utxo-v4.dat"))?;
-    let mut snapshot_reader = std::io::BufReader::new(snapshot_file);
-    let snapshot =
-        bitcoin_rs_storage::utxo::snapshot::read_snapshot_strict_v4(&mut snapshot_reader)?;
-    assert_ne!(snapshot.muhash_trailer, [0_u8; 384]);
-    assert_eq!(snapshot.muhash_trailer, rescanned.muhash.finalize());
+    assert!(root.join(directory).join("chainstate").exists());
+    assert!(root.join(directory).join("headers-v1.dat").exists());
+    assert!(root.join(directory).join("coinstats-v1.dat").exists());
+    let manifest_bytes = std::fs::read(root.join(directory).join("manifest-v1.json"))?;
+    let manifest: sonic_rs::Value = sonic_rs::from_slice(&manifest_bytes)?;
+    assert!(manifest.get("utxo").is_none_or(|v| v.is_null()));
     drop(resumed);
 
     let resumed_again = NodeState::open(reopen_config, None)?;
@@ -179,7 +179,7 @@ fn clean_checkpoint_lifecycle_is_backend_neutral() -> Result<(), TestError> {
 }
 
 #[test]
-fn journal_replay_restores_state_above_checkpoint() -> Result<(), TestError> {
+fn durable_head_replay_restores_state_above_checkpoint() -> Result<(), TestError> {
     fn stable_hash(
         view: &bitcoin_rs_storage::utxo::UtxoSetView<'_>,
     ) -> Result<bitcoin_rs_consensus::primitives::Hash256, bitcoin_rs_storage::utxo::UtxoError>
@@ -188,11 +188,10 @@ fn journal_replay_restores_state_above_checkpoint() -> Result<(), TestError> {
     }
 
     let dir = tempfile::tempdir()?;
-    let data_dir = dir.path().join("journal-resume");
+    let data_dir = dir.path().join("checkpoint-resume");
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = data_dir;
     config.p2p.listen.clear();
-    config.chainstate_journal.blocks = 1;
 
     let genesis =
         BlockImage::from_local(bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block());
@@ -214,11 +213,11 @@ fn journal_replay_restores_state_above_checkpoint() -> Result<(), TestError> {
     drop(base);
 
     let resumed = NodeState::open(config, None)?;
-    assert_eq!(resumed.resume_source(), ResumeSource::Journal);
+    assert_eq!(resumed.resume_source(), ResumeSource::Checkpoint);
     let resumed_tip = resumed
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| std::io::Error::other("journal replay did not publish a tip"))?;
+        .ok_or_else(|| std::io::Error::other("checkpoint replay did not publish a tip"))?;
     assert_eq!(resumed_tip.as_ref(), &expected_tip);
     assert_eq!(
         resumed

@@ -30,7 +30,8 @@ pub fn detect_engine(dir: &Path) -> Result<Option<StorageBackend>, StorageError>
 
     let has_current = entries.iter().any(|name| name == "CURRENT");
     let has_options = entries.iter().any(|name| name.starts_with("OPTIONS-"));
-    let has_rocksdb = has_current && has_options;
+    let has_manifest = entries.iter().any(|name| name.starts_with("MANIFEST-"));
+    let has_rocksdb = has_current && (has_options || has_manifest);
 
     let has_surreal_marker = entries.iter().any(|name| name == SURREALKV_MARKER);
     let has_surreal_engine = entries.iter().any(|name| name == "ENGINE")
@@ -62,6 +63,7 @@ pub fn detect_engine(dir: &Path) -> Result<Option<StorageBackend>, StorageError>
     if let Some(backend) = detected {
         return Ok(Some(backend));
     }
+
     Err(StorageError::IncompatibleData(
         "unknown engine files".to_owned(),
     ))

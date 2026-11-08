@@ -105,7 +105,19 @@ pub fn workspace() -> PathBuf {
 }
 
 pub fn bitcoin_rs_binary() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("BITCOIN_RS_NODE") {
+    discover_binary("BITCOIN_RS_NODE", "bitcoin-rs", "--bin bitcoin-rs")
+}
+
+pub fn bitcoin_rs_storage_convert_binary() -> Result<PathBuf> {
+    discover_binary(
+        "BITCOIN_RS_STORAGE_CONVERT",
+        "bitcoin-rs-storage-convert",
+        "--bin bitcoin-rs-storage-convert",
+    )
+}
+
+fn discover_binary(env_key: &str, name: &str, build_flag: &str) -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os(env_key) {
         return Ok(PathBuf::from(path));
     }
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
@@ -120,7 +132,7 @@ pub fn bitcoin_rs_binary() -> Result<PathBuf> {
                 }
             },
         );
-    let binary_name = format!("bitcoin-rs{}", std::env::consts::EXE_SUFFIX);
+    let binary_name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     let newest = ["debug", "release"]
         .iter()
         .map(|profile| target_dir.join(profile).join(&binary_name))
@@ -131,9 +143,9 @@ pub fn bitcoin_rs_binary() -> Result<PathBuf> {
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
         });
     newest.ok_or_else(|| {
-        Error::Assertion(
-            "bitcoin-rs binary not found; run `cargo build --bin bitcoin-rs` first".into(),
-        )
+        Error::Assertion(format!(
+            "{name} binary not found; run `cargo build {build_flag}` first or set {env_key}"
+        ))
     })
 }
 

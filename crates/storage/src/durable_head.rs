@@ -1,8 +1,18 @@
 use bitcoin_rs_consensus::primitives::Hash256;
 
 use crate::assumeutxo::AssumeUtxoDiskStatus;
-use crate::chainstate_journal::crc32c;
-use crate::pruning::{BLOCK_DATA_CF, block_body_key, block_undo_key};
+
+pub(crate) fn crc32c(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0_u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0x82f6_3b78 & mask);
+        }
+    }
+    !crc
+}
 use crate::{ColumnFamily, KvStore, StorageError, WriteCondition};
 
 pub const DURABLE_HEAD_KEY: &[u8] = b"node:durable-head";
@@ -39,14 +49,14 @@ impl ScriptAttestation {
         }
     }
 
-    fn row(self, commit_id: u64) -> [u8; SCRIPT_ATTESTATION_ROW_LEN] {
+    pub(crate) fn row(self, commit_id: u64) -> [u8; SCRIPT_ATTESTATION_ROW_LEN] {
         let mut row = [0_u8; SCRIPT_ATTESTATION_ROW_LEN];
         row[..8].copy_from_slice(&commit_id.to_le_bytes());
         row[8] = self.byte();
         row
     }
 
-    fn from_row(row: &[u8], head: &DurableHead) -> Result<Self, StorageError> {
+    pub(crate) fn from_row(row: &[u8], head: &DurableHead) -> Result<Self, StorageError> {
         let corrupt =
             || StorageError::IncompatibleData("script attestation row is unreadable".to_owned());
         let row: &[u8; SCRIPT_ATTESTATION_ROW_LEN] = row.try_into().map_err(|_| corrupt())?;
@@ -185,13 +195,6 @@ pub struct CommitRecords<'a> {
 pub trait DurableHeadStore: Send + Sync + 'static {
     fn load(&self) -> Result<Option<DurableHead>, StorageError>;
 
-    fn commit(
-        &self,
-        expected: Option<&DurableHead>,
-        next: &DurableHead,
-        records: &CommitRecords<'_>,
-    ) -> Result<(), StorageError>;
-
     fn load_attestation(&self, head: &DurableHead) -> Result<ScriptAttestation, StorageError>;
 
     /// The weakest level of the commits made above a pending assumeutxo base.
@@ -241,29 +244,6 @@ impl<S: KvStore> KvDurableHeadStore<S> {
         }
         Ok(())
     }
-
-    fn suffix_row(
-        &self,
-        expected: Option<&DurableHead>,
-        next: &DurableHead,
-        records: &CommitRecords<'_>,
-    ) -> Result<Option<(ScriptAttestation, u64)>, StorageError> {
-        if !matches!(next.assumeutxo, AssumeUtxoDiskStatus::Validating { .. }) {
-            return Ok(None);
-        }
-        let level = match expected {
-            Some(current)
-                if matches!(current.assumeutxo, AssumeUtxoDiskStatus::Validating { .. }) =>
-            {
-                let previous = self.load_suffix_attestation(current)?;
-                records
-                    .attestation
-                    .map_or(previous, |batch| previous.min(batch))
-            }
-            _ => ScriptAttestation::Full,
-        };
-        Ok(Some((level, next.commit_id)))
-    }
 }
 
 impl<S: KvStore> DurableHeadStore for KvDurableHeadStore<S> {
@@ -300,90 +280,6 @@ impl<S: KvStore> DurableHeadStore for KvDurableHeadStore<S> {
 
     fn attest(&self, head: &DurableHead, level: ScriptAttestation) -> Result<(), StorageError> {
         self.write_attestation(head, level)
-    }
-
-    fn commit(
-        &self,
-        expected: Option<&DurableHead>,
-        next: &DurableHead,
-        records: &CommitRecords<'_>,
-    ) -> Result<(), StorageError> {
-        let previous = match expected {
-            Some(current) => self.load_attestation(current)?,
-            None => ScriptAttestation::Full,
-        };
-        let attestation = records
-            .attestation
-            .map_or(previous, |batch| previous.min(batch));
-        let mut batch = self.store.new_batch();
-        batch.put(
-            ColumnFamily::UtxoMeta,
-            SCRIPT_ATTESTATION_KEY,
-            &attestation.row(next.commit_id),
-        );
-        if let Some((level, commit_id)) = self.suffix_row(expected, next, records)? {
-            batch.put(
-                ColumnFamily::UtxoMeta,
-                SCRIPT_ATTESTATION_SUFFIX_KEY,
-                &level.row(commit_id),
-            );
-        }
-        for (height, hash, record) in &records.undo_rows {
-            batch.put(
-                ColumnFamily::UndoData,
-                &block_undo_key(*height, *hash),
-                record,
-            );
-        }
-        let mut file_heights = std::collections::BTreeMap::<u32, u32>::new();
-        for (height, hash, position) in &records.body_rows {
-            batch.put(
-                BLOCK_DATA_CF,
-                &block_body_key(*height, *hash),
-                &position.encode(),
-            );
-            file_heights
-                .entry(position.file_no)
-                .and_modify(|maximum| *maximum = (*maximum).max(*height))
-                .or_insert(*height);
-        }
-        for (file_no, maximum) in file_heights {
-            let key = crate::block_file_max_height_key(file_no);
-            let prior = self.store.get(BLOCK_DATA_CF, &key)?;
-            let maximum = match prior {
-                Some(bytes) => crate::decode_block_file_max_height(&bytes)
-                    .ok_or_else(|| {
-                        StorageError::IncompatibleData(
-                            "invalid block-file maximum height".to_owned(),
-                        )
-                    })?
-                    .max(maximum),
-                None => maximum,
-            };
-            batch.put(
-                BLOCK_DATA_CF,
-                &key,
-                &crate::encode_block_file_max_height(maximum),
-            );
-        }
-        let condition = match expected {
-            Some(current) => WriteCondition::Equals {
-                cf: ColumnFamily::UtxoMeta,
-                key: DURABLE_HEAD_KEY,
-                expected: &current.encode(),
-            },
-            None => WriteCondition::Absent {
-                cf: ColumnFamily::UtxoMeta,
-                key: DURABLE_HEAD_KEY,
-            },
-        };
-        batch.put(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY, &next.encode());
-        if !self.store.write_durable_if(&[condition], batch)? {
-            return Err(StorageError::InvalidOperation(
-                "durable head moved since it was read",
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -439,8 +335,12 @@ impl DurableHeadStore for InMemoryDurableHeadStore {
         *self.attestation.write() = Some((head.commit_id, level));
         Ok(())
     }
+}
 
-    fn commit(
+impl InMemoryDurableHeadStore {
+    /// Test-seam head mutation for the in-memory stub; production code writes
+    /// heads only through [`CommitAuthority`](crate::CommitAuthority).
+    pub fn commit(
         &self,
         expected: Option<&DurableHead>,
         next: &DurableHead,

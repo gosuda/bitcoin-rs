@@ -347,3 +347,51 @@ fn stale_read_fill_does_not_overwrite_newer_commit_or_resurrect_delete() -> Test
     );
     Ok(())
 }
+
+#[test]
+fn committed_record_with_440_outputs_survives_store_reopen() -> TestResult {
+    use bitcoin_rs_consensus::primitives::Hash256;
+    use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
+
+    const OUTPUT_COUNT: u32 = 440;
+    let temp = tempfile::TempDir::new()?;
+    let key = coin_key(11);
+    let expected: Vec<OwnedUtxoOut> = (0..OUTPUT_COUNT)
+        .map(|vout| OwnedUtxoOut::new(vout, u64::from(vout) + 1, vec![0x51, 0x21], false, 3))
+        .collect();
+    let record = UtxoRecord::from_owned_outputs(Hash256::from_le_bytes(&key.0), &expected)?;
+    let encoded = Bytes::copy_from_slice(record.bytes());
+
+    {
+        let store: Arc<dyn KvStore> = Arc::new(RocksDbStore::open(temp.path())?);
+        let coins = CoinStore::open(Arc::clone(&store), 1 << 20);
+        let mut delta = WindowDelta::default();
+        delta.push_final(key, Some(encoded.clone()));
+        let mut batch = store.new_batch();
+        coins.append_window(&mut batch, &delta)?;
+        store.write_durable(batch)?;
+    }
+
+    let store: Arc<dyn KvStore> = Arc::new(RocksDbStore::open(temp.path())?);
+    let reopened = CoinStore::open(store, 1 << 20);
+    let bytes = reopened
+        .get(&key)?
+        .ok_or(StorageError::InvalidOperation("coin record must survive reopen"))?;
+    assert_eq!(bytes, encoded, "reopened record bytes must match");
+
+    let decoded = UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice())?;
+    assert_eq!(
+        decoded.output_count(),
+        usize::try_from(OUTPUT_COUNT).unwrap_or(0)
+    );
+    let observed: Vec<(u32, u64, Vec<u8>)> = decoded
+        .outputs()
+        .map(|out| (out.vout, out.value, out.script_pubkey.to_vec()))
+        .collect();
+    let wanted: Vec<(u32, u64, Vec<u8>)> = expected
+        .iter()
+        .map(|out| (out.vout, out.value, out.script_pubkey.clone()))
+        .collect();
+    assert_eq!(observed, wanted, "every output must round-trip");
+    Ok(())
+}

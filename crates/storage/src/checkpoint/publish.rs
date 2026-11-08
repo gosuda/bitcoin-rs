@@ -97,6 +97,19 @@ impl CheckpointStage {
             .map_err(|e| E::from(CheckpointError::from(e)))?;
         Ok((value, ArtifactDigest { bytes, sha256 }))
     }
+    pub fn checkpoint_store(
+        &self,
+        data_dir: &std::path::Path,
+        root_name: &str,
+        store: &dyn crate::KvStore,
+    ) -> Result<(), CheckpointError> {
+        let dest = data_dir
+            .join(root_name)
+            .join(&self.paths.staging)
+            .join(crate::checkpoint::fs::STAGED_STORE_DIR);
+        store.checkpoint(&dest)?;
+        Ok(())
+    }
 }
 pub fn begin_publication(data_dir: &Dir) -> Result<CheckpointStage, CheckpointError> {
     begin_publication_at(

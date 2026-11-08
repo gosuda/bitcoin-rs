@@ -561,15 +561,6 @@ impl DurableHeadStore for AttestFailHeadStore {
         self.inner.load()
     }
 
-    fn commit(
-        &self,
-        expected: Option<&DurableHead>,
-        next: &DurableHead,
-        records: &CommitRecords<'_>,
-    ) -> Result<(), StorageError> {
-        self.inner.commit(expected, next, records)
-    }
-
     fn load_attestation(
         &self,
         head: &DurableHead,
@@ -635,114 +626,16 @@ fn cold_replay_attestation_failure_fails_closed() -> TestResult {
     Ok(())
 }
 
-/// RCV-02 / JW-ORDER-1: retention relief must not turn append-gap poison into
-/// a progress checkpoint or a retry. The original writer error stays intact.
-// RCV-02, JW-ORDER-1
-#[test]
-fn committed_gap_append_gap_does_not_enter_retention_relief() -> TestResult {
-    use bitcoin_rs_storage::chainstate_journal::{
-        FULL_REVALIDATION_MARKER, JournalEmit, JournalWriter, JournalWriterError,
-        shared_journal_writer,
-    };
+struct CrashFault;
 
-    let (mut handles, child) = restored_chainstate()?;
-    let bodies = Arc::new(MemoryBodies::default());
-    bodies.persist_block_body(1, child.block_hash().0, &consensus_bytes(&child))?;
-    let head = install_head(&mut handles, &child, bodies)?;
-    let temp = tempfile::tempdir()?;
-    let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(
-        temp.path().join("kv"),
-    )?);
-    let path = temp.path().join("journal");
-    std::fs::create_dir(&path)?;
-    let dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(&path)?;
-    let mut writer = JournalWriter::initialize(
-        dir,
-        store,
-        0,
-        (0, 0),
-        0,
-        Network::Regtest.genesis_block_hash().to_le_bytes(),
-        [0; 32],
-        1,
-    )?;
-    std::fs::write(
-        path.join(FULL_REVALIDATION_MARKER),
-        b"force full validation\n",
-    )?;
-    let marker_before = std::fs::read(path.join(FULL_REVALIDATION_MARKER))?;
-    let journal_head_before = std::fs::read(path.join("head.json"))?;
-    JournalEmit::mark_append_gap(&mut writer, 1);
-    *handles.journal.write() = Some(shared_journal_writer(writer));
-
-    let Err(ApplyError::JournalBackpressure(error)) = super::reconcile_at_boot(&handles) else {
-        panic!("append gap must return the original journal refusal, not recovery publication");
-    };
-    assert!(matches!(
-        *error,
-        JournalWriterError::AppendGap { height: 1 }
-    ));
-    assert!(matches!(
-        handles.begin_transition(),
-        Err(ApplyError::Shutdown)
-    ));
-    assert_eq!(
-        handles.applied_tip.load_full().map(|tip| tip.height),
-        Some(0)
-    );
-    assert_eq!(handles.durable_head.load()?, Some(head));
-    assert_eq!(
-        std::fs::read(path.join(FULL_REVALIDATION_MARKER))?,
-        marker_before
-    );
-    assert_eq!(std::fs::read(path.join("head.json"))?, journal_head_before);
-    Ok(())
-}
-
-struct CrashWindowHeadStore {
-    inner: Arc<dyn DurableHeadStore>,
-    fail_on_commit: Mutex<bool>,
-}
-
-impl DurableHeadStore for CrashWindowHeadStore {
-    fn load(&self) -> Result<Option<DurableHead>, StorageError> {
-        self.inner.load()
-    }
-
-    fn commit(
+impl bitcoin_rs_storage::commit::CommitFault for CrashFault {
+    fn before_commit(
         &self,
-        expected: Option<&DurableHead>,
-        next: &DurableHead,
-        records: &CommitRecords<'_>,
-    ) -> Result<(), StorageError> {
-        if *self.fail_on_commit.lock() {
-            return Err(StorageError::Backend(
-                "simulated crash during head commit".to_owned(),
-            ));
-        }
-        self.inner.commit(expected, next, records)
-    }
-
-    fn load_attestation(
-        &self,
-        head: &DurableHead,
-    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
-        self.inner.load_attestation(head)
-    }
-
-    fn load_suffix_attestation(
-        &self,
-        head: &DurableHead,
-    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
-        self.inner.load_suffix_attestation(head)
-    }
-
-    fn attest(
-        &self,
-        head: &DurableHead,
-        level: bitcoin_rs_storage::ScriptAttestation,
-    ) -> Result<(), StorageError> {
-        self.inner.attest(head, level)
+        _prefix: &bitcoin_rs_storage::AcceptedPrefix,
+    ) -> Result<(), bitcoin_rs_storage::CommitError> {
+        Err(bitcoin_rs_storage::CommitError::Storage(
+            StorageError::Backend("simulated crash during head commit".to_owned()),
+        ))
     }
 }
 
@@ -757,7 +650,6 @@ proptest! {
         fail_mode in 0_u8..=2,
         cold_boot in any::<bool>(),
     ) {
-        let store: Arc<dyn DurableHeadStore> = Arc::new(InMemoryDurableHeadStore::new());
         let bodies: Arc<dyn BlockBodyStore> = Arc::new(MemoryBodies::default());
         let genesis = Network::Regtest.genesis_block();
         let genesis_hash = Hash256::from(genesis.block_hash());
@@ -774,9 +666,6 @@ proptest! {
             body_extent: None,
             undo_extent: None,
         };
-        store
-            .commit(None, &genesis_head, &CommitRecords::default())
-            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
 
         let child1 = mined_child(BlockHash(genesis_hash), 1)
             .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
@@ -785,15 +674,24 @@ proptest! {
             .persist_block_body(1, child1_hash, &consensus_bytes(&child1))
             .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
 
-        let crash_store = Arc::new(CrashWindowHeadStore {
-            inner: Arc::clone(&store),
-            fail_on_commit: Mutex::new(fail_mode == 0),
-        });
-
         let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        chain
+            .commit_authority
+            .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+                expected_head: None,
+                next_head: genesis_head,
+                undo_rows: Vec::new(),
+                body_rows: Vec::new(),
+                attestation: None,
+                coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+            })
+            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
         let genesis_tip = seed_genesis(&chain).map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
-        chain.durable_head = crash_store;
         chain.block_body_store = Some(Arc::clone(&bodies));
+
+        if fail_mode == 0 {
+            chain.commit_authority.set_fault(Arc::new(CrashFault));
+        }
 
         let payload = bitcoin_rs_consensus::primitives::BlockImage::from_local(child1);
         let apply_result = chain.apply_block(&payload);
@@ -808,7 +706,8 @@ proptest! {
 
         let mut reopened = handles(Network::Regtest, Arc::new(UtxoSet::new()));
         let _ = seed_genesis(&reopened).map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
-        reopened.durable_head = store;
+        reopened.durable_head = Arc::clone(&chain.durable_head);
+        reopened.undo_store = Arc::clone(&chain.undo_store);
         reopened.block_body_store = Some(bodies);
         if cold_boot {
             reopened.applied_tip.store(None);

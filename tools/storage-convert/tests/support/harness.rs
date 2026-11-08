@@ -32,11 +32,36 @@ pub(crate) struct CopiedFileReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) struct CoinStatsReport {
+    pub(crate) height: u32,
+    pub(crate) utxo_count: u64,
+    pub(crate) total_amount: u64,
+    pub(crate) muhash: String,
+    pub(crate) tx_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) struct NormalizedUndoRowReport {
+    pub(crate) height: u32,
+    pub(crate) hash: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct ConversionReport {
     pub(crate) source_epoch: u32,
     pub(crate) target_epoch: u32,
     pub(crate) namespaces: Vec<NamespaceReport>,
     pub(crate) copied_files: Vec<CopiedFileReport>,
+    #[serde(default)]
+    pub(crate) checkpoint_stats: Option<CoinStatsReport>,
+    #[serde(default)]
+    pub(crate) final_stats: Option<CoinStatsReport>,
+    #[serde(default)]
+    pub(crate) normalized_undo_rows: Vec<NormalizedUndoRowReport>,
+    #[serde(default)]
+    pub(crate) carried_markers: Vec<String>,
+    #[serde(default)]
+    pub(crate) published_checkpoint: bool,
 }
 
 pub(crate) fn run_converter(args: &[&str]) -> io::Result<Output> {

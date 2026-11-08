@@ -215,7 +215,7 @@ pub fn read_and_verify(
     let authenticated = authenticate(reader, network, limits)?;
     let set = UtxoSet::new();
     for record in authenticated.records {
-        set.insert_snapshot_record(record);
+        set.insert_parsed_record(record);
     }
     Ok(CoreSnapshot {
         set,
@@ -247,7 +247,7 @@ pub fn read_verified(
                 coinbase: output.coinbase,
             });
         }
-        set.insert_snapshot_record(record);
+        set.insert_parsed_record(record);
     }
     Ok(VerifiedCoreSnapshot {
         metadata: authenticated.metadata,
@@ -918,10 +918,9 @@ mod sealed_state_tests {
     #[test]
     fn proofless_verification_refuses_a_mutated_set_or_a_foreign_anchor() -> TestResult {
         let anchor = bare()?.anchor;
-        let mutated = bare()?;
-        mutated.set.replace_from(UtxoSet::new());
+        let mutated_set = UtxoSet::new();
         assert!(matches!(
-            VerifiedSnapshotState::verify(mutated.set, anchor),
+            VerifiedSnapshotState::verify(mutated_set, anchor),
             Err(StateVerifyError::CommitmentMismatch { expected, .. })
                 if expected == anchor.hash_serialized
         ));
@@ -944,7 +943,7 @@ mod sealed_state_tests {
             .last_mut()
             .ok_or(TestError::Missing("empty fixture"))?;
         *last ^= 1;
-        let before = crate::utxo::set::SNAPSHOT_INSERTIONS.with(std::cell::Cell::get);
+        let before = crate::utxo::set::PARSED_RECORD_INSERTIONS.with(std::cell::Cell::get);
         assert!(matches!(
             read_verified(
                 &mut Cursor::new(&forged),
@@ -954,12 +953,12 @@ mod sealed_state_tests {
             Err(SnapshotError::CommitmentMismatch { .. })
         ));
         assert_eq!(
-            crate::utxo::set::SNAPSHOT_INSERTIONS.with(std::cell::Cell::get),
+            crate::utxo::set::PARSED_RECORD_INSERTIONS.with(std::cell::Cell::get),
             before
         );
         drop(sealed()?);
         assert_eq!(
-            crate::utxo::set::SNAPSHOT_INSERTIONS.with(std::cell::Cell::get),
+            crate::utxo::set::PARSED_RECORD_INSERTIONS.with(std::cell::Cell::get),
             before + 200
         );
         Ok(())

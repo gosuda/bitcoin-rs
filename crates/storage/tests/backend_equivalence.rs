@@ -875,11 +875,8 @@ macro_rules! engine_tests {
 
                 let empty_rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
                 let mut empty_iter = empty_rows.into_iter();
-                let count = store.ingest_sorted(
-                    ColumnFamily::Coins,
-                    &mut empty_iter,
-                    &scratch_path,
-                )?;
+                let count =
+                    store.ingest_sorted(ColumnFamily::Coins, &mut empty_iter, &scratch_path)?;
                 assert_eq!(count, 0);
 
                 let rows: Vec<(Vec<u8>, Vec<u8>)> = (0..500u32)
@@ -1035,10 +1032,7 @@ macro_rules! engine_tests {
                     reopened.get(ColumnFamily::Coins, b"cp_key")?,
                     Some(b"cp_value".to_vec())
                 );
-                assert_eq!(
-                    reopened.get(ColumnFamily::Coins, b"post_cp_key")?,
-                    None
-                );
+                assert_eq!(reopened.get(ColumnFamily::Coins, b"post_cp_key")?, None);
                 Ok(())
             }
 

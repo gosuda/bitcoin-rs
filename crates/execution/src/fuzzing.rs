@@ -3,11 +3,11 @@ use std::sync::Arc;
 use crate::chain::{BlockTree, ChainError, NodeStatus, TipSnapshot};
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_consensus::primitives::{Block, BlockImage, Hash256, Header, Network};
+use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
-use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, populate_block_changes};
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_storage::utxo::{UtxoCoin, UtxoSet};
-use bitcoin_rs_storage::{InMemoryDurableHeadStore, InMemoryUndoStore, StorageError, UndoStore};
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
@@ -57,8 +57,8 @@ impl FuzzCheckpoint {
 pub struct FuzzChain {
     chain: Chainstate,
     utxo: Arc<UtxoSet>,
-    durable: Arc<InMemoryDurableHeadStore>,
-    undo: Arc<InMemoryUndoStore>,
+    durable: Arc<dyn bitcoin_rs_storage::DurableHeadStore>,
+    undo: Arc<dyn bitcoin_rs_storage::UndoStore>,
     bodies: Arc<crate::test_support::MemoryBodies>,
     headers: RwLock<HashMap<Hash256, Header>>,
     network: Network,
@@ -76,11 +76,13 @@ impl FuzzChain {
             Arc::new(CoinStatsListener::new(CoinStats::default())),
             Arc::new(ChainEventPublisher::detached(0)),
         );
+        let durable = Arc::clone(&chain.durable_head);
+        let undo = Arc::clone(&chain.undo_store);
         let mut this = Self {
             chain,
             utxo,
-            durable: Arc::new(InMemoryDurableHeadStore::new()),
-            undo: Arc::new(InMemoryUndoStore::default()),
+            durable,
+            undo,
             bodies: Arc::new(crate::test_support::MemoryBodies::default()),
             headers: RwLock::new(HashMap::new()),
             network,
@@ -92,8 +94,6 @@ impl FuzzChain {
     }
 
     fn attach_stores(&mut self) {
-        self.chain.durable_head = self.durable.clone();
-        self.chain.undo_store = self.undo.clone();
         self.chain.block_body_store = Some(self.bodies.clone());
     }
 
@@ -196,7 +196,6 @@ impl FuzzChain {
                 coin.height,
             ));
         }
-        commit_block_changes(&utxo, &changes, &checkpoint.tip.hash)?;
         let mut chain = Chainstate::new(
             self.network,
             chain_tip,
@@ -206,15 +205,30 @@ impl FuzzChain {
             Arc::new(CoinStatsListener::new(CoinStats::default())),
             Arc::new(ChainEventPublisher::detached(0)),
         );
-        chain.durable_head = self.durable.clone();
-        chain.undo_store = self.undo.clone();
+        populate_block_changes(&chain.coins, &changes)?;
+        let head = self.durable.load()?;
+        if let Some(head) = head {
+            chain
+                .commit_authority
+                .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+                    expected_head: None,
+                    next_head: head,
+                    undo_rows: Vec::new(),
+                    body_rows: Vec::new(),
+                    attestation: None,
+                    coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+                })
+                .map_err(|error| bitcoin_rs_storage::StorageError::backend(error.to_string()))?;
+        }
+        let durable = Arc::clone(&chain.durable_head);
+        let undo = Arc::clone(&chain.undo_store);
         chain.block_body_store = Some(self.bodies.clone());
         recover_disconnect_marker(&chain)?;
         let reopened = Self {
             chain,
             utxo,
-            durable: Arc::clone(&self.durable),
-            undo: Arc::clone(&self.undo),
+            durable,
+            undo,
             bodies: Arc::clone(&self.bodies),
             headers: RwLock::new(
                 self.headers

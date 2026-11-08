@@ -9,6 +9,23 @@ pub const MAX_FILE_BYTES: usize = 4096;
 const FORMAT: &str = "1";
 const WITNESS_FILE: &str = "applied-tip-witness.json";
 const MARKER_FILE: &str = "chain-rollback-event.json";
+pub const FULL_REVALIDATION_MARKER: &str = "full-revalidation";
+
+pub fn mark_full_revalidation_at(data_dir: &Path) -> Result<(), EvidenceError> {
+    let path = data_dir.join(FULL_REVALIDATION_MARKER);
+    std::fs::write(&path, b"required\n")?;
+    Ok(())
+}
+
+pub fn clear_full_revalidation_marker_at(data_dir: &Path) -> Result<(), EvidenceError> {
+    let path = data_dir.join(FULL_REVALIDATION_MARKER);
+    if let Err(e) = std::fs::remove_file(&path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(EvidenceError::Io(e));
+    }
+    Ok(())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum EvidenceError {

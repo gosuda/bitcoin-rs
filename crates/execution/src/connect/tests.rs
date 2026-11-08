@@ -19,6 +19,7 @@ use bitcoin_rs_consensus::primitives::{
 use super::ApplyError;
 use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
 
+mod bip30_overwrite;
 mod sigops;
 mod transaction_structure;
 
@@ -102,7 +103,7 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
         )?;
         let outcome = handles.apply_block(&BlockImage::from_local(block.clone()))?;
 
-        let utxo = handles.utxo();
+        let utxo = handles.utxo_reader();
         assert!(
             utxo.get_entry(&spent_outpoint).is_none(),
             "external coin spent"
@@ -137,7 +138,7 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
         undo_records.push(undo);
 
         handles.disconnect_block(&block)?;
-        let utxo = handles.utxo();
+        let utxo = handles.utxo_reader();
         assert!(
             utxo.get_entry(&spent_outpoint).is_some(),
             "undo restores coin"

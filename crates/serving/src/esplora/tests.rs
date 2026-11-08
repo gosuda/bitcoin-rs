@@ -140,12 +140,8 @@ fn transaction_with_funded_input(ctx: &Context, input_value: u64) -> (Tx, Tx) {
         false,
         1,
     ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::from_le_bytes(&[0xaa; 32]),
-    )
-    .expect("fund test UTXO");
+    ctx.populate_fixture_coins(&changes)
+        .expect("fund test UTXO");
     let mut spend = transaction(
         Some(OutPoint::new(txid, 0)),
         TxOut {

@@ -1,13 +1,12 @@
 use hashbrown::HashSet;
 use std::borrow::Borrow;
 
-use crate::{DisconnectPhase, StorageError, UndoStore};
+use crate::{StorageError, UndoStore};
 use bitcoin_rs_consensus::primitives::{
     Block, BlockImage, Hash256, OutPoint, Script, TransactionView, Tx, TxOut, Txid,
 };
 
 use crate::utxo::set::{UtxoCoin, UtxoError, UtxoSet};
-use crate::utxo::stats::{CoinStatsListener, CoinStatsRewindError};
 use crate::utxo::undo_codec;
 
 pub use crate::utxo::undo_codec::{
@@ -31,18 +30,6 @@ impl<T> UtxoAdd<T> {
             txout,
             coinbase,
             height,
-        }
-    }
-}
-
-impl<T: Borrow<TxOut>> UtxoAdd<T> {
-    pub(crate) fn payload(&self) -> crate::utxo::set::BuildPayload<'_> {
-        crate::utxo::set::BuildPayload {
-            outpoint: &self.outpoint,
-            vout: self.outpoint.vout,
-            txout: self.txout.borrow(),
-            coinbase: self.coinbase,
-            height: self.height,
         }
     }
 }
@@ -131,7 +118,7 @@ impl UndoBatch {
     }
 
     #[must_use]
-    pub(crate) const fn from_parts(restores: Vec<UtxoAdd>, removes: Vec<OutPoint>) -> Self {
+    pub const fn from_parts(restores: Vec<UtxoAdd>, removes: Vec<OutPoint>) -> Self {
         Self { restores, removes }
     }
 }
@@ -145,7 +132,7 @@ impl std::fmt::Debug for UndoRecord {
 }
 
 impl UndoRecord {
-    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+    pub fn new(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
 
@@ -153,11 +140,6 @@ impl UndoRecord {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
-}
-
-#[derive(Debug)]
-pub struct DisconnectReceipt {
-    pub restored_parents: Vec<Txid>,
 }
 
 pub trait SpentOutputLookup {
@@ -171,6 +153,31 @@ pub trait OutputSource {
 impl OutputSource for UtxoSet {
     fn get_entry(&self, outpoint: &OutPoint) -> Option<UtxoCoin> {
         Self::get_entry(self, outpoint)
+    }
+}
+impl OutputSource for crate::utxo::set::UtxoReader {
+    fn get_entry(&self, outpoint: &OutPoint) -> Option<UtxoCoin> {
+        self.get_entry(outpoint)
+    }
+}
+
+impl OutputSource for crate::CoinStore {
+    fn get_entry(&self, outpoint: &OutPoint) -> Option<UtxoCoin> {
+        let key = crate::CoinKey(outpoint.txid.0.to_le_bytes());
+        let bytes = self.get(&key).ok()??;
+        let record =
+            crate::utxo::record::UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice())
+                .ok()?;
+        let out = record.find_output(outpoint.vout)?;
+        Some(UtxoCoin {
+            outpoint: *outpoint,
+            txout: TxOut {
+                value: bitcoin_rs_consensus::primitives::Amount::from_sat(out.value),
+                script_pubkey: out.script_pubkey.to_vec().into(),
+            },
+            coinbase: out.coinbase,
+            height: out.height,
+        })
     }
 }
 
@@ -316,25 +323,81 @@ pub fn block_spent_outputs(
     Ok(spent)
 }
 
-#[derive(Debug, thiserror::Error)]
-#[expect(missing_docs)]
-pub enum RollbackError {
-    #[error("rollback refused: {0}")]
-    Refused(#[source] StorageError),
-    #[error("utxo undo: {0}")]
-    Utxo(#[source] UtxoError),
-    #[error("coinstats rewind: {0}")]
-    CoinStats(#[source] CoinStatsRewindError),
-    #[error("disconnect marker: {0}")]
-    Marker(#[source] StorageError),
-}
-
-pub fn commit_block_changes<T: Borrow<TxOut>>(
-    set: &UtxoSet,
+pub fn populate_block_changes<T: Borrow<TxOut>>(
+    coin_store: &crate::CoinStore,
     changes: &BlockChanges<T>,
-    block_hash: &Hash256,
 ) -> Result<(), UtxoError> {
-    set.commit_block(changes, block_hash)
+    use crate::utxo::record::{OwnedUtxoOut, UtxoRecord};
+    use crate::{Bytes, CoinKey, WindowDelta};
+    use std::collections::{HashMap, HashSet};
+    let mut touched = HashSet::new();
+    let mut adds_by_txid: HashMap<Hash256, Vec<&UtxoAdd<T>>> = HashMap::new();
+    let mut removes_by_txid: HashMap<Hash256, Vec<u32>> = HashMap::new();
+
+    for add in changes.adds() {
+        let txid = Hash256::from(add.outpoint.txid);
+        touched.insert(txid);
+        adds_by_txid.entry(txid).or_default().push(add);
+    }
+    for remove in changes.spent_outpoints() {
+        let txid = Hash256::from(remove.txid);
+        touched.insert(txid);
+        removes_by_txid.entry(txid).or_default().push(remove.vout);
+    }
+
+    let mut delta = WindowDelta::default();
+    for txid in touched {
+        let key = CoinKey(txid.to_le_bytes());
+        let existing = coin_store.get(&key)?;
+        let mut outputs: Vec<OwnedUtxoOut> = if let Some(bytes) = existing {
+            let record = UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice())?;
+            record
+                .outputs()
+                .map(|out| OwnedUtxoOut {
+                    vout: out.vout,
+                    value: out.value,
+                    script_pubkey: out.script_pubkey.to_vec(),
+                    coinbase: out.coinbase,
+                    height: out.height,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        if let Some(removes) = removes_by_txid.get(&txid) {
+            let remove_set: HashSet<u32> = removes.iter().copied().collect();
+            outputs.retain(|out| !remove_set.contains(&out.vout));
+        }
+
+        if let Some(adds) = adds_by_txid.get(&txid) {
+            for add in adds {
+                outputs.retain(|out| out.vout != add.outpoint.vout);
+                outputs.push(OwnedUtxoOut {
+                    vout: add.outpoint.vout,
+                    value: add.txout.borrow().value.to_sat(),
+                    script_pubkey: add.txout.borrow().script_pubkey.to_vec(),
+                    coinbase: add.coinbase,
+                    height: add.height,
+                });
+            }
+        }
+
+        outputs.sort_by_key(|out| out.vout);
+
+        if outputs.is_empty() {
+            delta.push_final(key, None);
+        } else {
+            let record = UtxoRecord::from_owned_outputs(txid, &outputs)?;
+            delta.push_final(key, Some(Bytes::copy_from_slice(record.bytes())));
+        }
+    }
+    delta.records.sort_by_key(|(k, _)| *k);
+    let mut batch = coin_store.store().new_batch();
+    coin_store.append_window(&mut batch, &delta)?;
+    coin_store.store().write_durable(batch)?;
+    coin_store.install_committed(&delta);
+    Ok(())
 }
 
 pub fn build_block_changes<'a>(
@@ -374,7 +437,6 @@ pub struct BlockChangeInputs<'a, 'b> {
     pub same_block_spent: Option<&'b HashSet<OutPoint>>,
     pub add_capacity: usize,
     pub remove_capacity: usize,
-    pub overwritten: Option<&'b UtxoSet>,
     pub max_script_size: usize,
 }
 
@@ -432,7 +494,7 @@ impl ChangeBuilder {
             if same_block || inputs.is_unstorable(&txout) {
                 continue;
             }
-            self.stage_created(outpoint, txout, coinbase, inputs.overwritten);
+            self.stage_created(outpoint, txout, coinbase);
         }
         Ok(())
     }
@@ -456,25 +518,10 @@ impl ChangeBuilder {
         Ok(())
     }
 
-    fn stage_created(
-        &mut self,
-        outpoint: OutPoint,
-        txout: TxOut,
-        coinbase: bool,
-        overwritten: Option<&UtxoSet>,
-    ) {
-        let replaced = overwritten.and_then(|set| set.get_entry(&outpoint));
+    fn stage_created(&mut self, outpoint: OutPoint, txout: TxOut, coinbase: bool) {
         self.changes
             .add(UtxoAdd::new(outpoint, txout, coinbase, self.height));
-        match replaced {
-            Some(previous) => self.undo.restore(UtxoAdd::new(
-                outpoint,
-                previous.txout,
-                previous.coinbase,
-                previous.height,
-            )),
-            None => self.undo.remove(outpoint),
-        }
+        self.undo.remove(outpoint);
     }
 
     fn add_spends(
@@ -607,6 +654,42 @@ fn validate_undo_for_block(
     Ok(())
 }
 
+/// Rewrites a record so that every overwritten outpoint is deleted on
+/// disconnect instead of restored. Bitcoin Core removes all outputs a block
+/// created on disconnect, so an overwritten coin does not come back.
+///
+/// Returns `None` when the record restores no outpoint of a created txid.
+pub fn rewrite_overwrite_restores(
+    record: &[u8],
+    block_hash: Hash256,
+    created_txids: &HashSet<Txid>,
+) -> Result<Option<Vec<u8>>, UndoCodecError> {
+    let batch = undo_codec::decode(record, block_hash)?;
+    let mut restores = Vec::with_capacity(batch.restores.len());
+    let mut overwritten = Vec::new();
+    for add in batch.restores {
+        if created_txids.contains(&add.outpoint.txid) {
+            overwritten.push(add.outpoint);
+        } else {
+            restores.push(add);
+        }
+    }
+    if overwritten.is_empty() {
+        return Ok(None);
+    }
+    let mut removes = batch.removes;
+    let mut seen: HashSet<OutPoint> = removes.iter().copied().collect();
+    for outpoint in overwritten {
+        if seen.insert(outpoint) {
+            removes.push(outpoint);
+        }
+    }
+    Ok(Some(undo_codec::encode(
+        &UndoBatch::from_parts(restores, removes),
+        block_hash,
+    )))
+}
+
 fn block_outputs(
     check: &BlockUndoCheck<'_>,
 ) -> Result<(HashSet<OutPoint>, HashSet<OutPoint>), UndoCodecError> {
@@ -652,65 +735,6 @@ fn block_inputs(check: &BlockUndoCheck<'_>) -> (HashSet<OutPoint>, HashSet<OutPo
         prior_txids.insert(*txid);
     }
     (external, same_block)
-}
-
-pub fn rollback_block(
-    store: &dyn UndoStore,
-    utxo: &UtxoSet,
-    coin_stats: &CoinStatsListener,
-    hash: Hash256,
-    height: u32,
-    parent_height: u32,
-    tx_count_delta: u64,
-    undo: &UndoBatch,
-) -> Result<DisconnectReceipt, RollbackError> {
-    if store
-        .load_disconnect_marker()
-        .map_err(RollbackError::Refused)?
-        .is_some_and(|marker| marker.phase == DisconnectPhase::InFlight)
-    {
-        return Err(RollbackError::Refused(StorageError::InvalidOperation(
-            "a disconnect is already in flight",
-        )));
-    }
-    store
-        .arm_disconnect(height, hash)
-        .map_err(RollbackError::Refused)?;
-    rollback_block_recovery(
-        utxo,
-        coin_stats,
-        height,
-        parent_height,
-        tx_count_delta,
-        undo,
-    )?;
-    store
-        .complete_disconnect(height, hash)
-        .map_err(RollbackError::Marker)?;
-    Ok(DisconnectReceipt {
-        restored_parents: undo
-            .restores()
-            .iter()
-            .map(|restored| restored.outpoint.txid)
-            .collect(),
-    })
-}
-
-pub fn rollback_block_recovery(
-    utxo: &UtxoSet,
-    coin_stats: &CoinStatsListener,
-    height: u32,
-    parent_height: u32,
-    tx_count_delta: u64,
-    undo: &UndoBatch,
-) -> Result<(), RollbackError> {
-    coin_stats
-        .check_rewind(height, tx_count_delta)
-        .map_err(RollbackError::CoinStats)?;
-    utxo.undo_block(undo).map_err(RollbackError::Utxo)?;
-    coin_stats
-        .rewind_block(height, parent_height, tx_count_delta)
-        .map_err(RollbackError::CoinStats)
 }
 
 #[cfg(test)]

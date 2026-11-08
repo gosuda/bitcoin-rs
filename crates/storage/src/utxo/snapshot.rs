@@ -301,7 +301,7 @@ pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
     let mut seen_vouts = HashSet::new();
     for _ in 0..record_count_usize {
         let (txid, outputs) = read_snapshot_record_v4(reader, &mut seen_vouts)?;
-        set.insert_snapshot_record(UtxoRecord::from_owned_outputs(txid, &outputs)?);
+        set.insert_parsed_record(UtxoRecord::from_owned_outputs(txid, &outputs)?);
         for output in &outputs {
             observer.observe_coin(SnapshotCoin {
                 txid,
@@ -965,11 +965,8 @@ mod seed_no_token_tests {
         read_raw_snapshot_stream, read_snapshot_strict_v4, read_snapshot_strict_v4_witnessed,
         write_snapshot_witnessed,
     };
-    use crate::utxo::{
-        UtxoError, UtxoKey, UtxoSet,
-        contract::{BlockChanges, UtxoAdd, commit_block_changes},
-    };
-    use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, Script, TxOut, Txid};
+    use crate::utxo::{UtxoError, UtxoKey, UtxoSet};
+    use bitcoin_rs_consensus::primitives::{Amount, Hash256, TxOut, Txid};
     use std::io::Cursor;
 
     use crate::utxo::test_support::{TestError, TestResult};
@@ -994,29 +991,31 @@ mod seed_no_token_tests {
         let set = UtxoSet::new();
         let first = txid(7_001);
         let second = txid(7_002);
-        let mut changes = BlockChanges::default();
-        changes.add(UtxoAdd::new(
-            OutPoint::new(first.into(), 0),
-            txout(7_010)?,
-            false,
-            100,
-        ));
-        changes.add(UtxoAdd::new(
-            OutPoint::new(first.into(), 3),
-            TxOut {
-                value: Amount::from_sat(7_011),
-                script_pubkey: Script::new(),
-            },
-            true,
-            101,
-        ));
-        changes.add(UtxoAdd::new(
-            OutPoint::new(second.into(), 1),
-            txout(7_012)?,
-            false,
-            102,
-        ));
-        commit_block_changes(&set, &changes, &txid(7_003))?;
+        let out1 = crate::utxo::record::OwnedUtxoOut {
+            vout: 0,
+            value: txout(7_010)?.value.to_sat(),
+            script_pubkey: txout(7_010)?.script_pubkey.to_vec(),
+            coinbase: false,
+            height: 100,
+        };
+        let out2 = crate::utxo::record::OwnedUtxoOut {
+            vout: 3,
+            value: 7_011,
+            script_pubkey: Vec::new(),
+            coinbase: true,
+            height: 101,
+        };
+        let out3 = crate::utxo::record::OwnedUtxoOut {
+            vout: 1,
+            value: txout(7_012)?.value.to_sat(),
+            script_pubkey: txout(7_012)?.script_pubkey.to_vec(),
+            coinbase: false,
+            height: 102,
+        };
+        let rec1 = crate::utxo::record::UtxoRecord::from_owned_outputs(first, &[out1, out2])?;
+        let rec2 = crate::utxo::record::UtxoRecord::from_owned_outputs(second, &[out3])?;
+        set.insert_parsed_record(rec1);
+        set.insert_parsed_record(rec2);
         Ok((set, txid(7_004), 103))
     }
 
@@ -1165,31 +1164,27 @@ mod seed_no_token_tests {
 #[cfg(test)]
 mod walk_tests {
     use super::WALK_CANCELLATION_INTERVAL;
-    use crate::utxo::{
-        UtxoError, UtxoSet,
-        contract::{BlockChanges, UtxoAdd, commit_block_changes},
-    };
-    use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut};
+    use crate::utxo::{UtxoError, UtxoSet};
+    use bitcoin_rs_consensus::primitives::Hash256;
     use std::cell::Cell;
 
     fn set_with_coins(count: usize) -> UtxoSet {
         let set = UtxoSet::new();
-        let mut changes = BlockChanges::default();
         for index in 0..count {
             let mut bytes = [0_u8; 32];
             bytes[..8].copy_from_slice(&u64::try_from(index).unwrap_or(u64::MAX).to_le_bytes());
-            changes.add(UtxoAdd::new(
-                OutPoint::new(Hash256::from_le_bytes(&bytes).into(), 0),
-                TxOut {
-                    value: Amount::from_sat(7),
-                    script_pubkey: vec![0x51].into(),
-                },
-                false,
-                0,
-            ));
+            let txid = Hash256::from_le_bytes(&bytes);
+            let out = crate::utxo::record::OwnedUtxoOut {
+                vout: 0,
+                value: 7,
+                script_pubkey: vec![0x51],
+                coinbase: false,
+                height: 0,
+            };
+            let record = crate::utxo::record::UtxoRecord::from_owned_outputs(txid, &[out])
+                .unwrap_or_else(|error| panic!("fixture record: {error}"));
+            set.insert_parsed_record(record);
         }
-        commit_block_changes(&set, &changes, &Hash256::default())
-            .unwrap_or_else(|error| panic!("fixture coins: {error}"));
         set
     }
 

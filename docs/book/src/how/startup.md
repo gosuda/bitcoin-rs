@@ -1,6 +1,6 @@
 # Startup
 
-The binary parses the CLI, resolves config, opens the data directory under a lock, restores chainstate from checkpoint or journal, verifies the recent tip, then binds services in a fixed order: metrics, RPC, P2P, and finally the event loop. Most steps log one INFO or DEBUG line you can match against a real run; the metrics bind and ZMQ bind emit no line. This page walks that order with the owning file and function for each step. [run/first-start.md](../run/first-start.md) covers the operator procedure, [embed/lifecycle.md](../embed/lifecycle.md) covers embedding, and `EVT-02` in `docs/contracts/architecture.md` owns the event contract.
+The binary parses the CLI, resolves config, opens the data directory under a lock, restores chainstate from an accepted checkpoint or cold, verifies the recent tip, then binds services in a fixed order: metrics, RPC, P2P, and finally the event loop. Most steps log one INFO or DEBUG line you can match against a real run; the metrics bind and ZMQ bind emit no line. This page walks that order with the owning file and function for each step. [run/first-start.md](../run/first-start.md) covers the operator procedure, [embed/lifecycle.md](../embed/lifecycle.md) covers embedding, and `EVT-02` in `docs/contracts/architecture.md` owns the event contract.
 
 ## From main to open
 
@@ -21,16 +21,15 @@ The binary parses the CLI, resolves config, opens the data directory under a loc
 2. `initialize_data_dir` (`open.rs`) creates the process epoch used by recovery evidence.
 3. Split the dbcache budget between chainstate and txindex, then `NodeStorage::open` (`open.rs`).
 4. Bind ZMQ publisher sockets from `[[notifications.zmq]]` TOML endpoints (`open.rs`; key form in [reference/config-keys.md](../reference/config-keys.md)).
-5. `require_full_script_attestation` then `prepare_initial_chainstate` (`open.rs`): restore from checkpoint or journal, or start cold. The chosen source logs one line from `crates/execution/src/recovery.rs:339`, `:354`, or `:464`:
+5. `require_full_script_attestation` then `prepare_initial_chainstate` (`open.rs`): restore from a checkpoint or start cold. The cold path logs one line from `crates/execution/src/recovery.rs:354`; a checkpoint restore logs `restored chainstate checkpoint height=... hash=...` (`open.rs`):
 
    ```
-   INFO bitcoin_rs_execution::recovery: chainstate restore selected restore_source="checkpoint" checkpoint_generation=2 checkpoint_height=5 height=5 hash="0ef5cd..."
-   INFO bitcoin_rs_execution::recovery: chainstate restore selected restore_source="journal" checkpoint_generation=1 checkpoint_height=0 height=3 hash=7ae5b4e2... replayed_records=3 chain_tx_count=4 replay_seconds=0.0003619
+   INFO bitcoin_rs_node::state::open: restored chainstate checkpoint height=5 hash=0ef5cd...
    INFO bitcoin_rs_execution::recovery: chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
    ```
 
-   The journal variant is the replay path: `replayed_records=3` journal records were re-applied on top of the checkpoint, and `replay_seconds` times that work (`recovery.rs:464`). A checkpoint fallback with a gap above `STALE_RESTORE_ERROR_THRESHOLD` logs the `stale checkpoint restore` error (`open.rs`).
-6. Open the journal writer, mempool, script cache, and fee history; build `Chainstate::from_parts` (`open.rs`).
+   The cold variant reconciles the durable head from canonical block bodies and undo records. A checkpoint fallback with a gap above `STALE_RESTORE_ERROR_THRESHOLD` logs the `stale checkpoint restore` error (`open.rs`).
+6. Open the mempool, script cache, and fee history; build `Chainstate::from_parts` (`open.rs`).
 7. Construct the P2P service with resolved slots: `FAST_OUTBOUND_PEER_TARGET` under `--fast-sync`, otherwise `P2P_OUTBOUND_FULL_RELAY_SLOTS`; services flags include `NETWORK_LIMITED` when pruning (`open.rs`).
 8. Install the tip-staged hook for mining, the mempool gateway, block-announce queue, and chain followers (`open.rs`).
 9. Configure checkpointing and clear any disconnect marker (`open.rs`); an unrecoverable durable-head gap returns `UnrecoverableDurableHeadGap` naming the three on-disk paths to fix or wipe.
@@ -89,10 +88,10 @@ The shutdown latch and chainstate shutdown request propagate to every service. `
 |---|---|---|
 | Event-loop progress uses elapsed time | `telemetry_uses_elapsed_time_not_wake_count` | `crates/node/src/event_loop.rs:105` |
 | Startup window depth and level | `STARTUP_VERIFY_DEPTH = 6`, `CheckLevel::CheckUndoAndCommitments` | `crates/execution/src/verify.rs:24`, `open.rs` |
-| Journal replay matches the durable head identity | `replayed_frontier_must_match_the_durable_head_identity` | `crates/execution/src/journal/replay_tests.rs` (also cited in [how/state-and-storage.md](state-and-storage.md)) |
+| Durable head recovery | `torn_disconnect_replays_parent_tip` | `crates/node/tests/crash_recovery.rs` |
 | Crash recovery end to end | `crates/node/tests/crash_recovery.rs` (clause `SYNC-05` evidence) |
 
-Commands run for this page: the regtest traces above come from `./target/release/bitcoin-rs --network regtest --data-dir $DATA --log-level debug` with `generatetoaddress` over RPC; the restart traces (checkpoint and journal restore lines) come from a second and third start on the same datadir.
+Commands run for this page: the regtest traces above come from `./target/release/bitcoin-rs --network regtest --data-dir $DATA --log-level debug` with `generatetoaddress` over RPC; the restart traces (checkpoint restore lines) come from a second and third start on the same datadir.
 
 Contracts named: `EVT-02`, `SYNC-05` (`docs/contracts/architecture.md`, `docs/contracts/synchronization.md`).
 

@@ -143,31 +143,6 @@ topics = ["hashblock", "hashtx", "rawblock", "rawtx", "sequence"]
 hwm = 1000
 ```
 
-### `chainstate_journal`
-
-The journal has a TOML table and environment names, but no CLI flags:
-
-```toml
-[chainstate_journal]
-enabled = true
-blocks = 500
-seconds = 5
-rotate_mib = 256
-max_journal_mib = 2048
-max_lag_blocks = 500
-max_lag_seconds = 30
-```
-
-| TOML key | Environment | Default |
-| --- | --- | --- |
-| `chainstate_journal.enabled` | `BITCOIN_RS_CHAINSTATE_JOURNAL` | `true` |
-| `chainstate_journal.blocks` | `BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS` | `500` |
-| `chainstate_journal.seconds` | `BITCOIN_RS_CHAINSTATE_JOURNAL_SECONDS` | `5` |
-| `chainstate_journal.rotate_mib` | `BITCOIN_RS_CHAINSTATE_JOURNAL_ROTATE_MIB` | `256` |
-| `chainstate_journal.max_journal_mib` | `BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_JOURNAL_MIB` | `2048` |
-| `chainstate_journal.max_lag_blocks` | `BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_LAG_BLOCKS` | `500` |
-| `chainstate_journal.max_lag_seconds` | `BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_LAG_SECONDS` | `30` |
-
 ## A complete regtest file
 
 This file starts a regtest node with the same settings as the examples. `$DATA` stands for the data directory you pass to `--data-dir` or the `data_dir` key:

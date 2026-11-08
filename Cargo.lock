@@ -633,11 +633,14 @@ dependencies = [
 name = "bitcoin-rs-storage-convert"
 version = "0.15.0"
 dependencies = [
+ "bitcoin-rs-consensus",
+ "bitcoin-rs-execution",
  "bitcoin-rs-storage",
  "cap-fs-ext",
  "cap-std",
  "clap",
  "fjall",
+ "hashbrown 0.17.1",
  "redb",
  "serde",
  "sha2",

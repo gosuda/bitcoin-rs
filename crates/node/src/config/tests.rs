@@ -4,8 +4,7 @@ use std::path::PathBuf;
 
 use super::{Auth, ConfigError, NetworkSelection, NodeConfig, ScriptIndexMode, ValidationEngine};
 use crate::options::{
-    ChainstateJournalOverrides, P2pOverrides, RpcOverrides, StorageOverrides, UserConfig,
-    ValidationOverrides,
+    P2pOverrides, RpcOverrides, StorageOverrides, UserConfig, ValidationOverrides,
 };
 
 fn pool_layer() -> UserConfig {
@@ -1026,7 +1025,6 @@ fn resolve_keeps_absent_nested_fields_at_their_network_defaults() {
     assert!(!config.indexes.txindex);
     assert_eq!(config.indexes.script_index, ScriptIndexMode::Disabled);
     assert_eq!(config.observability.metrics_bind, None);
-    assert!(config.chainstate_journal.enabled);
     assert_eq!(
         config.validation.assume_valid_height, 0,
         "regtest pins no assume-valid anchor"
@@ -1128,32 +1126,6 @@ fn validation_engine_kernel_is_rejected_without_kernel_support() {
 }
 
 #[test]
-fn journal_nested_overrides_apply_field_by_field_across_layers() {
-    let base = UserConfig {
-        chainstate_journal: ChainstateJournalOverrides {
-            blocks: Some(200),
-            ..ChainstateJournalOverrides::default()
-        },
-        ..UserConfig::default()
-    };
-    let higher = UserConfig {
-        chainstate_journal: ChainstateJournalOverrides {
-            seconds: Some(45),
-            ..ChainstateJournalOverrides::default()
-        },
-        ..UserConfig::default()
-    };
-    let config = resolved(&[&base, &higher]);
-    assert_eq!(config.chainstate_journal.blocks, 200);
-    assert_eq!(config.chainstate_journal.seconds, 45);
-    assert_eq!(
-        config.chainstate_journal.rotate_mib, 256,
-        "untouched bounds keep the network defaults"
-    );
-    assert_eq!(config.chainstate_journal.max_journal_mib, 2048);
-}
-
-#[test]
 fn rpc_cookie_and_credential_layers_keep_one_auth_source() {
     let cookie = UserConfig {
         rpc: RpcOverrides {
@@ -1246,53 +1218,6 @@ fn p2p_magic_override_is_cross_field_validated() {
         ..UserConfig::default()
     };
     assert_eq!(resolved(&[&valid]).p2p.magic, magic);
-}
-
-#[test]
-fn journal_retention_and_lag_bounds_are_cross_field_validated() {
-    let inverted_retention = UserConfig {
-        chainstate_journal: ChainstateJournalOverrides {
-            rotate_mib: Some(4096),
-            max_journal_mib: Some(2048),
-            ..ChainstateJournalOverrides::default()
-        },
-        ..UserConfig::default()
-    };
-    let Err(error) = super::resolve(&[&inverted_retention]) else {
-        panic!("retention below rotation must fail validation");
-    };
-    assert!(
-        matches!(error, ConfigError::JournalMaxJournalMib),
-        "{error:?}"
-    );
-
-    let inverted_lag = UserConfig {
-        chainstate_journal: ChainstateJournalOverrides {
-            blocks: Some(500),
-            max_lag_blocks: Some(100),
-            ..ChainstateJournalOverrides::default()
-        },
-        ..UserConfig::default()
-    };
-    let Err(error) = super::resolve(&[&inverted_lag]) else {
-        panic!("a lag bound below the batch size must fail validation");
-    };
-    assert!(
-        matches!(error, ConfigError::JournalMaxLagBlocks),
-        "{error:?}"
-    );
-
-    let zero_period = UserConfig {
-        chainstate_journal: ChainstateJournalOverrides {
-            seconds: Some(0),
-            ..ChainstateJournalOverrides::default()
-        },
-        ..UserConfig::default()
-    };
-    let Err(error) = super::resolve(&[&zero_period]) else {
-        panic!("a non-positive period must fail validation");
-    };
-    assert!(matches!(error, ConfigError::JournalSeconds), "{error:?}");
 }
 
 #[test]

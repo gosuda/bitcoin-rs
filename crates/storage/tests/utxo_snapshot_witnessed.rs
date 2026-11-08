@@ -2,12 +2,11 @@ use std::convert::Infallible;
 use std::io::{Cursor, Seek, Write};
 
 use crate::support::utxo::{TestError, TestResult};
-use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, Script, TxOut};
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut};
 use bitcoin_rs_storage::checkpoint::CheckpointReference;
-use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
 use bitcoin_rs_storage::utxo::{
     OfferOutcome, RawSeedError, SeedOfferCell, SeedProvenance, SeedSlot, SnapshotCoin,
-    SnapshotCoinObserver, VerifiedSnapshotArtifact, read_snapshot_strict_v4,
+    SnapshotCoinObserver, UtxoSet, VerifiedSnapshotArtifact, read_snapshot_strict_v4,
     read_snapshot_strict_v4_witnessed, write_snapshot_observed, write_snapshot_witnessed,
 };
 use sha2::{Digest, Sha256};
@@ -32,29 +31,32 @@ fn fixture_set() -> TestResult<(bitcoin_rs_storage::utxo::UtxoSet, Hash256, u32)
     let set = bitcoin_rs_storage::utxo::UtxoSet::new();
     let first = txid(7_001);
     let second = txid(7_002);
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(
-        OutPoint::new(first.into(), 0),
-        txout(7_010),
-        false,
-        100,
-    ));
-    changes.add(UtxoAdd::new(
-        OutPoint::new(first.into(), 3),
-        TxOut {
-            value: Amount::from_sat(7_011),
-            script_pubkey: Script::new(),
-        },
-        true,
-        101,
-    ));
-    changes.add(UtxoAdd::new(
-        OutPoint::new(second.into(), 1),
-        txout(7_012),
-        false,
-        102,
-    ));
-    commit_block_changes(&set, &changes, &txid(7_003))?;
+    let out1 = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+        vout: 0,
+        value: txout(7_010).value.to_sat(),
+        script_pubkey: txout(7_010).script_pubkey.to_vec(),
+        coinbase: false,
+        height: 100,
+    };
+    let out2 = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+        vout: 3,
+        value: 7_011,
+        script_pubkey: Vec::new(),
+        coinbase: true,
+        height: 101,
+    };
+    let out3 = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+        vout: 1,
+        value: txout(7_012).value.to_sat(),
+        script_pubkey: txout(7_012).script_pubkey.to_vec(),
+        coinbase: false,
+        height: 102,
+    };
+    let rec1 =
+        bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(first, &[out1, out2])?;
+    let rec2 = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(second, &[out3])?;
+    set.insert_parsed_record(rec1);
+    set.insert_parsed_record(rec2);
     Ok((set, txid(7_004), 103))
 }
 
@@ -482,15 +484,17 @@ fn empty_snapshot_mints_and_traverses_zero_coins() -> TestResult {
 }
 
 fn tiny_artifact(tip_seed: u64, base_byte: u8) -> TestResult<VerifiedSnapshotArtifact> {
-    let set = bitcoin_rs_storage::utxo::UtxoSet::new();
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(
-        OutPoint::new(txid(tip_seed).into(), 0),
-        txout(tip_seed + 1),
-        false,
-        10,
-    ));
-    commit_block_changes(&set, &changes, &txid(tip_seed + 2))?;
+    let set = UtxoSet::new();
+    let out = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+        vout: 0,
+        value: txout(tip_seed + 1).value.to_sat(),
+        script_pubkey: txout(tip_seed + 1).script_pubkey.to_vec(),
+        coinbase: false,
+        height: 10,
+    };
+    let rec =
+        bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(txid(tip_seed), &[out])?;
+    set.insert_parsed_record(rec);
     let tip = txid(tip_seed + 3);
     let mut bytes = Vec::new();
     let (_, (), witness) = write_snapshot_witnessed(&set, &tip, 11, &mut bytes, ())?;
@@ -591,17 +595,21 @@ fn cell_handles_are_thread_shareable() {
 
 #[test]
 fn seed_traversal_polls_cancellation_every_4096_coins() -> TestResult {
-    let set = bitcoin_rs_storage::utxo::UtxoSet::new();
-    let mut changes = BlockChanges::default();
+    let set = UtxoSet::new();
     for i in 0..9_000_u64 {
-        changes.add(UtxoAdd::new(
-            OutPoint::new(txid(200_000 + i).into(), 0),
-            txout(i),
-            false,
-            1,
-        ));
+        let out = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+            vout: 0,
+            value: txout(i).value.to_sat(),
+            script_pubkey: txout(i).script_pubkey.to_vec(),
+            coinbase: false,
+            height: 1,
+        };
+        let rec = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
+            txid(200_000 + i),
+            &[out],
+        )?;
+        set.insert_parsed_record(rec);
     }
-    commit_block_changes(&set, &changes, &txid(199_999))?;
     let tip = txid(200_001);
     let mut bytes = Vec::new();
     let (_, (), witness) = write_snapshot_witnessed(&set, &tip, 7, &mut bytes, ())?;

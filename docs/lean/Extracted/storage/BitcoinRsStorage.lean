@@ -101,6 +101,37 @@ axiom bitcoin_rs_consensus.primitives.units.Amount.MAX_MONEY
 axiom bitcoin_rs_consensus.primitives.units.Amount.to_sat
   : bitcoin_rs_consensus.primitives.units.Amount → Result Std.U64
 
+/-- [bitcoin_rs_storage::column_families::ColumnFamily]
+    Source: 'crates/storage/src/column_families.rs', lines 3:0-17:1
+    Visibility: public -/
+@[discriminant u8]
+inductive column_families.ColumnFamily where
+| TxConfirmed : column_families.ColumnFamily
+| TxMempool : column_families.ColumnFamily
+| BlockHeaders : column_families.ColumnFamily
+| Funding : column_families.ColumnFamily
+| Spending : column_families.ColumnFamily
+| Coinstats : column_families.ColumnFamily
+| BlockTree : column_families.ColumnFamily
+| UtxoMeta : column_families.ColumnFamily
+| BlockBodies : column_families.ColumnFamily
+| UndoData : column_families.ColumnFamily
+| ScriptLive : column_families.ColumnFamily
+| Coins : column_families.ColumnFamily
+| PoolLedger : column_families.ColumnFamily
+
+/-- [bitcoin_rs_storage::error::StorageError]
+    Source: 'crates/storage/src/error.rs', lines 6:0-21:1
+    Visibility: public -/
+@[discriminant isize]
+inductive error.StorageError where
+| UnknownColumnFamily : column_families.ColumnFamily → error.StorageError
+| Io : core.io.error.Error → error.StorageError
+| Backend : String → error.StorageError
+| InvalidOperation : Str → error.StorageError
+| IncompatibleData : String → error.StorageError
+| CorruptBlockFrame : Str → error.StorageError
+
 /-- [bitcoin_rs_storage::utxo::compress::MAX_COMPRESSIBLE_AMOUNT]
     Source: 'crates/storage/src/utxo/compress.rs', lines 66:0-66:75 -/
 @[global_simps, irreducible]
@@ -109,20 +140,22 @@ def utxo.compress.MAX_COMPRESSIBLE_AMOUNT : Result Std.U64 := do
   bitcoin_rs_consensus.primitives.units.Amount.to_sat a
 
 /-- [bitcoin_rs_storage::utxo::scan::UtxoScanError]
-    Source: 'crates/storage/src/utxo/scan.rs', lines 18:0-25:1
+    Source: 'crates/storage/src/utxo/scan.rs', lines 20:0-29:1
     Visibility: public -/
 @[discriminant isize]
 inductive utxo.scan.UtxoScanError where
 | InProgress : utxo.scan.UtxoScanError
 | Limit : Str → utxo.scan.UtxoScanError
 | Aborted : utxo.scan.UtxoScanError
+| Corrupt : String → utxo.scan.UtxoScanError
 
 /-- [bitcoin_rs_storage::utxo::set::UtxoError]
-    Source: 'crates/storage/src/utxo/set.rs', lines 20:0-53:1
+    Source: 'crates/storage/src/utxo/set.rs', lines 13:0-48:1
     Visibility: public -/
 @[discriminant isize]
 inductive utxo.set.UtxoError where
 | Scan : utxo.scan.UtxoScanError → utxo.set.UtxoError
+| Storage : error.StorageError → utxo.set.UtxoError
 | ScriptTooLarge : Std.Usize → utxo.set.UtxoError
 | RecordTooLarge : Std.Usize → utxo.set.UtxoError
 | CorruptRecord : utxo.set.UtxoError

@@ -6,18 +6,11 @@ use bitcoin_rs_consensus::primitives::Hash256;
 
 use bitcoin_rs_storage::DisconnectPhase;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
-use bitcoin_rs_storage::checkpoint::{
-    CHECKPOINT_ROOT, CheckpointOpen, UTXO_FILE, open_checkpoint_generation_at,
-};
 
-use bitcoin_rs_storage::utxo::snapshot::{
-    SeedOfferCell, SeedProvenance, V4Witness, VerifiedSnapshotArtifact,
-};
+use bitcoin_rs_storage::utxo::snapshot::{SeedOfferCell, V4Witness};
 use bitcoin_rs_storage::utxo::{UtxoSet, stats::CoinStatsListener};
 
 use bitcoin_rs_storage::recovery_evidence::{AppliedTipWitness, write_witness};
-
-use bitcoin_rs_storage::checkpoint::fs::open_file;
 
 use crate::{
     ApplyAdmission, UndoStore,
@@ -33,9 +26,9 @@ use std::{
 };
 
 fn retire_full_revalidation_marker(data_dir: &std::path::Path) -> Result<(), CheckpointError> {
-    bitcoin_rs_storage::chainstate_journal::clear_full_revalidation_marker_at(data_dir).map_err(
+    bitcoin_rs_storage::recovery_evidence::clear_full_revalidation_marker_at(data_dir).map_err(
         |error| match error {
-            bitcoin_rs_storage::chainstate_journal::JournalWriterError::Io(io) => {
+            bitcoin_rs_storage::recovery_evidence::EvidenceError::Io(io) => {
                 CheckpointError::FullRevalidationMarker(io)
             }
             other => CheckpointError::Store(
@@ -52,6 +45,7 @@ enum DisconnectRetirement {
     /// Boot replay is still below the durable head. Publish a compaction base
     /// without retiring either recovery marker; a crash must resume recovery,
     /// not treat this progress checkpoint as a completed repair.
+    #[expect(dead_code)]
     RecoveryProgress,
 }
 
@@ -67,13 +61,12 @@ pub(crate) struct CheckpointPublisher {
     pub(crate) block_tree: Arc<RwLock<BlockTree>>,
     pub(crate) utxo: Arc<UtxoSet>,
     pub(crate) coin_stats: Arc<CoinStatsListener>,
-    pub(crate) journal:
-        Arc<RwLock<Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>>>,
 
     pub(crate) seed_offer: Option<SeedOfferCell>,
     pub(crate) data_dir: PathBuf,
     pub(crate) chain_events: Arc<ChainEventPublisher>,
     pub(crate) durable_tip_height: Arc<std::sync::atomic::AtomicU32>,
+    pub(crate) store: Option<Arc<dyn bitcoin_rs_storage::KvStore>>,
 }
 
 impl CheckpointPublisher {
@@ -87,6 +80,7 @@ impl CheckpointPublisher {
         self.publish_transaction(DisconnectRetirement::Recovered)
     }
 
+    #[expect(dead_code)]
     pub(crate) fn publish_recovery_progress(
         &self,
     ) -> core::result::Result<CheckpointWrite, CheckpointError> {
@@ -102,71 +96,8 @@ impl CheckpointPublisher {
         if self.admission.is_closed() {
             return Err(CheckpointError::ClosedForRecovery);
         }
-        let journal_handle = self.journal.read().clone();
-        let mut journal = journal_handle.as_ref().map(|journal| journal.lock());
-        if let Some(writer) = journal.as_mut() {
-            writer.freeze().map_err(|error| {
-                CheckpointError::Store(bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(
-                    error.to_string(),
-                ))
-            })?;
-        }
         let applied_tip = self.applied_tip.load_full();
-        let chain_tx_count = applied_tip
-            .as_ref()
-            .map_or(0, |tip| tip.chain_tx_count.to_wire());
-        let mut result = self.publish_frozen(applied_tip.as_deref(), retirement);
-        if let (Ok(CheckpointWrite::Published { reference }), Some(tip), Some(writer)) =
-            (&result, applied_tip.as_ref(), journal.as_mut())
-        {
-            let compact_result = self.tip_prev_hash(tip).and_then(|tip_prev_hash| {
-                let base = bitcoin_rs_storage::chainstate_journal::CheckpointBase {
-                    generation: reference.generation,
-                    height: tip.height,
-                    hash: tip.hash.to_le_bytes(),
-                    prev_hash: tip_prev_hash.to_le_bytes(),
-                    chain_tx_count,
-                };
-                let compacted = match retirement {
-                    DisconnectRetirement::Ordinary | DisconnectRetirement::Recovered => {
-                        writer.compact_to_checkpoint(base)
-                    }
-                    DisconnectRetirement::RecoveryProgress => {
-                        writer.compact_to_checkpoint_for_recovery(base)
-                    }
-                };
-                compacted.map_err(|error| {
-                    CheckpointError::Store(
-                        bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(error.to_string()),
-                    )
-                })
-            });
-            if let Err(error) = compact_result {
-                result = Err(error);
-            }
-        }
-        if let Some(writer) = journal.as_mut()
-            && let Err(error) = writer.resume()
-        {
-            let resume_error = CheckpointError::Store(
-                bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(error.to_string()),
-            );
-            if result.is_ok() {
-                result = Err(resume_error);
-            } else {
-                tracing::error!(%error, "failed to resume chainstate journal after publication error");
-            }
-        }
-        if result.is_ok()
-            && let Err(error) = match retirement {
-                DisconnectRetirement::Ordinary => self.undo_store.disarm_disconnect(),
-                DisconnectRetirement::Recovered => self.undo_store.retire_disconnect_marker(),
-                DisconnectRetirement::RecoveryProgress => Ok(()),
-            }
-        {
-            result = Err(CheckpointError::from(error));
-        }
-        result
+        self.publish_frozen(applied_tip.as_deref(), retirement)
     }
 
     pub(crate) fn settle_disconnect_debt(&self) -> core::result::Result<bool, CheckpointError> {
@@ -180,6 +111,7 @@ impl CheckpointPublisher {
         Ok(true)
     }
 
+    #[expect(dead_code)]
     fn tip_prev_hash(&self, tip: &TipSnapshot) -> core::result::Result<Hash256, CheckpointError> {
         let tree = self.block_tree.read();
         let node = tree.node(tip.tip_id).map_err(|error| {
@@ -200,7 +132,7 @@ impl CheckpointPublisher {
     }
 
     /// The disconnect marker is the recovery latch: it retires only once the
-    /// checkpoint, the journal compaction, and the journal resume all succeeded.
+    /// checkpoint publication succeeded.
     ///
     /// The durable head is the chain's commit point and publication follows it, so a
     /// checkpoint — which freezes the published state — can never legitimately name a
@@ -241,17 +173,32 @@ impl CheckpointPublisher {
         }
         self.block_body_store.sync()?;
         self.block_body_store.flush_index()?;
-        let (written, stage_witness) = checkpoint::write_checkpoint_from_dir(
-            &self.checkpoint_data_dir,
-            checkpoint::headers::HeaderCheckpointConfig {
-                network: self.network,
-                genesis: self.genesis_hash,
-            },
-            &self.block_tree,
-            &self.utxo,
-            &self.coin_stats,
-            applied_tip,
-        )?;
+        let header_config = checkpoint::headers::HeaderCheckpointConfig {
+            network: self.network,
+            genesis: self.genesis_hash,
+        };
+        let (written, stage_witness) = if let Some(store) = self.store.as_deref() {
+            checkpoint::write_checkpoint_with_store(
+                &self.checkpoint_data_dir,
+                header_config,
+                &self.block_tree,
+                &self.coin_stats,
+                applied_tip,
+                checkpoint::CheckpointStoreTarget {
+                    store,
+                    host_data_dir: &self.data_dir,
+                },
+            )?
+        } else {
+            checkpoint::write_checkpoint_from_dir(
+                &self.checkpoint_data_dir,
+                header_config,
+                &self.block_tree,
+                &self.utxo,
+                &self.coin_stats,
+                applied_tip,
+            )?
+        };
         if let CheckpointWrite::Published { .. } = written
             && let Some(tip) = applied_tip
         {
@@ -275,6 +222,15 @@ impl CheckpointPublisher {
             && !matches!(retirement, DisconnectRetirement::RecoveryProgress)
         {
             retire_full_revalidation_marker(&self.data_dir)?;
+            if let Err(error) = match retirement {
+                DisconnectRetirement::Ordinary => self.undo_store.disarm_disconnect(),
+                DisconnectRetirement::Recovered => self.undo_store.retire_disconnect_marker(),
+                DisconnectRetirement::RecoveryProgress => Ok(()),
+            } {
+                return Err(CheckpointError::Store(
+                    bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(error.to_string()),
+                ));
+            }
         }
         if let (CheckpointWrite::Published { reference }, Some(witness)) = (&written, stage_witness)
             && let Some(cell) = &self.seed_offer
@@ -288,29 +244,11 @@ impl CheckpointPublisher {
     }
 
     fn offer_committed_seed(
-        checkpoint_data_dir: &cap_std::fs::Dir,
-        cell: &SeedOfferCell,
-        reference: bitcoin_rs_storage::checkpoint::CheckpointReference,
-        witness: V4Witness,
+        _checkpoint_data_dir: &cap_std::fs::Dir,
+        _cell: &SeedOfferCell,
+        _reference: bitcoin_rs_storage::checkpoint::CheckpointReference,
+        _witness: V4Witness,
     ) {
-        let opened = open_checkpoint_generation_at(checkpoint_data_dir, CHECKPOINT_ROOT, reference);
-        let Ok(CheckpointOpen::Selected { generation_dir, .. }) = opened else {
-            return;
-        };
-        let Ok(file) = open_file(&generation_dir, UTXO_FILE) else {
-            return;
-        };
-        let Ok(len) = file.metadata().map(|metadata| metadata.len()) else {
-            return;
-        };
-        if len != witness.byte_len() {
-            return;
-        }
-        cell.offer(VerifiedSnapshotArtifact::seal(
-            file.into_std(),
-            witness,
-            SeedProvenance::Checkpoint(reference),
-        ));
     }
 }
 
@@ -318,17 +256,14 @@ impl CheckpointPublisher {
 mod tests {
     use super::retire_full_revalidation_marker;
     use crate::checkpoint::CheckpointError;
-    use bitcoin_rs_storage::chainstate_journal::JOURNAL_DIR_NAME;
+    use bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER;
 
     use crate::test_fixtures::{TestError, TestResult};
 
     #[test]
     fn full_revalidation_marker_clears_after_checkpoint_publication() -> TestResult {
         let dir = tempfile::tempdir()?;
-        let journal_dir = dir.path().join(JOURNAL_DIR_NAME);
-        let marker =
-            journal_dir.join(bitcoin_rs_storage::chainstate_journal::FULL_REVALIDATION_MARKER);
-        std::fs::create_dir_all(&journal_dir)?;
+        let marker = dir.path().join(FULL_REVALIDATION_MARKER);
         std::fs::write(&marker, b"force full validation\n")?;
 
         retire_full_revalidation_marker(dir.path())?;
@@ -340,13 +275,13 @@ mod tests {
     #[test]
     fn marker_clear_io_is_classified_as_retryable_marker_error() -> TestResult {
         let dir = tempfile::tempdir()?;
-        std::fs::write(dir.path().join(JOURNAL_DIR_NAME), b"not a directory")?;
+        std::fs::create_dir(dir.path().join(FULL_REVALIDATION_MARKER))?;
 
         let error = match retire_full_revalidation_marker(dir.path()) {
             Err(error) => error,
             Ok(()) => {
                 return Err(TestError::UnexpectedSuccess(
-                    "opening a file as the journal directory must fail",
+                    "removing a directory at the marker path must fail",
                 ));
             }
         };
@@ -385,7 +320,7 @@ mod tests {
             .join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT)
             .join("gen-00000000000000000000");
         std::fs::create_dir_all(&generation_path)?;
-        let fifo_path = generation_path.join(bitcoin_rs_storage::checkpoint::UTXO_FILE);
+        let fifo_path = generation_path.join("seed.fifo");
         let created = std::process::Command::new("mkfifo")
             .arg(&fifo_path)
             .status()?;
@@ -419,9 +354,8 @@ mod tests {
                 .nonblock(true);
             Some(cap_dir.open_with(
                 format!(
-                    "{}/gen-00000000000000000000/{}",
-                    bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT,
-                    bitcoin_rs_storage::checkpoint::UTXO_FILE
+                    "{}/gen-00000000000000000000/seed.fifo",
+                    bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT
                 ),
                 &options,
             ))

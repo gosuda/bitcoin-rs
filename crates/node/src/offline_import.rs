@@ -220,16 +220,6 @@ pub enum OfflineImportError {
         hash: bitcoin_rs_consensus::primitives::BlockHash,
         connect_error: Box<crate::ConnectMutationError>,
     },
-    #[error("journal backpressure relief checkpoint failed at block {hash}")]
-    BackpressureCheckpointFailed {
-        hash: bitcoin_rs_consensus::primitives::BlockHash,
-        #[source]
-        source: Box<bitcoin_rs_execution::CheckpointError>,
-    },
-    #[error("journal backpressure relief checkpoint skipped at block {hash}: no applied tip")]
-    BackpressureCheckpointSkipped {
-        hash: bitcoin_rs_consensus::primitives::BlockHash,
-    },
     #[error("cannot check archive trailing bytes: {io_error}")]
     TrailingBytesCheck { io_error: std::io::Error },
     #[error("archive contains trailing bytes after the last record")]
@@ -626,40 +616,10 @@ fn connect_batch(
     for payload in batch.drain(..) {
         let hash = payload.block_hash();
         if let Err(error) = followers.apply_connect(&chainstate, &payload) {
-            let retention_limited = matches!(
-                &error,
-                crate::ConnectMutationError::NotCommitted(
-                    bitcoin_rs_execution::ApplyError::JournalBackpressure(inner)
-                ) if matches!(
-                    inner.as_ref(),
-                    bitcoin_rs_storage::chainstate_journal::JournalWriterError::RetentionLimit { .. }
-                )
-            );
-            if !retention_limited {
-                return Err(OfflineImportError::ConnectFailed {
-                    hash,
-                    connect_error: Box::new(error),
-                });
-            }
-            let generation = node.publish_checkpoint().map_err(|source| {
-                OfflineImportError::BackpressureCheckpointFailed {
-                    hash,
-                    source: Box::new(source),
-                }
-            })?;
-            if generation.is_none() {
-                return Err(OfflineImportError::BackpressureCheckpointSkipped { hash });
-            }
-            tracing::info!(
-                %hash,
-                "compacted the chainstate journal during offline import; retrying the refused block"
-            );
-            followers
-                .apply_connect(&chainstate, &payload)
-                .map_err(|connect_error| OfflineImportError::ConnectFailed {
-                    hash,
-                    connect_error: Box::new(connect_error),
-                })?;
+            return Err(OfflineImportError::ConnectFailed {
+                hash,
+                connect_error: Box::new(error),
+            });
         }
     }
     Ok(())

@@ -48,7 +48,7 @@ Tier: in-tree oracle and differential evidence. Related: [validation-default](co
 cargo test --locked -p bitcoin-rs-consensus --features kernel --test suite -- kernel_block_parity:: kernel_boundary_parity:: kernel_vector_parity:: --nocapture
 ```
 ## 6. Contextual consensus-rule tests
-Tier: in-tree consensus verification. Owners: `crates/execution/src/chain/header_sync.rs` (`contextual_header_tests`: nBits, MTP, BIP94 timewarp, version floors), `crates/consensus/src/verify_block.rs` (BIP30 duplicate txids, BIP34 coinbase height, BIP68 locktimes, BIP141 commitments, weight limits). Third owner: `crates/execution/src/tests/persistence_tests.rs` (mutation failure boundaries, undo atomicity, BIP30 overwrite undo-coin restoration).
+Tier: in-tree consensus verification. Owners: `crates/execution/src/chain/header_sync.rs` (`contextual_header_tests`: nBits, MTP, BIP94 timewarp, version floors), `crates/consensus/src/verify_block.rs` (BIP30 duplicate txids, BIP34 coinbase height, BIP68 locktimes, BIP141 commitments, weight limits). Third owner: `crates/execution/src/tests/persistence_tests.rs` (mutation failure boundaries, undo atomicity, BIP30 overwrite undo-coin removal).
 ```sh
 cargo test --locked -p bitcoin-rs-execution header_sync::contextual_header_tests && cargo test --locked -p bitcoin-rs-consensus verify_block::tests
 cargo test --locked -p bitcoin-rs-execution --lib persistence_tests

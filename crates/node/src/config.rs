@@ -1,10 +1,7 @@
-use crate::options::{
-    ChainstateJournalOverrides, IndexBundleDirError, OptionParseError, UserConfig,
-    check_index_bundle_path,
-};
+use crate::options::{IndexBundleDirError, OptionParseError, UserConfig, check_index_bundle_path};
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::primitives::Network;
-use bitcoin_rs_execution::{ChainstateJournalConfig, ValidationMode};
+use bitcoin_rs_execution::ValidationMode;
 use bitcoin_rs_projection::IndexCapabilities;
 #[cfg(feature = "pool")]
 use bitcoin_rs_serving::mining::pool::ledger as pool_ledger;
@@ -146,18 +143,6 @@ pub enum ConfigError {
     Zmq(#[from] bitcoin_rs_serving::zmq::ZmqConfigError),
     #[error(transparent)]
     Overlay(#[from] std::io::Error),
-    #[error("chainstate_journal.blocks must be positive")]
-    JournalBlocks,
-    #[error("chainstate_journal.seconds must be positive")]
-    JournalSeconds,
-    #[error("chainstate_journal.rotate_mib must be positive")]
-    JournalRotateMib,
-    #[error("chainstate_journal.max_journal_mib must be >= rotate_mib")]
-    JournalMaxJournalMib,
-    #[error("chainstate_journal.max_lag_blocks must be >= blocks")]
-    JournalMaxLagBlocks,
-    #[error("chainstate_journal.max_lag_seconds must be positive")]
-    JournalMaxLagSeconds,
     #[error("P2P magic overrides currently require --network mainnet")]
     MagicRequiresMainnet,
     #[error("P2P magic overrides require at least one --connect peer")]
@@ -256,33 +241,6 @@ impl ScriptIndexMode {
             "false" | "0" | "no" => Some(Self::Disabled),
             _ => None,
         }
-    }
-}
-
-fn apply_journal_overrides(
-    layer: &ChainstateJournalOverrides,
-    config: &mut ChainstateJournalConfig,
-) {
-    if let Some(enabled) = layer.enabled {
-        config.enabled = enabled;
-    }
-    if let Some(blocks) = layer.blocks {
-        config.blocks = blocks;
-    }
-    if let Some(seconds) = layer.seconds {
-        config.seconds = seconds;
-    }
-    if let Some(rotate_mib) = layer.rotate_mib {
-        config.rotate_mib = rotate_mib;
-    }
-    if let Some(max_journal_mib) = layer.max_journal_mib {
-        config.max_journal_mib = max_journal_mib;
-    }
-    if let Some(max_lag_blocks) = layer.max_lag_blocks {
-        config.max_lag_blocks = max_lag_blocks;
-    }
-    if let Some(max_lag_seconds) = layer.max_lag_seconds {
-        config.max_lag_seconds = max_lag_seconds;
     }
 }
 
@@ -592,7 +550,6 @@ pub struct NodeConfig {
     pub indexes: IndexConfig,
     pub observability: ObservabilityConfig,
     pub notifications: NotificationConfig,
-    pub chainstate_journal: ChainstateJournalConfig,
     pub validation: ValidationConfig,
     pub mining: MiningConfig,
     pub pool: Option<PoolConfig>,
@@ -606,8 +563,6 @@ impl NodeConfig {
 
     fn materialize(settings: &UserConfig, selection: NetworkSelection) -> Self {
         let profile = NetworkProfile::for_selection(selection);
-        let mut chainstate_journal = ChainstateJournalConfig::default();
-        apply_journal_overrides(&settings.chainstate_journal, &mut chainstate_journal);
         let mempool_snapshot_max_bytes = settings
             .mempool_snapshot_max_mb
             .unwrap_or(bitcoin_rs_mempool::snapshot::DEFAULT_MAX_BYTES / (1024 * 1024))
@@ -655,7 +610,6 @@ impl NodeConfig {
                 metrics_bind: settings.observability.metrics_bind,
             },
             notifications: settings.notifications.clone().unwrap_or_default(),
-            chainstate_journal,
             validation: ValidationConfig {
                 assume_valid_height: settings
                     .validation
@@ -754,30 +708,6 @@ impl NodeConfig {
         self.validate_p2p_network()?;
         self.p2p.overlay.validate()?;
         bitcoin_rs_serving::zmq::validate_endpoint_configs(&self.notifications.zmq)?;
-        self.validate_chainstate_journal()?;
-        Ok(())
-    }
-
-    fn validate_chainstate_journal(&self) -> Result<(), ConfigError> {
-        let journal = &self.chainstate_journal;
-        if journal.blocks == 0 {
-            return Err(ConfigError::JournalBlocks);
-        }
-        if journal.seconds == 0 {
-            return Err(ConfigError::JournalSeconds);
-        }
-        if journal.rotate_mib == 0 {
-            return Err(ConfigError::JournalRotateMib);
-        }
-        if journal.max_journal_mib < journal.rotate_mib {
-            return Err(ConfigError::JournalMaxJournalMib);
-        }
-        if journal.max_lag_blocks < journal.blocks {
-            return Err(ConfigError::JournalMaxLagBlocks);
-        }
-        if journal.max_lag_seconds == 0 {
-            return Err(ConfigError::JournalMaxLagSeconds);
-        }
         Ok(())
     }
 

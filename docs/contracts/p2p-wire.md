@@ -340,10 +340,10 @@ Queue accounting:
 - It increments `node.sync.invalid_block_disconnects`.
 - `BodyMutated` and `Operational` stay retryable and non-punitive.
 - `Fatal` halts admission without peer blame.
-- An unrecoverable storage-engine failure settles `Fatal`: a failed undo write, a failed block-body write, a failed utxo or durable-head commit, a journal failure that retention backpressure does not own, and a failed recovery checkpoint publication.
+- An unrecoverable storage-engine failure settles `Fatal`: a failed undo write, a failed block-body write, a failed coin or durable-head commit, and a failed recovery checkpoint publication.
 - `Fatal` closes the chainstate for recovery through `fail_closed_for_recovery`: the commit loop schedules no retry, the event loop requests node shutdown, and the supervisor restart replays the durable state with a clean engine.
 - `getblockchaininfo` reports the closed chainstate as `is_apply_halted` until the process exits.
-- Journal backpressure from the retention limit stays `Operational`; compaction relieves it in-process.
+- A transient storage read or write refusal that the engine resolves stays `Operational`, and the caller retries under its owning mechanism.
 - `BodyMutated` names only delivered bytes (header stays valid, body re-fetched).
 - These include Merkle or witness mismatch.
 - They also include a coinbaseless body holding a 64-byte witness-stripped tx (`SixtyFourByteMutation`; CVE-2017-12842, Core `IsBlockMutated`).

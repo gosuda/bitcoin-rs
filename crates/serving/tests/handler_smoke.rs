@@ -522,11 +522,7 @@ fn gettxoutsetinfo_returns_real_utxo_counts() -> Result<(), TestError> {
         false,
         1,
     ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::from_le_bytes(&[0xaa; 32]),
-    )?;
+    ctx.populate_fixture_coins(&changes)?;
     let handler = Handler::new(Arc::clone(&ctx));
     let result = handler.dispatch("gettxoutsetinfo", &json!([]))?;
     assert_eq!(

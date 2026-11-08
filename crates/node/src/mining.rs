@@ -567,9 +567,7 @@ impl MiningControl for MiningCoordinator {
 
 fn map_apply_error(error: ApplyError) -> Result<BlockValidationResult, MiningControlError> {
     match error {
-        ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
-            Ok(BlockValidationResult::Inconclusive)
-        }
+        ApplyError::Shutdown => Ok(BlockValidationResult::Inconclusive),
         ApplyError::ConcurrentChainChange => Err(MiningControlError::Unavailable(
             CompactString::from(error.to_string()),
         )),
@@ -627,9 +625,7 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             | ChainError::BadVersion { .. }
             | ChainError::TimewarpAttack { .. }),
         ) => bitcoin_rs_serving::mining::chain_reject_reason(chain),
-        ApplyError::Shutdown
-        | ApplyError::JournalBackpressure(_)
-        | ApplyError::ConcurrentChainChange => {
+        ApplyError::Shutdown | ApplyError::ConcurrentChainChange => {
             return Err(MiningControlError::Unavailable(CompactString::from(
                 error.to_string(),
             )));
@@ -656,7 +652,9 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
         | ApplyError::DurableHeadLineage { .. }
         | ApplyError::DisconnectOffDurableHead { .. }
         | ApplyError::DurableHeadGapUnrecoverable { .. }
+        | ApplyError::WindowWorkspaceIncomplete { .. }
         | ApplyError::RecoveryPublication(_)
+        | ApplyError::CoinStoreRead(_)
         | ApplyError::CoinStatsRewind(_)
         | ApplyError::DisconnectBelowSnapshotBase { .. }
         | ApplyError::PruneDuringHistoricalValidation { .. }

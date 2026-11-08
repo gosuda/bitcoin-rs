@@ -17,9 +17,12 @@ mdbx = ["bitcoin-rs-storage/mdbx"]
 
 
 [dependencies]
+bitcoin-rs-consensus = { workspace = true }
+bitcoin-rs-execution = { workspace = true }
 bitcoin-rs-storage = { workspace = true }
 cap-std = { workspace = true }
 cap-fs-ext = { workspace = true }
+hashbrown = { workspace = true }
 clap = { workspace = true }
 fjall = { workspace = true }
 redb = { workspace = true }
@@ -30,6 +33,8 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+bitcoin-rs-execution = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-consensus = { workspace = true }
 sha2 = { workspace = true }
 fjall = { workspace = true }
 redb = { workspace = true }

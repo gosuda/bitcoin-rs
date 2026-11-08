@@ -11,6 +11,9 @@ pub use cache::CoinCache;
 pub const COIN_KEY_LEN: usize = 32;
 const INGEST_BATCH_TARGET_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Exclusive upper bound for full-keyspace scans over the `coins` family.
+pub const COIN_KEYSPACE_END: &[u8] = &[0xff_u8; 64];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CoinKey(pub [u8; COIN_KEY_LEN]);
 
@@ -59,6 +62,14 @@ impl CoinStore {
             store,
             cache: CoinCache::new(budget_bytes),
         }
+    }
+
+    /// Point-in-time image of the `coins` keyspace for streaming scans.
+    ///
+    /// Callers pair the snapshot with the chain-transition lock so the image
+    /// and the applied head describe the same committed state.
+    pub fn scan_snapshot(&self) -> Result<Box<dyn crate::KvSnapshot + '_>, StorageError> {
+        self.store.snapshot()
     }
 
     pub fn get(&self, key: &CoinKey) -> Result<Option<Bytes>, StorageError> {
@@ -164,6 +175,19 @@ impl CoinStore {
         outcome
     }
 
+    /// Deletes every engine coin row and clears the resident cache (CMT-03).
+    ///
+    /// Boot recovery uses this to discard staged snapshot coins after an
+    /// interrupted activation; the canonical set is rebuilt from the durable
+    /// head's own replay paths.
+    pub fn wipe(&self) -> Result<(), StorageError> {
+        let outcome = self
+            .store
+            .delete_range(ColumnFamily::Coins, &[], COIN_KEYSPACE_END);
+        self.cache.clear();
+        outcome
+    }
+
     fn write_sorted_run(
         &self,
         records: impl Iterator<Item = (CoinKey, Bytes)>,
@@ -193,6 +217,10 @@ impl CoinStore {
             self.store.write_durable(batch)?;
         }
         Ok(())
+    }
+    #[must_use]
+    pub fn store(&self) -> &Arc<dyn KvStore> {
+        &self.store
     }
 
     #[cfg(any(test, feature = "test-seam"))]

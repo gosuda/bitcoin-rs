@@ -3,12 +3,12 @@ use std::sync::Arc;
 use crate::chain::ChainTxCount;
 use crate::chain::regtest_fixture::mined_regtest_child_at as mined_child;
 use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Network, Witness};
+use bitcoin_rs_storage::DurableHead;
 use bitcoin_rs_storage::utxo::UtxoSet;
-use bitcoin_rs_storage::{CommitRecords, DurableHead};
 use parking_lot::Mutex;
 
 use crate::test_fixtures::{
-    StagedFire, TestError, TestResult, handles, seed_genesis, staging_recorder,
+    StagedFire, TestError, TestResult, handles, seed_durable_head, seed_genesis, staging_recorder,
 };
 
 #[test]
@@ -16,9 +16,9 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count() -> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let genesis = Network::Regtest.genesis_block();
     seed_genesis(&handles)?;
-    handles.durable_head.commit(
-        None,
-        &DurableHead {
+    seed_durable_head(
+        &handles,
+        DurableHead {
             assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id: 1,
             height: 0,
@@ -27,7 +27,6 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count() -> TestResult {
             body_extent: None,
             undo_extent: None,
         },
-        &CommitRecords::default(),
     )?;
 
     let first = mined_child(genesis.block_hash(), 1)?;
@@ -100,9 +99,9 @@ fn a_grouped_window_stages_only_its_newest_block_before_the_sync() -> TestResult
     let genesis = Network::Regtest.genesis_block();
     let genesis_hash = Hash256::from(genesis.block_hash());
     seed_genesis(&handles)?;
-    handles.durable_head.commit(
-        None,
-        &DurableHead {
+    seed_durable_head(
+        &handles,
+        DurableHead {
             assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id: 1,
             height: 0,
@@ -111,7 +110,6 @@ fn a_grouped_window_stages_only_its_newest_block_before_the_sync() -> TestResult
             body_extent: None,
             undo_extent: None,
         },
-        &CommitRecords::default(),
     )?;
 
     let first = mined_child(genesis.block_hash(), 1)?;

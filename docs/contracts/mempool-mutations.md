@@ -210,7 +210,7 @@ The gateway owns its private orphan/reject state (`crates/mempool/src/orphan.rs`
 - RPC and node peer ingress use that same view.
 - They use it with no gateway ownership, shadow version, or copied chain-state model.
 - A provider can return no snapshot to request a transient retry.
-- Peer and native package duplicate suppression uses positive live-coin evidence from `UtxoSet::has_live_outputs_for_txid`.
+- Peer and native package duplicate suppression uses positive live-coin evidence from the coin-read capability `has_live_outputs_for_txid`, answered from `CoinStore` in the engine `coins` keyspace.
 - The absence of live outputs leaves confirmation status unknown.
 - RPC transaction-body cache membership supplies no such evidence.
 - The gateway identifies a resident orphan by its witness transaction hash, as Core 31.1's orphanage does.

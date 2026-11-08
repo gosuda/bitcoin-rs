@@ -428,7 +428,6 @@ pub(super) fn load_verified(
         tree,
         applied_tip: Some(tip),
         resume_source: ResumeSource::Snapshot,
-        journal_bootstrap: None,
         script_live_seed: Some(seed),
     })
 }

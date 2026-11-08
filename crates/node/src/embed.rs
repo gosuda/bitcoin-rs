@@ -392,10 +392,9 @@ mod tests {
                 1,
             ));
         }
-        bitcoin_rs_storage::utxo::contract::commit_block_changes(
-            &node.state.chainstate().utxo_handle(),
+        bitcoin_rs_storage::utxo::contract::populate_block_changes(
+            node.state.chainstate().coins(),
             &changes,
-            &Hash256::from_le_bytes(&[0xAB; 32]),
         )
         .map_err(|error| format!("fixture utxo commit failed: {error}"))
         .expect("fixture utxo commit");

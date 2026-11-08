@@ -278,19 +278,26 @@ fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> Resul
         .chainstate()
         .applied_tip_snapshot()
         .ok_or_else(|| TestError::message("missing fixture tip"))?;
-    head_store.commit(
-        prior.as_ref(),
-        &bitcoin_rs_storage::DurableHead {
-            assumeutxo: status,
-            commit_id: 1,
-            tip: tip.hash,
-            height: tip.height,
-            chain_tx_count: tip.chain_tx_count.to_wire(),
-            body_extent: None,
-            undo_extent: None,
-        },
-        &bitcoin_rs_storage::CommitRecords::default(),
-    )?;
+    state
+        .chainstate()
+        .commit_authority()
+        .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+            expected_head: prior,
+            next_head: bitcoin_rs_storage::DurableHead {
+                assumeutxo: status,
+                commit_id: 1,
+                tip: tip.hash,
+                height: tip.height,
+                chain_tx_count: tip.chain_tx_count.to_wire(),
+                body_extent: None,
+                undo_extent: None,
+            },
+            undo_rows: Vec::new(),
+            body_rows: Vec::new(),
+            attestation: None,
+            coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+        })
+        .map_err(|error| bitcoin_rs_storage::StorageError::backend(error.to_string()))?;
     let _assumeutxo = AssumeUtxoManager::open(
         Network::Regtest,
         state.chainstate(),

@@ -517,7 +517,7 @@ pub(crate) fn rpc_handler(state: &NodeState, mining_control: Arc<dyn MiningContr
             active_tip_wait: Some(state.chainstate()),
             progress: state.chainstate().chain_progress_reader(),
             blocks: state.block_log_reader(),
-            utxo: bitcoin_rs_storage::utxo::UtxoReader::new(Arc::new(UtxoSet::new())),
+            utxo: bitcoin_rs_storage::utxo::UtxoReader::fixture_with_set(Arc::new(UtxoSet::new())),
             coin_stats: state.chainstate().coin_stats_handle(),
             block_tree: state.chainstate().block_tree_reader(),
             chain_network: state.config().network,

@@ -850,40 +850,6 @@ macro_rules! option_rows {
                         toml native("pool_max_payout_outputs")
                     }
                 }
-                group chainstate_journal: ChainstateJournalOverrides
-                table("chainstate_journal")
-                #[derive(serde::Deserialize)]
-                #[serde(default, deny_unknown_fields)]
-                {
-                    enabled as enabled: Option<bool> {
-                        cli[#[arg(skip)]]
-                        env["BITCOIN_RS_CHAINSTATE_JOURNAL", parse_bool]
-                    }
-                    blocks as blocks: Option<u32> {
-                        cli[#[arg(skip)]]
-                        env["BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS", str::parse]
-                    }
-                    seconds as seconds: Option<u64> {
-                        cli[#[arg(skip)]]
-                        env["BITCOIN_RS_CHAINSTATE_JOURNAL_SECONDS", str::parse]
-                    }
-                    rotate_mib as rotate_mib: Option<u64> {
-                        cli[#[arg(skip)]]
-                        env["BITCOIN_RS_CHAINSTATE_JOURNAL_ROTATE_MIB", str::parse]
-                    }
-                    max_journal_mib as max_journal_mib: Option<u64> {
-                        cli[#[arg(skip)]]
-                        env["BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_JOURNAL_MIB", str::parse]
-                    }
-                    max_lag_blocks as max_lag_blocks: Option<u32> {
-                        cli[#[arg(skip)]]
-                        env["BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_LAG_BLOCKS", str::parse]
-                    }
-                    max_lag_seconds as max_lag_seconds: Option<u64> {
-                        cli[#[arg(skip)]]
-                        env["BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_LAG_SECONDS", str::parse]
-                    }
-                }
             }
         }
     };

@@ -7,15 +7,13 @@ use bitcoin::{
     pow::CompactTarget,
     script::Builder,
 };
-use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint};
 use bitcoin_rs_execution::chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::{
     HistoryAccess, HistoryUnavailable, RetentionBudget, RetentionRegistry,
 };
-use bitcoin_rs_storage::utxo::contract::{
-    BlockChanges, SpentOutputLookup, UtxoAdd, commit_block_changes,
-};
+use bitcoin_rs_storage::utxo::contract::SpentOutputLookup;
 use bitcoin_rs_storage::utxo::{
     OfferOutcome, SeedOfferCell, SeedSlot, UtxoSet, VerifiedSnapshotArtifact,
     read_snapshot_strict_v4_witnessed, write_snapshot_witnessed,
@@ -47,24 +45,23 @@ fn synthetic_txid(seed: u64) -> Hash256 {
 
 fn seed_coin_set(n: u64) -> (UtxoSet, Vec<(OutPoint, Vec<u8>)>) {
     let set = UtxoSet::new();
-    let mut changes = BlockChanges::default();
     let mut coins = Vec::new();
     for i in 0..n {
         let txid = synthetic_txid(1_000_000 + i);
         let script = vec![0x51, u8::try_from(i % 251).expect("script byte")];
         let outpoint = OutPoint::new(txid.into(), 0);
-        changes.add(UtxoAdd::new(
-            outpoint,
-            bitcoin_rs_consensus::primitives::TxOut {
-                value: Amount::from_sat(1_000 + i),
-                script_pubkey: script.clone().into(),
-            },
-            false,
-            2,
-        ));
+        let out = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+            vout: 0,
+            value: 1_000 + i,
+            script_pubkey: script.clone(),
+            coinbase: false,
+            height: 2,
+        };
+        let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(txid, &[out])
+            .expect("record");
+        set.insert_parsed_record(record);
         coins.push((outpoint, script));
     }
-    commit_block_changes(&set, &changes, &synthetic_txid(999)).expect("commit seed coins");
     (set, coins)
 }
 
@@ -500,7 +497,6 @@ impl SeedFixture {
                         same_block_spent: None,
                         add_capacity: 0,
                         remove_capacity: 0,
-                        overwritten: None,
                         max_script_size: crate::MAX_LIVE_SCRIPT_SIZE,
                     },
                     &coins,
@@ -735,24 +731,23 @@ fn seed_paused_write_permits_apply_and_retires_generation() {
             "seed reached its first intermediate commit"
         );
         let hold = ReleaseOnDrop(Some(rel_tx));
-        let mut changes = BlockChanges::default();
         let mut applied = Vec::new();
         for i in 0..3u64 {
-            let txid = synthetic_txid(2_000_000 + i);
+            let txid = synthetic_txid(4_000_000 + i);
             let outpoint = OutPoint::new(txid.into(), 0);
-            changes.add(UtxoAdd::new(
-                outpoint,
-                bitcoin_rs_consensus::primitives::TxOut {
-                    value: Amount::from_sat(5_000 + i),
-                    script_pubkey: vec![0x52].into(),
-                },
-                false,
-                2,
-            ));
+            let out = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+                vout: 0,
+                value: 5_000 + i,
+                script_pubkey: vec![0x52],
+                coinbase: false,
+                height: 2,
+            };
+            let record =
+                bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(txid, &[out])
+                    .expect("record");
+            harness.utxo_set.insert_parsed_record(record);
             applied.push(outpoint);
         }
-        commit_block_changes(&harness.utxo_set, &changes, &synthetic_txid(4242))
-            .expect("concurrent apply while seed held");
         assert!(Arc::ptr_eq(&harness.utxo_set, &source));
         for outpoint in &applied {
             assert!(
@@ -889,7 +884,7 @@ fn seed_tamper_variants_yield_integrity_without_watermark() {
     }
 
     let dir = tempfile::tempdir().expect("generation dir");
-    let path = dir.path().join("utxo-v4.dat");
+    let path = dir.path().join("snapshot.dat");
     std::fs::write(&path, &original_bytes).expect("stage generation");
     let read_file = std::fs::File::open(&path).expect("open generation");
     let mut read_clone = read_file;

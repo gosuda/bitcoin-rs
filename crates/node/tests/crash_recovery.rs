@@ -3,7 +3,9 @@ use bitcoin_rs_node::test_support::TestError;
 type Result<T, E = TestError> = core::result::Result<T, E>;
 
 use bitcoin_rs_execution::chain::regtest_fixture;
-use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
+use bitcoin_rs_node::{Network, NodeConfig, NodeOpenError, state::NodeState};
+use bitcoin_rs_storage::durable_head::DURABLE_HEAD_KEY;
+use bitcoin_rs_storage::{ColumnFamily, KvStore, StorageBackend};
 
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
@@ -22,8 +24,8 @@ const SCENARIO_ENV: &str = "BITCOIN_RS_CRASH_TEST_SCENARIO";
 const CRASH_TEST_BACKEND_ENV: &str = "BITCOIN_RS_CRASH_TEST_BACKEND";
 
 #[test]
-fn sigkill_restarts_at_valid_journal_frontier() -> Result<()> {
-    for scenario in ["journal", "reorg", "publication"] {
+fn sigkill_restarts_at_the_engine_commit_frontier() -> Result<()> {
+    for scenario in ["apply", "reorg", "publication"] {
         run_sigkill_scenario(scenario)?;
     }
     Ok(())
@@ -122,8 +124,7 @@ fn torn_disconnect_checkpoint_above_head_rewinds_to_head() -> Result<()> {
 fn checkpoint_fallback_replays_wide_gap_to_durable_head() -> Result<()> {
     const GAP_BLOCKS: u32 = 65;
     let temp = tempfile::tempdir()?;
-    let mut config = test_config(temp.path().join("node"));
-    config.chainstate_journal.enabled = false;
+    let config = test_config(temp.path().join("node"));
     let genesis = Network::Regtest.genesis_block();
     let state = NodeState::open(config.clone(), None)?;
     state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
@@ -210,8 +211,7 @@ fn upgrade_matrix_falls_back_without_misclassifying_corruption() -> Result<()> {
     let data_dir = temp.path().join("upgrade-node");
     let genesis = Network::Regtest.genesis_block();
 
-    let mut old_config = test_config(data_dir.clone());
-    old_config.chainstate_journal.enabled = false;
+    let old_config = test_config(data_dir.clone());
     let old = NodeState::open(old_config.clone(), None)?;
     let genesis_tip = old.apply_block(
         &bitcoin_rs_consensus::primitives::BlockImage::from_local(genesis.clone()),
@@ -219,32 +219,12 @@ fn upgrade_matrix_falls_back_without_misclassifying_corruption() -> Result<()> {
     old.publish_checkpoint()?;
     drop(old);
 
-    let journal_dir = data_dir.join("chainstate-journal");
-    std::fs::create_dir_all(&journal_dir)?;
-    std::fs::write(journal_dir.join("head.json.tmp"), b"partial head")?;
-    std::fs::write(
-        journal_dir.join("segment-0000000000.log"),
-        b"partial record",
-    )?;
     std::fs::write(data_dir.join("recovery_meta.json"), b"stale v1 sidecar")?;
 
-    let enabled = test_config(data_dir);
+    let enabled = test_config(data_dir.clone());
     let recovered = NodeState::open(enabled.clone(), None)?;
     assert_tip(&recovered, &genesis_tip)?;
     drop(recovered);
-
-    let head_path = journal_dir.join("head.json");
-    let mut head = std::fs::read(&head_path)?;
-    if head.len() < 5 {
-        return Err(TestError::message(
-            "journal head is too short for a version byte",
-        ));
-    }
-    head[4] = u8::MAX;
-    std::fs::write(&head_path, head)?;
-    let version_fallback = NodeState::open(enabled.clone(), None)?;
-    assert_tip(&version_fallback, &genesis_tip)?;
-    drop(version_fallback);
 
     let generation_change = NodeState::open(old_config, None)?;
     let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
@@ -254,8 +234,23 @@ fn upgrade_matrix_falls_back_without_misclassifying_corruption() -> Result<()> {
     generation_change.publish_checkpoint()?;
     drop(generation_change);
 
-    let generation_fallback = NodeState::open(enabled, None)?;
+    let generation_fallback = NodeState::open(enabled.clone(), None)?;
     assert_tip(&generation_fallback, &block1_tip)?;
+    drop(generation_fallback);
+
+    corrupt_durable_head_row(&data_dir.join("chainstate"), enabled.storage.backend)?;
+    let refusal = NodeState::open(enabled, None)
+        .err()
+        .ok_or_else(|| TestError::message("a corrupt durable head row must refuse startup"))?;
+    assert!(
+        matches!(
+            &refusal,
+            NodeOpenError::Storage(
+                bitcoin_rs_storage::StorageError::IncompatibleData(message),
+            ) if message.contains("refusing to treat it as absent"),
+        ),
+        "a corrupt durable head row must be refused as unreadable, not treated as absent: {refusal:#}"
+    );
     Ok(())
 }
 
@@ -280,7 +275,7 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
     let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
 
     match scenario.as_str() {
-        "journal" => {
+        "apply" => {
             state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 block1,
             ))?;
@@ -342,6 +337,9 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
                 return Err(TestError::message("prune scenario needs the prune service"));
             };
             service.prune_to_height(12)?;
+        }
+        "window-commit" => {
+            run_window_commit_worker(&state, &data_dir)?;
         }
         other => {
             return Err(TestError::message(format!(
@@ -433,15 +431,8 @@ fn spawn_and_kill_worker(scenario: &str, data_dir: &Path, ready_after: Duration)
     Ok(())
 }
 
-fn crash_config(scenario: &str, data_dir: PathBuf) -> NodeConfig {
-    let mut config = test_config(data_dir);
-    if matches!(
-        scenario,
-        "disconnect-rolledback" | "inflight-cold" | "disconnect-above-head"
-    ) {
-        config.chainstate_journal.enabled = false;
-    }
-    config
+fn crash_config(_scenario: &str, data_dir: PathBuf) -> NodeConfig {
+    test_config(data_dir)
 }
 
 fn run_marker_scenario(scenario: &str) -> Result<(tempfile::TempDir, NodeConfig, NodeState)> {
@@ -532,11 +523,58 @@ fn crash_test_backend(
     );
     backend
 }
+fn corrupt_durable_head_row(chainstate_dir: &Path, backend: StorageBackend) -> Result<()> {
+    fn flip_payload_bit<S: KvStore>(store: &S) -> Result<()> {
+        let frame = store
+            .get(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY)?
+            .ok_or_else(|| TestError::message("the durable head row must exist"))?;
+        let mut corrupted = frame;
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0x80;
+        store.put(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY, &corrupted)?;
+        Ok(())
+    }
+    match backend {
+        StorageBackend::RocksDb => {
+            flip_payload_bit(&bitcoin_rs_storage::RocksDbStore::open_with_cache(
+                chainstate_dir,
+                0,
+            )?)?;
+        }
+        #[cfg(feature = "surrealkv")]
+        StorageBackend::SurrealKv => {
+            flip_payload_bit(&bitcoin_rs_storage::SurrealKvStore::open_with_cache(
+                chainstate_dir,
+                0,
+            )?)?;
+        }
+        #[cfg(not(feature = "surrealkv"))]
+        StorageBackend::SurrealKv => {
+            return Err(TestError::message(
+                "surrealkv is not compiled into this test binary",
+            ));
+        }
+        #[cfg(feature = "mdbx")]
+        StorageBackend::Mdbx => {
+            flip_payload_bit(&bitcoin_rs_storage::MdbxStore::open_with_cache(
+                chainstate_dir,
+                0,
+            )?)?;
+        }
+        #[cfg(not(feature = "mdbx"))]
+        StorageBackend::Mdbx => {
+            return Err(TestError::message(
+                "mdbx is not compiled into this test binary",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn test_config(data_dir: PathBuf) -> NodeConfig {
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = data_dir;
     config.p2p.listen.clear();
-    config.chainstate_journal.blocks = 1;
     config.storage.backend = crash_test_backend(config.storage.backend);
     config
 }
@@ -603,4 +641,185 @@ fn coinbase_height_push(height: u32) -> Result<Vec<u8>> {
     let mut push = vec![u8::try_from(bytes.len())?];
     push.extend(bytes);
     Ok(push)
+}
+
+const WINDOW_OUTPUT_SAT: u64 = 1;
+
+struct BlockCommitUntilKilled {
+    marker: PathBuf,
+    height: u32,
+}
+
+impl bitcoin_rs_storage::commit::CommitFault for BlockCommitUntilKilled {
+    fn before_commit(
+        &self,
+        prefix: &bitcoin_rs_storage::commit::AcceptedPrefix,
+    ) -> core::result::Result<(), bitcoin_rs_storage::CommitError> {
+        if prefix.next_head.height != self.height {
+            return Ok(());
+        }
+        std::fs::write(&self.marker, b"window-commit").map_err(|error| {
+            bitcoin_rs_storage::CommitError::Storage(bitcoin_rs_storage::StorageError::backend(
+                error.to_string(),
+            ))
+        })?;
+        loop {
+            std::thread::sleep(Duration::from_mins(1));
+        }
+    }
+}
+
+fn window_spend_tx(previous_output: OutPoint) -> Tx {
+    Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output,
+            script_sig: Script::from_bytes(vec![0x51]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(WINDOW_OUTPUT_SAT),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        }],
+    }
+}
+
+fn mined_block_with_txs(prev_blockhash: BlockHash, height: u32, txs: Vec<Tx>) -> Result<Block> {
+    let mut block = mined_regtest_child_at(prev_blockhash, height)?;
+    block.txs.extend(txs);
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
+        .ok_or_else(|| std::io::Error::other("test block has no merkle root"))?;
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
+    Ok(block)
+}
+
+fn window_commit_blocks() -> Result<(Vec<Block>, Vec<Block>, Vec<Block>)> {
+    let mut parent = Network::Regtest.genesis_block().block_hash();
+    let mut prefix = Vec::new();
+    for height in 1..=100_u32 {
+        let block = mined_regtest_child_at(parent, height)?;
+        parent = block.block_hash();
+        prefix.push(block);
+    }
+    let funding = OutPoint::new(prefix[0].txs[0].txid(), 0);
+    let a1 = window_spend_tx(funding);
+    let a1_out = OutPoint::new(a1.txid(), 0);
+    let block101 = mined_block_with_txs(parent, 101, vec![a1])?;
+    let a2 = window_spend_tx(a1_out);
+    let a2_out = OutPoint::new(a2.txid(), 0);
+    let a3 = window_spend_tx(a2_out);
+    let a3_out = OutPoint::new(a3.txid(), 0);
+    let block102 = mined_block_with_txs(block101.block_hash(), 102, vec![a2, a3])?;
+    let b1 = window_spend_tx(a3_out);
+    let block103 = mined_block_with_txs(block102.block_hash(), 103, vec![b1])?;
+    Ok((prefix, vec![block101, block102], vec![block103]))
+}
+
+fn run_window_commit_worker(state: &NodeState, data_dir: &Path) -> Result<()> {
+    let (prefix, window_a, window_b) = window_commit_blocks()?;
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+        Network::Regtest.genesis_block(),
+    ))?;
+    for block in &prefix {
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+            block.clone(),
+        ))?;
+    }
+    let chain = state.chainstate();
+    let window_a_images: Vec<_> = window_a
+        .iter()
+        .cloned()
+        .map(bitcoin_rs_consensus::primitives::BlockImage::from_local)
+        .collect();
+    let window_a_refs: Vec<_> = window_a_images.iter().collect();
+    chain
+        .apply_window(&window_a_refs)
+        .map_err(|error| TestError::message(format!("{error:?}")))?;
+
+    chain.set_commit_fault(std::sync::Arc::new(BlockCommitUntilKilled {
+        marker: data_dir.join("crash-test-ready"),
+        height: 103,
+    }));
+    let window_b_images: Vec<_> = window_b
+        .iter()
+        .cloned()
+        .map(bitcoin_rs_consensus::primitives::BlockImage::from_local)
+        .collect();
+    let window_b_refs: Vec<_> = window_b_images.iter().collect();
+    chain
+        .apply_window(&window_b_refs)
+        .map_err(|error| TestError::message(format!("{error:?}")))?;
+    Ok(())
+}
+
+fn coin_records(
+    state: &NodeState,
+    txids: &[bitcoin_rs_consensus::primitives::Txid],
+) -> Result<Vec<Option<Vec<u8>>>> {
+    let coins = state.coins();
+    txids
+        .iter()
+        .map(|txid| {
+            let key = bitcoin_rs_storage::CoinKey(txid.0.to_le_bytes());
+            let record = coins
+                .get(&key)
+                .map_err(|error| TestError::message(error.to_string()))?;
+            Ok(record.map(|bytes| bytes.to_vec()))
+        })
+        .collect()
+}
+
+// RCV-04
+#[test]
+fn sigkill_during_window_commit_restarts_to_sequential_prefix() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let data_dir = temp.path().join("window-commit-node");
+    spawn_and_kill_worker("window-commit", &data_dir, Duration::from_secs(120))?;
+
+    let resumed = NodeState::open(crash_config("window-commit", data_dir), None)?;
+    let oracle = NodeState::open(
+        crash_config("window-commit", temp.path().join("oracle-node")),
+        None,
+    )?;
+    let (prefix, window_a, window_b) = window_commit_blocks()?;
+    let touched: Vec<_> = prefix
+        .iter()
+        .chain(&window_a)
+        .chain(&window_b)
+        .flat_map(|block| {
+            block
+                .txs
+                .iter()
+                .map(bitcoin_rs_consensus::primitives::Tx::txid)
+        })
+        .collect();
+    let genesis =
+        bitcoin_rs_consensus::primitives::BlockImage::from_local(Network::Regtest.genesis_block());
+    oracle.apply_block(&genesis)?;
+    for block in prefix.iter().chain(&window_a) {
+        oracle.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+            block.clone(),
+        ))?;
+    }
+
+    let last_committed = window_a
+        .last()
+        .ok_or_else(|| std::io::Error::other("window A has blocks"))?;
+    let resumed_tip = resumed
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or_else(|| std::io::Error::other("restarted node has no applied tip"))?;
+    assert_eq!(
+        (resumed_tip.height, resumed_tip.hash),
+        (102, last_committed.block_hash().0),
+        "a window killed inside its commit must leave the last durable window as the tip"
+    );
+    assert_eq!(
+        coin_records(&resumed, &touched)?,
+        coin_records(&oracle, &touched)?,
+        "restarted coins must equal sequential execution of the durable prefix"
+    );
+    Ok(())
 }

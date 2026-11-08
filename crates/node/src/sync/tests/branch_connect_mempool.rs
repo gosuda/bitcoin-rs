@@ -243,6 +243,20 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         blocks.push(block);
     }
     let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
+    let mem_store = Arc::new(bitcoin_rs_storage::memory_kv::MemoryKvStore::default());
+    let durable_head = Arc::new(bitcoin_rs_storage::KvDurableHeadStore::new(Arc::clone(
+        &mem_store,
+    )));
+    let undo_store = Arc::new(bitcoin_rs_storage::KvUndoStore::new(Arc::clone(&mem_store)));
+    let dyn_store: Arc<dyn bitcoin_rs_storage::KvStore> = mem_store;
+    let coins = Arc::new(bitcoin_rs_storage::CoinStore::open(
+        Arc::clone(&dyn_store),
+        64 * 1024 * 1024,
+    ));
+    let commit_authority = Arc::new(bitcoin_rs_storage::CommitAuthority::new(
+        dyn_store,
+        Arc::clone(&coins),
+    ));
     let handles =
         bitcoin_rs_execution::Chainstate::from_parts(bitcoin_rs_execution::ChainstateParts {
             network: Network::Regtest,
@@ -256,14 +270,15 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
                 0,
             )),
             block_body_store: Some(Arc::new(Bodies::default())),
-            undo_store: Arc::new(bitcoin_rs_storage::undo::InMemoryUndoStore::default()),
-            durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
+            undo_store,
+            durable_head,
+            coins,
+            commit_authority,
             chain_transition: bitcoin_rs_execution::chain::TransitionDomain::new().authority(),
             assume_valid_height: 0,
             validation_mode: bitcoin_rs_execution::ValidationMode::AssumeValid,
             validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
             script_cache: None,
-            journal: None,
             capture_rawtx: false,
             capture_block_bytes: true,
             retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),

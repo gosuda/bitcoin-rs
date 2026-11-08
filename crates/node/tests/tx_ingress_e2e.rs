@@ -77,12 +77,8 @@ fn fund_utxo_script(
         false,
         100,
     ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &state.chainstate().utxo_handle(),
-        &changes,
-        &Hash256::from_le_bytes(&[0xBB; 32]),
-    )
-    .map_err(|error| TestError::message(format!("utxo commit failed: {error}")))
+    bitcoin_rs_storage::utxo::contract::populate_block_changes(state.chainstate().coins(), &changes)
+        .map_err(|error| TestError::message(format!("utxo commit failed: {error}")))
 }
 
 fn spending_tx(parent: Txid, output_value: u64) -> Tx {

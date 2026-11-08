@@ -8,7 +8,6 @@ pub mod core_snapshot;
 mod key;
 
 pub(crate) use key::UtxoKey;
-mod listener;
 pub mod record;
 pub mod scan;
 pub mod set;
@@ -19,6 +18,7 @@ pub mod stats;
 pub(crate) mod test_support;
 mod undo_codec;
 
+pub use record::UtxoRecord;
 pub use set::{UtxoCoin, UtxoError, UtxoMemoryReport, UtxoReader, UtxoScan, UtxoSet, UtxoSetView};
 pub use snapshot::{
     OfferOutcome, RawSeedError, SeedOfferCell, SeedProvenance, SeedSlot, SnapshotCoin,

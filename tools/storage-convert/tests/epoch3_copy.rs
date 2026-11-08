@@ -19,7 +19,7 @@ fn epoch3_rocksdb_to_rocksdb_copies_current_epoch_verbatim() -> TestResult<()> {
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, 3)?;
+    write_schema_marker(from_path, 4)?;
 
     let chainstate_data = vec![
         (
@@ -62,7 +62,7 @@ fn epoch3_rocksdb_to_rocksdb_copies_current_epoch_verbatim() -> TestResult<()> {
     }
 
     let dest_schema = fs::read_to_string(to_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema != "3\n" {
+    if dest_schema != "4\n" {
         return Err(TestError::Assertion(format!(
             "expected destination CURRENT_SCHEMA '3\\n', got '{dest_schema}'"
         )));
@@ -98,17 +98,21 @@ fn epoch3_rocksdb_to_rocksdb_copies_current_epoch_verbatim() -> TestResult<()> {
         }
     }
 
-    assert_independent_files_copied_and_ignored_skipped(&to_path, &independent_files)?;
+    let expected_files: Vec<_> = independent_files
+        .into_iter()
+        .filter(|(path, _)| !path.starts_with("chainstate-journal"))
+        .collect();
+    assert_independent_files_copied_and_ignored_skipped(&to_path, &expected_files)?;
 
-    if report.source_epoch != 3 {
+    if report.source_epoch != 4 {
         return Err(TestError::Assertion(format!(
-            "expected report source_epoch 3, got {}",
+            "expected report source_epoch 4, got {}",
             report.source_epoch
         )));
     }
-    if report.target_epoch != 3 {
+    if report.target_epoch != 4 {
         return Err(TestError::Assertion(format!(
-            "expected report target_epoch 3, got {}",
+            "expected report target_epoch 4, got {}",
             report.target_epoch
         )));
     }
@@ -158,7 +162,7 @@ fn epoch3_rocksdb_empty_key_empty_value_row_copies_exactly() -> TestResult<()> {
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, 3)?;
+    write_schema_marker(from_path, 4)?;
 
     let chainstate_data = vec![(ColumnFamily::UtxoMeta, vec![(Vec::new(), Vec::new())])];
     write_rocksdb_namespace(&from_path.join("chainstate"), &chainstate_data)?;
@@ -189,7 +193,7 @@ fn epoch3_rocksdb_empty_key_empty_value_row_copies_exactly() -> TestResult<()> {
     }
 
     let dest_schema = fs::read_to_string(to_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema != "3\n" {
+    if dest_schema != "4\n" {
         return Err(TestError::Assertion(format!(
             "expected destination CURRENT_SCHEMA '3\\n', got '{dest_schema}'"
         )));

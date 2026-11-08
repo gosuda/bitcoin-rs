@@ -2,9 +2,9 @@
 //!
 //! Models the lifecycle of node datadir schema verification and the converter step
 //! `3 -> 4` targeting storage epoch 4 (with epoch 3 retired) per RCV-09 and RCV-10.
-//! Epoch 4 places coins in the engine `coins` keyspace, deletes the chainstate
-//! journal, and removes the `utxo-v4.dat` checkpoint coin image as a resident
-//! authority. Live storage (`checkpoint::fs`) remains at schema epoch 3; this is a
+//! Epoch 4 places coins in the engine `coins` keyspace, deletes the
+//! journal, and removes the utxo v4 checkpoint coin image as a resident
+//! authority. Live storage (`checkpoint::fs`) remains at schema epoch 4; this is a
 //! standalone behavioral design model, not an implementation-refinement claim on
 //! `fs.rs` or `tools/storage-convert`.
 
@@ -115,7 +115,7 @@ pub enum Phase {
 }
 
 /// High-level outcome of lifecycle execution.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub enum Outcome {
     Pending,
     Refused,
@@ -125,6 +125,22 @@ pub enum Outcome {
     PublicationUnknown,
     Success,
 }
+impl PartialEq for Outcome {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Pending, Self::Pending) => true,
+            (Self::Refused, Self::Refused) => true,
+            (Self::RefusedNoCheckpoint, Self::RefusedNoCheckpoint) => true,
+            (Self::MissingData { height: h1 }, Self::MissingData { height: h2 }) => h1 == h2,
+            (Self::PrepublicationFailure, Self::PrepublicationFailure) => true,
+            (Self::PublicationUnknown, Self::PublicationUnknown) => true,
+            (Self::Success, Self::Success) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Outcome {}
 
 /// Discrete transition actions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

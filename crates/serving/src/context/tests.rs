@@ -261,7 +261,7 @@ fn from_handles_shares_chain_handles_with_caller() {
             active_tip_wait: None,
             progress,
             blocks: BlockLogReader::fixture_empty(),
-            utxo: bitcoin_rs_storage::utxo::UtxoReader::new(Arc::clone(&utxo)),
+            utxo: bitcoin_rs_storage::utxo::UtxoReader::fixture_with_set(Arc::clone(&utxo)),
             coin_stats: Arc::clone(&coin_stats),
             block_tree: BlockTreeReader::new(Arc::clone(&block_tree)),
             chain_network: Network::Mainnet,
@@ -416,14 +416,13 @@ fn new_context_wires_utxo_commits_to_coin_stats() {
         script_pubkey: Script::new(),
     };
     let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(outpoint, txout, true, 7));
+    changes.add(UtxoAdd::new(outpoint, txout.clone(), true, 7));
 
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )
-    .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+    let mut stats = ctx.chain.coin_stats.snapshot();
+    stats.insert_utxo(&outpoint, &txout, 7, true);
+    ctx.chain.coin_stats.reset(stats);
+    ctx.populate_fixture_coins(&changes)
+        .unwrap_or_else(|err| panic!("populate failed: {err}"));
 
     let snapshot = ctx.chain.coin_stats.snapshot();
     assert_eq!(snapshot.utxo_count, 1);
@@ -776,7 +775,7 @@ fn ibd_latch_judges_the_contexts_own_tree() {
                 )),
             ),
             blocks: BlockLogReader::fixture_empty(),
-            utxo: bitcoin_rs_storage::utxo::UtxoReader::new(Arc::new(
+            utxo: bitcoin_rs_storage::utxo::UtxoReader::fixture_with_set(Arc::new(
                 bitcoin_rs_storage::utxo::UtxoSet::new(),
             )),
             coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(

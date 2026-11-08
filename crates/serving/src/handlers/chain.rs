@@ -1393,11 +1393,15 @@ fn scantxoutset_scan(
             .chain_transition
             .try_lock_for(std::time::Duration::from_millis(50))
         {
+            let snapshot =
+                ctx.chain.utxo.scan_coin_snapshot().map_err(|error| {
+                    RpcError::Misc(format!("UTXO scan snapshot failed: {error}"))
+                })?;
             let applied = ctx.chain.applied_view();
-            let (complete, scan) = permit
-                .scan(&scripts, || cancellation.is_triggered())
-                .map_err(|error| scan_error(&error))?;
             drop(transition);
+            let (complete, scan) = permit
+                .scan_snapshot(&*snapshot, &scripts, || cancellation.is_triggered())
+                .map_err(|error| scan_error(&error))?;
             break (applied, complete, scan);
         }
     };
