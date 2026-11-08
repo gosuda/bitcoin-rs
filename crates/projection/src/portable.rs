@@ -35,6 +35,7 @@ pub enum IndexBundleDirective {
     AttachManifestArtifact(Box<ManifestArtifactTarget>),
     AttachManifestScriptHistory(Box<ManifestArtifactTarget>),
     AttachManifestCompactFilters(Box<ManifestArtifactTarget>),
+    Manifest(Vec<IndexBundleDirective>),
 }
 
 #[derive(Clone, Debug)]
@@ -171,6 +172,15 @@ pub(crate) fn run(
         }
         IndexBundleDirective::AttachManifestCompactFilters(target) => {
             attach_manifest_compact_filters(host, target)
+        }
+        IndexBundleDirective::Manifest(directives) => {
+            let mut last = None;
+            for directive in directives {
+                if let Some(outcome) = run(host, directive)? {
+                    last = Some(outcome);
+                }
+            }
+            Ok(last)
         }
     }
 }

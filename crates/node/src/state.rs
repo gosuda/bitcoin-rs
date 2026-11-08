@@ -494,7 +494,9 @@ fn index_bundle_directive(
     };
     match (&config.indexes.bundle_import, &config.indexes.bundle_export) {
         (None, None) => match config.assumeutxo_manifest.as_deref() {
-            Some(path) => manifest_attach_directive(path, config.network),
+            Some(path) => {
+                manifest_attach_directive(path, config.network, derived_index_capabilities(config))
+            }
             None => Ok(IndexBundleDirective::None),
         },
         (Some(dir), None) => Ok(IndexBundleDirective::Restore(request(dir))),
@@ -505,8 +507,11 @@ fn index_bundle_directive(
 fn manifest_attach_directive(
     manifest_path: &std::path::Path,
     network: bitcoin_rs_consensus::primitives::Network,
+    enabled: bitcoin_rs_projection::IndexCapabilities,
 ) -> Result<bitcoin_rs_projection::portable::IndexBundleDirective, ConfigError> {
+    use bitcoin_rs_consensus::primitives::IndexArtifactCapability;
     use bitcoin_rs_execution::manifest::CapabilityTrust;
+    use bitcoin_rs_projection::IndexCapability;
     use bitcoin_rs_projection::portable::{IndexBundleDirective, ManifestArtifactTarget};
     let bytes = match read_bounded_manifest(manifest_path) {
         Ok(b) => b,
@@ -537,28 +542,48 @@ fn manifest_attach_directive(
     let Ok(trust) = manifest.verify_against_anchor(network, genesis, anchor) else {
         return Ok(IndexBundleDirective::None);
     };
-    let CapabilityTrust::Trusted(_) = trust.capability_trust[0] else {
-        return Ok(IndexBundleDirective::None);
-    };
     let dir = manifest_path.parent().unwrap_or(manifest_path);
-    let Ok(artifact_path) = manifest.artifact_path(dir, 1) else {
-        return Ok(IndexBundleDirective::None);
-    };
-    Ok(IndexBundleDirective::AttachManifestArtifact(Box::new(
-        ManifestArtifactTarget {
+    let mut attachments = Vec::new();
+    for (index, cap_trust) in trust.capability_trust.iter().enumerate() {
+        let CapabilityTrust::Trusted(_) = cap_trust else {
+            continue;
+        };
+        let Some(capability) = IndexArtifactCapability::from_index(index) else {
+            continue;
+        };
+        let Ok(artifact_path) = manifest.artifact_path(dir, index + 1) else {
+            continue;
+        };
+        let target = Box::new(ManifestArtifactTarget {
             artifact_path,
             base_height: manifest.base_height,
             base_hash: manifest.base_hash,
-            floor: manifest.coverage[0].unwrap_or(0),
+            floor: manifest.coverage[index].unwrap_or(0),
             network,
             index_format: manifest.schema,
-            sha256: manifest.artifact_sha256(
-                bitcoin_rs_consensus::primitives::IndexArtifactCapability::TxLookup,
+            sha256: manifest.artifact_sha256(capability),
+            size_bytes: manifest.artifact_size(capability),
+        });
+        let (projection, directive) = match capability {
+            IndexArtifactCapability::TxLookup => (
+                IndexCapability::TxLookup,
+                IndexBundleDirective::AttachManifestArtifact(target),
             ),
-            size_bytes: manifest
-                .artifact_size(bitcoin_rs_consensus::primitives::IndexArtifactCapability::TxLookup),
-        },
-    )))
+            IndexArtifactCapability::ScriptHistory => (
+                IndexCapability::ScriptHistory,
+                IndexBundleDirective::AttachManifestScriptHistory(target),
+            ),
+            IndexArtifactCapability::CompactFilters => (
+                IndexCapability::CompactFilters,
+                IndexBundleDirective::AttachManifestCompactFilters(target),
+            ),
+            IndexArtifactCapability::ScriptLive => continue,
+        };
+        if enabled.contains(projection) {
+            attachments.push(directive);
+        }
+    }
+    Ok(IndexBundleDirective::Manifest(attachments))
 }
 
 fn read_bounded_manifest(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
