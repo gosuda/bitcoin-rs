@@ -921,15 +921,39 @@ fn interrupted_activation_fails_closed_and_restart_retries_cleanly() -> Result<(
     Ok(())
 }
 
-fn write_valid_manifest(
+fn write_manifest_bytes(
     dir: &Path,
-    pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
+    base_height: u32,
+    base_hash: [u8; 32],
+    utxo_commitment: [u8; 32],
     core_bytes: &[u8],
 ) -> Result<PathBuf, TestError> {
+    use bitcoin_rs_execution::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
     use sha2::Digest;
 
-    let utxo_digest: [u8; 32] = sha2::Sha256::digest(core_bytes).into();
-    write_manifest_with_utxo_digest(dir, pinned, core_bytes, utxo_digest)
+    let mut sizes = [0_u64; ARTIFACT_SLOTS];
+    let mut hashes = [[0_u8; 32]; ARTIFACT_SLOTS];
+    sizes[UTXO_SLOT] =
+        u64::try_from(core_bytes.len()).map_err(|e| TestError::Io(std::io::Error::other(e)))?;
+    hashes[UTXO_SLOT] = sha2::Sha256::digest(core_bytes).into();
+
+    let manifest = SnapshotManifest {
+        manifest_version: 1,
+        network: "regtest".to_string(),
+        genesis: Network::Regtest.genesis_block_hash().to_le_bytes(),
+        base_hash,
+        base_height,
+        schema: bitcoin_rs_projection::index_format_version(),
+        utxo_commitment,
+        index_commitments: [None; 4],
+        coverage: [None; 4],
+        sizes,
+        hashes,
+        historical_verified_height: 0,
+    };
+    let manifest_path = dir.join("snapshot_manifest.json");
+    std::fs::write(&manifest_path, sonic_rs::to_vec_pretty(&manifest)?)?;
+    Ok(manifest_path)
 }
 
 fn write_manifest_with_utxo_digest(
@@ -952,7 +976,7 @@ fn write_manifest_with_utxo_digest(
         genesis: Network::Regtest.genesis_block_hash().to_le_bytes(),
         base_hash: pinned.block_hash.to_le_bytes(),
         base_height: pinned.height,
-        schema: 1,
+        schema: bitcoin_rs_projection::index_format_version(),
         utxo_commitment: pinned.hash_serialized.to_le_bytes(),
         index_commitments: [None; 4],
         coverage: [None; 4],
@@ -960,10 +984,23 @@ fn write_manifest_with_utxo_digest(
         hashes,
         historical_verified_height: 0,
     };
-    let json_bytes = sonic_rs::to_vec_pretty(&manifest)?;
     let manifest_path = dir.join("snapshot_manifest.json");
-    std::fs::write(&manifest_path, json_bytes)?;
+    std::fs::write(&manifest_path, sonic_rs::to_vec_pretty(&manifest)?)?;
     Ok(manifest_path)
+}
+
+fn write_valid_manifest(
+    dir: &Path,
+    pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
+    core_bytes: &[u8],
+) -> Result<PathBuf, TestError> {
+    write_manifest_bytes(
+        dir,
+        pinned.height,
+        pinned.block_hash.to_le_bytes(),
+        pinned.hash_serialized.to_le_bytes(),
+        core_bytes,
+    )
 }
 
 fn write_manifest_with_mismatched_index_artifact(
@@ -998,7 +1035,7 @@ fn write_manifest_with_mismatched_index_artifact(
         genesis: Network::Regtest.genesis_block_hash().to_le_bytes(),
         base_hash: pinned.block_hash.to_le_bytes(),
         base_height: pinned.height,
-        schema: 1,
+        schema: bitcoin_rs_projection::index_format_version(),
         utxo_commitment: pinned.hash_serialized.to_le_bytes(),
         index_commitments,
         coverage: [None; 4],
@@ -1256,5 +1293,34 @@ fn ingest_pass_file_swap_after_the_verification_pass_fails_closed() -> Result<()
         state.snapshots.manager.status()?,
         AssumeUtxoDiskStatus::Uninitialized
     ));
+    Ok(())
+}
+
+// SNP-02
+#[test]
+fn a_manifest_on_a_foreign_schema_is_refused_at_activation() -> Result<(), TestError> {
+    let pinned = regtest_pin()?;
+    let dir = tempfile::tempdir()?;
+    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let core_bytes = std::fs::read(&core_path)?;
+    let manifest_path = write_valid_manifest(dir.path(), pinned, &core_bytes)?;
+    let mut manifest: bitcoin_rs_execution::manifest::SnapshotManifest =
+        sonic_rs::from_slice(&std::fs::read(&manifest_path)?)?;
+    manifest.schema = 1;
+    let foreign = dir.path().join("foreign_schema_manifest.json");
+    std::fs::write(&foreign, sonic_rs::to_vec(&manifest)?)?;
+
+    let result = state.import_manifest(&foreign);
+    assert!(matches!(
+        result,
+        Err(SnapshotImportError::Manifest(
+            bitcoin_rs_execution::manifest::ManifestError::SchemaMismatch { found: 1, .. }
+        ))
+    ));
+    assert!(matches!(
+        state.snapshots.manager.status()?,
+        AssumeUtxoDiskStatus::Uninitialized
+    ));
+    assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
     Ok(())
 }

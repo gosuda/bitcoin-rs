@@ -672,6 +672,14 @@ impl SnapshotControl {
         }
         let bytes = read_bounded_manifest(path)?;
         let manifest = bitcoin_rs_execution::manifest::SnapshotManifest::parse(&bytes)?;
+        if manifest.schema != bitcoin_rs_projection::index_format_version() {
+            return Err(SnapshotImportError::Manifest(
+                bitcoin_rs_execution::manifest::ManifestError::SchemaMismatch {
+                    expected: bitcoin_rs_projection::index_format_version(),
+                    found: manifest.schema,
+                },
+            ));
+        }
         let anchor = self
             .network
             .assume_utxo_for_height(manifest.base_height)

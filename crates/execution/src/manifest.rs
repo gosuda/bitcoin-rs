@@ -112,6 +112,11 @@ impl SnapshotManifest {
         if self.schema == 0 {
             return Err(ManifestError::Format("schema must be nonzero"));
         }
+        if self.historical_verified_height > self.base_height {
+            return Err(ManifestError::Format(
+                "historical verification provenance exceeds the base height",
+            ));
+        }
         if self.sizes.len() != ARTIFACT_SLOTS || self.hashes.len() != ARTIFACT_SLOTS {
             return Err(ManifestError::Artifacts(
                 "size and hash tables need 5 slots",
@@ -542,5 +547,17 @@ mod tests {
             ),
             "a manifest whose artifact hash is not the index commitment must be refused"
         );
+    }
+
+    // SNP-02
+    #[test]
+    fn a_manifest_claiming_provenance_past_its_base_is_refused() {
+        let mut manifest = manifest_with([None; 4]);
+        manifest.historical_verified_height = manifest.base_height.saturating_add(1);
+        let bytes = sonic_rs::to_vec(&manifest).expect("serialize");
+        assert!(matches!(
+            SnapshotManifest::parse(&bytes),
+            Err(ManifestError::Format(_))
+        ));
     }
 }
