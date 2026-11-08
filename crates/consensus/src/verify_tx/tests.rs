@@ -569,6 +569,7 @@ fn op_equal_txout(value: u64) -> TxOut {
     }
 }
 
+// SCR-06
 #[test]
 fn script_cache_hit_skips_scripts_for_exact_flags_only() -> Result<(), TestError> {
     use crate::script_cache::{ScriptExecutionCache, WindowCacheTakes};
@@ -675,6 +676,7 @@ fn witnessed_mismatch_input(outpoint: OutPoint) -> TxIn {
     }
 }
 
+// SCR-06
 #[test]
 fn script_cache_hit_uses_derived_witness_ids_for_witness_bearing_bodies() -> Result<(), TestError> {
     use crate::script_cache::{ScriptExecutionCache, WindowCacheTakes};
@@ -704,6 +706,83 @@ fn script_cache_hit_uses_derived_witness_ids_for_witness_bearing_bodies() -> Res
     let hit =
         super::prepare_block_script_checks(&mut view, 0, 0, flags, &parsed, Some(&mut takes))?;
     assert!(super::verify_prepared_units(core::slice::from_ref(&hit)).is_ok());
+    Ok(())
+}
+
+// BLK-04
+#[test]
+fn block_script_checks_borrow_the_image_without_a_second_object_graph() -> Result<(), TestError> {
+    use crate::block_view::{BlockFacts, BlockView};
+    use crate::kernel::BlockScriptSource;
+    use crate::primitives::block::{
+        BlockImage, block_image_materialize_call_count, reset_block_image_materialize_call_count,
+        reset_transaction_view_materialize_call_count, transaction_view_materialize_call_count,
+    };
+
+    let witness_script = vec![crate::script::opcode::OP_PUSHNUM_1];
+    let witness_program = {
+        use bitcoin::hashes::sha256;
+        let mut program = vec![0x00, 0x20];
+        program.extend_from_slice(sha256::Hash::hash(&witness_script).as_byte_array());
+        program
+    };
+    let prevout = TxOut {
+        value: Amount::from_sat(50),
+        script_pubkey: Script::from_bytes(witness_program),
+    };
+    let coinbase = coinbase_transaction_with_script_sig_len(2);
+    let spend = Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: outpoint(9),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::from_stack(vec![witness_script]),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(50),
+            script_pubkey: Script::from_bytes(vec![crate::script::opcode::OP_PUSHNUM_1]),
+        }],
+    };
+    let block = Block {
+        header: Header {
+            version: 1,
+            bits: CompactTarget::from_consensus(0x2000_ffff),
+            ..Header::default()
+        },
+        txs: vec![coinbase.clone(), spend.clone()],
+    };
+    let image = BlockImage::from_local(block);
+    let expected_txids = [coinbase.txid(), spend.txid()];
+    let mut view = BlockView::from_image(&image, BlockFacts::from_image(&image));
+    assert_eq!(view.facts().txids(), &expected_txids[..]);
+    view.set_resolved(vec![Vec::new(), vec![Some(prevout)]]);
+
+    reset_block_image_materialize_call_count();
+    reset_transaction_view_materialize_call_count();
+    let checks = super::prepare_block_script_checks(
+        &mut view,
+        0,
+        0,
+        VerifyFlags::MANDATORY,
+        &BlockScriptSource::Native,
+        None,
+    )?;
+    assert!(
+        super::verify_prepared_units(core::slice::from_ref(&checks)).is_ok(),
+        "the fixture spend must verify through views over the image"
+    );
+    assert_eq!(
+        block_image_materialize_call_count(),
+        0,
+        "validation must not build a second owned transaction object graph"
+    );
+    assert_eq!(
+        transaction_view_materialize_call_count(),
+        0,
+        "validation must read through transaction views over the image"
+    );
     Ok(())
 }
 
@@ -961,5 +1040,3 @@ fn coinbase_maturity_boundaries() {
     assert_eq!(super::check_coinbase_maturity(true, 10, 110), Ok(()));
     assert_eq!(super::check_coinbase_maturity(false, 10, 10), Ok(()));
 }
-// SCR-06
-// SCR-06

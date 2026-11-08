@@ -67,6 +67,36 @@ pub struct BlockImage {
     hash: BlockHash,
 }
 
+#[cfg(any(test, feature = "test-seam"))]
+static BLOCK_IMAGE_MATERIALIZATIONS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(any(test, feature = "test-seam"))]
+static TRANSACTION_VIEW_MATERIALIZATIONS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(any(test, feature = "test-seam"))]
+#[must_use]
+pub fn block_image_materialize_call_count() -> usize {
+    BLOCK_IMAGE_MATERIALIZATIONS.load(core::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+pub fn reset_block_image_materialize_call_count() {
+    BLOCK_IMAGE_MATERIALIZATIONS.store(0, core::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+#[must_use]
+pub fn transaction_view_materialize_call_count() -> usize {
+    TRANSACTION_VIEW_MATERIALIZATIONS.load(core::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+pub fn reset_transaction_view_materialize_call_count() {
+    TRANSACTION_VIEW_MATERIALIZATIONS.store(0, core::sync::atomic::Ordering::SeqCst);
+}
+
 impl BlockImage {
     pub fn from_raw(raw: Bytes) -> Result<Self, DecodeError> {
         let (layout, identities) = BlockLayout::parse_exact(&raw)?;
@@ -169,6 +199,8 @@ impl BlockImage {
 
     #[must_use]
     pub fn materialize(&self) -> Block {
+        #[cfg(any(test, feature = "test-seam"))]
+        BLOCK_IMAGE_MATERIALIZATIONS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         Block {
             header: self.header(),
             txs: (0..self.tx_count())
@@ -353,6 +385,8 @@ impl<'a> TransactionView<'a> {
 
     #[must_use]
     pub fn materialize(&self) -> Tx {
+        #[cfg(any(test, feature = "test-seam"))]
+        TRANSACTION_VIEW_MATERIALIZATIONS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         let version = self.version();
         let lock_time = self.lock_time();
 
