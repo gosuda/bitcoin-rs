@@ -721,6 +721,9 @@ impl NodeState {
                     .contains(bitcoin_rs_projection::IndexCapability::ScriptLive)
             })
             .map(|(runtime, _, _, _)| Arc::clone(runtime.script_live_seed()));
+        if let Some(seed) = script_live_seed.as_ref() {
+            seed.set_spill_dir(&config.data_dir);
+        }
         let derived_index_runtime = derived_index_parts
             .as_ref()
             .map(|(runtime, _, _, _)| Arc::clone(runtime));
