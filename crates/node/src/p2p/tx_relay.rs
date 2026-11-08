@@ -268,6 +268,16 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
     gateway: Weak<MempoolGateway>,
     shutdown: bitcoin_rs_execution::chain::LatchReader,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
+    spawn_tx_relay_worker_polling(sink, rx, gateway, shutdown, RELAY_POLL)
+}
+
+fn spawn_tx_relay_worker_polling<S: RelaySink + 'static>(
+    sink: S,
+    rx: Receiver<RelayRequest>,
+    gateway: Weak<MempoolGateway>,
+    shutdown: bitcoin_rs_execution::chain::LatchReader,
+    poll: std::time::Duration,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("bitcoin-rs-tx-relay".to_owned())
         .spawn(move || {
@@ -302,7 +312,7 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
                         }
                         Err(_) => break,
                     },
-                    recv(crossbeam_channel::after(RELAY_POLL)) -> _ => {}
+                    recv(crossbeam_channel::after(poll)) -> _ => {}
                 }
             }
         })

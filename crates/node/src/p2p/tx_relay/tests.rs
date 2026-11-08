@@ -814,12 +814,17 @@ fn tx_relay_worker_promptly_exits_on_latch_trigger_while_idle() {
     let (_queue, rx) = TxRelayQueue::new(8);
     let sink = FakeSink::new(Vec::new());
     let latch = bitcoin_rs_execution::chain::LatchWriter::new();
-    let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), latch.reader())
-        .expect("relay worker spawns");
+    let worker = spawn_tx_relay_worker_polling(
+        sink,
+        rx,
+        Arc::downgrade(&gateway),
+        latch.reader(),
+        std::time::Duration::from_secs(3600),
+    )
+    .expect("relay worker spawns");
 
     std::thread::sleep(std::time::Duration::from_millis(15));
 
-    let started = std::time::Instant::now();
     latch.trigger();
 
     let (joined_tx, joined_rx) = bounded(1);
@@ -829,7 +834,6 @@ fn tx_relay_worker_promptly_exits_on_latch_trigger_while_idle() {
     });
 
     joined_rx
-        .recv_timeout(std::time::Duration::from_millis(45))
-        .expect("relay worker must exit promptly on latch trigger within 45ms");
-    assert!(started.elapsed() < std::time::Duration::from_millis(45));
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("relay worker must exit on latch trigger, not on its poll interval");
 }
