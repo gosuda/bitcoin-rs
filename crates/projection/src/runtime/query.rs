@@ -23,7 +23,7 @@ mod transactions;
 
 pub const DEFAULT_SCRIPTHASH_LIMIT: usize = 25_000;
 
-pub(super) struct QueryBudget {
+pub(crate) struct QueryBudget {
     remaining_rows: usize,
     remaining_bytes: usize,
     remaining_scans: usize,
@@ -279,6 +279,11 @@ impl ServingView {
         Instant::now() >= self.deadline
     }
 
+    #[cfg(any(test, feature = "test-seam"))]
+    pub(crate) fn expire_for_test(&mut self) {
+        self.deadline = Instant::now();
+    }
+
     fn coverage_for(&self, capability: IndexCapability) -> Option<CapabilityCoverage> {
         self.coverage[capability.index()]
     }
@@ -347,6 +352,11 @@ impl DerivedIndexQueryEngine {
     pub(crate) fn with_scripthash_limit(mut self, limit: usize) -> Self {
         self.scripthash_limit = limit;
         self
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    pub(crate) fn set_generation_for_test(&mut self, generation: Arc<Generation>) {
+        self.generation = generation;
     }
 
     fn script_budget(&self, budget: &mut QueryBudget) {

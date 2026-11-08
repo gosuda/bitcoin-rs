@@ -115,4 +115,25 @@ mod tests {
         let nf = super::dispatch_error(crate::RpcError::NotFound("missing"));
         assert_eq!(nf.status, 404);
     }
+
+    #[test]
+    fn expired_view_keeps_the_main_retry_texts() {
+        use bitcoin_rs_projection::TxQueryError;
+        let response = super::query_error(TxQueryError::ExpiredView);
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response.body,
+            b"transaction index changed during query; retry"
+        );
+
+        let rpc: crate::RpcError = TxQueryError::ExpiredView.into();
+        assert!(
+            matches!(
+                rpc,
+                crate::RpcError::Internal(text)
+                    if text == "transaction index is still catching up; retry later"
+            ),
+            "ExpiredView must keep the main rpc catch-up text"
+        );
+    }
 }

@@ -3342,6 +3342,92 @@ fn tx_lookups_refuse_with_retry_while_watermark_lags_the_tip()
     Ok(())
 }
 
+// QRY-07
+#[test]
+fn expired_revoked_and_replaced_views_fail_closed() -> Result<(), crate::portable::TestError> {
+    let genesis = Network::Regtest.genesis_block();
+    let mut tree = BlockTree::new();
+    let genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let tip = tip_snapshot_for(&tree, genesis_id)?;
+    let watermark = watermark_for(&tree, genesis_id)?;
+    let generation = Arc::new(Generation::new(1));
+
+    let tip_cell = Arc::new(ArcSwapOption::empty());
+    tip_cell.store(Some(Arc::new(tip)));
+    let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let reader: Arc<dyn IndexReader> = Arc::new(ResetReader {
+        state: Arc::new(ParkMutex::new(HistoricalSnapshot {
+            tx_watermark: Some(watermark),
+            sh_watermark: Some(watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: Vec::new(),
+        })),
+    });
+    let engine = DerivedIndexQueryEngine::new(
+        runtime,
+        reader,
+        bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_execution::chain::TipReader::new(tip_cell),
+        None,
+        QueryEngineLive {
+            enabled: IndexCapabilities::ALL,
+            generation: Arc::clone(&generation),
+            historical_verified: None,
+            chain_transition: None,
+        },
+    );
+
+    let (view, snapshot) = engine.capture_view(IndexCapabilities::TX_LOOKUP)?;
+    let mut expired_view = view;
+    expired_view.expire_for_test();
+    let expired = engine.with_view(
+        IndexCapabilities::TX_LOOKUP,
+        &expired_view,
+        snapshot.as_ref(),
+        |_, _, _| Ok::<(), TxQueryError>(()),
+    );
+    assert!(
+        matches!(expired, Err(TxQueryError::ExpiredView)),
+        "a view past its deadline must fail closed: {expired:?}"
+    );
+
+    let (view, snapshot) = engine.capture_view(IndexCapabilities::TX_LOOKUP)?;
+    let mut moved = engine.clone();
+    moved.set_generation_for_test(Arc::new(Generation::new(2)));
+    let replaced = moved.with_view(
+        IndexCapabilities::TX_LOOKUP,
+        &view,
+        snapshot.as_ref(),
+        |_, _, _| Ok::<(), TxQueryError>(()),
+    );
+    assert!(
+        matches!(replaced, Err(TxQueryError::ExpiredView)),
+        "a view from a replaced generation must fail closed: {replaced:?}"
+    );
+
+    let (view, snapshot) = engine.capture_view(IndexCapabilities::TX_LOOKUP)?;
+    generation.revoke();
+    let revoked = engine.with_view(
+        IndexCapabilities::TX_LOOKUP,
+        &view,
+        snapshot.as_ref(),
+        |_, _, _| Ok::<(), TxQueryError>(()),
+    );
+    assert!(
+        matches!(revoked, Err(TxQueryError::ExpiredView)),
+        "a view whose generation was revoked must fail closed: {revoked:?}"
+    );
+
+    let refused = engine.transaction(&genesis.txs[0].txid());
+    assert!(
+        matches!(refused, Err(TxQueryError::ExpiredView)),
+        "a fresh capture on a revoked generation must refuse: {refused:?}"
+    );
+    Ok(())
+}
+
 // PRJ-11
 #[test]
 fn script_live_takes_no_transition_lock() -> Result<(), crate::portable::TestError> {

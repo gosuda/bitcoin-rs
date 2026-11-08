@@ -500,45 +500,48 @@ That document gives consumer usage and defers to this clause for every consisten
 - `Hash256` is `bitcoin_rs_consensus::primitives::Hash256`.
 - `CompactString` is `compact_str::CompactString`.
 - `ScriptHash`, `IndexCapability`, `ScriptIndexSnapshot`, and `SpendingRecord` keep their existing paths.
-- `TxQueryError` and `TxUnavailableCause` are byte-for-byte unchanged:
-  - no new variant is added there
-  - no text change is made
-  - strict exact-tip paths stay identical.
+- `TxQueryError` and `TxUnavailableCause` change additively:
+  - `TxQueryError` gains `Retry(RetryReason)` and `ExpiredView`.
+  - `Retry` carries the tip-move reason with the capture-time commit ids.
+  - `ExpiredView` marks a view whose generation was replaced or revoked or whose lifetime ended.
+  - `TxUnavailableCause` gains `OutsideCoverage { declared_floor_or_tip }`.
+  - The Display strings of the pre-existing variants are unchanged.
+  - The new variants render the retry and coverage texts that the JSON-RPC and REST adapters already emit.
 - Matchers match the variant, never the rendered string.
 - Per-call capabilities: each call consumes only the capabilities its answer depends on.
 - `transaction_at_prefix` needs `TxLookup` only.
 - Nodes with transaction indexing only serve it without `ScriptHistory`.
 - `script_history_at_prefix` and `spender_at_prefix` need `ScriptHistory`.
-- A disabled required capability returns `Shared(CapabilityDisabled)`, preserving typed visibility.
-- One snapshot, server-selected anchor:
-  - Each call takes one immutable DB snapshot holding rows, watermarks, and floors.
+- A disabled required capability returns `Unavailable(CapabilityDisabled)`, preserving typed visibility.
+- One serving view, server-selected anchor:
+  - Each call captures one serving view holding the applied epoch, the generation id, and the watermark and floor of every required capability.
+  - The capture reads them from one DB snapshot, and the call keeps that snapshot for the whole answer.
+  - Every row the answer reads comes from that captured snapshot, so a shallow tail rewrite inside one answer is never observed.
   - The call checks worker health before and after the read.
-  - It derives the common covered ancestor of required capability watermarks and the published tip under a shared bounded ancestry budget.
   - The three prefix calls take no client anchor parameter and no cursor.
   - The exact-tip `confirmed_history_page` is the one keyset-paged read.
-  - Its cursor is `(height, serialized-block byte offset)`.
+  - Its cursor is `(height, transaction position)` and is bound to the view that issued it.
   - `history_cursor` resolves an `API-09` transaction id to that cursor.
-  - Each page reads one snapshot.
+  - Each page reads the captured snapshot.
+  - Endpoints that promise current-tip data verify at capture that every required watermark equals the applied-tip height and return `Retry` otherwise.
+  - The embedded prefix reads keep watermark-pinned coverage and answer from the covered prefix without that check.
   - Independent calls never share an anchor automatically: each returns its own prefix.
   - Callers composing answers compare the returned `floor`/`height`/`hash` metadata themselves.
 - Floor and range:
   - `floor` equals the maximum consumed floor for the call.
   - Only rows in `[floor, anchor]` on `chain(anchor)` are read.
-  - Rows outside the range are skipped.
-  - An anchor below the floor returns `Unavailable(PrefixBelowFloor { floor })`.
+  - A point lookup that sees only rows below `floor` returns `Unavailable(OutsideCoverage { declared_floor_or_tip: floor })`.
+  - Coverage starting above the applied tip returns `Unavailable(OutsideCoverage { declared_floor_or_tip: floor })`.
   - Record identity and position verification and existing query budgets apply unchanged.
   - Historical queries take no live-UTXO or chain-transition lock.
-  - The tree guard is held only for the bounded ancestry walk and released before body reads.
 - Post-read freshness:
   - After the read, the call checks health again.
-  - It requires the anchor to still be an ancestor of the newly published tip.
-  - Ordinary extension, index forward progress mid-read, a reorg above anchor, and completed resets keep the answer valid.
-  - A reorganization below the anchor, an absent tip, or an unknown watermark hash returns `Retry`.
-  - A reset claim visible in the snapshot (required watermark absent) returns `Unavailable(NoCoveredPrefix)`.
+  - The answer keeps its captured epoch; there is no post-read anchor recheck.
+  - The serving view stops serving when its generation is replaced or revoked, or when its 60 second lifetime ends; the call then returns `ExpiredView`.
+  - A required watermark absent in the captured snapshot returns `Retry`.
   - Rebuilds do not spin on `Retry`.
-  - Stale branches deeper than the shared hop budget return `Unavailable(AncestryBudgetExhausted)`.
 - Scoped absence, no mempool:
-  - Absence means "not present in `[floor, anchor]` on `chain(anchor)`", never a global claim.
+  - Absence without rows below `floor` means "not present in `[floor, anchor]` on `chain(anchor)`", never a global claim.
   - Historical calls read the confirmed index only.
   - Mempool contents are never merged in.
 - Duplicates keep existing order:
@@ -550,10 +553,10 @@ That document gives consumer usage and defers to this clause for every consisten
   - History occurrence rows are keyed by script, so spends of below-floor funding outputs are visible at their height.
   - The history snapshot that `script_history_at_prefix` returns also carries funding outputs with value and output index.
   - Funding rows below `floor` are not provable.
-  - Full `script_history_at_prefix` answers stay unproven on a positive floor and return `Shared(HistoryUnproven { floor })`.
+  - Full `script_history_at_prefix` answers stay unproven on a positive floor and return `Unavailable(HistoryUnproven { floor })`.
   - Standalone `spender_at_prefix` takes the exact `OutPoint`.
   - Its spender rows are keyed directly by outpoint prefix and height and verified per candidate.
-  - It needs no funding discovery and may return a scoped `Ok(None)` above a positive floor after verifying matching spender rows in range.
+  - It needs no funding discovery and may return a scoped `Ok(None)` above a positive floor after verifying matching spender rows in range and none below it.
   - That `None` means no verified spend in `[floor, anchor]`, not that the coin is unspent and not that the outpoint exists.
 - Unchanged and not added:
   - Strict `ScriptLive` reads, current Core RPC handlers, compact-filter serving, and existing exact-tip methods keep their behavior.
@@ -564,12 +567,13 @@ That document gives consumer usage and defers to this clause for every consisten
 - Error shape:
   | Case | Result |
   |---|---|
-  | Reorg below anchor, absent tip, watermark hash unknown to tree | `Retry` |
-  | Required watermark absent in snapshot (reset claim, rebuild) | `Unavailable(NoCoveredPrefix { capability })` |
-  | Stale branch deeper than the shared hop budget | `Unavailable(AncestryBudgetExhausted { capability, watermark_height })` |
-  | Anchor below max floor | `Unavailable(PrefixBelowFloor { floor })` |
-  | Positive floor on full script history | `Unavailable(Shared(HistoryUnproven { floor }))` |
-  | Row, scan, body-read, and body-byte budgets, truncated scans, `BlockBodyMissing`, disabled capability, worker failure/stop, missing authority, lifecycle causes | `Unavailable(Shared(...))` with the identical wrapped variant |
+  | Absent tip, or a required watermark absent in the captured snapshot | `Retry(TipMoved)` |
+  | Required watermark below the applied tip on a current-tip endpoint | `Retry(TipMoved)` |
+  | View whose generation was replaced or revoked, or whose lifetime ended | `ExpiredView` |
+  | Point lookup with rows only below `floor` | `Unavailable(OutsideCoverage { declared_floor_or_tip: floor })` |
+  | Coverage starting above the applied tip | `Unavailable(OutsideCoverage { declared_floor_or_tip: floor })` |
+  | Positive floor on full script history | `Unavailable(HistoryUnproven { floor })` |
+  | Row, scan, body-read, and body-byte budgets, truncated scans, `BlockBodyMissing`, disabled capability, worker failure/stop, missing authority, lifecycle causes | `Unavailable(...)` with the identical variant |
   | Snapshot-open and body-read storage failures | `Storage(...)` |
 
 ### Compact-filter data and serving
