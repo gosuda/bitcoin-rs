@@ -154,42 +154,56 @@ structure primitives.tx.Tx where
   lock_time : primitives.units.LockTime
 
 /-- [bitcoin_rs_consensus::primitives::layout::ByteSpan]
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 62:0-65:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 63:0-66:1
     Visibility: public -/
 structure primitives.layout.ByteSpan where
   start : Std.U32
   len : Std.U32
 
 /-- [bitcoin_rs_consensus::primitives::layout::OutputLayout]
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 224:0-227:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 275:0-278:1
     Visibility: public -/
 structure primitives.layout.OutputLayout where
   value : primitives.layout.ByteSpan
   script_pubkey : primitives.layout.ByteSpan
 
+/-- [bitcoin_rs_consensus::primitives::layout::WitnessItemLayout]
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 192:0-194:1
+    Visibility: public -/
+structure primitives.layout.WitnessItemLayout where
+  item : primitives.layout.ByteSpan
+
 /-- [bitcoin_rs_consensus::primitives::layout::InputLayout]
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 191:0-197:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 229:0-236:1
     Visibility: public -/
 structure primitives.layout.InputLayout where
   outpoint : primitives.layout.ByteSpan
   script_sig : primitives.layout.ByteSpan
   sequence : primitives.layout.ByteSpan
   witness : primitives.layout.ByteSpan
-  witness_items : Std.U32
+  witness_items : Slice primitives.layout.WitnessItemLayout
+  witness_item_count : Std.U32
+
+/-- [bitcoin_rs_consensus::primitives::layout::TxLayout]
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 293:0-303:1
+    Visibility: public -/
+structure primitives.layout.TxLayout where
+  span : primitives.layout.ByteSpan
+  version : primitives.layout.ByteSpan
+  marker_flag : Option primitives.layout.ByteSpan
+  input_count : primitives.layout.ByteSpan
+  inputs : Slice primitives.layout.InputLayout
+  output_count : primitives.layout.ByteSpan
+  outputs : Slice primitives.layout.OutputLayout
+  lock_time : primitives.layout.ByteSpan
+  segwit : Bool
 
 /-- [bitcoin_rs_consensus::primitives::layout::ParsedTransaction]
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 237:0-248:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 676:0-679:1
     Visibility: public -/
 structure primitives.layout.ParsedTransaction where
   bytes : Slice Std.U8
-  span : primitives.layout.ByteSpan
-  version_span : primitives.layout.ByteSpan
-  input_count_span : primitives.layout.ByteSpan
-  output_count_span : primitives.layout.ByteSpan
-  lock_time_span : primitives.layout.ByteSpan
-  segwit : Bool
-  inputs : alloc.vec.Vec primitives.layout.InputLayout
-  outputs : alloc.vec.Vec primitives.layout.OutputLayout
+  layout : primitives.layout.TxLayout
 
 /-- [bitcoin_rs_consensus::primitives::layout::TX_DECODE_BYTES]
     Source: 'crates/consensus/src/primitives/layout.rs', lines 20:0-22:33 -/
@@ -218,18 +232,20 @@ def primitives.layout.OUTPUT_DECODE_BYTES : Result Std.Usize := do
   i + i1
 
 /-- [bitcoin_rs_consensus::primitives::layout::WITNESS_ITEM_DECODE_BYTES]
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 27:0-27:69 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 27:0-28:76 -/
 @[global_simps, irreducible]
-def primitives.layout.WITNESS_ITEM_DECODE_BYTES : Result Std.Usize :=
-  core.mem.size_of Std.U32
+def primitives.layout.WITNESS_ITEM_DECODE_BYTES : Result Std.Usize := do
+  let i ← core.mem.size_of primitives.layout.WitnessItemLayout
+  let i1 ← core.mem.size_of Std.U32
+  i + i1
 
 /-- [bitcoin_rs_consensus::primitives::layout::SCRIPT_BYTE_DECODE_BYTES]
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 28:0-28:42 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 29:0-29:42 -/
 @[global_simps, irreducible]
 def primitives.layout.SCRIPT_BYTE_DECODE_BYTES : Std.Usize := 1#usize
 
 /-- [bitcoin_rs_consensus::primitives::layout::larger]:
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 30:0-32:1 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 31:0-33:1 -/
 def primitives.layout.larger
   (left : Std.Usize) (right : Std.Usize) : Result Std.Usize := do
   if left > right
@@ -237,7 +253,7 @@ def primitives.layout.larger
   else ok right
 
 /-- [bitcoin_rs_consensus::primitives::layout::DECODE_EXPANSION]
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 35:0-47:2 -/
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 36:0-48:2 -/
 @[global_simps, irreducible]
 def primitives.layout.DECODE_EXPANSION : Result Std.Usize := do
   let i ← primitives.layout.TX_DECODE_BYTES
@@ -257,7 +273,7 @@ def primitives.layout.DECODE_EXPANSION : Result Std.Usize := do
   primitives.layout.larger i4 i11
 
 /-- [bitcoin_rs_consensus::primitives::layout::decode_reservation]:
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 55:0-57:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 56:0-58:1
     Visibility: public -/
 def primitives.layout.decode_reservation
   (wire_len : Std.Usize) : Result Std.Usize := do
