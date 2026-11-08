@@ -3288,6 +3288,60 @@ fn tip_promising_script_pages_refuse_while_watermark_lags_the_tip()
     Ok(())
 }
 
+// QRY-03
+#[test]
+fn tx_lookups_refuse_with_retry_while_watermark_lags_the_tip()
+-> Result<(), crate::portable::TestError> {
+    let genesis = Network::Regtest.genesis_block();
+    let child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
+    let mut tree = BlockTree::new();
+    let genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let child_id = tree.insert_header(child.header, NodeStatus::HeaderValid)?;
+    let genesis_watermark = watermark_for(&tree, genesis_id)?;
+    let genesis_txid = genesis.txs[0].txid();
+    let outpoint = OutPoint::new(genesis_txid, 0);
+
+    let (fixture, _) = HistoricalFixture::build(
+        tree,
+        child_id,
+        HistoricalConfig {
+            tx_watermark: Some(genesis_watermark),
+            sh_watermark: Some(genesis_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: vec![scan_response(
+                ColumnFamily::TxConfirmed,
+                TxidRow::scan_prefix(&genesis_txid),
+                vec![(
+                    TxidRow::row(&genesis_txid, 0).to_db_row().to_vec(),
+                    vec![0_u8],
+                )],
+                true,
+            )],
+            bodies: vec![(0, genesis.block_hash(), consensus_bytes(&genesis))],
+            on_first_read: None,
+            enabled: IndexCapabilities::ALL,
+        },
+    )?;
+
+    let found = fixture.engine.transaction(&genesis_txid);
+    assert!(
+        matches!(&found, Err(TxQueryError::Retry(_))),
+        "a current-tip tx lookup must refuse with Retry while the watermark lags: {found:?}"
+    );
+    let height = fixture.engine.transaction_height(&genesis_txid);
+    assert!(
+        matches!(&height, Err(TxQueryError::Retry(_))),
+        "a current-tip height lookup must refuse with Retry while the watermark lags: {height:?}"
+    );
+    let value = fixture.engine.outpoint_value(&outpoint);
+    assert!(
+        matches!(&value, Err(TxQueryError::Retry(_))),
+        "a current-tip outpoint lookup must refuse with Retry while the watermark lags: {value:?}"
+    );
+    Ok(())
+}
+
 // PRJ-11
 #[test]
 fn script_live_takes_no_transition_lock() -> Result<(), crate::portable::TestError> {

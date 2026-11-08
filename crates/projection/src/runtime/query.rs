@@ -718,6 +718,7 @@ impl DerivedIndexQuery for DerivedIndexQueryEngine {
             &view,
             snapshot.as_ref(),
             |snapshot, view, budget| {
+                Self::require_tip_coverage_on_view(view, IndexCapabilities::TX_LOOKUP)?;
                 let prefix = Self::require_tip_prefix(view, IndexCapability::TxLookup)?;
                 let found = self.transaction_for(snapshot, &prefix, budget, txid)?;
                 self.scoped_or_outside(view, IndexCapability::TxLookup, found)
@@ -732,6 +733,7 @@ impl DerivedIndexQuery for DerivedIndexQueryEngine {
             &view,
             snapshot.as_ref(),
             |snapshot, view, budget| {
+                Self::require_tip_coverage_on_view(view, IndexCapabilities::TX_LOOKUP)?;
                 let prefix = Self::require_tip_prefix(view, IndexCapability::TxLookup)?;
                 let value = self.outpoint_value_for(snapshot, &prefix, budget, outpoint)?;
                 self.scoped_or_outside(view, IndexCapability::TxLookup, value)
@@ -746,6 +748,7 @@ impl DerivedIndexQuery for DerivedIndexQueryEngine {
             &view,
             snapshot.as_ref(),
             |snapshot, view, budget| {
+                Self::require_tip_coverage_on_view(view, IndexCapabilities::TX_LOOKUP)?;
                 let prefix = Self::require_tip_prefix(view, IndexCapability::TxLookup)?;
                 let height = self
                     .locate_transaction_for(snapshot, &prefix, budget, txid)?
@@ -894,6 +897,7 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
             &view,
             snapshot.as_ref(),
             |snapshot, view, budget| {
+                Self::require_tip_coverage_on_view(view, IndexCapabilities::SCRIPT_HISTORY)?;
                 let prefix = Self::require_tip_prefix(view, IndexCapability::ScriptHistory)?;
                 let spent = self.spender_for(snapshot, &prefix, budget, &outpoint)?;
                 self.scoped_or_outside(view, IndexCapability::ScriptHistory, spent)
