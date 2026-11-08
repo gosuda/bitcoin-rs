@@ -22,7 +22,7 @@ impl DerivedIndexCapability {
         Self {
             lifecycle,
             runtime,
-            enabled: enabled.without(crate::IndexCapability::CompactFilters),
+            enabled,
         }
     }
 
@@ -147,14 +147,36 @@ impl DerivedIndexCapability {
             }
         }
     }
+
     #[must_use]
     pub fn coverage_height(&self) -> Option<u32> {
+        let mut lowest = None;
+        for capability in self.enabled.iter() {
+            let Some(height) = self.coverage_of(capability) else {
+                continue;
+            };
+            lowest = Some(lowest.map_or(height, |current: u32| current.min(height)));
+        }
+        lowest
+    }
+
+    /// SNP-09: one independent coverage value per enabled projection.
+    #[must_use]
+    pub fn capability_coverage(&self) -> [Option<u32>; 4] {
+        let mut coverage = [None; 4];
+        for capability in self.enabled.iter() {
+            coverage[capability.index()] = self.coverage_of(capability);
+        }
+        coverage
+    }
+
+    fn coverage_of(&self, capability: IndexCapability) -> Option<u32> {
         let lifecycle = self.lifecycle.as_ref()?.load();
         let engine = match &**lifecycle {
             DerivedIndexLifecycle::Serving(engine) => engine,
             _ => return None,
         };
-        Self::progress(engine, self.enabled)
+        Self::progress(engine, IndexCapabilities::NONE.insert(capability))
             .ok()
             .map(|progress| progress.processed_height)
     }
@@ -174,5 +196,9 @@ impl DerivedIndexCapabilitySource for DerivedIndexCapability {
 
     fn coverage_height(&self) -> Option<u32> {
         self.coverage_height()
+    }
+
+    fn capability_coverage(&self) -> [Option<u32>; 4] {
+        self.capability_coverage()
     }
 }

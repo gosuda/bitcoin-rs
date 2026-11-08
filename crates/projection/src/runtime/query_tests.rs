@@ -499,8 +499,8 @@ fn filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries(
         IndexCapabilities::COMPACT_FILTERS,
     )
     .capability();
-    assert!(!filters_only.enabled);
-    assert_eq!(filters_only.state, CapabilityState::Disabled);
+    assert!(filters_only.enabled);
+    assert_ne!(filters_only.state, CapabilityState::Disabled);
     Ok(())
 }
 

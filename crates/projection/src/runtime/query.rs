@@ -918,6 +918,11 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
 
 impl DerivedIndexQueryEngine {
     fn check_capability_failures(&self, required: IndexCapabilities) -> Result<(), TxQueryError> {
+        if required.contains(IndexCapability::TxLookup)
+            && let Some(reason) = self.runtime.tx_lookup_failure.read().clone()
+        {
+            return Err(TxQueryError::Unavailable(TxUnavailableCause::Other(reason)));
+        }
         if required.contains(IndexCapability::CompactFilters)
             && let Some(reason) = self.runtime.compact_filter_failure.read().clone()
         {

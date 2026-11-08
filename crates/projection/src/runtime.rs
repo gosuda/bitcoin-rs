@@ -77,6 +77,7 @@ pub struct DerivedIndexRuntime {
     wake_tx: Sender<()>,
     failure_message: RwLock<Option<CompactString>>,
     compact_filter_failure: RwLock<Option<CompactString>>,
+    tx_lookup_failure: RwLock<Option<CompactString>>,
     script_live_failure: RwLock<Option<CompactString>>,
     script_history_failure: RwLock<Option<CompactString>>,
     phase: arc_swap::ArcSwap<ReconcilePhase>,
@@ -95,6 +96,7 @@ impl DerivedIndexRuntime {
             wake_tx,
             failure_message: RwLock::new(None),
             compact_filter_failure: RwLock::new(None),
+            tx_lookup_failure: RwLock::new(None),
             script_live_failure: RwLock::new(None),
             script_history_failure: RwLock::new(None),
             phase: arc_swap::ArcSwap::from_pointee(ReconcilePhase::FORWARD),
@@ -168,6 +170,14 @@ impl DerivedIndexRuntime {
             error,
             "ScriptLive index unavailable; other indexes continue",
         );
+    }
+
+    /// SNP-10: TxLookup fails as one capability, never as the whole runtime.
+    pub fn fail_tx_lookup(&self, reason: &str) {
+        tracing::error!(reason, "txlookup index unavailable; other indexes continue");
+        *self.tx_lookup_failure.write() = Some(reason.into());
+        self.publish_leg(IndexCapabilities::TX_LOOKUP, ReconcileLeg::Forward);
+        self.wake();
     }
 
     pub fn fail_script_history(&self, error: &DerivedIndexWorkerError) {
