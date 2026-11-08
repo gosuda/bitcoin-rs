@@ -792,6 +792,15 @@ pub fn spawn_block_announce_worker(
     rx: BlockAnnounceReceiver,
     shutdown: bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<std::thread::JoinHandle<()>, std::io::Error> {
+    spawn_block_announce_worker_polling(announcer, rx, shutdown, ANNOUNCE_POLL)
+}
+
+fn spawn_block_announce_worker_polling(
+    announcer: Arc<BlockAnnouncer>,
+    rx: BlockAnnounceReceiver,
+    shutdown: bitcoin_rs_execution::chain::LatchReader,
+    poll: Duration,
+) -> Result<std::thread::JoinHandle<()>, std::io::Error> {
     std::thread::Builder::new()
         .name("bitcoin-rs-block-announce".into())
         .spawn(move || {
@@ -808,7 +817,7 @@ pub fn spawn_block_announce_worker(
                         }
                         Err(_) => break,
                     },
-                    recv(crossbeam_channel::after(ANNOUNCE_POLL)) -> _ => {
+                    recv(crossbeam_channel::after(poll)) -> _ => {
                         announcer.reconcile_high_bandwidth_peers();
                         announcer.process_tip_retry();
                         announcer.process_stale_tips();

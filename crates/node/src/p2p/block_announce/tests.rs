@@ -1944,8 +1944,13 @@ fn block_announce_worker_cancels_promptly_on_latch() {
     ));
     let (_queue, worker_rx) = BlockAnnounceQueue::new();
     let latch = bitcoin_rs_execution::chain::LatchWriter::new();
-    let worker =
-        spawn_block_announce_worker(announcer, worker_rx, latch.reader()).expect("worker spawns");
+    let worker = spawn_block_announce_worker_polling(
+        announcer,
+        worker_rx,
+        latch.reader(),
+        std::time::Duration::from_secs(3600),
+    )
+    .expect("worker spawns");
     let (join_tx, join_rx) = crossbeam_channel::bounded(1);
     std::thread::spawn(move || {
         let _ = worker.join();
@@ -1955,7 +1960,7 @@ fn block_announce_worker_cancels_promptly_on_latch() {
     latch.trigger();
     assert!(
         join_rx
-            .recv_timeout(std::time::Duration::from_millis(40))
+            .recv_timeout(std::time::Duration::from_secs(10))
             .is_ok(),
         "block announce worker must join promptly upon latch trigger without waiting for poll timeout"
     );
