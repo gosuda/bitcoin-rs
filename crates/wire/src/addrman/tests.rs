@@ -15,7 +15,9 @@ impl ParseEndpoint for &str {
     }
 }
 fn book() -> Arc<AddressBook> {
-    AddressBook::open(None, [1; 4], false, None)
+    let book = AddressBook::open(None, [1; 4], false, None);
+    book.state.lock().stored.secret = [1; 32];
+    book
 }
 
 #[test]
