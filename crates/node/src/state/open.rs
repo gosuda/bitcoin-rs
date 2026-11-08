@@ -400,14 +400,16 @@ impl NodeState {
         let derived_index_open_spec =
             build_derived_index_open_spec(&config, txindex_cache_bytes, epoch, &data_dir_guard)?;
         let (facts_queue, facts_parts) = if derived_index_open_spec.is_some() {
+            let ledger: Arc<dyn bitcoin_rs_storage::budget::BudgetCharge> = budget.clone();
             let charge = bitcoin_rs_storage::budget::ChargeHandle::new(
-                Arc::clone(&budget) as Arc<dyn bitcoin_rs_storage::budget::BudgetCharge>,
+                ledger,
                 bitcoin_rs_storage::budget::BudgetOwner::FactsQueue,
             );
             let queue = Arc::new(crate::facts_queue::FactsQueue::new(
                 crate::facts_queue::DEFAULT_FACTS_QUEUE_CAPACITY,
                 charge,
             ));
+            budget.add_reclaimer(queue.reclaimer());
             let rx = queue.receiver();
             let charge = queue.charge_handle();
             let gap = queue.gap_handle();

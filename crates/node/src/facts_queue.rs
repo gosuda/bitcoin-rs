@@ -1,5 +1,5 @@
 use bitcoin_rs_storage::CommittedFacts;
-use bitcoin_rs_storage::budget::ChargeHandle;
+use bitcoin_rs_storage::budget::{BudgetReclaimer, ChargeHandle};
 use crossbeam_channel::{Receiver, Sender};
 use std::sync::{
     Arc,
@@ -91,6 +91,42 @@ impl FactsQueue {
     }
 }
 
+impl BudgetReclaimer for FactsQueue {
+    fn reclaim(&self, bytes: u64) -> u64 {
+        let mut freed = 0;
+        while freed < bytes {
+            let Ok(facts) = self.rx.try_recv() else {
+                break;
+            };
+            let size = facts.size_bytes();
+            self.charge.release(size);
+            freed = freed.saturating_add(size);
+        }
+        if freed > 0 {
+            self.gap.store(true, Ordering::SeqCst);
+        }
+        freed
+    }
+}
+
+struct FactsReclaimer {
+    queue: std::sync::Weak<FactsQueue>,
+}
+
+impl BudgetReclaimer for FactsReclaimer {
+    fn reclaim(&self, bytes: u64) -> u64 {
+        self.queue.upgrade().map_or(0, |queue| queue.reclaim(bytes))
+    }
+}
+
+impl FactsQueue {
+    pub(crate) fn reclaimer(self: &Arc<Self>) -> Arc<dyn BudgetReclaimer> {
+        Arc::new(FactsReclaimer {
+            queue: Arc::downgrade(self),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,14 +163,13 @@ mod tests {
     }
 
     fn queue(budget: &Arc<NodeBudget>) -> FactsQueue {
-        let charge = ChargeHandle::new(
-            Arc::clone(budget) as Arc<dyn BudgetCharge>,
-            BudgetOwner::FactsQueue,
-        );
+        let ledger: Arc<dyn BudgetCharge> = budget.clone();
+        let charge = ChargeHandle::new(ledger, BudgetOwner::FactsQueue);
         FactsQueue::new(8, charge)
     }
 
     // BUD-06
+    #[expect(clippy::expect_used)]
     #[test]
     fn facts_queue_charge_is_owned_by_the_node_budget() {
         let budget = budget();
@@ -151,5 +186,40 @@ mod tests {
         let drained = queue.drain().expect("no gap");
         assert_eq!(drained.len(), 1);
         assert_eq!(budget.available_of_charges(BudgetOwner::FactsQueue), 0);
+    }
+
+    // BUD-07
+    #[expect(clippy::expect_used)]
+    #[test]
+    fn ensure_available_reclaims_queued_facts() {
+        let budget = budget();
+        let queue = Arc::new(queue(&budget));
+        budget.add_reclaimer(queue.reclaimer());
+        let facts = facts(1);
+        let size = facts.size_bytes();
+        assert!(queue.try_push(facts));
+
+        let staged = 8_192;
+        budget
+            .reserve(BudgetOwner::StagedImages, staged)
+            .expect("staged reservation fits");
+        budget
+            .allocate(BudgetOwner::StagedImages, staged)
+            .expect("staged allocation fits");
+        assert_eq!(budget.total_committed(), 8_192 + size);
+
+        budget
+            .ensure_available(BudgetOwner::FactsQueue, 4_096)
+            .expect("reclaiming queued facts frees the reservation");
+        assert_eq!(
+            budget.available_of_charges(BudgetOwner::FactsQueue),
+            0,
+            "the reclaimer released the queued facts"
+        );
+        assert_eq!(
+            budget.available_of_reservations(BudgetOwner::FactsQueue),
+            4_096
+        );
+        assert!(queue.has_gap(), "dropping queued facts sets the gap");
     }
 }

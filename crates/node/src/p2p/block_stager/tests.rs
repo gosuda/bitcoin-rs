@@ -758,6 +758,7 @@ fn decoded_heap_limits_staging_and_expected_frontier_can_evict_a_fat_tail() {
     assert!(stager.retained_attributed_bytes() <= budget.max_retained_bytes);
 }
 
+#[expect(clippy::expect_used)]
 #[test]
 fn decoded_attribution_follows_insert_drain_and_restore_apart_from_serialized_bytes() {
     let (lean, fat, serialized) = lean_and_fat_blocks();
