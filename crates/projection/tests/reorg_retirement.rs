@@ -3,8 +3,10 @@ use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_projection::segment::{
     GenerationDescriptor, IndexGeneration, TailDescriptor, meta_gen_key, retire_generation,
 };
+use bitcoin_rs_storage::budget::UnboundedBudget;
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, TxFacts};
 use bitcoin_rs_storage::{Bytes, ColumnFamily, KvStore, RocksDbStore};
+use std::sync::Arc;
 use tempfile::tempdir;
 
 use crate::support::TestError;
@@ -44,7 +46,11 @@ fn deep_reorg_retires_one_generation_only() -> Result<(), TestError> {
         }],
     };
 
-    let builder = BulkSegmentBuilder::new(64 * 1024 * 1024, scratch.path().to_path_buf());
+    let builder = BulkSegmentBuilder::new(
+        Arc::new(UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    );
     let coverage = builder
         .build_and_ingest(&store, gen_id, &[block])
         .map_err(|e| e.to_string())?;

@@ -60,6 +60,7 @@ pub(crate) struct RebuildIndexReport {
     pub(crate) engine: String,
     pub(crate) format_version: u32,
     pub(crate) blocks: u64,
+    pub(crate) budget_refusals: u64,
     pub(crate) families: Vec<FamilyResetReport>,
 }
 

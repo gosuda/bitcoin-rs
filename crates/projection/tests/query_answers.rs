@@ -1,7 +1,9 @@
 use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_projection::segment::format::{decode_tx_dir_value, encode_tx_dir_key};
+use bitcoin_rs_storage::budget::UnboundedBudget;
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, TxFacts};
 use bitcoin_rs_storage::{Bytes, ColumnFamily, KvStore, RocksDbStore};
+use std::sync::Arc;
 use tempfile::tempdir;
 
 use crate::support::TestError;
@@ -38,7 +40,11 @@ fn no_segment_offset_in_answers() -> Result<(), TestError> {
         }],
     };
 
-    let builder = BulkSegmentBuilder::new(64 * 1024 * 1024, scratch.path().to_path_buf());
+    let builder = BulkSegmentBuilder::new(
+        Arc::new(UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    );
     builder
         .build_and_ingest(&store, gen_id, &[block])
         .map_err(|e| e.to_string())?;

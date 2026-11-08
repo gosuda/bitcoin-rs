@@ -1,5 +1,24 @@
-use std::path::PathBuf;
+//! Bounded external sort for bulk index generation (`PRJ-09`).
+//!
+//! Rows stream through per-family spill sorters charged to
+//! `BudgetOwner::IndexBuilder`. When the shared budget pool refuses the next
+//! row, the sorted in-memory buffer spills to one run file in the scratch
+//! directory and its bytes are released; output is a partitioned k-way merge
+//! over the runs plus the sorted remainder, streamed into `ingest_sorted`.
+//! Rows are unique per family, so run order is total. Scratch runs carry no
+//! durability: a crash invalidates the whole build, and a fresh builder
+//! sweeps stale run files before its first spill.
 
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(test)]
+use bitcoin_rs_storage::budget::UnboundedBudget;
+use bitcoin_rs_storage::budget::{
+    BackgroundCpuPermit, BudgetCharge, BudgetError, BudgetOwner, CpuShares,
+};
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout};
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use hashbrown::HashMap;
@@ -14,90 +33,62 @@ pub enum BulkBuilderError {
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("index builder budget refused the retained window: {0}")]
+    Budget(BudgetError),
     #[error("empty block range")]
     EmptyRange,
     #[error("invalid block sequence")]
     InvalidBlockSequence,
+    #[error("segment row exceeds the spill run length prefix")]
+    RowTooLarge,
 }
 
 pub struct GenerationRows {
     pub coverage: Coverage,
-    pub tx_dir: Vec<(Vec<u8>, Vec<u8>)>,
-    pub script_dict: Vec<(Vec<u8>, Vec<u8>)>,
-    pub script_post: Vec<(Vec<u8>, Vec<u8>)>,
-    pub spend_dir: Vec<(Vec<u8>, Vec<u8>)>,
-    pub script_stats: Vec<(Vec<u8>, Vec<u8>)>,
-    pub filters: Vec<(Vec<u8>, Vec<u8>)>,
+    pub tx_dir: SegmentRows,
+    pub script_dict: SegmentRows,
+    pub script_post: SegmentRows,
+    pub spend_dir: SegmentRows,
+    pub script_stats: SegmentRows,
+    pub filters: SegmentRows,
 }
+
+pub(super) type SegmentRows = Vec<(Vec<u8>, Vec<u8>)>;
 
 pub struct BulkSegmentBuilder {
-    pub memory_budget: usize,
-    pub scratch_dir: PathBuf,
-}
-
-struct Occurrence {
-    ordinal: u32,
-    flags: u8,
-    sats: u64,
-}
-
-struct TxOccurrences {
-    tx_dir_rows: Vec<(Vec<u8>, Vec<u8>)>,
-    spend_dir_rows: Vec<(Vec<u8>, Vec<u8>)>,
-    script_occurrences: HashMap<[u8; 32], Vec<Occurrence>>,
-}
-
-struct ScriptRows {
-    script_dict: Vec<(Vec<u8>, Vec<u8>)>,
-    script_post: Vec<(Vec<u8>, Vec<u8>)>,
-    script_stats: Vec<(Vec<u8>, Vec<u8>)>,
+    budget: Arc<dyn BudgetCharge>,
+    cpu: Option<Arc<CpuShares>>,
+    scratch_dir: PathBuf,
 }
 
 impl BulkSegmentBuilder {
     #[must_use]
-    pub fn new(memory_budget: usize, scratch_dir: PathBuf) -> Self {
+    pub fn new(
+        budget: Arc<dyn BudgetCharge>,
+        cpu: Option<Arc<CpuShares>>,
+        scratch_dir: PathBuf,
+    ) -> Self {
         Self {
-            memory_budget,
+            budget,
+            cpu,
             scratch_dir,
         }
     }
 
+    /// In-memory reference build: materializes every row and is meant for
+    /// proofs and small corpora. The bounded path is [`Self::stream`] into
+    /// [`StreamingSegmentBuilder::finish`].
     // PRJ-09
     pub fn build_generation_rows(
         &self,
         gen_id: u64,
         blocks: &[CommittedBlock],
     ) -> Result<GenerationRows, BulkBuilderError> {
-        let coverage = validate_blocks(blocks)?;
-
-        let mut tx_data = collect_tx_and_occurrences(gen_id, blocks);
-        let mut filter_rows = build_filter_rows(gen_id, blocks);
-        let mut script_rows = build_script_rows(gen_id, tx_data.script_occurrences)?;
-
-        tx_data.tx_dir_rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        tx_data
-            .spend_dir_rows
-            .sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        filter_rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        script_rows
-            .script_dict
-            .sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        script_rows
-            .script_post
-            .sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        script_rows
-            .script_stats
-            .sort_unstable_by(|a, b| a.0.cmp(&b.0));
-
-        Ok(GenerationRows {
-            coverage,
-            tx_dir: tx_data.tx_dir_rows,
-            script_dict: script_rows.script_dict,
-            script_post: script_rows.script_post,
-            spend_dir: tx_data.spend_dir_rows,
-            script_stats: script_rows.script_stats,
-            filters: filter_rows,
-        })
+        let mut stream = self.stream(gen_id);
+        for block in blocks {
+            stream.push_block(block)?;
+        }
+        stream.finish_rows()
     }
 
     // PRJ-09
@@ -107,262 +98,807 @@ impl BulkSegmentBuilder {
         gen_id: u64,
         blocks: &[CommittedBlock],
     ) -> Result<Coverage, BulkBuilderError> {
-        let rows = self.build_generation_rows(gen_id, blocks)?;
+        let mut stream = self.stream(gen_id);
+        for block in blocks {
+            stream.push_block(block)?;
+        }
+        stream.finish(store)
+    }
 
-        let mut tx_iter = rows.tx_dir.into_iter();
-        store.ingest_sorted(ColumnFamily::TxDir, &mut tx_iter, &self.scratch_dir)?;
-
-        let mut dict_iter = rows.script_dict.into_iter();
-        store.ingest_sorted(ColumnFamily::ScriptDict, &mut dict_iter, &self.scratch_dir)?;
-
-        let mut post_iter = rows.script_post.into_iter();
-        store.ingest_sorted(ColumnFamily::ScriptPost, &mut post_iter, &self.scratch_dir)?;
-
-        let mut spend_iter = rows.spend_dir.into_iter();
-        store.ingest_sorted(ColumnFamily::SpendDir, &mut spend_iter, &self.scratch_dir)?;
-
-        let mut stats_iter = rows.script_stats.into_iter();
-        store.ingest_sorted(
-            ColumnFamily::ScriptStats,
-            &mut stats_iter,
-            &self.scratch_dir,
-        )?;
-
-        let mut filter_iter = rows.filters.into_iter();
-        store.ingest_sorted(ColumnFamily::Filters, &mut filter_iter, &self.scratch_dir)?;
-
-        Ok(rows.coverage)
+    #[must_use]
+    pub fn stream(&self, gen_id: u64) -> StreamingSegmentBuilder {
+        let permit = self
+            .cpu
+            .as_ref()
+            .and_then(|cpu| cpu.try_acquire_background());
+        StreamingSegmentBuilder::new(
+            gen_id,
+            Arc::clone(&self.budget),
+            permit,
+            self.scratch_dir.clone(),
+        )
     }
 }
 
-fn validate_blocks(blocks: &[CommittedBlock]) -> Result<Coverage, BulkBuilderError> {
-    let (Some(first), Some(last)) = (blocks.first(), blocks.last()) else {
-        return Err(BulkBuilderError::EmptyRange);
+/// Push/finish builder over the bounded external sort. `finish` ingests
+/// straight from the merged runs; `finish_rows` materializes the whole
+/// generation for in-memory consumers.
+pub struct StreamingSegmentBuilder {
+    gen_id: u64,
+    _permit: Option<BackgroundCpuPermit>,
+    tx_dir: SpillSorter,
+    spend_candidates: SpillSorter,
+    occurrences: SpillSorter,
+    spend_dir: SpillSorter,
+    script_dict: SpillSorter,
+    script_post: SpillSorter,
+    script_stats: SpillSorter,
+    filters: SpillSorter,
+    first_height: Option<u32>,
+    last_height: u32,
+    last_hash: [u8; 32],
+    ordinal: u32,
+    occurrence_seq: u32,
+    prev_filter_header: [u8; 32],
+    scratch_dir: PathBuf,
+}
+
+fn next_builder_serial() -> u64 {
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    SERIAL.fetch_add(1, Ordering::Relaxed)
+}
+
+const RUN_FILE_PREFIX: &str = "segbuild-";
+const ROW_CHARGE_OVERHEAD: u64 = 64;
+
+fn sweep_stale_runs(scratch_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(scratch_dir) else {
+        return;
     };
-    for window in blocks.windows(2) {
-        if window[1].height != window[0].height.saturating_add(1) {
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(RUN_FILE_PREFIX)
+        {
+            let _unused = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+impl StreamingSegmentBuilder {
+    fn new(
+        gen_id: u64,
+        budget: Arc<dyn BudgetCharge>,
+        permit: Option<BackgroundCpuPermit>,
+        scratch_dir: PathBuf,
+    ) -> Self {
+        let builder_serial = next_builder_serial();
+        sweep_stale_runs(&scratch_dir);
+        let owner = BudgetOwner::IndexBuilder;
+        let sorter_ids = [
+            "txdir", "cands", "occur", "spend", "dict", "post", "stats", "filtr",
+        ];
+        let mut next_sorter = 0usize;
+        let mut maker = || {
+            let sorter_id = sorter_ids[next_sorter];
+            next_sorter += 1;
+            SpillSorter::new(
+                Arc::clone(&budget),
+                owner,
+                scratch_dir.clone(),
+                builder_serial,
+                sorter_id,
+            )
+        };
+        Self {
+            gen_id,
+            _permit: permit,
+            tx_dir: maker(),
+            spend_candidates: maker(),
+            occurrences: maker(),
+            spend_dir: maker(),
+            script_dict: maker(),
+            script_post: maker(),
+            script_stats: maker(),
+            filters: maker(),
+            first_height: None,
+            last_height: 0,
+            last_hash: [0; 32],
+            ordinal: 0,
+            occurrence_seq: 0,
+            prev_filter_header: [0; 32],
+            scratch_dir,
+        }
+    }
+
+    #[must_use]
+    pub fn total_runs_spilled(&self) -> usize {
+        self.tx_dir.spilled
+            + self.spend_candidates.spilled
+            + self.occurrences.spilled
+            + self.spend_dir.spilled
+            + self.script_dict.spilled
+            + self.script_post.spilled
+            + self.script_stats.spilled
+            + self.filters.spilled
+    }
+
+    pub fn push_block(&mut self, block: &CommittedBlock) -> Result<(), BulkBuilderError> {
+        if self.first_height.is_some() && block.height != self.last_height.saturating_add(1) {
             return Err(BulkBuilderError::InvalidBlockSequence);
         }
-    }
-    Ok(Coverage::new(first.height, last.height, last.hash))
-}
+        self.first_height.get_or_insert(block.height);
 
-fn collect_tx_and_occurrences(gen_id: u64, blocks: &[CommittedBlock]) -> TxOccurrences {
-    let mut tx_dir_rows = Vec::new();
-    let mut spend_dir_rows = Vec::new();
-    let mut script_occurrences: HashMap<[u8; 32], Vec<Occurrence>> = HashMap::new();
-    let mut txid_to_ordinal: HashMap<[u8; 32], u32> = HashMap::new();
-    let mut current_ordinal: u32 = 0;
-
-    for block in blocks {
         for tx in &block.txs {
-            let ordinal = current_ordinal;
-            current_ordinal = current_ordinal.saturating_add(1);
-            txid_to_ordinal.insert(tx.txid, ordinal);
-
-            let key = encode_tx_dir_key(gen_id, &tx.txid, block.height);
-            let val = encode_tx_dir_value(&block.hash, ordinal, tx.offset, tx.len);
-            tx_dir_rows.push((key.to_vec(), val.to_vec()));
-
-            process_tx_inputs(
-                gen_id,
-                ordinal,
-                &tx.inputs,
-                &txid_to_ordinal,
-                &mut spend_dir_rows,
-                &mut script_occurrences,
-            );
-            process_tx_outputs(ordinal, &tx.outputs, &mut script_occurrences);
-        }
-    }
-
-    TxOccurrences {
-        tx_dir_rows,
-        spend_dir_rows,
-        script_occurrences,
-    }
-}
-
-fn process_tx_inputs(
-    gen_id: u64,
-    ordinal: u32,
-    inputs: &[SpentPrevout],
-    txid_to_ordinal: &HashMap<[u8; 32], u32>,
-    spend_dir_rows: &mut Vec<(Vec<u8>, Vec<u8>)>,
-    script_occurrences: &mut HashMap<[u8; 32], Vec<Occurrence>>,
-) {
-    for input in inputs {
-        if input.txid == [0u8; 32] && input.vout == u32::MAX {
-            continue;
-        }
-        if let Some(&creation_ord) = txid_to_ordinal.get(&input.txid) {
-            let key = encode_spend_dir_key(gen_id, creation_ord, input.vout);
-            let val = encode_spend_dir_value(ordinal);
-            spend_dir_rows.push((key.to_vec(), val.to_vec()));
-        }
-        if !input.script.is_empty() {
-            let script_hash: [u8; 32] = Sha256::digest(&input.script).into();
-            script_occurrences
-                .entry(script_hash)
-                .or_default()
-                .push(Occurrence {
-                    ordinal,
-                    flags: POSTING_FLAG_SPENDING,
-                    sats: input.value,
-                });
-        }
-    }
-}
-
-fn process_tx_outputs(
-    ordinal: u32,
-    outputs: &[CreatedOutput],
-    script_occurrences: &mut HashMap<[u8; 32], Vec<Occurrence>>,
-) {
-    for output in outputs {
-        if !output.script.is_empty() && output.script[0] != 0x6a {
-            let script_hash: [u8; 32] = Sha256::digest(&output.script).into();
-            script_occurrences
-                .entry(script_hash)
-                .or_default()
-                .push(Occurrence {
-                    ordinal,
-                    flags: POSTING_FLAG_FUNDING,
-                    sats: output.value,
-                });
-        }
-    }
-}
-
-fn build_script_rows(
-    gen_id: u64,
-    mut script_occurrences: HashMap<[u8; 32], Vec<Occurrence>>,
-) -> Result<ScriptRows, BulkBuilderError> {
-    let mut sorted_hashes: Vec<[u8; 32]> = script_occurrences.keys().copied().collect();
-    sorted_hashes.sort_unstable();
-
-    let mut script_dict = Vec::with_capacity(sorted_hashes.len());
-    let mut script_stats = Vec::with_capacity(sorted_hashes.len());
-    let mut script_post = Vec::new();
-
-    for (dense_id, script_hash) in sorted_hashes.into_iter().enumerate() {
-        let script_id =
-            u32::try_from(dense_id).map_err(|_| BulkBuilderError::InvalidBlockSequence)?;
-        let dict_key = encode_script_dict_key(gen_id, &script_hash);
-        let dict_val = encode_script_dict_value(script_id);
-        script_dict.push((dict_key.to_vec(), dict_val.to_vec()));
-
-        let mut occurrences = script_occurrences.remove(&script_hash).unwrap_or_default();
-        occurrences.sort_unstable_by_key(|o| o.ordinal);
-
-        let (stats, posting_items) = summarize_occurrences(&occurrences);
-        let stats_key = encode_script_stats_key(gen_id, script_id);
-        let stats_val = encode_script_stats_value(&stats);
-        script_stats.push((stats_key.to_vec(), stats_val.to_vec()));
-
-        emit_posting_chunks(gen_id, script_id, posting_items, &mut script_post);
-    }
-
-    Ok(ScriptRows {
-        script_dict,
-        script_post,
-        script_stats,
-    })
-}
-
-fn summarize_occurrences(occurrences: &[Occurrence]) -> (ScriptStats, Vec<PostingItem>) {
-    let mut stats = ScriptStats::default();
-    let mut posting_items = Vec::with_capacity(occurrences.len());
-    let mut last_ordinal = 0u32;
-
-    for occ in occurrences {
-        if occ.flags == POSTING_FLAG_FUNDING {
-            stats.funded_count = stats.funded_count.saturating_add(1);
-            stats.funded_sats = stats.funded_sats.saturating_add(occ.sats);
-        } else if occ.flags == POSTING_FLAG_SPENDING {
-            stats.spent_count = stats.spent_count.saturating_add(1);
-            stats.spent_sats = stats.spent_sats.saturating_add(occ.sats);
+            let ordinal = self.ordinal;
+            self.ordinal = self.ordinal.saturating_add(1);
+            let tx_key = encode_tx_dir_key(self.gen_id, &tx.txid, block.height);
+            let tx_val = encode_tx_dir_value(&block.hash, ordinal, tx.offset, tx.len);
+            self.tx_dir.push_row(tx_key.to_vec(), tx_val.to_vec())?;
+            self.push_inputs(ordinal, &tx.inputs)?;
+            self.push_outputs(ordinal, &tx.outputs)?;
         }
 
-        let delta = occ.ordinal.saturating_sub(last_ordinal);
-        last_ordinal = occ.ordinal;
-        posting_items.push(PostingItem {
-            delta_ordinal: delta,
-            flags: occ.flags,
-        });
+        let (filter, filter_hash, header) = self.build_block_filter(block);
+        self.prev_filter_header = header;
+        let filter_key = encode_filter_key(self.gen_id, block.height);
+        let filter_val = encode_filter_value(&block.hash, &filter_hash, &header, &filter);
+        self.filters.push_row(filter_key.to_vec(), filter_val)?;
+
+        self.last_height = block.height;
+        self.last_hash = block.hash;
+        Ok(())
     }
 
-    (stats, posting_items)
-}
-
-fn emit_posting_chunks(
-    gen_id: u64,
-    script_id: u32,
-    posting_items: Vec<PostingItem>,
-    script_post: &mut Vec<(Vec<u8>, Vec<u8>)>,
-) {
-    script_post.extend(chunk_postings(gen_id, script_id, posting_items));
-}
-
-fn build_filter_rows(gen_id: u64, blocks: &[CommittedBlock]) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let mut rows = Vec::with_capacity(blocks.len());
-    let mut prev_header = [0u8; 32];
-
-    for block in blocks {
-        let (filter, filter_hash, filter_header) = build_block_filter(block, &prev_header);
-        prev_header = filter_header;
-
-        let key = encode_filter_key(gen_id, block.height);
-        let val = encode_filter_value(&block.hash, &filter_hash, &filter_header, &filter);
-        rows.push((key.to_vec(), val));
-    }
-
-    rows
-}
-
-fn build_block_filter(
-    block: &CommittedBlock,
-    prev_header: &[u8; 32],
-) -> (Vec<u8>, [u8; 32], [u8; 32]) {
-    use bitcoin_rs_consensus::primitives::encode;
-
-    let mut k0_bytes = [0u8; 8];
-    k0_bytes.copy_from_slice(&block.hash[..8]);
-    let k0 = u64::from_le_bytes(k0_bytes);
-
-    let mut k1_bytes = [0u8; 8];
-    k1_bytes.copy_from_slice(&block.hash[8..16]);
-    let k1 = u64::from_le_bytes(k1_bytes);
-
-    let mut filter = Vec::new();
-    let mut writer = bitcoin::bip158::GcsFilterWriter::new(&mut filter, k0, k1, 784_931, 19);
-    let mut created: HashMap<([u8; 32], u32), &[u8]> = HashMap::new();
-
-    for tx in &block.txs {
-        for input in &tx.inputs {
+    fn push_inputs(
+        &mut self,
+        ordinal: u32,
+        inputs: &[SpentPrevout],
+    ) -> Result<(), BulkBuilderError> {
+        for input in inputs {
             if input.txid == [0u8; 32] && input.vout == u32::MAX {
                 continue;
             }
-            if let Some(&script) = created.get(&(input.txid, input.vout)) {
-                writer.add_element(script);
-            } else if !input.script.is_empty() {
-                writer.add_element(&input.script);
+            let mut candidate_key = Vec::with_capacity(40);
+            candidate_key.extend_from_slice(&input.txid);
+            candidate_key.extend_from_slice(&input.vout.to_be_bytes());
+            candidate_key.extend_from_slice(&ordinal.to_be_bytes());
+            self.spend_candidates.push_row(candidate_key, Vec::new())?;
+            self.push_occurrence(&input.script, ordinal, POSTING_FLAG_SPENDING, input.value)?;
+        }
+        Ok(())
+    }
+
+    fn push_outputs(
+        &mut self,
+        ordinal: u32,
+        outputs: &[CreatedOutput],
+    ) -> Result<(), BulkBuilderError> {
+        for output in outputs {
+            self.push_occurrence(&output.script, ordinal, POSTING_FLAG_FUNDING, output.value)?;
+        }
+        Ok(())
+    }
+
+    fn push_occurrence(
+        &mut self,
+        script: &[u8],
+        ordinal: u32,
+        flags: u8,
+        sats: u64,
+    ) -> Result<(), BulkBuilderError> {
+        if script.is_empty() || (flags == POSTING_FLAG_FUNDING && script[0] == 0x6a) {
+            return Ok(());
+        }
+        let hash: [u8; 32] = Sha256::digest(script).into();
+        let seq = self.occurrence_seq;
+        self.occurrence_seq = self.occurrence_seq.saturating_add(1);
+        let mut key = Vec::with_capacity(41);
+        key.extend_from_slice(&hash);
+        key.extend_from_slice(&ordinal.to_be_bytes());
+        key.extend_from_slice(&seq.to_be_bytes());
+        key.push(flags);
+        self.occurrences.push_row(key, sats.to_le_bytes().to_vec())
+    }
+
+    fn build_block_filter(&self, block: &CommittedBlock) -> (Vec<u8>, [u8; 32], [u8; 32]) {
+        use bitcoin_rs_consensus::primitives::encode;
+
+        let mut k0_bytes = [0u8; 8];
+        k0_bytes.copy_from_slice(&block.hash[..8]);
+        let k0 = u64::from_le_bytes(k0_bytes);
+
+        let mut k1_bytes = [0u8; 8];
+        k1_bytes.copy_from_slice(&block.hash[8..16]);
+        let k1 = u64::from_le_bytes(k1_bytes);
+
+        let mut filter = Vec::new();
+        let mut writer = bitcoin::bip158::GcsFilterWriter::new(&mut filter, k0, k1, 784_931, 19);
+        let mut created: HashMap<([u8; 32], u32), &[u8]> = HashMap::new();
+
+        for tx in &block.txs {
+            for input in &tx.inputs {
+                if input.txid == [0u8; 32] && input.vout == u32::MAX {
+                    continue;
+                }
+                if let Some(&script) = created.get(&(input.txid, input.vout)) {
+                    writer.add_element(script);
+                } else if !input.script.is_empty() {
+                    writer.add_element(&input.script);
+                }
+            }
+
+            for output in &tx.outputs {
+                created.insert((tx.txid, output.vout), &output.script);
+                if !output.script.is_empty() && output.script[0] != 0x6a {
+                    writer.add_element(&output.script);
+                }
             }
         }
 
-        for output in &tx.outputs {
-            created.insert((tx.txid, output.vout), &output.script);
-            if !output.script.is_empty() && output.script[0] != 0x6a {
-                writer.add_element(&output.script);
+        let _ = writer.finish();
+        let filter_hash = encode::double_sha256(&filter).to_le_bytes();
+        let mut header_input = [0u8; 64];
+        header_input[..32].copy_from_slice(&filter_hash);
+        header_input[32..].copy_from_slice(&self.prev_filter_header);
+        let header = encode::double_sha256(&header_input).to_le_bytes();
+        (filter, filter_hash, header)
+    }
+
+    // PRJ-09
+    pub fn finish<S: KvStore + ?Sized>(&mut self, store: &S) -> Result<Coverage, BulkBuilderError> {
+        let coverage = self.coverage()?;
+        self.resolve_spends()?;
+        self.emit_script_rows()?;
+
+        let families = [
+            (&mut self.tx_dir, ColumnFamily::TxDir),
+            (&mut self.script_dict, ColumnFamily::ScriptDict),
+            (&mut self.script_post, ColumnFamily::ScriptPost),
+            (&mut self.spend_dir, ColumnFamily::SpendDir),
+            (&mut self.script_stats, ColumnFamily::ScriptStats),
+            (&mut self.filters, ColumnFamily::Filters),
+        ];
+        for (sorter, cf) in families {
+            let mut rows = sorter.sorted_into_rows()?;
+            store.ingest_sorted(cf, &mut rows, &self.scratch_dir)?;
+            sorter.release();
+        }
+        self.release_all();
+        Ok(coverage)
+    }
+
+    // PRJ-09
+    pub fn finish_rows(&mut self) -> Result<GenerationRows, BulkBuilderError> {
+        let coverage = self.coverage()?;
+        self.resolve_spends()?;
+        self.emit_script_rows()?;
+
+        let tx_dir = self.tx_dir.collect_rows()?;
+        let script_dict = self.script_dict.collect_rows()?;
+        let script_post = self.script_post.collect_rows()?;
+        let spend_dir = self.spend_dir.collect_rows()?;
+        let script_stats = self.script_stats.collect_rows()?;
+        let filters = self.filters.collect_rows()?;
+        self.release_all();
+        Ok(GenerationRows {
+            coverage,
+            tx_dir,
+            script_dict,
+            script_post,
+            spend_dir,
+            script_stats,
+            filters,
+        })
+    }
+
+    fn coverage(&self) -> Result<Coverage, BulkBuilderError> {
+        let Some(first_height) = self.first_height else {
+            return Err(BulkBuilderError::EmptyRange);
+        };
+        Ok(Coverage::new(
+            first_height,
+            self.last_height,
+            self.last_hash,
+        ))
+    }
+
+    /// Merge-joins spend candidates against the sorted transaction
+    /// directory: in-generation creations resolve to the last directory
+    /// ordinal for the spent txid (BIP30 duplicates included), older coins
+    /// leave no spender row, and repeated spends of one creation reuse the
+    /// cached resolution.
+    fn resolve_spends(&mut self) -> Result<(), BulkBuilderError> {
+        self.tx_dir.finalize()?;
+        self.spend_candidates.finalize()?;
+        let mut directory = DirectoryScan {
+            rows: self.tx_dir.sorted_rows()?,
+            front: None,
+        };
+        directory.front = next_directory_row(&mut directory.rows)?;
+        let candidates = self.spend_candidates.sorted_rows()?;
+        let mut resolved: Option<([u8; 32], u32)> = None;
+        for candidate in candidates {
+            let (spent_txid, vout, spending_ordinal) = decode_candidate(&candidate)?;
+            let Some(creation) = resolve_creation(&mut directory, &mut resolved, spent_txid)?
+            else {
+                continue;
+            };
+            let spend_key = encode_spend_dir_key(self.gen_id, creation, vout);
+            let spend_val = encode_spend_dir_value(spending_ordinal);
+            self.spend_dir
+                .push_row(spend_key.to_vec(), spend_val.to_vec())?;
+        }
+        Ok(())
+    }
+
+    /// Drains script occurrences in hash order, assigns dense dictionary
+    /// ids, and emits stats and size-chunked postings per script.
+    fn emit_script_rows(&mut self) -> Result<(), BulkBuilderError> {
+        self.occurrences.finalize()?;
+        let mut script_id: u32 = 0;
+        let mut group: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut group_hash: Option<[u8; 32]> = None;
+        for row in self.occurrences.sorted_rows()? {
+            let hash: [u8; 32] = row.0[..32]
+                .try_into()
+                .map_err(|_| BulkBuilderError::InvalidBlockSequence)?;
+            match group_hash {
+                Some(existing) if existing == hash => {}
+                Some(_) => {
+                    self.flush_script_group(&group, script_id)?;
+                    script_id = script_id.saturating_add(1);
+                    group.clear();
+                    group_hash = Some(hash);
+                }
+                None => group_hash = Some(hash),
             }
+            group.push(row);
+        }
+        if group_hash.is_some() {
+            self.flush_script_group(&group, script_id)?;
+        }
+        Ok(())
+    }
+
+    fn flush_script_group(
+        &mut self,
+        group: &[(Vec<u8>, Vec<u8>)],
+        script_id: u32,
+    ) -> Result<(), BulkBuilderError> {
+        let Some(hash) = group.first().map(|row| decode_script_hash(&row.0)) else {
+            return Ok(());
+        };
+        let hash = hash?;
+        let dict_key = encode_script_dict_key(self.gen_id, &hash);
+        self.script_dict.push_row(
+            dict_key.to_vec(),
+            encode_script_dict_value(script_id).to_vec(),
+        )?;
+
+        let mut stats = ScriptStats::default();
+        let mut items = Vec::with_capacity(group.len());
+        let mut last_ordinal = 0u32;
+        for (key, value) in group {
+            let ordinal = decode_be_u32(&key[32..36])?;
+            let flags = decode_flags(key)?;
+            let sats = u64::from_le_bytes(decode_array8(value)?);
+            if flags == POSTING_FLAG_FUNDING {
+                stats.funded_count = stats.funded_count.saturating_add(1);
+                stats.funded_sats = stats.funded_sats.saturating_add(sats);
+            } else if flags == POSTING_FLAG_SPENDING {
+                stats.spent_count = stats.spent_count.saturating_add(1);
+                stats.spent_sats = stats.spent_sats.saturating_add(sats);
+            }
+            let delta = ordinal.saturating_sub(last_ordinal);
+            last_ordinal = ordinal;
+            items.push(PostingItem {
+                delta_ordinal: delta,
+                flags,
+            });
+        }
+        let stats_key = encode_script_stats_key(self.gen_id, script_id);
+        self.script_stats.push_row(
+            stats_key.to_vec(),
+            encode_script_stats_value(&stats).to_vec(),
+        )?;
+        for (key, value) in chunk_postings(self.gen_id, script_id, items) {
+            self.script_post.push_row(key, value)?;
+        }
+        Ok(())
+    }
+
+    fn release_all(&mut self) {
+        self.spend_candidates.release();
+        self.occurrences.release();
+    }
+}
+
+impl Drop for StreamingSegmentBuilder {
+    fn drop(&mut self) {
+        self.release_all();
+    }
+}
+
+fn decode_script_hash(key: &[u8]) -> Result<[u8; 32], BulkBuilderError> {
+    key[..32]
+        .try_into()
+        .map_err(|_| BulkBuilderError::InvalidBlockSequence)
+}
+
+fn decode_candidate(
+    candidate: &(Vec<u8>, Vec<u8>),
+) -> Result<([u8; 32], u32, u32), BulkBuilderError> {
+    let key = &candidate.0;
+    if key.len() != 40 {
+        return Err(BulkBuilderError::InvalidBlockSequence);
+    }
+    let txid: [u8; 32] = key[..32]
+        .try_into()
+        .map_err(|_| BulkBuilderError::InvalidBlockSequence)?;
+    let vout = u32::from_be_bytes(decode_array4(&key[32..36])?);
+    let ordinal = u32::from_be_bytes(decode_array4(&key[36..40])?);
+    Ok((txid, vout, ordinal))
+}
+
+struct DirectoryScan {
+    rows: SortedRows,
+    front: Option<([u8; 32], u32)>,
+}
+
+fn resolve_creation(
+    directory: &mut DirectoryScan,
+    cached: &mut Option<([u8; 32], u32)>,
+    spent_txid: [u8; 32],
+) -> Result<Option<u32>, BulkBuilderError> {
+    if cached.is_some_and(|(txid, _)| txid == spent_txid) {
+        return Ok(cached.map(|(_, ordinal)| ordinal));
+    }
+    *cached = None;
+    let Some((txid, first_ordinal)) = advance_directory_to(directory, spent_txid)? else {
+        return Ok(None);
+    };
+    if txid != spent_txid {
+        return Ok(None);
+    }
+    let mut last = first_ordinal;
+    while let Some((same, ordinal)) = directory.front {
+        if same != spent_txid {
+            break;
+        }
+        last = ordinal;
+        directory.front = next_directory_row(&mut directory.rows)?;
+    }
+    *cached = Some((spent_txid, last));
+    Ok(Some(last))
+}
+
+fn advance_directory_to(
+    directory: &mut DirectoryScan,
+    spent_txid: [u8; 32],
+) -> Result<Option<([u8; 32], u32)>, BulkBuilderError> {
+    while let Some((txid, ordinal)) = directory.front {
+        if txid >= spent_txid {
+            return Ok(Some((txid, ordinal)));
+        }
+        directory.front = next_directory_row(&mut directory.rows)?;
+    }
+    Ok(None)
+}
+
+fn next_directory_row(rows: &mut SortedRows) -> Result<Option<([u8; 32], u32)>, BulkBuilderError> {
+    for row in rows.by_ref() {
+        if row.0.len() == TX_DIR_KEY_LEN && row.1.len() >= 36 {
+            let txid: [u8; 32] = row.0[8..40]
+                .try_into()
+                .map_err(|_| BulkBuilderError::InvalidBlockSequence)?;
+            let ordinal = u32::from_be_bytes(decode_array4(&row.1[32..36])?);
+            return Ok(Some((txid, ordinal)));
+        }
+    }
+    Ok(None)
+}
+
+fn decode_array4(bytes: &[u8]) -> Result<[u8; 4], BulkBuilderError> {
+    bytes
+        .try_into()
+        .map_err(|_| BulkBuilderError::InvalidBlockSequence)
+}
+
+fn decode_array8(bytes: &[u8]) -> Result<[u8; 8], BulkBuilderError> {
+    bytes
+        .try_into()
+        .map_err(|_| BulkBuilderError::InvalidBlockSequence)
+}
+
+fn decode_be_u32(bytes: &[u8]) -> Result<u32, BulkBuilderError> {
+    Ok(u32::from_be_bytes(decode_array4(bytes)?))
+}
+
+fn decode_flags(key: &[u8]) -> Result<u8, BulkBuilderError> {
+    key.last()
+        .copied()
+        .ok_or(BulkBuilderError::InvalidBlockSequence)
+}
+
+struct RetainedCharge {
+    charge: Arc<dyn BudgetCharge>,
+    owner: BudgetOwner,
+    held: u64,
+}
+
+impl RetainedCharge {
+    fn take(&mut self, bytes: u64) -> Result<(), BudgetError> {
+        self.charge.reserve_bytes(self.owner, bytes)?;
+        self.charge.allocate_bytes(self.owner, bytes)?;
+        self.held = self.held.saturating_add(bytes);
+        Ok(())
+    }
+
+    fn give_back(&mut self, bytes: u64) {
+        let released = bytes.min(self.held);
+        self.charge.release_bytes(self.owner, released);
+        self.held -= released;
+    }
+}
+
+impl Drop for RetainedCharge {
+    fn drop(&mut self) {
+        self.give_back(self.held);
+    }
+}
+
+/// One family's rows: an in-memory buffer charged to the shared budget pool,
+/// spilled to a sorted run file when the pool refuses the next row. A row
+/// the pool cannot hold even after a spill stays buffered uncharged, so a
+/// valid logical row is never rejected and retained memory stays bounded by
+/// the pool plus one row per sorter.
+struct SpillSorter {
+    charge: RetainedCharge,
+    scratch_dir: PathBuf,
+    file_prefix: String,
+    buffer: Vec<(Vec<u8>, Vec<u8>)>,
+    buffered_bytes: u64,
+    runs: Vec<PathBuf>,
+    next_run_id: usize,
+    spilled: usize,
+    finalized: bool,
+}
+
+impl SpillSorter {
+    fn new(
+        charge: Arc<dyn BudgetCharge>,
+        owner: BudgetOwner,
+        scratch_dir: PathBuf,
+        builder_serial: u64,
+        sorter_id: &str,
+    ) -> Self {
+        Self {
+            charge: RetainedCharge {
+                charge,
+                owner,
+                held: 0,
+            },
+            scratch_dir,
+            file_prefix: format!("{RUN_FILE_PREFIX}{builder_serial:016x}-{sorter_id}-"),
+            buffer: Vec::new(),
+            buffered_bytes: 0,
+            runs: Vec::new(),
+            next_run_id: 0,
+            spilled: 0,
+            finalized: false,
         }
     }
 
-    let _ = writer.finish();
-    let filter_hash = encode::double_sha256(&filter).to_le_bytes();
-    let mut header_input = [0u8; 64];
-    header_input[..32].copy_from_slice(&filter_hash);
-    header_input[32..].copy_from_slice(prev_header);
-    let header = encode::double_sha256(&header_input).to_le_bytes();
-    (filter, filter_hash, header)
+    fn row_bytes(key: &[u8], value: &[u8]) -> u64 {
+        u64::try_from(key.len().saturating_add(value.len()))
+            .unwrap_or(u64::MAX)
+            .saturating_add(ROW_CHARGE_OVERHEAD)
+    }
+
+    fn push_row(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), BulkBuilderError> {
+        let bytes = Self::row_bytes(&key, &value);
+        match self.charge.take(bytes) {
+            Ok(()) => {}
+            Err(BudgetError::BudgetExhausted) => {
+                self.spill()?;
+                if let Err(other) = self.charge.take(bytes)
+                    && !matches!(other, BudgetError::BudgetExhausted)
+                {
+                    return Err(BulkBuilderError::Budget(other));
+                }
+            }
+            Err(other) => return Err(BulkBuilderError::Budget(other)),
+        }
+        self.buffered_bytes = self.buffered_bytes.saturating_add(bytes);
+        self.buffer.push((key, value));
+        Ok(())
+    }
+
+    fn spill(&mut self) -> Result<(), BulkBuilderError> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        self.buffer
+            .sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let path = self
+            .scratch_dir
+            .join(format!("{}{:06}", self.file_prefix, self.next_run_id));
+        self.next_run_id = self.next_run_id.saturating_add(1);
+        let file = std::fs::File::create(&path)?;
+        let mut writer = BufWriter::new(file);
+        for (key, value) in &self.buffer {
+            let key_len = u32::try_from(key.len()).map_err(|_| BulkBuilderError::RowTooLarge)?;
+            let value_len =
+                u32::try_from(value.len()).map_err(|_| BulkBuilderError::RowTooLarge)?;
+            writer.write_all(&key_len.to_le_bytes())?;
+            writer.write_all(&value_len.to_le_bytes())?;
+            writer.write_all(key)?;
+            writer.write_all(value)?;
+        }
+        writer.flush()?;
+        drop(writer);
+        self.runs.push(path);
+        self.spilled = self.spilled.saturating_add(1);
+        self.charge.give_back(self.buffered_bytes);
+        self.buffered_bytes = 0;
+        self.buffer = Vec::new();
+        Ok(())
+    }
+
+    fn finalize(&mut self) -> Result<(), BulkBuilderError> {
+        if !self.finalized {
+            self.spill()?;
+            self.buffer
+                .sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            self.finalized = true;
+        }
+        Ok(())
+    }
+
+    /// Non-consuming ascending stream over runs plus a clone of the sorted
+    /// remainder; the clone is bounded by the budget window.
+    fn sorted_rows(&mut self) -> Result<SortedRows, BulkBuilderError> {
+        self.finalize()?;
+        SortedRows::open(&self.runs, self.buffer.clone())
+    }
+
+    /// Consuming ascending stream used by ingestion.
+    fn sorted_into_rows(&mut self) -> Result<SortedRows, BulkBuilderError> {
+        self.finalize()?;
+        SortedRows::open(&self.runs, std::mem::take(&mut self.buffer))
+    }
+
+    fn collect_rows(&mut self) -> Result<SegmentRows, BulkBuilderError> {
+        let rows = self.sorted_into_rows()?.collect();
+        self.release();
+        Ok(rows)
+    }
+
+    fn release(&mut self) {
+        for path in std::mem::take(&mut self.runs) {
+            let _unused = std::fs::remove_file(path);
+        }
+        self.buffered_bytes = 0;
+        self.buffer = Vec::new();
+    }
 }
+
+impl Drop for SpillSorter {
+    fn drop(&mut self) {
+        for path in std::mem::take(&mut self.runs) {
+            let _unused = std::fs::remove_file(path);
+        }
+    }
+}
+
+type RunRow = Option<(Vec<u8>, Vec<u8>)>;
+
+struct RunCursor {
+    reader: BufReader<std::fs::File>,
+    current: Option<(Vec<u8>, Vec<u8>)>,
+}
+
+impl RunCursor {
+    fn open(path: &Path) -> Result<Self, BulkBuilderError> {
+        let file = std::fs::File::open(path)?;
+        let mut reader = BufReader::new(file);
+        let current = Self::read_row(&mut reader)?;
+        Ok(Self { reader, current })
+    }
+
+    fn read_row(reader: &mut BufReader<std::fs::File>) -> Result<RunRow, BulkBuilderError> {
+        let mut len_buf = [0u8; 4];
+        match reader.read_exact(&mut len_buf) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let key_len = usize::try_from(u32::from_le_bytes(len_buf))
+            .map_err(|_| BulkBuilderError::RowTooLarge)?;
+        reader.read_exact(&mut len_buf)?;
+        let value_len = usize::try_from(u32::from_le_bytes(len_buf))
+            .map_err(|_| BulkBuilderError::RowTooLarge)?;
+        let mut key = vec![0u8; key_len];
+        reader.read_exact(&mut key)?;
+        let mut value = vec![0u8; value_len];
+        reader.read_exact(&mut value)?;
+        Ok(Some((key, value)))
+    }
+
+    fn advance(&mut self) -> Result<(), BulkBuilderError> {
+        self.current = Self::read_row(&mut self.reader)?;
+        Ok(())
+    }
+}
+
+/// Ascending row stream over the spilled runs plus the sorted in-memory
+/// remainder (`PRJ-09` partitioned merge).
+///
+/// A run read failure poisons the stream: the next yielded row carries a
+/// key above every valid generation prefix, so `ingest_sorted` rejects the
+/// sequence instead of silently truncating the family.
+struct SortedRows {
+    runs: Vec<RunCursor>,
+    buffer: std::vec::IntoIter<(Vec<u8>, Vec<u8>)>,
+    poisoned: bool,
+}
+
+impl SortedRows {
+    fn open(runs: &[PathBuf], buffer: Vec<(Vec<u8>, Vec<u8>)>) -> Result<Self, BulkBuilderError> {
+        let cursors = runs
+            .iter()
+            .map(|path| RunCursor::open(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            runs: cursors,
+            buffer: buffer.into_iter(),
+            poisoned: false,
+        })
+    }
+
+    fn peek_min(&self) -> Option<usize> {
+        let mut min: Option<(&[u8], usize)> = None;
+        for (index, run) in self.runs.iter().enumerate() {
+            if let Some((key, _)) = &run.current {
+                if min.is_none_or(|best| key.as_slice() < best.0) {
+                    min = Some((key.as_slice(), index));
+                }
+            }
+        }
+        if let Some((key, _)) = self.buffer.as_slice().first() {
+            if min.is_none_or(|best| key.as_slice() < best.0) {
+                min = Some((key.as_slice(), usize::MAX));
+            }
+        }
+        min.map(|(_, source)| source)
+    }
+}
+
+impl Iterator for SortedRows {
+    type Item = (Vec<u8>, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.poisoned {
+            self.poisoned = false;
+            return Some((u64::MAX.to_be_bytes().to_vec(), Vec::new()));
+        }
+        let source = self.peek_min()?;
+        if source == usize::MAX {
+            return self.buffer.next();
+        }
+        let row = self.runs[source].current.take()?;
+        if self.runs[source].advance().is_err() {
+            self.poisoned = true;
+        }
+        Some(row)
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used)]
+#[path = "bulk_builder_tests.rs"]
+mod tests;

@@ -3,6 +3,8 @@ use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_consensus::primitives::Hash256;
@@ -11,6 +13,7 @@ use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_projection::segment::{
     Coverage, GenerationDescriptor, IndexGeneration, TailDescriptor, meta_gen_key,
 };
+use bitcoin_rs_storage::budget::{BudgetCharge, BudgetError, BudgetOwner};
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
 use bitcoin_rs_storage::utxo::contract::decode_undo_record;
@@ -31,6 +34,81 @@ const BLOCK_HEADER_LEN: usize = 80;
 const MAX_BLOCK_RECORD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_BLOCK_RECORD_BYTES_U64: u64 = 4 * 1024 * 1024;
 const ZERO_HASH: [u8; 32] = [0u8; 32];
+
+/// Refuses any reservation past `cap`, so the index builder spills sorted runs instead of exceeding the operator's budget.
+struct RebuildBudget {
+    cap: u64,
+    ledger: Mutex<RebuildLedger>,
+    refusals: AtomicU64,
+}
+
+#[derive(Default)]
+struct RebuildLedger {
+    reserved: u64,
+    charged: u64,
+}
+
+impl RebuildBudget {
+    fn new(cap: u64) -> Self {
+        Self {
+            cap,
+            ledger: Mutex::new(RebuildLedger::default()),
+            refusals: AtomicU64::new(0),
+        }
+    }
+
+    fn refusals(&self) -> u64 {
+        self.refusals.load(Ordering::SeqCst)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, RebuildLedger> {
+        self.ledger.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn headroom(&self, ledger: &RebuildLedger) -> u64 {
+        self.cap
+            .saturating_sub(ledger.reserved.saturating_add(ledger.charged))
+    }
+}
+
+impl BudgetCharge for RebuildBudget {
+    fn reserve_bytes(&self, _owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
+        let mut ledger = self.lock();
+        if bytes > self.headroom(&ledger) {
+            self.refusals.fetch_add(1, Ordering::SeqCst);
+            return Err(BudgetError::BudgetExhausted);
+        }
+        ledger.reserved = ledger.reserved.saturating_add(bytes);
+        Ok(())
+    }
+
+    fn allocate_bytes(&self, _owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
+        let mut ledger = self.lock();
+        if bytes > ledger.reserved {
+            return Err(BudgetError::UnreservedAllocation);
+        }
+        ledger.reserved = ledger.reserved.saturating_sub(bytes);
+        ledger.charged = ledger.charged.saturating_add(bytes);
+        Ok(())
+    }
+
+    fn release_bytes(&self, _owner: BudgetOwner, bytes: u64) {
+        let mut ledger = self.lock();
+        ledger.charged = ledger.charged.saturating_sub(bytes);
+    }
+
+    fn available_bytes(&self, _owner: BudgetOwner) -> u64 {
+        let ledger = self.lock();
+        self.headroom(&ledger)
+    }
+
+    fn ensure_available_bytes(&self, owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
+        if bytes > self.available_bytes(owner) {
+            return Err(BudgetError::BudgetExhausted);
+        }
+        Ok(())
+    }
+}
 
 struct ScratchGuard {
     path: PathBuf,
@@ -143,7 +221,10 @@ pub(crate) fn run_rebuild_index(
     }
 
     let scratch_guard = ScratchGuard::create(datadir.join("txindex_rebuild_scratch"))?;
-    let builder = BulkSegmentBuilder::new(budget_bytes, scratch_guard.path.clone());
+    let budget = std::sync::Arc::new(RebuildBudget::new(
+        u64::try_from(budget_bytes).unwrap_or(u64::MAX),
+    ));
+    let builder = BulkSegmentBuilder::new(budget.clone(), None, scratch_guard.path.clone());
     let coverage = if blocks.is_empty() {
         Coverage::new(0, 0, [0u8; 32])
     } else {
@@ -181,6 +262,7 @@ pub(crate) fn run_rebuild_index(
         engine: engine.as_str().to_owned(),
         format_version: reset.format_version,
         blocks: u64::try_from(blocks.len()).unwrap_or(u64::MAX),
+        budget_refusals: budget.refusals(),
         families: reset
             .families
             .into_iter()

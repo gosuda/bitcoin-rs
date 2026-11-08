@@ -1,10 +1,13 @@
-use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
+use bitcoin_rs_projection::segment::bulk_builder::{BulkSegmentBuilder, StreamingSegmentBuilder};
 use bitcoin_rs_projection::segment::{
     Coverage, TailWriterState, append_tail_block, seal_tail_generation,
 };
+use bitcoin_rs_storage::budget::{BudgetCharge, BudgetError, BudgetOwner, UnboundedBudget};
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
 use bitcoin_rs_storage::{Bytes, ColumnFamily, KvStore, RocksDbStore};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::tempdir;
 
 use crate::support::TestError;
@@ -39,6 +42,13 @@ fn cross_block_input(height: u32) -> SpentPrevout {
     }
 }
 
+fn cross_block_second_input(height: u32) -> SpentPrevout {
+    let mut second = cross_block_input(height);
+    second.vout = 1;
+    second.value = 7_000;
+    second
+}
+
 fn create_synthetic_blocks(count: u32) -> Vec<CommittedBlock> {
     let Ok(capacity) = usize::try_from(count) else {
         return Vec::new();
@@ -71,6 +81,7 @@ fn create_synthetic_blocks(count: u32) -> Vec<CommittedBlock> {
             }
             if t == 2 {
                 inputs.push(cross_block_input(h));
+                inputs.push(cross_block_second_input(h));
             }
             if t == 4 {
                 let mut older_txid = [0u8; 32];
@@ -165,7 +176,11 @@ fn bulk_and_live_generations_are_byte_identical() -> Result<(), TestError> {
     let dir_b = tempdir()?;
     let scratch_b = tempdir()?;
     let store_b = RocksDbStore::open(dir_b.path())?;
-    let builder_b = BulkSegmentBuilder::new(64 * 1024 * 1024, scratch_b.path().to_path_buf());
+    let builder_b = BulkSegmentBuilder::new(
+        Arc::new(UnboundedBudget),
+        None,
+        scratch_b.path().to_path_buf(),
+    );
     let coverage = builder_b
         .build_and_ingest(&store_b, gen_id, &blocks)
         .map_err(|e| e.to_string())?;
@@ -264,7 +279,11 @@ fn tail_seal_and_bulk_family_digests(
     let dir_bulk = tempdir()?;
     let scratch_bulk = tempdir()?;
     let store_bulk = RocksDbStore::open(dir_bulk.path())?;
-    let builder = BulkSegmentBuilder::new(64 * 1024 * 1024, scratch_bulk.path().to_path_buf());
+    let builder = BulkSegmentBuilder::new(
+        Arc::new(UnboundedBudget),
+        None,
+        scratch_bulk.path().to_path_buf(),
+    );
     let coverage_bulk = builder
         .build_and_ingest(&store_bulk, gen_id, blocks)
         .map_err(|e| e.to_string())?;
@@ -395,5 +414,156 @@ fn seal_repack_respects_posting_chunk_byte_cap() -> Result<(), TestError> {
         total_items, occurrences,
         "seal lost or duplicated occurrences"
     );
+    Ok(())
+}
+
+struct PoolBudget {
+    capacity: u64,
+    remaining: AtomicU64,
+    peak_outstanding: AtomicU64,
+}
+
+impl PoolBudget {
+    fn new(capacity: u64) -> Self {
+        Self {
+            capacity,
+            remaining: AtomicU64::new(capacity),
+            peak_outstanding: AtomicU64::new(0),
+        }
+    }
+
+    fn peak(&self) -> u64 {
+        self.peak_outstanding.load(Ordering::SeqCst)
+    }
+}
+
+impl BudgetCharge for PoolBudget {
+    fn reserve_bytes(&self, _owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
+        let mut current = self.remaining.load(Ordering::SeqCst);
+        loop {
+            if current < bytes {
+                return Err(BudgetError::BudgetExhausted);
+            }
+            match self.remaining.compare_exchange(
+                current,
+                current - bytes,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    let outstanding = self.capacity - self.remaining.load(Ordering::SeqCst);
+                    let peak = self.peak_outstanding.load(Ordering::SeqCst);
+                    if outstanding > peak {
+                        self.peak_outstanding.store(outstanding, Ordering::SeqCst);
+                    }
+                    return Ok(());
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn allocate_bytes(&self, _owner: BudgetOwner, _bytes: u64) -> Result<(), BudgetError> {
+        Ok(())
+    }
+
+    fn release_bytes(&self, _owner: BudgetOwner, bytes: u64) {
+        self.remaining.fetch_add(bytes, Ordering::SeqCst);
+    }
+
+    fn available_bytes(&self, _owner: BudgetOwner) -> u64 {
+        self.remaining.load(Ordering::SeqCst)
+    }
+}
+
+struct SpillOutcome {
+    digests: Vec<(ColumnFamily, [u8; 32])>,
+    spills: usize,
+    peak_outstanding: u64,
+    leftover_files: usize,
+}
+
+// PRJ-09
+fn run_stream_build(
+    budget: PoolBudget,
+    blocks: &[CommittedBlock],
+    gen_id: u64,
+) -> Result<SpillOutcome, TestError> {
+    let pool = Arc::new(budget);
+    let dir = tempdir()?;
+    let scratch = tempdir()?;
+    let store = RocksDbStore::open(dir.path())?;
+    let builder = BulkSegmentBuilder::new(pool.clone(), None, scratch.path().to_path_buf());
+    let mut stream: StreamingSegmentBuilder = builder.stream(gen_id);
+    for block in blocks {
+        stream.push_block(block).map_err(|e| e.to_string())?;
+    }
+    stream.finish(&store).map_err(|e| e.to_string())?;
+    let spills = stream.total_runs_spilled();
+    let cfs = [
+        ColumnFamily::TxDir,
+        ColumnFamily::ScriptDict,
+        ColumnFamily::ScriptPost,
+        ColumnFamily::SpendDir,
+        ColumnFamily::ScriptStats,
+        ColumnFamily::Filters,
+    ];
+    let digests = cfs
+        .iter()
+        .map(|&cf| (cf, compute_family_digest(&store, cf, gen_id)))
+        .collect();
+    let leftover_files = std::fs::read_dir(scratch.path())?
+        .filter_map(|entry| entry.ok())
+        .count();
+    Ok(SpillOutcome {
+        digests,
+        spills,
+        peak_outstanding: pool.peak(),
+        leftover_files,
+    })
+}
+
+// PRJ-09
+#[test]
+fn tiny_budget_spills_sorted_runs_and_matches_unbounded_output() -> Result<(), TestError> {
+    let blocks = create_synthetic_blocks(120);
+    const POOL: u64 = 48 * 1024;
+    let bounded = run_stream_build(PoolBudget::new(POOL), &blocks, 1)?;
+    let unbounded = run_stream_build(PoolBudget::new(u64::MAX), &blocks, 1)?;
+    assert!(bounded.spills > 0, "tiny budget must spill sorted runs");
+    assert!(
+        bounded.peak_outstanding <= POOL + 4096,
+        "retained {} exceeded pool plus one row",
+        bounded.peak_outstanding
+    );
+    assert_eq!(bounded.digests, unbounded.digests);
+    assert_eq!(
+        bounded.leftover_files, 0,
+        "finish must remove spill runs from scratch"
+    );
+    Ok(())
+}
+
+// PRJ-09
+#[test]
+fn stream_sweeps_stale_run_files_from_scratch() -> Result<(), TestError> {
+    let dir = tempdir()?;
+    let scratch = tempdir()?;
+    let store = RocksDbStore::open(dir.path())?;
+    std::fs::write(scratch.path().join("segbuild-stale000001"), b"junk")?;
+    let builder = BulkSegmentBuilder::new(
+        Arc::new(UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    );
+    let mut stream = builder.stream(1);
+    for block in &create_synthetic_blocks(2) {
+        stream.push_block(block).map_err(|e| e.to_string())?;
+    }
+    stream.finish(&store).map_err(|e| e.to_string())?;
+    let leftovers = std::fs::read_dir(scratch.path())?
+        .filter_map(|entry| entry.ok())
+        .count();
+    assert_eq!(leftovers, 0, "restart sweep must clear stale run files");
     Ok(())
 }

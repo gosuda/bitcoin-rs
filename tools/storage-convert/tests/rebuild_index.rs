@@ -41,6 +41,7 @@ struct RebuildIndexReport {
     datadir: String,
     engine: String,
     format_version: u32,
+    budget_refusals: u64,
     families: Vec<FamilyResetReport>,
 }
 
@@ -774,7 +775,11 @@ fn bulk_reference(blocks: &[FixtureBlock]) -> TestResult<Reference> {
         .iter()
         .map(|block| block.facts.clone())
         .collect::<Vec<_>>();
-    let builder = BulkSegmentBuilder::new(64 * 1024 * 1024, scratch.path().to_path_buf());
+    let builder = BulkSegmentBuilder::new(
+        std::sync::Arc::new(bitcoin_rs_storage::budget::UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    );
     builder
         .build_and_ingest(&store, BULK_GEN_ID, &facts)
         .map_err(|error| TestError::Assertion(error.to_string()))?;
@@ -1053,5 +1058,79 @@ fn rebuild_index_replaces_stale_generations_instead_of_overlaying() -> TestResul
         assert_generation_matches(&store, &reference.store);
         assert_descriptors(&store, &blocks)?;
     }
+    Ok(())
+}
+
+const WIDE_OUTPUTS: u32 = 40_000;
+
+fn wide_chain() -> Vec<FixtureBlock> {
+    let mut ledger = CoinLedger::new();
+    let genesis = assemble_block(
+        BlockSpec {
+            height: 0,
+            parent: [0u8; 32],
+            nonce: 0,
+            txs: vec![coinbase_tx(6, &[(50_000, p2wpkh_script(0xE1))])],
+        },
+        &mut ledger,
+    );
+    let outputs = (0..WIDE_OUTPUTS)
+        .map(|i| {
+            (
+                1_000 + u64::from(i),
+                p2wpkh_script(u8::try_from(i % 256).expect("byte")),
+            )
+        })
+        .collect::<Vec<_>>();
+    let wide = assemble_block(
+        BlockSpec {
+            height: 1,
+            parent: genesis.hash,
+            nonce: 1,
+            txs: vec![coinbase_tx(7, &outputs)],
+        },
+        &mut ledger,
+    );
+    vec![genesis, wide]
+}
+
+#[test]
+fn rebuild_index_spills_under_a_one_mib_budget_and_matches_unbounded() -> TestResult {
+    let tight_root = tempfile::tempdir()?;
+    let tight = prepare_datadir(tight_root.path())?;
+    let blocks = wide_chain();
+    let refs = blocks.iter().collect::<Vec<_>>();
+    write_chainstate(&tight, &refs, refs.last().copied(), &refs)?;
+    write_block_records(&tight, &refs)?;
+    let output = run_converter(&[
+        "rebuild-index",
+        "--datadir",
+        tight.to_string_lossy().as_ref(),
+        "--budget-mb",
+        "1",
+    ])?;
+    let tight_report = parse_rebuild_report(&output)?;
+    assert!(
+        tight_report.budget_refusals > 0,
+        "a 1 MiB budget over a >1 MiB row set must refuse reservations and spill runs: {tight_report:?}"
+    );
+
+    let wide_root = tempfile::tempdir()?;
+    let wide = prepare_datadir(wide_root.path())?;
+    write_chainstate(&wide, &refs, refs.last().copied(), &refs)?;
+    write_block_records(&wide, &refs)?;
+    let output = run_converter(&[
+        "rebuild-index",
+        "--datadir",
+        wide.to_string_lossy().as_ref(),
+        "--budget-mb",
+        "1024",
+    ])?;
+    let wide_report = parse_rebuild_report(&output)?;
+    assert_eq!(wide_report.budget_refusals, 0);
+
+    let tight_store = RocksDbStore::open(tight.join("txindex"))?;
+    let wide_store = RocksDbStore::open(wide.join("txindex"))?;
+    assert_generation_matches(&tight_store, &wide_store);
     Ok(())
 }
