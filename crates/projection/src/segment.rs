@@ -316,8 +316,20 @@ fn append_tail_filter(
 
     let mut filter_bytes = Vec::new();
     let mut writer = bitcoin::bip158::GcsFilterWriter::new(&mut filter_bytes, k0, k1, 784_931, 19);
+    let mut created: hashbrown::HashMap<([u8; 32], u32), &[u8]> = hashbrown::HashMap::new();
     for tx in &block.txs {
+        for input in &tx.inputs {
+            if input.txid == [0u8; 32] && input.vout == u32::MAX {
+                continue;
+            }
+            if let Some(&script) = created.get(&(input.txid, input.vout)) {
+                writer.add_element(script);
+            } else if !input.script.is_empty() {
+                writer.add_element(&input.script);
+            }
+        }
         for output in &tx.outputs {
+            created.insert((tx.txid, output.vout), &output.script);
             if !output.script.is_empty() && output.script[0] != 0x6a {
                 writer.add_element(&output.script);
             }

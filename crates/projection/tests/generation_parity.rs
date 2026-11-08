@@ -1,11 +1,38 @@
 use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
-use bitcoin_rs_projection::segment::{TailWriterState, append_tail_block, seal_tail_generation};
+use bitcoin_rs_projection::segment::{
+    Coverage, TailWriterState, append_tail_block, seal_tail_generation,
+};
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
 use bitcoin_rs_storage::{Bytes, ColumnFamily, KvStore, RocksDbStore};
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
 use crate::support::TestError;
+fn cross_block_script(height: u32) -> Bytes {
+    let mut script = b"\x76\xa9\x14cross_block_spent_\x88\xac".to_vec();
+    script[15] = u8::try_from(height & 0xff).unwrap_or(0);
+    Bytes::from(script)
+}
+
+fn cross_block_input(height: u32) -> SpentPrevout {
+    let (txid, spent_height, script) = if height > 1 {
+        let mut txid = [0u8; 32];
+        txid[..4].copy_from_slice(&(height - 1).to_be_bytes());
+        txid[4..8].copy_from_slice(&4u32.to_be_bytes());
+        (txid, height - 1, cross_block_script(height - 1))
+    } else {
+        ([0xFFu8; 32], 0, cross_block_script(0))
+    };
+    SpentPrevout {
+        txid,
+        vout: 0,
+        value: 33_000,
+        script,
+        height: spent_height,
+        coinbase: false,
+    }
+}
+
 fn create_synthetic_blocks(count: u32) -> Vec<CommittedBlock> {
     let Ok(capacity) = usize::try_from(count) else {
         return Vec::new();
@@ -23,7 +50,7 @@ fn create_synthetic_blocks(count: u32) -> Vec<CommittedBlock> {
             txid[4..8].copy_from_slice(&t.to_be_bytes());
 
             let mut inputs = Vec::new();
-            if t > 0 {
+            if t > 0 && t != 2 {
                 let mut prev_txid = [0u8; 32];
                 prev_txid[..4].copy_from_slice(&h.to_be_bytes());
                 prev_txid[4..8].copy_from_slice(&(t.saturating_sub(1)).to_be_bytes());
@@ -35,6 +62,9 @@ fn create_synthetic_blocks(count: u32) -> Vec<CommittedBlock> {
                     height: 0,
                     coinbase: false,
                 });
+            }
+            if t == 2 {
+                inputs.push(cross_block_input(h));
             }
 
             let outputs = vec![
@@ -144,6 +174,100 @@ fn bulk_and_live_generations_are_byte_identical() -> Result<(), TestError> {
         let digest_a = compute_family_digest(&store_a, cf, gen_id);
         let digest_b = compute_family_digest(&store_b, cf, gen_id);
         assert_eq!(digest_a, digest_b, "mismatch on {:?}", cf);
+    }
+    Ok(())
+}
+
+struct FamilyDigestPair {
+    family: ColumnFamily,
+    tail: [u8; 32],
+    bulk: [u8; 32],
+}
+
+fn cross_block_spend_generation() -> Vec<CommittedBlock> {
+    vec![CommittedBlock {
+        height: 1,
+        hash: [0x71; 32],
+        parent_hash: [0u8; 32],
+        header: [0u8; 80],
+        txs: vec![TxFacts {
+            txid: [0xD1; 32],
+            offset: 0,
+            len: 120,
+            inputs: vec![SpentPrevout {
+                txid: [0x99; 32],
+                vout: 3,
+                value: 20_000,
+                script: Bytes::copy_from_slice(b"\x51older_coin_script"),
+                height: 0,
+                coinbase: false,
+            }],
+            outputs: vec![CreatedOutput {
+                vout: 0,
+                value: 19_000,
+                script: Bytes::copy_from_slice(b"\x76\xa9\x14fresh_output\x88\xac"),
+            }],
+        }],
+    }]
+}
+
+fn tail_seal_and_bulk_family_digests(
+    blocks: &[CommittedBlock],
+    gen_id: u64,
+) -> Result<Vec<FamilyDigestPair>, TestError> {
+    let indexed_cfs = [
+        ColumnFamily::TxDir,
+        ColumnFamily::ScriptDict,
+        ColumnFamily::ScriptPost,
+        ColumnFamily::SpendDir,
+        ColumnFamily::ScriptStats,
+        ColumnFamily::Filters,
+    ];
+    let dir_tail = tempdir()?;
+    let scratch_tail = tempdir()?;
+    let store_tail = RocksDbStore::open(dir_tail.path())?;
+    let mut tail_state = TailWriterState::new();
+    for block in blocks {
+        let mut batch = store_tail.new_batch();
+        append_tail_block(&mut batch, block, &mut tail_state);
+        store_tail.write_durable(batch)?;
+    }
+    let coverage_tail = Coverage::new(
+        blocks.first().map_or(0, |b| b.height),
+        blocks.last().map_or(0, |b| b.height),
+        blocks.last().map_or([0u8; 32], |b| b.hash),
+    );
+    seal_tail_generation(&store_tail, gen_id, coverage_tail, scratch_tail.path())?;
+
+    let dir_bulk = tempdir()?;
+    let scratch_bulk = tempdir()?;
+    let store_bulk = RocksDbStore::open(dir_bulk.path())?;
+    let builder = BulkSegmentBuilder::new(64 * 1024 * 1024, scratch_bulk.path().to_path_buf());
+    let coverage_bulk = builder
+        .build_and_ingest(&store_bulk, gen_id, blocks)
+        .map_err(|e| e.to_string())?;
+    assert_eq!(coverage_tail, coverage_bulk);
+
+    Ok(indexed_cfs
+        .iter()
+        .map(|&cf| FamilyDigestPair {
+            family: cf,
+            tail: compute_family_digest(&store_tail, cf, gen_id),
+            bulk: compute_family_digest(&store_bulk, cf, gen_id),
+        })
+        .collect())
+}
+
+// PRJ-09
+#[test]
+fn cross_block_spends_produce_identical_tail_and_bulk_segments() -> Result<(), TestError> {
+    let blocks = cross_block_spend_generation();
+    for pair in tail_seal_and_bulk_family_digests(&blocks, 1)? {
+        assert_eq!(
+            pair.tail, pair.bulk,
+            "{:?} diverges on cross-block spend",
+            pair.family
+        );
     }
     Ok(())
 }

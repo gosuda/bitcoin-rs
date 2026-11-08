@@ -121,6 +121,7 @@ pub mod assumeutxo;
 mod batch;
 pub mod block_body;
 mod block_file;
+pub mod budget;
 pub mod cache_budget;
 pub mod coins;
 mod column_families;
