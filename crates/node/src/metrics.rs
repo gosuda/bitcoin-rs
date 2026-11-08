@@ -387,6 +387,14 @@ pub(crate) fn spawn_readiness_sampler(
     source: Arc<dyn DerivedIndexCapabilitySource>,
     shutdown: bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<JoinHandle<()>, RunError> {
+    spawn_readiness_sampler_polling(source, shutdown, READINESS_SAMPLE_INTERVAL)
+}
+
+fn spawn_readiness_sampler_polling(
+    source: Arc<dyn DerivedIndexCapabilitySource>,
+    shutdown: bitcoin_rs_execution::chain::LatchReader,
+    interval: Duration,
+) -> Result<JoinHandle<()>, RunError> {
     std::thread::Builder::new()
         .name("bitcoin-rs-metrics-readiness".into())
         .spawn(move || {
@@ -394,7 +402,7 @@ pub(crate) fn spawn_readiness_sampler(
                 publish_txindex_readiness(source.as_ref());
                 crossbeam_channel::select! {
                     recv(shutdown.closed()) -> _ => break,
-                    recv(crossbeam_channel::after(READINESS_SAMPLE_INTERVAL)) -> _ => {}
+                    recv(crossbeam_channel::after(interval)) -> _ => {}
                 }
             }
         })
