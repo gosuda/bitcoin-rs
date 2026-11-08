@@ -962,4 +962,29 @@ mod tests {
             "eight hexadecimal characters, optionally padded, are the only accepted --p2p-magic"
         );
     }
+
+    // ARCH-03
+    #[test]
+    fn parse_storage_backend_accepts_the_three_engines_and_rejects_retired_names() {
+        for (name, expected) in [
+            ("rocksdb", StorageBackend::RocksDb),
+            ("surrealkv", StorageBackend::SurrealKv),
+            ("mdbx", StorageBackend::Mdbx),
+        ] {
+            assert!(
+                matches!(parse_storage_backend(name), Ok(backend) if backend == expected),
+                "{name} is a config-keys.md storage_backend value and must parse to {expected:?}"
+            );
+        }
+        for retired in ["fjall", "redb"] {
+            let error = parse_storage_backend(retired);
+            assert!(
+                matches!(
+                    &error,
+                    Err(OptionParseError::StorageBackend { value }) if value == retired
+                ),
+                "{retired} names a retired engine and is not an accepted storage_backend value, got {error:?}"
+            );
+        }
+    }
 }

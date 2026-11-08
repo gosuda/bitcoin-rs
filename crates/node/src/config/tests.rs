@@ -1378,3 +1378,33 @@ fn empty_data_dir_is_rejected_by_config_validation() {
     };
     assert!(matches!(error, ConfigError::DataDirEmpty), "{error:?}");
 }
+
+// ARCH-03
+#[test]
+fn storage_backend_gate_admits_exactly_the_compiled_engines() {
+    for backend in [
+        bitcoin_rs_storage::StorageBackend::RocksDb,
+        bitcoin_rs_storage::StorageBackend::SurrealKv,
+        bitcoin_rs_storage::StorageBackend::Mdbx,
+    ] {
+        let mut config =
+            NodeConfig::default_for_network(bitcoin_rs_consensus::primitives::Network::Regtest);
+        config.storage.backend = backend;
+        let result = config.validate();
+        if backend.is_compiled_in() {
+            assert!(
+                result.is_ok(),
+                "{backend:?} is compiled in and must pass validation, got {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    &result,
+                    Err(ConfigError::StorageBackendUnsupported { backend: rejected })
+                        if *rejected == backend
+                ),
+                "{backend:?} is not compiled in and must be refused by name, got {result:?}"
+            );
+        }
+    }
+}
