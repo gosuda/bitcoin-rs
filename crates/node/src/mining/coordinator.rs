@@ -154,7 +154,6 @@ impl CoordinatorState {
         }
     }
 }
-// refused_by: modify_delete_guard · collision: none (no common ancestor text)
 
 pub struct MiningService {
     network: Network,
