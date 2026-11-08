@@ -29,6 +29,23 @@ use std::time::Instant;
 
 type AnchoredPreparation = Result<Result<PreparedBlock, IndexError>, DerivedIndexWorkerError>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrefixStop {
+    Complete,
+    MissingBody,
+    AwaitingFacts,
+}
+
+impl PrefixStop {
+    fn action(self) -> Option<ChunkAction> {
+        match self {
+            Self::Complete => None,
+            Self::MissingBody => Some(ChunkAction::MissingBody),
+            Self::AwaitingFacts => Some(ChunkAction::AwaitingFacts),
+        }
+    }
+}
+
 impl Worker {
     pub(super) fn collect_target_chain(
         &self,
@@ -210,14 +227,16 @@ impl Worker {
             }
         }
 
-        let (bodies, missing_body) = self
+        let (bodies, stop) = self
             .load_body_prefix(body_reader.as_mut(), identities)
             .map_err(DerivedIndexWorkerError::Storage)?;
         if self.runtime.should_stop() {
             return Ok(ChunkAction::Stalled);
         }
-        if bodies.is_empty() && missing_body {
-            return Ok(ChunkAction::MissingBody);
+        if bodies.is_empty()
+            && let Some(action) = stop.action()
+        {
+            return Ok(action);
         }
         let loaded = bodies.len();
         let sub_chunk = &identities[..loaded];
@@ -236,8 +255,8 @@ impl Worker {
             return Ok(action);
         }
         *identities = &identities[loaded..];
-        if missing_body {
-            return Ok(ChunkAction::MissingBody);
+        if let Some(action) = stop.action() {
+            return Ok(action);
         }
         Ok(ChunkAction::Continue)
     }
@@ -409,16 +428,19 @@ impl Worker {
         &self,
         reader: &mut dyn BlockBodyReader,
         identities: &[BlockIdentity],
-    ) -> Result<(Vec<Vec<u8>>, bool), StorageError> {
+    ) -> Result<(Vec<Vec<u8>>, PrefixStop), StorageError> {
         let mut bodies = Vec::new();
         let mut loaded_bytes = 0_usize;
         for identity in identities.iter().take(PREPARE_CHUNK_BLOCKS) {
             if self.runtime.should_stop() {
                 break;
             }
+            if self.runtime.awaits_historical_facts(identity.height) {
+                return Ok((bodies, PrefixStop::AwaitingFacts));
+            }
             let hash = Hash256::from_le_bytes(&identity.hash);
             let Some(body) = reader.load_block_body(identity.height, hash)? else {
-                return Ok((bodies, true));
+                return Ok((bodies, PrefixStop::MissingBody));
             };
             loaded_bytes = loaded_bytes.saturating_add(body.len());
             bodies.push(body);
@@ -426,7 +448,7 @@ impl Worker {
                 break;
             }
         }
-        Ok((bodies, false))
+        Ok((bodies, PrefixStop::Complete))
     }
 
     pub(super) fn wait_for_revision_quiet(&self, mut seen_revision: u64) -> Option<u64> {
@@ -578,6 +600,19 @@ impl Worker {
                         );
                         return Ok(PrefetchOutcome::Leg(ForwardLeg::Settled(
                             ReconcileAction::Buffered,
+                        )));
+                    }
+                    ChunkAction::AwaitingFacts => {
+                        Self::park_unused_seed_lease(
+                            scope.seed_lease,
+                            scope.from_seed,
+                            scope.pass_history,
+                        );
+                        if !state.batch.is_empty() {
+                            *pending = Some(state);
+                        }
+                        return Ok(PrefetchOutcome::Leg(ForwardLeg::Settled(
+                            ReconcileAction::Stalled,
                         )));
                     }
                 }

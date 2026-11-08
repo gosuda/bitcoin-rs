@@ -545,7 +545,7 @@ impl NodeState {
             derived_index_parts
                 .as_ref()
                 .map(|(runtime, _, _, _)| Arc::clone(runtime)),
-            facts_queue,
+            facts_queue.clone(),
             Arc::clone(&mining_generation),
             Some(Arc::clone(&mempool_gateway)),
         )
@@ -737,9 +737,11 @@ impl NodeState {
             derived_index_runtime,
             Some(Arc::clone(&derived_index_status)),
         ));
+        snapshots.wire_historical_facts(facts_queue.clone());
         if let Some(manifest_path) = config.assumeutxo_manifest.as_ref() {
             snapshots.admit_startup_manifest(manifest_path)?;
         }
+        snapshots.sync_historical_window()?;
         verify_startup_window(&chainstate, &config.data_dir)?;
         let shutdown = Arc::new(chainstate.shutdown_reader().child());
         Ok(Self {

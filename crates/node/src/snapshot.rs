@@ -32,6 +32,8 @@ use bitcoin_rs_storage::utxo::{SnapshotCoin, SnapshotCoinObserver};
 use parking_lot::Mutex;
 
 use crate::chain_effects::ChainFollowers;
+use crate::facts_queue::FactsQueue;
+use bitcoin_rs_storage::CommittedFacts;
 
 const EXPORT_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -618,7 +620,10 @@ impl SnapshotControl {
                 Ok(_) => Err(SnapshotImportError::Settlement(settlement)),
             };
         }
-        result.map_err(SnapshotImportError::Activation)
+        let activated = result.map_err(SnapshotImportError::Activation)?;
+        self.sync_historical_window()
+            .inspect_err(|_| self.chainstate.fail_closed_for_recovery())?;
+        Ok(activated)
     }
 
     pub(crate) fn chainstates(&self) -> Result<ChainstatesInfo, SnapshotControlError> {
@@ -843,6 +848,45 @@ impl SnapshotControl {
                 },
             )),
         }
+    }
+
+    pub(crate) fn sync_historical_window(&self) -> Result<(), SnapshotImportError> {
+        let Some(runtime) = self.derived_index_runtime.as_ref() else {
+            return Ok(());
+        };
+        let (base, next) = match self.manager.status()? {
+            AssumeUtxoDiskStatus::Validating { base_height, .. } => {
+                let next = self
+                    .manager
+                    .next_historical_block()?
+                    .map_or(base_height.saturating_add(1), |(height, _)| height);
+                (base_height, next)
+            }
+            AssumeUtxoDiskStatus::Finalized { base_height, .. } => {
+                (base_height, base_height.saturating_add(1))
+            }
+            AssumeUtxoDiskStatus::Uninitialized | AssumeUtxoDiskStatus::Failed { .. } => {
+                return Ok(());
+            }
+        };
+        runtime.set_historical_window(base, next);
+        Ok(())
+    }
+
+    pub(crate) fn wire_historical_facts(&self, queue: Option<Arc<FactsQueue>>) {
+        let runtime = self.derived_index_runtime.clone();
+        self.manager
+            .set_historical_facts_hook(Arc::new(move |facts: &Arc<CommittedFacts>| {
+                if let Some(queue) = queue.as_ref() {
+                    queue.try_push(Arc::clone(facts));
+                }
+                let Some(height) = facts.blocks.iter().map(|block| block.height).max() else {
+                    return;
+                };
+                if let Some(runtime) = runtime.as_ref() {
+                    runtime.note_historical_facts(height);
+                }
+            }));
     }
 
     /// SNP-10: an index artifact failure invalidates that projection only.

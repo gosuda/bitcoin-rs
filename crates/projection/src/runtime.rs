@@ -69,6 +69,8 @@ use query::IndexProgress;
 pub(crate) use query::QueryEngineLive;
 pub use query::{DEFAULT_SCRIPTHASH_LIMIT, DerivedIndexQueryEngine};
 
+const NO_HISTORICAL_BASE: u64 = u64::MAX;
+
 pub struct DerivedIndexRuntime {
     revision: AtomicU64,
     pub(super) shutdown: AtomicBool,
@@ -82,6 +84,8 @@ pub struct DerivedIndexRuntime {
     script_history_failure: RwLock<Option<CompactString>>,
     phase: arc_swap::ArcSwap<ReconcilePhase>,
     script_live_seed: Arc<crate::snapshot_seed::ScriptLiveSeedState>,
+    historical_base: AtomicU64,
+    historical_next: AtomicU64,
 }
 
 impl DerivedIndexRuntime {
@@ -101,6 +105,8 @@ impl DerivedIndexRuntime {
             script_history_failure: RwLock::new(None),
             phase: arc_swap::ArcSwap::from_pointee(ReconcilePhase::FORWARD),
             script_live_seed,
+            historical_base: AtomicU64::new(NO_HISTORICAL_BASE),
+            historical_next: AtomicU64::new(0),
         });
         let weak = Arc::downgrade(&runtime);
         runtime.script_live_seed.set_wake(Arc::new(move || {
@@ -134,6 +140,34 @@ impl DerivedIndexRuntime {
     pub fn wake(&self) {
         self.revision.fetch_add(1, Ordering::Release);
         let _receiver_gone = self.wake_tx.try_send(());
+    }
+
+    /// SNP-08: the snapshot base and the first height whose historical facts
+    /// are not yet produced. Heights from `next` through `base` take their
+    /// facts from historical validation instead of block bodies.
+    pub fn set_historical_window(&self, base: u32, next: u32) {
+        self.historical_next
+            .store(u64::from(next), Ordering::SeqCst);
+        self.historical_base
+            .store(u64::from(base), Ordering::SeqCst);
+        self.wake();
+    }
+
+    /// SNP-08: records that historical facts through `height` were offered to
+    /// the facts queue. Called after the offer, so a height below `next` always
+    /// has its facts queued or repaired from its body.
+    pub fn note_historical_facts(&self, height: u32) {
+        self.historical_next
+            .fetch_max(u64::from(height) + 1, Ordering::SeqCst);
+        self.wake();
+    }
+
+    pub(crate) fn awaits_historical_facts(&self, height: u32) -> bool {
+        let base = self.historical_base.load(Ordering::SeqCst);
+        let height = u64::from(height);
+        base != NO_HISTORICAL_BASE
+            && height <= base
+            && height >= self.historical_next.load(Ordering::SeqCst)
     }
 
     pub fn publish_failed(&self, message: impl Into<CompactString>) {
@@ -674,6 +708,7 @@ enum ChunkAction {
     Stalled,
     Progressed,
     MissingBody,
+    AwaitingFacts,
 }
 
 enum ForwardLeg {

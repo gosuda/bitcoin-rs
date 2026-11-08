@@ -444,7 +444,7 @@ pub struct HistoricalChainstateSummary {
     pub validated_utxo_count: u64,
 }
 
-pub type HistoricalFactsHook = Arc<dyn Fn(&BlockImage, &ConnectOutcome) + Send + Sync>;
+pub type HistoricalFactsHook = Arc<dyn Fn(&Arc<bitcoin_rs_storage::CommittedFacts>) + Send + Sync>;
 
 pub struct AssumeUtxoManager {
     lifecycle: Mutex<()>,
@@ -1001,8 +1001,11 @@ impl AssumeUtxoManager {
         historical
             .undo_store
             .remove_archived(outcome.height, outcome.hash)?;
-        if let Some(hook) = self.historical_facts_hook.read().as_ref() {
-            hook(payload, &outcome);
+        if let (Some(hook), Some(facts)) = (
+            self.historical_facts_hook.read().as_ref(),
+            outcome.committed_facts.as_ref(),
+        ) {
+            hook(facts);
         }
         Ok(outcome)
     }

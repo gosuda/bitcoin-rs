@@ -1722,15 +1722,15 @@ fn historical_facts_hook_receives_facts_on_step_historical() -> TestResult {
     fixture.activate(&manager)?;
     let called = Arc::new(AtomicBool::new(false));
     let called_clone = Arc::clone(&called);
-    manager.set_historical_facts_hook(Arc::new(move |_payload, outcome| {
-        if outcome.height == 0 {
-            called_clone.store(true, Ordering::Release);
+    manager.set_historical_facts_hook(Arc::new(move |facts| {
+        if facts.blocks.iter().any(|block| block.height == 0) {
+            called_clone.store(true, Ordering::SeqCst);
         }
     }));
     let genesis = BlockImage::from_local(Network::Regtest.genesis_block());
     let outcome = manager.step_historical(&genesis)?;
     assert_eq!(outcome.height, 0);
-    assert!(called.load(Ordering::Acquire));
+    assert!(called.load(Ordering::SeqCst));
     manager.clear_historical_facts_hook();
     Ok(())
 }
