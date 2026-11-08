@@ -46,6 +46,7 @@ use bitcoin_rs_storage::{
     BlockFilePosition, ColumnFamily, FlatFileBlockStore, KvStore, StorageBackend,
 };
 use cap_fs_ext::DirExt;
+use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 use sha2::{Digest, Sha256};
 
@@ -1048,7 +1049,33 @@ fn convert_historical_checkpoints(
             .join("chainstate");
         let engine = open_destination_store(&engine_path, target_engine)?;
         engine.ingest_sorted(ColumnFamily::Coins, &mut rows.into_iter(), &scratch_path)?;
+        let to_root = Dir::open_ambient_dir(to_path, ambient_authority())?;
+        let generation_dir = to_root
+            .open_dir_nofollow(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT)?
+            .open_dir_nofollow(name)?;
+        retire_historical_utxo_payload(&generation_dir, manifest)?;
     }
+    Ok(())
+}
+
+fn retire_historical_utxo_payload(
+    generation_dir: &Dir,
+    mut manifest: CheckpointManifestV1,
+) -> Result<(), ConvertError> {
+    manifest.utxo = None;
+    let bytes = sonic_rs::to_vec(&manifest).map_err(|error| {
+        ConvertError::IncompatibleData(format!("historical manifest encode: {error}"))
+    })?;
+    generation_dir.remove_file(MANIFEST_FILE)?;
+    let mut manifest_file = create_file_no_follow(generation_dir, MANIFEST_FILE)?;
+    manifest_file.write_all(&bytes)?;
+    manifest_file.sync_all()?;
+    match generation_dir.remove_file(UTXO_FILE) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    sync_dir(generation_dir)?;
     Ok(())
 }
 

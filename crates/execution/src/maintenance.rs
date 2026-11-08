@@ -87,15 +87,13 @@ mod tests {
             network,
             genesis_hash: network.genesis_block_hash(),
             block_tree: Arc::new(parking_lot::RwLock::new(crate::chain::BlockTree::new())),
-            utxo: Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new()),
             coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
                 bitcoin_rs_storage::utxo::stats::CoinStats::default(),
             )),
-            seed_offer: None,
             data_dir: dir.to_path_buf(),
             chain_events: Arc::new(crate::events::ChainEventPublisher::detached(0)),
             durable_tip_height: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            store: None,
+            store: Arc::new(bitcoin_rs_storage::memory_kv::MemoryKvStore::default()),
         })
     }
 

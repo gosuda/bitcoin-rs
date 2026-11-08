@@ -1488,7 +1488,7 @@ impl AssumeUtxoManager {
             network: self.network,
             genesis: self.network.genesis_block_hash(),
         };
-        let (write, _historical_witness) =
+        let write =
             crate::checkpoint::write_historical_checkpoint_with_store(
                 &data,
                 config,

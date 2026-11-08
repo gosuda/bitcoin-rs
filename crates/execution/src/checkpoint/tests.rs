@@ -46,12 +46,6 @@ fn mutate_authenticated_artifact(
             manifest.headers.bytes = length;
             manifest.headers.sha256 = digest;
         }
-        "coins.dat" => {
-            if let Some(utxo) = manifest.utxo.as_mut() {
-                utxo.bytes = length;
-                utxo.sha256 = digest;
-            }
-        }
         COINSTATS_FILE => {
             manifest.coinstats.bytes = length;
             manifest.coinstats.sha256 = digest;

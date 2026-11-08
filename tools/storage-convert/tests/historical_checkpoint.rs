@@ -87,9 +87,16 @@ fn converted_historical_generation_loads_epoch3_coins_through_assumeutxo() -> Te
 
     let generation = converted_generation(&to);
     let (_, manifest) = read_manifest(&generation)?;
-    let utxo = manifest.utxo.as_ref().ok_or_else(|| {
-        TestError::Assertion("historical manifest must keep its utxo artifact".into())
-    })?;
+    if manifest.utxo.is_some() {
+        return Err(TestError::Assertion(
+            "converted historical manifest must not carry a utxo payload".into(),
+        ));
+    }
+    if generation.join(UTXO_FILE).exists() {
+        return Err(TestError::Assertion(
+            "converted historical generation must not carry utxo-v4.dat".into(),
+        ));
+    }
     let reference = historical_reference(&generation)?;
 
     let engine =
@@ -99,7 +106,10 @@ fn converted_historical_generation_loads_epoch3_coins_through_assumeutxo() -> Te
                 TestError::Assertion("historical checkpoint must restore an engine".into())
             })?;
 
-    let mut snapshot_file = fs::File::open(generation.join(UTXO_FILE))?;
+    let source_generation = from
+        .join(HISTORICAL_CHECKPOINT_ROOT)
+        .join(GENERATION);
+    let mut snapshot_file = fs::File::open(source_generation.join(UTXO_FILE))?;
     let snapshot = read_snapshot_strict_v4(&mut snapshot_file)
         .map_err(|error| TestError::Assertion(format!("epoch-3 utxo-v4.dat: {error}")))?;
 
@@ -135,19 +145,23 @@ fn converted_historical_generation_loads_epoch3_coins_through_assumeutxo() -> Te
         }
     }
 
+    let source_utxo = read_manifest(&source_generation)?
+        .1
+        .utxo
+        .ok_or_else(|| TestError::Assertion("source historical manifest must carry utxo".into()))?;
     let record_count =
         u64::try_from(rows.len()).map_err(|error| TestError::Assertion(error.to_string()))?;
-    if record_count != utxo.record_count {
+    if record_count != source_utxo.record_count {
         return Err(TestError::Assertion(format!(
             "engine holds {} coin records, epoch-3 utxo-v4.dat holds {}",
             rows.len(),
-            utxo.record_count
+            source_utxo.record_count
         )));
     }
-    if outputs != utxo.output_count {
+    if outputs != source_utxo.output_count {
         return Err(TestError::Assertion(format!(
             "engine holds {outputs} outputs, epoch-3 utxo-v4.dat holds {}",
-            utxo.output_count
+            source_utxo.output_count
         )));
     }
     Ok(())

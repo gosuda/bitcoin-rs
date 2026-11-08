@@ -195,6 +195,10 @@ pub enum CheckpointLoadError {
         "corrupt current-schema checkpoint: {0}; remove or replace the datadir and restart to perform a full resync"
     )]
     Corrupt(String),
+    #[error(
+        "checkpoint generation {generation} carries a utxo payload written by an earlier build, which this build refuses; run bitcoin-rs-storage-convert to convert the datadir"
+    )]
+    UtxoPayloadRetired { generation: u64 },
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

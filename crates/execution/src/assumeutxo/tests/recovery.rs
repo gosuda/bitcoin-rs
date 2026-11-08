@@ -86,7 +86,7 @@ fn open_persistent(dir: &Path, pinned: &AssumeUtxoData) -> TestResult<Arc<Chains
     active.coins = Arc::clone(&coins);
     active.commit_authority = Arc::new(bitcoin_rs_storage::CommitAuthority::new(dyn_store, coins));
     active.block_body_store = Some(Arc::new(IndexedBlockBodyStore::new(store, files)));
-    active.configure_checkpointing(dir, Arc::new(AtomicU32::new(0)), None)?;
+    active.configure_checkpointing(dir, Arc::new(AtomicU32::new(0)))?;
     crate::recover_snapshot_activation(&active)?;
     crate::recover_disconnect_marker(&active)?;
     Ok(Arc::new(active))
@@ -845,75 +845,6 @@ fn snapshot_base_checkpoint_is_bound_to_the_pinned_commitment() -> TestResult {
 }
 
 #[test]
-fn snapshot_base_checkpoint_rejects_coin_height_alias() -> TestResult {
-    use bitcoin_rs_consensus::primitives::hex::hex_encode;
-    use bitcoin_rs_storage::checkpoint::{
-        CHECKPOINT_ROOT, CURRENT_FILE, CheckpointManifestV1, CurrentV1, MANIFEST_FILE,
-    };
-    use sha2::{Digest, Sha256};
-
-    let fixture = Fixture::new()?;
-    let dir = tempfile::tempdir()?;
-    let (active, manager) = activate(dir.path(), &fixture)?;
-    assert!(active.publish_checkpoint()?.is_some());
-    drop(manager);
-    drop(active);
-
-    let root = dir.path().join(CHECKPOINT_ROOT);
-    let current_path = root.join(CURRENT_FILE);
-    let mut current: CurrentV1 = sonic_rs::from_slice(&std::fs::read(&current_path)?)?;
-    let generation = root.join(&current.directory);
-    let manifest_path = generation.join(MANIFEST_FILE);
-    let mut manifest: CheckpointManifestV1 = sonic_rs::from_slice(&std::fs::read(&manifest_path)?)?;
-    let Some(utxo) = manifest.utxo.as_ref() else {
-        return Ok(());
-    };
-    let utxo_path = generation.join(&utxo.file);
-    let mut bytes = std::fs::read(&utxo_path)?;
-    let offset = 52 + 45 + 12;
-    let height = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?);
-    assert!(height <= fixture.pinned.height);
-    let invalid_height = height | 0x8000_0000;
-    bytes[offset..offset + 4].copy_from_slice(&invalid_height.to_le_bytes());
-    let forged =
-        bitcoin_rs_storage::utxo::read_snapshot_strict_v4(&mut std::io::Cursor::new(&bytes))?;
-    assert_eq!(
-        forged.set.lock_stable_view().hash_serialized_3()?,
-        fixture.pinned.hash_serialized,
-        "the high height bit must alias the commitment, not cause a hash rejection"
-    );
-    if let Some(utxo) = manifest.utxo.as_mut() {
-        utxo.sha256 = hex_encode(&Sha256::digest(&bytes));
-    }
-    std::fs::write(&utxo_path, &bytes)?;
-    let manifest_bytes = sonic_rs::to_vec(&manifest)?;
-    current.manifest_sha256 = hex_encode(&Sha256::digest(&manifest_bytes));
-    std::fs::write(manifest_path, manifest_bytes)?;
-    std::fs::write(current_path, sonic_rs::to_vec(&current)?)?;
-
-    let error = crate::recovery::restore_snapshot(dir.path(), Network::Regtest, &fixture.pinned)
-        .err()
-        .ok_or(TestError::UnexpectedSuccess(
-            "snapshot-base checkpoint accepted an impossible coin height",
-        ))?;
-    assert!(matches!(
-        error,
-        crate::recovery::RecoveryError::Utxo(
-            bitcoin_rs_storage::utxo::UtxoError::SnapshotCoinHeightOutOfRange {
-                height,
-                snapshot_height,
-            }
-        ) if height == invalid_height && snapshot_height == fixture.pinned.height
-    ));
-    assert_eq!(
-        std::fs::read(utxo_path)?,
-        bytes,
-        "refusal must preserve operator data"
-    );
-    Ok(())
-}
-
-#[test]
 fn snapshot_recovery_rejects_coin_height_alias() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
@@ -1125,7 +1056,7 @@ fn publish_genesis_historical_checkpoint(
         .historical_chainstate()
         .ok_or(TestError::Missing("missing history"))?;
     let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(dir)?;
-    let (write, _historical_witness) = crate::checkpoint::write_historical_checkpoint_with_store(
+    let write = crate::checkpoint::write_historical_checkpoint_with_store(
         &data,
         crate::checkpoint::headers::HeaderCheckpointConfig {
             network: Network::Regtest,

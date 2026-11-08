@@ -29,9 +29,6 @@ pub(crate) use bitcoin_rs_storage::checkpoint::HeadersArtifactV1;
 pub(crate) use bitcoin_rs_storage::checkpoint::MANIFEST_FILE;
 pub(crate) use bitcoin_rs_storage::checkpoint::MANIFEST_FORMAT;
 pub(crate) use bitcoin_rs_storage::checkpoint::MANIFEST_VERSION;
-pub(crate) use bitcoin_rs_storage::checkpoint::UTXO_CODEC;
-pub(crate) use bitcoin_rs_storage::checkpoint::UTXO_VERSION;
-pub(crate) use bitcoin_rs_storage::checkpoint::UtxoArtifactV1;
 pub(crate) use bitcoin_rs_storage::checkpoint::classify_checkpoint_io;
 pub(crate) use bitcoin_rs_storage::checkpoint::corrupt_checkpoint;
 use bitcoin_rs_storage::checkpoint::decode_hex;
@@ -41,13 +38,11 @@ use bitcoin_rs_storage::checkpoint::open_data_dir;
 use bitcoin_rs_storage::checkpoint::{ArtifactDigest, CheckpointStage};
 use bitcoin_rs_storage::checkpoint::{coinstats_artifact_payload, commit_publication};
 use bitcoin_rs_storage::checkpoint::{read_manifest, require_filename, verify_artifact};
-use bitcoin_rs_storage::utxo::snapshot::{SeedProvenance, V4Witness, VerifiedSnapshotArtifact};
-use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsAccumulator, CoinStatsListener};
-use bitcoin_rs_storage::utxo::{UtxoSet, read_snapshot_strict_v4_witnessed};
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
+use bitcoin_rs_storage::utxo::UtxoSet;
 use cap_std::fs::{Dir, File};
 use parking_lot::RwLock;
-use sha2::Digest;
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::path::Path;
 use thiserror::Error;
 
@@ -81,7 +76,6 @@ pub(crate) struct RestoredChainstate {
     pub(crate) utxo: UtxoSet,
     pub(crate) coin_stats: CoinStats,
     pub(crate) applied_tip: TipSnapshot,
-    pub(crate) seed: Option<VerifiedSnapshotArtifact>,
     pub(crate) engine: Option<std::sync::Arc<dyn bitcoin_rs_storage::KvStore>>,
 }
 
@@ -165,7 +159,13 @@ pub(crate) fn load_checkpoint_from_dir_with_path(
     root_name: &str,
 ) -> Result<CheckpointLoad, CheckpointLoadError> {
     let opened = bitcoin_rs_storage::checkpoint::open_current_checkpoint_at(data_dir, root_name)?;
-    load_opened_checkpoint(opened, config, host_data_dir, root_name)
+    load_opened_checkpoint(
+        opened,
+        config,
+        host_data_dir,
+        root_name,
+        UtxoPayloadPolicy::Refuse,
+    )
 }
 
 #[expect(dead_code)]
@@ -188,7 +188,37 @@ pub(crate) fn load_checkpoint_generation_from_dir_with_path(
     let opened = bitcoin_rs_storage::checkpoint::open_checkpoint_generation_at(
         data_dir, root_name, reference,
     )?;
-    load_opened_checkpoint(opened, config, host_data_dir, root_name)
+    load_opened_checkpoint(
+        opened,
+        config,
+        host_data_dir,
+        root_name,
+        UtxoPayloadPolicy::Refuse,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UtxoPayloadPolicy {
+    Refuse,
+    IgnoreForConversion,
+}
+
+/// Loads a generation as the source of an epoch-3 conversion. The converter
+/// reads coins from the source's own UTXO payload, so this entry accepts a
+/// generation that carries one. Node loads still refuse it.
+pub(crate) fn load_conversion_source_from_dir(
+    data_dir: &Dir,
+    config: headers::HeaderCheckpointConfig,
+    root_name: &str,
+) -> Result<CheckpointLoad, CheckpointLoadError> {
+    let opened = bitcoin_rs_storage::checkpoint::open_current_checkpoint_at(data_dir, root_name)?;
+    load_opened_checkpoint(
+        opened,
+        config,
+        None,
+        root_name,
+        UtxoPayloadPolicy::IgnoreForConversion,
+    )
 }
 
 fn load_opened_checkpoint(
@@ -196,6 +226,7 @@ fn load_opened_checkpoint(
     config: headers::HeaderCheckpointConfig,
     host_data_dir: Option<&Path>,
     root_name: &str,
+    policy: UtxoPayloadPolicy,
 ) -> Result<CheckpointLoad, CheckpointLoadError> {
     let CheckpointOpen::Selected {
         generation_dir,
@@ -236,20 +267,12 @@ fn load_opened_checkpoint(
         }
         Err(error) => return Err(classify_checkpoint_error(error)),
     };
-    if let Some(utxo) = &manifest.utxo {
-        if utxo.version != UTXO_VERSION {
-            return Err(corrupt_checkpoint(format!(
-                "UTXO checkpoint version {} is not current",
-                utxo.version
-            )));
-        }
-        if utxo.codec != UTXO_CODEC || manifest.coinstats.codec != COINSTATS_CODEC {
-            return Err(corrupt_checkpoint(format!(
-                "unexpected payload codecs UTXO={} CoinStats={}",
-                utxo.codec, manifest.coinstats.codec
-            )));
-        }
-    } else if manifest.coinstats.codec != COINSTATS_CODEC {
+    if policy == UtxoPayloadPolicy::Refuse && manifest.utxo.is_some() {
+        return Err(CheckpointLoadError::UtxoPayloadRetired {
+            generation: manifest.generation,
+        });
+    }
+    if manifest.coinstats.codec != COINSTATS_CODEC {
         return Err(corrupt_checkpoint(format!(
             "unexpected payload codec CoinStats={}",
             manifest.coinstats.codec
@@ -264,7 +287,6 @@ fn load_opened_checkpoint(
         &generation_dir,
         &manifest,
         restored_headers,
-        reference,
         store_path.as_deref(),
     ) {
         Ok(restored) => Ok(CheckpointLoad::Complete(Box::new(restored))),
@@ -273,7 +295,7 @@ fn load_opened_checkpoint(
 }
 
 #[cfg(test)]
-fn write_checkpoint(
+pub(crate) fn write_checkpoint(
     data_dir: &Path,
     config: headers::HeaderCheckpointConfig,
     block_tree: &RwLock<BlockTree>,
@@ -282,21 +304,58 @@ fn write_checkpoint(
     applied_tip: Option<&TipSnapshot>,
 ) -> Result<CheckpointWrite, CheckpointError> {
     let dir = open_data_dir(data_dir)?;
-    let (write, _) = write_checkpoint_from_dir_at_inner(
+    let store = engine_store_from_utxo(utxo)?;
+    write_checkpoint_with_store(
         &dir,
         config,
         block_tree,
         coin_stats,
         applied_tip,
-        CheckpointWriteOptions {
-            root_name: bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT,
-            retention: bitcoin_rs_storage::checkpoint::CheckpointRetention::Replace,
-            target: None,
-            utxo: Some(utxo),
-            host_data_dir: Some(data_dir),
+        CheckpointStoreTarget {
+            store: &store,
+            host_data_dir: data_dir,
         },
-    )?;
-    Ok(write)
+    )
+}
+
+#[cfg(test)]
+fn engine_store_from_utxo(
+    utxo: &UtxoSet,
+) -> Result<bitcoin_rs_storage::memory_kv::MemoryKvStore, CheckpointError> {
+    use bitcoin_rs_storage::KvStore;
+    let mut coins: std::collections::HashMap<
+        bitcoin_rs_consensus::primitives::Txid,
+        Vec<bitcoin_rs_storage::utxo::record::OwnedUtxoOut>,
+    > = std::collections::HashMap::new();
+    utxo.with_stable_view(|view| {
+        view.for_each_all(|outpoint, _| {
+            if let Some(entry) = utxo.get_entry(outpoint) {
+                coins
+                    .entry(outpoint.txid)
+                    .or_default()
+                    .push(bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+                        vout: outpoint.vout,
+                        value: entry.txout.value.to_sat(),
+                        script_pubkey: entry.txout.script_pubkey.as_bytes().to_vec(),
+                        coinbase: entry.coinbase,
+                        height: entry.height,
+                    });
+            }
+        });
+    });
+    let store = bitcoin_rs_storage::memory_kv::MemoryKvStore::default();
+    let mut batch = store.new_batch();
+    for (txid, outputs) in coins {
+        let record =
+            bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(txid.0, &outputs)?;
+        batch.put(
+            bitcoin_rs_storage::ColumnFamily::Coins,
+            bitcoin_rs_storage::CoinKey(txid.0.to_le_bytes()).as_bytes(),
+            record.bytes(),
+        );
+    }
+    store.write(batch)?;
+    Ok(store)
 }
 
 #[cfg(test)]
@@ -354,12 +413,10 @@ fn load_payloads(
     generation_dir: &Dir,
     manifest: &CheckpointManifestV1,
     mut headers: headers::RestoredHeaders,
-    reference: bitcoin_rs_storage::checkpoint::CheckpointReference,
     store_path: Option<&std::path::Path>,
 ) -> Result<RestoredChainstate, CheckpointError> {
     let chain_tx_count = ChainTxCount::from_wire(manifest.applied_tip.chain_tx_count);
-    let (utxo, coin_stats, seed, engine) =
-        load_payloads_inner(generation_dir, manifest, &headers, reference, store_path)?;
+    let (utxo, coin_stats, engine) = load_payloads_inner(generation_dir, manifest, store_path)?;
     validate_chain_tx_count(chain_tx_count, &coin_stats)?;
     let mut cursor = Some(headers.applied_tip_id);
     while let Some(node_id) = cursor {
@@ -395,7 +452,6 @@ fn load_payloads(
         utxo,
         coin_stats,
         applied_tip,
-        seed,
         engine,
     })
 }
@@ -418,59 +474,26 @@ fn validate_chain_tx_count(
 fn load_payloads_inner(
     generation_dir: &Dir,
     manifest: &CheckpointManifestV1,
-    headers: &headers::RestoredHeaders,
-    reference: bitcoin_rs_storage::checkpoint::CheckpointReference,
     store_path: Option<&std::path::Path>,
 ) -> Result<
     (
         UtxoSet,
         CoinStats,
-        Option<VerifiedSnapshotArtifact>,
         Option<std::sync::Arc<dyn bitcoin_rs_storage::KvStore>>,
     ),
     CheckpointError,
 > {
     let engine = open_generation_store(generation_dir, store_path)?;
-    if let Some(utxo) = &manifest.utxo {
-        let (utxo_file, coinstats_file, expected_applied) =
-            verify_payload_files(generation_dir, manifest, utxo)?;
-        let (snapshot, derived, witness, utxo_file) =
-            read_checkpoint_snapshot(utxo_file, utxo.bytes, expected_applied.height)?;
-        validate_snapshot_payload(manifest, utxo, &snapshot, &expected_applied)?;
-        let coin_stats = read_coinstats(coinstats_file, manifest)?;
-        validate_derived_stats(manifest, utxo, &snapshot, derived, &coin_stats)?;
-        let applied = headers.tree.node(headers.applied_tip_id)?;
-        if (applied.height, applied.hash) != (snapshot.height, snapshot.tip_hash) {
-            return Err(CheckpointError::Store(StoreError::Invalid(
-                "restored header and UTXO applied tips differ".to_owned(),
-            )));
-        }
-        let expected_sha: [u8; 32] = decode_hex(&utxo.sha256)?;
-        if witness.sha256() != expected_sha || witness.byte_len() != utxo.bytes {
-            return Err(CheckpointError::Store(StoreError::Invalid(
-                "UTXO witness digest does not match manifest".to_owned(),
-            )));
-        }
-        let seed = VerifiedSnapshotArtifact::seal(
-            utxo_file,
-            witness,
-            SeedProvenance::Checkpoint(reference),
-        );
-        Ok((snapshot.set, coin_stats, Some(seed), engine))
-    } else {
-        require_filename(&manifest.coinstats.file, COINSTATS_FILE)
-            .map_err(CheckpointError::Store)?;
-        let coinstats_file = verify_artifact(
-            generation_dir,
-            COINSTATS_FILE,
-            manifest.coinstats.bytes,
-            &manifest.coinstats.sha256,
-        )
-        .map_err(CheckpointError::Store)?;
-        let coin_stats = read_coinstats(coinstats_file, manifest)?;
-        let utxo = UtxoSet::new();
-        Ok((utxo, coin_stats, None, engine))
-    }
+    require_filename(&manifest.coinstats.file, COINSTATS_FILE).map_err(CheckpointError::Store)?;
+    let coinstats_file = verify_artifact(
+        generation_dir,
+        COINSTATS_FILE,
+        manifest.coinstats.bytes,
+        &manifest.coinstats.sha256,
+    )
+    .map_err(CheckpointError::Store)?;
+    let coin_stats = read_coinstats(coinstats_file, manifest)?;
+    Ok((UtxoSet::new(), coin_stats, engine))
 }
 
 /// Opens the engine image stored inside a checkpoint generation, if any.
@@ -513,64 +536,6 @@ fn open_generation_store(
     }
 }
 
-fn verify_payload_files(
-    generation_dir: &Dir,
-    manifest: &CheckpointManifestV1,
-    utxo: &UtxoArtifactV1,
-) -> Result<(File, File, headers::HeaderCheckpointTip), CheckpointError> {
-    if Path::new(&utxo.file).components().count() != 1 {
-        return Err(CheckpointError::Store(StoreError::Invalid(
-            "checkpoint utxo filename must be a single path component".to_owned(),
-        )));
-    }
-    require_filename(&manifest.coinstats.file, COINSTATS_FILE).map_err(CheckpointError::Store)?;
-    if manifest.coinstats.bytes != COINSTATS_ARTIFACT_LEN {
-        return Err(CheckpointError::Store(StoreError::Invalid(
-            "CoinStats artifact is not exactly 820 bytes".to_owned(),
-        )));
-    }
-    let utxo_file = verify_artifact(generation_dir, &utxo.file, utxo.bytes, &utxo.sha256)
-        .map_err(CheckpointError::Store)?;
-    let coinstats_file = verify_artifact(
-        generation_dir,
-        COINSTATS_FILE,
-        manifest.coinstats.bytes,
-        &manifest.coinstats.sha256,
-    )
-    .map_err(CheckpointError::Store)?;
-    let expected_applied = parse_tip(&manifest.applied_tip)?;
-    Ok((utxo_file, coinstats_file, expected_applied))
-}
-fn validate_snapshot_payload(
-    _manifest: &CheckpointManifestV1,
-    utxo: &UtxoArtifactV1,
-    snapshot: &bitcoin_rs_storage::utxo::SnapshotLoad,
-    expected_applied: &headers::HeaderCheckpointTip,
-) -> Result<(), CheckpointError> {
-    if (snapshot.height, snapshot.tip_hash) != (expected_applied.height, expected_applied.hash) {
-        return Err(CheckpointError::Store(StoreError::Invalid(
-            "UTXO tip does not match manifest applied tip".to_owned(),
-        )));
-    }
-    let record_count = u64::try_from(snapshot.set.record_count()).map_err(|_| {
-        CheckpointError::Store(StoreError::Invalid(
-            "loaded UTXO record count does not fit u64".to_owned(),
-        ))
-    })?;
-    if record_count != utxo.record_count {
-        return Err(CheckpointError::Store(StoreError::Invalid(
-            "UTXO record count does not match manifest".to_owned(),
-        )));
-    }
-    let trailer_digest: [u8; 32] = sha2::Sha256::digest(snapshot.muhash_trailer).into();
-    if trailer_digest != decode_hex(&utxo.muhash_trailer_sha256)? {
-        return Err(CheckpointError::Store(StoreError::Invalid(
-            "UTXO MuHash trailer digest does not match manifest".to_owned(),
-        )));
-    }
-    Ok(())
-}
-
 fn read_coinstats(
     coinstats_file: File,
     manifest: &CheckpointManifestV1,
@@ -588,55 +553,6 @@ fn read_coinstats(
     Ok(coin_stats)
 }
 
-fn validate_derived_stats(
-    _manifest: &CheckpointManifestV1,
-    utxo: &UtxoArtifactV1,
-    snapshot: &bitcoin_rs_storage::utxo::SnapshotLoad,
-    mut derived: CoinStats,
-    coin_stats: &CoinStats,
-) -> Result<(), CheckpointError> {
-    derived.tx_count = coin_stats.tx_count;
-    if derived != *coin_stats {
-        return Err(CheckpointError::Store(StoreError::Invalid(
-            "CoinStats does not match loaded UTXO traversal".to_owned(),
-        )));
-    }
-    if coin_stats.utxo_count != utxo.output_count {
-        return Err(CheckpointError::Store(StoreError::Invalid(
-            "UTXO output count does not match manifest".to_owned(),
-        )));
-    }
-    if snapshot.muhash_trailer != coin_stats.muhash.finalize() {
-        return Err(CheckpointError::Store(StoreError::Invalid(
-            "UTXO trailer does not match restored CoinStats".to_owned(),
-        )));
-    }
-    Ok(())
-}
-fn read_checkpoint_snapshot(
-    utxo_file: File,
-    encoded_len: u64,
-    height: u32,
-) -> Result<
-    (
-        bitcoin_rs_storage::utxo::SnapshotLoad,
-        CoinStats,
-        V4Witness,
-        std::fs::File,
-    ),
-    CheckpointError,
-> {
-    let mut limited =
-        BufReader::new(utxo_file).take(encoded_len.checked_add(1).ok_or_else(|| {
-            CheckpointError::Store(StoreError::Invalid("UTXO byte length overflow".to_owned()))
-        })?);
-    let (snapshot, accumulator, witness) = read_snapshot_strict_v4_witnessed(
-        &mut limited,
-        CoinStatsAccumulator::with_parallel_muhash(height),
-    )?;
-    let utxo_file = limited.into_inner().into_inner().into_std();
-    Ok((snapshot, accumulator.into_stats(), witness, utxo_file))
-}
 fn validate_coinstats_manifest(
     stats: &CoinStats,
     expected: &CoinStatsArtifactV1,
@@ -682,25 +598,6 @@ fn checkpoint_best_tip_id(
     }
     Ok(applied_id)
 }
-pub(crate) fn write_checkpoint_from_dir(
-    data_dir: &Dir,
-    config: headers::HeaderCheckpointConfig,
-    block_tree: &RwLock<BlockTree>,
-    utxo: &UtxoSet,
-    coin_stats: &CoinStatsListener,
-    applied_tip: Option<&TipSnapshot>,
-) -> Result<(CheckpointWrite, Option<V4Witness>), CheckpointError> {
-    write_checkpoint_from_dir_at(
-        data_dir,
-        config,
-        block_tree,
-        utxo,
-        coin_stats,
-        applied_tip,
-        bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT,
-        bitcoin_rs_storage::checkpoint::CheckpointRetention::Replace,
-    )
-}
 pub(crate) struct CheckpointStoreTarget<'a> {
     pub store: &'a dyn bitcoin_rs_storage::KvStore,
     pub host_data_dir: &'a std::path::Path,
@@ -709,10 +606,7 @@ pub(crate) struct CheckpointStoreTarget<'a> {
 pub(crate) struct CheckpointWriteOptions<'a> {
     pub root_name: &'a str,
     pub retention: bitcoin_rs_storage::checkpoint::CheckpointRetention,
-    pub target: Option<CheckpointStoreTarget<'a>>,
-    pub utxo: Option<&'a UtxoSet>,
-    #[cfg_attr(not(any(test, feature = "test-seam")), allow(dead_code))]
-    pub host_data_dir: Option<&'a std::path::Path>,
+    pub target: CheckpointStoreTarget<'a>,
 }
 
 pub(crate) fn write_checkpoint_with_store(
@@ -722,7 +616,7 @@ pub(crate) fn write_checkpoint_with_store(
     coin_stats: &CoinStatsListener,
     applied_tip: Option<&TipSnapshot>,
     target: CheckpointStoreTarget<'_>,
-) -> Result<(CheckpointWrite, Option<V4Witness>), CheckpointError> {
+) -> Result<CheckpointWrite, CheckpointError> {
     write_checkpoint_from_dir_at_inner(
         data_dir,
         config,
@@ -732,9 +626,7 @@ pub(crate) fn write_checkpoint_with_store(
         CheckpointWriteOptions {
             root_name: bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT,
             retention: bitcoin_rs_storage::checkpoint::CheckpointRetention::Replace,
-            host_data_dir: Some(target.host_data_dir),
-            target: Some(target),
-            utxo: None,
+            target,
         },
     )
 }
@@ -745,7 +637,7 @@ pub(crate) fn write_historical_checkpoint_with_store(
     coin_stats: &CoinStatsListener,
     applied_tip: Option<&TipSnapshot>,
     target: CheckpointStoreTarget<'_>,
-) -> Result<(CheckpointWrite, Option<V4Witness>), CheckpointError> {
+) -> Result<CheckpointWrite, CheckpointError> {
     write_checkpoint_from_dir_at_inner(
         data_dir,
         config,
@@ -755,9 +647,7 @@ pub(crate) fn write_historical_checkpoint_with_store(
         CheckpointWriteOptions {
             root_name: bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
             retention: bitcoin_rs_storage::checkpoint::CheckpointRetention::UntilReferenced,
-            host_data_dir: Some(target.host_data_dir),
-            target: Some(target),
-            utxo: None,
+            target,
         },
     )
 }
@@ -929,78 +819,6 @@ fn checkpoint_manifest(input: &ManifestInputs<'_>) -> CheckpointManifestV1 {
         },
     }
 }
-pub(crate) fn write_checkpoint_from_dir_at(
-    data_dir: &Dir,
-    config: headers::HeaderCheckpointConfig,
-    block_tree: &RwLock<BlockTree>,
-    utxo: &UtxoSet,
-    coin_stats: &CoinStatsListener,
-    applied_tip: Option<&TipSnapshot>,
-    root_name: &str,
-    retention: bitcoin_rs_storage::checkpoint::CheckpointRetention,
-) -> Result<(CheckpointWrite, Option<V4Witness>), CheckpointError> {
-    write_checkpoint_from_dir_at_inner(
-        data_dir,
-        config,
-        block_tree,
-        coin_stats,
-        applied_tip,
-        CheckpointWriteOptions {
-            root_name,
-            retention,
-            target: None,
-            utxo: Some(utxo),
-            host_data_dir: None,
-        },
-    )
-}
-
-#[cfg(any(test, feature = "test-seam"))]
-fn checkpoint_utxo_fallback(
-    host_data_dir: Option<&Path>,
-    root_name: &str,
-    stage: &CheckpointStage,
-    utxo: &UtxoSet,
-) -> Result<(), CheckpointError> {
-    if utxo.is_empty() {
-        return Ok(());
-    }
-    let Some(host_path) = host_data_dir else {
-        return Ok(());
-    };
-    use bitcoin_rs_storage::KvStore;
-    let mem_store = bitcoin_rs_storage::memory_kv::MemoryKvStore::default();
-    let mut batch = mem_store.new_batch();
-    utxo.with_stable_view(|view| {
-        view.for_each_all(|outpoint, _| {
-            if let Some(entry) = utxo.get_entry(outpoint) {
-                let key = bitcoin_rs_storage::CoinKey(outpoint.txid.0.to_le_bytes());
-                let out = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
-                    vout: outpoint.vout,
-                    value: entry.txout.value.to_sat(),
-                    script_pubkey: entry.txout.script_pubkey.as_bytes().to_vec(),
-                    coinbase: entry.coinbase,
-                    height: entry.height,
-                };
-                if let Ok(rec) = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
-                    outpoint.txid.0,
-                    &[out],
-                ) {
-                    batch.put(
-                        bitcoin_rs_storage::ColumnFamily::Coins,
-                        key.as_bytes(),
-                        rec.bytes(),
-                    );
-                }
-            }
-        });
-    });
-    mem_store.write(batch).map_err(CheckpointError::from)?;
-    stage
-        .checkpoint_store(host_path, root_name, &mem_store)
-        .map_err(CheckpointError::Store)
-}
-
 fn write_checkpoint_from_dir_at_inner(
     data_dir: &Dir,
     config: headers::HeaderCheckpointConfig,
@@ -1008,20 +826,19 @@ fn write_checkpoint_from_dir_at_inner(
     coin_stats: &CoinStatsListener,
     applied_tip: Option<&TipSnapshot>,
     options: CheckpointWriteOptions<'_>,
-) -> Result<(CheckpointWrite, Option<V4Witness>), CheckpointError> {
+) -> Result<CheckpointWrite, CheckpointError> {
     let Some(applied_tip) = applied_tip else {
-        return Ok((CheckpointWrite::SkippedNoAppliedTip, None));
+        return Ok(CheckpointWrite::SkippedNoAppliedTip);
     };
     let chain_tx_count = applied_tip.chain_tx_count;
     let stage = begin_checkpoint_stage(data_dir, options.root_name, options.retention)?;
-    if let Some(target) = options.target {
-        stage
-            .checkpoint_store(target.host_data_dir, options.root_name, target.store)
-            .map_err(CheckpointError::Store)?;
-    } else if let Some(_utxo) = options.utxo {
-        #[cfg(any(test, feature = "test-seam"))]
-        checkpoint_utxo_fallback(options.host_data_dir, options.root_name, &stage, _utxo)?;
-    }
+    stage
+        .checkpoint_store(
+            options.target.host_data_dir,
+            options.root_name,
+            options.target.store,
+        )
+        .map_err(CheckpointError::Store)?;
     let (headers_meta, headers_digest) =
         write_headers_artifact(&stage, block_tree, config, applied_tip)?;
     let listener_stats = coin_stats.snapshot();
@@ -1038,7 +855,7 @@ fn write_checkpoint_from_dir_at_inner(
         stats_digest: &stats_digest,
     });
     let reference = commit_publication(stage, &manifest)?;
-    Ok((CheckpointWrite::Published { reference }, None))
+    Ok(CheckpointWrite::Published { reference })
 }
 fn manifest_tip(tip: headers::HeaderCheckpointTip, chain_tx_count: u64) -> CheckpointTipV1 {
     let chainwork: [u8; 32] = tip.chainwork.to_be_bytes();

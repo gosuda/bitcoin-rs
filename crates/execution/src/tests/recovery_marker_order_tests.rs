@@ -97,8 +97,8 @@ fn valid_checkpoint_with_marker_selects_cold_replay() -> TestResult {
 
     let (tree, tip) = genesis_tip()?;
     let store = bitcoin_rs_storage::checkpoint::open_data_dir(data_dir)?;
-    let _ = checkpoint::write_checkpoint_from_dir(
-        &store,
+    let _ = checkpoint::write_checkpoint(
+        data_dir,
         checkpoint_config(),
         &tree,
         &UtxoSet::new(),

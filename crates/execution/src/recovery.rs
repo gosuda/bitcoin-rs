@@ -246,7 +246,7 @@ fn restored_initial(
         tree: restored.tree,
         applied_tip: Some(restored.applied_tip),
         resume_source: ResumeSource::Checkpoint,
-        script_live_seed: restored.seed,
+        script_live_seed: None,
     })
 }
 
@@ -472,9 +472,8 @@ pub fn publish_converted_checkpoint(
     engine: &dyn bitcoin_rs_storage::KvStore,
 ) -> Result<(), ConvertedCheckpointError> {
     let config = header_checkpoint_config(network);
-    let source = match crate::checkpoint::load_checkpoint_from_dir_with_path(
+    let source = match crate::checkpoint::load_conversion_source_from_dir(
         source_data_dir,
-        None,
         config,
         bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT,
     )
@@ -523,7 +522,7 @@ pub fn publish_converted_checkpoint(
     };
     let listener = bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(checkpoint.stats);
     let block_tree = parking_lot::RwLock::new(tree);
-    let (written, _) = crate::checkpoint::write_checkpoint_with_store(
+    let written = crate::checkpoint::write_checkpoint_with_store(
         target_data_dir,
         config,
         &block_tree,

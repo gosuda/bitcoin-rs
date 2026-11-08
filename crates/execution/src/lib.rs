@@ -1202,7 +1202,6 @@ impl Chainstate {
         &mut self,
         data_dir: &std::path::Path,
         durable_tip_height: Arc<std::sync::atomic::AtomicU32>,
-        seed_offer: Option<bitcoin_rs_storage::utxo::SeedOfferCell>,
     ) -> core::result::Result<(), CheckpointSetupError> {
         let checkpoint_data_dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)?;
         let block_body_store = self
@@ -1220,13 +1219,11 @@ impl Chainstate {
                 network: self.network,
                 genesis_hash: self.network.genesis_block_hash(),
                 block_tree: Arc::clone(&self.block_tree),
-                utxo: Arc::clone(&self.utxo),
                 coin_stats: Arc::clone(&self.coin_stats),
                 data_dir: data_dir.to_path_buf(),
                 chain_events: Arc::clone(&self.chain_events),
                 durable_tip_height,
-                seed_offer,
-                store: Some(Arc::clone(self.commit_authority.store())),
+                store: Arc::clone(self.commit_authority.store()),
             },
         ));
         Ok(())

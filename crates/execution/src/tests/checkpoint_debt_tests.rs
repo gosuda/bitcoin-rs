@@ -32,7 +32,7 @@ fn checkpoint_refuses_inflight_disconnect_and_preserves_state() -> TestResult {
     let mut handles = crate::test_fixtures::handles(network, Arc::new(UtxoSet::new()));
     handles.block_body_store = Some(Arc::new(MemoryBodies::default()));
     handles.apply_block(&BlockImage::from_local(network.genesis_block()))?;
-    handles.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)), None)?;
+    handles.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)))?;
     assert!(handles.publish_checkpoint()?.is_some());
 
     let checkpoint_root = dir.path().join(CHECKPOINT_ROOT);
@@ -69,7 +69,7 @@ fn checkpoint_refuses_a_closed_for_recovery_chainstate() -> TestResult {
     let mut handles = crate::test_fixtures::handles(network, Arc::new(UtxoSet::new()));
     handles.block_body_store = Some(Arc::new(MemoryBodies::default()));
     handles.apply_block(&BlockImage::from_local(network.genesis_block()))?;
-    handles.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)), None)?;
+    handles.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)))?;
     assert!(handles.publish_checkpoint()?.is_some());
 
     let checkpoint_root = dir.path().join(CHECKPOINT_ROOT);
@@ -135,7 +135,7 @@ fn recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication(
     let mut chain = crate::test_fixtures::handles(Network::Regtest, Arc::new(UtxoSet::new()));
     chain.block_body_store = Some(bodies.clone());
     chain.apply_block(&BlockImage::from_local(Network::Regtest.genesis_block()))?;
-    chain.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)), None)?;
+    chain.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)))?;
     assert!(chain.publish_checkpoint()?.is_some());
     let root = dir.path().join(CHECKPOINT_ROOT);
     let previous = std::fs::read(root.join("CURRENT"))?;

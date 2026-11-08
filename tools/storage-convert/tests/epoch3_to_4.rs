@@ -582,10 +582,9 @@ fn converted_historical_checkpoint_carries_engine_coins() -> TestResult<()> {
     let converted_gen = to_path
         .join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT)
         .join(gen_name);
-    if !converted_gen.join(UTXO_FILE).is_file() {
+    if converted_gen.join(UTXO_FILE).exists() {
         return Err(TestError::Assertion(
-            "converted historical generation must keep its manifest-referenced utxo artifact"
-                .into(),
+            "converted historical generation must not carry utxo-v4.dat".into(),
         ));
     }
     let engine = RocksDbStore::open(converted_gen.join("chainstate"))?;

@@ -572,7 +572,6 @@ impl NodeState {
         chainstate.configure_checkpointing(
             &config.data_dir,
             Arc::clone(&durable_tip_height),
-            seed_offer.clone(),
         )?;
         bitcoin_rs_execution::recover_snapshot_activation(&chainstate).map_err(|error| {
             NodeOpenError::AssumeUtxoOpen {

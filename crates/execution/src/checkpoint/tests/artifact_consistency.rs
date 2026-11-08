@@ -13,9 +13,8 @@ fn checkpoint_transaction_counts_must_agree_when_known() -> TestResult {
         };
         let mut stats = CoinStats::new();
         stats.finish_block(0, 1);
-        let data_dir = super::super::open_data_dir(dir.path())?;
-        super::super::write_checkpoint_from_dir(
-            &data_dir,
+        super::super::write_checkpoint(
+            dir.path(),
             config(),
             &tree,
             &UtxoSet::new(),
@@ -54,9 +53,8 @@ fn checkpoint_writer_refuses_inconsistent_transaction_counts() -> TestResult {
         chain_tx_count: crate::chain::ChainTxCount::established(2),
         ..applied_tip
     };
-    let data_dir = super::super::open_data_dir(dir.path())?;
-    let result = super::super::write_checkpoint_from_dir(
-        &data_dir,
+    let result = super::super::write_checkpoint(
+        dir.path(),
         config(),
         &RwLock::new(tree),
         &UtxoSet::new(),
@@ -76,11 +74,10 @@ fn checkpoint_writer_refuses_height_mismatch() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
-    let data_dir = super::super::open_data_dir(dir.path())?;
     let mut stats = CoinStats::new();
     stats.finish_block(1, 0);
-    let result = super::super::write_checkpoint_from_dir(
-        &data_dir,
+    let result = super::super::write_checkpoint(
+        dir.path(),
         config(),
         &RwLock::new(tree),
         &UtxoSet::new(),
