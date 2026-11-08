@@ -239,9 +239,11 @@ fn mismatched_datadir_schema_is_refused_before_storage_opens() -> Result<(), Tes
             "mismatched datadir schema is refused with ValidateSchema",
         ));
     };
-    let message = source.to_string();
-    assert!(message.contains("CURRENT_SCHEMA is not the current datadir schema epoch"));
-    assert!(message.contains("resync into a new datadir"));
+    assert_eq!(
+        source.kind(),
+        std::io::ErrorKind::InvalidData,
+        "a stale schema epoch is refused as invalid datadir data: {source}"
+    );
     assert!(!data_dir.join("chainstate").exists());
     Ok(())
 }
