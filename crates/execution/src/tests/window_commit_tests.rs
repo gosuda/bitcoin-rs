@@ -813,6 +813,45 @@ fn engine_coin_spent_inside_the_window_is_not_a_duplicate() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn engine_coin_duplicate_across_windows_is_rejected_by_bip30() -> TestResult {
+    let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chain)?;
+    commit_genesis_head(&chain)?;
+
+    let genesis = Network::Regtest.genesis_block();
+    let b1 = mined_child(genesis.block_hash(), 1)?;
+    let b1_hash = b1.block_hash().0;
+    let b2 = mined_child(b1.block_hash(), 2)?;
+    insert_engine_coin(&chain, b2.txs[0].txid())?;
+
+    apply_headers(&chain, &[&b1, &b2])?;
+    let blocks = [b1, b2];
+    let payloads = dump_payloads(&blocks);
+    let payload_refs: Vec<&BlockImage> = payloads.iter().collect();
+
+    let error = match chain.apply_window(&payload_refs) {
+        Ok(outcomes) => panic!(
+            "a coinbase already resident in the engine was accepted as new; head at height {}",
+            outcomes.last().map_or(0, |outcome| outcome.height)
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("BIP30"),
+        "the rejection must name BIP30, got: {error}"
+    );
+
+    let head = chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("durable head"))?;
+    assert_eq!(head.height, 1, "block 1 commits and the duplicate block does not");
+    assert_eq!(head.tip, b1_hash);
+
+    Ok(())
+}
+
 // WIN-07
 #[test]
 fn gap_replay_token_keeps_the_duplicate_exemption() -> TestResult {

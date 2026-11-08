@@ -1362,10 +1362,10 @@ fn check_bip30_and_bip34(
         )
     {
         for txid in txids {
-            let staged = scope
+            let known = scope
                 .staged
-                .and_then(|workspace| workspace.staged_coin_presence_before(*txid, height));
-            let present = match staged {
+                .and_then(|workspace| workspace.coin_presence_before(*txid, height));
+            let present = match known {
                 Some(present) => present,
                 None => {
                     let key = bitcoin_rs_storage::CoinKey(txid.0.to_le_bytes());

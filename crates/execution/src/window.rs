@@ -7,7 +7,7 @@ use super::{
 };
 use crate::chain::NodeStatus;
 use crate::error::ApplyError;
-use bitcoin_rs_consensus::primitives::{BlockImage, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Txid};
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -641,6 +641,16 @@ fn prepare_window<'a>(
     let prepare_started = quanta::Instant::now();
     let mut workspace =
         super::workspace::WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
+    let mut window_txids: Vec<Txid> = parsed
+        .iter()
+        .filter_map(|parsed| parsed.as_ref().ok())
+        .flat_map(|(_, facts)| facts.txids().iter().copied())
+        .collect();
+    window_txids.sort_unstable();
+    window_txids.dedup();
+    workspace
+        .resolve_engine_presence(handles.coins.as_ref(), &window_txids)
+        .map_err(ApplyError::CoinStoreRead)?;
     let mut prepared = Vec::with_capacity(payloads.len());
     for (index, ((&payload, parsed), context)) in
         payloads.iter().zip(parsed).zip(contexts).enumerate()
@@ -650,15 +660,22 @@ fn prepare_window<'a>(
         };
         let tx_plan = plan_block_transactions(payload, facts.txids());
         let view = bitcoin_rs_consensus::BlockView::from_image(payload, facts);
-        let duplicates_visible = view.txids().iter().any(|txid| {
-            workspace.has_live_outputs(*txid)
-                || handles
-                    .coins
-                    .get(&bitcoin_rs_storage::CoinKey(txid.0.to_le_bytes()))
-                    .ok()
-                    .flatten()
-                    .is_some()
-        });
+        let mut duplicates_visible = false;
+        for txid in view.txids() {
+            let present = workspace.has_live_outputs(*txid)
+                || match workspace.resolved_engine_presence(*txid) {
+                    Some(present) => present,
+                    None => handles
+                        .coins
+                        .get(&bitcoin_rs_storage::CoinKey(txid.0.to_le_bytes()))
+                        .map_err(ApplyError::CoinStoreRead)?
+                        .is_some(),
+                };
+            if present {
+                duplicates_visible = true;
+                break;
+            }
+        }
         if index > 0
             && duplicates_visible
             && !bitcoin_rs_consensus::bip30::is_bip30_exception(context.height, context.hash)

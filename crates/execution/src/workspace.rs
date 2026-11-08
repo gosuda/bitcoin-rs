@@ -82,6 +82,8 @@ pub(crate) struct WindowWorkspace {
     resolved_external: HashMap<OutPoint, UtxoCoin>,
     initial_records: HashMap<Txid, Option<UtxoRecord>>,
     flushed_transitions: usize,
+    touched: HashMap<Txid, Vec<usize>>,
+    engine_presence: HashMap<Txid, bool>,
 }
 
 impl WindowWorkspace {
@@ -95,6 +97,8 @@ impl WindowWorkspace {
             resolved_external: HashMap::new(),
             initial_records: HashMap::new(),
             flushed_transitions: 0,
+            touched: HashMap::new(),
+            engine_presence: HashMap::new(),
         }
     }
     #[must_use]
@@ -221,7 +225,7 @@ impl WindowWorkspace {
             }
         }
 
-        self.transitions.push(BlockTransition {
+        let transition = BlockTransition {
             height,
             hash: Hash256::from(block.block_hash()),
             prev_hash: block.header.prev_blockhash.into(),
@@ -229,7 +233,9 @@ impl WindowWorkspace {
             spent_external,
             spent_outpoints,
             bip30_overwrites,
-        });
+        };
+        index_transition(&mut self.touched, self.transitions.len(), &transition);
+        self.transitions.push(transition);
 
         Ok(())
     }
@@ -240,14 +246,20 @@ impl WindowWorkspace {
     #[must_use]
     pub(crate) fn staged_coin_presence_before(&self, txid: Txid, height: u32) -> Option<bool> {
         let mut tracked = self.initial_records.contains_key(&txid);
-        let mut unspent: HashSet<u32> = initial_outputs_for_txid(&self.initial_records, txid)
-            .into_iter()
-            .map(|output| output.vout)
-            .collect();
-        for transition in self.transitions[self.flushed_transitions..]
-            .iter()
-            .filter(|transition| transition.height < height)
-        {
+        let mut unspent: HashSet<u32> = HashSet::new();
+        if let Some(Some(record)) = self.initial_records.get(&txid) {
+            unspent.extend(record.outputs().map(|output| output.vout));
+        }
+        for &index in self.touched.get(&txid).into_iter().flatten() {
+            if index < self.flushed_transitions {
+                continue;
+            }
+            let Some(transition) = self.transitions.get(index) else {
+                continue;
+            };
+            if transition.height >= height {
+                continue;
+            }
             if transition
                 .bip30_overwrites
                 .iter()
@@ -271,6 +283,33 @@ impl WindowWorkspace {
             }
         }
         tracked.then_some(!unspent.is_empty())
+    }
+
+    pub(crate) fn resolve_engine_presence(
+        &mut self,
+        coin_store: &CoinStore,
+        txids: &[Txid],
+    ) -> Result<(), StorageError> {
+        let keys: Vec<CoinKey> = txids
+            .iter()
+            .map(|txid| CoinKey(txid.0.to_le_bytes()))
+            .collect();
+        let records = coin_store.multi_get(&keys)?;
+        for (txid, record) in txids.iter().zip(records) {
+            self.engine_presence.insert(*txid, record.is_some());
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub(crate) fn resolved_engine_presence(&self, txid: Txid) -> Option<bool> {
+        self.engine_presence.get(&txid).copied()
+    }
+
+    #[must_use]
+    pub(crate) fn coin_presence_before(&self, txid: Txid, height: u32) -> Option<bool> {
+        self.staged_coin_presence_before(txid, height)
+            .or_else(|| self.resolved_engine_presence(txid))
     }
 
     pub(crate) fn build_window_delta(
@@ -485,6 +524,30 @@ fn touched_txids(prefix: &[BlockTransition]) -> Vec<Txid> {
     txids
 }
 
+fn index_transition(
+    touched: &mut HashMap<Txid, Vec<usize>>,
+    index: usize,
+    transition: &BlockTransition,
+) {
+    let txids = transition
+        .created
+        .iter()
+        .map(|created| created.txid)
+        .chain(transition.spent_outpoints.iter().map(|spent| spent.txid))
+        .chain(
+            transition
+                .bip30_overwrites
+                .iter()
+                .map(|overwrite| overwrite.outpoint.txid),
+        );
+    for txid in txids {
+        let entries = touched.entry(txid).or_default();
+        if entries.last() != Some(&index) {
+            entries.push(index);
+        }
+    }
+}
+
 fn merge_delta_records<'r>(
     initial_records: &mut HashMap<Txid, Option<UtxoRecord>>,
     records: impl Iterator<Item = &'r (CoinKey, Option<Bytes>)>,
@@ -581,7 +644,7 @@ mod tests {
 
     use bytes::Bytes;
 
-    use super::{CoinKey, HashMap, UtxoError, merge_delta_records};
+    use super::{CoinKey, Hash256, HashMap, Txid, UtxoError, WindowWorkspace, merge_delta_records};
 
     // WIN-05
     #[test]
@@ -597,4 +660,157 @@ mod tests {
             "a corrupt record must not be stored as an absent coin"
         );
     }
+
+    #[test]
+    fn staged_presence_reads_flushed_and_unflushed_transitions() {
+        use crate::chain::regtest_fixture::{coinbase, mined_block_with_prev_hash};
+        use bitcoin_rs_consensus::primitives::{Block, Network};
+        use hashbrown::HashSet;
+
+        let mut blocks: Vec<Block> = Vec::new();
+        let mut prev = Network::Regtest.genesis_block().block_hash();
+        for height in 1..=3_u32 {
+            let block = mined_block_with_prev_hash(prev, height, vec![coinbase(height)])
+                .expect("fixture block");
+            prev = block.block_hash();
+            blocks.push(block);
+        }
+        let txid_of = |block: &Block| block.txs[0].txid();
+        let (x1, x2, x3) = (txid_of(&blocks[0]), txid_of(&blocks[1]), txid_of(&blocks[2]));
+        let untracked = Txid(Hash256::from_le_bytes(&[0x42; 32]));
+
+        let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
+        for (index, block) in blocks.iter().enumerate() {
+            let txids = [txid_of(block)];
+            let height = u32::try_from(index + 1).expect("height");
+            workspace
+                .advance(block, &txids, height, &HashSet::new())
+                .expect("advance");
+        }
+
+        assert_eq!(workspace.staged_coin_presence_before(x1, 1), None);
+        assert_eq!(workspace.staged_coin_presence_before(x1, 2), Some(true));
+        assert_eq!(workspace.staged_coin_presence_before(x3, 3), None);
+        assert_eq!(workspace.staged_coin_presence_before(untracked, 4), None);
+
+        workspace.build_flush_delta(2).expect("flush first two blocks");
+
+        assert_eq!(workspace.staged_coin_presence_before(x1, 3), Some(true));
+        assert_eq!(workspace.staged_coin_presence_before(x2, 3), Some(true));
+        assert_eq!(workspace.staged_coin_presence_before(x3, 4), Some(true));
+        assert_eq!(workspace.staged_coin_presence_before(x3, 3), None);
+        assert_eq!(workspace.staged_coin_presence_before(untracked, 4), None);
+    }
+
+    fn reference_presence(workspace: &WindowWorkspace, txid: Txid, height: u32) -> Option<bool> {
+        let mut tracked = workspace.initial_records.contains_key(&txid);
+        let mut unspent: hashbrown::HashSet<u32> = match workspace.initial_records.get(&txid) {
+            Some(Some(record)) => record.outputs().map(|output| output.vout).collect(),
+            _ => hashbrown::HashSet::new(),
+        };
+        for transition in workspace.transitions[workspace.flushed_transitions..]
+            .iter()
+            .filter(|transition| transition.height < height)
+        {
+            if transition
+                .bip30_overwrites
+                .iter()
+                .any(|overwrite| overwrite.outpoint.txid == txid)
+            {
+                unspent.clear();
+                tracked = true;
+            }
+            for created in &transition.created {
+                if created.txid == txid {
+                    unspent.insert(created.vout);
+                    tracked = true;
+                }
+            }
+            for spent in &transition.spent_outpoints {
+                if spent.txid == txid {
+                    let vout = spent.vout;
+                    unspent.remove(&vout);
+                    tracked = true;
+                }
+            }
+        }
+        tracked.then_some(!unspent.is_empty())
+    }
+
+    #[test]
+    fn staged_presence_index_matches_the_linear_scan() {
+        use crate::chain::regtest_fixture::{coinbase, mined_block_with_prev_hash};
+        use bitcoin_rs_consensus::primitives::{
+            Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+        };
+        use hashbrown::HashSet;
+
+        let spend = |previous: OutPoint| Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output: previous,
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: vec![0x51].into(),
+            }],
+        };
+        let genesis_hash = Network::Regtest.genesis_block().block_hash();
+        let block_1 = mined_block_with_prev_hash(genesis_hash, 1, vec![coinbase(1)])
+            .expect("fixture block");
+        let x1 = block_1.txs[0].txid();
+        let block_2 = mined_block_with_prev_hash(
+            block_1.block_hash(),
+            2,
+            vec![coinbase(2), spend(OutPoint::new(x1, 0))],
+        )
+        .expect("fixture block");
+        let x2 = block_2.txs[0].txid();
+        let s2 = block_2.txs[1].txid();
+        let block_3 = mined_block_with_prev_hash(
+            block_2.block_hash(),
+            3,
+            vec![
+                coinbase(3),
+                spend(OutPoint::new(x2, 0)),
+                spend(OutPoint::new(s2, 0)),
+            ],
+        )
+        .expect("fixture block");
+        let blocks = [block_1, block_2, block_3];
+
+        let mut candidates: Vec<Txid> = blocks
+            .iter()
+            .flat_map(|block| block.txs.iter().map(Tx::txid))
+            .collect();
+        candidates.push(Txid(Hash256::from_le_bytes(&[0x42; 32])));
+
+        let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
+        for (index, block) in blocks.iter().enumerate() {
+            let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
+            let height = u32::try_from(index + 1).expect("height");
+            workspace
+                .advance(block, &txids, height, &HashSet::new())
+                .expect("advance");
+        }
+
+        for flushed in 0..=blocks.len() {
+            for height in 0..=4_u32 {
+                for txid in &candidates {
+                    assert_eq!(
+                        workspace.staged_coin_presence_before(*txid, height),
+                        reference_presence(&workspace, *txid, height),
+                        "indexed presence diverged at height {height} after {flushed} flushed blocks"
+                    );
+                }
+            }
+            if flushed < blocks.len() {
+                workspace.build_flush_delta(1).expect("flush one block");
+            }
+        }
+     }
 }
