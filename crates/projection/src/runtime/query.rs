@@ -279,7 +279,7 @@ impl ServingView {
         Instant::now() >= self.deadline
     }
 
-    #[cfg(any(test, feature = "test-seam"))]
+    #[cfg(test)]
     pub(crate) fn expire_for_test(&mut self) {
         self.deadline = Instant::now();
     }
@@ -354,7 +354,7 @@ impl DerivedIndexQueryEngine {
         self
     }
 
-    #[cfg(any(test, feature = "test-seam"))]
+    #[cfg(test)]
     pub(crate) fn set_generation_for_test(&mut self, generation: Arc<Generation>) {
         self.generation = generation;
     }
