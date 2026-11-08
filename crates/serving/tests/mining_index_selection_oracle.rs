@@ -7,10 +7,11 @@ use crate::support::mining::fixtures as common;
 
 use std::collections::HashSet;
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::mining::{Candidate, CandidateContext, assemble_candidate};
 use bitcoin_rs_consensus::primitives::{Amount, Hash256, LockTime, OutPoint, Sequence, Tx, Txid};
-use bitcoin_rs_mempool::{Mempool, SnapshotEntry};
+use bitcoin_rs_mempool::{Mempool, MempoolEntry, SnapshotEntry};
 use common::{
     Forged, PAYOUT, insert_forged, selected_fees, serialized_size, total_sigop_cost, tx,
     zero_fee_pool,
@@ -342,14 +343,11 @@ fn spec_tx(label: u8, parent: Option<Txid>, spec: &Spec) -> Tx {
 fn build_pool(specs: &[Spec]) -> Mempool {
     let mut pool = zero_fee_pool();
     let mut txids: Vec<Txid> = Vec::new();
+    let mut cluster_of: Vec<usize> = Vec::new();
+    let mut cluster_weights: Vec<u64> = Vec::new();
+    let max_cluster_weight = pool.limits.cluster_size_vbytes.saturating_mul(4);
     for (index, spec) in specs.iter().enumerate() {
         let label = u8::try_from(index).expect("at most 24 specs");
-        let parent = spec
-            .parent
-            .filter(|_| index > 0)
-            .map(|choice| txids[choice % index]);
-        let transaction = spec_tx(label, parent, spec);
-        txids.push(transaction.txid());
         let forged = Forged::new(spec.fee, spec.weight, spec.size).with_sigops(spec.sigops);
         let forged = if spec.exact_vsize {
             let vsize = u32::try_from(spec.weight.div_ceil(4)).expect("weight fits vsize");
@@ -357,6 +355,39 @@ fn build_pool(specs: &[Spec]) -> Mempool {
         } else {
             forged
         };
+        let mut dummy = MempoolEntry::new(
+            Arc::new(tx(label, 1_000, None)),
+            forged.vsize,
+            forged.fee,
+            1,
+            100,
+            forged.sigop_cost,
+        );
+        dummy.weight = forged.weight;
+        let policy_weight = dummy.policy_weight();
+        let parent_idx = spec
+            .parent
+            .filter(|_| index > 0)
+            .map(|choice| choice % index)
+            .filter(|&choice| {
+                let cid = cluster_of[choice];
+                cluster_weights[cid].saturating_add(policy_weight) <= max_cluster_weight
+            });
+        let parent = parent_idx.map(|choice| txids[choice]);
+        let transaction = spec_tx(label, parent, spec);
+        txids.push(transaction.txid());
+        match parent_idx {
+            Some(choice) => {
+                let cid = cluster_of[choice];
+                cluster_of.push(cid);
+                cluster_weights[cid] = cluster_weights[cid].saturating_add(policy_weight);
+            }
+            None => {
+                let cid = cluster_weights.len();
+                cluster_of.push(cid);
+                cluster_weights.push(policy_weight);
+            }
+        }
         insert_forged(&mut pool, transaction, forged)
             .expect("generated entries stay inside admission limits");
     }
