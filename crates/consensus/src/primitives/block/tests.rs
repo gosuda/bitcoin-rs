@@ -1,4 +1,5 @@
 use super::Block;
+use super::BlockImage;
 use crate::primitives::deserialize;
 use crate::primitives::encode::DecodeError;
 
@@ -558,5 +559,123 @@ fn block_image_identities_and_views_distinct_domains() -> Result<()> {
         Some(segwit_image.tx(0).wtxid())
     );
     assert_ne!(segwit_image.tx(0).wtxid().0, segwit_image.tx(0).txid().0);
+    Ok(())
+}
+
+fn rewrite_witness_items_in_place(
+    image: &BlockImage,
+    bytes: &mut [u8],
+    mask: &mut [bool],
+) -> Result<()> {
+    for tx_layout in image.layout().txs() {
+        for input_layout in tx_layout.inputs() {
+            for item_layout in input_layout.witness_items() {
+                let span = item_layout.item();
+                let start = usize::try_from(span.start())?;
+                let end = usize::try_from(span.end())?;
+                mask[start..end].fill(true);
+                for byte in &mut bytes[start..end] {
+                    *byte = 0x5A;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn assert_transaction_views_match_except_witness(left: &BlockImage, right: &BlockImage) {
+    assert_eq!(left.tx_count(), right.tx_count());
+    for index in 0..left.tx_count() {
+        let left_tx = left.tx(index);
+        let right_tx = right.tx(index);
+        assert_eq!(left_tx.identity().txid(), right_tx.identity().txid());
+        assert_inputs_match_except_witness(&left_tx, &right_tx);
+        assert_eq!(left_tx.output_count(), right_tx.output_count());
+        for i in 0..left_tx.output_count() {
+            assert_eq!(left_tx.output_value(i), right_tx.output_value(i));
+            assert_eq!(left_tx.output_script(i), right_tx.output_script(i));
+        }
+    }
+}
+
+fn assert_inputs_match_except_witness(
+    left: &crate::primitives::TransactionView<'_>,
+    right: &crate::primitives::TransactionView<'_>,
+) {
+    assert_eq!(left.input_count(), right.input_count());
+    for i in 0..left.input_count() {
+        assert_eq!(left.input_outpoint(i), right.input_outpoint(i));
+    }
+}
+
+// BLK-07
+#[test]
+fn utxo_and_fact_inputs_ignore_witness_bytes() -> Result<()> {
+    use crate::block_view::BlockFacts;
+
+    let golden = read_test_fixture("481824.bin")?;
+    let witness_image = BlockImage::from_raw(bytes::Bytes::from(golden.clone()))?;
+
+    let mut witness_mask = vec![false; witness_image.bytes().len()];
+    let mut rewritten = golden;
+    rewrite_witness_items_in_place(&witness_image, &mut rewritten, &mut witness_mask)?;
+    let rewritten_image = BlockImage::from_raw(bytes::Bytes::from(rewritten))?;
+
+    let witness_facts = BlockFacts::from_image(&witness_image);
+    let rewritten_facts = BlockFacts::from_image(&rewritten_image);
+    assert_transaction_views_match_except_witness(&witness_image, &rewritten_image);
+    assert_eq!(witness_facts.txids(), rewritten_facts.txids());
+    assert_eq!(witness_facts.weight(), rewritten_facts.weight());
+    assert_eq!(witness_facts.merkle_root(), rewritten_facts.merkle_root());
+    assert_eq!(witness_facts.has_witness(), rewritten_facts.has_witness());
+    assert_ne!(witness_facts.wtxids(), rewritten_facts.wtxids());
+    assert_ne!(
+        witness_image.bytes().as_ref(),
+        rewritten_image.bytes().as_ref()
+    );
+    let differing = witness_image
+        .bytes()
+        .iter()
+        .zip(rewritten_image.bytes().iter())
+        .enumerate()
+        .filter(|(_, (left, right))| left != right)
+        .map(|(index, _)| index);
+    for index in differing {
+        assert!(
+            witness_mask[index],
+            "a byte outside witness spans changed under witness-only rewriting"
+        );
+    }
+    Ok(())
+}
+
+// BLK-08
+#[test]
+fn long_lived_records_own_their_bytes_and_outlive_the_image() -> Result<()> {
+    use crate::block_view::BlockFacts;
+    use crate::primitives::layout::TxIdentity;
+
+    const fn assert_unborrowed<T: 'static>() {}
+    assert_unborrowed::<TxIdentity>();
+    assert_unborrowed::<BlockFacts>();
+
+    let golden = read_test_fixture("481824.bin")?;
+    let facts;
+    let identities: Vec<TxIdentity>;
+    {
+        let image = BlockImage::from_raw(bytes::Bytes::from(golden))?;
+        facts = BlockFacts::from_image(&image);
+        identities = image.identities().to_vec();
+    }
+    assert_eq!(facts.txids().len(), identities.len());
+    let wtxids = facts.wtxids().ok_or("fixture block must carry witness")?;
+    assert_eq!(wtxids.len(), identities.len());
+    for (index, (identity, txid)) in identities.iter().zip(facts.txids()).enumerate() {
+        assert_eq!(identity.txid(), *txid);
+        match identity.wtxid() {
+            Some(wtxid) => assert_eq!(wtxid, wtxids[index]),
+            None => assert_eq!(wtxids[index].0, txid.0),
+        }
+    }
     Ok(())
 }
