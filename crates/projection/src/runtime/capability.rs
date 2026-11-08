@@ -148,18 +148,6 @@ impl DerivedIndexCapability {
         }
     }
 
-    #[must_use]
-    pub fn coverage_height(&self) -> Option<u32> {
-        let mut lowest = None;
-        for capability in self.enabled.iter() {
-            let Some(height) = self.coverage_of(capability) else {
-                continue;
-            };
-            lowest = Some(lowest.map_or(height, |current: u32| current.min(height)));
-        }
-        lowest
-    }
-
     /// SNP-09: one independent coverage value per enabled projection.
     #[must_use]
     pub fn capability_coverage(&self) -> [Option<u32>; 4] {
@@ -192,10 +180,6 @@ impl DerivedIndexCapabilitySource for DerivedIndexCapability {
             _ => CapabilityState::Disabled,
         };
         derived_index_status(enabled, state)
-    }
-
-    fn coverage_height(&self) -> Option<u32> {
-        self.coverage_height()
     }
 
     fn capability_coverage(&self) -> [Option<u32>; 4] {

@@ -1195,6 +1195,11 @@ fn three_positions_move_independently() -> Result<(), TestError> {
         p2.historical_validation_height,
         p1.historical_validation_height
     );
+    assert_eq!(
+        p2.projection_coverage,
+        [None, None, None, None],
+        "no projection worker runs, so no projection claims coverage"
+    );
 
     Ok(())
 }

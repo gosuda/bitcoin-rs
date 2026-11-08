@@ -861,7 +861,7 @@ impl SnapshotControl {
         let projection_coverage = self
             .derived_index_status
             .as_ref()
-            .and_then(|status| status.coverage_height());
+            .map_or([None; 4], |status| status.capability_coverage());
         Ok(ThreePositions {
             active_chain_height,
             historical_validation_height,
@@ -876,7 +876,8 @@ impl SnapshotControl {
 pub struct ThreePositions {
     pub active_chain_height: u32,
     pub historical_validation_height: u32,
-    pub projection_coverage: Option<u32>,
+    /// Indexed by `IndexCapability::index`; `None` where no projection serves.
+    pub projection_coverage: [Option<u32>; 4],
 }
 
 fn micros(elapsed: Duration) -> u64 {
