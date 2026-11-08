@@ -719,7 +719,7 @@ impl Publication<'_, '_, '_> {
             prev_hash,
             coin_stats_height_delta: _,
         } = self;
-        let commit_id = match publication {
+        match publication {
             PublishMode::Now => {
                 return Err(ApplyError::DurableHeadCommit(
                     bitcoin_rs_storage::StorageError::InvalidOperation(
@@ -776,8 +776,8 @@ impl Publication<'_, '_, '_> {
                 if certify_head {
                     outcome.tip = receipt.certify(outcome.tip);
                 }
+                outcome.commit_id = commit_id;
                 outcome.committed_facts = build_committed_facts(&outcome, image, &undo);
-                commit_id
             }
             PublishMode::Grouped(group) => {
                 outcome.committed_facts = build_committed_facts(&outcome, image, &undo);
@@ -792,7 +792,7 @@ impl Publication<'_, '_, '_> {
         };
 
         handles.publish_applied(&outcome.tip, crate::events::HintKind::Connected);
-        outcome.commit_id = commit_id;
+
         Ok(ApplyFinish::Committed(Box::new(outcome)))
     }
 }

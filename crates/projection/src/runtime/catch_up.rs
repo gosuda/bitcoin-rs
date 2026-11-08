@@ -366,7 +366,7 @@ impl Worker {
         }
     }
 
-    fn try_prepare_from_facts(
+    pub(super) fn try_prepare_from_facts(
         &self,
         identities: &[BlockIdentity],
         capabilities: IndexCapabilities,
@@ -375,6 +375,10 @@ impl Worker {
             return Ok(None);
         }
         self.drain_facts_into_buffer();
+        if let Some(floor) = identities.first().map(|identity| identity.height) {
+            let mut guard = self.buffered_facts.lock();
+            guard.retain(|_, block| block.height >= floor);
+        }
         let guard = self.buffered_facts.lock();
         if guard.is_empty() {
             return Ok(None);

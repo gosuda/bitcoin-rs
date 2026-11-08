@@ -1383,3 +1383,53 @@ fn malformed_stored_consumer_cursor_never_causes_panic_and_overwrites_cleanly() 
         assert_eq!(stored, h.worker.chain_events.cursor().to_bytes());
     }
 }
+
+// PRJ-04
+#[test]
+fn buffered_facts_below_index_progress_are_evicted() {
+    use bitcoin_rs_storage::CommittedBlock;
+
+    let f = ForkFixture::new(2);
+    let mut h = Harness::with_enabled(&f, u32::MAX, IndexCapabilities::TX_LOOKUP);
+    let (_facts_tx, facts_rx) = crossbeam_channel::bounded(8);
+    h.worker.facts_rx = Some(facts_rx);
+
+    let a2 = f.tip(f.a[1]);
+    let identities = h
+        .worker
+        .collect_target_chain(&a2, 1, 2)
+        .expect("target chain from height one");
+    let stale = CommittedBlock {
+        height: 0,
+        hash: [0x77; 32],
+        parent_hash: [0_u8; 32],
+        header: [0_u8; 80],
+        txs: Vec::new(),
+    };
+    let window = CommittedBlock {
+        height: identities[0].height,
+        hash: identities[0].hash,
+        parent_hash: identities[0].parent_hash,
+        header: [0_u8; 80],
+        txs: Vec::new(),
+    };
+    {
+        let mut guard = h.worker.buffered_facts.lock();
+        guard.insert((stale.hash, stale.height), stale);
+        guard.insert((window.hash, window.height), window.clone());
+    }
+
+    let prepared = h
+        .worker
+        .try_prepare_from_facts(&identities, IndexCapabilities::TX_LOOKUP)
+        .expect("facts preparation");
+    assert_eq!(
+        prepared.map(|blocks| blocks.len()),
+        Some(1),
+        "the fact inside the requested window must serve the fast path"
+    );
+    assert!(
+        h.worker.buffered_facts.lock().is_empty(),
+        "facts below the requested height must be evicted instead of accumulating"
+    );
+}

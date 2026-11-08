@@ -5,6 +5,7 @@ mod assumevalid_trust_tests;
 mod chain_tx_count_tests;
 mod checkpoint_debt_tests;
 mod coin_read_fault_tests;
+mod facts_commit_id_tests;
 mod observability_tests;
 mod parse_once_tests;
 mod persistence_tests;

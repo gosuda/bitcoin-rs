@@ -8,9 +8,6 @@ use std::sync::{
 pub const DEFAULT_FACTS_QUEUE_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_FACTS_QUEUE_CAPACITY: usize = 256;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Gap;
-
 // PRJ-04, PRJ-02, IDX-08
 #[derive(Clone)]
 pub struct FactsQueue {
@@ -71,21 +68,6 @@ impl FactsQueue {
                 false
             }
         }
-    }
-
-    pub fn drain(&self) -> Result<Vec<Arc<CommittedFacts>>, Gap> {
-        if self.gap.load(Ordering::SeqCst) {
-            while let Ok(facts) = self.rx.try_recv() {
-                self.bytes.fetch_sub(facts.size_bytes(), Ordering::SeqCst);
-            }
-            return Err(Gap);
-        }
-        let mut items = Vec::new();
-        while let Ok(facts) = self.rx.try_recv() {
-            self.bytes.fetch_sub(facts.size_bytes(), Ordering::SeqCst);
-            items.push(facts);
-        }
-        Ok(items)
     }
 
     #[must_use]
