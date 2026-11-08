@@ -18,7 +18,10 @@ pub mod segment;
 #[cfg(feature = "silent-payments")]
 pub mod silent_payments;
 pub mod snapshot_seed;
-pub use writer::{ScriptHistoryAttachment, TxIndexWriter, TxLookupAttachment};
+pub use writer::{
+    CompactFilterAttachment, CompactFilterRow, ScriptHistoryAttachment, TxIndexWriter,
+    TxLookupAttachment,
+};
 pub mod types;
 mod writer;
 

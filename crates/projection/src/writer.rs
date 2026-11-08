@@ -20,6 +20,20 @@ pub struct ScriptHistoryAttachment<'a> {
     pub scratch: &'a Path,
 }
 
+pub struct CompactFilterRow {
+    pub height: u32,
+    pub block_hash: [u8; 32],
+    pub filter_hash: [u8; 32],
+    pub header: [u8; 32],
+    pub filter: Vec<u8>,
+}
+
+pub struct CompactFilterAttachment<'a> {
+    pub base: IndexWatermark,
+    pub records: u64,
+    pub scratch: &'a Path,
+}
+
 pub trait TxIndexWriter: Send + Sync {
     fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError>;
     fn prepare_block_with_spent_scripts(
@@ -50,6 +64,12 @@ pub trait TxIndexWriter: Send + Sync {
         funding: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
         spending: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
         attachment: &ScriptHistoryAttachment<'_>,
+    ) -> Result<u64, IndexError>;
+    fn attach_compact_filter_rows(
+        &self,
+        by_height: &mut dyn Iterator<Item = CompactFilterRow>,
+        by_block: &mut dyn Iterator<Item = CompactFilterRow>,
+        attachment: &CompactFilterAttachment<'_>,
     ) -> Result<u64, IndexError>;
     fn commit_forward_with_cursor(
         &self,
@@ -153,6 +173,16 @@ where
     ) -> Result<u64, IndexError> {
         self.write()
             .attach_script_history_rows(funding, spending, attachment)
+    }
+
+    fn attach_compact_filter_rows(
+        &self,
+        by_height: &mut dyn Iterator<Item = CompactFilterRow>,
+        by_block: &mut dyn Iterator<Item = CompactFilterRow>,
+        attachment: &CompactFilterAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        self.write()
+            .attach_compact_filter_rows(by_height, by_block, attachment)
     }
 
     fn commit_rollback_one_for_with_cursor_with_spent_scripts(

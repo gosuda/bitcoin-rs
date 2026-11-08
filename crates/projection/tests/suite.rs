@@ -1,5 +1,6 @@
 mod adversarial_index;
 mod be_order;
+mod compact_filter_artifact;
 mod compact_filters;
 mod generation_parity;
 mod index_roundtrip;

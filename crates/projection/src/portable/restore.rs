@@ -2,7 +2,13 @@ use super::artifact::{
     ARTIFACT_VERSION, ArtifactHeader, CANCEL_POLL_RECORDS, HEADER_LEN, ReadFault, RecordReader,
     RowAssembler, ScriptFamily, ScriptRecordReader, TxLookupRecord, into_digest, open_hashed,
 };
+use super::artifact::{HashedFile, IO_BUFFER_BYTES};
 use super::chain::{BaseCount, BodyReader, ChainBase, Located};
+use super::compact_filters::{
+    Merge, RECORD_FIXED_LEN, Rows, Run, RunWriter, SpillFile, chain_header, decode_fixed,
+    encode_record,
+};
+use super::export::create_new_file;
 use super::manifest::{
     BundleFamily, IndexBundleManifestV1, MANIFEST_FILE, MAX_MANIFEST_BYTES, ValidatedManifest,
 };
@@ -12,18 +18,21 @@ use super::{
 };
 use crate::types::TxPosition;
 use crate::writer::TxIndexWriter;
+use crate::writer::{CompactFilterAttachment, CompactFilterRow};
 use crate::{
     IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWatermarks,
     TxIndexFamily,
 };
 use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::primitives::encode::double_sha256;
 use bitcoin_rs_execution::chain::BlockTreeReader;
 use bitcoin_rs_execution::chain::TipSnapshot;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, BufWriter, Read};
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub(super) fn restore(
     host: &BundleHost<'_>,
@@ -248,6 +257,232 @@ pub fn attach_script_history_artifact(
             &attachment,
         )
         .map_err(IndexBundleError::Index)
+}
+
+pub fn attach_compact_filter_artifact(
+    writer: &dyn TxIndexWriter,
+    target: &ManifestArtifactTarget,
+    scratch: &Path,
+) -> Result<u64, IndexBundleError> {
+    const NAME: &str = "compact_filters.artifact";
+    let path = &target.artifact_path;
+    let fail = |error| io_error(path, error);
+    if target.floor != 0 {
+        return Err(IndexBundleError::ArtifactHeader {
+            name: NAME,
+            reason: "compact filter coverage starts at height zero",
+        });
+    }
+    let length = fs::metadata(path).map_err(fail)?.len();
+    if length != target.size_bytes {
+        return Err(IndexBundleError::ArtifactLength {
+            name: NAME,
+            expected: target.size_bytes,
+            actual: length,
+        });
+    }
+    let mut hashed = open_hashed(path).map_err(fail)?;
+    let mut header_bytes = [0_u8; HEADER_LEN];
+    let header = match hashed.read_exact(&mut header_bytes) {
+        Ok(()) => ArtifactHeader::decode(&header_bytes),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            Err("file ends inside the header")
+        }
+        Err(error) => return Err(fail(error)),
+    };
+    let expectation = ArtifactExpectation {
+        family: BundleFamily::CompactFilters,
+        index_format: target.index_format,
+        network_magic: target.network.magic(),
+        base_height: target.base_height,
+        base_hash: target.base_hash,
+        records: Some(u64::from(target.base_height) + 1),
+        payload_bytes: target
+            .size_bytes
+            .checked_sub(u64::try_from(HEADER_LEN).unwrap_or(u64::MAX)),
+    };
+    let header =
+        match header.and_then(|header| check_header(&header, &expectation).map(|()| header)) {
+            Ok(header) => header,
+            Err(reason) => return Err(IndexBundleError::ArtifactHeader { name: NAME, reason }),
+        };
+    let work = scratch.join(COMPACT_FILTERS_WORK_DIR);
+    match fs::remove_dir_all(&work) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(fail(error)),
+    }
+    fs::create_dir_all(&work).map_err(fail)?;
+    let outcome = stage_verified(hashed, &header, target, &work).and_then(|(staged, digest)| {
+        if digest != target.sha256 {
+            return Err(IndexBundleError::ArtifactHash { name: NAME });
+        }
+        ingest_staged(writer, target, staged, &work)
+    });
+    let _ = fs::remove_dir_all(&work);
+    outcome
+}
+
+const COMPACT_FILTERS_WORK_DIR: &str = "compact-filters-attach";
+
+struct Staged {
+    heights: PathBuf,
+    runs: Vec<Run>,
+}
+
+fn stage_verified(
+    mut hashed: HashedFile,
+    header: &ArtifactHeader,
+    target: &ManifestArtifactTarget,
+    work: &Path,
+) -> Result<(Staged, [u8; 32]), IndexBundleError> {
+    const NAME: &str = "compact_filters.artifact";
+    let path = &target.artifact_path;
+    let heights_path = work.join("heights.bin");
+    let mut heights = BufWriter::with_capacity(IO_BUFFER_BYTES, create_new_file(&heights_path)?);
+    let mut runs = RunWriter::new(work.to_path_buf());
+    let mut previous = [0_u8; 32];
+    let mut last_block = [0_u8; 32];
+    let mut payload_left = header.payload_bytes;
+    for height in 0..=target.base_height {
+        let record = u64::from(height);
+        let framing = |reason: &'static str| IndexBundleError::ArtifactFraming {
+            name: NAME,
+            record,
+            reason,
+        };
+        let mut fixed = [0_u8; RECORD_FIXED_LEN];
+        read_record_bytes(&mut hashed, &mut fixed, record, path)?;
+        let fields = decode_fixed(&fixed);
+        if fields.height != height {
+            return Err(framing("heights are not contiguous from zero"));
+        }
+        let total = u64::try_from(RECORD_FIXED_LEN)
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::from(fields.length));
+        if total > payload_left {
+            return Err(framing("record overruns the declared payload"));
+        }
+        let length = usize::try_from(fields.length)
+            .map_err(|_| framing("record overruns the declared payload"))?;
+        let mut filter = vec![0_u8; length];
+        read_record_bytes(&mut hashed, &mut filter, record, path)?;
+        payload_left -= total;
+        if double_sha256(&filter).to_le_bytes() != fields.filter_hash {
+            return Err(framing("filter hash does not match the filter bytes"));
+        }
+        if chain_header(&fields.filter_hash, &previous) != fields.header {
+            return Err(framing("filter header chain is broken"));
+        }
+        previous = fields.header;
+        last_block = fields.block_hash;
+        let row = CompactFilterRow {
+            height,
+            block_hash: fields.block_hash,
+            filter_hash: fields.filter_hash,
+            header: fields.header,
+            filter,
+        };
+        encode_record(&mut heights, &row).map_err(|error| io_error(&heights_path, error))?;
+        runs.push(row)?;
+    }
+    let tail = u64::from(target.base_height) + 1;
+    if payload_left != 0 {
+        return Err(IndexBundleError::ArtifactFraming {
+            name: NAME,
+            record: tail,
+            reason: "payload is longer than its records",
+        });
+    }
+    let mut probe = [0_u8; 1];
+    match hashed.read(&mut probe) {
+        Ok(0) => {}
+        Ok(_) => {
+            return Err(IndexBundleError::ArtifactFraming {
+                name: NAME,
+                record: tail,
+                reason: "bytes follow the final record",
+            });
+        }
+        Err(error) => return Err(io_error(path, error)),
+    }
+    if last_block != target.base_hash {
+        return Err(IndexBundleError::ArtifactFraming {
+            name: NAME,
+            record: u64::from(target.base_height),
+            reason: "final record is not the base block",
+        });
+    }
+    let digest = into_digest(hashed);
+    heights
+        .into_inner()
+        .map_err(|error| io_error(&heights_path, error.into_error()))?;
+    Ok((
+        Staged {
+            heights: heights_path,
+            runs: runs.finish()?,
+        },
+        digest,
+    ))
+}
+
+fn ingest_staged(
+    writer: &dyn TxIndexWriter,
+    target: &ManifestArtifactTarget,
+    staged: Staged,
+    work: &Path,
+) -> Result<u64, IndexBundleError> {
+    const NAME: &str = "compact_filters.artifact";
+    let records = u64::from(target.base_height) + 1;
+    let mut previous = None;
+    for row in Merge::new(staged.runs.clone())? {
+        let row = row?;
+        if previous == Some(row.block_hash) {
+            return Err(IndexBundleError::ArtifactFraming {
+                name: NAME,
+                record: u64::from(row.height),
+                reason: "two records name the same block",
+            });
+        }
+        previous = Some(row.block_hash);
+    }
+    let failure: RefCell<Option<IndexBundleError>> = RefCell::new(None);
+    let outcome = {
+        let mut by_height = Rows::new(SpillFile::open(staged.heights, records)?, &failure);
+        let mut by_block = Rows::new(Merge::new(staged.runs)?, &failure);
+        let attachment = CompactFilterAttachment {
+            base: IndexWatermark {
+                height: target.base_height,
+                hash: target.base_hash,
+            },
+            records,
+            scratch: work,
+        };
+        writer.attach_compact_filter_rows(&mut by_height, &mut by_block, &attachment)
+    };
+    if let Some(error) = failure.into_inner() {
+        return Err(error);
+    }
+    outcome.map_err(IndexBundleError::Index)
+}
+
+fn read_record_bytes(
+    reader: &mut impl Read,
+    buffer: &mut [u8],
+    record: u64,
+    path: &Path,
+) -> Result<(), IndexBundleError> {
+    reader.read_exact(buffer).map_err(|error| {
+        if error.kind() == io::ErrorKind::UnexpectedEof {
+            IndexBundleError::ArtifactFraming {
+                name: "compact_filters.artifact",
+                record,
+                reason: "file ends inside a record",
+            }
+        } else {
+            io_error(path, error)
+        }
+    })
 }
 
 pub(crate) fn reset_interrupted_import(

@@ -59,6 +59,10 @@ pub enum IndexError {
     LiveAlreadySeeded,
     #[error("ScriptHistory already holds rows; attach needs an empty family")]
     ScriptHistoryPopulated,
+    #[error("CompactFilters already holds rows; attach needs an empty family")]
+    CompactFiltersPopulated,
+    #[error("CompactFilters attach wrote {actual} rows, the artifact has {expected}")]
+    CompactFiltersIncomplete { expected: u64, actual: u64 },
     #[error("a ScriptLive snapshot seed session is already active")]
     SeedAlreadyActive,
     #[error("ScriptLive snapshot seed staging stalled; the store writer is not draining")]

@@ -6,7 +6,7 @@
 //! | bytes | field |
 //! |---|---|
 //! | 0..8 | magic `BRSIXART` |
-//! | 8 | family (`1` `tx_lookup`, `2` `script_history`) |
+//! | 8 | family (`1` `tx_lookup`, `2` `script_history`, `3` `compact_filters`) |
 //! | 9..13 | artifact version |
 //! | 13..17 | index format version |
 //! | 17..21 | network magic, wire order |
@@ -30,6 +30,12 @@
 //! live row value entry: a 71-byte `ScriptHistoryOccurrence` for `Funding`, a 6-byte
 //! `TxPosition` for `Spending`. Records appear in strictly ascending `(kind, key)` order, the
 //! stored-key order of each family, so each family streams into `ingest_sorted` in one pass.
+//!
+//! A `CompactFilters` record is `height (4, BE) || block hash (32, LE) || filter hash (32, LE) ||
+//! filter header (32, LE) || filter length (4, LE) || filter bytes`. Records appear in strictly
+//! ascending height order, one per block from height zero to the base. Each filter hash is the
+//! dSHA256 of the filter bytes, and each filter header is dSHA256(filter hash || previous header),
+//! with the zero header before height zero. The live index stores these as hash-keyed rows.
 
 use super::manifest::BundleFamily;
 use crate::IndexError;
@@ -72,6 +78,7 @@ impl ArtifactHeader {
         out[8] = match self.family {
             BundleFamily::TxLookup => 1,
             BundleFamily::ScriptHistory => 2,
+            BundleFamily::CompactFilters => 3,
         };
         out[9..13].copy_from_slice(&self.artifact_version.to_le_bytes());
         out[13..17].copy_from_slice(&self.index_format.to_le_bytes());
@@ -90,6 +97,7 @@ impl ArtifactHeader {
         let family = match bytes[8] {
             1 => BundleFamily::TxLookup,
             2 => BundleFamily::ScriptHistory,
+            3 => BundleFamily::CompactFilters,
             _ => return Err("unknown artifact family"),
         };
         let mut word = [0_u8; 4];

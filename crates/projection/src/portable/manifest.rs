@@ -11,6 +11,7 @@ pub(super) const BUNDLE_VERSION: u32 = 1;
 pub(super) const MANIFEST_FILE: &str = "manifest.json";
 pub(super) const TXLOOKUP_FILE: &str = "txlookup-v1.dat";
 pub(super) const SCRIPTHISTORY_FILE: &str = "scripthistory-v1.dat";
+pub(super) const COMPACT_FILTERS_FILE: &str = "compact_filters.artifact";
 pub(super) const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -18,6 +19,7 @@ pub(super) const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 pub(super) enum BundleFamily {
     TxLookup,
     ScriptHistory,
+    CompactFilters,
 }
 
 impl BundleFamily {
@@ -25,6 +27,7 @@ impl BundleFamily {
         match self {
             Self::TxLookup => "tx_lookup",
             Self::ScriptHistory => "script_history",
+            Self::CompactFilters => "compact_filters",
         }
     }
 
@@ -32,6 +35,7 @@ impl BundleFamily {
         match self {
             Self::TxLookup => TXLOOKUP_FILE,
             Self::ScriptHistory => SCRIPTHISTORY_FILE,
+            Self::CompactFilters => COMPACT_FILTERS_FILE,
         }
     }
 }

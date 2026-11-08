@@ -1,5 +1,6 @@
 mod artifact;
 mod chain;
+mod compact_filters;
 mod export;
 mod manifest;
 mod restore;
@@ -12,8 +13,11 @@ use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use std::path::{Path, PathBuf};
 
+pub use compact_filters::{CompactFilterArtifact, write_compact_filter_artifact};
 pub(crate) use restore::reset_interrupted_import;
-pub use restore::{attach_script_history_artifact, attach_tx_lookup_artifact};
+pub use restore::{
+    attach_compact_filter_artifact, attach_script_history_artifact, attach_tx_lookup_artifact,
+};
 pub use script_history::{ScriptHistoryArtifact, write_script_history_artifact};
 
 #[derive(Clone, Debug)]
@@ -30,6 +34,7 @@ pub enum IndexBundleDirective {
     Export(IndexBundleRequest),
     AttachManifestArtifact(Box<ManifestArtifactTarget>),
     AttachManifestScriptHistory(Box<ManifestArtifactTarget>),
+    AttachManifestCompactFilters(Box<ManifestArtifactTarget>),
 }
 
 #[derive(Clone, Debug)]
@@ -50,6 +55,8 @@ pub enum IndexBundleError {
     TxLookupDisabled,
     #[error("portable script history bundles need the script history capability enabled")]
     ScriptHistoryDisabled,
+    #[error("portable compact filter bundles need the compact filter capability enabled")]
+    CompactFiltersDisabled,
     #[error("bundle I/O at {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -162,6 +169,9 @@ pub(crate) fn run(
         IndexBundleDirective::AttachManifestScriptHistory(target) => {
             attach_manifest_script_history(host, target)
         }
+        IndexBundleDirective::AttachManifestCompactFilters(target) => {
+            attach_manifest_compact_filters(host, target)
+        }
     }
 }
 
@@ -252,6 +262,39 @@ fn attach_manifest_script_history(
         base,
         records: rows,
         rows: usize::try_from(rows).unwrap_or(usize::MAX),
+    })))
+}
+
+fn attach_manifest_compact_filters(
+    host: &BundleHost<'_>,
+    target: &ManifestArtifactTarget,
+) -> Result<Option<BundleOutcome>, IndexBundleError> {
+    if !host.enabled.contains(IndexCapability::CompactFilters) {
+        return Err(IndexBundleError::CompactFiltersDisabled);
+    }
+    let (_, watermarks) = host
+        .writer
+        .fenced_watermarks()
+        .map_err(IndexBundleError::Index)?;
+    if watermarks
+        .compact_filters
+        .is_some_and(|existing| existing.height >= target.base_height)
+    {
+        return Ok(None);
+    }
+    let base = IndexWatermark {
+        height: target.base_height,
+        hash: target.base_hash,
+    };
+    let scratch = target
+        .artifact_path
+        .parent()
+        .unwrap_or(&target.artifact_path);
+    let records = restore::attach_compact_filter_artifact(host.writer, target, scratch)?;
+    Ok(Some(BundleOutcome::Restored(RestoreReport {
+        base,
+        records,
+        rows: usize::try_from(records).unwrap_or(usize::MAX),
     })))
 }
 

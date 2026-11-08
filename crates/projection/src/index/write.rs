@@ -277,6 +277,80 @@ impl<S: KvStore> IndexWriter<S> {
             .ok_or(IndexError::MutationSizeOverflow)
     }
 
+    pub fn attach_compact_filter_rows(
+        &self,
+        by_height: &mut dyn Iterator<Item = crate::writer::CompactFilterRow>,
+        by_block: &mut dyn Iterator<Item = crate::writer::CompactFilterRow>,
+        attachment: &crate::writer::CompactFilterAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        refuse_compact_filters_populated(self.indexer.store.as_ref(), &fence)?;
+        match self.install_compact_filters(by_height, by_block, &fence, attachment) {
+            Ok(rows) => Ok(rows),
+            Err(error) => Err(
+                match remove_compact_filter_rows(self.indexer.store.as_ref()) {
+                    Ok(()) => error,
+                    Err(cleanup) => cleanup,
+                },
+            ),
+        }
+    }
+
+    fn install_compact_filters(
+        &self,
+        by_height: &mut dyn Iterator<Item = crate::writer::CompactFilterRow>,
+        by_block: &mut dyn Iterator<Item = crate::writer::CompactFilterRow>,
+        fence: &IndexWriteFence,
+        attachment: &crate::writer::CompactFilterAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        let store = self.indexer.store.as_ref();
+        let mut height_rows = by_height.map(|row| {
+            let key = crate::segment::format::encode_filter_key(0, row.height);
+            let value = crate::segment::format::encode_filter_value(
+                &row.block_hash,
+                &row.filter_hash,
+                &row.header,
+                &row.filter,
+            );
+            (key.to_vec(), value)
+        });
+        let height_count =
+            store.ingest_sorted(ColumnFamily::Filters, &mut height_rows, attachment.scratch)?;
+        let mut block_rows = by_block.map(|row| {
+            let key = super::filters::key(&row.block_hash);
+            let value = super::filters::BasicFilter {
+                filter: row.filter,
+                hash: row.filter_hash,
+                header: row.header,
+            }
+            .encode();
+            (key.to_vec(), value)
+        });
+        let block_count =
+            store.ingest_sorted(ColumnFamily::UtxoMeta, &mut block_rows, attachment.scratch)?;
+        for actual in [height_count, block_count] {
+            if actual != attachment.records {
+                return Err(IndexError::CompactFiltersIncomplete {
+                    expected: attachment.records,
+                    actual,
+                });
+            }
+        }
+        let mut batch = store.new_batch();
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            FORMAT_VERSION_KEY,
+            &FORMAT_VERSION_VALUE,
+        );
+        put_selected_watermarks(
+            &mut batch,
+            IndexCapabilities::COMPACT_FILTERS,
+            Some(attachment.base),
+        );
+        commit_ordinary(store, self.generation, fence, batch)?;
+        Ok(attachment.records)
+    }
+
     pub fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
         if capabilities.is_empty() {
             return Err(IndexError::InvalidResetMarker);
@@ -684,6 +758,36 @@ fn refuse_script_history_populated<S: KvStore>(
             return Err(IndexError::ScriptHistoryPopulated);
         }
     }
+    Ok(())
+}
+
+fn refuse_compact_filters_populated<S: KvStore>(
+    store: &S,
+    fence: &IndexWriteFence,
+) -> Result<(), IndexError> {
+    if let Some(actual) = fence.watermarks.compact_filters {
+        return Err(IndexError::WatermarkMismatch {
+            expected: None,
+            actual: Some(actual),
+        });
+    }
+    if let Some(entry) = store
+        .iter_prefix(ColumnFamily::UtxoMeta, super::filters::PREFIX)?
+        .next()
+    {
+        let _ = entry?;
+        return Err(IndexError::CompactFiltersPopulated);
+    }
+    if let Some(entry) = store.iter_prefix(ColumnFamily::Filters, &[])?.next() {
+        let _ = entry?;
+        return Err(IndexError::CompactFiltersPopulated);
+    }
+    Ok(())
+}
+
+fn remove_compact_filter_rows<S: KvStore>(store: &S) -> Result<(), IndexError> {
+    store.delete_range(ColumnFamily::UtxoMeta, super::filters::PREFIX, &[1, b'G'])?;
+    store.delete_range(ColumnFamily::Filters, &[0; 8], &[0, 0, 0, 0, 0, 0, 0, 1])?;
     Ok(())
 }
 
