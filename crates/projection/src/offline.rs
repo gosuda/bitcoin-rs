@@ -5,13 +5,20 @@ use crate::IndexError;
 /// Every column family the derived-index projection owns inside its
 /// namespace store. `UtxoMeta` carries only index metadata there: watermark
 /// rows, the consumer cursor, reset fencing state, and compact filters.
-const INDEX_FAMILIES: [ColumnFamily; 6] = [
+const INDEX_FAMILIES: [ColumnFamily; 13] = [
     ColumnFamily::TxConfirmed,
     ColumnFamily::BlockHeaders,
     ColumnFamily::Funding,
     ColumnFamily::Spending,
     ColumnFamily::UtxoMeta,
     ColumnFamily::ScriptLive,
+    ColumnFamily::IdxMeta,
+    ColumnFamily::TxDir,
+    ColumnFamily::ScriptDict,
+    ColumnFamily::ScriptPost,
+    ColumnFamily::SpendDir,
+    ColumnFamily::ScriptStats,
+    ColumnFamily::Filters,
 ];
 
 const WIPE_SCAN_ROWS: usize = 10_000;

@@ -76,10 +76,17 @@ impl IndexCapability {
 
     pub(super) const fn column_families(self) -> &'static [ColumnFamily] {
         match self {
-            Self::TxLookup => &[ColumnFamily::TxConfirmed],
-            Self::ScriptHistory => &[ColumnFamily::Funding, ColumnFamily::Spending],
+            Self::TxLookup => &[ColumnFamily::TxConfirmed, ColumnFamily::TxDir],
+            Self::ScriptHistory => &[
+                ColumnFamily::Funding,
+                ColumnFamily::Spending,
+                ColumnFamily::ScriptDict,
+                ColumnFamily::ScriptPost,
+                ColumnFamily::SpendDir,
+                ColumnFamily::ScriptStats,
+            ],
             Self::ScriptLive => &[ColumnFamily::ScriptLive],
-            Self::CompactFilters => &[],
+            Self::CompactFilters => &[ColumnFamily::Filters],
         }
     }
 

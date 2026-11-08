@@ -548,6 +548,10 @@ fn build_reset_batch<S: KvStore>(
     let capabilities = IndexCapabilities::from_mask(mask)?;
     for capability in capabilities.iter() {
         batch.delete(ColumnFamily::UtxoMeta, capability.watermark_key());
+        batch.delete(
+            ColumnFamily::IdxMeta,
+            &crate::segment::meta_gen_key(capability),
+        );
     }
     crate::index::capability::delete_selected_floors(&mut batch, capabilities);
     batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
