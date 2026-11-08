@@ -215,7 +215,10 @@ impl ChainFollowers {
     pub(crate) fn on_connect(&self, payload: &BlockImage, outcome: &ConnectOutcome) {
         let on_connect_started = quanta::Instant::now();
         let block_removals = if let Some(gateway) = &self.mempool {
-            let facts = bitcoin_rs_mempool::TransitionFacts::from_block(payload);
+            let facts = match &outcome.committed_facts {
+                Some(committed) => bitcoin_rs_mempool::TransitionFacts::from_committed(committed),
+                None => bitcoin_rs_mempool::TransitionFacts::from_block(payload),
+            };
             gateway.settle_block_facts(
                 AdmissionOrigin::Block,
                 &facts,

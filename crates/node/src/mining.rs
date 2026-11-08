@@ -276,15 +276,13 @@ impl MempoolSnapshotSource for MempoolAdapter {
 
     fn select_template_after(
         &self,
-        block: &Block,
+        block: &bitcoin_rs_consensus::primitives::BlockImage,
         context: &CandidateContext,
         payout: &[u8],
     ) -> Result<PreparedTemplateBody, MiningControlError> {
         let pool = self.mempool.read();
         let source_sequences = (pool.sequence_number(), pool.fee_delta_sequence_number());
-        let facts = bitcoin_rs_mempool::TransitionFacts::from_block(
-            &bitcoin_rs_consensus::primitives::BlockImage::from_local(block.clone()),
-        );
+        let facts = bitcoin_rs_mempool::TransitionFacts::from_block(block);
         let plan = pool.plan_block_removals(&facts);
         let body = select_template_body_after(&pool, &plan, context, payout)
             .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;

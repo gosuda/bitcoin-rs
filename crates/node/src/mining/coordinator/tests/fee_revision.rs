@@ -1,5 +1,5 @@
 use super::*;
-use bitcoin_rs_consensus::primitives::{Block, Sequence, TxIn, Txid, Witness};
+use bitcoin_rs_consensus::primitives::{BlockImage, Sequence, TxIn, Txid, Witness};
 use bitcoin_rs_execution::chain::{BlockTree, ChainError, ChainTxCount, LatchReader, NodeStatus};
 use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
 use bitcoin_rs_serving::mining::{
@@ -81,15 +81,14 @@ impl MempoolSnapshotSource for Sources {
     }
     fn select_template_after(
         &self,
-        block: &Block,
+        block: &BlockImage,
         context: &CandidateContext,
         payout: &[u8],
     ) -> Result<PreparedTemplateBody, MiningControlError> {
         let pool = self.pool.lock();
         let source_sequences = (pool.sequence_number(), pool.fee_delta_sequence_number());
-        let plan = pool.plan_block_removals(&bitcoin_rs_mempool::TransitionFacts::from_block(
-            &bitcoin_rs_consensus::primitives::BlockImage::from_local(block.clone()),
-        ));
+        let plan =
+            pool.plan_block_removals(&bitcoin_rs_mempool::TransitionFacts::from_block(block));
         let body = select_template_body_after(&pool, &plan, context, payout)
             .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
         let removals = plan

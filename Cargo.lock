@@ -433,6 +433,7 @@ dependencies = [
  "bitcoin",
  "bitcoin-rs-consensus",
  "bitcoin-rs-mempool",
+ "bitcoin-rs-storage",
  "bytemuck",
  "hashbrown 0.17.1",
  "metrics",

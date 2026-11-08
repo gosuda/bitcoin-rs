@@ -352,16 +352,15 @@ impl MempoolSnapshotSource for StaticPool {
 
     fn select_template_after(
         &self,
-        block: &Block,
+        block: &BlockImage,
         context: &CandidateContext,
         payout: &[u8],
     ) -> Result<PreparedTemplateBody, MiningControlError> {
         self.pool_reads.fetch_add(1, Ordering::Relaxed);
         let source_sequences = *self.counters.lock();
         let fixture = Mempool::new(MempoolLimits::default());
-        let plan = fixture.plan_block_removals(&bitcoin_rs_mempool::TransitionFacts::from_block(
-            &bitcoin_rs_consensus::primitives::BlockImage::from_local(block.clone()),
-        ));
+        let plan =
+            fixture.plan_block_removals(&bitcoin_rs_mempool::TransitionFacts::from_block(block));
         assert!(
             plan.removals.is_empty(),
             "the fixture pool holds nothing to project"
@@ -763,7 +762,7 @@ impl MempoolSnapshotSource for GatedPool {
 
     fn select_template_after(
         &self,
-        block: &Block,
+        block: &BlockImage,
         context: &CandidateContext,
         payout: &[u8],
     ) -> Result<PreparedTemplateBody, MiningControlError> {
@@ -786,9 +785,8 @@ impl MempoolSnapshotSource for GatedPool {
         );
         let source_sequences = *self.counters.lock();
         let fixture = Mempool::new(MempoolLimits::default());
-        let plan = fixture.plan_block_removals(&bitcoin_rs_mempool::TransitionFacts::from_block(
-            &bitcoin_rs_consensus::primitives::BlockImage::from_local(block.clone()),
-        ));
+        let plan =
+            fixture.plan_block_removals(&bitcoin_rs_mempool::TransitionFacts::from_block(block));
         let mut body = select_template_body_after(&fixture, &plan, context, payout)
             .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
         body.sequence = source_sequences.0;

@@ -436,7 +436,7 @@ impl MempoolSnapshotSource for BudgetGate {
 
     fn select_template_after(
         &self,
-        block: &Block,
+        block: &BlockImage,
         context: &CandidateContext,
         payout: &[u8],
     ) -> Result<PreparedTemplateBody, MiningControlError> {

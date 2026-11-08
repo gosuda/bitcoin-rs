@@ -1,4 +1,4 @@
-use bitcoin_rs_consensus::primitives::{Block, BlockImage, CompactTarget, Hash256, Network, Txid};
+use bitcoin_rs_consensus::primitives::{BlockImage, CompactTarget, Hash256, Network, Txid};
 use bitcoin_rs_consensus::{LocktimeRule, locktime_cutoff};
 use bitcoin_rs_execution::chain::{
     BlockTree, ChainError, TipSnapshot, candidate_version, header_sync, node::NodeId,
@@ -45,7 +45,7 @@ pub trait MempoolSnapshotSource: Send + Sync {
     ) -> Result<Option<SelectedBody>, MiningControlError>;
     fn select_template_after(
         &self,
-        block: &Block,
+        block: &BlockImage,
         context: &CandidateContext,
         payout: &[u8],
     ) -> Result<PreparedTemplateBody, MiningControlError>;

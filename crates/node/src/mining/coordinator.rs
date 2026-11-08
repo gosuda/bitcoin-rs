@@ -2,8 +2,6 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
-#[cfg(test)]
-use bitcoin_rs_consensus::primitives::Block;
 use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_consensus::primitives::CompactTarget;
 use bitcoin_rs_consensus::primitives::Hash256;
@@ -1216,11 +1214,10 @@ fn preparation_loop(shared: &PrepShared) {
             mark_prep_failed(shared, job.tip.hash);
             continue;
         };
-        let native_block = job.block.materialize();
         let Ok(prepared) =
             shared
                 .mempool
-                .select_template_after(&native_block, &context, &shared.coinbase_script)
+                .select_template_after(&job.block, &context, &shared.coinbase_script)
         else {
             mark_prep_failed(shared, job.tip.hash);
             continue;
