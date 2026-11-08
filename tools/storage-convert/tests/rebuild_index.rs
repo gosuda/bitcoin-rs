@@ -1,9 +1,3 @@
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Output;
-use std::sync::Arc;
-
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::{Hash as _, sha256d};
 use bitcoin::transaction::Version;
@@ -12,6 +6,7 @@ use bitcoin::{
 };
 use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
+use bitcoin_rs_projection::IndexCapabilities;
 use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_projection::segment::{
     Coverage, GenerationDescriptor, IndexGeneration, TailDescriptor, TailWriterState,
@@ -26,6 +21,11 @@ use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore, block_undo_key};
 use bytes::Bytes;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Output;
+use std::sync::Arc;
 
 use crate::support::error::{TestError, TestResult};
 use crate::support::harness::run_converter;
@@ -796,7 +796,13 @@ fn live_reference(blocks: &[FixtureBlock]) -> TestResult<Reference> {
         append_tail_block(&mut batch, &block.facts, &mut state);
         store.write_durable(batch)?;
     }
-    seal_tail_generation(&store, BULK_GEN_ID, coverage_for(blocks), scratch.path())?;
+    seal_tail_generation(
+        &store,
+        BULK_GEN_ID,
+        coverage_for(blocks),
+        IndexCapabilities::ALL,
+        scratch.path(),
+    )?;
     Ok(Reference { store, _dir: dir })
 }
 

@@ -1,9 +1,9 @@
-use bitcoin_rs_projection::IndexCapability;
 use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_projection::segment::{
     Coverage, RetireFault, SealFault, TailWriterState, append_tail_block, arm_retire_fault,
     arm_seal_fault, meta_gen_key, recover_segments, seal_tail_generation,
 };
+use bitcoin_rs_projection::{IndexCapabilities, IndexCapability};
 use bitcoin_rs_storage::budget::UnboundedBudget;
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
 use bitcoin_rs_storage::{Bytes, ColumnFamily, KvStore, RocksDbStore};
@@ -140,6 +140,7 @@ fn seal_fault_before_marker_commit_recovers_by_rollback() -> Result<(), TestErro
         &store,
         1,
         Coverage::new(1, 1, [0x81; 32]),
+        IndexCapabilities::ALL,
         tempdir()?.path(),
     );
     arm_seal_fault(None);
@@ -160,7 +161,13 @@ fn seal_fault_before_marker_commit_recovers_by_rollback() -> Result<(), TestErro
     }
 
     let coverage = Coverage::new(1, 1, [0x81; 32]);
-    seal_tail_generation(&store, 1, coverage, tempdir()?.path())?;
+    seal_tail_generation(
+        &store,
+        1,
+        coverage,
+        IndexCapabilities::ALL,
+        tempdir()?.path(),
+    )?;
     let expected = bulk_digests(&blocks)?;
     for (cf, digest) in expected {
         assert_eq!(hash_family(&store, cf, 1)?, digest, "{cf:?} after re-seal");
@@ -178,6 +185,7 @@ fn seal_fault_after_committed_marker_recovers_by_completion() -> Result<(), Test
         &store,
         1,
         Coverage::new(1, 1, [0x81; 32]),
+        IndexCapabilities::ALL,
         tempdir()?.path(),
     );
     arm_seal_fault(None);
@@ -207,7 +215,11 @@ fn seal_fault_after_committed_marker_recovers_by_completion() -> Result<(), Test
             .get(ColumnFamily::IdxMeta, b"seal/committed")?
             .is_none()
     );
-    for capability in IndexCapability::ALL {
+    for capability in [
+        IndexCapability::TxLookup,
+        IndexCapability::ScriptHistory,
+        IndexCapability::CompactFilters,
+    ] {
         assert!(
             snapshot
                 .get(ColumnFamily::IdxMeta, &meta_gen_key(capability))?
@@ -215,6 +227,15 @@ fn seal_fault_after_committed_marker_recovers_by_completion() -> Result<(), Test
             "{capability:?} descriptor must publish"
         );
     }
+    assert!(
+        snapshot
+            .get(
+                ColumnFamily::IdxMeta,
+                &meta_gen_key(IndexCapability::ScriptLive)
+            )?
+            .is_none(),
+        "ScriptLive keeps no segment descriptor"
+    );
     Ok(())
 }
 
@@ -228,6 +249,7 @@ fn seal_fault_after_tail_clear_recovers_by_completion() -> Result<(), TestError>
         &store,
         1,
         Coverage::new(1, 1, [0x81; 32]),
+        IndexCapabilities::ALL,
         tempdir()?.path(),
     );
     arm_seal_fault(None);
@@ -274,6 +296,7 @@ fn writer_open_completes_an_interrupted_seal() -> Result<(), TestError> {
         store.as_ref(),
         1,
         Coverage::new(1, 1, [0x81; 32]),
+        IndexCapabilities::ALL,
         tempdir()?.path(),
     );
     arm_seal_fault(None);
@@ -306,6 +329,60 @@ fn writer_open_completes_an_interrupted_seal() -> Result<(), TestError> {
     Ok(())
 }
 
+// PRJ-05
+#[test]
+fn seal_publishes_descriptors_only_for_built_capabilities() -> Result<(), TestError> {
+    let blocks = one_spend_generation();
+    let (_dir, store) = tail_only_store(&blocks)?;
+
+    seal_tail_generation(
+        &store,
+        1,
+        Coverage::new(1, 1, [0x81; 32]),
+        IndexCapabilities::TX_LOOKUP,
+        tempdir()?.path(),
+    )?;
+
+    let snapshot = store.snapshot()?;
+    assert!(
+        snapshot
+            .get(
+                ColumnFamily::IdxMeta,
+                &meta_gen_key(IndexCapability::TxLookup)
+            )?
+            .is_some(),
+        "built capability must publish its descriptor"
+    );
+    assert!(
+        snapshot
+            .get(
+                ColumnFamily::IdxMeta,
+                &meta_gen_key(IndexCapability::ScriptHistory)
+            )?
+            .is_none(),
+        "unbuilt capability must not publish a descriptor"
+    );
+    assert!(
+        snapshot
+            .get(
+                ColumnFamily::IdxMeta,
+                &meta_gen_key(IndexCapability::CompactFilters)
+            )?
+            .is_none(),
+        "unbuilt capability must not publish a descriptor"
+    );
+    assert!(
+        snapshot
+            .get(
+                ColumnFamily::IdxMeta,
+                &meta_gen_key(IndexCapability::ScriptLive)
+            )?
+            .is_none(),
+        "ScriptLive keeps no segment descriptor"
+    );
+    Ok(())
+}
+
 // REO-04
 #[test]
 fn retire_fault_after_tombstone_recovers_by_completion() -> Result<(), TestError> {
@@ -321,7 +398,13 @@ fn retire_fault_after_tombstone_recovers_by_completion() -> Result<(), TestError
     let coverage = builder
         .build_and_ingest(&store, 1, &blocks)
         .map_err(|e| e.to_string())?;
-    seal_tail_generation(&store, 1, coverage, tempdir()?.path())?;
+    seal_tail_generation(
+        &store,
+        1,
+        coverage,
+        IndexCapabilities::ALL,
+        tempdir()?.path(),
+    )?;
 
     arm_retire_fault(Some(RetireFault::AfterTombstone));
     let retired =

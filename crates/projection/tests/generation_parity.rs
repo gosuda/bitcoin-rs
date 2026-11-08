@@ -1,3 +1,4 @@
+use bitcoin_rs_projection::IndexCapabilities;
 use bitcoin_rs_projection::segment::bulk_builder::{BulkSegmentBuilder, StreamingSegmentBuilder};
 use bitcoin_rs_projection::segment::{
     Coverage, TailWriterState, append_tail_block, meta_gen_key, seal_tail_generation,
@@ -196,7 +197,13 @@ fn bulk_and_live_generations_are_byte_identical() -> Result<(), TestError> {
         store_a.write_durable(batch)?;
     }
 
-    seal_tail_generation(&store_a, gen_id, coverage, scratch_a.path())?;
+    seal_tail_generation(
+        &store_a,
+        gen_id,
+        coverage,
+        IndexCapabilities::ALL,
+        scratch_a.path(),
+    )?;
 
     let indexed_cfs = [
         ColumnFamily::TxDir,
@@ -274,7 +281,13 @@ fn tail_seal_and_bulk_family_digests(
         blocks.last().map_or(0, |b| b.height),
         blocks.last().map_or([0u8; 32], |b| b.hash),
     );
-    seal_tail_generation(&store_tail, gen_id, coverage_tail, scratch_tail.path())?;
+    seal_tail_generation(
+        &store_tail,
+        gen_id,
+        coverage_tail,
+        IndexCapabilities::ALL,
+        scratch_tail.path(),
+    )?;
 
     let dir_bulk = tempdir()?;
     let scratch_bulk = tempdir()?;
@@ -391,7 +404,13 @@ fn seal_repack_respects_posting_chunk_byte_cap() -> Result<(), TestError> {
     }
     store.write_durable(post_batch)?;
 
-    seal_tail_generation(&store, 1, Coverage::new(0, 0, [0u8; 32]), scratch.path())?;
+    seal_tail_generation(
+        &store,
+        1,
+        Coverage::new(0, 0, [0u8; 32]),
+        IndexCapabilities::ALL,
+        scratch.path(),
+    )?;
 
     let snapshot = store.snapshot()?;
     let mut total_items = 0usize;

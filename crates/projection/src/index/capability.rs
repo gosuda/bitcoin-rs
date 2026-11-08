@@ -171,11 +171,11 @@ impl IndexCapabilities {
             .collect()
     }
 
-    pub(super) const fn to_mask(self) -> u8 {
+    pub(crate) const fn to_mask(self) -> u8 {
         self.0
     }
 
-    pub(super) fn from_mask(mask: u8) -> Result<Self, IndexError> {
+    pub(crate) fn from_mask(mask: u8) -> Result<Self, IndexError> {
         if mask == 0 || mask & !0b1111 != 0 {
             return Err(IndexError::InvalidResetMarker);
         }

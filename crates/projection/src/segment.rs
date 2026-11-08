@@ -3,7 +3,7 @@ pub mod format;
 #[cfg(test)]
 mod tests;
 
-use crate::IndexCapability;
+use crate::{IndexCapabilities, IndexCapability};
 use sha2::Digest as _;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,20 +205,26 @@ fn retire_fault(stage: RetireFault) -> Result<(), crate::IndexError> {
     Ok(())
 }
 
-fn seal_marker_value(gen_id: u64, coverage: &Coverage) -> [u8; 48] {
-    let mut out = [0u8; 48];
+fn seal_marker_value(
+    gen_id: u64,
+    coverage: &Coverage,
+    capabilities: IndexCapabilities,
+) -> [u8; 49] {
+    let mut out = [0u8; 49];
     out[..8].copy_from_slice(&gen_id.to_le_bytes());
     out[8..48].copy_from_slice(&coverage.to_bytes());
+    out[48] = capabilities.to_mask();
     out
 }
 
-fn decode_seal_marker(bytes: &[u8]) -> Option<(u64, Coverage)> {
-    if bytes.len() < 48 {
+fn decode_seal_marker(bytes: &[u8]) -> Option<(u64, Coverage, IndexCapabilities)> {
+    if bytes.len() < 49 {
         return None;
     }
     let gen_id = u64::from_le_bytes(bytes[..8].try_into().ok()?);
     let coverage = Coverage::from_bytes(&bytes[8..48])?;
-    Some((gen_id, coverage))
+    let capabilities = IndexCapabilities::from_mask(bytes[48]).ok()?;
+    Some((gen_id, coverage, capabilities))
 }
 
 fn retirement_families(capability: IndexCapability) -> &'static [bitcoin_rs_storage::ColumnFamily] {
@@ -615,6 +621,7 @@ pub fn seal_tail_generation<S: bitcoin_rs_storage::KvStore>(
     store: &S,
     gen_id: u64,
     coverage: Coverage,
+    capabilities: IndexCapabilities,
     scratch: &std::path::Path,
 ) -> Result<(), crate::IndexError> {
     let snapshot = store.snapshot().map_err(crate::IndexError::Storage)?;
@@ -652,7 +659,7 @@ pub fn seal_tail_generation<S: bitcoin_rs_storage::KvStore>(
     staging_batch.put(
         bitcoin_rs_storage::ColumnFamily::IdxMeta,
         SEAL_STAGING_KEY,
-        &seal_marker_value(gen_id, &coverage),
+        &seal_marker_value(gen_id, &coverage, capabilities),
     );
     store.write_durable(staging_batch)?;
     seal_fault(SealFault::AfterStaging)?;
@@ -699,14 +706,14 @@ pub fn seal_tail_generation<S: bitcoin_rs_storage::KvStore>(
     committed_batch.put(
         bitcoin_rs_storage::ColumnFamily::IdxMeta,
         SEAL_COMMITTED_KEY,
-        &seal_marker_value(gen_id, &coverage),
+        &seal_marker_value(gen_id, &coverage, capabilities),
     );
     store.write_durable(committed_batch)?;
     seal_fault(SealFault::AfterCommitted)?;
 
     clear_tail(store)?;
     seal_fault(SealFault::AfterClear)?;
-    publish_descriptors(store, gen_id, coverage)?;
+    publish_descriptors(store, gen_id, coverage, capabilities)?;
     seal_fault(SealFault::AfterPublish)?;
     remove_seal_markers(store)?;
     Ok(())
@@ -725,6 +732,7 @@ fn publish_descriptors<S: bitcoin_rs_storage::KvStore>(
     store: &S,
     gen_id: u64,
     coverage: Coverage,
+    capabilities: IndexCapabilities,
 ) -> Result<(), crate::IndexError> {
     let desc = GenerationDescriptor {
         gen_id,
@@ -736,7 +744,10 @@ fn publish_descriptors<S: bitcoin_rs_storage::KvStore>(
         },
     };
     let mut batch = store.new_batch();
-    for cap in IndexCapability::ALL {
+    for cap in capabilities.iter() {
+        if cap == IndexCapability::ScriptLive {
+            continue;
+        }
         batch.put(
             bitcoin_rs_storage::ColumnFamily::IdxMeta,
             &meta_gen_key(cap),
@@ -771,13 +782,13 @@ pub fn recover_segments<S: bitcoin_rs_storage::KvStore>(
     let snapshot = store.snapshot().map_err(crate::IndexError::Storage)?;
     let staging = snapshot
         .get(bitcoin_rs_storage::ColumnFamily::IdxMeta, SEAL_STAGING_KEY)?
-        .filter(|bytes| bytes.len() >= 48);
+        .filter(|bytes| bytes.len() >= 49);
     let committed = snapshot
         .get(
             bitcoin_rs_storage::ColumnFamily::IdxMeta,
             SEAL_COMMITTED_KEY,
         )?
-        .filter(|bytes| bytes.len() >= 48);
+        .filter(|bytes| bytes.len() >= 49);
     drop(snapshot);
 
     let staged = staging.as_deref().map_or_else(
@@ -785,13 +796,13 @@ pub fn recover_segments<S: bitcoin_rs_storage::KvStore>(
         |bytes| decode_seal_marker(bytes).ok_or(crate::IndexError::InvalidSealMarker),
     );
     if let Some(bytes) = committed.as_deref() {
-        let (gen_id, coverage) =
+        let (gen_id, coverage, capabilities) =
             decode_seal_marker(bytes).ok_or(crate::IndexError::InvalidSealMarker)?;
-        complete_seal(store, gen_id, coverage)?;
+        complete_seal(store, gen_id, coverage, capabilities)?;
         if staged.is_err() {
             return Err(crate::IndexError::InvalidSealMarker);
         }
-    } else if let Ok((gen_id, _coverage)) = staged {
+    } else if let Ok((gen_id, _coverage, _capabilities)) = staged {
         rollback_seal(store, gen_id)?;
     }
     recover_retirements(store)
@@ -801,9 +812,10 @@ fn complete_seal<S: bitcoin_rs_storage::KvStore>(
     store: &S,
     gen_id: u64,
     coverage: Coverage,
+    capabilities: IndexCapabilities,
 ) -> Result<(), crate::IndexError> {
     clear_tail(store)?;
-    publish_descriptors(store, gen_id, coverage)?;
+    publish_descriptors(store, gen_id, coverage, capabilities)?;
     remove_seal_markers(store)
 }
 
