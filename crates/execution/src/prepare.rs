@@ -38,16 +38,11 @@ pub(super) fn parse_block_for_apply(
             bitcoin_rs_consensus::kernel::BlockScriptSource::Native,
             facts,
         )),
-        #[cfg(feature = "kernel")]
         bitcoin_rs_consensus::ValidationEngine::Kernel => {
             let parsed = bitcoin_rs_consensus::kernel::BlockParse::parse(payload.bytes(), engine)
                 .map_err(ApplyError::Consensus)?;
             Ok((parsed.into_script_source(), facts))
         }
-        #[cfg(not(feature = "kernel"))]
-        bitcoin_rs_consensus::ValidationEngine::Kernel => Err(ApplyError::Consensus(
-            bitcoin_rs_consensus::kernel::kernel_not_compiled(),
-        )),
     }
 }
 
