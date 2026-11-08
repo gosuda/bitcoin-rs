@@ -209,8 +209,7 @@ impl RunWriter {
     }
 
     fn spill(&mut self) -> Result<(), IndexBundleError> {
-        self.rows
-            .sort_unstable_by(|left, right| left.block_hash.cmp(&right.block_hash));
+        self.rows.sort_unstable_by_key(|row| row.block_hash);
         let path = self.dir.join(format!("run-{:06}.bin", self.runs.len()));
         let file = create_new_file(&path)?;
         let mut out = BufWriter::with_capacity(IO_BUFFER_BYTES, file);

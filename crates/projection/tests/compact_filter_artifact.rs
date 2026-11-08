@@ -41,7 +41,9 @@ struct Fixture {
     hashes: Vec<[u8; 32]>,
 }
 
-struct FixtureOutputs(HashMap<([u8; 32], u32), (Vec<u8>, u64, u32, bool)>);
+type OutputMap = HashMap<([u8; 32], u32), (Vec<u8>, u64, u32, bool)>;
+
+struct FixtureOutputs(OutputMap);
 
 impl SpentCoins for FixtureOutputs {
     fn spent_coin(&self, txid: &[u8; 32], vout: u32) -> Option<SpentCoin<'_>> {

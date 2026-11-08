@@ -265,7 +265,8 @@ impl ScriptLiveSeedState {
                 return;
             }
         };
-        if let Err(source) = self.queue.lock().push(bytes) {
+        let pushed = self.queue.lock().push(bytes);
+        if let Err(source) = pushed {
             *error = Some(source);
             return;
         }
@@ -397,6 +398,6 @@ mod tests {
             rows,
             "every staged row must survive staging"
         );
-        assert_eq!(u64::try_from(seed.staged_rows()).expect("rows fit"), rows);
+        assert_eq!(seed.staged_rows(), rows);
     }
 }

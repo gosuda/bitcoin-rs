@@ -775,16 +775,16 @@ impl SnapshotControl {
             if manifest.index_commitments[slot_idx].is_none() {
                 continue;
             }
-            let verified = manifest
-                .verify_index_artifact(dir, slot_idx + 1)
-                .and_then(|()| match cap_trust {
-                    bitcoin_rs_execution::manifest::CapabilityTrust::Trusted(_) => Ok(()),
-                    bitcoin_rs_execution::manifest::CapabilityTrust::Untrusted => {
-                        Err(bitcoin_rs_execution::manifest::ManifestError::Artifacts(
-                            "the manifest index commitment is not compiled into this node",
-                        ))
-                    }
-                });
+            let verified = match cap_trust {
+                bitcoin_rs_execution::manifest::CapabilityTrust::Trusted(_) => {
+                    manifest.verify_index_artifact(dir, slot_idx + 1)
+                }
+                bitcoin_rs_execution::manifest::CapabilityTrust::Untrusted => {
+                    Err(bitcoin_rs_execution::manifest::ManifestError::Artifacts(
+                        "the manifest index commitment is not compiled into this node",
+                    ))
+                }
+            };
             match verified {
                 Ok(()) => tracing::info!(
                     capability = %cap.name(),
