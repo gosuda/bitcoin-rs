@@ -335,3 +335,65 @@ fn same_tx_fund_and_spend_keeps_both_posting_occurrences() -> Result<(), TestErr
     }
     Ok(())
 }
+
+// PRJ-08
+#[test]
+fn seal_repack_respects_posting_chunk_byte_cap() -> Result<(), TestError> {
+    use bitcoin_rs_projection::segment::format::{
+        PostingItem, SCRIPT_POST_CHUNK_MAX_BYTES, decode_posting_items, decode_script_post_key,
+        encode_posting_items, encode_script_dict_key, encode_script_dict_value,
+        encode_script_post_key,
+    };
+
+    let dir = tempdir()?;
+    let scratch = tempdir()?;
+    let store = RocksDbStore::open(dir.path())?;
+
+    let mut script_hash = [0u8; 32];
+    script_hash[0] = 0xAB;
+    let mut dict_batch = store.new_batch();
+    dict_batch.put(
+        ColumnFamily::ScriptDict,
+        &encode_script_dict_key(0, &script_hash),
+        &encode_script_dict_value(0),
+    );
+    store.write_durable(dict_batch)?;
+
+    let occurrences = 1_024usize;
+    let mut post_batch = store.new_batch();
+    for slot in 0..occurrences {
+        let ordinal = u32::try_from(slot).unwrap_or(0) * 0x20_0000;
+        let key = encode_script_post_key(0, 0, u32::try_from(slot).unwrap_or(0));
+        let value = encode_posting_items(&[PostingItem {
+            delta_ordinal: ordinal,
+            flags: bitcoin_rs_projection::segment::format::POSTING_FLAG_FUNDING,
+        }]);
+        post_batch.put(ColumnFamily::ScriptPost, &key, &value);
+    }
+    store.write_durable(post_batch)?;
+
+    seal_tail_generation(&store, 1, Coverage::new(0, 0, [0u8; 32]), scratch.path())?;
+
+    let snapshot = store.snapshot()?;
+    let mut total_items = 0usize;
+    let start = 1u64.to_be_bytes();
+    for item in snapshot.iter_prefix(ColumnFamily::ScriptPost, &start)? {
+        let (key, value) = item?;
+        let (_, script_id, _) = decode_script_post_key(&key).ok_or("decode post key")?;
+        assert_eq!(script_id, 0);
+        assert!(
+            value.len() <= SCRIPT_POST_CHUNK_MAX_BYTES,
+            "sealed chunk is {} bytes, cap is {}",
+            value.len(),
+            SCRIPT_POST_CHUNK_MAX_BYTES
+        );
+        total_items += decode_posting_items(&value)
+            .ok_or("decode posting items")?
+            .len();
+    }
+    assert_eq!(
+        total_items, occurrences,
+        "seal lost or duplicated occurrences"
+    );
+    Ok(())
+}

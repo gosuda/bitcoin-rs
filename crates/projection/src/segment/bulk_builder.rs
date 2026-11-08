@@ -301,21 +301,7 @@ fn emit_posting_chunks(
     posting_items: Vec<PostingItem>,
     script_post: &mut Vec<(Vec<u8>, Vec<u8>)>,
 ) {
-    let mut chunk_idx = 0u32;
-    let mut chunk_items = Vec::new();
-    for item in posting_items {
-        chunk_items.push(item);
-        if chunk_items.len() >= SCRIPT_POST_CHUNK_MAX_BYTES / 4 {
-            let post_key = encode_script_post_key(gen_id, script_id, chunk_idx);
-            let post_val = encode_posting_items(&chunk_items);
-            script_post.push((post_key.to_vec(), post_val));
-            chunk_items.clear();
-            chunk_idx = chunk_idx.saturating_add(1);
-        }
-    }
-    let post_key = encode_script_post_key(gen_id, script_id, chunk_idx);
-    let post_val = encode_posting_items(&chunk_items);
-    script_post.push((post_key.to_vec(), post_val));
+    script_post.extend(chunk_postings(gen_id, script_id, posting_items));
 }
 
 fn build_filter_rows(gen_id: u64, blocks: &[CommittedBlock]) -> Vec<(Vec<u8>, Vec<u8>)> {

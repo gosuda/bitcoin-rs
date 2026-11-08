@@ -463,21 +463,7 @@ fn seal_repack_scripts(
             });
         }
 
-        let mut chunk_idx = 0u32;
-        let mut chunk = Vec::new();
-        for item in repacked_items {
-            chunk.push(item);
-            if chunk.len() >= format::SCRIPT_POST_CHUNK_MAX_BYTES / 4 {
-                let key = format::encode_script_post_key(gen_id, new_id, chunk_idx);
-                let val = format::encode_posting_items(&chunk);
-                post_rows.push((key.to_vec(), val));
-                chunk.clear();
-                chunk_idx = chunk_idx.saturating_add(1);
-            }
-        }
-        let key = format::encode_script_post_key(gen_id, new_id, chunk_idx);
-        let val = format::encode_posting_items(&chunk);
-        post_rows.push((key.to_vec(), val));
+        post_rows.extend(format::chunk_postings(gen_id, new_id, repacked_items));
     }
 
     SealedScripts {

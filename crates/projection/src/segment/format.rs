@@ -190,6 +190,48 @@ pub fn encode_posting_items(items: &[PostingItem]) -> Vec<u8> {
     buf
 }
 
+fn uvarint_len(mut val: u32) -> usize {
+    let mut len = 1;
+    while val >= 0x80 {
+        len += 1;
+        val >>= 7;
+    }
+    len
+}
+
+// PRJ-08
+#[must_use]
+pub fn chunk_postings(
+    gen_id: u64,
+    script_id: u32,
+    items: Vec<PostingItem>,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut rows = Vec::new();
+    let mut chunk: Vec<PostingItem> = Vec::new();
+    let mut chunk_bytes = 0usize;
+    let mut chunk_idx = 0u32;
+    for item in items {
+        let item_bytes = uvarint_len(item.delta_ordinal).saturating_add(1);
+        if !chunk.is_empty() && chunk_bytes.saturating_add(item_bytes) > SCRIPT_POST_CHUNK_MAX_BYTES
+        {
+            rows.push((
+                encode_script_post_key(gen_id, script_id, chunk_idx).to_vec(),
+                encode_posting_items(&chunk),
+            ));
+            chunk.clear();
+            chunk_bytes = 0;
+            chunk_idx = chunk_idx.saturating_add(1);
+        }
+        chunk_bytes = chunk_bytes.saturating_add(item_bytes);
+        chunk.push(item);
+    }
+    rows.push((
+        encode_script_post_key(gen_id, script_id, chunk_idx).to_vec(),
+        encode_posting_items(&chunk),
+    ));
+    rows
+}
+
 // PRJ-08
 #[must_use]
 pub fn decode_posting_items(mut bytes: &[u8]) -> Option<Vec<PostingItem>> {
