@@ -14,6 +14,12 @@ fn cross_block_script(height: u32) -> Bytes {
     Bytes::from(script)
 }
 
+fn self_transfer_script(height: u32) -> Bytes {
+    let mut script = b"\x76\xa9\x14self_transfer_script\x88\xac".to_vec();
+    script[16] = u8::try_from(height & 0xff).unwrap_or(0);
+    Bytes::from(script)
+}
+
 fn cross_block_input(height: u32) -> SpentPrevout {
     let (txid, spent_height, script) = if height > 1 {
         let mut txid = [0u8; 32];
@@ -66,12 +72,28 @@ fn create_synthetic_blocks(count: u32) -> Vec<CommittedBlock> {
             if t == 2 {
                 inputs.push(cross_block_input(h));
             }
+            if t == 4 {
+                let mut older_txid = [0u8; 32];
+                older_txid[0] = 0xCC;
+                inputs.push(SpentPrevout {
+                    txid: older_txid,
+                    vout: 0,
+                    value: 21_000,
+                    script: self_transfer_script(h),
+                    height: 0,
+                    coinbase: false,
+                });
+            }
 
             let outputs = vec![
                 CreatedOutput {
                     vout: 0,
-                    value: 50_000,
-                    script: Bytes::copy_from_slice(b"\x76\xa9\x14synthetic_output_script\x88\xac"),
+                    value: if t == 4 { 20_000 } else { 50_000 },
+                    script: if t == 4 {
+                        self_transfer_script(h)
+                    } else {
+                        Bytes::copy_from_slice(b"\x76\xa9\x14synthetic_output_script\x88\xac")
+                    },
                 },
                 CreatedOutput {
                     vout: 1,
@@ -268,6 +290,48 @@ fn cross_block_spends_produce_identical_tail_and_bulk_segments() -> Result<(), T
             "{:?} diverges on cross-block spend",
             pair.family
         );
+    }
+    Ok(())
+}
+
+// PRJ-09
+#[test]
+fn same_tx_fund_and_spend_keeps_both_posting_occurrences() -> Result<(), TestError> {
+    let script = self_transfer_script(7);
+    let blocks = vec![CommittedBlock {
+        height: 1,
+        hash: [0x72; 32],
+        parent_hash: [0u8; 32],
+        header: [0u8; 80],
+        txs: vec![TxFacts {
+            txid: [0xD2; 32],
+            offset: 0,
+            len: 130,
+            inputs: vec![SpentPrevout {
+                txid: [0xCC; 32],
+                vout: 0,
+                value: 21_000,
+                script: script.clone(),
+                height: 0,
+                coinbase: false,
+            }],
+            outputs: vec![CreatedOutput {
+                vout: 0,
+                value: 20_000,
+                script,
+            }],
+        }],
+    }];
+
+    for pair in tail_seal_and_bulk_family_digests(&blocks, 1)? {
+        assert_eq!(
+            pair.tail, pair.bulk,
+            "{:?} diverges on same-tx fund and spend",
+            pair.family
+        );
+        if pair.family == ColumnFamily::ScriptStats {
+            assert_ne!(pair.bulk, [0u8; 32], "stats row missing");
+        }
     }
     Ok(())
 }

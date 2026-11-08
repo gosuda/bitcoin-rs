@@ -163,6 +163,7 @@ pub struct TailWriterState {
     pub txid_to_ordinal: hashbrown::HashMap<[u8; 32], u32>,
     pub script_id_map: hashbrown::HashMap<[u8; 32], u32>,
     pub script_stats: hashbrown::HashMap<u32, format::ScriptStats>,
+    pub posting_slots: hashbrown::HashMap<u32, u32>,
 }
 
 impl TailWriterState {
@@ -273,7 +274,9 @@ fn record_tail_occurrence(
     sats: u64,
     state: &mut TailWriterState,
 ) {
-    let post_key = format::encode_script_post_key(0, script_id, ordinal);
+    let slot = state.posting_slots.entry(script_id).or_insert(0);
+    let post_key = format::encode_script_post_key(0, script_id, *slot);
+    *slot = slot.saturating_add(1);
     let post_val = format::encode_posting_items(&[format::PostingItem {
         delta_ordinal: ordinal,
         flags,
