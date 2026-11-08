@@ -138,6 +138,14 @@ impl SnapshotManifest {
                     ));
                 }
             }
+            if let Some(commitment) = &self.index_commitments[slot - 1]
+                && (self.sizes[slot] != commitment.size_bytes
+                    || self.hashes[slot] != commitment.sha256)
+            {
+                return Err(ManifestError::Artifacts(
+                    "an artifact does not match its index commitment",
+                ));
+            }
         }
         Ok(())
     }
@@ -491,5 +499,20 @@ mod tests {
             SnapshotManifest::parse(&bytes),
             Err(ManifestError::Artifacts(_))
         ));
+    }
+
+    // SNP-03, SNP-04
+    #[test]
+    fn manifest_file_hash_must_equal_the_index_commitment() {
+        let mut manifest = manifest_with([Some(committed([5; 32])), None, None, None]);
+        manifest.hashes[1] = [0xaa; 32];
+        let bytes = sonic_rs::to_vec(&manifest).expect("serialize");
+        assert!(
+            matches!(
+                SnapshotManifest::parse(&bytes),
+                Err(ManifestError::Artifacts(_) | ManifestError::Format(_))
+            ),
+            "a manifest whose artifact hash is not the index commitment must be refused"
+        );
     }
 }
