@@ -1622,14 +1622,18 @@ impl ResolvedUtxoView {
         tx_plan: &BlockTxPlan,
     ) -> Self {
         let same_block = tx_plan.same_block_spent.as_ref();
-        let candidates = (0..image.tx_count())
+        let outpoints: Vec<OutPoint> = (0..image.tx_count())
             .map(|i| image.tx(i))
             .filter(|tx| !tx.is_coinbase())
             .flat_map(|tx| (0..tx.input_count()).map(move |j| tx.input_outpoint(j)))
-            .filter(|outpoint| same_block.is_none_or(|set| !set.contains(outpoint)));
+            .filter(|outpoint| same_block.is_none_or(|set| !set.contains(outpoint)))
+            .collect();
+        let entries = utxo.get_entries(&outpoints);
         Self {
-            external: candidates
-                .filter_map(|outpoint| utxo.get_entry(&outpoint).map(|entry| (outpoint, entry)))
+            external: outpoints
+                .into_iter()
+                .zip(entries)
+                .filter_map(|(outpoint, entry)| entry.map(|entry| (outpoint, entry)))
                 .collect(),
             _hold: None,
         }

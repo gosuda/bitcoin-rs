@@ -20,6 +20,7 @@ use super::ApplyError;
 use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
 
 mod bip30_overwrite;
+mod resolve_batch;
 mod sigops;
 mod transaction_structure;
 

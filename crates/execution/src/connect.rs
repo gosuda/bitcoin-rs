@@ -18,8 +18,8 @@ use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Header, Txid};
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, UtxoView};
 use bitcoin_rs_storage::ScriptAttestation;
 use bitcoin_rs_storage::utxo::contract::{
-    BlockChangeError, BlockChangeInputs, BlockChanges, BlockValueTotals, UndoBatch, UndoRecord,
-    build_block_changes,
+    BlockChangeError, BlockChangeInputs, BlockChanges, BlockValueTotals, CoinEntryError, UndoBatch,
+    UndoRecord, build_block_changes, resolve_coin_entries,
 };
 use hashbrown::HashMap;
 use std::sync::Arc;
@@ -228,33 +228,26 @@ impl bitcoin_rs_storage::utxo::contract::OutputSource for ChainstateUtxoSource<'
         &self,
         outpoint: &bitcoin_rs_consensus::primitives::OutPoint,
     ) -> Option<bitcoin_rs_storage::utxo::UtxoCoin> {
-        let key = bitcoin_rs_storage::CoinKey(outpoint.txid.0.to_le_bytes());
-        let bytes = match self.handles.coins.get(&key) {
-            Ok(bytes) => bytes?,
-            Err(source) => {
+        self.get_entries(std::slice::from_ref(outpoint))
+            .pop()
+            .flatten()
+    }
+
+    fn get_entries(
+        &self,
+        outpoints: &[bitcoin_rs_consensus::primitives::OutPoint],
+    ) -> Vec<Option<bitcoin_rs_storage::utxo::UtxoCoin>> {
+        match resolve_coin_entries(&self.handles.coins, outpoints) {
+            Ok(entries) => entries,
+            Err(CoinEntryError::Read(source)) => {
                 self.note_failure(ApplyError::CoinStoreRead(source));
-                return None;
+                vec![None; outpoints.len()]
             }
-        };
-        let record = match bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(
-            bytes.to_vec().into_boxed_slice(),
-        ) {
-            Ok(record) => record,
-            Err(error) => {
+            Err(CoinEntryError::Record(error)) => {
                 self.note_failure(ApplyError::UtxoCommit(error));
-                return None;
+                vec![None; outpoints.len()]
             }
-        };
-        let out = record.find_output(outpoint.vout)?;
-        Some(bitcoin_rs_storage::utxo::UtxoCoin {
-            outpoint: *outpoint,
-            txout: bitcoin_rs_consensus::primitives::TxOut {
-                value: bitcoin_rs_consensus::primitives::Amount::from_sat(out.value),
-                script_pubkey: out.script_pubkey.to_vec().into(),
-            },
-            coinbase: out.coinbase,
-            height: out.height,
-        })
+        }
     }
 }
 

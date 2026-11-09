@@ -1,4 +1,4 @@
-use hashbrown::HashSet;
+use hashbrown::{HashMap, HashSet};
 use std::borrow::Borrow;
 
 use crate::{StorageError, UndoStore};
@@ -148,6 +148,13 @@ pub trait SpentOutputLookup {
 
 pub trait OutputSource {
     fn get_entry(&self, outpoint: &OutPoint) -> Option<UtxoCoin>;
+
+    fn get_entries(&self, outpoints: &[OutPoint]) -> Vec<Option<UtxoCoin>> {
+        outpoints
+            .iter()
+            .map(|outpoint| self.get_entry(outpoint))
+            .collect()
+    }
 }
 
 impl OutputSource for UtxoSet {
@@ -179,6 +186,56 @@ impl OutputSource for crate::CoinStore {
             height: out.height,
         })
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CoinEntryError {
+    #[error(transparent)]
+    Read(#[from] StorageError),
+    #[error(transparent)]
+    Record(#[from] UtxoError),
+}
+
+pub fn resolve_coin_entries(
+    coins: &crate::CoinStore,
+    outpoints: &[OutPoint],
+) -> Result<Vec<Option<UtxoCoin>>, CoinEntryError> {
+    let mut slots: HashMap<Txid, usize> = HashMap::with_capacity(outpoints.len());
+    let mut keys = Vec::new();
+    for outpoint in outpoints {
+        slots.entry(outpoint.txid).or_insert_with(|| {
+            keys.push(crate::CoinKey(outpoint.txid.0.to_le_bytes()));
+            keys.len() - 1
+        });
+    }
+    let values = coins.multi_get(&keys)?;
+    let records = values
+        .into_iter()
+        .map(|value| {
+            value
+                .map(|bytes| {
+                    crate::utxo::record::UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice())
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, UtxoError>>()?;
+    Ok(outpoints
+        .iter()
+        .map(|outpoint| {
+            let slot = *slots.get(&outpoint.txid)?;
+            let record = records.get(slot)?.as_ref()?;
+            let out = record.find_output(outpoint.vout)?;
+            Some(UtxoCoin {
+                outpoint: *outpoint,
+                txout: TxOut {
+                    value: bitcoin_rs_consensus::primitives::Amount::from_sat(out.value),
+                    script_pubkey: out.script_pubkey.to_vec().into(),
+                },
+                coinbase: out.coinbase,
+                height: out.height,
+            })
+        })
+        .collect())
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
