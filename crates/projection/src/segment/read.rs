@@ -1071,6 +1071,36 @@ impl SegmentSnapshot<'_> {
 }
 
 #[cfg(test)]
+impl SegmentSnapshot<'_> {
+    pub(crate) fn tx_answer_for_test(
+        &self,
+        txid: &Txid,
+    ) -> Result<Vec<(u32, TxPosition)>, IndexError> {
+        Ok(self.transaction_entries(txid, unlimited_scan())?.0)
+    }
+
+    pub(crate) fn history_answer_for_test(
+        &self,
+        scripthash: ScriptHash,
+    ) -> Result<HistoryAnswer, IndexError> {
+        let scan = self.history_rows(scripthash, None, unlimited_scan())?;
+        Ok(scan
+            .rows
+            .into_iter()
+            .map(|row| (row.row.to_db_row().to_vec(), row.value))
+            .collect())
+    }
+}
+
+#[cfg(test)]
+fn unlimited_scan() -> PrefixScanLimit {
+    PrefixScanLimit {
+        max_rows: usize::MAX,
+        max_bytes: usize::MAX,
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
@@ -1084,6 +1114,7 @@ mod tests {
     const PAGE_READ_SLACK: usize = 1;
     type Row = (Vec<u8>, Vec<u8>);
     type SnapshotRows = Vec<Result<Row, StorageError>>;
+    type FixtureRows = (BTreeMap<Vec<u8>, Vec<u8>>, Vec<Row>);
 
     struct CountingSnapshot {
         rows: BTreeMap<Vec<u8>, Vec<u8>>,
@@ -1170,7 +1201,7 @@ mod tests {
             .collect()
     }
 
-    fn fixture(txs: u32) -> (BTreeMap<Vec<u8>, Vec<u8>>, Vec<Row>) {
+    fn fixture(txs: u32) -> FixtureRows {
         let mut rows = BTreeMap::new();
         let mut expected = Vec::new();
         for index in 0..txs {
@@ -1264,35 +1295,5 @@ mod tests {
                 );
             }
         }
-    }
-}
-
-#[cfg(test)]
-impl SegmentSnapshot<'_> {
-    pub(crate) fn tx_answer_for_test(
-        &self,
-        txid: &Txid,
-    ) -> Result<Vec<(u32, TxPosition)>, IndexError> {
-        Ok(self.transaction_entries(txid, unlimited_scan())?.0)
-    }
-
-    pub(crate) fn history_answer_for_test(
-        &self,
-        scripthash: ScriptHash,
-    ) -> Result<HistoryAnswer, IndexError> {
-        let scan = self.history_rows(scripthash, None, unlimited_scan())?;
-        Ok(scan
-            .rows
-            .into_iter()
-            .map(|row| (row.row.to_db_row().to_vec(), row.value))
-            .collect())
-    }
-}
-
-#[cfg(test)]
-fn unlimited_scan() -> PrefixScanLimit {
-    PrefixScanLimit {
-        max_rows: usize::MAX,
-        max_bytes: usize::MAX,
     }
 }
