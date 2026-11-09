@@ -93,6 +93,11 @@ pub enum IndexError {
     CorruptTailLog { height: u32 },
     #[error("sealing a tail segment needs a scratch directory under the node datadir")]
     SealScratchUnset,
+    #[error(
+        "consumer cursor of {len} bytes exceeds the reserved width of {} bytes",
+        crate::reconcile::CURSOR_BYTE_LEN
+    )]
+    CursorLength { len: usize },
     #[error("operation cancelled")]
     Cancelled,
 }

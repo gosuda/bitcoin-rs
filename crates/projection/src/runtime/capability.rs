@@ -53,14 +53,14 @@ impl DerivedIndexCapability {
         let script_live_outage = runtime.script_live_failure.read().clone();
         let script_history_outage = runtime.script_history_failure.read().clone();
         let unavailable = [
-            (IndexCapability::ScriptLive, script_live_outage.as_ref()),
+            (IndexCapability::ScriptLive, script_live_outage.is_some()),
             (
                 IndexCapability::ScriptHistory,
-                script_history_outage.as_ref(),
+                script_history_outage.is_some(),
             ),
         ]
         .into_iter()
-        .filter_map(|(capability, reason)| reason.map(|_| capability))
+        .filter_map(|(capability, down)| down.then_some(capability))
         .collect::<IndexCapabilities>();
         let observed = if unavailable.is_empty() {
             phase
@@ -73,7 +73,10 @@ impl DerivedIndexCapability {
                 to_height,
             };
         }
-        if let Some(reason) = script_live_outage.or(script_history_outage) {
+        let reason = script_live_outage
+            .map(|outage| outage.reason())
+            .or(script_history_outage);
+        if let Some(reason) = reason {
             let servable = enabled
                 .iter()
                 .filter(|capability| !unavailable.contains(*capability))

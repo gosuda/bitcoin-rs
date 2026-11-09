@@ -941,10 +941,10 @@ impl DerivedIndexQueryEngine {
             ));
         }
         if required.contains(IndexCapability::ScriptLive)
-            && let Some(reason) = self.runtime.script_live_failure.read().clone()
+            && let Some(outage) = self.runtime.script_live_failure.read().clone()
         {
             return Err(TxQueryError::Unavailable(
-                TxUnavailableCause::ScriptLiveUnavailable(reason),
+                TxUnavailableCause::ScriptLiveUnavailable(outage.reason()),
             ));
         }
         if required.contains(IndexCapability::ScriptHistory)

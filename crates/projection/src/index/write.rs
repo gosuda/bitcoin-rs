@@ -523,6 +523,7 @@ impl<S: KvStore> IndexWriter<S> {
         batch: PreparedBatch,
         cursor: ConsumerCursorUpdate<'_>,
     ) -> Result<IndexWatermark, IndexError> {
+        validate_cursor_update(cursor)?;
         if batch.is_empty() {
             return Err(IndexError::NonContiguousPrepared {
                 watermark: fence.watermarks.tx_lookup,
@@ -720,6 +721,7 @@ impl<S: KvStore> IndexWriter<S> {
         cursor: ConsumerCursorUpdate<'_>,
         spent_scripts: &dyn SpentCoins,
     ) -> Result<(), IndexError> {
+        validate_cursor_update(cursor)?;
         let capabilities = tail_rollback_group(fence.watermarks, capabilities);
         let current = fence
             .watermarks
@@ -801,6 +803,7 @@ impl<S: KvStore> IndexWriter<S> {
         fence: IndexWriteFence,
         cursor: &[u8],
     ) -> Result<(), IndexError> {
+        validate_cursor_update(ConsumerCursorUpdate::Set(cursor))?;
         let mut store_batch = self.indexer.store.new_batch();
         store_batch.put(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY, cursor);
         commit_ordinary(
@@ -1054,6 +1057,15 @@ fn chain_forward_blocks(
     merged.sort();
     let final_watermark = last.ok_or(IndexError::NonContiguousPrepared { watermark: current })?;
     Ok((merged, final_watermark, blocks))
+}
+
+fn validate_cursor_update(cursor: ConsumerCursorUpdate<'_>) -> Result<(), IndexError> {
+    match cursor {
+        ConsumerCursorUpdate::Set(bytes) if bytes.len() > crate::reconcile::CURSOR_BYTE_LEN => {
+            Err(IndexError::CursorLength { len: bytes.len() })
+        }
+        _ => Ok(()),
+    }
 }
 
 fn apply_cursor_update(store_batch: &mut BufferedWriteBatch, cursor: ConsumerCursorUpdate<'_>) {

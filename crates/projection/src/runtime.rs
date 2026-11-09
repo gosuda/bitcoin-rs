@@ -71,6 +71,25 @@ pub use query::{DEFAULT_SCRIPTHASH_LIMIT, DerivedIndexQueryEngine};
 
 const NO_HISTORICAL_BASE: u64 = u64::MAX;
 
+/// Why ScriptLive is down. `HistoryPruned` is terminal: pruned undo history
+/// does not return, so the group stays down until the artifact is replaced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ScriptLiveOutage {
+    HistoryPruned,
+    Failed(CompactString),
+}
+
+impl ScriptLiveOutage {
+    pub(crate) fn reason(&self) -> CompactString {
+        match self {
+            Self::HistoryPruned => DerivedIndexWorkerError::ScriptLiveHistoryPruned
+                .to_string()
+                .into(),
+            Self::Failed(reason) => reason.clone(),
+        }
+    }
+}
+
 pub struct DerivedIndexRuntime {
     revision: AtomicU64,
     pub(super) shutdown: AtomicBool,
@@ -79,7 +98,7 @@ pub struct DerivedIndexRuntime {
     wake_tx: Sender<()>,
     failure_message: RwLock<Option<CompactString>>,
     compact_filter_failure: RwLock<Option<CompactString>>,
-    script_live_failure: RwLock<Option<CompactString>>,
+    script_live_failure: RwLock<Option<ScriptLiveOutage>>,
     tx_lookup_failure: RwLock<Option<CompactString>>,
     undo_gap: RwLock<Option<(u32, Hash256)>>,
     script_history_failure: RwLock<Option<CompactString>>,
@@ -177,15 +196,16 @@ impl DerivedIndexRuntime {
         self.failed.store(true, Ordering::Release);
     }
 
-    fn fail_capability(
+    fn fail_capability<T>(
         &self,
         capability: IndexCapabilities,
-        failure: &RwLock<Option<CompactString>>,
+        failure: &RwLock<Option<T>>,
+        value: T,
         error: &DerivedIndexWorkerError,
         message: &str,
     ) {
         tracing::error!(%error, message);
-        *failure.write() = Some(error.to_string().into());
+        *failure.write() = Some(value);
         self.publish_leg(capability, ReconcileLeg::Forward);
         self.wake();
     }
@@ -194,15 +214,21 @@ impl DerivedIndexRuntime {
         self.fail_capability(
             IndexCapabilities::COMPACT_FILTERS,
             &self.compact_filter_failure,
+            error.to_string().into(),
             error,
             "compact filter index unavailable; other indexes continue",
         );
     }
 
     pub fn fail_script_live(&self, error: &DerivedIndexWorkerError) {
+        let outage = match error {
+            DerivedIndexWorkerError::ScriptLiveHistoryPruned => ScriptLiveOutage::HistoryPruned,
+            other => ScriptLiveOutage::Failed(other.to_string().into()),
+        };
         self.fail_capability(
             IndexCapabilities::SCRIPT_LIVE,
             &self.script_live_failure,
+            outage,
             error,
             "ScriptLive index unavailable; other indexes continue",
         );
@@ -212,6 +238,7 @@ impl DerivedIndexRuntime {
         self.fail_capability(
             IndexCapabilities::SCRIPT_HISTORY,
             &self.script_history_failure,
+            error.to_string().into(),
             error,
             "ScriptHistory index unavailable; other indexes continue",
         );
@@ -226,6 +253,7 @@ impl DerivedIndexRuntime {
         self.fail_capability(
             IndexCapabilities::TX_LOOKUP,
             &self.tx_lookup_failure,
+            error.to_string().into(),
             error,
             "TxLookup paused at a missing undo record; other indexes continue",
         );
@@ -272,7 +300,7 @@ impl DerivedIndexRuntime {
 
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn script_live_failure(&self) -> Option<CompactString> {
+    pub(crate) fn script_live_failure(&self) -> Option<ScriptLiveOutage> {
         self.script_live_failure.read().clone()
     }
 

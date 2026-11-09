@@ -1167,7 +1167,12 @@ fn script_live_pruned_terminal_keeps_worker_alive() {
             h.runtime.failure_message().is_none(),
             "no global worker failure"
         );
-        if h.runtime.script_live_failure().is_some() {
+        if let Some(outage) = h.runtime.script_live_failure() {
+            assert_eq!(
+                outage,
+                ScriptLiveOutage::HistoryPruned,
+                "pruned history is the terminal ScriptLive reason"
+            );
             flagged = true;
         }
     }
@@ -1431,8 +1436,7 @@ fn malformed_stored_consumer_cursor_never_causes_panic_and_overwrites_cleanly() 
         &b"\xff"[..],
         &b"corrupt-cursor-bytes"[..],
         &[0xaa; 51][..],
-        &[0xbb; 53][..],
-        &[0xcc; 1024][..],
+        &[0xbb; crate::reconcile::CURSOR_BYTE_LEN][..],
     ] {
         let (fence, _) = h.writer.fenced_watermarks().expect("fence");
         h.writer
@@ -1452,6 +1456,19 @@ fn malformed_stored_consumer_cursor_never_causes_panic_and_overwrites_cleanly() 
             .expect("cursor exists");
         assert_eq!(stored.len(), crate::reconcile::CURSOR_BYTE_LEN);
         assert_eq!(stored, h.worker.chain_events.cursor().to_bytes());
+    }
+    let (fence, _) = h.writer.fenced_watermarks().expect("fence");
+    for oversized in [
+        &[0xbb; crate::reconcile::CURSOR_BYTE_LEN + 1][..],
+        &[0xcc; 1024][..],
+    ] {
+        assert!(
+            matches!(
+                h.writer.commit_consumer_cursor(fence, oversized),
+                Err(crate::IndexError::CursorLength { .. })
+            ),
+            "a cursor wider than the reserved width is refused before any write"
+        );
     }
 }
 

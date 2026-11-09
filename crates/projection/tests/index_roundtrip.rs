@@ -15,6 +15,7 @@ use bitcoin_rs_consensus::primitives::{
 };
 use parking_lot::{Mutex, RwLock};
 
+use bitcoin_rs_projection::CURSOR_BYTE_LEN;
 use bitcoin_rs_projection::ScriptHash;
 use bitcoin_rs_projection::types::{
     HEADER_ROW_SIZE, ScriptHistoryOccurrence, TxPosition, TxPositionValue,
@@ -2883,5 +2884,33 @@ fn second_writer_contention_rejects_a_stale_fence() -> Result<(), TestError> {
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn consumer_cursor_must_be_the_reserved_width() -> Result<(), TestError> {
+    let store = Arc::new(MemoryStore::default());
+    seed_populated_store(&store, 1)?;
+    let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
+    let (fence, _) = writer.fenced_watermarks()?;
+    assert!(writer.consumer_cursor()?.is_none());
+
+    let oversized = vec![0_u8; CURSOR_BYTE_LEN + 1];
+    let result = writer.commit_consumer_cursor(fence, &oversized);
+    assert!(
+        matches!(&result, Err(IndexError::CursorLength { len }) if *len == CURSOR_BYTE_LEN + 1),
+        "a cursor wider than CURSOR_BYTE_LEN must be refused: {result:?}"
+    );
+    assert!(
+        writer.consumer_cursor()?.is_none(),
+        "a refused cursor writes nothing"
+    );
+
+    let reserved = vec![0_u8; CURSOR_BYTE_LEN];
+    writer.commit_consumer_cursor(fence, &reserved)?;
+    assert_eq!(
+        writer.consumer_cursor()?.as_deref(),
+        Some(reserved.as_slice())
+    );
     Ok(())
 }
