@@ -121,3 +121,134 @@ fn history_pages_walk_more_than_256_posting_chunks() {
     assert!(unpaged.complete);
     assert_eq!(unpaged.rows.len(), usize::try_from(TXS).unwrap_or(0));
 }
+
+#[test]
+fn core_filter_vectors_read_back_through_the_segment_snapshot()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::segment::SegmentSnapshot;
+    use crate::segment::tail::{
+        TailBounds, TailWriterState, append_tail_block, put_generation_descriptors,
+    };
+    use crate::{IndexCapability, TxIndexSnapshot};
+    use bitcoin::{consensus::deserialize, hashes::Hash as _, hex::FromHex as _};
+    use bitcoin_rs_storage::committed_facts::{
+        CommittedBlock, CreatedOutput, SpentPrevout, TxFacts,
+    };
+    use bitcoin_rs_storage::{Bytes, KvStore, RocksDbStore};
+
+    let vectors: Vec<sonic_rs::Value> =
+        sonic_rs::from_str(include_str!("../../tests/data/blockfilters-core-31.1.json"))?;
+    for vector in vectors.into_iter().skip(1) {
+        let (height, _hash, body, prevouts, _previous, expected_filter, _header, note): (
+            u32,
+            String,
+            String,
+            Vec<String>,
+            String,
+            String,
+            String,
+            String,
+        ) = sonic_rs::from_value(&vector)?;
+        let bytes = Vec::from_hex(&body)?;
+        let block: bitcoin::Block = deserialize(&bytes)?;
+        let hash = block.block_hash().to_byte_array();
+        let mut scripts = hashbrown::HashMap::<([u8; 32], u32), Vec<u8>>::new();
+        for (input, script) in block
+            .txdata
+            .iter()
+            .skip(1)
+            .flat_map(|tx| &tx.input)
+            .zip(prevouts)
+        {
+            scripts.insert(
+                (
+                    input.previous_output.txid.to_byte_array(),
+                    input.previous_output.vout,
+                ),
+                Vec::from_hex(&script)?,
+            );
+        }
+        let mut created = hashbrown::HashMap::<([u8; 32], u32), Bytes>::new();
+        let mut txs = Vec::with_capacity(block.txdata.len());
+        for (index, tx) in block.txdata.iter().enumerate() {
+            let txid = tx.compute_txid().to_byte_array();
+            let mut inputs = Vec::new();
+            if index > 0 {
+                for input in &tx.input {
+                    let prev_txid = input.previous_output.txid.to_byte_array();
+                    let prev_vout = input.previous_output.vout;
+                    let script = created
+                        .get(&(prev_txid, prev_vout))
+                        .cloned()
+                        .or_else(|| {
+                            scripts
+                                .get(&(prev_txid, prev_vout))
+                                .map(|s| Bytes::copy_from_slice(s))
+                        })
+                        .ok_or("prevout script missing from the vector")?;
+                    inputs.push(SpentPrevout {
+                        txid: prev_txid,
+                        vout: prev_vout,
+                        value: 0,
+                        script,
+                        height: 0,
+                        coinbase: false,
+                    });
+                }
+            }
+            let mut outputs = Vec::with_capacity(tx.output.len());
+            for (vout, out) in tx.output.iter().enumerate() {
+                let vout = u32::try_from(vout)?;
+                let script = Bytes::copy_from_slice(out.script_pubkey.as_bytes());
+                created.insert((txid, vout), script.clone());
+                outputs.push(CreatedOutput {
+                    vout,
+                    value: out.value.to_sat(),
+                    script,
+                });
+            }
+            txs.push(TxFacts {
+                txid,
+                offset: 0,
+                len: 0,
+                inputs,
+                outputs,
+            });
+        }
+
+        let dir = tempfile::tempdir()?;
+        let store = RocksDbStore::open(dir.path())?;
+        let block_facts = CommittedBlock {
+            height,
+            hash,
+            parent_hash: [0; 32],
+            header: [0; 80],
+            txs,
+        };
+        let mut state = TailWriterState::new();
+        let mut batch = store.new_batch();
+        append_tail_block(
+            &mut batch,
+            &block_facts,
+            &mut state,
+            &crate::segment::tail::NoSealedTxOrdinals,
+        )?;
+        put_generation_descriptors(
+            &mut batch,
+            [IndexCapability::CompactFilters],
+            TailBounds {
+                newest: None,
+                first_height: Some(height),
+                at: Some((height, hash)),
+            },
+        );
+        store.write_durable(batch)?;
+
+        let snapshot = SegmentSnapshot::open(store.snapshot()?)?;
+        let filter = snapshot
+            .compact_filter(height, &hash)?
+            .ok_or("the segment holds no filter for a covered height")?;
+        assert_eq!(filter.filter, Vec::from_hex(&expected_filter)?, "{note}");
+    }
+    Ok(())
+}
