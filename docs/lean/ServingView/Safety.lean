@@ -8,9 +8,9 @@ Models AppliedEpoch, CapabilityCoverage, capture_view, single-view tied
 query evaluation, resilience to ordinary chain extension (QRY-03),
 explicit Unavailable for out-of-coverage queries (QRY-05), generation
 retirement on deep reorg leading to ExpiredView (QRY-06), lock-free
-self-contained ScriptLive (PRJ-11), concurrent ChainTransition lock
-acquisition/release, and post-access serialization without chain or
-mempool locks (QRY-08).
+self-contained ScriptLive (PRJ-11), reads of an immutable captured view
+under concurrent chain extension (QRY-02), and post-access serialization
+without chain or mempool locks (QRY-08).
 
 Design model only: specifies the state machine and invariant safety.
 Not an implementation refinement proof or physical durability proof.
@@ -34,8 +34,6 @@ structure State where
   queryIsTipPromised : Nat
   queryIsScriptLive : Nat
   queryResult : Nat
-  chainTransitionLockHeld : Nat
-  transitionLockHeld : Nat
   chainLockHeld : Nat
   mempoolLockHeld : Nat
 
@@ -58,8 +56,6 @@ def init : State :=
     queryIsTipPromised := 0,
     queryIsScriptLive := 0,
     queryResult := 0,
-    chainTransitionLockHeld := 0,
-    transitionLockHeld := 0,
     chainLockHeld := 0,
     mempoolLockHeld := 0 }
 
@@ -67,8 +63,6 @@ inductive Action
   | extendChain
   | advanceCoverage
   | deepReorg
-  | chainTransitionAcquire
-  | chainTransitionRelease
   | captureView (isScriptLive : Nat) (isTip : Nat) (targetH : Nat)
   | accessState
   | startSerialization
@@ -90,14 +84,6 @@ def step (s : State) : Action → State
       let newStatus := if s.viewGen ≤ newRetired then 2 else s.viewStatus
       { s with currentGen := s.currentGen + 1, retiredBelow := newRetired, viewStatus := newStatus }
     else s
-  | .chainTransitionAcquire =>
-    if s.chainTransitionLockHeld = 0 then
-      { s with chainTransitionLockHeld := 1 }
-    else s
-  | .chainTransitionRelease =>
-    if s.chainTransitionLockHeld = 1 then
-      { s with chainTransitionLockHeld := 0 }
-    else s
   | .captureView isScriptLive isTip targetH =>
     if s.queryPhase = 0 then
       let chainLock := if isScriptLive = 0 then 1 else 0
@@ -111,33 +97,32 @@ def step (s : State) : Action → State
                queryIsTipPromised := isTip,
                queryIsScriptLive := isScriptLive,
                queryResult := 0,
-               transitionLockHeld := 0,
                chainLockHeld := chainLock,
                mempoolLockHeld := 0 }
     else s
   | .accessState =>
-    if s.queryPhase = 1 ∧ (s.queryIsScriptLive ≠ 0 ∨ s.chainTransitionLockHeld = 0) then
+    if s.queryPhase = 1 then
       if s.viewStatus = 2 ∨ s.viewGen ≤ s.retiredBelow then
         { s with queryPhase := 2, queryResult := 3,
-                 transitionLockHeld := 0, chainLockHeld := 0, mempoolLockHeld := 0 }
+                 chainLockHeld := 0, mempoolLockHeld := 0 }
       else if s.queryIsTipPromised ≠ 0 ∧ s.viewEpochCommit ≠ s.tipCommit then
         { s with queryPhase := 2, queryResult := 4,
-                 transitionLockHeld := 0, chainLockHeld := 0, mempoolLockHeld := 0 }
+                 chainLockHeld := 0, mempoolLockHeld := 0 }
       else if s.viewCoverage < s.queryTargetHeight then
         { s with queryPhase := 2, queryResult := 2,
-                 transitionLockHeld := 0, chainLockHeld := 0, mempoolLockHeld := 0 }
+                 chainLockHeld := 0, mempoolLockHeld := 0 }
       else
         { s with queryPhase := 2, queryResult := 1,
-                 transitionLockHeld := 0, chainLockHeld := 0, mempoolLockHeld := 0 }
+                 chainLockHeld := 0, mempoolLockHeld := 0 }
     else s
   | .startSerialization =>
-    if s.queryPhase = 2 ∧ s.transitionLockHeld = 0 ∧ s.chainLockHeld = 0 ∧ s.mempoolLockHeld = 0 then
+    if s.queryPhase = 2 ∧ s.chainLockHeld = 0 ∧ s.mempoolLockHeld = 0 then
       { s with queryPhase := 3 }
     else s
   | .finishQuery =>
     if s.queryPhase = 3 then
       { s with queryPhase := 0, queryResult := 0,
-               transitionLockHeld := 0, chainLockHeld := 0, mempoolLockHeld := 0 }
+               chainLockHeld := 0, mempoolLockHeld := 0 }
     else s
   | .stutter => s
 
@@ -151,18 +136,16 @@ def safety (s : State) : Prop :=
   -- Phase invariants
   ∧ (s.queryPhase = 1 → s.queryResult = 0)
   ∧ (s.retiredBelow ≤ s.currentGen)
-  -- PRJ-11: ScriptLive never acquires the chain transition lock
-  ∧ (s.queryIsScriptLive ≠ 0 → s.transitionLockHeld = 0)
+  -- PRJ-11: ScriptLive never acquires the chain lock
+  ∧ (s.queryIsScriptLive ≠ 0 → s.chainLockHeld = 0)
   -- QRY-08: Serialization runs with no chain or mempool locks held
-  ∧ (s.queryPhase = 3 → (s.transitionLockHeld = 0 ∧ s.chainLockHeld = 0 ∧ s.mempoolLockHeld = 0))
+  ∧ (s.queryPhase = 3 → (s.chainLockHeld = 0 ∧ s.mempoolLockHeld = 0))
   -- Well-formed machine bounds
   ∧ s.tipHeight ≤ maxHeight
   ∧ s.coverageHeight ≤ s.tipHeight
   ∧ s.currentGen ≤ maxGen
   ∧ s.queryPhase ≤ 3
   ∧ s.queryResult ≤ 4
-  ∧ s.chainTransitionLockHeld ≤ 1
-  ∧ s.transitionLockHeld ≤ 1
   ∧ s.chainLockHeld ≤ 1
   ∧ s.mempoolLockHeld ≤ 1
 
@@ -175,82 +158,72 @@ theorem safety_init : safety init := by
 theorem safety_inductive (s : State) (a : Action) (h : safety s) :
     safety (step s a) := by
   unfold safety at *
-  rcases h with ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
+  rcases h with ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCLBnd, hMLBnd⟩
   cases a
   case extendChain =>
     dsimp [step]
     split <;> try dsimp
-    · refine ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, by omega, by omega, hGenBnd, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
-    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
+    · refine ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, by omega, by omega, hGenBnd, hPhaseBnd, hResBnd, hCLBnd, hMLBnd⟩
+    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCLBnd, hMLBnd⟩
   case advanceCoverage =>
     dsimp [step]
     split <;> try dsimp
-    · refine ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, by omega, hGenBnd, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
-    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
+    · refine ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, by omega, hGenBnd, hPhaseBnd, hResBnd, hCLBnd, hMLBnd⟩
+    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCLBnd, hMLBnd⟩
   case deepReorg =>
     dsimp [step]
     split <;> try dsimp
     · split <;> try dsimp
-      · refine ⟨hRetry, hCover, ?_, hPhase1, by omega, hSL, hSerNoLock, hTipBnd, hCovBnd, by omega, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
+      · refine ⟨hRetry, hCover, ?_, hPhase1, by omega, hSL, hSerNoLock, hTipBnd, hCovBnd, by omega, hPhaseBnd, hResBnd, hCLBnd, hMLBnd⟩
         intro _; left; rfl
-      · refine ⟨hRetry, hCover, ?_, hPhase1, by omega, hSL, hSerNoLock, hTipBnd, hCovBnd, by omega, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
+      · refine ⟨hRetry, hCover, ?_, hPhase1, by omega, hSL, hSerNoLock, hTipBnd, hCovBnd, by omega, hPhaseBnd, hResBnd, hCLBnd, hMLBnd⟩
         intro h3
         rcases hExp h3 with h1 | h2
         · left; exact h1
         · right; omega
-    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
-  case chainTransitionAcquire =>
-    dsimp [step]
-    split <;> try dsimp
-    · refine ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, by omega, hTLBnd, hCLBnd, hMLBnd⟩
-    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
-  case chainTransitionRelease =>
-    dsimp [step]
-    split <;> try dsimp
-    · refine ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, by omega, hTLBnd, hCLBnd, hMLBnd⟩
-    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
+    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCLBnd, hMLBnd⟩
   case captureView isScriptLive isTip targetH =>
     dsimp [step]
     split <;> try dsimp
-    · refine ⟨by intro h; contradiction, ?_, by intro h; contradiction, ?_, ?_, ?_, by intro h; contradiction, hTipBnd, hCovBnd, hGenBnd, by omega, by omega, hCTBnd, by omega, ?_, by omega⟩
+    · refine ⟨by intro h; contradiction, ?_, by intro h; contradiction, ?_, ?_, ?_, by intro h; contradiction, hTipBnd, hCovBnd, hGenBnd, by omega, by omega, ?_, by omega⟩
       · intro h; contradiction
       · intro _; rfl
       · omega
-      · intro _; rfl
+      · intro h; split <;> omega
       · split <;> omega
-    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
+    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCLBnd, hMLBnd⟩
   case accessState =>
     dsimp [step]
     split <;> try dsimp
     · split <;> try dsimp
-      · refine ⟨by intro h; contradiction, by intro h; contradiction, ?_, by intro h; contradiction, hRetGen, by intro _; rfl, by intro h; contradiction, hTipBnd, hCovBnd, hGenBnd, by omega, by omega, hCTBnd, by omega, by omega, by omega⟩
+      · refine ⟨by intro h; contradiction, by intro h; contradiction, ?_, by intro h; contradiction, hRetGen, by intro _; rfl, by intro h; contradiction, hTipBnd, hCovBnd, hGenBnd, by omega, by omega, by omega, by omega⟩
         intro _
         assumption
       · split <;> try dsimp
-        · refine ⟨?_, by intro h; contradiction, by intro h; contradiction, by intro h; contradiction, hRetGen, by intro _; rfl, by intro h; contradiction, hTipBnd, hCovBnd, hGenBnd, by omega, by omega, hCTBnd, by omega, by omega, by omega⟩
+        · refine ⟨?_, by intro h; contradiction, by intro h; contradiction, by intro h; contradiction, hRetGen, by intro _; rfl, by intro h; contradiction, hTipBnd, hCovBnd, hGenBnd, by omega, by omega, by omega, by omega⟩
           intro _
           omega
         · split <;> try dsimp
-          · refine ⟨by intro h; contradiction, by intro h; contradiction, by intro h; contradiction, by intro h; contradiction, hRetGen, by intro _; rfl, by intro h; contradiction, hTipBnd, hCovBnd, hGenBnd, by omega, by omega, hCTBnd, by omega, by omega, by omega⟩
-          · refine ⟨by intro h; contradiction, ?_, by intro h; contradiction, by intro h; contradiction, hRetGen, by intro _; rfl, by intro h; contradiction, hTipBnd, hCovBnd, hGenBnd, by omega, by omega, hCTBnd, by omega, by omega, by omega⟩
+          · refine ⟨by intro h; contradiction, by intro h; contradiction, by intro h; contradiction, by intro h; contradiction, hRetGen, by intro _; rfl, by intro h; contradiction, hTipBnd, hCovBnd, hGenBnd, by omega, by omega, by omega, by omega⟩
+          · refine ⟨by intro h; contradiction, ?_, by intro h; contradiction, by intro h; contradiction, hRetGen, by intro _; rfl, by intro h; contradiction, hTipBnd, hCovBnd, hGenBnd, by omega, by omega, by omega, by omega⟩
             intro _
             omega
-    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
+    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCLBnd, hMLBnd⟩
   case startSerialization =>
     dsimp [step]
     split <;> try dsimp
     · rename_i hG
-      refine ⟨hRetry, hCover, hExp, by intro h; contradiction, hRetGen, hSL, ?_, hTipBnd, hCovBnd, hGenBnd, by omega, hResBnd, hCTBnd, by omega, by omega, by omega⟩
+      refine ⟨hRetry, hCover, hExp, by intro h; contradiction, hRetGen, hSL, ?_, hTipBnd, hCovBnd, hGenBnd, by omega, hResBnd, by omega, by omega⟩
       intro _
-      exact ⟨hG.2.1, hG.2.2.1, hG.2.2.2⟩
-    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
+      exact ⟨hG.2.1, hG.2.2⟩
+    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCLBnd, hMLBnd⟩
   case finishQuery =>
     dsimp [step]
     split <;> try dsimp
-    · refine ⟨by intro h; contradiction, by intro h; contradiction, by intro h; contradiction, by intro h; contradiction, hRetGen, by intro _; rfl, by intro h; contradiction, hTipBnd, hCovBnd, hGenBnd, by omega, by omega, hCTBnd, by omega, by omega, by omega⟩
-    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
+    · refine ⟨by intro h; contradiction, by intro h; contradiction, by intro h; contradiction, by intro h; contradiction, hRetGen, by intro _; rfl, by intro h; contradiction, hTipBnd, hCovBnd, hGenBnd, by omega, by omega, by omega, by omega⟩
+    · exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCLBnd, hMLBnd⟩
   case stutter =>
     dsimp [step]
-    exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCTBnd, hTLBnd, hCLBnd, hMLBnd⟩
+    exact ⟨hRetry, hCover, hExp, hPhase1, hRetGen, hSL, hSerNoLock, hTipBnd, hCovBnd, hGenBnd, hPhaseBnd, hResBnd, hCLBnd, hMLBnd⟩
 
 end ServingView
