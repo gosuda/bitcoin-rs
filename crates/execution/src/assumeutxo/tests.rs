@@ -1726,3 +1726,107 @@ fn historical_facts_hook_receives_facts_on_step_historical() -> TestResult {
     manager.clear_historical_facts_hook();
     Ok(())
 }
+
+fn core_varint(mut value: u64) -> TestResult<Vec<u8>> {
+    let mut digits = vec![u8::try_from(value & 0x7f)?];
+    value >>= 7;
+    while value > 0 {
+        value -= 1;
+        digits.push(0x80 | u8::try_from(value & 0x7f)?);
+        value >>= 7;
+    }
+    digits.reverse();
+    Ok(digits)
+}
+
+fn core_snapshot_with_coin_code(pinned: &AssumeUtxoData, code: u64) -> TestResult<Vec<u8>> {
+    let mut bytes = b"utxo\xff".to_vec();
+    bytes.extend_from_slice(&2_u16.to_le_bytes());
+    bytes.extend_from_slice(&Network::Regtest.magic());
+    bytes.extend_from_slice(&pinned.block_hash.to_le_bytes());
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    bytes.extend_from_slice(&[0x11; 32]);
+    bytes.push(0x01);
+    bytes.push(0x00);
+    bytes.extend(core_varint(code)?);
+    bytes.push(0x00);
+    bytes.push(0x07);
+    bytes.push(0x51);
+    Ok(bytes)
+}
+
+// SNP-07
+#[test]
+fn core_snapshot_rejects_coin_height_beyond_base_before_activation() -> TestResult {
+    let pinned = Network::Regtest
+        .assume_utxo_for_height(110)
+        .ok_or(TestError::Missing("missing pin"))?;
+    let active = chainstate();
+    let mut blocks = vec![Network::Regtest.genesis_block()];
+    for height in 1..=2 {
+        blocks.push(crate::chain::regtest_fixture::mined_regtest_child_at(
+            blocks
+                .last()
+                .ok_or(TestError::Missing("missing predecessor"))?
+                .block_hash(),
+            height,
+        )?);
+    }
+    for block in &blocks {
+        active
+            .lock_transition()?
+            .into_transition()
+            .connect(&BlockImage::from_local((*block).clone()))?;
+    }
+    assert!(active.has_durable_head()?);
+    let coins_before = engine_coin_set(&active)?
+        .lock_stable_view()
+        .hash_serialized_3()?;
+    let dir = tempfile::tempdir()?;
+    let manager = AssumeUtxoManager::open(
+        Network::Regtest,
+        Arc::clone(&active),
+        dir.path().to_path_buf(),
+    )?;
+    let alias_of_base =
+        core_snapshot_with_coin_code(pinned, u64::from(0x8000_0000_u32 | 110) << 1)?;
+    let Err(error) =
+        manager.activate_core_snapshot(&mut Cursor::new(alias_of_base), None, |_, _| {}, || true)
+    else {
+        return Err(TestError::UnexpectedSuccess(
+            "a coin height at or above 2^31 was activated",
+        ));
+    };
+    assert!(matches!(
+        error,
+        AssumeUtxoError::Codec(
+            bitcoin_rs_storage::utxo::core_snapshot::SnapshotError::VarIntOverflow
+        )
+    ));
+    let past_base = core_snapshot_with_coin_code(pinned, 111 << 1)?;
+    let Err(error) =
+        manager.activate_core_snapshot(&mut Cursor::new(past_base), None, |_, _| {}, || true)
+    else {
+        return Err(TestError::UnexpectedSuccess(
+            "a coin height above the base was activated",
+        ));
+    };
+    assert!(matches!(
+        error,
+        AssumeUtxoError::Codec(
+            bitcoin_rs_storage::utxo::core_snapshot::SnapshotError::InvalidHeight {
+                height: 111,
+                base_height: 110,
+            }
+        )
+    ));
+    assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
+    assert_no_checkpoint(dir.path());
+    assert_eq!(
+        engine_coin_set(&active)?
+            .lock_stable_view()
+            .hash_serialized_3()?,
+        coins_before
+    );
+    Ok(())
+}
