@@ -113,3 +113,131 @@ fn live_coalescing_matches_first_and_last_operations_for_all_small_sequences()
     }
     Ok(())
 }
+
+#[test]
+fn family_byte_histograms_recording() {
+    let family = IndexRowBytes {
+        tx_lookup: 42,
+        script_history: 84,
+        script_live: 86,
+        headers: 80,
+        filters: 101,
+        tail_log: 7,
+    };
+    let recorder = RecordedHistograms::default();
+    metrics::with_local_recorder(&recorder, || {
+        super::super::write::record_family_byte_histograms(&family);
+    });
+    let recorded = recorder.samples.lock().clone();
+    let expected = [
+        ("tx_lookup", 42.0),
+        ("script_history", 84.0),
+        ("script_live", 86.0),
+        ("headers", 80.0),
+        ("filters", 101.0),
+        ("tail_log", 7.0),
+    ];
+    for (label, bytes) in expected {
+        assert_eq!(
+            recorded.get(&format!(
+                "index.family_planned_write_bytes{{family=\"{label}\"}}"
+            )),
+            Some(&vec![bytes]),
+            "family {label} records its planned bytes once"
+        );
+    }
+    assert_eq!(recorded.len(), expected.len());
+
+    let partial_family = IndexRowBytes {
+        tx_lookup: 100,
+        ..IndexRowBytes::ZERO
+    };
+    let partial_recorder = RecordedHistograms::default();
+    metrics::with_local_recorder(&partial_recorder, || {
+        super::super::write::record_family_byte_histograms(&partial_family);
+    });
+    let partial_recorded = partial_recorder.samples.lock().clone();
+    assert_eq!(
+        partial_recorded.get("index.family_planned_write_bytes{family=\"tx_lookup\"}"),
+        Some(&vec![100.0])
+    );
+    assert_eq!(partial_recorded.len(), 1, "a zero family records nothing");
+}
+
+#[derive(Clone, Debug, Default)]
+struct RecordedHistograms {
+    samples: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<f64>>>>,
+}
+
+impl metrics::Recorder for RecordedHistograms {
+    fn describe_counter(
+        &self,
+        _key: metrics::KeyName,
+        _unit: Option<metrics::Unit>,
+        _description: metrics::SharedString,
+    ) {
+    }
+    fn describe_gauge(
+        &self,
+        _key: metrics::KeyName,
+        _unit: Option<metrics::Unit>,
+        _description: metrics::SharedString,
+    ) {
+    }
+    fn describe_histogram(
+        &self,
+        _key: metrics::KeyName,
+        _unit: Option<metrics::Unit>,
+        _description: metrics::SharedString,
+    ) {
+    }
+    fn register_counter(
+        &self,
+        _key: &metrics::Key,
+        _metadata: &metrics::Metadata<'_>,
+    ) -> metrics::Counter {
+        metrics::Counter::noop()
+    }
+    fn register_gauge(
+        &self,
+        _key: &metrics::Key,
+        _metadata: &metrics::Metadata<'_>,
+    ) -> metrics::Gauge {
+        metrics::Gauge::noop()
+    }
+    fn register_histogram(
+        &self,
+        key: &metrics::Key,
+        _metadata: &metrics::Metadata<'_>,
+    ) -> metrics::Histogram {
+        let labels = key
+            .labels()
+            .map(|l| format!("{}=\"{}\"", l.key(), l.value()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let metric_name = if labels.is_empty() {
+            key.name().to_owned()
+        } else {
+            format!("{}{{{labels}}}", key.name())
+        };
+        metrics::Histogram::from_arc(std::sync::Arc::new(RecordedHistogramHandle {
+            samples: std::sync::Arc::clone(&self.samples),
+            name: metric_name,
+        }))
+    }
+}
+
+struct RecordedHistogramHandle {
+    samples: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<f64>>>>,
+    name: String,
+}
+
+impl metrics::HistogramFn for RecordedHistogramHandle {
+    fn record(&self, value: f64) {
+        self.samples
+            .lock()
+            .entry(self.name.clone())
+            .or_default()
+            .push(value);
+    }
+}
