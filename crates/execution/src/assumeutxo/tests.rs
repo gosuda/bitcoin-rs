@@ -183,6 +183,43 @@ fn engine_coin_set(chain: &Chainstate) -> TestResult<UtxoSet> {
 }
 
 #[test]
+fn untrusted_snapshot_height_and_tx_count_fail_the_trust_anchor() -> TestResult {
+    let pinned = Network::Regtest
+        .assume_utxo_for_height(110)
+        .ok_or(TestError::Missing("missing pin"))?;
+    assert!(Network::Regtest.assume_utxo_for_height(1234).is_none());
+    let unpinned_height = AssumeUtxoDiskStatus::Validating {
+        base_height: 1234,
+        base_hash: pinned.block_hash,
+        expected_hash_serialized: pinned.hash_serialized,
+        chain_tx_count: pinned.chain_tx_count,
+        historical_height: 0,
+        historical_hash: Network::Regtest.genesis_block_hash(),
+        pending: None,
+        checkpoint: None,
+    };
+    assert!(matches!(
+        crate::assumeutxo_snapshot::trusted_anchor(Network::Regtest, &unpinned_height),
+        Err(crate::SnapshotAnchorError::UnrecognizedBase)
+    ));
+    let miscounted = AssumeUtxoDiskStatus::Validating {
+        base_height: pinned.height,
+        base_hash: pinned.block_hash,
+        expected_hash_serialized: pinned.hash_serialized,
+        chain_tx_count: pinned.chain_tx_count + 1,
+        historical_height: 0,
+        historical_hash: Network::Regtest.genesis_block_hash(),
+        pending: None,
+        checkpoint: None,
+    };
+    assert!(matches!(
+        crate::assumeutxo_snapshot::trusted_anchor(Network::Regtest, &miscounted),
+        Err(crate::SnapshotAnchorError::TrustAnchorTxCount)
+    ));
+    Ok(())
+}
+
+#[test]
 fn snapshot_rejects_invalid_base_and_descendant_before_persistence() -> TestResult {
     for invalid_height in [2, 1] {
         let fixture = Fixture::new()?;
