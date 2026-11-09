@@ -289,4 +289,66 @@ mod tests {
         );
         assert_eq!(BudgetError::Cancelled.refusal(), None);
     }
+
+    const CAPACITY: u64 = 100;
+
+    #[derive(Default)]
+    struct OnceFailingAllocate {
+        state: Mutex<FailingLedger>,
+    }
+
+    #[derive(Default)]
+    struct FailingLedger {
+        fail_next_allocate: bool,
+        outstanding: u64,
+        releases: Vec<(BudgetOwner, u64)>,
+    }
+
+    impl BudgetCharge for OnceFailingAllocate {
+        fn reserve_bytes(&self, _owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
+            let mut state = self.state.lock();
+            if state.outstanding.saturating_add(bytes) > CAPACITY {
+                return Err(BudgetError::BudgetExhausted);
+            }
+            state.outstanding += bytes;
+            Ok(())
+        }
+
+        fn allocate_bytes(&self, _owner: BudgetOwner, _bytes: u64) -> Result<(), BudgetError> {
+            if std::mem::take(&mut self.state.lock().fail_next_allocate) {
+                return Err(BudgetError::BudgetExhausted);
+            }
+            Ok(())
+        }
+
+        fn release_bytes(&self, owner: BudgetOwner, bytes: u64) {
+            let mut state = self.state.lock();
+            state.releases.push((owner, bytes));
+            state.outstanding = state.outstanding.saturating_sub(bytes);
+        }
+
+        fn available_bytes(&self, _owner: BudgetOwner) -> u64 {
+            CAPACITY - self.state.lock().outstanding
+        }
+    }
+
+    // BUD-01
+    #[test]
+    fn failed_allocation_releases_reservation_and_books_balance() {
+        let fake = Arc::new(OnceFailingAllocate::default());
+        fake.state.lock().fail_next_allocate = true;
+        let handle = ChargeHandle::new(fake.clone(), BudgetOwner::StagedImages);
+
+        assert_eq!(handle.charge(64), Err(BudgetError::BudgetExhausted));
+        assert_eq!(
+            fake.state.lock().releases,
+            vec![(BudgetOwner::StagedImages, 64)]
+        );
+        assert_eq!(handle.available(), CAPACITY);
+
+        assert_eq!(handle.charge(32), Ok(()));
+        assert_eq!(handle.available(), CAPACITY - 32);
+        handle.release(32);
+        assert_eq!(handle.available(), CAPACITY);
+    }
 }
