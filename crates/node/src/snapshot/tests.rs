@@ -114,14 +114,14 @@ fn core_headers() -> Result<Vec<bitcoin_rs_consensus::primitives::Header>, TestE
         .collect()
 }
 
-fn snapshot_inputs(dir: &Path) -> Result<(crate::state::NodeState, PathBuf, PathBuf), TestError> {
+fn snapshot_inputs(dir: &Path) -> Result<(crate::state::NodeState, PathBuf), TestError> {
     snapshot_inputs_with(dir, |_| {})
 }
 
 fn snapshot_inputs_with(
     dir: &Path,
     configure: impl FnOnce(&mut crate::NodeConfig),
-) -> Result<(crate::state::NodeState, PathBuf, PathBuf), TestError> {
+) -> Result<(crate::state::NodeState, PathBuf), TestError> {
     let mut config = node_config(dir);
     configure(&mut config);
     let state = crate::state::NodeState::open(config, None)?;
@@ -132,60 +132,7 @@ fn snapshot_inputs_with(
     let core_bytes = include_bytes!("../../../storage/tests/fixtures/core-v2/core200.dat");
     let core_path = dir.join("core.dat");
     std::fs::write(&core_path, core_bytes)?;
-    let snapshot = read_and_verify(
-        &mut core_bytes.as_slice(),
-        Network::Regtest,
-        SnapshotLimits::default(),
-    )?;
-    let mut native = Vec::new();
-    bitcoin_rs_storage::utxo::write_snapshot_observed(
-        &snapshot.set,
-        &snapshot.anchor.block_hash,
-        snapshot.anchor.height,
-        &mut native,
-        (),
-    )?;
-    let native_path = dir.join("native.dat");
-    std::fs::write(&native_path, &native)?;
-    Ok((state, core_path, native_path))
-}
-
-type CoinRows = Vec<(Vec<u8>, Vec<u8>)>;
-fn engine_coin_rows(state: &crate::state::NodeState) -> Result<CoinRows, TestError> {
-    let mut rows = Vec::new();
-    for row in state
-        .chainstate()
-        .coin_store()
-        .store()
-        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
-    {
-        let (key, value) = row?;
-        rows.push((key.to_vec(), value.to_vec()));
-    }
-    Ok(rows)
-}
-
-fn first_coin_value(set: &bitcoin_rs_storage::utxo::UtxoSet) -> Result<u64, TestError> {
-    let records = set.all_records();
-    let record = records
-        .first()
-        .ok_or(TestError::Missing("snapshot coin record"))?;
-    let output = record
-        .outputs()
-        .next()
-        .ok_or(TestError::Missing("snapshot coin output"))?;
-    Ok(output.value)
-}
-
-fn coin_value_offset(native: &[u8], value: u64) -> Result<usize, TestError> {
-    let pattern = value.to_le_bytes();
-    native
-        .windows(pattern.len())
-        .enumerate()
-        .skip(100)
-        .find(|(_, window)| *window == pattern.as_slice())
-        .map(|(offset, _)| offset)
-        .ok_or(TestError::Missing("coin value bytes in the native image"))
+    Ok((state, core_path))
 }
 
 struct TamperOnRewind {
@@ -228,100 +175,9 @@ impl std::io::Seek for TamperOnRewind {
 }
 
 #[test]
-fn rejected_import_with_a_prior_head_leaves_head_and_coins_untouched() -> Result<(), TestError> {
-    let source = tempfile::tempdir()?;
-    let (_source, _core_path, native_path) = snapshot_inputs(source.path())?;
+fn core_embedding_contract_and_shared_import_budget() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
-    let state = prior_state_with_coins(dir.path())?;
-    let core_bytes = include_bytes!("../../../storage/tests/fixtures/core-v2/core200.dat");
-    let loaded = read_and_verify(
-        &mut core_bytes.as_slice(),
-        Network::Regtest,
-        SnapshotLimits::default(),
-    )?;
-    let before_tip = tip_identity(&state);
-    let before_coins = engine_coin_rows(&state)?;
-    assert!(before_tip.is_some(), "the prior state has a durable head");
-    assert!(!before_coins.is_empty(), "the prior state holds coins");
-    let native = std::fs::read(&native_path)?;
-    let offset = coin_value_offset(&native, first_coin_value(&loaded.set)?)?;
-    let mut forged = native;
-    forged[offset] ^= 1;
-    let forged_path = dir.path().join("forged-native.dat");
-    std::fs::write(&forged_path, &forged)?;
-
-    assert!(matches!(
-        state.snapshots.import_native(&forged_path),
-        Err(SnapshotImportError::Activation(
-            AssumeUtxoError::SnapshotCommitmentMismatch { .. }
-        ))
-    ));
-    assert_eq!(tip_identity(&state), before_tip);
-    assert_eq!(engine_coin_rows(&state)?, before_coins);
-    assert!(!state.chainstate().is_closed_for_recovery());
-    assert!(matches!(
-        state.snapshots.manager.status()?,
-        AssumeUtxoDiskStatus::Uninitialized
-    ));
-    Ok(())
-}
-
-#[test]
-fn failure_after_the_wipe_with_a_prior_head_fails_closed() -> Result<(), TestError> {
-    let dir = tempfile::tempdir()?;
-    let (state, core_path, native_path) = snapshot_inputs(dir.path())?;
-    let core_bytes = std::fs::read(&core_path)?;
-    let loaded = read_and_verify(
-        &mut core_bytes.as_slice(),
-        Network::Regtest,
-        SnapshotLimits::default(),
-    )?;
-    assert!(
-        tip_identity(&state).is_some(),
-        "the prior state has a durable head"
-    );
-    let native = std::fs::read(&native_path)?;
-    let flip_at = coin_value_offset(&native, first_coin_value(&loaded.set)?)?;
-    let mut reader = TamperOnRewind {
-        bytes: native,
-        position: 0,
-        rewound: false,
-        flip_at,
-    };
-    assert!(matches!(
-        state
-            .snapshots
-            .manager
-            .activate_native_snapshot(&mut reader, |_, _| {}, || true),
-        Err(AssumeUtxoError::SnapshotCommitmentMismatch { .. })
-    ));
-    assert!(
-        state.chainstate().is_closed_for_recovery(),
-        "a file that changed between the verification pass and the ingest pass fails closed"
-    );
-    Ok(())
-}
-
-fn prior_state_with_coins(dir: &Path) -> Result<crate::state::NodeState, TestError> {
-    let state = crate::state::NodeState::open(node_config(dir), None)?;
-    let genesis = Network::Regtest.genesis_block();
-    let genesis_hash = genesis.block_hash();
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
-        genesis,
-    ))?;
-    let child =
-        bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(genesis_hash, 1)?;
-    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
-        child,
-    ))?;
-    Ok(state)
-}
-
-#[test]
-fn native_embedding_contract_and_shared_import_budget() -> Result<(), TestError> {
-    let dir = tempfile::tempdir()?;
-    let (state, core_path, native_path) = snapshot_inputs(dir.path())?;
-    let native = std::fs::read(&native_path)?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     let core_bytes = std::fs::read(&core_path)?;
     {
         let _permit = state.snapshots.import.lock();
@@ -329,17 +185,10 @@ fn native_embedding_contract_and_shared_import_budget() -> Result<(), TestError>
             state.snapshots.import(&core_path),
             Err(SnapshotImportError::ImportInProgress)
         ));
-        assert!(matches!(
-            state.snapshots.import_native(&native_path),
-            Err(SnapshotImportError::ImportInProgress)
-        ));
     }
-    assert!(state.activate_assumeutxo_snapshot_file(&core_path).is_err());
-    state.activate_assumeutxo_snapshot_file(&native_path)?;
+    state.snapshots.import(&core_path)?;
     assert!(matches!(
-        state
-            .snapshots
-            .import_native(&dir.path().join("missing.dat")),
+        state.snapshots.import(&dir.path().join("missing.dat")),
         Err(SnapshotImportError::Activation(
             AssumeUtxoError::AlreadyActive
         ))
@@ -348,8 +197,7 @@ fn native_embedding_contract_and_shared_import_budget() -> Result<(), TestError>
     assert_eq!(view.active_chainstate.height, Some(200));
     assert!(!view.active_chainstate.validated);
     assert!(view.historical_chainstate.is_some());
-    assert_eq!(std::fs::read(native_path)?, native);
-    assert_eq!(std::fs::read(core_path)?, core_bytes);
+    assert_eq!(std::fs::read(&core_path)?, core_bytes);
     Ok(())
 }
 
@@ -358,55 +206,49 @@ fn successful_snapshot_import_preserves_nonresident_fee_prioritisation() -> Resu
     use bitcoin_rs_consensus::primitives::{Hash256, Txid};
     use bitcoin_rs_mempool::PrioritisedTransaction;
 
-    for native in [false, true] {
-        let dir = tempfile::tempdir()?;
-        let (state, core_path, native_path) = snapshot_inputs(dir.path())?;
-        let gateway = state.mempool_gateway();
-        let txid = Txid(Hash256::from_le_bytes(&[42; 32]));
-        gateway.prioritise(txid, 123)?;
-        let expected = vec![PrioritisedTransaction {
-            txid,
-            fee_delta: 123,
-            in_mempool: false,
-            modified_fee: None,
-        }];
-        assert_eq!(gateway.prioritised_transactions(), expected);
-        assert!(gateway.read().is_empty());
-        let sequence = gateway.read().sequence_number();
-        if native {
-            state.snapshots.import_native(&native_path)?;
-        } else {
-            state.snapshots.import(&core_path)?;
-        }
-        assert_eq!(
-            gateway.prioritised_transactions(),
-            expected,
-            "successful import must preserve operator fee deltas (native={native})"
-        );
-        assert!(gateway.read().is_empty());
-        assert_eq!(gateway.read().sequence_number(), sequence);
-        assert!(gateway.stable_generation().is_some());
-        assert_eq!(
-            state
-                .chainstate()
-                .applied_tip_snapshot()
-                .map(|tip| tip.height),
-            Some(200)
-        );
-        assert!(state.chainstate().role().is_assumed_active());
-    }
+    let dir = tempfile::tempdir()?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
+    let gateway = state.mempool_gateway();
+    let txid = Txid(Hash256::from_le_bytes(&[42; 32]));
+    gateway.prioritise(txid, 123)?;
+    let expected = vec![PrioritisedTransaction {
+        txid,
+        fee_delta: 123,
+        in_mempool: false,
+        modified_fee: None,
+    }];
+    assert_eq!(gateway.prioritised_transactions(), expected);
+    assert!(gateway.read().is_empty());
+    let sequence = gateway.read().sequence_number();
+    state.snapshots.import(&core_path)?;
+    assert_eq!(
+        gateway.prioritised_transactions(),
+        expected,
+        "successful import must preserve operator fee deltas"
+    );
+    assert!(gateway.read().is_empty());
+    assert_eq!(gateway.read().sequence_number(), sequence);
+    assert!(gateway.stable_generation().is_some());
+    assert_eq!(
+        state
+            .chainstate()
+            .applied_tip_snapshot()
+            .map(|tip| tip.height),
+        Some(200)
+    );
+    assert!(state.chainstate().role().is_assumed_active());
     Ok(())
 }
 
 #[test]
-fn nonempty_mempool_refuses_both_formats_without_changing_state() -> Result<(), TestError> {
+fn nonempty_mempool_refuses_import_without_changing_state() -> Result<(), TestError> {
     use bitcoin_rs_consensus::primitives::{
         Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
     };
     use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry};
 
     let dir = tempfile::tempdir()?;
-    let (state, core_path, native_path) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     let gateway = state.mempool_gateway();
     let transaction = Arc::new(Tx {
         version: 2,
@@ -432,39 +274,31 @@ fn nonempty_mempool_refuses_both_formats_without_changing_state() -> Result<(), 
     let before_sequence = gateway.read().sequence_number();
     let before_fees = gateway.prioritised_transactions();
     let core_bytes = std::fs::read(&core_path)?;
-    let native_bytes = std::fs::read(&native_path)?;
-    for native in [false, true] {
-        let result = if native {
-            state.snapshots.import_native(&native_path)
-        } else {
-            state.snapshots.import(&core_path).map(|_| ())
-        };
-        assert!(
-            matches!(result, Err(SnapshotImportError::MempoolNotEmpty)),
-            "a populated mempool must refuse snapshot activation"
-        );
-        assert!(gateway.read().contains_txid(&transaction.txid()));
-        assert_eq!(gateway.read().sequence_number(), before_sequence);
-        assert_eq!(gateway.prioritised_transactions(), before_fees);
-        assert!(
-            gateway.stable_generation().is_some(),
-            "refusal must settle its admission fence"
-        );
-        assert_eq!(state.chainstate().applied_tip_snapshot(), before_tip);
-        assert_eq!(
-            state.chainstate().coin_stats_handle().snapshot(),
-            before_stats
-        );
-        assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
-        assert!(matches!(
-            state.snapshots.manager.status()?,
-            AssumeUtxoDiskStatus::Uninitialized
-        ));
-        assert!(!state.chainstate().is_closed_for_recovery());
-        assert!(!dir.path().join("node/assumeutxo").exists());
-        assert_eq!(std::fs::read(&core_path)?, core_bytes);
-        assert_eq!(std::fs::read(&native_path)?, native_bytes);
-    }
+    let result = state.snapshots.import(&core_path).map(|_| ());
+    assert!(
+        matches!(result, Err(SnapshotImportError::MempoolNotEmpty)),
+        "a populated mempool must refuse snapshot activation"
+    );
+    assert!(gateway.read().contains_txid(&transaction.txid()));
+    assert_eq!(gateway.read().sequence_number(), before_sequence);
+    assert_eq!(gateway.prioritised_transactions(), before_fees);
+    assert!(
+        gateway.stable_generation().is_some(),
+        "refusal must settle its admission fence"
+    );
+    assert_eq!(state.chainstate().applied_tip_snapshot(), before_tip);
+    assert_eq!(
+        state.chainstate().coin_stats_handle().snapshot(),
+        before_stats
+    );
+    assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
+    assert!(matches!(
+        state.snapshots.manager.status()?,
+        AssumeUtxoDiskStatus::Uninitialized
+    ));
+    assert!(!state.chainstate().is_closed_for_recovery());
+    assert!(!dir.path().join("node/assumeutxo").exists());
+    assert_eq!(std::fs::read(&core_path)?, core_bytes);
     gateway.clear(AdmissionOrigin::Rpc)?;
     state.snapshots.import(&core_path)?;
     assert_eq!(
@@ -489,7 +323,7 @@ fn entry_names(dir: &Path) -> Result<Vec<String>, TestError> {
 #[test]
 fn export_reproduces_the_core_snapshot_and_never_replaces_an_entry() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _native_path) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     state.snapshots.import(&core_path)?;
     let core_bytes = std::fs::read(&core_path)?;
     let pin = Network::Regtest
@@ -559,7 +393,7 @@ fn export_reproduces_the_core_snapshot_and_never_replaces_an_entry() -> Result<(
 #[test]
 fn interrupted_export_publishes_nothing_and_removes_its_staged_file() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _native_path) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     state.snapshots.import(&core_path)?;
     let out = dir.path().join("out");
     std::fs::create_dir(&out)?;
@@ -615,7 +449,7 @@ fn interrupted_export_publishes_nothing_and_removes_its_staged_file() -> Result<
 #[test]
 fn stale_same_pid_temp_does_not_block_a_new_export() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _native_path) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     state.snapshots.import(&core_path)?;
     let out = dir.path().join("out");
     std::fs::create_dir(&out)?;
@@ -657,7 +491,7 @@ fn stale_same_pid_temp_does_not_block_a_new_export() -> Result<(), TestError> {
 #[test]
 fn concurrent_export_is_refused_while_the_permit_is_held() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _native_path) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     state.snapshots.import(&core_path)?;
     let output = dir.path().join("busy.dat");
     {
@@ -720,79 +554,66 @@ fn tip_identity(
 }
 
 #[test]
-fn sealed_and_proofless_activation_install_identical_state_and_survive_restart()
--> Result<(), TestError> {
+fn sealed_activation_installs_state_and_survives_restart() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
-    let mut installed = Vec::new();
-    for native in [false, true] {
-        let dir = tempfile::tempdir()?;
-        let (state, core_path, native_path) = snapshot_inputs(dir.path())?;
-        if native {
-            state.snapshots.import_native(&native_path)?;
-        } else {
-            state.snapshots.import(&core_path)?;
+    let dir = tempfile::tempdir()?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
+    state.snapshots.import(&core_path)?;
+    let stats = state.chainstate().coin_stats_handle().snapshot();
+    let (commitment, mut scanned) = {
+        let coin_store = state.coins();
+        let snapshot = coin_store.store().snapshot()?;
+        let coins = bitcoin_rs_storage::utxo::UtxoSet::new();
+        for row in snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
+            let (_key, value) = row?;
+            coins.insert_parsed_record(
+                bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
+                    .map_err(TestError::Utxo)?,
+            );
         }
-        let stats = state.chainstate().coin_stats_handle().snapshot();
-        let (commitment, mut scanned) = {
-            let coin_store = state.coins();
-            let snapshot = coin_store.store().snapshot()?;
-            let coins = bitcoin_rs_storage::utxo::UtxoSet::new();
-            for row in snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
-                let (_key, value) = row?;
-                coins.insert_parsed_record(
-                    bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
-                        .map_err(TestError::Utxo)?,
-                );
-            }
-            coins.with_stable_view(|view| {
-                Ok::<_, TestError>((
-                    view.hash_serialized_3_at_height(pinned.height)?,
-                    bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, pinned.height, true)?,
-                ))
-            })?
-        };
-        assert_eq!(commitment, pinned.hash_serialized, "native={native}");
-        scanned.tx_count = pinned.chain_tx_count;
-        assert_eq!(
-            stats.to_bytes(),
-            scanned.to_bytes(),
-            "native={native}: installed statistics equal an independent scan"
-        );
-        assert_eq!(stats.utxo_count, 200);
-        let identity = validating_identity(&state.snapshots.manager.status()?)?;
-        assert_eq!(identity.1, pinned.block_hash);
-        drop(state);
-
-        let resumed = crate::state::NodeState::open(node_config(dir.path()), None)?;
-        assert_eq!(
-            resumed
-                .chainstate()
-                .coin_stats_handle()
-                .snapshot()
-                .to_bytes(),
-            stats.to_bytes(),
-            "native={native}: restart recomputation agrees with installed statistics"
-        );
-        assert_eq!(
-            validating_identity(&resumed.snapshots.manager.status()?)?,
-            identity
-        );
-        assert!(resumed.chainstate().role().is_assumed_active());
-        assert_eq!(
-            tip_identity(&resumed),
-            Some((pinned.height, pinned.block_hash))
-        );
-        assert!(
-            resumed
-                .chainstates_summary()?
-                .historical_chainstate
-                .is_some()
-        );
-        installed.push(stats.to_bytes());
-    }
+        coins.with_stable_view(|view| {
+            Ok::<_, TestError>((
+                view.hash_serialized_3_at_height(pinned.height)?,
+                bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, pinned.height, true)?,
+            ))
+        })?
+    };
+    assert_eq!(commitment, pinned.hash_serialized);
+    scanned.tx_count = pinned.chain_tx_count;
     assert_eq!(
-        installed[0], installed[1],
-        "typed and proofless activation must be indistinguishable"
+        stats.to_bytes(),
+        scanned.to_bytes(),
+        "installed statistics equal an independent scan"
+    );
+    assert_eq!(stats.utxo_count, 200);
+    let identity = validating_identity(&state.snapshots.manager.status()?)?;
+    assert_eq!(identity.1, pinned.block_hash);
+    drop(state);
+
+    let resumed = crate::state::NodeState::open(node_config(dir.path()), None)?;
+    assert_eq!(
+        resumed
+            .chainstate()
+            .coin_stats_handle()
+            .snapshot()
+            .to_bytes(),
+        stats.to_bytes(),
+        "restart recomputation agrees with installed statistics"
+    );
+    assert_eq!(
+        validating_identity(&resumed.snapshots.manager.status()?)?,
+        identity
+    );
+    assert!(resumed.chainstate().role().is_assumed_active());
+    assert_eq!(
+        tip_identity(&resumed),
+        Some((pinned.height, pinned.block_hash))
+    );
+    assert!(
+        resumed
+            .chainstates_summary()?
+            .historical_chainstate
+            .is_some()
     );
     Ok(())
 }
@@ -800,7 +621,7 @@ fn sealed_and_proofless_activation_install_identical_state_and_survive_restart()
 #[test]
 fn wrong_commitment_changes_nothing_and_a_valid_retry_activates() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     let mut forged = std::fs::read(&core_path)?;
     *forged
         .last_mut()
@@ -833,60 +654,12 @@ fn wrong_commitment_changes_nothing_and_a_valid_retry_activates() -> Result<(), 
     Ok(())
 }
 
-#[test]
-fn mutating_an_unproven_set_is_caught_by_the_single_verification() -> Result<(), TestError> {
-    let pinned = regtest_pin()?;
-    let dir = tempfile::tempdir()?;
-    let (state, core_path, _) = snapshot_inputs(dir.path())?;
-    let bytes = std::fs::read(&core_path)?;
-    let loaded = read_and_verify(
-        &mut bytes.as_slice(),
-        Network::Regtest,
-        SnapshotLimits::default(),
-    )?;
-    let empty_set = bitcoin_rs_storage::utxo::UtxoSet::new();
-    let before_tip = state.chainstate().applied_tip_snapshot();
-    let before_stats = state.chainstate().coin_stats_handle().snapshot();
-    let mut snapshot_bytes = Vec::new();
-    bitcoin_rs_storage::utxo::write_snapshot_observed(
-        &empty_set,
-        &loaded.metadata.base_block_hash,
-        loaded.anchor.height,
-        &mut snapshot_bytes,
-        (),
-    )?;
-    let result = state.snapshots.manager.activate_native_snapshot(
-        &mut std::io::Cursor::new(snapshot_bytes),
-        |_, _| {},
-        || true,
-    );
-    assert!(matches!(
-        result,
-        Err(AssumeUtxoError::SnapshotCommitmentMismatch { expected, .. })
-            if expected == pinned.hash_serialized
-    ));
-    assert_eq!(state.chainstate().applied_tip_snapshot(), before_tip);
-    assert_eq!(
-        state.chainstate().coin_stats_handle().snapshot(),
-        before_stats
-    );
-    assert!(matches!(
-        state.snapshots.manager.status()?,
-        AssumeUtxoDiskStatus::Uninitialized
-    ));
-    assert!(!state.chainstate().is_closed_for_recovery());
-    assert!(!dir.path().join("node/assumeutxo").exists());
-    state.snapshots.import(&core_path)?;
-    assert_eq!(tip_identity(&state).map(|tip| tip.0), Some(200));
-    Ok(())
-}
-
 #[cfg(unix)]
 #[test]
 fn interrupted_activation_fails_closed_and_restart_retries_cleanly() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     let archive = dir
         .path()
         .join("node/assumeutxo")
@@ -1064,7 +837,7 @@ fn write_manifest_with_mismatched_index_artifact(
 fn node_from_manifest_serves_covered_queries_before_historical_sync() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     let core_bytes = std::fs::read(&core_path)?;
     let manifest_path = write_valid_manifest(dir.path(), pinned, &core_bytes)?;
 
@@ -1118,7 +891,7 @@ fn node_from_manifest_serves_covered_queries_before_historical_sync() -> Result<
 fn bad_index_artifact_keeps_the_coin_store_import() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     let core_bytes = std::fs::read(&core_path)?;
     let manifest_path =
         write_manifest_with_mismatched_index_artifact(dir.path(), pinned, &core_bytes)?;
@@ -1154,7 +927,7 @@ fn bad_index_artifact_keeps_the_coin_store_import() -> Result<(), TestError> {
 fn failed_txlookup_artifact_leaves_the_chainstate_open_and_serving() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
     let dir = tempfile::tempdir()?;
-    let (mut state, core_path, _) = snapshot_inputs_with(dir.path(), |config| {
+    let (mut state, core_path) = snapshot_inputs_with(dir.path(), |config| {
         config.indexes.txindex = true;
         config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
     })?;
@@ -1216,7 +989,7 @@ fn failed_txlookup_artifact_leaves_the_chainstate_open_and_serving() -> Result<(
 fn three_positions_move_independently() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     let core_bytes = std::fs::read(&core_path)?;
     let manifest_path = write_valid_manifest(dir.path(), pinned, &core_bytes)?;
 
@@ -1279,7 +1052,7 @@ fn three_positions_move_independently() -> Result<(), TestError> {
 fn an_oversized_manifest_is_refused_before_activation() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     let core_bytes = std::fs::read(&core_path)?;
     let manifest_path = write_valid_manifest(dir.path(), pinned, &core_bytes)?;
     let mut json = std::fs::read(&manifest_path)?;
@@ -1316,7 +1089,7 @@ fn an_oversized_manifest_is_refused_before_activation() -> Result<(), TestError>
 fn manifest_utxo_digest_is_checked_in_the_ingest_pass() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     let core_bytes = std::fs::read(&core_path)?;
     let manifest_path =
         write_manifest_with_utxo_digest(dir.path(), pinned, &core_bytes, [0xab; 32])?;
@@ -1342,7 +1115,7 @@ fn manifest_utxo_digest_is_checked_in_the_ingest_pass() -> Result<(), TestError>
 #[test]
 fn ingest_pass_file_swap_after_the_verification_pass_fails_closed() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     let core_bytes = std::fs::read(&core_path)?;
     let attestation = bitcoin_rs_execution::assumeutxo::FileAttestation {
         sha256: {
@@ -1377,7 +1150,7 @@ fn ingest_pass_file_swap_after_the_verification_pass_fails_closed() -> Result<()
 fn a_manifest_on_a_foreign_schema_is_refused_at_activation() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     let core_bytes = std::fs::read(&core_path)?;
     let manifest_path = write_valid_manifest(dir.path(), pinned, &core_bytes)?;
     let mut manifest: bitcoin_rs_execution::manifest::SnapshotManifest =
@@ -1408,7 +1181,7 @@ fn a_snapshot_file_from_another_base_is_refused_before_activation() -> Result<()
         .assume_utxo_for_height(110)
         .ok_or(TestError::Missing("regtest height-110 anchor"))?;
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
     let core_bytes = std::fs::read(&core_path)?;
     let manifest_path = write_manifest_bytes(
         dir.path(),

@@ -75,7 +75,7 @@ The typed in-process surface provides `Node::start`, gateway broadcast, and cons
 
 ## Startup failure and cancellation
 
-`Node::activate_assumeutxo_snapshot_file` keeps its native v4 input contract and caller-relative paths. Portable Core v2 files enter via `loadtxoutset`. Both share one import permit and one format-independent activation owner (no format translation). Both enter the node-owned activation boundary after header sync admits the pinned base. The activation boundary uses mempool fencing and consumer alignment without exporting `NodeState`. Refusal is `NodeError::Snapshot`. Reporting-storage failure is `NodeError::Unavailable`. See `ARCH-07b`.
+Portable Core v2 files enter via `loadtxoutset`, and manifest bundles enter via `Node::import_manifest`. The embed surface keeps one Core v2 input contract with caller-relative paths, one import permit and one activation owner (no format translation). Each enters the node-owned activation boundary after header sync admits the pinned base. The activation boundary uses mempool fencing and consumer alignment without exporting `NodeState`. Refusal is `NodeError::Snapshot`. Reporting-storage failure is `NodeError::Unavailable`. See `ARCH-07b`.
 
 `start_node` records every worker, socket owner, and channel end in a startup guard at creation. Any later bootstrap failure rolls back through the same ordered teardown in `StartupAbort` mode. This mode never publishes a clean checkpoint. Nothing is handed out via tuple or second factory.
 

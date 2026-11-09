@@ -183,77 +183,6 @@ fn engine_coin_set(chain: &Chainstate) -> TestResult<UtxoSet> {
 }
 
 #[test]
-fn untrusted_snapshot_cannot_assert_its_own_commitment() -> TestResult {
-    let fixture = Fixture::new()?;
-    let dir = tempfile::tempdir()?;
-    let manager = fixture.manager(dir.path())?;
-    let untrusted =
-        manager.activate_native_snapshot(&mut Cursor::new(&fixture.snapshot), |_, _| {}, || true);
-    assert!(matches!(
-        untrusted,
-        Err(AssumeUtxoError::UntrustedSnapshotHeight(height)) if height == fixture.pinned.height
-    ));
-    let pin = |block_hash, hash_serialized| AssumeUtxoData {
-        height: fixture.pinned.height,
-        block_hash,
-        hash_serialized,
-        chain_tx_count: fixture.pinned.chain_tx_count,
-        index_commitments: [None; 4],
-    };
-    let wrong_base = manager.activate_native_pinned(
-        &mut Cursor::new(&fixture.snapshot),
-        &pin(Hash256::default(), fixture.pinned.hash_serialized),
-        |_, _| {},
-        || true,
-    );
-    assert!(matches!(
-        wrong_base,
-        Err(AssumeUtxoError::SnapshotBlockHashMismatch { .. })
-    ));
-    let forged = manager.activate_native_pinned(
-        &mut Cursor::new(&fixture.snapshot),
-        &pin(fixture.pinned.block_hash, Hash256::default()),
-        |_, _| {},
-        || true,
-    );
-    assert!(matches!(
-        forged,
-        Err(AssumeUtxoError::SnapshotCommitmentMismatch { .. })
-    ));
-    assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
-    assert!(fixture.active.applied_tip_snapshot().is_none());
-    assert_eq!(fixture.active.role(), ChainstateRole::Ordinary);
-    Ok(())
-}
-
-#[test]
-fn snapshot_rejects_coin_height_alias_with_identical_commitment() -> TestResult {
-    let fixture = Fixture::new()?;
-    let mut bytes = fixture.snapshot.clone();
-    let offset = 52 + 45 + 12;
-    let height = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?);
-    assert!(height <= fixture.pinned.height);
-    bytes[offset..offset + 4].copy_from_slice(&(height | 0x8000_0000).to_le_bytes());
-    let forged = read_snapshot_strict_v4(&mut Cursor::new(&bytes))?;
-    assert_eq!(
-        forged.set.lock_stable_view().hash_serialized_3()?,
-        fixture.pinned.hash_serialized,
-        "the encoded commitment aliases the high height bit"
-    );
-    let dir = tempfile::tempdir()?;
-    let manager = fixture.manager(dir.path())?;
-    assert!(matches!(
-        manager.activate_pinned_snapshot(forged.set, forged.tip_hash, &fixture.pinned),
-        Err(AssumeUtxoError::Utxo(
-            bitcoin_rs_storage::utxo::UtxoError::SnapshotCoinHeightOutOfRange { .. }
-        ))
-    ));
-    assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
-    assert!(fixture.active.applied_tip_snapshot().is_none());
-    Ok(())
-}
-
-#[test]
 fn snapshot_rejects_invalid_base_and_descendant_before_persistence() -> TestResult {
     for invalid_height in [2, 1] {
         let fixture = Fixture::new()?;
@@ -1416,9 +1345,11 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
     let manager = fixture.manager(dir.path())?;
     let mut reader = Some(reader);
     let mut observed = None;
+    let loaded = fixture.load()?;
     let result = std::thread::scope(|scope| {
-        manager.activate_native_pinned(
-            &mut std::io::Cursor::new(&fixture.snapshot),
+        manager.activate_pinned_snapshot_with(
+            loaded.set,
+            loaded.tip_hash,
             &fixture.pinned,
             |_, _| {
                 let Some(reader) = reader.take() else {
@@ -1703,8 +1634,10 @@ fn activation_streams_every_snapshot_coin_into_the_engine() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
     let manager = fixture.manager(dir.path())?;
-    let activated = manager.activate_native_pinned(
-        &mut Cursor::new(&fixture.snapshot),
+    let loaded = fixture.load()?;
+    let activated = manager.activate_pinned_snapshot_with(
+        loaded.set,
+        loaded.tip_hash,
         &fixture.pinned,
         |_, _| {},
         || true,

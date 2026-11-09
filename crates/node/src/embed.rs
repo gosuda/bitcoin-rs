@@ -74,14 +74,6 @@ impl Node {
             .map_err(|error| NodeError::Unavailable(error.to_string()))
     }
 
-    pub async fn activate_assumeutxo_snapshot_file(
-        &self,
-        path: impl AsRef<std::path::Path>,
-    ) -> Result<(), NodeError> {
-        self.state
-            .activate_assumeutxo_snapshot_file(path)
-            .map_err(|error| NodeError::Snapshot(error.to_string()))
-    }
     pub async fn import_manifest(
         &self,
         path: impl AsRef<std::path::Path>,

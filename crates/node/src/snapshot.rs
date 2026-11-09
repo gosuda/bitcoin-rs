@@ -191,8 +191,6 @@ pub enum SnapshotImportError {
     Seed(#[from] bitcoin_rs_projection::IndexError),
     #[error("snapshot activation failed: {0}")]
     Activation(#[from] AssumeUtxoError),
-    #[error("invalid native snapshot: {0}")]
-    Native(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error("snapshot admission failed: {0}")]
     Admission(#[from] bitcoin_rs_execution::ApplyError),
     #[error("snapshot consumer reconciliation failed: {0}")]
@@ -217,9 +215,7 @@ impl From<SnapshotImportError> for SnapshotControlError {
             SnapshotImportError::Codec(
                 bitcoin_rs_storage::utxo::core_snapshot::SnapshotError::Io(_),
             ) => Self::Failed(error.to_string()),
-            SnapshotImportError::Codec(_) | SnapshotImportError::Native(_) => {
-                Self::Invalid(error.to_string())
-            }
+            SnapshotImportError::Codec(_) => Self::Invalid(error.to_string()),
             SnapshotImportError::ImportInProgress
             | SnapshotImportError::MempoolNotEmpty
             | SnapshotImportError::Activation(
@@ -557,27 +553,6 @@ impl SnapshotControl {
             }),
             None => Ok(None),
         }
-    }
-
-    pub(crate) fn import_native(&self, path: &Path) -> Result<(), SnapshotImportError> {
-        let _permit = self.claim_import()?;
-        let mut file = BufReader::new(open_regular_input(path)?);
-        let session = self.begin_decode_seed()?;
-        let seed = session.as_ref();
-        let mut refused = None;
-        let outcome = self.activate(|manager| {
-            let mut observer = seed.map(ScriptLiveSeedSession::observer);
-            manager.activate_native_snapshot(
-                &mut file,
-                |txid, record| {
-                    if let Some(observer) = observer.as_mut() {
-                        observe_outputs(observer, txid, record);
-                    }
-                },
-                || admit_seed(seed, &mut refused),
-            )
-        });
-        settle_seed(seed, outcome, refused).map(|_| ())
     }
 
     fn activate<T>(

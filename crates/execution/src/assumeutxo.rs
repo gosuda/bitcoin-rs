@@ -18,9 +18,6 @@ use bitcoin_rs_consensus::primitives::{AssumeUtxoData, BlockImage, Hash256, Netw
 use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::utxo::core_snapshot::{CoreSnapshotStream, StateVerifyError};
 use bitcoin_rs_storage::utxo::record::UtxoRecord;
-use bitcoin_rs_storage::utxo::snapshot::{read_snapshot_metadata_v4, stream_snapshot_v4_body};
-#[cfg(test)]
-use bitcoin_rs_storage::utxo::write_snapshot_observed;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 mod serde_hash256 {
@@ -349,8 +346,6 @@ pub enum AssumeUtxoError {
     },
     #[error("historical transaction count {found} does not match pinned count {expected}")]
     HistoricalTransactionCountMismatch { expected: u64, found: u64 },
-    #[error("snapshot height {0} is not pinned in AssumeUtxoData for this network")]
-    UntrustedSnapshotHeight(u32),
     #[error("snapshot block hash {found} does not match pinned hash {expected}")]
     SnapshotBlockHashMismatch { expected: Hash256, found: Hash256 },
     #[error("snapshot commitment {found} does not match pinned hash {expected}")]
@@ -733,72 +728,6 @@ impl AssumeUtxoManager {
         )
     }
 
-    pub fn activate_native_snapshot<R: Read + Seek>(
-        &self,
-        reader: &mut R,
-        observe: impl FnMut(Hash256, &UtxoRecord),
-        admit: impl FnOnce() -> bool,
-    ) -> Result<ActivatedSnapshot, AssumeUtxoError> {
-        let identity = read_snapshot_metadata_v4(reader)?;
-        let pinned = self
-            .network
-            .assume_utxo_for_height(identity.height)
-            .ok_or(AssumeUtxoError::UntrustedSnapshotHeight(identity.height))?;
-        self.activate_native_identified(reader, identity, pinned, observe, admit)
-    }
-
-    fn activate_native_identified<R: Read + Seek>(
-        &self,
-        reader: &mut R,
-        identity: bitcoin_rs_storage::utxo::snapshot::NativeSnapshotMetadata,
-        pinned: &AssumeUtxoData,
-        observe: impl FnMut(Hash256, &UtxoRecord),
-        admit: impl FnOnce() -> bool,
-    ) -> Result<ActivatedSnapshot, AssumeUtxoError> {
-        if pinned.block_hash != identity.tip_hash {
-            return Err(AssumeUtxoError::SnapshotBlockHashMismatch {
-                expected: pinned.block_hash,
-                found: identity.tip_hash,
-            });
-        }
-        let body_start = reader.stream_position().map_err(storage_io)?;
-        if self.active_chainstate.has_durable_head()? {
-            let verified =
-                stream_snapshot_v4_body(reader, identity, |_, _| Ok::<(), AssumeUtxoError>(()))?;
-            if verified.hash_serialized != pinned.hash_serialized {
-                return Err(AssumeUtxoError::SnapshotCommitmentMismatch {
-                    expected: pinned.hash_serialized,
-                    found: verified.hash_serialized,
-                });
-            }
-            rewind_to(reader, body_start)?;
-        }
-        let declared_coins = identity.record_count;
-        let limit = self.ingest_chunk_bytes;
-        self.activate_streamed(pinned, declared_coins, move |coins| {
-            let mut observe = observe;
-            let mut staged = StagedCoins::new(limit);
-            let streamed = stream_snapshot_v4_body(reader, identity, |txid, record| {
-                observe(txid, record);
-                stage_record(&mut staged, coins, txid, record).map_err(AssumeUtxoError::Storage)
-            })?;
-            finish_stage(&mut staged, coins)?;
-            if streamed.hash_serialized != pinned.hash_serialized {
-                return Err(AssumeUtxoError::SnapshotCommitmentMismatch {
-                    expected: pinned.hash_serialized,
-                    found: streamed.hash_serialized,
-                });
-            }
-            if !admit() {
-                return Err(AssumeUtxoError::ObserverRefused);
-            }
-            Ok(StreamedCoins {
-                coin_stats: streamed.coin_stats,
-                record_count: streamed.record_count,
-            })
-        })
-    }
-
     #[cfg(test)]
     pub(crate) fn activate_pinned_snapshot(
         &self,
@@ -806,24 +735,57 @@ impl AssumeUtxoManager {
         base_hash: Hash256,
         pinned: &AssumeUtxoData,
     ) -> Result<(), AssumeUtxoError> {
-        let mut reader = std::io::Cursor::new(Vec::new());
-        write_snapshot_observed(&set, &base_hash, pinned.height, reader.get_mut(), ())?;
-        reader.set_position(0);
-        let identity = read_snapshot_metadata_v4(&mut reader)?;
-        self.activate_native_identified(&mut reader, identity, pinned, |_, _| {}, || true)
+        self.activate_pinned_snapshot_with(set, base_hash, pinned, |_, _| {}, || true)
             .map(|_| ())
     }
 
     #[cfg(test)]
-    pub(crate) fn activate_native_pinned<R: Read + Seek>(
+    pub(crate) fn activate_pinned_snapshot_with(
         &self,
-        reader: &mut R,
+        set: UtxoSet,
+        base_hash: Hash256,
         pinned: &AssumeUtxoData,
-        observe: impl FnMut(Hash256, &UtxoRecord),
+        mut observe: impl FnMut(Hash256, &UtxoRecord),
         admit: impl FnOnce() -> bool,
     ) -> Result<ActivatedSnapshot, AssumeUtxoError> {
-        let identity = read_snapshot_metadata_v4(reader)?;
-        self.activate_native_identified(reader, identity, pinned, observe, admit)
+        if base_hash != pinned.block_hash {
+            return Err(AssumeUtxoError::SnapshotBlockHashMismatch {
+                expected: pinned.block_hash,
+                found: base_hash,
+            });
+        }
+        let commitment = set.lock_stable_view().hash_serialized_3()?;
+        if commitment != pinned.hash_serialized {
+            return Err(AssumeUtxoError::SnapshotCommitmentMismatch {
+                expected: pinned.hash_serialized,
+                found: commitment,
+            });
+        }
+        let stats = set.with_stable_view(|view| {
+            bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, pinned.height, true)
+        })?;
+        let record_count = u64::try_from(set.record_count()).map_err(|_| {
+            AssumeUtxoError::Storage(bitcoin_rs_storage::StorageError::InvalidOperation(
+                "snapshot record count does not fit u64",
+            ))
+        })?;
+        let records = set.all_records();
+        let limit = self.ingest_chunk_bytes;
+        self.activate_streamed(pinned, record_count, move |coins| {
+            let mut staged = StagedCoins::new(limit);
+            for record in &records {
+                observe(record.txid(), record);
+                stage_record(&mut staged, coins, record.txid(), record)?;
+            }
+            finish_stage(&mut staged, coins)?;
+            if !admit() {
+                return Err(AssumeUtxoError::ObserverRefused);
+            }
+            Ok(StreamedCoins {
+                coin_stats: stats,
+                record_count,
+            })
+        })
     }
 
     pub fn activate_core_snapshot<R: Read + Seek>(

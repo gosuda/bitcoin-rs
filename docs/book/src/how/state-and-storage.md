@@ -65,10 +65,9 @@ A snapshot-loaded node runs two chainstates:
 
 Exactly one chainstate is active. Only the active one drives mempool admission, mining, RPC and ZMQ effects, indexing, and pruning. Historical events are detached.
 
-Two entry points share one activation owner:
+One entry point owns activation:
 
-- `loadtxoutset` reads Core's portable v2 file.
-- `Node::activate_assumeutxo_snapshot_file` reads bitcoin-rs native v4 input.
+- `loadtxoutset` reads Core's portable v2 file. Manifest bundles enter through the same Core v2 activation owner.
 
 Trust comes from the `hash_serialized_3` commitment over the imported coins matching the compiled `assume_utxo_for_height` anchor. Caller-supplied digests and file trailers do not establish trust. Mainnet anchors exist at heights 840,000, 880,000, 910,000, 935,000, and 965,000.
 

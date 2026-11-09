@@ -1653,8 +1653,10 @@ fn crash_mid_ingest_is_rolled_back_by_the_marker_and_the_retry_matches_the_snaps
                 .with_ingest_chunk_bytes(chunk);
         let before = store.durable_batches();
         store.fail_durable_batch(2);
-        let outcome = manager.activate_native_pinned(
-            &mut Cursor::new(&fixture.snapshot),
+        let loaded = fixture.load()?;
+        let outcome = manager.activate_pinned_snapshot_with(
+            loaded.set,
+            loaded.tip_hash,
             &fixture.pinned,
             |_, _| {},
             || true,
@@ -1698,8 +1700,10 @@ fn crash_mid_ingest_is_rolled_back_by_the_marker_and_the_retry_matches_the_snaps
     let manager =
         AssumeUtxoManager::open(Network::Regtest, reopened.clone(), dir.path().to_path_buf())?
             .with_ingest_chunk_bytes(chunk);
-    manager.activate_native_pinned(
-        &mut Cursor::new(&fixture.snapshot),
+    let loaded = fixture.load()?;
+    manager.activate_pinned_snapshot_with(
+        loaded.set,
+        loaded.tip_hash,
         &fixture.pinned,
         |_, _| {},
         || true,

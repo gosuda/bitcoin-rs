@@ -1,7 +1,6 @@
 use crate::NodeConfig;
 use crate::config::ConfigError;
 use crate::run::RunError;
-use crate::snapshot::SnapshotImportError;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_execution::chain::TipSnapshot;
 use bitcoin_rs_execution::events::ChainEventPublisher;
@@ -341,13 +340,6 @@ impl NodeState {
     ) -> Result<bitcoin_rs_execution::ChainstatesSummary, bitcoin_rs_execution::AssumeUtxoError>
     {
         self.snapshots.manager.chainstates_summary()
-    }
-
-    pub fn activate_assumeutxo_snapshot_file(
-        &self,
-        path: impl AsRef<std::path::Path>,
-    ) -> core::result::Result<(), SnapshotImportError> {
-        self.snapshots.import_native(path.as_ref())
     }
 
     pub fn import_manifest(

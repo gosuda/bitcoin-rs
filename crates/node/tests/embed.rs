@@ -54,7 +54,7 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
     let invalid_snapshot = dir.path().join("invalid-snapshot.dat");
     std::fs::write(&invalid_snapshot, b"not a UTXO snapshot")?;
     assert!(matches!(
-        block_on(node.activate_assumeutxo_snapshot_file(&invalid_snapshot)),
+        block_on(node.import_manifest(&invalid_snapshot)),
         Err(NodeError::Snapshot(_))
     ));
     assert_eq!(node.snapshot(), before_import);
