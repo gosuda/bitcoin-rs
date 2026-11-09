@@ -445,9 +445,9 @@ fn take_len_prefixed(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((body.get(..len)?, body.get(len..)?))
 }
 
-/// Rebuilds the tail state from generation-0 rows, the undo logs, and the
-/// sealed descriptors (`IndexWriter::open`).
-pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
+/// The generation id the next segment takes: the stored counter, or one past
+/// the newest sealed TxLookup generation when the counter is behind.
+pub fn next_gen_id(snapshot: &dyn KvSnapshot) -> Result<u64, IndexError> {
     let sealed = sealed_generations(snapshot, IndexCapability::TxLookup)?;
     let stored_next = snapshot
         .get(ColumnFamily::IdxMeta, crate::segment::SEAL_NEXT_GEN_KEY)?
@@ -456,8 +456,15 @@ pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
     let after_sealed = sealed
         .last()
         .map_or(1, |newest| newest.gen_id.saturating_add(1));
+    Ok(stored_next.max(after_sealed))
+}
+
+/// Rebuilds the tail state from generation-0 rows, the undo logs, and the
+/// sealed descriptors (`IndexWriter::open`).
+pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
+    let sealed = sealed_generations(snapshot, IndexCapability::TxLookup)?;
     let mut state = TailWriterState {
-        next_gen_id: stored_next.max(after_sealed),
+        next_gen_id: next_gen_id(snapshot)?,
         sealed,
         ..TailWriterState::default()
     };

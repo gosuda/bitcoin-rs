@@ -48,6 +48,7 @@ pub struct ManifestArtifactTarget {
     pub index_format: u32,
     pub sha256: [u8; 32],
     pub size_bytes: u64,
+    pub chain_tx_count: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +71,8 @@ pub enum IndexBundleError {
     Stale,
     #[error("a bundle file already exists at {}", .0.display())]
     ExistingBundle(PathBuf),
+    #[error(transparent)]
+    ScriptHistoryImport(#[from] crate::segment::import::ScriptHistoryImportError),
     #[error("bundle manifest invalid: {0}")]
     Manifest(String),
     #[error("bundle declares unsupported capability {0}")]
@@ -267,12 +270,42 @@ fn attach_manifest_script_history(
         .artifact_path
         .parent()
         .unwrap_or(&target.artifact_path);
-    let rows = restore::attach_script_history_artifact(host.writer, target, scratch)?;
+    let block_hashes = chain_block_hashes(host.block_tree, target.base_height, target.base_hash)?;
+    let rows =
+        restore::attach_script_history_artifact(host.writer, target, &block_hashes, scratch)?;
     Ok(Some(BundleOutcome::Restored(RestoreReport {
         base,
         records: rows,
         rows: usize::try_from(rows).unwrap_or(usize::MAX),
     })))
+}
+
+fn chain_block_hashes(
+    block_tree: &BlockTreeReader,
+    base_height: u32,
+    base_hash: [u8; 32],
+) -> Result<Vec<[u8; 32]>, IndexBundleError> {
+    let tree = block_tree.read();
+    let tip_node = tree
+        .lookup(bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
+            &base_hash,
+        ))
+        .ok_or_else(|| {
+            IndexBundleError::Identity(
+                "the receiver chain has no header at the manifest base".to_owned(),
+            )
+        })?;
+    let mut hashes = Vec::new();
+    for height in 0..=base_height {
+        let Some(id) = tree.node_at_height_from(tip_node, height) else {
+            break;
+        };
+        let node = tree
+            .node(id)
+            .map_err(|_| IndexBundleError::Identity("node lookup failed".to_owned()))?;
+        hashes.push(node.hash.to_le_bytes());
+    }
+    Ok(hashes)
 }
 
 fn attach_manifest_compact_filters(

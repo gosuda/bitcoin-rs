@@ -285,7 +285,7 @@ impl IndexWatermark {
     }
 }
 
-pub(super) fn read_coverage_floor(
+pub(crate) fn read_coverage_floor(
     snapshot: &dyn KvSnapshot,
     capability: IndexCapability,
 ) -> Result<u32, IndexError> {

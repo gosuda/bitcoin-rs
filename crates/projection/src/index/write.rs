@@ -47,6 +47,7 @@ impl<S: KvStore> IndexWriter<S> {
             }
         }
         crate::segment::recover_segments(indexer.store.as_ref())?;
+        crate::segment::import::clear_unpublished_segment_rows(indexer.store.as_ref())?;
         resume_capability_reset(indexer.store.as_ref(), generation, 0)?;
         let tail = {
             let snapshot = indexer.store.snapshot()?;
@@ -184,9 +185,9 @@ impl<S: KvStore> IndexWriter<S> {
         Ok(written)
     }
 
-    pub fn attach_tx_lookup_rows(
+    pub fn attach_tx_lookup_segment(
         &self,
-        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        segment: &crate::segment::import::ImportedSegment,
         attachment: &crate::writer::TxLookupAttachment<'_>,
     ) -> Result<u64, IndexError> {
         let existing = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
@@ -194,11 +195,10 @@ impl<S: KvStore> IndexWriter<S> {
         self.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
         let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
         refuse_tx_lookup_populated(&fence)?;
-        let count = self.indexer.store.ingest_sorted(
-            ColumnFamily::TxConfirmed,
-            rows,
-            attachment.scratch,
-        )?;
+        let store = self.indexer.store.as_ref();
+        let gen_id = crate::segment::import::next_segment_id(store)?;
+        crate::segment::import::clear_unpublished_segment_rows(store)?;
+        crate::segment::import::stage_segment(store, gen_id, segment, attachment.scratch)?;
         let mut batch = self.indexer.store.new_batch();
         batch.put(
             ColumnFamily::UtxoMeta,
@@ -206,12 +206,7 @@ impl<S: KvStore> IndexWriter<S> {
             &FORMAT_VERSION_VALUE,
         );
         for header in attachment.headers {
-            if self
-                .indexer
-                .store
-                .get(ColumnFamily::BlockHeaders, *header)?
-                .is_none()
-            {
+            if store.get(ColumnFamily::BlockHeaders, *header)?.is_none() {
                 batch.put(ColumnFamily::BlockHeaders, *header, &[]);
             }
         }
@@ -225,46 +220,34 @@ impl<S: KvStore> IndexWriter<S> {
             IndexCapabilities::TX_LOOKUP,
             attachment.floor,
         );
-        commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, batch)?;
-        Ok(count)
+        crate::segment::import::put_segment(
+            &mut batch,
+            gen_id,
+            segment,
+            IndexCapabilities::TX_LOOKUP,
+        );
+        commit_ordinary(store, self.generation, &fence, batch)?;
+        Ok(segment.records)
     }
 
-    pub fn attach_script_history_rows(
+    pub fn clear_unpublished_segments(&self) -> Result<(), IndexError> {
+        crate::segment::import::clear_unpublished_segment_rows(self.indexer.store.as_ref())
+    }
+
+    pub fn attach_script_history_segment(
         &self,
-        funding: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
-        spending: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        segment: &crate::segment::import::ImportedSegment,
         attachment: &crate::writer::ScriptHistoryAttachment<'_>,
     ) -> Result<u64, IndexError> {
+        let existing = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        refuse_script_history_populated(self.indexer.store.as_ref(), &existing)?;
+        self.reset_capabilities(IndexCapabilities::SCRIPT_HISTORY)?;
         let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
         refuse_script_history_populated(self.indexer.store.as_ref(), &fence)?;
-        match self.install_script_history(funding, spending, &fence, attachment) {
-            Ok(rows) => Ok(rows),
-            Err(IndexError::StaleIndexState) => Err(IndexError::StaleIndexState),
-            Err(error) => Err(
-                match self.reset_capabilities(IndexCapabilities::SCRIPT_HISTORY) {
-                    Ok(()) => error,
-                    Err(cleanup) => cleanup,
-                },
-            ),
-        }
-    }
-
-    fn install_script_history(
-        &self,
-        funding: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
-        spending: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
-        fence: &IndexWriteFence,
-        attachment: &crate::writer::ScriptHistoryAttachment<'_>,
-    ) -> Result<u64, IndexError> {
-        let funding_rows =
-            self.indexer
-                .store
-                .ingest_sorted(ColumnFamily::Funding, funding, attachment.scratch)?;
-        let spending_rows = self.indexer.store.ingest_sorted(
-            ColumnFamily::Spending,
-            spending,
-            attachment.scratch,
-        )?;
+        let store = self.indexer.store.as_ref();
+        let gen_id = crate::segment::import::next_segment_id(store)?;
+        crate::segment::import::clear_unpublished_segment_rows(store)?;
+        crate::segment::import::stage_segment(store, gen_id, segment, attachment.scratch)?;
         let mut batch = self.indexer.store.new_batch();
         batch.put(
             ColumnFamily::UtxoMeta,
@@ -281,41 +264,28 @@ impl<S: KvStore> IndexWriter<S> {
             IndexCapabilities::SCRIPT_HISTORY,
             attachment.floor,
         );
-        commit_ordinary(self.indexer.store.as_ref(), self.generation, fence, batch)?;
-        funding_rows
-            .checked_add(spending_rows)
-            .ok_or(IndexError::MutationSizeOverflow)
+        crate::segment::import::put_segment(
+            &mut batch,
+            gen_id,
+            segment,
+            IndexCapabilities::SCRIPT_HISTORY,
+        );
+        commit_ordinary(store, self.generation, &fence, batch)?;
+        Ok(segment.records)
     }
 
-    pub fn attach_compact_filter_rows(
+    pub fn attach_compact_filter_segment(
         &self,
         by_height: &mut dyn Iterator<Item = crate::writer::CompactFilterRow>,
-        by_block: &mut dyn Iterator<Item = crate::writer::CompactFilterRow>,
         attachment: &crate::writer::CompactFilterAttachment<'_>,
     ) -> Result<u64, IndexError> {
         let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
         refuse_compact_filters_populated(self.indexer.store.as_ref(), &fence)?;
-        match self.install_compact_filters(by_height, by_block, &fence, attachment) {
-            Ok(rows) => Ok(rows),
-            Err(error) => Err(
-                match remove_compact_filter_rows(self.indexer.store.as_ref()) {
-                    Ok(()) => error,
-                    Err(cleanup) => cleanup,
-                },
-            ),
-        }
-    }
-
-    fn install_compact_filters(
-        &self,
-        by_height: &mut dyn Iterator<Item = crate::writer::CompactFilterRow>,
-        by_block: &mut dyn Iterator<Item = crate::writer::CompactFilterRow>,
-        fence: &IndexWriteFence,
-        attachment: &crate::writer::CompactFilterAttachment<'_>,
-    ) -> Result<u64, IndexError> {
         let store = self.indexer.store.as_ref();
+        let gen_id = crate::segment::import::next_segment_id(store)?;
+        crate::segment::import::clear_unpublished_segment_rows(store)?;
         let mut height_rows = by_height.map(|row| {
-            let key = crate::segment::format::encode_filter_key(0, row.height);
+            let key = crate::segment::format::encode_filter_key(gen_id, row.height);
             let value = crate::segment::format::encode_filter_value(
                 &row.block_hash,
                 &row.filter_hash,
@@ -324,28 +294,24 @@ impl<S: KvStore> IndexWriter<S> {
             );
             (key.to_vec(), value)
         });
-        let height_count =
+        let staged =
             store.ingest_sorted(ColumnFamily::Filters, &mut height_rows, attachment.scratch)?;
-        let mut block_rows = by_block.map(|row| {
-            let key = super::filters::key(&row.block_hash);
-            let value = super::filters::BasicFilter {
-                filter: row.filter,
-                hash: row.filter_hash,
-                header: row.header,
-            }
-            .encode();
-            (key.to_vec(), value)
-        });
-        let block_count =
-            store.ingest_sorted(ColumnFamily::UtxoMeta, &mut block_rows, attachment.scratch)?;
-        for actual in [height_count, block_count] {
-            if actual != attachment.records {
-                return Err(IndexError::CompactFiltersIncomplete {
-                    expected: attachment.records,
-                    actual,
-                });
-            }
+        if staged != attachment.records {
+            return Err(IndexError::CompactFiltersIncomplete {
+                expected: attachment.records,
+                actual: staged,
+            });
         }
+        let segment = crate::segment::import::ImportedSegment {
+            coverage: crate::segment::Coverage::new(
+                0,
+                attachment.base.height,
+                attachment.base.hash,
+            ),
+            next_ordinal: 0,
+            records: attachment.records,
+            families: Vec::new(),
+        };
         let mut batch = store.new_batch();
         batch.put(
             ColumnFamily::UtxoMeta,
@@ -357,7 +323,13 @@ impl<S: KvStore> IndexWriter<S> {
             IndexCapabilities::COMPACT_FILTERS,
             Some(attachment.base),
         );
-        commit_ordinary(store, self.generation, fence, batch)?;
+        crate::segment::import::put_segment(
+            &mut batch,
+            gen_id,
+            &segment,
+            IndexCapabilities::COMPACT_FILTERS,
+        );
+        commit_ordinary(store, self.generation, &fence, batch)?;
         Ok(attachment.records)
     }
 
@@ -829,11 +801,6 @@ fn refuse_compact_filters_populated<S: KvStore>(
     Ok(())
 }
 
-fn remove_compact_filter_rows<S: KvStore>(store: &S) -> Result<(), IndexError> {
-    store.delete_range(ColumnFamily::UtxoMeta, super::filters::PREFIX, &[1, b'G'])?;
-    store.delete_range(ColumnFamily::Filters, &[0; 8], &[0, 0, 0, 0, 0, 0, 0, 1])?;
-    Ok(())
-}
 impl<S: KvStore> IndexWriter<S> {
     fn initial_filter_header(
         &self,

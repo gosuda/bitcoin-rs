@@ -138,6 +138,16 @@ impl ChainFixture {
             .len()
     }
 
+    fn txs_through(&self, height: u32) -> u64 {
+        u64::try_from(
+            self.txids
+                .iter()
+                .filter(|(_, tx_height)| *tx_height <= height)
+                .count(),
+        )
+        .expect("tx count fits u64")
+    }
+
     fn tip_watermark(&self) -> IndexWatermark {
         IndexWatermark {
             height: self.tip.height,
@@ -691,12 +701,36 @@ fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     }
 }
 
+type LogicalTxRow = ([u8; 32], u32, [u8; 32], u32, u32);
+
 #[derive(Debug, PartialEq, Eq)]
 struct Durable {
-    tx_confirmed: Vec<KvPair>,
+    tx_confirmed: Vec<LogicalTxRow>,
     headers: Vec<KvPair>,
     watermark: Option<IndexWatermark>,
     floor: Option<u32>,
+}
+
+fn tx_lookup_rows(store: &RocksDbStore) -> Vec<LogicalTxRow> {
+    use bitcoin_rs_projection::segment::format::{
+        TX_DIR_KEY_LEN, decode_tx_dir_key, decode_tx_dir_value,
+    };
+    let mut rows: Vec<LogicalTxRow> = store
+        .iter_prefix(ColumnFamily::TxDir, &[])
+        .expect("iterate tx directory")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read tx directory")
+        .into_iter()
+        .filter(|(key, _)| key.len() == TX_DIR_KEY_LEN)
+        .map(|(key, value)| {
+            let (_gen, txid, height) = decode_tx_dir_key(&key).expect("tx directory key");
+            let (block_hash, _ordinal, offset, len) =
+                decode_tx_dir_value(&value).expect("tx directory value");
+            (txid, height, block_hash, offset, len)
+        })
+        .collect();
+    rows.sort_unstable();
+    rows
 }
 
 fn durable(data_dir: &Path) -> Durable {
@@ -711,7 +745,7 @@ fn durable(data_dir: &Path) -> Durable {
             .collect::<Result<Vec<_>, _>>()
             .expect("read column family")
     };
-    let tx_confirmed = rows(ColumnFamily::TxConfirmed);
+    let tx_confirmed = tx_lookup_rows(&store);
     let headers = rows(ColumnFamily::BlockHeaders);
     let indexer = Indexer::new(Arc::clone(&store));
     let snapshot = indexer.snapshot().expect("index snapshot");
@@ -1065,6 +1099,7 @@ fn manifest_target(
     base: IndexWatermark,
     sha256: [u8; 32],
     size_bytes: u64,
+    chain_tx_count: u64,
 ) -> ManifestArtifactTarget {
     ManifestArtifactTarget {
         artifact_path: artifact.to_path_buf(),
@@ -1075,6 +1110,7 @@ fn manifest_target(
         index_format: index_format_version(),
         sha256,
         size_bytes,
+        chain_tx_count,
     }
 }
 
@@ -1118,6 +1154,7 @@ fn manifest_artifact_attach_verifies_digest_header_and_base_before_ingest() {
             base,
             digest_of(&attach.join(ARTIFACT)),
             size,
+            fixture.txs_through(base.height),
         ),
         &header_refs,
         &attach,
@@ -1138,7 +1175,13 @@ fn manifest_artifact_attach_verifies_digest_header_and_base_before_ingest() {
     let receiver = open_receiver(root.path(), "receiver-bad");
     let error = attach_tx_lookup_artifact(
         receiver.writer(),
-        &manifest_target(&poisoned.join(ARTIFACT), base, forged, size),
+        &manifest_target(
+            &poisoned.join(ARTIFACT),
+            base,
+            forged,
+            size,
+            fixture.txs_through(base.height),
+        ),
         &header_refs,
         &poisoned,
     )
@@ -1162,6 +1205,7 @@ fn manifest_artifact_attach_verifies_digest_header_and_base_before_ingest() {
             wrong_base,
             digest_of(&poisoned.join(ARTIFACT)),
             size,
+            fixture.txs_through(wrong_base.height),
         ),
         &header_refs,
         &poisoned,

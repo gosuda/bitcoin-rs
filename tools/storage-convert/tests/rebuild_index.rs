@@ -793,7 +793,7 @@ fn live_reference(blocks: &[FixtureBlock]) -> TestResult<Reference> {
     let mut state = TailWriterState::new();
     for block in blocks {
         let mut batch = store.new_batch();
-        append_tail_block(&mut batch, &block.facts, &mut state, &NoSealedTxOrdinals);
+        append_tail_block(&mut batch, &block.facts, &mut state, &NoSealedTxOrdinals)?;
         store.write_durable(batch)?;
     }
     seal_tail_generation(

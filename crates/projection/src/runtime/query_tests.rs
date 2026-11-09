@@ -135,16 +135,12 @@ impl TxIndexSnapshot for QuerySnapshot {
         Ok(Some(self.watermark))
     }
 
-    fn scan_family_page(
+    fn tx_lookup_page(
         &self,
-        family: crate::TxIndexFamily,
         start_after: Option<&[u8]>,
         limit: PrefixScanLimit,
     ) -> Result<crate::TxIndexPage, IndexError> {
-        let cf = match family {
-            crate::TxIndexFamily::TxConfirmed => ColumnFamily::TxConfirmed,
-        };
-        fake_family_page(&self.scans, cf, start_after, limit)
+        fake_family_page(&self.scans, ColumnFamily::TxConfirmed, start_after, limit)
     }
 
     fn transaction_rows(
@@ -1629,16 +1625,12 @@ impl TxIndexSnapshot for HistoricalSnapshot {
         }
     }
 
-    fn scan_family_page(
+    fn tx_lookup_page(
         &self,
-        family: crate::TxIndexFamily,
         start_after: Option<&[u8]>,
         limit: PrefixScanLimit,
     ) -> Result<crate::TxIndexPage, IndexError> {
-        let cf = match family {
-            crate::TxIndexFamily::TxConfirmed => ColumnFamily::TxConfirmed,
-        };
-        fake_family_page(&self.scans, cf, start_after, limit)
+        fake_family_page(&self.scans, ColumnFamily::TxConfirmed, start_after, limit)
     }
 
     fn transaction_rows(

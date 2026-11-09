@@ -172,6 +172,7 @@ fn target(
         index_format: index_format_version(),
         sha256,
         size_bytes,
+        chain_tx_count: 0,
     }
 }
 
@@ -260,12 +261,13 @@ fn compact_filter_artifact_attaches_and_serves_the_live_rows_at_its_base() {
 
     let mut previous = [0_u8; 32];
     for (height, hash) in fixture.hashes.iter().enumerate() {
+        let height = u32::try_from(height).expect("fixture height fits u32");
         let attached_filter = served
-            .compact_filter(hash)
+            .compact_filter(height, hash)
             .expect("filter read")
             .expect("attached row");
         let live_filter = live
-            .compact_filter(hash)
+            .compact_filter(height, hash)
             .expect("live filter read")
             .expect("live row");
         assert_eq!(

@@ -607,9 +607,8 @@ mod tests {
             Ok(None)
         }
 
-        fn scan_family_page(
+        fn tx_lookup_page(
             &self,
-            _family: crate::TxIndexFamily,
             _start_after: Option<&[u8]>,
             _limit: PrefixScanLimit,
         ) -> Result<crate::TxIndexPage, IndexError> {

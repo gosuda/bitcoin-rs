@@ -1,6 +1,9 @@
 pub mod bulk_builder;
 pub mod format;
+pub mod import;
+mod read;
 pub mod tail;
+pub(crate) use read::{RecordPage, SegmentSnapshot};
 pub use tail::{
     CreationOrdinals, NoSealedTxOrdinals, SealedTxOrdinals, TailWriterState, append_tail_block,
 };

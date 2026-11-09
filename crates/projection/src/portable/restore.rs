@@ -1,6 +1,6 @@
 use super::artifact::{
     ARTIFACT_VERSION, ArtifactHeader, CANCEL_POLL_RECORDS, HEADER_LEN, ReadFault, RecordReader,
-    RowAssembler, ScriptFamily, ScriptRecordReader, TxLookupRecord, into_digest, open_hashed,
+    ScriptFamily, ScriptRecordReader, TxLookupRecord, into_digest, open_hashed,
 };
 use super::artifact::{HashedFile, IO_BUFFER_BYTES};
 use super::chain::{BaseCount, BodyReader, ChainBase, Located};
@@ -19,10 +19,7 @@ use super::{
 use crate::types::TxPosition;
 use crate::writer::TxIndexWriter;
 use crate::writer::{CompactFilterAttachment, CompactFilterRow};
-use crate::{
-    IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWatermarks,
-    TxIndexFamily,
-};
+use crate::{IndexCapabilities, IndexCapability, IndexError, IndexWatermark, IndexWatermarks};
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::encode::double_sha256;
 use bitcoin_rs_execution::chain::BlockTreeReader;
@@ -137,8 +134,7 @@ pub fn attach_tx_lookup_artifact(
             Ok(header) => header,
             Err(reason) => return Err(IndexBundleError::ArtifactHeader { name: NAME, reason }),
         };
-    let mut rows = Vec::new();
-    let mut assembler = RowAssembler::default();
+    let mut occurrences = Vec::new();
     {
         let mut records = RecordReader::new(&mut hashed, &header, target.floor);
         while let Some(record) = records.next_record().map_err(|fault| match fault {
@@ -149,16 +145,9 @@ pub fn attach_tx_lookup_artifact(
                 reason,
             },
         })? {
-            assembler.push(&record, &mut |row, value| {
-                rows.push((row.to_db_row().to_vec(), value.to_vec()));
-                Ok(())
-            })?;
+            push_tx_occurrences(&record, headers, &mut occurrences)?;
         }
     }
-    assembler.flush::<IndexError>(&mut |row, value| {
-        rows.push((row.to_db_row().to_vec(), value.to_vec()));
-        Ok(())
-    })?;
     drain_remaining_for_hash(&mut hashed, &|| false, path)?;
     if into_digest(hashed) != target.sha256 {
         return Err(IndexBundleError::ArtifactHash { name: NAME });
@@ -167,19 +156,62 @@ pub fn attach_tx_lookup_artifact(
         height: target.base_height,
         hash: target.base_hash,
     };
+    let ordinal_base = tx_ordinal_base(target.chain_tx_count, occurrences.len())?;
+    let coverage =
+        crate::segment::Coverage::new(target.floor, target.base_height, target.base_hash);
+    let segment = crate::segment::import::tx_lookup_segment(occurrences, coverage, ordinal_base)
+        .map_err(IndexBundleError::Index)?;
     let attachment = crate::writer::TxLookupAttachment {
         headers,
         base,
         floor: target.floor,
         scratch,
     };
-    let count = writer.attach_tx_lookup_rows(&mut rows.into_iter(), &attachment)?;
-    Ok(count)
+    writer
+        .attach_tx_lookup_segment(&segment, &attachment)
+        .map_err(IndexBundleError::Index)
+}
+
+fn push_tx_occurrences(
+    record: &TxLookupRecord<'_>,
+    headers: &[&[u8; crate::types::HEADER_ROW_SIZE]],
+    out: &mut Vec<crate::segment::import::TxOccurrence>,
+) -> Result<(), IndexBundleError> {
+    let [position] = record.positions else {
+        return Err(IndexBundleError::Identity(
+            "a restored tx lookup record must name exactly one position".to_owned(),
+        ));
+    };
+    let header = headers
+        .get(usize::try_from(record.height).unwrap_or(usize::MAX))
+        .ok_or_else(|| {
+            IndexBundleError::Identity("a restored record height has no header".to_owned())
+        })?;
+    out.push(crate::segment::import::TxOccurrence {
+        txid: record.txid,
+        height: record.height,
+        block_hash: double_sha256(&header[..]).to_le_bytes(),
+        position: *position,
+    });
+    Ok(())
+}
+
+fn tx_ordinal_base(chain_tx_count: u64, restored: usize) -> Result<u32, IndexBundleError> {
+    let restored = u64::try_from(restored).unwrap_or(u64::MAX);
+    let base = chain_tx_count.checked_sub(restored).ok_or_else(|| {
+        IndexBundleError::Identity(
+            "the bundle restores more transactions than its chain count admits".to_owned(),
+        )
+    })?;
+    u32::try_from(base).map_err(|_| {
+        IndexBundleError::Identity("the chain-global ordinal base exceeds u32".to_owned())
+    })
 }
 
 pub fn attach_script_history_artifact(
     writer: &dyn TxIndexWriter,
     target: &ManifestArtifactTarget,
+    block_hashes: &[[u8; 32]],
     scratch: &Path,
 ) -> Result<u64, IndexBundleError> {
     const NAME: &str = "scripthistory.artifact";
@@ -245,17 +277,22 @@ pub fn attach_script_history_artifact(
         height: target.base_height,
         hash: target.base_hash,
     };
+    let coverage =
+        crate::segment::Coverage::new(target.floor, target.base_height, target.base_hash);
+    let segment = crate::segment::import::script_history_segment(
+        &funding,
+        &spending,
+        coverage,
+        target.chain_tx_count,
+        block_hashes,
+    )?;
     let attachment = crate::writer::ScriptHistoryAttachment {
         base,
         floor: target.floor,
         scratch,
     };
     writer
-        .attach_script_history_rows(
-            &mut funding.into_iter(),
-            &mut spending.into_iter(),
-            &attachment,
-        )
+        .attach_script_history_segment(&segment, &attachment)
         .map_err(IndexBundleError::Index)
 }
 
@@ -449,7 +486,6 @@ fn ingest_staged(
     let failure: RefCell<Option<IndexBundleError>> = RefCell::new(None);
     let outcome = {
         let mut by_height = Rows::new(SpillFile::open(staged.heights, records)?, &failure);
-        let mut by_block = Rows::new(Merge::new(staged.runs)?, &failure);
         let attachment = CompactFilterAttachment {
             base: IndexWatermark {
                 height: target.base_height,
@@ -458,7 +494,7 @@ fn ingest_staged(
             records,
             scratch: work,
         };
-        writer.attach_compact_filter_rows(&mut by_height, &mut by_block, &attachment)
+        writer.attach_compact_filter_segment(&mut by_height, &attachment)
     };
     if let Some(error) = failure.into_inner() {
         return Err(error);
@@ -485,27 +521,12 @@ fn read_record_bytes(
     })
 }
 
-pub(crate) fn reset_interrupted_import(
-    writer: &dyn TxIndexWriter,
-    reader: &dyn IndexReader,
-) -> Result<bool, IndexError> {
+pub(crate) fn reset_interrupted_import(writer: &dyn TxIndexWriter) -> Result<(), IndexError> {
     let (_, watermarks) = writer.fenced_watermarks()?;
     if watermarks.tx_lookup.is_some() {
-        return Ok(false);
+        return Ok(());
     }
-    let probe = reader.snapshot()?.scan_family_page(
-        TxIndexFamily::TxConfirmed,
-        None,
-        bitcoin_rs_storage::PrefixScanLimit {
-            max_rows: 1,
-            max_bytes: usize::MAX,
-        },
-    )?;
-    if probe.rows.is_empty() {
-        return Ok(false);
-    }
-    writer.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
-    Ok(true)
+    writer.reset_capabilities(IndexCapabilities::TX_LOOKUP)
 }
 
 fn read_manifest(path: &Path) -> Result<IndexBundleManifestV1, IndexBundleError> {
@@ -936,20 +957,13 @@ impl ImportPlan<'_> {
                 })?;
             headers.push(header);
         }
+        let header_refs: Vec<&[u8; crate::types::HEADER_ROW_SIZE]> = headers.iter().collect();
         let mut records =
             RecordReader::new(&mut hashed, &self.header, self.manifest.tx_lookup.floor);
-        let mut rows = Vec::new();
-        let mut assembler = RowAssembler::default();
+        let mut occurrences = Vec::new();
         read_records(&mut records, self.host, self.path, |record| {
-            assembler.push(record, &mut |row, value| {
-                rows.push((row.to_db_row().to_vec(), value.to_vec()));
-                Ok(())
-            })?;
+            push_tx_occurrences(record, &header_refs, &mut occurrences)?;
             Ok(ControlFlow::Continue(()))
-        })?;
-        assembler.flush::<IndexError>(&mut |row, value| {
-            rows.push((row.to_db_row().to_vec(), value.to_vec()));
-            Ok(())
         })?;
         if into_digest(hashed) != self.manifest.tx_lookup.sha256 {
             return Err(IndexBundleError::ArtifactHash { name });
@@ -971,7 +985,13 @@ impl ImportPlan<'_> {
         }
 
         let scratch = self.path.parent().unwrap_or(self.path);
-        let header_refs: Vec<&[u8; crate::types::HEADER_ROW_SIZE]> = headers.iter().collect();
+        let ordinal_base =
+            tx_ordinal_base(self.manifest.identity.chain_tx_count, occurrences.len())?;
+        let coverage =
+            crate::segment::Coverage::new(self.manifest.tx_lookup.floor, base.height, base.hash);
+        let segment =
+            crate::segment::import::tx_lookup_segment(occurrences, coverage, ordinal_base)
+                .map_err(IndexBundleError::Index)?;
         let attachment = crate::writer::TxLookupAttachment {
             headers: &header_refs,
             base,
@@ -981,7 +1001,7 @@ impl ImportPlan<'_> {
         let imported = self
             .host
             .writer
-            .attach_tx_lookup_rows(&mut rows.into_iter(), &attachment);
+            .attach_tx_lookup_segment(&segment, &attachment);
         let count = match imported {
             Ok(count) => return Ok(usize::try_from(count).unwrap_or(usize::MAX)),
             Err(error) => error,

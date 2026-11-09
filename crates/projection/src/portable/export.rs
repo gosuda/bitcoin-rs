@@ -12,7 +12,7 @@ use crate::TxIndexSnapshot;
 use crate::types::{
     HASH_PREFIX_ROW_SIZE, HashPrefixRow, TxPosition, TxPositionValue, positions_are_valid,
 };
-use crate::{IndexCapability, IndexError, IndexWatermark, IndexWriteFence, TxIndexFamily};
+use crate::{IndexCapability, IndexError, IndexWatermark, IndexWriteFence};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use bitcoin_rs_storage::{PrefixScanLimit, StorageError};
 use std::cmp::Reverse;
@@ -47,8 +47,7 @@ fn stream_family_pages(
     let mut visited = 0_u64;
     let mut totals = (0_u64, 0_u64);
     loop {
-        let page =
-            snapshot.scan_family_page(TxIndexFamily::TxConfirmed, start_after.as_deref(), limit)?;
+        let page = snapshot.tx_lookup_page(start_after.as_deref(), limit)?;
         let mut last_key: Option<Vec<u8>> = None;
         for scan_row in page.rows {
             visited += 1;
@@ -624,11 +623,7 @@ impl RowExporter<'_> {
                 if snapshot.capability_floor(IndexCapability::TxLookup)? != self.floor {
                     return Err(IndexBundleError::Stale);
                 }
-                snapshot.scan_family_page(
-                    TxIndexFamily::TxConfirmed,
-                    start_after.as_deref(),
-                    limit,
-                )?
+                snapshot.tx_lookup_page(start_after.as_deref(), limit)?
             };
             for row in &page.rows {
                 scanned = scanned.saturating_add(1);

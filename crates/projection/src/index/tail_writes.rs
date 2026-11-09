@@ -2,13 +2,26 @@ use super::capability::{IndexCapabilities, IndexCapability, IndexWatermark};
 use super::error::IndexError;
 use super::write::IndexWriter;
 use crate::segment::format::{TAIL_MAX_BLOCKS, TAIL_MAX_BYTES};
-use crate::segment::tail::{self, SealedTxOrdinals, TailWriterState};
-use crate::segment::{self, Coverage, SealedGen};
+use crate::segment::tail::{self, CreationOrdinals, SealedTxOrdinals, TailWriterState};
+use crate::segment::{self, Coverage, SealedGen, sealed_generations};
 use bitcoin_rs_storage::{BufferedWriteBatch, CommittedBlock, KvStore};
 
 pub(super) enum RollbackTail {
     Unwind,
     Retire(SealedGen),
+}
+struct CreationsAcross<'a> {
+    tail_gens: SealedTxOrdinals<'a>,
+    script_gens: SealedTxOrdinals<'a>,
+}
+
+impl CreationOrdinals for CreationsAcross<'_> {
+    fn creation_ordinal(&self, txid: &[u8; 32]) -> Result<Option<u32>, IndexError> {
+        match self.tail_gens.creation_ordinal(txid)? {
+            Some(ordinal) => Ok(Some(ordinal)),
+            None => self.script_gens.creation_ordinal(txid),
+        }
+    }
 }
 
 impl<S: KvStore> IndexWriter<S> {
@@ -32,9 +45,16 @@ impl<S: KvStore> IndexWriter<S> {
     ) -> Result<(), IndexError> {
         let snapshot = self.indexer.store.snapshot()?;
         let gens = state.sealed.clone();
-        let older = SealedTxOrdinals {
-            snapshot: snapshot.as_ref(),
-            gens: &gens,
+        let script_gens = sealed_generations(snapshot.as_ref(), IndexCapability::ScriptHistory)?;
+        let older = CreationsAcross {
+            tail_gens: SealedTxOrdinals {
+                snapshot: snapshot.as_ref(),
+                gens: &gens,
+            },
+            script_gens: SealedTxOrdinals {
+                snapshot: snapshot.as_ref(),
+                gens: &script_gens,
+            },
         };
         for block in blocks {
             tail::append_tail_block(batch, block, state, &older)?;

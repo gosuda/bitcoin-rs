@@ -551,3 +551,203 @@ fn tx(previous_output: OutPoint, script_pubkey: Vec<u8>) -> Tx {
 fn spent_outpoint(label: u8, vout: u32) -> OutPoint {
     OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), vout)
 }
+
+fn tx_occurrences(first: u8, count: u8) -> Vec<crate::segment::import::TxOccurrence> {
+    (0..count)
+        .map(|i| crate::segment::import::TxOccurrence {
+            txid: [first + i; 32],
+            height: 1,
+            block_hash: [0x77; 32],
+            position: crate::types::TxPosition::new(u32::from(i) * 100, 100),
+        })
+        .collect()
+}
+
+fn tx_dir_rows(store: &RocksDbStore) -> Result<StoredRows, IndexError> {
+    let snapshot = store.snapshot()?;
+    snapshot
+        .iter_prefix(ColumnFamily::TxDir, &[])?
+        .map(|row| row.map(|(key, value)| (ColumnFamily::TxDir, [key, value].concat())))
+        .collect::<Result<_, _>>()
+        .map_err(IndexError::Storage)
+}
+
+#[test]
+fn restart_clears_a_staged_segment_and_keeps_the_published_one()
+-> Result<(), crate::portable::TestError> {
+    let dir = tempfile::tempdir()?;
+    let scratch = tempfile::tempdir()?;
+    let store = Arc::new(RocksDbStore::open(dir.path())?);
+    let base = IndexWatermark {
+        height: 1,
+        hash: [0x77; 32],
+    };
+    let coverage = crate::segment::Coverage::new(0, base.height, base.hash);
+    let published =
+        crate::segment::import::tx_lookup_segment(tx_occurrences(0x10, 3), coverage, 0)?;
+    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let attachment = crate::writer::TxLookupAttachment {
+        headers: &[],
+        base,
+        floor: 0,
+        scratch: scratch.path(),
+    };
+    writer.attach_tx_lookup_segment(&published, &attachment)?;
+    let published_rows = tx_dir_rows(&store)?;
+    assert!(!published_rows.is_empty(), "the attach must publish rows");
+
+    let staged = crate::segment::import::tx_lookup_segment(tx_occurrences(0x40, 2), coverage, 3)?;
+    let pending = crate::segment::import::next_segment_id(store.as_ref())?;
+    crate::segment::import::stage_segment(store.as_ref(), pending, &staged, scratch.path())?;
+    assert!(
+        tx_dir_rows(&store)?.len() > published_rows.len(),
+        "the interrupted stage must leave rows on disk"
+    );
+
+    drop(writer);
+    let reopened = IndexWriter::open(Arc::clone(&store), 2)?;
+    assert_eq!(
+        tx_dir_rows(&store)?,
+        published_rows,
+        "restart must clear the staged rows and leave the published segment unchanged"
+    );
+    let snapshot = reopened.indexer().snapshot()?;
+    assert_eq!(
+        snapshot.capability_watermark(IndexCapability::TxLookup)?,
+        Some(base)
+    );
+    let bulk_dir = tempfile::tempdir()?;
+    let bulk_store = RocksDbStore::open(bulk_dir.path())?;
+    let block = bitcoin_rs_storage::committed_facts::CommittedBlock {
+        height: 1,
+        hash: [0x77; 32],
+        parent_hash: [0; 32],
+        header: [0; 80],
+        txs: (0..3_u8)
+            .map(|i| bitcoin_rs_storage::committed_facts::TxFacts {
+                txid: [0x10 + i; 32],
+                offset: u32::from(i) * 100,
+                len: 100,
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+            })
+            .collect(),
+    };
+    crate::segment::bulk_builder::BulkSegmentBuilder::new(
+        Arc::new(bitcoin_rs_storage::budget::UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    )
+    .build_and_ingest(&bulk_store, 1, std::slice::from_ref(&block))
+    .map_err(|error| std::io::Error::other(format!("bulk build: {error}")))?;
+    assert_eq!(
+        tx_dir_rows(&store)?,
+        tx_dir_rows(&bulk_store)?,
+        "the restored published segment equals a separate bulk build"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation()
+-> Result<(), crate::portable::TestError> {
+    use crate::segment::format::{decode_tx_dir_key, decode_tx_dir_value, encode_spend_dir_key};
+    use bitcoin_rs_storage::committed_facts::{
+        CommittedBlock, CreatedOutput, SpentPrevout, TxFacts,
+    };
+
+    let dir = tempfile::tempdir()?;
+    let scratch = tempfile::tempdir()?;
+    let store = Arc::new(RocksDbStore::open(dir.path())?);
+    let created = CommittedBlock {
+        height: 1,
+        hash: [1; 32],
+        parent_hash: [0; 32],
+        header: [0; 80],
+        txs: vec![TxFacts {
+            txid: [0xA1; 32],
+            offset: 0,
+            len: 100,
+            inputs: Vec::new(),
+            outputs: vec![CreatedOutput {
+                vout: 0,
+                value: 5_000,
+                script: bitcoin_rs_storage::Bytes::from_static(b"\x51creator"),
+            }],
+        }],
+    };
+    let spending = CommittedBlock {
+        height: 2,
+        hash: [2; 32],
+        parent_hash: [1; 32],
+        header: [0; 80],
+        txs: vec![TxFacts {
+            txid: [0xB2; 32],
+            offset: 0,
+            len: 100,
+            inputs: vec![SpentPrevout {
+                txid: [0xA1; 32],
+                vout: 0,
+                value: 5_000,
+                script: bitcoin_rs_storage::Bytes::from_static(b"\x51creator"),
+                height: 1,
+                coinbase: false,
+            }],
+            outputs: Vec::new(),
+        }],
+    };
+
+    let mut state = crate::segment::TailWriterState::new();
+    let mut batch = store.new_batch();
+    batch.put(
+        ColumnFamily::UtxoMeta,
+        crate::types::INDEX_FORMAT_VERSION_KEY,
+        &crate::types::INDEX_FORMAT_VERSION_VALUE,
+    );
+    crate::segment::append_tail_block(
+        &mut batch,
+        &created,
+        &mut state,
+        &crate::segment::NoSealedTxOrdinals,
+    )?;
+    store.write_durable(batch)?;
+    crate::segment::seal_tail_generation(
+        store.as_ref(),
+        1,
+        crate::segment::Coverage::new(1, 1, [1; 32]),
+        crate::IndexCapabilities::SCRIPT_HISTORY,
+        scratch.path(),
+    )?;
+
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let mut tail = writer.tail_for(None)?;
+    let mut batch = store.new_batch();
+    writer.append_forward_tail(&mut tail, std::slice::from_ref(&spending), &mut batch)?;
+    store.write_durable(batch)?;
+
+    let snapshot = store.snapshot()?;
+    let mut creation = None;
+    for row in snapshot.iter_prefix(ColumnFamily::TxDir, &1_u64.to_be_bytes())? {
+        let (key, value) = row?;
+        if key.len() != crate::segment::format::TX_DIR_KEY_LEN {
+            continue;
+        }
+        let (_, txid, _) = decode_tx_dir_key(&key).ok_or("tx directory key")?;
+        if txid == [0xA1; 32] {
+            let (_, ordinal, _, _) = decode_tx_dir_value(&value).ok_or("tx directory value")?;
+            creation = Some(ordinal);
+        }
+    }
+    let creation = creation.ok_or("the sealed generation names the creating transaction")?;
+    let spends: Vec<_> = snapshot
+        .iter_prefix(ColumnFamily::SpendDir, &0_u64.to_be_bytes())?
+        .collect::<Result<_, _>>()?;
+    let expected_key = encode_spend_dir_key(0, creation, 0);
+    assert_eq!(
+        spends.len(),
+        1,
+        "the cross-capability spend writes one spend row"
+    );
+    assert_eq!(spends[0].0, expected_key.to_vec());
+    Ok(())
+}

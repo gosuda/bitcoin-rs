@@ -6,6 +6,8 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 pub(crate) const HASH_PREFIX_LEN: usize = 8;
 pub(crate) const HEIGHT_SIZE: usize = 4;
 pub const HASH_PREFIX_ROW_SIZE: usize = HASH_PREFIX_LEN + HEIGHT_SIZE;
+// PRJ-07
+pub(crate) const SPENDING_RECORD_KEY_LEN: usize = 32 + 4 + 4;
 pub const HEADER_ROW_SIZE: usize = bitcoin_rs_consensus::primitives::Header::LEN;
 pub const U24_MAX: u32 = 0x00FF_FFFF;
 

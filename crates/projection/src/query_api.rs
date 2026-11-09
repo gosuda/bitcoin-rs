@@ -62,6 +62,7 @@ pub enum TxUnavailableCause {
     HistoryUnproven { floor: u32 },
     OutsideCoverage { declared_floor_or_tip: u32 },
     CapabilityDisabled(IndexCapability),
+    CapabilityUnpublished(IndexCapability),
     WorkerFailed(CompactString),
     WorkerStopped,
     CompactFilterFailed(CompactString),
@@ -100,6 +101,11 @@ impl core::fmt::Display for TxUnavailableCause {
                 "requested data is outside declared coverage ending at height {declared_floor_or_tip}"
             ),
             Self::CapabilityDisabled(capability) => f.write_str(capability.disabled_message()),
+            Self::CapabilityUnpublished(capability) => write!(
+                f,
+                "{} index has no published generation yet",
+                capability.name()
+            ),
             Self::WorkerFailed(message)
             | Self::CompactFilterFailed(message)
             | Self::ScriptLiveUnavailable(message)

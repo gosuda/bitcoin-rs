@@ -19,7 +19,7 @@ use super::namespace::NamespaceRegistry;
 use crate::PreparedBatchLimits;
 use crate::portable::{BundleHost, BundleOutcome, IndexBundleError, Withheld};
 use crate::writer::TxIndexWriter;
-use crate::{IndexCapability, IndexError, IndexWriter};
+use crate::{IndexError, IndexWriter};
 use arc_swap::ArcSwap;
 use bitcoin_rs_execution::chain::{BlockTreeReader, LatchReader, LatchWriter, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
@@ -262,11 +262,13 @@ fn execute_portable_bundle(
     open: &OpenDerivedIndex,
     setup: &WorkerSetup<'_>,
 ) -> Result<(), DerivedIndexWorkerError> {
-    if setup.spec.enabled.contains(IndexCapability::TxLookup)
-        && crate::portable::reset_interrupted_import(open.writer.as_ref(), open.reader.as_ref())
-            .map_err(DerivedIndexWorkerError::Index)?
+    if setup
+        .spec
+        .enabled
+        .contains(crate::IndexCapability::TxLookup)
     {
-        tracing::warn!("cleared rows left by an interrupted portable index import");
+        crate::portable::reset_interrupted_import(open.writer.as_ref())
+            .map_err(DerivedIndexWorkerError::Index)?;
     }
     let cancelled = || setup.is_interrupted();
     let host = BundleHost {

@@ -374,8 +374,10 @@ Owners:
 - Records carry full transaction ids in strictly ascending `(txid[..8], height, txid[8..])` order, never raw key-value rows.
 - Transaction ids sharing an 8-byte prefix inside one block fold into one stored row on restore.
 - Coverage: a bundle carries the `TxLookup` family only, as the `TxConfirmed` rows of one snapshot at the applied tip.
-- Export never writes a `ScriptHistory` artifact.
-- Restore refuses an artifact that declares `ScriptHistory` (`UnsupportedCapability`).
+- The `ScriptHistory` artifact (`scripthistory.artifact`, artifact version 2) streams every record of one pinned segment snapshot. Its `Funding` records are `prefix (8) || inverted height (4)` keys with the full `ScriptHistoryOccurrence` entries, sorted by `(position, txid, scripthash, flags)`.
+- Its `Spending` records are `spent txid (32) || vout (4, BE) || spending height (4, BE)` keys with the spending `TxPosition` entries. Export reads them from `SpendDir`, and import writes `SpendDir` rows for them.
+- Restore publishes an accepted `ScriptHistory` artifact as one sealed segment with chain-global ordinals bounded by `chain_tx_count`. An artifact of another artifact version is refused with `ArtifactHeader`.
+- Export is a cursor-resumable page stream. Concatenated pages equal one full export.
 - `ScriptLive` is never a bundle capability and is never reseeded from the live UTXO set.
 - After restore or reset, `ScriptLive` accepts a verified immutable snapshot artifact, or replays complete retained history, or reports `Unavailable` (`IDX-07`).
 - `CompactFilters` is not a bundle family.

@@ -422,6 +422,17 @@ impl DerivedIndexQueryEngine {
             .snapshot()
             .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
 
+        for capability in required.iter() {
+            let published = snapshot
+                .capability_published(capability)
+                .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
+            if !published {
+                return Err(TxQueryError::Unavailable(
+                    TxUnavailableCause::CapabilityUnpublished(capability),
+                ));
+            }
+        }
+
         let mut coverage = [None; 4];
         for capability in required.iter() {
             let watermark = snapshot

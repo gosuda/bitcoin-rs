@@ -53,12 +53,13 @@ pub fn write_compact_filter_artifact(
         let height = u32::try_from(index).map_err(|_| {
             IndexBundleError::Identity("the block list exceeds the height range".to_owned())
         })?;
-        let stored = snapshot
-            .compact_filter(block_hash)?
-            .ok_or(IndexBundleError::SourceRow {
-                height,
-                reason: "compact filter row missing at the base",
-            })?;
+        let stored =
+            snapshot
+                .compact_filter(height, block_hash)?
+                .ok_or(IndexBundleError::SourceRow {
+                    height,
+                    reason: "compact filter row missing at the base",
+                })?;
         if double_sha256(&stored.filter).to_le_bytes() != stored.hash {
             return Err(IndexBundleError::SourceRow {
                 height,

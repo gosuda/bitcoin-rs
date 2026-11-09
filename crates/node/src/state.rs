@@ -578,6 +578,7 @@ fn manifest_attach_directive(
             index_format: manifest.schema,
             sha256: manifest.artifact_sha256(capability),
             size_bytes: manifest.artifact_size(capability),
+            chain_tx_count: anchor.chain_tx_count,
         });
         let (projection, directive) = match capability {
             IndexArtifactCapability::TxLookup => (

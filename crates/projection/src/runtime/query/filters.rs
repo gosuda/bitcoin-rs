@@ -12,15 +12,11 @@ impl CompactFilterQuery for DerivedIndexQueryEngine {
             &view,
             snapshot.as_ref(),
             |snapshot, view, _| {
-                if self
-                    .block_tree
-                    .read()
-                    .active_height_of(view.tip_id, hash)
-                    .is_none()
-                {
+                let Some(height) = self.block_tree.read().active_height_of(view.tip_id, hash)
+                else {
                     return Ok(None);
-                }
-                let filter = read_filter(snapshot, hash)?;
+                };
+                let filter = read_filter(snapshot, height, hash)?;
                 Ok(Some(filter))
             },
         )
@@ -67,7 +63,7 @@ impl CompactFilterQuery for DerivedIndexQueryEngine {
                     let previous = if start == 0 {
                         None
                     } else {
-                        Some(hash_at(start - 1)?)
+                        Some((start - 1, hash_at(start - 1)?))
                     };
                     let mut hashes = Vec::with_capacity(usize::try_from(count).map_err(|_| {
                         TxQueryError::Unavailable(TxUnavailableCause::FilterDataMissing)
@@ -75,16 +71,16 @@ impl CompactFilterQuery for DerivedIndexQueryEngine {
                     for height in (start..=end).step_by(usize::try_from(step).map_err(|_| {
                         TxQueryError::Unavailable(TxUnavailableCause::FilterDataMissing)
                     })?) {
-                        hashes.push(hash_at(height)?);
+                        hashes.push((height, hash_at(height)?));
                     }
                     (previous, hashes)
                 };
                 let previous_header = match previous {
                     None => [0; 32],
-                    Some(hash) => read_filter(snapshot, hash)?.header,
+                    Some((height, hash)) => read_filter(snapshot, height, hash)?.header,
                 };
-                for hash in hashes {
-                    if !emit(hash, read_filter(snapshot, hash)?) {
+                for (height, hash) in hashes {
+                    if !emit(hash, read_filter(snapshot, height, hash)?) {
                         return Ok(None);
                     }
                 }
@@ -114,9 +110,13 @@ impl CompactFilterQuery for DerivedIndexQueryEngine {
     }
 }
 
-fn read_filter(snapshot: &dyn TxIndexSnapshot, hash: Hash256) -> Result<BasicFilter, TxQueryError> {
+fn read_filter(
+    snapshot: &dyn TxIndexSnapshot,
+    height: u32,
+    hash: Hash256,
+) -> Result<BasicFilter, TxQueryError> {
     snapshot
-        .compact_filter(&hash.to_le_bytes())
+        .compact_filter(height, &hash.to_le_bytes())
         .map_err(|error| TxQueryError::Storage(error.to_string().into()))?
         .ok_or_else(|| TxQueryError::Unavailable(TxUnavailableCause::FilterDataMissing))
 }

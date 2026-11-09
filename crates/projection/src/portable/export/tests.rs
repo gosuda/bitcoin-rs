@@ -262,9 +262,8 @@ impl TxIndexSnapshot for PagedFake {
         Ok(None)
     }
 
-    fn scan_family_page(
+    fn tx_lookup_page(
         &self,
-        _family: TxIndexFamily,
         start_after: Option<&[u8]>,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexPage, IndexError> {

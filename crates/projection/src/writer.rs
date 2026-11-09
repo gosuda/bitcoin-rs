@@ -54,21 +54,20 @@ pub trait TxIndexWriter: Send + Sync {
         rows: &mut dyn Iterator<Item = Vec<u8>>,
     ) -> Result<usize, IndexError>;
     fn publish_script_live_seed(&self, seed_tip: IndexWatermark) -> Result<(), IndexError>;
-    fn attach_tx_lookup_rows(
+    fn attach_tx_lookup_segment(
         &self,
-        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        segment: &crate::segment::import::ImportedSegment,
         attachment: &TxLookupAttachment<'_>,
     ) -> Result<u64, IndexError>;
-    fn attach_script_history_rows(
+    fn attach_script_history_segment(
         &self,
-        funding: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
-        spending: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        segment: &crate::segment::import::ImportedSegment,
         attachment: &ScriptHistoryAttachment<'_>,
     ) -> Result<u64, IndexError>;
-    fn attach_compact_filter_rows(
+    fn clear_unpublished_segments(&self) -> Result<(), IndexError>;
+    fn attach_compact_filter_segment(
         &self,
         by_height: &mut dyn Iterator<Item = CompactFilterRow>,
-        by_block: &mut dyn Iterator<Item = CompactFilterRow>,
         attachment: &CompactFilterAttachment<'_>,
     ) -> Result<u64, IndexError>;
     fn commit_forward_with_cursor(
@@ -157,32 +156,34 @@ where
         self.write().publish_script_live_seed(seed_tip)
     }
 
-    fn attach_tx_lookup_rows(
+    fn attach_tx_lookup_segment(
         &self,
-        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        segment: &crate::segment::import::ImportedSegment,
         attachment: &TxLookupAttachment<'_>,
     ) -> Result<u64, IndexError> {
-        self.write().attach_tx_lookup_rows(rows, attachment)
+        self.write().attach_tx_lookup_segment(segment, attachment)
     }
 
-    fn attach_script_history_rows(
+    fn attach_script_history_segment(
         &self,
-        funding: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
-        spending: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        segment: &crate::segment::import::ImportedSegment,
         attachment: &ScriptHistoryAttachment<'_>,
     ) -> Result<u64, IndexError> {
         self.write()
-            .attach_script_history_rows(funding, spending, attachment)
+            .attach_script_history_segment(segment, attachment)
     }
 
-    fn attach_compact_filter_rows(
+    fn attach_compact_filter_segment(
         &self,
         by_height: &mut dyn Iterator<Item = CompactFilterRow>,
-        by_block: &mut dyn Iterator<Item = CompactFilterRow>,
         attachment: &CompactFilterAttachment<'_>,
     ) -> Result<u64, IndexError> {
         self.write()
-            .attach_compact_filter_rows(by_height, by_block, attachment)
+            .attach_compact_filter_segment(by_height, attachment)
+    }
+
+    fn clear_unpublished_segments(&self) -> Result<(), IndexError> {
+        self.write().clear_unpublished_segments()
     }
 
     fn commit_rollback_one_for_with_cursor_with_spent_scripts(
