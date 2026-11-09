@@ -390,6 +390,7 @@ impl ChainFollowers {
                 if bitcoin_rs_execution::classify_apply_error(&error)
                     == bitcoin_rs_execution::WindowApplyDisposition::Fatal
                 {
+                    handles.fail_closed_for_recovery();
                     drop(mempool_change);
                     drop(transition);
                     return Err(ConnectMutationError::NotCommitted(error));

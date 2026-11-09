@@ -67,6 +67,7 @@ fn settle_window_failure(
         || bitcoin_rs_execution::classify_apply_error(&error.source)
             == bitcoin_rs_execution::WindowApplyDisposition::Fatal
     {
+        handles.fail_closed_for_recovery();
         error.disposition = bitcoin_rs_execution::WindowApplyDisposition::Fatal;
     } else if let Err(finish_source) =
         crate::chain_effects::ChainFollowers::finish_transition(handles, transition, mempool_change)

@@ -233,3 +233,61 @@ fn historical_validation_runs_under_a_background_cpu_permit() {
         "the permit releases on return"
     );
 }
+// SYNC-04
+#[test]
+fn fatal_window_settlement_closes_the_chain_for_recovery() -> Result<(), TestError> {
+    use bitcoin_rs_consensus::ValidationEngine;
+    use bitcoin_rs_execution::{ApplyError, WindowApplyDisposition, WindowApplyError};
+    use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits};
+
+    let genesis = Network::Regtest.genesis_block();
+    let mut tree = BlockTree::new();
+    tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+    let handles = apply_handles(
+        tree.tip_handle(),
+        Arc::new(ArcSwapOption::empty()),
+        Arc::new(RwLock::new(tree)),
+    );
+    let gateway = Arc::new(MempoolGateway::new(
+        Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+        None,
+        ValidationEngine::Native,
+        None,
+    ));
+    let followers = crate::chain_effects::ChainFollowers::new(
+        Arc::new(RwLock::new(
+            bitcoin_rs_projection::block_log::BlockLog::new(),
+        )),
+        Arc::new(crate::NoOpZmqPublisher),
+        None,
+        None,
+        Arc::new(crate::mining::MiningGenerationSignal::new()),
+        Some(gateway),
+    );
+    let transition = handles
+        .begin_transition()
+        .map_err(|error| TestError::Apply(Box::new(error)))?;
+    let change = followers
+        .begin_mempool_change()
+        .map_err(|error| TestError::Apply(Box::new(error)))?;
+    let fatal = WindowApplyError {
+        applied: 0,
+        committed: Vec::new(),
+        source: Box::new(ApplyError::CoinStoreRead(
+            bitcoin_rs_storage::StorageError::InvalidOperation("fatal settlement probe"),
+        )),
+        disposition: WindowApplyDisposition::Fatal,
+        invalidated: Box::default(),
+    };
+    let settled = super::settle_window_failure(transition, change, fatal);
+    assert_eq!(settled.disposition, WindowApplyDisposition::Fatal);
+    assert!(
+        handles.is_closed_for_recovery(),
+        "a fatal window failure must close the chain for recovery"
+    );
+    assert!(
+        matches!(handles.begin_transition(), Err(ApplyError::Shutdown)),
+        "a closed chain must refuse the next transition instead of retrying"
+    );
+    Ok(())
+}
