@@ -1154,14 +1154,32 @@ fn bad_index_artifact_keeps_the_coin_store_import() -> Result<(), TestError> {
 fn failed_txlookup_artifact_leaves_the_chainstate_open_and_serving() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
     let dir = tempfile::tempdir()?;
-    let (state, core_path, _) = snapshot_inputs_with(dir.path(), |config| {
+    let (mut state, core_path, _) = snapshot_inputs_with(dir.path(), |config| {
         config.indexes.txindex = true;
         config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
     })?;
     let core_bytes = std::fs::read(&core_path)?;
     let manifest_path =
         write_manifest_with_mismatched_index_artifact(dir.path(), pinned, &core_bytes)?;
+    state.start_index_workers()?;
+    let script_live = bitcoin_rs_consensus::primitives::IndexArtifactCapability::ScriptLive.index();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let claimed = state.three_positions()?.projection_coverage[script_live];
+        if claimed.is_some() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the ScriptLive worker claimed no coverage within 120s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     let before = state.three_positions()?;
+    assert!(
+        before.projection_coverage[script_live].is_some(),
+        "ScriptLive holds coverage before the TxLookup failure"
+    );
 
     state.import_manifest(&manifest_path)?;
 
@@ -1182,7 +1200,10 @@ fn failed_txlookup_artifact_leaves_the_chainstate_open_and_serving() -> Result<(
         "the chainstate keeps serving its applied tip"
     );
     let after = state.three_positions()?;
-    let script_live = bitcoin_rs_consensus::primitives::IndexArtifactCapability::ScriptLive.index();
+    assert!(
+        after.projection_coverage[script_live].is_some(),
+        "ScriptLive still holds coverage after the TxLookup failure"
+    );
     assert_eq!(
         after.projection_coverage[script_live], before.projection_coverage[script_live],
         "the ScriptLive capability keeps its coverage when TxLookup fails"
