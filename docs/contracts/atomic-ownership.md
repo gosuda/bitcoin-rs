@@ -374,10 +374,12 @@ Nothing below the owner facade can interpret or copy the same data again.
 - A file checksum does not prove consensus trust.
 - Activation requires an independently trusted commitment compiled into the node software.
 
-### `SNP-05`: Direct index segment attachment
+### `SNP-05`: Streaming index segment re-encode
 
-- An immutable index artifact must attach directly as a serving segment after verification.
-- The node must not decode an index artifact and rewrite it row by row.
+- A verified index artifact attaches through one streaming re-encode into a sealed segment.
+- The re-encode holds no more than the stated spill budget of decoded rows in memory at once and spills sorted runs to scratch for the merge.
+- The node must not write artifact rows one by one into the live store.
+- Digest, header, and base verification precede the attach.
 
 ### `SNP-06`: Unified streaming decode for coin store and live index
 
