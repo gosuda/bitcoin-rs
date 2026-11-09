@@ -13,13 +13,13 @@ use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use std::path::{Path, PathBuf};
 
+pub use crate::segment::spill::{RESTORE_SPILL_BUDGET_BYTES, SpillBudget};
 pub use compact_filters::{CompactFilterArtifact, write_compact_filter_artifact};
 pub(crate) use restore::reset_interrupted_import;
 pub use restore::{
     attach_compact_filter_artifact, attach_script_history_artifact, attach_tx_lookup_artifact,
 };
 pub use script_history::{ScriptHistoryArtifact, write_script_history_artifact};
-
 #[derive(Clone, Debug)]
 pub struct IndexBundleRequest {
     pub dir: PathBuf,
@@ -237,7 +237,9 @@ fn attach_manifest_artifact(
         .parent()
         .unwrap_or(&target.artifact_path);
     let header_refs: Vec<&[u8; 80]> = headers.iter().collect();
-    let records = restore::attach_tx_lookup_artifact(host.writer, target, &header_refs, scratch)?;
+    let budget = SpillBudget::new(RESTORE_SPILL_BUDGET_BYTES);
+    let records =
+        restore::attach_tx_lookup_artifact(host.writer, target, &header_refs, scratch, &budget)?;
     Ok(Some(BundleOutcome::Restored(RestoreReport {
         base,
         records,
@@ -271,8 +273,14 @@ fn attach_manifest_script_history(
         .parent()
         .unwrap_or(&target.artifact_path);
     let block_hashes = chain_block_hashes(host.block_tree, target.base_height, target.base_hash)?;
-    let rows =
-        restore::attach_script_history_artifact(host.writer, target, &block_hashes, scratch)?;
+    let budget = SpillBudget::new(RESTORE_SPILL_BUDGET_BYTES);
+    let rows = restore::attach_script_history_artifact(
+        host.writer,
+        target,
+        &block_hashes,
+        scratch,
+        &budget,
+    )?;
     Ok(Some(BundleOutcome::Restored(RestoreReport {
         base,
         records: rows,
@@ -333,7 +341,8 @@ fn attach_manifest_compact_filters(
         .artifact_path
         .parent()
         .unwrap_or(&target.artifact_path);
-    let records = restore::attach_compact_filter_artifact(host.writer, target, scratch)?;
+    let budget = SpillBudget::new(RESTORE_SPILL_BUDGET_BYTES);
+    let records = restore::attach_compact_filter_artifact(host.writer, target, scratch, &budget)?;
     Ok(Some(BundleOutcome::Restored(RestoreReport {
         base,
         records,

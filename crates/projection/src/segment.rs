@@ -2,6 +2,7 @@ pub mod bulk_builder;
 pub mod format;
 pub mod import;
 mod read;
+pub mod spill;
 pub mod tail;
 pub(crate) use read::{RecordPage, SegmentSnapshot};
 pub use tail::{

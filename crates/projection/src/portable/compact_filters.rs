@@ -6,14 +6,11 @@ use crate::writer::CompactFilterRow;
 use crate::{IndexCapability, IndexReader, IndexWatermark};
 use bitcoin_rs_consensus::primitives::{Network, encode::double_sha256};
 use std::cell::RefCell;
-use std::cmp::{Ordering, Reverse};
-use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 pub(super) const RECORD_FIXED_LEN: usize = 4 + 32 + 32 + 32 + 4;
-const RUN_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompactFilterArtifact {
@@ -175,62 +172,36 @@ fn read_row(reader: &mut impl Read) -> io::Result<CompactFilterRow> {
     })
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct Run {
-    pub(super) path: PathBuf,
-    pub(super) rows: u64,
-}
-
-pub(super) struct RunWriter {
-    dir: PathBuf,
-    rows: Vec<CompactFilterRow>,
-    buffered: usize,
-    runs: Vec<Run>,
-}
-
-impl RunWriter {
-    pub(super) fn new(dir: PathBuf) -> Self {
-        Self {
-            dir,
-            rows: Vec::new(),
-            buffered: 0,
-            runs: Vec::new(),
-        }
+pub(super) fn decode_run_row(
+    key: &[u8],
+    value: &[u8],
+) -> Result<CompactFilterRow, IndexBundleError> {
+    const NAME: &str = "compact_filters.artifact";
+    let framing = |reason: &'static str| IndexBundleError::ArtifactFraming {
+        name: NAME,
+        record: 0,
+        reason,
+    };
+    if key.len() != 32 || value.len() < RECORD_FIXED_LEN {
+        return Err(framing("spill run row is truncated"));
     }
-
-    pub(super) fn push(&mut self, row: CompactFilterRow) -> Result<(), IndexBundleError> {
-        self.buffered = self
-            .buffered
-            .saturating_add(RECORD_FIXED_LEN + row.filter.len());
-        self.rows.push(row);
-        if self.buffered >= RUN_BYTES {
-            self.spill()?;
-        }
-        Ok(())
+    let mut block_hash = [0_u8; 32];
+    block_hash.copy_from_slice(key);
+    let mut fixed = [0_u8; RECORD_FIXED_LEN];
+    fixed.copy_from_slice(&value[..RECORD_FIXED_LEN]);
+    let fields = decode_fixed(&fixed);
+    if block_hash != fields.block_hash {
+        return Err(framing(
+            "spill run key does not match the record block hash",
+        ));
     }
-
-    fn spill(&mut self) -> Result<(), IndexBundleError> {
-        self.rows.sort_unstable_by_key(|row| row.block_hash);
-        let path = self.dir.join(format!("run-{:06}.bin", self.runs.len()));
-        let file = create_new_file(&path)?;
-        let mut out = BufWriter::with_capacity(IO_BUFFER_BYTES, file);
-        let rows = u64::try_from(self.rows.len()).unwrap_or(u64::MAX);
-        for row in self.rows.drain(..) {
-            encode_record(&mut out, &row).map_err(|error| io_error(&path, error))?;
-        }
-        out.into_inner()
-            .map_err(|error| io_error(&path, error.into_error()))?;
-        self.runs.push(Run { path, rows });
-        self.buffered = 0;
-        Ok(())
-    }
-
-    pub(super) fn finish(mut self) -> Result<Vec<Run>, IndexBundleError> {
-        if !self.rows.is_empty() {
-            self.spill()?;
-        }
-        Ok(self.runs)
-    }
+    Ok(CompactFilterRow {
+        height: fields.height,
+        block_hash,
+        filter_hash: fields.filter_hash,
+        header: fields.header,
+        filter: value[RECORD_FIXED_LEN..].to_vec(),
+    })
 }
 
 pub(super) struct SpillFile {
@@ -259,71 +230,6 @@ impl Iterator for SpillFile {
         }
         self.rows_left -= 1;
         Some(read_row(&mut self.reader).map_err(|error| io_error(&self.path, error)))
-    }
-}
-
-struct Head {
-    row: CompactFilterRow,
-    run: usize,
-}
-
-impl PartialEq for Head {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl Eq for Head {}
-
-impl PartialOrd for Head {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Head {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.row
-            .block_hash
-            .cmp(&other.row.block_hash)
-            .then(self.run.cmp(&other.run))
-    }
-}
-
-pub(super) struct Merge {
-    sources: Vec<SpillFile>,
-    heads: BinaryHeap<Reverse<Head>>,
-}
-
-impl Merge {
-    pub(super) fn new(runs: Vec<Run>) -> Result<Self, IndexBundleError> {
-        let mut sources = Vec::with_capacity(runs.len());
-        let mut heads = BinaryHeap::with_capacity(runs.len());
-        for (index, run) in runs.into_iter().enumerate() {
-            let mut source = SpillFile::open(run.path, run.rows)?;
-            if let Some(first) = source.next() {
-                heads.push(Reverse(Head {
-                    row: first?,
-                    run: index,
-                }));
-            }
-            sources.push(source);
-        }
-        Ok(Self { sources, heads })
-    }
-}
-
-impl Iterator for Merge {
-    type Item = Result<CompactFilterRow, IndexBundleError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let Reverse(head) = self.heads.pop()?;
-        match self.sources[head.run].next() {
-            Some(Ok(row)) => self.heads.push(Reverse(Head { row, run: head.run })),
-            Some(Err(error)) => return Some(Err(error)),
-            None => {}
-        }
-        Some(Ok(head.row))
     }
 }
 

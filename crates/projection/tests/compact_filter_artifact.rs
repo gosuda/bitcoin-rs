@@ -13,7 +13,7 @@ use bitcoin::hashes::{Hash as _, sha256, sha256d};
 use bitcoin::hex::FromHex as _;
 use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_projection::portable::{
-    CompactFilterArtifact, IndexBundleError, ManifestArtifactTarget,
+    CompactFilterArtifact, IndexBundleError, ManifestArtifactTarget, SpillBudget,
     attach_compact_filter_artifact, write_compact_filter_artifact,
 };
 use bitcoin_rs_projection::{
@@ -239,6 +239,7 @@ fn compact_filter_artifact_attaches_and_serves_the_live_rows_at_its_base() {
         &receiver,
         &target(&path, base, artifact.sha256, artifact.bytes),
         root.path(),
+        &SpillBudget::new(u64::MAX),
     )
     .expect("a verified artifact attaches");
     assert_eq!(attached, records);
@@ -290,6 +291,67 @@ fn compact_filter_artifact_attaches_and_serves_the_live_rows_at_its_base() {
         previous = header;
     }
 }
+// SNP-05
+#[test]
+fn small_budget_compact_filter_restore_matches_live_rows() {
+    let fixture = load_fixture();
+    let source = build_source(&fixture);
+    let root = tempfile::tempdir().expect("tempdir");
+    let (path, artifact) = produce(
+        &source,
+        &fixture,
+        Network::Regtest,
+        root.path(),
+        "bounded.dat",
+    );
+    let size = fs::metadata(&path).expect("artifact metadata").len();
+    let base = base_at_tip(&fixture);
+    let decoded = size.saturating_sub(u64::try_from(HEADER_LEN).expect("header fits u64"));
+    let budget = SpillBudget::new(4096);
+    assert!(
+        decoded > budget.peak_bytes().max(4096),
+        "the artifact must exceed the budget to prove streaming: {decoded} <= 4096"
+    );
+
+    let (receiver_store, receiver) = empty_receiver();
+    let attached = attach_compact_filter_artifact(
+        &receiver,
+        &target(&path, base, artifact.sha256, artifact.bytes),
+        root.path(),
+        &budget,
+    )
+    .expect("a bounded re-encode attaches");
+    assert_eq!(attached, artifact.records);
+    assert!(
+        budget.peak_bytes() <= 4096,
+        "the re-encode buffered {} bytes above the 4096-byte budget",
+        budget.peak_bytes()
+    );
+
+    let receiver_guard = receiver.read();
+    let served = receiver_guard.snapshot().expect("receiver snapshot");
+    let live = source.snapshot().expect("source snapshot");
+    for (height, hash) in fixture.hashes.iter().enumerate() {
+        let height = u32::try_from(height).expect("fixture height fits u32");
+        let attached_filter = served
+            .compact_filter(height, hash)
+            .expect("filter read")
+            .expect("attached row");
+        let live_filter = live
+            .compact_filter(height, hash)
+            .expect("live filter read")
+            .expect("live row");
+        assert_eq!(
+            attached_filter, live_filter,
+            "height {height} matches the live writer"
+        );
+    }
+    assert_eq!(
+        rows_with_prefix(&receiver_store, ColumnFamily::Filters, &[]),
+        fixture.hashes.len(),
+        "one height-keyed row per block"
+    );
+}
 
 #[test]
 fn compact_filter_artifact_forged_digest_is_refused_without_rows() {
@@ -311,6 +373,7 @@ fn compact_filter_artifact_forged_digest_is_refused_without_rows() {
         &receiver,
         &target(&path, base_at_tip(&fixture), forged, artifact.bytes),
         root.path(),
+        &SpillBudget::new(u64::MAX),
     )
     .expect_err("a forged digest is refused");
     assert!(
@@ -358,6 +421,7 @@ fn compact_filter_artifact_broken_header_chain_is_refused_without_rows() {
             u64::try_from(bytes.len()).expect("fits"),
         ),
         root.path(),
+        &SpillBudget::new(u64::MAX),
     )
     .expect_err("a broken filter header chain is refused");
     assert!(
@@ -385,6 +449,7 @@ fn compact_filter_artifact_foreign_base_hash_is_refused_without_rows() {
         &receiver,
         &target(&path, foreign, artifact.sha256, artifact.bytes),
         root.path(),
+        &SpillBudget::new(u64::MAX),
     )
     .expect_err("a foreign base hash is refused");
     assert!(
@@ -416,6 +481,7 @@ fn compact_filter_artifact_truncated_payload_is_refused_without_rows() {
             u64::try_from(short.len()).expect("fits"),
         ),
         root.path(),
+        &SpillBudget::new(u64::MAX),
     )
     .expect_err("a truncated payload is refused");
     assert!(
@@ -441,12 +507,22 @@ fn compact_filter_artifact_second_attach_over_populated_family_is_refused() {
     let manifest = target(&path, base, artifact.sha256, artifact.bytes);
 
     let (receiver_store, receiver) = empty_receiver();
-    attach_compact_filter_artifact(&receiver, &manifest, root.path())
-        .expect("the first attach succeeds");
+    attach_compact_filter_artifact(
+        &receiver,
+        &manifest,
+        root.path(),
+        &SpillBudget::new(u64::MAX),
+    )
+    .expect("the first attach succeeds");
     let before = rows_with_prefix(&receiver_store, ColumnFamily::UtxoMeta, &UTXO_FILTER_PREFIX);
 
-    let error = attach_compact_filter_artifact(&receiver, &manifest, root.path())
-        .expect_err("a populated CompactFilters family refuses a second attach");
+    let error = attach_compact_filter_artifact(
+        &receiver,
+        &manifest,
+        root.path(),
+        &SpillBudget::new(u64::MAX),
+    )
+    .expect_err("a populated CompactFilters family refuses a second attach");
     assert!(
         matches!(
             error,
@@ -483,8 +559,13 @@ fn compact_filter_artifact_nonzero_floor_is_refused_without_rows() {
     raised.floor = 1;
 
     let (receiver_store, receiver) = empty_receiver();
-    let error = attach_compact_filter_artifact(&receiver, &raised, root.path())
-        .expect_err("a compact filter floor above zero is refused");
+    let error = attach_compact_filter_artifact(
+        &receiver,
+        &raised,
+        root.path(),
+        &SpillBudget::new(u64::MAX),
+    )
+    .expect_err("a compact filter floor above zero is refused");
     assert!(
         matches!(error, IndexBundleError::ArtifactHeader { .. }),
         "got {error:?}"

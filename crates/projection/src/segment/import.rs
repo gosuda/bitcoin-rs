@@ -1,3 +1,4 @@
+#[cfg(test)]
 use super::format::{
     PostingItem, chunk_postings, encode_script_dict_key, encode_script_dict_value,
     encode_spend_dir_key, encode_spend_dir_value, encode_tx_dir_key, encode_tx_dir_value,
@@ -5,6 +6,7 @@ use super::format::{
 };
 use super::tail::{self, TailBounds};
 use super::{Coverage, SEAL_NEXT_GEN_KEY, SealedGen, encode_sealed_gen, sealed_gen_key};
+#[cfg(test)]
 use crate::types::{
     HASH_PREFIX_LEN, HEIGHT_SIZE, SPENDING_RECORD_KEY_LEN, ScriptHistoryOccurrence, TxPosition,
     TxPositionValue, U24_MAX, decode_history_height,
@@ -13,6 +15,7 @@ use crate::{IndexCapabilities, IndexCapability, IndexError};
 use bitcoin_rs_storage::{
     BufferedWriteBatch, ColumnFamily, KvStore, PrefixScanLimit, StorageError,
 };
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -40,22 +43,160 @@ pub struct ImportedSegment {
     pub(crate) families: Vec<(ColumnFamily, FamilyRows)>,
 }
 
+pub(crate) fn tx_lookup_seal(
+    floor: u32,
+    base_height: u32,
+    base_hash: [u8; 32],
+    count: u64,
+    ordinal_base: u32,
+) -> Result<StreamedSeal, IndexError> {
+    let count32 = u32::try_from(count).map_err(|_| {
+        IndexError::Storage(StorageError::IncompatibleData(
+            "restored segment exceeds u32 ordinals".to_owned(),
+        ))
+    })?;
+    let next_ordinal = ordinal_base.checked_add(count32).ok_or_else(|| {
+        IndexError::Storage(StorageError::IncompatibleData(
+            "restored segment exceeds u32 ordinals".to_owned(),
+        ))
+    })?;
+    Ok(StreamedSeal {
+        coverage: Coverage::new(floor, base_height, base_hash),
+        next_ordinal,
+        records: count,
+    })
+}
+
+pub struct StreamedFamily {
+    pub(crate) runs: Vec<super::spill::RunFile>,
+    pub(crate) rows: u64,
+}
+
+pub struct StreamedSeal {
+    pub(crate) coverage: Coverage,
+    pub(crate) next_ordinal: u32,
+    pub(crate) records: u64,
+}
+
+pub(crate) fn stage_streamed<S: KvStore>(
+    store: &S,
+    gen_id: u64,
+    cf: ColumnFamily,
+    family: &StreamedFamily,
+    scratch: &Path,
+) -> Result<u64, IndexError> {
+    let prefix = gen_id.to_be_bytes();
+    let mut failure: Option<std::io::Error> = None;
+    let merged = super::spill::merge(&family.runs)
+        .map_err(|error| IndexError::Storage(StorageError::Io(error)))?;
+    let mut rekeyed = Rekeyed {
+        source: merged,
+        prefix,
+        failure: &mut failure,
+    };
+    let staged = store.ingest_sorted(cf, &mut rekeyed, scratch)?;
+    if let Some(error) = failure {
+        return Err(IndexError::Storage(StorageError::Io(error)));
+    }
+    if staged != family.rows {
+        return Err(IndexError::Storage(StorageError::backend(format!(
+            "streamed segment staged {staged} rows, the artifact has {}",
+            family.rows
+        ))));
+    }
+    Ok(staged)
+}
+
+struct Rekeyed<'a, I> {
+    source: I,
+    prefix: [u8; 8],
+    failure: &'a mut Option<std::io::Error>,
+}
+
+impl<I> Iterator for Rekeyed<'_, I>
+where
+    I: Iterator<Item = std::io::Result<(Vec<u8>, Vec<u8>)>>,
+{
+    type Item = (Vec<u8>, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (mut key, value) = match self.source.next()? {
+            Ok(row) => row,
+            Err(error) => {
+                if self.failure.is_none() {
+                    *self.failure = Some(error);
+                }
+                return None;
+            }
+        };
+        if key.len() >= 8 {
+            key[..8].copy_from_slice(&self.prefix);
+        }
+        Some((key, value))
+    }
+}
+
+pub(crate) fn put_streamed_segment(
+    batch: &mut BufferedWriteBatch,
+    gen_id: u64,
+    seal: &StreamedSeal,
+    capabilities: IndexCapabilities,
+) {
+    let sealed = SealedGen {
+        gen_id,
+        coverage: seal.coverage,
+        next_ordinal: seal.next_ordinal,
+    };
+    let record = encode_sealed_gen(&sealed);
+    let segment_caps: Vec<IndexCapability> = capabilities
+        .iter()
+        .filter(|capability| *capability != IndexCapability::ScriptLive)
+        .collect();
+    for &capability in &segment_caps {
+        batch.put(
+            ColumnFamily::IdxMeta,
+            &sealed_gen_key(capability, gen_id),
+            &record,
+        );
+    }
+    batch.put(
+        ColumnFamily::IdxMeta,
+        SEAL_NEXT_GEN_KEY,
+        &gen_id.saturating_add(1).to_le_bytes(),
+    );
+    tail::put_generation_descriptors(
+        batch,
+        segment_caps,
+        TailBounds {
+            newest: Some(sealed),
+            first_height: None,
+            at: Some((seal.coverage.last_height, seal.coverage.last_hash)),
+        },
+    );
+}
+
+#[cfg(test)]
 type Identity = (u32, u32, u32);
+#[cfg(test)]
 type Rows = Vec<(Vec<u8>, Vec<u8>)>;
 
+#[cfg(test)]
 fn record_error(height: u32, reason: &'static str) -> ScriptHistoryImportError {
     ScriptHistoryImportError::Record { height, reason }
 }
 
+#[cfg(test)]
 fn identity_of(height: u32, position: TxPosition) -> Identity {
     (height, position.offset(), position.byte_len())
 }
 
+#[cfg(test)]
 fn funding_height(key: &[u8]) -> Option<u32> {
     let bytes: [u8; HEIGHT_SIZE] = key.get(HASH_PREFIX_LEN..)?.try_into().ok()?;
     Some(decode_history_height(bytes))
 }
 
+#[cfg(test)]
 struct Spend {
     txid: [u8; 32],
     vout: u32,
@@ -63,6 +204,7 @@ struct Spend {
     spender: Identity,
 }
 
+#[cfg(test)]
 fn parse_spend(key: &[u8], value: &[u8]) -> Result<Spend, ScriptHistoryImportError> {
     if key.len() != SPENDING_RECORD_KEY_LEN {
         return Err(record_error(0, "spending key has the wrong length"));
@@ -93,10 +235,12 @@ fn parse_spend(key: &[u8], value: &[u8]) -> Result<Spend, ScriptHistoryImportErr
     })
 }
 
+#[cfg(test)]
 struct Transactions {
     identities: BTreeMap<Identity, Option<[u8; 32]>>,
 }
 
+#[cfg(test)]
 impl Transactions {
     fn name(&mut self, identity: Identity, txid: Option<[u8; 32]>) -> Result<(), &'static str> {
         let slot = self.identities.entry(identity).or_insert(None);
@@ -114,6 +258,7 @@ impl Transactions {
 }
 
 // PRJ-07
+#[cfg(test)]
 pub(crate) fn script_history_segment(
     funding: &[(Vec<u8>, Vec<u8>)],
     spending: &[(Vec<u8>, Vec<u8>)],
@@ -171,6 +316,7 @@ pub(crate) fn script_history_segment(
     })
 }
 
+#[cfg(test)]
 fn collect_funded(
     funding: &[(Vec<u8>, Vec<u8>)],
     transactions: &mut Transactions,
@@ -191,8 +337,10 @@ fn collect_funded(
     Ok(funded)
 }
 
+#[cfg(test)]
 type Creations = BTreeMap<[u8; 32], Vec<u32>>;
 
+#[cfg(test)]
 fn transaction_rows(
     identities: &BTreeMap<Identity, Option<[u8; 32]>>,
     ordinals: &BTreeMap<Identity, u32>,
@@ -224,17 +372,20 @@ fn transaction_rows(
     Ok((rows, creations))
 }
 
+#[cfg(test)]
 fn latest_creation_before(creations: &Creations, txid: &[u8; 32], spending: u32) -> Option<u32> {
     let ordinals = creations.get(txid)?;
     let earlier = ordinals.partition_point(|&creation| creation < spending);
     earlier.checked_sub(1).map(|index| ordinals[index])
 }
 
+#[cfg(test)]
 struct PostingRows {
     dictionary: Rows,
     posts: Rows,
 }
 
+#[cfg(test)]
 fn posting_rows(
     funded: &[(Identity, ScriptHistoryOccurrence)],
     ordinals: &BTreeMap<Identity, u32>,
@@ -272,6 +423,7 @@ fn posting_rows(
     Ok(PostingRows { dictionary, posts })
 }
 
+#[cfg(test)]
 fn spend_rows(
     spends: &[Spend],
     creations: &Creations,
@@ -364,37 +516,12 @@ pub(crate) fn put_segment(
     segment: &ImportedSegment,
     capabilities: IndexCapabilities,
 ) {
-    let sealed = SealedGen {
-        gen_id,
+    let seal = StreamedSeal {
         coverage: segment.coverage,
         next_ordinal: segment.next_ordinal,
+        records: segment.records,
     };
-    let record = encode_sealed_gen(&sealed);
-    let segment_caps: Vec<IndexCapability> = capabilities
-        .iter()
-        .filter(|capability| *capability != IndexCapability::ScriptLive)
-        .collect();
-    for &capability in &segment_caps {
-        batch.put(
-            ColumnFamily::IdxMeta,
-            &sealed_gen_key(capability, gen_id),
-            &record,
-        );
-    }
-    batch.put(
-        ColumnFamily::IdxMeta,
-        SEAL_NEXT_GEN_KEY,
-        &gen_id.saturating_add(1).to_le_bytes(),
-    );
-    tail::put_generation_descriptors(
-        batch,
-        segment_caps,
-        TailBounds {
-            newest: Some(sealed),
-            first_height: None,
-            at: Some((segment.coverage.last_height, segment.coverage.last_hash)),
-        },
-    );
+    put_streamed_segment(batch, gen_id, &seal, capabilities);
 }
 
 fn malformed_key() -> IndexError {
@@ -404,6 +531,7 @@ fn malformed_key() -> IndexError {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg(test)]
 pub struct TxOccurrence {
     pub txid: [u8; 32],
     pub height: u32,
@@ -412,6 +540,7 @@ pub struct TxOccurrence {
 }
 
 // PRJ-06, PRJ-07, PRJ-09
+#[cfg(test)]
 pub(crate) fn tx_lookup_segment(
     mut occurrences: Vec<TxOccurrence>,
     coverage: Coverage,
@@ -449,6 +578,7 @@ pub(crate) fn tx_lookup_segment(
     })
 }
 
+#[cfg(test)]
 fn restored_overflow() -> IndexError {
     IndexError::Storage(StorageError::IncompatibleData(
         "restored segment exceeds u32 ordinals".into(),

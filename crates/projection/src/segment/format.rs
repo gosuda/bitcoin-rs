@@ -287,42 +287,87 @@ pub fn decode_chunk_postings(base_ordinal: u32, bytes: &[u8]) -> Option<Vec<(u32
     Some(postings)
 }
 
-// PRJ-08
-#[must_use]
+pub struct PostingChunker {
+    gen_id: u64,
+    script_id: u32,
+    chunk: Vec<PostingItem>,
+    chunk_bytes: usize,
+    base: u32,
+    ordinal: u32,
+}
+
+impl PostingChunker {
+    pub fn new(gen_id: u64, script_id: u32) -> Self {
+        Self {
+            gen_id,
+            script_id,
+            chunk: Vec::new(),
+            chunk_bytes: 0,
+            base: 0,
+            ordinal: 0,
+        }
+    }
+
+    pub fn push(&mut self, delta_ordinal: u32, flags: u8) -> Option<(Vec<u8>, Vec<u8>)> {
+        let next = self.ordinal.saturating_add(delta_ordinal);
+        let item_bytes = uvarint_len(delta_ordinal).saturating_add(1);
+        let full = delta_ordinal != 0
+            && self.chunk_bytes.saturating_add(item_bytes) > SCRIPT_POST_CHUNK_MAX_BYTES;
+        let emitted = if self.chunk.is_empty() || full {
+            let flushed = if self.chunk.is_empty() {
+                None
+            } else {
+                let rows = chunk_row(self.gen_id, self.script_id, self.base, &self.chunk);
+                self.chunk.clear();
+                Some(rows)
+            };
+            self.base = next;
+            self.chunk.push(PostingItem {
+                delta_ordinal: 0,
+                flags,
+            });
+            self.chunk_bytes = uvarint_len(0).saturating_add(1);
+            flushed
+        } else {
+            self.chunk.push(PostingItem {
+                delta_ordinal,
+                flags,
+            });
+            self.chunk_bytes = self.chunk_bytes.saturating_add(item_bytes);
+            None
+        };
+        self.ordinal = next;
+        emitted
+    }
+
+    pub fn finish(self) -> Option<(Vec<u8>, Vec<u8>)> {
+        if self.chunk.is_empty() {
+            None
+        } else {
+            Some(chunk_row(
+                self.gen_id,
+                self.script_id,
+                self.base,
+                &self.chunk,
+            ))
+        }
+    }
+}
+
 pub fn chunk_postings(
     gen_id: u64,
     script_id: u32,
     items: Vec<PostingItem>,
 ) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut rows = Vec::new();
-    let mut chunk: Vec<PostingItem> = Vec::new();
-    let mut chunk_bytes = 0usize;
-    let mut base = 0u32;
-    let mut ordinal = 0u32;
+    let mut chunker = PostingChunker::new(gen_id, script_id);
     for item in items {
-        let next = ordinal.saturating_add(item.delta_ordinal);
-        let item_bytes = uvarint_len(item.delta_ordinal).saturating_add(1);
-        let full = item.delta_ordinal != 0
-            && chunk_bytes.saturating_add(item_bytes) > SCRIPT_POST_CHUNK_MAX_BYTES;
-        if chunk.is_empty() || full {
-            if !chunk.is_empty() {
-                rows.push(chunk_row(gen_id, script_id, base, &chunk));
-                chunk.clear();
-            }
-            base = next;
-            chunk.push(PostingItem {
-                delta_ordinal: 0,
-                flags: item.flags,
-            });
-            chunk_bytes = uvarint_len(0).saturating_add(1);
-        } else {
-            chunk.push(item);
-            chunk_bytes = chunk_bytes.saturating_add(item_bytes);
+        if let Some(row) = chunker.push(item.delta_ordinal, item.flags) {
+            rows.push(row);
         }
-        ordinal = next;
     }
-    if !chunk.is_empty() {
-        rows.push(chunk_row(gen_id, script_id, base, &chunk));
+    if let Some(row) = chunker.finish() {
+        rows.push(row);
     }
     rows
 }

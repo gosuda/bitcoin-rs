@@ -5,8 +5,7 @@ use super::artifact::{
 use super::artifact::{HashedFile, IO_BUFFER_BYTES};
 use super::chain::{BaseCount, BodyReader, ChainBase, Located};
 use super::compact_filters::{
-    Merge, RECORD_FIXED_LEN, Rows, Run, RunWriter, SpillFile, chain_header, decode_fixed,
-    encode_record,
+    RECORD_FIXED_LEN, Rows, SpillFile, chain_header, decode_fixed, decode_run_row, encode_record,
 };
 use super::export::create_new_file;
 use super::manifest::{
@@ -16,6 +15,10 @@ use super::{
     BundleHost, BundleOutcome, IndexBundleError, IndexBundleRequest, ManifestArtifactTarget,
     RestoreReport, Withheld, io_error,
 };
+use crate::segment::format::PostingChunker;
+use crate::segment::spill::{
+    Merge, RESTORE_SPILL_BUDGET_BYTES, RunFile, SpillBudget, SpillSet, SpillSorter, merge,
+};
 use crate::types::TxPosition;
 use crate::writer::TxIndexWriter;
 use crate::writer::{CompactFilterAttachment, CompactFilterRow};
@@ -24,13 +27,14 @@ use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::encode::double_sha256;
 use bitcoin_rs_execution::chain::BlockTreeReader;
 use bitcoin_rs_execution::chain::TipSnapshot;
+use bitcoin_rs_storage::{ColumnFamily, StorageError};
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Read};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-
 pub(super) fn restore(
     host: &BundleHost<'_>,
     request: &IndexBundleRequest,
@@ -96,8 +100,8 @@ pub fn attach_tx_lookup_artifact(
     writer: &dyn TxIndexWriter,
     target: &ManifestArtifactTarget,
     headers: &[&[u8; crate::types::HEADER_ROW_SIZE]],
-
     scratch: &Path,
+    budget: &SpillBudget,
 ) -> Result<u64, IndexBundleError> {
     const NAME: &str = "txlookup.artifact";
     let path = &target.artifact_path;
@@ -135,9 +139,107 @@ pub fn attach_tx_lookup_artifact(
             Ok(header) => header,
             Err(reason) => return Err(IndexBundleError::ArtifactHeader { name: NAME, reason }),
         };
-    let mut occurrences = Vec::new();
+    let work = scratch.join(TX_LOOKUP_WORK_DIR);
+    match fs::remove_dir_all(&work) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(fail(error)),
+    }
+    fs::create_dir_all(&work).map_err(fail)?;
+    let set = SpillSet::new(budget, work.clone());
+    let stream = TxLookupStream {
+        floor: target.floor,
+        path,
+        headers,
+        set,
+    };
+    let outcome = stream
+        .decode(&mut hashed, &header, &|| false)
+        .and_then(|decoded| {
+            drain_remaining_for_hash(&mut hashed, &|| false, path)?;
+            if into_digest(hashed) != target.sha256 {
+                return Err(IndexBundleError::ArtifactHash { name: NAME });
+            }
+            let (family, count, ordinal_base) = stream.order(decoded, target.chain_tx_count)?;
+            let seal = crate::segment::import::tx_lookup_seal(
+                target.floor,
+                target.base_height,
+                target.base_hash,
+                count,
+                ordinal_base,
+            )
+            .map_err(IndexBundleError::Index)?;
+            let attachment = crate::writer::TxLookupAttachment {
+                headers,
+                base: IndexWatermark {
+                    height: target.base_height,
+                    hash: target.base_hash,
+                },
+                floor: target.floor,
+                scratch,
+            };
+            writer
+                .attach_streamed_tx_lookup(&family, &seal, &attachment)
+                .map_err(IndexBundleError::Index)
+        });
+    let _ = fs::remove_dir_all(&work);
+    outcome
+}
+
+const TX_LOOKUP_WORK_DIR: &str = "tx-lookup-attach";
+
+struct TxLookupRuns {
+    occurrences: Vec<crate::segment::spill::RunFile>,
+    count: u64,
+}
+
+struct TxLookupStream<'a> {
+    floor: u32,
+    path: &'a Path,
+    headers: &'a [&'a [u8; crate::types::HEADER_ROW_SIZE]],
+    set: SpillSet<'a>,
+}
+
+impl TxLookupStream<'_> {
+    fn decode(
+        &self,
+        hashed: &mut HashedFile,
+        header: &ArtifactHeader,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<TxLookupRuns, IndexBundleError> {
+        decode_tx_lookup_artifact(
+            hashed,
+            header,
+            self.floor,
+            self.path,
+            self.headers,
+            &self.set,
+            cancelled,
+        )
+    }
+
+    fn order(
+        &self,
+        decoded: TxLookupRuns,
+        chain_tx_count: u64,
+    ) -> Result<(crate::segment::import::StreamedFamily, u64, u32), IndexBundleError> {
+        order_tx_lookup_runs(decoded, chain_tx_count, &self.set, self.path)
+    }
+}
+fn decode_tx_lookup_artifact(
+    hashed: &mut HashedFile,
+    header: &ArtifactHeader,
+    floor: u32,
+    path: &Path,
+    headers: &[&[u8; crate::types::HEADER_ROW_SIZE]],
+    set: &SpillSet,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<TxLookupRuns, IndexBundleError> {
+    const NAME: &str = "txlookup.artifact";
+    let mut occurrences = set.sorter("tx-lookup-occ");
+    let mut count = 0_u64;
     {
-        let mut records = RecordReader::new(&mut hashed, &header, target.floor);
+        let mut records = RecordReader::new(hashed, header, floor);
         while let Some(record) = records.next_record().map_err(|fault| match fault {
             ReadFault::Io(error) => io_error(path, error),
             ReadFault::Framing { record, reason } => IndexBundleError::ArtifactFraming {
@@ -146,57 +248,115 @@ pub fn attach_tx_lookup_artifact(
                 reason,
             },
         })? {
-            push_tx_occurrences(&record, headers, &mut occurrences)?;
+            count += 1;
+            if count.is_multiple_of(CANCEL_POLL_RECORDS) && cancelled() {
+                return Err(IndexBundleError::Cancelled);
+            }
+            let [position] = record.positions else {
+                return Err(IndexBundleError::Identity(
+                    "a restored tx lookup record must name exactly one position".to_owned(),
+                ));
+            };
+            let header = headers
+                .get(usize::try_from(record.height).unwrap_or(usize::MAX))
+                .ok_or_else(|| {
+                    IndexBundleError::Identity("a restored record height has no header".to_owned())
+                })?;
+            let mut key = Vec::with_capacity(40);
+            key.extend_from_slice(&record.height.to_be_bytes());
+            key.extend_from_slice(&position.offset().to_be_bytes());
+            key.extend_from_slice(&record.txid);
+            let mut value = Vec::with_capacity(36);
+            value.extend_from_slice(&double_sha256(&header[..]).to_le_bytes());
+            value.extend_from_slice(&position.byte_len().to_be_bytes());
+            occurrences
+                .push(key, value)
+                .map_err(|error| io_error(path, error))?;
         }
     }
-    drain_remaining_for_hash(&mut hashed, &|| false, path)?;
-    if into_digest(hashed) != target.sha256 {
-        return Err(IndexBundleError::ArtifactHash { name: NAME });
-    }
-    let base = IndexWatermark {
-        height: target.base_height,
-        hash: target.base_hash,
-    };
-    let ordinal_base = tx_ordinal_base(target.chain_tx_count, occurrences.len())?;
-    let coverage =
-        crate::segment::Coverage::new(target.floor, target.base_height, target.base_hash);
-    let segment = crate::segment::import::tx_lookup_segment(occurrences, coverage, ordinal_base)
-        .map_err(IndexBundleError::Index)?;
-    let attachment = crate::writer::TxLookupAttachment {
-        headers,
-        base,
-        floor: target.floor,
-        scratch,
-    };
-    writer
-        .attach_tx_lookup_segment(&segment, &attachment)
-        .map_err(IndexBundleError::Index)
+    let runs = occurrences
+        .finish()
+        .map_err(|error| io_error(path, error))?;
+    Ok(TxLookupRuns {
+        occurrences: runs,
+        count,
+    })
 }
 
-fn push_tx_occurrences(
-    record: &TxLookupRecord<'_>,
-    headers: &[&[u8; crate::types::HEADER_ROW_SIZE]],
-    out: &mut Vec<crate::segment::import::TxOccurrence>,
-) -> Result<(), IndexBundleError> {
-    let [position] = record.positions else {
-        return Err(IndexBundleError::Identity(
-            "a restored tx lookup record must name exactly one position".to_owned(),
-        ));
-    };
-    let header = headers
-        .get(usize::try_from(record.height).unwrap_or(usize::MAX))
-        .ok_or_else(|| {
-            IndexBundleError::Identity("a restored record height has no header".to_owned())
+fn order_tx_lookup_runs(
+    decoded: TxLookupRuns,
+    chain_tx_count: u64,
+    set: &SpillSet,
+    path: &Path,
+) -> Result<(crate::segment::import::StreamedFamily, u64, u32), IndexBundleError> {
+    const NAME: &str = "txlookup.artifact";
+    let ordinal_base = tx_ordinal_base(
+        chain_tx_count,
+        usize::try_from(decoded.count).unwrap_or(usize::MAX),
+    )?;
+    let count32 = u32::try_from(decoded.count).map_err(|_| {
+        IndexBundleError::Index(IndexError::Storage(StorageError::IncompatibleData(
+            "restored segment exceeds u32 ordinals".to_owned(),
+        )))
+    })?;
+    ordinal_base.checked_add(count32).ok_or_else(|| {
+        IndexBundleError::Index(IndexError::Storage(StorageError::IncompatibleData(
+            "restored segment exceeds u32 ordinals".to_owned(),
+        )))
+    })?;
+    let mut dir = set.sorter("tx-lookup-dir");
+    let mut rows = 0_u64;
+    let mut ordinal = ordinal_base;
+    let merged = merge(&decoded.occurrences).map_err(|error| io_error(path, error))?;
+    for (index, record) in merged.enumerate() {
+        let (key, value) = record.map_err(|error| io_error(path, error))?;
+        if key.len() != 40 || value.len() != 36 {
+            return Err(IndexBundleError::ArtifactFraming {
+                name: NAME,
+                record: u64::try_from(index).unwrap_or(u64::MAX),
+                reason: "spill run row is truncated",
+            });
+        }
+        let mut height = [0_u8; 4];
+        height.copy_from_slice(&key[..4]);
+        let mut offset = [0_u8; 4];
+        offset.copy_from_slice(&key[4..8]);
+        let mut txid = [0_u8; 32];
+        txid.copy_from_slice(&key[8..40]);
+        let mut block_hash = [0_u8; 32];
+        block_hash.copy_from_slice(&value[..32]);
+        let mut byte_len = [0_u8; 4];
+        byte_len.copy_from_slice(&value[32..36]);
+        let height = u32::from_be_bytes(height);
+        let offset = u32::from_be_bytes(offset);
+        let byte_len = u32::from_be_bytes(byte_len);
+        let dir_key = crate::segment::format::encode_tx_dir_key(0, &txid, height).to_vec();
+        let dir_value =
+            crate::segment::format::encode_tx_dir_value(&block_hash, ordinal, offset, byte_len)
+                .to_vec();
+        dir.push(dir_key, dir_value)
+            .map_err(|error| io_error(path, error))?;
+        rows += 1;
+        let ordinal_key = crate::segment::format::encode_tx_ordinal_key(0, ordinal).to_vec();
+        let ordinal_value =
+            crate::segment::format::encode_tx_ordinal_value(&txid, height, offset, byte_len)
+                .to_vec();
+        dir.push(ordinal_key, ordinal_value)
+            .map_err(|error| io_error(path, error))?;
+        rows += 1;
+        ordinal = ordinal.checked_add(1).ok_or_else(|| {
+            IndexBundleError::Index(IndexError::Storage(StorageError::IncompatibleData(
+                "restored segment exceeds u32 ordinals".to_owned(),
+            )))
         })?;
-    out.push(crate::segment::import::TxOccurrence {
-        txid: record.txid,
-        height: record.height,
-        block_hash: double_sha256(&header[..]).to_le_bytes(),
-        position: *position,
-    });
-    Ok(())
+    }
+    let runs = dir.finish().map_err(|error| io_error(path, error))?;
+    Ok((
+        crate::segment::import::StreamedFamily { runs, rows },
+        decoded.count,
+        ordinal_base,
+    ))
 }
-
 fn tx_ordinal_base(chain_tx_count: u64, restored: usize) -> Result<u32, IndexBundleError> {
     let restored = u64::try_from(restored).unwrap_or(u64::MAX);
     let base = chain_tx_count.checked_sub(restored).ok_or_else(|| {
@@ -214,6 +374,7 @@ pub fn attach_script_history_artifact(
     target: &ManifestArtifactTarget,
     block_hashes: &[[u8; 32]],
     scratch: &Path,
+    budget: &SpillBudget,
 ) -> Result<u64, IndexBundleError> {
     const NAME: &str = "scripthistory.artifact";
     let path = &target.artifact_path;
@@ -251,56 +412,936 @@ pub fn attach_script_history_artifact(
             Ok(header) => header,
             Err(reason) => return Err(IndexBundleError::ArtifactHeader { name: NAME, reason }),
         };
-    let mut funding = Vec::new();
-    let mut spending = Vec::new();
-    {
-        let mut records = ScriptRecordReader::new(&mut hashed, &header, target.floor);
-        while let Some(record) = records.next_record().map_err(|fault| match fault {
-            ReadFault::Io(error) => io_error(path, error),
-            ReadFault::Framing { record, reason } => IndexBundleError::ArtifactFraming {
-                name: NAME,
-                record,
-                reason,
+    let work = scratch.join(SCRIPT_HISTORY_WORK_DIR);
+    match fs::remove_dir_all(&work) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(fail(error)),
+    }
+    fs::create_dir_all(&work).map_err(fail)?;
+    let set = SpillSet::new(budget, work.clone());
+    let stream = ScriptHistoryStream {
+        floor: target.floor,
+        path,
+        set,
+        chain_tx_count: target.chain_tx_count,
+        block_hashes,
+        base: IndexWatermark {
+            height: target.base_height,
+            hash: target.base_hash,
+        },
+    };
+    let outcome = stream
+        .decode(&mut hashed, &header, &|| false)
+        .and_then(|decoded| {
+            drain_remaining_for_hash(&mut hashed, &|| false, path)?;
+            if into_digest(hashed) != target.sha256 {
+                return Err(IndexBundleError::ArtifactHash { name: NAME });
+            }
+            let (families, seal) = stream.order(decoded)?;
+            let attachment = crate::writer::ScriptHistoryAttachment {
+                base: stream.base,
+                floor: stream.floor,
+                scratch,
+            };
+            writer
+                .attach_streamed_script_history(&families, &seal, &attachment)
+                .map_err(IndexBundleError::Index)
+        });
+    let _ = fs::remove_dir_all(&work);
+    outcome
+}
+
+const SCRIPT_HISTORY_WORK_DIR: &str = "script-history-attach";
+
+struct DecodedScriptHistory {
+    funding: Vec<crate::segment::spill::RunFile>,
+    spending: Vec<crate::segment::spill::RunFile>,
+    funding_records: u64,
+    spending_records: u64,
+}
+
+struct ScriptHistoryStream<'a> {
+    floor: u32,
+    path: &'a Path,
+    set: SpillSet<'a>,
+    chain_tx_count: u64,
+    block_hashes: &'a [[u8; 32]],
+    base: IndexWatermark,
+}
+
+fn script_record_error(height: u32, reason: &'static str) -> IndexBundleError {
+    IndexBundleError::ScriptHistoryImport(
+        crate::segment::import::ScriptHistoryImportError::Record { height, reason },
+    )
+}
+
+fn script_too_many(transactions: usize, chain_tx_count: u64) -> IndexBundleError {
+    IndexBundleError::ScriptHistoryImport(
+        crate::segment::import::ScriptHistoryImportError::TooManyTransactions {
+            transactions,
+            chain_tx_count,
+        },
+    )
+}
+
+impl ScriptHistoryStream<'_> {
+    fn decode(
+        &self,
+        hashed: &mut HashedFile,
+        header: &ArtifactHeader,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<DecodedScriptHistory, IndexBundleError> {
+        const NAME: &str = "scripthistory.artifact";
+        let path = self.path;
+        let mut funding = self.set.sorter("sh-funded");
+        let mut spending = self.set.sorter("sh-spend");
+        let mut funding_records = 0_u64;
+        let mut spending_records = 0_u64;
+        {
+            let mut records = ScriptRecordReader::new(hashed, header, self.floor);
+            let mut seen = 0_u64;
+            while let Some(record) = records.next_record().map_err(|fault| match fault {
+                ReadFault::Io(error) => io_error(path, error),
+                ReadFault::Framing { record, reason } => IndexBundleError::ArtifactFraming {
+                    name: NAME,
+                    record,
+                    reason,
+                },
+            })? {
+                if seen.is_multiple_of(CANCEL_POLL_RECORDS) && cancelled() {
+                    return Err(IndexBundleError::Cancelled);
+                }
+                seen += 1;
+                match record.family {
+                    ScriptFamily::Funding => {
+                        funding_records += 1;
+                        let mut height_bytes = [0_u8; 4];
+                        height_bytes.copy_from_slice(
+                            &record.key
+                                [crate::types::HASH_PREFIX_LEN..crate::types::HASH_PREFIX_ROW_SIZE],
+                        );
+                        let height = crate::types::decode_history_height(height_bytes);
+                        let occurrences =
+                            crate::types::ScriptHistoryOccurrence::decode_all(&record.value)
+                                .ok_or(IndexBundleError::ArtifactFraming {
+                                    name: NAME,
+                                    record: seen,
+                                    reason: "entries are not history occurrences",
+                                })?;
+                        for occurrence in occurrences {
+                            let mut key = [0_u8; 12];
+                            key[..4].copy_from_slice(&height.to_be_bytes());
+                            key[4..8].copy_from_slice(&occurrence.position.offset().to_be_bytes());
+                            key[8..12]
+                                .copy_from_slice(&occurrence.position.byte_len().to_be_bytes());
+                            let mut value = [0_u8; 65];
+                            value[..32].copy_from_slice(&occurrence.scripthash.to_byte_array());
+                            value[32..64].copy_from_slice(&occurrence.txid);
+                            value[64] = occurrence.flags;
+                            funding
+                                .push(key.to_vec(), value.to_vec())
+                                .map_err(|error| io_error(path, error))?;
+                        }
+                    }
+                    ScriptFamily::Spending => {
+                        spending_records += 1;
+                        let spend = decode_spend_record(&record.key, &record.value)?;
+                        let mut key = [0_u8; 12];
+                        key[..4].copy_from_slice(&spend.height.to_be_bytes());
+                        key[4..8].copy_from_slice(&spend.offset.to_be_bytes());
+                        key[8..12].copy_from_slice(&spend.len.to_be_bytes());
+                        let mut value = [0_u8; 36];
+                        value[..32].copy_from_slice(&spend.txid);
+                        value[32..36].copy_from_slice(&spend.vout.to_be_bytes());
+                        spending
+                            .push(key.to_vec(), value.to_vec())
+                            .map_err(|error| io_error(path, error))?;
+                    }
+                }
+            }
+        }
+        let funding = funding.finish().map_err(|error| io_error(path, error))?;
+        let spending = spending.finish().map_err(|error| io_error(path, error))?;
+        Ok(DecodedScriptHistory {
+            funding,
+            spending,
+            funding_records,
+            spending_records,
+        })
+    }
+}
+
+struct DecodedSpend {
+    txid: [u8; 32],
+    vout: u32,
+    height: u32,
+    offset: u32,
+    len: u32,
+}
+
+fn decode_spend_record(key: &[u8], value: &[u8]) -> Result<DecodedSpend, IndexBundleError> {
+    let mut height_bytes = [0_u8; 4];
+    height_bytes.copy_from_slice(&key[key.len() - 4..]);
+    let height = u32::from_be_bytes(height_bytes);
+    let positions = crate::types::TxPositionValue::decode(value)
+        .ok_or_else(|| script_record_error(height, "entries are not positions"))?;
+    let [position] = positions else {
+        return Err(script_record_error(
+            height,
+            "a spent outpoint names exactly one spending transaction",
+        ));
+    };
+    let mut txid = [0_u8; 32];
+    txid.copy_from_slice(&key[..32]);
+    let mut vout_bytes = [0_u8; 4];
+    vout_bytes.copy_from_slice(&key[32..36]);
+    let vout = u32::from_be_bytes(vout_bytes);
+    if vout > crate::types::U24_MAX {
+        return Err(script_record_error(
+            height,
+            "vout exceeds the spend directory range",
+        ));
+    }
+    Ok(DecodedSpend {
+        txid,
+        vout,
+        height,
+        offset: position.offset(),
+        len: position.byte_len(),
+    })
+}
+
+type MergeRow = (Vec<u8>, Vec<u8>);
+
+struct MergeCursor<'a> {
+    source: Merge,
+    path: &'a Path,
+    current: Option<MergeRow>,
+}
+
+impl<'a> MergeCursor<'a> {
+    fn open(runs: &[RunFile], path: &'a Path) -> Result<Self, IndexBundleError> {
+        let mut source = merge(runs).map_err(|error| io_error(path, error))?;
+        let current = match source.next() {
+            None => None,
+            Some(Ok(row)) => Some(row),
+            Some(Err(error)) => return Err(io_error(path, error)),
+        };
+        Ok(Self {
+            source,
+            path,
+            current,
+        })
+    }
+
+    fn key(&self) -> Option<&[u8]> {
+        self.current.as_ref().map(|(key, _)| key.as_slice())
+    }
+
+    fn take(&mut self) -> Result<Option<MergeRow>, IndexBundleError> {
+        let taken = self.current.take();
+        self.current = match self.source.next() {
+            None => None,
+            Some(Ok(row)) => Some(row),
+            Some(Err(error)) => return Err(io_error(self.path, error)),
+        };
+        Ok(taken)
+    }
+}
+
+fn truncated_run() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "spill run row is truncated",
+    )
+}
+
+fn split_identity(key: &[u8]) -> Result<(u32, u32, u32), std::io::Error> {
+    if key.len() != 12 {
+        return Err(truncated_run());
+    }
+    let mut height = [0_u8; 4];
+    height.copy_from_slice(&key[..4]);
+    let mut offset = [0_u8; 4];
+    offset.copy_from_slice(&key[4..8]);
+    let mut len = [0_u8; 4];
+    len.copy_from_slice(&key[8..12]);
+    Ok((
+        u32::from_be_bytes(height),
+        u32::from_be_bytes(offset),
+        u32::from_be_bytes(len),
+    ))
+}
+
+fn take_funded_group(
+    cursor: &mut MergeCursor<'_>,
+    path: &Path,
+) -> Result<([u8; 12], [u8; 32]), IndexBundleError> {
+    let Some((key, value)) = cursor.take()? else {
+        return Err(IndexBundleError::Identity(
+            "the funded merge ended inside a group".to_owned(),
+        ));
+    };
+    if key.len() != 12 || value.len() != 65 {
+        return Err(io_error(path, truncated_run()));
+    }
+    let mut identity = [0_u8; 12];
+    identity.copy_from_slice(&key);
+    let mut txid = [0_u8; 32];
+    txid.copy_from_slice(&value[32..64]);
+    let mut height_bytes = [0_u8; 4];
+    height_bytes.copy_from_slice(&identity[..4]);
+    let height = u32::from_be_bytes(height_bytes);
+    loop {
+        match cursor.key() {
+            Some(next) if next == identity => {
+                let (_, next_value) = cursor.take()?.ok_or_else(|| {
+                    IndexBundleError::Identity("the funded merge ended inside a group".to_owned())
+                })?;
+                if next_value.len() != 65 {
+                    return Err(io_error(path, truncated_run()));
+                }
+                let mut next_txid = [0_u8; 32];
+                next_txid.copy_from_slice(&next_value[32..64]);
+                if next_txid != txid {
+                    return Err(script_record_error(
+                        height,
+                        "one position names two transactions",
+                    ));
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok((identity, txid))
+}
+fn take_spend_row(
+    cursor: &mut MergeCursor<'_>,
+) -> Result<([u8; 12], [u8; 32], u32), IndexBundleError> {
+    let Some((key, value)) = cursor.take()? else {
+        return Err(IndexBundleError::Identity(
+            "the spending merge ended inside a row".to_owned(),
+        ));
+    };
+    if key.len() != 12 || value.len() != 36 {
+        return Err(io_error(cursor.path, truncated_run()));
+    }
+    let mut identity = [0_u8; 12];
+    identity.copy_from_slice(&key);
+    let mut txid = [0_u8; 32];
+    txid.copy_from_slice(&value[..32]);
+    let mut vout = [0_u8; 4];
+    vout.copy_from_slice(&value[32..36]);
+    Ok((identity, txid, u32::from_be_bytes(vout)))
+}
+
+fn skip_spend_group(
+    cursor: &mut MergeCursor<'_>,
+    identity: &[u8; 12],
+) -> Result<(), IndexBundleError> {
+    while matches!(cursor.key(), Some(key) if key == identity.as_slice()) {
+        cursor.take()?;
+    }
+    Ok(())
+}
+
+fn push_spend2_row(
+    spend2: &mut SpillSorter,
+    path: &Path,
+    spent_txid: &[u8; 32],
+    spending: u32,
+    vout: u32,
+) -> Result<(), IndexBundleError> {
+    let mut key = Vec::with_capacity(36);
+    key.extend_from_slice(spent_txid);
+    key.extend_from_slice(&spending.to_be_bytes());
+    spend2
+        .push(key, vout.to_be_bytes().to_vec())
+        .map_err(|error| io_error(path, error))
+}
+impl ScriptHistoryStream<'_> {
+    fn order(
+        &self,
+        decoded: DecodedScriptHistory,
+    ) -> Result<
+        (
+            Vec<(ColumnFamily, crate::segment::import::StreamedFamily)>,
+            crate::segment::import::StreamedSeal,
+        ),
+        IndexBundleError,
+    > {
+        let (ord_runs, distinct) = self.enumerate(&decoded)?;
+        let (base, next_ordinal) = ordinal_window(self.chain_tx_count, distinct)?;
+        let mut emission = ScriptEmission::new(self, base, distinct);
+        emission.join_funded(&decoded.funding, &ord_runs)?;
+        let (spend2_runs, created_runs) = emission.join_spenders(&decoded.spending, &ord_runs)?;
+        let spend_raw_runs = emission.spend_rows(&spend2_runs, &created_runs)?;
+        let spend_family = emission.finish_spend_dir(&spend_raw_runs)?;
+        let post_in_runs = emission.take_post_in()?;
+        let (dict_family, post_family) = emission.posting_families(&post_in_runs)?;
+        let dir_family = emission.take_dir()?;
+        let families = vec![
+            (ColumnFamily::TxDir, dir_family),
+            (ColumnFamily::ScriptDict, dict_family),
+            (ColumnFamily::ScriptPost, post_family),
+            (ColumnFamily::SpendDir, spend_family),
+        ];
+        let seal = crate::segment::import::StreamedSeal {
+            coverage: crate::segment::Coverage::new(self.floor, self.base.height, self.base.hash),
+            next_ordinal,
+            records: decoded
+                .funding_records
+                .saturating_add(decoded.spending_records),
+        };
+        Ok((families, seal))
+    }
+}
+
+struct ScriptEmission<'a> {
+    set: &'a SpillSet<'a>,
+    path: &'a Path,
+    block_hashes: &'a [[u8; 32]],
+    base: u64,
+    chain_tx_count: u64,
+    distinct: u64,
+    dir: Option<SpillSorter<'a>>,
+    dir_rows: u64,
+    post_in: Option<SpillSorter<'a>>,
+    post_in_rows: u64,
+    created: Option<SpillSorter<'a>>,
+}
+impl<'a> ScriptEmission<'a> {
+    fn new(stream: &'a ScriptHistoryStream<'_>, base: u64, distinct: u64) -> ScriptEmission<'a> {
+        ScriptEmission {
+            set: &stream.set,
+            path: stream.path,
+            block_hashes: stream.block_hashes,
+            base,
+            chain_tx_count: stream.chain_tx_count,
+            distinct,
+            dir: Some(stream.set.sorter("sh-txdir")),
+            dir_rows: 0,
+            post_in: Some(stream.set.sorter("sh-post-in")),
+            post_in_rows: 0,
+            created: Some(stream.set.sorter("sh-created")),
+        }
+    }
+
+    fn ordinal(&self, rank: u32) -> Result<u32, IndexBundleError> {
+        self.base
+            .checked_add(u64::from(rank))
+            .and_then(|ordinal| u32::try_from(ordinal).ok())
+            .ok_or_else(|| {
+                script_too_many(
+                    usize::try_from(rank).unwrap_or(usize::MAX),
+                    self.chain_tx_count,
+                )
+            })
+    }
+
+    fn block_hash(&self, height: u32) -> Result<[u8; 32], IndexBundleError> {
+        self.block_hashes
+            .get(usize::try_from(height).unwrap_or(usize::MAX))
+            .copied()
+            .ok_or(IndexBundleError::ScriptHistoryImport(
+                crate::segment::import::ScriptHistoryImportError::MissingHeader { height },
+            ))
+    }
+
+    fn take_created(&mut self) -> Result<SpillSorter<'a>, IndexBundleError> {
+        self.created.take().ok_or_else(|| {
+            IndexBundleError::Identity("the created sorter is already staged".to_owned())
+        })
+    }
+
+    fn take_post_in(&mut self) -> Result<Vec<RunFile>, IndexBundleError> {
+        let sorter = self.post_in.take().ok_or_else(|| {
+            IndexBundleError::Identity("the posting sorter is already staged".to_owned())
+        })?;
+        sorter.finish().map_err(|error| io_error(self.path, error))
+    }
+
+    fn take_dir(&mut self) -> Result<crate::segment::import::StreamedFamily, IndexBundleError> {
+        let sorter = self.dir.take().ok_or_else(|| {
+            IndexBundleError::Identity("the directory sorter is already staged".to_owned())
+        })?;
+        let runs = sorter
+            .finish()
+            .map_err(|error| io_error(self.path, error))?;
+        Ok(crate::segment::import::StreamedFamily {
+            runs,
+            rows: self.dir_rows,
+        })
+    }
+}
+
+fn ordinal_window(chain_tx_count: u64, distinct: u64) -> Result<(u64, u32), IndexBundleError> {
+    let count = usize::try_from(distinct).unwrap_or(usize::MAX);
+    let next_ordinal =
+        u32::try_from(chain_tx_count).map_err(|_| script_too_many(count, chain_tx_count))?;
+    if distinct > chain_tx_count {
+        return Err(script_too_many(count, chain_tx_count));
+    }
+    Ok((chain_tx_count - distinct, next_ordinal))
+}
+
+impl ScriptHistoryStream<'_> {
+    fn push_ord(
+        &self,
+        sorter: &mut SpillSorter,
+        identity: &[u8; 12],
+        rank: u64,
+        funded: bool,
+    ) -> Result<(), IndexBundleError> {
+        let rank32 = u32::try_from(rank).map_err(|_| {
+            script_too_many(
+                usize::try_from(rank).unwrap_or(usize::MAX),
+                self.chain_tx_count,
+            )
+        })?;
+        let mut value = [0_u8; 5];
+        value[..4].copy_from_slice(&rank32.to_be_bytes());
+        value[4] = u8::from(funded);
+        sorter
+            .push(identity.to_vec(), value.to_vec())
+            .map_err(|error| io_error(self.path, error))
+    }
+
+    fn enumerate(
+        &self,
+        decoded: &DecodedScriptHistory,
+    ) -> Result<(Vec<RunFile>, u64), IndexBundleError> {
+        let mut ord = self.set.sorter("sh-ord");
+        let mut funded = MergeCursor::open(&decoded.funding, self.path)?;
+        let mut spending = MergeCursor::open(&decoded.spending, self.path)?;
+        let mut distinct = 0_u64;
+        loop {
+            let order = match (funded.key(), spending.key()) {
+                (None, None) => break,
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (Some(a), Some(b)) => a.cmp(b),
+            };
+            match order {
+                Ordering::Less => {
+                    let (identity, _) = take_funded_group(&mut funded, self.path)?;
+                    self.push_ord(&mut ord, &identity, distinct, true)?;
+                    distinct += 1;
+                }
+                Ordering::Greater => {
+                    let (identity, _, _) = take_spend_row(&mut spending)?;
+                    skip_spend_group(&mut spending, &identity)?;
+                    self.push_ord(&mut ord, &identity, distinct, false)?;
+                    distinct += 1;
+                }
+                Ordering::Equal => {
+                    let (identity, _) = take_funded_group(&mut funded, self.path)?;
+                    take_spend_row(&mut spending)?;
+                    skip_spend_group(&mut spending, &identity)?;
+                    self.push_ord(&mut ord, &identity, distinct, true)?;
+                    distinct += 1;
+                }
+            }
+        }
+        let runs = ord.finish().map_err(|error| io_error(self.path, error))?;
+        Ok((runs, distinct))
+    }
+}
+
+fn split_ord(value: &[u8], path: &Path) -> Result<(u32, bool), IndexBundleError> {
+    if value.len() != 5 {
+        return Err(io_error(path, truncated_run()));
+    }
+    let mut rank = [0_u8; 4];
+    rank.copy_from_slice(&value[..4]);
+    Ok((u32::from_be_bytes(rank), value[4] != 0))
+}
+
+fn ord_at(
+    cursor: &mut MergeCursor<'_>,
+    current: &mut Option<(Vec<u8>, Vec<u8>)>,
+    key: &[u8],
+    path: &Path,
+) -> Result<(u32, bool), IndexBundleError> {
+    loop {
+        match current.take() {
+            Some((okey, oval)) => match okey.as_slice().cmp(key) {
+                Ordering::Less => {
+                    *current = cursor.take()?;
+                }
+                Ordering::Equal => {
+                    let out = split_ord(&oval, path)?;
+                    *current = Some((okey, oval));
+                    return Ok(out);
+                }
+                Ordering::Greater => {
+                    return Err(IndexBundleError::Identity(
+                        "the ordinal map skips an identity".to_owned(),
+                    ));
+                }
             },
-        })? {
-            let row = (record.key.to_vec(), record.value);
-            match record.family {
-                ScriptFamily::Funding => funding.push(row),
-                ScriptFamily::Spending => spending.push(row),
+            None => {
+                return Err(IndexBundleError::Identity(
+                    "the ordinal map skips an identity".to_owned(),
+                ));
             }
         }
     }
-    drain_remaining_for_hash(&mut hashed, &|| false, path)?;
-    if into_digest(hashed) != target.sha256 {
-        return Err(IndexBundleError::ArtifactHash { name: NAME });
+}
+
+fn split_funded(value: &[u8]) -> Result<([u8; 32], [u8; 32], u8), std::io::Error> {
+    if value.len() != 65 {
+        return Err(truncated_run());
     }
-    let base = IndexWatermark {
-        height: target.base_height,
-        hash: target.base_hash,
-    };
-    let coverage =
-        crate::segment::Coverage::new(target.floor, target.base_height, target.base_hash);
-    let segment = crate::segment::import::script_history_segment(
-        &funding,
-        &spending,
-        coverage,
-        target.chain_tx_count,
-        block_hashes,
-    )?;
-    let attachment = crate::writer::ScriptHistoryAttachment {
-        base,
-        floor: target.floor,
-        scratch,
-    };
-    writer
-        .attach_script_history_segment(&segment, &attachment)
-        .map_err(IndexBundleError::Index)
+    let mut scripthash = [0_u8; 32];
+    scripthash.copy_from_slice(&value[..32]);
+    let mut txid = [0_u8; 32];
+    txid.copy_from_slice(&value[32..64]);
+    Ok((scripthash, txid, value[64]))
+}
+
+struct TxIdentity<'a> {
+    txid: &'a [u8; 32],
+    height: u32,
+    offset: u32,
+    len: u32,
+}
+
+impl ScriptEmission<'_> {
+    fn push_tx_rows(
+        &mut self,
+        tx: &TxIdentity,
+        block_hash: &[u8; 32],
+        ordinal: u32,
+    ) -> Result<(), IndexBundleError> {
+        let Some(dir) = self.dir.as_mut() else {
+            return Err(IndexBundleError::Identity(
+                "the directory sorter is already staged".to_owned(),
+            ));
+        };
+        let path = self.path;
+        let dir_key = crate::segment::format::encode_tx_dir_key(0, tx.txid, tx.height).to_vec();
+        let dir_value =
+            crate::segment::format::encode_tx_dir_value(block_hash, ordinal, tx.offset, tx.len)
+                .to_vec();
+        dir.push(dir_key, dir_value)
+            .map_err(|error| io_error(path, error))?;
+        self.dir_rows += 1;
+        let ordinal_key = crate::segment::format::encode_tx_ordinal_key(0, ordinal).to_vec();
+        let ordinal_value =
+            crate::segment::format::encode_tx_ordinal_value(tx.txid, tx.height, tx.offset, tx.len)
+                .to_vec();
+        dir.push(ordinal_key, ordinal_value)
+            .map_err(|error| io_error(path, error))?;
+        self.dir_rows += 1;
+        Ok(())
+    }
+    fn push_spend_only_ordinal(
+        &mut self,
+        height: u32,
+        offset: u32,
+        len: u32,
+        ordinal: u32,
+    ) -> Result<(), IndexBundleError> {
+        let Some(dir) = self.dir.as_mut() else {
+            return Err(IndexBundleError::Identity(
+                "the directory sorter is already staged".to_owned(),
+            ));
+        };
+        let path = self.path;
+        let key = crate::segment::format::encode_tx_ordinal_key(0, ordinal).to_vec();
+        let value =
+            crate::segment::format::encode_tx_ordinal_value(&[0_u8; 32], height, offset, len)
+                .to_vec();
+        dir.push(key, value)
+            .map_err(|error| io_error(path, error))?;
+        self.dir_rows += 1;
+        Ok(())
+    }
+
+    fn push_posting_input(
+        &mut self,
+        scripthash: &[u8; 32],
+        ordinal: u32,
+        flags: u8,
+    ) -> Result<(), IndexBundleError> {
+        let Some(post_in) = self.post_in.as_mut() else {
+            return Err(IndexBundleError::Identity(
+                "the posting sorter is already staged".to_owned(),
+            ));
+        };
+        let path = self.path;
+        let mut key = Vec::with_capacity(36);
+        key.extend_from_slice(scripthash);
+        key.extend_from_slice(&ordinal.to_be_bytes());
+        post_in
+            .push(key, vec![flags])
+            .map_err(|error| io_error(path, error))?;
+        self.post_in_rows += 1;
+        Ok(())
+    }
+
+    fn push_created(&mut self, txid: &[u8; 32], ordinal: u32) -> Result<(), IndexBundleError> {
+        let Some(created) = self.created.as_mut() else {
+            return Err(IndexBundleError::Identity(
+                "the created sorter is already staged".to_owned(),
+            ));
+        };
+        let path = self.path;
+        let mut key = Vec::with_capacity(36);
+        key.extend_from_slice(txid);
+        key.extend_from_slice(&ordinal.to_be_bytes());
+        created
+            .push(key, Vec::new())
+            .map_err(|error| io_error(path, error))?;
+        Ok(())
+    }
+
+    fn join_funded(
+        &mut self,
+        funding_runs: &[RunFile],
+        ord_runs: &[RunFile],
+    ) -> Result<(), IndexBundleError> {
+        let mut funded = MergeCursor::open(funding_runs, self.path)?;
+        let mut ord = MergeCursor::open(ord_runs, self.path)?;
+        let mut current_ord = ord.take()?;
+        let mut prev: Option<Vec<u8>> = None;
+        while let Some((fkey, fval)) = funded.take()? {
+            let (height, offset, len) =
+                split_identity(&fkey).map_err(|error| io_error(self.path, error))?;
+            let (scripthash, txid, flags) =
+                split_funded(&fval).map_err(|error| io_error(self.path, error))?;
+            let fresh = prev.as_deref() != Some(fkey.as_slice());
+            let (orank, _) = ord_at(&mut ord, &mut current_ord, &fkey, self.path)?;
+            let ordinal = self.ordinal(orank)?;
+            if fresh {
+                prev = Some(fkey.clone());
+                let block_hash = self.block_hash(height)?;
+                let tx = TxIdentity {
+                    txid: &txid,
+                    height,
+                    offset,
+                    len,
+                };
+                self.push_tx_rows(&tx, &block_hash, ordinal)?;
+            }
+            self.push_posting_input(&scripthash, ordinal, flags)?;
+            self.push_created(&txid, ordinal)?;
+        }
+        Ok(())
+    }
+
+    fn join_spenders(
+        &mut self,
+        spending_runs: &[RunFile],
+        ord_runs: &[RunFile],
+    ) -> Result<(Vec<RunFile>, Vec<RunFile>), IndexBundleError> {
+        let mut spending = MergeCursor::open(spending_runs, self.path)?;
+        let mut ord = MergeCursor::open(ord_runs, self.path)?;
+        let mut current_ord = ord.take()?;
+        let mut spend2 = self.set.sorter("sh-spend2");
+        while spending.key().is_some() {
+            let (skey, spent_txid, vout) = take_spend_row(&mut spending)?;
+            let (height, offset, len) =
+                split_identity(&skey).map_err(|error| io_error(self.path, error))?;
+            let (orank, ofunded) = ord_at(&mut ord, &mut current_ord, &skey, self.path)?;
+            let sos = self.ordinal(orank)?;
+            push_spend2_row(&mut spend2, self.path, &spent_txid, sos, vout)?;
+            loop {
+                if !matches!(spending.key(), Some(key) if key == skey.as_slice()) {
+                    break;
+                }
+                let (_, spent_txid, vout) = take_spend_row(&mut spending)?;
+                push_spend2_row(&mut spend2, self.path, &spent_txid, sos, vout)?;
+            }
+            if !ofunded {
+                self.push_spend_only_ordinal(height, offset, len, sos)?;
+            }
+        }
+        let spend2_runs = spend2
+            .finish()
+            .map_err(|error| io_error(self.path, error))?;
+        let created = self.take_created()?;
+        let created_runs = created
+            .finish()
+            .map_err(|error| io_error(self.path, error))?;
+        Ok((spend2_runs, created_runs))
+    }
+}
+
+fn split_spend_key(key: &[u8]) -> Result<([u8; 32], u32), std::io::Error> {
+    if key.len() != 36 {
+        return Err(truncated_run());
+    }
+    let mut txid = [0_u8; 32];
+    txid.copy_from_slice(&key[..32]);
+    let mut ordinal = [0_u8; 4];
+    ordinal.copy_from_slice(&key[32..36]);
+    Ok((txid, u32::from_be_bytes(ordinal)))
+}
+
+impl ScriptEmission<'_> {
+    fn spend_rows(
+        &self,
+        spend2_runs: &[RunFile],
+        created_runs: &[RunFile],
+    ) -> Result<Vec<RunFile>, IndexBundleError> {
+        let mut spend_raw = self.set.sorter("sh-spendraw");
+        let mut spends = MergeCursor::open(spend2_runs, self.path)?;
+        let mut creations = MergeCursor::open(created_runs, self.path)?;
+        let mut current_spend = spends.take()?;
+        let mut current_creation = creations.take()?;
+        let mut active: Option<[u8; 32]> = None;
+        let mut last: Option<u32> = None;
+        while let Some((skey, sval)) = current_spend {
+            let (spent_txid, spending) =
+                split_spend_key(&skey).map_err(|error| io_error(self.path, error))?;
+            if sval.len() != 4 {
+                return Err(io_error(self.path, truncated_run()));
+            }
+            let mut vout = [0_u8; 4];
+            vout.copy_from_slice(&sval);
+            let vout = u32::from_be_bytes(vout);
+            if active != Some(spent_txid) {
+                active = Some(spent_txid);
+                last = None;
+            }
+            while let Some((ckey, _)) = &current_creation {
+                let (created_txid, creation) =
+                    split_spend_key(ckey).map_err(|error| io_error(self.path, error))?;
+                if created_txid < spent_txid {
+                    current_creation = creations.take()?;
+                    continue;
+                }
+                if created_txid != spent_txid {
+                    break;
+                }
+                if creation < spending {
+                    last = Some(creation);
+                    current_creation = creations.take()?;
+                    continue;
+                }
+                break;
+            }
+            if let Some(creation) = last {
+                let key = crate::segment::format::encode_spend_dir_key(0, creation, vout).to_vec();
+                let value = crate::segment::format::encode_spend_dir_value(spending).to_vec();
+                spend_raw
+                    .push(key, value)
+                    .map_err(|error| io_error(self.path, error))?;
+            }
+            current_spend = spends.take()?;
+        }
+        spend_raw
+            .finish()
+            .map_err(|error| io_error(self.path, error))
+    }
+
+    fn finish_spend_dir(
+        &self,
+        raw_runs: &[RunFile],
+    ) -> Result<crate::segment::import::StreamedFamily, IndexBundleError> {
+        let mut dir = self.set.sorter("sh-spenddir");
+        let mut merged = MergeCursor::open(raw_runs, self.path)?;
+        let mut current = merged.take()?;
+        let mut previous: Option<Vec<u8>> = None;
+        let mut rows = 0_u64;
+        while let Some((key, value)) = current {
+            if previous.as_deref() == Some(key.as_slice()) {
+                return Err(script_record_error(0, "a spent outpoint appears twice"));
+            }
+            previous = Some(key.clone());
+            dir.push(key, value)
+                .map_err(|error| io_error(self.path, error))?;
+            rows += 1;
+            current = merged.take()?;
+        }
+        let runs = dir.finish().map_err(|error| io_error(self.path, error))?;
+        Ok(crate::segment::import::StreamedFamily { runs, rows })
+    }
+    fn posting_families(
+        &self,
+        post_in_runs: &[RunFile],
+    ) -> Result<
+        (
+            crate::segment::import::StreamedFamily,
+            crate::segment::import::StreamedFamily,
+        ),
+        IndexBundleError,
+    > {
+        let mut dict = self.set.sorter("sh-dict");
+        let mut dict_rows = 0_u64;
+        let mut post = self.set.sorter("sh-post");
+        let mut post_rows = 0_u64;
+        let mut merged = MergeCursor::open(post_in_runs, self.path)?;
+        let mut current = merged.take()?;
+        let mut script_id = 0_u32;
+        while let Some((pkey, _)) = current.clone() {
+            if pkey.len() != 36 {
+                return Err(io_error(self.path, truncated_run()));
+            }
+            let mut script = [0_u8; 32];
+            script.copy_from_slice(&pkey[..32]);
+            let mut chunker = PostingChunker::new(0, script_id);
+            let mut previous = 0_u32;
+            while let Some((ckey, cval)) = current {
+                if ckey.len() != 36 || cval.len() != 1 {
+                    return Err(io_error(self.path, truncated_run()));
+                }
+                if ckey[..32] != script {
+                    current = Some((ckey, cval));
+                    break;
+                }
+                let mut ordinal = [0_u8; 4];
+                ordinal.copy_from_slice(&ckey[32..36]);
+                let ordinal = u32::from_be_bytes(ordinal);
+                let delta = ordinal.wrapping_sub(previous);
+                previous = ordinal;
+                if let Some(row) = chunker.push(delta, cval[0]) {
+                    post.push(row.0, row.1)
+                        .map_err(|error| io_error(self.path, error))?;
+                    post_rows += 1;
+                }
+                current = merged.take()?;
+            }
+            if let Some(row) = chunker.finish() {
+                post.push(row.0, row.1)
+                    .map_err(|error| io_error(self.path, error))?;
+                post_rows += 1;
+            }
+            let dict_key = crate::segment::format::encode_script_dict_key(0, &script).to_vec();
+            let dict_value = crate::segment::format::encode_script_dict_value(script_id).to_vec();
+            dict.push(dict_key, dict_value)
+                .map_err(|error| io_error(self.path, error))?;
+            dict_rows += 1;
+            script_id = script_id.checked_add(1).ok_or_else(|| {
+                script_too_many(
+                    usize::try_from(self.distinct).unwrap_or(usize::MAX),
+                    self.chain_tx_count,
+                )
+            })?;
+        }
+        let dict_runs = dict.finish().map_err(|error| io_error(self.path, error))?;
+        let post_runs = post.finish().map_err(|error| io_error(self.path, error))?;
+        Ok((
+            crate::segment::import::StreamedFamily {
+                runs: dict_runs,
+                rows: dict_rows,
+            },
+            crate::segment::import::StreamedFamily {
+                runs: post_runs,
+                rows: post_rows,
+            },
+        ))
+    }
 }
 
 pub fn attach_compact_filter_artifact(
     writer: &dyn TxIndexWriter,
     target: &ManifestArtifactTarget,
     scratch: &Path,
+    budget: &SpillBudget,
 ) -> Result<u64, IndexBundleError> {
     const NAME: &str = "compact_filters.artifact";
     let path = &target.artifact_path;
@@ -351,12 +1392,13 @@ pub fn attach_compact_filter_artifact(
         Err(error) => return Err(fail(error)),
     }
     fs::create_dir_all(&work).map_err(fail)?;
-    let outcome = stage_verified(hashed, &header, target, &work).and_then(|(staged, digest)| {
-        if digest != target.sha256 {
-            return Err(IndexBundleError::ArtifactHash { name: NAME });
-        }
-        ingest_staged(writer, target, staged, &work)
-    });
+    let outcome =
+        stage_verified(hashed, &header, target, &work, budget).and_then(|(staged, digest)| {
+            if digest != target.sha256 {
+                return Err(IndexBundleError::ArtifactHash { name: NAME });
+            }
+            ingest_staged(writer, target, staged, &work)
+        });
     let _ = fs::remove_dir_all(&work);
     outcome
 }
@@ -365,7 +1407,7 @@ const COMPACT_FILTERS_WORK_DIR: &str = "compact-filters-attach";
 
 struct Staged {
     heights: PathBuf,
-    runs: Vec<Run>,
+    runs: Vec<crate::segment::spill::RunFile>,
 }
 
 fn stage_verified(
@@ -373,12 +1415,14 @@ fn stage_verified(
     header: &ArtifactHeader,
     target: &ManifestArtifactTarget,
     work: &Path,
+    budget: &SpillBudget,
 ) -> Result<(Staged, [u8; 32]), IndexBundleError> {
     const NAME: &str = "compact_filters.artifact";
     let path = &target.artifact_path;
     let heights_path = work.join("heights.bin");
     let mut heights = BufWriter::with_capacity(IO_BUFFER_BYTES, create_new_file(&heights_path)?);
-    let mut runs = RunWriter::new(work.to_path_buf());
+    let set = SpillSet::new(budget, work.to_path_buf());
+    let mut runs = set.sorter("compact-filter");
     let mut previous = [0_u8; 32];
     let mut last_block = [0_u8; 32];
     let mut payload_left = header.payload_bytes;
@@ -422,7 +1466,10 @@ fn stage_verified(
             filter,
         };
         encode_record(&mut heights, &row).map_err(|error| io_error(&heights_path, error))?;
-        runs.push(row)?;
+        let mut encoded = Vec::with_capacity(RECORD_FIXED_LEN + row.filter.len());
+        encode_record(&mut encoded, &row).map_err(|error| io_error(path, error))?;
+        runs.push(row.block_hash.to_vec(), encoded)
+            .map_err(|error| io_error(path, error))?;
     }
     let tail = u64::from(target.base_height) + 1;
     if payload_left != 0 {
@@ -455,10 +1502,11 @@ fn stage_verified(
     heights
         .into_inner()
         .map_err(|error| io_error(&heights_path, error.into_error()))?;
+    let runs = runs.finish().map_err(|error| io_error(path, error))?;
     Ok((
         Staged {
             heights: heights_path,
-            runs: runs.finish()?,
+            runs,
         },
         digest,
     ))
@@ -473,8 +1521,10 @@ fn ingest_staged(
     const NAME: &str = "compact_filters.artifact";
     let records = u64::from(target.base_height) + 1;
     let mut previous = None;
-    for row in Merge::new(staged.runs.clone())? {
-        let row = row?;
+    let merged = merge(&staged.runs).map_err(|error| io_error(work, error))?;
+    for record in merged {
+        let (key, value) = record.map_err(|error| io_error(work, error))?;
+        let row = decode_run_row(&key, &value)?;
         if previous == Some(row.block_hash) {
             return Err(IndexBundleError::ArtifactFraming {
                 name: NAME,
@@ -958,13 +2008,36 @@ impl ImportPlan<'_> {
             headers.push(header);
         }
         let header_refs: Vec<&[u8; crate::types::HEADER_ROW_SIZE]> = headers.iter().collect();
-        let mut records =
-            RecordReader::new(&mut hashed, &self.header, self.manifest.tx_lookup.floor);
-        let mut occurrences = Vec::new();
-        read_records(&mut records, self.host, self.path, |record| {
-            push_tx_occurrences(record, &header_refs, &mut occurrences)?;
-            Ok(ControlFlow::Continue(()))
-        })?;
+        let scratch = self.path.parent().unwrap_or(self.path);
+        let work = scratch.join(TX_LOOKUP_WORK_DIR);
+        match fs::remove_dir_all(&work) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(self.path, error)),
+        }
+        fs::create_dir_all(&work).map_err(|error| io_error(self.path, error))?;
+        let result = self.import_streamed(&header_refs, &work, hashed, base);
+        let _ = fs::remove_dir_all(&work);
+        result
+    }
+
+    fn import_streamed(
+        &self,
+        header_refs: &[&[u8; crate::types::HEADER_ROW_SIZE]],
+        work: &Path,
+        mut hashed: HashedFile,
+        base: IndexWatermark,
+    ) -> Result<usize, IndexBundleError> {
+        let name = BundleFamily::TxLookup.file_name();
+        let budget = SpillBudget::new(RESTORE_SPILL_BUDGET_BYTES);
+        let set = SpillSet::new(&budget, work.to_path_buf());
+        let stream = TxLookupStream {
+            floor: self.manifest.tx_lookup.floor,
+            path: self.path,
+            headers: header_refs,
+            set,
+        };
+        let decoded = stream.decode(&mut hashed, &self.header, self.host.cancelled)?;
         if into_digest(hashed) != self.manifest.tx_lookup.sha256 {
             return Err(IndexBundleError::ArtifactHash { name });
         }
@@ -983,25 +2056,27 @@ impl ImportPlan<'_> {
                 "the bundle base is not on the receiver's active chain".to_owned(),
             ));
         }
-
-        let scratch = self.path.parent().unwrap_or(self.path);
-        let ordinal_base =
-            tx_ordinal_base(self.manifest.identity.chain_tx_count, occurrences.len())?;
-        let coverage =
-            crate::segment::Coverage::new(self.manifest.tx_lookup.floor, base.height, base.hash);
-        let segment =
-            crate::segment::import::tx_lookup_segment(occurrences, coverage, ordinal_base)
-                .map_err(IndexBundleError::Index)?;
+        let (family, count, ordinal_base) =
+            stream.order(decoded, self.manifest.identity.chain_tx_count)?;
+        let seal = crate::segment::import::tx_lookup_seal(
+            self.manifest.tx_lookup.floor,
+            base.height,
+            base.hash,
+            count,
+            ordinal_base,
+        )
+        .map_err(IndexBundleError::Index)?;
         let attachment = crate::writer::TxLookupAttachment {
-            headers: &header_refs,
+            headers: header_refs,
             base,
             floor: self.manifest.tx_lookup.floor,
-            scratch,
+            scratch: self.path.parent().unwrap_or(self.path),
         };
         let imported = self
             .host
             .writer
-            .attach_tx_lookup_segment(&segment, &attachment);
+            .attach_streamed_tx_lookup(&family, &seal, &attachment)
+            .map_err(IndexBundleError::Index);
         let count = match imported {
             Ok(count) => return Ok(usize::try_from(count).unwrap_or(usize::MAX)),
             Err(error) => error,
@@ -1016,11 +2091,7 @@ impl ImportPlan<'_> {
                 .writer
                 .reset_capabilities(IndexCapabilities::TX_LOOKUP)
         };
-        Err(discard_partial_rows(
-            IndexBundleError::Index(count),
-            watermarks,
-            reset,
-        ))
+        Err(discard_partial_rows(count, watermarks, reset))
     }
 }
 

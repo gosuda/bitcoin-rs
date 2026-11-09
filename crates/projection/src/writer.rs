@@ -6,6 +6,7 @@ use crate::{
     ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexWatermark, IndexWatermarks,
     IndexWriteFence, IndexWriter, PreparedBatch, PreparedBlock, SpentCoins,
 };
+use bitcoin_rs_storage::ColumnFamily;
 
 pub struct TxLookupAttachment<'a> {
     pub headers: &'a [&'a [u8; crate::types::HEADER_ROW_SIZE]],
@@ -62,6 +63,18 @@ pub trait TxIndexWriter: Send + Sync {
     fn attach_script_history_segment(
         &self,
         segment: &crate::segment::import::ImportedSegment,
+        attachment: &ScriptHistoryAttachment<'_>,
+    ) -> Result<u64, IndexError>;
+    fn attach_streamed_tx_lookup(
+        &self,
+        tx_dir: &crate::segment::import::StreamedFamily,
+        seal: &crate::segment::import::StreamedSeal,
+        attachment: &TxLookupAttachment<'_>,
+    ) -> Result<u64, IndexError>;
+    fn attach_streamed_script_history(
+        &self,
+        families: &[(ColumnFamily, crate::segment::import::StreamedFamily)],
+        seal: &crate::segment::import::StreamedSeal,
         attachment: &ScriptHistoryAttachment<'_>,
     ) -> Result<u64, IndexError>;
     fn clear_unpublished_segments(&self) -> Result<(), IndexError>;
@@ -171,6 +184,26 @@ where
     ) -> Result<u64, IndexError> {
         self.write()
             .attach_script_history_segment(segment, attachment)
+    }
+
+    fn attach_streamed_tx_lookup(
+        &self,
+        tx_dir: &crate::segment::import::StreamedFamily,
+        seal: &crate::segment::import::StreamedSeal,
+        attachment: &TxLookupAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        self.write()
+            .attach_streamed_tx_lookup(tx_dir, seal, attachment)
+    }
+
+    fn attach_streamed_script_history(
+        &self,
+        families: &[(ColumnFamily, crate::segment::import::StreamedFamily)],
+        seal: &crate::segment::import::StreamedSeal,
+        attachment: &ScriptHistoryAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        self.write()
+            .attach_streamed_script_history(families, seal, attachment)
     }
 
     fn attach_compact_filter_segment(

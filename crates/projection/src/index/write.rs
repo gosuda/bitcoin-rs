@@ -341,6 +341,101 @@ impl<S: KvStore> IndexWriter<S> {
         Ok(attachment.records)
     }
 
+    pub fn attach_streamed_tx_lookup(
+        &self,
+        tx_dir: &crate::segment::import::StreamedFamily,
+        seal: &crate::segment::import::StreamedSeal,
+        attachment: &crate::writer::TxLookupAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        let existing = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        refuse_tx_lookup_populated(&existing)?;
+        self.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
+        let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        refuse_tx_lookup_populated(&fence)?;
+        let store = self.indexer.store.as_ref();
+        let gen_id = crate::segment::import::next_segment_id(store)?;
+        crate::segment::import::clear_unpublished_segment_rows(store)?;
+        crate::segment::import::stage_streamed(
+            store,
+            gen_id,
+            ColumnFamily::TxDir,
+            tx_dir,
+            attachment.scratch,
+        )?;
+        let mut batch = self.indexer.store.new_batch();
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            FORMAT_VERSION_KEY,
+            &FORMAT_VERSION_VALUE,
+        );
+        for header in attachment.headers {
+            if store.get(ColumnFamily::BlockHeaders, *header)?.is_none() {
+                batch.put(ColumnFamily::BlockHeaders, *header, &[]);
+            }
+        }
+        put_selected_watermarks(
+            &mut batch,
+            IndexCapabilities::TX_LOOKUP,
+            Some(attachment.base),
+        );
+        crate::index::capability::put_selected_floors(
+            &mut batch,
+            IndexCapabilities::TX_LOOKUP,
+            attachment.floor,
+        );
+        crate::segment::import::put_streamed_segment(
+            &mut batch,
+            gen_id,
+            seal,
+            IndexCapabilities::TX_LOOKUP,
+        );
+        commit_ordinary(store, self.generation, &fence, batch)?;
+        Ok(seal.records)
+    }
+
+    pub fn attach_streamed_script_history(
+        &self,
+        families: &[(ColumnFamily, crate::segment::import::StreamedFamily)],
+        seal: &crate::segment::import::StreamedSeal,
+        attachment: &crate::writer::ScriptHistoryAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        let existing = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        refuse_script_history_populated(self.indexer.store.as_ref(), &existing)?;
+        self.reset_capabilities(IndexCapabilities::SCRIPT_HISTORY)?;
+        let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        refuse_script_history_populated(self.indexer.store.as_ref(), &fence)?;
+        let store = self.indexer.store.as_ref();
+        let gen_id = crate::segment::import::next_segment_id(store)?;
+        crate::segment::import::clear_unpublished_segment_rows(store)?;
+        for (cf, family) in families {
+            crate::segment::import::stage_streamed(store, gen_id, *cf, family, attachment.scratch)?;
+        }
+        let mut batch = self.indexer.store.new_batch();
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            FORMAT_VERSION_KEY,
+            &FORMAT_VERSION_VALUE,
+        );
+        put_selected_watermarks(
+            &mut batch,
+            IndexCapabilities::SCRIPT_HISTORY,
+            Some(attachment.base),
+        );
+        crate::index::capability::put_selected_floors(
+            &mut batch,
+            IndexCapabilities::SCRIPT_HISTORY,
+            attachment.floor,
+        );
+        crate::segment::import::put_streamed_segment(
+            &mut batch,
+            gen_id,
+            seal,
+            IndexCapabilities::SCRIPT_HISTORY,
+        );
+        commit_ordinary(store, self.generation, &fence, batch)?;
+        Ok(seal.records)
+    }
+
     pub fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
         if capabilities.is_empty() {
             return Err(IndexError::InvalidResetMarker);

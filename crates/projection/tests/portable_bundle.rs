@@ -25,7 +25,8 @@ use bitcoin_rs_execution::chain::{
     BlockTree, BlockTreeReader, ChainTxCount, LatchWriter, NodeStatus, TipReader, TipSnapshot,
 };
 use bitcoin_rs_projection::portable::{
-    IndexBundleDirective, IndexBundleRequest, ManifestArtifactTarget, attach_tx_lookup_artifact,
+    IndexBundleDirective, IndexBundleRequest, ManifestArtifactTarget, SpillBudget,
+    attach_tx_lookup_artifact,
 };
 use bitcoin_rs_projection::reconcile::{ChainCursorSource, ConsumerCursor};
 use bitcoin_rs_projection::runtime::{
@@ -1157,6 +1158,7 @@ fn manifest_artifact_attach_verifies_digest_header_and_base_before_ingest() {
         ),
         &header_refs,
         &attach,
+        &SpillBudget::new(u64::MAX),
     )
     .expect("a verified manifest artifact attaches");
     assert!(records > 0, "the attached artifact produced no rows");
@@ -1183,6 +1185,7 @@ fn manifest_artifact_attach_verifies_digest_header_and_base_before_ingest() {
         ),
         &header_refs,
         &poisoned,
+        &SpillBudget::new(u64::MAX),
     )
     .expect_err("a manifest artifact with a forged digest must be refused");
     assert!(
@@ -1208,6 +1211,7 @@ fn manifest_artifact_attach_verifies_digest_header_and_base_before_ingest() {
         ),
         &header_refs,
         &poisoned,
+        &SpillBudget::new(u64::MAX),
     )
     .expect_err("a manifest artifact from another base must be refused");
     assert!(
@@ -1221,6 +1225,60 @@ fn manifest_artifact_attach_verifies_digest_header_and_base_before_ingest() {
     drop(good);
     drop(receiver);
     assert_untouched_fresh(&root.path().join("receiver-bad"));
+}
+// SNP-05
+#[test]
+fn small_budget_tx_lookup_restore_matches_backfill() {
+    let fixture = ChainFixture::new(6, 40);
+    let root = tempfile::tempdir().expect("tempdir");
+    let (source, bundle) = (root.path().join("source"), root.path().join("bundle"));
+    backfilled_source(&fixture, &source);
+    exported_bundle(&fixture, &source, &bundle);
+    let base = fixture.tip_watermark();
+    let exported = bundle.join(ARTIFACT);
+    let size = fs::metadata(&exported)
+        .expect("exported artifact metadata")
+        .len();
+    let decoded = size.saturating_sub(73);
+    let headers = chain_headers(&fixture, base.height, base.hash);
+    let header_refs: Vec<&[u8; 80]> = headers.iter().collect();
+
+    let attach = root.path().join("attach");
+    fs::create_dir_all(&attach).expect("attach dir");
+    fs::copy(&exported, attach.join(ARTIFACT)).expect("stage manifest artifact");
+    let budget = SpillBudget::new(1024);
+    let receiver = open_receiver(root.path(), "receiver-bounded");
+    let records = attach_tx_lookup_artifact(
+        receiver.writer(),
+        &manifest_target(
+            &attach.join(ARTIFACT),
+            base,
+            digest_of(&attach.join(ARTIFACT)),
+            size,
+            fixture.txs_through(base.height),
+        ),
+        &header_refs,
+        &attach,
+        &budget,
+    )
+    .expect("a bounded re-encode attaches");
+    assert!(records > 0, "the attached artifact produced no rows");
+    assert!(
+        decoded > budget.peak_bytes(),
+        "the artifact must exceed the budget to prove streaming: {decoded} <= {}",
+        budget.peak_bytes()
+    );
+    assert!(
+        budget.peak_bytes() <= 1024,
+        "the re-encode buffered {} bytes above the 1024-byte budget",
+        budget.peak_bytes()
+    );
+    drop(receiver);
+    assert_eq!(
+        durable(&root.path().join("receiver-bounded")),
+        durable(&source),
+        "the bounded restore serves the backfilled rows"
+    );
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use super::{Cut, write_records};
 use crate::portable::artifact::{ARTIFACT_VERSION, ArtifactHeader};
 use crate::portable::manifest::BundleFamily;
-use crate::portable::{IndexBundleError, ManifestArtifactTarget};
+use crate::portable::{IndexBundleError, ManifestArtifactTarget, SpillBudget};
 use crate::segment::bulk_builder::BulkSegmentBuilder;
 use crate::segment::format::{TX_KIND_TXID, tx_dir_kind_prefix};
 use crate::segment::import::{ImportedSegment, put_segment};
@@ -364,6 +364,7 @@ fn artifact_of_the_previous_version_is_refused_with_a_typed_error() -> TestResul
         &target,
         &[],
         scratch.path(),
+        &SpillBudget::new(u64::MAX),
     );
     assert!(
         matches!(
@@ -473,6 +474,231 @@ fn a_height_without_a_verified_header_refuses_the_import() -> TestResult {
             Err(ScriptHistoryImportError::MissingHeader { height }) if height == BLOCKS
         ),
         "a height without a verified header refuses the import"
+    );
+    Ok(())
+}
+// SNP-05
+#[test]
+fn small_budget_restore_matches_the_live_export() -> TestResult {
+    let blocks = synthetic_blocks(BLOCKS);
+    let base = base_of(&blocks);
+    let (_live_dir, live) = live_store(&blocks)?;
+    let snapshot = SegmentSnapshot::open(live.snapshot()?)?;
+    let mut body = Vec::new();
+    let totals = write_records(
+        &snapshot,
+        Cut {
+            base,
+            floor: 0,
+            path: Path::new("export"),
+        },
+        &mut body,
+    )?;
+    let header = ArtifactHeader {
+        family: BundleFamily::ScriptHistory,
+        artifact_version: ARTIFACT_VERSION,
+        index_format: index_format_version(),
+        network_magic: Network::Regtest.magic(),
+        base_height: base.height,
+        base_hash: base.hash,
+        records: totals.records,
+        payload_bytes: totals.payload_bytes,
+    };
+    let mut bytes = header.encode().to_vec();
+    bytes.extend_from_slice(&body);
+    let sha256: [u8; 32] = Sha256::digest(&bytes).into();
+    let dir = tempdir()?;
+    let artifact_path = dir.path().join("bounded.dat");
+    std::fs::write(&artifact_path, &bytes)?;
+    let budget = SpillBudget::new(8192);
+    assert!(
+        u64::try_from(bytes.len())? > budget.peak_bytes().max(8192),
+        "the artifact must exceed the budget to prove streaming"
+    );
+    let target = ManifestArtifactTarget {
+        artifact_path,
+        base_height: base.height,
+        base_hash: base.hash,
+        floor: 0,
+        network: Network::Regtest,
+        index_format: index_format_version(),
+        sha256,
+        size_bytes: u64::try_from(bytes.len())?,
+        chain_tx_count: TX_COUNT,
+    };
+    let receiver_dir = tempdir()?;
+    let scratch = tempdir()?;
+    let receiver_store = Arc::new(RocksDbStore::open(receiver_dir.path())?);
+    let receiver = RwLock::new(IndexWriter::open(Arc::clone(&receiver_store), 1)?);
+    let attached = crate::portable::restore::attach_script_history_artifact(
+        &receiver,
+        &target,
+        &block_hashes(&blocks),
+        scratch.path(),
+        &budget,
+    )?;
+    assert_eq!(attached, totals.records);
+    assert!(
+        budget.peak_bytes() <= 8192,
+        "the re-encode buffered {} bytes above the 8192-byte budget",
+        budget.peak_bytes()
+    );
+    let receiver_export = export(&*receiver_store, base)?;
+    assert_eq!(
+        receiver_export,
+        export(&live, base)?,
+        "the bounded restore exports the live pages"
+    );
+    let family_rows = |store: &RocksDbStore, cf: ColumnFamily| {
+        let rows = store
+            .iter_prefix(cf, &[])?
+            .collect::<Result<Vec<(Vec<u8>, Vec<u8>)>, _>>()?;
+        let mut stripped: Vec<(Vec<u8>, Vec<u8>)> = rows
+            .into_iter()
+            .map(|(key, value)| (key[8..].to_vec(), value))
+            .collect();
+        stripped.sort_unstable();
+        Ok::<_, Box<dyn Error>>(stripped)
+    };
+    assert_eq!(
+        family_rows(&receiver_store, ColumnFamily::TxDir)?,
+        family_rows(&live, ColumnFamily::TxDir)?,
+        "the bounded restore serves the live directory rows"
+    );
+    Ok(())
+}
+// SNP-05
+#[test]
+fn one_spender_of_two_outpoints_names_one_transaction() -> TestResult {
+    let script_a = Bytes::copy_from_slice(b"\x76\xa9\x14double_spend_script_a\x88\xac");
+    let script_b = Bytes::copy_from_slice(b"\x76\xa9\x14double_spend_script_b\x88\xac");
+    let script_c = Bytes::copy_from_slice(b"\x76\xa9\x14double_spend_script_c\x88\xac");
+    let funding = CommittedBlock {
+        height: 1,
+        hash: [0x11_u8; 32],
+        parent_hash: [0_u8; 32],
+        header: [0_u8; 80],
+        txs: vec![TxFacts {
+            txid: [0xA1_u8; 32],
+            offset: 0,
+            len: 100,
+            inputs: Vec::new(),
+            outputs: vec![
+                CreatedOutput {
+                    vout: 0,
+                    value: 50_000,
+                    script: script_a.clone(),
+                },
+                CreatedOutput {
+                    vout: 1,
+                    value: 25_000,
+                    script: script_b.clone(),
+                },
+            ],
+        }],
+    };
+    let spending = CommittedBlock {
+        height: 2,
+        hash: [0x22_u8; 32],
+        parent_hash: [0x11_u8; 32],
+        header: [0_u8; 80],
+        txs: vec![TxFacts {
+            txid: [0xB1_u8; 32],
+            offset: 0,
+            len: 120,
+            inputs: vec![
+                SpentPrevout {
+                    txid: [0xA1_u8; 32],
+                    vout: 0,
+                    value: 50_000,
+                    script: script_a,
+                    height: 1,
+                    coinbase: false,
+                },
+                SpentPrevout {
+                    txid: [0xA1_u8; 32],
+                    vout: 1,
+                    value: 25_000,
+                    script: script_b,
+                    height: 1,
+                    coinbase: false,
+                },
+            ],
+            outputs: vec![CreatedOutput {
+                vout: 0,
+                value: 74_000,
+                script: script_c,
+            }],
+        }],
+    };
+    let blocks = vec![funding, spending];
+    let base = base_of(&blocks);
+    let (_live_dir, live) = live_store(&blocks)?;
+    let snapshot = SegmentSnapshot::open(live.snapshot()?)?;
+    let mut body = Vec::new();
+    let totals = write_records(
+        &snapshot,
+        Cut {
+            base,
+            floor: 0,
+            path: Path::new("export"),
+        },
+        &mut body,
+    )?;
+    let header = ArtifactHeader {
+        family: BundleFamily::ScriptHistory,
+        artifact_version: ARTIFACT_VERSION,
+        index_format: index_format_version(),
+        network_magic: Network::Regtest.magic(),
+        base_height: base.height,
+        base_hash: base.hash,
+        records: totals.records,
+        payload_bytes: totals.payload_bytes,
+    };
+    let mut bytes = header.encode().to_vec();
+    bytes.extend_from_slice(&body);
+    let dir = tempdir()?;
+    let artifact_path = dir.path().join("double-spend.dat");
+    std::fs::write(&artifact_path, &bytes)?;
+    let target = ManifestArtifactTarget {
+        artifact_path,
+        base_height: base.height,
+        base_hash: base.hash,
+        floor: 0,
+        network: Network::Regtest,
+        index_format: index_format_version(),
+        sha256: Sha256::digest(&bytes).into(),
+        size_bytes: u64::try_from(bytes.len())?,
+        chain_tx_count: 2,
+    };
+    let receiver_dir = tempdir()?;
+    let scratch = tempdir()?;
+    let receiver_store = Arc::new(RocksDbStore::open(receiver_dir.path())?);
+    let receiver = RwLock::new(IndexWriter::open(Arc::clone(&receiver_store), 1)?);
+    let budget = SpillBudget::new(u64::MAX);
+    let attached = crate::portable::restore::attach_script_history_artifact(
+        &receiver,
+        &target,
+        &block_hashes(&blocks),
+        scratch.path(),
+        &budget,
+    )?;
+    assert_eq!(attached, totals.records);
+    let family_rows = |store: &RocksDbStore, cf: ColumnFamily| {
+        let rows = store
+            .iter_prefix(cf, &[])?
+            .collect::<Result<Vec<(Vec<u8>, Vec<u8>)>, _>>()?;
+        let mut stripped: Vec<(Vec<u8>, Vec<u8>)> = rows
+            .into_iter()
+            .map(|(key, value)| (key[8..].to_vec(), value))
+            .collect();
+        stripped.sort_unstable();
+        Ok::<_, Box<dyn Error>>(stripped)
+    };
+    assert_eq!(
+        family_rows(&receiver_store, ColumnFamily::TxDir)?,
+        family_rows(&live, ColumnFamily::TxDir)?,
+        "one spender of two outpoints restores the live ordinals"
     );
     Ok(())
 }
