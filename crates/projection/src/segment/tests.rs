@@ -313,24 +313,17 @@ fn restore_orphan_cleanup_deletes_only_the_pending_segment() {
     );
 }
 
+// PRJ-12
 #[test]
 fn core_filter_vectors_read_back_through_the_segment_snapshot()
--> Result<(), Box<dyn std::error::Error>> {
-    use crate::segment::SegmentSnapshot;
-    use crate::segment::tail::{
-        TailBounds, TailWriterState, append_tail_block, put_generation_descriptors,
-    };
-    use crate::{IndexCapability, TxIndexSnapshot};
+-> Result<(), crate::portable::TestError> {
+    use bitcoin::bip158::FilterHeader;
     use bitcoin::{consensus::deserialize, hashes::Hash as _, hex::FromHex as _};
-    use bitcoin_rs_storage::committed_facts::{
-        CommittedBlock, CreatedOutput, SpentPrevout, TxFacts,
-    };
-    use bitcoin_rs_storage::{Bytes, KvStore, RocksDbStore};
 
     let vectors: Vec<sonic_rs::Value> =
         sonic_rs::from_str(include_str!("../../tests/data/blockfilters-core-31.1.json"))?;
     for vector in vectors.into_iter().skip(1) {
-        let (height, _hash, body, prevouts, _previous, expected_filter, _header, note): (
+        let (height, _hash, body, prevouts, previous, expected_filter, expected_header, note): (
             u32,
             String,
             String,
@@ -340,10 +333,8 @@ fn core_filter_vectors_read_back_through_the_segment_snapshot()
             String,
             String,
         ) = sonic_rs::from_value(&vector)?;
-        let bytes = Vec::from_hex(&body)?;
-        let block: bitcoin::Block = deserialize(&bytes)?;
-        let hash = block.block_hash().to_byte_array();
-        let mut scripts = hashbrown::HashMap::<([u8; 32], u32), Vec<u8>>::new();
+        let block: bitcoin::Block = deserialize(&Vec::from_hex(&body)?)?;
+        let mut external = hashbrown::HashMap::new();
         for (input, script) in block
             .txdata
             .iter()
@@ -351,95 +342,20 @@ fn core_filter_vectors_read_back_through_the_segment_snapshot()
             .flat_map(|tx| &tx.input)
             .zip(prevouts)
         {
-            scripts.insert(
+            external.insert(
                 (
                     input.previous_output.txid.to_byte_array(),
                     input.previous_output.vout,
                 ),
-                Vec::from_hex(&script)?,
+                bitcoin_rs_storage::Bytes::copy_from_slice(&Vec::from_hex(&script)?),
             );
         }
-        let mut created = hashbrown::HashMap::<([u8; 32], u32), Bytes>::new();
-        let mut txs = Vec::with_capacity(block.txdata.len());
-        for (index, tx) in block.txdata.iter().enumerate() {
-            let txid = tx.compute_txid().to_byte_array();
-            let mut inputs = Vec::new();
-            if index > 0 {
-                for input in &tx.input {
-                    let prev_txid = input.previous_output.txid.to_byte_array();
-                    let prev_vout = input.previous_output.vout;
-                    let script = created
-                        .get(&(prev_txid, prev_vout))
-                        .cloned()
-                        .or_else(|| {
-                            scripts
-                                .get(&(prev_txid, prev_vout))
-                                .map(|s| Bytes::copy_from_slice(s))
-                        })
-                        .ok_or("prevout script missing from the vector")?;
-                    inputs.push(SpentPrevout {
-                        txid: prev_txid,
-                        vout: prev_vout,
-                        value: 0,
-                        script,
-                        height: 0,
-                        coinbase: false,
-                    });
-                }
-            }
-            let mut outputs = Vec::with_capacity(tx.output.len());
-            for (vout, out) in tx.output.iter().enumerate() {
-                let vout = u32::try_from(vout)?;
-                let script = Bytes::copy_from_slice(out.script_pubkey.as_bytes());
-                created.insert((txid, vout), script.clone());
-                outputs.push(CreatedOutput {
-                    vout,
-                    value: out.value.to_sat(),
-                    script,
-                });
-            }
-            txs.push(TxFacts {
-                txid,
-                offset: 0,
-                len: 0,
-                inputs,
-                outputs,
-            });
-        }
-
-        let dir = tempfile::tempdir()?;
-        let store = RocksDbStore::open(dir.path())?;
-        let block_facts = CommittedBlock {
-            height,
-            hash,
-            parent_hash: [0; 32],
-            header: [0; 80],
-            txs,
-        };
-        let mut state = TailWriterState::new();
-        let mut batch = store.new_batch();
-        append_tail_block(
-            &mut batch,
-            &block_facts,
-            &mut state,
-            &crate::segment::tail::NoSealedTxOrdinals,
-        )?;
-        put_generation_descriptors(
-            &mut batch,
-            [IndexCapability::CompactFilters],
-            TailBounds {
-                newest: None,
-                first_height: Some(height),
-                at: Some((height, hash)),
-            },
-        );
-        store.write_durable(batch)?;
-
-        let snapshot = SegmentSnapshot::open(store.snapshot()?)?;
-        let filter = snapshot
-            .compact_filter(height, &hash)?
-            .ok_or("the segment holds no filter for a covered height")?;
+        let facts = committed_facts(&block, height, &external)?;
+        let previous: FilterHeader = previous.parse()?;
+        let filter = append_and_read(&facts, previous.to_byte_array())?;
         assert_eq!(filter.filter, Vec::from_hex(&expected_filter)?, "{note}");
+        let expected: FilterHeader = expected_header.parse()?;
+        assert_eq!(filter.header, expected.to_byte_array(), "{note}");
     }
     Ok(())
 }
@@ -516,6 +432,7 @@ fn committed_facts(
 
 fn append_and_read(
     block: &bitcoin_rs_storage::CommittedBlock,
+    previous_header: [u8; 32],
 ) -> Result<crate::BasicFilter, crate::portable::TestError> {
     use crate::segment::SegmentSnapshot;
     use crate::segment::tail::{
@@ -528,6 +445,7 @@ fn append_and_read(
     let dir = tempfile::tempdir()?;
     let store = RocksDbStore::open(dir.path())?;
     let mut state = TailWriterState::new();
+    state.prev_filter_header = previous_header;
     let mut batch = store.new_batch();
     append_tail_block(&mut batch, block, &mut state, &NoSealedTxOrdinals)?;
     put_generation_descriptors(
@@ -556,7 +474,7 @@ fn oversized_scripts_stay_in_basic_filters() -> Result<(), crate::portable::Test
     block.txdata[0].output[0].script_pubkey =
         ScriptBuf::from_bytes(vec![0x51_u8; crate::MAX_LIVE_SCRIPT_SIZE + 1]);
     let facts = committed_facts(&block, 0, &hashbrown::HashMap::new())?;
-    let filter = append_and_read(&facts)?;
+    let filter = append_and_read(&facts, [0; 32])?;
     let oracle = bitcoin::bip158::BlockFilter::new_script_filter(&block, |outpoint| {
         Err::<ScriptBuf, _>(bitcoin::bip158::Error::UtxoMissing(*outpoint))
     })?;
@@ -589,7 +507,7 @@ fn same_block_spends_resolve_locally_and_empty_filters_encode_zero()
         },
     ];
     let empty = committed_facts(&block, 0, &hashbrown::HashMap::new())?;
-    assert_eq!(append_and_read(&empty)?.filter, [0]);
+    assert_eq!(append_and_read(&empty, [0; 32])?.filter, [0]);
 
     block.txdata[0].output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51]);
     let parent = block.txdata[0].compute_txid();
@@ -602,7 +520,7 @@ fn same_block_spends_resolve_locally_and_empty_filters_encode_zero()
     block.txdata.push(child);
     let mut same_block = committed_facts(&block, 1, &hashbrown::HashMap::new())?;
     same_block.txs[1].inputs[0].script = bitcoin_rs_storage::Bytes::new();
-    let filter = append_and_read(&same_block)?;
+    let filter = append_and_read(&same_block, [0; 32])?;
     let oracle = bitcoin::bip158::BlockFilter::new_script_filter(&block, |outpoint| {
         if *outpoint
             == (OutPoint {
