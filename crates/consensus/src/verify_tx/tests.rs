@@ -715,8 +715,8 @@ fn block_script_checks_borrow_the_image_without_a_second_object_graph() -> Resul
     use crate::block_view::{BlockFacts, BlockView};
     use crate::kernel::BlockScriptSource;
     use crate::primitives::block::{
-        BlockImage, block_image_materialize_call_count, reset_block_image_materialize_call_count,
-        reset_transaction_view_materialize_call_count, transaction_view_materialize_call_count,
+        BlockImage, block_image_materialize_call_count, transaction_view_materialize_call_count,
+        unwatch_materializations, watch_materializations,
     };
 
     let witness_script = vec![crate::script::opcode::OP_PUSHNUM_1];
@@ -759,8 +759,7 @@ fn block_script_checks_borrow_the_image_without_a_second_object_graph() -> Resul
     assert_eq!(view.facts().txids(), &expected_txids[..]);
     view.set_resolved(vec![Vec::new(), vec![Some(prevout)]]);
 
-    reset_block_image_materialize_call_count();
-    reset_transaction_view_materialize_call_count();
+    watch_materializations(&image);
     let checks = super::prepare_block_script_checks(
         &mut view,
         0,
@@ -773,14 +772,15 @@ fn block_script_checks_borrow_the_image_without_a_second_object_graph() -> Resul
         super::verify_prepared_units(core::slice::from_ref(&checks)).is_ok(),
         "the fixture spend must verify through views over the image"
     );
+    let image_copies = block_image_materialize_call_count(&image);
+    let view_copies = transaction_view_materialize_call_count(&image);
+    unwatch_materializations(&image);
     assert_eq!(
-        block_image_materialize_call_count(),
-        0,
+        image_copies, 0,
         "validation must not build a second owned transaction object graph"
     );
     assert_eq!(
-        transaction_view_materialize_call_count(),
-        0,
+        view_copies, 0,
         "validation must read through transaction views over the image"
     );
     Ok(())
