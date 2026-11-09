@@ -441,3 +441,69 @@ fn committed_outputs(
     }
     outputs
 }
+
+#[cfg(test)]
+mod tests {
+    use super::pending_rows_for_facts;
+    use crate::index::capability::IndexCapabilities;
+    use bitcoin_rs_storage::Bytes;
+    use bitcoin_rs_storage::CommittedBlock;
+    use bitcoin_rs_storage::committed_facts::{CreatedOutput, SpentPrevout, TxFacts};
+
+    fn block_with_spend() -> CommittedBlock {
+        CommittedBlock {
+            height: 1,
+            hash: [3; 32],
+            parent_hash: [4; 32],
+            header: [5; 80],
+            txs: vec![TxFacts {
+                txid: [6; 32],
+                offset: 0,
+                len: 0,
+                inputs: vec![SpentPrevout {
+                    txid: [7; 32],
+                    vout: 0,
+                    value: 5,
+                    script: Bytes::from_static(&[0x51]),
+                    height: 0,
+                    coinbase: false,
+                }],
+                outputs: vec![CreatedOutput {
+                    vout: 0,
+                    value: 4,
+                    script: Bytes::from_static(&[0x51]),
+                }],
+            }],
+        }
+    }
+
+    // PRJ-03
+    #[test]
+    fn disabled_projections_allocate_no_live_row_buffers() -> Result<(), crate::portable::TestError>
+    {
+        let rows = pending_rows_for_facts(&block_with_spend(), IndexCapabilities::NONE)?;
+        assert_eq!(
+            rows.header_rows.len(),
+            1,
+            "the header family is always on and keeps its row"
+        );
+        assert_eq!(
+            rows.live_ops.capacity(),
+            0,
+            "a disabled ScriptLive projection must not allocate its row buffer"
+        );
+        assert!(rows.live_ops.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn enabled_script_live_turns_the_spend_into_a_live_op() -> Result<(), crate::portable::TestError>
+    {
+        let rows = pending_rows_for_facts(&block_with_spend(), IndexCapabilities::SCRIPT_LIVE)?;
+        assert!(
+            !rows.live_ops.is_empty(),
+            "the spend must produce a live delete when ScriptLive is enabled"
+        );
+        Ok(())
+    }
+}
