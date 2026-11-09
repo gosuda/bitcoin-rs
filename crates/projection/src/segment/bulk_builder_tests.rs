@@ -499,3 +499,34 @@ fn header_cut_run_fails_finish() -> Result<(), StreamError> {
     }
     Ok(())
 }
+
+// PRJ-09
+#[test]
+fn bounded_fan_in_matches_sorted_reference() -> Result<(), StreamError> {
+    reset_cursor_peak();
+    const ROWS: u64 = 24;
+    let scratch = tempfile::tempdir()?;
+    let mut sorter = SpillSorter::new(
+        Arc::new(PoolBudget::new(0)),
+        BudgetOwner::IndexBuilder,
+        scratch.path().to_path_buf(),
+        0xA022,
+        "fanin",
+    );
+    let mut pushed: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for order in 0..ROWS {
+        let key = ((order * 7) % ROWS).to_be_bytes().to_vec();
+        let value = (((order * 7) % ROWS) ^ 0x9e37).to_be_bytes().to_vec();
+        sorter.push_row(key.clone(), value.clone())?;
+        pushed.push((key, value));
+    }
+    let merged = sorter.collect_rows()?;
+    let mut expected = pushed;
+    expected.sort();
+    assert_eq!(merged, expected);
+    assert!(
+        cursor_peak() <= 16,
+        "merge held more open runs than the fan-in bound"
+    );
+    Ok(())
+}

@@ -9,7 +9,8 @@
 //! durability: a crash invalidates the whole build, and a fresh builder
 //! sweeps stale run files before its first spill.
 
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,6 +61,7 @@ pub struct GenerationRows {
 }
 
 pub(super) type SegmentRows = Vec<(Vec<u8>, Vec<u8>)>;
+type MergeHeapEntry = (Vec<u8>, Vec<u8>, usize);
 type MergedRow = (Vec<u8>, Vec<u8>);
 
 pub struct BulkSegmentBuilder {
@@ -184,6 +186,7 @@ static LIVE_BUILDER_SERIALS: LazyLock<Mutex<HashSet<u64>>> =
 
 const RUN_FILE_PREFIX: &str = "segbuild-";
 const ROW_CHARGE_OVERHEAD: u64 = 64;
+const MAX_MERGE_FAN_IN: usize = 16;
 
 fn serial_of_run_file(name: &str) -> Option<u64> {
     let rest = name.strip_prefix(RUN_FILE_PREFIX)?;
@@ -822,7 +825,27 @@ impl SpillSorter {
             self.spill()?;
             self.buffer
                 .sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            self.consolidate()?;
             self.finalized = true;
+        }
+        Ok(())
+    }
+
+    fn consolidate(&mut self) -> Result<(), BulkBuilderError> {
+        while self.runs.len() > MAX_MERGE_FAN_IN {
+            let count = self.runs.len().min(MAX_MERGE_FAN_IN);
+            let path = self
+                .scratch_dir
+                .join(format!("{}{:06}", self.file_prefix, self.next_run_id));
+            self.next_run_id = self.next_run_id.saturating_add(1);
+            if let Err(error) = merge_run_prefix(&self.runs[..count], &path) {
+                let _unused = std::fs::remove_file(&path);
+                return Err(error);
+            }
+            for input in self.runs.drain(..count) {
+                let _unused = std::fs::remove_file(input);
+            }
+            self.runs.push(path);
         }
         Ok(())
     }
@@ -867,6 +890,51 @@ impl Drop for SpillSorter {
     }
 }
 
+fn merge_run_prefix(inputs: &[PathBuf], out: &Path) -> Result<(), BulkBuilderError> {
+    let mut cursors = inputs
+        .iter()
+        .map(|path| RunCursor::open(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut heap: BinaryHeap<Reverse<MergeHeapEntry>> = BinaryHeap::with_capacity(cursors.len());
+    for (index, cursor) in cursors.iter_mut().enumerate() {
+        if let Some((key, value)) = cursor.current.take() {
+            heap.push(Reverse((key, value, index)));
+        }
+    }
+    let file = std::fs::File::create(out)?;
+    let mut writer = BufWriter::new(file);
+    while let Some(Reverse((key, value, index))) = heap.pop() {
+        let key_len = u32::try_from(key.len()).map_err(|_| BulkBuilderError::RowTooLarge)?;
+        let value_len = u32::try_from(value.len()).map_err(|_| BulkBuilderError::RowTooLarge)?;
+        writer.write_all(&key_len.to_le_bytes())?;
+        writer.write_all(&value_len.to_le_bytes())?;
+        writer.write_all(&key)?;
+        writer.write_all(&value)?;
+        cursors[index].advance()?;
+        if let Some((key, value)) = cursors[index].current.take() {
+            heap.push(Reverse((key, value, index)));
+        }
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static OPEN_RUN_CURSORS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PEAK_RUN_CURSORS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_cursor_peak() {
+    OPEN_RUN_CURSORS.with(|open| open.set(0));
+    PEAK_RUN_CURSORS.with(|peak| peak.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn cursor_peak() -> usize {
+    PEAK_RUN_CURSORS.with(|peak| peak.get())
+}
 type RunRow = Option<(Vec<u8>, Vec<u8>)>;
 
 struct RunCursor {
@@ -879,6 +947,12 @@ impl RunCursor {
         let file = std::fs::File::open(path)?;
         let mut reader = BufReader::new(file);
         let current = Self::read_row(&mut reader)?;
+        #[cfg(test)]
+        OPEN_RUN_CURSORS.with(|open| {
+            let held = open.get().saturating_add(1);
+            open.set(held);
+            PEAK_RUN_CURSORS.with(|peak| peak.set(peak.get().max(held)));
+        });
         Ok(Self { reader, current })
     }
 
@@ -911,6 +985,13 @@ impl RunCursor {
     fn advance(&mut self) -> Result<(), BulkBuilderError> {
         self.current = Self::read_row(&mut self.reader)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for RunCursor {
+    fn drop(&mut self) {
+        OPEN_RUN_CURSORS.with(|open| open.set(open.get().saturating_sub(1)));
     }
 }
 

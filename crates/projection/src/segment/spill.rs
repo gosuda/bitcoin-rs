@@ -216,6 +216,23 @@ fn read_row(reader: &mut impl Read) -> std::io::Result<Option<(Vec<u8>, Vec<u8>)
     Ok(Some((key, value)))
 }
 
+#[cfg(test)]
+thread_local! {
+    static OPEN_RUN_CURSORS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PEAK_RUN_CURSORS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_cursor_peak() {
+    OPEN_RUN_CURSORS.with(|open| open.set(0));
+    PEAK_RUN_CURSORS.with(|peak| peak.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn cursor_peak() -> usize {
+    PEAK_RUN_CURSORS.with(|peak| peak.get())
+}
+
 struct RunCursor {
     reader: BufReader<File>,
     current: Option<(Vec<u8>, Vec<u8>)>,
@@ -226,12 +243,25 @@ impl RunCursor {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
         let current = read_row(&mut reader)?;
+        #[cfg(test)]
+        OPEN_RUN_CURSORS.with(|open| {
+            let held = open.get().saturating_add(1);
+            open.set(held);
+            PEAK_RUN_CURSORS.with(|peak| peak.set(peak.get().max(held)));
+        });
         Ok(Self { reader, current })
     }
 
     fn advance(&mut self) -> std::io::Result<()> {
         self.current = read_row(&mut self.reader)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for RunCursor {
+    fn drop(&mut self) {
+        OPEN_RUN_CURSORS.with(|open| open.set(open.get().saturating_sub(1)));
     }
 }
 
@@ -261,31 +291,89 @@ impl Ord for HeapRow {
     }
 }
 
+const MAX_MERGE_FAN_IN: usize = 16;
+
+static MERGE_TMP_ID: AtomicU64 = AtomicU64::new(0);
+
 pub struct Merge {
     sources: Vec<RunCursor>,
     heap: BinaryHeap<Reverse<HeapRow>>,
     failed: bool,
+    owned: Vec<PathBuf>,
+}
+
+impl Merge {
+    fn open(runs: &[RunFile], owned: Vec<PathBuf>) -> std::io::Result<Self> {
+        let mut sources = Vec::with_capacity(runs.len());
+        let mut heap = BinaryHeap::with_capacity(runs.len());
+        for (index, run) in runs.iter().enumerate() {
+            let mut source = RunCursor::open(&run.path)?;
+            if let Some((key, value)) = source.current.take() {
+                heap.push(Reverse(HeapRow {
+                    key,
+                    value,
+                    run: index,
+                }));
+            }
+            sources.push(source);
+        }
+        Ok(Merge {
+            sources,
+            heap,
+            failed: false,
+            owned,
+        })
+    }
+}
+
+impl Drop for Merge {
+    fn drop(&mut self) {
+        for path in std::mem::take(&mut self.owned) {
+            let _unused = std::fs::remove_file(path);
+        }
+    }
 }
 
 pub fn merge(runs: &[RunFile]) -> std::io::Result<Merge> {
-    let mut sources = Vec::with_capacity(runs.len());
-    let mut heap = BinaryHeap::with_capacity(runs.len());
-    for (index, run) in runs.iter().enumerate() {
-        let mut source = RunCursor::open(&run.path)?;
-        if let Some((key, value)) = source.current.take() {
-            heap.push(Reverse(HeapRow {
-                key,
-                value,
-                run: index,
-            }));
+    let mut owned: Vec<PathBuf> = Vec::new();
+    let mut current: Vec<RunFile> = runs.to_vec();
+    while current.len() > MAX_MERGE_FAN_IN {
+        let dir = current
+            .first()
+            .and_then(|run| run.path.parent())
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "merge needs run files")
+            })?;
+        let mut next: Vec<RunFile> = Vec::new();
+        for chunk in current.chunks(MAX_MERGE_FAN_IN) {
+            let id = MERGE_TMP_ID.fetch_add(1, SeqCst);
+            let out = dir.join(format!("spill-merge-{id:016x}.bin"));
+            merge_chunk(chunk, &out)?;
+            owned.push(out.clone());
+            next.push(RunFile { path: out });
         }
-        sources.push(source);
+        current = next;
     }
-    Ok(Merge {
-        sources,
-        heap,
-        failed: false,
-    })
+    Merge::open(&current, owned)
+}
+
+fn merge_chunk(chunk: &[RunFile], out: &Path) -> std::io::Result<()> {
+    let merged = Merge::open(chunk, Vec::new())?;
+    let result = (|| -> std::io::Result<()> {
+        let file = OpenOptions::new().write(true).create_new(true).open(out)?;
+        let mut writer = BufWriter::new(file);
+        for row in merged {
+            let (key, value) = row?;
+            write_row(&mut writer, &key, &value)?;
+        }
+        writer.flush()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _unused = std::fs::remove_file(out);
+    }
+    result
 }
 
 impl Iterator for Merge {
@@ -313,3 +401,7 @@ impl Iterator for Merge {
         Some(Ok((head.key, head.value)))
     }
 }
+
+#[cfg(test)]
+#[path = "spill_tests.rs"]
+mod tests;
