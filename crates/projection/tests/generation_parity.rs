@@ -1,7 +1,7 @@
 use bitcoin_rs_projection::IndexCapabilities;
 use bitcoin_rs_projection::segment::bulk_builder::{BulkSegmentBuilder, StreamingSegmentBuilder};
 use bitcoin_rs_projection::segment::{
-    Coverage, TailWriterState, append_tail_block, seal_tail_generation,
+    Coverage, TailWriterState, append_tail_block, meta_gen_key, seal_tail_generation,
 };
 use bitcoin_rs_storage::budget::{BudgetCharge, BudgetError, BudgetOwner, UnboundedBudget};
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
@@ -584,5 +584,60 @@ fn stream_sweeps_stale_run_files_from_scratch() -> Result<(), TestError> {
         .filter_map(|entry| entry.ok())
         .count();
     assert_eq!(leftovers, 0, "restart sweep must clear stale run files");
+    Ok(())
+}
+
+// PRJ-05
+#[test]
+fn reset_offline_clears_segment_families_and_descriptors() -> Result<(), TestError> {
+    use bitcoin_rs_projection::IndexCapability;
+    use bitcoin_rs_projection::reset_offline;
+    use bitcoin_rs_storage::PrefixScanLimit;
+
+    let blocks = create_synthetic_blocks(3);
+    let dir = tempdir()?;
+    let scratch = tempdir()?;
+    let store = RocksDbStore::open(dir.path())?;
+    let builder = BulkSegmentBuilder::new(
+        Arc::new(UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    );
+    builder
+        .build_and_ingest(&store, 1, &blocks)
+        .map_err(|e| e.to_string())?;
+
+    let mut batch = store.new_batch();
+    batch.put(
+        ColumnFamily::IdxMeta,
+        &meta_gen_key(IndexCapability::TxLookup),
+        &[7u8; 88],
+    );
+    store.write_durable(batch)?;
+
+    reset_offline(&store)?;
+
+    for cf in [
+        ColumnFamily::IdxMeta,
+        ColumnFamily::TxDir,
+        ColumnFamily::ScriptDict,
+        ColumnFamily::ScriptPost,
+        ColumnFamily::SpendDir,
+        ColumnFamily::ScriptStats,
+        ColumnFamily::Filters,
+    ] {
+        let scan = store.scan_prefix_bounded(
+            cf,
+            &[],
+            PrefixScanLimit {
+                max_rows: 1,
+                max_bytes: usize::MAX,
+            },
+        )?;
+        assert!(
+            scan.rows.is_empty(),
+            "{cf:?} still has rows after reset_offline"
+        );
+    }
     Ok(())
 }
