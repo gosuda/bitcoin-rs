@@ -85,6 +85,48 @@ pub fn decode_tx_dir_value(val: &[u8]) -> Option<([u8; 32], u32, u32, u32)> {
     Some((block_hash, ordinal, offset, len))
 }
 
+pub const TX_ORDINAL_KEY_LEN: usize = 12;
+pub const TX_ORDINAL_VALUE_LEN: usize = 44;
+
+// PRJ-07
+#[must_use]
+pub fn encode_tx_ordinal_key(gen_id: u64, ordinal: u32) -> [u8; TX_ORDINAL_KEY_LEN] {
+    let mut key = [0u8; TX_ORDINAL_KEY_LEN];
+    key[0..8].copy_from_slice(&gen_id.to_be_bytes());
+    key[8..12].copy_from_slice(&ordinal.to_be_bytes());
+    key
+}
+
+// PRJ-07
+#[must_use]
+pub fn encode_tx_ordinal_value(
+    txid: &[u8; 32],
+    height: u32,
+    offset: u32,
+    len: u32,
+) -> [u8; TX_ORDINAL_VALUE_LEN] {
+    let mut val = [0u8; TX_ORDINAL_VALUE_LEN];
+    val[0..32].copy_from_slice(txid);
+    val[32..36].copy_from_slice(&height.to_be_bytes());
+    val[36..40].copy_from_slice(&offset.to_le_bytes());
+    val[40..44].copy_from_slice(&len.to_le_bytes());
+    val
+}
+
+// PRJ-07
+#[must_use]
+pub fn decode_tx_ordinal_value(val: &[u8]) -> Option<([u8; 32], u32, u32, u32)> {
+    if val.len() < TX_ORDINAL_VALUE_LEN {
+        return None;
+    }
+    let mut txid = [0u8; 32];
+    txid.copy_from_slice(&val[0..32]);
+    let height = u32::from_be_bytes(val[32..36].try_into().ok()?);
+    let offset = u32::from_le_bytes(val[36..40].try_into().ok()?);
+    let len = u32::from_le_bytes(val[40..44].try_into().ok()?);
+    Some((txid, height, offset, len))
+}
+
 // PRJ-08
 #[must_use]
 pub fn encode_script_dict_key(gen_id: u64, script_hash: &[u8; 32]) -> [u8; SCRIPT_DICT_KEY_LEN] {

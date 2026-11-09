@@ -17,6 +17,7 @@ pub struct PreparedBlock {
     pub(crate) family_bytes: IndexRowBytes,
     pub(super) capabilities: IndexCapabilities,
     pub(super) rows: PendingRows,
+    pub(super) committed: Box<bitcoin_rs_storage::CommittedBlock>,
 }
 
 impl PreparedBlock {

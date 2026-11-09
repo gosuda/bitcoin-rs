@@ -577,3 +577,170 @@ fn live_admission(script: &[u8]) -> Option<ScriptHash> {
     let admitted = !is_op_return_script(script) && script.len() <= MAX_LIVE_SCRIPT_SIZE;
     admitted.then(|| ScriptHash::from_script_bytes(script))
 }
+
+pub(crate) struct BodyFacts<'a> {
+    pub height: u32,
+    pub needs_scripts: bool,
+    pub spent_coins: &'a dyn SpentCoins,
+}
+
+#[derive(Clone)]
+struct CreatedCoin {
+    script: bitcoin_rs_storage::Bytes,
+    value: u64,
+    height: u32,
+    coinbase: bool,
+}
+
+type CreatedCoins = hashbrown::HashMap<([u8; 32], u32), CreatedCoin>;
+
+pub(crate) fn committed_block_from_body(
+    block: &[u8],
+    hash: [u8; 32],
+    parent_hash: [u8; 32],
+    facts: &BodyFacts<'_>,
+) -> Result<bitcoin_rs_storage::CommittedBlock, IndexError> {
+    let parsed = ParsedBlock::parse_exact(block).map_err(IndexError::BlockParse)?;
+    let header_bytes = parsed
+        .span_bytes(parsed.header_span())
+        .unwrap_or_else(|| unreachable!("header span belongs to the parsed image"));
+    let header: [u8; crate::types::HEADER_ROW_SIZE] = header_bytes
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("the layout parser fixes the header at 80 bytes"));
+    let mut created = CreatedCoins::new();
+    let mut txs = Vec::new();
+    for tx in parsed.transactions() {
+        let span = tx.span();
+        let txid = *tx.txid().as_bytes();
+        let inputs = committed_inputs(tx, facts, &created)?;
+        let outputs = committed_outputs(tx, txid, facts.height, &mut created);
+        txs.push(bitcoin_rs_storage::committed_facts::TxFacts {
+            txid,
+            offset: span.start(),
+            len: span.len(),
+            inputs,
+            outputs,
+        });
+    }
+    Ok(bitcoin_rs_storage::CommittedBlock {
+        height: facts.height,
+        hash,
+        parent_hash,
+        header,
+        txs,
+    })
+}
+
+fn committed_inputs(
+    tx: &ParsedTransaction<'_>,
+    facts: &BodyFacts<'_>,
+    created: &CreatedCoins,
+) -> Result<Vec<bitcoin_rs_storage::committed_facts::SpentPrevout>, IndexError> {
+    let mut inputs = Vec::new();
+    for input in tx.inputs() {
+        let outpoint = tx
+            .span_bytes(input.outpoint())
+            .unwrap_or_else(|| unreachable!("outpoint span belongs to the parsed image"));
+        let (prev_txid, vout) = split_outpoint(outpoint);
+        if is_null_prevout(&prev_txid, vout) {
+            inputs.push(bitcoin_rs_storage::committed_facts::SpentPrevout {
+                txid: [0u8; 32],
+                vout: u32::MAX,
+                value: 0,
+                script: bitcoin_rs_storage::Bytes::new(),
+                height: facts.height,
+                coinbase: true,
+            });
+            continue;
+        }
+        let coin = resolve_spent_coin(prev_txid, vout, facts, created)?;
+        inputs.push(bitcoin_rs_storage::committed_facts::SpentPrevout {
+            txid: prev_txid,
+            vout,
+            value: coin.value,
+            script: coin.script,
+            height: coin.height,
+            coinbase: coin.coinbase,
+        });
+    }
+    Ok(inputs)
+}
+
+fn split_outpoint(outpoint: &[u8]) -> ([u8; 32], u32) {
+    let (prev_bytes, vout_bytes) = outpoint.split_at(32);
+    let mut prev_txid = [0u8; 32];
+    prev_txid.copy_from_slice(prev_bytes);
+    let vout = u32::from_le_bytes(
+        vout_bytes
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("an outpoint vout is four bytes")),
+    );
+    (prev_txid, vout)
+}
+
+fn resolve_spent_coin(
+    prev_txid: [u8; 32],
+    vout: u32,
+    facts: &BodyFacts<'_>,
+    created: &CreatedCoins,
+) -> Result<CreatedCoin, IndexError> {
+    if let Some(coin) = created.get(&(prev_txid, vout)) {
+        return Ok(coin.clone());
+    }
+    if let Some(coin) = facts.spent_coins.spent_coin(&prev_txid, vout) {
+        return Ok(CreatedCoin {
+            script: bitcoin_rs_storage::Bytes::copy_from_slice(coin.script),
+            value: coin.value,
+            height: coin.height,
+            coinbase: coin.coinbase,
+        });
+    }
+    if facts.needs_scripts {
+        return Err(IndexError::MissingSpentCoin {
+            txid: prev_txid,
+            vout,
+            height: facts.height,
+        });
+    }
+    Ok(CreatedCoin {
+        script: bitcoin_rs_storage::Bytes::new(),
+        value: 0,
+        height: 0,
+        coinbase: false,
+    })
+}
+
+fn committed_outputs(
+    tx: &ParsedTransaction<'_>,
+    txid: [u8; 32],
+    height: u32,
+    created: &mut CreatedCoins,
+) -> Vec<bitcoin_rs_storage::committed_facts::CreatedOutput> {
+    let coinbase = transaction_is_coinbase(tx);
+    let mut outputs = Vec::new();
+    for (index, output) in tx.outputs().iter().enumerate() {
+        let Ok(vout) = u32::try_from(index) else {
+            break;
+        };
+        let script = tx.span_bytes(output.script_pubkey()).map_or_else(
+            bitcoin_rs_storage::Bytes::new,
+            bitcoin_rs_storage::Bytes::copy_from_slice,
+        );
+        let value = output_value(tx, output.value());
+        created.insert(
+            (txid, vout),
+            CreatedCoin {
+                script: script.clone(),
+                value,
+                height,
+                coinbase,
+            },
+        );
+        outputs.push(bitcoin_rs_storage::committed_facts::CreatedOutput {
+            vout,
+            value,
+            script,
+        });
+    }
+    outputs
+}

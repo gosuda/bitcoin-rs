@@ -1,7 +1,8 @@
 use bitcoin_rs_projection::IndexCapabilities;
 use bitcoin_rs_projection::segment::bulk_builder::{BulkSegmentBuilder, StreamingSegmentBuilder};
 use bitcoin_rs_projection::segment::{
-    Coverage, TailWriterState, append_tail_block, meta_gen_key, seal_tail_generation,
+    Coverage, NoSealedTxOrdinals, TailWriterState, append_tail_block, meta_gen_key,
+    seal_tail_generation,
 };
 use bitcoin_rs_storage::budget::{BudgetCharge, BudgetError, BudgetOwner, UnboundedBudget};
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
@@ -193,7 +194,7 @@ fn bulk_and_live_generations_are_byte_identical() -> Result<(), TestError> {
     let mut tail_state = TailWriterState::new();
     for block in &blocks {
         let mut batch = store_a.new_batch();
-        append_tail_block(&mut batch, block, &mut tail_state);
+        append_tail_block(&mut batch, block, &mut tail_state, &NoSealedTxOrdinals)?;
         store_a.write_durable(batch)?;
     }
 
@@ -273,7 +274,7 @@ fn tail_seal_and_bulk_family_digests(
     let mut tail_state = TailWriterState::new();
     for block in blocks {
         let mut batch = store_tail.new_batch();
-        append_tail_block(&mut batch, block, &mut tail_state);
+        append_tail_block(&mut batch, block, &mut tail_state, &NoSealedTxOrdinals)?;
         store_tail.write_durable(batch)?;
     }
     let coverage_tail = Coverage::new(

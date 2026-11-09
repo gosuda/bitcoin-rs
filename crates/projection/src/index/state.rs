@@ -506,8 +506,10 @@ pub(super) fn resume_capability_reset<S: KvStore>(
             work.claim.condition(),
             revision_condition(work.revision, &revision_bytes),
         ];
-        let scan_slices: Vec<(ColumnFamily, &[u8])> =
-            scans.iter().map(|&(cf, p)| (cf, p)).collect();
+        let scan_slices: Vec<(ColumnFamily, &[u8])> = scans
+            .iter()
+            .map(|(cf, prefix)| (*cf, prefix.as_slice()))
+            .collect();
         let claim_changed = purge_family_scans(store, &scan_slices, &conditions)?;
         if claim_changed {
             continue;
@@ -552,7 +554,14 @@ fn build_reset_batch<S: KvStore>(
             ColumnFamily::IdxMeta,
             &crate::segment::meta_gen_key(capability),
         );
+        let (sealed_start, sealed_end) = crate::segment::sealed_gen_range(capability);
+        batch.delete_range(ColumnFamily::IdxMeta, &sealed_start, &sealed_end);
     }
+    batch.delete_range(
+        ColumnFamily::IdxMeta,
+        crate::segment::tail::LOG_PREFIX,
+        crate::segment::tail::LOG_END,
+    );
     crate::index::capability::delete_selected_floors(&mut batch, capabilities);
     batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
     Ok(batch)
@@ -561,11 +570,11 @@ fn build_reset_batch<S: KvStore>(
 fn reset_scan_families<S: KvStore>(
     store: &S,
     capabilities: IndexCapabilities,
-) -> Result<Vec<(ColumnFamily, &'static [u8])>, IndexError> {
-    let mut scans: Vec<(ColumnFamily, &'static [u8])> = capabilities
+) -> Result<Vec<(ColumnFamily, Vec<u8>)>, IndexError> {
+    let mut scans: Vec<(ColumnFamily, Vec<u8>)> = capabilities
         .iter()
         .flat_map(IndexCapability::column_families)
-        .map(|&cf| (cf, &[][..]))
+        .map(|&cf| (cf, Vec::new()))
         .collect();
     let unselected_cursor_remains = IndexCapability::ALL.into_iter().try_fold(
         false,
@@ -579,10 +588,24 @@ fn reset_scan_families<S: KvStore>(
         },
     )?;
     if !unselected_cursor_remains {
-        scans.push((ColumnFamily::BlockHeaders, &[]));
+        scans.push((ColumnFamily::BlockHeaders, Vec::new()));
     }
     if capabilities.contains(IndexCapability::CompactFilters) {
-        scans.push((ColumnFamily::UtxoMeta, super::filters::PREFIX));
+        scans.push((ColumnFamily::UtxoMeta, super::filters::PREFIX.to_vec()));
+    }
+    for capability in capabilities.iter() {
+        if capability != IndexCapability::ScriptLive {
+            scans.push((
+                ColumnFamily::IdxMeta,
+                crate::segment::meta_gen_key(capability),
+            ));
+        }
+    }
+    if !capabilities.is_empty() {
+        scans.push((
+            ColumnFamily::IdxMeta,
+            crate::segment::tail::LOG_PREFIX.to_vec(),
+        ));
     }
     Ok(scans)
 }

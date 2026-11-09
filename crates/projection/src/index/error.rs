@@ -91,6 +91,8 @@ pub enum IndexError {
     InjectedFault { stage: &'static str },
     #[error("segment seal marker is corrupt")]
     InvalidSealMarker,
+    #[error("tail undo log at height {height} is corrupt")]
+    CorruptTailLog { height: u32 },
     #[error("operation cancelled")]
     Cancelled,
 }

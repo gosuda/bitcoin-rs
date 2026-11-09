@@ -2,6 +2,7 @@ use bitcoin_rs_projection::IndexCapability;
 use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_projection::segment::{
     GenerationDescriptor, IndexGeneration, TailDescriptor, meta_gen_key, retire_generation,
+    sealed_gen_key,
 };
 use bitcoin_rs_storage::budget::UnboundedBudget;
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, TxFacts};
@@ -72,6 +73,16 @@ fn deep_reorg_retires_one_generation_only() -> Result<(), TestError> {
     );
     batch.put(
         ColumnFamily::IdxMeta,
+        &sealed_gen_key(IndexCapability::TxLookup, gen_id),
+        &IndexGeneration::encode_meta_value(&desc),
+    );
+    batch.put(
+        ColumnFamily::IdxMeta,
+        &sealed_gen_key(IndexCapability::ScriptHistory, gen_id),
+        &IndexGeneration::encode_meta_value(&desc),
+    );
+    batch.put(
+        ColumnFamily::IdxMeta,
         &meta_gen_key(IndexCapability::ScriptHistory),
         &IndexGeneration::encode_meta_value(&desc),
     );
@@ -97,7 +108,23 @@ fn deep_reorg_retires_one_generation_only() -> Result<(), TestError> {
         ColumnFamily::IdxMeta,
         &meta_gen_key(IndexCapability::TxLookup),
     )?;
-    assert!(tx_meta.is_none());
+    assert!(
+        snapshot
+            .get(
+                ColumnFamily::IdxMeta,
+                &sealed_gen_key(IndexCapability::TxLookup, gen_id),
+            )?
+            .is_none(),
+        "the retired TxLookup sealed record must be deleted"
+    );
+    let tx_desc = tx_meta
+        .as_deref()
+        .and_then(IndexGeneration::decode_meta_value);
+    assert_eq!(
+        tx_desc.map(|desc| desc.gen_id),
+        Some(0),
+        "retirement rewrites the TxLookup descriptor to the tail-only bounds (no sealed generation)"
+    );
 
     let script_meta = snapshot.get(
         ColumnFamily::IdxMeta,

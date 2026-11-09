@@ -133,6 +133,13 @@ fn family_bytes_accounting() -> Result<(), IndexError> {
         height: 1,
         hash: [1; 32],
         parent_hash: [0; 32],
+        committed: Box::new(bitcoin_rs_storage::CommittedBlock {
+            height: 1,
+            hash: [1; 32],
+            parent_hash: [0; 32],
+            header: [0; 80],
+            txs: Vec::new(),
+        }),
         row_count: rows.total(),
         encoded_bytes: total_bytes,
         family_bytes: family,

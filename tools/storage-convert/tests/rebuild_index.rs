@@ -9,8 +9,8 @@ use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
 use bitcoin_rs_projection::IndexCapabilities;
 use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_projection::segment::{
-    Coverage, GenerationDescriptor, IndexGeneration, TailDescriptor, TailWriterState,
-    append_tail_block, meta_gen_key, seal_tail_generation,
+    Coverage, GenerationDescriptor, IndexGeneration, NoSealedTxOrdinals, TailDescriptor,
+    TailWriterState, append_tail_block, meta_gen_key, seal_tail_generation,
 };
 use bitcoin_rs_projection::{IndexCapability, IndexWatermark, IndexWriter};
 use bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus;
@@ -793,7 +793,7 @@ fn live_reference(blocks: &[FixtureBlock]) -> TestResult<Reference> {
     let mut state = TailWriterState::new();
     for block in blocks {
         let mut batch = store.new_batch();
-        append_tail_block(&mut batch, &block.facts, &mut state);
+        append_tail_block(&mut batch, &block.facts, &mut state, &NoSealedTxOrdinals);
         store.write_durable(batch)?;
     }
     seal_tail_generation(

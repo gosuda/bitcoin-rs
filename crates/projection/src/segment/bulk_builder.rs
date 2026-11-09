@@ -236,6 +236,9 @@ impl StreamingSegmentBuilder {
             let tx_key = encode_tx_dir_key(self.gen_id, &tx.txid, block.height);
             let tx_val = encode_tx_dir_value(&block.hash, ordinal, tx.offset, tx.len);
             self.tx_dir.push_row(tx_key.to_vec(), tx_val.to_vec())?;
+            let rev_key = encode_tx_ordinal_key(self.gen_id, ordinal);
+            let rev_val = encode_tx_ordinal_value(&tx.txid, block.height, tx.offset, tx.len);
+            self.tx_dir.push_row(rev_key.to_vec(), rev_val.to_vec())?;
             self.push_inputs(ordinal, &tx.inputs)?;
             self.push_outputs(ordinal, &tx.outputs)?;
         }

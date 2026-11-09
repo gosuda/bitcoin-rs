@@ -7,9 +7,12 @@ mod reader;
 mod rows;
 mod snapshot;
 mod state;
+mod tail_writes;
 mod write;
 
 pub(crate) use block::NoSpentScripts;
+#[cfg(test)]
+pub(crate) use block::{BodyFacts, committed_block_from_body};
 pub use block::{MAX_LIVE_SCRIPT_SIZE, SpentCoin, SpentCoins};
 pub use capability::{IndexCapabilities, IndexCapability, IndexWatermark, IndexWatermarks};
 pub use error::IndexError;

@@ -1,7 +1,8 @@
 use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_projection::segment::{
-    Coverage, RetireFault, SealFault, TailWriterState, append_tail_block, arm_retire_fault,
-    arm_seal_fault, meta_gen_key, recover_segments, seal_tail_generation,
+    Coverage, IndexGeneration, NoSealedTxOrdinals, RetireFault, SealFault, TailWriterState,
+    append_tail_block, arm_retire_fault, arm_seal_fault, meta_gen_key, recover_segments,
+    seal_tail_generation,
 };
 use bitcoin_rs_projection::{IndexCapabilities, IndexCapability};
 use bitcoin_rs_storage::budget::UnboundedBudget;
@@ -107,7 +108,7 @@ fn tail_only_store(blocks: &[CommittedBlock]) -> Result<(TempDir, RocksDbStore),
     let mut state = TailWriterState::new();
     for block in blocks {
         let mut batch = store.new_batch();
-        append_tail_block(&mut batch, block, &mut state);
+        append_tail_block(&mut batch, block, &mut state, &NoSealedTxOrdinals)?;
         store.write_durable(batch)?;
     }
     Ok((dir, store))
@@ -281,7 +282,7 @@ fn writer_open_completes_an_interrupted_seal() -> Result<(), TestError> {
     let mut state = TailWriterState::new();
     for block in &blocks {
         let mut batch = store.new_batch();
-        append_tail_block(&mut batch, block, &mut state);
+        append_tail_block(&mut batch, block, &mut state, &NoSealedTxOrdinals)?;
         store.write_durable(batch)?;
     }
     let mut marker_batch = store.new_batch();
@@ -432,14 +433,15 @@ fn retire_fault_after_tombstone_recovers_by_completion() -> Result<(), TestError
         );
     }
     let snapshot = store.snapshot()?;
+    let descriptor = snapshot.get(
+        ColumnFamily::IdxMeta,
+        &meta_gen_key(IndexCapability::TxLookup),
+    )?;
     assert!(
-        snapshot
-            .get(
-                ColumnFamily::IdxMeta,
-                &meta_gen_key(IndexCapability::TxLookup)
-            )?
-            .is_none(),
-        "retired descriptor must clear"
+        descriptor
+            .and_then(|bytes| IndexGeneration::decode_meta_value(&bytes))
+            .is_none_or(|desc| desc.gen_id == 0),
+        "retired descriptor must not name the retired generation"
     );
     assert!(
         snapshot

@@ -1,7 +1,8 @@
 use super::{
-    block::NoSpentScripts, block::SpentCoins, block::pending_rows_for_block_with_header,
-    block::pending_rows_for_facts, capability::IndexCapabilities, capability::IndexCapability,
-    capability::IndexWatermark, capability::IndexWatermarks, capability::SCRIPT_LIVE_WATERMARK_KEY,
+    block::BodyFacts, block::NoSpentScripts, block::SpentCoins, block::committed_block_from_body,
+    block::pending_rows_for_block_with_header, block::pending_rows_for_facts,
+    capability::IndexCapabilities, capability::IndexCapability, capability::IndexWatermark,
+    capability::IndexWatermarks, capability::SCRIPT_LIVE_WATERMARK_KEY,
     capability::put_selected_watermarks, error::IndexError, prepared::PreparedBatch,
     prepared::PreparedBatchLimits, prepared::PreparedBlock, reader::Indexer, rows::IndexRowBytes,
     rows::PendingRows, rows::delete_rows, rows::delete_rows_with_headers, rows::put_rows,
@@ -9,12 +10,15 @@ use super::{
     state::FORMAT_VERSION_VALUE, state::IndexWriteFence, state::capture_write_fence,
     state::commit_ordinary, state::ensure_fence_live, state::resume_capability_reset,
 };
+use crate::segment::tail::TailWriterState;
 use bitcoin_rs_consensus::primitives::{OutPoint, encode};
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvStore, PrefixScanLimit};
 
 pub struct IndexWriter<S: KvStore> {
     pub(super) indexer: Indexer<S>,
     pub(super) generation: u64,
+    pub(super) tail: Option<TailWriterState>,
+    pub(super) seal_scratch: std::path::PathBuf,
 }
 
 impl<S: KvStore> IndexWriter<S> {
@@ -44,9 +48,15 @@ impl<S: KvStore> IndexWriter<S> {
         }
         crate::segment::recover_segments(indexer.store.as_ref())?;
         resume_capability_reset(indexer.store.as_ref(), generation, 0)?;
+        let tail = {
+            let snapshot = indexer.store.snapshot()?;
+            crate::segment::tail::load(snapshot.as_ref())?
+        };
         Ok(Self {
             indexer,
             generation,
+            tail: Some(tail),
+            seal_scratch: super::tail_writes::default_seal_scratch(),
         })
     }
 
@@ -439,6 +449,18 @@ impl<S: KvStore> IndexWriter<S> {
         let row_count = rows.total();
         let family_bytes = rows.encoded_bytes_by_family()?;
         let encoded_bytes = family_bytes.total()?;
+        let needs_scripts = capabilities.contains(IndexCapability::ScriptHistory)
+            || capabilities.contains(IndexCapability::CompactFilters);
+        let committed = Box::new(committed_block_from_body(
+            body,
+            hash,
+            parent_hash,
+            &BodyFacts {
+                height,
+                needs_scripts,
+                spent_coins: spent_scripts,
+            },
+        )?);
         Ok(PreparedBlock {
             height,
             hash,
@@ -448,6 +470,7 @@ impl<S: KvStore> IndexWriter<S> {
             family_bytes,
             capabilities,
             rows,
+            committed,
         })
     }
 
@@ -475,6 +498,7 @@ impl<S: KvStore> IndexWriter<S> {
             family_bytes,
             capabilities,
             rows,
+            committed: Box::new(block.clone()),
         })
     }
 
@@ -530,13 +554,14 @@ impl<S: KvStore> IndexWriter<S> {
         let expected_parent = current.map(|w| w.hash);
         let previous_filter_header = self.initial_filter_header(&fence, capabilities, current)?;
         let batch_family_bytes = batch.family_bytes();
-        let (merged, final_watermark) = chain_forward_blocks(
+        let (merged, final_watermark, blocks) = chain_forward_blocks(
             batch,
             current,
             expected_height,
             expected_parent,
             previous_filter_header,
         )?;
+        let mut tail = self.tail_for(current)?;
         let mut store_batch = self.indexer.store.new_batch();
         put_rows(&mut store_batch, &merged)?;
         store_batch.put(
@@ -545,6 +570,12 @@ impl<S: KvStore> IndexWriter<S> {
             &FORMAT_VERSION_VALUE,
         );
         put_selected_watermarks(&mut store_batch, capabilities, Some(final_watermark));
+        self.append_forward_tail(&mut tail, &blocks, &mut store_batch)?;
+        crate::segment::tail::put_generation_descriptors(
+            &mut store_batch,
+            capabilities.iter(),
+            tail.bounds(),
+        );
         apply_cursor_update(&mut store_batch, cursor);
         commit_ordinary(
             self.indexer.store.as_ref(),
@@ -553,6 +584,9 @@ impl<S: KvStore> IndexWriter<S> {
             store_batch,
         )?;
         record_family_byte_histograms(&batch_family_bytes);
+        if !self.seal_if_due(&tail, capabilities, final_watermark)? {
+            self.tail = Some(tail);
+        }
         Ok(final_watermark)
     }
 
@@ -616,6 +650,8 @@ impl<S: KvStore> IndexWriter<S> {
             current,
             header,
         )?;
+        let mut tail = self.tail_for(Some(current))?;
+        let tail_plan = self.plan_rollback_tail(&tail, capabilities, current)?;
         let mut store_batch = self.indexer.store.new_batch();
         let unselected_keeps_identity = IndexCapability::ALL.into_iter().any(|capability| {
             !capabilities.contains(capability)
@@ -635,6 +671,14 @@ impl<S: KvStore> IndexWriter<S> {
             &FORMAT_VERSION_VALUE,
         );
         put_selected_watermarks(&mut store_batch, capabilities, prev);
+        self.apply_rollback_tail(
+            &mut tail,
+            tail_plan,
+            capabilities,
+            current,
+            prev,
+            &mut store_batch,
+        )?;
         apply_cursor_update(&mut store_batch, cursor);
         commit_ordinary(
             self.indexer.store.as_ref(),
@@ -823,10 +867,18 @@ fn chain_forward_blocks(
     mut expected_height: u32,
     mut expected_parent: Option<[u8; 32]>,
     mut previous_filter_header: [u8; 32],
-) -> Result<(PendingRows, IndexWatermark), IndexError> {
+) -> Result<
+    (
+        PendingRows,
+        IndexWatermark,
+        Vec<bitcoin_rs_storage::CommittedBlock>,
+    ),
+    IndexError,
+> {
     let mut merged = PendingRows::default();
     let mut last = None;
     let block_count = batch.len();
+    let mut blocks = Vec::with_capacity(block_count);
     for (block_index, mut block) in batch.into_blocks().into_iter().enumerate() {
         if block.height != expected_height {
             return Err(IndexError::NonContiguousPrepared { watermark: current });
@@ -840,6 +892,7 @@ fn chain_forward_blocks(
             filter.chain(previous_filter_header);
             previous_filter_header = filter.header;
         }
+        blocks.push(*block.committed);
         merged.append(block.rows);
         if block_index + 1 < block_count {
             expected_height = expected_height
@@ -854,7 +907,7 @@ fn chain_forward_blocks(
     }
     merged.sort();
     let final_watermark = last.ok_or(IndexError::NonContiguousPrepared { watermark: current })?;
-    Ok((merged, final_watermark))
+    Ok((merged, final_watermark, blocks))
 }
 
 fn apply_cursor_update(store_batch: &mut BufferedWriteBatch, cursor: ConsumerCursorUpdate<'_>) {

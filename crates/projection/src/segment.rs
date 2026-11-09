@@ -1,10 +1,13 @@
 pub mod bulk_builder;
 pub mod format;
+pub mod tail;
+pub use tail::{
+    CreationOrdinals, NoSealedTxOrdinals, SealedTxOrdinals, TailWriterState, append_tail_block,
+};
 #[cfg(test)]
 mod tests;
 
 use crate::{IndexCapabilities, IndexCapability};
-use sha2::Digest as _;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Coverage {
@@ -121,8 +124,78 @@ pub fn meta_gen_key(capability: IndexCapability) -> Vec<u8> {
     key
 }
 
+/// One sealed segment of a capability (`PRJ-05`): its coverage and the first
+/// chain-global ordinal after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SealedGen {
+    pub gen_id: u64,
+    pub coverage: Coverage,
+    pub next_ordinal: u32,
+}
+
+/// Length of a sealed segment record: coverage (40) plus next ordinal (4).
+pub const SEALED_RECORD_LEN: usize = 44;
+
+#[must_use]
+pub fn sealed_gen_prefix(capability: IndexCapability) -> Vec<u8> {
+    let mut key = b"gen/".to_vec();
+    key.extend_from_slice(capability.name().as_bytes());
+    key.push(b'/');
+    key
+}
+
+#[must_use]
+pub fn sealed_gen_key(capability: IndexCapability, gen_id: u64) -> Vec<u8> {
+    let mut key = sealed_gen_prefix(capability);
+    key.extend_from_slice(&gen_id.to_be_bytes());
+    key
+}
+
+#[must_use]
+pub fn encode_sealed_gen(sealed: &SealedGen) -> [u8; SEALED_RECORD_LEN] {
+    let mut out = [0u8; SEALED_RECORD_LEN];
+    out[..40].copy_from_slice(&sealed.coverage.to_bytes());
+    out[40..44].copy_from_slice(&sealed.next_ordinal.to_le_bytes());
+    out
+}
+
+fn decode_sealed_gen(gen_id: u64, bytes: &[u8]) -> Option<SealedGen> {
+    if bytes.len() < SEALED_RECORD_LEN {
+        return None;
+    }
+    Some(SealedGen {
+        gen_id,
+        coverage: Coverage::from_bytes(&bytes[..40])?,
+        next_ordinal: u32::from_le_bytes(bytes[40..44].try_into().ok()?),
+    })
+}
+
+/// Sealed segments of `capability`, ascending by generation id.
+pub fn sealed_generations(
+    snapshot: &dyn bitcoin_rs_storage::KvSnapshot,
+    capability: IndexCapability,
+) -> Result<Vec<SealedGen>, crate::IndexError> {
+    let prefix = sealed_gen_prefix(capability);
+    let mut out = Vec::new();
+    for item in snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::IdxMeta, &prefix)? {
+        let (key, value) = item?;
+        let Some(id_bytes) = key.get(prefix.len()..) else {
+            continue;
+        };
+        let Ok(id_array) = <[u8; 8]>::try_from(id_bytes) else {
+            continue;
+        };
+        if let Some(sealed) = decode_sealed_gen(u64::from_be_bytes(id_array), &value) {
+            out.push(sealed);
+        }
+    }
+    out.sort_unstable_by_key(|sealed| sealed.gen_id);
+    Ok(out)
+}
+
 pub const SEAL_STAGING_KEY: &[u8] = b"seal/staging";
 pub const SEAL_COMMITTED_KEY: &[u8] = b"seal/committed";
+pub const SEAL_NEXT_GEN_KEY: &[u8] = b"seal/next_gen";
 
 const RETIRE_TOMBSTONE_PREFIX: &[u8] = b"retire/";
 
@@ -205,26 +278,31 @@ fn retire_fault(stage: RetireFault) -> Result<(), crate::IndexError> {
     Ok(())
 }
 
+const SEAL_MARKER_LEN: usize = 53;
+
 fn seal_marker_value(
     gen_id: u64,
     coverage: &Coverage,
     capabilities: IndexCapabilities,
-) -> [u8; 49] {
-    let mut out = [0u8; 49];
+    next_ordinal: u32,
+) -> [u8; SEAL_MARKER_LEN] {
+    let mut out = [0u8; SEAL_MARKER_LEN];
     out[..8].copy_from_slice(&gen_id.to_le_bytes());
     out[8..48].copy_from_slice(&coverage.to_bytes());
     out[48] = capabilities.to_mask();
+    out[49..53].copy_from_slice(&next_ordinal.to_le_bytes());
     out
 }
 
-fn decode_seal_marker(bytes: &[u8]) -> Option<(u64, Coverage, IndexCapabilities)> {
-    if bytes.len() < 49 {
+fn decode_seal_marker(bytes: &[u8]) -> Option<(u64, Coverage, IndexCapabilities, u32)> {
+    if bytes.len() < SEAL_MARKER_LEN {
         return None;
     }
     let gen_id = u64::from_le_bytes(bytes[..8].try_into().ok()?);
     let coverage = Coverage::from_bytes(&bytes[8..48])?;
     let capabilities = IndexCapabilities::from_mask(bytes[48]).ok()?;
-    Some((gen_id, coverage, capabilities))
+    let next_ordinal = u32::from_le_bytes(bytes[49..53].try_into().ok()?);
+    Some((gen_id, coverage, capabilities, next_ordinal))
 }
 
 fn retirement_families(capability: IndexCapability) -> &'static [bitcoin_rs_storage::ColumnFamily] {
@@ -240,7 +318,6 @@ fn retirement_families(capability: IndexCapability) -> &'static [bitcoin_rs_stor
         IndexCapability::CompactFilters => &[bitcoin_rs_storage::ColumnFamily::Filters],
     }
 }
-
 fn retire_tombstone_key(capability: IndexCapability, gen_id: u64) -> Vec<u8> {
     let mut key = RETIRE_TOMBSTONE_PREFIX.to_vec();
     key.extend_from_slice(&gen_id.to_be_bytes());
@@ -261,15 +338,15 @@ fn decode_tombstone_key(key: &[u8]) -> Option<(Vec<u8>, u64, IndexCapability)> {
     Some((key.to_vec(), gen_id, capability))
 }
 
+/// Marker-first retirement of one sealed segment: the tombstone is durable
+/// before any row clears, so recovery finishes an interrupted retirement on
+/// open. Rows and the segment record never survive without the tombstone.
 // REO-04, REO-05
-pub fn retire_generation<S: bitcoin_rs_storage::KvStore>(
+pub fn retire_generation_rows<S: bitcoin_rs_storage::KvStore>(
     store: &S,
     capability: IndexCapability,
     gen_id: u64,
 ) -> Result<(), crate::IndexError> {
-    let start = format::gen_prefix_start(gen_id);
-    let end = format::gen_prefix_end(gen_id);
-
     let mut tombstone_batch = store.new_batch();
     tombstone_batch.put(
         bitcoin_rs_storage::ColumnFamily::IdxMeta,
@@ -278,221 +355,36 @@ pub fn retire_generation<S: bitcoin_rs_storage::KvStore>(
     );
     store.write_durable(tombstone_batch)?;
     retire_fault(RetireFault::AfterTombstone)?;
-
-    for &cf in retirement_families(capability) {
-        store.delete_range(cf, &start, &end)?;
-    }
+    clear_retirement_rows(store, capability, gen_id)?;
     retire_fault(RetireFault::AfterClear)?;
+    Ok(())
+}
 
+/// Retires one sealed segment end to end: rows, then the record, the
+/// descriptor, and the tombstone in one batch.
+pub fn retire_generation<S: bitcoin_rs_storage::KvStore>(
+    store: &S,
+    capability: IndexCapability,
+    gen_id: u64,
+) -> Result<(), crate::IndexError> {
+    retire_generation_rows(store, capability, gen_id)?;
+    let snapshot = store.snapshot().map_err(crate::IndexError::Storage)?;
+    let mut state = tail::load(snapshot.as_ref())?;
+    drop(snapshot);
+    state.sealed.retain(|sealed| sealed.gen_id != gen_id);
     let mut batch = store.new_batch();
     batch.delete(
         bitcoin_rs_storage::ColumnFamily::IdxMeta,
-        &meta_gen_key(capability),
+        &sealed_gen_key(capability, gen_id),
     );
     batch.delete(
         bitcoin_rs_storage::ColumnFamily::IdxMeta,
         &retire_tombstone_key(capability, gen_id),
     );
+    tail::put_generation_descriptors(&mut batch, [capability], state.bounds());
     store.write_durable(batch)?;
     retire_fault(RetireFault::AfterDescriptor)?;
-
     Ok(())
-}
-
-#[derive(Default)]
-pub struct TailWriterState {
-    pub current_ordinal: u32,
-    pub prev_filter_header: [u8; 32],
-    pub txid_to_ordinal: hashbrown::HashMap<[u8; 32], u32>,
-    pub script_id_map: hashbrown::HashMap<[u8; 32], u32>,
-    pub script_stats: hashbrown::HashMap<u32, format::ScriptStats>,
-    pub posting_slots: hashbrown::HashMap<u32, u32>,
-}
-
-impl TailWriterState {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-// PRJ-05
-pub fn append_tail_block(
-    batch: &mut bitcoin_rs_storage::BufferedWriteBatch,
-    block: &bitcoin_rs_storage::committed_facts::CommittedBlock,
-    state: &mut TailWriterState,
-) {
-    for tx in &block.txs {
-        let ordinal = state.current_ordinal;
-        state.current_ordinal = state.current_ordinal.saturating_add(1);
-        state.txid_to_ordinal.insert(tx.txid, ordinal);
-
-        let tx_key = format::encode_tx_dir_key(0, &tx.txid, block.height);
-        let tx_val = format::encode_tx_dir_value(&block.hash, ordinal, tx.offset, tx.len);
-        batch.put(bitcoin_rs_storage::ColumnFamily::TxDir, &tx_key, &tx_val);
-
-        append_tail_inputs(batch, ordinal, &tx.inputs, state);
-        append_tail_outputs(batch, ordinal, &tx.outputs, state);
-    }
-
-    append_tail_filter(batch, block, state);
-}
-
-fn append_tail_inputs(
-    batch: &mut bitcoin_rs_storage::BufferedWriteBatch,
-    spending_ordinal: u32,
-    inputs: &[bitcoin_rs_storage::committed_facts::SpentPrevout],
-    state: &mut TailWriterState,
-) {
-    for input in inputs {
-        if input.txid == [0u8; 32] && input.vout == u32::MAX {
-            continue;
-        }
-        if let Some(&creation_ord) = state.txid_to_ordinal.get(&input.txid) {
-            let key = format::encode_spend_dir_key(0, creation_ord, input.vout);
-            let val = format::encode_spend_dir_value(spending_ordinal);
-            batch.put(bitcoin_rs_storage::ColumnFamily::SpendDir, &key, &val);
-        }
-        if !input.script.is_empty() {
-            let hash: [u8; 32] = sha2::Sha256::digest(&input.script).into();
-            let script_id = get_or_insert_tail_script_id(&hash, state, batch);
-            record_tail_occurrence(
-                batch,
-                script_id,
-                spending_ordinal,
-                format::POSTING_FLAG_SPENDING,
-                input.value,
-                state,
-            );
-        }
-    }
-}
-
-fn append_tail_outputs(
-    batch: &mut bitcoin_rs_storage::BufferedWriteBatch,
-    ordinal: u32,
-    outputs: &[bitcoin_rs_storage::committed_facts::CreatedOutput],
-    state: &mut TailWriterState,
-) {
-    for output in outputs {
-        if !output.script.is_empty() && output.script[0] != 0x6a {
-            let hash: [u8; 32] = sha2::Sha256::digest(&output.script).into();
-            let script_id = get_or_insert_tail_script_id(&hash, state, batch);
-            record_tail_occurrence(
-                batch,
-                script_id,
-                ordinal,
-                format::POSTING_FLAG_FUNDING,
-                output.value,
-                state,
-            );
-        }
-    }
-}
-
-fn get_or_insert_tail_script_id(
-    hash: &[u8; 32],
-    state: &mut TailWriterState,
-    batch: &mut bitcoin_rs_storage::BufferedWriteBatch,
-) -> u32 {
-    if let Some(&id) = state.script_id_map.get(hash) {
-        id
-    } else {
-        let Ok(id) = u32::try_from(state.script_id_map.len()) else {
-            return u32::MAX;
-        };
-        state.script_id_map.insert(*hash, id);
-        let key = format::encode_script_dict_key(0, hash);
-        let val = format::encode_script_dict_value(id);
-        batch.put(bitcoin_rs_storage::ColumnFamily::ScriptDict, &key, &val);
-        id
-    }
-}
-
-fn record_tail_occurrence(
-    batch: &mut bitcoin_rs_storage::BufferedWriteBatch,
-    script_id: u32,
-    ordinal: u32,
-    flags: u8,
-    sats: u64,
-    state: &mut TailWriterState,
-) {
-    let slot = state.posting_slots.entry(script_id).or_insert(0);
-    let post_key = format::encode_script_post_key(0, script_id, *slot);
-    *slot = slot.saturating_add(1);
-    let post_val = format::encode_posting_items(&[format::PostingItem {
-        delta_ordinal: ordinal,
-        flags,
-    }]);
-    batch.put(
-        bitcoin_rs_storage::ColumnFamily::ScriptPost,
-        &post_key,
-        &post_val,
-    );
-
-    let stats = state.script_stats.entry(script_id).or_default();
-    if flags == format::POSTING_FLAG_FUNDING {
-        stats.funded_count = stats.funded_count.saturating_add(1);
-        stats.funded_sats = stats.funded_sats.saturating_add(sats);
-    } else {
-        stats.spent_count = stats.spent_count.saturating_add(1);
-        stats.spent_sats = stats.spent_sats.saturating_add(sats);
-    }
-    let stats_key = format::encode_script_stats_key(0, script_id);
-    let stats_val = format::encode_script_stats_value(stats);
-    batch.put(
-        bitcoin_rs_storage::ColumnFamily::ScriptStats,
-        &stats_key,
-        &stats_val,
-    );
-}
-
-fn append_tail_filter(
-    batch: &mut bitcoin_rs_storage::BufferedWriteBatch,
-    block: &bitcoin_rs_storage::committed_facts::CommittedBlock,
-    state: &mut TailWriterState,
-) {
-    let mut k0_b = [0u8; 8];
-    k0_b.copy_from_slice(&block.hash[..8]);
-    let k0 = u64::from_le_bytes(k0_b);
-
-    let mut k1_b = [0u8; 8];
-    k1_b.copy_from_slice(&block.hash[8..16]);
-    let k1 = u64::from_le_bytes(k1_b);
-
-    let mut filter_bytes = Vec::new();
-    let mut writer = bitcoin::bip158::GcsFilterWriter::new(&mut filter_bytes, k0, k1, 784_931, 19);
-    let mut created: hashbrown::HashMap<([u8; 32], u32), &[u8]> = hashbrown::HashMap::new();
-    for tx in &block.txs {
-        for input in &tx.inputs {
-            if input.txid == [0u8; 32] && input.vout == u32::MAX {
-                continue;
-            }
-            if let Some(&script) = created.get(&(input.txid, input.vout)) {
-                writer.add_element(script);
-            } else if !input.script.is_empty() {
-                writer.add_element(&input.script);
-            }
-        }
-        for output in &tx.outputs {
-            created.insert((tx.txid, output.vout), &output.script);
-            if !output.script.is_empty() && output.script[0] != 0x6a {
-                writer.add_element(&output.script);
-            }
-        }
-    }
-    let _ = writer.finish();
-    let filter_hash =
-        bitcoin_rs_consensus::primitives::encode::double_sha256(&filter_bytes).to_le_bytes();
-    let mut hdr_in = [0u8; 64];
-    hdr_in[..32].copy_from_slice(&filter_hash);
-    hdr_in[32..].copy_from_slice(&state.prev_filter_header);
-    let header = bitcoin_rs_consensus::primitives::encode::double_sha256(&hdr_in).to_le_bytes();
-    state.prev_filter_header = header;
-
-    let key = format::encode_filter_key(0, block.height);
-    let val = format::encode_filter_value(&block.hash, &filter_hash, &header, &filter_bytes);
-    batch.put(bitcoin_rs_storage::ColumnFamily::Filters, &key, &val);
 }
 
 fn seal_rekey_simple_family(
@@ -625,6 +517,7 @@ pub fn seal_tail_generation<S: bitcoin_rs_storage::KvStore>(
     scratch: &std::path::Path,
 ) -> Result<(), crate::IndexError> {
     let snapshot = store.snapshot().map_err(crate::IndexError::Storage)?;
+    let next_ordinal = tail::load(snapshot.as_ref())?.next_ordinal;
 
     let mut tx_dir_rows = seal_rekey_simple_family(
         snapshot.as_ref(),
@@ -659,7 +552,7 @@ pub fn seal_tail_generation<S: bitcoin_rs_storage::KvStore>(
     staging_batch.put(
         bitcoin_rs_storage::ColumnFamily::IdxMeta,
         SEAL_STAGING_KEY,
-        &seal_marker_value(gen_id, &coverage, capabilities),
+        &seal_marker_value(gen_id, &coverage, capabilities, next_ordinal),
     );
     store.write_durable(staging_batch)?;
     seal_fault(SealFault::AfterStaging)?;
@@ -706,14 +599,14 @@ pub fn seal_tail_generation<S: bitcoin_rs_storage::KvStore>(
     committed_batch.put(
         bitcoin_rs_storage::ColumnFamily::IdxMeta,
         SEAL_COMMITTED_KEY,
-        &seal_marker_value(gen_id, &coverage, capabilities),
+        &seal_marker_value(gen_id, &coverage, capabilities, next_ordinal),
     );
     store.write_durable(committed_batch)?;
     seal_fault(SealFault::AfterCommitted)?;
 
     clear_tail(store)?;
     seal_fault(SealFault::AfterClear)?;
-    publish_descriptors(store, gen_id, coverage, capabilities)?;
+    publish_sealed(store, gen_id, coverage, next_ordinal, capabilities)?;
     seal_fault(SealFault::AfterPublish)?;
     remove_seal_markers(store)?;
     Ok(())
@@ -725,35 +618,58 @@ fn clear_tail<S: bitcoin_rs_storage::KvStore>(store: &S) -> Result<(), crate::In
     for &cf in &SEALED_FAMILIES {
         store.delete_range(cf, &start, &end)?;
     }
-    Ok(())
+    store
+        .delete_range(
+            bitcoin_rs_storage::ColumnFamily::IdxMeta,
+            tail::LOG_PREFIX,
+            tail::LOG_END,
+        )
+        .map_err(crate::IndexError::Storage)
 }
 
-fn publish_descriptors<S: bitcoin_rs_storage::KvStore>(
+/// Publishes the sealed segment record and the `gen/<cap>` descriptor in one
+/// batch. The tail is empty afterwards, so `tail_lo > tail_hi`.
+fn publish_sealed<S: bitcoin_rs_storage::KvStore>(
     store: &S,
     gen_id: u64,
     coverage: Coverage,
+    next_ordinal: u32,
     capabilities: IndexCapabilities,
 ) -> Result<(), crate::IndexError> {
-    let desc = GenerationDescriptor {
+    let sealed = SealedGen {
         gen_id,
         coverage,
-        tail: TailDescriptor {
-            tail_lo: coverage.last_height.saturating_add(1),
-            tail_hi: coverage.last_height,
-            tail_hash: coverage.last_hash,
-        },
+        next_ordinal,
     };
+    let record = encode_sealed_gen(&sealed);
     let mut batch = store.new_batch();
-    for cap in capabilities.iter() {
-        if cap == IndexCapability::ScriptLive {
+    batch.put(
+        bitcoin_rs_storage::ColumnFamily::IdxMeta,
+        SEAL_NEXT_GEN_KEY,
+        &gen_id.saturating_add(1).to_le_bytes(),
+    );
+    let segment_caps = capabilities
+        .iter()
+        .filter(|capability| *capability != IndexCapability::ScriptLive);
+    for capability in capabilities.iter() {
+        if capability == IndexCapability::ScriptLive {
             continue;
         }
         batch.put(
             bitcoin_rs_storage::ColumnFamily::IdxMeta,
-            &meta_gen_key(cap),
-            &IndexGeneration::encode_meta_value(&desc),
+            &sealed_gen_key(capability, gen_id),
+            &record,
         );
     }
+    tail::put_generation_descriptors(
+        &mut batch,
+        segment_caps,
+        tail::TailBounds {
+            newest: Some(sealed),
+            first_height: None,
+            at: Some((coverage.last_height, coverage.last_hash)),
+        },
+    );
     store
         .write_durable(batch)
         .map_err(crate::IndexError::Storage)
@@ -782,13 +698,13 @@ pub fn recover_segments<S: bitcoin_rs_storage::KvStore>(
     let snapshot = store.snapshot().map_err(crate::IndexError::Storage)?;
     let staging = snapshot
         .get(bitcoin_rs_storage::ColumnFamily::IdxMeta, SEAL_STAGING_KEY)?
-        .filter(|bytes| bytes.len() >= 49);
+        .filter(|bytes| bytes.len() >= SEAL_MARKER_LEN);
     let committed = snapshot
         .get(
             bitcoin_rs_storage::ColumnFamily::IdxMeta,
             SEAL_COMMITTED_KEY,
         )?
-        .filter(|bytes| bytes.len() >= 49);
+        .filter(|bytes| bytes.len() >= SEAL_MARKER_LEN);
     drop(snapshot);
 
     let staged = staging.as_deref().map_or_else(
@@ -796,27 +712,18 @@ pub fn recover_segments<S: bitcoin_rs_storage::KvStore>(
         |bytes| decode_seal_marker(bytes).ok_or(crate::IndexError::InvalidSealMarker),
     );
     if let Some(bytes) = committed.as_deref() {
-        let (gen_id, coverage, capabilities) =
+        let (gen_id, coverage, capabilities, next_ordinal) =
             decode_seal_marker(bytes).ok_or(crate::IndexError::InvalidSealMarker)?;
-        complete_seal(store, gen_id, coverage, capabilities)?;
+        clear_tail(store)?;
+        publish_sealed(store, gen_id, coverage, next_ordinal, capabilities)?;
+        remove_seal_markers(store)?;
         if staged.is_err() {
             return Err(crate::IndexError::InvalidSealMarker);
         }
-    } else if let Ok((gen_id, _coverage, _capabilities)) = staged {
+    } else if let Ok((gen_id, _coverage, _capabilities, _next)) = staged {
         rollback_seal(store, gen_id)?;
     }
     recover_retirements(store)
-}
-
-fn complete_seal<S: bitcoin_rs_storage::KvStore>(
-    store: &S,
-    gen_id: u64,
-    coverage: Coverage,
-    capabilities: IndexCapabilities,
-) -> Result<(), crate::IndexError> {
-    clear_tail(store)?;
-    publish_descriptors(store, gen_id, coverage, capabilities)?;
-    remove_seal_markers(store)
 }
 
 fn rollback_seal<S: bitcoin_rs_storage::KvStore>(
@@ -835,6 +742,8 @@ fn rollback_seal<S: bitcoin_rs_storage::KvStore>(
         .map_err(crate::IndexError::Storage)
 }
 
+/// Finishes every tombstoned retirement: rows first, then the record, the
+/// descriptor, and the tombstone in one batch.
 fn recover_retirements<S: bitcoin_rs_storage::KvStore>(store: &S) -> Result<(), crate::IndexError> {
     let snapshot = store.snapshot().map_err(crate::IndexError::Storage)?;
     let mut tombstones = Vec::new();
@@ -850,18 +759,60 @@ fn recover_retirements<S: bitcoin_rs_storage::KvStore>(store: &S) -> Result<(), 
     drop(snapshot);
 
     for (key, gen_id, capability) in tombstones {
-        let start = format::gen_prefix_start(gen_id);
-        let end = format::gen_prefix_end(gen_id);
-        for &cf in retirement_families(capability) {
-            store.delete_range(cf, &start, &end)?;
+        finish_retirement(store, &key, gen_id, capability)?;
+    }
+    Ok(())
+}
+
+fn finish_retirement<S: bitcoin_rs_storage::KvStore>(
+    store: &S,
+    tombstone: &[u8],
+    gen_id: u64,
+    capability: IndexCapability,
+) -> Result<(), crate::IndexError> {
+    clear_retirement_rows(store, capability, gen_id)?;
+    let snapshot = store.snapshot().map_err(crate::IndexError::Storage)?;
+    let mut state = tail::load(snapshot.as_ref())?;
+    drop(snapshot);
+    state.sealed.retain(|sealed| sealed.gen_id != gen_id);
+    let mut batch = store.new_batch();
+    batch.delete(
+        bitcoin_rs_storage::ColumnFamily::IdxMeta,
+        &sealed_gen_key(capability, gen_id),
+    );
+    batch.delete(bitcoin_rs_storage::ColumnFamily::IdxMeta, tombstone);
+    tail::put_generation_descriptors(&mut batch, [capability], state.bounds());
+    store
+        .write_durable(batch)
+        .map_err(crate::IndexError::Storage)
+}
+
+fn clear_retirement_rows<S: bitcoin_rs_storage::KvStore>(
+    store: &S,
+    capability: IndexCapability,
+    gen_id: u64,
+) -> Result<(), crate::IndexError> {
+    let start = format::gen_prefix_start(gen_id);
+    let end = format::gen_prefix_end(gen_id);
+    let snapshot = store.snapshot().map_err(crate::IndexError::Storage)?;
+    let mut families = retirement_families(capability).to_vec();
+    for other in IndexCapability::ALL {
+        if other == capability || other == IndexCapability::ScriptLive {
+            continue;
         }
-        let mut batch = store.new_batch();
-        batch.delete(
-            bitcoin_rs_storage::ColumnFamily::IdxMeta,
-            &meta_gen_key(capability),
-        );
-        batch.delete(bitcoin_rs_storage::ColumnFamily::IdxMeta, &key);
-        store.write_durable(batch)?;
+        let built = snapshot
+            .get(
+                bitcoin_rs_storage::ColumnFamily::IdxMeta,
+                &sealed_gen_key(other, gen_id),
+            )?
+            .is_some();
+        if !built {
+            families.extend_from_slice(retirement_families(other));
+        }
+    }
+    drop(snapshot);
+    for cf in families {
+        store.delete_range(cf, &start, &end)?;
     }
     Ok(())
 }
@@ -877,4 +828,31 @@ fn ingest_family_rows<S: bitcoin_rs_storage::KvStore>(
         .ingest_sorted(cf, &mut row_iter, scratch)
         .map_err(crate::IndexError::Storage)?;
     Ok(())
+}
+
+/// Clears a retired segment's record and tombstone in the caller's batch.
+pub fn clear_retirement_markers(
+    batch: &mut bitcoin_rs_storage::BufferedWriteBatch,
+    capability: IndexCapability,
+    gen_id: u64,
+) {
+    batch.delete(
+        bitcoin_rs_storage::ColumnFamily::IdxMeta,
+        &sealed_gen_key(capability, gen_id),
+    );
+    batch.delete(
+        bitcoin_rs_storage::ColumnFamily::IdxMeta,
+        &retire_tombstone_key(capability, gen_id),
+    );
+}
+
+/// Key range covering every sealed segment record of `capability`.
+#[must_use]
+pub fn sealed_gen_range(capability: IndexCapability) -> (Vec<u8>, Vec<u8>) {
+    let start = sealed_gen_prefix(capability);
+    let mut end = start.clone();
+    if let Some(last) = end.last_mut() {
+        *last += 1;
+    }
+    (start, end)
 }

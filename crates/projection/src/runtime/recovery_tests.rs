@@ -309,6 +309,7 @@ impl ForkFixture {
 
 struct Harness {
     _index_dir: tempfile::TempDir,
+    store: Arc<RocksDbStore>,
     writer: Arc<dyn TxIndexWriter>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     runtime: Arc<DerivedIndexRuntime>,
@@ -361,7 +362,7 @@ impl Harness {
         let index_dir = tempfile::tempdir().expect("index dir");
         let store = Arc::new(RocksDbStore::open(index_dir.path()).expect("rocksdb open"));
         let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(
-            crate::IndexWriter::open(store, 1).expect("index writer open"),
+            crate::IndexWriter::open(Arc::clone(&store), 1).expect("index writer open"),
         ));
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(16);
@@ -397,6 +398,7 @@ impl Harness {
         };
         Self {
             _index_dir: index_dir,
+            store,
             writer,
             applied_tip,
             runtime,
@@ -1364,4 +1366,186 @@ fn buffered_facts_below_index_progress_are_evicted() {
         h.worker.buffered_facts.lock().is_empty(),
         "facts below the requested height must be evicted instead of accumulating"
     );
+}
+
+use bitcoin_rs_storage::{ColumnFamily, KvStore};
+
+const SEGMENT_FAMILIES: [ColumnFamily; 6] = [
+    ColumnFamily::TxDir,
+    ColumnFamily::ScriptDict,
+    ColumnFamily::ScriptPost,
+    ColumnFamily::SpendDir,
+    ColumnFamily::ScriptStats,
+    ColumnFamily::Filters,
+];
+
+fn sealed_at(store: &RocksDbStore) -> Vec<crate::segment::SealedGen> {
+    let snapshot = store.snapshot().expect("snapshot");
+    crate::segment::sealed_generations(snapshot.as_ref(), IndexCapability::TxLookup)
+        .expect("sealed generations")
+}
+
+fn generation_rows(store: &RocksDbStore, sealed_id: u64) -> Vec<(ColumnFamily, Vec<u8>, Vec<u8>)> {
+    let snapshot = store.snapshot().expect("snapshot");
+    let prefix = sealed_id.to_be_bytes();
+    let mut rows = Vec::new();
+    for cf in SEGMENT_FAMILIES {
+        for item in snapshot.iter_prefix(cf, &prefix).expect("scan") {
+            let (key, value) = item.expect("row");
+            rows.push((cf, key, value));
+        }
+    }
+    rows
+}
+
+fn committed_chain(
+    f: &ForkFixture,
+    branch: &[(NodeId, Hash256)],
+    first_height: u32,
+    last_height: u32,
+) -> Vec<bitcoin_rs_storage::CommittedBlock> {
+    let bodies = f.bodies.bodies.lock();
+    let mut out = Vec::new();
+    for height in first_height..=last_height {
+        let index = usize::try_from(height).expect("height fits usize");
+        let hash = if height == 0 {
+            f.genesis
+        } else {
+            branch[index - 1].1
+        };
+        let parent = match height {
+            0 => Hash256::from_le_bytes(&[0_u8; 32]),
+            1 => f.genesis,
+            _ => branch[index - 2].1,
+        };
+        let body = bodies
+            .get(&(height, hash.to_le_bytes()))
+            .expect("fixture body");
+        let facts = crate::index::BodyFacts {
+            height,
+            needs_scripts: false,
+            spent_coins: &crate::index::NoSpentScripts,
+        };
+        out.push(
+            crate::index::committed_block_from_body(
+                body,
+                hash.to_le_bytes(),
+                parent.to_le_bytes(),
+                &facts,
+            )
+            .expect("committed block"),
+        );
+    }
+    out
+}
+
+fn assert_sealed_matches_bulk(store: &RocksDbStore, f: &ForkFixture, branch: &[(NodeId, Hash256)]) {
+    let sealed = sealed_at(store);
+    assert_eq!(
+        sealed.len(),
+        1,
+        "one tail-bound seal publishes one generation"
+    );
+    let segment = sealed[0];
+    let blocks = committed_chain(
+        f,
+        branch,
+        segment.coverage.first_height,
+        segment.coverage.last_height,
+    );
+    let bulk_dir = tempfile::tempdir().expect("bulk dir");
+    let scratch = tempfile::tempdir().expect("bulk scratch");
+    let bulk_store = RocksDbStore::open(bulk_dir.path()).expect("bulk store");
+    let builder = crate::segment::bulk_builder::BulkSegmentBuilder::new(
+        Arc::new(bitcoin_rs_storage::budget::UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    );
+    let coverage = builder
+        .build_and_ingest(&bulk_store, segment.gen_id, &blocks)
+        .expect("bulk build");
+    assert_eq!(
+        coverage, segment.coverage,
+        "bulk coverage matches the sealed segment"
+    );
+    assert_eq!(
+        generation_rows(store, segment.gen_id),
+        generation_rows(&bulk_store, segment.gen_id),
+        "sealed segment rows equal the bulk builder output for the same blocks"
+    );
+}
+
+// PRJ-09
+#[test]
+fn sync_past_the_tail_bound_seals_one_generation_equal_to_bulk() {
+    let f = ForkFixture::new(2017);
+    let h = Harness::new(&f, u32::MAX);
+    let mut pending = None;
+    let tip = f.tip(f.a[2016]);
+    h.set_tip(&tip);
+    h.settle(&mut pending);
+    h.assert_at(&tip);
+    assert_sealed_matches_bulk(&h.store, &f, &f.a);
+}
+
+// REO-04, REO-05
+#[test]
+fn deep_reorg_through_the_runtime_retires_exactly_the_affected_generation() {
+    let f = ForkFixture::new(2020);
+    f.persist_undo();
+    let h = Harness::new(&f, u32::MAX);
+    let mut pending = None;
+    let a = f.tip(f.a[2019]);
+    h.set_tip(&a);
+    h.settle(&mut pending);
+    h.assert_at(&a);
+    let affected = sealed_at(&h.store);
+    assert_eq!(affected.len(), 1, "the sync seals one generation");
+    let affected_id = affected[0].gen_id;
+    assert!(!generation_rows(&h.store, affected_id).is_empty());
+
+    let b = f.tip(f.b[2019]);
+    h.set_tip(&b);
+    h.settle(&mut pending);
+    h.assert_at(&b);
+    assert!(
+        sealed_at(&h.store)
+            .iter()
+            .all(|segment| segment.gen_id != affected_id),
+        "the affected generation leaves the published set"
+    );
+    let left: Vec<ColumnFamily> = generation_rows(&h.store, affected_id)
+        .iter()
+        .map(|(cf, _, _)| *cf)
+        .collect();
+    assert!(left.is_empty(), "affected rows left in {left:?}");
+}
+
+// PRJ-05
+#[test]
+fn crash_between_seal_steps_recovers_on_reopen() {
+    use crate::segment::{SealFault, arm_seal_fault};
+    let f = ForkFixture::new(2017);
+    let h = Harness::new(&f, u32::MAX);
+    let mut pending = None;
+    let tip = f.tip(f.a[2016]);
+    h.set_tip(&tip);
+    arm_seal_fault(Some(SealFault::AfterCommitted));
+    let mut failed = false;
+    for _ in 0..64 {
+        match h.worker.reconcile_once(&mut pending) {
+            Ok(ReconcileAction::CaughtUp) => break,
+            Ok(_) => {}
+            Err(_) => {
+                failed = true;
+                break;
+            }
+        }
+    }
+    arm_seal_fault(None);
+    assert!(failed, "the injected seal fault must surface");
+
+    let reopened = crate::IndexWriter::open(Arc::clone(&h.store), 1).expect("reopen");
+    drop(reopened);
+    assert_sealed_matches_bulk(&h.store, &f, &f.a);
 }
