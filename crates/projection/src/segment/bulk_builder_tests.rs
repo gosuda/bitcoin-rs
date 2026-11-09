@@ -322,6 +322,8 @@ enum StreamError {
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Int(#[from] std::num::TryFromIntError),
     #[error("test scratch has no multi-row spill run")]
     NoMultiRowRun,
 }
@@ -434,6 +436,66 @@ fn second_builder_keeps_first_builder_runs() -> Result<(), StreamError> {
             path.exists(),
             "a live builder run must survive a second builder"
         );
+    }
+    Ok(())
+}
+
+// PRJ-09
+#[test]
+fn header_cut_run_fails_finish() -> Result<(), StreamError> {
+    let pool = Arc::new(PoolBudget::new(POOL_BYTES));
+    let scratch = tempfile::tempdir()?;
+    let dir = tempfile::tempdir()?;
+    let store = RocksDbStore::open(dir.path())?;
+    let builder = BulkSegmentBuilder::new(pool.clone(), None, scratch.path().to_path_buf());
+    let mut stream = builder.stream(1);
+    for block in &synthetic_blocks(60) {
+        stream.push_block(block)?;
+    }
+    let mut runs: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(scratch.path())? {
+        runs.push(entry?.path());
+    }
+    runs.sort();
+    let mut victim: Option<(PathBuf, u64)> = None;
+    for path in &runs {
+        let bytes = std::fs::read(path)?;
+        if spill_row_count(&bytes).is_some_and(|count| count > 1) {
+            let key_len = usize::try_from(u32::from_le_bytes(
+                bytes
+                    .get(..4)
+                    .ok_or(StreamError::NoMultiRowRun)?
+                    .try_into()
+                    .map_err(|_| StreamError::NoMultiRowRun)?,
+            ))?;
+            let value_len = usize::try_from(u32::from_le_bytes(
+                bytes
+                    .get(4..8)
+                    .ok_or(StreamError::NoMultiRowRun)?
+                    .try_into()
+                    .map_err(|_| StreamError::NoMultiRowRun)?,
+            ))?;
+            let cut = u64::try_from(8usize.saturating_add(key_len).saturating_add(value_len))?
+                .saturating_add(2);
+            victim = Some((path.clone(), cut));
+            break;
+        }
+    }
+    let Some((victim, cut)) = victim else {
+        return Err(StreamError::NoMultiRowRun);
+    };
+    let len = std::fs::metadata(&victim)?.len();
+    assert!(cut < len, "the header cut must stay inside the file");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&victim)?
+        .set_len(cut)?;
+    match stream.finish(&store) {
+        Ok(_) => panic!("finish must fail over a run file cut inside its header"),
+        Err(error) => assert!(
+            matches!(error, BulkBuilderError::Io(_)),
+            "a header cut must surface as a typed io failure, got {error:?}"
+        ),
     }
     Ok(())
 }

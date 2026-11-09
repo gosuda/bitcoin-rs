@@ -188,14 +188,19 @@ fn write_row(out: &mut impl Write, key: &[u8], value: &[u8]) -> std::io::Result<
 }
 
 fn read_row(reader: &mut impl Read) -> std::io::Result<Option<(Vec<u8>, Vec<u8>)>> {
-    let mut lens = [0_u8; 8];
-    match reader.read_exact(&mut lens) {
+    let mut first = [0u8; 1];
+    match reader.read_exact(&mut first) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
             return Ok(None);
         }
         Err(error) => return Err(error),
     }
+    let mut rest = [0u8; 7];
+    reader.read_exact(&mut rest)?;
+    let mut lens = [0u8; 8];
+    lens[0] = first[0];
+    lens[1..].copy_from_slice(&rest);
     let key_len = usize::try_from(u32::from_le_bytes(lens[..4].try_into().map_err(|_| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, "spill row is truncated")
     })?))

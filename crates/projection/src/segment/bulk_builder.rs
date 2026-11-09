@@ -883,14 +883,19 @@ impl RunCursor {
     }
 
     fn read_row(reader: &mut BufReader<std::fs::File>) -> Result<RunRow, BulkBuilderError> {
-        let mut len_buf = [0u8; 4];
-        match reader.read_exact(&mut len_buf) {
+        let mut first = [0u8; 1];
+        match reader.read_exact(&mut first) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
                 return Ok(None);
             }
             Err(error) => return Err(error.into()),
         }
+        let mut rest = [0u8; 3];
+        reader.read_exact(&mut rest)?;
+        let mut len_buf = [0u8; 4];
+        len_buf[0] = first[0];
+        len_buf[1..].copy_from_slice(&rest);
         let key_len = usize::try_from(u32::from_le_bytes(len_buf))
             .map_err(|_| BulkBuilderError::RowTooLarge)?;
         reader.read_exact(&mut len_buf)?;
