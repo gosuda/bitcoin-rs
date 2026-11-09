@@ -10,6 +10,7 @@ mod capabilities;
 mod index;
 pub mod offline;
 pub mod portable;
+pub use portable::{ManifestArtifactTarget, attach_tx_lookup_artifact};
 pub mod query_api;
 pub mod reconcile;
 pub mod runtime;
@@ -17,6 +18,7 @@ pub mod segment;
 #[cfg(feature = "silent-payments")]
 pub mod silent_payments;
 pub mod snapshot_seed;
+pub use writer::{TxIndexWriter, TxLookupAttachment};
 pub mod types;
 mod writer;
 

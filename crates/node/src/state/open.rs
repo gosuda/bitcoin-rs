@@ -64,6 +64,8 @@ pub enum NodeOpenError {
     ZmqBind(#[from] bitcoin_rs_serving::zmq::ZmqBindError),
     #[error(transparent)]
     Apply(Box<bitcoin_rs_execution::ApplyError>),
+    #[error(transparent)]
+    Snapshot(#[from] crate::snapshot::SnapshotImportError),
     #[error("create data_dir {path}")]
     CreateDataDir {
         path: PathBuf,
@@ -719,6 +721,9 @@ impl NodeState {
                     .contains(bitcoin_rs_projection::IndexCapability::ScriptLive)
             })
             .map(|(runtime, _, _, _)| Arc::clone(runtime.script_live_seed()));
+        let derived_index_runtime = derived_index_parts
+            .as_ref()
+            .map(|(runtime, _, _, _)| Arc::clone(runtime));
         let snapshots = Arc::new(crate::snapshot::SnapshotControl::new(
             assumeutxo,
             Arc::clone(&chainstate),
@@ -726,7 +731,12 @@ impl NodeState {
             config.data_dir.clone(),
             config.network,
             script_live_seed,
+            derived_index_runtime,
+            Some(Arc::clone(&derived_index_status)),
         ));
+        if let Some(manifest_path) = config.assumeutxo_manifest.as_ref() {
+            snapshots.import_manifest(manifest_path)?;
+        }
         verify_startup_window(&chainstate, &config.data_dir)?;
         let shutdown = Arc::new(chainstate.shutdown_reader().child());
         Ok(Self {

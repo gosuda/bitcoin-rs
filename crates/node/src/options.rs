@@ -494,6 +494,11 @@ macro_rules! option_rows {
                     cli[#[arg(skip)]]
                     toml native("notifications")
                 }
+                assumeutxo_manifest: Option<PathBuf> {
+                    cli[#[arg(long = "assumeutxo-manifest")]]
+                    env["BITCOIN_RS_ASSUMEUTXO_MANIFEST", parse_path]
+                    toml native("assumeutxo_manifest")
+                }
             }
             groups {
                 group storage: StorageOverrides {

@@ -336,6 +336,14 @@ impl NodeState {
         self.snapshots.import_native(path.as_ref())
     }
 
+    pub fn import_manifest(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> core::result::Result<crate::snapshot::SnapshotImport, crate::snapshot::SnapshotImportError>
+    {
+        self.snapshots.import_manifest(path.as_ref())
+    }
+
     #[must_use]
     pub fn derived_index_query(
         &self,
@@ -476,11 +484,57 @@ fn index_bundle_directive(
         network: config.network,
     };
     match (&config.indexes.bundle_import, &config.indexes.bundle_export) {
-        (None, None) => Ok(IndexBundleDirective::None),
+        (None, None) => match config.assumeutxo_manifest.as_deref() {
+            Some(path) => manifest_attach_directive(path, config.network),
+            None => Ok(IndexBundleDirective::None),
+        },
         (Some(dir), None) => Ok(IndexBundleDirective::Restore(request(dir))),
         (None, Some(dir)) => Ok(IndexBundleDirective::Export(request(dir))),
         (Some(_), Some(_)) => Err(ConfigError::IndexBundleImportExportExclusive),
     }
+}
+fn manifest_attach_directive(
+    manifest_path: &std::path::Path,
+    network: bitcoin_rs_consensus::primitives::Network,
+) -> Result<bitcoin_rs_projection::portable::IndexBundleDirective, ConfigError> {
+    use bitcoin_rs_execution::manifest::CapabilityTrust;
+    use bitcoin_rs_projection::portable::{IndexBundleDirective, ManifestArtifactTarget};
+    let bytes = match std::fs::read(manifest_path) {
+        Ok(b) => b,
+        Err(err) => {
+            tracing::debug!(path = %manifest_path.display(), %err, "could not read manifest for index directive");
+            return Ok(IndexBundleDirective::None);
+        }
+    };
+    let manifest = match bitcoin_rs_execution::manifest::SnapshotManifest::parse(&bytes) {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::debug!(path = %manifest_path.display(), %err, "could not parse manifest for index directive");
+            return Ok(IndexBundleDirective::None);
+        }
+    };
+    let Some(anchor) = network.assume_utxo_for_height(manifest.base_height) else {
+        return Ok(IndexBundleDirective::None);
+    };
+    let genesis = network.genesis_block_hash().to_le_bytes();
+    let Ok(trust) = manifest.verify_against_anchor(network, genesis, anchor) else {
+        return Ok(IndexBundleDirective::None);
+    };
+    let CapabilityTrust::Trusted(_) = trust.capability_trust[0] else {
+        return Ok(IndexBundleDirective::None);
+    };
+    let dir = manifest_path.parent().unwrap_or(manifest_path);
+    let Ok(artifact_path) = manifest.artifact_path(dir, 1) else {
+        return Ok(IndexBundleDirective::None);
+    };
+    Ok(IndexBundleDirective::AttachManifestArtifact(
+        ManifestArtifactTarget {
+            artifact_path,
+            base_height: manifest.base_height,
+            base_hash: manifest.base_hash,
+            floor: manifest.coverage[0].unwrap_or(0),
+        },
+    ))
 }
 
 struct DerivedIndexComposer {

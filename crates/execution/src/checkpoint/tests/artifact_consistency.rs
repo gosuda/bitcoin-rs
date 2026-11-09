@@ -170,3 +170,72 @@ fn authenticated_coinstats_semantics_require_resync() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn engine_image_tamper_requires_resync() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let (tree, _, applied) = chain_with_applied_height(0, 0)?;
+    let applied_tip = tip_snapshot(&tree, applied)?;
+    let data_dir = super::super::open_data_dir(dir.path())?;
+    let store = bitcoin_rs_storage::memory_kv::MemoryKvStore::new();
+    let write = super::super::write_checkpoint_with_store(
+        &data_dir,
+        config(),
+        &RwLock::new(tree),
+        &CoinStatsListener::new(CoinStats::new()),
+        Some(&applied_tip),
+        super::super::CheckpointStoreTarget {
+            store: &store,
+            host_data_dir: dir.path(),
+        },
+    )?;
+    assert!(matches!(write, CheckpointWrite::Published { .. }));
+    let root = dir.path().join(CHECKPOINT_ROOT);
+    let current: CurrentV1 = sonic_rs::from_slice(&fs::read(root.join(CURRENT_FILE))?)?;
+    let image = root
+        .join(&current.directory)
+        .join("chainstate")
+        .join(bitcoin_rs_storage::memory_kv::MEMORY_KV_FILE);
+    let mut image_bytes = fs::read(&image)?;
+    image_bytes.pop();
+    fs::write(&image, &image_bytes)?;
+    let Err(CheckpointLoadError::Corrupt(_)) = load_checkpoint(dir.path(), config()) else {
+        return Err(TestError::UnexpectedSuccess(
+            "truncated engine image unexpectedly loaded",
+        ));
+    };
+    Ok(())
+}
+
+#[test]
+fn publish_swap_between_commit_and_open_yields_integrity() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let (tree, _, applied) = chain_with_applied_height(0, 0)?;
+    let applied_tip = tip_snapshot(&tree, applied)?;
+    let data_dir = super::super::open_data_dir(dir.path())?;
+    let store = bitcoin_rs_storage::memory_kv::MemoryKvStore::new();
+    let write = super::super::write_checkpoint_with_store(
+        &data_dir,
+        config(),
+        &RwLock::new(tree),
+        &CoinStatsListener::new(CoinStats::new()),
+        Some(&applied_tip),
+        super::super::CheckpointStoreTarget {
+            store: &store,
+            host_data_dir: dir.path(),
+        },
+    )?;
+    assert!(matches!(write, CheckpointWrite::Published { .. }));
+    let root = dir.path().join(CHECKPOINT_ROOT);
+    let current: CurrentV1 = sonic_rs::from_slice(&fs::read(root.join(CURRENT_FILE))?)?;
+    let manifest_path = root.join(&current.directory).join(MANIFEST_FILE);
+    let mut manifest_bytes = fs::read(&manifest_path)?;
+    manifest_bytes.push(b'\n');
+    fs::write(&manifest_path, &manifest_bytes)?;
+    let Err(CheckpointLoadError::Corrupt(_)) = load_checkpoint(dir.path(), config()) else {
+        return Err(TestError::UnexpectedSuccess(
+            "swapped manifest unexpectedly loaded",
+        ));
+    };
+    Ok(())
+}

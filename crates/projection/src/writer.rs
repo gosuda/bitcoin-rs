@@ -14,7 +14,7 @@ pub struct TxLookupAttachment<'a> {
     pub scratch: &'a Path,
 }
 
-pub(crate) trait TxIndexWriter: Send + Sync {
+pub trait TxIndexWriter: Send + Sync {
     fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError>;
     fn prepare_block_with_spent_scripts(
         &self,

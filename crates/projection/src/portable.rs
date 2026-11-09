@@ -5,12 +5,13 @@ mod manifest;
 mod restore;
 
 use crate::writer::TxIndexWriter;
-use crate::{IndexCapabilities, IndexError, IndexReader, IndexWatermark};
+use crate::{IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark};
 use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use std::path::{Path, PathBuf};
 
+pub use restore::attach_tx_lookup_artifact;
 pub(crate) use restore::reset_interrupted_import;
 
 #[derive(Clone, Debug)]
@@ -25,6 +26,15 @@ pub enum IndexBundleDirective {
     None,
     Restore(IndexBundleRequest),
     Export(IndexBundleRequest),
+    AttachManifestArtifact(ManifestArtifactTarget),
+}
+
+#[derive(Clone, Debug)]
+pub struct ManifestArtifactTarget {
+    pub artifact_path: PathBuf,
+    pub base_height: u32,
+    pub base_hash: [u8; 32],
+    pub floor: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -137,7 +147,64 @@ pub(crate) fn run(
             export::export(host, request).map(|report| Some(BundleOutcome::Exported(report)))
         }
         IndexBundleDirective::Restore(request) => restore::restore(host, request).map(Some),
+        IndexBundleDirective::AttachManifestArtifact(target) => {
+            attach_manifest_artifact(host, target)
+        }
     }
+}
+
+fn attach_manifest_artifact(
+    host: &BundleHost<'_>,
+    target: &ManifestArtifactTarget,
+) -> Result<Option<BundleOutcome>, IndexBundleError> {
+    if !host.enabled.contains(IndexCapability::TxLookup) {
+        return Err(IndexBundleError::TxLookupDisabled);
+    }
+    let base = IndexWatermark {
+        height: target.base_height,
+        hash: target.base_hash,
+    };
+    let tree = host.block_tree.read();
+    let count = usize::try_from(target.base_height.saturating_add(1)).unwrap_or(0);
+    let mut headers = Vec::with_capacity(count);
+    let tip_hash = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&target.base_hash);
+    let tip_node = tree.lookup(tip_hash).ok_or_else(|| {
+        IndexBundleError::Identity(
+            "the receiver chain has no header at the manifest base".to_owned(),
+        )
+    })?;
+    for height in 0..=target.base_height {
+        let id = tree.node_at_height_from(tip_node, height).ok_or_else(|| {
+            IndexBundleError::Identity("missing header in active chain".to_owned())
+        })?;
+        let node = tree
+            .node(id)
+            .map_err(|_| IndexBundleError::Identity("node lookup failed".to_owned()))?;
+        let mut header_bytes = [0_u8; 80];
+        header_bytes.copy_from_slice(
+            &bitcoin_rs_consensus::primitives::consensus_bytes(&node.header)[..80],
+        );
+        headers.push(header_bytes);
+    }
+    drop(tree);
+    let scratch = target
+        .artifact_path
+        .parent()
+        .unwrap_or(&target.artifact_path);
+    let header_refs: Vec<&[u8; 80]> = headers.iter().collect();
+    let records = restore::attach_tx_lookup_artifact(
+        host.writer,
+        &target.artifact_path,
+        &header_refs,
+        base,
+        target.floor,
+        scratch,
+    )?;
+    Ok(Some(BundleOutcome::Restored(RestoreReport {
+        base,
+        records,
+        rows: usize::try_from(records).unwrap_or(usize::MAX),
+    })))
 }
 
 fn io_error(path: &Path, source: std::io::Error) -> IndexBundleError {

@@ -51,6 +51,16 @@ impl IndexArtifactCapability {
             _ => None,
         }
     }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::TxLookup => "txindex",
+            Self::ScriptHistory => "script_history",
+            Self::ScriptLive => "script_live",
+            Self::CompactFilters => "basic block filter index",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

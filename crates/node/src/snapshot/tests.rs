@@ -914,3 +914,175 @@ fn interrupted_activation_fails_closed_and_restart_retries_cleanly() -> Result<(
     );
     Ok(())
 }
+
+fn write_valid_manifest(
+    dir: &Path,
+    pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
+    core_bytes: &[u8],
+) -> Result<PathBuf, TestError> {
+    use bitcoin_rs_execution::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
+    use sha2::Digest;
+
+    let mut sizes = [0_u64; ARTIFACT_SLOTS];
+    let mut hashes = [[0_u8; 32]; ARTIFACT_SLOTS];
+    sizes[UTXO_SLOT] =
+        u64::try_from(core_bytes.len()).map_err(|e| TestError::Io(std::io::Error::other(e)))?;
+    hashes[UTXO_SLOT] = sha2::Sha256::digest(core_bytes).into();
+
+    let manifest = SnapshotManifest {
+        manifest_version: 1,
+        network: "regtest".to_string(),
+        genesis: Network::Regtest.genesis_block_hash().to_le_bytes(),
+        base_hash: pinned.block_hash.to_le_bytes(),
+        base_height: pinned.height,
+        schema: 1,
+        utxo_commitment: pinned.hash_serialized.to_le_bytes(),
+        index_commitments: [None; 4],
+        coverage: [None; 4],
+        sizes,
+        hashes,
+        historical_verified_height: 0,
+    };
+    let json_bytes = sonic_rs::to_vec_pretty(&manifest)?;
+    let manifest_path = dir.join("snapshot_manifest.json");
+    std::fs::write(&manifest_path, json_bytes)?;
+    Ok(manifest_path)
+}
+
+fn write_manifest_with_mismatched_index_artifact(
+    dir: &Path,
+    pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
+    core_bytes: &[u8],
+) -> Result<PathBuf, TestError> {
+    use bitcoin_rs_execution::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
+    use sha2::Digest;
+
+    let mut sizes = [0_u64; ARTIFACT_SLOTS];
+    let mut hashes = [[0_u8; 32]; ARTIFACT_SLOTS];
+    sizes[UTXO_SLOT] =
+        u64::try_from(core_bytes.len()).map_err(|e| TestError::Io(std::io::Error::other(e)))?;
+    hashes[UTXO_SLOT] = sha2::Sha256::digest(core_bytes).into();
+
+    let fake_bytes = b"invalid artifact bytes";
+    std::fs::write(dir.join("txlookup.artifact"), fake_bytes)?;
+    sizes[1] =
+        u64::try_from(fake_bytes.len()).map_err(|e| TestError::Io(std::io::Error::other(e)))?;
+    hashes[1] = [0xee; 32];
+
+    let mut index_commitments = [None; 4];
+    index_commitments[0] = Some(bitcoin_rs_execution::manifest::ManifestIndexCommitment {
+        sha256: [0xee; 32],
+        size_bytes: sizes[1],
+    });
+
+    let manifest = SnapshotManifest {
+        manifest_version: 1,
+        network: "regtest".to_string(),
+        genesis: Network::Regtest.genesis_block_hash().to_le_bytes(),
+        base_hash: pinned.block_hash.to_le_bytes(),
+        base_height: pinned.height,
+        schema: 1,
+        utxo_commitment: pinned.hash_serialized.to_le_bytes(),
+        index_commitments,
+        coverage: [None; 4],
+        sizes,
+        hashes,
+        historical_verified_height: 0,
+    };
+    let json_bytes = sonic_rs::to_vec_pretty(&manifest)?;
+    let manifest_path = dir.join("snapshot_manifest.json");
+    std::fs::write(&manifest_path, json_bytes)?;
+    Ok(manifest_path)
+}
+
+// SNP-01, SNP-05, SNP-08
+#[test]
+fn node_from_manifest_serves_covered_queries_before_historical_sync() -> Result<(), TestError> {
+    let pinned = regtest_pin()?;
+    let dir = tempfile::tempdir()?;
+    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let core_bytes = std::fs::read(&core_path)?;
+    let manifest_path = write_valid_manifest(dir.path(), pinned, &core_bytes)?;
+
+    let import = state.import_manifest(&manifest_path)?;
+    assert_eq!(import.base_height, pinned.height);
+    assert_eq!(import.tip_hash, pinned.block_hash.to_string_be());
+    assert_eq!(import.coins_loaded, 200);
+
+    assert_eq!(
+        state.chainstate().role(),
+        ChainstateRole::AssumedActive {
+            base_height: pinned.height,
+            base_hash: pinned.block_hash,
+        }
+    );
+    assert_eq!(
+        tip_identity(&state),
+        Some((pinned.height, pinned.block_hash))
+    );
+
+    let status = state.snapshots.manager.status()?;
+    assert!(matches!(
+        status,
+        AssumeUtxoDiskStatus::Validating {
+            base_height: 200,
+            historical_height: 0,
+            ..
+        }
+    ));
+
+    let mut coin_rows = 0_usize;
+    for row in state
+        .chainstate()
+        .coin_store()
+        .store()
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+    {
+        row?;
+        coin_rows += 1;
+    }
+    assert_eq!(coin_rows, 200);
+
+    let stats = state.chainstate().coin_stats_handle().snapshot();
+    assert_eq!(stats.utxo_count, 200);
+    assert_eq!(stats.total_amount, 872500000000);
+
+    Ok(())
+}
+// SNP-04, SNP-07, SNP-10
+#[test]
+fn manifest_with_invalid_index_commitment_rejects_and_keeps_coin_store_unpublished()
+-> Result<(), TestError> {
+    let pinned = regtest_pin()?;
+    let dir = tempfile::tempdir()?;
+    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let core_bytes = std::fs::read(&core_path)?;
+    let manifest_path =
+        write_manifest_with_mismatched_index_artifact(dir.path(), pinned, &core_bytes)?;
+
+    let result = state.import_manifest(&manifest_path);
+    assert!(matches!(
+        result,
+        Err(SnapshotImportError::Manifest(
+            bitcoin_rs_execution::manifest::ManifestError::ArtifactHashMismatch { .. }
+        ))
+    ));
+
+    assert!(matches!(
+        state.snapshots.manager.status()?,
+        AssumeUtxoDiskStatus::Uninitialized
+    ));
+    assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
+    assert_eq!(
+        tip_identity(&state),
+        Some((0, Network::Regtest.genesis_block_hash()))
+    );
+
+    let utxo_len = state
+        .chainstate()
+        .utxo()
+        .with_stable_view(|view| Ok::<_, TestError>(view.len()))?;
+    assert_eq!(utxo_len, 0);
+
+    Ok(())
+}

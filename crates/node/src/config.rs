@@ -542,6 +542,7 @@ pub struct NodeConfig {
     pub network: Network,
     pub data_dir: PathBuf,
     pub persist_mempool: bool,
+    pub assumeutxo_manifest: Option<PathBuf>,
     pub mempool_snapshot_max_bytes: u64,
     pub mempool_snapshot_restore_timeout_secs: u64,
     pub storage: StorageConfig,
@@ -580,6 +581,7 @@ impl NodeConfig {
             mempool_snapshot_max_bytes,
             mempool_snapshot_restore_timeout_secs,
             data_dir,
+            assumeutxo_manifest: settings.assumeutxo_manifest.clone(),
             storage: StorageConfig {
                 backend: settings.storage.backend.unwrap_or(DEFAULT_STORAGE_BACKEND),
                 dbcache_mb: settings.storage.dbcache_mb.unwrap_or(DEFAULT_DBCACHE_MB),

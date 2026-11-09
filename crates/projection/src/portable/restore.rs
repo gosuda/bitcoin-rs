@@ -86,6 +86,54 @@ pub(super) fn restore(
         rows,
     }))
 }
+pub fn attach_tx_lookup_artifact(
+    writer: &dyn TxIndexWriter,
+    artifact_path: &Path,
+    headers: &[&[u8; crate::types::HEADER_ROW_SIZE]],
+    base: IndexWatermark,
+    floor: u32,
+    scratch: &Path,
+) -> Result<u64, IndexBundleError> {
+    let mut hashed = open_hashed(artifact_path).map_err(|error| io_error(artifact_path, error))?;
+    let mut header_bytes = [0_u8; HEADER_LEN];
+    hashed
+        .read_exact(&mut header_bytes)
+        .map_err(|error| io_error(artifact_path, error))?;
+    let header = ArtifactHeader::decode(&header_bytes).map_err(|reason| {
+        IndexBundleError::ArtifactHeader {
+            name: "tx_lookup",
+            reason,
+        }
+    })?;
+    let mut records = RecordReader::new(&mut hashed, &header, floor);
+    let mut rows = Vec::new();
+    let mut assembler = RowAssembler::default();
+    while let Some(record) = records.next_record().map_err(|fault| match fault {
+        ReadFault::Io(error) => io_error(artifact_path, error),
+        ReadFault::Framing { record, reason } => IndexBundleError::ArtifactFraming {
+            name: "tx_lookup",
+            record,
+            reason,
+        },
+    })? {
+        assembler.push(&record, &mut |row, value| {
+            rows.push((row.to_db_row().to_vec(), value.to_vec()));
+            Ok(())
+        })?;
+    }
+    assembler.flush::<IndexError>(&mut |row, value| {
+        rows.push((row.to_db_row().to_vec(), value.to_vec()));
+        Ok(())
+    })?;
+    let attachment = crate::writer::TxLookupAttachment {
+        headers,
+        base,
+        floor,
+        scratch,
+    };
+    let count = writer.attach_tx_lookup_rows(&mut rows.into_iter(), &attachment)?;
+    Ok(count)
+}
 
 pub(crate) fn reset_interrupted_import(
     writer: &dyn TxIndexWriter,

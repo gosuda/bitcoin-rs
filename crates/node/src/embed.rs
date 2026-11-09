@@ -82,6 +82,14 @@ impl Node {
             .activate_assumeutxo_snapshot_file(path)
             .map_err(|error| NodeError::Snapshot(error.to_string()))
     }
+    pub async fn import_manifest(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<bitcoin_rs_serving::context::SnapshotImport, NodeError> {
+        self.state
+            .import_manifest(path)
+            .map_err(|error| NodeError::Snapshot(error.to_string()))
+    }
 
     #[must_use]
     pub fn capabilities(&self) -> CapabilitySnapshot {

@@ -44,9 +44,10 @@ fn coin(index: u64, height: u32) -> SnapshotCoin<'static> {
 }
 
 fn watermark(height: u32) -> IndexWatermark {
+    let byte = u8::try_from(height).unwrap_or(0);
     IndexWatermark {
         height,
-        hash: Hash256::from_le_bytes(&[height.to_le_bytes()[0]; 32]).to_le_bytes(),
+        hash: Hash256::from_le_bytes(&[byte; 32]).to_le_bytes(),
     }
 }
 

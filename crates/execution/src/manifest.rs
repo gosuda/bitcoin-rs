@@ -1,6 +1,7 @@
 use bitcoin_rs_consensus::primitives::{
     AssumeUtxoData, Hash256, IndexArtifactCapability, IndexArtifactCommitment, Network,
 };
+use sha2::Digest;
 
 #[derive(Clone, Debug, PartialEq, Eq, sonic_rs::Deserialize, sonic_rs::Serialize)]
 pub struct SnapshotManifest {
@@ -65,6 +66,24 @@ pub enum ManifestError {
     UtxoCommitmentMismatch { expected: Hash256, found: Hash256 },
     #[error("manifest artifact table is malformed: {0}")]
     Artifacts(&'static str),
+    #[error(
+        "manifest declares index artifacts, but compiled index commitments on mainnet are blocked (7.2)"
+    )]
+    MainnetIndexCommitmentsBlocked,
+    #[error("manifest artifact file {} not found", .path.display())]
+    ArtifactNotFound { path: std::path::PathBuf },
+    #[error("artifact size mismatch for slot {slot}: declared {declared}, actual {actual}")]
+    ArtifactSizeMismatch {
+        slot: usize,
+        declared: u64,
+        actual: u64,
+    },
+    #[error("artifact hash mismatch for slot {slot}: declared {declared:?}, actual {actual:?}")]
+    ArtifactHashMismatch {
+        slot: usize,
+        declared: [u8; 32],
+        actual: [u8; 32],
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,7 +180,17 @@ impl SnapshotManifest {
                 Some(capability) => capability,
                 None => continue,
             };
-            let compiled = anchor.index_commitment(capability);
+            let compiled = {
+                #[cfg(any(test, feature = "test-seam"))]
+                {
+                    get_test_index_commitment(network, self.base_height, capability)
+                        .or_else(|| anchor.index_commitment(capability).copied())
+                }
+                #[cfg(not(any(test, feature = "test-seam")))]
+                {
+                    anchor.index_commitment(capability).copied()
+                }
+            };
             let verified = compiled.is_some_and(|compiled| {
                 compiled.sha256 == commitment.sha256 && compiled.size_bytes == commitment.size_bytes
             });
@@ -195,6 +224,117 @@ impl SnapshotManifest {
     pub fn utxo_sha256(&self) -> [u8; 32] {
         self.hashes[UTXO_SLOT]
     }
+    pub fn artifact_path(
+        &self,
+        dir: &std::path::Path,
+        slot: usize,
+    ) -> Result<std::path::PathBuf, ManifestError> {
+        let names: &[&str] = match slot {
+            UTXO_SLOT => &["utxo.dat", "core.dat", "snapshot.dat"],
+            1 => &[
+                "txlookup.artifact",
+                "tx_lookup.artifact",
+                "txlookup.dat",
+                "tx_lookup.dat",
+            ],
+            2 => &[
+                "scripthistory.artifact",
+                "script_history.artifact",
+                "scripthistory.dat",
+                "script_history.dat",
+            ],
+            3 => &[
+                "scriptlive.artifact",
+                "script_live.artifact",
+                "scriptlive.dat",
+                "script_live.dat",
+            ],
+            4 => &[
+                "compactfilters.artifact",
+                "compact_filters.artifact",
+                "compactfilters.dat",
+                "compact_filters.dat",
+            ],
+            _ => return Err(ManifestError::Artifacts("invalid artifact slot")),
+        };
+        for name in names {
+            let p = dir.join(name);
+            if p.is_file() {
+                return Ok(p);
+            }
+        }
+        Err(ManifestError::ArtifactNotFound {
+            path: dir.join(names[0]),
+        })
+    }
+
+    pub fn verify_artifacts(&self, dir: &std::path::Path) -> Result<(), ManifestError> {
+        for slot in 0..ARTIFACT_SLOTS {
+            if self.sizes[slot] == 0 {
+                continue;
+            }
+            let path = self.artifact_path(dir, slot)?;
+            let meta = std::fs::metadata(&path)
+                .map_err(|_| ManifestError::ArtifactNotFound { path: path.clone() })?;
+            if meta.len() != self.sizes[slot] {
+                return Err(ManifestError::ArtifactSizeMismatch {
+                    slot,
+                    declared: self.sizes[slot],
+                    actual: meta.len(),
+                });
+            }
+            let bytes = std::fs::read(&path)
+                .map_err(|_| ManifestError::ArtifactNotFound { path: path.clone() })?;
+            let digest: [u8; 32] = sha2::Sha256::digest(&bytes).into();
+            if digest != self.hashes[slot] {
+                return Err(ManifestError::ArtifactHashMismatch {
+                    slot,
+                    declared: self.hashes[slot],
+                    actual: digest,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+type TestCommitmentKey = (&'static str, u32, IndexArtifactCapability);
+#[cfg(any(test, feature = "test-seam"))]
+type TestCommitmentMap = std::collections::HashMap<TestCommitmentKey, IndexArtifactCommitment>;
+
+#[cfg(any(test, feature = "test-seam"))]
+static TEST_INDEX_COMMITMENTS: parking_lot::RwLock<Option<TestCommitmentMap>> =
+    parking_lot::RwLock::new(None);
+#[cfg(any(test, feature = "test-seam"))]
+pub fn register_test_index_commitment(
+    network: Network,
+    height: u32,
+    commitment: IndexArtifactCommitment,
+) {
+    let mut guard = TEST_INDEX_COMMITMENTS.write();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    map.insert(
+        (network.identity_name(), height, commitment.capability),
+        commitment,
+    );
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+pub fn clear_test_index_commitments() {
+    *TEST_INDEX_COMMITMENTS.write() = None;
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+fn get_test_index_commitment(
+    network: Network,
+    height: u32,
+    capability: IndexArtifactCapability,
+) -> Option<IndexArtifactCommitment> {
+    TEST_INDEX_COMMITMENTS.read().as_ref().and_then(|map| {
+        map.get(&(network.identity_name(), height, capability))
+            .copied()
+    })
 }
 #[cfg(test)]
 #[allow(clippy::expect_used)]

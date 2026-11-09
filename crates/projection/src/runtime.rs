@@ -134,7 +134,7 @@ impl DerivedIndexRuntime {
         let _receiver_gone = self.wake_tx.try_send(());
     }
 
-    pub(crate) fn publish_failed(&self, message: impl Into<CompactString>) {
+    pub fn publish_failed(&self, message: impl Into<CompactString>) {
         *self.failure_message.write() = Some(message.into());
         self.failed.store(true, Ordering::Release);
     }
@@ -152,7 +152,7 @@ impl DerivedIndexRuntime {
         self.wake();
     }
 
-    pub(crate) fn fail_compact_filters(&self, error: &DerivedIndexWorkerError) {
+    pub fn fail_compact_filters(&self, error: &DerivedIndexWorkerError) {
         self.fail_capability(
             IndexCapabilities::COMPACT_FILTERS,
             &self.compact_filter_failure,
@@ -161,7 +161,7 @@ impl DerivedIndexRuntime {
         );
     }
 
-    pub(crate) fn fail_script_live(&self, error: &DerivedIndexWorkerError) {
+    pub fn fail_script_live(&self, error: &DerivedIndexWorkerError) {
         self.fail_capability(
             IndexCapabilities::SCRIPT_LIVE,
             &self.script_live_failure,
@@ -170,7 +170,7 @@ impl DerivedIndexRuntime {
         );
     }
 
-    pub(crate) fn fail_script_history(&self, error: &DerivedIndexWorkerError) {
+    pub fn fail_script_history(&self, error: &DerivedIndexWorkerError) {
         self.fail_capability(
             IndexCapabilities::SCRIPT_HISTORY,
             &self.script_history_failure,
