@@ -592,10 +592,10 @@ fn advance_directory_to(
 
 fn next_directory_row(rows: &mut SortedRows) -> Result<Option<([u8; 32], u32)>, BulkBuilderError> {
     for row in rows.by_ref() {
-        if row.0.len() == TX_DIR_KEY_LEN && row.1.len() >= 36 {
-            let txid: [u8; 32] = row.0[8..40]
-                .try_into()
-                .map_err(|_| BulkBuilderError::InvalidBlockSequence)?;
+        let Some((_, txid, _)) = decode_tx_dir_key(&row.0) else {
+            continue;
+        };
+        if row.1.len() >= 36 {
             let ordinal = u32::from_be_bytes(decode_array4(&row.1[32..36])?);
             return Ok(Some((txid, ordinal)));
         }

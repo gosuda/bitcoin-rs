@@ -3,6 +3,7 @@ use crate::portable::artifact::{ARTIFACT_VERSION, ArtifactHeader};
 use crate::portable::manifest::BundleFamily;
 use crate::portable::{IndexBundleError, ManifestArtifactTarget};
 use crate::segment::bulk_builder::BulkSegmentBuilder;
+use crate::segment::format::{TX_KIND_TXID, tx_dir_kind_prefix};
 use crate::segment::import::{ImportedSegment, put_segment};
 use crate::segment::import::{ScriptHistoryImportError, script_history_segment};
 use crate::segment::{
@@ -382,7 +383,7 @@ fn block_hashes(blocks: &[CommittedBlock]) -> Vec<[u8; 32]> {
 fn tx_directory<S: KvStore>(store: &S) -> TestResult<Rows> {
     let snapshot = store.snapshot()?;
     let rows = snapshot
-        .iter_prefix(ColumnFamily::TxDir, &1_u64.to_be_bytes())?
+        .iter_prefix(ColumnFamily::TxDir, &tx_dir_kind_prefix(1, TX_KIND_TXID))?
         .collect::<Result<Rows, _>>()?;
     Ok(rows)
 }

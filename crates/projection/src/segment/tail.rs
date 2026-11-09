@@ -132,11 +132,12 @@ pub struct SealedTxOrdinals<'a> {
 impl CreationOrdinals for SealedTxOrdinals<'_> {
     fn creation_ordinal(&self, txid: &[u8; 32]) -> Result<Option<u32>, IndexError> {
         for sealed in self.gens.iter().rev() {
-            let mut prefix = sealed.gen_id.to_be_bytes().to_vec();
+            let mut prefix =
+                format::tx_dir_kind_prefix(sealed.gen_id, format::TX_KIND_TXID).to_vec();
             prefix.extend_from_slice(txid);
             for item in self.snapshot.iter_prefix(ColumnFamily::TxDir, &prefix)? {
                 let (key, value) = item?;
-                if key.len() != format::TX_DIR_KEY_LEN {
+                if format::decode_tx_dir_key(&key).is_none() {
                     continue;
                 }
                 if let Some((_, ordinal, _, _)) = format::decode_tx_dir_value(&value) {
@@ -484,11 +485,9 @@ pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
     }
 
     let gen0 = 0u64.to_be_bytes();
-    for item in snapshot.iter_prefix(ColumnFamily::TxDir, &gen0)? {
+    let txid_gen0 = format::tx_dir_kind_prefix(0, format::TX_KIND_TXID);
+    for item in snapshot.iter_prefix(ColumnFamily::TxDir, &txid_gen0)? {
         let (key, value) = item?;
-        if key.len() != format::TX_DIR_KEY_LEN {
-            continue;
-        }
         let (Some((_, txid, _)), Some((_, ordinal, _, _))) = (
             format::decode_tx_dir_key(&key),
             format::decode_tx_dir_value(&value),

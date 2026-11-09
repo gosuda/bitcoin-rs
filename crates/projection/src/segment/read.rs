@@ -27,9 +27,24 @@ struct TxidRowStream {
 }
 
 impl TxidRowStream {
-    fn head_prefix(&self) -> Option<[u8; 8]> {
+    fn new(scope: Scope, start: &[u8]) -> Self {
+        let mut from = scope.txid_prefix().to_vec();
+        from.extend_from_slice(start);
+        Self {
+            scope,
+            from,
+            rows: VecDeque::new(),
+            exhausted: false,
+        }
+    }
+
+    fn head_txid(&self) -> Option<[u8; 32]> {
         let (key, _) = self.rows.front()?;
-        key.get(8..16)?.try_into().ok()
+        format::decode_tx_dir_key(key).map(|(_, txid, _)| txid)
+    }
+
+    fn head_prefix(&self) -> Option<[u8; 8]> {
+        self.head_txid()?.get(..8)?.try_into().ok()
     }
 }
 
@@ -37,7 +52,7 @@ fn refill_txid_rows(kv: &dyn KvSnapshot, stream: &mut TxidRowStream) -> Result<(
     while stream.rows.is_empty() && !stream.exhausted {
         let scan = kv.scan_prefix_from_bounded(
             ColumnFamily::TxDir,
-            &stream.scope.prefix(),
+            &stream.scope.txid_prefix(),
             &stream.from,
             PrefixScanLimit {
                 max_rows: TX_DIR_CHUNK_ROWS,
@@ -50,13 +65,26 @@ fn refill_txid_rows(kv: &dyn KvSnapshot, stream: &mut TxidRowStream) -> Result<(
         };
         stream.from = last.clone();
         stream.from.push(0);
-        stream.rows.extend(
-            scan.rows
-                .into_iter()
-                .filter(|(key, _)| key.len() == format::TX_DIR_KEY_LEN),
-        );
+        for (key, value) in scan.rows {
+            format::decode_tx_dir_key(&key).ok_or_else(|| malformed("tx_dir key"))?;
+            stream.rows.push_back((key, value));
+        }
     }
     Ok(())
+}
+
+fn skip_txid_rows(
+    kv: &dyn KvSnapshot,
+    stream: &mut TxidRowStream,
+    txid: &[u8; 32],
+) -> Result<(), IndexError> {
+    loop {
+        refill_txid_rows(kv, stream)?;
+        if stream.head_txid().as_ref() != Some(txid) {
+            return Ok(());
+        }
+        stream.rows.pop_front();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +103,10 @@ impl Scope {
 
     fn prefix(self) -> [u8; 8] {
         self.segment_id().to_be_bytes()
+    }
+
+    fn txid_prefix(self) -> [u8; 9] {
+        format::tx_dir_kind_prefix(self.segment_id(), format::TX_KIND_TXID)
     }
 
     const fn covers(self, height: u32) -> bool {
@@ -181,7 +213,7 @@ impl<'a> SegmentSnapshot<'a> {
         let mut rows = BTreeMap::new();
         let mut complete = true;
         for &scope in self.scopes(IndexCapability::TxLookup)? {
-            let mut prefix = scope.prefix().to_vec();
+            let mut prefix = scope.txid_prefix().to_vec();
             prefix.extend_from_slice(txid.as_bytes());
             let scan = self.scan(ColumnFamily::TxDir, &prefix, limit)?;
             complete &= scan.complete;
@@ -318,7 +350,7 @@ impl<'a> SegmentSnapshot<'a> {
         let mut creations = Vec::new();
         let mut complete = true;
         for &scope in scopes {
-            let mut prefix = scope.prefix().to_vec();
+            let mut prefix = scope.txid_prefix().to_vec();
             prefix.extend_from_slice(outpoint.txid.as_bytes());
             let scan = self.scan(ColumnFamily::TxDir, &prefix, limit)?;
             complete &= scan.complete;
@@ -480,20 +512,15 @@ impl TxIndexSnapshot for SegmentSnapshot<'_> {
         limit: PrefixScanLimit,
     ) -> Result<TxIndexPage, IndexError> {
         let scopes = self.scopes(IndexCapability::TxLookup)?;
+        let start: &[u8] = match start_after {
+            Some(cursor) => cursor
+                .get(..8)
+                .ok_or_else(|| malformed("tx lookup cursor"))?,
+            None => &[],
+        };
         let mut streams: Vec<TxidRowStream> = scopes
             .iter()
-            .map(|&scope| {
-                let mut from = scope.prefix().to_vec();
-                if let Some(cursor) = start_after {
-                    from.extend_from_slice(&cursor[..8]);
-                }
-                TxidRowStream {
-                    scope,
-                    from,
-                    rows: VecDeque::new(),
-                    exhausted: false,
-                }
-            })
+            .map(|&scope| TxidRowStream::new(scope, start))
             .collect();
         let kv = self.kv.as_ref();
         let mut page = TxIndexPage {
@@ -724,17 +751,30 @@ impl SegmentSnapshot<'_> {
         limit: PrefixScanLimit,
     ) -> Result<RecordPage, IndexError> {
         let scopes = self.scopes(IndexCapability::ScriptHistory)?;
-        let mut start = [0_u8; 32];
-        if let Some(after) = after {
-            start.copy_from_slice(&after[..32]);
-        }
+        let start: &[u8] = match after {
+            Some(after) => after
+                .get(..32)
+                .ok_or_else(|| malformed("spending record cursor"))?,
+            None => &[],
+        };
+        let kv = self.kv.as_ref();
+        let mut streams: Vec<TxidRowStream> = scopes
+            .iter()
+            .map(|&scope| TxidRowStream::new(scope, start))
+            .collect();
         let mut page = RecordPage::default();
         let mut bytes = 0_usize;
         loop {
-            let Some(txid) = self.next_creation_txid(scopes, start)? else {
+            for stream in &mut streams {
+                refill_txid_rows(kv, stream)?;
+            }
+            let Some(txid) = streams.iter().filter_map(TxidRowStream::head_txid).min() else {
                 page.complete = true;
                 return Ok(page);
             };
+            for stream in &mut streams {
+                skip_txid_rows(kv, stream, &txid)?;
+            }
             for ((vout, height), mut positions) in self.spends_of(scopes, &txid)? {
                 positions.sort_unstable();
                 positions.dedup();
@@ -751,11 +791,6 @@ impl SegmentSnapshot<'_> {
             }
             let full = page.rows.len() >= limit.max_rows || bytes >= limit.max_bytes;
             if full && !page.rows.is_empty() {
-                return Ok(page);
-            }
-            start = txid;
-            if !increment_be(&mut start) {
-                page.complete = true;
                 return Ok(page);
             }
         }
@@ -814,59 +849,6 @@ impl SegmentSnapshot<'_> {
         Ok(hashes)
     }
 
-    fn next_creation_txid(
-        &self,
-        scopes: &[Scope],
-        start: [u8; 32],
-    ) -> Result<Option<[u8; 32]>, IndexError> {
-        let mut least: Option<[u8; 32]> = None;
-        for &scope in scopes {
-            if let Some(txid) = self.creation_txid_from(scope, &start)? {
-                least = Some(least.map_or(txid, |current| current.min(txid)));
-            }
-        }
-        Ok(least)
-    }
-
-    fn creation_txid_from(
-        &self,
-        scope: Scope,
-        start: &[u8; 32],
-    ) -> Result<Option<[u8; 32]>, IndexError> {
-        let mut from = scope.prefix().to_vec();
-        from.extend_from_slice(start);
-        let mut max_rows = 1;
-        loop {
-            let scan = self.kv.scan_prefix_from_bounded(
-                ColumnFamily::TxDir,
-                &scope.prefix(),
-                &from,
-                PrefixScanLimit {
-                    max_rows,
-                    max_bytes: usize::MAX,
-                },
-            )?;
-            if let Some((key, _)) = scan
-                .rows
-                .iter()
-                .find(|(key, _)| key.len() == format::TX_DIR_KEY_LEN)
-            {
-                let (_, txid, _) =
-                    format::decode_tx_dir_key(key).ok_or_else(|| malformed("tx_dir key"))?;
-                return Ok(Some(txid));
-            }
-            let Some((last, _)) = scan.rows.last() else {
-                return Ok(None);
-            };
-            if scan.complete {
-                return Ok(None);
-            }
-            from = last.clone();
-            from.push(0);
-            max_rows = TX_DIR_CHUNK_ROWS;
-        }
-    }
-
     fn spends_of(
         &self,
         scopes: &[Scope],
@@ -874,7 +856,7 @@ impl SegmentSnapshot<'_> {
     ) -> Result<BTreeMap<(u32, u32), Vec<TxPosition>>, IndexError> {
         let mut creations = Vec::new();
         for &scope in scopes {
-            let mut prefix = scope.prefix().to_vec();
+            let mut prefix = scope.txid_prefix().to_vec();
             prefix.extend_from_slice(txid);
             let scan = self.scan(ColumnFamily::TxDir, &prefix, record_limit())?;
             if !scan.complete {
@@ -934,10 +916,10 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    const TXS: u32 = 3_000;
+    const TXS: [u32; 2] = [3_000, 12_000];
     const SCOPES: u32 = 2;
     const PAGE_ROWS: usize = 64;
-    const READ_CHUNK_ROWS: usize = 1_024;
+    const PAGE_READ_SLACK: usize = 1;
     type Row = (Vec<u8>, Vec<u8>);
     type SnapshotRows = Vec<Result<Row, StorageError>>;
 
@@ -1026,10 +1008,10 @@ mod tests {
             .collect()
     }
 
-    fn fixture() -> (BTreeMap<Vec<u8>, Vec<u8>>, Vec<Row>) {
+    fn fixture(txs: u32) -> (BTreeMap<Vec<u8>, Vec<u8>>, Vec<Row>) {
         let mut rows = BTreeMap::new();
         let mut expected = Vec::new();
-        for index in 0..TXS {
+        for index in 0..txs {
             let txid = txid(index);
             let segment = index % SCOPES;
             let ordinal = index / SCOPES;
@@ -1092,39 +1074,33 @@ mod tests {
 
     #[test]
     fn tx_lookup_pages_match_the_full_listing_and_bound_engine_reads() {
-        let (rows, expected) = fixture();
-        let scans = Arc::new(AtomicUsize::new(0));
-        let mut published: [Option<Vec<Scope>>; 4] = std::array::from_fn(|_| None);
-        published[IndexCapability::TxLookup.index()] = Some(scopes());
-        let snapshot = SegmentSnapshot {
-            kv: Box::new(CountingSnapshot {
-                rows,
-                scans: Arc::clone(&scans),
-            }),
-            published,
-        };
-
-        let (paged, reads_per_page) = page_all(&snapshot, &scans, PAGE_ROWS);
-        assert_eq!(
-            paged, expected,
-            "paged listing differs from the full listing"
-        );
-        assert!(reads_per_page.len() > 1, "fixture must span several pages");
-
         let scope_count = usize::try_from(SCOPES).expect("scope count fits usize");
-        let steady = 2 * scope_count + 8;
-        let ordinal_rows = usize::try_from(TXS).expect("count fits usize");
-        let ordinal_run = ordinal_rows / READ_CHUNK_ROWS + scope_count;
-        for (page, &reads) in reads_per_page.iter().enumerate() {
-            let bound = if page == 0 {
-                ordinal_run + steady
-            } else {
-                steady
+        let bound = scope_count + PAGE_READ_SLACK;
+        for txs in TXS {
+            let (rows, expected) = fixture(txs);
+            let scans = Arc::new(AtomicUsize::new(0));
+            let mut published: [Option<Vec<Scope>>; 4] = std::array::from_fn(|_| None);
+            published[IndexCapability::TxLookup.index()] = Some(scopes());
+            let snapshot = SegmentSnapshot {
+                kv: Box::new(CountingSnapshot {
+                    rows,
+                    scans: Arc::clone(&scans),
+                }),
+                published,
             };
-            assert!(
-                reads <= bound,
-                "page {page} made {reads} bounded engine reads, bound {bound}"
+
+            let (paged, reads_per_page) = page_all(&snapshot, &scans, PAGE_ROWS);
+            assert_eq!(
+                paged, expected,
+                "paged listing differs from the full listing at {txs} txs"
             );
+            assert!(reads_per_page.len() > 1, "fixture must span several pages");
+            for (page, &reads) in reads_per_page.iter().enumerate() {
+                assert!(
+                    reads <= bound,
+                    "{txs} txs: page {page} made {reads} engine reads, bound {bound}"
+                );
+            }
         }
     }
 }

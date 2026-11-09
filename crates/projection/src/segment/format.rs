@@ -1,7 +1,10 @@
 pub const TAIL_MAX_BLOCKS: u32 = 2_016;
 pub const TAIL_MAX_BYTES: usize = 32 * 1024 * 1024;
 
-pub const TX_DIR_KEY_LEN: usize = 44;
+pub const TX_KIND_TXID: u8 = 1;
+pub const TX_KIND_ORDINAL: u8 = 2;
+
+pub const TX_DIR_KEY_LEN: usize = 45;
 pub const TX_DIR_VALUE_LEN: usize = 44;
 
 pub const SCRIPT_DICT_KEY_LEN: usize = 40;
@@ -32,26 +35,32 @@ pub fn gen_prefix_end(gen_id: u64) -> [u8; 8] {
     gen_id.saturating_add(1).to_be_bytes()
 }
 
-// PRJ-06, PRJ-07
+#[must_use]
+pub fn tx_dir_kind_prefix(gen_id: u64, kind: u8) -> [u8; 9] {
+    let mut prefix = [0u8; 9];
+    prefix[0..8].copy_from_slice(&gen_id.to_be_bytes());
+    prefix[8] = kind;
+    prefix
+}
+
 #[must_use]
 pub fn encode_tx_dir_key(gen_id: u64, txid: &[u8; 32], height: u32) -> [u8; TX_DIR_KEY_LEN] {
     let mut key = [0u8; TX_DIR_KEY_LEN];
-    key[0..8].copy_from_slice(&gen_id.to_be_bytes());
-    key[8..40].copy_from_slice(txid);
-    key[40..44].copy_from_slice(&height.to_be_bytes());
+    key[0..9].copy_from_slice(&tx_dir_kind_prefix(gen_id, TX_KIND_TXID));
+    key[9..41].copy_from_slice(txid);
+    key[41..45].copy_from_slice(&height.to_be_bytes());
     key
 }
 
-// PRJ-06, PRJ-07
 #[must_use]
 pub fn decode_tx_dir_key(key: &[u8]) -> Option<(u64, [u8; 32], u32)> {
-    if key.len() < TX_DIR_KEY_LEN {
+    if key.len() != TX_DIR_KEY_LEN || key[8] != TX_KIND_TXID {
         return None;
     }
     let gen_id = u64::from_be_bytes(key[0..8].try_into().ok()?);
     let mut txid = [0u8; 32];
-    txid.copy_from_slice(&key[8..40]);
-    let height = u32::from_be_bytes(key[40..44].try_into().ok()?);
+    txid.copy_from_slice(&key[9..41]);
+    let height = u32::from_be_bytes(key[41..45].try_into().ok()?);
     Some((gen_id, txid, height))
 }
 
@@ -85,15 +94,14 @@ pub fn decode_tx_dir_value(val: &[u8]) -> Option<([u8; 32], u32, u32, u32)> {
     Some((block_hash, ordinal, offset, len))
 }
 
-pub const TX_ORDINAL_KEY_LEN: usize = 12;
+pub const TX_ORDINAL_KEY_LEN: usize = 13;
 pub const TX_ORDINAL_VALUE_LEN: usize = 44;
 
-// PRJ-07
 #[must_use]
 pub fn encode_tx_ordinal_key(gen_id: u64, ordinal: u32) -> [u8; TX_ORDINAL_KEY_LEN] {
     let mut key = [0u8; TX_ORDINAL_KEY_LEN];
-    key[0..8].copy_from_slice(&gen_id.to_be_bytes());
-    key[8..12].copy_from_slice(&ordinal.to_be_bytes());
+    key[0..9].copy_from_slice(&tx_dir_kind_prefix(gen_id, TX_KIND_ORDINAL));
+    key[9..13].copy_from_slice(&ordinal.to_be_bytes());
     key
 }
 

@@ -651,7 +651,10 @@ fn restart_clears_a_staged_segment_and_keeps_the_published_one()
 #[test]
 fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation()
 -> Result<(), crate::portable::TestError> {
-    use crate::segment::format::{decode_tx_dir_key, decode_tx_dir_value, encode_spend_dir_key};
+    use crate::segment::format::{
+        TX_KIND_TXID, decode_tx_dir_key, decode_tx_dir_value, encode_spend_dir_key,
+        tx_dir_kind_prefix,
+    };
     use bitcoin_rs_storage::committed_facts::{
         CommittedBlock, CreatedOutput, SpentPrevout, TxFacts,
     };
@@ -727,11 +730,9 @@ fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation(
 
     let snapshot = store.snapshot()?;
     let mut creation = None;
-    for row in snapshot.iter_prefix(ColumnFamily::TxDir, &1_u64.to_be_bytes())? {
+    let txid_rows = tx_dir_kind_prefix(1, TX_KIND_TXID);
+    for row in snapshot.iter_prefix(ColumnFamily::TxDir, &txid_rows)? {
         let (key, value) = row?;
-        if key.len() != crate::segment::format::TX_DIR_KEY_LEN {
-            continue;
-        }
         let (_, txid, _) = decode_tx_dir_key(&key).ok_or("tx directory key")?;
         if txid == [0xA1; 32] {
             let (_, ordinal, _, _) = decode_tx_dir_value(&value).ok_or("tx directory value")?;

@@ -712,16 +712,14 @@ struct Durable {
 }
 
 fn tx_lookup_rows(store: &RocksDbStore) -> Vec<LogicalTxRow> {
-    use bitcoin_rs_projection::segment::format::{
-        TX_DIR_KEY_LEN, decode_tx_dir_key, decode_tx_dir_value,
-    };
+    use bitcoin_rs_projection::segment::format::{decode_tx_dir_key, decode_tx_dir_value};
     let mut rows: Vec<LogicalTxRow> = store
         .iter_prefix(ColumnFamily::TxDir, &[])
         .expect("iterate tx directory")
         .collect::<Result<Vec<_>, _>>()
         .expect("read tx directory")
         .into_iter()
-        .filter(|(key, _)| key.len() == TX_DIR_KEY_LEN)
+        .filter(|(key, _)| decode_tx_dir_key(key).is_some())
         .map(|(key, value)| {
             let (_gen, txid, height) = decode_tx_dir_key(&key).expect("tx directory key");
             let (block_hash, _ordinal, offset, len) =
