@@ -8,9 +8,6 @@ use std::sync::{
 
 pub const DEFAULT_FACTS_QUEUE_CAPACITY: usize = 256;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Gap;
-
 // PRJ-04, PRJ-02, IDX-08, BUD-06, BUD-07
 #[derive(Clone)]
 pub struct FactsQueue {
@@ -51,17 +48,6 @@ impl FactsQueue {
         }
     }
 
-    pub fn drain(&self) -> Result<Vec<Arc<CommittedFacts>>, Gap> {
-        let mut items = Vec::new();
-        while let Ok(facts) = self.rx.try_recv() {
-            self.charge.release(facts.size_bytes());
-            items.push(facts);
-        }
-        if self.gap.load(Ordering::SeqCst) {
-            return Err(Gap);
-        }
-        Ok(items)
-    }
     #[must_use]
     pub fn has_gap(&self) -> bool {
         self.gap.load(Ordering::SeqCst)
@@ -183,8 +169,8 @@ mod tests {
             "the queued facts must be charged to the node budget"
         );
         assert_eq!(budget.available_of_reservations(BudgetOwner::FactsQueue), 0);
-        let drained = queue.drain().expect("no gap");
-        assert_eq!(drained.len(), 1);
+        let received = queue.receiver().try_recv().expect("one queued fact");
+        queue.charge_handle().release(received.size_bytes());
         assert_eq!(budget.available_of_charges(BudgetOwner::FactsQueue), 0);
     }
 

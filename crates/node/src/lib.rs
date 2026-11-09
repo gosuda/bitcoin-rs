@@ -10,7 +10,7 @@ mod embed;
 mod event_loop;
 pub mod facts_queue;
 pub mod options;
-pub use facts_queue::{FactsQueue, Gap};
+pub use facts_queue::FactsQueue;
 
 mod lifecycle;
 pub mod metrics;
