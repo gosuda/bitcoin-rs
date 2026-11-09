@@ -85,6 +85,20 @@ pub(crate) fn stage_streamed<S: KvStore>(
     family: &StreamedFamily,
     scratch: &Path,
 ) -> Result<u64, IndexError> {
+    let staged = stage_streamed_inner(store, gen_id, cf, family, scratch);
+    for run in &family.runs {
+        let _unused = std::fs::remove_file(run.path());
+    }
+    staged
+}
+
+fn stage_streamed_inner<S: KvStore>(
+    store: &S,
+    gen_id: u64,
+    cf: ColumnFamily,
+    family: &StreamedFamily,
+    scratch: &Path,
+) -> Result<u64, IndexError> {
     let prefix = gen_id.to_be_bytes();
     let mut failure: Option<std::io::Error> = None;
     let merged = super::spill::merge(&family.runs)

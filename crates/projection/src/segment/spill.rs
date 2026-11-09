@@ -63,6 +63,12 @@ pub struct SpillSorter<'a> {
 pub struct RunFile {
     path: PathBuf,
 }
+
+impl RunFile {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
 impl<'a> SpillSet<'a> {
     pub fn new(budget: &'a SpillBudget, dir: PathBuf) -> Self {
         Self {
@@ -154,6 +160,19 @@ impl<'a> SpillSet<'a> {
             self.spill(id)?;
         }
         Ok(std::mem::take(&mut self.sorters.borrow_mut()[id].runs))
+    }
+}
+
+impl Drop for SpillSet<'_> {
+    fn drop(&mut self) {
+        let Ok(mut sorters) = self.sorters.try_borrow_mut() else {
+            return;
+        };
+        for state in sorters.iter_mut() {
+            for run in std::mem::take(&mut state.runs) {
+                let _unused = std::fs::remove_file(&run.path);
+            }
+        }
     }
 }
 
