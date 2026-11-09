@@ -478,9 +478,9 @@ impl P2pService {
         self.shared_outbound.set_ledger(ledger);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
-    pub(crate) fn shared_outbound_budget(&self) -> Arc<crate::connection::SharedOutboundBudget> {
+    pub fn shared_outbound_budget(&self) -> Arc<crate::connection::SharedOutboundBudget> {
         Arc::clone(&self.shared_outbound)
     }
 

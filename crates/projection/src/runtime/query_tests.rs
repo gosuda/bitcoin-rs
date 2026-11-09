@@ -3522,3 +3522,41 @@ fn script_live_takes_no_transition_lock() -> Result<(), crate::portable::TestErr
     );
     Ok(())
 }
+// BUD-02
+#[test]
+fn view_charge_refusal_reports_node_budget() -> Result<(), crate::portable::TestError> {
+    let genesis = Network::Regtest.genesis_block();
+    let engine = engine_with_body_source(&genesis, Vec::new(), None)?;
+    struct Refusing;
+    impl bitcoin_rs_storage::budget::BudgetCharge for Refusing {
+        fn reserve_bytes(
+            &self,
+            _owner: bitcoin_rs_storage::budget::BudgetOwner,
+            _bytes: u64,
+        ) -> Result<(), bitcoin_rs_storage::budget::BudgetError> {
+            Err(bitcoin_rs_storage::budget::BudgetError::BudgetExhausted)
+        }
+        fn allocate_bytes(
+            &self,
+            _owner: bitcoin_rs_storage::budget::BudgetOwner,
+            _bytes: u64,
+        ) -> Result<(), bitcoin_rs_storage::budget::BudgetError> {
+            Err(bitcoin_rs_storage::budget::BudgetError::BudgetExhausted)
+        }
+        fn release_bytes(&self, _owner: bitcoin_rs_storage::budget::BudgetOwner, _bytes: u64) {}
+        fn available_bytes(&self, _owner: bitcoin_rs_storage::budget::BudgetOwner) -> u64 {
+            0
+        }
+    }
+    let engine = engine.with_query_charge(Some(bitcoin_rs_storage::budget::ChargeHandle::new(
+        std::sync::Arc::new(Refusing),
+        bitcoin_rs_storage::budget::BudgetOwner::QueryViews,
+    )));
+    assert!(matches!(
+        engine.capture_view(IndexCapabilities::TX_LOOKUP),
+        Err(TxQueryError::Unavailable(
+            TxUnavailableCause::NodeBudgetExhausted
+        ))
+    ));
+    Ok(())
+}

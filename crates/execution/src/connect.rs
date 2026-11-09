@@ -271,7 +271,12 @@ fn prepare_block<'b>(
         Some(ProvenApply::Proven(proof)) => Ok((proof.prepared, false)),
         None => {
             let source = ChainstateUtxoSource::new(handles);
-            let prepared = prepare_apply(payload, &source, handles.validation_engine)?;
+            let prepared = prepare_apply(
+                payload,
+                &source,
+                handles.validation_engine,
+                handles.prevout_charge.clone(),
+            )?;
             source.into_result()?;
             Ok((prepared, false))
         }
@@ -367,7 +372,10 @@ struct ScriptVerification<'a, 'b> {
 }
 
 impl ScriptVerification<'_, '_> {
-    fn run(&mut self, timings: &mut ApplyTimings) -> core::result::Result<ScriptsRan, ApplyError> {
+    fn run(
+        &mut self,
+        timings: &mut ApplyTimings,
+    ) -> core::result::Result<(ScriptsRan, Option<super::PrevoutHold>), ApplyError> {
         let script_verify_started = quanta::Instant::now();
         let script_cache = if self.intent == ApplyIntent::Commit {
             self.handles.script_cache.as_deref()
@@ -375,7 +383,7 @@ impl ScriptVerification<'_, '_> {
             None
         };
         let script_verify_result = if self.transactions_proven {
-            Ok(ScriptsRan::Executed)
+            Ok((ScriptsRan::Executed, None))
         } else {
             verify_block_transactions(
                 self.handles,
@@ -1035,7 +1043,7 @@ impl BlockValidation<'_, '_, '_> {
         }
         .check(&mut view, tx_plan.has_witness, timings)?;
 
-        let scripts_ran = ScriptVerification {
+        let (scripts_ran, _view_hold) = ScriptVerification {
             handles: self.handles,
             view: &mut view,
             tx_plan: &tx_plan,

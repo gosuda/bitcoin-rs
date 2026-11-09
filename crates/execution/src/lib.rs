@@ -859,7 +859,7 @@ impl Chainstate {
             facts: Arc::new(FactsGate::default()),
             retention: self.retention.clone(),
             window_limits: crate::window_limits::default_window_limits_source(),
-            prevout_charge: None,
+            prevout_charge: self.prevout_charge.clone(),
             history: self.history.clone(),
             ibd,
             role: Arc::new(RwLock::new(ChainstateRole::Historical {
@@ -1546,8 +1546,73 @@ impl PrevoutMeta {
     }
 }
 
+pub(crate) struct PrevoutHold {
+    charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
+    bytes: u64,
+}
+
+impl PrevoutHold {
+    pub(crate) fn charge(
+        handle: Option<bitcoin_rs_storage::budget::ChargeHandle>,
+        bytes: u64,
+    ) -> core::result::Result<Option<Self>, ApplyError> {
+        let Some(handle) = handle else {
+            return Ok(None);
+        };
+        if bytes == 0 {
+            return Ok(Some(Self {
+                charge: Some(handle),
+                bytes: 0,
+            }));
+        }
+        handle
+            .charge(bytes)
+            .map_err(|_| ApplyError::StagedBudgetExhausted)?;
+        Ok(Some(Self {
+            charge: Some(handle),
+            bytes,
+        }))
+    }
+}
+
+impl Drop for PrevoutHold {
+    fn drop(&mut self) {
+        if let Some(charge) = self.charge.as_ref() {
+            charge.release(self.bytes);
+        }
+    }
+}
+
+fn resolved_view_bytes(view: &ResolvedUtxoView) -> u64 {
+    let slot = u64::try_from(core::mem::size_of::<Option<TxOut>>()).unwrap_or(u64::MAX);
+    let outpoint = u64::try_from(core::mem::size_of::<OutPoint>()).unwrap_or(u64::MAX);
+    view.external
+        .values()
+        .map(|coin| {
+            let script = u64::try_from(coin.txout.script_pubkey.len()).unwrap_or(u64::MAX);
+            slot.saturating_add(outpoint).saturating_add(script)
+        })
+        .fold(0_u64, u64::saturating_add)
+}
+
+pub(crate) fn prevout_vec_bytes(resolved: &[Vec<Option<TxOut>>]) -> u64 {
+    let slot = u64::try_from(core::mem::size_of::<Option<TxOut>>()).unwrap_or(u64::MAX);
+    resolved
+        .iter()
+        .flatten()
+        .map(|prevout| {
+            let script = prevout
+                .as_ref()
+                .map_or(0, |txout| txout.script_pubkey.len());
+            let script = u64::try_from(script).unwrap_or(u64::MAX);
+            slot.saturating_add(script)
+        })
+        .fold(0_u64, u64::saturating_add)
+}
+
 struct ResolvedUtxoView {
     external: HashMap<OutPoint, UtxoCoin>,
+    _hold: Option<PrevoutHold>,
 }
 
 impl ResolvedUtxoView {
@@ -1566,7 +1631,19 @@ impl ResolvedUtxoView {
             external: candidates
                 .filter_map(|outpoint| utxo.get_entry(&outpoint).map(|entry| (outpoint, entry)))
                 .collect(),
+            _hold: None,
         }
+    }
+    fn resolve_charged<S: bitcoin_rs_storage::utxo::contract::OutputSource + ?Sized>(
+        utxo: &S,
+        image: &BlockImage,
+        tx_plan: &BlockTxPlan,
+        charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
+    ) -> core::result::Result<Self, ApplyError> {
+        let mut view = Self::resolve(utxo, image, tx_plan);
+        let bytes = resolved_view_bytes(&view);
+        view._hold = PrevoutHold::charge(charge, bytes)?;
+        Ok(view)
     }
     fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
         self.external.get(outpoint).map(|entry| entry.txout.clone())

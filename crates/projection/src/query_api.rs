@@ -53,6 +53,7 @@ pub enum TxQueryError {
 pub enum TxUnavailableCause {
     ScriptHashLimitExceeded { limit: usize },
     RowBudgetExhausted,
+    NodeBudgetExhausted,
     RowBudgetExceeded,
     PrefixScanTruncated,
     LivePrefixScanTruncated,
@@ -81,6 +82,7 @@ impl core::fmt::Display for TxUnavailableCause {
                 write!(f, "scripthash limit exceeded ({limit} entries)")
             }
             Self::RowBudgetExhausted => f.write_str("txindex query work budget exhausted"),
+            Self::NodeBudgetExhausted => f.write_str("txindex node budget exhausted"),
             Self::RowBudgetExceeded => f.write_str("txindex query work budget exceeded"),
             Self::PrefixScanTruncated => f.write_str("txindex prefix scan truncated"),
             Self::LivePrefixScanTruncated => f.write_str("txindex live prefix scan truncated"),

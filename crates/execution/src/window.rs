@@ -556,6 +556,7 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
         | ApplyError::DisconnectBelowSnapshotBase { .. }
         | ApplyError::PruneDuringHistoricalValidation { .. }
         | ApplyError::ConnectPastHistoricalTarget { .. }
+        | ApplyError::StagedBudgetExhausted
         | ApplyError::HistoricalTargetHashMismatch { .. } => Operational,
     }
 }
@@ -760,7 +761,12 @@ fn prepare_window<'a>(
                 super::workspace::WindowReadError::Record(source) => ApplyError::UtxoCommit(source),
             });
         }
-        let resolved = Arc::new(ResolvedUtxoView::resolve(&workspace, payload, &tx_plan));
+        let resolved = Arc::new(ResolvedUtxoView::resolve_charged(
+            &workspace,
+            payload,
+            &tx_plan,
+            handles.prevout_charge.clone(),
+        )?);
         if workspace
             .advance(
                 &payload.materialize(),
@@ -856,11 +862,17 @@ fn prove_window_scripts<'a, 'h>(
             if let Some(takes) = takes.take() {
                 takes.rollback();
             }
+            for unit in prepared.iter_mut() {
+                unit.view.set_resolved(Vec::new());
+            }
             return None;
         };
         if !prevouts.admit(prevout_bytes(&resolved)) {
             if let Some(takes) = takes.take() {
                 takes.rollback();
+            }
+            for unit in prepared.iter_mut() {
+                unit.view.set_resolved(Vec::new());
             }
             return None;
         }
@@ -877,6 +889,9 @@ fn prove_window_scripts<'a, 'h>(
         } else {
             if let Some(takes) = takes.take() {
                 takes.rollback();
+            }
+            for unit in prepared.iter_mut() {
+                unit.view.set_resolved(Vec::new());
             }
             return None;
         }
@@ -895,6 +910,9 @@ fn prove_window_scripts<'a, 'h>(
     if verdict.is_err() {
         if let Some(takes) = takes.take() {
             takes.rollback();
+        }
+        for unit in prepared.iter_mut() {
+            unit.view.set_resolved(Vec::new());
         }
         return None;
     }

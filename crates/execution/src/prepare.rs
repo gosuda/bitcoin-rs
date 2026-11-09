@@ -50,11 +50,14 @@ pub(super) fn prepare_apply<'b, S: bitcoin_rs_storage::utxo::contract::OutputSou
     payload: &'b BlockImage,
     source: &S,
     engine: bitcoin_rs_consensus::ValidationEngine,
+    charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
 ) -> core::result::Result<PreparedApply<'b>, ApplyError> {
     let (script_source, facts) = parse_block_for_apply(payload, engine)?;
     let tx_plan = plan_block_transactions(payload, facts.txids());
     let view = bitcoin_rs_consensus::BlockView::from_image(payload, facts);
-    let resolved = Arc::new(ResolvedUtxoView::resolve(source, payload, &tx_plan));
+    let resolved = Arc::new(ResolvedUtxoView::resolve_charged(
+        source, payload, &tx_plan, charge,
+    )?);
     Ok(PreparedApply {
         script_source,
         view,
@@ -269,10 +272,10 @@ pub(super) fn verify_block_transactions(
     provenance: BlockProvenance,
     script_source: &bitcoin_rs_consensus::kernel::BlockScriptSource,
     script_cache: Option<&bitcoin_rs_consensus::ScriptExecutionCache>,
-) -> core::result::Result<ScriptsRan, ApplyError> {
+) -> core::result::Result<(ScriptsRan, Option<super::PrevoutHold>), ApplyError> {
     debug_assert_eq!(view.tx_count(), view.txids().len());
     if tx_plan.only_coinbase {
-        return Ok(ScriptsRan::Executed);
+        return Ok((ScriptsRan::Executed, None));
     }
     let skip_scripts = handles.scripts_verified_upstream(provenance, context.height, context.hash);
     if skip_scripts {
@@ -285,7 +288,7 @@ pub(super) fn verify_block_transactions(
             context.locktime_cutoff,
             context.flags,
         )?;
-        return Ok(ScriptsRan::Skipped);
+        return Ok((ScriptsRan::Skipped, None));
     }
     let resolution_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let resolution_result = if let Some(image) = view.image() {
@@ -299,6 +302,10 @@ pub(super) fn verify_block_transactions(
         "script_verify: profile"
     );
     let resolved = resolution_result?;
+    let hold = super::PrevoutHold::charge(
+        handles.prevout_charge.clone(),
+        super::prevout_vec_bytes(&resolved),
+    )?;
     view.set_resolved(resolved);
     let mut script_timings = bitcoin_rs_consensus::ScriptStageTimings::default();
     let script_input_result = bitcoin_rs_consensus::verify_block_input_scripts(
@@ -317,5 +324,5 @@ pub(super) fn verify_block_transactions(
         "script_verify: profile"
     );
     script_input_result?;
-    Ok(ScriptsRan::Executed)
+    Ok((ScriptsRan::Executed, hold))
 }

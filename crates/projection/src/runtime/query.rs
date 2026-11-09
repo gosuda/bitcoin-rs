@@ -505,7 +505,7 @@ impl DerivedIndexQueryEngine {
         let bytes = u64::try_from(std::mem::size_of::<ServingView>()).unwrap_or(u64::MAX);
         handle
             .charge(bytes)
-            .map_err(|_| TxQueryError::Unavailable(TxUnavailableCause::RowBudgetExhausted))?;
+            .map_err(|_| TxQueryError::Unavailable(TxUnavailableCause::NodeBudgetExhausted))?;
         Ok(Some(ViewCharge {
             handle: handle.clone(),
             bytes,

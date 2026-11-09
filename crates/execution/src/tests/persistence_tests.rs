@@ -157,6 +157,7 @@ fn bip30_overwrite_undo_removes_the_overwritten_coin() -> TestResult {
     let txids = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
     let resolved = ResolvedUtxoView {
         external: HashMap::new(),
+        _hold: None,
     };
     let (_changes, undo, _totals) = build_block_changes(
         &BlockChangeInputs {

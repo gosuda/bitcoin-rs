@@ -646,7 +646,9 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             | ChainError::BadVersion { .. }
             | ChainError::TimewarpAttack { .. }),
         ) => bitcoin_rs_serving::mining::chain_reject_reason(chain),
-        ApplyError::Shutdown | ApplyError::ConcurrentChainChange => {
+        ApplyError::Shutdown
+        | ApplyError::ConcurrentChainChange
+        | ApplyError::StagedBudgetExhausted => {
             return Err(MiningControlError::Unavailable(CompactString::from(
                 error.to_string(),
             )));

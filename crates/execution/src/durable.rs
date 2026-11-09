@@ -525,6 +525,7 @@ fn apply_replayed_gap_block(
                 payload,
                 &UndoRowSpends(&undo),
                 handles.validation_engine,
+                handles.prevout_charge.clone(),
             )?,
         )),
         Ok(_) | Err(UndoLoadError::Missing { .. }) => None,

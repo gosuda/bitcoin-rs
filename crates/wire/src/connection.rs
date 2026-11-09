@@ -315,6 +315,16 @@ impl SharedOutboundBudget {
     pub const fn max_bytes(&self) -> usize {
         self.max_bytes
     }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn test_try_charge(&self, bytes: usize) -> bool {
+        self.try_charge(bytes, self.max_bytes)
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn test_release(&self, bytes: usize) {
+        self.release_counter(bytes);
+    }
 }
 
 impl std::fmt::Debug for SharedOutboundBudget {

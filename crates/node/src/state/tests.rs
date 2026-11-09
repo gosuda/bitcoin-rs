@@ -3,6 +3,7 @@ mod construction;
 mod data_dir_lock;
 mod events;
 mod index;
+mod open;
 mod pow_valid_hook;
 mod prune;
 mod recovery;
