@@ -64,12 +64,27 @@ impl WindowGroup {
     }
 
     pub(super) fn stage(&mut self, pending: PendingBlockCommit) {
-        self.staged_bytes += pending.outcome.block_bytes.len();
+        self.staged_bytes +=
+            pending.outcome.block_bytes.len() + pending.undo_record.as_bytes().len();
         self.pending.push(pending);
     }
 
-    fn should_flush(&self) -> bool {
-        self.pending.len() >= self.limits.max_blocks || self.staged_bytes >= self.limits.max_bytes
+    fn should_flush(
+        &self,
+        workspace: Option<&mut super::workspace::WindowWorkspace>,
+    ) -> core::result::Result<bool, ApplyError> {
+        if self.pending.len() >= self.limits.max_blocks
+            || self.staged_bytes >= self.limits.max_bytes
+        {
+            return Ok(true);
+        }
+        let coin_bytes = match workspace {
+            Some(workspace) => workspace
+                .staged_coin_bytes(self.pending.len())
+                .map_err(ApplyError::UtxoCommit)?,
+            None => 0,
+        };
+        Ok(self.staged_bytes.saturating_add(coin_bytes) >= self.limits.max_bytes)
     }
 
     fn flush(
@@ -423,7 +438,21 @@ pub(super) fn apply_window_admitted(
                 });
             }
         }
-        if group.should_flush() {
+        let flush_now = match group.should_flush(workspace.as_mut()) {
+            Ok(flush_now) => flush_now,
+            Err(source) => {
+                restore_uncommitted_takes(takes.take(), &take_starts, committed.len());
+                group.abandon();
+                return Err(WindowApplyError {
+                    applied: committed.len(),
+                    committed,
+                    source: Box::new(source),
+                    disposition: WindowApplyDisposition::Fatal,
+                    invalidated: Box::default(),
+                });
+            }
+        };
+        if flush_now {
             if let Err(error) = flush_group(
                 &mut group,
                 handles,

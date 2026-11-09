@@ -362,3 +362,76 @@ fn corpus_spend_tx(previous_output: OutPoint) -> Tx {
         lock_time: LockTime::ZERO,
     }
 }
+
+pub(crate) fn apply_headers(chain: &Chainstate, blocks: &[&Block]) -> TestResult {
+    let headers: Vec<_> = blocks.iter().map(|block| block.header).collect();
+    chain.admit_headers(&headers)?;
+    Ok(())
+}
+
+pub(crate) fn commit_genesis_head(chain: &Chainstate) -> TestResult {
+    let genesis = Network::Regtest.genesis_block();
+    seed_durable_head(
+        chain,
+        bitcoin_rs_storage::DurableHead {
+            assumeutxo: crate::AssumeUtxoDiskStatus::Uninitialized,
+            commit_id: 1,
+            height: 0,
+            tip: Hash256::from(genesis.block_hash()),
+            chain_tx_count: 1,
+            body_extent: None,
+            undo_extent: None,
+        },
+    )
+}
+
+const CHURN_PREFIX_BLOCKS: u32 = 200;
+const CHURN_BLOCKS: u32 = 8;
+const CHURN_SPENDS_PER_BLOCK: u32 = 12;
+
+pub(crate) fn churn_corpus() -> TestResult<Corpus> {
+    let mut parent = Network::Regtest.genesis_block().block_hash();
+    let mut prefix = Vec::new();
+    for height in 1..=CHURN_PREFIX_BLOCKS {
+        let block = crate::chain::regtest_fixture::mined_regtest_child_at(parent, height)?;
+        parent = block.block_hash();
+        prefix.push(block);
+    }
+    let mut blocks = Vec::new();
+    for block_index in 0..CHURN_BLOCKS {
+        let height = CHURN_PREFIX_BLOCKS + 1 + block_index;
+        let mut block = crate::chain::regtest_fixture::mined_regtest_child_at(parent, height)?;
+        for spend in 0..CHURN_SPENDS_PER_BLOCK {
+            let funded = usize::try_from(block_index * CHURN_SPENDS_PER_BLOCK + spend)?;
+            let coinbase = prefix
+                .get(funded)
+                .ok_or(TestError::Missing("funded coinbase block"))?;
+            block
+                .txs
+                .push(corpus_spend_tx(OutPoint::new(coinbase.txs[0].txid(), 0)));
+        }
+        block.header.merkle_root = crate::chain::regtest_fixture::merkle_root(&block.txs)
+            .ok_or(TestError::Missing("churn merkle root"))?;
+        crate::chain::regtest_fixture::mine_block_to_declared_target(&mut block)?;
+        parent = block.block_hash();
+        blocks.push(block);
+    }
+    Ok(Corpus { prefix, blocks })
+}
+
+pub(crate) fn funded_chain(
+    corpus: &Corpus,
+    limits: crate::window_limits::WindowLimits,
+) -> TestResult<Chainstate> {
+    let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    chain.set_capture_flags(false, true);
+    chain.window_limits = Arc::new(move || limits);
+    seed_genesis(&chain)?;
+    commit_genesis_head(&chain)?;
+    for block in &corpus.prefix {
+        chain.apply_block(&BlockImage::from_local(block.clone()))?;
+    }
+    let blocks: Vec<&Block> = corpus.blocks.iter().collect();
+    apply_headers(&chain, &blocks)?;
+    Ok(chain)
+}

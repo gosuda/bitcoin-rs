@@ -84,6 +84,9 @@ pub(crate) struct WindowWorkspace {
     flushed_transitions: usize,
     touched: HashMap<Txid, Vec<usize>>,
     engine_presence: HashMap<Txid, bool>,
+    coin_cursor: usize,
+    coin_entries: HashMap<Txid, usize>,
+    coin_bytes: usize,
 }
 
 impl WindowWorkspace {
@@ -99,6 +102,9 @@ impl WindowWorkspace {
             flushed_transitions: 0,
             touched: HashMap::new(),
             engine_presence: HashMap::new(),
+            coin_cursor: 0,
+            coin_entries: HashMap::new(),
+            coin_bytes: 0,
         }
     }
     #[must_use]
@@ -138,7 +144,42 @@ impl WindowWorkspace {
         let delta = Self::build_window_delta(prefix, &self.initial_records)?;
         merge_delta_records(&mut self.initial_records, delta.records.iter())?;
         self.flushed_transitions = end;
+        self.coin_cursor = end;
+        self.coin_entries.clear();
+        self.coin_bytes = 0;
         Ok(delta)
+    }
+
+    pub(crate) fn staged_coin_bytes(&mut self, pending_count: usize) -> Result<usize, UtxoError> {
+        let target = (self.flushed_transitions + pending_count).min(self.transitions.len());
+        while self.coin_cursor < target {
+            let index = self.coin_cursor;
+            for txid in transition_txids(&self.transitions[index]) {
+                let entry = self.coin_entry(txid, index)?;
+                let bytes = entry.as_ref().map_or(0, entry_encoded_len);
+                let previous = self.coin_entries.insert(txid, bytes).unwrap_or(0);
+                self.coin_bytes = self
+                    .coin_bytes
+                    .saturating_sub(previous)
+                    .saturating_add(bytes);
+            }
+            self.coin_cursor += 1;
+        }
+        Ok(self.coin_bytes)
+    }
+
+    fn coin_entry(&self, txid: Txid, through: usize) -> Result<Option<CoinEntry>, UtxoError> {
+        let mut current_outputs = initial_outputs_for_txid(&self.initial_records, txid);
+        for &index in self.touched.get(&txid).into_iter().flatten() {
+            if index >= self.flushed_transitions && index <= through {
+                apply_transition_to_txid_outputs(
+                    &self.transitions[index],
+                    txid,
+                    &mut current_outputs,
+                );
+            }
+        }
+        txid_entry(&self.initial_records, txid, &current_outputs)
     }
 
     pub(crate) fn resolve_external_batch(
@@ -316,30 +357,14 @@ impl WindowWorkspace {
         prefix: &[BlockTransition],
         initial_records: &HashMap<Txid, Option<UtxoRecord>>,
     ) -> Result<WindowDelta, UtxoError> {
-        let touched_txids = touched_txids(prefix);
         let mut delta = WindowDelta::default();
-        for txid in touched_txids {
-            let existed_before = initial_records
-                .get(&txid)
-                .and_then(Option::as_ref)
-                .is_some();
+        for txid in touched_txids(prefix) {
             let mut current_outputs = initial_outputs_for_txid(initial_records, txid);
             for transition in prefix {
                 apply_transition_to_txid_outputs(transition, txid, &mut current_outputs);
             }
-            match (existed_before, current_outputs.is_empty()) {
-                (false, true) => {}
-                (true, true) => delta.push_final(CoinKey(txid.0.to_le_bytes()), None),
-                (_, false) => {
-                    let record = UtxoRecord::from_owned_outputs(
-                        Hash256::from_le_bytes(&txid.0.to_le_bytes()),
-                        &current_outputs,
-                    )?;
-                    delta.push_final(
-                        CoinKey(txid.0.to_le_bytes()),
-                        Some(Bytes::copy_from_slice(record.bytes())),
-                    );
-                }
+            if let Some((key, record)) = txid_entry(initial_records, txid, &current_outputs)? {
+                delta.push_final(key, record);
             }
         }
         delta.records.sort_by_key(|(key, _)| *key);
@@ -506,18 +531,24 @@ fn install_resolved_records(
     Ok(())
 }
 
+fn transition_txids(transition: &BlockTransition) -> impl Iterator<Item = Txid> + '_ {
+    transition
+        .created
+        .iter()
+        .map(|created| created.txid)
+        .chain(transition.spent_outpoints.iter().map(|spent| spent.txid))
+        .chain(
+            transition
+                .bip30_overwrites
+                .iter()
+                .map(|overwrite| overwrite.outpoint.txid),
+        )
+}
+
 fn touched_txids(prefix: &[BlockTransition]) -> Vec<Txid> {
     let mut touched = HashSet::new();
     for transition in prefix {
-        for created in &transition.created {
-            touched.insert(created.txid);
-        }
-        for spent in &transition.spent_outpoints {
-            touched.insert(spent.txid);
-        }
-        for overwrite in &transition.bip30_overwrites {
-            touched.insert(overwrite.outpoint.txid);
-        }
+        touched.extend(transition_txids(transition));
     }
     let mut txids: Vec<Txid> = touched.into_iter().collect();
     txids.sort_unstable();
@@ -529,23 +560,41 @@ fn index_transition(
     index: usize,
     transition: &BlockTransition,
 ) {
-    let txids = transition
-        .created
-        .iter()
-        .map(|created| created.txid)
-        .chain(transition.spent_outpoints.iter().map(|spent| spent.txid))
-        .chain(
-            transition
-                .bip30_overwrites
-                .iter()
-                .map(|overwrite| overwrite.outpoint.txid),
-        );
-    for txid in txids {
+    for txid in transition_txids(transition) {
         let entries = touched.entry(txid).or_default();
         if entries.last() != Some(&index) {
             entries.push(index);
         }
     }
+}
+
+type CoinEntry = (CoinKey, Option<Bytes>);
+
+fn txid_entry(
+    initial_records: &HashMap<Txid, Option<UtxoRecord>>,
+    txid: Txid,
+    current_outputs: &[OwnedUtxoOut],
+) -> Result<Option<CoinEntry>, UtxoError> {
+    let existed_before = initial_records
+        .get(&txid)
+        .and_then(Option::as_ref)
+        .is_some();
+    let key = CoinKey(txid.0.to_le_bytes());
+    match (existed_before, current_outputs.is_empty()) {
+        (false, true) => Ok(None),
+        (true, true) => Ok(Some((key, None))),
+        (_, false) => {
+            let record = UtxoRecord::from_owned_outputs(
+                Hash256::from_le_bytes(&txid.0.to_le_bytes()),
+                current_outputs,
+            )?;
+            Ok(Some((key, Some(Bytes::copy_from_slice(record.bytes())))))
+        }
+    }
+}
+
+fn entry_encoded_len(entry: &CoinEntry) -> usize {
+    entry.0.as_bytes().len() + entry.1.as_ref().map_or(0, Bytes::len)
 }
 
 fn merge_delta_records<'r>(
@@ -818,5 +867,61 @@ mod tests {
                 workspace.build_flush_delta(1).expect("flush one block");
             }
         }
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    enum CoinBytesError {
+        #[error(transparent)]
+        Fixture(Box<crate::test_fixtures::TestError>),
+        #[error(transparent)]
+        Read(#[from] super::WindowReadError),
+        #[error(transparent)]
+        Workspace(#[from] super::WindowWorkspaceError),
+        #[error(transparent)]
+        Utxo(#[from] UtxoError),
+        #[error(transparent)]
+        Height(#[from] std::num::TryFromIntError),
+    }
+
+    impl From<crate::test_fixtures::TestError> for CoinBytesError {
+        fn from(error: crate::test_fixtures::TestError) -> Self {
+            Self::Fixture(Box::new(error))
+        }
+    }
+
+    // BUD-06, WIN-05
+    #[test]
+    fn staged_coin_bytes_equal_the_flush_encoder_after_each_block() -> Result<(), CoinBytesError> {
+        let corpus = crate::test_fixtures::churn_corpus()?;
+        let limits = crate::window_limits::WindowLimits::durable_head_defaults();
+        let chain = crate::test_fixtures::funded_chain(&corpus, limits)?;
+        let outpoints: Vec<super::OutPoint> = corpus
+            .blocks
+            .iter()
+            .flat_map(|block| block.txs.iter().filter(|tx| !tx.is_coinbase()))
+            .flat_map(|tx| tx.inputs.iter().map(|input| input.previous_output))
+            .collect();
+        let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
+        workspace.resolve_external_batch(chain.coins.as_ref(), &outpoints)?;
+        for (index, block) in corpus.blocks.iter().enumerate() {
+            let txids: Vec<Txid> = block.txs.iter().map(|tx| tx.txid()).collect();
+            let height = u32::try_from(corpus.prefix.len() + index + 1)?;
+            workspace.advance(block, &txids, height, &super::HashSet::new())?;
+            let running = workspace.staged_coin_bytes(index + 1)?;
+            let flushed = WindowWorkspace::build_window_delta(
+                &workspace.transitions[..=index],
+                &workspace.initial_records,
+            )?;
+            let encoder_bytes: usize = flushed.records.iter().map(super::entry_encoded_len).sum();
+            assert_eq!(
+                running, encoder_bytes,
+                "running coin bytes diverged from the flush encoder after block {index}"
+            );
+        }
+        assert!(
+            workspace.coin_bytes > 0,
+            "the churn blocks must stage coin bytes"
+        );
+        Ok(())
     }
 }

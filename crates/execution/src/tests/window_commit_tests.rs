@@ -12,17 +12,15 @@ use bitcoin_rs_consensus::primitives::{
     TxOut, Witness,
 };
 use bitcoin_rs_consensus::script::opcode::OP_PUSHNUM_1;
+use bitcoin_rs_storage::ColumnFamily;
 use bitcoin_rs_storage::coins::{CoinKey, CoinStore};
-use bitcoin_rs_storage::commit::AcceptedPrefix;
-use bitcoin_rs_storage::durable_head::DurableHead;
 use bitcoin_rs_storage::utxo::UtxoSet;
-use bitcoin_rs_storage::{ColumnFamily, WindowDelta};
 
 use crate::ApplyError;
 use crate::Chainstate;
 use crate::test_fixtures::{
-    Corpus, CorpusBlockPlan, CorpusSpend, CorpusSpendPlan, TestError, TestResult, coin_scan,
-    handles, seed_genesis,
+    Corpus, CorpusBlockPlan, CorpusSpend, CorpusSpendPlan, TestError, TestResult, apply_headers,
+    coin_scan, commit_genesis_head, handles, seed_genesis,
 };
 use proptest::prelude::*;
 
@@ -39,40 +37,6 @@ fn dump_payloads(blocks: &[Block]) -> Vec<BlockImage> {
         .iter()
         .map(|block| BlockImage::from_local(block.clone()))
         .collect()
-}
-
-fn apply_headers(chain: &Chainstate, blocks: &[&Block]) -> TestResult {
-    let headers: Vec<_> = blocks.iter().map(|block| block.header).collect();
-    chain.admit_headers(&headers)?;
-    Ok(())
-}
-
-fn commit_genesis_head(chain: &Chainstate) -> TestResult {
-    let genesis = Network::Regtest.genesis_block();
-    let prefix = AcceptedPrefix {
-        expected_head: None,
-        next_head: DurableHead {
-            assumeutxo: crate::AssumeUtxoDiskStatus::Uninitialized,
-            commit_id: 1,
-            height: 0,
-            tip: Hash256::from(genesis.block_hash()),
-            chain_tx_count: 1,
-            body_extent: None,
-            undo_extent: None,
-        },
-        undo_rows: Vec::new(),
-        body_rows: Vec::new(),
-        attestation: None,
-        coin_delta: WindowDelta::default(),
-    };
-    chain
-        .commit_authority
-        .commit_prefix(prefix)
-        .map_err(|e| match e {
-            bitcoin_rs_storage::CommitError::Storage(s) => s,
-            other => bitcoin_rs_storage::StorageError::backend(other.to_string()),
-        })?;
-    Ok(())
 }
 
 fn window_slices(len: usize, cuts: &[usize]) -> Vec<(usize, usize)> {

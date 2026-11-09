@@ -15,6 +15,7 @@ mod recovery_marker_order_tests;
 mod utxo_integrity_tests;
 mod window_commit_tests;
 mod window_disposition_tests;
+mod window_flush_budget_tests;
 mod window_invalidation_tests;
 mod window_pipeline_tests;
 mod window_tx_count_tests;
