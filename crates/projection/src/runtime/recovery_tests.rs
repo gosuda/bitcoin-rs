@@ -604,6 +604,30 @@ fn missing_undo_pauses_the_tail_group_at_the_fork_point() {
     assert!(!h.runtime.should_stop());
 }
 
+// EVT-04, IDX-07
+#[test]
+fn unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark() {
+    let fixture = ForkFixture::new(2);
+    fixture.persist_undo();
+    let harness = Harness::with_enabled(
+        &fixture,
+        u32::MAX,
+        IndexCapabilities::HISTORICAL.with_compact_filters(true),
+    );
+    harness.retention.reserve(1).commit(1);
+    harness.set_tip(&fixture.tip(fixture.a[1]));
+    harness.settle(&mut None);
+    harness.assert_at(&fixture.tip(fixture.a[1]));
+    assert!(harness.runtime.compact_filter_failure.read().is_some());
+    assert!(!harness.runtime.should_stop());
+    assert!(harness.watermarks().compact_filters.is_none());
+    assert!(harness.writer.consumer_cursor().expect("cursor").is_none());
+    harness.set_tip(&fixture.tip(fixture.b[1]));
+    harness.settle(&mut None);
+    harness.assert_at(&fixture.tip(fixture.b[1]));
+    assert!(harness.watermarks().compact_filters.is_none());
+}
+
 // IDX-06, IDX-07
 #[test]
 fn rollback_without_undo_preserves_script_history_and_rewinds_siblings() {
