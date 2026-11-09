@@ -3522,6 +3522,223 @@ fn script_live_takes_no_transition_lock() -> Result<(), crate::portable::TestErr
     );
     Ok(())
 }
+
+// QRY-02
+#[test]
+fn traversal_of_a_captured_view_ignores_commits_and_seal_during_it()
+-> Result<(), crate::portable::TestError> {
+    struct NoSpends;
+
+    impl crate::SpentCoins for NoSpends {
+        fn spent_coin(&self, _txid: &[u8; 32], _vout: u32) -> Option<crate::SpentCoin<'_>> {
+            None
+        }
+    }
+
+    fn commit_one(
+        writer: &mut crate::IndexWriter<bitcoin_rs_storage::RocksDbStore>,
+        height: u32,
+        hash: [u8; 32],
+        body: &[u8],
+    ) -> Result<(), crate::portable::TestError> {
+        let prepared = writer.prepare_block_with_spent_scripts(
+            IndexCapabilities::TX_LOOKUP,
+            height,
+            hash,
+            body,
+            &NoSpends,
+        )?;
+        let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
+        if batch.try_push(prepared).is_err() {
+            return Err("one block is admitted per batch".into());
+        }
+        writer.commit_forward(batch)?;
+        Ok(())
+    }
+
+    fn sealed_generation_count(
+        store: &bitcoin_rs_storage::RocksDbStore,
+    ) -> Result<usize, crate::portable::TestError> {
+        use bitcoin_rs_storage::KvStore as _;
+        let snapshot = store.snapshot()?;
+        Ok(crate::segment::sealed_generations(snapshot.as_ref(), IndexCapability::TxLookup)?.len())
+    }
+
+    let genesis = Network::Regtest.genesis_block();
+    let txid_a = genesis
+        .txs
+        .first()
+        .ok_or("genesis carries a coinbase")?
+        .txid();
+    let dir = tempfile::TempDir::new()?;
+    let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(dir.path())?);
+    let scratch = tempfile::TempDir::new()?;
+    let mut writer = crate::IndexWriter::open(Arc::clone(&store), 1)?
+        .with_seal_scratch(scratch.path().to_path_buf());
+    commit_one(
+        &mut writer,
+        0,
+        *genesis.block_hash().as_bytes(),
+        &consensus_bytes(&genesis),
+    )?;
+    assert_eq!(
+        sealed_generation_count(&store)?,
+        0,
+        "no sealed generation exists before the tail reaches its bound"
+    );
+
+    let last_height = crate::segment::format::TAIL_MAX_BLOCKS + 1;
+    let mut chain = Vec::new();
+    let mut parent = genesis.block_hash();
+    for height in 1..=last_height {
+        let block = regtest_fixture::mined_regtest_child_at(parent, height)
+            .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+        parent = block.block_hash();
+        chain.push((
+            height,
+            *block.block_hash().as_bytes(),
+            consensus_bytes(&block),
+            block
+                .txs
+                .first()
+                .ok_or("each mined block carries a coinbase")?
+                .txid(),
+        ));
+    }
+    let txid_b = chain.first().ok_or("the chain is non-empty")?.3;
+    let txid_last = chain.last().ok_or("the chain is non-empty")?.3;
+    assert_ne!(
+        txid_a, txid_b,
+        "each block contributes its own coinbase row"
+    );
+
+    let mut tree = BlockTree::new();
+    let tip_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let tip = tip_snapshot_for(&tree, tip_id)?;
+    let tree = Arc::new(RwLock::new(tree));
+    let applied_tip = Arc::new(ArcSwapOption::empty());
+    applied_tip.store(Some(Arc::new(tip)));
+    let reader: Arc<dyn IndexReader> = Arc::new(crate::Indexer::new(Arc::clone(&store)));
+    let fresh_reader = Arc::clone(&reader);
+    let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+    let engine = DerivedIndexQueryEngine::new(
+        DerivedIndexRuntime::new(wake_tx),
+        reader,
+        bitcoin_rs_execution::chain::BlockTreeReader::new(tree),
+        bitcoin_rs_execution::chain::TipReader::new(applied_tip),
+        None,
+        QueryEngineLive {
+            enabled: IndexCapabilities::ALL,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: None,
+            chain_transition: None,
+        },
+    );
+    let limit = PrefixScanLimit {
+        max_rows: 16,
+        max_bytes: 4096,
+    };
+    let values = |scan: &TxIndexScan| {
+        scan.rows
+            .iter()
+            .map(|row| row.value.clone())
+            .collect::<Vec<_>>()
+    };
+
+    let (view, snapshot) = engine.capture_view(IndexCapabilities::TX_LOOKUP)?;
+    let read = |txid: &Txid| {
+        engine.with_view(
+            IndexCapabilities::TX_LOOKUP,
+            &view,
+            snapshot.as_ref(),
+            |snap: &dyn TxIndexSnapshot, _view, _budget| {
+                snap.transaction_rows(txid, limit)
+                    .map_err(|error| TxQueryError::Storage(error.to_string().into()))
+            },
+        )
+    };
+    let before = values(&read(&txid_a)?);
+    assert_eq!(
+        before.len(),
+        1,
+        "the captured view holds the genesis coinbase row"
+    );
+
+    let (first_committed_tx, first_committed_rx) = std::sync::mpsc::channel::<()>();
+    let (traversed_tx, traversed_rx) = std::sync::mpsc::channel::<()>();
+    let worker = std::thread::spawn(move || -> Result<(), crate::portable::TestError> {
+        let mut blocks = chain.into_iter();
+        let (height, hash, body, _) = blocks.next().ok_or("the chain is non-empty")?;
+        commit_one(&mut writer, height, hash, &body)?;
+        first_committed_tx
+            .send(())
+            .map_err(|_| "the reader stopped")?;
+        traversed_rx
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .map_err(|_| "the reader did not traverse the first commit")?;
+        for (height, hash, body, _) in blocks {
+            commit_one(&mut writer, height, hash, &body)?;
+        }
+        Ok(())
+    });
+
+    first_committed_rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .map_err(|_| "the commit worker did not commit the first block")?;
+    assert_eq!(
+        values(&read(&txid_a)?),
+        before,
+        "a traversal that overlaps the first commit must return the capture-time answer"
+    );
+    assert!(
+        read(&txid_b)?.rows.is_empty(),
+        "a block committed after capture must not appear in the captured view"
+    );
+    traversed_tx
+        .send(())
+        .map_err(|_| "the commit worker stopped")?;
+
+    while !worker.is_finished() {
+        assert_eq!(
+            values(&read(&txid_a)?),
+            before,
+            "a traversal overlapping commits must return the capture-time answer"
+        );
+        assert!(
+            read(&txid_b)?.rows.is_empty(),
+            "rows committed after capture must not appear in the captured view"
+        );
+    }
+    worker.join().map_err(|_| "commit worker panicked")??;
+
+    assert_eq!(
+        sealed_generation_count(&store)?,
+        1,
+        "committing past the tail bound must seal exactly one generation"
+    );
+    assert_eq!(
+        values(&read(&txid_a)?),
+        before,
+        "the captured view keeps its answer after the tail seals"
+    );
+    let fresh = fresh_reader.snapshot()?;
+    assert_eq!(
+        fresh
+            .capability_watermark(IndexCapability::TxLookup)?
+            .map(|watermark| watermark.height),
+        Some(last_height),
+        "the writer committed every block"
+    );
+    assert_eq!(
+        fresh.transaction_rows(&txid_last, limit)?.rows.len(),
+        1,
+        "a view captured after the commits sees the last block"
+    );
+    Ok(())
+}
 // BUD-02
 #[test]
 fn view_charge_refusal_reports_node_budget() -> Result<(), crate::portable::TestError> {
