@@ -67,9 +67,17 @@ pub struct CoinStore {
 
 impl CoinStore {
     pub fn open(store: Arc<dyn KvStore>, budget_bytes: u64) -> Self {
+        Self::open_with_charge(store, budget_bytes, None)
+    }
+
+    pub fn open_with_charge(
+        store: Arc<dyn KvStore>,
+        budget_bytes: u64,
+        charge: Option<crate::budget::ChargeHandle>,
+    ) -> Self {
         Self {
             store,
-            cache: CoinCache::new(budget_bytes),
+            cache: CoinCache::with_charge(budget_bytes, charge),
         }
     }
 

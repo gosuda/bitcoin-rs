@@ -401,6 +401,7 @@ pub struct Chainstate {
     pub(crate) facts: Arc<FactsGate>,
     pub(crate) retention: bitcoin_rs_storage::MandatoryRetention,
     pub(crate) window_limits: crate::window_limits::WindowLimitsSource,
+    pub(crate) prevout_charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
     pub(crate) history: bitcoin_rs_storage::pruning::HistoryAccess,
     ibd: Arc<crate::chain::InitialBlockDownload>,
     pub(crate) role: Arc<RwLock<ChainstateRole>>,
@@ -562,10 +563,15 @@ impl Chainstate {
             facts: Arc::new(FactsGate::default()),
             retention: parts.retention,
             window_limits: parts.window_limits,
+            prevout_charge: None,
             history: parts.history,
             ibd,
             role: Arc::new(RwLock::new(parts.role)),
         }
+    }
+
+    pub fn set_prevout_charge(&mut self, charge: bitcoin_rs_storage::budget::ChargeHandle) {
+        self.prevout_charge = Some(charge);
     }
 
     #[must_use]
@@ -853,6 +859,7 @@ impl Chainstate {
             facts: Arc::new(FactsGate::default()),
             retention: self.retention.clone(),
             window_limits: crate::window_limits::default_window_limits_source(),
+            prevout_charge: None,
             history: self.history.clone(),
             ibd,
             role: Arc::new(RwLock::new(ChainstateRole::Historical {
@@ -1243,6 +1250,7 @@ impl Chainstate {
             facts: Arc::new(FactsGate::default()),
             retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
             window_limits: crate::window_limits::default_window_limits_source(),
+            prevout_charge: None,
             history: bitcoin_rs_storage::pruning::HistoryAccess::new(
                 retention,
                 bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(

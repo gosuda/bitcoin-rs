@@ -571,6 +571,7 @@ pub struct DerivedIndexOpenSpec {
     pub facts_rx:
         Option<crossbeam_channel::Receiver<std::sync::Arc<bitcoin_rs_storage::CommittedFacts>>>,
     pub facts_charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
+    pub query_charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
     pub facts_gap: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub cpu: Option<Arc<bitcoin_rs_storage::budget::CpuShares>>,
 }

@@ -586,6 +586,7 @@ impl Node {
             bundle: start.bundle,
             facts_rx: None,
             facts_charge: None,
+            query_charge: None,
             facts_gap: None,
             cpu: None,
         };

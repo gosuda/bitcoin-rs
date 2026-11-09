@@ -36,12 +36,16 @@ impl ShardState {
 /// values; `lookup` never returns bytes that did not enter through those two
 /// paths.
 ///
-/// Lock order: the global resident counter first, then a shard lock. `lookup`
-/// takes only a shard lock.
+/// Lock order: never hold the node ledger and the resident/shard locks
+/// together. A mutation charges the ledger before locking, then adjusts the
+/// resident counter under its lock, then releases any evicted bytes after
+/// unlocking. The charge handle is fixed at construction so the ledger
+/// balance tracks the resident counter from an empty cache.
 pub struct CoinCache {
     budget_bytes: u64,
     resident: Mutex<u64>,
     shards: Box<[ShardLock]>,
+    charge: Option<super::super::budget::ChargeHandle>,
 }
 
 #[repr(align(64))]
@@ -59,6 +63,14 @@ impl ShardLock {
 impl CoinCache {
     #[must_use]
     pub fn new(budget_bytes: u64) -> Self {
+        Self::with_charge(budget_bytes, None)
+    }
+
+    #[must_use]
+    pub fn with_charge(
+        budget_bytes: u64,
+        charge: Option<super::super::budget::ChargeHandle>,
+    ) -> Self {
         Self {
             budget_bytes,
             resident: Mutex::new(0),
@@ -72,6 +84,23 @@ impl CoinCache {
                     }),
                 })
                 .collect(),
+            charge,
+        }
+    }
+
+    fn charge_delta(&self, bytes: u64) -> bool {
+        let Some(handle) = self.charge.clone() else {
+            return true;
+        };
+        handle.charge(bytes).is_ok()
+    }
+
+    fn release_delta(&self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        if let Some(handle) = self.charge.clone() {
+            handle.release(bytes);
         }
     }
 
@@ -107,8 +136,7 @@ impl CoinCache {
     }
 
     pub fn fill_after_read_guarded(&self, key: &CoinKey, value: Bytes, expected_epoch: u64) {
-        let shard_idx = usize::from(key.shard());
-        let shard_lock = &self.shards[shard_idx];
+        let shard_lock = &self.shards[usize::from(key.shard())];
         if shard_lock.epoch.load(Ordering::Acquire) != expected_epoch {
             return;
         }
@@ -116,21 +144,44 @@ impl CoinCache {
         if value_bytes > self.budget_bytes {
             return;
         }
+        if !self.charge_delta(value_bytes) {
+            return;
+        }
+        let (admitted, freed) =
+            self.insert_fresh_locked(shard_lock, key, value, value_bytes, expected_epoch);
+        self.release_delta(freed);
+        if !admitted {
+            self.release_delta(value_bytes);
+        }
+    }
+
+    fn insert_fresh_locked(
+        &self,
+        shard_lock: &ShardLock,
+        key: &CoinKey,
+        value: Bytes,
+        value_bytes: u64,
+        expected_epoch: u64,
+    ) -> (bool, u64) {
         let mut resident = self.resident.lock();
         let mut shard = shard_lock.lock();
         if shard_lock.epoch.load(Ordering::Acquire) != expected_epoch {
-            return;
+            return (false, 0);
         }
-        if let Some(entry) = shard.entries.iter_mut().find(|entry| entry.key == *key) {
-            entry.referenced = true;
-            return;
+        if shard.entries.iter().any(|entry| entry.key == *key) {
+            if let Some(entry) = shard.entries.iter_mut().find(|entry| entry.key == *key) {
+                entry.referenced = true;
+            }
+            return (false, 0);
         }
+        let mut freed = 0_u64;
         while *resident + value_bytes > self.budget_bytes && !shard.entries.is_empty() {
-            let freed = clock_evict_one(&mut shard);
-            *resident -= freed;
+            let evicted = clock_evict_one(&mut shard);
+            freed += evicted;
+            *resident -= evicted;
         }
         if *resident + value_bytes > self.budget_bytes {
-            return;
+            return (false, freed);
         }
         shard.entries.push(ClockEntry {
             key: *key,
@@ -138,36 +189,64 @@ impl CoinCache {
             referenced: true,
         });
         *resident += value_bytes;
+        (true, freed)
     }
 
+    /// Replaces the entry for `key`. The old entry always leaves the cache
+    /// and the shard epoch always advances, even when the new value is
+    /// refused, so a stale read can never survive an install.
     pub fn install(&self, key: &CoinKey, record: Option<Bytes>) {
-        let shard_idx = usize::from(key.shard());
-        let shard_lock = &self.shards[shard_idx];
+        let wanted = record
+            .as_ref()
+            .map(|value| u64::try_from(value.len()).unwrap_or(u64::MAX));
+        let charged = match wanted {
+            Some(bytes) if bytes <= self.budget_bytes && self.charge_delta(bytes) => Some(bytes),
+            _ => None,
+        };
+        let value = record.filter(|_| charged.is_some());
+        let (inserted, released) = self.replace_locked(key, value);
+        self.release_delta(released);
+        if let Some(bytes) = charged {
+            if !inserted {
+                self.release_delta(bytes);
+            }
+        }
+    }
+
+    /// Runs under the resident lock then the shard lock. Returns whether
+    /// `value` was inserted and how many charged bytes left the cache.
+    fn replace_locked(&self, key: &CoinKey, value: Option<Bytes>) -> (bool, u64) {
+        let shard_lock = &self.shards[usize::from(key.shard())];
         let mut resident = self.resident.lock();
         let mut shard = shard_lock.lock();
+        let mut released = 0_u64;
         if let Some(position) = shard.entries.iter().position(|entry| entry.key == *key) {
             let removed = shard.entries.remove(position);
             fix_hand_after_removal(&mut shard, position);
-            *resident -= u64::try_from(removed.value.len()).unwrap_or(0);
-        }
-        if let Some(value) = record {
-            let value_bytes = u64::try_from(value.len()).unwrap_or(u64::MAX);
-            if value_bytes <= self.budget_bytes {
-                while *resident + value_bytes > self.budget_bytes && !shard.entries.is_empty() {
-                    let freed = clock_evict_one(&mut shard);
-                    *resident -= freed;
-                }
-                if *resident + value_bytes <= self.budget_bytes {
-                    shard.entries.push(ClockEntry {
-                        key: *key,
-                        value,
-                        referenced: true,
-                    });
-                    *resident += value_bytes;
-                }
-            }
+            let bytes = u64::try_from(removed.value.len()).unwrap_or(u64::MAX);
+            *resident -= bytes;
+            released += bytes;
         }
         shard_lock.epoch.fetch_add(1, Ordering::Release);
+        let Some(value) = value else {
+            return (false, released);
+        };
+        let bytes = u64::try_from(value.len()).unwrap_or(u64::MAX);
+        while *resident + bytes > self.budget_bytes && !shard.entries.is_empty() {
+            let evicted = clock_evict_one(&mut shard);
+            *resident -= evicted;
+            released += evicted;
+        }
+        if *resident + bytes > self.budget_bytes {
+            return (false, released);
+        }
+        shard.entries.push(ClockEntry {
+            key: *key,
+            value,
+            referenced: true,
+        });
+        *resident += bytes;
+        (true, released)
     }
 
     pub fn note_bytes(&self, shard_index: u8, bytes: usize) {
@@ -175,50 +254,73 @@ impl CoinCache {
         if charge > self.budget_bytes {
             return;
         }
+        if !self.charge_delta(charge) {
+            return;
+        }
+        let (admitted, freed) = self.note_locked(shard_index, charge);
+        self.release_delta(freed);
+        if !admitted {
+            self.release_delta(charge);
+        }
+    }
+
+    fn note_locked(&self, shard_index: u8, charge: u64) -> (bool, u64) {
         let mut resident = self.resident.lock();
         let mut shard = self.shards[usize::from(shard_index)].lock();
+        let mut freed = 0_u64;
         while *resident + charge > self.budget_bytes && !shard.entries.is_empty() {
-            let freed = clock_evict_one(&mut shard);
-            *resident -= freed;
+            let evicted = clock_evict_one(&mut shard);
+            freed += evicted;
+            *resident -= evicted;
         }
         if *resident + charge > self.budget_bytes {
-            return;
+            return (false, freed);
         }
         shard.overhead_bytes += charge;
         *resident += charge;
+        (true, freed)
     }
 
     pub fn evict_to_budget(&self) {
-        let mut resident = self.resident.lock();
-        while *resident > self.budget_bytes {
-            let mut heaviest: Option<usize> = None;
-            let mut heaviest_bytes = 0_u64;
-            for (index, shard) in self.shards.iter().enumerate() {
-                let bytes = shard.lock().entry_bytes();
-                if bytes > heaviest_bytes {
-                    heaviest_bytes = bytes;
-                    heaviest = Some(index);
+        let freed = {
+            let mut resident = self.resident.lock();
+            let mut freed = 0_u64;
+            while *resident > self.budget_bytes {
+                let mut heaviest: Option<usize> = None;
+                let mut heaviest_bytes = 0_u64;
+                for (index, shard) in self.shards.iter().enumerate() {
+                    let bytes = shard.lock().entry_bytes();
+                    if bytes > heaviest_bytes {
+                        heaviest_bytes = bytes;
+                        heaviest = Some(index);
+                    }
                 }
+                let Some(index) = heaviest else {
+                    break;
+                };
+                let mut shard = self.shards[index].lock();
+                let evicted = clock_evict_one(&mut shard);
+                freed += evicted;
+                *resident -= evicted;
             }
-            let Some(index) = heaviest else {
-                return;
-            };
-            let mut shard = self.shards[index].lock();
-            let freed = clock_evict_one(&mut shard);
-            *resident -= freed;
-        }
+            freed
+        };
+        self.release_delta(freed);
     }
 
     pub fn clear(&self) {
-        let mut resident = self.resident.lock();
-        for shard_lock in &self.shards {
-            let mut shard = shard_lock.lock();
-            shard.entries.clear();
-            shard.overhead_bytes = 0;
-            shard.hand = 0;
-            shard_lock.epoch.fetch_add(1, Ordering::Release);
-        }
-        *resident = 0;
+        let resident = {
+            let mut guard = self.resident.lock();
+            for shard_lock in &self.shards {
+                let mut shard = shard_lock.lock();
+                shard.entries.clear();
+                shard.overhead_bytes = 0;
+                shard.hand = 0;
+                shard_lock.epoch.fetch_add(1, Ordering::Release);
+            }
+            std::mem::replace(&mut *guard, 0)
+        };
+        self.release_delta(resident);
     }
 }
 

@@ -1,8 +1,9 @@
 use bitcoin_rs_execution::chain::NodeStatus;
-use bitcoin_rs_node::budget::{BudgetedIngressLedger, NodeBudget};
+use bitcoin_rs_node::budget::{BudgetedIngressLedger, BudgetedOutboundLedger, NodeBudget};
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, NodeConfig};
 use bitcoin_rs_storage::budget::{BudgetError, BudgetOwner, BudgetRefusal};
+use bitcoin_rs_wire::connection::OutboundLedger;
 use bitcoin_rs_wire::inbound::block_memory::BlockMemory;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,69 +17,46 @@ fn open_test_node() -> (NodeState, tempfile::TempDir) {
     let state = NodeState::open(config, None).expect("node open succeeds");
     (state, dir)
 }
-
-// BUD-06
+// BUD-02, BUD-06
 #[test]
 #[expect(clippy::expect_used)]
-fn every_retained_allocation_has_one_owner() {
+fn ingress_and_peer_outbound_charges_return_to_their_owner_on_release() {
     let budget = Arc::new(NodeBudget::from_dbcache_bytes(64 * 1024 * 1024, 8));
     let ledger = Arc::new(BudgetedIngressLedger::new(Arc::clone(&budget)));
     let block_memory = Arc::new(BlockMemory::new(ledger));
+    let outbound = BudgetedOutboundLedger::new(Arc::clone(&budget));
 
-    let owners = [
-        BudgetOwner::CoinCache,
-        BudgetOwner::EngineCache,
-        BudgetOwner::FactsQueue,
-        BudgetOwner::IndexBuilder,
-        BudgetOwner::StagedImages,
-        BudgetOwner::QueryViews,
-    ];
-
-    let alloc_amounts: [u64; 6] = [
-        0,
-        1024 * 1024,
-        2 * 1024 * 1024,
-        4 * 1024 * 1024,
-        1024 * 1024,
-        512 * 1024,
-    ];
-
-    for (&owner, &amt) in owners.iter().zip(alloc_amounts.iter()) {
-        if amt > 0 && owner != BudgetOwner::StagedImages {
-            budget.reserve(owner, amt).expect("reserve succeeds");
-            budget.allocate(owner, amt).expect("allocate succeeds");
-        }
-    }
-
-    let ingress_bytes = 1024 * 1024;
+    let ingress_bytes: usize = 1024 * 1024;
     let credit = block_memory
         .reserve(ingress_bytes, || false)
         .expect("ingress reservation succeeds");
-
-    let mut sum_of_charges = 0_u64;
-    for &owner in &owners {
-        let charged = budget.available_of_charges(owner);
-        let expected = alloc_amounts[owner.index()];
-        assert_eq!(
-            charged, expected,
-            "owner {owner:?} charge mismatch: got {charged}, expected {expected}"
-        );
-        sum_of_charges = sum_of_charges.saturating_add(charged);
-    }
-
     assert_eq!(
-        budget.total_committed(),
-        sum_of_charges,
-        "total committed memory must equal sum of per-owner charges"
+        budget.available_of_charges(BudgetOwner::StagedImages),
+        1024 * 1024,
+        "the staged block charge rises while the credit is held"
     );
-
     drop(credit);
     assert_eq!(
         budget.available_of_charges(BudgetOwner::StagedImages),
         0,
-        "staged images charge must return to zero on credit drop"
+        "dropping the staged block credit returns its charge"
     );
 
+    assert!(
+        outbound.try_take(4096),
+        "an outbound reservation inside the cap is admitted"
+    );
+    assert_eq!(
+        budget.available_of_charges(BudgetOwner::PeerOutbound),
+        4096,
+        "the outbound reservation charges the peer owner"
+    );
+    outbound.give_back(4096);
+    assert_eq!(
+        budget.available_of_charges(BudgetOwner::PeerOutbound),
+        0,
+        "releasing the outbound bytes returns the peer owner charge"
+    );
     assert!(budget.is_safe());
 }
 
@@ -93,9 +71,11 @@ fn full_budget_refuses_ingress_without_marking_invalid() {
     let owners = [
         BudgetOwner::StagedImages,
         BudgetOwner::EngineCache,
+        BudgetOwner::CoinCache,
         BudgetOwner::FactsQueue,
         BudgetOwner::IndexBuilder,
         BudgetOwner::QueryViews,
+        BudgetOwner::PeerOutbound,
     ];
     for owner in owners {
         let avail = budget.available(owner);

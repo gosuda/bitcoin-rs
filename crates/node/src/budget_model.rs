@@ -11,6 +11,7 @@ pub(crate) enum AllocationOwner {
     IndexBuilder = 3,
     StagedImages = 4,
     QueryViews = 5,
+    PeerOutbound = 6,
 }
 
 impl AllocationOwner {
@@ -24,6 +25,7 @@ impl AllocationOwner {
             Self::IndexBuilder => 3,
             Self::StagedImages => 4,
             Self::QueryViews => 5,
+            Self::PeerOutbound => 6,
         }
     }
 
@@ -48,11 +50,10 @@ pub(crate) enum BudgetError {
     #[error("engine cache accounting is unsupported for this backend")]
     EngineCacheUnsupported,
 }
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BudgetState {
-    pub(crate) charges: [u32; 6],
-    pub(crate) reserved: [u32; 6],
+    pub(crate) charges: [u32; 7],
+    pub(crate) reserved: [u32; 7],
     pub(crate) block_staged: bool,
     pub(crate) block_refused: bool,
     pub(crate) consensus_invalid: bool,
@@ -78,6 +79,9 @@ pub(crate) enum Action {
     ReserveEngineCache(u32),
     AllocateEngineCache(u32),
     ReleaseEngineCache(u32),
+    ReservePeerOutbound(u32),
+    AllocatePeerOutbound(u32),
+    ReleasePeerOutbound(u32),
     Stutter,
 }
 
@@ -85,8 +89,8 @@ impl BudgetState {
     #[must_use]
     pub(crate) const fn init(total_budget: u32, foreground_reserve: u32) -> Self {
         Self {
-            charges: [0; 6],
-            reserved: [0; 6],
+            charges: [0; 7],
+            reserved: [0; 7],
             block_staged: false,
             block_refused: false,
             consensus_invalid: false,
@@ -99,8 +103,8 @@ impl BudgetState {
     #[must_use]
     pub(crate) const fn init_mdbx(total_budget: u32, foreground_reserve: u32) -> Self {
         Self {
-            charges: [0; 6],
-            reserved: [0; 6],
+            charges: [0; 7],
+            reserved: [0; 7],
             block_staged: false,
             block_refused: false,
             consensus_invalid: false,
@@ -272,6 +276,15 @@ pub(crate) fn step(s: &BudgetState, a: Action) -> BudgetState {
         }
         Action::ReleaseEngineCache(amt) => {
             let _ = next.release(AllocationOwner::EngineCache, amt);
+        }
+        Action::ReservePeerOutbound(amt) => {
+            let _ = next.reserve(AllocationOwner::PeerOutbound, amt);
+        }
+        Action::AllocatePeerOutbound(amt) => {
+            let _ = next.allocate(AllocationOwner::PeerOutbound, amt);
+        }
+        Action::ReleasePeerOutbound(amt) => {
+            let _ = next.release(AllocationOwner::PeerOutbound, amt);
         }
         Action::Stutter => {}
     }

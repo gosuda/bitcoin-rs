@@ -129,6 +129,7 @@ mod tests {
                 facts_queue: 4_096,
                 index_builder: 0,
                 query_views: 0,
+                peer_outbound: 0,
                 foreground_reserve: 0,
             },
             4,

@@ -22,6 +22,7 @@ fn test_open_spec(dir: &std::path::Path, epoch: u64) -> DerivedIndexOpenSpec {
         bundle: crate::portable::IndexBundleDirective::None,
         facts_rx: None,
         facts_charge: None,
+        query_charge: None,
         facts_gap: None,
         cpu: None,
         open_store: Arc::new(move |dir| {

@@ -154,6 +154,7 @@ fn shutdown_before_thread_creation_never_touches_the_store() -> std::io::Result<
         bundle: crate::portable::IndexBundleDirective::None,
         facts_rx: None,
         facts_charge: None,
+        query_charge: None,
         facts_gap: None,
         cpu: None,
     };
@@ -290,6 +291,7 @@ fn recovery_open_spec(dir: &Path) -> DerivedIndexOpenSpec {
         bundle: crate::portable::IndexBundleDirective::None,
         facts_rx: None,
         facts_charge: None,
+        query_charge: None,
         facts_gap: None,
         cpu: None,
     }

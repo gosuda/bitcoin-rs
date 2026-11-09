@@ -21,6 +21,7 @@ pub const STAGED_IMAGE_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 pub const FACTS_QUEUE_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 pub const INDEX_BUILDER_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 pub const QUERY_VIEW_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
+pub const PEER_OUTBOUND_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 pub const FOREGROUND_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
 
 const INGRESS_WAIT_POLL: Duration = Duration::from_millis(100);
@@ -33,22 +34,24 @@ pub struct BudgetCaps {
     pub facts_queue: u64,
     pub index_builder: u64,
     pub query_views: u64,
+    pub peer_outbound: u64,
     pub foreground_reserve: u64,
 }
 
 impl BudgetCaps {
-    /// `dbcache_mb` stays the operator knob for the cache-class owners
-    /// (`BUD-06`): it sizes the engine caches now, and the coin cache share
-    /// is carved out of it when the coin store lands in the engine.
+    /// `dbcache_mb` is the operator knob for the cache-class owners
+    /// (`BUD-06`). The coin cache and the engine each get the full budget as
+    /// their cap; the chainstate coin share is at most the full budget.
     #[must_use]
     pub fn from_dbcache_bytes(dbcache_bytes: u64) -> Self {
         Self {
             staged_images: STAGED_IMAGE_BUDGET_BYTES,
             engine_cache: dbcache_bytes,
-            coin_cache: 0,
+            coin_cache: dbcache_bytes,
             facts_queue: FACTS_QUEUE_BUDGET_BYTES,
             index_builder: INDEX_BUILDER_BUDGET_BYTES,
             query_views: QUERY_VIEW_BUDGET_BYTES,
+            peer_outbound: PEER_OUTBOUND_BUDGET_BYTES,
             foreground_reserve: FOREGROUND_RESERVE_BYTES,
         }
     }
@@ -62,6 +65,7 @@ impl BudgetCaps {
             BudgetOwner::IndexBuilder => self.index_builder,
             BudgetOwner::StagedImages => self.staged_images,
             BudgetOwner::QueryViews => self.query_views,
+            BudgetOwner::PeerOutbound => self.peer_outbound,
         }
     }
 
@@ -73,13 +77,14 @@ impl BudgetCaps {
             .saturating_add(self.facts_queue)
             .saturating_add(self.index_builder)
             .saturating_add(self.query_views)
+            .saturating_add(self.peer_outbound)
     }
 }
 
 #[derive(Default)]
 struct Ledger {
-    charges: [u64; 6],
-    reserved: [u64; 6],
+    charges: [u64; 7],
+    reserved: [u64; 7],
     ingress_refused: bool,
 }
 
@@ -444,6 +449,36 @@ impl bitcoin_rs_wire::inbound::block_memory::IngressLedger for BudgetedIngressLe
 
     fn wait_released(&self, timeout: Duration) {
         self.budget.wait_released(timeout);
+    }
+}
+
+/// `BUD-02`: backs the wire shared outbound budget from the node ledger.
+pub struct BudgetedOutboundLedger {
+    budget: Arc<NodeBudget>,
+}
+
+impl BudgetedOutboundLedger {
+    #[must_use]
+    pub fn new(budget: Arc<NodeBudget>) -> Self {
+        Self { budget }
+    }
+}
+
+impl bitcoin_rs_wire::connection::OutboundLedger for BudgetedOutboundLedger {
+    fn try_take(&self, bytes: usize) -> bool {
+        let bytes_u64 = u64::try_from(bytes).unwrap_or(u64::MAX);
+        self.budget
+            .reserve(BudgetOwner::PeerOutbound, bytes_u64)
+            .is_ok()
+            && self
+                .budget
+                .allocate(BudgetOwner::PeerOutbound, bytes_u64)
+                .is_ok()
+    }
+
+    fn give_back(&self, bytes: usize) {
+        let bytes_u64 = u64::try_from(bytes).unwrap_or(0);
+        let _ = self.budget.release(BudgetOwner::PeerOutbound, bytes_u64);
     }
 }
 

@@ -1085,3 +1085,62 @@ fn a_release_that_leaves_the_queue_saturated_does_not_end_the_wait() {
 fn wire_len_of(message: &crate::Message) -> usize {
     crate::wire::wire_len(message).unwrap_or_else(|_| panic!("test message must encode"))
 }
+
+#[derive(Default)]
+struct RecordingLedger {
+    balance: parking_lot::Mutex<usize>,
+}
+
+impl super::OutboundLedger for RecordingLedger {
+    fn try_take(&self, bytes: usize) -> bool {
+        *self.balance.lock() += bytes;
+        true
+    }
+
+    fn give_back(&self, bytes: usize) {
+        *self.balance.lock() -= bytes;
+    }
+}
+
+struct RefusingLedger;
+
+impl super::OutboundLedger for RefusingLedger {
+    fn try_take(&self, _bytes: usize) -> bool {
+        false
+    }
+
+    fn give_back(&self, _bytes: usize) {}
+}
+
+fn budget_on_ledger(ledger: Arc<dyn super::OutboundLedger>) -> Arc<OutboundBudget> {
+    let shared = Arc::new(SharedOutboundBudget::with_limits(1 << 20, 0));
+    shared.set_ledger(ledger);
+    let mut budget = OutboundBudget::with_block_reserve(8, 1 << 20, 0);
+    budget.shared = Some(shared);
+    Arc::new(budget)
+}
+
+// BUD-02
+#[test]
+fn outbound_send_charges_the_peer_owner_and_returns_it_on_release() -> TestResult {
+    let ledger = Arc::new(RecordingLedger::default());
+    let budget = budget_on_ledger(ledger.clone());
+    let Ok(credit) = budget.try_charge(4096) else {
+        return Err(TestError::Missing("admitted send"));
+    };
+    assert_eq!(*ledger.balance.lock(), 4096, "the send charges the ledger");
+    drop(credit);
+    assert_eq!(*ledger.balance.lock(), 0, "the release returns the charge");
+    Ok(())
+}
+
+// BUD-02
+#[test]
+fn outbound_send_refused_by_the_ledger_is_shared_backpressure() -> TestResult {
+    let budget = budget_on_ledger(Arc::new(RefusingLedger));
+    match budget.try_charge(4096) {
+        Err(Refusal::Shared) => Ok(()),
+        Err(Refusal::Local) => Err(TestError::Missing("shared refusal, got local")),
+        Ok(_) => Err(TestError::Missing("refused send was admitted")),
+    }
+}

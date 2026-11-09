@@ -1,11 +1,14 @@
 use super::{BudgetCaps, NodeBudget, STAGED_IMAGE_BUDGET_BYTES};
 use crate::budget_model::{self, Action, AllocationOwner};
 use bitcoin_rs_execution::WindowLimits;
-use bitcoin_rs_storage::budget::{BudgetError, BudgetOwner, BudgetRefusal};
+use bitcoin_rs_storage::budget::{BudgetError, BudgetOwner, BudgetRefusal, ChargeHandle};
+use bitcoin_rs_storage::{CoinKey, CoinStore, MemoryKvStore, WindowDelta};
+use bytes::Bytes;
+use std::sync::Arc;
 
 const AMOUNT_CAP: u32 = 20_000;
 const OWNER_CAP: u64 = 20_000;
-const MODEL_TOTAL: u32 = 120_000;
+const MODEL_TOTAL: u32 = 7 * 20_000;
 const MODEL_FOREGROUND: u32 = 64_000;
 const DIFFERENTIAL_STEPS: usize = 4_000;
 
@@ -34,6 +37,7 @@ fn differential_caps() -> BudgetCaps {
         facts_queue: OWNER_CAP,
         index_builder: OWNER_CAP,
         query_views: OWNER_CAP,
+        peer_outbound: OWNER_CAP,
         foreground_reserve: 64_000,
     }
 }
@@ -46,34 +50,29 @@ fn owner_of_model(owner: crate::budget_model::AllocationOwner) -> BudgetOwner {
         crate::budget_model::AllocationOwner::IndexBuilder => BudgetOwner::IndexBuilder,
         crate::budget_model::AllocationOwner::StagedImages => BudgetOwner::StagedImages,
         crate::budget_model::AllocationOwner::QueryViews => BudgetOwner::QueryViews,
+        crate::budget_model::AllocationOwner::PeerOutbound => BudgetOwner::PeerOutbound,
     }
 }
 
-fn ledger_of(budget: &NodeBudget) -> ([u64; 6], [u64; 6], bool) {
-    (
-        [
-            budget.available_of_charges(BudgetOwner::CoinCache),
-            budget.available_of_charges(BudgetOwner::EngineCache),
-            budget.available_of_charges(BudgetOwner::FactsQueue),
-            budget.available_of_charges(BudgetOwner::IndexBuilder),
-            budget.available_of_charges(BudgetOwner::StagedImages),
-            budget.available_of_charges(BudgetOwner::QueryViews),
-        ],
-        [
-            budget.available_of_reservations(BudgetOwner::CoinCache),
-            budget.available_of_reservations(BudgetOwner::EngineCache),
-            budget.available_of_reservations(BudgetOwner::FactsQueue),
-            budget.available_of_reservations(BudgetOwner::IndexBuilder),
-            budget.available_of_reservations(BudgetOwner::StagedImages),
-            budget.available_of_reservations(BudgetOwner::QueryViews),
-        ],
-        budget.ingress_refused(),
-    )
+const ALL_OWNERS: [BudgetOwner; 7] = [
+    BudgetOwner::CoinCache,
+    BudgetOwner::EngineCache,
+    BudgetOwner::FactsQueue,
+    BudgetOwner::IndexBuilder,
+    BudgetOwner::StagedImages,
+    BudgetOwner::QueryViews,
+    BudgetOwner::PeerOutbound,
+];
+
+fn ledger_of(budget: &NodeBudget) -> ([u64; 7], [u64; 7], bool) {
+    let charges = ALL_OWNERS.map(|owner| budget.available_of_charges(owner));
+    let reserved = ALL_OWNERS.map(|owner| budget.available_of_reservations(owner));
+    (charges, reserved, budget.ingress_refused())
 }
 
 fn assert_ledger_matches(budget: &NodeBudget, state: &budget_model::BudgetState, site: &str) {
     let (charges, reserved, refused) = ledger_of(budget);
-    for index in 0..6 {
+    for index in 0..ALL_OWNERS.len() {
         assert_eq!(
             charges[index],
             u64::from(state.charges[index]),
@@ -102,7 +101,7 @@ fn assert_ledger_matches(budget: &NodeBudget, state: &budget_model::BudgetState,
 }
 
 fn random_action(rng: &mut XorShift, background: bool) -> Action {
-    let pick = rng.next() % 11;
+    let pick = rng.next() % 14;
     let amount = rng.amount();
     match pick {
         0 => Action::ReserveIngress(amount),
@@ -126,6 +125,9 @@ fn random_action(rng: &mut XorShift, background: bool) -> Action {
         7 => Action::ReleaseCoinCache(amount),
         8 => Action::GrowEngineCache(amount),
         9 => Action::ShrinkEngineCache(amount),
+        10 => Action::ReservePeerOutbound(amount),
+        11 => Action::AllocatePeerOutbound(amount),
+        12 => Action::ReleasePeerOutbound(amount),
         _ if background => Action::Stutter,
         _ => match rng.next() % 2 {
             0 => Action::Stutter,
@@ -176,6 +178,15 @@ fn apply_action(budget: &NodeBudget, action: &Action) {
         }
         Action::ReleaseEngineCache(amount) => {
             release(budget, BudgetOwner::EngineCache, amount);
+        }
+        Action::ReservePeerOutbound(amount) => {
+            reserve(budget, BudgetOwner::PeerOutbound, amount);
+        }
+        Action::AllocatePeerOutbound(amount) => {
+            allocate(budget, BudgetOwner::PeerOutbound, amount);
+        }
+        Action::ReleasePeerOutbound(amount) => {
+            release(budget, BudgetOwner::PeerOutbound, amount);
         }
         Action::Stutter => {}
     }
@@ -259,7 +270,7 @@ fn exhausted_ingress_refuses_without_consent_invalidation() {
 fn background_reservations_stop_at_the_foreground_reserve() {
     let mut caps = differential_caps();
     caps.facts_queue = 60_000;
-    caps.foreground_reserve = 110_000;
+    caps.foreground_reserve = 130_000;
     let budget = NodeBudget::new(caps, 4);
     let ceiling = caps.total().saturating_sub(caps.foreground_reserve);
     let beyond = ceiling.saturating_add(1);
@@ -368,4 +379,39 @@ fn background_cpu_permits_stop_at_the_foreground_share() {
     assert_eq!(cpu.foreground_active(), 1);
     drop(guard);
     assert_eq!(cpu.foreground_active(), 0);
+}
+
+// BUD-06
+#[test]
+#[expect(clippy::expect_used)]
+fn coin_cache_fill_charges_the_coin_cache_owner_and_wipe_returns_it() {
+    let budget = Arc::new(NodeBudget::from_dbcache_bytes(64 * 1024 * 1024, 4));
+    let charge = ChargeHandle::new(budget.clone(), BudgetOwner::CoinCache);
+    let coins = CoinStore::open_with_charge(
+        Arc::new(MemoryKvStore::new()),
+        64 * 1024 * 1024,
+        Some(charge),
+    );
+    let key = CoinKey([7; 32]);
+    let value = Bytes::from(vec![0xab_u8; 1024]);
+    let mut delta = WindowDelta::default();
+    delta.push_final(key, Some(value));
+    coins.ingest_chunk(&delta).expect("ingest succeeds");
+    assert_eq!(
+        budget.available_of_charges(BudgetOwner::CoinCache),
+        0,
+        "a durable write alone does not fill the cache"
+    );
+    coins.get(&key).expect("read succeeds");
+    assert_eq!(
+        budget.available_of_charges(BudgetOwner::CoinCache),
+        1024,
+        "the read fill charges the coin cache"
+    );
+    coins.wipe().expect("wipe succeeds");
+    assert_eq!(
+        budget.available_of_charges(BudgetOwner::CoinCache),
+        0,
+        "wipe returns the coin cache charge"
+    );
 }

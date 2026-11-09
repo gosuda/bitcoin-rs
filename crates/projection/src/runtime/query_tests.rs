@@ -748,6 +748,64 @@ fn engine_with_body_error(
     engine_with_body_source(block, scans, Some(Arc::new(FailingBody { error })))
 }
 
+#[derive(Default)]
+struct RecordingQueryCharge {
+    balance: ParkMutex<(u64, u64)>,
+}
+
+impl bitcoin_rs_storage::budget::BudgetCharge for RecordingQueryCharge {
+    fn reserve_bytes(
+        &self,
+        _owner: bitcoin_rs_storage::budget::BudgetOwner,
+        _bytes: u64,
+    ) -> Result<(), bitcoin_rs_storage::budget::BudgetError> {
+        Ok(())
+    }
+
+    fn allocate_bytes(
+        &self,
+        _owner: bitcoin_rs_storage::budget::BudgetOwner,
+        bytes: u64,
+    ) -> Result<(), bitcoin_rs_storage::budget::BudgetError> {
+        let mut balance = self.balance.lock();
+        balance.0 += bytes;
+        balance.1 = balance.1.max(balance.0);
+        Ok(())
+    }
+
+    fn release_bytes(&self, _owner: bitcoin_rs_storage::budget::BudgetOwner, bytes: u64) {
+        let mut balance = self.balance.lock();
+        balance.0 = balance.0.saturating_sub(bytes);
+    }
+
+    fn available_bytes(&self, _owner: bitcoin_rs_storage::budget::BudgetOwner) -> u64 {
+        u64::MAX
+    }
+}
+
+// BUD-06
+#[test]
+fn query_view_capture_charges_query_views_and_drop_returns_it()
+-> Result<(), crate::portable::TestError> {
+    let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
+    let engine = engine_with_body_source(&genesis, Vec::new(), None)?;
+    let charge = Arc::new(RecordingQueryCharge::default());
+    let engine = engine.with_query_charge(Some(bitcoin_rs_storage::budget::ChargeHandle::new(
+        charge.clone(),
+        bitcoin_rs_storage::budget::BudgetOwner::QueryViews,
+    )));
+    let (view, snapshot) = engine
+        .capture_view(IndexCapabilities::TX_LOOKUP)
+        .map_err(|_| std::io::Error::other("query view capture refused"))?;
+    let (held, _) = *charge.balance.lock();
+    assert!(held > 0, "capturing a view charges the query views owner");
+    drop(snapshot);
+    drop(view);
+    let (current, _) = *charge.balance.lock();
+    assert_eq!(current, 0, "dropping the view returns its charge");
+    Ok(())
+}
+
 #[test]
 fn transaction_reports_unavailable_when_body_source_returns_none()
 -> Result<(), crate::portable::TestError> {

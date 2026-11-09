@@ -366,6 +366,7 @@ fn live_index_path_reads_zero_block_bodies() {
         bundle: IndexBundleDirective::None,
         facts_rx: Some(facts_rx),
         facts_charge: Some(facts_charge),
+        query_charge: None,
         facts_gap: Some(facts_gap),
         cpu: None,
     };

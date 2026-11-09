@@ -9,6 +9,8 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 
 /// `BUD-06`: one owner per retained allocation.
+/// `BUD-02`: peer outbound bytes share the node-wide ledger with block,
+/// execution, and index owners instead of a side counter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum BudgetOwner {
     CoinCache = 0,
@@ -17,6 +19,7 @@ pub enum BudgetOwner {
     IndexBuilder = 3,
     StagedImages = 4,
     QueryViews = 5,
+    PeerOutbound = 6,
 }
 
 impl BudgetOwner {
@@ -29,6 +32,7 @@ impl BudgetOwner {
             Self::IndexBuilder => 3,
             Self::StagedImages => 4,
             Self::QueryViews => 5,
+            Self::PeerOutbound => 6,
         }
     }
 

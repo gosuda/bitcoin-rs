@@ -228,8 +228,12 @@ impl NodeState {
         };
         let chainstate_cache_bytes = cache_shares[0].bytes;
         let txindex_cache_bytes = cache_shares[1].bytes;
-        let (storage, block_files) =
-            NodeStorage::open(&config, chainstate_cache_bytes, &data_dir_guard)?;
+        let (storage, block_files) = NodeStorage::open(
+            &config,
+            chainstate_cache_bytes,
+            &data_dir_guard,
+            Arc::clone(&budget),
+        )?;
         budget.set_mdbx(storage.kind() == bitcoin_rs_storage::StorageBackend::Mdbx.as_str());
         let engine_cache_probe = storage.engine_cache_probe();
         budget.set_engine_cache_source(Some(Box::new(move || engine_cache_probe())));
@@ -399,8 +403,17 @@ impl NodeState {
             history: storage.bounded_history(),
             role: bitcoin_rs_execution::ChainstateRole::Ordinary,
         });
-        let derived_index_open_spec =
-            build_derived_index_open_spec(&config, txindex_cache_bytes, epoch, &data_dir_guard)?;
+        chainstate.set_prevout_charge(bitcoin_rs_storage::budget::ChargeHandle::new(
+            budget.clone(),
+            bitcoin_rs_storage::budget::BudgetOwner::StagedImages,
+        ));
+        let derived_index_open_spec = build_derived_index_open_spec(
+            &config,
+            txindex_cache_bytes,
+            epoch,
+            &data_dir_guard,
+            &budget,
+        )?;
         let (facts_queue, facts_parts) = if derived_index_open_spec.is_some() {
             let ledger: Arc<dyn bitcoin_rs_storage::budget::BudgetCharge> = budget.clone();
             let charge = bitcoin_rs_storage::budget::ChargeHandle::new(
@@ -524,6 +537,9 @@ impl NodeState {
             },
             p2p_shutdown.reader(),
         ));
+        p2p.set_outbound_ledger(Arc::new(crate::budget::BudgetedOutboundLedger::new(
+            Arc::clone(&budget),
+        )));
         let peer_table = p2p.table();
         let inbound_headers_rx = p2p
             .take_inbound_headers_receiver()

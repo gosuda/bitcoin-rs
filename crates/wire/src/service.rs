@@ -474,6 +474,10 @@ impl P2pService {
             .resolve(endpoint, &|| self.shutdown.is_triggered())
     }
 
+    pub fn set_outbound_ledger(&self, ledger: Arc<dyn crate::connection::OutboundLedger>) {
+        self.shared_outbound.set_ledger(ledger);
+    }
+
     #[cfg(test)]
     #[must_use]
     pub(crate) fn shared_outbound_budget(&self) -> Arc<crate::connection::SharedOutboundBudget> {

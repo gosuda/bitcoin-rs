@@ -7,7 +7,7 @@ use super::{
 };
 use crate::chain::NodeStatus;
 use crate::error::ApplyError;
-use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Txid};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, TxOut, Txid};
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -227,12 +227,57 @@ impl WindowGroup {
     }
 }
 
+struct WindowPrevouts {
+    charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
+    bytes: u64,
+}
+
+impl WindowPrevouts {
+    fn new(charge: Option<bitcoin_rs_storage::budget::ChargeHandle>) -> Self {
+        Self { charge, bytes: 0 }
+    }
+
+    fn admit(&mut self, bytes: u64) -> bool {
+        let Some(charge) = self.charge.as_ref() else {
+            return true;
+        };
+        if charge.charge(bytes).is_err() {
+            return false;
+        }
+        self.bytes += bytes;
+        true
+    }
+}
+
+impl Drop for WindowPrevouts {
+    fn drop(&mut self) {
+        if let Some(charge) = self.charge.as_ref() {
+            charge.release(self.bytes);
+        }
+    }
+}
+
+fn prevout_bytes(resolved: &[Vec<Option<TxOut>>]) -> u64 {
+    let slot = std::mem::size_of::<Option<TxOut>>();
+    resolved
+        .iter()
+        .flatten()
+        .map(|prevout| {
+            let script = prevout
+                .as_ref()
+                .map_or(0, |txout| txout.script_pubkey.len());
+            u64::try_from(slot + script).unwrap_or(u64::MAX)
+        })
+        .fold(0_u64, u64::saturating_add)
+}
+
 #[derive(Default)]
 struct ProvenWindow<'a, 'h> {
     proven: Vec<ProvenApply<'a>>,
     takes: Option<bitcoin_rs_consensus::WindowCacheTakes<'h>>,
     take_starts: Vec<usize>,
     workspace: Option<super::workspace::WindowWorkspace>,
+    prevouts: Option<WindowPrevouts>,
 }
 
 fn restore_uncommitted_takes(
@@ -287,6 +332,7 @@ pub(super) fn apply_window_admitted(
     let mut takes = window.takes;
     let take_starts = window.take_starts;
     let mut workspace = window.workspace;
+    let _window_prevouts = window.prevouts;
     let mut group = WindowGroup::new((handles.window_limits)());
     let mut committed: Vec<ConnectOutcome> = Vec::with_capacity(payloads.len());
     for (index, &payload) in payloads.iter().enumerate() {
@@ -768,6 +814,7 @@ type WindowScriptProof<'h> = (
     Option<bitcoin_rs_consensus::WindowCacheTakes<'h>>,
     Vec<usize>,
     Vec<bool>,
+    WindowPrevouts,
 );
 
 fn prove_window_scripts<'a, 'h>(
@@ -776,6 +823,7 @@ fn prove_window_scripts<'a, 'h>(
     prepared: &mut [PreparedApply<'a>],
     contexts: &[BlockValidationContext],
 ) -> Option<WindowScriptProof<'h>> {
+    let mut prevouts = WindowPrevouts::new(handles.prevout_charge.clone());
     let mut takes = handles
         .script_cache
         .as_deref()
@@ -810,6 +858,12 @@ fn prove_window_scripts<'a, 'h>(
             }
             return None;
         };
+        if !prevouts.admit(prevout_bytes(&resolved)) {
+            if let Some(takes) = takes.take() {
+                takes.rollback();
+            }
+            return None;
+        }
         unit.view.set_resolved(resolved);
         if let Ok(checks) = bitcoin_rs_consensus::verify_tx::prepare_block_script_checks(
             &mut unit.view,
@@ -847,7 +901,7 @@ fn prove_window_scripts<'a, 'h>(
     if !units.is_empty() {
         metrics::counter!("node.window.verify_success_total").increment(1);
     }
-    Some((takes, take_starts, skipped))
+    Some((takes, take_starts, skipped, prevouts))
 }
 
 fn prove_window<'a, 'h>(
@@ -872,10 +926,10 @@ fn prove_window<'a, 'h>(
     let Some((mut prepared, workspace)) = prepare_window(handles, payloads, &contexts)? else {
         return Ok(ProvenWindow::default());
     };
-    let (proven, takes, take_starts) =
+    let (proven, takes, take_starts, prevouts) =
         if window_commitments_match(payloads, &mut prepared, &contexts) {
             match prove_window_scripts(handles, payloads, &mut prepared, &contexts) {
-                Some((takes, take_starts, skipped)) => {
+                Some((takes, take_starts, skipped, prevouts)) => {
                     let proven = prepared
                         .into_iter()
                         .zip(contexts)
@@ -888,12 +942,13 @@ fn prove_window<'a, 'h>(
                             }
                         })
                         .collect();
-                    (proven, takes, take_starts)
+                    (proven, takes, take_starts, Some(prevouts))
                 }
                 None => (
                     prepared.into_iter().map(ProvenApply::Unproven).collect(),
                     None,
                     Vec::new(),
+                    None,
                 ),
             }
         } else {
@@ -901,6 +956,7 @@ fn prove_window<'a, 'h>(
                 prepared.into_iter().map(ProvenApply::Unproven).collect(),
                 None,
                 Vec::new(),
+                None,
             )
         };
     Ok(ProvenWindow {
@@ -908,6 +964,7 @@ fn prove_window<'a, 'h>(
         takes,
         take_starts,
         workspace: Some(workspace),
+        prevouts,
     })
 }
 

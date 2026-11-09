@@ -255,6 +255,7 @@ pub struct DerivedIndexQueryEngine {
     enabled: IndexCapabilities,
     generation: Arc<Generation>,
     historical_verified: Option<(u32, Hash256)>,
+    query_charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
     #[cfg(any(test, feature = "test-seam"))]
     #[expect(dead_code, reason = "test seam field")]
     pub(crate) chain_transition: Option<bitcoin_rs_execution::chain::StableRead>,
@@ -272,6 +273,7 @@ pub(crate) struct ServingView {
     pub historical_verified_hash: Hash256,
     pub(super) tip_id: NodeId,
     deadline: Instant,
+    _view_charge: Option<ViewCharge>,
 }
 
 impl ServingView {
@@ -316,6 +318,17 @@ impl ServingView {
         })
     }
 }
+
+struct ViewCharge {
+    handle: bitcoin_rs_storage::budget::ChargeHandle,
+    bytes: u64,
+}
+
+impl Drop for ViewCharge {
+    fn drop(&mut self) {
+        self.handle.release(self.bytes);
+    }
+}
 impl core::fmt::Debug for DerivedIndexQueryEngine {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DerivedIndexQueryEngine")
@@ -343,6 +356,7 @@ impl DerivedIndexQueryEngine {
             enabled: live.enabled,
             generation: live.generation,
             historical_verified: live.historical_verified,
+            query_charge: None,
             #[cfg(any(test, feature = "test-seam"))]
             chain_transition: live.chain_transition,
         }
@@ -350,6 +364,14 @@ impl DerivedIndexQueryEngine {
 
     pub(crate) fn with_scripthash_limit(mut self, limit: usize) -> Self {
         self.scripthash_limit = limit;
+        self
+    }
+
+    pub(crate) fn with_query_charge(
+        mut self,
+        charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
+    ) -> Self {
+        self.query_charge = charge;
         self
     }
 
@@ -456,6 +478,7 @@ impl DerivedIndexQueryEngine {
 
         let (historical_verified_height, historical_verified_hash) =
             self.historical_verified.unwrap_or((tip.height, tip.hash));
+        let view_charge = self.charge_view()?;
         Ok((
             ServingView {
                 epoch: AppliedEpoch {
@@ -469,9 +492,24 @@ impl DerivedIndexQueryEngine {
                 historical_verified_hash,
                 tip_id: tip.tip_id,
                 deadline: Instant::now() + VIEW_DEADLINE,
+                _view_charge: view_charge,
             },
             snapshot,
         ))
+    }
+
+    fn charge_view(&self) -> Result<Option<ViewCharge>, TxQueryError> {
+        let Some(handle) = self.query_charge.as_ref() else {
+            return Ok(None);
+        };
+        let bytes = u64::try_from(std::mem::size_of::<ServingView>()).unwrap_or(u64::MAX);
+        handle
+            .charge(bytes)
+            .map_err(|_| TxQueryError::Unavailable(TxUnavailableCause::RowBudgetExhausted))?;
+        Ok(Some(ViewCharge {
+            handle: handle.clone(),
+            bytes,
+        }))
     }
 
     fn check_view(&self, view: &ServingView) -> Result<(), TxQueryError> {

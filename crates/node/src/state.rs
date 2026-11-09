@@ -457,6 +457,7 @@ fn build_derived_index_open_spec(
     txindex_cache_bytes: u64,
     epoch: u64,
     guard: &bitcoin_rs_storage::StoreGuard,
+    budget: &Arc<crate::budget::NodeBudget>,
 ) -> core::result::Result<Option<bitcoin_rs_projection::runtime::DerivedIndexOpenSpec>, ConfigError>
 {
     let enabled = derived_index_capabilities(config);
@@ -499,6 +500,10 @@ fn build_derived_index_open_spec(
         bundle: index_bundle_directive(config)?,
         facts_rx: None,
         facts_charge: None,
+        query_charge: Some(bitcoin_rs_storage::budget::ChargeHandle::new(
+            budget.clone(),
+            bitcoin_rs_storage::budget::BudgetOwner::QueryViews,
+        )),
         facts_gap: None,
         cpu: None,
     }))

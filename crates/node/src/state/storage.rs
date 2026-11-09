@@ -34,6 +34,7 @@ struct ChainstateComposer<'a> {
     data_dir: &'a std::path::Path,
     guard: &'a StoreGuard,
     chainstate_cache_bytes: u64,
+    budget: Arc<crate::budget::NodeBudget>,
 }
 
 impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
@@ -51,9 +52,14 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
             &store,
         )));
         let dyn_store: Arc<dyn bitcoin_rs_storage::KvStore> = store.clone();
-        let coins = Arc::new(bitcoin_rs_storage::CoinStore::open(
+        let coin_charge = bitcoin_rs_storage::budget::ChargeHandle::new(
+            self.budget.clone(),
+            bitcoin_rs_storage::budget::BudgetOwner::CoinCache,
+        );
+        let coins = Arc::new(bitcoin_rs_storage::CoinStore::open_with_charge(
             Arc::clone(&dyn_store),
             self.chainstate_cache_bytes,
+            Some(coin_charge),
         ));
         let commit_authority = Arc::new(bitcoin_rs_storage::CommitAuthority::new(
             dyn_store,
@@ -108,6 +114,7 @@ impl NodeStorage {
         config: &NodeConfig,
         chainstate_cache_bytes: u64,
         guard: &StoreGuard,
+        budget: Arc<crate::budget::NodeBudget>,
     ) -> Result<(Self, Arc<FlatFileBlockStore>), NodeOpenError> {
         let chainstate_dir = config.data_dir.join("chainstate");
         std::fs::create_dir_all(&chainstate_dir).map_err(|source| {
@@ -129,6 +136,7 @@ impl NodeStorage {
                 data_dir: &config.data_dir,
                 guard,
                 chainstate_cache_bytes,
+                budget,
             },
         )?;
         Ok(opened)

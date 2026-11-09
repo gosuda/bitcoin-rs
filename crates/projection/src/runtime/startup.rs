@@ -249,7 +249,8 @@ fn publish_serving_query_engine(open: &OpenDerivedIndex, setup: &WorkerSetup<'_>
                 chain_transition: None,
             },
         )
-        .with_scripthash_limit(setup.spec.scripthash_limit),
+        .with_scripthash_limit(setup.spec.scripthash_limit)
+        .with_query_charge(setup.spec.query_charge.clone()),
     );
     publish_lifecycle(
         setup.lifecycle,
