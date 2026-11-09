@@ -874,12 +874,14 @@ impl SnapshotControl {
     }
 
     pub(crate) fn wire_historical_facts(&self, queue: Option<Arc<FactsQueue>>) {
+        let Some(queue) = queue else {
+            self.manager.clear_historical_facts_hook();
+            return;
+        };
         let runtime = self.derived_index_runtime.clone();
         self.manager
             .set_historical_facts_hook(Arc::new(move |facts: &Arc<CommittedFacts>| {
-                if let Some(queue) = queue.as_ref() {
-                    queue.try_push(Arc::clone(facts));
-                }
+                queue.try_push(Arc::clone(facts));
                 let Some(height) = facts.blocks.iter().map(|block| block.height).max() else {
                     return;
                 };

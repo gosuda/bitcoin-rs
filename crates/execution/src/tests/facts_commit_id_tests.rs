@@ -30,6 +30,7 @@ fn commit_genesis_head(chain: &Chainstate) -> TestResult<u64> {
 #[test]
 fn committed_facts_carry_the_durable_commit_id() -> TestResult {
     let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    chain.set_committed_facts_consumer(true);
     seed_genesis(&chain)?;
     let genesis_commit = commit_genesis_head(&chain)?;
 

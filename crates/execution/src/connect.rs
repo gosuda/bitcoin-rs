@@ -777,10 +777,12 @@ impl Publication<'_, '_, '_> {
                     outcome.tip = receipt.certify(outcome.tip);
                 }
                 outcome.commit_id = commit_id;
-                outcome.committed_facts = build_committed_facts(&outcome, image, &undo);
+                outcome.committed_facts =
+                    committed_facts_for_publish(handles, &outcome, image, &undo);
             }
             PublishMode::Grouped(group) => {
-                outcome.committed_facts = build_committed_facts(&outcome, image, &undo);
+                outcome.committed_facts =
+                    committed_facts_for_publish(handles, &outcome, image, &undo);
                 group.stage(PendingBlockCommit {
                     outcome: outcome.clone(),
                     undo_record,
@@ -871,6 +873,23 @@ fn replay_coin_delta(
         delta.push_final(key, Some(bytes::Bytes::copy_from_slice(record.bytes())));
     }
     Ok(delta)
+}
+
+fn committed_facts_for_publish(
+    handles: &Chainstate,
+    outcome: &ConnectOutcome,
+    image: &BlockImage,
+    undo: &UndoBatch,
+) -> Option<Arc<bitcoin_rs_storage::CommittedFacts>> {
+    if !handles.wants_committed_facts() {
+        return None;
+    }
+    #[cfg(any(test, feature = "test-seam"))]
+    handles
+        .facts
+        .builds
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    build_committed_facts(outcome, image, undo)
 }
 
 pub(crate) fn build_committed_facts(

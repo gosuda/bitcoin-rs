@@ -576,6 +576,7 @@ impl NodeState {
         )
         .with_block_announcer(Some(block_announce_queue));
         chainstate.set_capture_flags(followers.needs_rawtx(), followers.needs_block_bytes());
+        chainstate.set_committed_facts_consumer(followers.wants_committed_facts());
         let durable_tip_height = Arc::new(AtomicU32::new(
             chainstate
                 .applied_tip_reader()

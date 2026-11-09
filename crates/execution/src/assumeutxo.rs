@@ -977,10 +977,12 @@ impl AssumeUtxoManager {
     }
 
     pub fn set_historical_facts_hook(&self, hook: HistoricalFactsHook) {
+        let _lifecycle = self.lifecycle.lock();
         *self.historical_facts_hook.write() = Some(hook);
     }
 
     pub fn clear_historical_facts_hook(&self) {
+        let _lifecycle = self.lifecycle.lock();
         self.historical_facts_hook.write().take();
     }
 
@@ -1031,6 +1033,7 @@ impl AssumeUtxoManager {
                 self.active_chainstate.fail_closed_for_recovery();
                 historical.fail_closed_for_recovery();
             })?;
+        historical.set_committed_facts_consumer(self.historical_facts_hook.read().is_some());
         let result = {
             let transition = historical.lock_transition()?.into_transition();
             transition.connect(payload)

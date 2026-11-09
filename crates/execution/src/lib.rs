@@ -398,11 +398,19 @@ pub struct Chainstate {
     pub(crate) checkpoint_publisher: Option<Arc<crate::checkpoint::publisher::CheckpointPublisher>>,
     pub(crate) capture_rawtx: bool,
     pub(crate) capture_block_bytes: bool,
+    pub(crate) facts: Arc<FactsGate>,
     pub(crate) retention: bitcoin_rs_storage::MandatoryRetention,
     pub(crate) window_limits: crate::window_limits::WindowLimitsSource,
     pub(crate) history: bitcoin_rs_storage::pruning::HistoryAccess,
     ibd: Arc<crate::chain::InitialBlockDownload>,
     pub(crate) role: Arc<RwLock<ChainstateRole>>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct FactsGate {
+    attached: AtomicBool,
+    #[cfg(any(test, feature = "test-seam"))]
+    builds: std::sync::atomic::AtomicUsize,
 }
 
 pub struct ChainstateParts {
@@ -551,6 +559,7 @@ impl Chainstate {
             checkpoint_publisher: None,
             capture_rawtx: parts.capture_rawtx,
             capture_block_bytes: parts.capture_block_bytes,
+            facts: Arc::new(FactsGate::default()),
             retention: parts.retention,
             window_limits: parts.window_limits,
             history: parts.history,
@@ -841,6 +850,7 @@ impl Chainstate {
             checkpoint_publisher: None,
             capture_rawtx: false,
             capture_block_bytes: false,
+            facts: Arc::new(FactsGate::default()),
             retention: self.retention.clone(),
             window_limits: crate::window_limits::default_window_limits_source(),
             history: self.history.clone(),
@@ -1084,6 +1094,21 @@ impl Chainstate {
         self.capture_block_bytes = block_bytes;
     }
 
+    pub fn set_committed_facts_consumer(&self, attached: bool) {
+        self.facts.attached.store(attached, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub(crate) fn wants_committed_facts(&self) -> bool {
+        self.facts.attached.load(Ordering::Relaxed)
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn committed_facts_builds(&self) -> usize {
+        self.facts.builds.load(Ordering::SeqCst)
+    }
+
     pub fn reevaluate_assume_valid(&self) {
         self.assume_valid_gate.evaluate(&self.block_tree.read());
     }
@@ -1215,6 +1240,7 @@ impl Chainstate {
             checkpoint_publisher: None,
             capture_rawtx: false,
             capture_block_bytes: false,
+            facts: Arc::new(FactsGate::default()),
             retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
             window_limits: crate::window_limits::default_window_limits_source(),
             history: bitcoin_rs_storage::pruning::HistoryAccess::new(

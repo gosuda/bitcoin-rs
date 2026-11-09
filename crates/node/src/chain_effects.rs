@@ -136,6 +136,11 @@ impl ChainFollowers {
     }
 
     #[must_use]
+    pub(crate) fn wants_committed_facts(&self) -> bool {
+        self.facts_queue.is_some()
+    }
+
+    #[must_use]
     pub fn needs_rawtx(&self) -> bool {
         self.zmq.wants_rawtx()
     }
