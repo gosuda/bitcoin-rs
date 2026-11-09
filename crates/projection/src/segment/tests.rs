@@ -444,6 +444,126 @@ fn core_filter_vectors_read_back_through_the_segment_snapshot()
     Ok(())
 }
 
+fn committed_facts(
+    block: &bitcoin::Block,
+    height: u32,
+    external: &hashbrown::HashMap<([u8; 32], u32), bitcoin_rs_storage::Bytes>,
+) -> Result<bitcoin_rs_storage::CommittedBlock, crate::portable::TestError> {
+    use bitcoin::hashes::Hash as _;
+    use bitcoin_rs_storage::Bytes;
+    use bitcoin_rs_storage::committed_facts::{CreatedOutput, SpentPrevout, TxFacts};
+
+    let mut created = hashbrown::HashMap::<([u8; 32], u32), Bytes>::new();
+    let mut txs = Vec::with_capacity(block.txdata.len());
+    for tx in &block.txdata {
+        let txid = tx.compute_txid().to_byte_array();
+        let mut inputs = Vec::with_capacity(tx.input.len());
+        for input in &tx.input {
+            let prev_txid = input.previous_output.txid.to_byte_array();
+            let vout = input.previous_output.vout;
+            if prev_txid == [0; 32] && vout == u32::MAX {
+                inputs.push(SpentPrevout {
+                    txid: [0; 32],
+                    vout: u32::MAX,
+                    value: 0,
+                    script: Bytes::new(),
+                    height,
+                    coinbase: true,
+                });
+                continue;
+            }
+            let script = created
+                .get(&(prev_txid, vout))
+                .cloned()
+                .or_else(|| external.get(&(prev_txid, vout)).cloned())
+                .ok_or("prevout script missing from the fixture")?;
+            inputs.push(SpentPrevout {
+                txid: prev_txid,
+                vout,
+                value: 0,
+                script,
+                height: 0,
+                coinbase: false,
+            });
+        }
+        let mut outputs = Vec::with_capacity(tx.output.len());
+        for (vout, out) in tx.output.iter().enumerate() {
+            let vout = u32::try_from(vout)?;
+            let script = Bytes::copy_from_slice(out.script_pubkey.as_bytes());
+            created.insert((txid, vout), script.clone());
+            outputs.push(CreatedOutput {
+                vout,
+                value: out.value.to_sat(),
+                script,
+            });
+        }
+        txs.push(TxFacts {
+            txid,
+            offset: 0,
+            len: 0,
+            inputs,
+            outputs,
+        });
+    }
+    Ok(bitcoin_rs_storage::CommittedBlock {
+        height,
+        hash: block.block_hash().to_byte_array(),
+        parent_hash: [0; 32],
+        header: [0; 80],
+        txs,
+    })
+}
+
+fn append_and_read(
+    block: &bitcoin_rs_storage::CommittedBlock,
+) -> Result<crate::BasicFilter, crate::portable::TestError> {
+    use crate::segment::SegmentSnapshot;
+    use crate::segment::tail::{
+        NoSealedTxOrdinals, TailBounds, TailWriterState, append_tail_block,
+        put_generation_descriptors,
+    };
+    use crate::{IndexCapability, TxIndexSnapshot};
+    use bitcoin_rs_storage::{KvStore, RocksDbStore};
+
+    let dir = tempfile::tempdir()?;
+    let store = RocksDbStore::open(dir.path())?;
+    let mut state = TailWriterState::new();
+    let mut batch = store.new_batch();
+    append_tail_block(&mut batch, block, &mut state, &NoSealedTxOrdinals)?;
+    put_generation_descriptors(
+        &mut batch,
+        [IndexCapability::CompactFilters],
+        TailBounds {
+            newest: None,
+            first_height: Some(block.height),
+            at: Some((block.height, block.hash)),
+        },
+    );
+    store.write_durable(batch)?;
+    let snapshot = SegmentSnapshot::open(store.snapshot()?)?;
+    let filter = snapshot
+        .compact_filter(block.height, &block.hash)?
+        .ok_or("the segment holds no filter for a covered height")?;
+    Ok(filter)
+}
+
+// PRJ-12
+#[test]
+fn oversized_scripts_stay_in_basic_filters() -> Result<(), crate::portable::TestError> {
+    use bitcoin::ScriptBuf;
+
+    let mut block = bitcoin::constants::genesis_block(bitcoin::Network::Regtest);
+    block.txdata[0].output[0].script_pubkey =
+        ScriptBuf::from_bytes(vec![0x51_u8; crate::MAX_LIVE_SCRIPT_SIZE + 1]);
+    let facts = committed_facts(&block, 0, &hashbrown::HashMap::new())?;
+    let filter = append_and_read(&facts)?;
+    let oracle = bitcoin::bip158::BlockFilter::new_script_filter(&block, |outpoint| {
+        Err::<ScriptBuf, _>(bitcoin::bip158::Error::UtxoMissing(*outpoint))
+    })?;
+    assert_eq!(filter.filter, oracle.content);
+    Ok(())
+}
+
 fn shared_script_blocks(count: u32) -> Vec<bitcoin_rs_storage::CommittedBlock> {
     let script = bitcoin_rs_storage::Bytes::copy_from_slice(&[0x51]);
     let mut blocks = Vec::new();
