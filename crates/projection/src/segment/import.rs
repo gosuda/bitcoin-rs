@@ -131,6 +131,14 @@ where
         };
         if key.len() >= 8 {
             key[..8].copy_from_slice(&self.prefix);
+        } else {
+            if self.failure.is_none() {
+                *self.failure = Some(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "streamed row key is shorter than the generation prefix",
+                ));
+            }
+            return None;
         }
         Some((key, value))
     }
@@ -584,3 +592,7 @@ fn restored_overflow() -> IndexError {
         "restored segment exceeds u32 ordinals".into(),
     ))
 }
+
+#[cfg(test)]
+#[path = "import_tests.rs"]
+mod tests;
