@@ -294,6 +294,7 @@ struct StaticScriptIndex {
 
 struct RepublishTipScriptIndex {
     applied_tip: bitcoin_rs_execution::chain::TipReader,
+    replacement: Option<Arc<bitcoin_rs_execution::chain::TipSnapshot>>,
 }
 
 impl crate::context::ScriptIndexQuery for RepublishTipScriptIndex {
@@ -309,7 +310,11 @@ impl crate::context::ScriptIndexQuery for RepublishTipScriptIndex {
         _script_hash: ScriptHash,
     ) -> Result<crate::context::ScriptIndexSnapshot, TxQueryError> {
         if let Some(tip) = self.applied_tip.load_full() {
-            self.applied_tip.store(Some(Arc::new((*tip).clone())));
+            self.applied_tip.store(Some(
+                self.replacement
+                    .clone()
+                    .unwrap_or_else(|| Arc::new((*tip).clone())),
+            ));
         }
         Ok(crate::context::ScriptIndexSnapshot::default())
     }
@@ -954,6 +959,7 @@ fn composed_response_stays_valid_when_the_applied_tip_identity_changes() {
     context.chain.applied_tip.store(Some(tip));
     context.indexes.script_index = Some(Arc::new(RepublishTipScriptIndex {
         applied_tip: context.chain.applied_tip.clone(),
+        replacement: None,
     }));
     let handler = Handler::new(Arc::new(context));
 
@@ -965,6 +971,47 @@ fn composed_response_stays_valid_when_the_applied_tip_identity_changes() {
         );
         assert_eq!(response.status, 200);
     }
+}
+
+#[test]
+fn composed_response_refuses_when_the_applied_tip_moves_between_reads() {
+    use bitcoin_rs_consensus::primitives::Header;
+
+    let block = fixture_genesis();
+    let mut context = Context::new();
+    context
+        .chain
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
+            0, &block,
+        ));
+    let (tip, moved) = {
+        let mut tree = context.chain.block_tree.write();
+        let genesis = tree
+            .insert_node(None, block.header, NodeStatus::Active)
+            .expect("insert applied tip");
+        let tip = tree.tip().expect("applied tip");
+        let child = Header {
+            prev_blockhash: block.header.compute_hash(),
+            nonce: block.header.nonce.wrapping_add(1),
+            ..block.header
+        };
+        tree.insert_node(Some(genesis), child, NodeStatus::Active)
+            .expect("insert moved tip");
+        (tip, tree.tip().expect("moved tip"))
+    };
+    assert_ne!(
+        tip.hash, moved.hash,
+        "the second read must observe a different tip"
+    );
+    context.chain.applied_tip.store(Some(tip));
+    context.indexes.script_index = Some(Arc::new(RepublishTipScriptIndex {
+        applied_tip: context.chain.applied_tip.clone(),
+        replacement: Some(moved),
+    }));
+    let handler = Handler::new(Arc::new(context));
+
+    let response = route(&handler, &format!("/scripthash/{}", "00".repeat(32)), "");
+    assert_eq!(response.status, 503);
 }
 
 #[test]
