@@ -352,7 +352,15 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 ### `SNP-02`: Snapshot manifest contents
 
-- The snapshot manifest must declare: the network and genesis hash, base block identity, schema versions, UTXO commitment, logical commitments for each index capability, coverage ranges, artifact sizes, hashes, and validation provenance.
+- The snapshot manifest must declare `manifest_version`. The node accepts only version 1.
+- The snapshot manifest must declare the network name and the genesis block hash.
+- The snapshot manifest must declare the base block hash and the base block height.
+- The snapshot manifest must declare one index format schema version for all index artifacts. The node refuses a manifest whose schema version is not its compiled index format version.
+- The snapshot manifest must declare the UTXO commitment, and the SHA-256 hash and size in bytes of the UTXO artifact.
+- For each index capability that the manifest commits, the snapshot manifest must declare the SHA-256 hash and size in bytes of the artifact. The node refuses a manifest whose artifact hash differs from its index commitment.
+- For each index capability, the snapshot manifest must declare a coverage floor. The coverage range of the capability runs from the floor to the base height, inclusive. A missing coverage floor counts as 0.
+- The snapshot manifest must declare `historical_verified_height` as validation provenance. The node refuses a manifest whose `historical_verified_height` is greater than the base height.
+- The coverage floor of the compact filter index must be 0. The node refuses to attach a compact filter artifact whose coverage floor is not 0.
 
 ### `SNP-03`: Independent artifact authentication
 
@@ -414,9 +422,16 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 ### `BUD-04`: Bounded scheduling domains
 
-- CPU work must use one bounded scheduling domain.
-- Blocking storage operations must be isolated from verification workers.
-- The node must not nest worker thread pools or construct per-input task graphs.
+- CPU work must use one bounded scheduling domain. The node sets one global rayon pool at startup to the lower of the available parallelism and 4 threads. If the process configured the global pool before startup, the node keeps that pool.
+- Window parse runs on the global pool as one parallel map over the block payloads.
+- Script checks run on the global pool as one parallel map over all input checks of a batch, when the batch has at least 32 checks. Otherwise they run on the calling thread.
+- Projection catch-up prepares blocks on the global pool when no background CPU share table is configured or when it holds a background permit. Otherwise it prepares them on the calling thread.
+- UTXO statistics MuHash lanes run on the global pool for large batches.
+- Background CPU permits count the background operations in flight. The node grants at most the total workers minus the foreground reserve.
+- Historical validation holds one background permit while it runs, when one is free. Otherwise it runs without a permit.
+- Bulk scoring holds one background permit while it runs, when one is free. It runs on the calling thread.
+- Blocking storage operations must run on the calling thread. Projection catch-up is the exception: when it runs in parallel, its pool workers read undo records from storage.
+- The node must not nest worker thread pools or construct per-input task graphs. The node builds one worker pool, and script checks form one flat map with no dependency graph.
 
 ### `BUD-05`: Reserved foreground progress
 
@@ -449,11 +464,17 @@ Nothing below the owner facade can interpret or copy the same data again.
 - Mining template generation must consume a matched pair: one applied epoch and one settled mempool generation.
 - A template must never combine a new chain state with an obsolete dependency graph.
 
-### `MPS-04`: Bounded event delivery
+### `MPS-04`: Event delivery
 
 - Notifications describe committed blocks.
 - Notifications do not guarantee availability of intermediate UTXO states.
-- Event observers must use bounded delivery channels with explicit gap detection.
+- Chain consumers pull the chain feed. The node keeps no event queue for them. A poll sets `gap` when the epoch changes, when the sequence is not consecutive, or when the tips are not adjacent.
+- A replay call returns at most the requested number of steps. The node refuses a step limit of 0 or more than 256.
+- Mempool observers are synchronous callbacks. The mempool delivers committed mutations to observers in commit order, one at a time.
+- A mutation that an observer commits during a callback is delivered after that callback returns.
+- The mempool delivery queue has no fixed capacity. Its length depends on the commit rate and on observer run time.
+- An observer panic does not roll back the committed mutation. Delivery continues with the next queued mutation.
+- Each committed change has a sequence number. A subscriber detects a gap when a sequence number is skipped.
 
 ### `MOD-01`: Owner crates and exclusive responsibilities
 
