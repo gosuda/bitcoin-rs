@@ -2974,3 +2974,108 @@ fn chain_change_fence_skips_expiry_for_a_non_reorg_origin() {
     assert!(gateway.read().contains_txid(&stale_txid));
     assert!(gateway.read().contains_txid(&fresh_txid));
 }
+
+#[test]
+fn batch_requests_chain_package_shares_bodies_and_resolves_incrementally() {
+    const PACKAGE_LEN: usize = 25;
+    const CONFIRMED_VALUE: u64 = 10_000;
+    const OUTPUT_VALUE: u64 = 9_000;
+    let confirmed = OutPoint::new(Txid(Hash256::from_le_bytes(&[8; 32])), 0);
+    let chain = Coins(vec![(
+        confirmed,
+        TxOut {
+            value: Amount::from_sat(CONFIRMED_VALUE),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
+        },
+    )]);
+    let mut txs = Vec::with_capacity(PACKAGE_LEN);
+    let mut parent = confirmed;
+    let mut marker = 1_u8;
+    for _ in 0..PACKAGE_LEN {
+        let tx = standard_spend(parent, marker);
+        parent = OutPoint::new(tx.txid(), 0);
+        marker = marker.wrapping_add(1);
+        txs.push(tx);
+    }
+    let shared: Vec<Arc<Tx>> = txs.iter().map(|tx| Arc::new(tx.clone())).collect();
+    let mempool_inputs = vec![Some(HashMap::new()); PACKAGE_LEN];
+    let Some((requests, package_output_clones)) = batch_requests_package_clone_count(
+        &shared,
+        mempool_inputs,
+        &chain,
+        None,
+        0,
+        AdmissionOrigin::Rpc,
+        (7, 11),
+        crate::gateway::AdmissionMode::PackageSubmit,
+    ) else {
+        panic!("a chain package resolves against its confirmed coin and package parents");
+    };
+    assert_eq!(
+        requests.len(),
+        PACKAGE_LEN,
+        "every package member yields one admission request"
+    );
+    let mut oracle_outputs = HashMap::new();
+    oracle_outputs.insert(
+        confirmed,
+        TxOut {
+            value: Amount::from_sat(CONFIRMED_VALUE),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
+        },
+    );
+    let mut in_package_refs = 0_u64;
+    for (index, request) in requests.iter().enumerate() {
+        let tx = &txs[index];
+        assert!(
+            Arc::ptr_eq(&request.tx, &shared[index]),
+            "request shares the submitted body instead of deep-cloning it"
+        );
+        let mut expected_prevouts = Vec::with_capacity(tx.inputs.len());
+        let mut input_value = 0_u64;
+        for input in &tx.inputs {
+            let Some(output) = oracle_outputs.get(&input.previous_output) else {
+                panic!("the policy oracle resolves every package input");
+            };
+            input_value += output.value.to_sat();
+            expected_prevouts.push((input.previous_output, output.clone()));
+            if input.previous_output != confirmed {
+                in_package_refs += 1;
+            }
+        }
+        assert_eq!(
+            request.prevouts, expected_prevouts,
+            "request prevouts match the policy oracle"
+        );
+        let output_value: u64 = tx.outputs.iter().map(|output| output.value.to_sat()).sum();
+        assert_eq!(
+            request.context.fee,
+            input_value.saturating_sub(output_value),
+            "request fee follows inputs minus outputs"
+        );
+        assert!(
+            !request.context.missing_inputs,
+            "a chain package resolves every input"
+        );
+        assert_eq!(request.origin, AdmissionOrigin::Rpc);
+        assert_eq!(
+            (request.expected_generation, request.expected_sequence),
+            (7, 11)
+        );
+        assert_eq!(request.height, 1);
+        let txid = tx.txid();
+        for (vout, output) in tx.outputs.iter().enumerate() {
+            if let Ok(vout) = u32::try_from(vout) {
+                oracle_outputs.insert(OutPoint::new(txid, vout), output.clone());
+            }
+        }
+    }
+    assert_eq!(
+        OUTPUT_VALUE, 9_000,
+        "chain children carry no fee, so the oracle only prices the confirmed parent spend"
+    );
+    assert!(
+        package_output_clones <= in_package_refs,
+        "incremental resolution clones package outputs only for in-package references"
+    );
+}
