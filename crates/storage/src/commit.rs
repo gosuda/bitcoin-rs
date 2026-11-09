@@ -148,6 +148,27 @@ impl CommitAuthority {
         &self.store
     }
 
+    pub fn in_flight_snapshot_activation(
+        &self,
+    ) -> Result<Option<crate::snapshot_activation::SnapshotActivationMarker>, StorageError> {
+        use crate::snapshot_activation::{SNAPSHOT_ACTIVATION_KEY, SnapshotActivationMarker};
+
+        let Some(marker_bytes) = self
+            .store
+            .get(ColumnFamily::UtxoMeta, SNAPSHOT_ACTIVATION_KEY)?
+        else {
+            return Ok(None);
+        };
+        SnapshotActivationMarker::decode(&marker_bytes)
+            .map(Some)
+            .ok_or_else(|| {
+                StorageError::IncompatibleData(
+                    "snapshot activation marker is unreadable; refusing to treat it as absent"
+                        .to_owned(),
+                )
+            })
+    }
+
     #[cfg(any(test, feature = "test-seam"))]
     pub fn set_fault(&self, fault: Arc<dyn CommitFault>) {
         *self.fault.lock() = Some(fault);

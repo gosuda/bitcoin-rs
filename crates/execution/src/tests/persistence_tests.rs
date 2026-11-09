@@ -313,6 +313,9 @@ fn current_schema_version_mismatch_and_corruption_refuses_open() -> TestResult {
     assert!(ensure_current_schema(&dir).is_err());
 
     std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"4\n")?;
+    assert!(ensure_current_schema(&dir).is_err());
+
+    std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"5\n")?;
     assert!(ensure_current_schema(&dir).is_ok());
     Ok(())
 }

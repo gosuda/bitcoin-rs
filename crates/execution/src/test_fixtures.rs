@@ -194,7 +194,7 @@ pub(crate) enum TestError {
     #[error(transparent)]
     DataDir(#[from] crate::events::DataDirError),
     #[error(transparent)]
-    SnapshotArchive(#[from] crate::SnapshotArchiveError),
+    SnapshotAnchor(#[from] crate::SnapshotAnchorError),
     #[error(transparent)]
     BodyDecode(#[from] crate::verify::BodyDecodeError),
     #[error(transparent)]
@@ -225,8 +225,6 @@ pub(crate) enum TestError {
     Exhausted(&'static str),
     #[error("worker panicked: {0}")]
     WorkerPanicked(&'static str),
-    #[error("blocked past the deadline: {0}")]
-    Blocked(&'static str),
     #[error("unexpected success: {0}")]
     UnexpectedSuccess(&'static str),
 }

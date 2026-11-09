@@ -7,8 +7,9 @@ mod empty_namespaces;
 #[cfg(any(feature = "mdbx", feature = "surrealkv"))]
 mod engine_copy;
 mod engine_rejection;
-mod epoch3_copy;
 mod epoch3_to_4;
+mod epoch4_to_5;
+mod epoch5_copy;
 mod full_revalidation;
 mod historical_checkpoint;
 mod large_row;

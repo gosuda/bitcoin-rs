@@ -78,7 +78,7 @@ fn corrupt_checkpoint_with_marker_selects_cold_replay() -> TestResult {
 
     arm_full_revalidation_marker(data_dir);
 
-    let state = prepare_initial_chainstate(data_dir, NETWORK, None)?;
+    let state = prepare_initial_chainstate(data_dir, NETWORK, None, None)?;
 
     assert!(
         matches!(state.resume_source, ResumeSource::Cold),
@@ -107,7 +107,7 @@ fn valid_checkpoint_with_marker_selects_cold_replay() -> TestResult {
     )?;
     drop(store);
 
-    let no_marker = prepare_initial_chainstate(data_dir, NETWORK, None)?;
+    let no_marker = prepare_initial_chainstate(data_dir, NETWORK, None, None)?;
     assert!(
         matches!(no_marker.resume_source, ResumeSource::Checkpoint),
         "a valid checkpoint without a marker must restore to Checkpoint, got {:?}",
@@ -116,7 +116,7 @@ fn valid_checkpoint_with_marker_selects_cold_replay() -> TestResult {
 
     arm_full_revalidation_marker(data_dir);
 
-    let state = prepare_initial_chainstate(data_dir, NETWORK, None)?;
+    let state = prepare_initial_chainstate(data_dir, NETWORK, None, None)?;
 
     assert!(
         matches!(state.resume_source, ResumeSource::Cold),

@@ -15,7 +15,6 @@ impl From<SnapshotExportError> for TestError {
             }
             SnapshotExportError::Exists(_) => Self::ExpectationFailed("the export target is new"),
             SnapshotExportError::OutputName
-            | SnapshotExportError::RecoveryOutput
             | SnapshotExportError::NoAtomicPublish
             | SnapshotExportError::NoAppliedTip
             | SnapshotExportError::ChainTxCountUnknown
@@ -380,13 +379,6 @@ fn export_reproduces_the_core_snapshot_and_never_replaces_an_entry() -> Result<(
             .canonicalize()?
             .to_string_lossy()
     );
-
-    let recovery = dir.path().join("node/assumeutxo/export.dat");
-    assert!(matches!(
-        state.snapshots.export(&recovery, &never),
-        Err(SnapshotExportError::RecoveryOutput)
-    ));
-    assert!(!recovery.exists());
     Ok(())
 }
 
@@ -654,23 +646,20 @@ fn wrong_commitment_changes_nothing_and_a_valid_retry_activates() -> Result<(), 
     Ok(())
 }
 
-#[cfg(unix)]
 #[test]
 fn interrupted_activation_fails_closed_and_restart_retries_cleanly() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
     let dir = tempfile::tempdir()?;
     let (state, core_path) = snapshot_inputs(dir.path())?;
-    let archive = dir
-        .path()
-        .join("node/assumeutxo")
-        .join(pinned.block_hash.to_string());
-    let obstruction = archive.join("headers.dat");
-    std::fs::create_dir_all(&obstruction)?;
+    let checkpoints = dir.path().join("node/chainstate-checkpoints");
+    std::fs::write(&checkpoints, b"obstruction")?;
     let before_tip = tip_identity(&state);
     assert!(before_tip.is_some());
     assert!(matches!(
         state.snapshots.import(&core_path),
-        Err(SnapshotImportError::Activation(AssumeUtxoError::Archive(_)))
+        Err(SnapshotImportError::Activation(
+            AssumeUtxoError::ActivationCheckpointPublish { .. }
+        ))
     ));
     assert!(state.chainstate().is_closed_for_recovery());
     assert!(matches!(
@@ -679,10 +668,14 @@ fn interrupted_activation_fails_closed_and_restart_retries_cleanly() -> Result<(
     ));
     assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
     assert_eq!(tip_identity(&state), before_tip);
-    assert!(archive.join("coins.dat").is_file(), "orphan coin archive");
+    assert!(!dir.path().join("node/assumeutxo").exists());
+    assert!(
+        !checkpoints.join("CURRENT").is_file(),
+        "a failed checkpoint publication writes no CURRENT"
+    );
     drop(state);
 
-    std::fs::remove_dir(&obstruction)?;
+    std::fs::remove_file(&checkpoints)?;
     let resumed = crate::state::NodeState::open(node_config(dir.path()), None)?;
     assert!(!resumed.chainstate().is_closed_for_recovery());
     assert!(matches!(
@@ -694,12 +687,203 @@ fn interrupted_activation_fails_closed_and_restart_retries_cleanly() -> Result<(
     resumed.chainstate().admit_headers(&core_headers()?)?;
     resumed.snapshots.import(&core_path)?;
     assert_eq!(tip_identity(&resumed), Some((200, pinned.block_hash)));
-    assert!(archive.join("headers.dat").is_file());
-    let mut coins = BufReader::new(File::open(archive.join("coins.dat"))?);
-    let archived = bitcoin_rs_storage::utxo::read_snapshot_strict_v4(&mut coins)?;
+    let current = dir.path().join("node/chainstate-checkpoints/CURRENT");
+    assert!(current.is_file(), "activation publishes the checkpoint");
+    let stats = resumed.chainstate().coin_stats_handle().snapshot();
+    let commitment = {
+        let coin_store = resumed.coins();
+        let snapshot = coin_store.store().snapshot()?;
+        let coins = bitcoin_rs_storage::utxo::UtxoSet::new();
+        for row in snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
+            let (_key, value) = row?;
+            coins.insert_parsed_record(
+                bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
+                    .map_err(TestError::Utxo)?,
+            );
+        }
+        coins.with_stable_view(|view| {
+            Ok::<_, TestError>(view.hash_serialized_3_at_height(pinned.height)?)
+        })?
+    };
+    assert_eq!(commitment, pinned.hash_serialized);
+    assert_eq!(stats.tx_count, pinned.chain_tx_count);
+    drop(resumed);
+    let restarted = crate::state::NodeState::open(node_config(dir.path()), None)?;
+    assert_eq!(tip_identity(&restarted), Some((200, pinned.block_hash)));
     assert_eq!(
-        (archived.height, archived.tip_hash, archived.set.len()),
-        (pinned.height, pinned.block_hash, 200)
+        restarted
+            .chainstate()
+            .coin_stats_handle()
+            .snapshot()
+            .to_bytes(),
+        stats.to_bytes(),
+        "restart resumes at the base from the published checkpoint"
+    );
+    Ok(())
+}
+
+struct SnapshotActivationKill {
+    ready: PathBuf,
+}
+
+impl bitcoin_rs_storage::commit::CommitFault for SnapshotActivationKill {
+    fn before_commit(
+        &self,
+        prefix: &bitcoin_rs_storage::commit::AcceptedPrefix,
+    ) -> Result<(), bitcoin_rs_storage::CommitError> {
+        if matches!(
+            prefix.next_head.assumeutxo,
+            AssumeUtxoDiskStatus::Validating { .. }
+        ) {
+            std::fs::write(&self.ready, b"ready").map_err(|error| {
+                bitcoin_rs_storage::CommitError::Storage(bitcoin_rs_storage::StorageError::backend(
+                    error.to_string(),
+                ))
+            })?;
+            loop {
+                std::thread::park();
+            }
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn snapshot_activation_crash_worker() -> Result<(), TestError> {
+    let Some(dir) = std::env::var_os("BITCOIN_RS_SNAPSHOT_KILL_DIR") else {
+        return Ok(());
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let (state, core_path) = snapshot_inputs(&dir)?;
+    state
+        .chainstate()
+        .set_commit_fault(std::sync::Arc::new(SnapshotActivationKill {
+            ready: dir.join("kill-ready"),
+        }));
+    state.snapshots.import(&core_path)?;
+    Err(TestError::UnexpectedSuccess(
+        "activation kill fault was not reached",
+    ))
+}
+
+#[test]
+fn process_kill_between_checkpoint_publish_and_head_commit_restarts_cold() -> Result<(), TestError>
+{
+    let pinned = regtest_pin()?;
+    let dir = tempfile::tempdir()?;
+    let mut child = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "snapshot::tests::snapshot_activation_crash_worker",
+            "--nocapture",
+        ])
+        .env("BITCOIN_RS_SNAPSHOT_KILL_DIR", dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !dir.path().join("kill-ready").exists() && std::time::Instant::now() < deadline {
+        if let Some(status) = child.try_wait()? {
+            return Err(TestError::message(format!(
+                "activation crash child exited before the head commit: {status}"
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if !dir.path().join("kill-ready").exists() {
+        child.kill()?;
+        child.wait()?;
+        return Err(TestError::Timeout(
+            "activation crash child never reached the head commit",
+        ));
+    }
+    child.kill()?;
+    child.wait()?;
+    let cs_store = bitcoin_rs_storage::RocksDbStore::open(dir.path().join("node/chainstate"))?;
+    let raw = bitcoin_rs_storage::KvStore::get(
+        &cs_store,
+        bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+        bitcoin_rs_storage::durable_head::DURABLE_HEAD_KEY,
+    )?
+    .ok_or(TestError::Missing("post-kill durable head missing"))?;
+    let actual = bitcoin_rs_storage::durable_head::DurableHead::decode(&raw)
+        .ok_or(TestError::Missing("post-kill durable head undecodable"))?;
+    let marker_bytes = bitcoin_rs_storage::KvStore::get(
+        &cs_store,
+        bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+        bitcoin_rs_storage::SNAPSHOT_ACTIVATION_KEY,
+    )?;
+    let marker = marker_bytes
+        .as_deref()
+        .and_then(bitcoin_rs_storage::SnapshotActivationMarker::decode);
+    drop(cs_store);
+    assert_eq!(actual.height, 0);
+    assert_eq!(actual.tip, Network::Regtest.genesis_block_hash());
+    let prepared = bitcoin_rs_execution::recovery::prepare_initial_state_with_engine(
+        &dir.path().join("node"),
+        Network::Regtest,
+        Some(&actual),
+        marker.as_ref(),
+    )
+    .map_err(|error| TestError::Recovery(Box::new(error)))?;
+    assert!(
+        matches!(
+            prepared.initial.resume_source,
+            bitcoin_rs_execution::recovery::ResumeSource::Cold
+        ),
+        "a kill between checkpoint publish and head commit must restore cold"
+    );
+    let resumed = crate::state::NodeState::open(node_config(dir.path()), None)?;
+    assert_eq!(
+        tip_identity(&resumed),
+        Some((0, Network::Regtest.genesis_block_hash()))
+    );
+    assert!(matches!(
+        resumed.snapshots.manager.status()?,
+        AssumeUtxoDiskStatus::Uninitialized
+    ));
+    assert_eq!(resumed.chainstate().role(), ChainstateRole::Ordinary);
+    assert!(
+        !dir.path()
+            .join("node/chainstate-checkpoints/CURRENT")
+            .exists(),
+        "the rollback removes the checkpoint no head names"
+    );
+    resumed.chainstate().admit_headers(&core_headers()?)?;
+    let core_path = dir.path().join("core.dat");
+    resumed.snapshots.import(&core_path)?;
+    assert_eq!(tip_identity(&resumed), Some((200, pinned.block_hash)));
+    let current = dir.path().join("node/chainstate-checkpoints/CURRENT");
+    assert!(current.is_file(), "activation publishes the checkpoint");
+    let stats = resumed.chainstate().coin_stats_handle().snapshot();
+    let commitment = {
+        let coin_store = resumed.coins();
+        let snapshot = coin_store.store().snapshot()?;
+        let coins = bitcoin_rs_storage::utxo::UtxoSet::new();
+        for row in snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
+            let (_key, value) = row?;
+            coins.insert_parsed_record(
+                bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
+                    .map_err(TestError::Utxo)?,
+            );
+        }
+        coins.with_stable_view(|view| {
+            Ok::<_, TestError>(view.hash_serialized_3_at_height(pinned.height)?)
+        })?
+    };
+    assert_eq!(commitment, pinned.hash_serialized);
+    assert_eq!(stats.tx_count, pinned.chain_tx_count);
+    drop(resumed);
+    let restarted = crate::state::NodeState::open(node_config(dir.path()), None)?;
+    assert_eq!(tip_identity(&restarted), Some((200, pinned.block_hash)));
+    assert_eq!(
+        restarted
+            .chainstate()
+            .coin_stats_handle()
+            .snapshot()
+            .to_bytes(),
+        stats.to_bytes(),
+        "restart resumes at the base from the published checkpoint"
     );
     Ok(())
 }
@@ -1245,6 +1429,84 @@ fn reopening_with_the_manifest_configuration_succeeds() -> Result<(), TestError>
             AssumeUtxoDiskStatus::Validating { .. } | AssumeUtxoDiskStatus::Finalized { .. }
         ),
         "the restart must keep the imported base instead of failing on AlreadyActive"
+    );
+    Ok(())
+}
+
+#[test]
+fn checkpoint_published_before_head_commit_restarts_cold() -> Result<(), TestError> {
+    let pinned = regtest_pin()?;
+    let dir = tempfile::tempdir()?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
+    state.snapshots.import(&core_path)?;
+    drop(state);
+    let data_dir = dir.path().join("node");
+    let head_with = |assumeutxo| bitcoin_rs_storage::DurableHead {
+        assumeutxo,
+        commit_id: 1,
+        height: pinned.height,
+        tip: pinned.block_hash,
+        chain_tx_count: pinned.chain_tx_count,
+        body_extent: None,
+        undo_extent: None,
+    };
+    let uncommitted = head_with(AssumeUtxoDiskStatus::Uninitialized);
+    let in_flight = bitcoin_rs_storage::SnapshotActivationMarker {
+        base_hash: pinned.block_hash,
+        coin_count: 0,
+        coin_digest: pinned.hash_serialized,
+    };
+    let cold = bitcoin_rs_execution::recovery::prepare_initial_state_with_engine(
+        &data_dir,
+        Network::Regtest,
+        Some(&uncommitted),
+        Some(&in_flight),
+    )
+    .map_err(|error| TestError::Recovery(Box::new(error)))?;
+    assert!(
+        matches!(
+            cold.initial.resume_source,
+            bitcoin_rs_execution::recovery::ResumeSource::Cold
+        ),
+        "a checkpoint at the base of an in-flight activation must not be restored"
+    );
+    let ordinary = bitcoin_rs_execution::recovery::prepare_initial_state_with_engine(
+        &data_dir,
+        Network::Regtest,
+        Some(&uncommitted),
+        None,
+    )
+    .map_err(|error| TestError::Recovery(Box::new(error)))?;
+    assert!(
+        matches!(
+            ordinary.initial.resume_source,
+            bitcoin_rs_execution::recovery::ResumeSource::Checkpoint
+        ),
+        "a checkpoint at a compiled base with no activation in flight must restore"
+    );
+    let committed = head_with(AssumeUtxoDiskStatus::Validating {
+        base_height: pinned.height,
+        base_hash: pinned.block_hash,
+        expected_hash_serialized: pinned.hash_serialized,
+        chain_tx_count: pinned.chain_tx_count,
+        historical_height: 0,
+        historical_hash: Network::Regtest.genesis_block_hash(),
+        pending: None,
+        checkpoint: None,
+    });
+    let warm = bitcoin_rs_execution::recovery::prepare_initial_state_with_engine(
+        &data_dir,
+        Network::Regtest,
+        Some(&committed),
+        None,
+    )
+    .map_err(|error| TestError::Recovery(Box::new(error)))?;
+    assert!(
+        matches!(
+            warm.initial.resume_source,
+            bitcoin_rs_execution::recovery::ResumeSource::Checkpoint
+        ),
+        "the head that names the base must restore the published checkpoint"
     );
     Ok(())
 }

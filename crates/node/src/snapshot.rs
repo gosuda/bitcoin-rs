@@ -79,8 +79,6 @@ pub(crate) enum SnapshotExportError {
         "{0} already exists. If you are sure this is what you want, move it out of the way first"
     )]
     Exists(String),
-    #[error("snapshot output cannot be in the node's snapshot recovery namespace")]
-    RecoveryOutput,
     #[error("this platform has no atomic no-replace rename, so a snapshot cannot be published")]
     NoAtomicPublish,
     #[error("chain is not accepting a snapshot export: {0}")]
@@ -106,8 +104,7 @@ impl From<SnapshotExportError> for SnapshotControlError {
             | SnapshotExportError::Codec(SnapshotError::Interrupted) => Self::Interrupted,
             SnapshotExportError::OutputName
             | SnapshotExportError::Output(_)
-            | SnapshotExportError::Exists(_)
-            | SnapshotExportError::RecoveryOutput => Self::File(error.to_string()),
+            | SnapshotExportError::Exists(_) => Self::File(error.to_string()),
             SnapshotExportError::ExportInProgress
             | SnapshotExportError::NoAtomicPublish
             | SnapshotExportError::Admission(_)
@@ -183,8 +180,6 @@ pub enum SnapshotImportError {
     ImportInProgress,
     #[error("snapshot activation requires an empty mempool")]
     MempoolNotEmpty,
-    #[error("snapshot input cannot be in the node's snapshot recovery namespace")]
-    RecoveryInput,
     #[error("invalid Core snapshot: {0}")]
     Codec(#[from] bitcoin_rs_storage::utxo::core_snapshot::SnapshotError),
     #[error("ScriptLive snapshot seed staging failed: {0}")]
@@ -209,9 +204,9 @@ pub enum SnapshotImportError {
 impl From<SnapshotImportError> for SnapshotControlError {
     fn from(error: SnapshotImportError) -> Self {
         match error {
-            SnapshotImportError::File(_)
-            | SnapshotImportError::NotRegular
-            | SnapshotImportError::RecoveryInput => Self::File(error.to_string()),
+            SnapshotImportError::File(_) | SnapshotImportError::NotRegular => {
+                Self::File(error.to_string())
+            }
             SnapshotImportError::Codec(
                 bitcoin_rs_storage::utxo::core_snapshot::SnapshotError::Io(_),
             ) => Self::Failed(error.to_string()),
@@ -390,14 +385,6 @@ impl SnapshotControl {
             .ok_or(SnapshotExportError::OutputName)?
             .canonicalize()
             .map_err(SnapshotExportError::Output)?;
-        let recovery = self
-            .data_dir
-            .canonicalize()
-            .map_err(SnapshotExportError::Output)?
-            .join("assumeutxo");
-        if parent.starts_with(recovery) {
-            return Err(SnapshotExportError::RecoveryOutput);
-        }
         let dir = open_data_dir(&parent).map_err(SnapshotExportError::Output)?;
         let path = parent.join(&name);
         match dir.symlink_metadata(&name) {
@@ -499,10 +486,6 @@ impl SnapshotControl {
         let path = path.canonicalize()?;
         if !path.metadata()?.is_file() {
             return Err(SnapshotImportError::NotRegular);
-        }
-        let recovery = self.data_dir.canonicalize()?.join("assumeutxo");
-        if path.starts_with(recovery) {
-            return Err(SnapshotImportError::RecoveryInput);
         }
         let mut file = BufReader::new(open_regular_input(&path)?);
         let file_bytes = path.metadata()?.len();
@@ -645,10 +628,6 @@ impl SnapshotControl {
         let _permit = self.claim_import()?;
         if !path.is_file() {
             return Err(SnapshotImportError::NotRegular);
-        }
-        let recovery = self.data_dir.canonicalize()?.join("assumeutxo");
-        if path.starts_with(&recovery) {
-            return Err(SnapshotImportError::RecoveryInput);
         }
         let bytes = read_bounded_manifest(path)?;
         let manifest = bitcoin_rs_execution::manifest::SnapshotManifest::parse(&bytes)?;

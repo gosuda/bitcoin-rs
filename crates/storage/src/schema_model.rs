@@ -1,10 +1,12 @@
-//! Executable reference model for schema epoch 4 admission and offline conversion.
+//! Executable reference model for schema epoch 5 admission and offline conversion.
 //!
-//! Models the lifecycle of node datadir schema verification and the converter step
-//! `3 -> 4` targeting storage epoch 4 (with epoch 3 retired) per RCV-09 and RCV-10.
-//! Epoch 4 places coins in the engine `coins` keyspace, deletes the
-//! journal, and removes the utxo v4 checkpoint coin image as a resident
-//! authority. Live storage (`checkpoint::fs`) remains at schema epoch 4; this is a
+//! Models the lifecycle of node datadir schema verification and the converter steps
+//! `3 -> 5` and `4 -> 5` targeting storage epoch 5 per RCV-09 and RCV-10. Epoch 4
+//! and epoch 3 are retired. Epoch 5 keeps coins in the engine `coins` keyspace,
+//! deletes the journal, and publishes a snapshot-base checkpoint in place of the
+//! retired snapshot archive. The model treats both retired epochs as the same
+//! convertible source; archive verification of a retired epoch 4 snapshot is not
+//! modeled. Live storage (`checkpoint::fs`) is at schema epoch 5; this is a
 //! standalone behavioral design model, not an implementation-refinement claim on
 //! `fs.rs` or `tools/storage-convert`.
 
@@ -25,8 +27,10 @@ pub enum MarkerClassification {
     Malformed,
     /// Datadir schema epoch 3 (retired epoch; journal and checkpoint coin image).
     RetiredEpoch3,
-    /// Datadir schema epoch 4 (current epoch; engine `coins` keyspace).
-    CurrentEpoch4,
+    /// Datadir schema epoch 4 (retired epoch; engine `coins` keyspace, snapshot archive).
+    RetiredEpoch4,
+    /// Datadir schema epoch 5 (current epoch; engine `coins` keyspace, snapshot-base checkpoint).
+    CurrentEpoch5,
     /// Future schema epoch not recognized by this version.
     FutureEpoch,
 }
@@ -34,12 +38,15 @@ pub enum MarkerClassification {
 impl MarkerClassification {
     #[must_use]
     pub const fn is_current(self) -> bool {
-        matches!(self, Self::CurrentEpoch4)
+        matches!(self, Self::CurrentEpoch5)
     }
 
     #[must_use]
     pub const fn is_convertible(self) -> bool {
-        matches!(self, Self::RetiredEpoch3 | Self::CurrentEpoch4)
+        matches!(
+            self,
+            Self::RetiredEpoch3 | Self::RetiredEpoch4 | Self::CurrentEpoch5
+        )
     }
 
     #[must_use]
@@ -374,7 +381,7 @@ fn step_node_init(state: &State, action: Action) -> Option<State> {
                 return None;
             }
             let mut next = *state;
-            next.source_marker = MarkerClassification::CurrentEpoch4;
+            next.source_marker = MarkerClassification::CurrentEpoch5;
             next.phase = Phase::NodeInitPendingSync;
             Some(next)
         }
@@ -554,7 +561,7 @@ fn step_conversion_publish(state: &State, action: Action) -> Option<State> {
                 return None;
             }
             let mut next = *state;
-            next.dest_marker = Some(MarkerClassification::CurrentEpoch4);
+            next.dest_marker = Some(MarkerClassification::CurrentEpoch5);
             next.phase = Phase::PublishedPendingSync;
             Some(next)
         }
@@ -650,7 +657,7 @@ fn is_verified_prefix(dest: &[u8; NUM_CELLS], src: &[u8; NUM_CELLS], verify_curs
 fn is_node_admission_terminal_coherent(state: &State) -> bool {
     match state.outcome {
         Outcome::Refused => {
-            state.inputs.source_marker != MarkerClassification::CurrentEpoch4
+            state.inputs.source_marker != MarkerClassification::CurrentEpoch5
                 && !(state.inputs.source_marker == MarkerClassification::Absent
                     && state.inputs.source_dir_empty)
                 && state.source_marker == state.inputs.source_marker
@@ -663,8 +670,8 @@ fn is_node_admission_terminal_coherent(state: &State) -> bool {
                 && !state.observed_final_sync
         }
         Outcome::Success => {
-            state.source_marker == MarkerClassification::CurrentEpoch4
-                && if state.inputs.source_marker == MarkerClassification::CurrentEpoch4 {
+            state.source_marker == MarkerClassification::CurrentEpoch5
+                && if state.inputs.source_marker == MarkerClassification::CurrentEpoch5 {
                     !state.observed_final_sync
                 } else if state.inputs.source_marker == MarkerClassification::Absent
                     && state.inputs.source_dir_empty
@@ -677,7 +684,7 @@ fn is_node_admission_terminal_coherent(state: &State) -> bool {
         Outcome::PublicationUnknown => {
             state.inputs.source_marker == MarkerClassification::Absent
                 && state.inputs.source_dir_empty
-                && state.source_marker == MarkerClassification::CurrentEpoch4
+                && state.source_marker == MarkerClassification::CurrentEpoch5
                 && !state.observed_final_sync
         }
         Outcome::RefusedNoCheckpoint | Outcome::MissingData { .. } => false,
@@ -716,7 +723,7 @@ fn is_node_admission_coherent(state: &State) -> bool {
         Phase::NodeInitPendingSync => {
             state.inputs.source_marker == MarkerClassification::Absent
                 && state.inputs.source_dir_empty
-                && state.source_marker == MarkerClassification::CurrentEpoch4
+                && state.source_marker == MarkerClassification::CurrentEpoch5
                 && !state.observed_final_sync
         }
         Phase::Terminal => is_node_admission_terminal_coherent(state),
@@ -785,7 +792,7 @@ fn is_conversion_terminal_coherent(state: &State) -> bool {
                 && state.verify_cursor == NUM_CELLS_U8
                 && state.dest_cells == state.source_contents
                 && state.dest_coins == state.inputs.oracle_coins(state.inputs.durable_head)
-                && state.dest_marker == Some(MarkerClassification::CurrentEpoch4)
+                && state.dest_marker == Some(MarkerClassification::CurrentEpoch5)
                 && state.required_files_durable
                 && state.scratch_deleted
                 && state.replay_applied
@@ -797,7 +804,7 @@ fn is_conversion_terminal_coherent(state: &State) -> bool {
                 && state.verify_cursor == NUM_CELLS_U8
                 && state.dest_cells == state.source_contents
                 && state.dest_coins == state.inputs.oracle_coins(state.inputs.durable_head)
-                && state.dest_marker == Some(MarkerClassification::CurrentEpoch4)
+                && state.dest_marker == Some(MarkerClassification::CurrentEpoch5)
                 && state.required_files_durable
                 && state.scratch_deleted
                 && state.replay_applied
@@ -966,7 +973,7 @@ fn is_conversion_coherent(state: &State) -> bool {
                 && state.copy_cursor == NUM_CELLS_U8
                 && state.verify_cursor == NUM_CELLS_U8
                 && state.dest_cells == state.source_contents
-                && state.dest_marker == Some(MarkerClassification::CurrentEpoch4)
+                && state.dest_marker == Some(MarkerClassification::CurrentEpoch5)
                 && state.required_files_durable
                 && state.scratch_deleted
                 && !state.observed_final_sync

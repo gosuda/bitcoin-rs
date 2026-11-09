@@ -266,10 +266,12 @@ impl NodeState {
                     .stored_prune_height()
                     .is_some_and(|height| height > 0),
             )?;
+            let in_flight = storage.commit_authority().in_flight_snapshot_activation()?;
             bitcoin_rs_execution::recovery::prepare_initial_state_with_engine(
                 &config.data_dir,
                 config.network,
                 head.as_ref(),
+                in_flight.as_ref(),
             )?
         };
         let engine = restored.engine.clone();

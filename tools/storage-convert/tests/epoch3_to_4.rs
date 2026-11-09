@@ -450,13 +450,13 @@ fn replay_with_checkpoint_at_durable_head() -> TestResult<()> {
     let output = run_converter(&["--from", from_str, "--to", to_str])?;
     let report = parse_report(&output)?;
 
-    if report.source_epoch != 3 || report.target_epoch != 4 {
+    if report.source_epoch != 3 || report.target_epoch != 5 {
         return Err(TestError::Assertion("unexpected report epochs".into()));
     }
 
     let dest_schema = fs::read_to_string(to_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema != "4\n" {
-        return Err(TestError::Assertion("expected 4\n".into()));
+    if dest_schema != "5\n" {
+        return Err(TestError::Assertion("expected 5\n".into()));
     }
 
     let dest_store = RocksDbStore::open(to_path.join("chainstate"))?;

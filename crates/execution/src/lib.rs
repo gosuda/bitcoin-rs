@@ -52,7 +52,7 @@ pub use assumeutxo::{
 
 mod assumeutxo_snapshot;
 mod checkpoint;
-pub use assumeutxo_snapshot::SnapshotArchiveError;
+pub use assumeutxo_snapshot::SnapshotAnchorError;
 pub use checkpoint::{CheckpointError, CheckpointSetupError};
 mod error;
 pub mod events;
@@ -590,24 +590,26 @@ impl Chainstate {
         declared_coins: u64,
         stream: S,
         persist: P,
-    ) -> Result<Option<bitcoin_rs_storage::utxo::V4Witness>, AssumeUtxoError>
+    ) -> Result<(), AssumeUtxoError>
     where
         S: FnOnce(
             &bitcoin_rs_storage::CoinStore,
         ) -> Result<assumeutxo_snapshot::StreamedCoins, AssumeUtxoError>,
         P: FnOnce(
             &bitcoin_rs_storage::CoinStore,
-            &BlockTree,
+            &parking_lot::RwLock<BlockTree>,
             &TipSnapshot,
             Option<&bitcoin_rs_storage::DurableHead>,
             &bitcoin_rs_storage::SnapshotActivationMarker,
             &assumeutxo_snapshot::StreamedCoins,
-        ) -> Result<Option<bitcoin_rs_storage::utxo::V4Witness>, AssumeUtxoError>,
+        ) -> Result<(), AssumeUtxoError>,
     {
         let _guard = self.admission.enter()?;
         let _transition = self.chain_transition.lock();
-        let tree = self.block_tree.read();
-        let tip_snapshot = Self::snapshot_base_tip(&tree, pinned)?;
+        let tip_snapshot = {
+            let tree = self.block_tree.read();
+            Self::snapshot_base_tip(&tree, pinned)?
+        };
         let prior = self.durable_head.load().inspect_err(|_| {
             self.fail_closed_for_recovery();
         })?;
@@ -646,18 +648,16 @@ impl Chainstate {
             Ok(streamed) => streamed,
             Err(error) => return Err(self.discard_partial_ingest(error, prior.as_ref())),
         };
-        let witness = match persist(
+        if let Err(error) = persist(
             &self.coins,
-            &tree,
+            &self.block_tree,
             &tip_snapshot,
             prior.as_ref(),
             &marker,
             &streamed,
         ) {
-            Ok(witness) => witness,
-            Err(error) => return Err(self.discard_partial_ingest(error, prior.as_ref())),
-        };
-        drop(tree);
+            return Err(self.discard_partial_ingest(error, prior.as_ref()));
+        }
         let mut tree = self.block_tree.write();
         tree.restore_chain_tx_count(tip_snapshot.tip_id, tip_snapshot.chain_tx_count)
             .map_err(ApplyError::from)
@@ -670,7 +670,7 @@ impl Chainstate {
             base_height: pinned.height,
             base_hash: pinned.block_hash,
         };
-        Ok(witness)
+        Ok(())
     }
 
     fn discard_partial_ingest(

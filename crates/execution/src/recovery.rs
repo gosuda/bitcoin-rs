@@ -5,7 +5,7 @@ use bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER;
 use bitcoin_rs_storage::utxo::UtxoSet;
 use std::path::{Path, PathBuf};
 
-use crate::assumeutxo_snapshot::SnapshotArchiveError;
+use crate::assumeutxo_snapshot::SnapshotAnchorError;
 
 pub const STALE_RESTORE_ERROR_THRESHOLD: u32 = 1000;
 
@@ -27,7 +27,7 @@ pub enum RecoveryError {
     #[error(transparent)]
     Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error(transparent)]
-    Snapshot(#[from] SnapshotArchiveError),
+    Snapshot(#[from] SnapshotAnchorError),
     #[error(transparent)]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error("read the script attestation of the durable head")]
@@ -330,13 +330,7 @@ fn restore_snapshot_with_engine(
             });
         }
     }
-    let initial = crate::assumeutxo_snapshot::load_verified(data_dir, network, pinned)
-        .map_err(RecoveryError::from)?;
-    Ok(RestoredState {
-        initial,
-        engine: None,
-        _scratch: None,
-    })
+    Err(RecoveryError::PinnedCheckpointMismatch)
 }
 
 fn cold_initial_chainstate(
@@ -404,14 +398,16 @@ pub fn prepare_initial_chainstate(
     data_dir: &Path,
     network: bitcoin_rs_consensus::primitives::Network,
     durable_head: Option<&bitcoin_rs_storage::DurableHead>,
+    in_flight: Option<&bitcoin_rs_storage::SnapshotActivationMarker>,
 ) -> Result<InitialChainstate, RecoveryError> {
-    Ok(prepare_initial_state_with_engine(data_dir, network, durable_head)?.initial)
+    Ok(prepare_initial_state_with_engine(data_dir, network, durable_head, in_flight)?.initial)
 }
 
 pub fn prepare_initial_state_with_engine(
     data_dir: &Path,
     network: bitcoin_rs_consensus::primitives::Network,
     durable_head: Option<&bitcoin_rs_storage::DurableHead>,
+    in_flight: Option<&bitcoin_rs_storage::SnapshotActivationMarker>,
 ) -> Result<RestoredState, RecoveryError> {
     let checkpoint_data_dir = open_checkpoint_data_dir(data_dir)?;
     let anchor = durable_head
@@ -442,6 +438,13 @@ pub fn prepare_initial_state_with_engine(
             _scratch: None,
         });
     };
+    if in_flight_activation_base(in_flight, &restored.applied_tip) {
+        return Ok(RestoredState {
+            initial: no_checkpoint_cold_start(data_dir, network)?,
+            engine: None,
+            _scratch: None,
+        });
+    }
     let engine = restored.engine.clone();
     let (initial, scratch) = restored_initial(*restored)?;
     Ok(RestoredState {
@@ -449,6 +452,18 @@ pub fn prepare_initial_state_with_engine(
         engine,
         _scratch: scratch,
     })
+}
+
+/// A checkpoint at the base of an activation that has begun and not committed
+/// is the residue of a crash between the checkpoint publish and the head
+/// commit. Restart must not adopt it. The activation rollback removes it.
+/// Checkpoints at a compiled base that no activation is in flight for are
+/// ordinary validation output and are adopted.
+fn in_flight_activation_base(
+    in_flight: Option<&bitcoin_rs_storage::SnapshotActivationMarker>,
+    tip: &TipSnapshot,
+) -> bool {
+    in_flight.is_some_and(|marker| marker.base_hash == tip.hash)
 }
 
 pub struct ConvertedCheckpoint<'a> {
@@ -475,6 +490,14 @@ pub enum ConvertedCheckpointError {
     Publish(#[source] crate::CheckpointError),
     #[error("checkpoint publication skipped: no applied tip")]
     Skipped,
+    #[error(
+        "converted engine coins do not match the pinned commitment: expected {expected}, found {found}"
+    )]
+    EngineCommitmentMismatch { expected: String, found: String },
+    #[error("converted engine coins are unreadable")]
+    Coins(#[source] bitcoin_rs_storage::utxo::UtxoError),
+    #[error("converted engine store is unreadable")]
+    Engine(#[source] bitcoin_rs_storage::StorageError),
 }
 
 pub fn publish_converted_checkpoint(
@@ -535,6 +558,172 @@ pub fn publish_converted_checkpoint(
         chain_tx_count,
     };
     let listener = bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(checkpoint.stats);
+    let block_tree = parking_lot::RwLock::new(tree);
+    let written = crate::checkpoint::write_checkpoint_with_store(
+        target_data_dir,
+        config,
+        &block_tree,
+        &listener,
+        Some(&applied),
+        crate::checkpoint::CheckpointStoreTarget {
+            store: engine,
+            host_data_dir: target_host_dir,
+        },
+    )
+    .map_err(ConvertedCheckpointError::Publish)?;
+    match written {
+        crate::checkpoint::CheckpointWrite::Published { .. } => Ok(()),
+        crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => {
+            Err(ConvertedCheckpointError::Skipped)
+        }
+    }
+}
+
+/// Checks whether the target datadir holds a checkpoint the snapshot base
+/// resumes from. It mirrors the restart predicate: the base sits on the
+/// checkpoint ancestry, and a checkpoint at the base carries the pinned
+/// coins and transaction count.
+pub fn snapshot_base_checkpoint_compatible(
+    target_data_dir: &cap_std::fs::Dir,
+    target_host_dir: Option<&Path>,
+    network: bitcoin_rs_consensus::primitives::Network,
+    pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
+) -> Result<bool, ConvertedCheckpointError> {
+    let config = header_checkpoint_config(network);
+    let loaded = crate::checkpoint::load_checkpoint_from_dir_with_path(
+        target_data_dir,
+        target_host_dir,
+        config,
+        bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT,
+    )
+    .map_err(ConvertedCheckpointError::Source)?;
+    let crate::checkpoint::CheckpointLoad::Complete(restored) = loaded else {
+        return Ok(false);
+    };
+    let compatible = restored
+        .tree
+        .node_at_height_from(restored.applied_tip.tip_id, pinned.height)
+        .and_then(|id| restored.tree.node(id).ok())
+        .is_some_and(|node| node.hash == pinned.block_hash);
+    if !compatible {
+        return Ok(false);
+    }
+    if restored.applied_tip.height == pinned.height
+        && !checkpoint_image_matches_pin(restored.engine.as_ref(), pinned)?
+    {
+        return Ok(false);
+    }
+    if restored.applied_tip.height == pinned.height
+        && restored.applied_tip.chain_tx_count.to_wire() != pinned.chain_tx_count
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn checkpoint_image_matches_pin(
+    engine: Option<&std::sync::Arc<dyn bitcoin_rs_storage::KvStore>>,
+    pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
+) -> Result<bool, ConvertedCheckpointError> {
+    let Some(image) = engine else {
+        return Ok(false);
+    };
+    let snapshot = image.snapshot().map_err(ConvertedCheckpointError::Engine)?;
+    let coins = UtxoSet::new();
+    for row in snapshot
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])
+        .map_err(ConvertedCheckpointError::Engine)?
+    {
+        let (_key, value) = row.map_err(ConvertedCheckpointError::Engine)?;
+        coins.insert_parsed_record(
+            bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
+                .map_err(ConvertedCheckpointError::Coins)?,
+        );
+    }
+    Ok(coins
+        .lock_stable_view()
+        .hash_serialized_3_at_height(pinned.height)
+        .map_err(ConvertedCheckpointError::Coins)?
+        == pinned.hash_serialized)
+}
+
+/// Publishes a checkpoint at the snapshot base from converted engine coins
+/// after the caller verified the retired archive. The header linkage and
+/// proof of work check runs here, the engine coin hash must equal the
+/// pinned commitment, and CURRENT is written last.
+pub fn publish_snapshot_base_checkpoint(
+    target_data_dir: &cap_std::fs::Dir,
+    target_host_dir: &Path,
+    network: bitcoin_rs_consensus::primitives::Network,
+    headers: &[crate::chain::BlockHeader],
+    pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
+    engine: &dyn bitcoin_rs_storage::KvStore,
+) -> Result<(), ConvertedCheckpointError> {
+    let config = header_checkpoint_config(network);
+    let mut tree = crate::chain::BlockTree::new();
+    crate::chain::accept_headers(
+        &mut tree,
+        headers,
+        network,
+        0,
+        crate::chain::HeaderValidationMode::HistoricalReplay,
+    )
+    .map_err(ConvertedCheckpointError::Headers)?;
+    let tip_id =
+        tree.lookup(pinned.block_hash)
+            .ok_or_else(|| ConvertedCheckpointError::TipNotInTree {
+                hash: pinned.block_hash.to_string_be(),
+                height: pinned.height,
+            })?;
+    let node = tree
+        .node(tip_id)
+        .map_err(ConvertedCheckpointError::Headers)?;
+    if node.height != pinned.height {
+        return Err(ConvertedCheckpointError::HeightMismatch {
+            tree: node.height,
+            head: pinned.height,
+        });
+    }
+    let chainwork = node.chainwork;
+    let hash = node.hash;
+    let chain_tx_count = crate::chain::ChainTxCount::from_wire(pinned.chain_tx_count);
+    tree.restore_chain_tx_count(tip_id, chain_tx_count)
+        .map_err(ConvertedCheckpointError::Headers)?;
+    let coins = UtxoSet::new();
+    for row in engine
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])
+        .map_err(ConvertedCheckpointError::Engine)?
+    {
+        let (_key, value) = row.map_err(ConvertedCheckpointError::Engine)?;
+        coins.insert_parsed_record(
+            bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
+                .map_err(ConvertedCheckpointError::Coins)?,
+        );
+    }
+    let commitment = coins
+        .lock_stable_view()
+        .hash_serialized_3_at_height(pinned.height)
+        .map_err(ConvertedCheckpointError::Coins)?;
+    if commitment != pinned.hash_serialized {
+        return Err(ConvertedCheckpointError::EngineCommitmentMismatch {
+            expected: pinned.hash_serialized.to_string_be(),
+            found: commitment.to_string_be(),
+        });
+    }
+    let mut stats = coins
+        .with_stable_view(|view| {
+            bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, pinned.height, true)
+        })
+        .map_err(ConvertedCheckpointError::Coins)?;
+    stats.tx_count = pinned.chain_tx_count;
+    let applied = TipSnapshot {
+        tip_id,
+        height: pinned.height,
+        chainwork,
+        hash,
+        chain_tx_count,
+    };
+    let listener = bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(stats);
     let block_tree = parking_lot::RwLock::new(tree);
     let written = crate::checkpoint::write_checkpoint_with_store(
         target_data_dir,

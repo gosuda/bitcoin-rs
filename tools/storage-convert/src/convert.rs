@@ -20,9 +20,13 @@ use crate::target::{
 };
 use bitcoin_rs_consensus::bip30::{BIP30_DUPLICATE_TXID_EXCEPTIONS, is_bip30_exception};
 use bitcoin_rs_consensus::primitives::{
-    Block, BlockImage, ConsensusDecode, Hash256, Network, OutPoint, Txid, hex::hex_encode,
+    AssumeUtxoData, Block, BlockImage, ConsensusDecode, Hash256, Header, Network, OutPoint, Txid,
+    deserialize, hex::hex_encode,
 };
-use bitcoin_rs_execution::recovery::{ConvertedCheckpoint, publish_converted_checkpoint};
+use bitcoin_rs_execution::recovery::{
+    ConvertedCheckpoint, publish_converted_checkpoint, publish_snapshot_base_checkpoint,
+    snapshot_base_checkpoint_compatible,
+};
 use bitcoin_rs_storage::checkpoint::{
     CHECKPOINT_ROOT, COINSTATS_FILE, CURRENT_FILE, CURRENT_FORMAT, CURRENT_VERSION,
     CheckpointManifestV1, CheckpointOpen, CheckpointReference, CurrentV1, HEADERS_FILE,
@@ -30,6 +34,7 @@ use bitcoin_rs_storage::checkpoint::{
 };
 pub(crate) const UTXO_FILE: &str = "utxo-v4.dat";
 const EPOCH3_JOURNAL_DIR: &str = "chainstate-journal";
+use bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus;
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
 use bitcoin_rs_storage::pruning::{block_body_key, block_undo_key};
 use bitcoin_rs_storage::utxo::UtxoCoin;
@@ -38,9 +43,10 @@ use bitcoin_rs_storage::utxo::contract::{
     decode_undo_record_for_block, rewrite_overwrite_restores,
 };
 use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
+use bitcoin_rs_storage::utxo::snapshot::stream_snapshot_v4_records;
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsAccumulator};
 use bitcoin_rs_storage::utxo::{
-    SnapshotCoin, SnapshotCoinObserver, read_snapshot_strict_v4_observed,
+    SnapshotCoin, SnapshotCoinObserver, UtxoError, read_snapshot_strict_v4_observed,
 };
 use bitcoin_rs_storage::{
     BlockFilePosition, ColumnFamily, FlatFileBlockStore, KvStore, StorageBackend,
@@ -63,7 +69,7 @@ pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertE
     let roots = validate_and_open_roots(&args)?;
 
     let source_epoch = read_source_epoch(&roots.from_dir)?;
-    if source_epoch != 2 && source_epoch != 3 && source_epoch != 4 {
+    if source_epoch != 2 && source_epoch != 3 && source_epoch != 4 && source_epoch != 5 {
         return Err(ConvertError::UnknownEpoch(source_epoch));
     }
 
@@ -71,9 +77,13 @@ pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertE
         return run_step_3_to_4(&args, &roots, target_engine);
     }
 
+    if source_epoch == 4 {
+        return run_step_4_to_5(&args, &roots, target_engine);
+    }
+
     let target_epoch = match source_epoch {
         2 => 3,
-        4 => 4,
+        5 => 5,
         _ => return Err(ConvertError::UnknownEpoch(source_epoch)),
     };
 
@@ -1386,12 +1396,15 @@ fn run_step_3_to_4(
         )
         .map_err(ConvertError::CheckpointPublish)?;
     }
+    drop(engine);
+    let _snapshot_outcome =
+        finalize_snapshot_base(roots, to_path, target_engine, &mut namespaces_report)?;
     let carried_markers = carry_full_revalidation_marker(&roots.from_dir, &roots.to_dir)?;
-    publish_current_schema(&roots.to_dir, 4)?;
+    publish_current_schema(&roots.to_dir, 5)?;
 
     Ok(ConversionReport {
         source_epoch: 3,
-        target_epoch: 4,
+        target_epoch: 5,
         namespaces: namespaces_report,
         copied_files,
         checkpoint_stats: Some(checkpoint_stats_report),
@@ -1399,6 +1412,261 @@ fn run_step_3_to_4(
         normalized_undo_rows,
         carried_markers,
         published_checkpoint: true,
+    })
+}
+
+const SNAPSHOT_NETWORKS: [Network; 5] = [
+    Network::Mainnet,
+    Network::Testnet3,
+    Network::Testnet4,
+    Network::Signet,
+    Network::Regtest,
+];
+
+fn pinned_for_base(height: u32, hash: Hash256) -> Option<(Network, &'static AssumeUtxoData)> {
+    for network in SNAPSHOT_NETWORKS {
+        if let Some(pinned) = network.assume_utxo_for_height(height)
+            && pinned.block_hash == hash
+        {
+            return Some((network, pinned));
+        }
+    }
+    None
+}
+
+fn snapshot_base_of(head: &DurableHead) -> Option<(u32, Hash256)> {
+    match head.assumeutxo {
+        AssumeUtxoDiskStatus::Validating {
+            base_height,
+            base_hash,
+            ..
+        }
+        | AssumeUtxoDiskStatus::Finalized {
+            base_height,
+            base_hash,
+            ..
+        } => Some((base_height, base_hash)),
+        AssumeUtxoDiskStatus::Uninitialized | AssumeUtxoDiskStatus::Failed { .. } => None,
+    }
+}
+fn snapshot_archive_base_dir(from_dir: &Dir, base: &str) -> Result<Dir, ConvertError> {
+    let invalid = |reason: String| ConvertError::SnapshotArchiveInvalid {
+        base: base.to_owned(),
+        reason,
+    };
+    let root = from_dir
+        .open_dir_nofollow("assumeutxo")
+        .map_err(|_| invalid("missing assumeutxo archive".to_owned()))?;
+    root.open_dir_nofollow(base)
+        .map_err(|_| invalid("missing snapshot base archive".to_owned()))
+}
+
+fn read_snapshot_archive_headers(
+    from_dir: &Dir,
+    pinned: &AssumeUtxoData,
+) -> Result<Vec<Header>, ConvertError> {
+    let base = pinned.block_hash.to_string();
+    let invalid = |reason: String| ConvertError::SnapshotArchiveInvalid {
+        base: base.clone(),
+        reason,
+    };
+    let dir = snapshot_archive_base_dir(from_dir, &base)?;
+    let file = open_file_read_no_follow(&dir, "headers.dat")
+        .map_err(|_| invalid("missing headers.dat".to_owned()))?;
+    if file.metadata()?.len() != (u64::from(pinned.height) + 1) * 80 {
+        return Err(invalid(format!(
+            "headers.dat length does not match pinned height {}",
+            pinned.height
+        )));
+    }
+    let mut std_file = file.into_std();
+    let mut bytes = Vec::new();
+    std_file.read_to_end(&mut bytes)?;
+    bytes
+        .as_chunks::<80>()
+        .0
+        .iter()
+        .map(|chunk| deserialize::<Header>(chunk).map_err(|error| invalid(error.to_string())))
+        .collect()
+}
+
+fn verify_snapshot_archive_coins(
+    from_dir: &Dir,
+    pinned: &AssumeUtxoData,
+) -> Result<(), ConvertError> {
+    let base = pinned.block_hash.to_string();
+    let invalid = |reason: String| ConvertError::SnapshotArchiveInvalid {
+        base: base.clone(),
+        reason,
+    };
+    let dir = snapshot_archive_base_dir(from_dir, &base)?;
+    let file = open_file_read_no_follow(&dir, "coins.dat")
+        .map_err(|_| invalid("missing coins.dat".to_owned()))?;
+    let mut std_file = file.into_std();
+    let streamed = stream_snapshot_v4_records(&mut std_file, |_: Hash256, _: &UtxoRecord| {
+        Ok::<(), UtxoError>(())
+    })
+    .map_err(|error| invalid(format!("coins.dat: {error}")))?;
+    if streamed.height != pinned.height || streamed.tip_hash != pinned.block_hash {
+        return Err(invalid(
+            "coins.dat identity does not match the pinned base".to_owned(),
+        ));
+    }
+    if streamed.hash_serialized != pinned.hash_serialized {
+        return Err(invalid(
+            "coins.dat hash does not match the pinned commitment".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+struct SnapshotStepOutcome {
+    checkpoint_stats: Option<CoinStatsReport>,
+    final_stats: Option<CoinStatsReport>,
+    published_checkpoint: bool,
+}
+
+fn finalize_snapshot_base(
+    roots: &crate::fs_util::OpenedRoots,
+    to_path: &Path,
+    target_engine: StorageBackend,
+    namespaces_report: &mut [NamespaceReport],
+) -> Result<SnapshotStepOutcome, ConvertError> {
+    let cs_dst_path = to_path.join("chainstate");
+    let dest_store = open_destination_store(&cs_dst_path, target_engine)?;
+    let durable_head =
+        match dest_store.get(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY)? {
+            Some(bytes) => Some(DurableHead::decode(&bytes).ok_or_else(|| {
+                ConvertError::IncompatibleData("corrupt durable head frame".into())
+            })?),
+            None => None,
+        };
+    let mut published_checkpoint = false;
+    let mut checkpoint_stats = None;
+    let mut final_stats = None;
+    if let Some(head) = durable_head.as_ref()
+        && let Some((base_height, base_hash)) = snapshot_base_of(head)
+    {
+        let (network, pinned) = pinned_for_base(base_height, base_hash).ok_or_else(|| {
+            ConvertError::IncompatibleData(format!(
+                "unrecognized snapshot base {base_hash} at height {base_height}"
+            ))
+        })?;
+        let compatible =
+            snapshot_base_checkpoint_compatible(&roots.to_dir, Some(to_path), network, pinned)
+                .map_err(ConvertError::CheckpointPublish)?;
+        if !compatible {
+            if head.height != base_height {
+                return Err(ConvertError::MissingCheckpoint);
+            }
+            let headers = read_snapshot_archive_headers(&roots.from_dir, pinned)?;
+            verify_snapshot_archive_coins(&roots.from_dir, pinned)?;
+            let (mut stats, coins_count, coins_digest) =
+                scan_destination_coins(dest_store.as_ref(), head.height)?;
+            stats.tx_count = pinned.chain_tx_count;
+            let stats_report = coin_stats_report(&stats, pinned.chain_tx_count);
+            publish_snapshot_base_checkpoint(
+                &roots.to_dir,
+                to_path,
+                network,
+                &headers,
+                pinned,
+                dest_store.as_ref(),
+            )
+            .map_err(ConvertError::CheckpointPublish)?;
+            published_checkpoint = true;
+            checkpoint_stats = Some(stats_report.clone());
+            final_stats = Some(stats_report);
+            if let Some(cs_report) = namespaces_report
+                .iter_mut()
+                .find(|n| n.namespace == "chainstate")
+            {
+                set_family_report(cs_report, ColumnFamily::Coins, coins_count, coins_digest);
+            }
+        }
+    }
+    Ok(SnapshotStepOutcome {
+        checkpoint_stats,
+        final_stats,
+        published_checkpoint,
+    })
+}
+
+fn run_step_4_to_5(
+    args: &CliArgs,
+    roots: &crate::fs_util::OpenedRoots,
+    target_engine: StorageBackend,
+) -> Result<ConversionReport, ConvertError> {
+    let (_, to_path) = args.convert_roots()?;
+    let mut namespaces_report = Vec::new();
+    let node_namespaces = [("chainstate", "chainstate"), ("txindex", "txindex")];
+    for &(ns_name, rel_path) in &node_namespaces {
+        let dst_path = to_path.join(rel_path);
+        let scratch_base = to_path.join(".convert-src");
+        let scratch_path = scratch_base.join(rel_path);
+        let paths = NamespacePaths {
+            name: ns_name,
+            dst_path: &dst_path,
+            scratch_path: &scratch_path,
+            from_root: &roots.from_dir,
+            to_root: &roots.to_dir,
+        };
+        let report = convert_namespace(paths, 4, target_engine)?;
+        namespaces_report.push(report);
+    }
+    if let (Some(_), Some(pool_to_path)) = (&args.pool_from, &args.pool_to) {
+        let pool_from_dir = roots.pool_from_dir.as_ref().ok_or_else(|| {
+            ConvertError::InvalidOperation("missing pool source directory".into())
+        })?;
+        let pool_to_dir = roots.pool_to_dir.as_ref().ok_or_else(|| {
+            ConvertError::InvalidOperation("missing pool target directory".into())
+        })?;
+        let dst_path = pool_to_path.join("ledger");
+        let scratch_base = pool_to_path.join(".convert-src");
+        let scratch_path = scratch_base.join("ledger");
+        let paths = NamespacePaths {
+            name: "ledger",
+            dst_path: &dst_path,
+            scratch_path: &scratch_path,
+            from_root: pool_from_dir,
+            to_root: pool_to_dir,
+        };
+        let report = convert_namespace(paths, 4, target_engine)?;
+        namespaces_report.push(report);
+    }
+    let mut copied_files = Vec::new();
+    copy_independent_files(
+        &roots.from_dir,
+        &roots.to_dir,
+        &mut copied_files,
+        false,
+        true,
+    )?;
+    let SnapshotStepOutcome {
+        checkpoint_stats,
+        final_stats,
+        published_checkpoint,
+    } = finalize_snapshot_base(roots, to_path, target_engine, &mut namespaces_report)?;
+    let carried_markers = carry_full_revalidation_marker(&roots.from_dir, &roots.to_dir)?;
+    cleanup_scratch(&roots.to_dir)?;
+    if let Some(pool_to_dir) = &roots.pool_to_dir {
+        cleanup_scratch(pool_to_dir)?;
+    }
+    sync_dir(&roots.to_dir)?;
+    if let Some(pool_to_dir) = &roots.pool_to_dir {
+        sync_dir(pool_to_dir)?;
+    }
+    publish_current_schema(&roots.to_dir, 5)?;
+    Ok(ConversionReport {
+        source_epoch: 4,
+        target_epoch: 5,
+        namespaces: namespaces_report,
+        copied_files,
+        checkpoint_stats,
+        final_stats,
+        normalized_undo_rows: Vec::new(),
+        carried_markers,
+        published_checkpoint,
     })
 }
 

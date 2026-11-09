@@ -134,7 +134,7 @@ fn converted_suffix_datadir_resumes_from_checkpoint_at_durable_head() -> TestRes
         )));
     }
 
-    let restored = prepare_initial_state_with_engine(&to, Network::Regtest, Some(&head))
+    let restored = prepare_initial_state_with_engine(&to, Network::Regtest, Some(&head), None)
         .map_err(|error| TestError::Assertion(error.to_string()))?;
     if restored.initial.resume_source != ResumeSource::Checkpoint {
         return Err(TestError::Assertion(format!(

@@ -51,6 +51,9 @@ pub(crate) enum ConvertError {
     #[error("invalid operation: {0}")]
     InvalidOperation(String),
 
+    #[error("snapshot archive for base {base} failed verification: {reason}")]
+    SnapshotArchiveInvalid { base: String, reason: String },
+
     #[error("missing complete chainstate checkpoint; resync into a new datadir is required")]
     MissingCheckpoint,
 

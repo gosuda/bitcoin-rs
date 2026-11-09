@@ -1418,19 +1418,6 @@ fn lifecycle_report_refuses_contention_without_waiting_for_the_transition() -> T
     Ok(())
 }
 
-#[test]
-fn activation_stages_witness_only_after_durable_commit() -> TestResult {
-    let fixture = Fixture::new()?;
-    let dir = tempfile::tempdir()?;
-    let manager = fixture.manager(dir.path())?;
-    assert!(manager.take_pending_activation_witness().is_none());
-    fixture.activate(&manager)?;
-    let staged = manager.take_pending_activation_witness();
-    assert!(staged.is_some(), "activation must stage a witness");
-    assert!(manager.take_pending_activation_witness().is_none());
-    Ok(())
-}
-
 // RCV-02
 #[test]
 fn activation_attests_the_snapshot_base_as_assume_valid() -> TestResult {
@@ -1456,7 +1443,7 @@ fn activation_attests_the_snapshot_base_as_assume_valid() -> TestResult {
 }
 
 #[test]
-fn activation_failure_leaves_no_staged_witness() -> TestResult {
+fn activation_failure_publishes_no_checkpoint() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
     let manager = fixture.manager(dir.path())?;
@@ -1468,13 +1455,21 @@ fn activation_failure_leaves_no_staged_witness() -> TestResult {
         result,
         Err(AssumeUtxoError::SnapshotBlockHashMismatch { .. })
     ));
-    assert!(manager.take_pending_activation_witness().is_none());
+    assert_no_checkpoint(dir.path());
     fixture.head.fail.store(true, Ordering::Release);
     let loaded = fixture.load()?;
     let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
     assert!(result.is_err());
-    assert!(manager.take_pending_activation_witness().is_none());
+    assert_no_checkpoint(dir.path());
     Ok(())
+}
+
+fn assert_no_checkpoint(dir: &std::path::Path) {
+    let current = dir.join("chainstate-checkpoints").join("CURRENT");
+    assert!(
+        !current.is_file(),
+        "a failed activation must not publish a checkpoint"
+    );
 }
 
 #[test]
@@ -1514,25 +1509,12 @@ fn activation_offer_only_on_full_success() -> TestResult {
     let dir = tempfile::tempdir()?;
     let manager = fixture.manager(dir.path())?;
     fixture.activate(&manager)?;
-
-    let staged = manager.take_pending_activation_witness();
-    assert!(staged.is_some(), "activation must stage a witness");
-    let _ = staged;
-    assert!(manager.take_pending_activation_witness().is_none());
-
     let retry = fixture.load()?;
     assert!(matches!(
         manager.activate_pinned_snapshot(retry.set, retry.tip_hash, &fixture.pinned),
         Err(AssumeUtxoError::AlreadyActive)
     ));
-    let initial =
-        crate::assumeutxo_snapshot::load_verified(dir.path(), Network::Regtest, &fixture.pinned)?;
-    assert!(matches!(
-        initial.resume_source,
-        crate::recovery::ResumeSource::Snapshot
-    ));
-    assert!(manager.take_pending_activation_witness().is_none());
-
+    assert_restores_at_snapshot_base(dir.path(), &fixture.pinned)?;
     drop(manager);
     let reopened = fixture.manager(dir.path())?;
     assert!(matches!(
@@ -1540,34 +1522,74 @@ fn activation_offer_only_on_full_success() -> TestResult {
         AssumeUtxoDiskStatus::Validating { .. }
     ));
     drop(reopened);
-    let restored =
-        crate::assumeutxo_snapshot::load_verified(dir.path(), Network::Regtest, &fixture.pinned)?;
-    assert!(matches!(
-        restored.resume_source,
-        crate::recovery::ResumeSource::Snapshot
-    ));
+    assert_restores_at_snapshot_base(dir.path(), &fixture.pinned)?;
+    Ok(())
+}
+fn assert_restores_at_snapshot_base(dir: &std::path::Path, pinned: &AssumeUtxoData) -> TestResult {
+    std::fs::write(
+        dir.join(bitcoin_rs_storage::checkpoint::fs::CURRENT_SCHEMA_FILE),
+        bitcoin_rs_storage::checkpoint::fs::current_schema_bytes(),
+    )
+    .map_err(TestError::Io)?;
+    let restored = crate::recovery::restore_snapshot(dir, Network::Regtest, pinned)?;
+    assert!(
+        matches!(
+            restored.resume_source,
+            crate::recovery::ResumeSource::Checkpoint
+        ),
+        "restart must resume from the published checkpoint"
+    );
+    assert_eq!(
+        restored.coin_stats.tx_count, pinned.chain_tx_count,
+        "restored coin statistics must equal the pinned transaction count"
+    );
+    let root = dir.join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT);
+    let current: bitcoin_rs_storage::checkpoint::CurrentV1 = sonic_rs::from_slice(&std::fs::read(
+        root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE),
+    )?)
+    .map_err(TestError::Sonic)?;
+    let engine = bitcoin_rs_storage::open_checkpoint_store(
+        &root.join(&current.directory).join("chainstate"),
+    )?;
+    let coins = UtxoSet::new();
+    for row in engine.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
+        let (_key, value) = row?;
+        coins.insert_parsed_record(bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
+            value.into_boxed_slice(),
+        )?);
+    }
+    assert_eq!(
+        coins
+            .lock_stable_view()
+            .hash_serialized_3_at_height(pinned.height)?,
+        pinned.hash_serialized,
+        "restored coin statistics must equal the pinned hash"
+    );
     Ok(())
 }
 
 // RCV-01, RCV-04
 #[test]
-fn rejects_assumeutxo_snapshot_with_truncated_headers() -> TestResult {
+fn restart_without_checkpoint_at_snapshot_base_refuses() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
     let manager = fixture.manager(dir.path())?;
     fixture.activate(&manager)?;
     drop(manager);
-    let path = dir
-        .path()
-        .join("assumeutxo")
-        .join(fixture.pinned.block_hash.to_string());
-    std::fs::write(path.join("headers.dat"), [0_u8; 10])?;
-    let result =
-        crate::assumeutxo_snapshot::load_verified(dir.path(), Network::Regtest, &fixture.pinned);
-    assert!(matches!(
-        result,
-        Err(crate::assumeutxo_snapshot::SnapshotArchiveError::HeaderArchiveLength)
-    ));
+    std::fs::remove_dir_all(dir.path().join("chainstate-checkpoints"))?;
+    std::fs::write(
+        dir.path()
+            .join(bitcoin_rs_storage::checkpoint::fs::CURRENT_SCHEMA_FILE),
+        bitcoin_rs_storage::checkpoint::fs::current_schema_bytes(),
+    )?;
+    let result = crate::recovery::restore_snapshot(dir.path(), Network::Regtest, &fixture.pinned);
+    assert!(
+        matches!(
+            result,
+            Err(crate::recovery::RecoveryError::PinnedCheckpointMismatch)
+        ),
+        "a snapshot base without its checkpoint must fail closed"
+    );
     Ok(())
 }
 

@@ -158,7 +158,7 @@ fn engine_copy_rocksdb_to_mdbx_and_back_is_identical() -> TestResult<()> {
     }
 
     let report1 = parse_report(&output1)?;
-    if report1.source_epoch != 4 || report1.target_epoch != 4 {
+    if report1.source_epoch != 4 || report1.target_epoch != 5 {
         return Err(TestError::Assertion(
             "epoch mismatch in hop 1 report".into(),
         ));
@@ -191,7 +191,7 @@ fn engine_copy_rocksdb_to_mdbx_and_back_is_identical() -> TestResult<()> {
     verify_namespace_families(tx_report1, &txindex_data, &oracle_digests, "hop 1 tx")?;
 
     let dest_schema1 = fs::read_to_string(mdbx_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema1 != "4\n" {
+    if dest_schema1 != "5\n" {
         return Err(TestError::Assertion("CURRENT_SCHEMA != 3 in hop 1".into()));
     }
     assert_independent_files_copied_and_ignored_skipped(&mdbx_path, &independent_files)?;
@@ -217,7 +217,7 @@ fn engine_copy_rocksdb_to_mdbx_and_back_is_identical() -> TestResult<()> {
     }
 
     let report2 = parse_report(&output2)?;
-    if report2.source_epoch != 4 || report2.target_epoch != 4 {
+    if report2.source_epoch != 5 || report2.target_epoch != 5 {
         return Err(TestError::Assertion(
             "epoch mismatch in hop 2 report".into(),
         ));
@@ -250,7 +250,7 @@ fn engine_copy_rocksdb_to_mdbx_and_back_is_identical() -> TestResult<()> {
     verify_namespace_families(tx_report2, &txindex_data, &oracle_digests, "hop 2 tx")?;
 
     let dest_schema2 = fs::read_to_string(final_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema2 != "4\n" {
+    if dest_schema2 != "5\n" {
         return Err(TestError::Assertion("CURRENT_SCHEMA != 3 in hop 2".into()));
     }
     assert_independent_files_copied_and_ignored_skipped(&final_path, &independent_files)?;
@@ -324,7 +324,7 @@ fn engine_copy_rocksdb_to_surrealkv_and_back_is_identical() -> TestResult<()> {
     }
 
     let report1 = parse_report(&output1)?;
-    if report1.source_epoch != 4 || report1.target_epoch != 4 {
+    if report1.source_epoch != 4 || report1.target_epoch != 5 {
         return Err(TestError::Assertion(
             "epoch mismatch in hop 1 report".into(),
         ));
@@ -356,7 +356,7 @@ fn engine_copy_rocksdb_to_surrealkv_and_back_is_identical() -> TestResult<()> {
     verify_namespace_families(tx_report1, &txindex_data, &oracle_digests, "hop 1 tx")?;
 
     let dest_schema1 = fs::read_to_string(surrealkv_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema1 != "4\n" {
+    if dest_schema1 != "5\n" {
         return Err(TestError::Assertion("CURRENT_SCHEMA != 3 in hop 1".into()));
     }
     assert_independent_files_copied_and_ignored_skipped(&surrealkv_path, &independent_files)?;
@@ -382,7 +382,7 @@ fn engine_copy_rocksdb_to_surrealkv_and_back_is_identical() -> TestResult<()> {
     }
 
     let report2 = parse_report(&output2)?;
-    if report2.source_epoch != 4 || report2.target_epoch != 4 {
+    if report2.source_epoch != 5 || report2.target_epoch != 5 {
         return Err(TestError::Assertion(
             "epoch mismatch in hop 2 report".into(),
         ));
@@ -415,7 +415,7 @@ fn engine_copy_rocksdb_to_surrealkv_and_back_is_identical() -> TestResult<()> {
     verify_namespace_families(tx_report2, &txindex_data, &oracle_digests, "hop 2 tx")?;
 
     let dest_schema2 = fs::read_to_string(final_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema2 != "4\n" {
+    if dest_schema2 != "5\n" {
         return Err(TestError::Assertion("CURRENT_SCHEMA != 3 in hop 2".into()));
     }
     assert_independent_files_copied_and_ignored_skipped(&final_path, &independent_files)?;
