@@ -62,14 +62,12 @@ pub enum ManifestError {
     UnknownAnchor { found: Hash256, height: u32 },
     #[error("manifest base identity does not match the anchor at height {height}")]
     AnchorMismatch { height: u32 },
+    #[error("manifest schema {found} does not match the node index format {expected}")]
+    SchemaMismatch { expected: u32, found: u32 },
     #[error("manifest UTXO commitment {found} does not match the anchor commitment {expected}")]
     UtxoCommitmentMismatch { expected: Hash256, found: Hash256 },
     #[error("manifest artifact table is malformed: {0}")]
     Artifacts(&'static str),
-    #[error(
-        "manifest declares index artifacts, but compiled index commitments on mainnet are blocked (7.2)"
-    )]
-    MainnetIndexCommitmentsBlocked,
     #[error("manifest artifact file {} not found", .path.display())]
     ArtifactNotFound { path: std::path::PathBuf },
     #[error("artifact size mismatch for slot {slot}: declared {declared}, actual {actual}")]
@@ -276,34 +274,64 @@ impl SnapshotManifest {
         })
     }
 
-    pub fn verify_artifacts(&self, dir: &std::path::Path) -> Result<(), ManifestError> {
-        for slot in 0..ARTIFACT_SLOTS {
-            if self.sizes[slot] == 0 {
-                continue;
-            }
-            let path = self.artifact_path(dir, slot)?;
-            let meta = std::fs::metadata(&path)
-                .map_err(|_| ManifestError::ArtifactNotFound { path: path.clone() })?;
-            if meta.len() != self.sizes[slot] {
-                return Err(ManifestError::ArtifactSizeMismatch {
-                    slot,
-                    declared: self.sizes[slot],
-                    actual: meta.len(),
-                });
-            }
-            let bytes = std::fs::read(&path)
-                .map_err(|_| ManifestError::ArtifactNotFound { path: path.clone() })?;
-            let digest: [u8; 32] = sha2::Sha256::digest(&bytes).into();
-            if digest != self.hashes[slot] {
-                return Err(ManifestError::ArtifactHashMismatch {
-                    slot,
-                    declared: self.hashes[slot],
-                    actual: digest,
-                });
-            }
+    pub fn verify_index_artifact(
+        &self,
+        dir: &std::path::Path,
+        slot: usize,
+    ) -> Result<(), ManifestError> {
+        if slot == UTXO_SLOT || slot >= ARTIFACT_SLOTS {
+            return Err(ManifestError::Artifacts("invalid artifact slot"));
+        }
+        if self.sizes[slot] == 0 {
+            return Ok(());
+        }
+        let path = self.artifact_path(dir, slot)?;
+        let meta = std::fs::metadata(&path)
+            .map_err(|_| ManifestError::ArtifactNotFound { path: path.clone() })?;
+        if meta.len() != self.sizes[slot] {
+            return Err(ManifestError::ArtifactSizeMismatch {
+                slot,
+                declared: self.sizes[slot],
+                actual: meta.len(),
+            });
+        }
+        let (digest, bytes) = stream_sha256(&path)
+            .map_err(|_| ManifestError::ArtifactNotFound { path: path.clone() })?;
+        if bytes != self.sizes[slot] {
+            return Err(ManifestError::ArtifactSizeMismatch {
+                slot,
+                declared: self.sizes[slot],
+                actual: bytes,
+            });
+        }
+        if digest != self.hashes[slot] {
+            return Err(ManifestError::ArtifactHashMismatch {
+                slot,
+                declared: self.hashes[slot],
+                actual: digest,
+            });
         }
         Ok(())
     }
+}
+
+const STREAM_BUFFER_BYTES: usize = 64 * 1024;
+
+fn stream_sha256(path: &std::path::Path) -> std::io::Result<([u8; 32], u64)> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = vec![0_u8; STREAM_BUFFER_BYTES];
+    let mut total = 0_u64;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        total += u64::try_from(read).unwrap_or(u64::MAX);
+    }
+    Ok((hasher.finalize().into(), total))
 }
 
 #[cfg(any(test, feature = "test-seam"))]

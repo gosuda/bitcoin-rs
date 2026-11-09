@@ -926,14 +926,25 @@ fn write_valid_manifest(
     pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
     core_bytes: &[u8],
 ) -> Result<PathBuf, TestError> {
-    use bitcoin_rs_execution::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
     use sha2::Digest;
+
+    let utxo_digest: [u8; 32] = sha2::Sha256::digest(core_bytes).into();
+    write_manifest_with_utxo_digest(dir, pinned, core_bytes, utxo_digest)
+}
+
+fn write_manifest_with_utxo_digest(
+    dir: &Path,
+    pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
+    core_bytes: &[u8],
+    utxo_digest: [u8; 32],
+) -> Result<PathBuf, TestError> {
+    use bitcoin_rs_execution::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
 
     let mut sizes = [0_u64; ARTIFACT_SLOTS];
     let mut hashes = [[0_u8; 32]; ARTIFACT_SLOTS];
     sizes[UTXO_SLOT] =
         u64::try_from(core_bytes.len()).map_err(|e| TestError::Io(std::io::Error::other(e)))?;
-    hashes[UTXO_SLOT] = sha2::Sha256::digest(core_bytes).into();
+    hashes[UTXO_SLOT] = utxo_digest;
 
     let manifest = SnapshotManifest {
         manifest_version: 1,
@@ -1148,5 +1159,102 @@ fn three_positions_move_independently() -> Result<(), TestError> {
         p1.historical_validation_height
     );
 
+    Ok(())
+}
+
+// SNP-02
+#[test]
+fn an_oversized_manifest_is_refused_before_activation() -> Result<(), TestError> {
+    let pinned = regtest_pin()?;
+    let dir = tempfile::tempdir()?;
+    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let core_bytes = std::fs::read(&core_path)?;
+    let manifest_path = write_valid_manifest(dir.path(), pinned, &core_bytes)?;
+    let mut json = std::fs::read(&manifest_path)?;
+    let closing = json
+        .pop()
+        .ok_or(TestError::Missing("manifest closing brace"))?;
+    if closing != b'}' {
+        return Err(TestError::ExpectationFailed(
+            "manifest JSON ends with a brace",
+        ));
+    }
+    json.extend_from_slice(b",\"filler\":\"");
+    json.extend(std::iter::repeat_n(b' ', 1 << 21));
+    json.extend_from_slice(b"\"}");
+    std::fs::write(&manifest_path, &json)?;
+
+    let result = state.import_manifest(&manifest_path);
+    assert!(matches!(
+        result,
+        Err(SnapshotImportError::Manifest(
+            bitcoin_rs_execution::manifest::ManifestError::Format("manifest is larger than 1 MiB")
+        ))
+    ));
+    assert!(matches!(
+        state.snapshots.manager.status()?,
+        AssumeUtxoDiskStatus::Uninitialized
+    ));
+    assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
+    Ok(())
+}
+
+#[test]
+fn manifest_utxo_digest_is_checked_in_the_ingest_pass() -> Result<(), TestError> {
+    let pinned = regtest_pin()?;
+    let dir = tempfile::tempdir()?;
+    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let core_bytes = std::fs::read(&core_path)?;
+    let manifest_path =
+        write_manifest_with_utxo_digest(dir.path(), pinned, &core_bytes, [0xab; 32])?;
+    let before_tip = tip_identity(&state);
+    assert!(matches!(
+        state.import_manifest(&manifest_path),
+        Err(SnapshotImportError::Manifest(
+            bitcoin_rs_execution::manifest::ManifestError::ArtifactHashMismatch { slot: 0, .. }
+        ))
+    ));
+    assert!(
+        state.chainstate().is_closed_for_recovery(),
+        "a digest mismatch found in the ingest pass fails closed"
+    );
+    assert_eq!(tip_identity(&state), before_tip);
+    assert!(matches!(
+        state.snapshots.manager.status()?,
+        AssumeUtxoDiskStatus::Uninitialized
+    ));
+    Ok(())
+}
+
+#[test]
+fn ingest_pass_file_swap_after_the_verification_pass_fails_closed() -> Result<(), TestError> {
+    let dir = tempfile::tempdir()?;
+    let (state, core_path, _) = snapshot_inputs(dir.path())?;
+    let core_bytes = std::fs::read(&core_path)?;
+    let attestation = bitcoin_rs_execution::assumeutxo::FileAttestation {
+        sha256: {
+            use sha2::Digest;
+            sha2::Sha256::digest(&core_bytes).into()
+        },
+        size: u64::try_from(core_bytes.len())?,
+    };
+    let mut reader = TamperOnRewind {
+        bytes: core_bytes.clone(),
+        position: 0,
+        rewound: false,
+        flip_at: core_bytes.len() / 2,
+    };
+    assert!(
+        state
+            .snapshots
+            .manager
+            .activate_core_snapshot(&mut reader, Some(attestation), |_, _| {}, || true)
+            .is_err()
+    );
+    assert!(state.chainstate().is_closed_for_recovery());
+    assert!(matches!(
+        state.snapshots.manager.status()?,
+        AssumeUtxoDiskStatus::Uninitialized
+    ));
     Ok(())
 }

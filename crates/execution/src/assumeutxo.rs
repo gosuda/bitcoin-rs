@@ -1,6 +1,10 @@
+use std::cell::RefCell;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
+
+use sha2::{Digest, Sha256};
 
 use crate::assumeutxo_snapshot::{
     SnapshotArchiveError, StagedCoins, StreamedCoins, finish_stage, stage_record,
@@ -99,6 +103,44 @@ impl ChainstateRole {
 }
 
 pub use bitcoin_rs_storage::assumeutxo::{AssumeUtxoDiskStatus, HistoricalCheckpointRef};
+
+/// Digest and length of a snapshot file, as the manifest attests them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileAttestation {
+    pub sha256: [u8; 32],
+    pub size: u64,
+}
+
+#[derive(Default)]
+struct IngestDigest {
+    hasher: Sha256,
+    bytes: u64,
+}
+
+impl IngestDigest {
+    fn finish(self) -> FileAttestation {
+        FileAttestation {
+            sha256: self.hasher.finalize().into(),
+            size: self.bytes,
+        }
+    }
+}
+
+/// Hashes exactly the bytes its inner reader hands to the ingest pass.
+struct DigestingReader<'a, R> {
+    inner: &'a mut R,
+    digest: Rc<RefCell<IngestDigest>>,
+}
+
+impl<R: Read> Read for DigestingReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.inner.read(buf)?;
+        let mut digest = self.digest.borrow_mut();
+        digest.hasher.update(&buf[..count]);
+        digest.bytes += u64::try_from(count).unwrap_or(u64::MAX);
+        Ok(count)
+    }
+}
 
 fn storage_io(error: std::io::Error) -> AssumeUtxoError {
     AssumeUtxoError::Storage(bitcoin_rs_storage::StorageError::Io(error))
@@ -227,6 +269,13 @@ pub enum AssumeUtxoError {
     Codec(#[from] bitcoin_rs_storage::utxo::core_snapshot::SnapshotError),
     #[error("snapshot observer refused the activation; the staged coins were discarded")]
     ObserverRefused,
+    #[error("snapshot file does not match its manifest attestation (digest or length)")]
+    ArtifactDigestMismatch {
+        expected_sha256: [u8; 32],
+        found_sha256: [u8; 32],
+        expected_size: u64,
+        found_size: u64,
+    },
     #[error(
         "snapshot activation failed ({ingest}) and its staged coins could not be discarded ({discard}); the datadir refuses to open until the activation marker is recovered"
     )]
@@ -780,6 +829,7 @@ impl AssumeUtxoManager {
     pub fn activate_core_snapshot<R: Read + Seek>(
         &self,
         reader: &mut R,
+        attestation: Option<FileAttestation>,
         observe: impl FnMut(Hash256, &UtxoRecord),
         admit: impl FnOnce() -> bool,
     ) -> Result<ActivatedSnapshot, AssumeUtxoError> {
@@ -789,7 +839,12 @@ impl AssumeUtxoManager {
                 .stream(|_, _| Ok::<(), AssumeUtxoError>(()))?;
             rewind_to(reader, body_start)?;
         }
-        let snapshot = CoreSnapshotStream::open(reader, self.network)?;
+        let ingested = Rc::new(RefCell::new(IngestDigest::default()));
+        let mut hashed = DigestingReader {
+            inner: reader,
+            digest: Rc::clone(&ingested),
+        };
+        let snapshot = CoreSnapshotStream::open(&mut hashed, self.network)?;
         let pinned = snapshot.anchor();
         let declared_coins = snapshot.metadata().coins_count;
         let limit = self.ingest_chunk_bytes;
@@ -803,6 +858,17 @@ impl AssumeUtxoManager {
                 stage_record(&mut staged, coins, txid, record).map_err(AssumeUtxoError::Storage)
             })?;
             finish_stage(&mut staged, coins)?;
+            if let Some(expected) = attestation {
+                let found = std::mem::take(&mut *ingested.borrow_mut()).finish();
+                if found.sha256 != expected.sha256 || found.size != expected.size {
+                    return Err(AssumeUtxoError::ArtifactDigestMismatch {
+                        expected_sha256: expected.sha256,
+                        found_sha256: found.sha256,
+                        expected_size: expected.size,
+                        found_size: found.size,
+                    });
+                }
+            }
             if !admit() {
                 return Err(AssumeUtxoError::ObserverRefused);
             }

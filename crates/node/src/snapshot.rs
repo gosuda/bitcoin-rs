@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Read as _, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -232,6 +232,20 @@ impl From<SnapshotImportError> for SnapshotControlError {
             _ => Self::Failed(error.to_string()),
         }
     }
+}
+
+fn read_bounded_manifest(path: &Path) -> Result<Vec<u8>, SnapshotImportError> {
+    const MAX_MANIFEST_BYTES: u64 = 1 << 20;
+    let file = File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_or(true, |len| len > MAX_MANIFEST_BYTES) {
+        return Err(SnapshotImportError::Manifest(
+            bitcoin_rs_execution::manifest::ManifestError::Format("manifest is larger than 1 MiB"),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn open_regular_input(path: &Path) -> Result<File, SnapshotImportError> {
@@ -502,6 +516,7 @@ impl SnapshotControl {
             let mut observer = seed.map(ScriptLiveSeedSession::observer);
             manager.activate_core_snapshot(
                 &mut file,
+                None,
                 |txid, record| {
                     if let Some(observer) = observer.as_mut() {
                         observe_outputs(observer, txid, record);
@@ -655,7 +670,7 @@ impl SnapshotControl {
         if path.starts_with(&recovery) {
             return Err(SnapshotImportError::RecoveryInput);
         }
-        let bytes = std::fs::read(path)?;
+        let bytes = read_bounded_manifest(path)?;
         let manifest = bitcoin_rs_execution::manifest::SnapshotManifest::parse(&bytes)?;
         let anchor = self
             .network
@@ -671,11 +686,16 @@ impl SnapshotControl {
         let genesis = self.network.genesis_block_hash().to_le_bytes();
         let trust = manifest.verify_against_anchor(self.network, genesis, anchor)?;
         let dir = path.parent().unwrap_or(path);
-        if let Err(err) = manifest.verify_artifacts(dir) {
-            if let Some(runtime) = self.derived_index_runtime.as_ref() {
-                runtime.publish_failed(format!("index artifact verification failed: {err}"));
+        for slot in 1..bitcoin_rs_execution::manifest::ARTIFACT_SLOTS {
+            if manifest.sizes[slot] == 0 {
+                continue;
             }
-            return Err(SnapshotImportError::Manifest(err));
+            if let Err(err) = manifest.verify_index_artifact(dir, slot) {
+                if let Some(runtime) = self.derived_index_runtime.as_ref() {
+                    runtime.publish_failed(format!("index artifact verification failed: {err}"));
+                }
+                return Err(SnapshotImportError::Manifest(err));
+            }
         }
 
         let utxo_path = manifest.artifact_path(dir, bitcoin_rs_execution::manifest::UTXO_SLOT)?;
@@ -689,6 +709,10 @@ impl SnapshotControl {
             let mut observer = seed.map(ScriptLiveSeedSession::observer);
             manager.activate_core_snapshot(
                 &mut file,
+                Some(bitcoin_rs_execution::assumeutxo::FileAttestation {
+                    sha256: manifest.utxo_sha256(),
+                    size: manifest.utxo_size(),
+                }),
                 |txid, record| {
                     if let Some(observer) = observer.as_mut() {
                         observe_outputs(observer, txid, record);
@@ -697,7 +721,7 @@ impl SnapshotControl {
                 || admit_seed(seed, &mut refused),
             )
         });
-        let activated = settle_seed(seed, outcome, refused)?;
+        let activated = settle_seed(seed, outcome, refused).map_err(ingest_error)?;
         let base_height = activated.height;
         let result = SnapshotImport {
             coins_loaded: activated.declared_coins,
@@ -854,6 +878,30 @@ fn admit_seed(seed: Option<&ScriptLiveSeedSession>, refused: &mut Option<IndexEr
             false
         }
         None => true,
+    }
+}
+
+fn ingest_error(error: SnapshotImportError) -> SnapshotImportError {
+    match error {
+        SnapshotImportError::Activation(AssumeUtxoError::ArtifactDigestMismatch {
+            expected_sha256,
+            found_sha256,
+            expected_size,
+            found_size,
+        }) => SnapshotImportError::Manifest(if expected_sha256 == found_sha256 {
+            bitcoin_rs_execution::manifest::ManifestError::ArtifactSizeMismatch {
+                slot: bitcoin_rs_execution::manifest::UTXO_SLOT,
+                declared: expected_size,
+                actual: found_size,
+            }
+        } else {
+            bitcoin_rs_execution::manifest::ManifestError::ArtifactHashMismatch {
+                slot: bitcoin_rs_execution::manifest::UTXO_SLOT,
+                declared: expected_sha256,
+                actual: found_sha256,
+            }
+        }),
+        other => codec_import_error(other),
     }
 }
 
