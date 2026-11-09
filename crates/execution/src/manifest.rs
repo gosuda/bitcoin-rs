@@ -81,6 +81,8 @@ pub enum ManifestError {
     SnapshotCommitmentMismatch { expected: Hash256, found: Hash256 },
     #[error("manifest artifact table is malformed: {0}")]
     Artifacts(&'static str),
+    #[error("index coverage floor {floor} exceeds the base height {base_height}")]
+    CoverageFloorAboveBase { floor: u32, base_height: u32 },
     #[error("manifest artifact file {} not found", .path.display())]
     ArtifactNotFound { path: std::path::PathBuf },
     #[error("artifact size mismatch for slot {slot}: declared {declared}, actual {actual}")]
@@ -129,6 +131,14 @@ impl SnapshotManifest {
             return Err(ManifestError::Format(
                 "historical verification provenance exceeds the base height",
             ));
+        }
+        for floor in self.coverage.iter().flatten() {
+            if *floor > self.base_height {
+                return Err(ManifestError::CoverageFloorAboveBase {
+                    floor: *floor,
+                    base_height: self.base_height,
+                });
+            }
         }
         if self.sizes.len() != ARTIFACT_SLOTS || self.hashes.len() != ARTIFACT_SLOTS {
             return Err(ManifestError::Artifacts(
@@ -572,6 +582,31 @@ mod tests {
             SnapshotManifest::parse(&bytes),
             Err(ManifestError::Format(_))
         ));
+    }
+    // SNP-02
+    #[test]
+    fn a_coverage_floor_above_the_base_height_is_refused() {
+        let mut manifest = manifest_with([None; 4]);
+        manifest.coverage[0] = Some(manifest.base_height + 1);
+        let bytes = sonic_rs::to_vec(&manifest).expect("serialize");
+        let error = SnapshotManifest::parse(&bytes).expect_err("floor above base is refused");
+        assert!(
+            matches!(
+                error,
+                ManifestError::CoverageFloorAboveBase { floor, base_height }
+                if floor == manifest.base_height + 1 && base_height == manifest.base_height
+            ),
+            "the refusal carries the floor and the base height"
+        );
+    }
+
+    // SNP-02
+    #[test]
+    fn a_coverage_floor_at_the_base_height_is_accepted() {
+        let mut manifest = manifest_with([None; 4]);
+        manifest.coverage[0] = Some(manifest.base_height);
+        let bytes = sonic_rs::to_vec(&manifest).expect("serialize");
+        SnapshotManifest::parse(&bytes).expect("floor at base height is the range end");
     }
 
     // SNP-02
