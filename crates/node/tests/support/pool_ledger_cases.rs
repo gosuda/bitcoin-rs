@@ -2504,7 +2504,7 @@ fn a_batch_fails_only_when_every_signed_transaction_is_conclusively_double_spent
 }
 
 #[test]
-fn a_mid_reconcile_chain_transition_defers_a_permanent_fail() {
+fn an_aborted_reconcile_defers_a_permanent_fail() {
     let fund = funded(0, 1_000_001);
     let batch = prepared(&fund);
     let first = pay_tx(

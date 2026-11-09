@@ -1954,7 +1954,7 @@ fn historical_extension_during_read_keeps_same_anchor() -> Result<(), crate::por
 }
 
 #[test]
-fn historical_wake_without_tip_move_stays_valid_while_strict_retries()
+fn historical_wake_without_tip_move_stays_valid_for_strict_reads()
 -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
