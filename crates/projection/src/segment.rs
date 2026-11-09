@@ -218,8 +218,7 @@ pub enum SealFault {
     AfterStaging = 1,
     AfterIngest = 2,
     AfterCommitted = 3,
-    AfterClear = 4,
-    AfterPublish = 5,
+    AfterPublish = 4,
 }
 
 impl SealFault {
@@ -228,8 +227,7 @@ impl SealFault {
             Self::AfterStaging => 1,
             Self::AfterIngest => 2,
             Self::AfterCommitted => 3,
-            Self::AfterClear => 4,
-            Self::AfterPublish => 5,
+            Self::AfterPublish => 4,
         }
     }
 }
@@ -390,172 +388,131 @@ pub fn retire_generation<S: bitcoin_rs_storage::KvStore>(
     Ok(())
 }
 
-fn seal_rekey_simple_family(
-    snapshot: &dyn bitcoin_rs_storage::KvSnapshot,
-    cf: bitcoin_rs_storage::ColumnFamily,
-    gen_id: u64,
-) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let mut rows = Vec::new();
-    let tail_prefix = 0u64.to_be_bytes();
-    let gen_prefix = gen_id.to_be_bytes();
-    let Ok(iter) = snapshot.iter_prefix(cf, &tail_prefix) else {
-        return rows;
+struct SealedRows {
+    tx_dir: Vec<(Vec<u8>, Vec<u8>)>,
+    spend_dir: Vec<(Vec<u8>, Vec<u8>)>,
+    filters: Vec<(Vec<u8>, Vec<u8>)>,
+    dict: Vec<(Vec<u8>, Vec<u8>)>,
+    post: Vec<(Vec<u8>, Vec<u8>)>,
+    stats: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+fn rekey_generation(key: &[u8], gen_id: u64) -> Option<Vec<u8>> {
+    let mut out = key.to_vec();
+    out.get_mut(..8)?.copy_from_slice(&gen_id.to_be_bytes());
+    Some(out)
+}
+
+fn sealed_rows(plan: &tail::PrefixCut, gen_id: u64) -> SealedRows {
+    let mut out = SealedRows {
+        tx_dir: Vec::new(),
+        spend_dir: Vec::new(),
+        filters: Vec::new(),
+        dict: Vec::new(),
+        post: Vec::new(),
+        stats: Vec::new(),
     };
-    for item in iter {
-        let Ok((mut k, v)) = item else {
+    let mut posts: hashbrown::HashMap<u32, Vec<format::PostingItem>> = hashbrown::HashMap::new();
+    for (family, key, value) in &plan.rows {
+        let target = match family {
+            tail::Family::TxDir => Some(&mut out.tx_dir),
+            tail::Family::SpendDir => Some(&mut out.spend_dir),
+            tail::Family::Filters => Some(&mut out.filters),
+            tail::Family::ScriptPost => None,
+            tail::Family::ScriptDict => None,
+        };
+        match (family, target) {
+            (tail::Family::ScriptPost, _) => {
+                if let (Some((_, old_id, _)), Some(items)) = (
+                    format::decode_script_post_key(key),
+                    format::decode_posting_items(value),
+                ) {
+                    posts.entry(old_id).or_default().extend(items);
+                }
+            }
+            (_, Some(rows)) => {
+                if let Some(new_key) = rekey_generation(key, gen_id) {
+                    rows.push((new_key, value.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut prefix_scripts: Vec<([u8; 32], u32)> = plan
+        .script_hashes
+        .iter()
+        .map(|(&old_id, &hash)| (hash, old_id))
+        .collect();
+    prefix_scripts.sort_unstable();
+    let mut new_ids = hashbrown::HashMap::<u32, u32>::new();
+    for (dense, (hash, old_id)) in prefix_scripts.into_iter().enumerate() {
+        let Ok(new_id) = u32::try_from(dense) else {
             continue;
         };
-        if k.len() >= 8 {
-            k[..8].copy_from_slice(&gen_prefix);
-            rows.push((k, v));
-        }
-    }
-    rows
-}
-
-struct SealedScripts {
-    dict_rows: Vec<(Vec<u8>, Vec<u8>)>,
-    post_rows: Vec<(Vec<u8>, Vec<u8>)>,
-    stats_rows: Vec<(Vec<u8>, Vec<u8>)>,
-}
-
-fn seal_repack_scripts(
-    snapshot: &dyn bitcoin_rs_storage::KvSnapshot,
-    gen_id: u64,
-) -> SealedScripts {
-    let tail_prefix = 0u64.to_be_bytes();
-    let mut old_to_new_id = hashbrown::HashMap::<u32, u32>::new();
-    let mut dict_rows = Vec::new();
-
-    if let Ok(iter) =
-        snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::ScriptDict, &tail_prefix)
-    {
-        for (dense_idx, item) in iter.enumerate() {
-            let Ok((k, v)) = item else {
-                continue;
-            };
-            if k.len() >= 8 {
-                let Ok(new_id) = u32::try_from(dense_idx) else {
-                    continue;
-                };
-                if let Some(old_id) = format::decode_script_dict_value(&v) {
-                    old_to_new_id.insert(old_id, new_id);
-                }
-                let mut new_key = k;
-                new_key[..8].copy_from_slice(&gen_id.to_be_bytes());
-                dict_rows.push((new_key, format::encode_script_dict_value(new_id).to_vec()));
-            }
+        new_ids.insert(old_id, new_id);
+        out.dict.push((
+            format::encode_script_dict_key(gen_id, &hash).to_vec(),
+            format::encode_script_dict_value(new_id).to_vec(),
+        ));
+        if let Some(stats) = plan.prefix_stats.get(&old_id) {
+            out.stats.push((
+                format::encode_script_stats_key(gen_id, new_id).to_vec(),
+                format::encode_script_stats_value(stats).to_vec(),
+            ));
         }
     }
 
-    let mut stats_rows = Vec::new();
-    if let Ok(iter) =
-        snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::ScriptStats, &tail_prefix)
-    {
-        for item in iter {
-            let Ok((k, v)) = item else {
-                continue;
-            };
-            if let Some((_, old_id)) = format::decode_script_stats_key(&k) {
-                if let Some(&new_id) = old_to_new_id.get(&old_id) {
-                    let new_key = format::encode_script_stats_key(gen_id, new_id);
-                    stats_rows.push((new_key.to_vec(), v));
-                }
-            }
-        }
-    }
-
-    let mut occurrences_by_new_id = hashbrown::HashMap::<u32, Vec<format::PostingItem>>::new();
-    if let Ok(iter) =
-        snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::ScriptPost, &tail_prefix)
-    {
-        for item in iter {
-            let Ok((k, v)) = item else {
-                continue;
-            };
-            if let Some((_, old_id, _)) = format::decode_script_post_key(&k) {
-                if let Some(&new_id) = old_to_new_id.get(&old_id) {
-                    if let Some(items) = format::decode_posting_items(&v) {
-                        occurrences_by_new_id
-                            .entry(new_id)
-                            .or_default()
-                            .extend(items);
-                    }
-                }
-            }
-        }
-    }
-
-    let mut post_rows = Vec::new();
-    for (new_id, mut items) in occurrences_by_new_id {
-        items.sort_unstable_by_key(|it| it.delta_ordinal);
-        let mut repacked_items = Vec::with_capacity(items.len());
+    for (old_id, mut items) in posts {
+        let Some(&new_id) = new_ids.get(&old_id) else {
+            continue;
+        };
+        items.sort_unstable_by_key(|item| item.delta_ordinal);
         let mut last_ordinal = 0u32;
-        for it in items {
-            let ordinal = it.delta_ordinal;
-            let delta = ordinal.saturating_sub(last_ordinal);
-            last_ordinal = ordinal;
-            repacked_items.push(format::PostingItem {
+        let mut repacked = Vec::with_capacity(items.len());
+        for item in items {
+            let delta = item.delta_ordinal.saturating_sub(last_ordinal);
+            last_ordinal = item.delta_ordinal;
+            repacked.push(format::PostingItem {
                 delta_ordinal: delta,
-                flags: it.flags,
+                flags: item.flags,
             });
         }
-
-        post_rows.extend(format::chunk_postings(gen_id, new_id, repacked_items));
+        out.post
+            .extend(format::chunk_postings(gen_id, new_id, repacked));
     }
-
-    SealedScripts {
-        dict_rows,
-        post_rows,
-        stats_rows,
-    }
+    out
 }
 
 // PRJ-05, PRJ-09
 pub fn seal_tail_generation<S: bitcoin_rs_storage::KvStore>(
     store: &S,
     gen_id: u64,
-    coverage: Coverage,
+    cut: u32,
     capabilities: IndexCapabilities,
     scratch: &std::path::Path,
 ) -> Result<(), crate::IndexError> {
     let snapshot = store.snapshot().map_err(crate::IndexError::Storage)?;
-    let next_ordinal = tail::load(snapshot.as_ref())?.next_ordinal;
-
-    let mut tx_dir_rows = seal_rekey_simple_family(
-        snapshot.as_ref(),
-        bitcoin_rs_storage::ColumnFamily::TxDir,
-        gen_id,
-    );
-    let mut spend_dir_rows = seal_rekey_simple_family(
-        snapshot.as_ref(),
-        bitcoin_rs_storage::ColumnFamily::SpendDir,
-        gen_id,
-    );
-    let mut filter_rows = seal_rekey_simple_family(
-        snapshot.as_ref(),
-        bitcoin_rs_storage::ColumnFamily::Filters,
-        gen_id,
-    );
-
-    let sealed_scripts = seal_repack_scripts(snapshot.as_ref(), gen_id);
-    let mut dict_rows = sealed_scripts.dict_rows;
-    let mut post_rows = sealed_scripts.post_rows;
-    let mut stats_rows = sealed_scripts.stats_rows;
+    let plan = tail::plan_prefix_cut(snapshot.as_ref(), cut)?;
     drop(snapshot);
-
-    tx_dir_rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    spend_dir_rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    filter_rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    dict_rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    post_rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    stats_rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let coverage = Coverage::new(plan.first, plan.cut, plan.cut_hash);
+    let mut rows = sealed_rows(&plan, gen_id);
+    for list in [
+        &mut rows.tx_dir,
+        &mut rows.spend_dir,
+        &mut rows.filters,
+        &mut rows.dict,
+        &mut rows.post,
+        &mut rows.stats,
+    ] {
+        list.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    }
 
     let mut staging_batch = store.new_batch();
     staging_batch.put(
         bitcoin_rs_storage::ColumnFamily::IdxMeta,
         SEAL_STAGING_KEY,
-        &seal_marker_value(gen_id, &coverage, capabilities, next_ordinal),
+        &seal_marker_value(gen_id, &coverage, capabilities, plan.next_ordinal),
     );
     store.write_durable(staging_batch)?;
     seal_fault(SealFault::AfterStaging)?;
@@ -563,37 +520,37 @@ pub fn seal_tail_generation<S: bitcoin_rs_storage::KvStore>(
     ingest_family_rows(
         store,
         bitcoin_rs_storage::ColumnFamily::TxDir,
-        tx_dir_rows,
+        rows.tx_dir,
         scratch,
     )?;
     ingest_family_rows(
         store,
         bitcoin_rs_storage::ColumnFamily::SpendDir,
-        spend_dir_rows,
+        rows.spend_dir,
         scratch,
     )?;
     ingest_family_rows(
         store,
         bitcoin_rs_storage::ColumnFamily::Filters,
-        filter_rows,
+        rows.filters,
         scratch,
     )?;
     ingest_family_rows(
         store,
         bitcoin_rs_storage::ColumnFamily::ScriptDict,
-        dict_rows,
+        rows.dict,
         scratch,
     )?;
     ingest_family_rows(
         store,
         bitcoin_rs_storage::ColumnFamily::ScriptPost,
-        post_rows,
+        rows.post,
         scratch,
     )?;
     ingest_family_rows(
         store,
         bitcoin_rs_storage::ColumnFamily::ScriptStats,
-        stats_rows,
+        rows.stats,
         scratch,
     )?;
     seal_fault(SealFault::AfterIngest)?;
@@ -602,37 +559,73 @@ pub fn seal_tail_generation<S: bitcoin_rs_storage::KvStore>(
     committed_batch.put(
         bitcoin_rs_storage::ColumnFamily::IdxMeta,
         SEAL_COMMITTED_KEY,
-        &seal_marker_value(gen_id, &coverage, capabilities, next_ordinal),
+        &seal_marker_value(gen_id, &coverage, capabilities, plan.next_ordinal),
     );
     store.write_durable(committed_batch)?;
     seal_fault(SealFault::AfterCommitted)?;
 
-    clear_tail(store)?;
-    seal_fault(SealFault::AfterClear)?;
-    publish_sealed(store, gen_id, coverage, next_ordinal, capabilities)?;
+    commit_cut(store, &plan, gen_id, coverage, capabilities)?;
     seal_fault(SealFault::AfterPublish)?;
     remove_seal_markers(store)?;
     Ok(())
 }
 
-fn clear_tail<S: bitcoin_rs_storage::KvStore>(store: &S) -> Result<(), crate::IndexError> {
-    let start = 0u64.to_be_bytes();
-    let end = 1u64.to_be_bytes();
-    for &cf in &SEALED_FAMILIES {
-        store.delete_range(cf, &start, &end)?;
-    }
+fn commit_cut<S: bitcoin_rs_storage::KvStore>(
+    store: &S,
+    plan: &tail::PrefixCut,
+    gen_id: u64,
+    coverage: Coverage,
+    capabilities: IndexCapabilities,
+) -> Result<(), crate::IndexError> {
+    let sealed = SealedGen {
+        gen_id,
+        coverage,
+        next_ordinal: plan.next_ordinal,
+    };
+    let mut batch = store.new_batch();
+    tail::cut_generation_zero(&mut batch, plan);
+    put_sealed_records(
+        &mut batch,
+        &sealed,
+        capabilities,
+        tail::TailBounds {
+            newest: Some(sealed),
+            first_height: plan.tail_first,
+            at: plan.tail_at,
+        },
+    );
     store
-        .delete_range(
-            bitcoin_rs_storage::ColumnFamily::IdxMeta,
-            tail::LOG_PREFIX,
-            tail::LOG_END,
-        )
+        .write_durable(batch)
         .map_err(crate::IndexError::Storage)
 }
 
-/// Publishes the sealed segment record and the `gen/<cap>` descriptor in one
-/// batch. The tail is empty afterwards, so `tail_lo > tail_hi`.
-fn publish_sealed<S: bitcoin_rs_storage::KvStore>(
+fn put_sealed_records(
+    batch: &mut bitcoin_rs_storage::BufferedWriteBatch,
+    sealed: &SealedGen,
+    capabilities: IndexCapabilities,
+    bounds: tail::TailBounds,
+) {
+    let record = encode_sealed_gen(sealed);
+    batch.put(
+        bitcoin_rs_storage::ColumnFamily::IdxMeta,
+        SEAL_NEXT_GEN_KEY,
+        &sealed.gen_id.saturating_add(1).to_le_bytes(),
+    );
+    let segment_caps: Vec<IndexCapability> = capabilities
+        .iter()
+        .filter(|capability| *capability != IndexCapability::ScriptLive)
+        .collect();
+    for &capability in &segment_caps {
+        batch.put(
+            bitcoin_rs_storage::ColumnFamily::IdxMeta,
+            &sealed_gen_key(capability, sealed.gen_id),
+            &record,
+        );
+    }
+    tail::put_generation_descriptors(batch, segment_caps, bounds);
+}
+
+pub fn publish_sealed<S: bitcoin_rs_storage::KvStore>(
     store: &S,
     gen_id: u64,
     coverage: Coverage,
@@ -644,29 +637,11 @@ fn publish_sealed<S: bitcoin_rs_storage::KvStore>(
         coverage,
         next_ordinal,
     };
-    let record = encode_sealed_gen(&sealed);
     let mut batch = store.new_batch();
-    batch.put(
-        bitcoin_rs_storage::ColumnFamily::IdxMeta,
-        SEAL_NEXT_GEN_KEY,
-        &gen_id.saturating_add(1).to_le_bytes(),
-    );
-    let segment_caps = capabilities
-        .iter()
-        .filter(|capability| *capability != IndexCapability::ScriptLive);
-    for capability in capabilities.iter() {
-        if capability == IndexCapability::ScriptLive {
-            continue;
-        }
-        batch.put(
-            bitcoin_rs_storage::ColumnFamily::IdxMeta,
-            &sealed_gen_key(capability, gen_id),
-            &record,
-        );
-    }
-    tail::put_generation_descriptors(
+    put_sealed_records(
         &mut batch,
-        segment_caps,
+        &sealed,
+        capabilities,
         tail::TailBounds {
             newest: Some(sealed),
             first_height: None,
@@ -715,10 +690,22 @@ pub fn recover_segments<S: bitcoin_rs_storage::KvStore>(
         |bytes| decode_seal_marker(bytes).ok_or(crate::IndexError::InvalidSealMarker),
     );
     if let Some(bytes) = committed.as_deref() {
-        let (gen_id, coverage, capabilities, next_ordinal) =
+        let (gen_id, coverage, capabilities, _next_ordinal) =
             decode_seal_marker(bytes).ok_or(crate::IndexError::InvalidSealMarker)?;
-        clear_tail(store)?;
-        publish_sealed(store, gen_id, coverage, next_ordinal, capabilities)?;
+        let snapshot = store.snapshot().map_err(crate::IndexError::Storage)?;
+        let landed = snapshot
+            .get(
+                bitcoin_rs_storage::ColumnFamily::IdxMeta,
+                &tail::log_key_for(coverage.first_height),
+            )?
+            .is_none();
+        drop(snapshot);
+        if !landed {
+            let snapshot = store.snapshot().map_err(crate::IndexError::Storage)?;
+            let plan = tail::plan_prefix_cut(snapshot.as_ref(), coverage.last_height)?;
+            drop(snapshot);
+            commit_cut(store, &plan, gen_id, coverage, capabilities)?;
+        }
         remove_seal_markers(store)?;
         if staged.is_err() {
             return Err(crate::IndexError::InvalidSealMarker);

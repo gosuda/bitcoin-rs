@@ -901,7 +901,11 @@ impl SnapshotControl {
         };
         match cap {
             bitcoin_rs_consensus::primitives::IndexArtifactCapability::TxLookup => {
-                runtime.fail_tx_lookup(&error.to_string());
+                runtime.fail_tx_lookup(
+                    &bitcoin_rs_projection::runtime::DerivedIndexWorkerError::ArtifactUnavailable(
+                        error.to_string(),
+                    ),
+                );
             }
             bitcoin_rs_consensus::primitives::IndexArtifactCapability::ScriptHistory => {
                 runtime.fail_script_history(

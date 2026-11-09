@@ -165,8 +165,13 @@ fn live_store(blocks: &[CommittedBlock]) -> TestResult<(TempDir, RocksDbStore)> 
         store.write_durable(batch)?;
     }
     let base = base_of(blocks);
-    let coverage = Coverage::new(blocks[0].height, base.height, base.hash);
-    seal_tail_generation(&store, 1, coverage, IndexCapabilities::ALL, scratch.path())?;
+    seal_tail_generation(
+        &store,
+        1,
+        base.height,
+        IndexCapabilities::ALL,
+        scratch.path(),
+    )?;
     Ok((dir, store))
 }
 

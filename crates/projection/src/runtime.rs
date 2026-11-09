@@ -79,8 +79,9 @@ pub struct DerivedIndexRuntime {
     wake_tx: Sender<()>,
     failure_message: RwLock<Option<CompactString>>,
     compact_filter_failure: RwLock<Option<CompactString>>,
-    tx_lookup_failure: RwLock<Option<CompactString>>,
     script_live_failure: RwLock<Option<CompactString>>,
+    tx_lookup_failure: RwLock<Option<CompactString>>,
+    undo_gap: RwLock<Option<(u32, Hash256)>>,
     script_history_failure: RwLock<Option<CompactString>>,
     phase: arc_swap::ArcSwap<ReconcilePhase>,
     script_live_seed: Arc<crate::snapshot_seed::ScriptLiveSeedState>,
@@ -102,6 +103,7 @@ impl DerivedIndexRuntime {
             compact_filter_failure: RwLock::new(None),
             tx_lookup_failure: RwLock::new(None),
             script_live_failure: RwLock::new(None),
+            undo_gap: RwLock::new(None),
             script_history_failure: RwLock::new(None),
             phase: arc_swap::ArcSwap::from_pointee(ReconcilePhase::FORWARD),
             script_live_seed,
@@ -206,14 +208,6 @@ impl DerivedIndexRuntime {
         );
     }
 
-    /// SNP-10: TxLookup fails as one capability, never as the whole runtime.
-    pub fn fail_tx_lookup(&self, reason: &str) {
-        tracing::error!(reason, "txlookup index unavailable; other indexes continue");
-        *self.tx_lookup_failure.write() = Some(reason.into());
-        self.publish_leg(IndexCapabilities::TX_LOOKUP, ReconcileLeg::Forward);
-        self.wake();
-    }
-
     pub fn fail_script_history(&self, error: &DerivedIndexWorkerError) {
         self.fail_capability(
             IndexCapabilities::SCRIPT_HISTORY,
@@ -224,6 +218,55 @@ impl DerivedIndexRuntime {
     }
 
     pub(crate) fn clear_script_live(&self) {
+        self.script_live_failure.write().take();
+    }
+
+    /// SNP-10: TxLookup fails as one capability, never as the whole runtime.
+    pub fn fail_tx_lookup(&self, error: &DerivedIndexWorkerError) {
+        self.fail_capability(
+            IndexCapabilities::TX_LOOKUP,
+            &self.tx_lookup_failure,
+            error,
+            "TxLookup paused at a missing undo record; other indexes continue",
+        );
+    }
+
+    pub(crate) fn stop_undo_group(
+        &self,
+        capabilities: IndexCapabilities,
+        error: &DerivedIndexWorkerError,
+    ) {
+        let filters = capabilities.contains(IndexCapability::CompactFilters);
+        let history = capabilities.contains(IndexCapability::ScriptHistory);
+        let script_live = capabilities.contains(IndexCapability::ScriptLive);
+        if let DerivedIndexWorkerError::UndoUnavailable { height, hash } = error
+            && (filters || history || script_live)
+        {
+            *self.undo_gap.write() = Some((*height, *hash));
+        }
+        if filters {
+            self.fail_compact_filters(error);
+        }
+        if history {
+            self.fail_script_history(error);
+        }
+        if filters || history {
+            self.fail_tx_lookup(error);
+        }
+        if script_live {
+            self.fail_script_live(error);
+        }
+    }
+
+    pub(crate) fn undo_gap(&self) -> Option<(u32, Hash256)> {
+        *self.undo_gap.read()
+    }
+
+    pub(crate) fn clear_undo_group(&self) {
+        self.undo_gap.write().take();
+        self.tx_lookup_failure.write().take();
+        self.script_history_failure.write().take();
+        self.compact_filter_failure.write().take();
         self.script_live_failure.write().take();
     }
 
@@ -750,6 +793,8 @@ pub enum DerivedIndexWorkerError {
     Index(#[from] IndexError),
     #[error("txindex worker: retained history unavailable: {0}")]
     HistoryUnavailable(#[from] HistoryUnavailable),
+    #[error("txindex worker: tx lookup artifact unavailable: {0}")]
+    ArtifactUnavailable(String),
     #[error("txindex worker: missing body at height {height}, hash {hash}")]
     MissingBody { height: u32, hash: Hash256 },
     #[error("txindex worker: body store missing")]

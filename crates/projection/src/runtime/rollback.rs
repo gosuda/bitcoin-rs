@@ -89,7 +89,10 @@ impl Worker {
         if !self.enabled.contains(IndexCapability::ScriptLive) {
             return Ok(SeedPass::Idle);
         }
-        if self.runtime.script_live_failure.read().is_some() && watermarks.script_live.is_some() {
+        if self.runtime.script_live_failure.read().is_some()
+            && self.runtime.undo_gap().is_none()
+            && watermarks.script_live.is_some()
+        {
             self.writer
                 .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
                 .map_err(DerivedIndexWorkerError::Index)?;
@@ -262,6 +265,7 @@ impl Worker {
         capabilities: IndexCapabilities,
         watermark: IndexWatermark,
     ) -> Result<Option<IndexWatermark>, DerivedIndexWorkerError> {
+        let capabilities = crate::index::tail_rollback_group(watermarks, capabilities);
         let watermark_hash = Hash256::from_le_bytes(&watermark.hash);
         let lease = match self.history.request_history(watermark.height) {
             Ok(lease) => lease,
@@ -277,11 +281,10 @@ impl Worker {
             Err(error) => return Err(DerivedIndexWorkerError::HistoryUnavailable(error)),
         };
         let body = self.load_body(watermark.height, watermark_hash, &lease)?;
-        let anchor = (capabilities.contains(IndexCapability::ScriptHistory)
-            || capabilities.contains(IndexCapability::ScriptLive)
-            || capabilities.contains(IndexCapability::CompactFilters))
-        .then(|| self.live_anchor(watermark.height, watermark.hash))
-        .transpose()?;
+        let anchor = capabilities
+            .contains(IndexCapability::ScriptLive)
+            .then(|| self.live_anchor(watermark.height, watermark.hash))
+            .transpose()?;
         lease.release();
 
         let spent: &dyn crate::SpentCoins =
@@ -293,7 +296,7 @@ impl Worker {
             let prepared = self
                 .writer
                 .prepare_block_with_spent_scripts(
-                    capabilities,
+                    crate::index::rollback_prepare_capabilities(capabilities),
                     watermark.height,
                     watermark.hash,
                     &body,

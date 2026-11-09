@@ -799,7 +799,7 @@ fn live_reference(blocks: &[FixtureBlock]) -> TestResult<Reference> {
     seal_tail_generation(
         &store,
         BULK_GEN_ID,
-        coverage_for(blocks),
+        coverage_for(blocks).last_height,
         IndexCapabilities::ALL,
         scratch.path(),
     )?;

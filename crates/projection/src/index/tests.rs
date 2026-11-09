@@ -10,7 +10,8 @@ use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvStore, RocksDbStore
 use super::{
     IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer, SpentCoins,
 };
-use crate::{ScriptHash, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow};
+use crate::segment::tail::PreparedTail;
+use crate::{ScriptHash, ScriptLiveRow};
 
 type StoredRows = Vec<(ColumnFamily, Vec<u8>)>;
 
@@ -84,43 +85,6 @@ fn raw_op_return_check_matches_script_prefix_semantics() {
 }
 
 #[test]
-fn iter_funding_rows_returns_indexed_rows() -> Result<(), crate::portable::TestError> {
-    let script = vec![0x51, 0x01];
-    let tx = tx(spent_outpoint(1, 0), script.clone());
-    let (_dir, mut writer) = writer()?;
-
-    commit_block(&mut writer, 0, &consensus_bytes(&block(vec![tx])))?;
-
-    let scripthash = ScriptHash::from_script_bytes(&script);
-    assert_eq!(
-        writer.indexer().iter_funding_rows(scripthash)?,
-        vec![ScriptHashRow::row(scripthash, 0)]
-    );
-    Ok(())
-}
-
-#[test]
-fn iter_funding_rows_height_order_is_newest_first() -> Result<(), crate::portable::TestError> {
-    let script = vec![0x51, 0x01];
-    let scripthash = ScriptHash::from_script_bytes(&script);
-    let dir = tempfile::tempdir()?;
-    let store = Arc::new(RocksDbStore::open(dir.path())?);
-    put_funding_row(&store, scripthash, 1)?;
-    put_funding_row(&store, scripthash, 256)?;
-    let indexer = Indexer::new(store);
-
-    let rows = indexer.iter_funding_rows(scripthash)?;
-    assert_eq!(rows.len(), 2, "two heights funded the same script");
-
-    assert_eq!(
-        rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
-        vec![256, 1],
-        "inverted BE byte order is newest first"
-    );
-    Ok(())
-}
-
-#[test]
 fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), crate::portable::TestError>
 {
     let script = vec![0x51, 0x05];
@@ -168,21 +132,6 @@ fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), crate::p
     Ok(())
 }
 
-#[test]
-fn iter_spending_rows_returns_indexed_rows() -> Result<(), crate::portable::TestError> {
-    let outpoint = spent_outpoint(2, 3);
-    let tx = tx(outpoint, vec![0x51, 0x02]);
-    let (_dir, mut writer) = writer()?;
-
-    commit_block(&mut writer, 0, &consensus_bytes(&block(vec![tx])))?;
-
-    assert_eq!(
-        writer.indexer().iter_spending_rows(&outpoint)?,
-        vec![SpendingPrefixRow::row(&outpoint, 0)]
-    );
-    Ok(())
-}
-
 fn rollback_fixture_block() -> Block {
     let funded = tx(OutPoint::null(), vec![0x51]);
     let spender = tx(OutPoint::new(funded.txid(), 0), vec![0x52]);
@@ -203,9 +152,9 @@ fn rollback_removes_every_row_a_matching_commit_wrote() -> Result<(), crate::por
         "fixture must write rows to be a meaningful rollback test"
     );
     for cf in [
-        ColumnFamily::TxConfirmed,
-        ColumnFamily::Funding,
-        ColumnFamily::Spending,
+        ColumnFamily::TxDir,
+        ColumnFamily::ScriptPost,
+        ColumnFamily::SpendDir,
         ColumnFamily::BlockHeaders,
     ] {
         assert!(
@@ -484,26 +433,13 @@ fn writer() -> Result<(tempfile::TempDir, IndexWriter<RocksDbStore>), crate::por
     Ok((dir, IndexWriter::open(store, 1)?))
 }
 
-fn put_funding_row(
-    store: &RocksDbStore,
-    scripthash: ScriptHash,
-    height: u32,
-) -> Result<(), crate::portable::TestError> {
-    let mut row = ScriptHashRow::row(scripthash, height).to_db_row();
-    row[crate::types::HASH_PREFIX_LEN..]
-        .copy_from_slice(&crate::types::encode_history_height(height));
-    let mut batch = store.new_batch();
-    batch.put(ColumnFamily::Funding, &row, &[]);
-    store.write(batch)?;
-    Ok(())
-}
-
 fn stored_rows(indexer: &Indexer<RocksDbStore>) -> Result<StoredRows, crate::portable::TestError> {
     let mut rows = Vec::new();
     for cf in [
-        ColumnFamily::TxConfirmed,
-        ColumnFamily::Funding,
-        ColumnFamily::Spending,
+        ColumnFamily::TxDir,
+        ColumnFamily::ScriptPost,
+        ColumnFamily::SpendDir,
+        ColumnFamily::ScriptLive,
         ColumnFamily::BlockHeaders,
     ] {
         for row in indexer.store.iter_prefix(cf, &[])? {
@@ -717,7 +653,7 @@ fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation(
     crate::segment::seal_tail_generation(
         store.as_ref(),
         1,
-        crate::segment::Coverage::new(1, 1, [1; 32]),
+        1,
         crate::IndexCapabilities::SCRIPT_HISTORY,
         scratch.path(),
     )?;
@@ -725,7 +661,8 @@ fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation(
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let mut tail = writer.tail_for(None)?;
     let mut batch = store.new_batch();
-    writer.append_forward_tail(&mut tail, std::slice::from_ref(&spending), &mut batch)?;
+    let prepared = PreparedTail::new(&spending);
+    writer.append_forward_tail(&mut tail, &[(spending, prepared)], &mut batch)?;
     store.write_durable(batch)?;
 
     let snapshot = store.snapshot()?;

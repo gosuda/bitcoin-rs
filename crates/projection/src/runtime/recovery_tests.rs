@@ -141,7 +141,7 @@ fn tree_header(block: &Block) -> bitcoin_rs_consensus::primitives::Header {
     .expect("80-byte header")
 }
 
-fn mine_block(prev_hash: Hash256, height: u32, extra: i64) -> (Block, Hash256) {
+fn mine_block(prev_hash: Hash256, height: u32, extra: i64, prev_extra: i64) -> (Block, Hash256) {
     let prev_blockhash = BlockHash::from_byte_array(prev_hash.to_le_bytes());
     let mut block = Block {
         header: BlockHeader {
@@ -157,7 +157,7 @@ fn mine_block(prev_hash: Hash256, height: u32, extra: i64) -> (Block, Hash256) {
     if height > 0 {
         let mut spend = coinbase_tx(height, extra);
         spend.input[0].previous_output = bitcoin::OutPoint {
-            txid: coinbase_tx(height - 1, if height == 1 { 0 } else { extra }).compute_txid(),
+            txid: coinbase_tx(height - 1, prev_extra).compute_txid(),
             vout: 0,
         };
         block.txdata.push(spend);
@@ -181,7 +181,7 @@ impl ForkFixture {
     fn new(len: u32) -> Self {
         let mut tree = BlockTree::new();
         let mut bodies = BodyMap::new();
-        let (genesis, genesis_hash) = mine_block(Hash256::from_le_bytes(&[0_u8; 32]), 0, 0);
+        let (genesis, genesis_hash) = mine_block(Hash256::from_le_bytes(&[0_u8; 32]), 0, 0, 0);
         tree.insert_header(tree_header(&genesis), NodeStatus::HeaderValid)
             .expect("genesis");
         bodies.insert((0, genesis_hash.to_le_bytes()), serialize(&genesis));
@@ -189,7 +189,8 @@ impl ForkFixture {
             let mut prev = genesis_hash;
             let mut ids = Vec::new();
             for height in 1..=len {
-                let (block, hash) = mine_block(prev, height, extra);
+                let prev_extra = if height == 1 { 0 } else { extra };
+                let (block, hash) = mine_block(prev, height, extra, prev_extra);
                 let id = tree
                     .insert_header(tree_header(&block), NodeStatus::HeaderValid)
                     .expect("branch header");
@@ -294,6 +295,28 @@ impl ForkFixture {
         self.persist_branch_undo(&self.b.clone());
     }
 
+    fn fork_from_a(&self, fork_height: u32, len: u32) -> Vec<(NodeId, Hash256)> {
+        let shared = usize::try_from(fork_height).expect("fork height");
+        let mut branch: Vec<(NodeId, Hash256)> = self.a[..shared].to_vec();
+        let mut prev = branch.last().map_or(self.genesis, |(_, hash)| *hash);
+        for height in fork_height + 1..=len {
+            let prev_extra = if height == fork_height + 1 { 0 } else { 2 };
+            let (block, hash) = mine_block(prev, height, 2, prev_extra);
+            let id = self
+                .tree
+                .write()
+                .insert_header(tree_header(&block), NodeStatus::HeaderValid)
+                .expect("fork header");
+            self.bodies
+                .bodies
+                .lock()
+                .insert((height, hash.to_le_bytes()), serialize(&block));
+            branch.push((id, hash));
+            prev = hash;
+        }
+        branch
+    }
+
     fn tip(&self, (node_id, _): (NodeId, Hash256)) -> Arc<TipSnapshot> {
         let tree = self.tree.read();
         let node = tree.node(node_id).expect("node");
@@ -318,31 +341,76 @@ struct Harness {
     worker: Worker,
 }
 
-// EVT-04, IDX-07
+// PRJ-05, REO-06
 #[test]
-fn unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark() {
-    let fixture = ForkFixture::new(2);
-    for pruned in [false, true] {
-        let harness = Harness::with_enabled(
-            &fixture,
-            u32::MAX,
-            IndexCapabilities::HISTORICAL.with_compact_filters(true),
-        );
-        harness.set_tip(&fixture.tip(fixture.a[1]));
-        if pruned {
-            harness.retention.reserve(1).commit(1);
-        }
-        harness.settle(&mut None);
-        harness.assert_at(&fixture.tip(fixture.a[1]));
-        assert!(harness.runtime.compact_filter_failure.read().is_some());
-        assert!(!harness.runtime.should_stop());
-        assert!(harness.watermarks().compact_filters.is_none());
-        assert!(harness.writer.consumer_cursor().expect("cursor").is_none());
-        harness.set_tip(&fixture.tip(fixture.b[1]));
-        harness.settle(&mut None);
-        harness.assert_at(&fixture.tip(fixture.b[1]));
-        assert!(harness.watermarks().compact_filters.is_none());
-    }
+fn missing_undo_pauses_the_tail_group_and_resumes_to_bulk() {
+    const TIP: u32 = 20;
+    const MISSING: u32 = 10;
+    let f = ForkFixture::new(TIP);
+    f.persist_undo();
+    let key = f.a_key(MISSING);
+    let record = f
+        .bodies
+        .undo
+        .lock()
+        .remove(&key)
+        .expect("undo record for the missing height");
+    let h = Harness::with_enabled(
+        &f,
+        u32::MAX,
+        IndexCapabilities::HISTORICAL.with_compact_filters(true),
+    );
+    let tip = f.tip(f.a[usize::try_from(TIP - 1).expect("index")]);
+    h.set_tip(&tip);
+    h.settle(&mut None);
+
+    let paused = h.watermarks();
+    assert_eq!(
+        paused.tx_lookup, paused.script_history,
+        "the tail group moves together"
+    );
+    assert_eq!(
+        paused.tx_lookup, paused.compact_filters,
+        "the tail group moves together"
+    );
+    assert!(
+        paused
+            .tx_lookup
+            .is_none_or(|watermark| watermark.height < MISSING),
+        "the tail group stops before the missing height: {paused:?}"
+    );
+    assert!(h.runtime.compact_filter_failure.read().is_some());
+    assert!(h.runtime.script_history_failure.read().is_some());
+    assert!(h.runtime.tx_lookup_failure.read().is_some());
+    assert!(!h.runtime.should_stop(), "the worker keeps running");
+    assert!(
+        sealed_at(&h.store).is_empty(),
+        "no seal covers the missing height"
+    );
+
+    f.bodies.undo.lock().insert(key, record);
+    h.settle(&mut None);
+    h.assert_at(&tip);
+    assert!(
+        h.runtime.undo_gap().is_none(),
+        "the gap clears once the undo row returns"
+    );
+    assert_chain_matches_bulk(&h.store, &f, TIP);
+}
+
+fn assert_chain_matches_bulk(live: &RocksDbStore, f: &ForkFixture, tip: u32) {
+    let blocks = committed_chain(f, &f.a, 0, tip);
+    let oracle = bulk_oracle(&blocks);
+    let bulk_view =
+        crate::segment::SegmentSnapshot::open(oracle.store.snapshot().expect("bulk snapshot"))
+            .expect("bulk view");
+    let live_view = crate::segment::SegmentSnapshot::open(live.snapshot().expect("live snapshot"))
+        .expect("live view");
+    assert_eq!(
+        winner_answers(&live_view, &blocks),
+        winner_answers(&bulk_view, &blocks),
+        "resumed index answers equal the bulk build of the chain"
+    );
 }
 
 impl Harness {
@@ -459,7 +527,7 @@ impl Harness {
 }
 
 #[test]
-fn missing_undo_during_filter_rollback_does_not_reset_filters_or_stop_siblings() {
+fn missing_undo_pauses_the_tail_group_at_the_fork_point() {
     struct SpentScript;
     impl crate::SpentCoins for SpentScript {
         fn spent_coin(&self, _: &[u8; 32], _: u32) -> Option<crate::SpentCoin<'_>> {
@@ -498,16 +566,41 @@ fn missing_undo_during_filter_rollback_does_not_reset_filters_or_stop_siblings()
     h.writer
         .commit_forward_with_cursor(fence, batch, crate::ConsumerCursorUpdate::Keep)
         .expect("initial filter publication");
-    let original = h.watermarks().compact_filters;
     h.set_tip(&f.tip(f.b[1]));
     h.settle(&mut None);
-    h.assert_at(&f.tip(f.b[1]));
+    let watermarks = h.watermarks();
+    for (name, mark) in [
+        ("tx_lookup", watermarks.tx_lookup),
+        ("script_history", watermarks.script_history),
+        ("compact_filters", watermarks.compact_filters),
+    ] {
+        assert_eq!(
+            mark.map(|watermark| watermark.height),
+            Some(0),
+            "{name} pauses at the fork point: the forward block has no undo record"
+        );
+    }
+    let undo_missing = DerivedIndexWorkerError::UndoUnavailable {
+        height: 1,
+        hash: f.b[0].1,
+    }
+    .to_string();
     assert_eq!(
-        h.watermarks().compact_filters,
-        original,
-        "preserve failed capability data"
+        h.runtime.compact_filter_failure.read().as_deref(),
+        Some(undo_missing.as_str()),
+        "compact_filter_failure records the UndoUnavailable of the forward block"
     );
-    assert!(h.runtime.compact_filter_failure.read().is_some());
+    assert_eq!(
+        h.runtime.script_history_failure.read().as_deref(),
+        Some(undo_missing.as_str()),
+        "script_history_failure records the UndoUnavailable of the forward block"
+    );
+    assert_eq!(
+        h.runtime.tx_lookup_failure.read().as_deref(),
+        Some(undo_missing.as_str()),
+        "tx_lookup_failure records the UndoUnavailable of the forward block"
+    );
+    assert_eq!(h.runtime.phase(), ReconcilePhase::FORWARD);
     assert!(!h.runtime.should_stop());
 }
 
@@ -536,10 +629,10 @@ fn rollback_without_undo_preserves_script_history_and_rewinds_siblings() {
     );
     assert_eq!(
         h.watermarks().script_history,
-        Some(at(&a3)),
-        "ScriptHistory keeps its rows and watermark"
+        Some(at(&a1)),
+        "the tail group rewinds together: ScriptHistory moves with TxLookup"
     );
-    assert!(h.runtime.script_history_failure.read().is_some());
+    assert!(h.runtime.script_history_failure.read().is_none());
     assert!(!h.runtime.should_stop());
 }
 
@@ -877,24 +970,32 @@ fn run_loop_commits_a_retained_prefix_and_retries_an_absent_body_without_a_wake(
     run.join().expect("worker thread").expect("worker run");
 }
 
+// PRJ-05, REO-06
 #[test]
-fn forward_script_live_follows_undo_present_missing_or_corrupt() {
+fn script_live_undo_gap_pauses_the_group_and_resumes_to_bulk() {
     #[derive(Clone, Copy)]
     enum Undo {
         Present,
         Missing,
         Corrupt,
     }
+    const MISSING: u32 = 4;
     for undo in [Undo::Present, Undo::Missing, Undo::Corrupt] {
         let f = ForkFixture::new(5);
         f.persist_undo();
         let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
         let (a2, a5) = (f.tip(f.a[1]), f.tip(f.a[4]));
-        h.stage_seed_rows(&a5, 32);
+        h.writer
+            .stage_script_live_rows(&mut std::iter::empty())
+            .expect("stage empty seed");
+        h.writer
+            .publish_script_live_seed(at(&a2))
+            .expect("publish seed at h-1");
         h.set_tip(&a2);
         h.settle(&mut None);
 
-        let key = f.a_key(4);
+        let key = f.a_key(MISSING);
+        let original = f.bodies.undo.lock().get(&key).cloned();
         match undo {
             Undo::Present => {}
             Undo::Missing => {
@@ -906,38 +1007,61 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
                 }
             }
         }
+        assert_eq!(
+            h.watermarks().script_live,
+            Some(at(&a2)),
+            "ScriptLive is seeded at h-1 before the gap"
+        );
         h.set_tip(&a5);
         let mut pending = None;
-
-        if !matches!(undo, Undo::Present) {
-            assert!(matches!(
-                h.worker.reconcile_once(&mut pending),
-                Ok(ReconcileAction::Stalled)
-            ));
-            assert!(pending.is_none());
-            let reset = h.watermarks();
-            assert_eq!(reset.script_live, None, "ScriptLive is reset");
-            assert_eq!(reset.tx_lookup, Some(at(&a2)), "siblings keep their rows");
+        if matches!(undo, Undo::Present) {
+            h.settle(&mut pending);
+        } else {
+            for _ in 0..64 {
+                match h
+                    .worker
+                    .reconcile_once(&mut pending)
+                    .expect("the pass returns instead of halting")
+                {
+                    ReconcileAction::CaughtUp | ReconcileAction::Stalled => break,
+                    ReconcileAction::Progressed | ReconcileAction::Buffered => {}
+                }
+            }
+            let paused = h.watermarks();
             assert_eq!(
-                reset.script_history,
+                paused.script_live,
                 Some(at(&a2)),
-                "ScriptHistory keeps its rows and watermark"
+                "ScriptLive pauses at h-1 without a reset"
+            );
+            assert_eq!(
+                paused.tx_lookup, paused.script_history,
+                "the tail group moves together"
+            );
+            assert!(
+                paused
+                    .tx_lookup
+                    .is_some_and(|watermark| watermark.height < MISSING),
+                "the tail group stops before the missing height: {paused:?}"
             );
             assert!(h.runtime.script_history_failure.read().is_some());
-            h.stage_seed_rows(&a5, 32);
+            assert_eq!(
+                h.runtime.undo_gap().map(|(height, _)| height),
+                Some(MISSING),
+                "the gap names the missing height"
+            );
+            if let Some(record) = original {
+                f.bodies.undo.lock().insert(key, record);
+            }
         }
         h.settle(&mut pending);
         assert_eq!(h.watermarks().tx_lookup, Some(at(&a5)));
+        assert_eq!(h.watermarks().script_history, Some(at(&a5)));
         assert_eq!(h.watermarks().script_live, Some(at(&a5)));
-        if matches!(undo, Undo::Present) {
-            h.assert_at(&a5);
-        } else {
-            assert_eq!(
-                h.watermarks().script_history,
-                Some(at(&a2)),
-                "an unavailable ScriptHistory never advances past its missing anchor"
-            );
-        }
+        assert!(
+            h.runtime.undo_gap().is_none(),
+            "the gap clears once the undo row returns"
+        );
+        assert_chain_matches_bulk(&h.store, &f, 5);
     }
 }
 
@@ -955,9 +1079,18 @@ fn anchor_failure_outranks_an_earlier_preparation_failure() {
 
     assert!(matches!(
         h.worker.reconcile_once(&mut None),
-        Ok(ReconcileAction::Stalled)
+        Ok(ReconcileAction::Progressed)
     ));
-    assert_eq!(h.watermarks().script_live, None);
+    assert_eq!(
+        h.runtime.undo_gap().map(|(height, _)| height),
+        Some(5),
+        "the anchor failure at height 5 is the recorded gap"
+    );
+    assert_eq!(
+        h.watermarks().script_live,
+        Some(at(&f.tip(f.a[1]))),
+        "ScriptLive pauses at h-1"
+    );
 }
 
 #[test]
@@ -1142,6 +1275,7 @@ fn seed_first_leg_consumes_held_lease() {
 
 struct SeedCellHarness {
     _index_dir: tempfile::TempDir,
+    store: Arc<RocksDbStore>,
     writer: Arc<dyn TxIndexWriter>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     runtime: Arc<DerivedIndexRuntime>,
@@ -1154,7 +1288,7 @@ impl SeedCellHarness {
         let index_dir = tempfile::tempdir().expect("index dir");
         let store = Arc::new(RocksDbStore::open(index_dir.path()).expect("rocksdb open"));
         let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(
-            crate::IndexWriter::open(store, 1).expect("index writer open"),
+            crate::IndexWriter::open(Arc::clone(&store), 1).expect("index writer open"),
         ));
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(16);
@@ -1189,6 +1323,7 @@ impl SeedCellHarness {
         };
         Self {
             _index_dir: index_dir,
+            store,
             writer,
             applied_tip,
             runtime,
@@ -1400,6 +1535,40 @@ fn generation_rows(store: &RocksDbStore, sealed_id: u64) -> Vec<(ColumnFamily, V
     rows
 }
 
+type CreatedCoin = (Vec<u8>, u64, u32, bool);
+
+#[derive(Default)]
+struct CreatedCoinMap(HashMap<([u8; 32], u32), CreatedCoin>);
+
+impl CreatedCoinMap {
+    fn insert_block(&mut self, block: &bitcoin_rs_storage::CommittedBlock) {
+        for tx in &block.txs {
+            let coinbase = tx.inputs.is_empty();
+            for output in &tx.outputs {
+                self.0.insert(
+                    (tx.txid, output.vout),
+                    (output.script.to_vec(), output.value, block.height, coinbase),
+                );
+            }
+        }
+    }
+}
+
+impl crate::index::SpentCoins for CreatedCoinMap {
+    fn spent_coin(&self, txid: &[u8; 32], vout: u32) -> Option<crate::index::SpentCoin<'_>> {
+        self.0
+            .get(&(*txid, vout))
+            .map(
+                |(script, value, height, coinbase)| crate::index::SpentCoin {
+                    script,
+                    value: *value,
+                    height: *height,
+                    coinbase: *coinbase,
+                },
+            )
+    }
+}
+
 fn committed_chain(
     f: &ForkFixture,
     branch: &[(NodeId, Hash256)],
@@ -1407,8 +1576,9 @@ fn committed_chain(
     last_height: u32,
 ) -> Vec<bitcoin_rs_storage::CommittedBlock> {
     let bodies = f.bodies.bodies.lock();
+    let mut created = CreatedCoinMap::default();
     let mut out = Vec::new();
-    for height in first_height..=last_height {
+    for height in 0..=last_height {
         let index = usize::try_from(height).expect("height fits usize");
         let hash = if height == 0 {
             f.genesis
@@ -1423,20 +1593,25 @@ fn committed_chain(
         let body = bodies
             .get(&(height, hash.to_le_bytes()))
             .expect("fixture body");
-        let facts = crate::index::BodyFacts {
-            height,
-            needs_scripts: false,
-            spent_coins: &crate::index::NoSpentScripts,
-        };
-        out.push(
-            crate::index::committed_block_from_body(
-                body,
+        let image = crate::index::parse_body(body).expect("fixture body parses");
+        let block = {
+            let facts = crate::index::BodyFacts {
+                height,
+                needs_scripts: true,
+                spent_coins: &created,
+            };
+            crate::index::committed_block_from_image(
+                &image,
                 hash.to_le_bytes(),
                 parent.to_le_bytes(),
                 &facts,
             )
-            .expect("committed block"),
-        );
+            .expect("committed block")
+        };
+        created.insert_block(&block);
+        if height >= first_height {
+            out.push(block);
+        }
     }
     out
 }
@@ -1463,27 +1638,62 @@ fn assert_sealed_matches_bulk(store: &RocksDbStore, f: &ForkFixture, branch: &[(
         None,
         scratch.path().to_path_buf(),
     );
-    let coverage = builder
+    let bulk_builder_coverage = builder
         .build_and_ingest(&bulk_store, segment.gen_id, &blocks)
         .expect("bulk build");
     assert_eq!(
-        coverage, segment.coverage,
+        bulk_builder_coverage, segment.coverage,
         "bulk coverage matches the sealed segment"
     );
+    let sealed_rows = generation_rows(store, segment.gen_id);
+    let bulk_rows = generation_rows(&bulk_store, segment.gen_id);
+    let per_family = |rows: &[(ColumnFamily, Vec<u8>, Vec<u8>)]| {
+        SEGMENT_FAMILIES
+            .iter()
+            .map(|cf| rows.iter().filter(|row| row.0 == *cf).count())
+            .collect::<Vec<_>>()
+    };
+    let posting_items = |rows: &[(ColumnFamily, Vec<u8>, Vec<u8>)]| {
+        rows.iter()
+            .filter(|row| row.0 == ColumnFamily::ScriptPost)
+            .map(|row| {
+                crate::segment::format::decode_posting_items(&row.2).map_or(0, |items| items.len())
+            })
+            .sum::<usize>()
+    };
     assert_eq!(
-        generation_rows(store, segment.gen_id),
-        generation_rows(&bulk_store, segment.gen_id),
-        "sealed segment rows equal the bulk builder output for the same blocks"
+        posting_items(&sealed_rows),
+        posting_items(&bulk_rows),
+        "posting items"
     );
+    assert_eq!(
+        per_family(&sealed_rows),
+        per_family(&bulk_rows),
+        "per-family row counts"
+    );
+    if let Some(index) = sealed_rows
+        .iter()
+        .zip(bulk_rows.iter())
+        .position(|(a, b)| a != b)
+    {
+        let (sealed_cf, sealed_key, sealed_value) = &sealed_rows[index];
+        let (bulk_cf, bulk_key, bulk_value) = &bulk_rows[index];
+        panic!(
+            "first differing sealed row {index}: sealed {sealed_cf:?} {sealed_key:?} ({} bytes) != bulk {bulk_cf:?} {bulk_key:?} ({} bytes)",
+            sealed_value.len(),
+            bulk_value.len()
+        );
+    }
 }
 
 // PRJ-09
 #[test]
 fn sync_past_the_tail_bound_seals_one_generation_equal_to_bulk() {
-    let f = ForkFixture::new(2017);
+    let f = ForkFixture::new(2100);
+    f.persist_undo();
     let h = Harness::new(&f, u32::MAX);
     let mut pending = None;
-    let tip = f.tip(f.a[2016]);
+    let tip = f.tip(f.a[2099]);
     h.set_tip(&tip);
     h.settle(&mut pending);
     h.assert_at(&tip);
@@ -1493,11 +1703,11 @@ fn sync_past_the_tail_bound_seals_one_generation_equal_to_bulk() {
 // REO-04, REO-05
 #[test]
 fn deep_reorg_through_the_runtime_retires_exactly_the_affected_generation() {
-    let f = ForkFixture::new(2020);
+    let f = ForkFixture::new(2100);
     f.persist_undo();
     let h = Harness::new(&f, u32::MAX);
     let mut pending = None;
-    let a = f.tip(f.a[2019]);
+    let a = f.tip(f.a[2099]);
     h.set_tip(&a);
     h.settle(&mut pending);
     h.assert_at(&a);
@@ -1506,7 +1716,7 @@ fn deep_reorg_through_the_runtime_retires_exactly_the_affected_generation() {
     let affected_id = affected[0].gen_id;
     assert!(!generation_rows(&h.store, affected_id).is_empty());
 
-    let b = f.tip(f.b[2019]);
+    let b = f.tip(f.b[2099]);
     h.set_tip(&b);
     h.settle(&mut pending);
     h.assert_at(&b);
@@ -1527,10 +1737,11 @@ fn deep_reorg_through_the_runtime_retires_exactly_the_affected_generation() {
 #[test]
 fn crash_between_seal_steps_recovers_on_reopen() {
     use crate::segment::{SealFault, arm_seal_fault};
-    let f = ForkFixture::new(2017);
+    let f = ForkFixture::new(2100);
+    f.persist_undo();
     let h = Harness::new(&f, u32::MAX);
     let mut pending = None;
-    let tip = f.tip(f.a[2016]);
+    let tip = f.tip(f.a[2099]);
     h.set_tip(&tip);
     arm_seal_fault(Some(SealFault::AfterCommitted));
     let mut failed = false;
@@ -1550,4 +1761,187 @@ fn crash_between_seal_steps_recovers_on_reopen() {
     let reopened = crate::IndexWriter::open(Arc::clone(&h.store), 1).expect("reopen");
     drop(reopened);
     assert_sealed_matches_bulk(&h.store, &f, &f.a);
+}
+
+type TxAnswer = (Vec<(u32, TxPosition)>, Vec<Vec<(Vec<u8>, Vec<u8>)>>);
+
+struct BulkOracle {
+    _dirs: (tempfile::TempDir, tempfile::TempDir),
+    store: RocksDbStore,
+}
+
+fn bulk_oracle(blocks: &[bitcoin_rs_storage::CommittedBlock]) -> BulkOracle {
+    let bulk_dir = tempfile::tempdir().expect("bulk dir");
+    let scratch = tempfile::tempdir().expect("bulk scratch");
+    let store = RocksDbStore::open(bulk_dir.path()).expect("bulk store");
+    let builder = crate::segment::bulk_builder::BulkSegmentBuilder::new(
+        Arc::new(bitcoin_rs_storage::budget::UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    );
+    let coverage = builder
+        .build_and_ingest(&store, 1, blocks)
+        .expect("bulk build");
+    let next_ordinal: usize = blocks.iter().map(|block| block.txs.len()).sum();
+    crate::segment::publish_sealed(
+        &store,
+        1,
+        coverage,
+        u32::try_from(next_ordinal).expect("ordinal count"),
+        IndexCapabilities::HISTORICAL,
+    )
+    .expect("publish bulk generation");
+    BulkOracle {
+        _dirs: (bulk_dir, scratch),
+        store,
+    }
+}
+
+fn winner_answers(
+    view: &crate::segment::SegmentSnapshot<'_>,
+    blocks: &[bitcoin_rs_storage::CommittedBlock],
+) -> Vec<TxAnswer> {
+    let mut answers = Vec::new();
+    for block in blocks {
+        for tx in &block.txs {
+            let txid = bitcoin_rs_consensus::primitives::Txid(Hash256::from_le_bytes(&tx.txid));
+            let positions = view.tx_answer_for_test(&txid).expect("tx answer");
+            let histories = tx
+                .outputs
+                .iter()
+                .map(|output| {
+                    let hash = ScriptHash::from_script_bytes(&output.script);
+                    view.history_answer_for_test(hash).expect("history answer")
+                })
+                .collect();
+            answers.push((positions, histories));
+        }
+    }
+    answers
+}
+
+fn audited_height(height: u32, cut: u32, rewound_from: u32) -> bool {
+    height.is_multiple_of(500)
+        || height.abs_diff(cut) <= 1
+        || height.saturating_add(2) >= rewound_from
+}
+
+fn assert_answers_match_bulk(
+    live: &RocksDbStore,
+    f: &ForkFixture,
+    winner: &[(NodeId, Hash256)],
+    rewound_from: u32,
+    tip: u32,
+) {
+    let cut = tip - crate::segment::format::REORG_WINDOW_BLOCKS;
+    let blocks = committed_chain(f, winner, 0, tip);
+    let oracle = bulk_oracle(&blocks);
+    let audited: Vec<bitcoin_rs_storage::CommittedBlock> = blocks
+        .iter()
+        .filter(|block| audited_height(block.height, cut, rewound_from))
+        .cloned()
+        .collect();
+    let bulk_view =
+        crate::segment::SegmentSnapshot::open(oracle.store.snapshot().expect("bulk snapshot"))
+            .expect("bulk view");
+    let live_view = crate::segment::SegmentSnapshot::open(live.snapshot().expect("live snapshot"))
+        .expect("live view");
+    let live_answers = winner_answers(&live_view, &audited);
+    let bulk_answers = winner_answers(&bulk_view, &audited);
+    assert_eq!(
+        live_answers, bulk_answers,
+        "winning chain answers equal the bulk build over the same blocks"
+    );
+    let rewound = committed_chain(f, &f.a, rewound_from, tip);
+    let rewound_live = winner_answers(&live_view, &rewound);
+    assert_eq!(
+        rewound_live,
+        winner_answers(&bulk_view, &rewound),
+        "rewound blocks answer as the bulk build does"
+    );
+    assert!(
+        rewound_live
+            .iter()
+            .all(|(positions, _)| positions.is_empty()),
+        "rewound transactions leave no tx lookup answer"
+    );
+}
+
+// PRJ-05, PRJ-09, REO-04
+#[test]
+fn shallow_reorg_after_seal_keeps_the_segment_and_rewinds_the_tail() {
+    const TIP: u32 = 2100;
+    const FORK: u32 = 2098;
+    let f = ForkFixture::new(TIP);
+    f.persist_undo();
+    let winner = f.fork_from_a(FORK, TIP);
+    f.persist_branch_undo(&winner);
+    let h = Harness::new(&f, u32::MAX);
+    let mut pending = None;
+    let first = f.tip(f.a[usize::try_from(TIP - 1).expect("index")]);
+    h.set_tip(&first);
+    h.settle(&mut pending);
+    h.assert_at(&first);
+    let sealed = sealed_at(&h.store);
+    assert_eq!(sealed.len(), 1, "the sync seals one stable prefix");
+    let segment = sealed[0];
+    assert_eq!(segment.coverage.first_height, 0);
+    assert_eq!(
+        segment.coverage.last_height,
+        crate::segment::format::TAIL_MAX_BLOCKS - 1 - crate::segment::format::REORG_WINDOW_BLOCKS,
+        "the first seal cuts the full tail bound less the retained window"
+    );
+    let sealed_rows = generation_rows(&h.store, segment.gen_id);
+
+    let reorged = f.tip(winner[usize::try_from(TIP - 1).expect("index")]);
+    h.set_tip(&reorged);
+    h.settle(&mut pending);
+    h.assert_at(&reorged);
+    assert_eq!(
+        sealed_at(&h.store),
+        sealed,
+        "the sealed segment stays published"
+    );
+    assert_eq!(
+        generation_rows(&h.store, segment.gen_id),
+        sealed_rows,
+        "sealed rows are untouched by the shallow reorg"
+    );
+    assert_answers_match_bulk(&h.store, &f, &winner, FORK + 1, TIP);
+}
+
+// PRJ-05, REO-04
+#[test]
+fn reorg_past_the_retained_tail_retires_the_newest_segment_and_matches_bulk() {
+    const TIP: u32 = 2_100;
+    const FORK: u32 = 1_000;
+    let f = ForkFixture::new(TIP);
+    f.persist_undo();
+    let winner = f.fork_from_a(FORK, TIP);
+    f.persist_branch_undo(&winner);
+    let h = Harness::new(&f, u32::MAX);
+    let mut pending = None;
+    let first = f.tip(f.a[usize::try_from(TIP - 1).expect("index")]);
+    h.set_tip(&first);
+    h.settle(&mut pending);
+    h.assert_at(&first);
+    let sealed = sealed_at(&h.store);
+    assert_eq!(sealed.len(), 1, "the sync seals one stable prefix");
+    let retired = sealed[0].gen_id;
+
+    let reorged = f.tip(winner[usize::try_from(TIP - 1).expect("index")]);
+    h.set_tip(&reorged);
+    h.settle(&mut pending);
+    h.assert_at(&reorged);
+    assert!(
+        sealed_at(&h.store)
+            .iter()
+            .all(|segment| segment.gen_id != retired),
+        "the newest segment leaves the published set"
+    );
+    assert!(
+        generation_rows(&h.store, retired).is_empty(),
+        "retired rows are gone"
+    );
+    assert_answers_match_bulk(&h.store, &f, &winner, FORK + 1, TIP);
 }

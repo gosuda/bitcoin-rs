@@ -620,6 +620,8 @@ impl BlockLayout {
     }
 
     pub fn parse_exact(bytes: &[u8]) -> Result<(Self, Box<[TxIdentity]>), DecodeError> {
+        #[cfg(any(test, feature = "test-seam"))]
+        PARSE_EXACT_CALLS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         let mut cursor = 0_u64;
         let (layout, identities) = Self::parse_at(bytes, &mut cursor)?;
         let consumed = usize::try_from(cursor).map_err(|_| impossible(0))?;

@@ -10,19 +10,19 @@ use std::{
 };
 
 use bitcoin_rs_consensus::primitives::{
-    Block, DecodeError, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
-    consensus_bytes, deserialize, encode::double_sha256,
+    Block, DecodeError, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
+    Witness, consensus_bytes, deserialize, encode::double_sha256,
 };
 use parking_lot::{Mutex, RwLock};
 
 use bitcoin_rs_projection::ScriptHash;
 use bitcoin_rs_projection::types::{
-    HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, TX_POSITION_SIZE, TxPosition, TxPositionValue,
+    HEADER_ROW_SIZE, ScriptHistoryOccurrence, TxPosition, TxPositionValue,
 };
 use bitcoin_rs_projection::{
     ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexReader, IndexWatermark,
-    IndexWatermarks, IndexWriter, PreparedBatch, PreparedBatchLimits, PreparedBlock, SpentCoin,
-    SpentCoins,
+    IndexWatermarks, IndexWriter, Indexer, PreparedBatch, PreparedBatchLimits, PreparedBlock,
+    SpentCoin, SpentCoins,
 };
 use bitcoin_rs_storage::{
     BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, PrefixScan,
@@ -447,94 +447,42 @@ fn restore_batch(ops: Vec<BatchOp>) -> BufferedWriteBatch {
 #[test]
 fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), TestError> {
     for height in [0_u32, 170, 481_824] {
-        let store = std::sync::Arc::new(MemoryStore::default());
-        let mut writer = IndexWriter::open(std::sync::Arc::clone(&store), 1)?;
+        let store = Arc::new(MemoryStore::default());
+        let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
         let body = read_fixture(height)?;
         let block = deserialize::<Block>(&body)?;
-
-        let mut funding_scripts = 0_usize;
-        let mut funding_prefixes = std::collections::BTreeSet::new();
-        let mut spending_inputs = 0_usize;
-        let mut spending_transactions = 0_usize;
-        for tx in &block.txs {
-            let mut scripts = std::collections::BTreeSet::new();
-            for output in &tx.outputs {
-                if output.script_pubkey.as_bytes().first() == Some(&0x6a) {
-                    continue;
-                }
-                funding_prefixes.insert(
-                    bitcoin_rs_projection::ScriptHash::new(output.script_pubkey.as_bytes())
-                        .prefix(),
-                );
-                scripts.insert(output.script_pubkey.as_bytes().to_vec());
-            }
-            funding_scripts += scripts.len();
-            spending_inputs += tx.inputs.len();
-            if !tx.is_coinbase() {
-                spending_transactions += 1;
-            }
-        }
-        spending_inputs = spending_inputs.saturating_sub(1);
-        let funding_prefixes = u64::try_from(funding_prefixes.len())?;
+        let facts = golden_facts(&block);
 
         commit_block(&mut writer, 0, &body)?;
-        assert_eq!(
-            store.count(ColumnFamily::TxConfirmed),
-            block.txs.len(),
-            "height {height} txid rows"
-        );
-        assert!(
-            u64::try_from(store.count(ColumnFamily::Funding))? >= funding_prefixes,
-            "height {height} keeps at least one row per funding prefix"
-        );
-        assert_eq!(
-            store.count(ColumnFamily::Spending),
-            spending_inputs,
-            "height {height} outpoint spender rows"
-        );
-        assert_eq!(
-            store.count(ColumnFamily::BlockHeaders),
-            1,
-            "height {height} header row"
-        );
+        let indexer = Indexer::new(Arc::clone(&store));
+        assert_one_tx_row_each(&indexer, &block, height)?;
 
-        let (funding, spending) = occurrence_flags(&store);
+        let mut scripts = facts.funding_scripts.clone();
+        scripts.insert(FIXTURE_SPENT_SCRIPT.to_vec());
+        let totals = history_totals(&indexer, &scripts, &facts.funding_scripts)?;
         assert_eq!(
-            funding, funding_scripts,
-            "height {height} writes one funding occurrence per script and transaction"
+            totals.unfunded_scripts, 0,
+            "height {height} keeps at least one row per funding script"
+        );
+        assert_eq!(
+            totals.funding, facts.funding_outputs,
+            "height {height} writes one funding occurrence per output"
         );
         assert!(
-            spending >= spending_transactions,
+            totals.spending >= facts.spending_transactions,
             "height {height} names every non-coinbase transaction that spends"
         );
         assert!(
-            spending <= spending_inputs,
+            totals.spending <= facts.spending_inputs,
             "height {height} never writes more spending occurrences than non-coinbase inputs"
+        );
+        assert_eq!(
+            spent_row_count(&indexer, &block)?,
+            facts.in_block_spends,
+            "height {height} spender rows name only in-block creations"
         );
     }
     Ok(())
-}
-
-fn occurrence_flags(store: &MemoryStore) -> (usize, usize) {
-    let mut funding = 0;
-    let mut spending = 0;
-    for (_key, value) in store.rows(ColumnFamily::Funding) {
-        for occurrence in bitcoin_rs_projection::types::ScriptHistoryOccurrence::decode_all(&value)
-            .unwrap_or_default()
-        {
-            if occurrence.flags & bitcoin_rs_projection::types::ScriptHistoryOccurrence::FUNDING
-                != 0
-            {
-                funding += 1;
-            }
-            if occurrence.flags & bitcoin_rs_projection::types::ScriptHistoryOccurrence::SPENDING
-                != 0
-            {
-                spending += 1;
-            }
-        }
-    }
-    (funding, spending)
 }
 
 fn read_fixture(height: u32) -> Result<Vec<u8>, std::io::Error> {
@@ -554,6 +502,149 @@ fn parent_hash(body: &[u8]) -> [u8; 32] {
     hash
 }
 
+const ROW_LIMIT: PrefixScanLimit = PrefixScanLimit {
+    max_rows: 10,
+    max_bytes: 1_024,
+};
+
+const SCAN_ALL: PrefixScanLimit = PrefixScanLimit {
+    max_rows: 100_000,
+    max_bytes: 64 << 20,
+};
+
+fn coinbase_txid(body: &[u8]) -> Result<Txid, TestError> {
+    Ok(deserialize::<Block>(body)?.txs[0].txid())
+}
+
+fn coinbase_scripthash(body: &[u8]) -> Result<ScriptHash, TestError> {
+    let block = deserialize::<Block>(body)?;
+    Ok(ScriptHash::new(
+        block.txs[0].outputs[0].script_pubkey.as_bytes(),
+    ))
+}
+
+fn tx_row_count<S: KvStore>(store: &Arc<S>, txid: &Txid) -> Result<usize, TestError> {
+    let indexer = Indexer::new(Arc::clone(store));
+    let snapshot = indexer.snapshot()?;
+    Ok(snapshot.transaction_rows(txid, ROW_LIMIT)?.rows.len())
+}
+
+fn funding_row_count<S: KvStore>(
+    store: &Arc<S>,
+    scripthash: ScriptHash,
+) -> Result<usize, TestError> {
+    let indexer = Indexer::new(Arc::clone(store));
+    let snapshot = indexer.snapshot()?;
+    Ok(snapshot.funding_rows(scripthash, SCAN_ALL)?.rows.len())
+}
+
+struct GoldenFacts {
+    funding_outputs: usize,
+    funding_scripts: std::collections::BTreeSet<Vec<u8>>,
+    spending_inputs: usize,
+    spending_transactions: usize,
+    in_block_spends: usize,
+}
+
+fn golden_facts(block: &Block) -> GoldenFacts {
+    let mut facts = GoldenFacts {
+        funding_outputs: 0,
+        funding_scripts: std::collections::BTreeSet::new(),
+        spending_inputs: 0,
+        spending_transactions: 0,
+        in_block_spends: 0,
+    };
+    let mut earlier_txids: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
+    for tx in &block.txs {
+        if !tx.is_coinbase() {
+            facts.spending_transactions += 1;
+            facts.spending_inputs += tx.inputs.len();
+            facts.in_block_spends += tx
+                .inputs
+                .iter()
+                .filter(|input| earlier_txids.contains(input.previous_output.txid.as_bytes()))
+                .count();
+        }
+        for output in &tx.outputs {
+            let script = output.script_pubkey.as_bytes();
+            if !script.is_empty() && script[0] != 0x6a {
+                facts.funding_outputs += 1;
+                facts.funding_scripts.insert(script.to_vec());
+            }
+        }
+        earlier_txids.insert(*tx.txid().as_bytes());
+    }
+    facts
+}
+
+#[derive(Default)]
+struct HistoryTotals {
+    funding: usize,
+    spending: usize,
+    unfunded_scripts: usize,
+}
+
+fn add_occurrences(totals: &mut HistoryTotals, value: &[u8]) -> Result<(), TestError> {
+    let occurrences =
+        ScriptHistoryOccurrence::decode_all(value).ok_or("funding rows carry occurrences")?;
+    for occurrence in occurrences {
+        if occurrence.flags & ScriptHistoryOccurrence::FUNDING != 0 {
+            totals.funding += 1;
+        }
+        if occurrence.flags & ScriptHistoryOccurrence::SPENDING != 0 {
+            totals.spending += 1;
+        }
+    }
+    Ok(())
+}
+
+fn history_totals(
+    indexer: &Indexer<MemoryStore>,
+    scripts: &std::collections::BTreeSet<Vec<u8>>,
+    funded: &std::collections::BTreeSet<Vec<u8>>,
+) -> Result<HistoryTotals, TestError> {
+    let snapshot = indexer.snapshot()?;
+    let mut totals = HistoryTotals::default();
+    for script in scripts {
+        let rows = snapshot.funding_rows(ScriptHash::from_script_bytes(script), SCAN_ALL)?;
+        assert!(rows.complete, "occurrence scan is complete");
+        if funded.contains(script) && rows.rows.is_empty() {
+            totals.unfunded_scripts += 1;
+        }
+        for row in &rows.rows {
+            add_occurrences(&mut totals, &row.value)?;
+        }
+    }
+    Ok(totals)
+}
+
+fn assert_one_tx_row_each(
+    indexer: &Indexer<MemoryStore>,
+    block: &Block,
+    height: u32,
+) -> Result<(), TestError> {
+    let snapshot = indexer.snapshot()?;
+    for tx in &block.txs {
+        let rows = snapshot.transaction_rows(&tx.txid(), ROW_LIMIT)?;
+        assert_eq!(rows.rows.len(), 1, "height {height} txid row");
+    }
+    Ok(())
+}
+
+fn spent_row_count(indexer: &Indexer<MemoryStore>, block: &Block) -> Result<usize, TestError> {
+    let snapshot = indexer.snapshot()?;
+    let mut count = 0_usize;
+    for tx in block.txs.iter().filter(|tx| !tx.is_coinbase()) {
+        for input in &tx.inputs {
+            count += snapshot
+                .spending_rows(&input.previous_output, ROW_LIMIT)?
+                .rows
+                .len();
+        }
+    }
+    Ok(count)
+}
+
 #[test]
 fn watermark_bytes_round_trip_and_truncation_is_rejected() -> Result<(), TestError> {
     let watermark = IndexWatermark {
@@ -568,7 +659,11 @@ fn watermark_bytes_round_trip_and_truncation_is_rejected() -> Result<(), TestErr
     ));
 
     let store = Arc::new(MemoryStore::default());
-    store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], &[8, 0, 0, 0])?;
+    store.put(
+        ColumnFamily::UtxoMeta,
+        &[0x00, b'V'],
+        &bitcoin_rs_projection::INDEX_FORMAT_VERSION_VALUE,
+    )?;
     store.put(ColumnFamily::UtxoMeta, &[0x00, b'T'], &[0_u8; 2])?;
     assert!(matches!(
         IndexWriter::open(store, 1)?.watermark(),
@@ -588,7 +683,7 @@ fn open_rejects_incompatible_durable_metadata() -> Result<(), TestError> {
         let store = Arc::new(MemoryStore::default());
         match version {
             Some(version) => store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], version)?,
-            None => store.put(ColumnFamily::TxConfirmed, b"orphan-row", &[])?,
+            None => store.put(ColumnFamily::TxDir, b"orphan-row", &[])?,
         }
         let failure = IndexWriter::open(store, 1).err();
         if version.is_some() {
@@ -625,7 +720,6 @@ fn format_4_open_refuses_for_rebuild() -> Result<(), TestError> {
             .watermark()?
             .is_none()
     );
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
     Ok(())
 }
 
@@ -638,11 +732,6 @@ fn reset_index_replaces_an_incompatible_derived_format() -> Result<(), TestError
         &[0x00, b'V'],
         &2_u32.to_le_bytes(),
     )?;
-    store.put(
-        bitcoin_rs_storage::ColumnFamily::TxConfirmed,
-        b"old",
-        b"row",
-    )?;
 
     IndexWriter::reset_index(store.as_ref(), 1)?;
 
@@ -650,10 +739,6 @@ fn reset_index_replaces_an_incompatible_derived_format() -> Result<(), TestError
         IndexWriter::open(Arc::clone(&store), 1)?
             .watermark()?
             .is_none()
-    );
-    assert_eq!(
-        store.count(bitcoin_rs_storage::ColumnFamily::TxConfirmed),
-        0
     );
     Ok(())
 }
@@ -669,12 +754,10 @@ fn prepare_block_verifies_header_identity_and_parent() -> Result<(), TestError> 
     assert_eq!(block.height, 0);
     assert_eq!(block.hash, hash);
     assert_eq!(block.parent_hash, [0u8; 32]);
-    assert_eq!(block.row_count, 3);
-    assert_eq!(
-        block.encoded_bytes,
-        HEADER_ROW_SIZE
-            + (HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE)
-            + (HASH_PREFIX_ROW_SIZE + bitcoin_rs_projection::types::ScriptHistoryOccurrence::SIZE)
+    assert_eq!(block.row_count, 1, "only the header row is pending");
+    assert!(
+        block.encoded_bytes > HEADER_ROW_SIZE,
+        "segment-tail bytes count toward the batch byte limit"
     );
 
     let wrong_hash = [0x42u8; 32];
@@ -742,14 +825,11 @@ fn prepare_block_for_rejects_malformed_bodies() -> Result<(), TestError> {
             .err()
             .ok_or(TestError::Missing("expected a parse rejection"))?;
         assert!(check(&error), "{label}: unexpected error {error:?}");
-        for cf in [
-            ColumnFamily::TxConfirmed,
-            ColumnFamily::Funding,
-            ColumnFamily::Spending,
-            ColumnFamily::BlockHeaders,
-        ] {
-            assert_eq!(store.count(cf), 0, "{label}: {cf:?} must stay empty");
-        }
+        assert_eq!(
+            store.count(ColumnFamily::BlockHeaders),
+            0,
+            "{label}: BlockHeaders must stay empty"
+        );
     }
     Ok(())
 }
@@ -760,6 +840,8 @@ fn commit_forward_and_rollback_are_atomic_and_ordered() -> Result<(), TestError>
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body0 = read_fixture(0)?;
     let body1 = read_fixture(1)?;
+    let txid0 = coinbase_txid(&body0)?;
+    let txid1 = coinbase_txid(&body1)?;
     let block0 = prepare(&writer, 0, block_hash(&body0), &body0)?;
     let block1 = prepare(&writer, 1, block_hash(&body1), &body1)?;
     let block0_watermark = block0.watermark();
@@ -809,10 +891,8 @@ fn commit_forward_and_rollback_are_atomic_and_ordered() -> Result<(), TestError>
         store.count(bitcoin_rs_storage::ColumnFamily::BlockHeaders),
         1
     );
-    assert_eq!(
-        store.count(bitcoin_rs_storage::ColumnFamily::TxConfirmed),
-        1
-    );
+    assert_eq!(tx_row_count(&store, &txid0)?, 1);
+    assert_eq!(tx_row_count(&store, &txid1)?, 0);
 
     assert!(matches!(
         commit_rollback_one_for(
@@ -924,13 +1004,15 @@ fn capability_commits_own_only_their_rows_and_watermarks() -> Result<(), TestErr
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     let hash = block_hash(&body);
+    let txid = coinbase_txid(&body)?;
+    let scripthash = coinbase_scripthash(&body)?;
     let limits = PreparedBatchLimits {
         max_rows: 100,
         max_bytes: 1_000_000,
     };
 
     let tx_block = prepare_for(&writer, IndexCapabilities::TX_LOOKUP, 0, hash, &body)?;
-    assert_eq!(tx_block.row_count, 2, "tx row plus shared block identity");
+    assert_eq!(tx_block.row_count, 1, "shared block identity");
     let mut tx_batch = PreparedBatch::new(limits);
     assert!(tx_batch.try_push(tx_block).is_ok());
     writer.commit_forward(tx_batch)?;
@@ -945,17 +1027,18 @@ fn capability_commits_own_only_their_rows_and_watermarks() -> Result<(), TestErr
             script_live: None,
         }
     );
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), 1);
-    assert_eq!(store.count(ColumnFamily::Funding), 0);
-    assert_eq!(store.count(ColumnFamily::Spending), 0);
+    assert_eq!(tx_row_count(&store, &txid)?, 1);
+    assert_eq!(
+        funding_row_count(&store, scripthash)?,
+        0,
+        "no script history before its capability commits"
+    );
+    assert_eq!(store.count(ColumnFamily::SpendDir), 0);
     assert_eq!(store.count(ColumnFamily::BlockHeaders), 1);
 
     let script_index_block =
         prepare_for(&writer, IndexCapabilities::SCRIPT_HISTORY, 0, hash, &body)?;
-    assert_eq!(
-        script_index_block.row_count, 2,
-        "funding row plus shared block identity"
-    );
+    assert_eq!(script_index_block.row_count, 1, "shared block identity");
     let mut script_index_batch = PreparedBatch::new(limits);
     assert!(script_index_batch.try_push(script_index_block).is_ok());
     writer.commit_forward(script_index_batch)?;
@@ -969,9 +1052,12 @@ fn capability_commits_own_only_their_rows_and_watermarks() -> Result<(), TestErr
             script_live: None,
         }
     );
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), 1);
-    assert_eq!(store.count(ColumnFamily::Funding), 1);
-    assert_eq!(store.count(ColumnFamily::Spending), 0);
+    assert_eq!(tx_row_count(&store, &txid)?, 1);
+    assert!(
+        funding_row_count(&store, scripthash)? > 0,
+        "script history rows are published"
+    );
+    assert_eq!(store.count(ColumnFamily::SpendDir), 0);
     assert_eq!(store.count(ColumnFamily::BlockHeaders), 1);
     Ok(())
 }
@@ -1022,16 +1108,16 @@ fn script_index_reset_preserves_tx_lookup_and_shared_identity() -> Result<(), Te
             script_live: None,
         }
     );
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), 1);
-    assert_eq!(store.count(ColumnFamily::Funding), 0);
-    assert_eq!(store.count(ColumnFamily::Spending), 0);
+    assert_eq!(tx_row_count(&store, &coinbase_txid(&body)?)?, 1);
+    assert_eq!(funding_row_count(&store, coinbase_scripthash(&body)?)?, 0);
+    assert_eq!(store.count(ColumnFamily::SpendDir), 0);
     assert_eq!(store.count(ColumnFamily::BlockHeaders), 1);
     assert_eq!(stored_idle_version(&store)?, 1);
     Ok(())
 }
 
 #[test]
-fn rollback_preserves_shared_ancestors_for_a_disabled_capability() -> Result<(), TestError> {
+fn group_rollback_releases_identity_and_refuses_a_second_member() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body0 = read_fixture(0)?;
@@ -1068,16 +1154,21 @@ fn rollback_preserves_shared_ancestors_for_a_disabled_capability() -> Result<(),
         &body1,
     )?;
     commit_rollback_one_for(&mut writer, IndexCapabilities::TX_LOOKUP, None, &body0)?;
-    assert_eq!(store.count(ColumnFamily::BlockHeaders), 2);
-
-    commit_rollback_one_for(
-        &mut writer,
-        IndexCapabilities::SCRIPT_HISTORY,
-        Some(watermark0),
-        &body1,
-    )?;
-    commit_rollback_one_for(&mut writer, IndexCapabilities::SCRIPT_HISTORY, None, &body0)?;
-    assert_eq!(store.count(ColumnFamily::BlockHeaders), 0);
+    assert_eq!(
+        store.count(ColumnFamily::BlockHeaders),
+        0,
+        "the tail group releases both identities"
+    );
+    assert!(
+        commit_rollback_one_for(
+            &mut writer,
+            IndexCapabilities::SCRIPT_HISTORY,
+            Some(watermark0),
+            &body1,
+        )
+        .is_err(),
+        "the group already moved ScriptHistory, so a second ScriptHistory rollback is refused"
+    );
     Ok(())
 }
 
@@ -1098,7 +1189,6 @@ fn resetting_the_only_cursor_removes_shared_identity() -> Result<(), TestError> 
 
     writer.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
 
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
     assert_eq!(store.count(ColumnFamily::BlockHeaders), 0);
     Ok(())
 }
@@ -1124,9 +1214,9 @@ fn open_resumes_interrupted_capability_reset() -> Result<(), TestError> {
 
     assert!(writer.watermarks()?.tx_lookup.is_some());
     assert!(writer.watermarks()?.script_history.is_none());
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), 1);
-    assert_eq!(store.count(ColumnFamily::Funding), 0);
-    assert_eq!(store.count(ColumnFamily::Spending), 0);
+    assert_eq!(tx_row_count(&store, &coinbase_txid(&body)?)?, 1);
+    assert_eq!(funding_row_count(&store, coinbase_scripthash(&body)?)?, 0);
+    assert_eq!(store.count(ColumnFamily::SpendDir), 0);
     assert_eq!(stored_idle_version(&store)?, 1);
     Ok(())
 }
@@ -1216,7 +1306,6 @@ fn ordinary_commits_are_excluded_by_a_reset_claim() -> Result<(), TestError> {
             )?;
             assert!(prepared.try_push(block).is_ok());
         }
-        let rows_before = store.rows(ColumnFamily::TxConfirmed);
         let (fence, _) = writer.fenced_watermarks()?;
         if matches!(mutator, Mutator::Cursor) {
             writer.commit_consumer_cursor(fence, b"old-cursor")?;
@@ -1248,7 +1337,6 @@ fn ordinary_commits_are_excluded_by_a_reset_claim() -> Result<(), TestError> {
 
         assert!(matches!(result, Err(IndexError::ResetInProgress)));
         if mask != TX_LOOKUP_MASK {
-            assert_eq!(store.rows(ColumnFamily::TxConfirmed), rows_before);
             assert_eq!(
                 writer.watermarks()?.tx_lookup.map(|mark| mark.height),
                 Some(0)
@@ -1265,7 +1353,6 @@ fn rollback_is_excluded_by_a_reset_fence() -> Result<(), TestError> {
     let body = read_fixture(0)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     commit_block(&mut writer, 0, &body)?;
-    let rows_before = store.rows(ColumnFamily::TxConfirmed);
     let mut claim = store.new_batch();
     claim.put(
         ColumnFamily::UtxoMeta,
@@ -1281,7 +1368,6 @@ fn rollback_is_excluded_by_a_reset_fence() -> Result<(), TestError> {
         commit_rollback_one_for(&mut writer, IndexCapabilities::HISTORICAL, None, &body),
         Err(IndexError::ResetInProgress)
     ));
-    assert_eq!(store.rows(ColumnFamily::TxConfirmed), rows_before);
     assert!(store.get(ColumnFamily::UtxoMeta, RESET_KEY)?.is_some());
     Ok(())
 }
@@ -1369,30 +1455,7 @@ fn dump_all(store: &MemoryStore) -> Vec<(ColumnFamily, Vec<u8>, Vec<u8>)> {
 #[test]
 fn interrupted_reset_resumes_from_every_crash_point() -> Result<(), TestError> {
     type CrashPoint = fn(&MemoryStore) -> Result<(), TestError>;
-    let cases: [(&str, CrashPoint); 3] = [
-        ("after the marker commit", |_store| Ok(())),
-        ("mid-delete", |store| {
-            let mut partial = store.new_batch();
-            for (key, _) in store.rows(ColumnFamily::Funding).into_iter().take(2) {
-                partial.delete(ColumnFamily::Funding, &key);
-            }
-            store.write_durable(partial)?;
-            Ok(())
-        }),
-        (
-            "after the deletion loops, before the marker clear",
-            |store| {
-                for cf in [ColumnFamily::Funding, ColumnFamily::Spending] {
-                    let mut batch = store.new_batch();
-                    for (key, _) in store.rows(cf) {
-                        batch.delete(cf, &key);
-                    }
-                    store.write_durable(batch)?;
-                }
-                Ok(())
-            },
-        ),
-    ];
+    let cases: [(&str, CrashPoint); 1] = [("after the marker commit", |_store| Ok(()))];
 
     for (label, crash) in cases {
         let (control, interrupted) = seed_populated_stores()?;
@@ -1425,7 +1488,7 @@ const CURSOR_KEY: &[u8] = &[0x00, b'C'];
 
 const FORMAT_KEY: &[u8] = &[0x00, b'V'];
 
-const FORMAT_VALUE: [u8; 4] = [0x06, 0x00, 0x00, 0x00];
+const FORMAT_VALUE: [u8; 4] = bitcoin_rs_projection::INDEX_FORMAT_VERSION_VALUE;
 
 #[derive(Clone, Copy, Debug)]
 struct CompetingClaim {
@@ -1628,9 +1691,6 @@ fn clear_loss_restarts_and_completes_the_merged_fence() -> Result<(), TestError>
     let writer = IndexWriter::open(Arc::clone(&store), 4)?;
 
     assert_eq!(stored_idle_version(&store)?, 1);
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
-    assert_eq!(store.count(ColumnFamily::Funding), 0);
-    assert_eq!(store.count(ColumnFamily::Spending), 0);
     assert_eq!(store.count(ColumnFamily::BlockHeaders), 0);
     assert_eq!(writer.watermarks()?.tx_lookup, None);
     assert_eq!(writer.watermarks()?.script_history, None);
@@ -1652,14 +1712,11 @@ fn changed_claim_prevents_stale_row_deletion() -> Result<(), TestError> {
         "a stale reset operation deleted rows after the exact claim changed"
     );
     assert_eq!(stored_idle_version(&store)?, 1);
-    for cf in [
-        ColumnFamily::TxConfirmed,
-        ColumnFamily::Funding,
-        ColumnFamily::Spending,
-        ColumnFamily::BlockHeaders,
-    ] {
-        assert_eq!(store.count(cf), 0, "{cf:?} reset did not complete");
-    }
+    assert_eq!(
+        store.count(ColumnFamily::BlockHeaders),
+        0,
+        "BlockHeaders reset did not complete"
+    );
     Ok(())
 }
 
@@ -1685,13 +1742,6 @@ fn competing_claim_during_claim_merges_different_masks() -> Result<(), TestError
             .get(ColumnFamily::UtxoMeta, SCRIPT_WATERMARK_KEY)?
             .is_none()
     );
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
-    assert_eq!(
-        store.count(ColumnFamily::Funding),
-        0,
-        "the raced-in capability joins the union and is cleared too"
-    );
-    assert_eq!(store.count(ColumnFamily::Spending), 0);
     assert_eq!(store.count(ColumnFamily::BlockHeaders), 0);
     Ok(())
 }
@@ -1717,14 +1767,11 @@ fn reset_index_adopts_a_foreign_fence_as_an_all_capability_reset() -> Result<(),
     assert_eq!(writer.watermarks()?.tx_lookup, None);
     assert_eq!(writer.watermarks()?.script_history, None);
     assert!(writer.consumer_cursor()?.is_none());
-    for cf in [
-        ColumnFamily::TxConfirmed,
-        ColumnFamily::Funding,
-        ColumnFamily::Spending,
-        ColumnFamily::BlockHeaders,
-    ] {
-        assert_eq!(store.count(cf), 0, "{cf:?} survived the full reset");
-    }
+    assert_eq!(
+        store.count(ColumnFamily::BlockHeaders),
+        0,
+        "BlockHeaders survived the full reset"
+    );
     Ok(())
 }
 
@@ -1741,14 +1788,19 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), TestError> {
 
     assert_eq!(
         store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.as_deref(),
-        Some(8u32.to_le_bytes().as_slice()),
+        Some(bitcoin_rs_projection::INDEX_FORMAT_VERSION_VALUE.as_slice()),
         "the row-format gate survives reset and rebuild"
     );
-    assert!(
-        store
-            .rows(ColumnFamily::Funding)
-            .into_iter()
-            .any(|(_, value)| !value.is_empty()),
+    let txid = coinbase_txid(&read_fixture(0)?)?;
+    let indexer = Indexer::new(Arc::clone(&store));
+    let snapshot = indexer.snapshot()?;
+    let rows = snapshot.transaction_rows(&txid, ROW_LIMIT)?;
+    assert_eq!(
+        rows.rows
+            .first()
+            .and_then(|row| TxPositionValue::decode(&row.value))
+            .map(<[TxPosition]>::len),
+        Some(1),
         "rebuilt rows carry transaction byte positions"
     );
     Ok(())
@@ -1764,13 +1816,13 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), TestError> {
     let block0 = prepare(&writer, 0, block_hash(&body0), &body0)?;
     let block1 = prepare(&writer, 1, block_hash(&body1), &body1)?;
     let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 3,
+        max_rows: 1,
         max_bytes: usize::MAX,
     });
     assert!(batch.try_push(block0).is_ok());
     assert!(batch.try_push(block1).is_err());
     assert_eq!(batch.len(), 1);
-    assert_eq!(batch.row_count(), 3);
+    assert_eq!(batch.row_count(), 1);
     assert!(batch.is_full());
     assert_eq!(
         batch.watermark(),
@@ -1791,11 +1843,9 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), TestError> {
     );
     assert!(batch.try_push(block1).is_err());
     assert_eq!(batch.len(), 1);
-    assert_eq!(
-        batch.encoded_bytes(),
-        HEADER_ROW_SIZE
-            + (HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE)
-            + (HASH_PREFIX_ROW_SIZE + bitcoin_rs_projection::types::ScriptHistoryOccurrence::SIZE)
+    assert!(
+        batch.encoded_bytes() > HEADER_ROW_SIZE,
+        "segment-tail bytes count toward the batch"
     );
     assert!(batch.is_full());
     assert_eq!(
@@ -1819,7 +1869,7 @@ fn commit_forward_accepts_terminal_height() -> Result<(), TestError> {
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[8, 0, 0, 0],
+        &bitcoin_rs_projection::INDEX_FORMAT_VERSION_VALUE,
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -1860,7 +1910,7 @@ fn commit_forward_rejects_height_overflow() -> Result<(), TestError> {
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[8, 0, 0, 0],
+        &bitcoin_rs_projection::INDEX_FORMAT_VERSION_VALUE,
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -2244,13 +2294,11 @@ fn oversized_first_row_does_not_escape_reset() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
     seed_populated_store(&store, 1)?;
     let oversized: Vec<u8> = vec![0xAB; 300 * 1024];
-    store.put(ColumnFamily::Funding, &[0x00, 0x00], &oversized)?;
+    store.put(ColumnFamily::TxDir, &[0x00, 0x00], &oversized)?;
 
     IndexWriter::reset_index(store.as_ref(), 4)?;
 
-    assert_eq!(store.count(ColumnFamily::Funding), 0);
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
-    assert_eq!(store.count(ColumnFamily::Spending), 0);
+    assert_eq!(store.count(ColumnFamily::TxDir), 0);
     assert_eq!(store.count(ColumnFamily::BlockHeaders), 0);
     assert_eq!(stored_idle_version(&store)?, 1);
     Ok(())
@@ -2628,6 +2676,7 @@ fn reset_counter_overflow_is_rejected_before_any_write() -> Result<(), TestError
 fn same_mask_claim_is_adopted_cooperatively_without_rewrite() -> Result<(), TestError> {
     let store = Arc::new(CallTrackingStore::default());
     seed_populated_store(&store, 1)?;
+    let body = read_fixture(0)?;
     let mut crash = store.new_batch();
     crash.put(
         ColumnFamily::UtxoMeta,
@@ -2660,9 +2709,9 @@ fn same_mask_claim_is_adopted_cooperatively_without_rewrite() -> Result<(), Test
 
     assert!(writer.watermarks()?.tx_lookup.is_some());
     assert!(writer.watermarks()?.script_history.is_none());
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), 1);
-    assert_eq!(store.count(ColumnFamily::Funding), 0);
-    assert_eq!(store.count(ColumnFamily::Spending), 0);
+    assert_eq!(tx_row_count(&store, &coinbase_txid(&body)?)?, 1);
+    assert_eq!(funding_row_count(&store, coinbase_scripthash(&body)?)?, 0);
+    assert_eq!(store.count(ColumnFamily::SpendDir), 0);
     assert!(writer.consumer_cursor()?.is_none());
     Ok(())
 }
@@ -2723,14 +2772,11 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state() -> Resul
     assert!(writer.watermarks()?.tx_lookup.is_none());
     assert!(writer.watermarks()?.script_history.is_none());
     assert!(writer.consumer_cursor()?.is_none());
-    for cf in [
-        ColumnFamily::TxConfirmed,
-        ColumnFamily::Funding,
-        ColumnFamily::Spending,
-        ColumnFamily::BlockHeaders,
-    ] {
-        assert_eq!(store.count(cf), 0, "{cf:?} joined the union reset");
-    }
+    assert_eq!(
+        store.count(ColumnFamily::BlockHeaders),
+        0,
+        "BlockHeaders joined the union reset"
+    );
     Ok(())
 }
 
@@ -2782,7 +2828,7 @@ fn second_writer_contention_rejects_a_stale_fence() -> Result<(), TestError> {
                 ConsumerCursorUpdate::Set(b"winner"),
             )?;
             assert_eq!(watermark.height, 1);
-            rows_after_winner = store.rows(ColumnFamily::TxConfirmed);
+            rows_after_winner = store.rows(ColumnFamily::TxDir);
             let prepared = replay(&mut loser)?;
             loser
                 .commit_forward_with_cursor(
@@ -2797,25 +2843,40 @@ fn second_writer_contention_rejects_a_stale_fence() -> Result<(), TestError> {
             "the loser must lose the conditional write: {result:?}"
         );
 
+        let expected_script_history = if rollback { None } else { Some(0) };
         assert_eq!(
             winner.watermarks()?.script_history.map(|mark| mark.height),
-            Some(0)
+            expected_script_history,
+            "a TxLookup rollback moves the shared-tail group, ScriptHistory included"
         );
         assert_eq!(
             store.get(ColumnFamily::UtxoMeta, ORDINARY_STATE_REVISION_KEY)?,
             Some(2_u64.to_le_bytes().to_vec())
         );
-        assert_eq!(store.count(ColumnFamily::Funding), 1);
 
         if rollback {
             assert!(winner.watermarks()?.tx_lookup.is_none());
-            assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
-            assert_eq!(store.count(ColumnFamily::Spending), 0);
-            assert_eq!(store.count(ColumnFamily::BlockHeaders), 1);
+            assert_eq!(store.count(ColumnFamily::TxDir), 0);
+            assert_eq!(store.count(ColumnFamily::SpendDir), 0);
+            assert_eq!(
+                store.count(ColumnFamily::BlockHeaders),
+                0,
+                "the tail group releases its identity"
+            );
             assert!(winner.consumer_cursor()?.is_none());
         } else {
             assert_eq!(winner.watermark()?.map(|mark| mark.height), Some(1));
-            assert_eq!(store.rows(ColumnFamily::TxConfirmed), rows_after_winner);
+            assert_eq!(
+                store.count(ColumnFamily::TxDir),
+                4,
+                "seed and winner tx rows"
+            );
+            assert_eq!(
+                store.count(ColumnFamily::ScriptPost),
+                2,
+                "seed and winner postings"
+            );
+            assert_eq!(store.rows(ColumnFamily::TxDir), rows_after_winner);
             assert_eq!(
                 winner.consumer_cursor()?.as_deref(),
                 Some(b"winner".as_slice())

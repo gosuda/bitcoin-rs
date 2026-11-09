@@ -774,21 +774,8 @@ impl Worker {
             Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
                 *pending = None;
                 state.batch = PreparedBatch::new(self.batch_limits);
-                if capabilities.contains(IndexCapability::CompactFilters) {
-                    self.runtime.fail_compact_filters(&error);
-                }
-                if capabilities.contains(IndexCapability::ScriptHistory) {
-                    self.runtime.fail_script_history(&error);
-                }
-                if !capabilities.contains(IndexCapability::ScriptLive) {
-                    return Ok(ControlFlow::Break(ChunkAction::Progressed));
-                }
-                self.writer
-                    .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
-                    .map_err(DerivedIndexWorkerError::Index)?;
-                self.runtime.fail_script_live(&error);
-                tracing::warn!(error = %error, "ScriptLive unavailable after missing undo; awaiting verified seed");
-                Ok(ControlFlow::Break(ChunkAction::MissingBody))
+                self.runtime.stop_undo_group(capabilities, &error);
+                Ok(ControlFlow::Break(ChunkAction::Progressed))
             }
             Err(error) => Err(error),
         }

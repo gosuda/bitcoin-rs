@@ -1,10 +1,17 @@
 use super::capability::{IndexCapabilities, IndexCapability, IndexWatermark};
 use super::error::IndexError;
+use super::rows::IndexRowBytes;
 use super::write::IndexWriter;
-use crate::segment::format::{TAIL_MAX_BLOCKS, TAIL_MAX_BYTES};
-use crate::segment::tail::{self, CreationOrdinals, SealedTxOrdinals, TailWriterState};
-use crate::segment::{self, Coverage, SealedGen, sealed_generations};
-use bitcoin_rs_storage::{BufferedWriteBatch, CommittedBlock, KvStore};
+use crate::segment::format::SCRIPT_STATS_VALUE_LEN;
+use crate::segment::tail::{
+    self, CreationOrdinals, PreparedTail, SealedTxOrdinals, TailWriterState,
+};
+use crate::segment::{self, SealedGen, sealed_generations};
+use bitcoin_rs_storage::{BatchOp, BufferedWriteBatch, ColumnFamily, CommittedBlock, KvStore};
+
+/// A stats row's undo-log entry carries its prior value: a length prefix and
+/// the fixed stats value.
+const STATS_PRIOR_LOG_BYTES: usize = 4 + SCRIPT_STATS_VALUE_LEN;
 
 pub(super) enum RollbackTail {
     Unwind,
@@ -24,6 +31,36 @@ impl CreationOrdinals for CreationsAcross<'_> {
     }
 }
 
+impl RollbackTail {
+    pub(super) fn rewind(
+        &self,
+        state: &TailWriterState,
+        prev: Option<IndexWatermark>,
+    ) -> Result<Option<IndexWatermark>, IndexError> {
+        let Self::Retire(newest) = self else {
+            return Ok(prev);
+        };
+        if newest.coverage.first_height == 0 {
+            return Ok(None);
+        }
+        let older = state
+            .sealed
+            .iter()
+            .filter(|sealed| sealed.gen_id < newest.gen_id)
+            .max_by_key(|sealed| sealed.gen_id)
+            .filter(|sealed| {
+                sealed.coverage.last_height.checked_add(1) == Some(newest.coverage.first_height)
+            })
+            .ok_or(IndexError::CorruptTailLog {
+                height: newest.coverage.first_height,
+            })?;
+        Ok(Some(IndexWatermark {
+            height: older.coverage.last_height,
+            hash: older.coverage.last_hash,
+        }))
+    }
+}
+
 impl<S: KvStore> IndexWriter<S> {
     pub(super) fn tail_for(
         &mut self,
@@ -40,7 +77,7 @@ impl<S: KvStore> IndexWriter<S> {
     pub(super) fn append_forward_tail(
         &self,
         state: &mut TailWriterState,
-        blocks: &[CommittedBlock],
+        blocks: &[(CommittedBlock, PreparedTail)],
         batch: &mut BufferedWriteBatch,
     ) -> Result<(), IndexError> {
         let snapshot = self.indexer.store.snapshot()?;
@@ -56,8 +93,8 @@ impl<S: KvStore> IndexWriter<S> {
                 gens: &script_gens,
             },
         };
-        for block in blocks {
-            tail::append_tail_block(batch, block, state, &older)?;
+        for (block, prepared) in blocks {
+            tail::append_prepared_tail_block(batch, block, prepared, state, &older)?;
         }
         Ok(())
     }
@@ -97,11 +134,8 @@ impl<S: KvStore> IndexWriter<S> {
             RollbackTail::Unwind => {
                 let snapshot = self.indexer.store.snapshot()?;
                 tail::unwind_tail_block(batch, snapshot.as_ref(), current.height)?;
-                if state.tail_blocks > 1 {
-                    state.first_height
-                } else {
-                    None
-                }
+                state.pop_newest_block();
+                state.first_height()
             }
             RollbackTail::Retire(newest) => {
                 state.sealed.retain(|sealed| sealed.gen_id != newest.gen_id);
@@ -123,28 +157,34 @@ impl<S: KvStore> IndexWriter<S> {
         Ok(())
     }
 
-    pub(super) fn seal_if_due(
+    pub fn restore_tail_bounds(&mut self) -> Result<(), IndexError> {
+        let (_, watermarks) = self.fenced_watermarks()?;
+        let state = self.tail_for(watermarks.tx_lookup)?;
+        if !state.admits(0, 0) {
+            let cut = state
+                .cut_before_append(0)
+                .ok_or(IndexError::CorruptTailLog { height: 0 })?;
+            self.seal_through(&state, cut, IndexCapabilities::ALL)?;
+        }
+        self.tail = None;
+        Ok(())
+    }
+
+    pub(super) fn seal_through(
         &self,
         state: &TailWriterState,
+        cut: u32,
         capabilities: IndexCapabilities,
-        tip: IndexWatermark,
-    ) -> Result<bool, IndexError> {
-        let byte_bound = u64::try_from(TAIL_MAX_BYTES).unwrap_or(u64::MAX);
-        if state.tail_blocks <= TAIL_MAX_BLOCKS && state.tail_bytes <= byte_bound {
-            return Ok(false);
-        }
-        let first_height = state.first_height.unwrap_or(tip.height);
-        let coverage = Coverage::new(first_height, tip.height, tip.hash);
+    ) -> Result<(), IndexError> {
         segment::seal_tail_generation(
             self.indexer.store.as_ref(),
             state.next_gen_id,
-            coverage,
+            cut,
             capabilities,
             self.seal_scratch
                 .as_deref()
                 .ok_or(IndexError::SealScratchUnset)?,
-        )?;
-        Ok(true)
+        )
     }
 }
 
@@ -152,4 +192,53 @@ fn segment_capabilities(capabilities: IndexCapabilities) -> impl Iterator<Item =
     capabilities
         .iter()
         .filter(|capability| *capability != IndexCapability::ScriptLive)
+}
+
+/// Upper bound on the bytes one block's tail append writes. The append runs
+/// on a scratch state that takes every state-dependent branch at its widest:
+/// each spend resolves, ordinals take the widest varint, and each stats row
+/// is charged the prior value its undo-log entry may carry.
+pub(super) fn planned_tail_bytes(
+    block: &CommittedBlock,
+    prepared: &PreparedTail,
+) -> Result<IndexRowBytes, IndexError> {
+    let mut batch = BufferedWriteBatch::default();
+    let mut state = TailWriterState::new();
+    state.next_ordinal = u32::MAX;
+    tail::append_prepared_tail_block(&mut batch, block, prepared, &mut state, &tail::AllCreated)?;
+    let mut bytes = IndexRowBytes::ZERO;
+    let mut stats_rows = 0usize;
+    for op in batch.into_ops() {
+        let BatchOp::Put { cf, key, value } = op else {
+            continue;
+        };
+        if cf == ColumnFamily::ScriptStats {
+            stats_rows += 1;
+        }
+        let family = match cf {
+            ColumnFamily::TxDir => &mut bytes.tx_lookup,
+            ColumnFamily::ScriptDict
+            | ColumnFamily::ScriptPost
+            | ColumnFamily::SpendDir
+            | ColumnFamily::ScriptStats => &mut bytes.script_history,
+            ColumnFamily::Filters => &mut bytes.filters,
+            ColumnFamily::IdxMeta => &mut bytes.tail_log,
+            _ => continue,
+        };
+        let added = key
+            .len()
+            .checked_add(value.len())
+            .ok_or(IndexError::MutationSizeOverflow)?;
+        *family = family
+            .checked_add(added)
+            .ok_or(IndexError::MutationSizeOverflow)?;
+    }
+    let prior_log_bytes = stats_rows
+        .checked_mul(STATS_PRIOR_LOG_BYTES)
+        .ok_or(IndexError::MutationSizeOverflow)?;
+    bytes.tail_log = bytes
+        .tail_log
+        .checked_add(prior_log_bytes)
+        .ok_or(IndexError::MutationSizeOverflow)?;
+    Ok(bytes)
 }

@@ -490,11 +490,13 @@ fn open_derived_index_store_in<S>(
 where
     S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
 {
-    let writer = open_writer(&store, epoch)?;
-    let writer = match seal_scratch {
-        Some(scratch) => writer.with_seal_scratch(scratch),
-        None => writer,
-    };
+    let mut writer = open_writer(&store, epoch)?;
+    if let Some(scratch) = seal_scratch {
+        writer = writer.with_seal_scratch(scratch);
+    }
+    writer
+        .restore_tail_bounds()
+        .map_err(DerivedIndexWorkerError::Index)?;
     let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(writer));
     let reader: Arc<dyn crate::IndexReader> = Arc::new(crate::Indexer::new(store));
     Ok(OpenDerivedIndex {

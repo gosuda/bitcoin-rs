@@ -109,6 +109,7 @@ impl Worker {
         &self,
         pending: &mut Option<PendingForward>,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
+        self.retry_undo_gap();
         let action = self.reconcile_pass(pending)?;
         if !matches!(action, ReconcileAction::CaughtUp) {
             return Ok(action);
@@ -130,6 +131,18 @@ impl Worker {
             }
         }
         Ok(ReconcileAction::CaughtUp)
+    }
+
+    fn retry_undo_gap(&self) {
+        let Some((height, hash)) = self.runtime.undo_gap() else {
+            return;
+        };
+        let Some(store) = self.body_store.as_ref() else {
+            return;
+        };
+        if matches!(store.undo_record(height, hash), Ok(Some(_))) {
+            self.runtime.clear_undo_group();
+        }
     }
 
     pub(super) fn reconcile_pass(
@@ -263,6 +276,9 @@ impl Worker {
 
     pub(super) fn effective_enabled(&self) -> IndexCapabilities {
         let mut enabled = self.enabled;
+        if self.runtime.tx_lookup_failure.read().is_some() {
+            enabled = enabled.without(IndexCapability::TxLookup);
+        }
         if self.runtime.compact_filter_failure.read().is_some() {
             enabled = enabled.without(IndexCapability::CompactFilters);
         }

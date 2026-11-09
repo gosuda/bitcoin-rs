@@ -779,10 +779,21 @@ fn live_predicate_matches_utxo_admission_not_history() -> Result<(), TestError> 
     assert_eq!(chain.live(&oversized), Vec::<OutPoint>::new());
     assert_eq!(chain.live(&normal), vec![OutPoint { txid, vout: 2 }]);
 
-    let funding = chain
-        .writer
-        .indexer()
-        .iter_funding_rows(ScriptHash::from_script_bytes(oversized.as_bytes()))?;
+    let funding = {
+        use bitcoin_rs_projection::IndexReader;
+        chain
+            .writer
+            .indexer()
+            .snapshot()?
+            .funding_rows(
+                ScriptHash::from_script_bytes(oversized.as_bytes()),
+                bitcoin_rs_storage::PrefixScanLimit {
+                    max_rows: 100_000,
+                    max_bytes: 64 << 20,
+                },
+            )?
+            .rows
+    };
     assert_eq!(
         funding.len(),
         1,

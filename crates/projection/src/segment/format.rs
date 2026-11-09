@@ -1,5 +1,7 @@
+pub const REORG_WINDOW_BLOCKS: u32 = 144;
 pub const TAIL_MAX_BLOCKS: u32 = 2_016;
 pub const TAIL_MAX_BYTES: usize = 32 * 1024 * 1024;
+pub const TAIL_RETAIN_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 pub const TX_KIND_TXID: u8 = 1;
 pub const TX_KIND_ORDINAL: u8 = 2;
@@ -251,6 +253,42 @@ fn uvarint_len(mut val: u32) -> usize {
 
 // PRJ-08
 #[must_use]
+pub fn encode_script_post_chunk_key(
+    gen_id: u64,
+    script_id: u32,
+    base_ordinal: u32,
+) -> [u8; SCRIPT_POST_KEY_LEN] {
+    encode_script_post_key(gen_id, script_id, !base_ordinal)
+}
+
+// PRJ-08
+#[must_use]
+pub fn decode_script_post_chunk_key(key: &[u8]) -> Option<(u64, u32, u32)> {
+    let (gen_id, script_id, inverted) = decode_script_post_key(key)?;
+    Some((gen_id, script_id, !inverted))
+}
+
+// PRJ-08
+#[must_use]
+pub fn decode_chunk_postings(base_ordinal: u32, bytes: &[u8]) -> Option<Vec<(u32, u8)>> {
+    let items = decode_posting_items(bytes)?;
+    let mut ordinal = base_ordinal;
+    let mut postings = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        if index == 0 {
+            if item.delta_ordinal != 0 {
+                return None;
+            }
+        } else {
+            ordinal = ordinal.checked_add(item.delta_ordinal)?;
+        }
+        postings.push((ordinal, item.flags));
+    }
+    Some(postings)
+}
+
+// PRJ-08
+#[must_use]
 pub fn chunk_postings(
     gen_id: u64,
     script_id: u32,
@@ -259,27 +297,41 @@ pub fn chunk_postings(
     let mut rows = Vec::new();
     let mut chunk: Vec<PostingItem> = Vec::new();
     let mut chunk_bytes = 0usize;
-    let mut chunk_idx = 0u32;
+    let mut base = 0u32;
+    let mut ordinal = 0u32;
     for item in items {
+        let next = ordinal.saturating_add(item.delta_ordinal);
         let item_bytes = uvarint_len(item.delta_ordinal).saturating_add(1);
-        if !chunk.is_empty() && chunk_bytes.saturating_add(item_bytes) > SCRIPT_POST_CHUNK_MAX_BYTES
-        {
-            rows.push((
-                encode_script_post_key(gen_id, script_id, chunk_idx).to_vec(),
-                encode_posting_items(&chunk),
-            ));
-            chunk.clear();
-            chunk_bytes = 0;
-            chunk_idx = chunk_idx.saturating_add(1);
+        let full = item.delta_ordinal != 0
+            && chunk_bytes.saturating_add(item_bytes) > SCRIPT_POST_CHUNK_MAX_BYTES;
+        if chunk.is_empty() || full {
+            if !chunk.is_empty() {
+                rows.push(chunk_row(gen_id, script_id, base, &chunk));
+                chunk.clear();
+            }
+            base = next;
+            chunk.push(PostingItem {
+                delta_ordinal: 0,
+                flags: item.flags,
+            });
+            chunk_bytes = uvarint_len(0).saturating_add(1);
+        } else {
+            chunk.push(item);
+            chunk_bytes = chunk_bytes.saturating_add(item_bytes);
         }
-        chunk_bytes = chunk_bytes.saturating_add(item_bytes);
-        chunk.push(item);
+        ordinal = next;
     }
-    rows.push((
-        encode_script_post_key(gen_id, script_id, chunk_idx).to_vec(),
-        encode_posting_items(&chunk),
-    ));
+    if !chunk.is_empty() {
+        rows.push(chunk_row(gen_id, script_id, base, &chunk));
+    }
     rows
+}
+
+fn chunk_row(gen_id: u64, script_id: u32, base: u32, chunk: &[PostingItem]) -> (Vec<u8>, Vec<u8>) {
+    (
+        encode_script_post_chunk_key(gen_id, script_id, base).to_vec(),
+        encode_posting_items(chunk),
+    )
 }
 
 // PRJ-08

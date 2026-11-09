@@ -281,6 +281,8 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 - A script identity must be stored once per segment dictionary.
 - A posting entry must hold an occurrence reference and flags, not a full script hash and transaction id.
+- A sealed posting chunk must be keyed by `gen_id` (BE8), `script_id` (BE4), and the inverted absolute ordinal of its first posting (BE4), so that a forward scan from a cursor's ordinal yields chunks newest first. A chunk must never split a run of postings that share one ordinal, and its first posting must carry delta zero.
+- A chunk must hold at most 4 KiB of encoded postings, except a chunk holding one transaction's postings for one script, which may be larger because a same-ordinal run is never split.
 
 ### `PRJ-09`: Bounded external sort for bulk construction
 

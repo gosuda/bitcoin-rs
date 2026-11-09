@@ -201,7 +201,7 @@ fn bulk_and_live_generations_are_byte_identical() -> Result<(), TestError> {
     seal_tail_generation(
         &store_a,
         gen_id,
-        coverage,
+        coverage.last_height,
         IndexCapabilities::ALL,
         scratch_a.path(),
     )?;
@@ -285,7 +285,7 @@ fn tail_seal_and_bulk_family_digests(
     seal_tail_generation(
         &store_tail,
         gen_id,
-        coverage_tail,
+        coverage_tail.last_height,
         IndexCapabilities::ALL,
         scratch_tail.path(),
     )?;
@@ -373,48 +373,58 @@ fn same_tx_fund_and_spend_keeps_both_posting_occurrences() -> Result<(), TestErr
 #[test]
 fn seal_repack_respects_posting_chunk_byte_cap() -> Result<(), TestError> {
     use bitcoin_rs_projection::segment::format::{
-        PostingItem, SCRIPT_POST_CHUNK_MAX_BYTES, decode_posting_items, decode_script_post_key,
-        encode_posting_items, encode_script_dict_key, encode_script_dict_value,
-        encode_script_post_key,
+        SCRIPT_POST_CHUNK_MAX_BYTES, decode_posting_items, decode_script_post_key,
     };
 
+    fn one_script_block(txs: usize) -> CommittedBlock {
+        let txs = (0..txs)
+            .map(|index| {
+                let mut txid = [0u8; 32];
+                txid[..8].copy_from_slice(&u64::try_from(index).unwrap_or(0).to_le_bytes());
+                bitcoin_rs_storage::committed_facts::TxFacts {
+                    txid,
+                    offset: 0,
+                    len: 1,
+                    inputs: Vec::new(),
+                    outputs: vec![CreatedOutput {
+                        vout: 0,
+                        value: 1,
+                        script: Bytes::copy_from_slice(&[0x51]),
+                    }],
+                }
+            })
+            .collect();
+        CommittedBlock {
+            height: 0,
+            hash: [0x11; 32],
+            parent_hash: [0u8; 32],
+            header: [0u8; 80],
+            txs,
+        }
+    }
+
+    let occurrences = 2_049usize;
     let dir = tempdir()?;
     let scratch = tempdir()?;
-    let store = RocksDbStore::open(dir.path())?;
-
-    let mut script_hash = [0u8; 32];
-    script_hash[0] = 0xAB;
-    let mut dict_batch = store.new_batch();
-    dict_batch.put(
-        ColumnFamily::ScriptDict,
-        &encode_script_dict_key(0, &script_hash),
-        &encode_script_dict_value(0),
-    );
-    store.write_durable(dict_batch)?;
-
-    let occurrences = 1_024usize;
-    let mut post_batch = store.new_batch();
-    for slot in 0..occurrences {
-        let ordinal = u32::try_from(slot).unwrap_or(0) * 0x20_0000;
-        let key = encode_script_post_key(0, 0, u32::try_from(slot).unwrap_or(0));
-        let value = encode_posting_items(&[PostingItem {
-            delta_ordinal: ordinal,
-            flags: bitcoin_rs_projection::segment::format::POSTING_FLAG_FUNDING,
-        }]);
-        post_batch.put(ColumnFamily::ScriptPost, &key, &value);
-    }
-    store.write_durable(post_batch)?;
-
-    seal_tail_generation(
-        &store,
-        1,
-        Coverage::new(0, 0, [0u8; 32]),
-        IndexCapabilities::ALL,
-        scratch.path(),
-    )?;
+    let store = std::sync::Arc::new(RocksDbStore::open(dir.path())?);
+    let mut writer = bitcoin_rs_projection::IndexWriter::open(std::sync::Arc::clone(&store), 1)?
+        .with_seal_scratch(scratch.path().to_path_buf());
+    let prepared =
+        writer.prepare_block_from_facts(IndexCapabilities::ALL, &one_script_block(occurrences))?;
+    let mut batch =
+        bitcoin_rs_projection::PreparedBatch::new(bitcoin_rs_projection::PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
+    batch
+        .try_push(prepared)
+        .map_err(|_| "block must be contiguous")?;
+    writer.commit_forward(batch)?;
+    seal_tail_generation(store.as_ref(), 1, 0, IndexCapabilities::ALL, scratch.path())?;
 
     let snapshot = store.snapshot()?;
     let mut total_items = 0usize;
+    let mut chunks = 0usize;
     let start = 1u64.to_be_bytes();
     for item in snapshot.iter_prefix(ColumnFamily::ScriptPost, &start)? {
         let (key, value) = item?;
@@ -426,10 +436,12 @@ fn seal_repack_respects_posting_chunk_byte_cap() -> Result<(), TestError> {
             value.len(),
             SCRIPT_POST_CHUNK_MAX_BYTES
         );
+        chunks += 1;
         total_items += decode_posting_items(&value)
             .ok_or("decode posting items")?
             .len();
     }
+    assert!(chunks > 1, "the posting list must split across chunks");
     assert_eq!(
         total_items, occurrences,
         "seal lost or duplicated occurrences"

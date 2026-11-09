@@ -32,10 +32,9 @@ pub use capabilities::{
 pub(crate) use index::NoSpentScripts;
 pub use index::{
     BasicFilter, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
-    IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, Indexer,
-    MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptLiveScan,
-    SpentCoin, SpentCoins, TxIndexPage, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
-    index_format_version,
+    IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, Indexer, MAX_LIVE_SCRIPT_SIZE,
+    PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptLiveScan, SpentCoin, SpentCoins,
+    TxIndexPage, TxIndexScan, TxIndexScanRow, TxIndexSnapshot, index_format_version,
 };
 pub use offline::{IndexResetReport, reset_offline};
 pub use query_api::{

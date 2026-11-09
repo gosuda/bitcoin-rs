@@ -1,18 +1,21 @@
+use super::tail_writes::planned_tail_bytes;
 use super::{
-    block::BodyFacts, block::NoSpentScripts, block::SpentCoins, block::committed_block_from_body,
-    block::pending_rows_for_block_with_header, block::pending_rows_for_facts,
+    block::BodyFacts, block::NoSpentScripts, block::SpentCoins, block::committed_block_from_image,
+    block::parse_body, block::pending_rows_for_facts, block::pending_rows_for_image,
     capability::IndexCapabilities, capability::IndexCapability, capability::IndexWatermark,
     capability::IndexWatermarks, capability::SCRIPT_LIVE_WATERMARK_KEY,
     capability::put_selected_watermarks, error::IndexError, prepared::PreparedBatch,
     prepared::PreparedBatchLimits, prepared::PreparedBlock, reader::Indexer, rows::IndexRowBytes,
     rows::PendingRows, rows::delete_rows, rows::delete_rows_with_headers, rows::put_rows,
     state::CONSUMER_CURSOR_KEY, state::ConsumerCursorUpdate, state::FORMAT_VERSION_KEY,
-    state::FORMAT_VERSION_VALUE, state::IndexWriteFence, state::capture_write_fence,
-    state::commit_ordinary, state::ensure_fence_live, state::resume_capability_reset,
+    state::FORMAT_VERSION_VALUE, state::IndexWriteFence, state::ORDINARY_STATE_REVISION_KEY,
+    state::capture_write_fence, state::commit_ordinary, state::ensure_fence_live,
+    state::resume_capability_reset,
 };
-use crate::segment::tail::TailWriterState;
+use crate::segment::tail::{PreparedTail, TailWriterState};
 use bitcoin_rs_consensus::primitives::{OutPoint, encode};
-use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvStore, PrefixScanLimit};
+use bitcoin_rs_storage::{BatchOp, BufferedWriteBatch, ColumnFamily, KvStore, PrefixScanLimit};
+use std::collections::VecDeque;
 
 pub struct IndexWriter<S: KvStore> {
     pub(super) indexer: Indexer<S>,
@@ -411,8 +414,9 @@ impl<S: KvStore> IndexWriter<S> {
                 watermark: self.watermark()?,
             });
         }
-        let (mut rows, header) =
-            pending_rows_for_block_with_header(body, height, capabilities, spent_scripts)?;
+        let image = parse_body(body)?;
+        let header = image.header_bytes();
+        let mut rows = pending_rows_for_image(&image, height, capabilities, spent_scripts)?;
         let actual_hash = encode::double_sha256(header.as_slice()).to_le_bytes();
         if actual_hash != hash {
             return Err(IndexError::BlockIdentityMismatch {
@@ -425,12 +429,10 @@ impl<S: KvStore> IndexWriter<S> {
         parent_hash.copy_from_slice(&header[4..36]);
         rows.sort();
         let row_count = rows.total();
-        let family_bytes = rows.encoded_bytes_by_family()?;
-        let encoded_bytes = family_bytes.total()?;
         let needs_scripts = capabilities.contains(IndexCapability::ScriptHistory)
             || capabilities.contains(IndexCapability::CompactFilters);
-        let committed = Box::new(committed_block_from_body(
-            body,
+        let committed = Box::new(committed_block_from_image(
+            &image,
             hash,
             parent_hash,
             &BodyFacts {
@@ -439,6 +441,11 @@ impl<S: KvStore> IndexWriter<S> {
                 spent_coins: spent_scripts,
             },
         )?);
+        let tail = PreparedTail::new(&committed);
+        let family_bytes = rows
+            .encoded_bytes_by_family()?
+            .checked_add(&planned_tail_bytes(&committed, &tail)?)?;
+        let encoded_bytes = family_bytes.total()?;
         Ok(PreparedBlock {
             height,
             hash,
@@ -449,6 +456,7 @@ impl<S: KvStore> IndexWriter<S> {
             capabilities,
             rows,
             committed,
+            tail,
         })
     }
 
@@ -462,10 +470,13 @@ impl<S: KvStore> IndexWriter<S> {
                 watermark: self.watermark()?,
             });
         }
-        let (mut rows, _header) = pending_rows_for_facts(block, capabilities)?;
+        let mut rows = pending_rows_for_facts(block, capabilities)?;
         rows.sort();
         let row_count = rows.total();
-        let family_bytes = rows.encoded_bytes_by_family()?;
+        let tail = PreparedTail::new(block);
+        let family_bytes = rows
+            .encoded_bytes_by_family()?
+            .checked_add(&planned_tail_bytes(block, &tail)?)?;
         let encoded_bytes = family_bytes.total()?;
         Ok(PreparedBlock {
             height: block.height,
@@ -477,6 +488,7 @@ impl<S: KvStore> IndexWriter<S> {
             capabilities,
             rows,
             committed: Box::new(block.clone()),
+            tail,
         })
     }
 
@@ -521,6 +533,113 @@ impl<S: KvStore> IndexWriter<S> {
             .ok_or(IndexError::NonContiguousPrepared {
                 watermark: fence.watermarks.tx_lookup,
             })?;
+        let mut pending: VecDeque<PreparedBlock> = batch.into_blocks().into();
+        let mut fence = fence;
+        let mut last = None;
+        while !pending.is_empty() {
+            if let Some(watermark) =
+                self.commit_next_step(&mut fence, capabilities, &mut pending, cursor)?
+            {
+                last = Some(watermark);
+            }
+        }
+        last.ok_or(IndexError::NonContiguousPrepared {
+            watermark: fence.watermarks.tx_lookup,
+        })
+    }
+
+    fn commit_next_step(
+        &mut self,
+        fence: &mut IndexWriteFence,
+        capabilities: IndexCapabilities,
+        pending: &mut VecDeque<PreparedBlock>,
+        cursor: ConsumerCursorUpdate<'_>,
+    ) -> Result<Option<IndexWatermark>, IndexError> {
+        let current = fence.watermarks.selected(capabilities)?;
+        let state = self.tail_for(current)?;
+        let take = Self::admitted_prefix(&state, pending);
+        if take > 0 {
+            let run: Vec<PreparedBlock> = pending.drain(..take).collect();
+            let run_cursor = if pending.is_empty() {
+                cursor
+            } else {
+                ConsumerCursorUpdate::Keep
+            };
+            self.tail = Some(state);
+            let watermark = self.forward_run(*fence, capabilities, run, run_cursor)?;
+            *fence = self.fenced_watermarks()?.0;
+            return Ok(Some(watermark));
+        }
+        let Some(head_bytes) = pending
+            .front()
+            .map(|head| crate::segment::tail::block_tail_bytes_bound(&head.committed))
+        else {
+            return Ok(None);
+        };
+        if head_bytes > Self::tail_byte_limit() {
+            let Some(block) = pending.pop_front() else {
+                return Ok(None);
+            };
+            if let Some(newest) = state.window.back().map(|block| block.height) {
+                self.seal_through(&state, newest, capabilities)?;
+            }
+            let run_cursor = if pending.is_empty() {
+                cursor
+            } else {
+                ConsumerCursorUpdate::Keep
+            };
+            let watermark = self.commit_oversized(*fence, capabilities, block, run_cursor)?;
+            *fence = self.fenced_watermarks()?.0;
+            return Ok(Some(watermark));
+        }
+        let cut = state
+            .cut_before_append(head_bytes)
+            .ok_or(IndexError::NonContiguousPrepared { watermark: current })?;
+        self.seal_through(&state, cut, capabilities)?;
+        Ok(None)
+    }
+
+    fn commit_oversized(
+        &mut self,
+        fence: IndexWriteFence,
+        capabilities: IndexCapabilities,
+        block: PreparedBlock,
+        cursor: ConsumerCursorUpdate<'_>,
+    ) -> Result<IndexWatermark, IndexError> {
+        let watermark = self.forward_run(fence, capabilities, vec![block], cursor)?;
+        if let Some(alone) = self.tail.take() {
+            self.seal_through(&alone, watermark.height, capabilities)?;
+        }
+        Ok(watermark)
+    }
+
+    fn admitted_prefix(state: &TailWriterState, pending: &VecDeque<PreparedBlock>) -> usize {
+        let mut take = 0_usize;
+        let mut bytes = 0_u64;
+        for block in pending {
+            let next = bytes.saturating_add(crate::segment::tail::block_tail_bytes_bound(
+                &block.committed,
+            ));
+            if !state.admits(take + 1, next) {
+                break;
+            }
+            take += 1;
+            bytes = next;
+        }
+        take
+    }
+
+    fn tail_byte_limit() -> u64 {
+        u64::try_from(crate::segment::format::TAIL_MAX_BYTES).unwrap_or(u64::MAX)
+    }
+
+    fn forward_run(
+        &mut self,
+        fence: IndexWriteFence,
+        capabilities: IndexCapabilities,
+        run: Vec<PreparedBlock>,
+        cursor: ConsumerCursorUpdate<'_>,
+    ) -> Result<IndexWatermark, IndexError> {
         let current = fence.watermarks.selected(capabilities)?;
         let expected_height = match current {
             None => 0,
@@ -530,15 +649,18 @@ impl<S: KvStore> IndexWriter<S> {
                 .ok_or(IndexError::NonContiguousPrepared { watermark: current })?,
         };
         let expected_parent = current.map(|w| w.hash);
-        let previous_filter_header = self.initial_filter_header(&fence, capabilities, current)?;
+        let mut batch = PreparedBatch::new(PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
+        for block in run {
+            batch
+                .try_push(block)
+                .map_err(|_| IndexError::NonContiguousPrepared { watermark: current })?;
+        }
         let batch_family_bytes = batch.family_bytes();
-        let (merged, final_watermark, blocks) = chain_forward_blocks(
-            batch,
-            current,
-            expected_height,
-            expected_parent,
-            previous_filter_header,
-        )?;
+        let (merged, final_watermark, blocks) =
+            chain_forward_blocks(batch, current, expected_height, expected_parent)?;
         let mut tail = self.tail_for(current)?;
         let mut store_batch = self.indexer.store.new_batch();
         put_rows(&mut store_batch, &merged)?;
@@ -562,9 +684,7 @@ impl<S: KvStore> IndexWriter<S> {
             store_batch,
         )?;
         record_family_byte_histograms(&batch_family_bytes);
-        if !self.seal_if_due(&tail, capabilities, final_watermark)? {
-            self.tail = Some(tail);
-        }
+        self.tail = Some(tail);
         Ok(final_watermark)
     }
 
@@ -600,12 +720,13 @@ impl<S: KvStore> IndexWriter<S> {
         cursor: ConsumerCursorUpdate<'_>,
         spent_scripts: &dyn SpentCoins,
     ) -> Result<(), IndexError> {
+        let capabilities = tail_rollback_group(fence.watermarks, capabilities);
         let current = fence
             .watermarks
             .selected(capabilities)?
             .ok_or(IndexError::NonContiguousPrepared { watermark: None })?;
         let prepared = self.prepare_block_with_spent_scripts(
-            capabilities,
+            rollback_prepare_capabilities(capabilities),
             current.height,
             current.hash,
             body,
@@ -630,6 +751,7 @@ impl<S: KvStore> IndexWriter<S> {
         )?;
         let mut tail = self.tail_for(Some(current))?;
         let tail_plan = self.plan_rollback_tail(&tail, capabilities, current)?;
+        let prev = tail_plan.rewind(&tail, prev)?;
         let mut store_batch = self.indexer.store.new_batch();
         let unselected_keeps_identity = IndexCapability::ALL.into_iter().any(|capability| {
             !capabilities.contains(capability)
@@ -725,6 +847,7 @@ pub(crate) const FAMILY_TX_LOOKUP: &str = "tx_lookup";
 pub(crate) const FAMILY_SCRIPT_HISTORY: &str = "script_history";
 pub(crate) const FAMILY_SCRIPT_LIVE: &str = "script_live";
 pub(crate) const FAMILY_HEADERS: &str = "headers";
+pub(crate) const FAMILY_TAIL_LOG: &str = "tail_log";
 pub(crate) const FAMILY_FILTERS: &str = "filters";
 
 #[expect(clippy::expect_used, reason = "usize metric value fits in u64")]
@@ -733,27 +856,105 @@ fn metric_f64_from_usize(val: usize) -> f64 {
 }
 
 pub(crate) fn record_family_byte_histograms(family_bytes: &IndexRowBytes) {
-    if family_bytes.tx_lookup > 0 {
-        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_TX_LOOKUP)
-            .record(metric_f64_from_usize(family_bytes.tx_lookup));
-    }
-    if family_bytes.script_history > 0 {
-        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_SCRIPT_HISTORY)
-            .record(metric_f64_from_usize(family_bytes.script_history));
-    }
-    if family_bytes.script_live > 0 {
-        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_SCRIPT_LIVE)
-            .record(metric_f64_from_usize(family_bytes.script_live));
-    }
-    if family_bytes.headers > 0 {
-        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_HEADERS)
-            .record(metric_f64_from_usize(family_bytes.headers));
-    }
-    if family_bytes.filters > 0 {
-        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_FILTERS)
-            .record(metric_f64_from_usize(family_bytes.filters));
+    for (label, bytes) in [
+        (FAMILY_TX_LOOKUP, family_bytes.tx_lookup),
+        (FAMILY_SCRIPT_HISTORY, family_bytes.script_history),
+        (FAMILY_SCRIPT_LIVE, family_bytes.script_live),
+        (FAMILY_HEADERS, family_bytes.headers),
+        (FAMILY_FILTERS, family_bytes.filters),
+        (FAMILY_TAIL_LOG, family_bytes.tail_log),
+    ] {
+        if bytes > 0 {
+            metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => label)
+                .record(metric_f64_from_usize(bytes));
+        }
     }
 }
+
+/// Bytes a forward commit writes outside the planned families: the format
+/// marker, the ordinary revision, the watermarks, the generation descriptors,
+/// and the consumer cursor at its widest, a full cursor value. The figure
+/// comes from the same writers the commit runs.
+pub(crate) fn commit_overhead_bytes(capabilities: IndexCapabilities) -> usize {
+    let mut batch = BufferedWriteBatch::default();
+    batch.put(
+        ColumnFamily::UtxoMeta,
+        FORMAT_VERSION_KEY,
+        &FORMAT_VERSION_VALUE,
+    );
+    batch.put(
+        ColumnFamily::UtxoMeta,
+        ORDINARY_STATE_REVISION_KEY,
+        &0_u64.to_le_bytes(),
+    );
+    put_selected_watermarks(
+        &mut batch,
+        capabilities,
+        Some(IndexWatermark {
+            height: 0,
+            hash: [0; 32],
+        }),
+    );
+    crate::segment::tail::put_generation_descriptors(
+        &mut batch,
+        capabilities.iter(),
+        crate::segment::tail::TailBounds::default(),
+    );
+    batch.put(
+        ColumnFamily::UtxoMeta,
+        CONSUMER_CURSOR_KEY,
+        &[0_u8; crate::reconcile::CURSOR_BYTE_LEN],
+    );
+    batch
+        .into_ops()
+        .iter()
+        .map(batch_op_bytes)
+        .fold(0_usize, usize::saturating_add)
+}
+
+fn batch_op_bytes(op: &BatchOp) -> usize {
+    match op {
+        BatchOp::Put { key, value, .. } => key.len().saturating_add(value.len()),
+        BatchOp::Delete { key, .. } => key.len(),
+        BatchOp::DeleteRange { start, end, .. } => start.len().saturating_add(end.len()),
+    }
+}
+
+/// TxLookup, ScriptHistory, and CompactFilters share one tail and one undo log,
+/// so a rollback of any of them at height h is one group rollback. The group is
+/// the tail-bound capabilities whose watermark sits at the requested height.
+pub(crate) fn tail_rollback_group(
+    watermarks: IndexWatermarks,
+    requested: IndexCapabilities,
+) -> IndexCapabilities {
+    let tail_bound = |capability: &IndexCapability| *capability != IndexCapability::ScriptLive;
+    let requested_height = IndexCapability::ALL
+        .into_iter()
+        .filter(tail_bound)
+        .find(|capability| requested.contains(*capability))
+        .and_then(|capability| watermarks.get(capability))
+        .map(|watermark| watermark.height);
+
+    let Some(height) = requested_height else {
+        return requested;
+    };
+    IndexCapability::ALL
+        .into_iter()
+        .filter(tail_bound)
+        .filter(|capability| watermarks.get(*capability).map(|w| w.height) == Some(height))
+        .fold(requested, IndexCapabilities::insert)
+}
+
+/// A rollback needs the block's header and parent. Tail-bound rows come from the
+/// tail's own undo log, so only ScriptLive needs spent scripts to prepare.
+pub(crate) fn rollback_prepare_capabilities(capabilities: IndexCapabilities) -> IndexCapabilities {
+    if capabilities.contains(IndexCapability::ScriptLive) {
+        capabilities
+    } else {
+        IndexCapabilities::TX_LOOKUP
+    }
+}
+
 fn refuse_tx_lookup_populated(fence: &IndexWriteFence) -> Result<(), IndexError> {
     match fence.watermarks.tx_lookup {
         Some(actual) => Err(IndexError::WatermarkMismatch {
@@ -794,7 +995,10 @@ fn refuse_compact_filters_populated<S: KvStore>(
         });
     }
     if let Some(entry) = store
-        .iter_prefix(ColumnFamily::UtxoMeta, super::filters::PREFIX)?
+        .iter_prefix(
+            ColumnFamily::UtxoMeta,
+            super::state::LEGACY_FILTER_ROW_PREFIX,
+        )?
         .next()
     {
         let _ = entry?;
@@ -807,52 +1011,25 @@ fn refuse_compact_filters_populated<S: KvStore>(
     Ok(())
 }
 
-impl<S: KvStore> IndexWriter<S> {
-    fn initial_filter_header(
-        &self,
-        fence: &IndexWriteFence,
-        capabilities: IndexCapabilities,
-        current: Option<IndexWatermark>,
-    ) -> Result<[u8; 32], IndexError> {
-        if !capabilities.contains(IndexCapability::CompactFilters) {
-            return Ok([0; 32]);
-        }
-        ensure_fence_live(self.indexer.store.as_ref(), self.generation, fence)?;
-        match current {
-            None => Ok([0; 32]),
-            Some(w) => {
-                let parent =
-                    super::filters::read(self.indexer.store.snapshot()?.as_ref(), &w.hash)?;
-                if parent.is_none() {
-                    ensure_fence_live(self.indexer.store.as_ref(), self.generation, fence)?;
-                }
-                parent
-                    .ok_or(IndexError::InvalidCompactFilter)
-                    .map(|f| f.header)
-            }
-        }
-    }
-}
+/// The merged rows, final watermark, and per-block committed facts with their
+/// prepared tail rows, in height order.
+type ChainedForward = (
+    PendingRows,
+    IndexWatermark,
+    Vec<(bitcoin_rs_storage::CommittedBlock, PreparedTail)>,
+);
 
 fn chain_forward_blocks(
     batch: PreparedBatch,
     current: Option<IndexWatermark>,
     mut expected_height: u32,
     mut expected_parent: Option<[u8; 32]>,
-    mut previous_filter_header: [u8; 32],
-) -> Result<
-    (
-        PendingRows,
-        IndexWatermark,
-        Vec<bitcoin_rs_storage::CommittedBlock>,
-    ),
-    IndexError,
-> {
+) -> Result<ChainedForward, IndexError> {
     let mut merged = PendingRows::default();
     let mut last = None;
     let block_count = batch.len();
     let mut blocks = Vec::with_capacity(block_count);
-    for (block_index, mut block) in batch.into_blocks().into_iter().enumerate() {
+    for (block_index, block) in batch.into_blocks().into_iter().enumerate() {
         if block.height != expected_height {
             return Err(IndexError::NonContiguousPrepared { watermark: current });
         }
@@ -861,11 +1038,7 @@ fn chain_forward_blocks(
                 return Err(IndexError::NonContiguousPrepared { watermark: current });
             }
         }
-        for (_, filter) in &mut block.rows.filter_rows {
-            filter.chain(previous_filter_header);
-            previous_filter_header = filter.header;
-        }
-        blocks.push(*block.committed);
+        blocks.push((*block.committed, block.tail));
         merged.append(block.rows);
         if block_index + 1 < block_count {
             expected_height = expected_height

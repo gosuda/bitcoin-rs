@@ -26,7 +26,9 @@ pub(super) const FORMAT_VERSION_KEY: &[u8] = crate::types::INDEX_FORMAT_VERSION_
 /// reset offline.
 pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = crate::types::INDEX_FORMAT_VERSION_VALUE;
 
-const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
+pub(super) const LEGACY_FILTER_ROW_PREFIX: &[u8] = &[1, b'F'];
+
+pub(super) const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
 
 /// `[mask, process_epoch(u64 LE), base_version(u64 LE)]` (17 bytes).
 /// `Idle(base_version + 1)`, which makes stale fences un-reusable (no ABA)
@@ -591,7 +593,7 @@ fn reset_scan_families<S: KvStore>(
         scans.push((ColumnFamily::BlockHeaders, Vec::new()));
     }
     if capabilities.contains(IndexCapability::CompactFilters) {
-        scans.push((ColumnFamily::UtxoMeta, super::filters::PREFIX.to_vec()));
+        scans.push((ColumnFamily::UtxoMeta, LEGACY_FILTER_ROW_PREFIX.to_vec()));
     }
     for capability in capabilities.iter() {
         if capability != IndexCapability::ScriptLive {

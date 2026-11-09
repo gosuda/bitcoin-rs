@@ -40,11 +40,6 @@ pub(crate) const fn decode_history_height(bytes: [u8; HEIGHT_SIZE]) -> u32 {
     !u32::from_be_bytes(bytes)
 }
 
-#[must_use]
-pub(crate) const fn ascending_history_height(bytes: [u8; HEIGHT_SIZE]) -> [u8; HEIGHT_SIZE] {
-    encode_height(decode_history_height(bytes))
-}
-
 pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 
 #[derive(
@@ -158,17 +153,6 @@ impl SpendingPrefixRow {
     pub fn row(outpoint: &OutPoint, height: u32) -> HashPrefixRow {
         HashPrefixRow::new(Self::scan_prefix(outpoint), height)
     }
-
-    pub(crate) fn row_parts(
-        txid_bytes: &[u8],
-        vout: u32,
-        height: [u8; HEIGHT_SIZE],
-    ) -> HashPrefixRow {
-        HashPrefixRow {
-            prefix: spending_prefix(txid_bytes, vout),
-            height,
-        }
-    }
 }
 
 pub(crate) struct TxidRow;
@@ -181,13 +165,6 @@ impl TxidRow {
     #[cfg(test)]
     pub(crate) fn row(txid: &Txid, height: u32) -> HashPrefixRow {
         HashPrefixRow::new(Self::scan_prefix(txid), height)
-    }
-
-    pub(crate) fn row_bytes(txid_bytes: &[u8], height: [u8; HEIGHT_SIZE]) -> HashPrefixRow {
-        HashPrefixRow {
-            prefix: txid_prefix(txid_bytes),
-            height,
-        }
     }
 }
 

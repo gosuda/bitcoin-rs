@@ -1,3 +1,6 @@
+#[cfg(test)]
+type HistoryAnswer = Vec<(Vec<u8>, Vec<u8>)>;
+
 use super::format;
 use super::{Coverage, IndexGeneration, meta_gen_key};
 use crate::types::{
@@ -113,6 +116,13 @@ impl Scope {
             Self::Sealed { coverage, .. } => {
                 coverage.first_height <= height && height <= coverage.last_height
             }
+        }
+    }
+
+    const fn first_height(self) -> u32 {
+        match self {
+            Self::Tail { lo, .. } => lo,
+            Self::Sealed { coverage, .. } => coverage.first_height,
         }
     }
 }
@@ -232,9 +242,12 @@ impl<'a> SegmentSnapshot<'a> {
         &self,
         scope: Scope,
         scripthash: ScriptHash,
-        start_height: Option<u32>,
+        start: u32,
         window: &mut HistoryWindow,
     ) -> Result<(), IndexError> {
+        if scope.first_height() > start {
+            return Ok(());
+        }
         let dict_key =
             format::encode_script_dict_key(scope.segment_id(), &scripthash.to_byte_array());
         let Some(value) = self.kv.get(ColumnFamily::ScriptDict, &dict_key)? else {
@@ -242,36 +255,137 @@ impl<'a> SegmentSnapshot<'a> {
         };
         let script_id = format::decode_script_dict_value(&value)
             .ok_or_else(|| malformed("script_dict value"))?;
-        let mut prefix = scope.prefix().to_vec();
-        prefix.extend_from_slice(&script_id.to_be_bytes());
-        let mut ordinal = 0_u32;
+        let query = ScriptQuery {
+            scope,
+            scripthash,
+            script_id,
+            start,
+        };
+        match scope {
+            Scope::Tail { .. } => self.stream_tail_postings(query, window),
+            Scope::Sealed { .. } => self.stream_sealed_postings(query, window),
+        }
+    }
+
+    fn stream_tail_postings(
+        &self,
+        query: ScriptQuery,
+        window: &mut HistoryWindow,
+    ) -> Result<(), IndexError> {
+        let mut prefix = query.scope.prefix().to_vec();
+        prefix.extend_from_slice(&query.script_id.to_be_bytes());
+        let mut postings = Vec::new();
         for entry in self.kv.iter_prefix(ColumnFamily::ScriptPost, &prefix)? {
             let (_key, value) = entry?;
             let items = format::decode_posting_items(&value)
                 .ok_or_else(|| malformed("script_post value"))?;
-            for item in items {
-                ordinal = match scope {
-                    Scope::Tail { .. } => item.delta_ordinal,
-                    Scope::Sealed { .. } => ordinal.saturating_add(item.delta_ordinal),
-                };
-                let tx = self
-                    .resolve_ordinal(scope, ordinal)?
-                    .ok_or_else(|| malformed("script posting ordinal absent from tx directory"))?;
-                if !scope.covers(tx.height) || start_height.is_some_and(|start| tx.height > start) {
-                    continue;
-                }
-                window.push(
-                    tx.height,
-                    ScriptHistoryOccurrence {
-                        scripthash,
-                        txid: tx.txid,
-                        position: tx.position,
-                        flags: item.flags,
-                    },
-                );
+            postings.extend(
+                items
+                    .into_iter()
+                    .map(|item| (item.delta_ordinal, item.flags)),
+            );
+        }
+        for (ordinal, flags) in postings.into_iter().rev() {
+            self.push_posting(query, ordinal, flags, window)?;
+            if window.is_closed() {
+                break;
             }
         }
         Ok(())
+    }
+
+    fn stream_sealed_postings(
+        &self,
+        query: ScriptQuery,
+        window: &mut HistoryWindow,
+    ) -> Result<(), IndexError> {
+        let segment = query.scope.segment_id();
+        let Some(bound) = self.last_ordinal_at_or_below(query.scope, query.start)? else {
+            return Ok(());
+        };
+        let mut prefix = query.scope.prefix().to_vec();
+        prefix.extend_from_slice(&query.script_id.to_be_bytes());
+        let limit = PrefixScanLimit {
+            max_rows: 1,
+            max_bytes: usize::MAX,
+        };
+        let mut seek =
+            format::encode_script_post_chunk_key(segment, query.script_id, bound).to_vec();
+        loop {
+            let scan = self.kv.scan_prefix_from_bounded(
+                ColumnFamily::ScriptPost,
+                &prefix,
+                &seek,
+                limit,
+            )?;
+            let Some((key, value)) = scan.rows.into_iter().next() else {
+                return Ok(());
+            };
+            let (_gen, _script, base) = format::decode_script_post_chunk_key(&key)
+                .ok_or_else(|| malformed("script_post key"))?;
+            let postings = format::decode_chunk_postings(base, &value)
+                .ok_or_else(|| malformed("script_post value"))?;
+            for (ordinal, flags) in postings.into_iter().rev() {
+                self.push_posting(query, ordinal, flags, window)?;
+                if window.is_closed() {
+                    return Ok(());
+                }
+            }
+            seek = key;
+            seek.push(0);
+        }
+    }
+
+    fn push_posting(
+        &self,
+        query: ScriptQuery,
+        ordinal: u32,
+        flags: u8,
+        window: &mut HistoryWindow,
+    ) -> Result<(), IndexError> {
+        let tx = self
+            .resolve_ordinal(query.scope, ordinal)?
+            .ok_or_else(|| malformed("script posting ordinal absent from tx directory"))?;
+        if !query.scope.covers(tx.height) || tx.height > query.start {
+            return Ok(());
+        }
+        window.push(
+            tx.height,
+            ScriptHistoryOccurrence {
+                scripthash: query.scripthash,
+                txid: tx.txid,
+                position: tx.position,
+                flags,
+            },
+        );
+        Ok(())
+    }
+
+    /// Largest ordinal of `scope` whose transaction sits at or below `start`.
+    /// Ordinals ascend with height, so the predicate is monotone.
+    fn last_ordinal_at_or_below(
+        &self,
+        scope: Scope,
+        start: u32,
+    ) -> Result<Option<u32>, IndexError> {
+        let within = |ordinal: u32| -> Result<bool, IndexError> {
+            Ok(self
+                .resolve_ordinal(scope, ordinal)?
+                .is_some_and(|tx| tx.height <= start))
+        };
+        if !within(0)? {
+            return Ok(None);
+        }
+        let (mut low, mut high) = (0_u32, u32::MAX);
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if within(middle)? {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        Ok(Some(low))
     }
 
     fn history_rows(
@@ -280,9 +394,13 @@ impl<'a> SegmentSnapshot<'a> {
         start_height: Option<u32>,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError> {
+        let start = start_height.unwrap_or(u32::MAX);
         let mut window = HistoryWindow::new(limit);
-        for &scope in self.scopes(IndexCapability::ScriptHistory) {
-            self.stream_script_occurrences(scope, scripthash, start_height, &mut window)?;
+        for &scope in self.scopes(IndexCapability::ScriptHistory).iter().rev() {
+            if window.is_closed() {
+                break;
+            }
+            self.stream_script_occurrences(scope, scripthash, start, &mut window)?;
         }
         Ok(window.finish(scripthash))
     }
@@ -403,10 +521,21 @@ fn read_scopes(
     Ok(Some(scopes))
 }
 
+#[derive(Clone, Copy)]
+struct ScriptQuery {
+    scope: Scope,
+    scripthash: ScriptHash,
+    script_id: u32,
+    start: u32,
+}
+
+/// Keeps the newest height groups that fit the page limit. Occurrences arrive
+/// newest first; the first group that does not fit closes the window, and every
+/// older group is then outside the page (`complete` is false).
 struct HistoryWindow {
     max_groups: usize,
     max_bytes: usize,
-    groups: VecDeque<(u32, Vec<ScriptHistoryOccurrence>, usize)>,
+    groups: Vec<(u32, Vec<ScriptHistoryOccurrence>, usize)>,
     current: Option<(u32, Vec<ScriptHistoryOccurrence>)>,
     bytes: usize,
     dropped: bool,
@@ -417,14 +546,21 @@ impl HistoryWindow {
         Self {
             max_groups: limit.max_rows,
             max_bytes: limit.max_bytes,
-            groups: VecDeque::new(),
+            groups: Vec::new(),
             current: None,
             bytes: 0,
             dropped: false,
         }
     }
 
+    const fn is_closed(&self) -> bool {
+        self.dropped
+    }
+
     fn push(&mut self, height: u32, occurrence: ScriptHistoryOccurrence) {
+        if self.dropped {
+            return;
+        }
         if let Some((current, group)) = self.current.as_mut() {
             if *current == height {
                 group.push(occurrence);
@@ -448,14 +584,13 @@ impl HistoryWindow {
         });
         let row_bytes = crate::HASH_PREFIX_ROW_SIZE
             .saturating_add(ScriptHistoryOccurrence::encode_all(&group).len());
-        self.bytes = self.bytes.saturating_add(row_bytes);
-        self.groups.push_back((height, group, row_bytes));
-        while self.groups.len() > self.max_groups
-            || (self.bytes > self.max_bytes && self.groups.len() > 1)
-        {
-            if let Some((_, _, dropped_bytes)) = self.groups.pop_front() {
-                self.bytes = self.bytes.saturating_sub(dropped_bytes);
-            }
+        let kept = self.groups.len();
+        let fits = kept < self.max_groups
+            && (kept == 0 || self.bytes.saturating_add(row_bytes) <= self.max_bytes);
+        if fits {
+            self.bytes = self.bytes.saturating_add(row_bytes);
+            self.groups.push((height, group, row_bytes));
+        } else {
             self.dropped = true;
         }
     }
@@ -472,14 +607,13 @@ impl HistoryWindow {
         self.close_current();
         let rows = self
             .groups
-            .iter()
-            .rev()
+            .into_iter()
             .map(|(height, group, _)| TxIndexScanRow {
                 row: HashPrefixRow {
                     prefix: ScriptHashRow::scan_prefix(scripthash),
-                    height: crate::types::encode_height(*height),
+                    height: crate::types::encode_height(height),
                 },
-                value: ScriptHistoryOccurrence::encode_all(group),
+                value: ScriptHistoryOccurrence::encode_all(&group),
             })
             .collect();
         TxIndexScan {
@@ -735,7 +869,7 @@ impl SegmentSnapshot<'_> {
                     max_bytes: usize::MAX,
                 });
                 for &scope in scopes {
-                    self.stream_script_occurrences(scope, scripthash, None, &mut window)?;
+                    self.stream_script_occurrences(scope, scripthash, u32::MAX, &mut window)?;
                 }
                 for (height, group) in window.into_groups() {
                     by_height.entry(height).or_default().extend(group);
@@ -1130,5 +1264,35 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl SegmentSnapshot<'_> {
+    pub(crate) fn tx_answer_for_test(
+        &self,
+        txid: &Txid,
+    ) -> Result<Vec<(u32, TxPosition)>, IndexError> {
+        Ok(self.transaction_entries(txid, unlimited_scan())?.0)
+    }
+
+    pub(crate) fn history_answer_for_test(
+        &self,
+        scripthash: ScriptHash,
+    ) -> Result<HistoryAnswer, IndexError> {
+        let scan = self.history_rows(scripthash, None, unlimited_scan())?;
+        Ok(scan
+            .rows
+            .into_iter()
+            .map(|row| (row.row.to_db_row().to_vec(), row.value))
+            .collect())
+    }
+}
+
+#[cfg(test)]
+fn unlimited_scan() -> PrefixScanLimit {
+    PrefixScanLimit {
+        max_rows: usize::MAX,
+        max_bytes: usize::MAX,
     }
 }

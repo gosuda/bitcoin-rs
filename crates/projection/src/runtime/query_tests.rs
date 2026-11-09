@@ -120,8 +120,7 @@ impl QuerySnapshot {
             &ScriptHashRow::scan_prefix(scripthash),
         )?;
         for row in &mut scan.rows {
-            row.row.height =
-                crate::types::encode_height(crate::types::decode_history_height(row.row.height));
+            row.row.height = crate::types::encode_height(!u32::from_be_bytes(row.row.height));
         }
         Ok(scan)
     }
@@ -534,7 +533,7 @@ fn history_row_raw(
 ) -> (Vec<u8>, Vec<u8>) {
     let row = HashPrefixRow {
         prefix: ScriptHashRow::scan_prefix(scripthash),
-        height: crate::types::encode_history_height(height),
+        height: (!height).to_be_bytes(),
     };
     (
         row.to_db_row().to_vec(),
@@ -1651,8 +1650,7 @@ impl TxIndexSnapshot for HistoricalSnapshot {
             &ScriptHashRow::scan_prefix(scripthash),
         )?;
         for row in &mut scan.rows {
-            row.row.height =
-                crate::types::encode_height(crate::types::decode_history_height(row.row.height));
+            row.row.height = crate::types::encode_height(!u32::from_be_bytes(row.row.height));
         }
         Ok(scan)
     }

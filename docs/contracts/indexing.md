@@ -217,7 +217,6 @@ Owners:
 - A committed block emits one header row.
 - It emits one transaction row per indexed transaction.
 - For `ScriptHistory`, it emits one occurrence per `(script, height, transaction)` without duplicate hash-prefix rows.
-- `IndexRowCounts.funding` counts distinct occurrence rows, not occurrences.
 - Pinned tests in `crates/projection/tests/index_roundtrip.rs` and `crates/projection/tests/script_history_occurrences.rs` own these cardinalities.
 - `NodeState::open` restores the authenticated checkpoint.
 - It then replays the certified committed suffix from canonical block files and undo records (`docs/contracts/recovery.md`).

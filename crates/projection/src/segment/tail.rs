@@ -2,30 +2,28 @@
 //! generation (PRJ-05). Each forward block appends its rows and one undo log
 //! to the caller's batch, so tail rows and the watermark publish together. A
 //! shallow reorg replays the log backwards in the batch that rewinds the
-//! watermark.
+//! watermark. A seal cuts the stable prefix off the tail using the same logs.
 
-use super::format::{self, PostingItem, ScriptStats};
+use super::format::{self, PostingItem, REORG_WINDOW_BLOCKS, ScriptStats, TAIL_RETAIN_MAX_BYTES};
 use super::{Coverage, SealedGen, sealed_generations};
 use crate::{IndexCapability, IndexError};
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout};
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvSnapshot};
 use sha2::Digest as _;
+use std::collections::VecDeque;
 
-/// Key prefix of one undo log per tail block: `tail/log/` || height BE4.
 pub(crate) const LOG_PREFIX: &[u8] = b"tail/log/";
-/// Exclusive end of the `tail/log/` key range.
 pub(crate) const LOG_END: &[u8] = b"tail/log0";
-/// Log value header: next ordinal LE4 || filter header 32.
-const LOG_HEADER_LEN: usize = 36;
+const LOG_HEADER_LEN: usize = 44;
+const LOG_CODE_STATS: u8 = 6;
+const STATS_OP_LEN: u64 = 14;
 
-/// Tail families in undo-log codes. Only these families carry tail rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Family {
+pub(crate) enum Family {
     TxDir,
     ScriptDict,
     ScriptPost,
     SpendDir,
-    ScriptStats,
     Filters,
 }
 
@@ -36,7 +34,6 @@ impl Family {
             Self::ScriptDict => ColumnFamily::ScriptDict,
             Self::ScriptPost => ColumnFamily::ScriptPost,
             Self::SpendDir => ColumnFamily::SpendDir,
-            Self::ScriptStats => ColumnFamily::ScriptStats,
             Self::Filters => ColumnFamily::Filters,
         }
     }
@@ -47,7 +44,6 @@ impl Family {
             Self::ScriptDict => 1,
             Self::ScriptPost => 2,
             Self::SpendDir => 3,
-            Self::ScriptStats => 4,
             Self::Filters => 5,
         }
     }
@@ -58,31 +54,31 @@ impl Family {
             1 => Self::ScriptDict,
             2 => Self::ScriptPost,
             3 => Self::SpendDir,
-            4 => Self::ScriptStats,
             5 => Self::Filters,
             _ => return None,
         })
     }
 }
 
-/// In-memory view of the tail, rebuilt from generation-0 rows after restart
-/// and kept in step with every committed append.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TailBlock {
+    pub height: u32,
+    pub bytes: u64,
+}
+
+/// In-memory view of the tail, rebuilt from generation-0 rows, the undo logs,
+/// and the sealed descriptors (`IndexWriter::open`).
 #[derive(Clone, Debug, Default)]
 pub struct TailWriterState {
-    /// Watermark height and hash the state describes.
     pub at: Option<(u32, [u8; 32])>,
-    /// Lowest tail height; `None` when the tail holds no blocks.
-    pub first_height: Option<u32>,
-    /// Chain-global ordinal of the next transaction.
     pub next_ordinal: u32,
     pub prev_filter_header: [u8; 32],
     pub txid_to_ordinal: hashbrown::HashMap<[u8; 32], u32>,
     pub script_id_map: hashbrown::HashMap<[u8; 32], u32>,
+    pub next_script_id: u32,
     pub script_stats: hashbrown::HashMap<u32, ScriptStats>,
     pub posting_slots: hashbrown::HashMap<u32, u32>,
-    pub tail_blocks: u32,
-    pub tail_bytes: u64,
-    /// Sealed generations of the index, ascending by generation id.
+    pub window: VecDeque<TailBlock>,
     pub sealed: Vec<SealedGen>,
     pub next_gen_id: u64,
 }
@@ -93,18 +89,84 @@ impl TailWriterState {
         Self::default()
     }
 
-    /// The newest sealed generation, if any.
     #[must_use]
     pub fn newest(&self) -> Option<SealedGen> {
         self.sealed.last().copied()
     }
 
-    /// Descriptor bounds for the current tail.
+    #[must_use]
+    pub fn first_height(&self) -> Option<u32> {
+        self.window.front().map(|block| block.height)
+    }
+
+    #[must_use]
+    pub fn tail_blocks(&self) -> usize {
+        self.window.len()
+    }
+
+    #[must_use]
+    pub fn tail_bytes(&self) -> u64 {
+        self.window
+            .iter()
+            .fold(0_u64, |total, block| total.saturating_add(block.bytes))
+    }
+
+    #[must_use]
+    pub fn retention_cut(&self) -> Option<u32> {
+        let mut bytes = 0_u64;
+        let max_blocks = usize::try_from(REORG_WINDOW_BLOCKS).unwrap_or(usize::MAX);
+        for (kept, block) in self.window.iter().rev().enumerate() {
+            let next_bytes = bytes.saturating_add(block.bytes);
+            if kept >= max_blocks || next_bytes > TAIL_RETAIN_MAX_BYTES {
+                return Some(block.height);
+            }
+            bytes = next_bytes;
+        }
+        None
+    }
+
+    /// Whether `blocks` more blocks of `bytes` in total keep the tail within
+    /// both bounds (PRJ-05).
+    #[must_use]
+    pub fn admits(&self, blocks: usize, bytes: u64) -> bool {
+        let max_blocks = usize::try_from(format::TAIL_MAX_BLOCKS).unwrap_or(usize::MAX);
+        let max_bytes = u64::try_from(format::TAIL_MAX_BYTES).unwrap_or(u64::MAX);
+        self.tail_blocks().saturating_add(blocks) <= max_blocks
+            && self.tail_bytes().saturating_add(bytes) <= max_bytes
+    }
+
+    /// The cut that must seal before a block of `incoming` bytes appends
+    /// (PRJ-05): the retention cut, raised until the kept suffix leaves room
+    /// for the block within both bounds. `None` only for an empty window.
+    #[must_use]
+    pub fn cut_before_append(&self, incoming: u64) -> Option<u32> {
+        let max_kept = usize::try_from(format::TAIL_MAX_BLOCKS).unwrap_or(usize::MAX) - 1;
+        let max_bytes = u64::try_from(format::TAIL_MAX_BYTES).unwrap_or(u64::MAX);
+        let mut kept_bytes = 0_u64;
+        let mut fitted = None;
+        for (kept_blocks, block) in self.window.iter().rev().enumerate() {
+            let next_bytes = kept_bytes.saturating_add(block.bytes);
+            if kept_blocks + 1 > max_kept || next_bytes.saturating_add(incoming) > max_bytes {
+                fitted = Some(block.height);
+                break;
+            }
+            kept_bytes = next_bytes;
+        }
+        match (self.retention_cut(), fitted) {
+            (Some(retained), Some(fit)) => Some(retained.max(fit)),
+            (retained, fit) => retained.or(fit),
+        }
+    }
+
+    pub fn pop_newest_block(&mut self) {
+        self.window.pop_back();
+    }
+
     #[must_use]
     pub fn bounds(&self) -> TailBounds {
         TailBounds {
             newest: self.newest(),
-            first_height: self.first_height,
+            first_height: self.first_height(),
             at: self.at,
         }
     }
@@ -158,21 +220,40 @@ impl CreationOrdinals for NoSealedTxOrdinals {
     }
 }
 
-/// Undo-log recorder: writes each row and the prior value it replaces.
+/// Resolves every creation to ordinal zero. Planning uses it so every spend
+/// row a block can emit is counted, including spends of outputs that live
+/// in the tail or in a sealed generation.
+pub struct AllCreated;
+
+impl CreationOrdinals for AllCreated {
+    fn creation_ordinal(&self, _txid: &[u8; 32]) -> Result<Option<u32>, IndexError> {
+        Ok(Some(0))
+    }
+}
+
+/// Undo-log recorder. Row keys are inserted, so undo deletes them; stats
+/// changes are logged as deltas so that a sealed prefix can be subtracted.
 struct Recorder<'a> {
     batch: &'a mut BufferedWriteBatch,
     log: Vec<u8>,
+    bytes: u64,
 }
 
 impl Recorder<'_> {
-    fn put(&mut self, family: Family, key: &[u8], value: &[u8], prior: Option<&[u8]>) {
+    fn put(&mut self, family: Family, key: &[u8], value: &[u8]) {
         self.batch.put(family.column_family(), key, value);
         self.log.push(family.code());
-        self.log.push(u8::from(prior.is_some()));
         push_len_prefixed(&mut self.log, key);
-        if let Some(prior) = prior {
-            push_len_prefixed(&mut self.log, prior);
-        }
+        let row_bytes = u64::try_from(key.len().saturating_add(value.len())).unwrap_or(u64::MAX);
+        self.bytes = self.bytes.saturating_add(row_bytes);
+    }
+
+    fn stats_delta(&mut self, script_id: u32, funding: bool, sats: u64) {
+        self.log.push(LOG_CODE_STATS);
+        self.log.extend_from_slice(&script_id.to_le_bytes());
+        self.log.push(u8::from(funding));
+        self.log.extend_from_slice(&sats.to_le_bytes());
+        self.bytes = self.bytes.saturating_add(STATS_OP_LEN);
     }
 }
 
@@ -188,9 +269,137 @@ fn log_key(height: u32) -> Vec<u8> {
     key
 }
 
+pub(crate) fn log_key_for(height: u32) -> Vec<u8> {
+    log_key(height)
+}
+
 fn log_height(key: &[u8]) -> Option<u32> {
     let rest = key.strip_prefix(LOG_PREFIX)?;
     Some(u32::from_be_bytes(rest.try_into().ok()?))
+}
+
+/// Upper bound on the tail bytes one block adds: row bytes plus its undo log
+/// (PRJ-05). Every dictionary, spend, and posting row is counted as new, so
+/// the bound never undercounts what `append_tail_block` records.
+#[must_use]
+pub fn block_tail_bytes_bound(block: &CommittedBlock) -> u64 {
+    let row = |key: usize, value: usize| u64::try_from(2 * key + value + 5).unwrap_or(u64::MAX);
+    let posting = format::encode_posting_items(&[PostingItem {
+        delta_ordinal: u32::MAX,
+        flags: format::POSTING_FLAG_SPENDING,
+    }]);
+    let occurrence =
+        row(format::encode_script_post_key(0, 0, 0).len(), posting.len()) + 2 * STATS_OP_LEN;
+    let dict = row(
+        format::encode_script_dict_key(0, &[0; 32]).len(),
+        format::encode_script_dict_value(0).len(),
+    );
+    let spend = row(
+        format::encode_spend_dir_key(0, 0, 0).len(),
+        format::encode_spend_dir_value(0).len(),
+    );
+    let tx_rows = row(
+        format::encode_tx_dir_key(0, &[0; 32], 0).len(),
+        format::encode_tx_dir_value(&[0; 32], 0, 0, 0).len(),
+    ) + row(
+        format::encode_tx_ordinal_key(0, 0).len(),
+        format::encode_tx_ordinal_value(&[0; 32], 0, 0, 0).len(),
+    );
+    let mut total = u64::try_from(LOG_HEADER_LEN).unwrap_or(0);
+    let mut elements = 0_usize;
+    for tx in &block.txs {
+        total = total.saturating_add(tx_rows);
+        for input in &tx.inputs {
+            if input.txid == [0u8; 32] && input.vout == u32::MAX {
+                continue;
+            }
+            elements += 1;
+            total = total.saturating_add(spend);
+            if !input.script.is_empty() {
+                total = total.saturating_add(dict.saturating_add(occurrence));
+            }
+        }
+        for output in &tx.outputs {
+            elements += 1;
+            if !output.script.is_empty() && output.script[0] != 0x6a {
+                total = total.saturating_add(dict.saturating_add(occurrence));
+            }
+        }
+    }
+    const GCS_BYTES_PER_ELEMENT: usize = 3;
+    const GCS_SLACK_BYTES: usize = 16;
+    let filter_bytes = elements
+        .saturating_mul(GCS_BYTES_PER_ELEMENT)
+        .saturating_add(GCS_SLACK_BYTES);
+    let filter_value = format::encode_filter_value(&[0; 32], &[0; 32], &[0; 32], &[]).len();
+    let filter = row(
+        format::encode_filter_key(0, 0).len(),
+        filter_value.saturating_add(filter_bytes),
+    );
+    total.saturating_add(filter)
+}
+
+/// Rows of one block that depend on the block alone: the compact filter and
+/// the hashes of the scripts the append keys its dictionary by. Prepare
+/// builds them once; the tail append consumes them, so no path builds a
+/// block's filter or hashes its scripts twice.
+pub(crate) struct PreparedTail {
+    filter_bytes: Vec<u8>,
+    filter_hash: [u8; 32],
+    inputs: Vec<Vec<Option<[u8; 32]>>>,
+    outputs: Vec<Vec<Option<[u8; 32]>>>,
+}
+
+impl PreparedTail {
+    pub(crate) fn new(block: &CommittedBlock) -> Self {
+        let (filter_bytes, filter_hash) = build_filter(block);
+        let inputs = block
+            .txs
+            .iter()
+            .map(|tx| {
+                tx.inputs
+                    .iter()
+                    .map(|input| {
+                        (!is_coinbase_marker(&input.txid, input.vout) && !input.script.is_empty())
+                            .then(|| script_hash(&input.script))
+                    })
+                    .collect()
+            })
+            .collect();
+        let outputs = block
+            .txs
+            .iter()
+            .map(|tx| {
+                tx.outputs
+                    .iter()
+                    .map(|output| {
+                        (!output.script.is_empty() && output.script[0] != 0x6a)
+                            .then(|| script_hash(&output.script))
+                    })
+                    .collect()
+            })
+            .collect();
+        Self {
+            filter_bytes,
+            filter_hash,
+            inputs,
+            outputs,
+        }
+    }
+}
+
+fn script_hash(script: &[u8]) -> [u8; 32] {
+    sha2::Sha256::digest(script).into()
+}
+
+fn is_coinbase_marker(txid: &[u8; 32], vout: u32) -> bool {
+    *txid == [0u8; 32] && vout == u32::MAX
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Filter builds on this thread; the live-path test counts them.
+    pub(crate) static FILTER_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Appends one committed block to the tail (PRJ-05). Rows, the undo log, and
@@ -201,52 +410,95 @@ pub fn append_tail_block(
     state: &mut TailWriterState,
     older: &dyn CreationOrdinals,
 ) -> Result<(), IndexError> {
+    let prepared = PreparedTail::new(block);
+    append_prepared_tail_block(batch, block, &prepared, state, older)
+}
+
+/// Appends one block whose block-only rows were prepared from `block`.
+pub(crate) fn append_prepared_tail_block(
+    batch: &mut BufferedWriteBatch,
+    block: &CommittedBlock,
+    prepared: &PreparedTail,
+    state: &mut TailWriterState,
+    older: &dyn CreationOrdinals,
+) -> Result<(), IndexError> {
     let mut rec = Recorder {
         batch,
         log: Vec::new(),
+        bytes: 0,
     };
-    for tx in &block.txs {
+    for (tx, (input_hashes, output_hashes)) in block
+        .txs
+        .iter()
+        .zip(prepared.inputs.iter().zip(&prepared.outputs))
+    {
         let ordinal = state.next_ordinal;
         state.next_ordinal = state.next_ordinal.saturating_add(1);
         state.txid_to_ordinal.insert(tx.txid, ordinal);
 
         let tx_key = format::encode_tx_dir_key(0, &tx.txid, block.height);
         let tx_val = format::encode_tx_dir_value(&block.hash, ordinal, tx.offset, tx.len);
-        rec.put(Family::TxDir, &tx_key, &tx_val, None);
+        rec.put(Family::TxDir, &tx_key, &tx_val);
         let rev_key = format::encode_tx_ordinal_key(0, ordinal);
         let rev_val = format::encode_tx_ordinal_value(&tx.txid, block.height, tx.offset, tx.len);
-        rec.put(Family::TxDir, &rev_key, &rev_val, None);
+        rec.put(Family::TxDir, &rev_key, &rev_val);
 
-        append_inputs(&mut rec, ordinal, &tx.inputs, state, older)?;
-        append_outputs(&mut rec, ordinal, &tx.outputs, state);
+        let spends = SpendingInputs {
+            ordinal,
+            prevouts: &tx.inputs,
+            hashes: input_hashes,
+        };
+        append_inputs(&mut rec, spends, state, older)?;
+        let funding = FundingOutputs {
+            ordinal,
+            outputs: &tx.outputs,
+            hashes: output_hashes,
+        };
+        append_outputs(&mut rec, funding, state);
     }
-    append_filter(&mut rec, block, state);
+    append_filter(&mut rec, block, prepared, state);
 
-    let mut value = Vec::with_capacity(LOG_HEADER_LEN + rec.log.len());
+    let block_bytes = rec.bytes;
+    let log = std::mem::take(&mut rec.log);
+    let mut value = Vec::with_capacity(LOG_HEADER_LEN + log.len());
     value.extend_from_slice(&state.next_ordinal.to_le_bytes());
     value.extend_from_slice(&state.prev_filter_header);
-    value.extend_from_slice(&rec.log);
+    value.extend_from_slice(&block_bytes.to_le_bytes());
+    value.extend_from_slice(&log);
     rec.batch
         .put(ColumnFamily::IdxMeta, &log_key(block.height), &value);
 
-    state.tail_blocks = state.tail_blocks.saturating_add(1);
-    state.tail_bytes = state
-        .tail_bytes
-        .saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX));
-    state.first_height.get_or_insert(block.height);
+    let value_len = u64::try_from(value.len()).unwrap_or(u64::MAX);
+    state.window.push_back(TailBlock {
+        height: block.height,
+        bytes: block_bytes.saturating_add(value_len),
+    });
     state.at = Some((block.height, block.hash));
     Ok(())
 }
 
+/// The spending inputs of one transaction, with the script hash of each.
+struct SpendingInputs<'a> {
+    ordinal: u32,
+    prevouts: &'a [SpentPrevout],
+    hashes: &'a [Option<[u8; 32]>],
+}
+
+/// The created outputs of one transaction, with the script hash of each.
+struct FundingOutputs<'a> {
+    ordinal: u32,
+    outputs: &'a [CreatedOutput],
+    hashes: &'a [Option<[u8; 32]>],
+}
+
 fn append_inputs(
     rec: &mut Recorder<'_>,
-    spending_ordinal: u32,
-    inputs: &[SpentPrevout],
+    spends: SpendingInputs<'_>,
     state: &mut TailWriterState,
     older: &dyn CreationOrdinals,
 ) -> Result<(), IndexError> {
-    for input in inputs {
-        if input.txid == [0u8; 32] && input.vout == u32::MAX {
+    for (input, hash) in spends.prevouts.iter().zip(spends.hashes) {
+        if is_coinbase_marker(&input.txid, input.vout) {
             continue;
         }
         let creation = match state.txid_to_ordinal.get(&input.txid) {
@@ -255,16 +507,15 @@ fn append_inputs(
         };
         if let Some(creation_ord) = creation {
             let key = format::encode_spend_dir_key(0, creation_ord, input.vout);
-            let val = format::encode_spend_dir_value(spending_ordinal);
-            rec.put(Family::SpendDir, &key, &val, None);
+            let val = format::encode_spend_dir_value(spends.ordinal);
+            rec.put(Family::SpendDir, &key, &val);
         }
-        if !input.script.is_empty() {
-            let hash: [u8; 32] = sha2::Sha256::digest(&input.script).into();
-            let script_id = script_id_for(rec, &hash, state);
+        if let Some(hash) = hash {
+            let script_id = script_id_for(rec, hash, state);
             record_occurrence(
                 rec,
                 script_id,
-                spending_ordinal,
+                spends.ordinal,
                 format::POSTING_FLAG_SPENDING,
                 input.value,
                 state,
@@ -276,18 +527,16 @@ fn append_inputs(
 
 fn append_outputs(
     rec: &mut Recorder<'_>,
-    ordinal: u32,
-    outputs: &[CreatedOutput],
+    funding: FundingOutputs<'_>,
     state: &mut TailWriterState,
 ) {
-    for output in outputs {
-        if !output.script.is_empty() && output.script[0] != 0x6a {
-            let hash: [u8; 32] = sha2::Sha256::digest(&output.script).into();
-            let script_id = script_id_for(rec, &hash, state);
+    for (output, hash) in funding.outputs.iter().zip(funding.hashes) {
+        if let Some(hash) = hash {
+            let script_id = script_id_for(rec, hash, state);
             record_occurrence(
                 rec,
                 script_id,
-                ordinal,
+                funding.ordinal,
                 format::POSTING_FLAG_FUNDING,
                 output.value,
                 state,
@@ -300,15 +549,13 @@ fn script_id_for(rec: &mut Recorder<'_>, hash: &[u8; 32], state: &mut TailWriter
     if let Some(&id) = state.script_id_map.get(hash) {
         return id;
     }
-    let Ok(id) = u32::try_from(state.script_id_map.len()) else {
-        return u32::MAX;
-    };
+    let id = state.next_script_id;
+    state.next_script_id = state.next_script_id.saturating_add(1);
     state.script_id_map.insert(*hash, id);
     rec.put(
         Family::ScriptDict,
         &format::encode_script_dict_key(0, hash),
         &format::encode_script_dict_value(id),
-        None,
     );
     id
 }
@@ -328,32 +575,49 @@ fn record_occurrence(
         delta_ordinal: ordinal,
         flags,
     }]);
-    rec.put(Family::ScriptPost, &post_key, &post_val, None);
+    rec.put(Family::ScriptPost, &post_key, &post_val);
 
-    let prior = state.script_stats.get(&script_id).copied();
-    let mut stats = prior.unwrap_or_default();
-    if flags == format::POSTING_FLAG_FUNDING {
+    let funding = flags == format::POSTING_FLAG_FUNDING;
+    rec.stats_delta(script_id, funding, sats);
+    let stats = state.script_stats.entry(script_id).or_default();
+    apply_delta(stats, funding, sats);
+    rec.batch.put(
+        ColumnFamily::ScriptStats,
+        &format::encode_script_stats_key(0, script_id),
+        &format::encode_script_stats_value(stats),
+    );
+}
+
+fn apply_delta(stats: &mut ScriptStats, funding: bool, sats: u64) {
+    if funding {
         stats.funded_count = stats.funded_count.saturating_add(1);
         stats.funded_sats = stats.funded_sats.saturating_add(sats);
     } else {
         stats.spent_count = stats.spent_count.saturating_add(1);
         stats.spent_sats = stats.spent_sats.saturating_add(sats);
     }
-    let stats_key = format::encode_script_stats_key(0, script_id);
-    let stats_val = format::encode_script_stats_value(&stats);
-    let prior_val = prior.map(|old| format::encode_script_stats_value(&old));
-    rec.put(
-        Family::ScriptStats,
-        &stats_key,
-        &stats_val,
-        prior_val
-            .as_ref()
-            .map(<[u8; format::SCRIPT_STATS_VALUE_LEN]>::as_slice),
-    );
-    state.script_stats.insert(script_id, stats);
 }
 
-fn append_filter(rec: &mut Recorder<'_>, block: &CommittedBlock, state: &mut TailWriterState) {
+fn minus(current: ScriptStats, delta: ScriptStats) -> Option<ScriptStats> {
+    Some(ScriptStats {
+        funded_count: current.funded_count.checked_sub(delta.funded_count)?,
+        spent_count: current.spent_count.checked_sub(delta.spent_count)?,
+        funded_sats: current.funded_sats.checked_sub(delta.funded_sats)?,
+        spent_sats: current.spent_sats.checked_sub(delta.spent_sats)?,
+    })
+}
+
+fn is_zero(stats: &ScriptStats) -> bool {
+    stats.funded_count == 0
+        && stats.spent_count == 0
+        && stats.funded_sats == 0
+        && stats.spent_sats == 0
+}
+
+/// Builds the compact filter of `block` (BIP 158 basic) and its hash.
+fn build_filter(block: &CommittedBlock) -> (Vec<u8>, [u8; 32]) {
+    #[cfg(test)]
+    FILTER_BUILDS.with(|builds| builds.set(builds.get() + 1));
     let mut k0_b = [0u8; 8];
     k0_b.copy_from_slice(&block.hash[..8]);
     let k0 = u64::from_le_bytes(k0_b);
@@ -366,7 +630,7 @@ fn append_filter(rec: &mut Recorder<'_>, block: &CommittedBlock, state: &mut Tai
     let mut created: hashbrown::HashMap<([u8; 32], u32), &[u8]> = hashbrown::HashMap::new();
     for tx in &block.txs {
         for input in &tx.inputs {
-            if input.txid == [0u8; 32] && input.vout == u32::MAX {
+            if is_coinbase_marker(&input.txid, input.vout) {
                 continue;
             }
             if let Some(&script) = created.get(&(input.txid, input.vout)) {
@@ -385,19 +649,80 @@ fn append_filter(rec: &mut Recorder<'_>, block: &CommittedBlock, state: &mut Tai
     let _ = writer.finish();
     let filter_hash =
         bitcoin_rs_consensus::primitives::encode::double_sha256(&filter_bytes).to_le_bytes();
+    (filter_bytes, filter_hash)
+}
+
+fn append_filter(
+    rec: &mut Recorder<'_>,
+    block: &CommittedBlock,
+    prepared: &PreparedTail,
+    state: &mut TailWriterState,
+) {
     let mut hdr_in = [0u8; 64];
-    hdr_in[..32].copy_from_slice(&filter_hash);
+    hdr_in[..32].copy_from_slice(&prepared.filter_hash);
     hdr_in[32..].copy_from_slice(&state.prev_filter_header);
     let header = bitcoin_rs_consensus::primitives::encode::double_sha256(&hdr_in).to_le_bytes();
     state.prev_filter_header = header;
 
     let key = format::encode_filter_key(0, block.height);
-    let val = format::encode_filter_value(&block.hash, &filter_hash, &header, &filter_bytes);
-    rec.put(Family::Filters, &key, &val, None);
+    let val = format::encode_filter_value(
+        &block.hash,
+        &prepared.filter_hash,
+        &header,
+        &prepared.filter_bytes,
+    );
+    rec.put(Family::Filters, &key, &val);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LogOp {
+    Row {
+        family: Family,
+        key: Vec<u8>,
+    },
+    Stats {
+        script_id: u32,
+        funding: bool,
+        sats: u64,
+    },
+}
+
+fn parse_log(mut bytes: &[u8]) -> Option<Vec<LogOp>> {
+    let mut ops = Vec::new();
+    while let Some((&code, rest)) = bytes.split_first() {
+        if code == LOG_CODE_STATS {
+            let script_id = u32::from_le_bytes(rest.get(..4)?.try_into().ok()?);
+            let funding = *rest.get(4)? == 1;
+            let sats = u64::from_le_bytes(rest.get(5..13)?.try_into().ok()?);
+            ops.push(LogOp::Stats {
+                script_id,
+                funding,
+                sats,
+            });
+            bytes = rest.get(13..)?;
+        } else {
+            let family = Family::from_code(code)?;
+            let (key, rest) = take_len_prefixed(rest)?;
+            ops.push(LogOp::Row {
+                family,
+                key: key.to_vec(),
+            });
+            bytes = rest;
+        }
+    }
+    Some(ops)
+}
+
+fn take_len_prefixed(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    let len = u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?);
+    let len = usize::try_from(len).ok()?;
+    let body = bytes.get(4..)?;
+    Some((body.get(..len)?, body.get(len..)?))
 }
 
 /// Replays the undo log of `height` backwards into `batch` and deletes the
-/// log row. Returns `false` when the tail holds no block at `height`.
+/// log row. Stats are restored by subtracting the logged deltas. Returns
+/// `false` when the tail holds no block at `height`.
 pub fn unwind_tail_block(
     batch: &mut BufferedWriteBatch,
     snapshot: &dyn KvSnapshot,
@@ -409,41 +734,204 @@ pub fn unwind_tail_block(
     };
     let ops = parse_log(value.get(LOG_HEADER_LEN..).unwrap_or(&[]))
         .ok_or(IndexError::CorruptTailLog { height })?;
-    for (family, row_key, prior) in ops.iter().rev() {
-        match prior {
-            Some(prior) => batch.put(family.column_family(), row_key, prior),
-            None => batch.delete(family.column_family(), row_key),
+    let mut deltas: hashbrown::HashMap<u32, ScriptStats> = hashbrown::HashMap::new();
+    for op in ops {
+        match op {
+            LogOp::Row { family, key } => batch.delete(family.column_family(), &key),
+            LogOp::Stats {
+                script_id,
+                funding,
+                sats,
+            } => apply_delta(deltas.entry(script_id).or_default(), funding, sats),
+        }
+    }
+    for (script_id, delta) in deltas {
+        let stats_key = format::encode_script_stats_key(0, script_id);
+        let current = read_stats(snapshot, script_id)?;
+        let remaining = minus(current, delta).ok_or(IndexError::CorruptTailLog { height })?;
+        if is_zero(&remaining) {
+            batch.delete(ColumnFamily::ScriptStats, &stats_key);
+        } else {
+            batch.put(
+                ColumnFamily::ScriptStats,
+                &stats_key,
+                &format::encode_script_stats_value(&remaining),
+            );
         }
     }
     batch.delete(ColumnFamily::IdxMeta, &key);
     Ok(true)
 }
 
-type LogOp = (Family, Vec<u8>, Option<Vec<u8>>);
-
-fn parse_log(mut bytes: &[u8]) -> Option<Vec<LogOp>> {
-    let mut ops = Vec::new();
-    while let Some((&code, rest)) = bytes.split_first() {
-        let family = Family::from_code(code)?;
-        let (&has_prior, rest) = rest.split_first()?;
-        let (key, rest) = take_len_prefixed(rest)?;
-        let (prior, rest) = if has_prior == 1 {
-            let (prior, rest) = take_len_prefixed(rest)?;
-            (Some(prior.to_vec()), rest)
-        } else {
-            (None, rest)
-        };
-        ops.push((family, key.to_vec(), prior));
-        bytes = rest;
-    }
-    Some(ops)
+fn read_stats(snapshot: &dyn KvSnapshot, script_id: u32) -> Result<ScriptStats, IndexError> {
+    let key = format::encode_script_stats_key(0, script_id);
+    Ok(snapshot
+        .get(ColumnFamily::ScriptStats, &key)?
+        .as_deref()
+        .and_then(format::decode_script_stats_value)
+        .unwrap_or_default())
 }
 
-fn take_len_prefixed(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
-    let len = u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?);
-    let len = usize::try_from(len).ok()?;
-    let body = bytes.get(4..)?;
-    Some((body.get(..len)?, body.get(len..)?))
+/// Stable-prefix cut of the tail (PRJ-05): the rows, stats, and logs of every
+/// tail height at or below `cut`, planned from the undo logs.
+pub(crate) struct PrefixCut {
+    pub(crate) first: u32,
+    pub(crate) cut: u32,
+    pub(crate) cut_hash: [u8; 32],
+    pub(crate) next_ordinal: u32,
+    pub(crate) rows: Vec<(Family, Vec<u8>, Vec<u8>)>,
+    pub(crate) script_hashes: hashbrown::HashMap<u32, [u8; 32]>,
+    pub(crate) prefix_stats: hashbrown::HashMap<u32, ScriptStats>,
+    pub(crate) dict_deletes: Vec<[u8; 32]>,
+    pub(crate) gen0_stats: Vec<(u32, Option<ScriptStats>)>,
+    pub(crate) log_keys: Vec<Vec<u8>>,
+    pub(crate) tail_first: Option<u32>,
+    pub(crate) tail_at: Option<(u32, [u8; 32])>,
+}
+
+/// Plans the cut of every tail height at or below `cut` (PRJ-05). The planner
+/// reads only the logs and generation-0 rows, so a re-run after a crash
+/// before the cut batch lands plans the same cut.
+pub(crate) fn plan_prefix_cut(
+    snapshot: &dyn KvSnapshot,
+    cut: u32,
+) -> Result<PrefixCut, IndexError> {
+    let mut logs: Vec<(u32, Vec<u8>)> = Vec::new();
+    let mut tip_height = None;
+    for item in snapshot.iter_prefix(ColumnFamily::IdxMeta, LOG_PREFIX)? {
+        let (key, value) = item?;
+        let Some(height) = log_height(&key) else {
+            continue;
+        };
+        tip_height = Some(height);
+        if height <= cut {
+            logs.push((height, value));
+        }
+    }
+    let first = logs
+        .first()
+        .map(|(height, _)| *height)
+        .ok_or(IndexError::CorruptTailLog { height: cut })?;
+    let contiguous = logs.iter().enumerate().all(|(offset, (height, _))| {
+        u32::try_from(offset)
+            .ok()
+            .and_then(|o| first.checked_add(o))
+            == Some(*height)
+    });
+    if !contiguous || logs.last().map(|(height, _)| *height) != Some(cut) {
+        return Err(IndexError::CorruptTailLog { height: cut });
+    }
+
+    let mut rows = Vec::new();
+    let mut prefix_stats: hashbrown::HashMap<u32, ScriptStats> = hashbrown::HashMap::new();
+    let mut next_ordinal = 0_u32;
+    for (height, value) in &logs {
+        if *height == cut {
+            next_ordinal = read_u32_le(value, 0);
+        }
+        let ops = parse_log(value.get(LOG_HEADER_LEN..).unwrap_or(&[]))
+            .ok_or(IndexError::CorruptTailLog { height: *height })?;
+        for op in ops {
+            match op {
+                LogOp::Row { family, key } => {
+                    if family == Family::ScriptDict {
+                        continue;
+                    }
+                    let row = snapshot
+                        .get(family.column_family(), &key)?
+                        .ok_or(IndexError::CorruptTailLog { height: *height })?;
+                    rows.push((family, key, row));
+                }
+                LogOp::Stats {
+                    script_id,
+                    funding,
+                    sats,
+                } => apply_delta(prefix_stats.entry(script_id).or_default(), funding, sats),
+            }
+        }
+    }
+
+    let cut_hash =
+        filter_block_hash(snapshot, 0, cut)?.ok_or(IndexError::CorruptTailLog { height: cut })?;
+
+    let mut script_hashes: hashbrown::HashMap<u32, [u8; 32]> = hashbrown::HashMap::new();
+    if !prefix_stats.is_empty() {
+        for item in snapshot.iter_prefix(ColumnFamily::ScriptDict, &0u64.to_be_bytes())? {
+            let (key, value) = item?;
+            if let (Some((_, hash)), Some(id)) = (
+                format::decode_script_dict_key(&key),
+                format::decode_script_dict_value(&value),
+            ) {
+                if prefix_stats.contains_key(&id) {
+                    script_hashes.insert(id, hash);
+                }
+            }
+        }
+    }
+
+    let mut gen0_stats = Vec::new();
+    let mut dict_deletes = Vec::new();
+    for (&script_id, delta) in &prefix_stats {
+        let remaining = minus(read_stats(snapshot, script_id)?, *delta)
+            .ok_or(IndexError::CorruptTailLog { height: cut })?;
+        let hash = *script_hashes
+            .get(&script_id)
+            .ok_or(IndexError::CorruptTailLog { height: cut })?;
+        if is_zero(&remaining) {
+            gen0_stats.push((script_id, None));
+            dict_deletes.push(hash);
+        } else {
+            gen0_stats.push((script_id, Some(remaining)));
+        }
+    }
+
+    let tip = tip_height.ok_or(IndexError::CorruptTailLog { height: cut })?;
+    let tail_first = (tip > cut).then(|| cut.saturating_add(1));
+    let tail_at = filter_block_hash(snapshot, 0, tip)?.map(|hash| (tip, hash));
+    let log_keys = logs.iter().map(|(height, _)| log_key(*height)).collect();
+
+    Ok(PrefixCut {
+        first,
+        cut,
+        cut_hash,
+        next_ordinal,
+        rows,
+        script_hashes,
+        prefix_stats,
+        dict_deletes,
+        gen0_stats,
+        log_keys,
+        tail_first,
+        tail_at,
+    })
+}
+
+/// Removes the cut rows, deltas, dictionary entries, and logs from generation
+/// zero, in the caller's batch.
+pub(crate) fn cut_generation_zero(batch: &mut BufferedWriteBatch, plan: &PrefixCut) {
+    for (family, key, _) in &plan.rows {
+        batch.delete(family.column_family(), key);
+    }
+    for hash in &plan.dict_deletes {
+        batch.delete(
+            ColumnFamily::ScriptDict,
+            &format::encode_script_dict_key(0, hash),
+        );
+    }
+    for (script_id, remaining) in &plan.gen0_stats {
+        let key = format::encode_script_stats_key(0, *script_id);
+        match remaining {
+            Some(stats) => batch.put(
+                ColumnFamily::ScriptStats,
+                &key,
+                &format::encode_script_stats_value(stats),
+            ),
+            None => batch.delete(ColumnFamily::ScriptStats, &key),
+        }
+    }
+    for key in &plan.log_keys {
+        batch.delete(ColumnFamily::IdxMeta, key);
+    }
 }
 
 /// The generation id the next segment takes: the stored counter, or one past
@@ -476,11 +964,12 @@ pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
         let Some(height) = log_height(&key) else {
             continue;
         };
-        state.tail_blocks = state.tail_blocks.saturating_add(1);
-        state.tail_bytes = state
-            .tail_bytes
-            .saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX));
-        state.first_height.get_or_insert(height);
+        let block_bytes = read_u64_le(&value, 36);
+        let value_len = u64::try_from(value.len()).unwrap_or(u64::MAX);
+        state.window.push_back(TailBlock {
+            height,
+            bytes: block_bytes.saturating_add(value_len),
+        });
         last_log = Some((height, value));
     }
 
@@ -503,6 +992,7 @@ pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
             format::decode_script_dict_value(&value),
         ) {
             state.script_id_map.insert(hash, id);
+            state.next_script_id = state.next_script_id.max(id.saturating_add(1));
         }
     }
     for item in snapshot.iter_prefix(ColumnFamily::ScriptStats, &gen0)? {
@@ -547,6 +1037,13 @@ fn read_u32_le(bytes: &[u8], at: usize) -> u32 {
         .map_or(0, u32::from_le_bytes)
 }
 
+fn read_u64_le(bytes: &[u8], at: usize) -> u64 {
+    bytes
+        .get(at..at + 8)
+        .and_then(|slice| <[u8; 8]>::try_from(slice).ok())
+        .map_or(0, u64::from_le_bytes)
+}
+
 fn read_hash(bytes: &[u8], at: usize) -> [u8; 32] {
     let mut out = [0u8; 32];
     if let Some(slice) = bytes.get(at..at + 32) {
@@ -577,22 +1074,6 @@ fn filter_header(
         return Ok([0u8; 32]);
     };
     Ok(format::decode_filter_value(&value).map_or([0u8; 32], |(_, _, header, _)| header))
-}
-
-/// Pops the top tail block from the in-memory state after its log is
-/// unwound. Callers drop the cached state after the batch commits.
-pub fn bounds_after_unwind(state: &TailWriterState, height: u32, hash: [u8; 32]) -> TailBounds {
-    let first_height = if state.tail_blocks > 1 {
-        state.first_height
-    } else {
-        None
-    };
-    let at = height.checked_sub(1).map(|prev| (prev, hash));
-    TailBounds {
-        newest: state.newest(),
-        first_height,
-        at,
-    }
 }
 
 /// Writes the `gen/<cap>` descriptor of every capability in `capabilities`

@@ -1,10 +1,12 @@
 mod adversarial_index;
-mod be_order;
+mod bip30_rollback;
 mod compact_filter_artifact;
 mod compact_filters;
 mod generation_parity;
 mod index_roundtrip;
 mod live_handoff;
+mod live_rows;
+mod planned_bytes;
 mod portable_bundle;
 mod query_answers;
 mod reorg_retirement;
@@ -12,6 +14,7 @@ mod script_history_occurrences;
 mod script_live;
 mod segment_recovery;
 mod silent_payments;
+mod tail_group_rollback;
 mod tx_positions;
 
 mod support;

@@ -48,6 +48,7 @@ parking_lot.workspace = true
 [dev-dependencies]
 bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-execution = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-consensus = { workspace = true, features = ["test-seam"] }
 proptest.workspace = true
 proptest-state-machine.workspace = true
 sonic-rs.workspace = true
@@ -57,3 +58,7 @@ tempfile.workspace = true
 [[test]]
 name = "suite"
 path = "tests/suite.rs"
+
+[[test]]
+name = "parse_once"
+path = "tests/parse_once.rs"

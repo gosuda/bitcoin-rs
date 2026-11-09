@@ -14,8 +14,6 @@ pub enum IndexError {
     InvalidHeaderLength { len: usize },
     #[error("transaction byte range is not addressable at block offset {offset}")]
     UnaddressablePosition { offset: u64 },
-    #[error("compact filter or parent filter commitment is unavailable or corrupt")]
-    InvalidCompactFilter,
     #[error("invalid TxIndex watermark encoding")]
     InvalidWatermark,
     #[error("invalid TxIndex prefix row length {len}")]

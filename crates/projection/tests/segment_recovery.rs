@@ -1,8 +1,8 @@
 use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_projection::segment::{
-    Coverage, IndexGeneration, NoSealedTxOrdinals, RetireFault, SealFault, TailWriterState,
-    append_tail_block, arm_retire_fault, arm_seal_fault, meta_gen_key, recover_segments,
-    seal_tail_generation,
+    IndexGeneration, NoSealedTxOrdinals, RetireFault, SealFault, TailWriterState,
+    append_tail_block, arm_retire_fault, arm_seal_fault, meta_gen_key, publish_sealed,
+    recover_segments, seal_tail_generation,
 };
 use bitcoin_rs_projection::{IndexCapabilities, IndexCapability};
 use bitcoin_rs_storage::budget::UnboundedBudget;
@@ -137,13 +137,7 @@ fn seal_fault_before_marker_commit_recovers_by_rollback() -> Result<(), TestErro
     let blocks = one_spend_generation();
     let (_dir, store) = tail_only_store(&blocks)?;
     arm_seal_fault(Some(SealFault::AfterStaging));
-    let sealed = seal_tail_generation(
-        &store,
-        1,
-        Coverage::new(1, 1, [0x81; 32]),
-        IndexCapabilities::ALL,
-        tempdir()?.path(),
-    );
+    let sealed = seal_tail_generation(&store, 1, 1, IndexCapabilities::ALL, tempdir()?.path());
     arm_seal_fault(None);
     assert!(sealed.is_err(), "injected fault must abort the seal");
 
@@ -161,14 +155,8 @@ fn seal_fault_before_marker_commit_recovers_by_rollback() -> Result<(), TestErro
         );
     }
 
-    let coverage = Coverage::new(1, 1, [0x81; 32]);
-    seal_tail_generation(
-        &store,
-        1,
-        coverage,
-        IndexCapabilities::ALL,
-        tempdir()?.path(),
-    )?;
+    let cut = 1u32;
+    seal_tail_generation(&store, 1, cut, IndexCapabilities::ALL, tempdir()?.path())?;
     let expected = bulk_digests(&blocks)?;
     for (cf, digest) in expected {
         assert_eq!(hash_family(&store, cf, 1)?, digest, "{cf:?} after re-seal");
@@ -182,13 +170,7 @@ fn seal_fault_after_committed_marker_recovers_by_completion() -> Result<(), Test
     let blocks = one_spend_generation();
     let (_dir, store) = tail_only_store(&blocks)?;
     arm_seal_fault(Some(SealFault::AfterCommitted));
-    let sealed = seal_tail_generation(
-        &store,
-        1,
-        Coverage::new(1, 1, [0x81; 32]),
-        IndexCapabilities::ALL,
-        tempdir()?.path(),
-    );
+    let sealed = seal_tail_generation(&store, 1, 1, IndexCapabilities::ALL, tempdir()?.path());
     arm_seal_fault(None);
     assert!(sealed.is_err(), "injected fault must abort the seal");
 
@@ -245,14 +227,8 @@ fn seal_fault_after_committed_marker_recovers_by_completion() -> Result<(), Test
 fn seal_fault_after_tail_clear_recovers_by_completion() -> Result<(), TestError> {
     let blocks = one_spend_generation();
     let (_dir, store) = tail_only_store(&blocks)?;
-    arm_seal_fault(Some(SealFault::AfterClear));
-    let sealed = seal_tail_generation(
-        &store,
-        1,
-        Coverage::new(1, 1, [0x81; 32]),
-        IndexCapabilities::ALL,
-        tempdir()?.path(),
-    );
+    arm_seal_fault(Some(SealFault::AfterPublish));
+    let sealed = seal_tail_generation(&store, 1, 1, IndexCapabilities::ALL, tempdir()?.path());
     arm_seal_fault(None);
     assert!(sealed.is_err(), "injected fault must abort the seal");
 
@@ -296,7 +272,7 @@ fn writer_open_completes_an_interrupted_seal() -> Result<(), TestError> {
     let sealed = seal_tail_generation(
         store.as_ref(),
         1,
-        Coverage::new(1, 1, [0x81; 32]),
+        1,
         IndexCapabilities::ALL,
         tempdir()?.path(),
     );
@@ -339,7 +315,7 @@ fn seal_publishes_descriptors_only_for_built_capabilities() -> Result<(), TestEr
     seal_tail_generation(
         &store,
         1,
-        Coverage::new(1, 1, [0x81; 32]),
+        1,
         IndexCapabilities::TX_LOOKUP,
         tempdir()?.path(),
     )?;
@@ -399,12 +375,13 @@ fn retire_fault_after_tombstone_recovers_by_completion() -> Result<(), TestError
     let coverage = builder
         .build_and_ingest(&store, 1, &blocks)
         .map_err(|e| e.to_string())?;
-    seal_tail_generation(
+    let tx_count: usize = blocks.iter().map(|block| block.txs.len()).sum();
+    publish_sealed(
         &store,
         1,
         coverage,
+        u32::try_from(tx_count).map_err(|e| e.to_string())?,
         IndexCapabilities::ALL,
-        tempdir()?.path(),
     )?;
 
     arm_retire_fault(Some(RetireFault::AfterTombstone));

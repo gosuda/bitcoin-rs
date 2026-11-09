@@ -31,7 +31,7 @@ pub enum ScriptHistoryImportError {
     MissingHeader { height: u32 },
 }
 
-type FamilyRows = Vec<(Vec<u8>, Vec<u8>)>;
+pub(crate) type FamilyRows = Vec<(Vec<u8>, Vec<u8>)>;
 
 pub struct ImportedSegment {
     pub(crate) coverage: Coverage,
