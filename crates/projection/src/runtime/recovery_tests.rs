@@ -1819,19 +1819,25 @@ fn winner_answers(
     blocks: &[bitcoin_rs_storage::CommittedBlock],
 ) -> Vec<TxAnswer> {
     let mut answers = Vec::new();
+    let mut histories = std::collections::HashMap::new();
     for block in blocks {
         for tx in &block.txs {
             let txid = bitcoin_rs_consensus::primitives::Txid(Hash256::from_le_bytes(&tx.txid));
             let positions = view.tx_answer_for_test(&txid).expect("tx answer");
-            let histories = tx
+            let outputs = tx
                 .outputs
                 .iter()
                 .map(|output| {
                     let hash = ScriptHash::from_script_bytes(&output.script);
-                    view.history_answer_for_test(hash).expect("history answer")
+                    histories
+                        .entry(hash.to_byte_array())
+                        .or_insert_with(|| {
+                            view.history_answer_for_test(hash).expect("history answer")
+                        })
+                        .clone()
                 })
                 .collect();
-            answers.push((positions, histories));
+            answers.push((positions, outputs));
         }
     }
     answers
@@ -1930,8 +1936,9 @@ fn shallow_reorg_after_seal_keeps_the_segment_and_rewinds_the_tail() {
 // PRJ-05, REO-04
 #[test]
 fn reorg_past_the_retained_tail_retires_the_newest_segment_and_matches_bulk() {
-    const TIP: u32 = 2_100;
-    const FORK: u32 = 1_000;
+    const TIP: u32 = crate::segment::format::TAIL_MAX_BLOCKS;
+    const FORK: u32 =
+        crate::segment::format::TAIL_MAX_BLOCKS - crate::segment::format::REORG_WINDOW_BLOCKS - 2;
     let f = ForkFixture::new(TIP);
     f.persist_undo();
     let winner = f.fork_from_a(FORK, TIP);
@@ -1945,6 +1952,10 @@ fn reorg_past_the_retained_tail_retires_the_newest_segment_and_matches_bulk() {
     let sealed = sealed_at(&h.store);
     assert_eq!(sealed.len(), 1, "the sync seals one stable prefix");
     let retired = sealed[0].gen_id;
+    assert!(
+        sealed[0].coverage.last_height > FORK,
+        "the fork lands inside the newest sealed segment"
+    );
 
     let reorged = f.tip(winner[usize::try_from(TIP - 1).expect("index")]);
     h.set_tip(&reorged);

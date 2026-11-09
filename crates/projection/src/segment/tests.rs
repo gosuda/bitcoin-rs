@@ -634,8 +634,8 @@ fn commit_one<S: bitcoin_rs_storage::KvStore>(
 #[test]
 #[expect(clippy::expect_used)]
 fn large_blocks_keep_both_bounds_and_the_window_before_a_crossing_block() {
-    const BLOCKS: u32 = 40;
-    const OUTPUTS: u32 = 6_500;
+    const BLOCKS: u32 = 10;
+    const OUTPUTS: u32 = 32_500;
     let max_blocks = usize::try_from(TAIL_MAX_BLOCKS).expect("block bound");
     let max_bytes = u64::try_from(TAIL_MAX_BYTES).expect("byte bound");
     let dir = tempfile::tempdir().expect("dir");
