@@ -62,7 +62,7 @@ mod query;
 mod reconciliation;
 mod rollback;
 mod startup;
-pub use startup::open_derived_index_store_on_worker;
+pub use startup::{open_derived_index_store_on_worker, open_derived_index_store_with_scratch};
 
 pub use capability::DerivedIndexCapability;
 use query::IndexProgress;

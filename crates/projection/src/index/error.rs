@@ -93,6 +93,8 @@ pub enum IndexError {
     InvalidSealMarker,
     #[error("tail undo log at height {height} is corrupt")]
     CorruptTailLog { height: u32 },
+    #[error("sealing a tail segment needs a scratch directory under the node datadir")]
+    SealScratchUnset,
     #[error("operation cancelled")]
     Cancelled,
 }

@@ -18,7 +18,7 @@ pub struct IndexWriter<S: KvStore> {
     pub(super) indexer: Indexer<S>,
     pub(super) generation: u64,
     pub(super) tail: Option<TailWriterState>,
-    pub(super) seal_scratch: std::path::PathBuf,
+    pub(super) seal_scratch: Option<std::path::PathBuf>,
 }
 
 impl<S: KvStore> IndexWriter<S> {
@@ -57,8 +57,13 @@ impl<S: KvStore> IndexWriter<S> {
             indexer,
             generation,
             tail: Some(tail),
-            seal_scratch: super::tail_writes::default_seal_scratch(),
+            seal_scratch: None,
         })
+    }
+
+    pub fn with_seal_scratch(mut self, scratch: std::path::PathBuf) -> Self {
+        self.seal_scratch = Some(scratch);
+        self
     }
 
     pub fn watermark(&self) -> Result<Option<IndexWatermark>, IndexError> {

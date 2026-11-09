@@ -140,7 +140,9 @@ impl<S: KvStore> IndexWriter<S> {
             state.next_gen_id,
             coverage,
             capabilities,
-            &self.seal_scratch,
+            self.seal_scratch
+                .as_deref()
+                .ok_or(IndexError::SealScratchUnset)?,
         )?;
         Ok(true)
     }
@@ -150,8 +152,4 @@ fn segment_capabilities(capabilities: IndexCapabilities) -> impl Iterator<Item =
     capabilities
         .iter()
         .filter(|capability| *capability != IndexCapability::ScriptLive)
-}
-
-pub(super) fn default_seal_scratch() -> std::path::PathBuf {
-    std::env::temp_dir().join("bitcoin-rs-segment-seal")
 }

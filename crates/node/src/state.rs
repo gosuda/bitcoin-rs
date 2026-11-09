@@ -11,7 +11,7 @@ pub(crate) use bitcoin_rs_execution::recovery::ResumeSource;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_projection::runtime::DEFAULT_BATCH_LIMITS;
 use bitcoin_rs_projection::runtime::OpenDerivedIndex;
-use bitcoin_rs_projection::runtime::open_derived_index_store_on_worker;
+use bitcoin_rs_projection::runtime::open_derived_index_store_with_scratch;
 use bitcoin_rs_serving::context::PruneService;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_storage::StorageBackend;
@@ -473,6 +473,7 @@ fn build_derived_index_open_spec(
     let backend = config.storage.backend;
     let cache_bytes = txindex_cache_bytes;
     let guard = Arc::clone(guard);
+    let seal_scratch = config.data_dir.join("seal-scratch");
     Ok(Some(bitcoin_rs_projection::runtime::DerivedIndexOpenSpec {
         scripthash_limit: config.indexes.scripthash_limit,
         data_dir: config.data_dir.clone(),
@@ -488,7 +489,11 @@ fn build_derived_index_open_spec(
                 dir,
                 Some(cache_bytes),
                 &guard,
-                DerivedIndexComposer { backend, epoch },
+                DerivedIndexComposer {
+                    backend,
+                    epoch,
+                    seal_scratch: seal_scratch.clone(),
+                },
             )
         }),
         bundle: index_bundle_directive(config)?,
@@ -622,6 +627,7 @@ fn read_bounded_manifest(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
 struct DerivedIndexComposer {
     backend: StorageBackend,
     epoch: u64,
+    seal_scratch: std::path::PathBuf,
 }
 
 impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
@@ -634,7 +640,7 @@ impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
     {
         let _ = self.backend;
         let batch_limits = DEFAULT_BATCH_LIMITS;
-        open_derived_index_store_on_worker(store, batch_limits, self.epoch)
+        open_derived_index_store_with_scratch(store, batch_limits, self.epoch, self.seal_scratch)
     }
 }
 

@@ -362,7 +362,9 @@ impl Harness {
         let index_dir = tempfile::tempdir().expect("index dir");
         let store = Arc::new(RocksDbStore::open(index_dir.path()).expect("rocksdb open"));
         let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(
-            crate::IndexWriter::open(Arc::clone(&store), 1).expect("index writer open"),
+            crate::IndexWriter::open(Arc::clone(&store), 1)
+                .expect("index writer open")
+                .with_seal_scratch(index_dir.path().join("seal-scratch")),
         ));
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(16);

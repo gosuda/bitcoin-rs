@@ -466,7 +466,35 @@ pub fn open_derived_index_store_on_worker<S>(
 where
     S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
 {
+    open_derived_index_store_in(store, batch_limits, epoch, None)
+}
+
+pub fn open_derived_index_store_with_scratch<S>(
+    store: Arc<S>,
+    batch_limits: PreparedBatchLimits,
+    epoch: u64,
+    seal_scratch: std::path::PathBuf,
+) -> Result<OpenDerivedIndex, DerivedIndexWorkerError>
+where
+    S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
+{
+    open_derived_index_store_in(store, batch_limits, epoch, Some(seal_scratch))
+}
+
+fn open_derived_index_store_in<S>(
+    store: Arc<S>,
+    batch_limits: PreparedBatchLimits,
+    epoch: u64,
+    seal_scratch: Option<std::path::PathBuf>,
+) -> Result<OpenDerivedIndex, DerivedIndexWorkerError>
+where
+    S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
+{
     let writer = open_writer(&store, epoch)?;
+    let writer = match seal_scratch {
+        Some(scratch) => writer.with_seal_scratch(scratch),
+        None => writer,
+    };
     let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(writer));
     let reader: Arc<dyn crate::IndexReader> = Arc::new(crate::Indexer::new(store));
     Ok(OpenDerivedIndex {
