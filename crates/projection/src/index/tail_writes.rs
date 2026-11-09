@@ -100,9 +100,7 @@ impl<S: KvStore> IndexWriter<S> {
     }
 
     pub(super) fn plan_rollback_tail(
-        &self,
         state: &TailWriterState,
-        capabilities: IndexCapabilities,
         current: IndexWatermark,
     ) -> Result<RollbackTail, IndexError> {
         let Some(newest) = state.newest() else {
@@ -110,13 +108,6 @@ impl<S: KvStore> IndexWriter<S> {
         };
         if newest.coverage.last_height < current.height {
             return Ok(RollbackTail::Unwind);
-        }
-        for capability in segment_capabilities(capabilities) {
-            segment::retire_generation_rows(
-                self.indexer.store.as_ref(),
-                capability,
-                newest.gen_id,
-            )?;
         }
         Ok(RollbackTail::Retire(newest))
     }
@@ -140,6 +131,12 @@ impl<S: KvStore> IndexWriter<S> {
             RollbackTail::Retire(newest) => {
                 state.sealed.retain(|sealed| sealed.gen_id != newest.gen_id);
                 for capability in segment_capabilities(capabilities) {
+                    segment::stage_retirement(
+                        self.indexer.store.as_ref(),
+                        batch,
+                        capability,
+                        newest.gen_id,
+                    )?;
                     segment::clear_retirement_markers(batch, capability, newest.gen_id);
                 }
                 None
@@ -241,4 +238,205 @@ pub(super) fn planned_tail_bytes(
         .checked_add(prior_log_bytes)
         .ok_or(IndexError::MutationSizeOverflow)?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod rollback_retire_tests {
+    use super::super::{
+        ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexWatermark,
+        IndexWriter, PreparedBatch, PreparedBatchLimits, SpentCoin, SpentCoins,
+    };
+    use bitcoin_rs_consensus::primitives::{
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
+        Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, encode,
+    };
+    use bitcoin_rs_storage::{ColumnFamily, KvStore, MemoryKvStore};
+    use std::sync::Arc;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct StoredRow {
+        family: ColumnFamily,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    }
+
+    struct FixtureScripts;
+
+    static FIXTURE_SPENT_SCRIPT: [u8; 2] = [0x51, 0x01];
+
+    impl SpentCoins for FixtureScripts {
+        fn spent_coin(&self, _txid: &[u8; 32], _vout: u32) -> Option<SpentCoin<'_>> {
+            Some(SpentCoin {
+                script: FIXTURE_SPENT_SCRIPT.as_slice(),
+                value: 0,
+                height: 0,
+                coinbase: false,
+            })
+        }
+    }
+
+    fn tx(previous_output: OutPoint, script_pubkey: Vec<u8>) -> Tx {
+        Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output,
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(5_000),
+                script_pubkey: script_pubkey.into(),
+            }],
+        }
+    }
+
+    fn block_with_prev(txs: Vec<Tx>, prev: BlockHash, nonce: u32) -> Block {
+        Block {
+            header: Header {
+                version: 1,
+                prev_blockhash: prev,
+                merkle_root: Hash256::default(),
+                time: 0,
+                bits: CompactTarget::from_consensus(0),
+                nonce,
+            },
+            txs,
+        }
+    }
+
+    fn commit_block(
+        writer: &mut IndexWriter<MemoryKvStore>,
+        height: u32,
+        body: &[u8],
+    ) -> Result<IndexWatermark, crate::portable::TestError> {
+        let header = body
+            .get(..crate::types::HEADER_ROW_SIZE)
+            .ok_or("short body")?;
+        let hash = encode::double_sha256(header).to_le_bytes();
+        let prepared = writer.prepare_block_with_spent_scripts(
+            IndexCapabilities::HISTORICAL,
+            height,
+            hash,
+            body,
+            &FixtureScripts,
+        )?;
+        let mut batch = PreparedBatch::new(PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
+        if batch.try_push(prepared).is_err() {
+            return Err("non-contiguous prepare".into());
+        }
+        Ok(writer.commit_forward(batch)?)
+    }
+
+    fn data_rows(store: &MemoryKvStore) -> Result<Vec<StoredRow>, crate::portable::TestError> {
+        let mut rows = Vec::new();
+        for cf in [
+            ColumnFamily::TxDir,
+            ColumnFamily::ScriptDict,
+            ColumnFamily::ScriptPost,
+            ColumnFamily::SpendDir,
+            ColumnFamily::ScriptStats,
+            ColumnFamily::Filters,
+            ColumnFamily::BlockHeaders,
+            ColumnFamily::ScriptLive,
+        ] {
+            for row in store.iter_prefix(cf, &[])? {
+                let (key, value) = row?;
+                rows.push(StoredRow {
+                    family: cf,
+                    key,
+                    value,
+                });
+            }
+        }
+        rows.sort_by(|left, right| {
+            (
+                left.family.name(),
+                left.key.as_slice(),
+                left.value.as_slice(),
+            )
+                .cmp(&(
+                    right.family.name(),
+                    right.key.as_slice(),
+                    right.value.as_slice(),
+                ))
+        });
+        Ok(rows)
+    }
+
+    fn sealed_record_count(store: &MemoryKvStore) -> Result<usize, crate::portable::TestError> {
+        Ok(store
+            .iter_prefix(
+                ColumnFamily::IdxMeta,
+                &crate::segment::sealed_gen_prefix(IndexCapability::TxLookup),
+            )?
+            .count())
+    }
+
+    // REO-04, REO-05
+    #[test]
+    fn fault_between_retire_plan_and_commit_leaves_watermark_and_rows_in_agreement()
+    -> Result<(), crate::portable::TestError> {
+        let dir = tempfile::tempdir()?;
+        let scratch = tempfile::tempdir()?;
+        let store = Arc::new(MemoryKvStore::new());
+        let mut writer = IndexWriter::open(Arc::clone(&store), 1)?
+            .with_seal_scratch(scratch.path().to_path_buf());
+
+        let funded = tx(
+            OutPoint::new(Txid(Hash256::from_le_bytes(&[0xa1; 32])), 0),
+            vec![0x51],
+        );
+        let first = block_with_prev(vec![funded], BlockHash::default(), 1);
+        let first_body = consensus_bytes(&first);
+        let base = commit_block(&mut writer, 0, &first_body)?;
+
+        let spender = tx(
+            OutPoint::new(Txid(Hash256::from_le_bytes(&[0xb2; 32])), 0),
+            vec![0x52],
+        );
+        let second = block_with_prev(vec![spender], first.block_hash(), 2);
+        let second_body = consensus_bytes(&second);
+        let tip = commit_block(&mut writer, 1, &second_body)?;
+
+        let state = writer.tail_for(Some(tip))?;
+        writer.seal_through(&state, tip.height, IndexCapabilities::HISTORICAL)?;
+        writer.tail = None;
+
+        assert_eq!(writer.watermarks()?.tx_lookup, Some(tip));
+        assert_eq!(sealed_record_count(&store)?, 1);
+        let before = data_rows(&store)?;
+        assert!(!before.is_empty());
+
+        crate::segment::arm_retire_fault(Some(crate::segment::RetireFault::AfterTombstone));
+        let (fence, _) = writer.fenced_watermarks()?;
+        let outcome = writer.commit_rollback_one_for_with_cursor_with_spent_scripts(
+            fence,
+            IndexCapabilities::HISTORICAL,
+            Some(base),
+            &second_body,
+            ConsumerCursorUpdate::Clear,
+            &FixtureScripts,
+        );
+        crate::segment::arm_retire_fault(None);
+        assert!(matches!(
+            outcome,
+            Err(IndexError::InjectedFault { stage: "retire" })
+        ));
+        store.flush()?;
+        store.checkpoint(dir.path())?;
+        drop(writer);
+        drop(store);
+
+        let store = Arc::new(MemoryKvStore::open_checkpoint(dir.path())?);
+        let writer = IndexWriter::open(Arc::clone(&store), 2)?;
+        assert_eq!(writer.watermarks()?.tx_lookup, Some(tip));
+        assert_eq!(sealed_record_count(&store)?, 1);
+        assert_eq!(data_rows(&store)?, before);
+        Ok(())
+    }
 }

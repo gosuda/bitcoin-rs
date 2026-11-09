@@ -361,7 +361,55 @@ pub fn retire_generation_rows<S: bitcoin_rs_storage::KvStore>(
     retire_fault(RetireFault::AfterClear)?;
     Ok(())
 }
+fn retirement_target_families<S: bitcoin_rs_storage::KvStore>(
+    store: &S,
+    capability: IndexCapability,
+    gen_id: u64,
+) -> Result<Vec<bitcoin_rs_storage::ColumnFamily>, crate::IndexError> {
+    let snapshot = store.snapshot().map_err(crate::IndexError::Storage)?;
+    let mut families = retirement_families(capability).to_vec();
+    for other in IndexCapability::ALL {
+        if other == capability || other == IndexCapability::ScriptLive {
+            continue;
+        }
+        let built = snapshot
+            .get(
+                bitcoin_rs_storage::ColumnFamily::IdxMeta,
+                &sealed_gen_key(other, gen_id),
+            )?
+            .is_some();
+        if !built {
+            families.extend_from_slice(retirement_families(other));
+        }
+    }
+    Ok(families)
+}
 
+/// Stages a sealed generation's retirement in the caller's commit batch: the
+/// tombstone first, then the row range deletes. The batch commits atomically
+/// with the watermark rewind, so a crash leaves the watermark and the rows in
+/// agreement either way.
+// REO-04, REO-05
+pub fn stage_retirement<S: bitcoin_rs_storage::KvStore>(
+    store: &S,
+    batch: &mut bitcoin_rs_storage::BufferedWriteBatch,
+    capability: IndexCapability,
+    gen_id: u64,
+) -> Result<(), crate::IndexError> {
+    batch.put(
+        bitcoin_rs_storage::ColumnFamily::IdxMeta,
+        &retire_tombstone_key(capability, gen_id),
+        &[],
+    );
+    retire_fault(RetireFault::AfterTombstone)?;
+    let start = format::gen_prefix_start(gen_id);
+    let end = format::gen_prefix_end(gen_id);
+    for family in retirement_target_families(store, capability, gen_id)? {
+        batch.delete_range(family, &start, &end);
+    }
+    retire_fault(RetireFault::AfterClear)?;
+    Ok(())
+}
 /// Retires one sealed segment end to end: rows, then the record, the
 /// descriptor, and the tombstone in one batch.
 pub fn retire_generation<S: bitcoin_rs_storage::KvStore>(
@@ -855,25 +903,8 @@ fn clear_retirement_rows<S: bitcoin_rs_storage::KvStore>(
 ) -> Result<(), crate::IndexError> {
     let start = format::gen_prefix_start(gen_id);
     let end = format::gen_prefix_end(gen_id);
-    let snapshot = store.snapshot().map_err(crate::IndexError::Storage)?;
-    let mut families = retirement_families(capability).to_vec();
-    for other in IndexCapability::ALL {
-        if other == capability || other == IndexCapability::ScriptLive {
-            continue;
-        }
-        let built = snapshot
-            .get(
-                bitcoin_rs_storage::ColumnFamily::IdxMeta,
-                &sealed_gen_key(other, gen_id),
-            )?
-            .is_some();
-        if !built {
-            families.extend_from_slice(retirement_families(other));
-        }
-    }
-    drop(snapshot);
-    for cf in families {
-        store.delete_range(cf, &start, &end)?;
+    for family in retirement_target_families(store, capability, gen_id)? {
+        store.delete_range(family, &start, &end)?;
     }
     Ok(())
 }

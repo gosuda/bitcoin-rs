@@ -857,7 +857,7 @@ impl<S: KvStore> IndexWriter<S> {
             header,
         )?;
         let mut tail = self.tail_for(Some(current))?;
-        let tail_plan = self.plan_rollback_tail(&tail, capabilities, current)?;
+        let tail_plan = Self::plan_rollback_tail(&tail, current)?;
         let prev = tail_plan.rewind(&tail, prev)?;
         let mut store_batch = self.indexer.store.new_batch();
         let unselected_keeps_identity = IndexCapability::ALL.into_iter().any(|capability| {
