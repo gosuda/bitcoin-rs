@@ -241,3 +241,81 @@ impl metrics::HistogramFn for RecordedHistogramHandle {
             .push(value);
     }
 }
+
+fn op_cf(op: &BatchOp) -> ColumnFamily {
+    match op {
+        BatchOp::Put { cf, .. } | BatchOp::Delete { cf, .. } | BatchOp::DeleteRange { cf, .. } => {
+            *cf
+        }
+    }
+}
+
+fn op_len(op: &BatchOp) -> usize {
+    match op {
+        BatchOp::Put { key, value, .. } => key.len() + value.len(),
+        BatchOp::Delete { key, .. } => key.len(),
+        BatchOp::DeleteRange { start, end, .. } => start.len() + end.len(),
+    }
+}
+
+fn emitted_bytes(ops: &[BatchOp], cf: ColumnFamily) -> usize {
+    ops.iter().filter(|op| op_cf(op) == cf).map(op_len).sum()
+}
+
+#[test]
+fn family_bytes_accounting() -> Result<(), IndexError> {
+    let outpoint1 = OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), 0);
+    let outpoint2 = OutPoint::new(Txid(Hash256::from_le_bytes(&[2; 32])), 1);
+    let live_row1 = ScriptLiveRow::new(ScriptHash::from_byte_array([10; 32]), &outpoint1);
+    let live_row2 = ScriptLiveRow::new(ScriptHash::from_byte_array([20; 32]), &outpoint2);
+    let live_coin1 =
+        crate::types::ScriptLiveCoin::new(ScriptHash::from_byte_array([10; 32]), 100, 7, false);
+    let live_coin2 =
+        crate::types::ScriptLiveCoin::new(ScriptHash::from_byte_array([20; 32]), 200, 8, false);
+    let rows = PendingRows {
+        header_rows: vec![
+            [0x42; crate::types::HEADER_ROW_SIZE],
+            [0x43; crate::types::HEADER_ROW_SIZE],
+        ],
+        live_ops: vec![
+            LiveOp::Insert {
+                row: live_row1,
+                coin: live_coin1,
+            },
+            LiveOp::Delete {
+                row: live_row2,
+                coin: live_coin2,
+            },
+        ],
+    };
+    let family = rows.encoded_bytes_by_family()?;
+    let mut batch = BufferedWriteBatch::default();
+    put_rows(&mut batch, &rows)?;
+    let emitted = batch.into_ops();
+
+    assert_eq!(
+        family.headers,
+        2 * crate::types::HEADER_ROW_SIZE,
+        "each header row is one fixed-width key"
+    );
+    assert_eq!(
+        family.headers,
+        emitted_bytes(&emitted, ColumnFamily::BlockHeaders)
+    );
+    assert_eq!(
+        family.script_live,
+        emitted_bytes(&emitted, ColumnFamily::ScriptLive),
+        "a live insert plans its key and value, a live delete its key"
+    );
+    assert_eq!(
+        family.tx_lookup + family.script_history + family.filters + family.tail_log,
+        0,
+        "block rows plan only the header and live families"
+    );
+    assert_eq!(
+        family.total()?,
+        emitted.iter().map(op_len).sum::<usize>(),
+        "the planned total equals the emitted key and value bytes"
+    );
+    Ok(())
+}
