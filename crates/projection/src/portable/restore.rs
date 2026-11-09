@@ -1410,6 +1410,14 @@ struct Staged {
     runs: Vec<crate::segment::spill::RunFile>,
 }
 
+/// Largest compact filter a bundle record may carry. A block holds at most
+/// `MAX_BLOCK_SERIALIZED_SIZE / 9` basic-filter elements: an output script
+/// costs at least 9 block bytes and a spent script at least one 41-byte
+/// input. BIP158 Golomb-Rice coding with `P = 19` and `M = 784931` spends
+/// fewer than `N * (M / 2^P + P + 1)` bits on `N` elements, which stays
+/// under 1_194_300 bytes with the CompactSize prefix.
+const MAX_COMPACT_FILTER_BYTES: u32 = 1_200_000;
+
 fn stage_verified(
     mut hashed: HashedFile,
     header: &ArtifactHeader,
@@ -1445,10 +1453,17 @@ fn stage_verified(
         if total > payload_left {
             return Err(framing("record overruns the declared payload"));
         }
-        let length = usize::try_from(fields.length)
-            .map_err(|_| framing("record overruns the declared payload"))?;
-        let mut filter = vec![0_u8; length];
-        read_record_bytes(&mut hashed, &mut filter, record, path)?;
+        if fields.length > MAX_COMPACT_FILTER_BYTES {
+            return Err(framing("filter exceeds the BIP158 size bound"));
+        }
+        let mut filter = Vec::new();
+        (&mut hashed)
+            .take(u64::from(fields.length))
+            .read_to_end(&mut filter)
+            .map_err(|error| io_error(path, error))?;
+        if u64::try_from(filter.len()).ok() != Some(u64::from(fields.length)) {
+            return Err(framing("file ends inside a record"));
+        }
         payload_left -= total;
         if double_sha256(&filter).to_le_bytes() != fields.filter_hash {
             return Err(framing("filter hash does not match the filter bytes"));
@@ -2259,5 +2274,57 @@ mod tests {
             matches!(&reported, IndexBundleError::Locator { height: 9 }),
             "a watermarked capability needs no cleanup: {reported}"
         );
+    }
+
+    #[test]
+    fn oversized_filter_record_is_refused_before_allocation()
+    -> Result<(), crate::portable::TestError> {
+        for length in [u32::MAX, 1_200_001] {
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("compact_filters.artifact");
+            let mut record = vec![0_u8; RECORD_FIXED_LEN];
+            record[RECORD_FIXED_LEN - 4..].copy_from_slice(&length.to_le_bytes());
+            std::fs::write(&path, &record)?;
+            let network = bitcoin_rs_consensus::primitives::Network::Mainnet;
+            let header = ArtifactHeader {
+                family: BundleFamily::CompactFilters,
+                artifact_version: ARTIFACT_VERSION,
+                index_format: crate::index_format_version(),
+                network_magic: network.magic(),
+                base_height: 0,
+                base_hash: [0_u8; 32],
+                records: 1,
+                payload_bytes: u64::try_from(RECORD_FIXED_LEN)? + u64::from(length),
+            };
+            let target = ManifestArtifactTarget {
+                artifact_path: path.clone(),
+                base_height: 0,
+                base_hash: [0_u8; 32],
+                floor: 0,
+                network,
+                index_format: crate::index_format_version(),
+                sha256: [0_u8; 32],
+                size_bytes: u64::try_from(record.len())?,
+                chain_tx_count: 0,
+            };
+            let work = dir.path().join("work");
+            std::fs::create_dir_all(&work)?;
+            let budget = SpillBudget::new(1 << 20);
+            let hashed = open_hashed(&path)?;
+            let Err(error) = stage_verified(hashed, &header, &target, &work, &budget) else {
+                return Err("an oversized filter record was staged".into());
+            };
+            assert!(
+                matches!(
+                    error,
+                    IndexBundleError::ArtifactFraming {
+                        reason: "filter exceeds the BIP158 size bound",
+                        ..
+                    }
+                ),
+                "a {length}-byte filter record must be refused by the bound: {error}"
+            );
+        }
+        Ok(())
     }
 }
