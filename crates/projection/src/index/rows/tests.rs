@@ -383,3 +383,85 @@ fn family_bytes_sum_matches_every_family() -> Result<(), IndexError> {
     assert_eq!(addend.total()?, 21);
     Ok(())
 }
+
+fn assert_same_ops(actual: &[BatchOp], expected: &[BatchOp]) {
+    assert_eq!(actual.len(), expected.len(), "operation count");
+    for op in expected {
+        assert!(actual.contains(op), "missing {op:?}");
+    }
+}
+
+#[test]
+fn row_deletes_mirror_inserts_and_shared_headers_are_deleted_only_on_request()
+-> Result<(), IndexError> {
+    let outpoint1 = OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), 0);
+    let outpoint2 = OutPoint::new(Txid(Hash256::from_le_bytes(&[2; 32])), 1);
+    let rows = PendingRows {
+        header_rows: vec![
+            [1; crate::types::HEADER_ROW_SIZE],
+            [2; crate::types::HEADER_ROW_SIZE],
+        ],
+        live_ops: vec![
+            LiveOp::Insert {
+                row: ScriptLiveRow::new(ScriptHash::from_byte_array([10; 32]), &outpoint1),
+                coin: crate::types::ScriptLiveCoin::new(
+                    ScriptHash::from_byte_array([10; 32]),
+                    100,
+                    7,
+                    false,
+                ),
+            },
+            LiveOp::Insert {
+                row: ScriptLiveRow::new(ScriptHash::from_byte_array([20; 32]), &outpoint2),
+                coin: crate::types::ScriptLiveCoin::new(
+                    ScriptHash::from_byte_array([20; 32]),
+                    200,
+                    8,
+                    false,
+                ),
+            },
+        ],
+    };
+    let mut puts = BufferedWriteBatch::default();
+    put_rows(&mut puts, &rows)?;
+    let puts = puts.into_ops();
+    assert!(
+        puts.iter().all(|op| matches!(op, BatchOp::Put { .. })),
+        "put_rows emits only puts"
+    );
+    let as_delete = |op: &BatchOp| match op {
+        BatchOp::Put { cf, key, .. } => BatchOp::Delete {
+            cf: *cf,
+            key: key.clone(),
+        },
+        BatchOp::Delete { .. } | BatchOp::DeleteRange { .. } => {
+            unreachable!("put_rows emits only puts")
+        }
+    };
+    let all_deletes: Vec<BatchOp> = puts.iter().map(as_delete).collect();
+    let live_deletes: Vec<BatchOp> = puts
+        .iter()
+        .filter(|op| op_cf(op) == ColumnFamily::ScriptLive)
+        .map(as_delete)
+        .collect();
+    assert_eq!(live_deletes.len(), 2);
+    assert_eq!(all_deletes.len(), 4);
+
+    let mut plain = BufferedWriteBatch::default();
+    delete_rows(&mut plain, &rows)?;
+    let plain = plain.into_ops();
+    assert_same_ops(&plain, &live_deletes);
+
+    let mut with_headers = BufferedWriteBatch::default();
+    delete_rows_with_headers(&mut with_headers, &rows)?;
+    let with_headers = with_headers.into_ops();
+    assert_same_ops(&with_headers, &all_deletes);
+    assert!(
+        plain
+            .iter()
+            .chain(with_headers.iter())
+            .all(|op| !matches!(op, BatchOp::DeleteRange { .. })),
+        "row deletes never emit range deletes"
+    );
+    Ok(())
+}
