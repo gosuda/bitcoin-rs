@@ -389,6 +389,7 @@ fn admit_request(gateway: &MempoolGateway, tx: &Tx, origin: AdmissionOrigin) -> 
     }
 }
 
+// MPS-04
 #[test]
 fn accepted_and_block_inclusion_events_arrive_in_commit_order() {
     let observer = Arc::new(RecordingObserver::default());
@@ -552,6 +553,7 @@ fn replacement_tags_direct_conflicts_and_descendants() {
     );
 }
 
+// MPS-04
 #[test]
 fn observer_panic_does_not_roll_back_the_mutation() {
     let gateway = gateway_with(Some(Arc::new(PanickingObserver)));
@@ -833,7 +835,7 @@ impl MempoolObserver for ReentrantObserver {
     }
 }
 
-// MPL-01
+// MPL-01, MPS-04
 #[test]
 fn reentrant_observer_mutation_completes_with_callback_sequence_1_2() {
     let observer = Arc::new(ReentrantObserver {
@@ -999,6 +1001,7 @@ impl MempoolObserver for SequenceStreamObserver {
     }
 }
 
+// MPS-04
 #[test]
 fn concurrent_mutations_publish_in_sequence_order() {
     const CYCLES: usize = 1_500;

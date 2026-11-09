@@ -46,7 +46,7 @@ fn block(parent: BlockHash, height: u32, tag: u32) -> Result<Block, TestError> {
     Ok(block)
 }
 
-// EVT-06
+// EVT-06, MPS-04
 #[test]
 fn settled_poll_replays_gaps_disconnects_and_pinned_targets() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;

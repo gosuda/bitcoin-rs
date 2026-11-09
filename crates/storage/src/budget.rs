@@ -269,6 +269,7 @@ mod tests {
         assert_eq!(budget.available_bytes(BudgetOwner::IndexBuilder), u64::MAX);
     }
 
+    // BUD-04
     #[test]
     fn cpu_shares_bound_background_permits() {
         let shares = Arc::new(CpuShares::new(2, 1));

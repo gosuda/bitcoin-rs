@@ -150,6 +150,7 @@ pub struct MutationEnvelope {
 mod tests {
     use super::*;
 
+    // MPS-04
     #[test]
     fn sequence_of_only_returns_sequences_for_committed_changes() {
         let result = MutationResult {

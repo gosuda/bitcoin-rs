@@ -547,7 +547,7 @@ mod tests {
         ));
     }
 
-    // SNP-03, SNP-04
+    // SNP-02, SNP-03, SNP-04
     #[test]
     fn manifest_file_hash_must_equal_the_index_commitment() {
         let mut manifest = manifest_with([Some(committed([5; 32])), None, None, None]);
@@ -570,6 +570,22 @@ mod tests {
         let bytes = sonic_rs::to_vec(&manifest).expect("serialize");
         assert!(matches!(
             SnapshotManifest::parse(&bytes),
+            Err(ManifestError::Format(_))
+        ));
+    }
+
+    // SNP-02
+    #[test]
+    fn a_manifest_missing_a_declared_field_is_refused() {
+        let manifest = manifest_with([None; 4]);
+        let bytes = sonic_rs::to_vec(&manifest).expect("serialize");
+        let renamed = String::from_utf8(bytes).expect("json is utf-8").replacen(
+            "\"coverage\":",
+            "\"renamed\":",
+            1,
+        );
+        assert!(matches!(
+            SnapshotManifest::parse(renamed.as_bytes()),
             Err(ManifestError::Format(_))
         ));
     }

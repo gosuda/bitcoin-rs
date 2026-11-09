@@ -460,3 +460,34 @@ fn compact_filter_artifact_second_attach_over_populated_family_is_refused() {
         "the refused attach leaves the rows as they were"
     );
 }
+
+// SNP-02
+#[test]
+fn compact_filter_artifact_nonzero_floor_is_refused_without_rows() {
+    let fixture = load_fixture();
+    let source = build_source(&fixture);
+    let root = tempfile::tempdir().expect("tempdir");
+    let (path, artifact) = produce(
+        &source,
+        &fixture,
+        Network::Regtest,
+        root.path(),
+        "floor.dat",
+    );
+    let mut raised = target(
+        &path,
+        base_at_tip(&fixture),
+        artifact.sha256,
+        artifact.bytes,
+    );
+    raised.floor = 1;
+
+    let (receiver_store, receiver) = empty_receiver();
+    let error = attach_compact_filter_artifact(&receiver, &raised, root.path())
+        .expect_err("a compact filter floor above zero is refused");
+    assert!(
+        matches!(error, IndexBundleError::ArtifactHeader { .. }),
+        "got {error:?}"
+    );
+    assert_untouched(&receiver_store, &receiver);
+}
