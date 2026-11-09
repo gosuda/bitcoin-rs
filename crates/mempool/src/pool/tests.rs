@@ -1943,3 +1943,62 @@ fn pool_expiry_projection_releases_surviving_neighbor_link_sides() -> Result<(),
     );
     Ok(())
 }
+
+#[test]
+fn mining_snapshot_shared_reuses_cache_until_mutation() -> Result<(), crate::test_error::TestError>
+{
+    let mut pool = Mempool::new(MempoolLimits::default());
+    let parent = tx(31, Vec::new());
+    let parent_id = OutPoint::new(parent.txid(), 0);
+    pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7, 0))?;
+    pool.insert_entry(MempoolEntry::new(
+        Arc::new(tx(32, alloc::vec![parent_id])),
+        100,
+        2_000,
+        2,
+        7,
+        0,
+    ))?;
+    let first = pool.mining_snapshot_shared();
+    let second = pool.mining_snapshot_shared();
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "an unchanged mempool reuses its mining snapshot"
+    );
+    assert_eq!(first.entries.len(), 2, "the snapshot holds both entries");
+    assert_eq!(
+        first.sequence,
+        pool.sequence_number(),
+        "the snapshot carries the current mempool sequence"
+    );
+    pool.prioritise(first.entries[0].txid, 500)?;
+    let third = pool.mining_snapshot_shared();
+    assert!(
+        !Arc::ptr_eq(&second, &third),
+        "a fee delta mutation invalidates the snapshot"
+    );
+    assert_eq!(
+        third.fee_delta_sequence,
+        pool.fee_delta_sequence_number(),
+        "the rebuilt snapshot carries the current fee delta sequence"
+    );
+    pool.insert_entry(MempoolEntry::new(
+        Arc::new(tx(33, Vec::new())),
+        100,
+        3_000,
+        3,
+        7,
+        0,
+    ))?;
+    let fourth = pool.mining_snapshot_shared();
+    assert!(
+        !Arc::ptr_eq(&third, &fourth),
+        "an entry mutation invalidates the snapshot"
+    );
+    assert_eq!(
+        fourth.entries.len(),
+        3,
+        "the rebuilt snapshot holds every entry"
+    );
+    Ok(())
+}

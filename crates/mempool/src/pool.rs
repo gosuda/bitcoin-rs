@@ -122,6 +122,7 @@ pub struct Mempool {
     fee_delta_sequence: u64,
     estimator: FeeEstimator,
     mempool_sequence: u64,
+    snapshot_cache: parking_lot::Mutex<Option<Arc<MempoolMiningSnapshot>>>,
     pub(crate) accepted_capture: Option<Vec<(Txid, Arc<Tx>)>>,
     rolling_min_fee: parking_lot::Mutex<crate::rolling_min_fee::RollingMinFee>,
     rolling_epoch: u64,
@@ -472,6 +473,7 @@ impl Mempool {
             fee_delta_sequence: 0,
             estimator: FeeEstimator::new(),
             mempool_sequence: 0,
+            snapshot_cache: parking_lot::Mutex::new(None),
             accepted_capture: None,
             rolling_min_fee: parking_lot::Mutex::new(
                 crate::rolling_min_fee::RollingMinFee::default(),
@@ -1205,6 +1207,24 @@ impl Mempool {
 
     #[must_use]
     pub fn mining_snapshot(&self) -> MempoolMiningSnapshot {
+        self.mining_snapshot_shared().as_ref().clone()
+    }
+
+    #[must_use]
+    pub(crate) fn mining_snapshot_shared(&self) -> Arc<MempoolMiningSnapshot> {
+        let sequence = self.sequence_number();
+        let fee_delta_sequence = self.fee_delta_sequence;
+        if let Some(cached) = self.snapshot_cache.lock().as_ref() {
+            if cached.sequence == sequence && cached.fee_delta_sequence == fee_delta_sequence {
+                return Arc::clone(cached);
+            }
+        }
+        let snapshot = Arc::new(self.rebuild_mining_snapshot());
+        *self.snapshot_cache.lock() = Some(Arc::clone(&snapshot));
+        snapshot
+    }
+
+    fn rebuild_mining_snapshot(&self) -> MempoolMiningSnapshot {
         let order: Vec<EntryId> = self
             .derived
             .chunks
