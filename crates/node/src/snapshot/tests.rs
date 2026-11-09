@@ -115,7 +115,16 @@ fn core_headers() -> Result<Vec<bitcoin_rs_consensus::primitives::Header>, TestE
 }
 
 fn snapshot_inputs(dir: &Path) -> Result<(crate::state::NodeState, PathBuf, PathBuf), TestError> {
-    let state = crate::state::NodeState::open(node_config(dir), None)?;
+    snapshot_inputs_with(dir, |_| {})
+}
+
+fn snapshot_inputs_with(
+    dir: &Path,
+    configure: impl FnOnce(&mut crate::NodeConfig),
+) -> Result<(crate::state::NodeState, PathBuf, PathBuf), TestError> {
+    let mut config = node_config(dir);
+    configure(&mut config);
+    let state = crate::state::NodeState::open(config, None)?;
     state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         Network::Regtest.genesis_block(),
     ))?;
@@ -1140,6 +1149,47 @@ fn bad_index_artifact_keeps_the_coin_store_import() -> Result<(), TestError> {
     Ok(())
 }
 
+// SNP-10
+#[test]
+fn failed_txlookup_artifact_leaves_the_chainstate_open_and_serving() -> Result<(), TestError> {
+    let pinned = regtest_pin()?;
+    let dir = tempfile::tempdir()?;
+    let (state, core_path, _) = snapshot_inputs_with(dir.path(), |config| {
+        config.indexes.txindex = true;
+        config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
+    })?;
+    let core_bytes = std::fs::read(&core_path)?;
+    let manifest_path =
+        write_manifest_with_mismatched_index_artifact(dir.path(), pinned, &core_bytes)?;
+    let before = state.three_positions()?;
+
+    state.import_manifest(&manifest_path)?;
+
+    assert!(
+        !state.chainstate().is_closed_for_recovery(),
+        "a failed index artifact must not close the chainstate"
+    );
+    assert_eq!(
+        state.chainstates_summary()?.active_chainstate.height,
+        Some(pinned.height)
+    );
+    assert_eq!(
+        state
+            .chainstate()
+            .applied_tip_snapshot()
+            .map(|tip| tip.height),
+        Some(pinned.height),
+        "the chainstate keeps serving its applied tip"
+    );
+    let after = state.three_positions()?;
+    let script_live = bitcoin_rs_consensus::primitives::IndexArtifactCapability::ScriptLive.index();
+    assert_eq!(
+        after.projection_coverage[script_live], before.projection_coverage[script_live],
+        "the ScriptLive capability keeps its coverage when TxLookup fails"
+    );
+    Ok(())
+}
+
 // SNP-09
 #[test]
 fn three_positions_move_independently() -> Result<(), TestError> {
@@ -1240,6 +1290,7 @@ fn an_oversized_manifest_is_refused_before_activation() -> Result<(), TestError>
     Ok(())
 }
 
+// SNP-10
 #[test]
 fn manifest_utxo_digest_is_checked_in_the_ingest_pass() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
