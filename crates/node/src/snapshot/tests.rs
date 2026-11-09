@@ -646,6 +646,63 @@ fn wrong_commitment_changes_nothing_and_a_valid_retry_activates() -> Result<(), 
     Ok(())
 }
 
+// SNP-07
+#[test]
+fn truncated_snapshot_installs_no_coins_and_stays_uninitialized() -> Result<(), TestError> {
+    let dir = tempfile::tempdir()?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
+    let core_bytes = std::fs::read(&core_path)?;
+    let truncated_path = dir.path().join("truncated.dat");
+    std::fs::write(&truncated_path, &core_bytes[..core_bytes.len() / 2])?;
+    let before_tip = state.chainstate().applied_tip_snapshot();
+    let before_stats = state.chainstate().coin_stats_handle().snapshot();
+    assert!(matches!(
+        state.snapshots.import(&truncated_path),
+        Err(SnapshotImportError::Codec(SnapshotError::Truncated { .. }))
+    ));
+    assert_eq!(state.chainstate().applied_tip_snapshot(), before_tip);
+    assert_eq!(
+        state.chainstate().coin_stats_handle().snapshot(),
+        before_stats
+    );
+    assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
+    assert!(matches!(
+        state.snapshots.manager.status()?,
+        AssumeUtxoDiskStatus::Uninitialized
+    ));
+    assert!(!state.chainstate().is_closed_for_recovery());
+    Ok(())
+}
+
+// SNP-07
+#[test]
+fn trailing_snapshot_bytes_install_no_coins_and_stay_uninitialized() -> Result<(), TestError> {
+    let dir = tempfile::tempdir()?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
+    let mut trailing = std::fs::read(&core_path)?;
+    trailing.push(0);
+    let trailing_path = dir.path().join("trailing.dat");
+    std::fs::write(&trailing_path, &trailing)?;
+    let before_tip = state.chainstate().applied_tip_snapshot();
+    let before_stats = state.chainstate().coin_stats_handle().snapshot();
+    assert!(matches!(
+        state.snapshots.import(&trailing_path),
+        Err(SnapshotImportError::Codec(SnapshotError::TrailingBytes))
+    ));
+    assert_eq!(state.chainstate().applied_tip_snapshot(), before_tip);
+    assert_eq!(
+        state.chainstate().coin_stats_handle().snapshot(),
+        before_stats
+    );
+    assert_eq!(state.chainstate().role(), ChainstateRole::Ordinary);
+    assert!(matches!(
+        state.snapshots.manager.status()?,
+        AssumeUtxoDiskStatus::Uninitialized
+    ));
+    assert!(!state.chainstate().is_closed_for_recovery());
+    Ok(())
+}
+
 #[test]
 fn interrupted_activation_fails_closed_and_restart_retries_cleanly() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
