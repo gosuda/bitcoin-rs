@@ -9,10 +9,11 @@
 //! durability: a crash invalidates the whole build, and a fresh builder
 //! sweeps stale run files before its first spill.
 
+use std::collections::HashSet;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 #[cfg(test)]
 use bitcoin_rs_storage::budget::UnboundedBudget;
@@ -166,28 +167,49 @@ pub struct StreamingSegmentBuilder {
     prev_filter_header: [u8; 32],
     build_filter: bool,
     scratch_dir: PathBuf,
+    builder_serial: u64,
 }
 
 fn next_builder_serial() -> u64 {
     static SERIAL: AtomicU64 = AtomicU64::new(0);
-    SERIAL.fetch_add(1, Ordering::Relaxed)
+    let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut live) = LIVE_BUILDER_SERIALS.lock() {
+        live.insert(serial);
+    }
+    serial
 }
+
+static LIVE_BUILDER_SERIALS: LazyLock<Mutex<HashSet<u64>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 const RUN_FILE_PREFIX: &str = "segbuild-";
 const ROW_CHARGE_OVERHEAD: u64 = 64;
 
+fn serial_of_run_file(name: &str) -> Option<u64> {
+    let rest = name.strip_prefix(RUN_FILE_PREFIX)?;
+    let (serial, _) = rest.split_at_checked(16)?;
+    u64::from_str_radix(serial, 16).ok()
+}
+
 fn sweep_stale_runs(scratch_dir: &Path) {
+    let live = LIVE_BUILDER_SERIALS
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
     let Ok(entries) = std::fs::read_dir(scratch_dir) else {
         return;
     };
     for entry in entries.flatten() {
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(RUN_FILE_PREFIX)
-        {
-            let _unused = std::fs::remove_file(entry.path());
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(RUN_FILE_PREFIX) {
+            continue;
         }
+        if let Some(serial) = serial_of_run_file(&name) {
+            if live.contains(&serial) {
+                continue;
+            }
+        }
+        let _unused = std::fs::remove_file(entry.path());
     }
 }
 
@@ -236,6 +258,7 @@ impl StreamingSegmentBuilder {
             prev_filter_header: [0; 32],
             build_filter,
             scratch_dir,
+            builder_serial,
         }
     }
 
@@ -562,6 +585,9 @@ impl StreamingSegmentBuilder {
 impl Drop for StreamingSegmentBuilder {
     fn drop(&mut self) {
         self.release_all();
+        if let Ok(mut live) = LIVE_BUILDER_SERIALS.lock() {
+            live.remove(&self.builder_serial);
+        }
     }
 }
 

@@ -409,3 +409,31 @@ fn truncated_run_fails_finish_without_fake_key() -> Result<(), StreamError> {
     }
     Ok(())
 }
+
+// PRJ-09
+#[test]
+fn second_builder_keeps_first_builder_runs() -> Result<(), StreamError> {
+    let pool = Arc::new(PoolBudget::new(POOL_BYTES));
+    let scratch = tempfile::tempdir()?;
+    let builder = BulkSegmentBuilder::new(pool.clone(), None, scratch.path().to_path_buf());
+    let mut first = builder.stream(1);
+    for block in &synthetic_blocks(60) {
+        first.push_block(block)?;
+    }
+    assert!(
+        first.total_runs_spilled() > 0,
+        "tiny budget must spill sorted runs"
+    );
+    let before: Vec<PathBuf> = std::fs::read_dir(scratch.path())?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect();
+    assert!(!before.is_empty(), "spilled runs must exist on disk");
+    let _second = builder.stream(2);
+    for path in &before {
+        assert!(
+            path.exists(),
+            "a live builder run must survive a second builder"
+        );
+    }
+    Ok(())
+}
