@@ -428,3 +428,106 @@ fn corrupt_or_truncated_spending_row_key_fails_loudly() -> Result<(), TestError>
     );
     Ok(())
 }
+
+fn identity_height(height: u32) -> u32 {
+    height
+}
+
+fn history_height(encoded: u32) -> u32 {
+    !encoded
+}
+
+fn legacy_rows(
+    store: &MemoryStore,
+    cf: ColumnFamily,
+    prefix: &[u8],
+    decode: fn(u32) -> u32,
+) -> Result<Vec<(u32, Vec<u8>)>, TestError> {
+    let mut rows = Vec::new();
+    for entry in store.iter_prefix(cf, prefix)? {
+        let (key, value) = entry?;
+        assert_eq!(
+            key.len(),
+            prefix.len() + 4,
+            "legacy key carries a 4-byte height"
+        );
+        let p = prefix.len();
+        let raw = u32::from_be_bytes([key[p], key[p + 1], key[p + 2], key[p + 3]]);
+        rows.push((decode(raw), value));
+    }
+    rows.sort();
+    Ok(rows)
+}
+
+fn segment_rows(rows: Vec<bitcoin_rs_projection::TxIndexScanRow>) -> Vec<(u32, Vec<u8>)> {
+    let mut pairs: Vec<(u32, Vec<u8>)> = rows
+        .into_iter()
+        .map(|row| (row.row.height(), row.value))
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+// PRJ-06, PRJ-07
+#[test]
+fn segment_reads_match_legacy_family_rows() -> Result<(), TestError> {
+    let chain = build_chain();
+    let store = Arc::new(MemoryStore::default());
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    commit_chain(&mut writer, &chain)?;
+    let indexer = Indexer::new(Arc::clone(&store));
+    let snapshot = indexer.snapshot()?;
+
+    let mut funding_rows_seen = 0_usize;
+    for seed in 0..BLOCKS {
+        let scripthash = ScriptHash::from_script_bytes(&script_for(seed));
+        let legacy = legacy_rows(
+            store.as_ref(),
+            ColumnFamily::Funding,
+            &ScriptHashRow::scan_prefix(scripthash),
+            history_height,
+        )?;
+        let segment = segment_rows(snapshot.funding_rows(scripthash, SCAN_ALL)?.rows);
+        funding_rows_seen += segment.len();
+        assert_eq!(segment, legacy, "funding rows for script seed {seed}");
+    }
+    assert!(funding_rows_seen > 0, "the fixture produces funding rows");
+
+    let mut transaction_rows_seen = 0_usize;
+    for txid_bytes in &chain.coinbase_txids {
+        let txid = Txid(Hash256::from_le_bytes(txid_bytes));
+        let legacy = legacy_rows(
+            store.as_ref(),
+            ColumnFamily::TxConfirmed,
+            &txid_bytes[..8],
+            identity_height,
+        )?;
+        let segment = segment_rows(snapshot.transaction_rows(&txid, SCAN_ALL)?.rows);
+        transaction_rows_seen += segment.len();
+        assert_eq!(segment, legacy, "transaction rows for one coinbase");
+    }
+    assert!(
+        transaction_rows_seen > 0,
+        "the fixture confirms coinbase transactions"
+    );
+
+    let mut spending_rows_seen = 0_usize;
+    for txid_bytes in &chain.coinbase_txids {
+        let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(txid_bytes)), 0);
+        let prefix = SpendingPrefixRow::row(&outpoint, 0).prefix;
+        let legacy = legacy_rows(
+            store.as_ref(),
+            ColumnFamily::Spending,
+            &prefix,
+            identity_height,
+        )?;
+        let segment = segment_rows(snapshot.spending_rows(&outpoint, SCAN_ALL)?.rows);
+        spending_rows_seen += segment.len();
+        assert_eq!(segment, legacy, "spending rows for one coinbase output");
+    }
+    assert!(
+        spending_rows_seen > 0,
+        "the fixture spends coinbase outputs"
+    );
+    Ok(())
+}

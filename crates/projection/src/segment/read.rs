@@ -13,9 +13,10 @@ use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, PrefixScan, PrefixScanLimit, 
 use std::collections::{BTreeMap, VecDeque};
 use zerocopy::IntoBytes as _;
 
-// PRJ-07: bound on the rows one posting walk may read. Exceeding it refuses
-// the answer instead of truncating it.
-const POSTING_ROW_LIMIT: usize = 4_000_000;
+// PRJ-07
+const POSTING_CHUNK_LIMIT: usize = 256;
+const POSTING_BYTE_LIMIT: usize = 1024 * 1024;
+const RECORD_ROW_LIMIT: usize = 4_000_000;
 
 const TX_DIR_CHUNK_ROWS: usize = 1_024;
 
@@ -174,10 +175,8 @@ impl<'a> SegmentSnapshot<'a> {
         Ok(Self { kv, published })
     }
 
-    fn scopes(&self, capability: IndexCapability) -> Result<&[Scope], IndexError> {
-        self.published[capability.index()]
-            .as_deref()
-            .ok_or_else(|| unpublished(capability))
+    fn scopes(&self, capability: IndexCapability) -> &[Scope] {
+        self.published[capability.index()].as_deref().unwrap_or(&[])
     }
 
     fn scan(
@@ -212,7 +211,7 @@ impl<'a> SegmentSnapshot<'a> {
     ) -> Result<(Vec<(u32, TxPosition)>, bool), IndexError> {
         let mut rows = BTreeMap::new();
         let mut complete = true;
-        for &scope in self.scopes(IndexCapability::TxLookup)? {
+        for &scope in self.scopes(IndexCapability::TxLookup) {
             let mut prefix = scope.txid_prefix().to_vec();
             prefix.extend_from_slice(txid.as_bytes());
             let scan = self.scan(ColumnFamily::TxDir, &prefix, limit)?;
@@ -247,8 +246,8 @@ impl<'a> SegmentSnapshot<'a> {
         let mut prefix = scope.prefix().to_vec();
         prefix.extend_from_slice(&script_id.to_be_bytes());
         let limit = PrefixScanLimit {
-            max_rows: POSTING_ROW_LIMIT,
-            max_bytes: usize::MAX,
+            max_rows: POSTING_CHUNK_LIMIT,
+            max_bytes: POSTING_BYTE_LIMIT,
         };
         let scan = self.scan(ColumnFamily::ScriptPost, &prefix, limit)?;
         if !scan.complete {
@@ -293,7 +292,7 @@ impl<'a> SegmentSnapshot<'a> {
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError> {
         let mut occurrences = Vec::new();
-        for &scope in self.scopes(IndexCapability::ScriptHistory)? {
+        for &scope in self.scopes(IndexCapability::ScriptHistory) {
             occurrences.extend(self.script_occurrences(scope, scripthash)?);
         }
         occurrences.sort_by(|left, right| {
@@ -346,7 +345,7 @@ impl<'a> SegmentSnapshot<'a> {
         outpoint: &OutPoint,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError> {
-        let scopes = self.scopes(IndexCapability::ScriptHistory)?;
+        let scopes = self.scopes(IndexCapability::ScriptHistory);
         let mut creations = Vec::new();
         let mut complete = true;
         for &scope in scopes {
@@ -418,13 +417,6 @@ fn malformed(what: &'static str) -> IndexError {
     IndexError::Storage(StorageError::IncompatibleData(format!("malformed {what}")))
 }
 
-fn unpublished(capability: IndexCapability) -> IndexError {
-    IndexError::Storage(StorageError::IncompatibleData(format!(
-        "{} has no published descriptor",
-        capability.name()
-    )))
-}
-
 fn read_scopes(
     kv: &dyn KvSnapshot,
     capability: IndexCapability,
@@ -470,10 +462,7 @@ impl TxIndexSnapshot for SegmentSnapshot<'_> {
         height: u32,
         hash: &[u8; 32],
     ) -> Result<Option<BasicFilter>, IndexError> {
-        let scopes = self.published[IndexCapability::CompactFilters.index()]
-            .as_deref()
-            .unwrap_or(&[]);
-        for &scope in scopes {
+        for &scope in self.scopes(IndexCapability::CompactFilters) {
             if !scope.covers(height) {
                 continue;
             }
@@ -511,7 +500,7 @@ impl TxIndexSnapshot for SegmentSnapshot<'_> {
         start_after: Option<&[u8]>,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexPage, IndexError> {
-        let scopes = self.scopes(IndexCapability::TxLookup)?;
+        let scopes = self.scopes(IndexCapability::TxLookup);
         let start: &[u8] = match start_after {
             Some(cursor) => cursor
                 .get(..8)
@@ -668,7 +657,7 @@ pub(crate) struct RecordPage {
 
 fn record_limit() -> PrefixScanLimit {
     PrefixScanLimit {
-        max_rows: POSTING_ROW_LIMIT,
+        max_rows: RECORD_ROW_LIMIT,
         max_bytes: usize::MAX,
     }
 }
@@ -691,7 +680,7 @@ impl SegmentSnapshot<'_> {
         after: Option<&[u8]>,
         limit: PrefixScanLimit,
     ) -> Result<RecordPage, IndexError> {
-        let scopes = self.scopes(IndexCapability::ScriptHistory)?;
+        let scopes = self.scopes(IndexCapability::ScriptHistory);
         let mut start = [0_u8; 32];
         if let Some(after) = after {
             start[..8].copy_from_slice(&after[..8]);
@@ -750,7 +739,7 @@ impl SegmentSnapshot<'_> {
         after: Option<&[u8]>,
         limit: PrefixScanLimit,
     ) -> Result<RecordPage, IndexError> {
-        let scopes = self.scopes(IndexCapability::ScriptHistory)?;
+        let scopes = self.scopes(IndexCapability::ScriptHistory);
         let start: &[u8] = match after {
             Some(after) => after
                 .get(..32)
