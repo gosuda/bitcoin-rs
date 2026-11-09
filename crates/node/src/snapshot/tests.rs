@@ -141,7 +141,8 @@ fn snapshot_inputs(dir: &Path) -> Result<(crate::state::NodeState, PathBuf, Path
     Ok((state, core_path, native_path))
 }
 
-fn engine_coin_rows(state: &crate::state::NodeState) -> Result<Vec<(Vec<u8>, Vec<u8>)>, TestError> {
+type CoinRows = Vec<(Vec<u8>, Vec<u8>)>;
+fn engine_coin_rows(state: &crate::state::NodeState) -> Result<CoinRows, TestError> {
     let mut rows = Vec::new();
     for row in state
         .chainstate()
@@ -213,7 +214,7 @@ impl std::io::Seek for TamperOnRewind {
                 ));
             }
         }
-        Ok(u64::try_from(self.position).map_err(std::io::Error::other)?)
+        u64::try_from(self.position).map_err(std::io::Error::other)
     }
 }
 
