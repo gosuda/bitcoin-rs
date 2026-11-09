@@ -354,7 +354,7 @@ Index row values carry transaction byte positions without a block tag. The reade
 ## Storage
 
 ### UTXO snapshot read contract
-The node accepts only complete native version-4 snapshots: exact magic and version, validated v4 records, the declared record count, a 384-byte MuHash trailer, and end-of-file. Versions 2 and 3 fail startup with a remove-and-resync instruction; there is no legacy reader.
+Snapshot import accepts only complete Core version-2 files: the staged record stream must reproduce the compiled `hash_serialized` anchor. There is no native version-4 input path. Restart never reads a snapshot file: it resumes from the snapshot-base checkpoint published at activation, whose engine image, header tree, and coin statistics carry the base. A base without its checkpoint refuses to open.
 
 ### Deferred block-body index durability
 `KvStore::write_deferred` (`crates/storage/src/trait_.rs`) writes a batch without its own fsync and leaves durability to the next successful durable write or explicit flush on the same store. Block-body index rows use it because a lost row is rebuilt from the block file. Correctness rests on ordering: body bytes are durable before the index row pointing at them is published. Weaker durability is opt-in per call site, never backend-wide.
