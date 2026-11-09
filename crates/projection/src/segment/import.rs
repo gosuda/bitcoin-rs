@@ -308,8 +308,9 @@ pub(crate) fn next_segment_id<S: KvStore>(store: &S) -> Result<u64, IndexError> 
 }
 
 pub(crate) fn clear_unpublished_segment_rows<S: KvStore>(store: &S) -> Result<(), IndexError> {
-    let start = next_segment_id(store)?.to_be_bytes();
-    let end = [0xFF_u8; 8];
+    let pending = next_segment_id(store)?;
+    let start = pending.to_be_bytes();
+    let end = pending.saturating_add(1).to_be_bytes();
     let snapshot = store.snapshot()?;
     let mut staged = false;
     for cf in SEGMENT_FAMILIES {

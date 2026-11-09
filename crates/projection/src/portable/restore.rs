@@ -96,6 +96,7 @@ pub fn attach_tx_lookup_artifact(
     writer: &dyn TxIndexWriter,
     target: &ManifestArtifactTarget,
     headers: &[&[u8; crate::types::HEADER_ROW_SIZE]],
+
     scratch: &Path,
 ) -> Result<u64, IndexBundleError> {
     const NAME: &str = "txlookup.artifact";
@@ -520,7 +521,6 @@ fn read_record_bytes(
         }
     })
 }
-
 pub(crate) fn reset_interrupted_import(writer: &dyn TxIndexWriter) -> Result<(), IndexError> {
     let (_, watermarks) = writer.fenced_watermarks()?;
     if watermarks.tx_lookup.is_some() {

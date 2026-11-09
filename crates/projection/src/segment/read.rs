@@ -13,9 +13,6 @@ use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, PrefixScan, PrefixScanLimit, 
 use std::collections::{BTreeMap, VecDeque};
 use zerocopy::IntoBytes as _;
 
-// PRJ-07
-const POSTING_CHUNK_LIMIT: usize = 256;
-const POSTING_BYTE_LIMIT: usize = 1024 * 1024;
 const RECORD_ROW_LIMIT: usize = 4_000_000;
 
 const TX_DIR_CHUNK_ROWS: usize = 1_024;
@@ -231,33 +228,25 @@ impl<'a> SegmentSnapshot<'a> {
         Ok((rows.into_iter().collect(), complete))
     }
 
-    fn script_occurrences(
+    fn stream_script_occurrences(
         &self,
         scope: Scope,
         scripthash: ScriptHash,
-    ) -> Result<Vec<(u32, ScriptHistoryOccurrence)>, IndexError> {
+        start_height: Option<u32>,
+        window: &mut HistoryWindow,
+    ) -> Result<(), IndexError> {
         let dict_key =
             format::encode_script_dict_key(scope.segment_id(), &scripthash.to_byte_array());
         let Some(value) = self.kv.get(ColumnFamily::ScriptDict, &dict_key)? else {
-            return Ok(Vec::new());
+            return Ok(());
         };
         let script_id = format::decode_script_dict_value(&value)
             .ok_or_else(|| malformed("script_dict value"))?;
         let mut prefix = scope.prefix().to_vec();
         prefix.extend_from_slice(&script_id.to_be_bytes());
-        let limit = PrefixScanLimit {
-            max_rows: POSTING_CHUNK_LIMIT,
-            max_bytes: POSTING_BYTE_LIMIT,
-        };
-        let scan = self.scan(ColumnFamily::ScriptPost, &prefix, limit)?;
-        if !scan.complete {
-            return Err(IndexError::Storage(StorageError::IncompatibleData(
-                "script postings exceed the reader's resolution bound".into(),
-            )));
-        }
-        let mut occurrences = Vec::new();
         let mut ordinal = 0_u32;
-        for (_key, value) in scan.rows {
+        for entry in self.kv.iter_prefix(ColumnFamily::ScriptPost, &prefix)? {
+            let (_key, value) = entry?;
             let items = format::decode_posting_items(&value)
                 .ok_or_else(|| malformed("script_post value"))?;
             for item in items {
@@ -268,10 +257,10 @@ impl<'a> SegmentSnapshot<'a> {
                 let tx = self
                     .resolve_ordinal(scope, ordinal)?
                     .ok_or_else(|| malformed("script posting ordinal absent from tx directory"))?;
-                if !scope.covers(tx.height) {
+                if !scope.covers(tx.height) || start_height.is_some_and(|start| tx.height > start) {
                     continue;
                 }
-                occurrences.push((
+                window.push(
                     tx.height,
                     ScriptHistoryOccurrence {
                         scripthash,
@@ -279,10 +268,10 @@ impl<'a> SegmentSnapshot<'a> {
                         position: tx.position,
                         flags: item.flags,
                     },
-                ));
+                );
             }
         }
-        Ok(occurrences)
+        Ok(())
     }
 
     fn history_rows(
@@ -291,53 +280,11 @@ impl<'a> SegmentSnapshot<'a> {
         start_height: Option<u32>,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError> {
-        let mut occurrences = Vec::new();
+        let mut window = HistoryWindow::new(limit);
         for &scope in self.scopes(IndexCapability::ScriptHistory) {
-            occurrences.extend(self.script_occurrences(scope, scripthash)?);
+            self.stream_script_occurrences(scope, scripthash, start_height, &mut window)?;
         }
-        occurrences.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then_with(|| right.1.position.cmp(&left.1.position))
-                .then_with(|| right.1.txid.cmp(&left.1.txid))
-                .then_with(|| right.1.flags.cmp(&left.1.flags))
-        });
-
-        let mut rows: Vec<TxIndexScanRow> = Vec::new();
-        let mut bytes = 0_usize;
-        let mut complete = true;
-        let mut index = 0_usize;
-        while index < occurrences.len() {
-            let height = occurrences[index].0;
-            let mut group = Vec::new();
-            while index < occurrences.len() && occurrences[index].0 == height {
-                group.push(occurrences[index].1);
-                index += 1;
-            }
-            if start_height.is_some_and(|start| height > start) {
-                continue;
-            }
-            let row = HashPrefixRow {
-                prefix: ScriptHashRow::scan_prefix(scripthash),
-                height: crate::types::encode_height(height),
-            };
-            let value = ScriptHistoryOccurrence::encode_all(&group);
-            let row_bytes = row.as_bytes().len().saturating_add(value.len());
-            if rows.len() >= limit.max_rows
-                || (!rows.is_empty() && bytes.saturating_add(row_bytes) > limit.max_bytes)
-            {
-                complete = false;
-                break;
-            }
-            bytes = bytes.saturating_add(row_bytes);
-            rows.push(TxIndexScanRow { row, value });
-        }
-        Ok(TxIndexScan {
-            rows,
-            encoded_bytes: bytes,
-            complete,
-        })
+        Ok(window.finish(scripthash))
     }
 
     fn spending_rows_for(
@@ -454,6 +401,93 @@ fn read_scopes(
         });
     }
     Ok(Some(scopes))
+}
+
+struct HistoryWindow {
+    max_groups: usize,
+    max_bytes: usize,
+    groups: VecDeque<(u32, Vec<ScriptHistoryOccurrence>, usize)>,
+    current: Option<(u32, Vec<ScriptHistoryOccurrence>)>,
+    bytes: usize,
+    dropped: bool,
+}
+
+impl HistoryWindow {
+    fn new(limit: PrefixScanLimit) -> Self {
+        Self {
+            max_groups: limit.max_rows,
+            max_bytes: limit.max_bytes,
+            groups: VecDeque::new(),
+            current: None,
+            bytes: 0,
+            dropped: false,
+        }
+    }
+
+    fn push(&mut self, height: u32, occurrence: ScriptHistoryOccurrence) {
+        if let Some((current, group)) = self.current.as_mut() {
+            if *current == height {
+                group.push(occurrence);
+                return;
+            }
+        }
+        self.close_current();
+        self.current = Some((height, vec![occurrence]));
+    }
+
+    fn close_current(&mut self) {
+        let Some((height, mut group)) = self.current.take() else {
+            return;
+        };
+        group.sort_by(|left, right| {
+            right
+                .position
+                .cmp(&left.position)
+                .then_with(|| right.txid.cmp(&left.txid))
+                .then_with(|| right.flags.cmp(&left.flags))
+        });
+        let row_bytes = crate::HASH_PREFIX_ROW_SIZE
+            .saturating_add(ScriptHistoryOccurrence::encode_all(&group).len());
+        self.bytes = self.bytes.saturating_add(row_bytes);
+        self.groups.push_back((height, group, row_bytes));
+        while self.groups.len() > self.max_groups
+            || (self.bytes > self.max_bytes && self.groups.len() > 1)
+        {
+            if let Some((_, _, dropped_bytes)) = self.groups.pop_front() {
+                self.bytes = self.bytes.saturating_sub(dropped_bytes);
+            }
+            self.dropped = true;
+        }
+    }
+
+    fn into_groups(mut self) -> Vec<(u32, Vec<ScriptHistoryOccurrence>)> {
+        self.close_current();
+        self.groups
+            .into_iter()
+            .map(|(height, group, _)| (height, group))
+            .collect()
+    }
+
+    fn finish(mut self, scripthash: ScriptHash) -> TxIndexScan {
+        self.close_current();
+        let rows = self
+            .groups
+            .iter()
+            .rev()
+            .map(|(height, group, _)| TxIndexScanRow {
+                row: HashPrefixRow {
+                    prefix: ScriptHashRow::scan_prefix(scripthash),
+                    height: crate::types::encode_height(*height),
+                },
+                value: ScriptHistoryOccurrence::encode_all(group),
+            })
+            .collect();
+        TxIndexScan {
+            rows,
+            encoded_bytes: self.bytes,
+            complete: !self.dropped,
+        }
+    }
 }
 
 impl TxIndexSnapshot for SegmentSnapshot<'_> {
@@ -696,10 +730,15 @@ impl SegmentSnapshot<'_> {
             prefix.copy_from_slice(&first[..8]);
             let mut by_height: BTreeMap<u32, Vec<ScriptHistoryOccurrence>> = BTreeMap::new();
             for scripthash in self.scripts_with_prefix(scopes, prefix)? {
+                let mut window = HistoryWindow::new(PrefixScanLimit {
+                    max_rows: usize::MAX,
+                    max_bytes: usize::MAX,
+                });
                 for &scope in scopes {
-                    for (height, occurrence) in self.script_occurrences(scope, scripthash)? {
-                        by_height.entry(height).or_default().push(occurrence);
-                    }
+                    self.stream_script_occurrences(scope, scripthash, None, &mut window)?;
+                }
+                for (height, group) in window.into_groups() {
+                    by_height.entry(height).or_default().extend(group);
                 }
             }
             for (height, mut occurrences) in by_height.into_iter().rev() {

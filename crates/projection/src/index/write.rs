@@ -341,7 +341,8 @@ impl<S: KvStore> IndexWriter<S> {
             self.indexer.store.as_ref(),
             self.generation,
             capabilities.to_mask(),
-        )
+        )?;
+        crate::segment::import::clear_unpublished_segment_rows(self.indexer.store.as_ref())
     }
 
     pub(crate) fn anchor_watermark(
