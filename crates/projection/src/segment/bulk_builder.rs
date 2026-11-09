@@ -59,6 +59,7 @@ pub struct GenerationRows {
 }
 
 pub(super) type SegmentRows = Vec<(Vec<u8>, Vec<u8>)>;
+type MergedRow = (Vec<u8>, Vec<u8>);
 
 pub struct BulkSegmentBuilder {
     budget: Arc<dyn BudgetCharge>,
@@ -400,7 +401,11 @@ impl StreamingSegmentBuilder {
         ];
         for (sorter, cf) in families {
             let mut rows = sorter.sorted_into_rows()?;
-            store.ingest_sorted(cf, &mut rows, &self.scratch_dir)?;
+            let ingested = store.ingest_sorted(cf, &mut rows, &self.scratch_dir);
+            if let Some(error) = rows.take_error() {
+                return Err(error);
+            }
+            ingested?;
             sorter.release();
         }
         self.release_all();
@@ -455,9 +460,9 @@ impl StreamingSegmentBuilder {
             front: None,
         };
         directory.front = next_directory_row(&mut directory.rows)?;
-        let candidates = self.spend_candidates.sorted_rows()?;
+        let mut candidates = self.spend_candidates.sorted_rows()?;
         let mut resolved: Option<([u8; 32], u32)> = None;
-        for candidate in candidates {
+        while let Some(candidate) = candidates.try_next()? {
             let (spent_txid, vout, spending_ordinal) = decode_candidate(&candidate)?;
             let Some(creation) = resolve_creation(&mut directory, &mut resolved, spent_txid)?
             else {
@@ -475,10 +480,11 @@ impl StreamingSegmentBuilder {
     /// ids, and emits stats and size-chunked postings per script.
     fn emit_script_rows(&mut self) -> Result<(), BulkBuilderError> {
         self.occurrences.finalize()?;
+        let mut merged = self.occurrences.sorted_rows()?;
         let mut script_id: u32 = 0;
         let mut group: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let mut group_hash: Option<[u8; 32]> = None;
-        for row in self.occurrences.sorted_rows()? {
+        while let Some(row) = merged.try_next()? {
             let hash: [u8; 32] = row.0[..32]
                 .try_into()
                 .map_err(|_| BulkBuilderError::InvalidBlockSequence)?;
@@ -626,7 +632,7 @@ fn advance_directory_to(
 }
 
 fn next_directory_row(rows: &mut SortedRows) -> Result<Option<([u8; 32], u32)>, BulkBuilderError> {
-    for row in rows.by_ref() {
+    while let Some(row) = rows.try_next()? {
         let Some((_, txid, _)) = decode_tx_dir_key(&row.0) else {
             continue;
         };
@@ -809,7 +815,11 @@ impl SpillSorter {
     }
 
     fn collect_rows(&mut self) -> Result<SegmentRows, BulkBuilderError> {
-        let rows = self.sorted_into_rows()?.collect();
+        let mut merged = self.sorted_into_rows()?;
+        let mut rows = SegmentRows::new();
+        while let Some(row) = merged.try_next()? {
+            rows.push(row);
+        }
         self.release();
         Ok(rows)
     }
@@ -876,13 +886,15 @@ impl RunCursor {
 /// Ascending row stream over the spilled runs plus the sorted in-memory
 /// remainder (`PRJ-09` partitioned merge).
 ///
-/// A run read failure poisons the stream: the next yielded row carries a
-/// key above every valid generation prefix, so `ingest_sorted` rejects the
-/// sequence instead of silently truncating the family.
+/// Fallible merge: a run read failure is recorded and the infallible pull
+/// then yields one duplicate of the last row, so `ingest_sorted` sees keys
+/// that are not strictly ascending, discards its scratch output, and commits
+/// nothing; `take_error` reports the typed failure instead of the fake row.
 struct SortedRows {
     runs: Vec<RunCursor>,
     buffer: std::vec::IntoIter<(Vec<u8>, Vec<u8>)>,
-    poisoned: bool,
+    poison: Option<Vec<u8>>,
+    error: Option<BulkBuilderError>,
 }
 
 impl SortedRows {
@@ -894,7 +906,8 @@ impl SortedRows {
         Ok(Self {
             runs: cursors,
             buffer: buffer.into_iter(),
-            poisoned: false,
+            poison: None,
+            error: None,
         })
     }
 
@@ -914,25 +927,46 @@ impl SortedRows {
         }
         min.map(|(_, source)| source)
     }
+
+    fn try_next(&mut self) -> Result<Option<MergedRow>, BulkBuilderError> {
+        if let Some(error) = self.error.take() {
+            return Err(error);
+        }
+        let Some(source) = self.peek_min() else {
+            return Ok(None);
+        };
+        if source == usize::MAX {
+            return Ok(self.buffer.next());
+        }
+        let Some((key, value)) = self.runs[source].current.take() else {
+            return Ok(None);
+        };
+        if let Err(error) = self.runs[source].advance() {
+            self.poison = Some(key.clone());
+            self.error = Some(error);
+        }
+        Ok(Some((key, value)))
+    }
+
+    fn take_error(&mut self) -> Option<BulkBuilderError> {
+        self.error.take()
+    }
 }
 
 impl Iterator for SortedRows {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.poisoned {
-            self.poisoned = false;
-            return Some((u64::MAX.to_be_bytes().to_vec(), Vec::new()));
+        if let Some(key) = self.poison.take() {
+            return Some((key, Vec::new()));
         }
-        let source = self.peek_min()?;
-        if source == usize::MAX {
-            return self.buffer.next();
+        match self.try_next() {
+            Ok(row) => row,
+            Err(error) => {
+                self.error = Some(error);
+                self.poison.take().map(|key| (key, Vec::new()))
+            }
         }
-        let row = self.runs[source].current.take()?;
-        if self.runs[source].advance().is_err() {
-            self.poisoned = true;
-        }
-        Some(row)
     }
 }
 

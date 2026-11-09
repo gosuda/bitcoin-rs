@@ -313,3 +313,99 @@ fn disabled_filters_skip_bulk_filter_build() {
         assert!(!filter.is_empty());
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+enum StreamError {
+    #[error(transparent)]
+    Build(#[from] BulkBuilderError),
+    #[error(transparent)]
+    Storage(#[from] bitcoin_rs_storage::StorageError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("test scratch has no multi-row spill run")]
+    NoMultiRowRun,
+}
+
+fn spill_row_count(bytes: &[u8]) -> Option<usize> {
+    let mut count = 0usize;
+    let mut at = 0usize;
+    while at < bytes.len() {
+        let key_len =
+            usize::try_from(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?)).ok()?;
+        let value_len = usize::try_from(u32::from_le_bytes(
+            bytes.get(at + 4..at + 8)?.try_into().ok()?,
+        ))
+        .ok()?;
+        at = at
+            .checked_add(8)?
+            .checked_add(key_len)?
+            .checked_add(value_len)?;
+        if at > bytes.len() {
+            return None;
+        }
+        count = count.saturating_add(1);
+    }
+    (at == bytes.len()).then_some(count)
+}
+
+// PRJ-09
+#[test]
+fn truncated_run_fails_finish_without_fake_key() -> Result<(), StreamError> {
+    let pool = Arc::new(PoolBudget::new(POOL_BYTES));
+    let scratch = tempfile::tempdir()?;
+    let dir = tempfile::tempdir()?;
+    let store = RocksDbStore::open(dir.path())?;
+    let builder = BulkSegmentBuilder::new(pool.clone(), None, scratch.path().to_path_buf());
+    let mut stream = builder.stream(1);
+    for block in &synthetic_blocks(60) {
+        stream.push_block(block)?;
+    }
+    let mut runs: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(scratch.path())? {
+        runs.push(entry?.path());
+    }
+    runs.sort();
+    let mut victim: Option<PathBuf> = None;
+    for path in &runs {
+        let bytes = std::fs::read(path)?;
+        if spill_row_count(&bytes).is_some_and(|count| count > 1) {
+            victim = Some(path.clone());
+            break;
+        }
+    }
+    let Some(victim) = victim else {
+        return Err(StreamError::NoMultiRowRun);
+    };
+    let len = std::fs::metadata(&victim)?.len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&victim)?
+        .set_len(len - 1)?;
+    match stream.finish(&store) {
+        Ok(_) => panic!("finish must fail over a run file truncated mid-row"),
+        Err(error) => assert!(
+            matches!(error, BulkBuilderError::Io(_)),
+            "truncation must surface as a typed io failure, got {error:?}"
+        ),
+    }
+    let snapshot = store.snapshot()?;
+    let families = [
+        ColumnFamily::TxDir,
+        ColumnFamily::ScriptDict,
+        ColumnFamily::ScriptPost,
+        ColumnFamily::SpendDir,
+        ColumnFamily::ScriptStats,
+        ColumnFamily::Filters,
+    ];
+    for cf in families {
+        let rows = snapshot.iter_prefix(cf, &[])?;
+        for row in rows.flatten() {
+            assert_ne!(
+                &row.0[..],
+                &[0xFFu8; 8][..],
+                "a truncated run must not ingest a fake key"
+            );
+        }
+    }
+    Ok(())
+}
