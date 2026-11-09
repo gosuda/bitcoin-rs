@@ -181,6 +181,15 @@ pub(super) fn pending_rows_for_image(
     Ok(rows)
 }
 
+// PRJ-03
+pub(super) fn tail_needs_filter(capabilities: IndexCapabilities) -> bool {
+    capabilities.contains(IndexCapability::CompactFilters)
+}
+// PRJ-03
+pub(super) fn tail_needs_script_hashes(capabilities: IndexCapabilities) -> bool {
+    capabilities.contains(IndexCapability::ScriptHistory)
+}
+
 struct LiveCreation {
     txid: [u8; 32],
     vout: u32,

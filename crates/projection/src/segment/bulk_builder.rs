@@ -27,6 +27,11 @@ use sha2::{Digest, Sha256};
 use super::Coverage;
 use super::format::*;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BULK_FILTER_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BulkBuilderError {
     #[error("storage error: {0}")]
@@ -59,6 +64,7 @@ pub struct BulkSegmentBuilder {
     budget: Arc<dyn BudgetCharge>,
     cpu: Option<Arc<CpuShares>>,
     scratch_dir: PathBuf,
+    build_filter: bool,
 }
 
 impl BulkSegmentBuilder {
@@ -72,7 +78,23 @@ impl BulkSegmentBuilder {
             budget,
             cpu,
             scratch_dir,
+            build_filter: true,
         }
+    }
+
+    #[must_use]
+    pub fn with_filter(self) -> Self {
+        self.set_build_filter(true)
+    }
+
+    #[must_use]
+    pub fn without_filter(self) -> Self {
+        self.set_build_filter(false)
+    }
+
+    fn set_build_filter(mut self, build: bool) -> Self {
+        self.build_filter = build;
+        self
     }
 
     /// In-memory reference build: materializes every row and is meant for
@@ -116,6 +138,7 @@ impl BulkSegmentBuilder {
             Arc::clone(&self.budget),
             permit,
             self.scratch_dir.clone(),
+            self.build_filter,
         )
     }
 }
@@ -140,6 +163,7 @@ pub struct StreamingSegmentBuilder {
     ordinal: u32,
     occurrence_seq: u32,
     prev_filter_header: [u8; 32],
+    build_filter: bool,
     scratch_dir: PathBuf,
 }
 
@@ -172,6 +196,7 @@ impl StreamingSegmentBuilder {
         budget: Arc<dyn BudgetCharge>,
         permit: Option<BackgroundCpuPermit>,
         scratch_dir: PathBuf,
+        build_filter: bool,
     ) -> Self {
         let builder_serial = next_builder_serial();
         sweep_stale_runs(&scratch_dir);
@@ -208,6 +233,7 @@ impl StreamingSegmentBuilder {
             ordinal: 0,
             occurrence_seq: 0,
             prev_filter_header: [0; 32],
+            build_filter,
             scratch_dir,
         }
     }
@@ -243,11 +269,13 @@ impl StreamingSegmentBuilder {
             self.push_outputs(ordinal, &tx.outputs)?;
         }
 
-        let (filter, filter_hash, header) = self.build_block_filter(block);
-        self.prev_filter_header = header;
-        let filter_key = encode_filter_key(self.gen_id, block.height);
-        let filter_val = encode_filter_value(&block.hash, &filter_hash, &header, &filter);
-        self.filters.push_row(filter_key.to_vec(), filter_val)?;
+        if self.build_filter {
+            let (filter, filter_hash, header) = self.build_block_filter(block);
+            self.prev_filter_header = header;
+            let filter_key = encode_filter_key(self.gen_id, block.height);
+            let filter_val = encode_filter_value(&block.hash, &filter_hash, &header, &filter);
+            self.filters.push_row(filter_key.to_vec(), filter_val)?;
+        }
 
         self.last_height = block.height;
         self.last_hash = block.hash;
@@ -306,6 +334,9 @@ impl StreamingSegmentBuilder {
     }
 
     fn build_block_filter(&self, block: &CommittedBlock) -> (Vec<u8>, [u8; 32], [u8; 32]) {
+        #[cfg(test)]
+        BULK_FILTER_BUILDS.with(|builds| builds.set(builds.get() + 1));
+
         use bitcoin_rs_consensus::primitives::encode;
 
         let mut k0_bytes = [0u8; 8];
@@ -339,14 +370,18 @@ impl StreamingSegmentBuilder {
                 }
             }
         }
-
         let _ = writer.finish();
         let filter_hash = encode::double_sha256(&filter).to_le_bytes();
-        let mut header_input = [0u8; 64];
-        header_input[..32].copy_from_slice(&filter_hash);
-        header_input[32..].copy_from_slice(&self.prev_filter_header);
-        let header = encode::double_sha256(&header_input).to_le_bytes();
+        let header = self.filter_header(&filter_hash);
         (filter, filter_hash, header)
+    }
+
+    fn filter_header(&self, filter_hash: &[u8; 32]) -> [u8; 32] {
+        use bitcoin_rs_consensus::primitives::encode;
+        let mut header_input = [0u8; 64];
+        header_input[..32].copy_from_slice(filter_hash);
+        header_input[32..].copy_from_slice(&self.prev_filter_header);
+        encode::double_sha256(&header_input).to_le_bytes()
     }
 
     // PRJ-09

@@ -281,3 +281,35 @@ fn run_build(budget: PoolBudget, blocks: &[CommittedBlock]) -> BuildOutcome {
         retained_max,
     }
 }
+
+// PRJ-03
+#[test]
+fn disabled_filters_skip_bulk_filter_build() {
+    let blocks = synthetic_blocks(3);
+    BULK_FILTER_BUILDS.with(|builds| builds.set(0));
+    let scratch = tempfile::tempdir().unwrap();
+    let rows = BulkSegmentBuilder::new(
+        Arc::new(UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    )
+    .without_filter()
+    .build_generation_rows(1, &blocks)
+    .unwrap();
+    assert_eq!(BULK_FILTER_BUILDS.with(std::cell::Cell::get), 0);
+    assert_eq!(rows.filters.len(), 0);
+    BULK_FILTER_BUILDS.with(|builds| builds.set(0));
+    let scratch = tempfile::tempdir().unwrap();
+    let rows = BulkSegmentBuilder::new(
+        Arc::new(UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    )
+    .build_generation_rows(1, &blocks)
+    .unwrap();
+    assert_eq!(BULK_FILTER_BUILDS.with(std::cell::Cell::get), blocks.len());
+    for (_, value) in &rows.filters {
+        let (_, _, _, filter) = crate::segment::format::decode_filter_value(value).unwrap();
+        assert!(!filter.is_empty());
+    }
+}

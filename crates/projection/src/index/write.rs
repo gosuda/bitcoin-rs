@@ -2,15 +2,15 @@ use super::tail_writes::planned_tail_bytes;
 use super::{
     block::BodyFacts, block::NoSpentScripts, block::SpentCoins, block::committed_block_from_image,
     block::parse_body, block::pending_rows_for_facts, block::pending_rows_for_image,
-    capability::IndexCapabilities, capability::IndexCapability, capability::IndexWatermark,
-    capability::IndexWatermarks, capability::SCRIPT_LIVE_WATERMARK_KEY,
-    capability::put_selected_watermarks, error::IndexError, prepared::PreparedBatch,
-    prepared::PreparedBatchLimits, prepared::PreparedBlock, reader::Indexer, rows::IndexRowBytes,
-    rows::PendingRows, rows::delete_rows, rows::delete_rows_with_headers, rows::put_rows,
-    state::CONSUMER_CURSOR_KEY, state::ConsumerCursorUpdate, state::FORMAT_VERSION_KEY,
-    state::FORMAT_VERSION_VALUE, state::IndexWriteFence, state::ORDINARY_STATE_REVISION_KEY,
-    state::capture_write_fence, state::commit_ordinary, state::ensure_fence_live,
-    state::resume_capability_reset,
+    block::tail_needs_filter, block::tail_needs_script_hashes, capability::IndexCapabilities,
+    capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,
+    capability::SCRIPT_LIVE_WATERMARK_KEY, capability::put_selected_watermarks, error::IndexError,
+    prepared::PreparedBatch, prepared::PreparedBatchLimits, prepared::PreparedBlock,
+    reader::Indexer, rows::IndexRowBytes, rows::PendingRows, rows::delete_rows,
+    rows::delete_rows_with_headers, rows::put_rows, state::CONSUMER_CURSOR_KEY,
+    state::ConsumerCursorUpdate, state::FORMAT_VERSION_KEY, state::FORMAT_VERSION_VALUE,
+    state::IndexWriteFence, state::ORDINARY_STATE_REVISION_KEY, state::capture_write_fence,
+    state::commit_ordinary, state::ensure_fence_live, state::resume_capability_reset,
 };
 use crate::segment::tail::{PreparedTail, TailWriterState};
 use bitcoin_rs_consensus::primitives::{OutPoint, encode};
@@ -536,7 +536,12 @@ impl<S: KvStore> IndexWriter<S> {
                 spent_coins: spent_scripts,
             },
         )?);
-        let tail = PreparedTail::new(&committed);
+
+        let tail = PreparedTail::new_gated(
+            &committed,
+            tail_needs_filter(capabilities),
+            tail_needs_script_hashes(capabilities),
+        );
         let family_bytes = rows
             .encoded_bytes_by_family()?
             .checked_add(&planned_tail_bytes(&committed, &tail)?)?;
@@ -568,7 +573,12 @@ impl<S: KvStore> IndexWriter<S> {
         let mut rows = pending_rows_for_facts(block, capabilities)?;
         rows.sort();
         let row_count = rows.total();
-        let tail = PreparedTail::new(block);
+
+        let tail = PreparedTail::new_gated(
+            block,
+            tail_needs_filter(capabilities),
+            tail_needs_script_hashes(capabilities),
+        );
         let family_bytes = rows
             .encoded_bytes_by_family()?
             .checked_add(&planned_tail_bytes(block, &tail)?)?;

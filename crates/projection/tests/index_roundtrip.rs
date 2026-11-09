@@ -2792,6 +2792,7 @@ fn second_writer_contention_rejects_a_stale_fence() -> Result<(), TestError> {
         let (loser_fence, _) = loser.fenced_watermarks()?;
         let mut rows_after_winner = Vec::new();
 
+        let postings_before_winner = store.count(ColumnFamily::ScriptPost);
         let result = if rollback {
             let body = read_fixture(0)?;
             winner.commit_rollback_one_for_with_cursor(
@@ -2874,8 +2875,8 @@ fn second_writer_contention_rejects_a_stale_fence() -> Result<(), TestError> {
             );
             assert_eq!(
                 store.count(ColumnFamily::ScriptPost),
-                2,
-                "seed and winner postings"
+                postings_before_winner,
+                "a TxLookup-only commit writes no postings"
             );
             assert_eq!(store.rows(ColumnFamily::TxDir), rows_after_winner);
             assert_eq!(

@@ -344,15 +344,24 @@ pub fn block_tail_bytes_bound(block: &CommittedBlock) -> u64 {
 /// builds them once; the tail append consumes them, so no path builds a
 /// block's filter or hashes its scripts twice.
 pub(crate) struct PreparedTail {
-    filter_bytes: Vec<u8>,
-    filter_hash: [u8; 32],
-    inputs: Vec<Vec<Option<[u8; 32]>>>,
-    outputs: Vec<Vec<Option<[u8; 32]>>>,
+    pub(crate) has_filter: bool,
+    pub(crate) filter_bytes: Vec<u8>,
+    pub(crate) filter_hash: [u8; 32],
+    pub(crate) inputs: Vec<Vec<Option<[u8; 32]>>>,
+    pub(crate) outputs: Vec<Vec<Option<[u8; 32]>>>,
 }
 
 impl PreparedTail {
-    pub(crate) fn new(block: &CommittedBlock) -> Self {
-        let (filter_bytes, filter_hash) = build_filter(block);
+    pub(crate) fn new_gated(
+        block: &CommittedBlock,
+        needs_filter: bool,
+        needs_hashes: bool,
+    ) -> Self {
+        let (filter_bytes, filter_hash) = if needs_filter {
+            build_filter(block)
+        } else {
+            Default::default()
+        };
         let inputs = block
             .txs
             .iter()
@@ -360,8 +369,10 @@ impl PreparedTail {
                 tx.inputs
                     .iter()
                     .map(|input| {
-                        (!is_coinbase_marker(&input.txid, input.vout) && !input.script.is_empty())
-                            .then(|| script_hash(&input.script))
+                        (needs_hashes
+                            && !is_coinbase_marker(&input.txid, input.vout)
+                            && !input.script.is_empty())
+                        .then(|| script_hash(&input.script))
                     })
                     .collect()
             })
@@ -373,13 +384,14 @@ impl PreparedTail {
                 tx.outputs
                     .iter()
                     .map(|output| {
-                        (!output.script.is_empty() && output.script[0] != 0x6a)
+                        (needs_hashes && !output.script.is_empty() && output.script[0] != 0x6a)
                             .then(|| script_hash(&output.script))
                     })
                     .collect()
             })
             .collect();
         Self {
+            has_filter: needs_filter,
             filter_bytes,
             filter_hash,
             inputs,
@@ -389,6 +401,8 @@ impl PreparedTail {
 }
 
 fn script_hash(script: &[u8]) -> [u8; 32] {
+    #[cfg(test)]
+    SCRIPT_HASH_BUILDS.with(|builds| builds.set(builds.get() + 1));
     sha2::Sha256::digest(script).into()
 }
 
@@ -398,8 +412,9 @@ fn is_coinbase_marker(txid: &[u8; 32], vout: u32) -> bool {
 
 #[cfg(test)]
 thread_local! {
-    /// Filter builds on this thread; the live-path test counts them.
     pub(crate) static FILTER_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static SCRIPT_HASH_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static TX_BLOCK_HASH_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Appends one committed block to the tail (PRJ-05). Rows, the undo log, and
@@ -410,7 +425,7 @@ pub fn append_tail_block(
     state: &mut TailWriterState,
     older: &dyn CreationOrdinals,
 ) -> Result<(), IndexError> {
-    let prepared = PreparedTail::new(block);
+    let prepared = PreparedTail::new_gated(block, true, true);
     append_prepared_tail_block(batch, block, &prepared, state, older)
 }
 
@@ -456,7 +471,9 @@ pub(crate) fn append_prepared_tail_block(
         };
         append_outputs(&mut rec, funding, state);
     }
-    append_filter(&mut rec, block, prepared, state);
+    if prepared.has_filter {
+        append_filter(&mut rec, block, prepared, state);
+    }
 
     let block_bytes = rec.bytes;
     let log = std::mem::take(&mut rec.log);
@@ -825,6 +842,7 @@ pub(crate) fn plan_prefix_cut(
     let mut rows = Vec::new();
     let mut prefix_stats: hashbrown::HashMap<u32, ScriptStats> = hashbrown::HashMap::new();
     let mut next_ordinal = 0_u32;
+    let mut cut_hash = None;
     for (height, value) in &logs {
         if *height == cut {
             next_ordinal = read_u32_le(value, 0);
@@ -840,6 +858,16 @@ pub(crate) fn plan_prefix_cut(
                     let row = snapshot
                         .get(family.column_family(), &key)?
                         .ok_or(IndexError::CorruptTailLog { height: *height })?;
+                    if family == Family::TxDir && cut_hash.is_none() {
+                        if let (Some((_, _, key_height)), Some((block_hash, _, _, _))) = (
+                            format::decode_tx_dir_key(&key),
+                            format::decode_tx_dir_value(&row),
+                        ) {
+                            if key_height == cut {
+                                cut_hash = Some(block_hash);
+                            }
+                        }
+                    }
                     rows.push((family, key, row));
                 }
                 LogOp::Stats {
@@ -850,9 +878,12 @@ pub(crate) fn plan_prefix_cut(
             }
         }
     }
-
-    let cut_hash =
-        filter_block_hash(snapshot, 0, cut)?.ok_or(IndexError::CorruptTailLog { height: cut })?;
+    let cut_hash = match cut_hash {
+        Some(hash) => hash,
+        None => {
+            tx_block_hash(snapshot, 0, cut)?.ok_or(IndexError::CorruptTailLog { height: cut })?
+        }
+    };
 
     let mut script_hashes: hashbrown::HashMap<u32, [u8; 32]> = hashbrown::HashMap::new();
     if !prefix_stats.is_empty() {
@@ -887,7 +918,11 @@ pub(crate) fn plan_prefix_cut(
 
     let tip = tip_height.ok_or(IndexError::CorruptTailLog { height: cut })?;
     let tail_first = (tip > cut).then(|| cut.saturating_add(1));
-    let tail_at = filter_block_hash(snapshot, 0, tip)?.map(|hash| (tip, hash));
+    let tail_at = if tip == cut {
+        Some((tip, cut_hash))
+    } else {
+        tx_block_hash(snapshot, 0, tip)?.map(|hash| (tip, hash))
+    };
     let log_keys = logs.iter().map(|(height, _)| log_key(*height)).collect();
 
     Ok(PrefixCut {
@@ -975,14 +1010,19 @@ pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
 
     let gen0 = 0u64.to_be_bytes();
     let txid_gen0 = format::tx_dir_kind_prefix(0, format::TX_KIND_TXID);
+    let tip_height = state.window.back().map(|block| block.height);
+    let mut tip_hash = None;
     for item in snapshot.iter_prefix(ColumnFamily::TxDir, &txid_gen0)? {
         let (key, value) = item?;
-        let (Some((_, txid, _)), Some((_, ordinal, _, _))) = (
+        let (Some((_, txid, key_height)), Some((block_hash, ordinal, _, _))) = (
             format::decode_tx_dir_key(&key),
             format::decode_tx_dir_value(&value),
         ) else {
             continue;
         };
+        if Some(key_height) == tip_height {
+            tip_hash = Some(block_hash);
+        }
         state.txid_to_ordinal.insert(txid, ordinal);
     }
     for item in snapshot.iter_prefix(ColumnFamily::ScriptDict, &gen0)? {
@@ -1016,7 +1056,10 @@ pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
         Some((height, value)) => {
             state.next_ordinal = read_u32_le(&value, 0);
             state.prev_filter_header = read_hash(&value, 4);
-            state.at = filter_block_hash(snapshot, 0, height)?.map(|hash| (height, hash));
+            state.at = match tip_hash {
+                Some(hash) => Some((height, hash)),
+                None => tx_block_hash(snapshot, 0, height)?.map(|hash| (height, hash)),
+            };
         }
         None => {
             if let Some(newest) = state.newest() {
@@ -1052,16 +1095,27 @@ fn read_hash(bytes: &[u8], at: usize) -> [u8; 32] {
     out
 }
 
-fn filter_block_hash(
+fn tx_block_hash(
     snapshot: &dyn KvSnapshot,
     gen_id: u64,
     height: u32,
 ) -> Result<Option<[u8; 32]>, IndexError> {
-    let key = format::encode_filter_key(gen_id, height);
-    let Some(value) = snapshot.get(ColumnFamily::Filters, &key)? else {
-        return Ok(None);
-    };
-    Ok(format::decode_filter_value(&value).map(|(hash, _, _, _)| hash))
+    #[cfg(test)]
+    TX_BLOCK_HASH_SCANS.with(|scans| scans.set(scans.get() + 1));
+    let prefix = format::tx_dir_kind_prefix(gen_id, format::TX_KIND_TXID);
+    for item in snapshot.iter_prefix(ColumnFamily::TxDir, &prefix)? {
+        let (key, value) = item?;
+        let Some((_, _, key_height)) = format::decode_tx_dir_key(&key) else {
+            continue;
+        };
+        if key_height != height {
+            continue;
+        }
+        if let Some((block_hash, _, _, _)) = format::decode_tx_dir_value(&value) {
+            return Ok(Some(block_hash));
+        }
+    }
+    Ok(None)
 }
 
 fn filter_header(

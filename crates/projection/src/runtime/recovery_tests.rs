@@ -1654,7 +1654,8 @@ fn assert_sealed_matches_bulk(store: &RocksDbStore, f: &ForkFixture, branch: &[(
         Arc::new(bitcoin_rs_storage::budget::UnboundedBudget),
         None,
         scratch.path().to_path_buf(),
-    );
+    )
+    .without_filter();
     let bulk_builder_coverage = builder
         .build_and_ingest(&bulk_store, segment.gen_id, &blocks)
         .expect("bulk build");

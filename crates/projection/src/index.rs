@@ -32,4 +32,6 @@ pub(crate) use write::{rollback_prepare_capabilities, tail_rollback_group};
 #[cfg(test)]
 mod filter_build_tests;
 #[cfg(test)]
+mod tail_gate_tests;
+#[cfg(test)]
 mod tests;
