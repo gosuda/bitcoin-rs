@@ -465,7 +465,7 @@ fn nonempty_mempool_refuses_both_formats_without_changing_state() -> Result<(), 
         assert_eq!(std::fs::read(&core_path)?, core_bytes);
         assert_eq!(std::fs::read(&native_path)?, native_bytes);
     }
-    gateway.clear(AdmissionOrigin::Rpc);
+    gateway.clear(AdmissionOrigin::Rpc)?;
     state.snapshots.import(&core_path)?;
     assert_eq!(
         state

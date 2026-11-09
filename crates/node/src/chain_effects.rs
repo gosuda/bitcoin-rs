@@ -23,6 +23,12 @@ pub enum ConnectMutationError {
         #[source]
         source: bitcoin_rs_execution::ApplyError,
     },
+    #[error("authoritative connect committed, but mempool settlement was refused: {source}")]
+    CommittedButMempoolSettlementRefused {
+        outcome: Box<ConnectOutcome>,
+        #[source]
+        source: bitcoin_rs_mempool::MempoolError,
+    },
 }
 #[derive(Clone, Debug)]
 pub struct EpochCell {
@@ -191,7 +197,8 @@ impl ChainFollowers {
                 gateway.begin_chain_change().map_err(|error| match error {
                     bitcoin_rs_mempool::ChainChangeError::AlreadyActive
                     | bitcoin_rs_mempool::ChainChangeError::GenerationMoved
-                    | bitcoin_rs_mempool::ChainChangeError::ForeignGuard => {
+                    | bitcoin_rs_mempool::ChainChangeError::ForeignGuard
+                    | bitcoin_rs_mempool::ChainChangeError::DeliveryQueueFull => {
                         bitcoin_rs_execution::ApplyError::ConcurrentChainChange
                     }
                     bitcoin_rs_mempool::ChainChangeError::Overflow => {
@@ -217,7 +224,11 @@ impl ChainFollowers {
         Ok(())
     }
 
-    pub(crate) fn on_connect(&self, payload: &BlockImage, outcome: &ConnectOutcome) {
+    pub(crate) fn on_connect(
+        &self,
+        payload: &BlockImage,
+        outcome: &ConnectOutcome,
+    ) -> Result<(), bitcoin_rs_mempool::MempoolError> {
         let on_connect_started = quanta::Instant::now();
         let block_removals = if let Some(gateway) = &self.mempool {
             let facts = match &outcome.committed_facts {
@@ -230,7 +241,7 @@ impl ChainFollowers {
                 outcome.commit_id,
                 outcome.height,
                 bitcoin_rs_consensus::primitives::unix_time_secs(),
-            )
+            )?
         } else {
             MutationResult::empty()
         };
@@ -263,6 +274,7 @@ impl ChainFollowers {
             on_connect_us = on_connect_started.elapsed().as_micros(),
             "chain_effects: on_connect profile"
         );
+        Ok(())
     }
 
     pub(crate) fn on_disconnect(&self, outcome: &DisconnectOutcome) {
@@ -349,13 +361,29 @@ impl ChainFollowers {
     ) -> core::result::Result<ConnectOutcome, ConnectMutationError> {
         match transition.connect(payload) {
             Ok(outcome) => {
-                self.on_connect(payload, &outcome);
-                match Self::finish_transition(handles, transition, mempool_change) {
-                    Ok(()) => Ok(outcome),
-                    Err(source) => Err(ConnectMutationError::CommittedButSettlementFailed {
-                        outcome: Box::new(outcome),
-                        source,
-                    }),
+                let settled = self.on_connect(payload, &outcome);
+                let finished = Self::finish_transition(handles, transition, mempool_change);
+                match (settled, finished) {
+                    (Ok(()), Ok(())) => Ok(outcome),
+                    (Ok(()), Err(source)) => {
+                        Err(ConnectMutationError::CommittedButSettlementFailed {
+                            outcome: Box::new(outcome),
+                            source,
+                        })
+                    }
+                    (Err(source), finished) => {
+                        if let Err(finish) = finished {
+                            tracing::error!(
+                                %source,
+                                finish = %finish,
+                                "durable receipt failed after refused mempool settlement"
+                            );
+                        }
+                        Err(ConnectMutationError::CommittedButMempoolSettlementRefused {
+                            outcome: Box::new(outcome),
+                            source,
+                        })
+                    }
                 }
             }
             Err(error) => {

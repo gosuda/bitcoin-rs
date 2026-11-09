@@ -531,6 +531,7 @@ impl MempoolGateway {
                     })
                 },
                 |result| Some(result),
+                || crate::AdmitError::DeliveryQueueFull,
             );
             match result {
                 Ok(result) => {
@@ -554,6 +555,7 @@ impl MempoolGateway {
                 Err(error) => {
                     let error = match error {
                         crate::AdmitError::Policy(reason) => SubmitError::Policy(reason),
+                        crate::AdmitError::DeliveryQueueFull => SubmitError::RetryExhausted,
                         _ => SubmitError::Consensus,
                     };
                     if facts.package_error == Some(AcceptanceRejectReason::MinRelayFeeNotMet) {

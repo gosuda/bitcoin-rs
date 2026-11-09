@@ -208,6 +208,14 @@ impl MiningCoordinator {
                 );
                 Ok(BlockValidationResult::Accepted)
             }
+            Err(ConnectMutationError::CommittedButMempoolSettlementRefused { outcome, source }) => {
+                tracing::error!(
+                    committed = %outcome.hash,
+                    %source,
+                    "submitblock committed but mempool settlement was refused; retry is forbidden"
+                );
+                Ok(BlockValidationResult::Accepted)
+            }
             Err(ConnectMutationError::NotCommitted(error)) => map_apply_error(error),
         }
     }

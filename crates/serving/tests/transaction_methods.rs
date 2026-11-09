@@ -143,7 +143,8 @@ fn sendrawtransaction_readmits_a_transaction_evicted_from_the_mempool() -> Resul
     let removed = ctx
         .mempool
         .gateway
-        .evict_below_fee_rate(AdmissionOrigin::Rpc, u64::MAX);
+        .evict_below_fee_rate(AdmissionOrigin::Rpc, u64::MAX)
+        .expect("eviction commits");
     assert!(
         !removed.changes.is_empty(),
         "the eviction must have removed the entry"

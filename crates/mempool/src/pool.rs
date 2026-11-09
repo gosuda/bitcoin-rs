@@ -79,6 +79,8 @@ pub enum MempoolError {
     Policy(#[from] PolicyError),
     #[error("mempool full")]
     Full,
+    #[error("mempool delivery queue is full")]
+    DeliveryQueueFull,
     #[error("mempool spending index is inconsistent")]
     InconsistentSpendingIndex,
 }

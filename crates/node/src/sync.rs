@@ -248,27 +248,39 @@ impl SyncChain for NodeSyncChain {
                     source: source.into(),
                 })?;
         let _foreground = self.budget.cpu().acquire_foreground();
+        let mut refused = None;
         let result = match transition.connect_window(payloads) {
             Ok(outcomes) => {
-                for (payload, outcome) in payloads.iter().zip(&outcomes) {
-                    self.followers.on_connect(payload, outcome);
+                for (index, (payload, outcome)) in payloads.iter().zip(&outcomes).enumerate() {
+                    if let Err(source) = self.followers.on_connect(payload, outcome) {
+                        refused = Some(refused_window(index, source));
+                        break;
+                    }
                 }
                 let applied = outcomes.len();
                 settle_window_success(transition, mempool_change, applied, outcomes)
             }
             Err(error) => {
-                for (payload, outcome) in payloads.iter().zip(&error.committed) {
-                    self.followers.on_connect(payload, outcome);
+                for (index, (payload, outcome)) in payloads.iter().zip(&error.committed).enumerate()
+                {
+                    if let Err(source) = self.followers.on_connect(payload, outcome) {
+                        refused = Some(refused_window(index, source));
+                        break;
+                    }
                 }
                 Err(settle_window_failure(transition, mempool_change, error))
             }
         };
-        result.map_err(|error| WindowCommitError {
+        let mut result = result.map_err(|error| WindowCommitError {
             applied: error.applied,
             disposition: error.disposition,
             invalidated: error.invalidated,
             source: (*error.source).into(),
-        })
+        });
+        if let Some(refusal) = refused {
+            result = Err(refusal);
+        }
+        result
     }
 
     fn switch_to_branch(
@@ -289,6 +301,15 @@ impl SyncChain for NodeSyncChain {
                 self.handles.reevaluate_assume_valid();
             }
         })
+    }
+}
+
+fn refused_window(index: usize, source: bitcoin_rs_mempool::MempoolError) -> WindowCommitError {
+    WindowCommitError {
+        applied: index,
+        disposition: WindowApplyDisposition::Operational,
+        invalidated: Box::default(),
+        source: SyncChainError::Message(format!("mempool settlement refused: {source}")),
     }
 }
 

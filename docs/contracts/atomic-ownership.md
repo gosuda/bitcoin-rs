@@ -472,7 +472,7 @@ Nothing below the owner facade can interpret or copy the same data again.
 - A replay call returns at most the requested number of steps. The node refuses a step limit of 0 or more than 256.
 - Mempool observers are synchronous callbacks. The mempool delivers committed mutations to observers in commit order, one at a time.
 - A mutation that an observer commits during a callback is delivered after that callback returns.
-- The mempool delivery queue has no fixed capacity. Its length depends on the commit rate and on observer run time.
+- The mempool delivery queue holds at most 100 producer envelopes. A producer that finds a full queue waits until the drain thread makes room. A reentrant mutation from the drain thread never waits. It queues past the bound, up to 108 envelopes. Past that ceiling the mutation is refused with DeliveryQueueFull before it commits. Nothing is committed and nothing is dropped.
 - An observer panic does not roll back the committed mutation. Delivery continues with the next queued mutation.
 - Each committed change has a sequence number. A subscriber detects a gap when a sequence number is skipped.
 

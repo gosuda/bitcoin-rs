@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- BREAKING CHANGE: `MempoolGateway::remove_for_block`, `settle_block_facts`, `expire`, `clear` and `evict_below_fee_rate` return `Result` carrying `MempoolError::DeliveryQueueFull` when a reentrant observer callback commits past the bounded delivery queue; callers propagate the error.
 - Coins live in the engine `coins` keyspace. Windows and blocks commit their coin replacements in the same atomic batch as the durable head, undo rows and body index. The resident `UtxoSet` is the snapshot reader only.
 - Epoch 4 datadir format. The `3 -> 4` step of `bitcoin-rs-storage-convert` loads the coin image of the newest checkpoint into the engine, replays the suffix to the durable head, and carries the epoch-3 `assumeutxo-historical-checkpoints` generations with their engine coins. Epoch-4 coin records use the Core-compressed txout value framing.
 - The chainstate journal and its replay are removed, and so is the `utxo-v4.dat` checkpoint coin image as an authority. New checkpoints carry an engine image; `chainstate-checkpoints/` generations from epoch 3 are not copied into the epoch-4 datadir. The `[chainstate_journal]` config table and `BITCOIN_RS_CHAINSTATE_JOURNAL*` variables are removed.

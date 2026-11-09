@@ -652,7 +652,7 @@ fn no_chain_invalid_attempt_rebuilds_after_its_parent_leaves_the_pool()
             .recv_timeout(std::time::Duration::from_secs(5))
             .is_ok()
     );
-    gateway.clear(AdmissionOrigin::Rpc);
+    gateway.clear(AdmissionOrigin::Rpc)?;
     let sequence = gateway.read().sequence_number();
     assert!(release_tx.send(()).is_ok());
     let Ok(result) = worker.join() else {
@@ -1618,7 +1618,7 @@ fn preview_matches_submission_and_has_no_side_effects() -> Result<(), crate::tes
         &crate::settlement::TransitionFacts::from_txs(&[valid.as_ref(), &second]),
         2,
         0,
-    );
+    )?;
     assert_eq!(preview_gateway.read().estimate_fee_rate(2), None);
     assert_eq!(observer.0.load(Ordering::SeqCst), 0);
     let submitted = gateway();
@@ -2149,7 +2149,10 @@ fn one_entry_ceiling() -> u64 {
     unit + unit / 2
 }
 
-fn seed_rolling_floor_via_capacity_eviction(gateway: &Arc<MempoolGateway>, now: u64) {
+fn seed_rolling_floor_via_capacity_eviction(
+    gateway: &Arc<MempoolGateway>,
+    now: u64,
+) -> Result<(), crate::test_error::TestError> {
     let markers = [100u8, 101, 102, 103, 104];
     let funded = Coins(
         markers
@@ -2190,7 +2193,7 @@ fn seed_rolling_floor_via_capacity_eviction(gateway: &Arc<MempoolGateway>, now: 
             &crate::settlement::TransitionFacts::from_txs(&refs),
             2,
             now,
-        );
+        )?;
     }
     assert!(
         gateway.read().is_empty(),
@@ -2201,6 +2204,7 @@ fn seed_rolling_floor_via_capacity_eviction(gateway: &Arc<MempoolGateway>, now: 
         floor_after > min_relay,
         "the rolling floor must survive block settlement within the decay grace, got {floor_after}"
     );
+    Ok(())
 }
 
 #[test]
@@ -2322,7 +2326,8 @@ fn reconsider_disconnected_does_not_register_with_the_estimator() {
 
 #[test]
 #[expect(clippy::expect_used)]
-fn reconsider_disconnected_admits_below_floor_then_trims_once() {
+fn reconsider_disconnected_admits_below_floor_then_trims_once()
+-> Result<(), crate::test_error::TestError> {
     let ceiling = one_entry_ceiling();
     let limits = crate::MempoolLimits {
         max_total_bytes: ceiling,
@@ -2337,7 +2342,7 @@ fn reconsider_disconnected_admits_below_floor_then_trims_once() {
         None,
     ));
     let now = unix_time_secs();
-    seed_rolling_floor_via_capacity_eviction(&gateway, now);
+    seed_rolling_floor_via_capacity_eviction(&gateway, now)?;
     log.0.lock().clear();
     let (parent, child) = witness_parent_and_child();
     let parent_txid = parent.txid();
@@ -2401,6 +2406,7 @@ fn reconsider_disconnected_admits_below_floor_then_trims_once() {
     );
 
     assert_reorg_publication_order(&log.0.lock(), &[parent_txid, child_txid], child_txid);
+    Ok(())
 }
 
 #[expect(clippy::expect_used)]
@@ -2461,7 +2467,8 @@ fn assert_reorg_publication_order(batches: &[ReorgBatch], admissions: &[Txid], t
 
 #[test]
 #[expect(clippy::expect_used)]
-fn reconsider_control_refuses_fresh_relay_below_floor() {
+fn reconsider_control_refuses_fresh_relay_below_floor() -> Result<(), crate::test_error::TestError>
+{
     let ceiling = one_entry_ceiling();
     let limits = crate::MempoolLimits {
         max_total_bytes: ceiling,
@@ -2474,7 +2481,7 @@ fn reconsider_control_refuses_fresh_relay_below_floor() {
         None,
     ));
     let now = unix_time_secs();
-    seed_rolling_floor_via_capacity_eviction(&control, now);
+    seed_rolling_floor_via_capacity_eviction(&control, now)?;
     let floor = control.read().min_fee_sat_per_kvb(now);
     assert!(
         floor > control.read().min_relay_fee_sat_per_kvb(),
@@ -2510,6 +2517,7 @@ fn reconsider_control_refuses_fresh_relay_below_floor() {
         )),
         "fresh relay must meet the rolling floor"
     );
+    Ok(())
 }
 
 #[test]
@@ -2708,7 +2716,7 @@ fn independent_spend(marker: u8) -> (Arc<Tx>, Coins) {
 }
 
 #[test]
-fn expiry_capacity_ordering_under_pressure() {
+fn expiry_capacity_ordering_under_pressure() -> Result<(), crate::test_error::TestError> {
     for package in [false, true] {
         for fee in [100, 11_000] {
             for expire_first in [false, true] {
@@ -2732,7 +2740,7 @@ fn expiry_capacity_ordering_under_pressure() {
                 let fresh_id = fresh.txid();
                 let now = unix_time_secs();
                 if expire_first {
-                    gateway.expire(AdmissionOrigin::Rpc, now);
+                    gateway.expire(AdmissionOrigin::Rpc, now)?;
                 }
                 let result = if package {
                     gateway
@@ -2775,6 +2783,7 @@ fn expiry_capacity_ordering_under_pressure() {
             }
         }
     }
+    Ok(())
 }
 
 fn insert_stale(gateway: &MempoolGateway, tx: Arc<Tx>) {

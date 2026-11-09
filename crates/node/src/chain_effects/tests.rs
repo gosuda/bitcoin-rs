@@ -135,7 +135,7 @@ fn connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order() -> Result<()
     let tip = genesis_tip(&genesis)?;
 
     let image = BlockImage::from_local(genesis.clone());
-    followers.on_connect(&image, &connect_outcome(&tip, &image));
+    followers.on_connect(&image, &connect_outcome(&tip, &image))?;
     assert_eq!(followers.block_log().read().len(), 1);
     assert_eq!(
         publisher.events(),
@@ -166,7 +166,7 @@ fn disconnect_does_not_pop_a_different_tail() -> Result<(), TestError> {
     let tip = genesis_tip(&genesis)?;
     let followers = ChainFollowers::noop();
     let image = BlockImage::from_local(genesis.clone());
-    followers.on_connect(&image, &connect_outcome(&tip, &image));
+    followers.on_connect(&image, &connect_outcome(&tip, &image))?;
     followers.on_disconnect(&DisconnectOutcome {
         hash: Hash256::from_le_bytes(&[0xAB; 32]),
         restored_parents: Vec::new(),
@@ -203,7 +203,7 @@ fn gatewayless_connect_publishes_an_empty_receipt_for_the_tip() -> Result<(), Te
     assert!(followers.mempool_gateway().is_none());
 
     let image = BlockImage::from_local(genesis.clone());
-    followers.on_connect(&image, &connect_outcome(&tip, &image));
+    followers.on_connect(&image, &connect_outcome(&tip, &image))?;
     assert_eq!(
         *wake.receipts.lock(),
         vec![(tip.hash, 0)],
@@ -451,7 +451,7 @@ fn assert_admission_followers_after_chain_change(connect: bool) -> Result<(), Te
     let image = BlockImage::from_local(block.clone());
     let change = gateway.begin_chain_change()?;
     if connect {
-        followers.on_connect(&image, &connect_outcome(&tip, &image));
+        followers.on_connect(&image, &connect_outcome(&tip, &image))?;
     } else {
         followers.on_disconnect(&DisconnectOutcome {
             hash,
@@ -540,15 +540,15 @@ fn committed_connect_settlement_failure_retains_outcome_and_forbids_retry() -> R
     let followers = settlement_breaking_followers(state.mempool_gateway(), 3);
     let genesis = BlockImage::from_local(Network::Regtest.genesis_block());
     let hash = Hash256::from(genesis.block_hash());
-
     let error = match followers.apply_connect(&state.chainstate(), &genesis) {
         Ok(outcome) => panic!("forced generation move settled connect {outcome:?}"),
         Err(error) => error,
     };
     let (outcome, source) = match error {
         ConnectMutationError::CommittedButSettlementFailed { outcome, source } => (outcome, source),
-        other @ ConnectMutationError::NotCommitted(_) => {
-            panic!("committed connect must retain its outcome: {other}")
+        other @ (ConnectMutationError::NotCommitted(_)
+        | ConnectMutationError::CommittedButMempoolSettlementRefused { .. }) => {
+            panic!("committed connect must retain its outcome: {other:?}")
         }
     };
     assert_eq!(outcome.hash, hash);
@@ -588,5 +588,191 @@ fn mining_reports_a_committed_settlement_failure_as_accepted() -> Result<(), Tes
         "submitblock must not invite retry after authoritative commit"
     );
     assert!(state.chainstate().shutdown_reader().is_triggered());
+    Ok(())
+}
+
+use bitcoin_rs_mempool::{BodyInterest, MempoolEntry, MempoolObserver, MutationEnvelope};
+
+fn flood_tx(thread: u8, index: u32) -> Tx {
+    let mut bytes = [thread; 32];
+    bytes[0..4].copy_from_slice(&index.to_le_bytes());
+    Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(
+                bitcoin_rs_consensus::primitives::Txid(Hash256::from_le_bytes(&bytes)),
+                0,
+            ),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: vec![0x51, thread].into(),
+        }],
+    }
+}
+
+struct ReentrantConnectObserver {
+    gateway: Mutex<Option<Arc<MempoolGateway>>>,
+    followers: Mutex<Option<Arc<ChainFollowers>>>,
+    entered: Mutex<Option<crossbeam_channel::Sender<()>>>,
+    release: Mutex<Option<crossbeam_channel::Receiver<()>>>,
+    stream: Mutex<Vec<u64>>,
+    connect: Mutex<Vec<Result<(), bitcoin_rs_mempool::MempoolError>>>,
+}
+
+impl MempoolObserver for ReentrantConnectObserver {
+    fn on_mutation(&self, envelope: &MutationEnvelope) {
+        let result = &envelope.result;
+        {
+            let mut stream = self.stream.lock();
+            for index in 0..result.len() {
+                stream.push(result.sequence_of(index).unwrap_or(u64::MAX));
+            }
+        }
+        if result.sequence_base == 1 {
+            let Some(entered) = self.entered.lock().take() else {
+                panic!("entered armed once");
+            };
+            if entered.send(()).is_err() {
+                panic!("main thread waiting");
+            }
+            let Some(release) = self.release.lock().take() else {
+                panic!("release armed once");
+            };
+            if release.recv().is_err() {
+                panic!("main thread alive");
+            }
+            let gateway = self.gateway.lock().clone();
+            let followers = self.followers.lock().clone();
+            if let (Some(gateway), Some(followers)) = (gateway, followers) {
+                for index in 0..8u32 {
+                    if gateway
+                        .insert_entry(
+                            AdmissionOrigin::Rpc,
+                            MempoolEntry::new(Arc::new(flood_tx(40, index)), 100, 1_000, 1, 0, 0),
+                        )
+                        .is_err()
+                    {
+                        panic!("nested admission fits under the ceiling");
+                    }
+                }
+                let genesis = Network::Regtest.genesis_block();
+                let image = BlockImage::from_local(genesis.clone());
+                let Ok(tip) = genesis_tip(&genesis) else {
+                    panic!("regtest tip builds");
+                };
+                self.connect
+                    .lock()
+                    .push(followers.on_connect(&image, &connect_outcome(&tip, &image)));
+            }
+        }
+    }
+}
+
+// MPS-04
+#[test]
+fn reentrant_connect_past_the_ceiling_is_refused_before_the_epoch_advances() -> Result<(), TestError>
+{
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded::<()>(1);
+    let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(1);
+    let observer = Arc::new(ReentrantConnectObserver {
+        gateway: Mutex::new(None),
+        followers: Mutex::new(None),
+        entered: Mutex::new(Some(entered_tx)),
+        release: Mutex::new(Some(release_rx)),
+        stream: Mutex::new(Vec::new()),
+        connect: Mutex::new(Vec::new()),
+    });
+    let observer_handle: Arc<dyn MempoolObserver> = observer.clone();
+    let gateway = Arc::new(MempoolGateway::new(
+        Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+        Some((observer_handle, BodyInterest::Metadata)),
+        ValidationEngine::Native,
+        None,
+    ));
+    *observer.gateway.lock() = Some(Arc::clone(&gateway));
+    let publisher = Arc::new(RecordingPublisher::default());
+    let followers = Arc::new(
+        ChainFollowers::new(
+            Arc::new(RwLock::new(BlockLog::new())),
+            Arc::new(crate::NoOpZmqPublisher),
+            None,
+            None,
+            Arc::new(crate::mining::MiningGenerationSignal::new()),
+            Some(Arc::clone(&gateway)),
+        )
+        .with_zmq_publisher(publisher.clone()),
+    );
+    *observer.followers.lock() = Some(Arc::clone(&followers));
+    let first = Arc::clone(&gateway);
+    let first_handle = std::thread::spawn(move || {
+        first
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(flood_tx(200, 0)), 100, 1_000, 1, 0, 0),
+            )
+            .map_err(TestError::Mempool)
+    });
+    entered_rx.recv_timeout(std::time::Duration::from_secs(10))?;
+    for index in 0..100u32 {
+        gateway.insert_entry(
+            AdmissionOrigin::Rpc,
+            MempoolEntry::new(Arc::new(flood_tx(10, index)), 100, 1_000, 1, 0, 0),
+        )?;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while gateway.publish_len() != 100 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the delivery queue never filled"
+        );
+        std::thread::yield_now();
+    }
+    release_tx.send(())?;
+    let first_result = first_handle
+        .join()
+        .map_err(|_| TestError::Missing("first publisher"))?;
+    first_result?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let sequence = gateway.read().sequence_number();
+        let published = u64::try_from(observer.stream.lock().len())?;
+        if published == sequence {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "publication never settled: {published} of {sequence} batches published"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        *observer.connect.lock(),
+        [Err(bitcoin_rs_mempool::MempoolError::DeliveryQueueFull)],
+        "a reentrant connect past the ceiling reports the refusal"
+    );
+    assert!(
+        followers.epoch().current().is_none(),
+        "a refused settlement never advances the epoch"
+    );
+    assert!(
+        followers.block_log().read().is_empty(),
+        "a refused settlement publishes nothing"
+    );
+    assert_eq!(
+        gateway.read().len(),
+        109,
+        "a refused settlement commits nothing and drops nothing"
+    );
+    let expected: Vec<u64> = (1..=109).collect();
+    assert_eq!(
+        *observer.stream.lock(),
+        expected,
+        "every committed event arrives exactly once in sequence order"
+    );
     Ok(())
 }

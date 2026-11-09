@@ -554,6 +554,7 @@ impl MempoolGateway {
                 }
                 Err(AdmitError::Policy(reason)) => return Err(SubmitError::Policy(reason)),
                 Err(AdmitError::Consensus) => return Err(SubmitError::Consensus),
+                Err(AdmitError::DeliveryQueueFull) => return Err(SubmitError::RetryExhausted),
             }
         }
         Err(SubmitError::RetryExhausted)

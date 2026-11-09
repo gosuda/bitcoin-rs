@@ -159,6 +159,8 @@ impl RngCore for CountingRng {
 enum TestError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Mempool(#[from] bitcoin_rs_mempool::MempoolError),
     #[error("missing: {0}")]
     Missing(&'static str),
 }
@@ -661,7 +663,7 @@ fn latest_fee_filter_changes_only_that_peers_queued_relay() {
 }
 
 #[test]
-fn disappeared_or_readmitted_epoch_does_not_leave_stale_inventory() {
+fn disappeared_or_readmitted_epoch_does_not_leave_stale_inventory() -> TestResult {
     let table = NodeTxPolicy::default();
     let gateway = gateway();
     let now = Instant::now();
@@ -677,15 +679,16 @@ fn disappeared_or_readmitted_epoch_does_not_leave_stale_inventory() {
     let tx = transaction(1, None);
     let old = insert(&gateway, &tx, 1_000);
     table.queue_transaction_relay(old, now, &mut rng);
-    gateway.clear(AdmissionOrigin::Block);
+    gateway.clear(AdmissionOrigin::Block)?;
     let current = insert(&gateway, &tx, 1_000);
     assert_ne!(old.sequence, current.sequence);
     table.poll_transaction_relay(&gateway, now + Duration::from_secs(31), false, &mut rng);
     assert_eq!(inventory(&rx), []);
     table.queue_transaction_relay(current, now + Duration::from_secs(31), &mut rng);
-    gateway.clear(AdmissionOrigin::Block);
+    gateway.clear(AdmissionOrigin::Block)?;
     table.poll_transaction_relay(&gateway, now + Duration::from_secs(62), false, &mut rng);
     assert_eq!(inventory(&rx), []);
+    Ok(())
 }
 
 #[test]
