@@ -319,3 +319,67 @@ fn family_bytes_accounting() -> Result<(), IndexError> {
     );
     Ok(())
 }
+
+fn family_mut(bytes: &mut IndexRowBytes, index: usize) -> &mut usize {
+    match index {
+        0 => &mut bytes.tx_lookup,
+        1 => &mut bytes.script_history,
+        2 => &mut bytes.script_live,
+        3 => &mut bytes.headers,
+        4 => &mut bytes.filters,
+        _ => &mut bytes.tail_log,
+    }
+}
+
+#[test]
+fn family_bytes_overflow_detection() {
+    let overflow_total = IndexRowBytes {
+        tx_lookup: usize::MAX,
+        script_history: 1,
+        ..IndexRowBytes::ZERO
+    };
+    assert!(matches!(
+        overflow_total.total(),
+        Err(IndexError::MutationSizeOverflow)
+    ));
+
+    for index in 0..6 {
+        let mut at_max = IndexRowBytes::ZERO;
+        *family_mut(&mut at_max, index) = usize::MAX;
+        let mut one = IndexRowBytes::ZERO;
+        *family_mut(&mut one, index) = 1;
+        assert!(
+            matches!(
+                at_max.checked_add(&one),
+                Err(IndexError::MutationSizeOverflow)
+            ),
+            "family {index} overflows on checked add"
+        );
+    }
+}
+
+#[test]
+fn family_bytes_sum_matches_every_family() -> Result<(), IndexError> {
+    let addend = IndexRowBytes {
+        tx_lookup: 1,
+        script_history: 2,
+        script_live: 3,
+        headers: 4,
+        filters: 5,
+        tail_log: 6,
+    };
+    let doubled = addend.checked_add(&addend)?;
+    assert_eq!(
+        doubled,
+        IndexRowBytes {
+            tx_lookup: 2,
+            script_history: 4,
+            script_live: 6,
+            headers: 8,
+            filters: 10,
+            tail_log: 12,
+        }
+    );
+    assert_eq!(addend.total()?, 21);
+    Ok(())
+}
