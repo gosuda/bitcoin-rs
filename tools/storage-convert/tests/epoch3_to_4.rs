@@ -159,6 +159,7 @@ pub(crate) fn create_checkpoint_fixture(
             utxo_count: coin_count,
             muhash: hex_encode(&trailer),
         },
+        engine: None,
     };
 
     let manifest_bytes = sonic_rs::to_vec(&manifest)?;
@@ -469,6 +470,28 @@ fn replay_with_checkpoint_at_durable_head() -> TestResult<()> {
     Ok(())
 }
 
+fn assert_engine_digest_matches_image(generation_dir: &Path) -> TestResult<()> {
+    let manifest: CheckpointManifestV1 =
+        sonic_rs::from_slice(&fs::read(generation_dir.join(MANIFEST_FILE))?)?;
+    let Some(expected) = manifest.engine.as_ref() else {
+        return Err(TestError::Assertion(
+            "converted generation manifest lacks an engine digest".into(),
+        ));
+    };
+    let chainstate = cap_std::fs::Dir::open_ambient_dir(
+        generation_dir.join("chainstate"),
+        cap_std::ambient_authority(),
+    )?;
+    let actual = bitcoin_rs_storage::checkpoint::digest_engine_dir(&chainstate)
+        .map_err(|error| TestError::Assertion(error.to_string()))?;
+    if actual != *expected {
+        return Err(TestError::Assertion(
+            "converted generation manifest digest does not match its image".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[test]
 fn converted_datadir_drops_old_checkpoint_coin_image() -> TestResult<()> {
     let source_temp = tempdir()?;
@@ -527,6 +550,11 @@ fn converted_datadir_drops_old_checkpoint_coin_image() -> TestResult<()> {
             converted.height, converted.tip, durable_head.height, durable_head.tip
         )));
     }
+    assert_engine_digest_matches_image(
+        &to_path
+            .join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT)
+            .join("gen-00000000000000000001"),
+    )?;
     Ok(())
 }
 
@@ -587,6 +615,7 @@ fn converted_historical_checkpoint_carries_engine_coins() -> TestResult<()> {
             "converted historical generation must not carry utxo-v4.dat".into(),
         ));
     }
+    assert_engine_digest_matches_image(&converted_gen)?;
     let engine = RocksDbStore::open(converted_gen.join("chainstate"))?;
     let stored = engine
         .get(ColumnFamily::Coins, &txid1.to_le_bytes())?

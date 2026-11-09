@@ -2,7 +2,7 @@ use crate::batch::{BatchOp, BufferedWriteBatch};
 use bytes::Bytes;
 use rust_rocksdb::checkpoint::Checkpoint;
 use rust_rocksdb::{
-    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBCompressionType, Direction,
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBCompressionType, Direction, FlushOptions,
     IngestExternalFileOptions, IteratorMode, Options, PrefixRange, ReadOptions, SstFileWriter,
     WriteBatch as RocksWriteBatch, WriteOptions,
 };
@@ -535,8 +535,26 @@ impl KvStore for RocksDbStore {
     }
 
     fn checkpoint(&self, dir: &Path) -> Result<(), StorageError> {
+        let mut flush_options = FlushOptions::default();
+        flush_options.set_wait(true);
+        for family in ColumnFamily::ALL {
+            let handle = self.cf_handle(*family)?;
+            self.db
+                .flush_cf_opt(handle, &flush_options)
+                .map_err(StorageError::backend)?;
+        }
         let cp = Checkpoint::new(&self.db).map_err(StorageError::backend)?;
         cp.create_checkpoint(dir).map_err(StorageError::backend)?;
+        for entry in std::fs::read_dir(dir).map_err(StorageError::Io)? {
+            let entry = entry.map_err(StorageError::Io)?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if name.ends_with(".log") {
+                std::fs::remove_file(entry.path()).map_err(StorageError::Io)?;
+            }
+        }
         Ok(())
     }
 

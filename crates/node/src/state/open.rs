@@ -252,7 +252,7 @@ impl NodeState {
             Arc::new(crate::NoOpZmqPublisher)
         };
         let head = durable_head.load()?;
-        let bitcoin_rs_execution::recovery::RestoredState { initial, engine } = {
+        let restored = {
             bitcoin_rs_execution::recovery::require_full_script_attestation(
                 &config.data_dir,
                 config.validation.mode,
@@ -268,6 +268,8 @@ impl NodeState {
                 head.as_ref(),
             )?
         };
+        let engine = restored.engine.clone();
+        let bitcoin_rs_execution::recovery::RestoredState { initial, .. } = restored;
         let InitialChainstate {
             utxo: mut utxo_set,
             coin_stats: initial_coin_stats,

@@ -3,14 +3,14 @@ use super::fs::{CheckpointRoot, open_file, read_file};
 use super::{
     COINSTATS_ARTIFACT_LEN, COINSTATS_MAGIC, COINSTATS_VERSION, CURRENT_FILE, CURRENT_FORMAT,
     CURRENT_VERSION, CheckpointError, CheckpointIdentity, CheckpointLoadError,
-    CheckpointManifestV1, CurrentV1, MANIFEST_FILE, MANIFEST_FORMAT, MANIFEST_VERSION,
-    MAX_CHECKPOINT_METADATA_BYTES, MAX_CHECKPOINT_PAYLOAD_BYTES,
+    CheckpointManifestV1, CurrentV1, EngineArtifactV1, MANIFEST_FILE, MANIFEST_FORMAT,
+    MANIFEST_VERSION, MAX_CHECKPOINT_METADATA_BYTES, MAX_CHECKPOINT_PAYLOAD_BYTES,
 };
 use bitcoin_rs_consensus::primitives::hex::hex_encode;
 use cap_std::fs::{Dir, File};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Component, Path};
 
 pub fn classify_checkpoint_error(error: CheckpointError) -> CheckpointLoadError {
     match error {
@@ -130,7 +130,41 @@ pub fn read_manifest(
             "checkpoint network, magic, or genesis does not match configuration".to_owned(),
         ));
     }
+    validate_engine_records(manifest.engine.as_ref())?;
     Ok(manifest)
+}
+
+fn validate_engine_records(engine: Option<&EngineArtifactV1>) -> Result<(), CheckpointError> {
+    let Some(engine) = engine else {
+        return Ok(());
+    };
+    let mut seen = std::collections::HashSet::new();
+    for record in &engine.files {
+        if !is_relative_image_path(&record.file) {
+            return Err(CheckpointError::Invalid(format!(
+                "checkpoint engine image path {:?} is not a relative file path",
+                record.file
+            )));
+        }
+        if !seen.insert(record.file.as_str()) {
+            return Err(CheckpointError::Invalid(format!(
+                "checkpoint engine image path {:?} is recorded twice",
+                record.file
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn is_relative_image_path(path: &str) -> bool {
+    let mut rebuilt = std::path::PathBuf::new();
+    for component in Path::new(path).components() {
+        let Component::Normal(name) = component else {
+            return false;
+        };
+        rebuilt.push(name);
+    }
+    !rebuilt.as_os_str().is_empty() && rebuilt.as_os_str() == std::ffi::OsStr::new(path)
 }
 
 pub(crate) fn open_regular_file(

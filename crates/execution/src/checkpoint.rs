@@ -22,6 +22,7 @@ pub(crate) use bitcoin_rs_storage::checkpoint::CheckpointTipV1;
 pub(crate) use bitcoin_rs_storage::checkpoint::CoinStatsArtifactV1;
 #[cfg(test)]
 pub(crate) use bitcoin_rs_storage::checkpoint::CurrentV1;
+use bitcoin_rs_storage::checkpoint::EngineArtifactV1;
 pub(crate) use bitcoin_rs_storage::checkpoint::HEADER_CODEC;
 pub(crate) use bitcoin_rs_storage::checkpoint::HEADERS_FILE;
 pub(crate) use bitcoin_rs_storage::checkpoint::HeadersArtifactV1;
@@ -35,6 +36,7 @@ use bitcoin_rs_storage::checkpoint::decode_hex;
 use bitcoin_rs_storage::checkpoint::network_name;
 #[cfg(test)]
 use bitcoin_rs_storage::checkpoint::open_data_dir;
+use bitcoin_rs_storage::checkpoint::verify_engine_artifact;
 use bitcoin_rs_storage::checkpoint::{ArtifactDigest, CheckpointStage};
 use bitcoin_rs_storage::checkpoint::{coinstats_artifact_payload, commit_publication};
 use bitcoin_rs_storage::checkpoint::{read_manifest, require_filename, verify_artifact};
@@ -42,6 +44,7 @@ use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use cap_std::fs::{Dir, File};
 use parking_lot::RwLock;
+use sha2::Digest;
 use std::io::Read;
 use std::path::Path;
 use thiserror::Error;
@@ -77,6 +80,18 @@ pub(crate) struct RestoredChainstate {
     pub(crate) coin_stats: CoinStats,
     pub(crate) applied_tip: TipSnapshot,
     pub(crate) engine: Option<std::sync::Arc<dyn bitcoin_rs_storage::KvStore>>,
+    pub(crate) engine_scratch: Option<EngineScratch>,
+}
+
+pub(crate) struct EngineScratch {
+    path: std::path::PathBuf,
+}
+impl Drop for EngineScratch {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.path) {
+            tracing::warn!(path = %self.path.display(), %error, "checkpoint scratch cleanup failed");
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -415,7 +430,8 @@ fn load_payloads(
     store_path: Option<&std::path::Path>,
 ) -> Result<RestoredChainstate, CheckpointError> {
     let chain_tx_count = ChainTxCount::from_wire(manifest.applied_tip.chain_tx_count);
-    let (utxo, coin_stats, engine) = load_payloads_inner(generation_dir, manifest, store_path)?;
+    let (utxo, coin_stats, engine, engine_scratch) =
+        load_payloads_inner(generation_dir, manifest, store_path)?;
     validate_chain_tx_count(chain_tx_count, &coin_stats)?;
     let mut cursor = Some(headers.applied_tip_id);
     while let Some(node_id) = cursor {
@@ -452,6 +468,7 @@ fn load_payloads(
         coin_stats,
         applied_tip,
         engine,
+        engine_scratch,
     })
 }
 fn validate_chain_tx_count(
@@ -479,10 +496,12 @@ fn load_payloads_inner(
         UtxoSet,
         CoinStats,
         Option<std::sync::Arc<dyn bitcoin_rs_storage::KvStore>>,
+        Option<EngineScratch>,
     ),
     CheckpointError,
 > {
-    let engine = open_generation_store(generation_dir, store_path)?;
+    let (engine, scratch) =
+        open_generation_store(generation_dir, store_path, manifest.engine.as_ref())?;
     require_filename(&manifest.coinstats.file, COINSTATS_FILE).map_err(CheckpointError::Store)?;
     let coinstats_file = verify_artifact(
         generation_dir,
@@ -492,22 +511,68 @@ fn load_payloads_inner(
     )
     .map_err(CheckpointError::Store)?;
     let coin_stats = read_coinstats(coinstats_file, manifest)?;
-    Ok((UtxoSet::new(), coin_stats, engine))
+    Ok((UtxoSet::new(), coin_stats, engine, scratch))
 }
 
 /// Opens the engine image stored inside a checkpoint generation, if any.
 ///
 /// Generations written before engine images existed have no store; those
 /// restore as `None` and the caller falls back to replaying from genesis.
+#[expect(clippy::type_complexity)]
 fn open_generation_store(
     store_dir: &Dir,
     store_path: Option<&std::path::Path>,
-) -> Result<Option<std::sync::Arc<dyn bitcoin_rs_storage::KvStore>>, CheckpointError> {
-    let nested = match store_dir.open_dir("chainstate") {
+    expected: Option<&EngineArtifactV1>,
+) -> Result<
+    (
+        Option<std::sync::Arc<dyn bitcoin_rs_storage::KvStore>>,
+        Option<EngineScratch>,
+    ),
+    CheckpointError,
+> {
+    let nested = match store_dir.open_dir(bitcoin_rs_storage::checkpoint::ENGINE_IMAGE_DIR) {
         Ok(dir) => Some(dir),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.into()),
     };
+    if let (Some(nested), Some(expected)) = (nested.as_ref(), expected) {
+        match nested.open(bitcoin_rs_storage::memory_kv::MEMORY_KV_FILE) {
+            Ok(_) => {
+                let Some(host) = store_path else {
+                    verify_engine_artifact(nested, expected).map_err(CheckpointError::Store)?;
+                    return Ok((Some(memory_image_store(nested, expected)?), None));
+                };
+                let scratch = scratch_copy(host, &expected.files)?;
+                let scratch_dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(&scratch.path)
+                    .map_err(CheckpointError::from)?;
+                verify_engine_artifact(&scratch_dir, expected).map_err(CheckpointError::Store)?;
+                return Ok((Some(memory_image_store(&scratch_dir, expected)?), None));
+            }
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            Err(_) => {}
+        }
+        let Some(host) = store_path else {
+            return Err(CheckpointError::Store(StoreError::Invalid(
+                "checkpoint engine image has no host path".to_owned(),
+            )));
+        };
+        let scratch = scratch_copy(host, &expected.files)?;
+        let scratch_dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(&scratch.path)
+            .map_err(CheckpointError::from)?;
+        verify_engine_artifact(&scratch_dir, expected).map_err(CheckpointError::Store)?;
+        let store =
+            bitcoin_rs_storage::open_checkpoint_store(&scratch.path).map_err(
+                |error| match error {
+                    bitcoin_rs_storage::StorageError::IncompatibleData(_) => {
+                        CheckpointError::Store(StoreError::Invalid(
+                            "checkpoint engine image is unrecognized".to_owned(),
+                        ))
+                    }
+                    error => error.into(),
+                },
+            )?;
+        return Ok((Some(store), Some(scratch)));
+    }
     let memory_file = match nested.as_ref() {
         Some(dir) => dir.open(bitcoin_rs_storage::memory_kv::MEMORY_KV_FILE),
         None => store_dir.open(bitcoin_rs_storage::memory_kv::MEMORY_KV_FILE),
@@ -519,20 +584,85 @@ fn open_generation_store(
                 .map_err(CheckpointError::from)?;
             let store = bitcoin_rs_storage::memory_kv::MemoryKvStore::from_bytes(&bytes)
                 .map_err(|e| CheckpointError::Store(StoreError::Invalid(e.to_string())))?;
-            Ok(Some(std::sync::Arc::new(store)))
+            Ok((Some(std::sync::Arc::new(store)), None))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let Some(path) = store_path else {
-                return Ok(None);
+                return Ok((None, None));
             };
             match bitcoin_rs_storage::open_checkpoint_store(path) {
-                Ok(store) => Ok(Some(store)),
-                Err(bitcoin_rs_storage::StorageError::IncompatibleData(_)) => Ok(None),
+                Ok(store) => Ok((Some(store), None)),
+                Err(bitcoin_rs_storage::StorageError::IncompatibleData(_)) => Ok((None, None)),
                 Err(error) => Err(error.into()),
             }
         }
         Err(e) => Err(e.into()),
     }
+}
+
+fn memory_image_store(
+    image_dir: &Dir,
+    expected: &EngineArtifactV1,
+) -> Result<std::sync::Arc<dyn bitcoin_rs_storage::KvStore>, CheckpointError> {
+    let record = expected
+        .files
+        .iter()
+        .find(|record| record.file == bitcoin_rs_storage::memory_kv::MEMORY_KV_FILE)
+        .ok_or_else(|| {
+            CheckpointError::Store(StoreError::Invalid(
+                "checkpoint engine image is missing its memory store".to_owned(),
+            ))
+        })?;
+    let mut file = image_dir
+        .open(bitcoin_rs_storage::memory_kv::MEMORY_KV_FILE)
+        .map_err(CheckpointError::from)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(CheckpointError::from)?;
+    let actual: [u8; 32] = sha2::Sha256::digest(&bytes).into();
+    if u64::try_from(bytes.len()).ok() != Some(record.bytes)
+        || actual != decode_hex::<32>(&record.sha256).map_err(CheckpointError::Store)?
+    {
+        return Err(CheckpointError::Store(StoreError::Invalid(format!(
+            "checkpoint engine image {:?} length or SHA256 mismatch",
+            bitcoin_rs_storage::memory_kv::MEMORY_KV_FILE
+        ))));
+    }
+    let store = bitcoin_rs_storage::memory_kv::MemoryKvStore::from_bytes(&bytes)
+        .map_err(|e| CheckpointError::Store(StoreError::Invalid(e.to_string())))?;
+    Ok(std::sync::Arc::new(store))
+}
+
+fn scratch_copy(
+    chainstate_path: &std::path::Path,
+    files: &[bitcoin_rs_storage::checkpoint::EngineFileV1],
+) -> Result<EngineScratch, CheckpointError> {
+    static SCRATCH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SCRATCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let Some(parent) = chainstate_path.parent() else {
+        return Err(CheckpointError::Store(StoreError::Invalid(
+            "checkpoint engine image path has no parent".to_owned(),
+        )));
+    };
+    let scratch = EngineScratch {
+        path: parent.join(format!(".scratch-{}-{seq}", std::process::id())),
+    };
+    for file in files {
+        let source = chainstate_path.join(&file.file);
+        let dest = scratch.path.join(&file.file);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(CheckpointError::from)?;
+        }
+        if std::fs::hard_link(&source, &dest).is_err() {
+            std::fs::copy(&source, &dest).map_err(|error| {
+                CheckpointError::Store(StoreError::Invalid(format!(
+                    "checkpoint engine image file {:?} failed: {error}",
+                    file.file
+                )))
+            })?;
+        }
+    }
+    Ok(scratch)
 }
 
 fn read_coinstats(
@@ -774,8 +904,8 @@ struct ManifestInputs<'a> {
     headers_digest: &'a ArtifactDigest,
     stats: &'a CoinStats,
     stats_digest: &'a ArtifactDigest,
+    engine: Option<EngineArtifactV1>,
 }
-
 fn checkpoint_manifest(input: &ManifestInputs<'_>) -> CheckpointManifestV1 {
     let stats = input.stats;
     CheckpointManifestV1 {
@@ -816,6 +946,7 @@ fn checkpoint_manifest(input: &ManifestInputs<'_>) -> CheckpointManifestV1 {
             utxo_count: stats.utxo_count,
             muhash: hex_encode(&stats.muhash.finalize()),
         },
+        engine: input.engine.clone(),
     }
 }
 fn write_checkpoint_from_dir_at_inner(
@@ -831,12 +962,20 @@ fn write_checkpoint_from_dir_at_inner(
     };
     let chain_tx_count = applied_tip.chain_tx_count;
     let stage = begin_checkpoint_stage(data_dir, options.root_name, options.retention)?;
+    options
+        .target
+        .store
+        .flush()
+        .map_err(CheckpointError::Storage)?;
     stage
         .checkpoint_store(
             options.target.host_data_dir,
             options.root_name,
             options.target.store,
         )
+        .map_err(CheckpointError::Store)?;
+    let engine_artifact = stage
+        .staged_engine_digest()
         .map_err(CheckpointError::Store)?;
     let (headers_meta, headers_digest) =
         write_headers_artifact(&stage, block_tree, config, applied_tip)?;
@@ -852,6 +991,7 @@ fn write_checkpoint_from_dir_at_inner(
         headers_digest: &headers_digest,
         stats: &listener_stats,
         stats_digest: &stats_digest,
+        engine: Some(engine_artifact),
     });
     let reference = commit_publication(stage, &manifest)?;
     Ok(CheckpointWrite::Published { reference })

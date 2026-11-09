@@ -11,6 +11,7 @@ use bitcoin_rs_storage::{
     DurableHeadStore, FlatFileBlockStore, KvDurableHeadStore, KvUndoStore, RocksDbStore,
 };
 use parking_lot::RwLock;
+use sha2::Digest as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU32;
 
@@ -654,6 +655,30 @@ fn remove_first_engine_coin(engine_dir: &Path) -> TestResult<(u64, u64)> {
     store.checkpoint(engine_dir)?;
     Ok((outputs, amount))
 }
+fn resign_engine_image(generation_dir: &Path) -> TestResult<[u8; 32]> {
+    let chainstate = cap_std::fs::Dir::open_ambient_dir(
+        generation_dir.join("chainstate"),
+        cap_std::ambient_authority(),
+    )?;
+    let engine = bitcoin_rs_storage::checkpoint::digest_engine_dir(&chainstate)
+        .map_err(crate::CheckpointError::Store)?;
+    let manifest_path = generation_dir.join(bitcoin_rs_storage::checkpoint::MANIFEST_FILE);
+    let mut manifest: bitcoin_rs_storage::checkpoint::CheckpointManifestV1 =
+        sonic_rs::from_slice(&std::fs::read(&manifest_path)?)?;
+    manifest.engine = Some(engine);
+    let manifest_bytes = sonic_rs::to_vec(&manifest)?;
+    std::fs::write(&manifest_path, &manifest_bytes)?;
+    let root = generation_dir.parent().ok_or(TestError::Missing(
+        "historical generation has no checkpoint root",
+    ))?;
+    let current_path = root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE);
+    let mut current: bitcoin_rs_storage::checkpoint::CurrentV1 =
+        sonic_rs::from_slice(&std::fs::read(&current_path)?)?;
+    let manifest_sha256: [u8; 32] = sha2::Sha256::digest(&manifest_bytes).into();
+    current.manifest_sha256 = bitcoin_rs_consensus::primitives::hex::hex_encode(&manifest_sha256);
+    std::fs::write(&current_path, sonic_rs::to_vec(&current)?)?;
+    Ok(manifest_sha256)
+}
 
 fn accepted_generation_dir(dir: &Path, generation: u64) -> PathBuf {
     dir.join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT)
@@ -668,9 +693,40 @@ fn historical_checkpoint_coin_stats_come_from_the_engine_image() -> TestResult {
     publish_unaccepted_historical_checkpoint(dir.path(), &fixture, &mut unaccepted)?;
     let accepted_stats = unaccepted.stats.clone();
     let generation = accepted_historical_generation(dir.path(), &fixture)?;
-    let (removed_outputs, removed_amount) = remove_first_engine_coin(
-        &accepted_generation_dir(dir.path(), generation).join("chainstate"),
-    )?;
+    let generation_dir = accepted_generation_dir(dir.path(), generation);
+    let (removed_outputs, removed_amount) =
+        remove_first_engine_coin(&generation_dir.join("chainstate"))?;
+    let manifest_sha256 = resign_engine_image(&generation_dir)?;
+    {
+        use bitcoin_rs_storage::KvStore as _;
+        let live = bitcoin_rs_storage::RocksDbStore::open(dir.path().join("chainstate"))?;
+        let raw = live
+            .get(
+                bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+                bitcoin_rs_storage::durable_head::DURABLE_HEAD_KEY,
+            )?
+            .ok_or(TestError::Missing("live chainstate has no durable head"))?;
+        let mut head = bitcoin_rs_storage::DurableHead::decode(&raw)
+            .ok_or(TestError::Missing("live durable head is undecodable"))?;
+        match &mut head.assumeutxo {
+            AssumeUtxoDiskStatus::Validating {
+                checkpoint: Some(checkpoint),
+                ..
+            } => {
+                checkpoint.checkpoint.manifest_sha256 = manifest_sha256;
+            }
+            _ => {
+                return Err(TestError::Missing(
+                    "accepted historical checkpoint is not recorded as validating",
+                ));
+            }
+        }
+        live.put(
+            bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+            bitcoin_rs_storage::durable_head::DURABLE_HEAD_KEY,
+            &head.encode(),
+        )?;
+    }
     let active = open_persistent(dir.path(), &fixture.pinned)?;
     let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
         Network::Regtest,

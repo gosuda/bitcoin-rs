@@ -130,6 +130,7 @@ pub struct InitialChainstate {
 pub struct RestoredState {
     pub initial: InitialChainstate,
     pub engine: Option<std::sync::Arc<dyn bitcoin_rs_storage::KvStore>>,
+    pub(crate) _scratch: Option<crate::checkpoint::EngineScratch>,
 }
 
 /// Installs a restored state into `chain` before any replayed block runs.
@@ -237,14 +238,24 @@ fn height_bytes(key: &[u8], start: usize) -> Option<u32> {
 
 fn restored_initial(
     restored: crate::checkpoint::RestoredChainstate,
-) -> Result<InitialChainstate, RecoveryError> {
-    Ok(InitialChainstate {
-        utxo: restored.utxo,
-        coin_stats: restored.coin_stats,
-        tree: restored.tree,
-        applied_tip: Some(restored.applied_tip),
+) -> Result<(InitialChainstate, Option<crate::checkpoint::EngineScratch>), RecoveryError> {
+    let crate::checkpoint::RestoredChainstate {
+        generation: _,
+        utxo,
+        coin_stats,
+        tree,
+        applied_tip,
+        engine: _,
+        engine_scratch,
+    } = restored;
+    let initial = InitialChainstate {
+        utxo,
+        coin_stats,
+        tree,
+        applied_tip: Some(applied_tip),
         resume_source: ResumeSource::Checkpoint,
-    })
+    };
+    Ok((initial, engine_scratch))
 }
 
 #[cfg_attr(not(test), expect(dead_code))]
@@ -311,9 +322,11 @@ fn restore_snapshot_with_engine(
                 }
             }
             let engine = restored.engine.clone();
+            let (initial, scratch) = restored_initial(*restored)?;
             return Ok(RestoredState {
-                initial: restored_initial(*restored)?,
+                initial,
                 engine,
+                _scratch: scratch,
             });
         }
     }
@@ -322,6 +335,7 @@ fn restore_snapshot_with_engine(
     Ok(RestoredState {
         initial,
         engine: None,
+        _scratch: None,
     })
 }
 
@@ -409,6 +423,7 @@ pub fn prepare_initial_state_with_engine(
         return Ok(RestoredState {
             initial: full_revalidation_cold_start(network),
             engine: None,
+            _scratch: None,
         });
     }
     if let Some(pinned) = anchor {
@@ -424,12 +439,15 @@ pub fn prepare_initial_state_with_engine(
         return Ok(RestoredState {
             initial: no_checkpoint_cold_start(data_dir, network)?,
             engine: None,
+            _scratch: None,
         });
     };
     let engine = restored.engine.clone();
+    let (initial, scratch) = restored_initial(*restored)?;
     Ok(RestoredState {
-        initial: restored_initial(*restored)?,
+        initial,
         engine,
+        _scratch: scratch,
     })
 }
 

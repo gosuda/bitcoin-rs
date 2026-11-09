@@ -7,7 +7,7 @@ use super::fs::{CheckpointRoot, create_file, remove_known_dir, sync_dir};
 use super::load::read_current;
 use super::{
     CURRENT_FILE, CURRENT_FORMAT, CURRENT_VERSION, CheckpointError, CheckpointManifestV1,
-    CurrentV1, GenerationPaths, HashingWriter, MANIFEST_FILE,
+    CurrentV1, EngineArtifactV1, GenerationPaths, HashingWriter, MANIFEST_FILE,
 };
 use cap_std::fs::Dir;
 use sha2::{Digest, Sha256};
@@ -109,6 +109,12 @@ impl CheckpointStage {
             .join(crate::checkpoint::fs::STAGED_STORE_DIR);
         store.checkpoint(&dest)?;
         Ok(())
+    }
+    pub fn staged_engine_digest(&self) -> Result<EngineArtifactV1, CheckpointError> {
+        let dir = self
+            .staging
+            .open_dir(crate::checkpoint::fs::STAGED_STORE_DIR)?;
+        super::digest::digest_engine_dir(&dir)
     }
 }
 pub fn begin_publication(data_dir: &Dir) -> Result<CheckpointStage, CheckpointError> {

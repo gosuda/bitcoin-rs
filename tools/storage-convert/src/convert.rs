@@ -26,7 +26,7 @@ use bitcoin_rs_execution::recovery::{ConvertedCheckpoint, publish_converted_chec
 use bitcoin_rs_storage::checkpoint::{
     CHECKPOINT_ROOT, COINSTATS_FILE, CURRENT_FILE, CURRENT_FORMAT, CURRENT_VERSION,
     CheckpointManifestV1, CheckpointOpen, CheckpointReference, CurrentV1, HEADERS_FILE,
-    MANIFEST_FILE, decode_hex, open_current_checkpoint_at, read_file,
+    MANIFEST_FILE, decode_hex, digest_engine_dir, open_current_checkpoint_at, read_file,
 };
 pub(crate) const UTXO_FILE: &str = "utxo-v4.dat";
 const EPOCH3_JOURNAL_DIR: &str = "chainstate-journal";
@@ -1011,7 +1011,7 @@ fn convert_historical_checkpoints(
         };
         let manifest_bytes = read_file(&generation_dir, MANIFEST_FILE, 1024 * 1024)
             .map_err(|_| ConvertError::MissingCheckpoint)?;
-        let manifest: CheckpointManifestV1 =
+        let mut manifest: CheckpointManifestV1 =
             sonic_rs::from_slice(&manifest_bytes).map_err(|error| {
                 ConvertError::IncompatibleData(format!(
                     "historical checkpoint {name} manifest: {error}"
@@ -1050,6 +1050,12 @@ fn convert_historical_checkpoints(
             .join("chainstate");
         let engine = open_destination_store(&engine_path, target_engine)?;
         engine.ingest_sorted(ColumnFamily::Coins, &mut rows.into_iter(), &scratch_path)?;
+        engine.flush()?;
+        drop(engine);
+        let chainstate_dir = Dir::open_ambient_dir(&engine_path, ambient_authority())?;
+        manifest.engine = Some(digest_engine_dir(&chainstate_dir).map_err(|error| {
+            ConvertError::IncompatibleData(format!("historical engine image: {error}"))
+        })?);
         let to_root = Dir::open_ambient_dir(to_path, ambient_authority())?;
         let generation_dir = to_root
             .open_dir_nofollow(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT)?
@@ -1120,12 +1126,18 @@ fn publish_epoch4_checkpoint(
         let bytes = read_file(checkpoint_dir, name, EPOCH3_ARTIFACT_LIMIT)?;
         write_synced(&generation_path.join(name), &bytes)?;
     }
+    engine.flush()?;
+    engine.checkpoint(&generation_path.join("chainstate"))?;
+    let chainstate_dir =
+        Dir::open_ambient_dir(generation_path.join("chainstate"), ambient_authority())?;
     let mut published = manifest.clone();
     published.utxo = None;
+    published.engine = Some(digest_engine_dir(&chainstate_dir).map_err(|error| {
+        ConvertError::IncompatibleData(format!("checkpoint engine image: {error}"))
+    })?);
     let manifest_bytes = sonic_rs::to_vec(&published)
         .map_err(|error| ConvertError::IncompatibleData(format!("checkpoint manifest: {error}")))?;
     write_synced(&generation_path.join(MANIFEST_FILE), &manifest_bytes)?;
-    engine.checkpoint(&generation_path.join("chainstate"))?;
     let current = CurrentV1 {
         format: CURRENT_FORMAT.to_owned(),
         version: CURRENT_VERSION,
