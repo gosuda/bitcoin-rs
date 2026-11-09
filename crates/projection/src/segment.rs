@@ -653,6 +653,76 @@ pub fn publish_sealed<S: bitcoin_rs_storage::KvStore>(
         .map_err(crate::IndexError::Storage)
 }
 
+pub fn publish_bulk_generation<S: bitcoin_rs_storage::KvStore + ?Sized>(
+    store: &S,
+    gen_id: u64,
+    coverage: Coverage,
+    next_ordinal: u32,
+    capabilities: IndexCapabilities,
+) -> Result<(), crate::IndexError> {
+    let descriptor = bulk_generation_descriptor(gen_id, coverage);
+    let mut batch = store.new_batch();
+    batch.put(
+        bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+        crate::INDEX_FORMAT_VERSION_KEY,
+        &crate::INDEX_FORMAT_VERSION_VALUE,
+    );
+    if next_ordinal == 0 {
+        for capability in IndexCapability::ALL {
+            batch.put(
+                bitcoin_rs_storage::ColumnFamily::IdxMeta,
+                &meta_gen_key(capability),
+                &IndexGeneration::encode_meta_value(&descriptor),
+            );
+        }
+    } else {
+        let sealed = SealedGen {
+            gen_id,
+            coverage,
+            next_ordinal,
+        };
+        put_sealed_records(
+            &mut batch,
+            &sealed,
+            capabilities,
+            tail::TailBounds {
+                newest: Some(sealed),
+                first_height: None,
+                at: Some((coverage.last_height, coverage.last_hash)),
+            },
+        );
+        crate::index::put_bulk_publish_marks(
+            &mut batch,
+            capabilities,
+            crate::IndexWatermark {
+                height: coverage.last_height,
+                hash: coverage.last_hash,
+            },
+            coverage.first_height,
+        );
+        batch.put(
+            bitcoin_rs_storage::ColumnFamily::IdxMeta,
+            &meta_gen_key(IndexCapability::ScriptLive),
+            &IndexGeneration::encode_meta_value(&descriptor),
+        );
+    }
+    store
+        .write_durable(batch)
+        .map_err(crate::IndexError::Storage)
+}
+
+fn bulk_generation_descriptor(gen_id: u64, coverage: Coverage) -> GenerationDescriptor {
+    GenerationDescriptor {
+        gen_id,
+        coverage,
+        tail: TailDescriptor {
+            tail_lo: coverage.last_height.saturating_add(1),
+            tail_hi: coverage.last_height,
+            tail_hash: coverage.last_hash,
+        },
+    }
+}
+
 fn remove_seal_markers<S: bitcoin_rs_storage::KvStore>(store: &S) -> Result<(), crate::IndexError> {
     let mut batch = store.new_batch();
     batch.delete(bitcoin_rs_storage::ColumnFamily::IdxMeta, SEAL_STAGING_KEY);

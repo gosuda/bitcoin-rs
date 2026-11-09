@@ -14,6 +14,7 @@ pub(crate) use block::NoSpentScripts;
 #[cfg(test)]
 pub(crate) use block::{BodyFacts, committed_block_from_image, parse_body};
 pub use block::{MAX_LIVE_SCRIPT_SIZE, SpentCoin, SpentCoins};
+pub(crate) use capability::put_bulk_publish_marks;
 pub(crate) use capability::read_coverage_floor;
 pub use capability::{IndexCapabilities, IndexCapability, IndexWatermark, IndexWatermarks};
 pub use error::IndexError;

@@ -7,6 +7,7 @@ use bitcoin::{
 use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
 use bitcoin_rs_projection::IndexCapabilities;
+use bitcoin_rs_projection::runtime::{DEFAULT_BATCH_LIMITS, open_derived_index_store_with_scratch};
 use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_projection::segment::{
     Coverage, GenerationDescriptor, IndexGeneration, NoSealedTxOrdinals, TailDescriptor,
@@ -1013,6 +1014,77 @@ fn rebuild_index_matches_the_bulk_generation_for_the_same_chain() -> TestResult 
     let reference = bulk_reference(&blocks)?;
     assert_generation_matches(&store, &reference.store);
     assert_descriptors(&store, &blocks)?;
+    Ok(())
+}
+
+fn bulk_owned_row_counts(store: &RocksDbStore) -> TestResult<Vec<u64>> {
+    let mut counts = Vec::new();
+    for cf in [
+        ColumnFamily::TxDir,
+        ColumnFamily::ScriptDict,
+        ColumnFamily::ScriptPost,
+        ColumnFamily::SpendDir,
+        ColumnFamily::ScriptStats,
+        ColumnFamily::Filters,
+        ColumnFamily::IdxMeta,
+    ] {
+        counts.push(count_rows(store, cf)?);
+    }
+    Ok(counts)
+}
+
+// PRJ-05, PRJ-09
+#[test]
+fn rebuild_index_generation_opens_on_the_node_path_without_writes() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let datadir = prepare_datadir(root.path())?;
+    let blocks = crossing_chain();
+    let refs = blocks.iter().collect::<Vec<_>>();
+    write_chainstate(&datadir, &refs, refs.last().copied(), &refs)?;
+    write_block_records(&datadir, &refs)?;
+
+    let output = rebuild(&datadir)?;
+    parse_rebuild_report(&output)?;
+
+    let store = Arc::new(RocksDbStore::open(datadir.join("txindex"))?);
+    let before = bulk_owned_row_counts(&store)?;
+
+    let scratch = tempfile::tempdir()?;
+    let open = open_derived_index_store_with_scratch(
+        Arc::clone(&store),
+        DEFAULT_BATCH_LIMITS,
+        BULK_GEN_ID,
+        scratch.path().to_path_buf(),
+    )
+    .map_err(|error| TestError::Assertion(error.to_string()))?;
+    let (_fence, marks) = open.writer().fenced_watermarks()?;
+
+    let coverage = coverage_for(&blocks);
+    let tip = IndexWatermark {
+        height: coverage.last_height,
+        hash: coverage.last_hash,
+    };
+    assert_eq!(
+        marks.tx_lookup,
+        Some(tip),
+        "tx_lookup must sit at the rebuilt tip"
+    );
+    assert_eq!(
+        marks.script_history,
+        Some(tip),
+        "script_history must sit at the rebuilt tip"
+    );
+    assert_eq!(
+        marks.compact_filters,
+        Some(tip),
+        "compact_filters must sit at the rebuilt tip"
+    );
+
+    let after = bulk_owned_row_counts(&store)?;
+    assert_eq!(
+        after, before,
+        "opening the rebuilt index must write no bulk-owned or IdxMeta rows"
+    );
     Ok(())
 }
 

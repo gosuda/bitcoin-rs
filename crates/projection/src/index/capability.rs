@@ -347,6 +347,17 @@ pub(super) fn put_selected_watermarks(
     }
 }
 
+pub(crate) fn put_bulk_publish_marks(
+    batch: &mut BufferedWriteBatch,
+    capabilities: IndexCapabilities,
+    watermark: IndexWatermark,
+    floor: u32,
+) {
+    let segment_caps = capabilities.without(IndexCapability::ScriptLive);
+    put_selected_watermarks(batch, segment_caps, Some(watermark));
+    put_selected_floors(batch, segment_caps, floor);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

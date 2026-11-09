@@ -8,11 +8,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_projection::IndexCapability;
+use bitcoin_rs_projection::IndexCapabilities;
+use bitcoin_rs_projection::segment::Coverage;
 use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
-use bitcoin_rs_projection::segment::{
-    Coverage, GenerationDescriptor, IndexGeneration, TailDescriptor, meta_gen_key,
-};
 use bitcoin_rs_storage::budget::{BudgetCharge, BudgetError, BudgetOwner};
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
@@ -230,31 +228,16 @@ pub(crate) fn run_rebuild_index(
     } else {
         builder.build_and_ingest(store.as_ref(), gen_id, &blocks)?
     };
-
-    let desc = GenerationDescriptor {
+    let next_ordinal = u32::try_from(blocks.iter().map(|block| block.txs.len()).sum::<usize>())
+        .unwrap_or(u32::MAX);
+    bitcoin_rs_projection::segment::publish_bulk_generation(
+        store.as_ref(),
         gen_id,
         coverage,
-        tail: TailDescriptor {
-            tail_lo: coverage.last_height.saturating_add(1),
-            tail_hi: coverage.last_height,
-            tail_hash: coverage.last_hash,
-        },
-    };
-
-    let mut batch = store.new_batch();
-    batch.put(
-        ColumnFamily::UtxoMeta,
-        bitcoin_rs_projection::INDEX_FORMAT_VERSION_KEY,
-        &bitcoin_rs_projection::INDEX_FORMAT_VERSION_VALUE,
-    );
-    for cap in IndexCapability::ALL {
-        batch.put(
-            ColumnFamily::IdxMeta,
-            &meta_gen_key(cap),
-            &IndexGeneration::encode_meta_value(&desc),
-        );
-    }
-    store.write_durable(batch)?;
+        next_ordinal,
+        IndexCapabilities::ALL,
+    )
+    .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
     drop(scratch_guard);
 
     Ok(RebuildIndexReport {
