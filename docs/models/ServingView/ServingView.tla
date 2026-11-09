@@ -49,7 +49,7 @@ VARIABLES
   queryIsScriptLive,
   \* @type: Str;
   queryResult,
-  \* @type: [transitionLock: Bool, chainLock: Bool, mempoolLock: Bool];
+  \* @type: [chainLock: Bool, mempoolLock: Bool];
   queryLocksHeld
 
 vars == << tipHeight, tipCommit, currentGen, retiredGens, coverageHeight,
@@ -70,7 +70,6 @@ ViewRecord == [
 ]
 
 LockState == [
-  transitionLock: BOOLEAN,
   chainLock: BOOLEAN,
   mempoolLock: BOOLEAN
 ]
@@ -100,7 +99,6 @@ InitView(i) == [
 ]
 
 InitLocks == [
-  transitionLock |-> FALSE,
   chainLock |-> FALSE,
   mempoolLock |-> FALSE
 ]
@@ -170,7 +168,6 @@ CaptureView(v, isScriptLive, isTip, targetH) ==
   /\ queryIsScriptLive' = isScriptLive
   /\ queryResult' = "None"
   /\ queryLocksHeld' = [
-       transitionLock |-> FALSE,
        chainLock |-> ~isScriptLive,
        mempoolLock |-> FALSE
      ]
@@ -220,7 +217,6 @@ CaptureView(v, isScriptLive, isTip, targetH) ==
 \* zero chain or mempool locks held.
 StartSerialization ==
   /\ queryPhase = "ResponseReady"
-  /\ queryLocksHeld.transitionLock = FALSE
   /\ queryLocksHeld.chainLock = FALSE
   /\ queryLocksHeld.mempoolLock = FALSE
   /\ queryPhase' = "Serializing"
@@ -273,14 +269,14 @@ SafetyAccessFromRetiredNeverAnswersOk ==
   /\ (queryPhase = "Captured" /\ (views[queryViewId].viewGen \in retiredGens \/ views[queryViewId].status = "Expired")) =>
        queryResult # "AnswerOk"
 
-\* PRJ-11: ScriptLive never acquires the chain transition lock
+\* PRJ-11: ScriptLive never acquires the chain lock
 SafetyScriptLiveLockFree ==
-  /\ queryIsScriptLive => ~queryLocksHeld.transitionLock
+  /\ queryIsScriptLive => ~queryLocksHeld.chainLock
 
 \* QRY-08: Serialization runs with no locks held
 SafetySerializationNoLocks ==
   /\ (queryPhase = "Serializing") =>
-       (~queryLocksHeld.transitionLock /\ ~queryLocksHeld.chainLock /\ ~queryLocksHeld.mempoolLock)
+       (~queryLocksHeld.chainLock /\ ~queryLocksHeld.mempoolLock)
 
 Safety ==
   /\ SafetyHistoryQueryNeverRetries
