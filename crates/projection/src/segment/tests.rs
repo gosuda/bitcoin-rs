@@ -564,6 +564,84 @@ fn oversized_scripts_stay_in_basic_filters() -> Result<(), crate::portable::Test
     Ok(())
 }
 
+// PRJ-12
+#[test]
+fn same_block_spends_resolve_locally_and_empty_filters_encode_zero()
+-> Result<(), crate::portable::TestError> {
+    use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut, consensus::serialize, hashes::Hash as _};
+
+    struct NoSpentScripts;
+    impl crate::SpentCoins for NoSpentScripts {
+        fn spent_coin(&self, _txid: &[u8; 32], _vout: u32) -> Option<crate::SpentCoin<'_>> {
+            None
+        }
+    }
+
+    let mut block = bitcoin::constants::genesis_block(bitcoin::Network::Regtest);
+    block.txdata[0].output = vec![
+        TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::new(),
+        },
+        TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(vec![0x6a]),
+        },
+    ];
+    let empty = committed_facts(&block, 0, &hashbrown::HashMap::new())?;
+    assert_eq!(append_and_read(&empty)?.filter, [0]);
+
+    block.txdata[0].output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51]);
+    let parent = block.txdata[0].compute_txid();
+    let mut child = block.txdata[0].clone();
+    child.input[0].previous_output = OutPoint {
+        txid: parent,
+        vout: 1,
+    };
+    child.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x52]);
+    block.txdata.push(child);
+    let mut same_block = committed_facts(&block, 1, &hashbrown::HashMap::new())?;
+    same_block.txs[1].inputs[0].script = bitcoin_rs_storage::Bytes::new();
+    let filter = append_and_read(&same_block)?;
+    let oracle = bitcoin::bip158::BlockFilter::new_script_filter(&block, |outpoint| {
+        if *outpoint
+            == (OutPoint {
+                txid: parent,
+                vout: 1,
+            })
+        {
+            Ok(ScriptBuf::from_bytes(vec![0x6a]))
+        } else {
+            Err(bitcoin::bip158::Error::UtxoMissing(*outpoint))
+        }
+    })?;
+    assert_eq!(filter.filter, oracle.content);
+    assert_eq!(filter.filter.first().copied(), Some(3));
+
+    block.txdata[1].input[0].previous_output.vout = 2;
+    let image = crate::index::parse_body(&serialize(&block))?;
+    let facts = crate::index::BodyFacts {
+        height: 1,
+        needs_scripts: true,
+        spent_coins: &NoSpentScripts,
+    };
+    let result = crate::index::committed_block_from_image(
+        &image,
+        block.block_hash().to_byte_array(),
+        [0; 32],
+        &facts,
+    );
+    assert!(matches!(
+        result,
+        Err(crate::IndexError::MissingSpentCoin {
+            height: 1,
+            vout: 2,
+            ..
+        })
+    ));
+    Ok(())
+}
+
 fn shared_script_blocks(count: u32) -> Vec<bitcoin_rs_storage::CommittedBlock> {
     let script = bitcoin_rs_storage::Bytes::copy_from_slice(&[0x51]);
     let mut blocks = Vec::new();
