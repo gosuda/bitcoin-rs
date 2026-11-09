@@ -205,8 +205,8 @@ fn live_facts_path_parses_nothing_and_fallback_parses_once() -> Result<(), Box<d
     };
 
     reset_parse_exact_call_count();
-    writer.prepare_block_from_facts(caps, &facts_one)?;
-    writer.prepare_block_from_facts(caps, &facts_two)?;
+    writer.prepare_block_from_facts(caps, facts_one)?;
+    writer.prepare_block_from_facts(caps, facts_two)?;
     let live_parses = parse_exact_call_count();
     assert_eq!(
         live_parses, 0,

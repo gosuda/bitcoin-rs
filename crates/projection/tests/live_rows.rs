@@ -45,7 +45,8 @@ fn new_unspent_outputs_insert_one_row_each_and_delete_nothing()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, writer) = writer()?;
     let block = coinbase_block(5, 3)?;
-    let prepared = writer.prepare_block_from_facts(IndexCapabilities::SCRIPT_LIVE, &block)?;
+    let prepared =
+        writer.prepare_block_from_facts(IndexCapabilities::SCRIPT_LIVE, block.clone())?;
     assert_eq!(
         prepared.row_count,
         1 + 3,
@@ -58,8 +59,8 @@ fn new_unspent_outputs_insert_one_row_each_and_delete_nothing()
 fn tail_rows_count_toward_the_batch_byte_limit() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, writer) = writer()?;
     let caps = IndexCapabilities::HISTORICAL;
-    let first = writer.prepare_block_from_facts(caps, &coinbase_block(5, 2)?)?;
-    let second = writer.prepare_block_from_facts(caps, &coinbase_block(6, 2)?)?;
+    let first = writer.prepare_block_from_facts(caps, coinbase_block(5, 2)?)?;
+    let second = writer.prepare_block_from_facts(caps, coinbase_block(6, 2)?)?;
     let mut batch = PreparedBatch::new(PreparedBatchLimits {
         max_rows: usize::MAX,
         max_bytes: 2 * HEADER_ROW_SIZE,

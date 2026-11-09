@@ -63,7 +63,7 @@ fn disabled_compact_filters_skip_filter_build() -> Result<(), Box<dyn std::error
     let (_dir, writer) = open_writer()?;
     let block = block_with_spends();
     reset_counts();
-    let prepared = writer.prepare_block_from_facts(IndexCapabilities::HISTORICAL, &block)?;
+    let prepared = writer.prepare_block_from_facts(IndexCapabilities::HISTORICAL, block.clone())?;
     assert_eq!(FILTER_BUILDS.with(std::cell::Cell::get), 0);
     assert_eq!(SCRIPT_HASH_BUILDS.with(std::cell::Cell::get), 2);
     assert!(
@@ -83,7 +83,7 @@ fn disabled_script_history_skips_script_hashes() -> Result<(), Box<dyn std::erro
     let block = block_with_spends();
     reset_counts();
     let caps = IndexCapabilities::TX_LOOKUP.insert(IndexCapability::CompactFilters);
-    let prepared = writer.prepare_block_from_facts(caps, &block)?;
+    let prepared = writer.prepare_block_from_facts(caps, block.clone())?;
     assert_eq!(FILTER_BUILDS.with(std::cell::Cell::get), 1);
     assert_eq!(SCRIPT_HASH_BUILDS.with(std::cell::Cell::get), 0);
     assert!(
@@ -109,7 +109,8 @@ fn lookup_and_history_disabled_skip_script_hashes() -> Result<(), Box<dyn std::e
     let (_dir, writer) = open_writer()?;
     let block = block_with_spends();
     reset_counts();
-    let prepared = writer.prepare_block_from_facts(IndexCapabilities::COMPACT_FILTERS, &block)?;
+    let prepared =
+        writer.prepare_block_from_facts(IndexCapabilities::COMPACT_FILTERS, block.clone())?;
     assert_eq!(FILTER_BUILDS.with(std::cell::Cell::get), 1);
     assert_eq!(SCRIPT_HASH_BUILDS.with(std::cell::Cell::get), 0);
     assert!(
@@ -128,7 +129,7 @@ fn all_enabled_matches_bulk_builder_rows() -> Result<(), Box<dyn std::error::Err
     let (_dir, writer) = open_writer()?;
     let block = block_with_spends();
     reset_counts();
-    let prepared = writer.prepare_block_from_facts(IndexCapabilities::ALL, &block)?;
+    let prepared = writer.prepare_block_from_facts(IndexCapabilities::ALL, block.clone())?;
     assert_eq!(FILTER_BUILDS.with(std::cell::Cell::get), 1);
     assert_eq!(SCRIPT_HASH_BUILDS.with(std::cell::Cell::get), 2);
     let scratch = tempfile::tempdir()?;
@@ -180,7 +181,7 @@ fn disabled_compact_filters_seal_writes_no_filter_rows() -> Result<(), Box<dyn s
         max_bytes: usize::MAX,
     });
     for block in &blocks {
-        let prepared = writer.prepare_block_from_facts(caps, block)?;
+        let prepared = writer.prepare_block_from_facts(caps, block.clone())?;
         batch
             .try_push(prepared)
             .map_err(|_| "seal batch must admit the block")?;
@@ -224,7 +225,7 @@ fn compact_filters_only_seal_and_reopen_keep_coverage() -> Result<(), Box<dyn st
         max_bytes: usize::MAX,
     });
     for block in &blocks {
-        let prepared = writer.prepare_block_from_facts(caps, block)?;
+        let prepared = writer.prepare_block_from_facts(caps, block.clone())?;
         batch
             .try_push(prepared)
             .map_err(|_| "seal batch must admit the block")?;
@@ -240,7 +241,7 @@ fn compact_filters_only_seal_and_reopen_keep_coverage() -> Result<(), Box<dyn st
         max_bytes: usize::MAX,
     });
     batch
-        .try_push(writer.prepare_block_from_facts(caps, &third)?)
+        .try_push(writer.prepare_block_from_facts(caps, third.clone())?)
         .map_err(|_| "seal batch must admit the block")?;
     writer.commit_forward(batch)?;
     crate::segment::seal_tail_generation(store.as_ref(), 2, 2, caps, scratch.path())?;
@@ -275,7 +276,7 @@ fn seal_and_open_skip_scans_when_hashes_known() -> Result<(), Box<dyn std::error
         max_bytes: usize::MAX,
     });
     for block in &blocks {
-        let prepared = writer.prepare_block_from_facts(caps, block)?;
+        let prepared = writer.prepare_block_from_facts(caps, block.clone())?;
         batch
             .try_push(prepared)
             .map_err(|_| "seal batch must admit the block")?;

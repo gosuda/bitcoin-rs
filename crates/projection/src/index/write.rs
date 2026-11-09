@@ -563,25 +563,25 @@ impl<S: KvStore> IndexWriter<S> {
     pub fn prepare_block_from_facts(
         &self,
         capabilities: IndexCapabilities,
-        block: &bitcoin_rs_storage::CommittedBlock,
+        block: bitcoin_rs_storage::CommittedBlock,
     ) -> Result<PreparedBlock, IndexError> {
         if capabilities.is_empty() {
             return Err(IndexError::NonContiguousPrepared {
                 watermark: self.watermark()?,
             });
         }
-        let mut rows = pending_rows_for_facts(block, capabilities)?;
+        let mut rows = pending_rows_for_facts(&block, capabilities)?;
         rows.sort();
         let row_count = rows.total();
 
         let tail = PreparedTail::new_gated(
-            block,
+            &block,
             tail_needs_filter(capabilities),
             tail_needs_script_hashes(capabilities),
         );
         let family_bytes = rows
             .encoded_bytes_by_family()?
-            .checked_add(&planned_tail_bytes(block, &tail)?)?;
+            .checked_add(&planned_tail_bytes(&block, &tail)?)?;
         let encoded_bytes = family_bytes.total()?;
         Ok(PreparedBlock {
             height: block.height,
@@ -592,7 +592,7 @@ impl<S: KvStore> IndexWriter<S> {
             family_bytes,
             capabilities,
             rows,
-            committed: Box::new(block.clone()),
+            committed: Box::new(block),
             tail,
         })
     }
@@ -1228,4 +1228,49 @@ fn verify_rollback_header_present<S: KvStore>(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod prepare_from_facts_tests {
+    use super::*;
+
+    // PRJ-01
+    #[test]
+    fn owned_facts_prepare_carries_the_input_identity() -> Result<(), crate::portable::TestError> {
+        let block = bitcoin_rs_storage::CommittedBlock {
+            height: 7,
+            hash: [0x07; 32],
+            parent_hash: [0x06; 32],
+            header: [0x07; 80],
+            txs: vec![bitcoin_rs_storage::committed_facts::TxFacts {
+                txid: [0x07; 32],
+                offset: 0,
+                len: 100,
+                inputs: vec![bitcoin_rs_storage::committed_facts::SpentPrevout {
+                    txid: [0x06; 32],
+                    vout: 0,
+                    value: 5_000,
+                    script: bitcoin_rs_storage::Bytes::from_static(&[0x51]),
+                    height: 6,
+                    coinbase: false,
+                }],
+                outputs: vec![bitcoin_rs_storage::committed_facts::CreatedOutput {
+                    vout: 0,
+                    value: 5_000,
+                    script: bitcoin_rs_storage::Bytes::from_static(&[0x52]),
+                }],
+            }],
+        };
+        let store = std::sync::Arc::new(bitcoin_rs_storage::MemoryKvStore::new());
+        let writer = IndexWriter::open(store, 1)?;
+        let prepared = writer.prepare_block_from_facts(IndexCapabilities::HISTORICAL, block)?;
+        assert_eq!(
+            prepared.watermark(),
+            IndexWatermark {
+                height: 7,
+                hash: [0x07; 32]
+            }
+        );
+        Ok(())
+    }
 }

@@ -478,7 +478,7 @@ fn segment_reads_match_bulk_build() -> Result<(), TestError> {
     let live_store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&live_store), 1)?;
     for block in &blocks {
-        let prepared = writer.prepare_block_from_facts(caps, block)?;
+        let prepared = writer.prepare_block_from_facts(caps, block.clone())?;
         let mut batch = PreparedBatch::new(PreparedBatchLimits {
             max_rows: usize::MAX,
             max_bytes: usize::MAX,

@@ -417,7 +417,7 @@ fn seal_repack_respects_posting_chunk_byte_cap() -> Result<(), TestError> {
     let mut writer = bitcoin_rs_projection::IndexWriter::open(std::sync::Arc::clone(&store), 1)?
         .with_seal_scratch(scratch.path().to_path_buf());
     let prepared =
-        writer.prepare_block_from_facts(IndexCapabilities::ALL, &one_script_block(occurrences))?;
+        writer.prepare_block_from_facts(IndexCapabilities::ALL, one_script_block(occurrences))?;
     let mut batch =
         bitcoin_rs_projection::PreparedBatch::new(bitcoin_rs_projection::PreparedBatchLimits {
             max_rows: usize::MAX,
@@ -923,7 +923,7 @@ fn catch_up_from_watermarks<S: KvStore>(
         max_bytes: usize::MAX,
     });
     for block in &blocks[first..] {
-        let prepared = writer.prepare_block_from_facts(caps, block)?;
+        let prepared = writer.prepare_block_from_facts(caps, block.clone())?;
         batch
             .try_push(prepared)
             .map_err(|_| TestError::Message("catch-up batch must admit the block".to_owned()))?;

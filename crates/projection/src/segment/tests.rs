@@ -636,7 +636,7 @@ fn window_history_for_a_shared_script_matches_bulk() {
         .with_seal_scratch(scratch.path().to_path_buf());
     for block in &blocks {
         let prepared = writer
-            .prepare_block_from_facts(crate::IndexCapabilities::ALL, block)
+            .prepare_block_from_facts(crate::IndexCapabilities::ALL, block.clone())
             .expect("prepare");
         let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
             max_rows: usize::MAX,
@@ -736,7 +736,7 @@ fn commit_one<S: bitcoin_rs_storage::KvStore>(
     block: &bitcoin_rs_storage::CommittedBlock,
 ) {
     let prepared = writer
-        .prepare_block_from_facts(crate::IndexCapabilities::ALL, block)
+        .prepare_block_from_facts(crate::IndexCapabilities::ALL, block.clone())
         .expect("prepare");
     let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
         max_rows: usize::MAX,
@@ -937,7 +937,7 @@ fn try_commit_one<S: bitcoin_rs_storage::KvStore>(
     writer: &mut crate::IndexWriter<S>,
     block: &bitcoin_rs_storage::CommittedBlock,
 ) -> Result<(), crate::IndexError> {
-    let prepared = writer.prepare_block_from_facts(crate::IndexCapabilities::ALL, block)?;
+    let prepared = writer.prepare_block_from_facts(crate::IndexCapabilities::ALL, block.clone())?;
     let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
         max_rows: usize::MAX,
         max_bytes: usize::MAX,

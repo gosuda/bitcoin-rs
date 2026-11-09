@@ -418,7 +418,7 @@ impl Worker {
         let mut prepared = Vec::with_capacity(count);
         for identity in &identities[..count] {
             if let Some(block) = guard.remove(&(identity.hash, identity.height)) {
-                prepared.push(self.writer.prepare_block_from_facts(capabilities, &block));
+                prepared.push(self.writer.prepare_block_from_facts(capabilities, block));
             }
         }
         Ok(Some(prepared))

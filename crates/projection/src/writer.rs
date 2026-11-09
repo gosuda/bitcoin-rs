@@ -48,7 +48,7 @@ pub trait TxIndexWriter: Send + Sync {
     fn prepare_block_from_facts(
         &self,
         capabilities: IndexCapabilities,
-        block: &bitcoin_rs_storage::CommittedBlock,
+        block: bitcoin_rs_storage::CommittedBlock,
     ) -> Result<PreparedBlock, IndexError>;
     fn stage_script_live_rows(
         &self,
@@ -143,7 +143,7 @@ where
     fn prepare_block_from_facts(
         &self,
         capabilities: IndexCapabilities,
-        block: &bitcoin_rs_storage::CommittedBlock,
+        block: bitcoin_rs_storage::CommittedBlock,
     ) -> Result<PreparedBlock, IndexError> {
         self.read().prepare_block_from_facts(capabilities, block)
     }

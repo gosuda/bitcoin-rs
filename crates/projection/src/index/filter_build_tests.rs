@@ -43,7 +43,7 @@ fn live_commit_builds_each_block_filter_once() -> Result<(), Box<dyn std::error:
         max_bytes: usize::MAX,
     });
     for block in [&first, &second] {
-        let prepared = writer.prepare_block_from_facts(caps, block)?;
+        let prepared = writer.prepare_block_from_facts(caps, block.clone())?;
         assert!(batch.try_push(prepared).is_ok());
     }
     writer.commit_forward(batch)?;
