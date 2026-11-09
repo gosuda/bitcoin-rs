@@ -291,7 +291,7 @@ Owners:
     - `retained_prefix_commits_before_any_group_switch_and_never_outlives_a_fence_change`
     - `run_loop_commits_a_retained_prefix_and_retries_an_absent_body_without_a_wake`
   - undo anchors and admission order:
-    - `forward_script_live_follows_undo_present_missing_or_corrupt`
+    - `script_live_undo_gap_pauses_the_group_and_resumes_to_bulk`
     - `anchor_failure_outranks_an_earlier_preparation_failure`
     - `preparation_failure_keeps_its_height_after_committed_successes`
 - If a rival reorg or tip extension occurs during batch preparation, atomic commit detects watermark divergence.
@@ -302,7 +302,10 @@ Owners:
 - A required block body can be missing during rollback (for example an abandoned-branch block pruned before rollback completed).
 - In that case, the worker resets the affected capability watermark and starts a fresh rebuild from the active chain.
 - A missing or unreadable undo record affects `ScriptHistory`, `ScriptLive`, and `CompactFilters`.
-- The worker resets `ScriptLive` and requests a verified immutable snapshot artifact.
+- On the forward path, the worker pauses at the height before the gap and resets nothing.
+- `TxLookup`, `ScriptHistory`, and `CompactFilters` pause as one tail group. `ScriptLive` pauses below the gap at its own watermark.
+- The pause clears when the undo record returns, and the worker resumes to the active tip.
+- On the rollback path, the worker resets `ScriptLive` and requests a verified immutable snapshot artifact.
 - If no accepted artifact is available, it replays the complete retained history through the body and undo worker path.
 - If that history is unavailable, only `ScriptLive` becomes `Unavailable`, while worker and sibling indexes continue.
 - `ScriptHistory` becomes unavailable for this run when its rollback or backfill needs a missing spent-script anchor.
@@ -334,6 +337,7 @@ Owners:
     - `unusable_worker_makes_queries_unavailable`
   - `crates/projection/src/runtime/recovery_tests.rs`:
     - `undo_read_failure_is_not_a_missing_undo`
+    - `missing_undo_pauses_the_tail_group_and_resumes_to_bulk`
     - `rollback_without_undo_preserves_script_history_and_rewinds_siblings`
     - the `IDX-06`/`IDX-07` anchor and reseed tests cited above
     - `unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark`
