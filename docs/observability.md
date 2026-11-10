@@ -29,7 +29,7 @@ enumerations: backend names, durability modes, and closed reason taxonomies
 (see `node.sync.stall_episodes_cleared{reason}` in `crates/node/src/p2p/download_window.rs`
 for the pattern). They also include the enum capability states of `node.capability.txindex_readiness`, and
 the closed family labels of `index.family_planned_write_bytes{family}` where
-`family` in `{tx_lookup, script_history, script_live, headers, filters}`.
+`family` in `{tx_lookup, script_history, script_live, headers, filters, tail_log}`.
 No speculative instrumentation: a signal earns its place by an operator
 decision (alert, dashboard, SLO) or a named contract hook (below).
 Evidence identity (binary/configuration/corpus digests and hardware)

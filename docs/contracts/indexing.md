@@ -300,7 +300,7 @@ Owners:
 ### `IDX-07`: Error isolation and supervised rebuild
 
 - A required block body can be missing during rollback (for example an abandoned-branch block pruned before rollback completed).
-- In that case, the worker resets the affected capability watermark and starts a fresh rebuild from the active chain.
+- In that case, the worker resets the selected rollback group's watermarks and starts a fresh rebuild from the active chain.
 - A missing or unreadable undo record affects `ScriptHistory`, `ScriptLive`, and `CompactFilters`.
 - On the forward path, the worker pauses at the height before the gap and resets nothing.
 - `TxLookup`, `ScriptHistory`, and `CompactFilters` pause as one tail group. `ScriptLive` pauses below the gap at its own watermark.
@@ -308,9 +308,13 @@ Owners:
 - On the rollback path, the worker resets `ScriptLive` and requests a verified immutable snapshot artifact.
 - If no accepted artifact is available, it replays the complete retained history through the body and undo worker path.
 - If that history is unavailable, only `ScriptLive` becomes `Unavailable`, while worker and sibling indexes continue.
-- `ScriptHistory` becomes unavailable for this run when its rollback or backfill needs a missing spent-script anchor.
-- Its durable rows and watermark are preserved, and its queries refuse with a typed unavailable cause.
-- `TxLookup` uses body-only rollback and keeps serving and reconciling.
+- `TxLookup`, `ScriptHistory`, and `CompactFilters` roll back as one tail group.
+- A rollback of one tail-bound capability at a height moves every tail-bound capability at that height with it.
+- The group releases the shared header identity unless an unselected capability still holds a watermark at or above that height.
+- A second rollback for an already-moved group member is refused.
+- `TxLookup` rollback needs only the block body, but it rewinds the whole tail group with it.
+- When the rollback group includes `ScriptLive` and its spent-script anchor is missing, `ScriptHistory` and `CompactFilters` in the group become unavailable for this run.
+- Their durable rows and watermarks are preserved, and their queries refuse with a typed unavailable cause.
 - `CompactFilters` becomes unavailable for this run, because a current UTXO snapshot cannot recreate spent scripts for historical filters.
 - Its durable rows and watermark are preserved.
 - Its queries refuse requests and its status reports unsynced.
@@ -341,6 +345,7 @@ Owners:
     - `rollback_without_undo_preserves_script_history_and_rewinds_siblings`
     - the `IDX-06`/`IDX-07` anchor and reseed tests cited above
     - `unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark`
+  - `group_rollback_releases_identity_and_refuses_a_second_member` in `crates/projection/tests/index_roundtrip.rs`
 
 ### `IDX-11`: Portable index bundle
 
