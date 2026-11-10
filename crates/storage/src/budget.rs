@@ -98,7 +98,7 @@ pub trait BudgetCharge: Send + Sync {
     }
 }
 
-/// Off-line callers (converter, tests) that must never be refused.
+/// Off-line callers (tests and offline tools) that must never be refused.
 pub struct UnboundedBudget;
 
 impl BudgetCharge for UnboundedBudget {
@@ -148,10 +148,6 @@ impl ChargeHandle {
         Ok(())
     }
 
-    pub fn ensure(&self, bytes: u64) -> Result<(), BudgetError> {
-        self.charge.ensure_available_bytes(self.owner, bytes)
-    }
-
     pub fn release(&self, bytes: u64) {
         self.charge.release_bytes(self.owner, bytes);
     }
@@ -159,11 +155,6 @@ impl ChargeHandle {
     #[must_use]
     pub fn available(&self) -> u64 {
         self.charge.available_bytes(self.owner)
-    }
-
-    #[must_use]
-    pub const fn owner(&self) -> BudgetOwner {
-        self.owner
     }
 }
 

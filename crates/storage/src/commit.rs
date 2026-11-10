@@ -225,14 +225,9 @@ impl CommitAuthority {
         match write_result {
             Ok(true) => {
                 #[cfg(any(test, feature = "test-seam"))]
-                self.notify_commit(&prefix, prefix.next_head.commit_id);
+                self.notify_commit(&prefix);
                 self.coins.install_committed(&prefix.coin_delta);
-                Ok(DurableReceipt {
-                    commit_id: prefix.next_head.commit_id,
-                    height: prefix.next_head.height,
-                    tip: prefix.next_head.tip,
-                    chain_tx_count: prefix.next_head.chain_tx_count,
-                })
+                Ok(DurableReceipt::from_head(&prefix.next_head))
             }
             Ok(false) => Err(CommitError::PreconditionFailed),
             Err(err) => {
@@ -293,7 +288,7 @@ impl CommitAuthority {
         match write_result {
             Ok(true) => {
                 #[cfg(any(test, feature = "test-seam"))]
-                self.notify_commit(&prefix, prefix.next_head.commit_id);
+                self.notify_commit(&prefix);
                 self.coins.install_committed(&prefix.coin_delta);
                 Ok(DurableReceipt::from_head(&prefix.next_head))
             }
@@ -494,13 +489,8 @@ impl CommitAuthority {
     }
 
     #[cfg(any(test, feature = "test-seam"))]
-    fn notify_commit(&self, prefix: &AcceptedPrefix, commit_id: u64) {
-        let receipt = DurableReceipt {
-            commit_id,
-            height: prefix.next_head.height,
-            tip: prefix.next_head.tip,
-            chain_tx_count: prefix.next_head.chain_tx_count,
-        };
+    fn notify_commit(&self, prefix: &AcceptedPrefix) {
+        let receipt = DurableReceipt::from_head(&prefix.next_head);
         let fault = self.fault.lock().clone();
         if let Some(fault) = fault {
             fault.after_commit(prefix, &receipt);

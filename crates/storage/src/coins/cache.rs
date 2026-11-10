@@ -16,7 +16,6 @@ struct ClockEntry {
 struct ShardState {
     entries: Vec<ClockEntry>,
     hand: usize,
-    overhead_bytes: u64,
 }
 
 impl ShardState {
@@ -32,7 +31,7 @@ impl ShardState {
 ///
 /// Invariant: resident bytes (entries plus overhead) never exceed the budget.
 /// Invariant: only `install` (called after a durable receipt) and
-/// `fill_after_read` (engine-returned committed bytes) may introduce or change
+/// `fill_after_read_guarded` (engine-returned committed bytes) may introduce or change
 /// values; `lookup` never returns bytes that did not enter through those two
 /// paths.
 ///
@@ -61,6 +60,7 @@ impl ShardLock {
 }
 
 impl CoinCache {
+    #[cfg(test)]
     #[must_use]
     pub fn new(budget_bytes: u64) -> Self {
         Self::with_charge(budget_bytes, None)
@@ -80,7 +80,6 @@ impl CoinCache {
                     state: Mutex::new(ShardState {
                         entries: Vec::new(),
                         hand: 0,
-                        overhead_bytes: 0,
                     }),
                 })
                 .collect(),
@@ -130,6 +129,7 @@ impl CoinCache {
         Some(entry.value.clone())
     }
 
+    #[cfg(test)]
     pub fn fill_after_read(&self, key: &CoinKey, value: Bytes) {
         let epoch = self.epoch(key.shard());
         self.fill_after_read_guarded(key, value, epoch);
@@ -276,7 +276,6 @@ impl CoinCache {
         if *resident + charge > self.budget_bytes {
             return (false, freed);
         }
-        shard.overhead_bytes += charge;
         *resident += charge;
         (true, freed)
     }
@@ -314,7 +313,6 @@ impl CoinCache {
             for shard_lock in &self.shards {
                 let mut shard = shard_lock.lock();
                 shard.entries.clear();
-                shard.overhead_bytes = 0;
                 shard.hand = 0;
                 shard_lock.epoch.fetch_add(1, Ordering::Release);
             }
