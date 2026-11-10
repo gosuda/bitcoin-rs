@@ -102,7 +102,7 @@ axiom bitcoin_rs_consensus.primitives.units.Amount.to_sat
   : bitcoin_rs_consensus.primitives.units.Amount → Result Std.U64
 
 /-- [bitcoin_rs_storage::column_families::ColumnFamily]
-    Source: 'crates/storage/src/column_families.rs', lines 3:0-17:1
+    Source: 'crates/storage/src/column_families.rs', lines 3:0-24:1
     Visibility: public -/
 @[discriminant u8]
 inductive column_families.ColumnFamily where
@@ -119,6 +119,13 @@ inductive column_families.ColumnFamily where
 | ScriptLive : column_families.ColumnFamily
 | Coins : column_families.ColumnFamily
 | PoolLedger : column_families.ColumnFamily
+| IdxMeta : column_families.ColumnFamily
+| TxDir : column_families.ColumnFamily
+| ScriptDict : column_families.ColumnFamily
+| ScriptPost : column_families.ColumnFamily
+| SpendDir : column_families.ColumnFamily
+| ScriptStats : column_families.ColumnFamily
+| Filters : column_families.ColumnFamily
 
 /-- [bitcoin_rs_storage::error::StorageError]
     Source: 'crates/storage/src/error.rs', lines 6:0-21:1
@@ -150,7 +157,7 @@ inductive utxo.scan.UtxoScanError where
 | Corrupt : String → utxo.scan.UtxoScanError
 
 /-- [bitcoin_rs_storage::utxo::set::UtxoError]
-    Source: 'crates/storage/src/utxo/set.rs', lines 13:0-48:1
+    Source: 'crates/storage/src/utxo/set.rs', lines 13:0-50:1
     Visibility: public -/
 @[discriminant isize]
 inductive utxo.set.UtxoError where
@@ -168,12 +175,14 @@ inductive utxo.set.UtxoError where
 | SnapshotOutputCountTooLarge : Std.Usize → utxo.set.UtxoError
 | SnapshotDuplicateVout : Std.U32 → utxo.set.UtxoError
 | SnapshotShardMismatch : Std.U8 → Std.U8 → utxo.set.UtxoError
+| SnapshotShardOutOfOrder : Std.U8 → Std.U8 → utxo.set.UtxoError
 | SnapshotTxidPrefixMismatch : utxo.set.UtxoError
 | AmountOutOfRange : Std.U64 → utxo.set.UtxoError
 | Cancelled : utxo.set.UtxoError
 
 /-- [bitcoin_rs_storage::utxo::compress::compress_amount]: loop body 0:
-    Source: 'crates/storage/src/utxo/compress.rs', lines 78:4-81:5 -/
+    Source: 'crates/storage/src/utxo/compress.rs', lines 78:4-81:5
+    Visibility: public -/
 @[rust_loop_body]
 def utxo.compress.compress_amount_loop.body
   (n : Std.U64) (exponent : Std.U64) :
@@ -191,7 +200,8 @@ def utxo.compress.compress_amount_loop.body
   else ok (done (n, exponent))
 
 /-- [bitcoin_rs_storage::utxo::compress::compress_amount]: loop 0:
-    Source: 'crates/storage/src/utxo/compress.rs', lines 78:4-81:5 -/
+    Source: 'crates/storage/src/utxo/compress.rs', lines 78:4-81:5
+    Visibility: public -/
 @[rust_loop]
 def utxo.compress.compress_amount_loop
   (n : Std.U64) (exponent : Std.U64) : Result (Std.U64 × Std.U64) := do
@@ -201,7 +211,8 @@ def utxo.compress.compress_amount_loop
     (n, exponent)
 
 /-- [bitcoin_rs_storage::utxo::compress::compress_amount]:
-    Source: 'crates/storage/src/utxo/compress.rs', lines 69:0-89:1 -/
+    Source: 'crates/storage/src/utxo/compress.rs', lines 69:0-89:1
+    Visibility: public -/
 def utxo.compress.compress_amount
   (amount : Std.U64) :
   Result (core.result.Result Std.U64 utxo.set.UtxoError)
@@ -242,7 +253,8 @@ def utxo.compress.POW10 : Array Std.U64 10#usize :=
     ]
 
 /-- [bitcoin_rs_storage::utxo::compress::decompress_amount]:
-    Source: 'crates/storage/src/utxo/compress.rs', lines 105:0-122:1 -/
+    Source: 'crates/storage/src/utxo/compress.rs', lines 105:0-122:1
+    Visibility: public -/
 def utxo.compress.decompress_amount
   (compressed : Std.U64) : Result (Option Std.U64) := do
   if compressed = 0#u64
