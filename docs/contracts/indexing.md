@@ -76,8 +76,8 @@ Owners:
 - Proof:
   - `crates/projection/src/runtime/query_tests.rs` (`filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries`)
   - `crates/serving/tests/handler_smoke.rs` (`compact_filter_rpc_exposes_only_enabled_ready_data`)
-  - `crates/wire/src/listener.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
-- `ScriptLive` is self-contained under format 8 (PRJ-11).
+- `crates/wire/src/listener/writer_shutdown_tests.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
+- `ScriptLive` is self-contained under format 9 (PRJ-11).
 - Its 43-byte key is `script-hash-prefix || full-outpoint`.
 - Its value stores `script_hash` followed by the compact varint coin payload `varint(compress_amount(value)) || varint((height << 1) | coinbase)` with Core's `CompressAmount` and minimal varints; decoding refuses truncated input, malformed varints, amount overflow, height overflow, and trailing bytes.
 - Readers exact-check the full script hash directly from the stored coin without requiring a live UTXO read or chain-transition lock.
@@ -174,7 +174,7 @@ Owners:
 - The `data_dir/txindex` namespace maintains durable format versions and capability watermarks (`IndexWatermarks`, `ConsumerCursor`).
 - A stored schema or format version foreign to this build MUST reset and rebuild the store per `docs/policies/db-migration.md`.
 - The store MUST never perform an in-place migration.
-- `IndexWriter::open` (`crates/projection/src/index/write.rs`) accepts row-format 6 as the current durability marker only.
+- `IndexWriter::open` (`crates/projection/src/index/write.rs`) accepts format 9 (`INDEX_FORMAT_VERSION_VALUE`) as the current durability marker only.
 - This format provides newest-first history-occurrence rows with inverted heights, 43-byte live rows, and 6-byte positions.
 - The row format is owned by this clause; any format change requires a new durability marker.
 - Every older marker returns `IndexError::UnsupportedTxIndexFormatVersion`.
@@ -300,7 +300,7 @@ Owners:
 ### `IDX-07`: Error isolation and supervised rebuild
 
 - A required block body can be missing during rollback (for example an abandoned-branch block pruned before rollback completed).
-- In that case, the worker resets the selected rollback group's watermarks and starts a fresh rebuild from the active chain.
+- When the selection contains `ScriptLive`, the worker marks only `ScriptLive` unavailable and continues without a reset. Otherwise the worker resets the caller's selected capabilities and rebuilds them from the active chain, not the tail-expanded group.
 - A missing or unreadable undo record affects `ScriptHistory`, `ScriptLive`, and `CompactFilters`.
 - On the forward path, the worker pauses at the height before the gap and resets nothing.
 - `TxLookup`, `ScriptHistory`, and `CompactFilters` pause as one tail group. `ScriptLive` pauses below the gap at its own watermark.

@@ -79,6 +79,6 @@ The full mapping is `classify_apply_error` (`crates/execution/src/window.rs`). A
 
 ## Boundaries
 
-`SIGKILL` is not power loss. The fault matrix injects lost, failed, and partial writes around apply, sync, and flush, but it runs in one process on one filesystem; device-cache behaviour is unmeasured here. No group-commit latency measurement backs the 64-block redo bound; that bound is a constant in `crates/execution/src/window.rs`, not a measured figure.
+`SIGKILL` is not power loss. The fault matrix injects lost, failed, and partial writes around apply, sync, and flush, but it runs in one process on one filesystem; device-cache behaviour is unmeasured here. No group-commit latency measurement backs the 64-block redo bound; that bound is a constant in `crates/execution/src/window_limits.rs`, not a measured figure.
 
 Pruning deletes the bodies and undo records this chapter leans on, so the next chapter is [Pruning](pruning.md).

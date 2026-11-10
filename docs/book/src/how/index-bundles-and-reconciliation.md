@@ -19,7 +19,7 @@ A watermark is 36 bytes: the height little-endian, then the 32-byte block hash (
 
 Compact filter rows are keyed by block hash under prefix `[1, b'F']` and store `hash || header || filter`. `BasicFilter::decode` recomputes the filter hash and rejects a mismatch, and `chain` hashes `filter_hash || previous_header` to extend the BIP157 header chain (`crates/projection/src/index/filters.rs:22`, `:50`). `build` adds every non-empty output script except `OP_RETURN` and every spent script, and derives the BIP158 hash keys from the first 16 bytes of the block hash (`filters.rs:68`).
 
-The row format is version 6, written under key `[0x00, b'V']` with value `06 00 00 00` (`crates/projection/src/index/state.rs:14`). `IndexWriter::open` accepts that value only. Any other stored value returns `UnsupportedTxIndexFormatVersion`; rows with no version marker at all return `LegacyCursorlessIndex` (`crates/projection/src/index/write.rs:25`). The runtime treats both as a rebuild request: it logs `resetting incompatible derived transaction index for rebuild` and calls `IndexWriter::reset_index` (`crates/projection/src/runtime/startup.rs:32`). There is no in-place migration.
+The row format is version 9, written under key `[0x00, b'V']` with value `09 00 00 00` (`INDEX_FORMAT_VERSION_VALUE` in `crates/projection/src/types.rs`). `IndexWriter::open` accepts that value only. Any other stored value returns `UnsupportedTxIndexFormatVersion`; rows with no version marker at all return `LegacyCursorlessIndex` (`crates/projection/src/index/write.rs`). The runtime treats both as a rebuild request: it logs `resetting incompatible derived transaction index for rebuild` and calls `IndexWriter::reset_index` (`crates/projection/src/runtime/startup.rs`). There is no in-place migration.
 
 ## The write path is one conditioned batch
 
@@ -66,7 +66,7 @@ stale index watermark exceeds the rollback cutover; rebuilding selected capabili
 
 and resets those capabilities instead of walking back block by block (`IDX-06`).
 
-Otherwise `rollback_one` loads the body at the watermark height, derives the same rows a forward commit would have written, and asks `commit_rollback_one_for_with_cursor_with_spent_scripts` to delete exactly those rows and set each grouped capability's watermark to the previous block (`crates/projection/src/runtime/rollback.rs:261`, `crates/projection/src/index/write.rs:820`). The call first expands the request to the tail group (`tail_rollback_group`, `crates/projection/src/index/write.rs:1034`), so a rollback of one tail-bound capability moves every tail-bound capability at that height, releases the shared header identity unless an unselected capability still needs it, and refuses a second rollback for an already-moved member (`group_rollback_releases_identity_and_refuses_a_second_member`, `crates/projection/tests/index_roundtrip.rs`). Two details matter:
+Otherwise `rollback_one` loads the body at the watermark height, derives the same rows a forward commit would have written, and asks `commit_rollback_one_for_with_cursor_with_spent_scripts` to delete exactly those rows and set each grouped capability's watermark to the previous block (`crates/projection/src/runtime/rollback.rs:261`, `crates/projection/src/index/write.rs`). The call first expands the request to the tail group (`tail_rollback_group`, `crates/projection/src/index/write.rs`), so a rollback of one tail-bound capability moves every tail-bound capability at that height, releases the shared header identity unless an unselected capability still needs it, and refuses a second rollback for an already-moved member (`group_rollback_releases_identity_and_refuses_a_second_member`, `crates/projection/tests/index_roundtrip.rs`). Two details matter:
 
 - Header rows are deleted only when no unselected capability still needs an identity at that height. `unselected_keeps_identity` checks sibling watermarks; when a sibling is also at or above the height, only the selected family's rows are deleted (`crates/projection/src/index/write.rs:446`).
 - `ScriptLive` and `CompactFilters` need spent-output scripts to rebuild their rows. Those come from the block's undo record (`live_anchor`, `crates/projection/src/runtime/rollback.rs:342`). A missing undo record raises `UndoUnavailable`; `ScriptHistory` and `CompactFilters` become unavailable for the run, and when `ScriptLive` was part of the selection it is reset for a fresh seed (`crates/projection/src/runtime/reconciliation.rs:465`).
@@ -150,11 +150,11 @@ Each record is `txid[32] || height u32 BE || count u8 || count * 6-byte TxPositi
 Real header from a 20-block regtest export:
 
 ```text
-00000000: 4252 5349 5841 5254 0101 0000 0006 0000  BRSIXART........
+00000000: 4252 5349 5841 5254 0101 0000 0009 0000  BRSIXART........
 00000010: 00fa bfb5 da00 0000 14d7 a239 1f09 0131  ...........9...1
 ```
 
-`01` is the family, `01 00 00 00` the artifact version, `06 00 00 00` the index format, `fa bf b5 da` the regtest magic, and `00 00 00 14` the base height 20.
+`01` is the family, `01 00 00 00` the artifact version, `09 00 00 00` the index format, `fa bf b5 da` the regtest magic, and `00 00 00 14` the base height 20.
 
 ### What import checks, and in what order
 
