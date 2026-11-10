@@ -627,6 +627,53 @@ mod body_position_prefetch_tests {
     }
 
     #[test]
+    fn prefetched_bodies_resolve_by_key_with_bounded_retention() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let index = Arc::new(crate::RocksDbStore::open(temp.path().join("index"))?);
+        let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
+        let store = IndexedBlockBodyStore::new(index, files);
+        let hash1 = Hash256::from_le_bytes(&[1_u8; 32]);
+        let hash2 = Hash256::from_le_bytes(&[2_u8; 32]);
+        let hash3 = Hash256::from_le_bytes(&[3_u8; 32]);
+        let hash4 = Hash256::from_le_bytes(&[9_u8; 32]);
+        store.persist_block_body(1, hash1, b"first body")?;
+        store.persist_block_body(2, hash2, b"second body")?;
+        store.persist_block_body(3, hash3, b"third body")?;
+        let mut reader = store.reader()?;
+        reader.prefetch_positions(&[(1, hash1), (2, hash2), (3, hash3)])?;
+        assert_eq!(
+            reader.load_block_body(3, hash3)?.as_deref(),
+            Some(b"third body".as_slice())
+        );
+        assert_eq!(
+            reader.load_block_body(1, hash1)?.as_deref(),
+            Some(b"first body".as_slice())
+        );
+        assert_eq!(
+            reader.load_block_body(2, hash2)?.as_deref(),
+            Some(b"second body".as_slice())
+        );
+        assert!(matches!(
+            reader.load_block_body(4, hash4),
+            Err(StorageError::InvalidOperation(_))
+        ));
+        reader.prefetch_positions(&[(2, hash2)])?;
+        assert!(matches!(
+            reader.load_block_body(1, hash1),
+            Err(StorageError::InvalidOperation(_))
+        ));
+        assert_eq!(
+            reader.load_block_body(2, hash2)?.as_deref(),
+            Some(b"second body".as_slice())
+        );
+        assert_eq!(
+            reader.load_block_body(2, hash2)?.as_deref(),
+            Some(b"second body".as_slice())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn persisting_same_block_body_twice_appends_once() -> TestResult {
         let temp = tempfile::tempdir()?;
         let index = Arc::new(crate::RocksDbStore::open(temp.path().join("index"))?);
