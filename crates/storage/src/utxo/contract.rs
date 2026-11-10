@@ -201,6 +201,8 @@ pub enum CoinEntryError {
     Record(#[from] UtxoError),
 }
 
+const COIN_ENTRY_TXIDS_PER_FETCH: usize = 64;
+
 pub fn resolve_coin_entries(
     coins: &crate::CoinStore,
     outpoints: &[OutPoint],
@@ -213,17 +215,21 @@ pub fn resolve_coin_entries(
             keys.len() - 1
         });
     }
-    let values = coins.multi_get(&keys)?;
-    let records = values
-        .into_iter()
-        .map(|value| {
-            value
-                .map(|bytes| {
-                    crate::utxo::record::UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice())
-                })
-                .transpose()
-        })
-        .collect::<Result<Vec<_>, UtxoError>>()?;
+    let mut records: Vec<Option<crate::utxo::record::UtxoRecord>> = Vec::with_capacity(keys.len());
+    for chunk in keys.chunks(COIN_ENTRY_TXIDS_PER_FETCH) {
+        let values = coins.multi_get(chunk)?;
+        for value in values {
+            records.push(
+                value
+                    .map(|bytes| {
+                        crate::utxo::record::UtxoRecord::from_encoded(
+                            bytes.to_vec().into_boxed_slice(),
+                        )
+                    })
+                    .transpose()?,
+            );
+        }
+    }
     Ok(outpoints
         .iter()
         .map(|outpoint| {

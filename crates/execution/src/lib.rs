@@ -1615,26 +1615,53 @@ struct ResolvedUtxoView {
     _hold: Option<PrevoutHold>,
 }
 
+const RESOLVE_TXIDS_PER_FETCH: usize = 64;
+
 impl ResolvedUtxoView {
+    fn external_outpoints(image: &BlockImage, tx_plan: &BlockTxPlan) -> Vec<OutPoint> {
+        let same_block = tx_plan.same_block_spent.as_ref();
+        (0..image.tx_count())
+            .map(|i| image.tx(i))
+            .filter(|tx| !tx.is_coinbase())
+            .flat_map(|tx| (0..tx.input_count()).map(move |j| tx.input_outpoint(j)))
+            .filter(|outpoint| same_block.is_none_or(|set| !set.contains(outpoint)))
+            .collect()
+    }
+    fn ordered_prev_txids(outpoints: &[OutPoint]) -> Vec<Txid> {
+        let mut seen: hashbrown::HashSet<Txid> = hashbrown::HashSet::with_capacity(outpoints.len());
+        let mut txids = Vec::with_capacity(outpoints.len());
+        for outpoint in outpoints {
+            if seen.insert(outpoint.txid) {
+                txids.push(outpoint.txid);
+            }
+        }
+        txids
+    }
     fn resolve<S: bitcoin_rs_storage::utxo::contract::OutputSource + ?Sized>(
         utxo: &S,
         image: &BlockImage,
         tx_plan: &BlockTxPlan,
     ) -> Self {
-        let same_block = tx_plan.same_block_spent.as_ref();
-        let outpoints: Vec<OutPoint> = (0..image.tx_count())
-            .map(|i| image.tx(i))
-            .filter(|tx| !tx.is_coinbase())
-            .flat_map(|tx| (0..tx.input_count()).map(move |j| tx.input_outpoint(j)))
-            .filter(|outpoint| same_block.is_none_or(|set| !set.contains(outpoint)))
-            .collect();
-        let entries = utxo.get_entries(&outpoints);
+        let outpoints = Self::external_outpoints(image, tx_plan);
+        let txids = Self::ordered_prev_txids(&outpoints);
+        let mut external = HashMap::with_capacity(outpoints.len());
+        for txids in txids.chunks(RESOLVE_TXIDS_PER_FETCH) {
+            let wanted: hashbrown::HashSet<Txid> = txids.iter().copied().collect();
+            let chunk: Vec<OutPoint> = outpoints
+                .iter()
+                .copied()
+                .filter(|outpoint| wanted.contains(&outpoint.txid))
+                .collect();
+            let entries = utxo.get_entries(&chunk);
+            external.extend(
+                chunk
+                    .into_iter()
+                    .zip(entries)
+                    .filter_map(|(outpoint, entry)| entry.map(|entry| (outpoint, entry))),
+            );
+        }
         Self {
-            external: outpoints
-                .into_iter()
-                .zip(entries)
-                .filter_map(|(outpoint, entry)| entry.map(|entry| (outpoint, entry)))
-                .collect(),
+            external,
             _hold: None,
         }
     }
@@ -1644,10 +1671,49 @@ impl ResolvedUtxoView {
         tx_plan: &BlockTxPlan,
         charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
     ) -> core::result::Result<Self, ApplyError> {
-        let mut view = Self::resolve(utxo, image, tx_plan);
-        let bytes = resolved_view_bytes(&view);
-        view._hold = PrevoutHold::charge(charge, bytes)?;
-        Ok(view)
+        if charge.is_none() {
+            return Ok(Self::resolve(utxo, image, tx_plan));
+        }
+        let outpoints = Self::external_outpoints(image, tx_plan);
+        let txids = Self::ordered_prev_txids(&outpoints);
+        let mut external = HashMap::with_capacity(outpoints.len());
+        let mut hold: Option<PrevoutHold> = None;
+        for txids in txids.chunks(RESOLVE_TXIDS_PER_FETCH) {
+            let wanted: hashbrown::HashSet<Txid> = txids.iter().copied().collect();
+            let chunk: Vec<OutPoint> = outpoints
+                .iter()
+                .copied()
+                .filter(|outpoint| wanted.contains(&outpoint.txid))
+                .collect();
+            let entries = utxo.get_entries(&chunk);
+            let probe = Self {
+                external: chunk
+                    .into_iter()
+                    .zip(entries)
+                    .filter_map(|(outpoint, entry)| entry.map(|entry| (outpoint, entry)))
+                    .collect(),
+                _hold: None,
+            };
+            let chunk_bytes = resolved_view_bytes(&probe);
+            if let Some(handle) = charge.clone() {
+                match hold.as_mut() {
+                    Some(held) => {
+                        handle
+                            .charge(chunk_bytes)
+                            .map_err(|_| ApplyError::StagedBudgetExhausted)?;
+                        held.bytes = held.bytes.saturating_add(chunk_bytes);
+                    }
+                    None => {
+                        hold = PrevoutHold::charge(Some(handle), chunk_bytes)?;
+                    }
+                }
+            }
+            external.extend(probe.external);
+        }
+        Ok(Self {
+            external,
+            _hold: hold,
+        })
     }
     fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
         self.external.get(outpoint).map(|entry| entry.txout.clone())
