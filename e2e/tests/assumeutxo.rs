@@ -747,6 +747,7 @@ fn snapshot_retries_resident_orphan_with_newly_available_prevout() -> Result<()>
     node.stop()
 }
 
+// ARCH-07b
 #[test]
 fn corrupt_snapshot_recovery_fails_closed() -> Result<()> {
     let artifacts = tempfile::tempdir()?;
@@ -754,82 +755,33 @@ fn corrupt_snapshot_recovery_fails_closed() -> Result<()> {
     std::fs::write(&snapshot, CORE_SNAPSHOT)?;
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     admit_headers(&mut node, &core_blocks()?)?;
-    node.rpc("loadtxoutset", &json!([snapshot]))?;
+    let imported = node.rpc("loadtxoutset", &json!([snapshot]))?;
+    assert_eq!(imported["coins_loaded"], 200);
     let datadir = node.take_datadir()?;
     node.send_sigkill();
     drop(node);
-    let recovery = datadir.path().join("node/assumeutxo");
-    let base_dir = std::fs::read_dir(&recovery)?
-        .next()
-        .ok_or_else(|| Error::Assertion("snapshot archive absent".into()))??
-        .path();
-    let coins = base_dir.join("coins.dat");
-    let mut bytes = std::fs::read(&coins)?;
-    bytes[0] ^= 1;
-    std::fs::write(&coins, bytes)?;
+    let current = datadir.path().join("node/chainstate-checkpoints/CURRENT");
+    assert!(
+        current.is_file(),
+        "activation must publish the snapshot-base checkpoint before the head commit"
+    );
+    std::fs::write(&current, b"corrupt")?;
     let start = ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &SpawnOptions::default(), datadir);
     let evidence = match start {
         Err(Error::ChildExit { evidence, .. }) => evidence,
         other => {
             return Err(Error::Assertion(format!(
-                "corrupt archive must refuse startup: {other:?}"
+                "corrupt checkpoint must refuse startup: {other:?}"
             )));
         }
     };
     let stderr = std::fs::read_to_string(evidence.join("stderr.log"))?;
     assert!(
-        stderr.contains("invalid snapshot magic"),
-        "startup must reject the committed corrupt archive: {stderr}"
+        stderr.contains("corrupt current-schema checkpoint"),
+        "startup must refuse the corrupt snapshot-base checkpoint: {stderr}"
     );
     assert_eq!(std::fs::read(&snapshot)?, CORE_SNAPSHOT);
     Ok(())
-}
-
-#[test]
-fn core_import_preserves_source_hardlinked_to_archive_staging() -> Result<()> {
-    let artifacts = tempfile::tempdir()?;
-    let source = artifacts.path().join("core200.dat");
-    std::fs::write(&source, CORE_SNAPSHOT)?;
-    let datadir = tempfile::tempdir()?;
-    let archive = datadir.path().join("node/assumeutxo").join(BASE);
-    let mut node =
-        ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &SpawnOptions::default(), datadir)?;
-    admit_headers(&mut node, &core_blocks()?)?;
-    std::fs::create_dir_all(&archive)?;
-    for name in ["coins.tmp", "headers.tmp", "coins.dat", "headers.dat"] {
-        std::fs::hard_link(&source, archive.join(name))?;
-    }
-    node.rpc("loadtxoutset", &json!([source]))?;
-    assert_eq!(std::fs::read(&source)?, CORE_SNAPSHOT);
-    for name in ["coins.tmp", "headers.tmp"] {
-        assert_eq!(
-            std::fs::read(archive.join(name))?,
-            CORE_SNAPSHOT,
-            "pre-existing {name} must be preserved"
-        );
-    }
-    let orphan_coins = archive.join(".coins.dat.12345.100.tmp");
-    let orphan_headers = archive.join(".headers.dat.12345.101.tmp");
-    std::fs::copy(archive.join("coins.dat"), &orphan_coins)?;
-    std::fs::copy(archive.join("headers.dat"), &orphan_headers)?;
-    let unknown_alias = archive.join(".coins.dat.12345.102.tmp");
-    std::fs::hard_link(&source, &unknown_alias)?;
-    let datadir = node.take_datadir()?;
-    node.send_sigkill();
-    drop(node);
-    let mut node =
-        ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &SpawnOptions::default(), datadir)?;
-    let view = states(&mut node)?;
-    assert_eq!(view["chainstates"][1]["blocks"], 200);
-    assert_eq!(view["chainstates"][1]["snapshot_blockhash"], BASE);
-    assert_eq!(std::fs::read(&source)?, CORE_SNAPSHOT);
-    assert!(!orphan_coins.exists());
-    assert!(!orphan_headers.exists());
-    assert_eq!(std::fs::read(&unknown_alias)?, CORE_SNAPSHOT);
-    for name in ["coins.tmp", "headers.tmp"] {
-        assert_eq!(std::fs::read(archive.join(name))?, CORE_SNAPSHOT);
-    }
-    node.stop()
 }
 
 #[test]
@@ -887,30 +839,36 @@ fn bitcoin_rs_export_is_accepted_by_a_fresh_core_node() -> Result<()> {
 }
 
 #[cfg(unix)]
+// ARCH-07b
 #[test]
 fn interrupted_core_activation_restarts_ordinary_and_retries() -> Result<()> {
     let datadir = tempfile::tempdir()?;
     let snapshot = datadir.path().join("node/core200.dat");
-    let archive = datadir.path().join("node/assumeutxo").join(BASE);
+    let checkpoint_current = datadir.path().join("node/chainstate-checkpoints/CURRENT");
     let mut node =
         ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &SpawnOptions::default(), datadir)?;
     std::fs::write(&snapshot, CORE_SNAPSHOT)?;
     admit_headers(&mut node, &core_blocks()?)?;
-    std::fs::create_dir_all(archive.join("headers.dat"))?;
+    if let Some(parent) = checkpoint_current.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&checkpoint_current, b"blocked")?;
     let reply =
         node.rpc_raw(&json!({"jsonrpc":"2.0","id":1,"method":"loadtxoutset","params":[snapshot]}))?;
     assert!(!reply["error"].is_null(), "{reply}");
-    assert!(archive.join("coins.dat").is_file(), "orphan coin archive");
+    assert_eq!(std::fs::read(&checkpoint_current)?, b"blocked");
     let datadir = node.take_datadir()?;
     node.send_sigkill();
     drop(node);
 
-    std::fs::remove_dir(archive.join("headers.dat"))?;
+    std::fs::remove_file(&checkpoint_current)?;
     let mut node =
         ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &SpawnOptions::default(), datadir)?;
     let restarted = states(&mut node)?;
     assert_eq!(
-        restarted["chainstates"].as_array().unwrap().len(),
+        restarted["chainstates"]
+            .as_array()
+            .map_or(0, |rows| rows.len()),
         1,
         "{restarted}"
     );
@@ -918,6 +876,12 @@ fn interrupted_core_activation_restarts_ordinary_and_retries() -> Result<()> {
         restarted["chainstates"][0]["validated"], true,
         "{restarted}"
     );
+    let datadir = node.stop_keep_datadir()?;
+    let orphan_dir = datadir.path().join("node/assumeutxo").join(BASE);
+    std::fs::create_dir_all(&orphan_dir)?;
+    std::fs::write(orphan_dir.join("coins.dat"), b"truncated snapshot")?;
+    let mut node =
+        ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &SpawnOptions::default(), datadir)?;
     admit_headers(&mut node, &core_blocks()?)?;
     let imported = node.rpc("loadtxoutset", &json!([snapshot]))?;
     assert_eq!(imported["coins_loaded"], 200);
@@ -925,6 +889,10 @@ fn interrupted_core_activation_restarts_ordinary_and_retries() -> Result<()> {
     let assumed = states(&mut node)?;
     assert_eq!(assumed["chainstates"][1]["blocks"], 200, "{assumed}");
     assert_eq!(assumed["chainstates"][1]["snapshot_blockhash"], BASE);
+    assert_eq!(
+        std::fs::read(orphan_dir.join("coins.dat"))?,
+        b"truncated snapshot"
+    );
     assert_eq!(std::fs::read(&snapshot)?, CORE_SNAPSHOT);
     node.stop()
 }
