@@ -217,9 +217,8 @@ mod branch_connect_mempool;
 #[cfg(test)]
 mod fatal_halt;
 
-// BUD-04
 #[test]
-fn historical_validation_runs_under_a_background_cpu_permit() {
+fn with_historical_background_permit_holds_one_permit_during_closure() {
     let budget = crate::budget::NodeBudget::from_dbcache_bytes(16, 4);
     let cpu = budget.cpu();
     let observed = super::with_historical_background_permit(&budget, || cpu.background_in_flight());
