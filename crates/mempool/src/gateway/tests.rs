@@ -1034,18 +1034,16 @@ impl MempoolObserver for BackpressureObserver {
         };
         std::thread::sleep(core::time::Duration::from_millis(1));
         if first {
-            self.entered
-                .lock()
-                .take()
-                .expect("entered armed once")
-                .send(())
-                .expect("main thread waiting");
-            self.release
-                .lock()
-                .take()
-                .expect("release armed once")
-                .recv()
-                .expect("main thread alive");
+            let Some(entered) = self.entered.lock().take() else {
+                return;
+            };
+            if entered.send(()).is_err() {
+                return;
+            }
+            let Some(release) = self.release.lock().take() else {
+                return;
+            };
+            let _ = release.recv();
         }
     }
 }
@@ -1067,15 +1065,13 @@ fn bounded_delivery_queue_never_exceeds_capacity_and_keeps_sequence_order()
     let first = Arc::clone(&gateway);
     let first_handle =
         std::thread::spawn(move || insert_contended(&first, &backpressure_tx(200, 0)));
-    entered_rx
-        .recv_timeout(core::time::Duration::from_secs(10))
-        .expect("first observer call started");
+    entered_rx.recv_timeout(core::time::Duration::from_secs(10))?;
     let mut done_rxs = Vec::with_capacity(PRODUCERS);
     for producer in 0..PRODUCERS {
         let (done_tx, done_rx) = mpsc::channel();
         done_rxs.push(done_rx);
         let gateway = Arc::clone(&gateway);
-        let label = u8::try_from(producer).expect("producer fits u8") + 10;
+        let label = u8::try_from(producer)? + 10;
         std::thread::spawn(move || {
             for index in 0..PER_PRODUCER {
                 insert_contended(&gateway, &backpressure_tx(label, index));
@@ -1096,16 +1092,17 @@ fn bounded_delivery_queue_never_exceeds_capacity_and_keeps_sequence_order()
         saw_backpressure,
         "a producer must block on the full delivery queue"
     );
-    release_tx.send(()).expect("gate thread alive");
+    release_tx.send(())?;
     for done in done_rxs {
-        done.recv_timeout(core::time::Duration::from_secs(30))
-            .expect("producer finished");
+        done.recv_timeout(core::time::Duration::from_secs(30))?;
     }
-    first_handle.join().expect("first publisher");
+    let Ok(()) = first_handle.join() else {
+        return Err("first publisher panicked".into());
+    };
     let deadline = std::time::Instant::now() + core::time::Duration::from_secs(10);
     loop {
         let sequence = gateway.read().sequence_number();
-        let published = u64::try_from(observer.stream.lock().len()).expect("length fits u64");
+        let published = u64::try_from(observer.stream.lock().len())?;
         if published == sequence {
             break;
         }
@@ -1147,23 +1144,25 @@ impl MempoolObserver for FullQueueReentrantObserver {
             }
         }
         if result.sequence_base == 1 {
-            self.entered
-                .lock()
-                .take()
-                .expect("entered armed once")
-                .send(())
-                .expect("main thread waiting");
-            self.release
-                .lock()
-                .take()
-                .expect("release armed once")
-                .recv()
-                .expect("main thread alive");
+            let Some(entered) = self.entered.lock().take() else {
+                return;
+            };
+            if entered.send(()).is_err() {
+                return;
+            }
+            let Some(release) = self.release.lock().take() else {
+                return;
+            };
+            if release.recv().is_err() {
+                return;
+            }
             let gateway = self.gateway.lock().clone();
             if let Some(gateway) = gateway {
-                let nested = gateway
-                    .insert_entry(AdmissionOrigin::Rpc, entry(&backpressure_tx(99, 0)))
-                    .expect("nested in");
+                let Ok(nested) =
+                    gateway.insert_entry(AdmissionOrigin::Rpc, entry(&backpressure_tx(99, 0)))
+                else {
+                    return;
+                };
                 self.nested.lock().push(nested);
             }
         }
@@ -1172,7 +1171,8 @@ impl MempoolObserver for FullQueueReentrantObserver {
 
 // MPS-04
 #[test]
-fn reentrant_mutation_completes_when_the_delivery_queue_is_full() {
+fn reentrant_mutation_completes_when_the_delivery_queue_is_full()
+-> Result<(), crate::test_error::TestError> {
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let observer = Arc::new(FullQueueReentrantObserver {
@@ -1192,10 +1192,8 @@ fn reentrant_mutation_completes_when_the_delivery_queue_is_full() {
     let first = Arc::clone(&gateway);
     let first_handle =
         std::thread::spawn(move || insert_contended(&first, &backpressure_tx(200, 0)));
-    entered_rx
-        .recv_timeout(core::time::Duration::from_secs(10))
-        .expect("first observer call started");
-    let flood = u32::try_from(DELIVERY_QUEUE_CAPACITY).expect("capacity fits u32") - 1;
+    entered_rx.recv_timeout(core::time::Duration::from_secs(10))?;
+    let flood = u32::try_from(DELIVERY_QUEUE_CAPACITY)? - 1;
     for index in 0..flood {
         insert_contended(&gateway, &backpressure_tx(10, index));
     }
@@ -1213,9 +1211,7 @@ fn reentrant_mutation_completes_when_the_delivery_queue_is_full() {
         );
         std::thread::yield_now();
     }
-    room_rx
-        .recv_timeout(core::time::Duration::from_secs(10))
-        .expect("room producer queued");
+    room_rx.recv_timeout(core::time::Duration::from_secs(10))?;
     let (blocked_tx, blocked_rx) = mpsc::channel();
     let blocked = Arc::clone(&gateway);
     let blocked_handle = std::thread::spawn(move || {
@@ -1230,17 +1226,21 @@ fn reentrant_mutation_completes_when_the_delivery_queue_is_full() {
         );
         std::thread::yield_now();
     }
-    release_tx.send(()).expect("gate thread alive");
-    blocked_rx
-        .recv_timeout(core::time::Duration::from_secs(20))
-        .expect("the blocked producer finished after room opened");
-    room_handle.join().expect("room producer");
-    blocked_handle.join().expect("blocked producer");
-    first_handle.join().expect("first publisher");
+    release_tx.send(())?;
+    blocked_rx.recv_timeout(core::time::Duration::from_secs(20))?;
+    let Ok(()) = room_handle.join() else {
+        return Err("room producer panicked".into());
+    };
+    let Ok(()) = blocked_handle.join() else {
+        return Err("blocked producer panicked".into());
+    };
+    let Ok(()) = first_handle.join() else {
+        return Err("first publisher panicked".into());
+    };
     let deadline = std::time::Instant::now() + core::time::Duration::from_secs(10);
     loop {
         let sequence = gateway.read().sequence_number();
-        let published = u64::try_from(observer.stream.lock().len()).expect("length fits u64");
+        let published = u64::try_from(observer.stream.lock().len())?;
         if published == sequence {
             break;
         }
@@ -1261,9 +1261,9 @@ fn reentrant_mutation_completes_when_the_delivery_queue_is_full() {
         1,
         "the nested mutation completed and returned"
     );
-    let capacity = u64::try_from(DELIVERY_QUEUE_CAPACITY).expect("capacity fits u64");
+    let capacity = u64::try_from(DELIVERY_QUEUE_CAPACITY)?;
     assert_eq!(
-        nested.first().expect("nested recorded").sequence_base,
+        nested.first().ok_or("nested recorded")?.sequence_base,
         capacity + 2,
         "the nested mutation took the next sequence past the full queue"
     );
@@ -1273,6 +1273,7 @@ fn reentrant_mutation_completes_when_the_delivery_queue_is_full() {
         expected,
         "every event arrives exactly once in sequence order"
     );
+    Ok(())
 }
 
 struct CeilingObserver {
@@ -1293,22 +1294,24 @@ impl MempoolObserver for CeilingObserver {
             }
         }
         if result.sequence_base == 1 {
-            self.entered
-                .lock()
-                .take()
-                .expect("entered armed once")
-                .send(())
-                .expect("main thread waiting");
-            self.release
-                .lock()
-                .take()
-                .expect("release armed once")
-                .recv()
-                .expect("main thread alive");
+            let Some(entered) = self.entered.lock().take() else {
+                return;
+            };
+            if entered.send(()).is_err() {
+                return;
+            }
+            let Some(release) = self.release.lock().take() else {
+                return;
+            };
+            if release.recv().is_err() {
+                return;
+            }
             let gateway = self.gateway.lock().clone();
             if let Some(gateway) = gateway {
-                let attempts =
-                    u32::try_from(DELIVERY_REENTRANT_ALLOWANCE).expect("allowance fits u32") + 2;
+                let Ok(allowance) = u32::try_from(DELIVERY_REENTRANT_ALLOWANCE) else {
+                    return;
+                };
+                let attempts = allowance + 2;
                 for attempt in 0..attempts {
                     let nested = gateway
                         .insert_entry(AdmissionOrigin::Rpc, entry(&backpressure_tx(30, attempt)));
@@ -1321,7 +1324,8 @@ impl MempoolObserver for CeilingObserver {
 
 // MPS-04
 #[test]
-fn reentrant_mutations_past_the_ceiling_are_refused_with_delivery_queue_full() {
+fn reentrant_mutations_past_the_ceiling_are_refused_with_delivery_queue_full()
+-> Result<(), crate::test_error::TestError> {
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let observer = Arc::new(CeilingObserver {
@@ -1341,10 +1345,8 @@ fn reentrant_mutations_past_the_ceiling_are_refused_with_delivery_queue_full() {
     let first = Arc::clone(&gateway);
     let first_handle =
         std::thread::spawn(move || insert_contended(&first, &backpressure_tx(200, 0)));
-    entered_rx
-        .recv_timeout(core::time::Duration::from_secs(10))
-        .expect("first observer call started");
-    let flood = u32::try_from(DELIVERY_QUEUE_CAPACITY).expect("capacity fits u32");
+    entered_rx.recv_timeout(core::time::Duration::from_secs(10))?;
+    let flood = u32::try_from(DELIVERY_QUEUE_CAPACITY)?;
     for index in 0..flood {
         insert_contended(&gateway, &backpressure_tx(10, index));
     }
@@ -1356,12 +1358,14 @@ fn reentrant_mutations_past_the_ceiling_are_refused_with_delivery_queue_full() {
         );
         std::thread::yield_now();
     }
-    release_tx.send(()).expect("gate thread alive");
-    first_handle.join().expect("first publisher");
+    release_tx.send(())?;
+    let Ok(()) = first_handle.join() else {
+        return Err("first publisher panicked".into());
+    };
     let deadline = std::time::Instant::now() + core::time::Duration::from_secs(10);
     loop {
         let sequence = gateway.read().sequence_number();
-        let published = u64::try_from(observer.stream.lock().len()).expect("length fits u64");
+        let published = u64::try_from(observer.stream.lock().len())?;
         if published == sequence {
             break;
         }
@@ -1371,11 +1375,11 @@ fn reentrant_mutations_past_the_ceiling_are_refused_with_delivery_queue_full() {
         );
         std::thread::yield_now();
     }
-    let allowance = u64::try_from(DELIVERY_REENTRANT_ALLOWANCE).expect("allowance fits u64");
-    let capacity = u64::try_from(DELIVERY_QUEUE_CAPACITY).expect("capacity fits u64");
+    let allowance = u64::try_from(DELIVERY_REENTRANT_ALLOWANCE)?;
+    let capacity = u64::try_from(DELIVERY_QUEUE_CAPACITY)?;
     assert_eq!(
         gateway.publish_high_water(),
-        usize::try_from(capacity + allowance).expect("ceiling fits usize"),
+        usize::try_from(capacity + allowance)?,
         "the queue never passes the reentrant ceiling"
     );
     let nested = observer.nested.lock();
@@ -1390,7 +1394,7 @@ fn reentrant_mutations_past_the_ceiling_are_refused_with_delivery_queue_full() {
     }
     assert_eq!(
         committed.len(),
-        usize::try_from(allowance).expect("allowance fits usize"),
+        usize::try_from(allowance)?,
         "only the allowance fits past the bound"
     );
     assert_eq!(refused, 2, "mutations past the ceiling are refused");
@@ -1405,6 +1409,7 @@ fn reentrant_mutations_past_the_ceiling_are_refused_with_delivery_queue_full() {
         expected,
         "every committed event arrives exactly once in sequence order"
     );
+    Ok(())
 }
 
 struct ChainDrivenReentrantObserver {
@@ -1427,18 +1432,18 @@ impl MempoolObserver for ChainDrivenReentrantObserver {
             }
         }
         if result.sequence_base == 1 {
-            self.entered
-                .lock()
-                .take()
-                .expect("entered armed once")
-                .send(())
-                .expect("main thread waiting");
-            self.release
-                .lock()
-                .take()
-                .expect("release armed once")
-                .recv()
-                .expect("main thread alive");
+            let Some(entered) = self.entered.lock().take() else {
+                return;
+            };
+            if entered.send(()).is_err() {
+                return;
+            }
+            let Some(release) = self.release.lock().take() else {
+                return;
+            };
+            if release.recv().is_err() {
+                return;
+            }
             let gateway = self.gateway.lock().clone();
             if let Some(gateway) = gateway {
                 let attempts = DELIVERY_REENTRANT_ALLOWANCE + 2;
@@ -1464,7 +1469,8 @@ impl MempoolObserver for ChainDrivenReentrantObserver {
 
 // MPS-04
 #[test]
-fn chain_driven_reentrant_mutations_past_the_ceiling_are_refused() {
+fn chain_driven_reentrant_mutations_past_the_ceiling_are_refused()
+-> Result<(), crate::test_error::TestError> {
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let observer = Arc::new(ChainDrivenReentrantObserver {
@@ -1486,11 +1492,9 @@ fn chain_driven_reentrant_mutations_past_the_ceiling_are_refused() {
     let first = Arc::clone(&gateway);
     let first_handle =
         std::thread::spawn(move || insert_contended(&first, &backpressure_tx(200, 0)));
-    entered_rx
-        .recv_timeout(core::time::Duration::from_secs(10))
-        .expect("first observer call started");
-    let flood = u32::try_from(DELIVERY_QUEUE_CAPACITY).expect("capacity fits u32");
-    let mut residents = Vec::with_capacity(usize::try_from(flood).expect("flood fits usize"));
+    entered_rx.recv_timeout(core::time::Duration::from_secs(10))?;
+    let flood = u32::try_from(DELIVERY_QUEUE_CAPACITY)?;
+    let mut residents = Vec::with_capacity(usize::try_from(flood)?);
     for index in 0..flood {
         let tx = backpressure_tx(10, index);
         insert_contended(&gateway, &tx);
@@ -1505,12 +1509,14 @@ fn chain_driven_reentrant_mutations_past_the_ceiling_are_refused() {
         );
         std::thread::yield_now();
     }
-    release_tx.send(()).expect("gate thread alive");
-    first_handle.join().expect("first publisher");
+    release_tx.send(())?;
+    let Ok(()) = first_handle.join() else {
+        return Err("first publisher panicked".into());
+    };
     let deadline = std::time::Instant::now() + core::time::Duration::from_secs(10);
     loop {
         let sequence = gateway.read().sequence_number();
-        let published = u64::try_from(observer.stream.lock().len()).expect("length fits u64");
+        let published = u64::try_from(observer.stream.lock().len())?;
         if published == sequence {
             break;
         }
@@ -1520,11 +1526,11 @@ fn chain_driven_reentrant_mutations_past_the_ceiling_are_refused() {
         );
         std::thread::yield_now();
     }
-    let allowance = u64::try_from(DELIVERY_REENTRANT_ALLOWANCE).expect("allowance fits u64");
-    let capacity = u64::try_from(DELIVERY_QUEUE_CAPACITY).expect("capacity fits u64");
+    let allowance = u64::try_from(DELIVERY_REENTRANT_ALLOWANCE)?;
+    let capacity = u64::try_from(DELIVERY_QUEUE_CAPACITY)?;
     assert_eq!(
         gateway.publish_high_water(),
-        usize::try_from(capacity + allowance).expect("ceiling fits usize"),
+        usize::try_from(capacity + allowance)?,
         "the queue never passes the reentrant ceiling"
     );
     let block_results = observer.block_results.lock();
@@ -1539,7 +1545,7 @@ fn chain_driven_reentrant_mutations_past_the_ceiling_are_refused() {
     }
     assert_eq!(
         settled.len(),
-        usize::try_from(allowance).expect("allowance fits usize"),
+        usize::try_from(allowance)?,
         "only the allowance settles past the bound"
     );
     assert_eq!(refused, 2, "chain mutations past the ceiling are refused");
@@ -1558,8 +1564,7 @@ fn chain_driven_reentrant_mutations_past_the_ceiling_are_refused() {
     );
     assert_eq!(
         gateway.read().len(),
-        usize::try_from(capacity + 1).expect("pool fits usize")
-            - usize::try_from(allowance).expect("allowance fits usize"),
+        usize::try_from(capacity + 1)? - usize::try_from(allowance)?,
         "refused mutations leave every resident in place"
     );
     let expected: Vec<u64> = (1..=(capacity + 1 + allowance)).collect();
@@ -1568,6 +1573,7 @@ fn chain_driven_reentrant_mutations_past_the_ceiling_are_refused() {
         expected,
         "every committed event arrives exactly once in sequence order"
     );
+    Ok(())
 }
 
 #[derive(Default)]

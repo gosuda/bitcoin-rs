@@ -334,7 +334,10 @@ fn crash_between_commit_and_cache_install_reloads_from_engine() -> TestResult {
     let reloaded = fresh_coins
         .get(&key)?
         .ok_or(TestError::Missing("coin must reload from engine"))?;
-    assert_eq!(&reloaded[0..32], &cb_txid.0.to_le_bytes());
+    let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
+        reloaded.to_vec().into_boxed_slice(),
+    )?;
+    assert_eq!(record.txid(), cb_txid.0);
 
     Ok(())
 }
@@ -374,7 +377,16 @@ fn bip30_overwrite_stays_explicit() -> TestResult {
         "regtest height 3 is not a BIP30 exception height"
     );
 
-    let committed = windowed.durable_head.load()?.map_or(0, |head| head.height);
+    let committed_head = windowed
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("durable head"))?;
+    assert_eq!(
+        committed_head.height, 2,
+        "the valid prefix before the rejected block commits and the rejected block does not"
+    );
+    assert_eq!(committed_head.tip, b2.block_hash().0);
+    let committed = committed_head.height;
     let sequential = fresh_regtest_chain_with_bodies()?;
     for block in blocks.iter().take(usize::try_from(committed)?) {
         sequential.apply_block(&BlockImage::from_local(block.clone()))?;
@@ -631,49 +643,6 @@ fn fixed_window_committed_prefix_equals_sequential_execution() -> TestResult {
 
     Ok(())
 }
-// WIN-07
-#[test]
-fn window_rejects_duplicate_txid_staged_in_the_same_window() -> TestResult {
-    let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
-    seed_genesis(&chain)?;
-    commit_genesis_head(&chain)?;
-
-    let genesis = Network::Regtest.genesis_block();
-    let b1 = mined_child(genesis.block_hash(), 1)?;
-    let b1_hash = b1.block_hash().0;
-    let b2 = mined_block_with_prev_hash(b1.block_hash(), 2, vec![b1.txs[0].clone()])?;
-    assert_eq!(b1.txs[0].txid(), b2.txs[0].txid());
-
-    apply_headers(&chain, &[&b1, &b2])?;
-    let blocks = [b1, b2];
-    let payloads = dump_payloads(&blocks);
-    let payload_refs: Vec<&BlockImage> = payloads.iter().collect();
-
-    let error = match chain.apply_window(&payload_refs) {
-        Ok(outcomes) => panic!(
-            "duplicate coinbase txid staged in one commit window was accepted; \
-             head at height {}",
-            outcomes.last().map_or(0, |outcome| outcome.height)
-        ),
-        Err(error) => error,
-    };
-    assert!(
-        error.to_string().contains("BIP30"),
-        "the rejection must name BIP30, got: {error}"
-    );
-
-    let head = chain
-        .durable_head
-        .load()?
-        .ok_or(TestError::Missing("durable head"))?;
-    assert_eq!(
-        head.height, 1,
-        "the valid prefix before the rejected block commits and the rejected block does not"
-    );
-    assert_eq!(head.tip, b1_hash);
-
-    Ok(())
-}
 
 fn insert_engine_coin(
     chain: &Chainstate,
@@ -759,12 +728,20 @@ fn engine_coin_spent_inside_the_window_is_not_a_duplicate() -> TestResult {
         Err(error) => error,
     };
     assert!(
-        !error.to_string().contains("BIP30"),
-        "a coin spent inside the window is not a duplicate, got: {error}"
+        !matches!(
+            *error.source,
+            ApplyError::Consensus(ConsensusError::Bip { .. })
+        ),
+        "a coin spent inside the window is not a duplicate, got: {:?}",
+        error.source
     );
     assert!(
-        error.to_string().contains("missing prevout"),
-        "block 2 must fail on its absent prevout, got: {error}"
+        matches!(
+            *error.source,
+            ApplyError::Consensus(ConsensusError::MissingPrevout { .. })
+        ),
+        "block 2 must fail on its absent prevout, got: {:?}",
+        error.source
     );
 
     let head = chain
@@ -895,8 +872,12 @@ fn engine_coin_duplicate_across_windows_is_rejected_by_bip30() -> TestResult {
         Err(error) => error,
     };
     assert!(
-        error.to_string().contains("BIP30"),
-        "the rejection must name BIP30, got: {error}"
+        matches!(
+            *error.source,
+            ApplyError::Consensus(ConsensusError::Bip { .. })
+        ),
+        "the duplicate must be refused by the BIP30 rule, got: {:?}",
+        error.source
     );
 
     let head = chain

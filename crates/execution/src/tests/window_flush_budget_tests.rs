@@ -34,7 +34,7 @@ fn carried_bytes(prefix: &AcceptedPrefix) -> usize {
     undo + coins
 }
 
-// BUD-06, WIN-05
+// BUD-06
 #[test]
 fn window_batches_stay_within_ceiling_under_undo_and_coin_churn() -> TestResult {
     let corpus = churn_corpus()?;

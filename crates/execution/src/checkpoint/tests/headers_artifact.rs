@@ -207,6 +207,13 @@ fn utxo_payload_generation_is_refused_and_names_the_converter() -> TestResult {
         ));
     };
     assert!(
+        matches!(
+            error,
+            bitcoin_rs_storage::checkpoint::CheckpointLoadError::UtxoPayloadRetired { .. }
+        ),
+        "a generation carrying a utxo payload must be refused as retired, got: {error:?}"
+    );
+    assert!(
         error.to_string().contains("bitcoin-rs-storage-convert"),
         "the refusal must name the converter, got: {error}"
     );

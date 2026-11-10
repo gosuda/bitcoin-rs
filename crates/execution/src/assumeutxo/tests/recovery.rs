@@ -651,24 +651,20 @@ fn accepted_historical_generation(dir: &Path, fixture: &Fixture) -> TestResult<u
     }
 }
 
-fn remove_first_engine_coin(engine_dir: &Path) -> TestResult<(u64, u64)> {
+fn remove_first_engine_coin(engine_dir: &Path) -> TestResult<()> {
     use bitcoin_rs_storage::KvStore as _;
     let store = bitcoin_rs_storage::memory_kv::MemoryKvStore::open_checkpoint(engine_dir)?;
-    let (key, value) = {
+    let key = {
         let mut rows = store.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?;
         rows.next()
             .ok_or(TestError::Missing("engine image has no coins"))??
+            .0
     };
-    let record =
-        bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(value.into_boxed_slice())
-            .map_err(|_| TestError::Missing("bad coin record"))?;
-    let outputs = u64::try_from(record.outputs().count())?;
-    let amount: u64 = record.outputs().map(|out| out.value).sum();
     let mut batch = store.new_batch();
     batch.delete(bitcoin_rs_storage::ColumnFamily::Coins, &key);
     store.write_durable(batch)?;
     store.checkpoint(engine_dir)?;
-    Ok((outputs, amount))
+    Ok(())
 }
 fn resign_engine_image(generation_dir: &Path) -> TestResult<[u8; 32]> {
     let chainstate = cap_std::fs::Dir::open_ambient_dir(
@@ -709,8 +705,7 @@ fn historical_checkpoint_coin_stats_come_from_the_engine_image() -> TestResult {
     let accepted_stats = unaccepted.stats.clone();
     let generation = accepted_historical_generation(dir.path(), &fixture)?;
     let generation_dir = accepted_generation_dir(dir.path(), generation);
-    let (removed_outputs, removed_amount) =
-        remove_first_engine_coin(&generation_dir.join("chainstate"))?;
+    remove_first_engine_coin(&generation_dir.join("chainstate"))?;
     let manifest_sha256 = resign_engine_image(&generation_dir)?;
     {
         use bitcoin_rs_storage::KvStore as _;
@@ -755,12 +750,12 @@ fn historical_checkpoint_coin_stats_come_from_the_engine_image() -> TestResult {
     let restored = historical.coin_stats.snapshot();
     assert_eq!(
         restored.utxo_count,
-        accepted_stats.utxo_count - removed_outputs,
+        accepted_stats.utxo_count - 1,
         "coin count must follow the engine image, not the coinstats artifact"
     );
     assert_eq!(
         restored.total_amount,
-        accepted_stats.total_amount - removed_amount,
+        accepted_stats.total_amount - 50 * 100_000_000,
         "coin amount must follow the engine image"
     );
     assert_eq!(restored.tx_count, accepted_stats.tx_count);
@@ -885,6 +880,7 @@ fn snapshot_activation_preserves_full_revalidation_requirement() -> TestResult {
     Ok(())
 }
 
+// ARCH-07b
 #[test]
 fn snapshot_base_checkpoint_is_bound_to_the_pinned_commitment() -> TestResult {
     let fixture = Fixture::new()?;
