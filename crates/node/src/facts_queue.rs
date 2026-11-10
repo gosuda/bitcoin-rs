@@ -48,6 +48,7 @@ impl FactsQueue {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn has_gap(&self) -> bool {
         self.gap.load(Ordering::SeqCst)
@@ -55,10 +56,6 @@ impl FactsQueue {
 
     pub fn set_gap(&self) {
         self.gap.store(true, Ordering::SeqCst);
-    }
-
-    pub fn clear_gap(&self) {
-        self.gap.store(false, Ordering::SeqCst);
     }
 
     #[must_use]

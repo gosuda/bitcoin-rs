@@ -24,8 +24,6 @@ pub const QUERY_VIEW_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 pub const PEER_OUTBOUND_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 pub const FOREGROUND_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
 
-const INGRESS_WAIT_POLL: Duration = Duration::from_millis(100);
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BudgetCaps {
     pub staged_images: u64,
@@ -182,6 +180,7 @@ impl NodeBudget {
         self.ledger.lock().charges[owner.index()]
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn available_of_reservations(&self, owner: BudgetOwner) -> u64 {
         self.ledger.lock().reserved[owner.index()]
@@ -251,31 +250,6 @@ impl NodeBudget {
     pub fn reserve(&self, owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
         let mut ledger = self.ledger.lock();
         self.reserve_locked(&mut ledger, owner, bytes)
-    }
-
-    /// Blocking variant for ingress: waits for capacity instead of failing,
-    /// bounded by the caller's cancel latch.
-    pub fn reserve_blocking(
-        &self,
-        owner: BudgetOwner,
-        bytes: u64,
-        is_cancelled: impl Fn() -> bool,
-    ) -> Result<(), BudgetError> {
-        loop {
-            {
-                let mut ledger = self.ledger.lock();
-                match self.reserve_locked(&mut ledger, owner, bytes) {
-                    Ok(()) => return Ok(()),
-                    Err(BudgetError::BudgetExhausted) => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            if is_cancelled() {
-                return Err(BudgetError::Cancelled);
-            }
-            let mut ledger = self.ledger.lock();
-            self.released.wait_for(&mut ledger, INGRESS_WAIT_POLL);
-        }
     }
 
     /// `BUD-07`: reclaim from optional owners, then reserve, then refuse.

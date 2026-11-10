@@ -28,36 +28,6 @@ pub struct FixedIngressLedger {
     released: Arc<Condvar>,
 }
 
-impl Default for FixedIngressLedger {
-    fn default() -> Self {
-        Self::new(BLOCK_INGRESS_BYTES)
-    }
-}
-
-impl FixedIngressLedger {
-    #[must_use]
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            used: Arc::new(Mutex::new(0)),
-            released: Arc::new(Condvar::new()),
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn with_shared(
-        capacity: usize,
-        used: Arc<Mutex<usize>>,
-        released: Arc<Condvar>,
-    ) -> Self {
-        Self {
-            capacity,
-            used,
-            released,
-        }
-    }
-}
-
 impl IngressLedger for FixedIngressLedger {
     fn capacity(&self) -> usize {
         self.capacity
@@ -149,11 +119,11 @@ impl Default for BlockMemory {
     fn default() -> Self {
         let used = Arc::new(Mutex::new(0));
         let released = Arc::new(Condvar::new());
-        let ledger = Arc::new(FixedIngressLedger::with_shared(
-            BLOCK_INGRESS_BYTES,
-            Arc::clone(&used),
+        let ledger = Arc::new(FixedIngressLedger {
+            capacity: BLOCK_INGRESS_BYTES,
+            used: Arc::clone(&used),
             released,
-        ));
+        });
         Self {
             ledger,
             #[cfg(test)]
