@@ -327,6 +327,72 @@ impl crate::context::ScriptIndexQuery for RepublishTipScriptIndex {
     }
 }
 
+struct AdvanceTipScriptIndex {
+    applied_tip: bitcoin_rs_execution::chain::TipReader,
+    extended: Arc<bitcoin_rs_execution::chain::TipSnapshot>,
+    history: Vec<ScriptHistoryRecord>,
+}
+
+impl crate::context::ScriptIndexQuery for AdvanceTipScriptIndex {
+    fn unspent_outputs(
+        &self,
+        _script_hash: ScriptHash,
+    ) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
+        Ok(Vec::new())
+    }
+
+    fn history_snapshot(
+        &self,
+        _script_hash: ScriptHash,
+    ) -> Result<crate::context::ScriptIndexSnapshot, TxQueryError> {
+        self.applied_tip.store(Some(Arc::clone(&self.extended)));
+        Ok(crate::context::ScriptIndexSnapshot {
+            history: self.history.clone(),
+            funding: Vec::new(),
+        })
+    }
+
+    fn spender(
+        &self,
+        _outpoint: OutPoint,
+    ) -> Result<Option<crate::context::SpendingRecord>, TxQueryError> {
+        Ok(None)
+    }
+}
+
+struct AdvanceTipTxIndex {
+    applied_tip: bitcoin_rs_execution::chain::TipReader,
+    extended: Arc<bitcoin_rs_execution::chain::TipSnapshot>,
+    tx: Tx,
+    height: u32,
+}
+
+impl crate::context::DerivedIndexQuery for AdvanceTipTxIndex {
+    fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
+        self.applied_tip.store(Some(Arc::clone(&self.extended)));
+        Ok((self.tx.txid() == *txid).then(|| self.tx.clone()))
+    }
+
+    fn outpoint_value(&self, _outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
+        Ok(None)
+    }
+
+    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+        Ok((self.tx.txid() == *txid).then_some(self.height))
+    }
+
+    fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+        Ok(crate::context::DerivedIndexInfo {
+            synced: true,
+            best_block_height: 0,
+            applied_height: 0,
+            historical_height: 0,
+            verified_height: 0,
+            coverage_height: 0,
+        })
+    }
+}
+
 impl crate::context::ScriptIndexQuery for StaticScriptIndex {
     fn unspent_outputs(
         &self,
@@ -973,8 +1039,9 @@ fn composed_response_stays_valid_when_the_applied_tip_identity_changes() {
     }
 }
 
+// WF-02
 #[test]
-fn composed_response_refuses_when_the_applied_tip_moves_between_reads() {
+fn composed_response_refuses_when_the_applied_tip_moves_between_reads() -> Result<(), TestError> {
     use bitcoin_rs_consensus::primitives::Header;
 
     let block = fixture_genesis();
@@ -986,18 +1053,20 @@ fn composed_response_refuses_when_the_applied_tip_moves_between_reads() {
         ));
     let (tip, moved) = {
         let mut tree = context.chain.block_tree.write();
-        let genesis = tree
-            .insert_node(None, block.header, NodeStatus::Active)
-            .expect("insert applied tip");
-        let tip = tree.tip().expect("applied tip");
+        let genesis = tree.insert_node(None, block.header, NodeStatus::Active)?;
+        let Some(tip) = tree.tip() else {
+            return Err("fixture tip missing".into());
+        };
         let child = Header {
             prev_blockhash: block.header.compute_hash(),
             nonce: block.header.nonce.wrapping_add(1),
             ..block.header
         };
-        tree.insert_node(Some(genesis), child, NodeStatus::Active)
-            .expect("insert moved tip");
-        (tip, tree.tip().expect("moved tip"))
+        tree.insert_node(Some(genesis), child, NodeStatus::Active)?;
+        let Some(moved) = tree.tip() else {
+            return Err("fixture tip missing".into());
+        };
+        (tip, moved)
     };
     assert_ne!(
         tip.hash, moved.hash,
@@ -1012,6 +1081,444 @@ fn composed_response_refuses_when_the_applied_tip_moves_between_reads() {
 
     let response = route(&handler, &format!("/scripthash/{}", "00".repeat(32)), "");
     assert_eq!(response.status, 503);
+    Ok(())
+}
+
+// QRY-03
+#[test]
+fn chain_only_history_survives_an_ordinary_extension() -> Result<(), TestError> {
+    use bitcoin_rs_consensus::primitives::Header;
+    use bitcoin_rs_execution::chain::NodeStatus;
+
+    let block = fixture_genesis();
+    let txid = block.txs[0].txid();
+    let block_hash = block.block_hash().to_string();
+    let mut context = Context::new();
+    context
+        .chain
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
+            0, &block,
+        ));
+    let child = Header {
+        prev_blockhash: block.header.compute_hash(),
+        nonce: block.header.nonce.wrapping_add(1),
+        ..block.header
+    };
+    context
+        .chain
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
+            1,
+            &Block {
+                header: child,
+                txs: block.txs.clone(),
+            },
+        ));
+    let (tip, extended) = {
+        let mut tree = context.chain.block_tree.write();
+        let genesis = tree.insert_node(None, block.header, NodeStatus::Active)?;
+        let tip = tree
+            .tip()
+            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
+        tree.insert_node(Some(genesis), child, NodeStatus::Active)?;
+        let extended = tree
+            .tip()
+            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
+        (tip, extended)
+    };
+    assert_ne!(
+        tip.hash, extended.hash,
+        "the extending read must observe a different tip"
+    );
+    assert_eq!(
+        extended.height,
+        tip.height + 1,
+        "the extension adds exactly one block"
+    );
+    context.chain.applied_tip.store(Some(tip));
+    context.indexes.esplora_tx_index =
+        Some(Arc::new(FixtureTxIndex(vec![(block.txs[0].clone(), 0)])));
+    context.indexes.script_index = Some(Arc::new(AdvanceTipScriptIndex {
+        applied_tip: context.chain.applied_tip.clone(),
+        extended,
+        history: vec![ScriptHistoryRecord { txid, height: 0 }],
+    }));
+    let handler = Handler::new(Arc::new(context));
+
+    let response = route(
+        &handler,
+        &format!("/scripthash/{}/txs/chain", "00".repeat(32)),
+        "",
+    );
+    assert_eq!(response.status, 200);
+    let page: Value = sonic_rs::from_slice(&response.body)?;
+    let Some(page) = page.as_array() else {
+        return Err("chain page missing".into());
+    };
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0]["txid"], json!(txid.to_string()));
+    assert_eq!(page[0]["status"]["confirmed"], json!(true));
+    assert_eq!(page[0]["status"]["block_height"], json!(0));
+    assert_eq!(page[0]["status"]["block_hash"], json!(block_hash));
+    Ok(())
+}
+
+// QRY-03
+#[test]
+fn confirmed_transaction_survives_an_ordinary_extension() -> Result<(), TestError> {
+    use bitcoin_rs_consensus::primitives::Header;
+
+    let block = fixture_genesis();
+    let txid = block.txs[0].txid();
+    let block_hash = block.block_hash().to_string();
+    let mut context = Context::new();
+    context
+        .chain
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
+            0, &block,
+        ));
+    let child = Header {
+        prev_blockhash: block.header.compute_hash(),
+        nonce: block.header.nonce.wrapping_add(1),
+        ..block.header
+    };
+    context
+        .chain
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
+            1,
+            &Block {
+                header: child,
+                txs: block.txs.clone(),
+            },
+        ));
+    let (tip, extended) = {
+        let mut tree = context.chain.block_tree.write();
+        let genesis = tree.insert_node(None, block.header, NodeStatus::Active)?;
+        let tip = tree
+            .tip()
+            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
+        tree.insert_node(Some(genesis), child, NodeStatus::Active)?;
+        let extended = tree
+            .tip()
+            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
+        (tip, extended)
+    };
+    assert_ne!(
+        tip.hash, extended.hash,
+        "the extending read must observe a different tip"
+    );
+    assert_eq!(
+        extended.height,
+        tip.height + 1,
+        "the extension adds exactly one block"
+    );
+    let extended_height = extended.height;
+    context.chain.applied_tip.store(Some(tip));
+    context.indexes.esplora_tx_index = Some(Arc::new(AdvanceTipTxIndex {
+        applied_tip: context.chain.applied_tip.clone(),
+        extended,
+        tx: block.txs[0].clone(),
+        height: 0,
+    }));
+    let ctx = Arc::new(context);
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    let response = route(&handler, &format!("/tx/{txid}"), "");
+    assert_eq!(response.status, 200);
+    let value: Value = sonic_rs::from_slice(&response.body)?;
+    assert_eq!(value["txid"], json!(txid.to_string()));
+    assert_eq!(value["status"]["confirmed"], json!(true));
+    assert_eq!(value["status"]["block_height"], json!(0));
+    assert_eq!(value["status"]["block_hash"], json!(block_hash));
+    assert_eq!(
+        ctx.chain
+            .applied_tip
+            .load_full()
+            .as_ref()
+            .map(|tip| tip.height),
+        Some(extended_height),
+        "the index read must have advanced the applied tip"
+    );
+    Ok(())
+}
+
+// WF-02
+#[test]
+fn mempool_transaction_refuses_when_the_applied_tip_moves_between_reads() -> Result<(), TestError> {
+    use bitcoin_rs_consensus::primitives::Header;
+
+    let parent = transaction(
+        None,
+        TxOut {
+            value: Amount::from_sat(5_000_000_000),
+            script_pubkey: vec![0x51].into(),
+        },
+    );
+    let unconfirmed = transaction(
+        Some(OutPoint::new(parent.txid(), 0)),
+        TxOut {
+            value: Amount::from_sat(4_999_999_000),
+            script_pubkey: vec![0x52].into(),
+        },
+    );
+    let unconfirmed_txid = unconfirmed.txid().to_string();
+    let block = fixture_genesis();
+    let mut context = Context::new();
+    let (tip, extended) = {
+        let mut tree = context.chain.block_tree.write();
+        let genesis = tree.insert_node(None, block.header, NodeStatus::Active)?;
+        let tip = tree
+            .tip()
+            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
+        let child = Header {
+            prev_blockhash: block.header.compute_hash(),
+            nonce: block.header.nonce.wrapping_add(1),
+            ..block.header
+        };
+        tree.insert_node(Some(genesis), child, NodeStatus::Active)?;
+        let extended = tree
+            .tip()
+            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
+        (tip, extended)
+    };
+    assert_ne!(
+        tip.hash, extended.hash,
+        "the second read must observe a different tip"
+    );
+    assert_eq!(
+        extended.height,
+        tip.height + 1,
+        "the extension adds exactly one block"
+    );
+    let extended_height = extended.height;
+    context.chain.applied_tip.store(Some(tip));
+    context.indexes.esplora_tx_index = Some(Arc::new(AdvanceTipTxIndex {
+        applied_tip: context.chain.applied_tip.clone(),
+        extended,
+        tx: parent.clone(),
+        height: 0,
+    }));
+    assert!(
+        context
+            .mempool
+            .gateway
+            .pool()
+            .write()
+            .insert_entry(MempoolEntry::new(
+                Arc::new(unconfirmed),
+                100,
+                1_000,
+                0,
+                0,
+                0,
+            ))
+            .is_ok(),
+        "mempool entry accepted"
+    );
+    let ctx = Arc::new(context);
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    let response = route(&handler, &format!("/tx/{unconfirmed_txid}"), "");
+    assert_eq!(response.status, 503);
+    assert_eq!(
+        ctx.chain
+            .applied_tip
+            .load_full()
+            .as_ref()
+            .map(|tip| tip.height),
+        Some(extended_height),
+        "the parent read must have advanced the applied tip"
+    );
+    Ok(())
+}
+// WF-02
+#[test]
+fn internal_block_txs_refuses_when_a_mempool_parent_meets_a_moved_tip() -> Result<(), TestError> {
+    use bitcoin_rs_consensus::primitives::Header;
+    let parent = paying_transaction(&[OutPoint::null()], &[(125, vec![0x51])]);
+    let mut block = fixture_genesis();
+    let child = paying_transaction(&[OutPoint::new(parent.txid(), 0)], &[(100, vec![0x52])]);
+    block.txs.push(child);
+    let Some(root) = merkle_root(&block.txs) else {
+        return Err("fixture block has transactions".into());
+    };
+    block.header.merkle_root = root;
+    let record = bitcoin_rs_projection::block_log::BlockRecord::from_block(0, &block);
+    let mut context = Context::new();
+    context.chain.add_block(record.clone());
+    let (tip, extended) = {
+        let mut tree = context.chain.block_tree.write();
+        let genesis = tree.insert_node(None, block.header, NodeStatus::Active)?;
+        let tip = tree
+            .tip()
+            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
+        let child_header = Header {
+            prev_blockhash: block.header.compute_hash(),
+            nonce: block.header.nonce.wrapping_add(1),
+            ..block.header
+        };
+        tree.insert_node(Some(genesis), child_header, NodeStatus::Active)?;
+        let extended = tree
+            .tip()
+            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
+        (tip, extended)
+    };
+    assert_ne!(
+        tip.hash, extended.hash,
+        "the second read must observe a different tip"
+    );
+    assert_eq!(
+        extended.height,
+        tip.height + 1,
+        "the extension adds exactly one block"
+    );
+    let extended_height = extended.height;
+    context.chain.applied_tip.store(Some(tip));
+    context
+        .mempool
+        .gateway
+        .pool()
+        .write()
+        .insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0, 0))?;
+    struct AdvancingBodies {
+        bodies: Vec<(u32, BlockHash, Vec<u8>)>,
+        applied_tip: bitcoin_rs_execution::chain::TipReader,
+        extended: Arc<bitcoin_rs_execution::chain::TipSnapshot>,
+    }
+    impl bitcoin_rs_storage::block_body::BlockBodySource for AdvancingBodies {
+        fn block_body(
+            &self,
+            height: u32,
+            hash: BlockHash,
+        ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
+            self.applied_tip.store(Some(Arc::clone(&self.extended)));
+            Ok(self
+                .bodies
+                .iter()
+                .find(|(candidate_height, candidate_hash, _)| {
+                    *candidate_height == height && *candidate_hash == hash
+                })
+                .map(|(_, _, body)| body.clone()))
+        }
+    }
+    context.chain.block_body_source = Some(Arc::new(AdvancingBodies {
+        bodies: vec![(0, record.hash, consensus_bytes(&block))],
+        applied_tip: context.chain.applied_tip.clone(),
+        extended,
+    }));
+    context.indexes.esplora_tx_index = None;
+    let ctx = Arc::new(context);
+    let handler = Handler::new(Arc::clone(&ctx));
+    let response = backend_route(
+        &handler,
+        &format!("/internal/block/{}/txs", record.hash),
+        "",
+    );
+    assert_eq!(response.status, 503);
+    assert_eq!(
+        ctx.chain
+            .applied_tip
+            .load_full()
+            .as_ref()
+            .map(|tip| tip.height),
+        Some(extended_height),
+        "the block read must have advanced the applied tip"
+    );
+    Ok(())
+}
+#[test]
+fn malformed_txid_keeps_bad_request_when_the_tip_moves() -> Result<(), TestError> {
+    use bitcoin_rs_consensus::primitives::Header;
+    let block = fixture_genesis();
+    let context = Context::new();
+    context
+        .chain
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
+            0, &block,
+        ));
+    let (tip, extended) = {
+        let mut tree = context.chain.block_tree.write();
+        let genesis = tree.insert_node(None, block.header, NodeStatus::Active)?;
+        let Some(tip) = tree.tip() else {
+            return Err("fixture tip missing".into());
+        };
+        let child = Header {
+            prev_blockhash: block.header.compute_hash(),
+            nonce: block.header.nonce.wrapping_add(1),
+            ..block.header
+        };
+        tree.insert_node(Some(genesis), child, NodeStatus::Active)?;
+        let Some(extended) = tree.tip() else {
+            return Err("fixture tip missing".into());
+        };
+        (tip, extended)
+    };
+    context.chain.applied_tip.store(Some(tip));
+    let body = sonic_rs::to_vec(&vec!["zz".to_string()])?;
+    let ctx = Arc::new(context);
+    let handler = Handler::new(Arc::clone(&ctx));
+    let extended_height = extended.height;
+    let (entered_send, entered_recv) = channel();
+    let (release_send, release_recv) = channel();
+    let request = std::thread::spawn(move || {
+        arm_route_gate(entered_send, release_recv);
+        backend_route_post(&handler, "/internal/txs", &body)
+    });
+    entered_recv
+        .recv_timeout(GATE_TIMEOUT)
+        .map_err(|_| "request did not capture its view")?;
+    ctx.chain.applied_tip.store(Some(extended));
+    let _ = release_send.send(());
+    let response = request.join().map_err(|_| "route thread failed")?;
+    assert_eq!(response.status, 400);
+    assert_eq!(
+        ctx.chain
+            .applied_tip
+            .load_full()
+            .as_ref()
+            .map(|tip| tip.height),
+        Some(extended_height)
+    );
+    Ok(())
+}
+// WF-02
+#[test]
+fn joined_answer_refuses_a_same_height_tip_replacement() -> Result<(), TestError> {
+    let block = fixture_genesis();
+    let mut context = Context::new();
+    context
+        .chain
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
+            0, &block,
+        ));
+    let (tip, replacement) = {
+        let mut tree = context.chain.block_tree.write();
+        tree.insert_node(None, block.header, NodeStatus::Active)?;
+        let Some(tip) = tree.tip() else {
+            return Err("fixture tip missing".into());
+        };
+        let mut other = (*tip).clone();
+        other.hash = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[9; 32]);
+        if other.hash == tip.hash {
+            other.hash = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[10; 32]);
+        }
+        let replacement = std::sync::Arc::new(other);
+        (tip, replacement)
+    };
+    if tip.hash == replacement.hash {
+        return Err("fixture must differ in hash".into());
+    }
+    if tip.height != replacement.height {
+        return Err("fixture must match in height".into());
+    }
+    context.chain.applied_tip.store(Some(tip));
+    context.indexes.script_index = Some(Arc::new(RepublishTipScriptIndex {
+        applied_tip: context.chain.applied_tip.clone(),
+        replacement: Some(replacement),
+    }));
+    let handler = Handler::new(Arc::new(context));
+    let response = route(&handler, &format!("/scripthash/{}", "00".repeat(32)), "");
+    assert_eq!(response.status, 503);
+    Ok(())
 }
 
 #[test]
@@ -2116,7 +2623,7 @@ fn script_activity_retries_when_pool_changes_between_views() {
 }
 
 #[test]
-fn transaction_projection_uses_internal_lookup_for_prevout_and_fee() {
+fn transaction_projection_uses_internal_lookup_for_prevout_and_fee() -> Result<(), TestError> {
     let parent = transaction(
         None,
         TxOut {
@@ -2134,19 +2641,16 @@ fn transaction_projection_uses_internal_lookup_for_prevout_and_fee() {
     let mut ctx = Context::new();
     ctx.indexes.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(parent)));
 
-    let rendered = Projection::new(&ctx)
-        .transaction_values([(&child, None)], None)
-        .expect("prevout indexed");
+    let Ok((rendered, _)) = Projection::new(&ctx).transaction_values([(&child, None)], None) else {
+        return Err("prevout indexed".into());
+    };
     let rendered = &rendered[0];
     assert_eq!(rendered.fee, 25);
-    assert_eq!(
-        rendered.vin[0]
-            .prevout
-            .as_ref()
-            .expect("rendered prevout")
-            .value,
-        125
-    );
+    let Some(prevout) = rendered.vin[0].prevout.as_ref() else {
+        return Err("rendered prevout".into());
+    };
+    assert_eq!(prevout.value, 125);
+    Ok(())
 }
 
 #[test]
@@ -2260,7 +2764,7 @@ fn history_resolves_shared_parents_once_per_page() {
 }
 
 #[test]
-fn batch_reuses_selected_transactions_and_mempool_parents() {
+fn batch_reuses_selected_transactions_and_mempool_parents() -> Result<(), TestError> {
     let parent = paying_transaction(&[OutPoint::null()], &[(125, vec![0x51]), (175, vec![0x52])]);
     let child = paying_transaction(
         &[
@@ -2281,46 +2785,51 @@ fn batch_reuses_selected_transactions_and_mempool_parents() {
             1,
             0,
             0,
-        ))
-        .expect("parent");
+        ))?;
     let projection = Projection::new(&ctx);
-    let values = projection
-        .transaction_values([(&child, None), (&child, None)], None)
-        .expect("mempool prevouts");
+    let Ok((values, _)) = projection.transaction_values([(&child, None), (&child, None)], None)
+    else {
+        return Err("mempool prevouts".into());
+    };
     assert_eq!(values.len(), 2);
     assert_eq!(values[0].fee, 50);
-    assert_eq!(
-        values[0].vin[0].prevout.as_ref().expect("vout 0").value,
-        125
-    );
-    assert_eq!(
-        values[0].vin[1].prevout.as_ref().expect("vout 1").value,
-        175
-    );
+    let Some(first) = values[0].vin[0].prevout.as_ref() else {
+        return Err("vout 0".into());
+    };
+    assert_eq!(first.value, 125);
+    let Some(second) = values[0].vin[1].prevout.as_ref() else {
+        return Err("vout 1".into());
+    };
+    assert_eq!(second.value, 175);
     assert!(!values[0].status.confirmed);
     assert_eq!(
-        sonic_rs::to_value(&values[0]).expect("first"),
-        sonic_rs::to_value(&values[1]).expect("duplicate")
+        sonic_rs::to_value(&values[0])?,
+        sonic_rs::to_value(&values[1])?
     );
     let ctx = Context::new();
-    let values = Projection::new(&ctx)
-        .transaction_values([(&child, None), (&parent, None)], None)
-        .expect("selected parent");
+    let Ok((values, _)) =
+        Projection::new(&ctx).transaction_values([(&child, None), (&parent, None)], None)
+    else {
+        return Err("selected parent".into());
+    };
     assert_eq!(values[0].fee, 50);
-    assert_eq!(
-        values[0].vin[0].prevout.as_ref().expect("vout 0").value,
-        125
-    );
-    assert_eq!(
-        values[0].vin[1].prevout.as_ref().expect("vout 1").value,
-        175
-    );
+    let Some(first) = values[0].vin[0].prevout.as_ref() else {
+        return Err("vout 0".into());
+    };
+    assert_eq!(first.value, 125);
+    let Some(second) = values[0].vin[1].prevout.as_ref() else {
+        return Err("vout 1".into());
+    };
+    assert_eq!(second.value, 175);
     assert_eq!(values[1].txid, parent.txid().to_string());
     let missing = paying_transaction(&[OutPoint::new(parent.txid(), 2)], &[(1, vec![0x51])]);
-    let response = Projection::new(&ctx)
-        .transaction_values([(&missing, None), (&parent, None)], None)
-        .expect_err("missing output");
+    let Err(response) =
+        Projection::new(&ctx).transaction_values([(&missing, None), (&parent, None)], None)
+    else {
+        return Err("missing output".into());
+    };
     assert_eq!(response.status, 503);
+    Ok(())
 }
 
 #[test]
@@ -2493,7 +3002,7 @@ fn block_witness_binding_observes_activation() {
 }
 
 #[test]
-fn block_parent_reuse_checks_readiness_only_when_needed() {
+fn block_parent_reuse_checks_readiness_only_when_needed() -> Result<(), TestError> {
     struct ReadinessIndex {
         parent: Tx,
         checks: Arc<AtomicUsize>,
@@ -2536,29 +3045,27 @@ fn block_parent_reuse_checks_readiness_only_when_needed() {
         checks: Arc::clone(&checks),
         synced: true,
     }));
-    let values = Projection::new(&ctx)
-        .transaction_values(
-            [(&child, None)],
-            Some(super::projection::ParentSource::Block(
-                std::slice::from_ref(&child),
-            )),
-        )
-        .expect("external parent");
-    assert_eq!(values[0].fee, 25);
+    let Ok((_, _)) = Projection::new(&ctx).transaction_values(
+        [(&child, None)],
+        Some(super::projection::ParentSource::Block(
+            std::slice::from_ref(&child),
+        )),
+    ) else {
+        return Err("external parent".into());
+    };
     assert_eq!(
         checks.load(Ordering::Relaxed),
         0,
         "an index-resolved parent needs no readiness read"
     );
-    let values = Projection::new(&ctx)
-        .transaction_values(
-            [(&child, None), (&child, None)],
-            Some(super::projection::ParentSource::Block(
-                std::slice::from_ref(&parent),
-            )),
-        )
-        .expect("in-block parent");
-    assert_eq!(values[0].fee, 25);
+    let Ok((values, _)) = Projection::new(&ctx).transaction_values(
+        [(&child, None), (&child, None)],
+        Some(super::projection::ParentSource::Block(
+            std::slice::from_ref(&parent),
+        )),
+    ) else {
+        return Err("in-block parent".into());
+    };
     assert_eq!(values[1].fee, 25);
     assert_eq!(
         checks.load(Ordering::Relaxed),
@@ -2570,20 +3077,21 @@ fn block_parent_reuse_checks_readiness_only_when_needed() {
         checks: Arc::clone(&checks),
         synced: false,
     }));
-    let error = Projection::new(&ctx)
-        .transaction_values(
-            [(&child, None)],
-            Some(super::projection::ParentSource::Block(
-                std::slice::from_ref(&parent),
-            )),
-        )
-        .expect_err("index behind tip");
+    let Err(error) = Projection::new(&ctx).transaction_values(
+        [(&child, None)],
+        Some(super::projection::ParentSource::Block(
+            std::slice::from_ref(&parent),
+        )),
+    ) else {
+        return Err("index behind tip".into());
+    };
     assert_eq!(error.status, 503);
     assert_eq!(
         checks.load(Ordering::Relaxed),
         2,
         "the behind-tip path confirms readiness once more"
     );
+    Ok(())
 }
 
 #[test]
@@ -2973,6 +3481,7 @@ thread_local! {
         const { RefCell::new(None) };
     static MEMPOOL_ACTIVITY_GATE: RefCell<Option<(Sender<()>, Receiver<()>)>> =
         const { RefCell::new(None) };
+    static ROUTE_GATE: RefCell<Option<(Sender<()>, Receiver<()>)>> = const { RefCell::new(None) };
 }
 
 const GATE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -3009,6 +3518,18 @@ fn arm_mempool_activity_gate(entered: Sender<()>, release: Receiver<()>) {
 
 pub(crate) fn gate_mempool_activity_for_tests() {
     let armed = MEMPOOL_ACTIVITY_GATE.with(|slot| slot.borrow_mut().take());
+    let Some((entered, release)) = armed else {
+        return;
+    };
+    let _ = entered.send(());
+    let _ = release.recv_timeout(GATE_TIMEOUT);
+}
+fn arm_route_gate(entered: Sender<()>, release: Receiver<()>) {
+    ROUTE_GATE.with(|slot| *slot.borrow_mut() = Some((entered, release)));
+}
+
+pub(crate) fn gate_route_for_tests() {
+    let armed = ROUTE_GATE.with(|slot| slot.borrow_mut().take());
     let Some((entered, release)) = armed else {
         return;
     };

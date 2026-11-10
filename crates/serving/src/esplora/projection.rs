@@ -28,6 +28,12 @@ pub(super) struct Confirmation {
     pub time: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TxSource {
+    Confirmed,
+    Joined,
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum ParentSource<'a> {
     Block(&'a [Tx]),
@@ -128,18 +134,28 @@ impl<'a> Projection<'a> {
     pub(super) fn required_transaction(
         &self,
         text_id: &str,
-    ) -> Result<(Tx, Option<Confirmation>), Response> {
-        let txid =
-            Txid::from_str(text_id).map_err(|_| bad_request("txid must be 64 hex characters"))?;
-        self.transaction(&txid)?.ok_or_else(not_found)
+    ) -> Result<(Tx, Option<Confirmation>, TxSource), (Response, TxSource)> {
+        let txid = Txid::from_str(text_id).map_err(|_| {
+            (
+                bad_request("txid must be 64 hex characters"),
+                TxSource::Confirmed,
+            )
+        })?;
+        match self
+            .transaction(&txid)
+            .map_err(|response| (response, TxSource::Confirmed))?
+        {
+            Some(found) => Ok(found),
+            None => Err((not_found(), TxSource::Joined)),
+        }
     }
 
     pub(super) fn transaction(
         &self,
         txid: &Txid,
-    ) -> Result<Option<(Tx, Option<Confirmation>)>, Response> {
+    ) -> Result<Option<(Tx, Option<Confirmation>, TxSource)>, Response> {
         if let Some(transaction) = self.ctx.mempool.gateway.read().transaction_by_txid(txid) {
-            return Ok(Some(((*transaction).clone(), None)));
+            return Ok(Some(((*transaction).clone(), None, TxSource::Joined)));
         }
         let index = self
             .ctx
@@ -152,7 +168,7 @@ impl<'a> Projection<'a> {
             self.confirmation(txid).and_then(|confirmation| {
                 confirmation.map_or_else(
                     || Err(service_unavailable("transaction confirmation unavailable")),
-                    |confirmation| Ok(Some((transaction, Some(confirmation)))),
+                    |confirmation| Ok(Some((transaction, Some(confirmation), TxSource::Confirmed))),
                 )
             })
         })
@@ -232,7 +248,7 @@ impl<'a> Projection<'a> {
         &self,
         transactions: impl IntoIterator<Item = (&'t Tx, Option<Confirmation>)>,
         parents: Option<ParentSource<'t>>,
-    ) -> Result<Vec<TransactionValue>, Response> {
+    ) -> Result<(Vec<TransactionValue>, TxSource), Response> {
         let transactions = transactions
             .into_iter()
             .map(|(tx, status)| (tx, status, tx.txid()))
@@ -275,6 +291,7 @@ impl<'a> Projection<'a> {
             available.clear();
         }
         let mut prevouts = Vec::with_capacity(outpoints.len());
+        let mut mempool_used = false;
         for points in outpoints.chunk_by(|left, right| left.txid == right.txid) {
             let txid = points[0].txid;
             let mut collect = |tx: &Tx| -> Result<(), Response> {
@@ -297,6 +314,7 @@ impl<'a> Projection<'a> {
             }
             let mempool = self.ctx.mempool.gateway.read().transaction_by_txid(&txid);
             if let Some(tx) = mempool {
+                mempool_used = true;
                 collect(&tx)?;
             } else {
                 let index =
@@ -310,10 +328,18 @@ impl<'a> Projection<'a> {
                 collect(&tx)?;
             }
         }
-        transactions
+        let values = transactions
             .into_iter()
             .map(|(tx, status, txid)| self.transaction_value(tx, txid, status, &prevouts))
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            values,
+            if mempool_used {
+                TxSource::Joined
+            } else {
+                TxSource::Confirmed
+            },
+        ))
     }
 
     fn transaction_value(
