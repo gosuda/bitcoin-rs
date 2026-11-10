@@ -23,7 +23,7 @@ use crate::error::ConvertError;
 use crate::report::{FamilyResetReport, RebuildIndexReport};
 use crate::target::open_destination_store;
 
-const CURRENT_EPOCH: u32 = 3;
+use bitcoin_rs_storage::checkpoint::CURRENT_SCHEMA_VERSION;
 const CURRENT_SCHEMA_MAX_BYTES: u64 = 16;
 const BLOCK_FILE_MAGIC: [u8; 4] = *b"BRSB";
 const RECORD_HEADER_LEN: usize = 44;
@@ -293,7 +293,7 @@ fn read_datadir_epoch(datadir: &Path) -> Result<(), ConvertError> {
         .trim()
         .parse()
         .map_err(|_| ConvertError::UnknownEpoch(0))?;
-    if epoch != CURRENT_EPOCH {
+    if epoch != CURRENT_SCHEMA_VERSION {
         return Err(ConvertError::UnknownEpoch(epoch));
     }
     Ok(())
@@ -719,4 +719,18 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(out, "{byte:02x}");
     }
     out
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebuild_accepts_current_epoch_datadir() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let marker = dir.path().join("CURRENT_SCHEMA");
+        let contents = format!("{CURRENT_SCHEMA_VERSION}\n");
+        std::fs::write(&marker, contents.as_bytes()).map_err(|e| e.to_string())?;
+        read_datadir_epoch(dir.path()).map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
