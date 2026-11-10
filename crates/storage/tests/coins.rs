@@ -374,9 +374,9 @@ fn committed_record_with_440_outputs_survives_store_reopen() -> TestResult {
 
     let store: Arc<dyn KvStore> = Arc::new(RocksDbStore::open(temp.path())?);
     let reopened = CoinStore::open(store, 1 << 20);
-    let bytes = reopened
-        .get(&key)?
-        .ok_or(StorageError::InvalidOperation("coin record must survive reopen"))?;
+    let bytes = reopened.get(&key)?.ok_or(StorageError::InvalidOperation(
+        "coin record must survive reopen",
+    ))?;
     assert_eq!(bytes, encoded, "reopened record bytes must match");
 
     let decoded = UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice())?;

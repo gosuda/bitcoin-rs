@@ -106,9 +106,7 @@ fn converted_historical_generation_loads_epoch3_coins_through_assumeutxo() -> Te
                 TestError::Assertion("historical checkpoint must restore an engine".into())
             })?;
 
-    let source_generation = from
-        .join(HISTORICAL_CHECKPOINT_ROOT)
-        .join(GENERATION);
+    let source_generation = from.join(HISTORICAL_CHECKPOINT_ROOT).join(GENERATION);
     let mut snapshot_file = fs::File::open(source_generation.join(UTXO_FILE))?;
     let snapshot = read_snapshot_strict_v4(&mut snapshot_file)
         .map_err(|error| TestError::Assertion(format!("epoch-3 utxo-v4.dat: {error}")))?;

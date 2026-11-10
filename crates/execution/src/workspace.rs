@@ -676,7 +676,11 @@ mod tests {
             blocks.push(block);
         }
         let txid_of = |block: &Block| block.txs[0].txid();
-        let (x1, x2, x3) = (txid_of(&blocks[0]), txid_of(&blocks[1]), txid_of(&blocks[2]));
+        let (x1, x2, x3) = (
+            txid_of(&blocks[0]),
+            txid_of(&blocks[1]),
+            txid_of(&blocks[2]),
+        );
         let untracked = Txid(Hash256::from_le_bytes(&[0x42; 32]));
 
         let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
@@ -693,7 +697,9 @@ mod tests {
         assert_eq!(workspace.staged_coin_presence_before(x3, 3), None);
         assert_eq!(workspace.staged_coin_presence_before(untracked, 4), None);
 
-        workspace.build_flush_delta(2).expect("flush first two blocks");
+        workspace
+            .build_flush_delta(2)
+            .expect("flush first two blocks");
 
         assert_eq!(workspace.staged_coin_presence_before(x1, 3), Some(true));
         assert_eq!(workspace.staged_coin_presence_before(x2, 3), Some(true));
@@ -760,8 +766,8 @@ mod tests {
             }],
         };
         let genesis_hash = Network::Regtest.genesis_block().block_hash();
-        let block_1 = mined_block_with_prev_hash(genesis_hash, 1, vec![coinbase(1)])
-            .expect("fixture block");
+        let block_1 =
+            mined_block_with_prev_hash(genesis_hash, 1, vec![coinbase(1)]).expect("fixture block");
         let x1 = block_1.txs[0].txid();
         let block_2 = mined_block_with_prev_hash(
             block_1.block_hash(),
@@ -812,5 +818,5 @@ mod tests {
                 workspace.build_flush_delta(1).expect("flush one block");
             }
         }
-     }
+    }
 }

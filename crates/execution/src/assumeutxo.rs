@@ -1488,19 +1488,18 @@ impl AssumeUtxoManager {
             network: self.network,
             genesis: self.network.genesis_block_hash(),
         };
-        let write =
-            crate::checkpoint::write_historical_checkpoint_with_store(
-                &data,
-                config,
-                &historical.block_tree,
-                &historical.coin_stats,
-                Some(&tip),
-                crate::checkpoint::CheckpointStoreTarget {
-                    store: historical.commit_authority.store().as_ref(),
-                    host_data_dir: &self.data_dir,
-                },
-            )
-            .map_err(|error| AssumeUtxoError::HistoricalCheckpointPublish { error })?;
+        let write = crate::checkpoint::write_historical_checkpoint_with_store(
+            &data,
+            config,
+            &historical.block_tree,
+            &historical.coin_stats,
+            Some(&tip),
+            crate::checkpoint::CheckpointStoreTarget {
+                store: historical.commit_authority.store().as_ref(),
+                host_data_dir: &self.data_dir,
+            },
+        )
+        .map_err(|error| AssumeUtxoError::HistoricalCheckpointPublish { error })?;
         let reference = match write {
             crate::checkpoint::CheckpointWrite::Published { reference } => reference,
             crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => {

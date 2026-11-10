@@ -38,8 +38,8 @@ use bitcoin_rs_storage::checkpoint::open_data_dir;
 use bitcoin_rs_storage::checkpoint::{ArtifactDigest, CheckpointStage};
 use bitcoin_rs_storage::checkpoint::{coinstats_artifact_payload, commit_publication};
 use bitcoin_rs_storage::checkpoint::{read_manifest, require_filename, verify_artifact};
-use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use cap_std::fs::{Dir, File};
 use parking_lot::RwLock;
 use std::io::Read;
@@ -330,16 +330,15 @@ fn engine_store_from_utxo(
     utxo.with_stable_view(|view| {
         view.for_each_all(|outpoint, _| {
             if let Some(entry) = utxo.get_entry(outpoint) {
-                coins
-                    .entry(outpoint.txid)
-                    .or_default()
-                    .push(bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+                coins.entry(outpoint.txid).or_default().push(
+                    bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
                         vout: outpoint.vout,
                         value: entry.txout.value.to_sat(),
                         script_pubkey: entry.txout.script_pubkey.as_bytes().to_vec(),
                         coinbase: entry.coinbase,
                         height: entry.height,
-                    });
+                    },
+                );
             }
         });
     });

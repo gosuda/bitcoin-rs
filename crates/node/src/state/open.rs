@@ -569,10 +569,7 @@ impl NodeState {
                 .as_ref()
                 .map_or(0, |tip| tip.height),
         ));
-        chainstate.configure_checkpointing(
-            &config.data_dir,
-            Arc::clone(&durable_tip_height),
-        )?;
+        chainstate.configure_checkpointing(&config.data_dir, Arc::clone(&durable_tip_height))?;
         bitcoin_rs_execution::recover_snapshot_activation(&chainstate).map_err(|error| {
             NodeOpenError::AssumeUtxoOpen {
                 error: Box::new(error),

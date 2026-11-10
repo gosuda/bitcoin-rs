@@ -846,7 +846,10 @@ fn engine_coin_duplicate_across_windows_is_rejected_by_bip30() -> TestResult {
         .durable_head
         .load()?
         .ok_or(TestError::Missing("durable head"))?;
-    assert_eq!(head.height, 1, "block 1 commits and the duplicate block does not");
+    assert_eq!(
+        head.height, 1,
+        "block 1 commits and the duplicate block does not"
+    );
     assert_eq!(head.tip, b1_hash);
 
     Ok(())

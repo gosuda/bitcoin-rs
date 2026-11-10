@@ -82,7 +82,9 @@ fn count_materialization(
     counts: &std::sync::Mutex<std::collections::HashMap<usize, usize>>,
     buffer: &[u8],
 ) {
-    let mut counts = counts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut counts = counts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(count) = counts.get_mut(&buffer.as_ptr().addr()) {
         *count += 1;
     }
@@ -93,8 +95,13 @@ fn materializations_of(
     counts: &std::sync::Mutex<std::collections::HashMap<usize, usize>>,
     image: &BlockImage,
 ) -> usize {
-    let counts = counts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    counts.get(&image.bytes.as_ptr().addr()).copied().unwrap_or(0)
+    let counts = counts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    counts
+        .get(&image.bytes.as_ptr().addr())
+        .copied()
+        .unwrap_or(0)
 }
 
 #[cfg(any(test, feature = "test-seam"))]
@@ -112,7 +119,10 @@ pub fn transaction_view_materialize_call_count(image: &BlockImage) -> usize {
 #[cfg(any(test, feature = "test-seam"))]
 pub fn watch_materializations(image: &BlockImage) {
     let key = image.bytes.as_ptr().addr();
-    for counts in [&BLOCK_IMAGE_MATERIALIZATIONS, &TRANSACTION_VIEW_MATERIALIZATIONS] {
+    for counts in [
+        &BLOCK_IMAGE_MATERIALIZATIONS,
+        &TRANSACTION_VIEW_MATERIALIZATIONS,
+    ] {
         counts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -123,7 +133,10 @@ pub fn watch_materializations(image: &BlockImage) {
 #[cfg(any(test, feature = "test-seam"))]
 pub fn unwatch_materializations(image: &BlockImage) {
     let key = image.bytes.as_ptr().addr();
-    for counts in [&BLOCK_IMAGE_MATERIALIZATIONS, &TRANSACTION_VIEW_MATERIALIZATIONS] {
+    for counts in [
+        &BLOCK_IMAGE_MATERIALIZATIONS,
+        &TRANSACTION_VIEW_MATERIALIZATIONS,
+    ] {
         counts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
