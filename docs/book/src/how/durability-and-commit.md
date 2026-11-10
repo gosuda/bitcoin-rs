@@ -52,7 +52,7 @@ IBD groups a verified prefix into one atomic commit. `DURABLE_HEAD_GROUP_BLOCKS`
 
 ## Fatal versus operational
 
-`ChainTransition::settle_apply` closes the node for recovery when `classify_apply_error` returns `Fatal`. `fail_closed_for_recovery` does two things: `admission.close_permanently()` and `request_shutdown()`. It does not rewrite the head or roll anything back. `getblockchaininfo` then reports `is_apply_halted: true` until the process exits, and the next start replays durable state with a clean engine.
+`ChainTransition::connect_window` closes the node for recovery when `classify_apply_error` returns `Fatal`. `fail_closed_for_recovery` does two things: `admission.close_permanently()` and `request_shutdown()`. It does not rewrite the head or roll anything back. `getblockchaininfo` then reports `is_apply_halted: true` until the process exits, and the next start replays durable state with a clean engine.
 
 | Class | Examples | Effect |
 |---|---|---|

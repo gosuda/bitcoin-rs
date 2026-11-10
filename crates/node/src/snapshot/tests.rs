@@ -1158,7 +1158,7 @@ fn node_from_manifest_serves_covered_queries_before_historical_sync() -> Result<
     let mut coin_rows = 0_usize;
     for row in state
         .chainstate()
-        .coin_store()
+        .coins()
         .store()
         .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
     {
@@ -1198,7 +1198,7 @@ fn bad_index_artifact_keeps_the_coin_store_import() -> Result<(), TestError> {
     let mut coin_rows = 0_usize;
     for row in state
         .chainstate()
-        .coin_store()
+        .coins()
         .store()
         .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
     {

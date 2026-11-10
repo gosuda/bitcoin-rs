@@ -449,20 +449,6 @@ pub struct ChainTransition<'a> {
 }
 
 impl<'a> ChainTransition<'a> {
-    #[expect(dead_code)]
-    fn settle_apply<T>(
-        &self,
-        result: core::result::Result<T, ApplyError>,
-    ) -> core::result::Result<T, ApplyError> {
-        if result
-            .as_ref()
-            .is_err_and(|error| classify_apply_error(error) == WindowApplyDisposition::Fatal)
-        {
-            self.chainstate.fail_closed_for_recovery();
-        }
-        result
-    }
-
     pub fn connect(
         &self,
         payload: &BlockImage,
@@ -1023,16 +1009,6 @@ impl Chainstate {
     #[must_use]
     pub fn commit_authority(&self) -> &Arc<bitcoin_rs_storage::CommitAuthority> {
         &self.commit_authority
-    }
-
-    #[must_use]
-    pub fn coin_store(&self) -> &bitcoin_rs_storage::CoinStore {
-        &self.coins
-    }
-
-    #[must_use]
-    pub fn coin_store_handle(&self) -> Arc<bitcoin_rs_storage::CoinStore> {
-        Arc::clone(&self.coins)
     }
 
     #[must_use]

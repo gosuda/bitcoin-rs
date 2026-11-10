@@ -36,19 +36,12 @@ pub(crate) struct CreatedOwned {
     pub script_pubkey: Bytes,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum UndoKind {
-    ExternalSpend,
-    Bip30Overwrite,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UndoCoin {
     pub outpoint: OutPoint,
     pub txout: TxOut,
     pub height: u32,
     pub coinbase: bool,
-    pub kind: UndoKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,7 +50,6 @@ pub(crate) struct BlockTransition {
     pub hash: Hash256,
     pub prev_hash: Hash256,
     pub created: Vec<CreatedOwned>,
-    pub spent_external: Vec<UndoCoin>,
     pub spent_outpoints: Vec<OutPoint>,
     pub bip30_overwrites: Vec<UndoCoin>,
 }
@@ -238,7 +230,6 @@ impl WindowWorkspace {
             Hash256::from(block.block_hash()),
         );
         let mut created_owned = Vec::new();
-        let mut spent_external = Vec::new();
         let mut spent_outpoints = Vec::new();
         let mut bip30_overwrites = Vec::new();
 
@@ -274,11 +265,7 @@ impl WindowWorkspace {
                     }
                     self.spent.insert(prev);
                     spent_outpoints.push(prev);
-                    if let Some(undo) =
-                        spend_input_in_workspace(&mut self.live, &self.resolved_external, prev)
-                    {
-                        spent_external.push(undo);
-                    }
+                    spend_input_in_workspace(&mut self.live, prev);
                 }
             }
         }
@@ -288,7 +275,6 @@ impl WindowWorkspace {
             hash: Hash256::from(block.block_hash()),
             prev_hash: block.header.prev_blockhash.into(),
             created: created_owned,
-            spent_external,
             spent_outpoints,
             bip30_overwrites,
         };
@@ -501,31 +487,17 @@ fn record_bip30_overwrites(
             },
             height: prior.height,
             coinbase: prior.coinbase,
-            kind: UndoKind::Bip30Overwrite,
         });
     }
 }
 
-fn spend_input_in_workspace(
-    live: &mut HashMap<Txid, Vec<LiveOut>>,
-    resolved_external: &HashMap<OutPoint, UtxoCoin>,
-    prev: OutPoint,
-) -> Option<UndoCoin> {
+fn spend_input_in_workspace(live: &mut HashMap<Txid, Vec<LiveOut>>, prev: OutPoint) {
     if let Some(outs) = live.get_mut(&prev.txid) {
         if let Some(out) = outs.iter_mut().find(|o| o.vout == prev.vout && !o.spent) {
             out.spent = true;
-            return None;
         }
     }
-    resolved_external.get(&prev).map(|coin| UndoCoin {
-        outpoint: prev,
-        txout: coin.txout.clone(),
-        height: coin.height,
-        coinbase: coin.coinbase,
-        kind: UndoKind::ExternalSpend,
-    })
 }
-
 fn unresolved_txids(workspace: &WindowWorkspace, outpoints: &[OutPoint]) -> Vec<Txid> {
     let mut needed: Vec<Txid> = outpoints
         .iter()
@@ -946,7 +918,7 @@ mod tests {
     -> Result<(), CoinBytesError> {
         use super::{
             BlockTransition, CreatedOwned, FOLD_EVENTS, HashSet, OutPoint, OwnedUtxoOut, TxOut,
-            UndoCoin, UndoKind, UtxoRecord,
+            UndoCoin, UtxoRecord,
         };
 
         let txid_a = Txid(Hash256::from_le_bytes(&[0xa0; 32]));
@@ -968,7 +940,6 @@ mod tests {
             txout: TxOut::default(),
             height,
             coinbase: false,
-            kind: UndoKind::Bip30Overwrite,
         };
         let block = |height: u32,
                      created: Vec<CreatedOwned>,
@@ -978,7 +949,6 @@ mod tests {
             hash: Hash256::default(),
             prev_hash: Hash256::default(),
             created,
-            spent_external: Vec::new(),
             spent_outpoints: spent,
             bip30_overwrites: overwrites,
         };
@@ -1130,7 +1100,6 @@ mod tests {
                 hash: Hash256::default(),
                 prev_hash: Hash256::default(),
                 created,
-                spent_external: Vec::new(),
                 spent_outpoints: spent,
                 bip30_overwrites: Vec::new(),
             };
