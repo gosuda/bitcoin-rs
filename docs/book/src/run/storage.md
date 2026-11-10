@@ -29,7 +29,7 @@ $ ./target/release/bitcoin-rs --storage-backend rocksdb --network regtest --data
 Error: unsupported storage backend rocksdb
 ```
 
-In the current runtime, RocksDB is always compiled in, so a separate `--features rocksdb` flag is no longer required. Historical epoch-2 datadirs wrote `chainstate/0.jnl` plus numbered `chainstate/keyspaces/` (`fjall`) or `chainstate/redb.db` (`redb`); current epoch-4 datadirs write native RocksDB files (including `chainstate/CURRENT`).
+In the current runtime, RocksDB is always compiled in, so a separate `--features rocksdb` flag is no longer required. Historical epoch-2 datadirs wrote `chainstate/0.jnl` plus numbered `chainstate/keyspaces/` (`fjall`) or `chainstate/redb.db` (`redb`); current epoch-6 datadirs write native RocksDB files (including `chainstate/CURRENT`).
 
 The backend appears in the startup line:
 
@@ -85,7 +85,7 @@ The process exits with status 1. Pruning keeps a reorg safety margin of 288 bloc
 
 ## Schema and migrations
 
-The authoritative format has one current epoch, `4`, recorded in `CURRENT_SCHEMA`. The node does not migrate, translate, or repair an incompatible directory in place. It refuses to open it and:
+The authoritative format has one current epoch, `6`, recorded in `CURRENT_SCHEMA`. The node does not migrate, translate, or repair an incompatible directory in place. It refuses to open it and:
 
 - preserves the directory untouched,
 - reports `incompatible_schema` when the marker, epoch, or referenced bytes do not match,
@@ -93,7 +93,7 @@ The authoritative format has one current epoch, `4`, recorded in `CURRENT_SCHEMA
 
 Owner-local state carries its own versions. Rejected mempool snapshots move intact to a `mempool-snapshot-rejected-*` directory; a fee estimator with no usable history reports insufficient data. Those cases never move `CURRENT_SCHEMA`.
 
-> **Warning** An epoch change is not an in-place upgrade. Keep the old directory, create a new one, sync it, then switch. Convert a retired epoch-2 or epoch-3 datadir offline with `tools/storage-convert` (`--from` the old data directory, `--to` a new one). The epoch-3 to epoch-4 step moves the coins from the retired checkpoint coin image into the engine `Coins` keyspace. The [datadir format policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/db-migration.md) owns the procedure, and [`RCV-09`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md) owns the fresh-replay and schema-refusal rule.
+> **Warning** An epoch change is not an in-place upgrade. Keep the old directory, create a new one, sync it, then switch. Convert a retired epoch-2, epoch-3, epoch-4, or epoch-5 datadir offline with `tools/storage-convert` (`--from` the old data directory, `--to` a new one). An epoch-3, epoch-4, or epoch-5 source converts to epoch `6` in one run: the conversion chains the retired steps and writes marker `6`. An epoch-2 source converts to epoch `3` first, and a second run converts the result to epoch `6`. The epoch-3 to epoch-4 step moves the coins from the retired checkpoint coin image into the engine `Coins` keyspace. The [datadir format policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/db-migration.md) owns the procedure, and [`RCV-09`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md) owns the fresh-replay and schema-refusal rule.
 
 ## Next
 

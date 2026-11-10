@@ -121,6 +121,11 @@ impl UndoBatch {
     pub const fn from_parts(restores: Vec<UtxoAdd>, removes: Vec<OutPoint>) -> Self {
         Self { restores, removes }
     }
+
+    #[must_use]
+    pub(crate) fn into_restores(self) -> Vec<UtxoAdd> {
+        self.restores
+    }
 }
 
 pub struct UndoRecord(Vec<u8>);
@@ -314,12 +319,36 @@ pub fn decode_undo_record_for_block(
         .map(|tx| tx.inputs.len())
         .sum::<usize>();
     let outputs = block.txs.iter().map(|tx| tx.outputs.len()).sum::<usize>();
-    undo_codec::decode_bounded(
+    let batch = undo_codec::decode_bounded(
         bytes,
         block.block_hash().into(),
         inputs.saturating_add(outputs),
-        outputs,
-    )
+    )?;
+    let restores = batch.into_restores();
+    let max_script_size = bitcoin_rs_consensus::MAX_SCRIPT_SIZE;
+    let txids: Vec<Txid> = block.txs.iter().map(|tx| tx.txid()).collect();
+    let check = BlockUndoCheck {
+        block,
+        txids: &txids,
+        max_script_size,
+    };
+    let (_, mut derived) = block_outputs(&check)?;
+    let (_, same_block) = block_inputs(&check);
+    derived.retain(|outpoint| !same_block.contains(outpoint));
+    let restored: HashSet<OutPoint> = restores.iter().map(|add| add.outpoint).collect();
+    derived.retain(|outpoint| !restored.contains(outpoint));
+    let mut removes: Vec<OutPoint> = derived.into_iter().collect();
+    removes.sort_by(|a, b| {
+        let a_txid = a.txid;
+        let b_txid = b.txid;
+        let a_vout = a.vout;
+        let b_vout = b.vout;
+        a_txid
+            .as_bytes()
+            .cmp(b_txid.as_bytes())
+            .then_with(|| a_vout.cmp(&b_vout))
+    });
+    Ok(UndoBatch::from_parts(restores, removes))
 }
 
 pub fn block_spent_outputs(
@@ -659,7 +688,27 @@ pub fn load_block_undo_for_block(
     let undo = load_block_undo(store, height, hash)?;
     validate_undo_for_block(check, height, &undo)
         .map_err(|source| UndoLoadError::Unreadable { hash, source })?;
-    Ok(undo)
+    if height == 0 {
+        return Ok(undo);
+    }
+    let (_, mut derived) =
+        block_outputs(check).map_err(|source| UndoLoadError::Unreadable { hash, source })?;
+    let (_, same_block) = block_inputs(check);
+    derived.retain(|outpoint| !same_block.contains(outpoint));
+    let restored: HashSet<OutPoint> = undo.restores().iter().map(|add| add.outpoint).collect();
+    derived.retain(|outpoint| !restored.contains(outpoint));
+    let mut removes: Vec<OutPoint> = derived.into_iter().collect();
+    removes.sort_by(|a, b| {
+        let a_txid = a.txid;
+        let b_txid = b.txid;
+        let a_vout = a.vout;
+        let b_vout = b.vout;
+        a_txid
+            .as_bytes()
+            .cmp(b_txid.as_bytes())
+            .then_with(|| a_vout.cmp(&b_vout))
+    });
+    Ok(UndoBatch::from_parts(undo.into_restores(), removes))
 }
 
 fn validate_undo_for_block(
@@ -675,9 +724,8 @@ fn validate_undo_for_block(
             reason: "transaction id count differs from the block transaction count",
         });
     }
-    let (created, mut expected_removes) = block_outputs(check)?;
-    let (external_inputs, same_block_inputs) = block_inputs(check);
-    expected_removes.retain(|outpoint| !same_block_inputs.contains(outpoint));
+    let (created, _) = block_outputs(check)?;
+    let (external_inputs, _) = block_inputs(check);
 
     let mut restored: HashSet<OutPoint> = HashSet::with_capacity(undo.restores().len());
     for add in undo.restores() {
@@ -701,13 +749,6 @@ fn validate_undo_for_block(
             reason: "an external input has no restored coin",
         });
     }
-    expected_removes.retain(|outpoint| !restored.contains(outpoint));
-    let removed: HashSet<OutPoint> = undo.removes().iter().copied().collect();
-    if removed != expected_removes {
-        return Err(UndoCodecError::BlockMismatch {
-            reason: "removed outpoints differ from the block's retained outputs",
-        });
-    }
     Ok(())
 }
 
@@ -723,26 +764,19 @@ pub fn rewrite_overwrite_restores(
 ) -> Result<Option<Vec<u8>>, UndoCodecError> {
     let batch = undo_codec::decode(record, block_hash)?;
     let mut restores = Vec::with_capacity(batch.restores.len());
-    let mut overwritten = Vec::new();
+    let mut dropped = false;
     for add in batch.restores {
         if created_txids.contains(&add.outpoint.txid) {
-            overwritten.push(add.outpoint);
+            dropped = true;
         } else {
             restores.push(add);
         }
     }
-    if overwritten.is_empty() {
+    if !dropped {
         return Ok(None);
     }
-    let mut removes = batch.removes;
-    let mut seen: HashSet<OutPoint> = removes.iter().copied().collect();
-    for outpoint in overwritten {
-        if seen.insert(outpoint) {
-            removes.push(outpoint);
-        }
-    }
     Ok(Some(undo_codec::encode(
-        &UndoBatch::from_parts(restores, removes),
+        &UndoBatch::from_parts(restores, Vec::new()),
         block_hash,
     )))
 }

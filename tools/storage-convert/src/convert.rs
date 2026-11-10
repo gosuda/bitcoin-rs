@@ -34,13 +34,14 @@ use bitcoin_rs_storage::checkpoint::{
 };
 pub(crate) const UTXO_FILE: &str = "utxo-v4.dat";
 const EPOCH3_JOURNAL_DIR: &str = "chainstate-journal";
+use crate::legacy_undo::decode_legacy_undo_record;
 use bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus;
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
 use bitcoin_rs_storage::pruning::{block_body_key, block_undo_key};
 use bitcoin_rs_storage::utxo::UtxoCoin;
 use bitcoin_rs_storage::utxo::contract::{
     BlockChangeInputs, SpentOutputLookup, block_spent_outputs, build_block_changes,
-    decode_undo_record_for_block, rewrite_overwrite_restores,
+    decode_undo_record_for_block, encode_undo_record, rewrite_overwrite_restores,
 };
 use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
 use bitcoin_rs_storage::utxo::snapshot::stream_snapshot_v4_records;
@@ -69,7 +70,12 @@ pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertE
     let roots = validate_and_open_roots(&args)?;
 
     let source_epoch = read_source_epoch(&roots.from_dir)?;
-    if source_epoch != 2 && source_epoch != 3 && source_epoch != 4 && source_epoch != 5 {
+    if source_epoch != 2
+        && source_epoch != 3
+        && source_epoch != 4
+        && source_epoch != 5
+        && source_epoch != 6
+    {
         return Err(ConvertError::UnknownEpoch(source_epoch));
     }
 
@@ -78,12 +84,16 @@ pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertE
     }
 
     if source_epoch == 4 {
-        return run_step_4_to_5(&args, &roots, target_engine);
+        return run_step_4_to_6(&args, &roots, target_engine);
+    }
+
+    if source_epoch == 5 {
+        return run_step_5_to_6(&args, &roots, target_engine);
     }
 
     let target_epoch = match source_epoch {
         2 => 3,
-        5 => 5,
+        6 => 6,
         _ => return Err(ConvertError::UnknownEpoch(source_epoch)),
     };
 
@@ -287,6 +297,125 @@ fn convert_namespace(
 
     sync_dir(&dst_dir)?;
 
+    Ok(NamespaceReport {
+        namespace: paths.name.to_string(),
+        engine: engine_label.to_string(),
+        families: family_reports,
+    })
+}
+fn convert_namespace_with_undo_recode(
+    paths: NamespacePaths<'_>,
+    source_epoch: u32,
+    target_engine: StorageBackend,
+) -> Result<NamespaceReport, ConvertError> {
+    let src_dir = match paths.from_root.open_dir_nofollow(paths.name) {
+        Ok(dir) => dir,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Ok(NamespaceReport {
+                namespace: paths.name.to_string(),
+                engine: "empty".to_string(),
+                families: Vec::new(),
+            });
+        }
+        Err(err) => return Err(ConvertError::Io(err)),
+    };
+    let scratch_base_name = ".convert-src";
+    match paths.to_root.open_dir_nofollow(scratch_base_name) {
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            paths.to_root.create_dir(scratch_base_name)?;
+        }
+        Err(err) => return Err(ConvertError::Io(err)),
+    }
+    let scratch_base_dir = paths.to_root.open_dir_nofollow(scratch_base_name)?;
+    match scratch_base_dir.open_dir_nofollow(paths.name) {
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            scratch_base_dir.create_dir(paths.name)?;
+        }
+        Err(err) => return Err(ConvertError::Io(err)),
+    }
+    let scratch_dir = scratch_base_dir.open_dir_nofollow(paths.name)?;
+    copy_dir_recursive(&src_dir, &scratch_dir)?;
+    sync_dir(&scratch_dir)?;
+    let detected = detect_engine(paths.scratch_path, &scratch_dir, source_epoch)?;
+    let Some(engine) = detected else {
+        return Ok(NamespaceReport {
+            namespace: paths.name.to_string(),
+            engine: "empty".to_string(),
+            families: Vec::new(),
+        });
+    };
+    match paths.to_root.open_dir_nofollow(paths.name) {
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            paths.to_root.create_dir(paths.name)?;
+        }
+        Err(err) => return Err(ConvertError::Io(err)),
+    }
+    let dst_dir = paths.to_root.open_dir_nofollow(paths.name)?;
+    let (source_ns, engine_label) = SourceNamespace::open(paths.scratch_path, Some(engine))?;
+    let dest_store = open_destination_store(paths.dst_path, target_engine)?;
+    let mut family_reports = Vec::new();
+    for cf in ColumnFamily::ALL.iter().copied() {
+        if cf == ColumnFamily::UndoData {
+            let mut writer = BatchWriter::new(dest_store.as_ref());
+            let row_count = source_ns.for_each_row(cf, |key, value| {
+                if key.len() != 37 {
+                    return Err(ConvertError::IncompatibleData(
+                        "undo key is not 37 bytes".into(),
+                    ));
+                }
+                let mut hash_bytes = [0_u8; 32];
+                hash_bytes.copy_from_slice(&key[5..37]);
+                let hash = Hash256::from_le_bytes(&hash_bytes);
+                let batch = decode_legacy_undo_record(value, hash).map_err(|e| {
+                    ConvertError::IncompatibleData(format!("legacy undo record is unreadable: {e}"))
+                })?;
+                let recoded = encode_undo_record(&batch, hash);
+                writer.put(cf, key, &recoded)?;
+                Ok(())
+            })?;
+            writer.flush()?;
+            let (dst_count, dst_digest_hex) = compute_destination_digest(dest_store.as_ref(), cf)?;
+            if row_count != dst_count {
+                return Err(ConvertError::DigestMismatch {
+                    namespace: paths.name.to_string(),
+                    family: cf.name().to_string(),
+                });
+            }
+            family_reports.push(FamilyReport {
+                family: cf.name().to_string(),
+                row_count,
+                digest: dst_digest_hex,
+            });
+            continue;
+        }
+        let mut source_digest = FamilyDigest::new();
+        let mut writer = BatchWriter::new(dest_store.as_ref());
+        let row_count = source_ns.for_each_row(cf, |key, value| {
+            source_digest.update(key, value)?;
+            writer.put(cf, key, value)?;
+            Ok(())
+        })?;
+        writer.flush()?;
+        let src_digest_hex = source_digest.finalize_hex();
+        let (dst_count, dst_digest_hex) = compute_destination_digest(dest_store.as_ref(), cf)?;
+        if row_count != dst_count || src_digest_hex != dst_digest_hex {
+            return Err(ConvertError::DigestMismatch {
+                namespace: paths.name.to_string(),
+                family: cf.name().to_string(),
+            });
+        }
+        family_reports.push(FamilyReport {
+            family: cf.name().to_string(),
+            row_count,
+            digest: src_digest_hex,
+        });
+    }
+    drop(dest_store);
+    drop(source_ns);
+    sync_dir(&dst_dir)?;
     Ok(NamespaceReport {
         namespace: paths.name.to_string(),
         engine: engine_label.to_string(),
@@ -1204,7 +1333,7 @@ fn run_step_3_to_4(
             from_root: &roots.from_dir,
             to_root: &roots.to_dir,
         };
-        let report = convert_namespace(paths, 3, target_engine)?;
+        let report = convert_namespace_with_undo_recode(paths, 3, target_engine)?;
         namespaces_report.push(report);
     }
 
@@ -1227,7 +1356,7 @@ fn run_step_3_to_4(
             from_root: pool_from_dir,
             to_root: pool_to_dir,
         };
-        let report = convert_namespace(paths, 3, target_engine)?;
+        let report = convert_namespace_with_undo_recode(paths, 3, target_engine)?;
         namespaces_report.push(report);
     }
 
@@ -1400,11 +1529,11 @@ fn run_step_3_to_4(
     let _snapshot_outcome =
         finalize_snapshot_base(roots, to_path, target_engine, &mut namespaces_report)?;
     let carried_markers = carry_full_revalidation_marker(&roots.from_dir, &roots.to_dir)?;
-    publish_current_schema(&roots.to_dir, 5)?;
+    publish_current_schema(&roots.to_dir, 6)?;
 
     Ok(ConversionReport {
         source_epoch: 3,
-        target_epoch: 5,
+        target_epoch: 6,
         namespaces: namespaces_report,
         copied_files,
         checkpoint_stats: Some(checkpoint_stats_report),
@@ -1592,7 +1721,7 @@ fn finalize_snapshot_base(
     })
 }
 
-fn run_step_4_to_5(
+fn run_step_4_to_6(
     args: &CliArgs,
     roots: &crate::fs_util::OpenedRoots,
     target_engine: StorageBackend,
@@ -1611,7 +1740,7 @@ fn run_step_4_to_5(
             from_root: &roots.from_dir,
             to_root: &roots.to_dir,
         };
-        let report = convert_namespace(paths, 4, target_engine)?;
+        let report = convert_namespace_with_undo_recode(paths, 4, target_engine)?;
         namespaces_report.push(report);
     }
     if let (Some(_), Some(pool_to_path)) = (&args.pool_from, &args.pool_to) {
@@ -1631,7 +1760,7 @@ fn run_step_4_to_5(
             from_root: pool_from_dir,
             to_root: pool_to_dir,
         };
-        let report = convert_namespace(paths, 4, target_engine)?;
+        let report = convert_namespace_with_undo_recode(paths, 4, target_engine)?;
         namespaces_report.push(report);
     }
     let mut copied_files = Vec::new();
@@ -1656,10 +1785,87 @@ fn run_step_4_to_5(
     if let Some(pool_to_dir) = &roots.pool_to_dir {
         sync_dir(pool_to_dir)?;
     }
-    publish_current_schema(&roots.to_dir, 5)?;
+    publish_current_schema(&roots.to_dir, 6)?;
     Ok(ConversionReport {
         source_epoch: 4,
-        target_epoch: 5,
+        target_epoch: 6,
+        namespaces: namespaces_report,
+        copied_files,
+        checkpoint_stats,
+        final_stats,
+        normalized_undo_rows: Vec::new(),
+        carried_markers,
+        published_checkpoint,
+    })
+}
+fn run_step_5_to_6(
+    args: &CliArgs,
+    roots: &crate::fs_util::OpenedRoots,
+    target_engine: StorageBackend,
+) -> Result<ConversionReport, ConvertError> {
+    let (_, to_path) = args.convert_roots()?;
+    let mut namespaces_report = Vec::new();
+    let node_namespaces = [("chainstate", "chainstate"), ("txindex", "txindex")];
+    for &(ns_name, rel_path) in &node_namespaces {
+        let dst_path = to_path.join(rel_path);
+        let scratch_base = to_path.join(".convert-src");
+        let scratch_path = scratch_base.join(rel_path);
+        let paths = NamespacePaths {
+            name: ns_name,
+            dst_path: &dst_path,
+            scratch_path: &scratch_path,
+            from_root: &roots.from_dir,
+            to_root: &roots.to_dir,
+        };
+        let report = convert_namespace_with_undo_recode(paths, 5, target_engine)?;
+        namespaces_report.push(report);
+    }
+    if let (Some(_), Some(pool_to_path)) = (&args.pool_from, &args.pool_to) {
+        let pool_from_dir = roots.pool_from_dir.as_ref().ok_or_else(|| {
+            ConvertError::InvalidOperation("missing pool source directory".into())
+        })?;
+        let pool_to_dir = roots.pool_to_dir.as_ref().ok_or_else(|| {
+            ConvertError::InvalidOperation("missing pool target directory".into())
+        })?;
+        let dst_path = pool_to_path.join("ledger");
+        let scratch_base = pool_to_path.join(".convert-src");
+        let scratch_path = scratch_base.join("ledger");
+        let paths = NamespacePaths {
+            name: "ledger",
+            dst_path: &dst_path,
+            scratch_path: &scratch_path,
+            from_root: pool_from_dir,
+            to_root: pool_to_dir,
+        };
+        let report = convert_namespace_with_undo_recode(paths, 5, target_engine)?;
+        namespaces_report.push(report);
+    }
+    let mut copied_files = Vec::new();
+    copy_independent_files(
+        &roots.from_dir,
+        &roots.to_dir,
+        &mut copied_files,
+        false,
+        true,
+    )?;
+    let SnapshotStepOutcome {
+        checkpoint_stats,
+        final_stats,
+        published_checkpoint,
+    } = finalize_snapshot_base(roots, to_path, target_engine, &mut namespaces_report)?;
+    let carried_markers = carry_full_revalidation_marker(&roots.from_dir, &roots.to_dir)?;
+    cleanup_scratch(&roots.to_dir)?;
+    if let Some(pool_to_dir) = &roots.pool_to_dir {
+        cleanup_scratch(pool_to_dir)?;
+    }
+    sync_dir(&roots.to_dir)?;
+    if let Some(pool_to_dir) = &roots.pool_to_dir {
+        sync_dir(pool_to_dir)?;
+    }
+    publish_current_schema(&roots.to_dir, 6)?;
+    Ok(ConversionReport {
+        source_epoch: 5,
+        target_epoch: 6,
         namespaces: namespaces_report,
         copied_files,
         checkpoint_stats,
@@ -1732,7 +1938,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_bip30_undo_rows_moves_overwrite_restores_to_removes() -> Result<(), String> {
+    fn normalize_bip30_undo_rows_drops_overwrite_restores() -> Result<(), String> {
         let (height, hash, block, overwritten, store) = overwrite_fixture()?;
         let load_block = |requested_height: u32, requested_hash: Hash256| {
             if requested_height == height && requested_hash == hash {
@@ -1753,14 +1959,14 @@ mod tests {
             .map_err(|e| e.to_string())?
             .ok_or("normalized row disappeared")?;
         let batch = decode_undo_record(&stored, hash).map_err(|e| e.to_string())?;
-        assert!(batch.removes().contains(&overwritten));
+        assert!(batch.restores().is_empty());
+        assert!(batch.removes().is_empty());
         assert!(
             batch
                 .restores()
                 .iter()
                 .all(|add| add.outpoint != overwritten)
         );
-        assert!(batch.restores().is_empty());
         Ok(())
     }
 
@@ -1788,5 +1994,47 @@ mod tests {
             } => Ok(()),
             other => Err(format!("unexpected refusal: {other}")),
         }
+    }
+    #[test]
+    fn undo_recode_drops_created_outputs_and_preserves_spent_coins() -> Result<(), String> {
+        use crate::legacy_undo::{decode_legacy_undo_record, encode_legacy_undo_record};
+        use bitcoin_rs_storage::utxo::contract::{UndoBatch, UtxoAdd};
+        let hash = Hash256::from_le_bytes(&[0x09; 32]);
+        let mut restores = Vec::new();
+        for (txid_byte, vout, sats) in [(0x01_u8, 0_u32, 50_000_u64), (0x02_u8, 7_u32, 1_u64)] {
+            let outpoint = OutPoint::new(Hash256::from_le_bytes(&[txid_byte; 32]).into(), vout);
+            let txout = TxOut {
+                value: Amount::from_sat(sats),
+                script_pubkey: Script::from_bytes(vec![0x51]),
+            };
+            restores.push(UtxoAdd::new(outpoint, txout, false, 11));
+        }
+        let removes = vec![OutPoint::new(Hash256::from_le_bytes(&[0x03; 32]).into(), 0)];
+        let batch = UndoBatch::from_parts(restores, removes);
+        let old_bytes = encode_legacy_undo_record(&batch, hash);
+        assert_eq!(old_bytes[0], 1);
+        let legacy = decode_legacy_undo_record(&old_bytes, hash).map_err(|e| e.to_string())?;
+        assert_eq!(legacy.restores().len(), 2);
+        assert_eq!(legacy.removes().len(), 1);
+        let recoded = encode_undo_record(&legacy, hash);
+        assert_eq!(recoded[0], 2);
+        let mut expected_len = 37_usize;
+        for add in legacy.restores() {
+            let script_len = add.txout.script_pubkey.len();
+            expected_len = expected_len
+                .saturating_add(36)
+                .saturating_add(8)
+                .saturating_add(1)
+                .saturating_add(script_len)
+                .saturating_add(1)
+                .saturating_add(4);
+        }
+        assert_eq!(recoded.len(), expected_len);
+        let decoded = decode_undo_record(&recoded, hash).map_err(|e| e.to_string())?;
+        assert_eq!(decoded.restores(), legacy.restores());
+        assert!(decoded.removes().is_empty());
+        let copied = decode_undo_record(&old_bytes, hash);
+        assert!(copied.is_err());
+        Ok(())
     }
 }

@@ -168,9 +168,9 @@ fn epoch4_valid_archive_converts_and_node_resumes_at_base() -> TestResult<()> {
     write_valid_epoch4_snapshot_source(from)?;
 
     let report = converted_report(&to, from)?;
-    if report.source_epoch != 4 || report.target_epoch != 5 {
+    if report.source_epoch != 4 || report.target_epoch != 6 {
         return Err(TestError::Assertion(format!(
-            "expected report 4 -> 5, got {} -> {}",
+            "expected report 4 -> 6, got {} -> {}",
             report.source_epoch, report.target_epoch
         )));
     }
@@ -184,9 +184,9 @@ fn epoch4_valid_archive_converts_and_node_resumes_at_base() -> TestResult<()> {
             "the archive must not be copied into the new datadir".into(),
         ));
     }
-    if fs::read_to_string(to.join("CURRENT_SCHEMA"))? != "5\n" {
+    if fs::read_to_string(to.join("CURRENT_SCHEMA"))? != "6\n" {
         return Err(TestError::Assertion(
-            "destination marker must be epoch 5".into(),
+            "destination marker must be epoch 6".into(),
         ));
     }
     let store = RocksDbStore::open(to.join("chainstate"))?;
@@ -387,9 +387,9 @@ fn epoch4_checkpoint_compatible_source_drops_archive() -> TestResult<()> {
         )));
     }
     let report = parse_report(&output)?;
-    if report.source_epoch != 4 || report.target_epoch != 5 {
+    if report.source_epoch != 4 || report.target_epoch != 6 {
         return Err(TestError::Assertion(format!(
-            "expected report 4 -> 5, got {} -> {}",
+            "expected report 4 -> 6, got {} -> {}",
             report.source_epoch, report.target_epoch
         )));
     }

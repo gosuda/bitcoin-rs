@@ -577,7 +577,7 @@ fn format_and_schema_helpers_round_trip() -> TestResult {
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     ensure_current_schema(&data)?;
-    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"5\n");
+    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"6\n");
     let mut oversized = data.create("oversized")?;
     oversized.write_all(&[0_u8; 17])?;
     oversized.sync_all()?;
@@ -586,7 +586,7 @@ fn format_and_schema_helpers_round_trip() -> TestResult {
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData
     ));
     data.remove_file(CURRENT_SCHEMA_FILE)?;
-    for epoch in [b"0\n", b"1\n", b"2\n", b"3\n", b"4\n"] {
+    for epoch in [b"0\n", b"1\n", b"2\n", b"3\n", b"4\n", b"5\n"] {
         let mut stale_schema = data.create(CURRENT_SCHEMA_FILE)?;
         stale_schema.write_all(epoch)?;
         stale_schema.sync_all()?;
@@ -615,7 +615,7 @@ fn schema_init_exempts_only_a_regular_lock_file() -> TestResult {
         lock.sync_all()?;
     }
     ensure_current_schema(&data)?;
-    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"5\n");
+    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"6\n");
     {
         let mut other = data.create("other")?;
         other.write_all(b"data")?;

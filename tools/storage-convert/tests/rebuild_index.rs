@@ -61,7 +61,7 @@ fn parse_rebuild_report(output: &Output) -> TestResult<RebuildIndexReport> {
 fn seeded_datadir(root: &Path) -> TestResult<PathBuf> {
     let datadir = root.join("datadir");
     fs::create_dir_all(datadir.join("txindex"))?;
-    fs::write(datadir.join("CURRENT_SCHEMA"), "3\n")?;
+    fs::write(datadir.join("CURRENT_SCHEMA"), "6\n")?;
     let store = Arc::new(RocksDbStore::open(datadir.join("txindex"))?);
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let scripthash = bitcoin_rs_projection::ScriptHash::from_script_bytes(&[0x51, 0x01]);
@@ -183,7 +183,7 @@ fn rebuild_index_refuses_a_datadir_without_txindex() -> TestResult {
     let root = tempfile::tempdir()?;
     let datadir = root.path().join("datadir");
     fs::create_dir_all(&datadir)?;
-    fs::write(datadir.join("CURRENT_SCHEMA"), "3\n")?;
+    fs::write(datadir.join("CURRENT_SCHEMA"), "6\n")?;
     let output = run_converter(&[
         "rebuild-index",
         "--datadir",
@@ -222,7 +222,7 @@ fn rebuild_index_refuses_empty_txindex_when_chainstate_engine_undetectable() -> 
     let root = tempfile::tempdir()?;
     let datadir = root.path().join("datadir");
     fs::create_dir_all(datadir.join("txindex"))?;
-    fs::write(datadir.join("CURRENT_SCHEMA"), "3\n")?;
+    fs::write(datadir.join("CURRENT_SCHEMA"), "6\n")?;
     let output = run_converter(&[
         "rebuild-index",
         "--datadir",
@@ -243,7 +243,7 @@ fn rebuild_index_empty_txindex_follows_detected_chainstate_engine() -> TestResul
     let datadir = root.path().join("datadir");
     fs::create_dir_all(datadir.join("txindex"))?;
     fs::create_dir_all(datadir.join("chainstate"))?;
-    fs::write(datadir.join("CURRENT_SCHEMA"), "3\n")?;
+    fs::write(datadir.join("CURRENT_SCHEMA"), "6\n")?;
     let cs_store = RocksDbStore::open(datadir.join("chainstate"))?;
     drop(cs_store);
 
@@ -341,10 +341,10 @@ fn spending_tx(prev: ([u8; 32], u32), witness: Witness, outputs: &[(u64, Vec<u8>
 fn encode_undo(
     block_hash: [u8; 32],
     restores: &[RestoreSpec],
-    removes: &[([u8; 32], u32)],
+    _removes: &[([u8; 32], u32)],
 ) -> Vec<u8> {
     let mut out = Vec::new();
-    out.push(1);
+    out.push(2);
     out.extend_from_slice(&block_hash);
     out.extend_from_slice(&u32::try_from(restores.len()).expect("fits").to_le_bytes());
     for (txid, vout, value, script, coinbase, height) in restores {
@@ -355,11 +355,6 @@ fn encode_undo(
         out.extend_from_slice(script);
         out.push(u8::from(*coinbase));
         out.extend_from_slice(&height.to_le_bytes());
-    }
-    out.extend_from_slice(&u32::try_from(removes.len()).expect("fits").to_le_bytes());
-    for (txid, vout) in removes {
-        out.extend_from_slice(txid);
-        out.extend_from_slice(&vout.to_le_bytes());
     }
     out
 }
@@ -487,7 +482,7 @@ fn assemble_block(spec: BlockSpec, ledger: &mut CoinLedger) -> FixtureBlock {
     let decoded = decode_undo_record(&undo, Hash256::from_le_bytes(&hash))
         .expect("fixture undo record decodes");
     assert_eq!(decoded.restores().len(), restores.len());
-    assert_eq!(decoded.removes().len(), removes.len());
+    assert!(decoded.removes().is_empty());
     for (add, (txid, vout, value, script, coinbase, coin_height)) in
         decoded.restores().iter().zip(restores.iter())
     {
@@ -683,7 +678,7 @@ fn prepare_datadir(root: &Path) -> TestResult<PathBuf> {
     let datadir = root.join("datadir");
     fs::create_dir_all(datadir.join("txindex"))?;
     fs::create_dir_all(datadir.join("blocks"))?;
-    fs::write(datadir.join("CURRENT_SCHEMA"), "3\n")?;
+    fs::write(datadir.join("CURRENT_SCHEMA"), "6\n")?;
     let store = RocksDbStore::open(datadir.join("txindex"))?;
     drop(store);
     Ok(datadir)

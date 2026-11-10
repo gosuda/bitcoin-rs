@@ -71,6 +71,31 @@ fn verify_final_rocksdb_data(
     Ok(())
 }
 
+fn undo_key(height: u32, hash_byte: u8) -> Vec<u8> {
+    let mut key = Vec::with_capacity(37);
+    key.push(b'u');
+    key.extend_from_slice(&height.to_be_bytes());
+    key.extend_from_slice(&[hash_byte; 32]);
+    key
+}
+
+fn undo_value_v1_empty(hash_byte: u8) -> Vec<u8> {
+    let mut value = Vec::with_capacity(41);
+    value.push(1);
+    value.extend_from_slice(&[hash_byte; 32]);
+    value.extend_from_slice(&0u32.to_le_bytes());
+    value.extend_from_slice(&0u32.to_le_bytes());
+    value
+}
+
+fn undo_value_v2(hash_byte: u8) -> Vec<u8> {
+    let mut value = Vec::with_capacity(37);
+    value.push(2);
+    value.extend_from_slice(&[hash_byte; 32]);
+    value.extend_from_slice(&0u32.to_le_bytes());
+    value
+}
+
 fn make_test_datasets() -> (Vec<FamilyRows>, Vec<FamilyRows>) {
     let chainstate_data = vec![
         (
@@ -86,8 +111,8 @@ fn make_test_datasets() -> (Vec<FamilyRows>, Vec<FamilyRows>) {
         (
             ColumnFamily::UndoData,
             vec![
-                (b"undo:00000001".to_vec(), vec![1u8; 128]),
-                (b"undo:00000002".to_vec(), vec![2u8; 256]),
+                (undo_key(101, 0x11), undo_value_v1_empty(0x11)),
+                (undo_key(102, 0x22), undo_value_v1_empty(0x22)),
             ],
         ),
     ];
@@ -131,6 +156,23 @@ fn engine_copy_rocksdb_to_mdbx_and_back_is_identical() -> TestResult<()> {
     for (cf, rows) in &txindex_data {
         oracle_digests.insert(("txindex", cf.name()), compute_oracle_digest(rows));
     }
+    let recoded_undo_rows = vec![
+        (undo_key(101, 0x11), undo_value_v2(0x11)),
+        (undo_key(102, 0x22), undo_value_v2(0x22)),
+    ];
+    let mut expected_recoded_chainstate = Vec::new();
+    for (cf, rows) in &chainstate_data {
+        if *cf == ColumnFamily::UndoData {
+            expected_recoded_chainstate.push((*cf, recoded_undo_rows.clone()));
+        } else {
+            expected_recoded_chainstate.push((*cf, rows.clone()));
+        }
+    }
+    let mut recoded_digests = oracle_digests.clone();
+    recoded_digests.insert(
+        ("chainstate", ColumnFamily::UndoData.name()),
+        compute_oracle_digest(&recoded_undo_rows),
+    );
 
     let source_digest_before = recursive_dir_digest(from_path)?;
 
@@ -158,7 +200,7 @@ fn engine_copy_rocksdb_to_mdbx_and_back_is_identical() -> TestResult<()> {
     }
 
     let report1 = parse_report(&output1)?;
-    if report1.source_epoch != 4 || report1.target_epoch != 5 {
+    if report1.source_epoch != 4 || report1.target_epoch != 6 {
         return Err(TestError::Assertion(
             "epoch mismatch in hop 1 report".into(),
         ));
@@ -175,7 +217,12 @@ fn engine_copy_rocksdb_to_mdbx_and_back_is_identical() -> TestResult<()> {
             cs_report1.engine
         )));
     }
-    verify_namespace_families(cs_report1, &chainstate_data, &oracle_digests, "hop 1 cs")?;
+    verify_namespace_families(
+        cs_report1,
+        &expected_recoded_chainstate,
+        &recoded_digests,
+        "hop 1 cs",
+    )?;
 
     let tx_report1 = report1
         .namespaces
@@ -191,8 +238,8 @@ fn engine_copy_rocksdb_to_mdbx_and_back_is_identical() -> TestResult<()> {
     verify_namespace_families(tx_report1, &txindex_data, &oracle_digests, "hop 1 tx")?;
 
     let dest_schema1 = fs::read_to_string(mdbx_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema1 != "5\n" {
-        return Err(TestError::Assertion("CURRENT_SCHEMA != 3 in hop 1".into()));
+    if dest_schema1 != "6\n" {
+        return Err(TestError::Assertion("CURRENT_SCHEMA != 6 in hop 1".into()));
     }
     assert_independent_files_copied_and_ignored_skipped(&mdbx_path, &independent_files)?;
 
@@ -217,7 +264,7 @@ fn engine_copy_rocksdb_to_mdbx_and_back_is_identical() -> TestResult<()> {
     }
 
     let report2 = parse_report(&output2)?;
-    if report2.source_epoch != 5 || report2.target_epoch != 5 {
+    if report2.source_epoch != 6 || report2.target_epoch != 6 {
         return Err(TestError::Assertion(
             "epoch mismatch in hop 2 report".into(),
         ));
@@ -234,7 +281,12 @@ fn engine_copy_rocksdb_to_mdbx_and_back_is_identical() -> TestResult<()> {
             cs_report2.engine
         )));
     }
-    verify_namespace_families(cs_report2, &chainstate_data, &oracle_digests, "hop 2 cs")?;
+    verify_namespace_families(
+        cs_report2,
+        &expected_recoded_chainstate,
+        &recoded_digests,
+        "hop 2 cs",
+    )?;
 
     let tx_report2 = report2
         .namespaces
@@ -250,12 +302,12 @@ fn engine_copy_rocksdb_to_mdbx_and_back_is_identical() -> TestResult<()> {
     verify_namespace_families(tx_report2, &txindex_data, &oracle_digests, "hop 2 tx")?;
 
     let dest_schema2 = fs::read_to_string(final_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema2 != "5\n" {
-        return Err(TestError::Assertion("CURRENT_SCHEMA != 3 in hop 2".into()));
+    if dest_schema2 != "6\n" {
+        return Err(TestError::Assertion("CURRENT_SCHEMA != 6 in hop 2".into()));
     }
     assert_independent_files_copied_and_ignored_skipped(&final_path, &independent_files)?;
 
-    verify_final_rocksdb_data(&final_path, "chainstate", &chainstate_data)?;
+    verify_final_rocksdb_data(&final_path, "chainstate", &expected_recoded_chainstate)?;
     verify_final_rocksdb_data(&final_path, "txindex", &txindex_data)?;
 
     Ok(())
@@ -290,6 +342,23 @@ fn engine_copy_rocksdb_to_surrealkv_and_back_is_identical() -> TestResult<()> {
     for (cf, rows) in &txindex_data {
         oracle_digests.insert(("txindex", cf.name()), compute_oracle_digest(rows));
     }
+    let recoded_undo_rows = vec![
+        (undo_key(101, 0x11), undo_value_v2(0x11)),
+        (undo_key(102, 0x22), undo_value_v2(0x22)),
+    ];
+    let mut expected_recoded_chainstate = Vec::new();
+    for (cf, rows) in &chainstate_data {
+        if *cf == ColumnFamily::UndoData {
+            expected_recoded_chainstate.push((*cf, recoded_undo_rows.clone()));
+        } else {
+            expected_recoded_chainstate.push((*cf, rows.clone()));
+        }
+    }
+    let mut recoded_digests = oracle_digests.clone();
+    recoded_digests.insert(
+        ("chainstate", ColumnFamily::UndoData.name()),
+        compute_oracle_digest(&recoded_undo_rows),
+    );
 
     let source_digest_before = recursive_dir_digest(from_path)?;
 
@@ -324,7 +393,7 @@ fn engine_copy_rocksdb_to_surrealkv_and_back_is_identical() -> TestResult<()> {
     }
 
     let report1 = parse_report(&output1)?;
-    if report1.source_epoch != 4 || report1.target_epoch != 5 {
+    if report1.source_epoch != 4 || report1.target_epoch != 6 {
         return Err(TestError::Assertion(
             "epoch mismatch in hop 1 report".into(),
         ));
@@ -341,7 +410,12 @@ fn engine_copy_rocksdb_to_surrealkv_and_back_is_identical() -> TestResult<()> {
             cs_report1.engine
         )));
     }
-    verify_namespace_families(cs_report1, &chainstate_data, &oracle_digests, "hop 1 cs")?;
+    verify_namespace_families(
+        cs_report1,
+        &expected_recoded_chainstate,
+        &recoded_digests,
+        "hop 1 cs",
+    )?;
     let tx_report1 = report1
         .namespaces
         .iter()
@@ -356,8 +430,8 @@ fn engine_copy_rocksdb_to_surrealkv_and_back_is_identical() -> TestResult<()> {
     verify_namespace_families(tx_report1, &txindex_data, &oracle_digests, "hop 1 tx")?;
 
     let dest_schema1 = fs::read_to_string(surrealkv_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema1 != "5\n" {
-        return Err(TestError::Assertion("CURRENT_SCHEMA != 3 in hop 1".into()));
+    if dest_schema1 != "6\n" {
+        return Err(TestError::Assertion("CURRENT_SCHEMA != 6 in hop 1".into()));
     }
     assert_independent_files_copied_and_ignored_skipped(&surrealkv_path, &independent_files)?;
 
@@ -382,7 +456,7 @@ fn engine_copy_rocksdb_to_surrealkv_and_back_is_identical() -> TestResult<()> {
     }
 
     let report2 = parse_report(&output2)?;
-    if report2.source_epoch != 5 || report2.target_epoch != 5 {
+    if report2.source_epoch != 6 || report2.target_epoch != 6 {
         return Err(TestError::Assertion(
             "epoch mismatch in hop 2 report".into(),
         ));
@@ -399,7 +473,12 @@ fn engine_copy_rocksdb_to_surrealkv_and_back_is_identical() -> TestResult<()> {
             cs_report2.engine
         )));
     }
-    verify_namespace_families(cs_report2, &chainstate_data, &oracle_digests, "hop 2 cs")?;
+    verify_namespace_families(
+        cs_report2,
+        &expected_recoded_chainstate,
+        &recoded_digests,
+        "hop 2 cs",
+    )?;
 
     let tx_report2 = report2
         .namespaces
@@ -415,13 +494,90 @@ fn engine_copy_rocksdb_to_surrealkv_and_back_is_identical() -> TestResult<()> {
     verify_namespace_families(tx_report2, &txindex_data, &oracle_digests, "hop 2 tx")?;
 
     let dest_schema2 = fs::read_to_string(final_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema2 != "5\n" {
-        return Err(TestError::Assertion("CURRENT_SCHEMA != 3 in hop 2".into()));
+    if dest_schema2 != "6\n" {
+        return Err(TestError::Assertion("CURRENT_SCHEMA != 6 in hop 2".into()));
     }
     assert_independent_files_copied_and_ignored_skipped(&final_path, &independent_files)?;
 
-    verify_final_rocksdb_data(&final_path, "chainstate", &chainstate_data)?;
+    verify_final_rocksdb_data(&final_path, "chainstate", &expected_recoded_chainstate)?;
     verify_final_rocksdb_data(&final_path, "txindex", &txindex_data)?;
 
+    Ok(())
+}
+
+#[cfg(feature = "mdbx")]
+#[test]
+fn engine_copy_current_epoch_undo_row_copies_verbatim() -> TestResult<()> {
+    let source_temp = tempdir()?;
+    let dest_temp = tempdir()?;
+    let from_path = source_temp.path();
+    let to_path = dest_temp.path().join("converted_mdbx");
+    write_schema_marker(from_path, 6)?;
+    let chainstate_data = vec![
+        (
+            ColumnFamily::UtxoMeta,
+            vec![(b"head:height".to_vec(), 101_u64.to_le_bytes().to_vec())],
+        ),
+        (
+            ColumnFamily::UndoData,
+            vec![(undo_key(101, 0x33), undo_value_v2(0x33))],
+        ),
+    ];
+    let txindex_data = vec![(
+        ColumnFamily::BlockHeaders,
+        vec![(b"header:00000001".to_vec(), vec![10u8; 80])],
+    )];
+    write_rocksdb_namespace(&from_path.join("chainstate"), &chainstate_data)?;
+    write_rocksdb_namespace(&from_path.join("txindex"), &txindex_data)?;
+    let all_files = write_independent_files(from_path)?;
+    let independent_files: Vec<_> = all_files
+        .into_iter()
+        .filter(|(p, _)| !p.starts_with("chainstate-journal"))
+        .collect();
+    let mut oracle_digests = BTreeMap::new();
+    for (cf, rows) in &chainstate_data {
+        oracle_digests.insert(("chainstate", cf.name()), compute_oracle_digest(rows));
+    }
+    for (cf, rows) in &txindex_data {
+        oracle_digests.insert(("txindex", cf.name()), compute_oracle_digest(rows));
+    }
+    let from_str = from_path
+        .to_str()
+        .ok_or_else(|| TestError::Assertion("invalid utf-8 path".into()))?;
+    let to_str = to_path
+        .to_str()
+        .ok_or_else(|| TestError::Assertion("invalid utf-8 path".into()))?;
+    let output = run_converter(&["--from", from_str, "--to", to_str, "--to-engine", "mdbx"])?;
+    if !output.status.success() {
+        return Err(TestError::Assertion(format!(
+            "current-epoch engine copy failed with stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let report = parse_report(&output)?;
+    if report.source_epoch != 6 || report.target_epoch != 6 {
+        return Err(TestError::Assertion(
+            "epoch mismatch in current-epoch copy".into(),
+        ));
+    }
+    let cs_report = report
+        .namespaces
+        .iter()
+        .find(|n| n.namespace == "chainstate")
+        .ok_or_else(|| TestError::Assertion("missing chainstate report".into()))?;
+    verify_namespace_families(cs_report, &chainstate_data, &oracle_digests, "current cs")?;
+    let tx_report = report
+        .namespaces
+        .iter()
+        .find(|n| n.namespace == "txindex")
+        .ok_or_else(|| TestError::Assertion("missing txindex report".into()))?;
+    verify_namespace_families(tx_report, &txindex_data, &oracle_digests, "current tx")?;
+    let dest_schema = fs::read_to_string(to_path.join("CURRENT_SCHEMA"))?;
+    if dest_schema != "6\n" {
+        return Err(TestError::Assertion(
+            "CURRENT_SCHEMA != 6 in current-epoch copy".into(),
+        ));
+    }
+    assert_independent_files_copied_and_ignored_skipped(&to_path, &independent_files)?;
     Ok(())
 }

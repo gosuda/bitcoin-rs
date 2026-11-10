@@ -62,9 +62,9 @@ fn epoch5_rocksdb_to_rocksdb_copies_current_epoch_verbatim() -> TestResult<()> {
     }
 
     let dest_schema = fs::read_to_string(to_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema != "5\n" {
+    if dest_schema != "6\n" {
         return Err(TestError::Assertion(format!(
-            "expected destination CURRENT_SCHEMA '5\\n', got '{dest_schema}'"
+            "expected destination CURRENT_SCHEMA '6\\n', got '{dest_schema}'"
         )));
     }
 
@@ -110,9 +110,9 @@ fn epoch5_rocksdb_to_rocksdb_copies_current_epoch_verbatim() -> TestResult<()> {
             report.source_epoch
         )));
     }
-    if report.target_epoch != 5 {
+    if report.target_epoch != 6 {
         return Err(TestError::Assertion(format!(
-            "expected report target_epoch 5, got {}",
+            "expected report target_epoch 6, got {}",
             report.target_epoch
         )));
     }
@@ -193,9 +193,9 @@ fn epoch5_rocksdb_empty_key_empty_value_row_copies_exactly() -> TestResult<()> {
     }
 
     let dest_schema = fs::read_to_string(to_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema != "5\n" {
+    if dest_schema != "6\n" {
         return Err(TestError::Assertion(format!(
-            "expected destination CURRENT_SCHEMA '5\\n', got '{dest_schema}'"
+            "expected destination CURRENT_SCHEMA '6\\n', got '{dest_schema}'"
         )));
     }
 

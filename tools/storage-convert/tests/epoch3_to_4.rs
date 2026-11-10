@@ -18,7 +18,7 @@ const UTXO_FILE: &str = "utxo-v4.dat";
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
 use bitcoin_rs_storage::pruning::{block_body_key, block_undo_key};
 use bitcoin_rs_storage::utxo::contract::{
-    BlockChangeInputs, SpentOutputLookup, build_block_changes, encode_undo_record,
+    BlockChangeInputs, SpentOutputLookup, build_block_changes,
 };
 use bitcoin_rs_storage::utxo::record::UtxoRecord;
 use bitcoin_rs_storage::utxo::stats::CoinStatsAccumulator;
@@ -31,6 +31,37 @@ use super::support::harness::{parse_report, recursive_dir_digest, run_converter}
 use super::support::oracle::write_schema_marker;
 
 const CURRENT_FORMAT: &str = "bitcoin-rs-chainstate-current";
+fn encode_undo_v1(
+    batch: &bitcoin_rs_storage::utxo::contract::UndoBatch,
+    block_hash: Hash256,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(1);
+    out.extend_from_slice(&block_hash.to_le_bytes());
+    let restores = batch.restores();
+    let restore_len = u32::try_from(restores.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&restore_len.to_le_bytes());
+    for add in restores {
+        let outpoint = add.outpoint;
+        let txid = outpoint.txid;
+        let vout = outpoint.vout;
+        out.extend_from_slice(txid.as_bytes());
+        out.extend_from_slice(&vout.to_le_bytes());
+        add.txout.consensus_encode(&mut out);
+        out.push(u8::from(add.coinbase));
+        out.extend_from_slice(&add.height.to_le_bytes());
+    }
+    let removes = batch.removes();
+    let remove_len = u32::try_from(removes.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&remove_len.to_le_bytes());
+    for outpoint in removes {
+        let txid = outpoint.txid;
+        let vout = outpoint.vout;
+        out.extend_from_slice(txid.as_bytes());
+        out.extend_from_slice(&vout.to_le_bytes());
+    }
+    out
+}
 const CURRENT_VERSION: u32 = 1;
 
 struct MapSpentLookup<'a>(&'a HashMap<OutPoint, UtxoCoin>);
@@ -269,7 +300,7 @@ fn append_block_and_undo(
         utxo_set.insert_parsed_record(record);
     }
 
-    let undo_bytes = encode_undo_record(&undo, block_hash_256);
+    let undo_bytes = encode_undo_v1(&undo, block_hash_256);
     batch.put(
         ColumnFamily::UndoData,
         &block_undo_key(height, block_hash_256),
@@ -450,13 +481,12 @@ fn replay_with_checkpoint_at_durable_head() -> TestResult<()> {
     let output = run_converter(&["--from", from_str, "--to", to_str])?;
     let report = parse_report(&output)?;
 
-    if report.source_epoch != 3 || report.target_epoch != 5 {
+    if report.source_epoch != 3 || report.target_epoch != 6 {
         return Err(TestError::Assertion("unexpected report epochs".into()));
     }
-
     let dest_schema = fs::read_to_string(to_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema != "5\n" {
-        return Err(TestError::Assertion("expected 5\n".into()));
+    if dest_schema != "6\n" {
+        return Err(TestError::Assertion("expected 6\n".into()));
     }
 
     let dest_store = RocksDbStore::open(to_path.join("chainstate"))?;
@@ -965,7 +995,7 @@ fn bip30_overwrite_row_without_block_data_refuses() -> TestResult<()> {
     cs_store.put(
         ColumnFamily::UndoData,
         &block_undo_key(height, exception_hash),
-        &encode_undo_record(&undo, exception_hash),
+        &encode_undo_v1(&undo, exception_hash),
     )?;
 
     let durable_head = DurableHead {

@@ -1,6 +1,6 @@
-//! Kani formal verification harnesses for the schema epoch 5 lifecycle.
+//! Kani formal verification harnesses for the schema epoch 6 lifecycle.
 //!
-//! Models the schema epoch 5 design (`CURRENT_SCHEMA_VERSION = 5`, coins in
+//! Models the schema epoch 6 design (`CURRENT_SCHEMA_VERSION = 6`, coins in
 //! the engine `coins` keyspace, snapshot-base checkpoint in place of the archive),
 //! matching live storage in `fs.rs`. Standalone design model proofs under
 //! Hoare/Dijkstra contracts, not an implementation-refinement claim.
@@ -12,12 +12,14 @@ use super::{
 
 fn any_marker() -> MarkerClassification {
     let val: u8 = kani::any();
-    kani::assume(val < 5);
+    kani::assume(val < 7);
     match val {
         0 => MarkerClassification::Absent,
         1 => MarkerClassification::Malformed,
         2 => MarkerClassification::RetiredEpoch3,
-        3 => MarkerClassification::CurrentEpoch5,
+        3 => MarkerClassification::RetiredEpoch4,
+        4 => MarkerClassification::RetiredEpoch5,
+        5 => MarkerClassification::CurrentEpoch6,
         _ => MarkerClassification::FutureEpoch,
     }
 }
@@ -209,7 +211,7 @@ fn node_never_opens_wrong_marker() {
     let next = step(&state, action);
     if next.engine_opened() {
         assert_eq!(next.inputs.mode, Mode::NodeAdmission);
-        assert_eq!(next.source_marker, MarkerClassification::CurrentEpoch5);
+        assert_eq!(next.source_marker, MarkerClassification::CurrentEpoch6);
         if next.inputs.source_marker == MarkerClassification::Absent {
             assert!(next.observed_final_sync);
         } else {
@@ -226,7 +228,7 @@ fn output_marker_implies_verified_ingest_replay_durability_and_scratch_removed()
     let action = any_action();
     let next = step(&state, action);
     if next.dest_marker.is_some() {
-        assert_eq!(next.dest_marker, Some(MarkerClassification::CurrentEpoch5));
+        assert_eq!(next.dest_marker, Some(MarkerClassification::CurrentEpoch6));
         assert_eq!(next.dest_cells, next.inputs.initial_source_contents);
         assert_eq!(next.verify_cursor, NUM_CELLS_U8);
         assert_eq!(
@@ -252,7 +254,7 @@ fn success_implies_final_sync() {
     if matches!(next.outcome, Outcome::Success) {
         match next.inputs.mode {
             Mode::OfflineConversion => {
-                assert_eq!(next.dest_marker, Some(MarkerClassification::CurrentEpoch5));
+                assert_eq!(next.dest_marker, Some(MarkerClassification::CurrentEpoch6));
                 assert_eq!(
                     next.dest_coins,
                     next.inputs.oracle_coins(next.inputs.durable_head)
@@ -260,7 +262,7 @@ fn success_implies_final_sync() {
                 assert!(next.observed_final_sync);
             }
             Mode::NodeAdmission => {
-                assert_eq!(next.source_marker, MarkerClassification::CurrentEpoch5);
+                assert_eq!(next.source_marker, MarkerClassification::CurrentEpoch6);
                 if next.inputs.source_marker == MarkerClassification::Absent {
                     assert!(next.observed_final_sync);
                 } else {

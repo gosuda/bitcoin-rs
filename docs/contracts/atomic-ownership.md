@@ -184,8 +184,11 @@ Nothing below the owner facade can interpret or copy the same data again.
 ### `CMT-06`: Output ownership and recovery records
 
 - The block bytes are the sole owner of created outputs.
-- Recovery records must contain only data that block bytes do not hold, including overwritten coin records.
-
+- Recovery records MUST contain only spent coins.
+- Recovery records MUST NOT contain created outpoints.
+- The node MUST derive created outputs from block bytes.
+- The undo codec version MUST be 2.
+- The converter MUST recode version 1 rows to version 2 offline.
 ### `CMT-07`: Publication protocol in configured engine
 
 - The block archive, the recovery records, and the index segments can live in separate physical streams.

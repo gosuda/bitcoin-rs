@@ -2,6 +2,7 @@ mod cli;
 mod convert;
 mod error;
 mod fs_util;
+mod legacy_undo;
 mod rebuild;
 mod report;
 mod source;

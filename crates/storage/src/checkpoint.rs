@@ -9,8 +9,8 @@ mod tests;
 pub use digest::{ENGINE_IMAGE_DIR, digest_engine_dir, verify_engine_artifact};
 pub use format::{decode_hex, network_name};
 pub use fs::{
-    CURRENT_SCHEMA_FILE, create_file, current_schema_bytes, ensure_current_schema, open_data_dir,
-    read_file, sync_dir,
+    CURRENT_SCHEMA_FILE, CURRENT_SCHEMA_VERSION, create_file, current_schema_bytes,
+    ensure_current_schema, open_data_dir, read_file, sync_dir,
 };
 pub use load::open_checkpoint_generation_at;
 pub use load::open_current_checkpoint_at;
