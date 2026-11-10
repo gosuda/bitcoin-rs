@@ -169,16 +169,16 @@ fn mine_block(prev_hash: Hash256, height: u32, extra: i64, prev_extra: i64) -> (
     (block, hash)
 }
 
-struct ForkFixture {
+pub(super) struct ForkFixture {
     tree: Arc<RwLock<BlockTree>>,
     bodies: Arc<MapBodyStore>,
     genesis: Hash256,
-    a: Vec<(NodeId, Hash256)>,
+    pub(super) a: Vec<(NodeId, Hash256)>,
     b: Vec<(NodeId, Hash256)>,
 }
 
 impl ForkFixture {
-    fn new(len: u32) -> Self {
+    pub(super) fn new(len: u32) -> Self {
         let mut tree = BlockTree::new();
         let mut bodies = BodyMap::new();
         let (genesis, genesis_hash) = mine_block(Hash256::from_le_bytes(&[0_u8; 32]), 0, 0, 0);
@@ -290,7 +290,7 @@ impl ForkFixture {
             coins.connect(height, &block, &txids);
         }
     }
-    fn persist_undo(&self) {
+    pub(super) fn persist_undo(&self) {
         self.persist_branch_undo(&self.a.clone());
         self.persist_branch_undo(&self.b.clone());
     }
@@ -317,7 +317,7 @@ impl ForkFixture {
         branch
     }
 
-    fn tip(&self, (node_id, _): (NodeId, Hash256)) -> Arc<TipSnapshot> {
+    pub(super) fn tip(&self, (node_id, _): (NodeId, Hash256)) -> Arc<TipSnapshot> {
         let tree = self.tree.read();
         let node = tree.node(node_id).expect("node");
         Arc::new(TipSnapshot {
@@ -787,7 +787,7 @@ fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
     );
 }
 
-fn at(tip: &TipSnapshot) -> IndexWatermark {
+pub(super) fn at(tip: &TipSnapshot) -> IndexWatermark {
     IndexWatermark {
         height: tip.height,
         hash: tip.hash.to_le_bytes(),
@@ -1302,18 +1302,18 @@ fn seed_first_leg_consumes_held_lease() {
     assert_eq!(h.retention.retention_floor(), None);
 }
 
-struct SeedCellHarness {
+pub(super) struct SeedCellHarness {
     _index_dir: tempfile::TempDir,
     store: Arc<RocksDbStore>,
     writer: Arc<dyn TxIndexWriter>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    runtime: Arc<DerivedIndexRuntime>,
+    pub(super) runtime: Arc<DerivedIndexRuntime>,
     retention: Arc<RetentionRegistry>,
     worker: Worker,
 }
 
 impl SeedCellHarness {
-    fn new(fixture: &ForkFixture, enabled: IndexCapabilities) -> Self {
+    pub(super) fn new(fixture: &ForkFixture, enabled: IndexCapabilities) -> Self {
         let index_dir = tempfile::tempdir().expect("index dir");
         let store = Arc::new(RocksDbStore::open(index_dir.path()).expect("rocksdb open"));
         let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(
@@ -1361,7 +1361,7 @@ impl SeedCellHarness {
         }
     }
 
-    fn stage_seed_rows(&self, tip: &TipSnapshot, count: u64) {
+    pub(super) fn stage_seed_rows(&self, tip: &TipSnapshot, count: u64) {
         let session = self
             .runtime
             .script_live_seed()
@@ -1389,7 +1389,7 @@ impl SeedCellHarness {
         });
     }
 
-    fn set_tip(&self, tip: &Arc<TipSnapshot>) {
+    pub(super) fn set_tip(&self, tip: &Arc<TipSnapshot>) {
         self.applied_tip.store(Some(Arc::clone(tip)));
     }
 
@@ -1404,11 +1404,11 @@ impl SeedCellHarness {
         panic!("worker kept progressing instead of waiting");
     }
 
-    fn watermarks(&self) -> IndexWatermarks {
+    pub(super) fn watermarks(&self) -> IndexWatermarks {
         self.writer.fenced_watermarks().expect("watermarks").1
     }
 
-    fn assert_at(&self, tip: &TipSnapshot) {
+    pub(super) fn assert_at(&self, tip: &TipSnapshot) {
         let expected = Some(IndexWatermark {
             height: tip.height,
             hash: tip.hash.to_le_bytes(),
@@ -1421,7 +1421,7 @@ impl SeedCellHarness {
         );
     }
 
-    fn settle(&self, pending: &mut Option<PendingForward>) {
+    pub(super) fn settle(&self, pending: &mut Option<PendingForward>) {
         for _ in 0..64 {
             assert!(
                 self.retention.active_leases() <= 1,

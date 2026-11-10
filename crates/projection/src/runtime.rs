@@ -862,4 +862,7 @@ mod supervisor_tests;
 mod recovery_tests;
 
 #[cfg(test)]
+mod seed_session_tests;
+
+#[cfg(test)]
 mod tests;
