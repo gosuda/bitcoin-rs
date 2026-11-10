@@ -1,35 +1,7 @@
 use super::*;
 use bitcoin_rs_storage::committed_facts::TxFacts;
 use bitcoin_rs_storage::{Bytes, RocksDbStore};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-
-struct RecordingBudget {
-    cpu: Arc<CpuShares>,
-    reserves: AtomicUsize,
-}
-
-impl BudgetCharge for RecordingBudget {
-    fn reserve_bytes(&self, owner: BudgetOwner, _bytes: u64) -> Result<(), BudgetError> {
-        assert_eq!(owner, BudgetOwner::IndexBuilder);
-        assert_eq!(
-            self.cpu.background_in_flight(),
-            1,
-            "build must hold the cpu permit inside reserve"
-        );
-        self.reserves.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-
-    fn allocate_bytes(&self, _owner: BudgetOwner, _bytes: u64) -> Result<(), BudgetError> {
-        Ok(())
-    }
-
-    fn release_bytes(&self, _owner: BudgetOwner, _bytes: u64) {}
-
-    fn available_bytes(&self, _owner: BudgetOwner) -> u64 {
-        u64::MAX
-    }
-}
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, PartialEq, Eq)]
 struct TxDirEntry {
@@ -148,57 +120,22 @@ fn synthetic_blocks(count: u32) -> Vec<CommittedBlock> {
     blocks
 }
 
-#[test]
-fn background_scoring_runs_under_a_cpu_permit() {
-    let cpu = Arc::new(CpuShares::new(2, 1));
-    let recording = Arc::new(RecordingBudget {
-        cpu: Arc::clone(&cpu),
-        reserves: AtomicUsize::new(0),
-    });
-    let budget = recording.clone();
-    let scratch = tempfile::tempdir().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let store = RocksDbStore::open(dir.path()).unwrap();
-    let builder =
-        BulkSegmentBuilder::new(budget, Some(Arc::clone(&cpu)), scratch.path().to_path_buf());
-    let mut stream = builder.stream(1);
-    for block in &synthetic_blocks(4) {
-        stream.push_block(block).unwrap();
-    }
-    stream.finish(&store).unwrap();
-    assert!(recording.reserves.load(Ordering::SeqCst) > 0);
-    drop(stream);
-    assert_eq!(cpu.background_in_flight(), 0);
-}
-
-#[test]
-fn single_worker_host_runs_background_scoring_without_a_permit() {
-    let cpu = Arc::new(CpuShares::new(1, 1));
-    assert!(cpu.try_acquire_background().is_none());
-    let budget: Arc<dyn BudgetCharge> = Arc::new(UnboundedBudget);
-    let scratch = tempfile::tempdir().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let store = RocksDbStore::open(dir.path()).unwrap();
-    let builder =
-        BulkSegmentBuilder::new(budget, Some(Arc::clone(&cpu)), scratch.path().to_path_buf());
-    let mut stream = builder.stream(1);
-    for block in &synthetic_blocks(2) {
-        stream.push_block(block).unwrap();
-    }
-    stream.finish(&store).unwrap();
-    assert_eq!(cpu.background_in_flight(), 0);
-}
-
 const POOL_BYTES: u64 = 16 * 1024;
+const POOL_SLACK_BYTES: u64 = 4096;
 
+// PRJ-09
 #[test]
-fn tiny_budget_spills_runs_and_matches_unbounded_bytes() {
+fn tiny_budget_spills_runs_and_matches_unbounded_bytes() -> Result<(), StreamError> {
     let blocks = synthetic_blocks(60);
-    let bounded = run_build(PoolBudget::new(POOL_BYTES), &blocks);
-    let unbounded = run_build(PoolBudget::new(u64::MAX), &blocks);
+    let bounded = run_build(PoolBudget::new(POOL_BYTES), &blocks)?;
+    let unbounded = run_build(PoolBudget::new(u64::MAX), &blocks)?;
     assert!(bounded.spills > 0, "tiny budget must spill sorted runs");
     assert!(
-        bounded.retained_max <= POOL_BYTES + 4096,
+        unbounded.retained_max > POOL_BYTES + POOL_SLACK_BYTES,
+        "fixture must exceed the pool or the bound proves nothing"
+    );
+    assert!(
+        bounded.retained_max <= POOL_BYTES + POOL_SLACK_BYTES,
         "retained {} exceeded pool plus one row",
         bounded.retained_max
     );
@@ -207,6 +144,7 @@ fn tiny_budget_spills_runs_and_matches_unbounded_bytes() {
         bounded.leftover_files, 0,
         "runs must be cleaned after finish"
     );
+    Ok(())
 }
 
 #[test]
@@ -238,7 +176,7 @@ struct BuildOutcome {
     retained_max: u64,
 }
 
-fn run_build(budget: PoolBudget, blocks: &[CommittedBlock]) -> BuildOutcome {
+fn run_build(budget: PoolBudget, blocks: &[CommittedBlock]) -> Result<BuildOutcome, StreamError> {
     let pool = Arc::new(budget);
     let scratch = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -246,9 +184,9 @@ fn run_build(budget: PoolBudget, blocks: &[CommittedBlock]) -> BuildOutcome {
     let builder = BulkSegmentBuilder::new(pool.clone(), None, scratch.path().to_path_buf());
     let mut stream = builder.stream(1);
     for block in blocks {
-        stream.push_block(block).unwrap();
+        stream.push_block(block)?;
     }
-    stream.finish(&store).unwrap();
+    stream.finish(&store)?;
     let spills = stream.total_runs_spilled();
     let retained_max = pool.peak_outstanding.load(Ordering::SeqCst);
     let cfs = [
@@ -259,44 +197,37 @@ fn run_build(budget: PoolBudget, blocks: &[CommittedBlock]) -> BuildOutcome {
         ColumnFamily::ScriptStats,
         ColumnFamily::Filters,
     ];
-    let snapshot = store.snapshot().unwrap();
+    let snapshot = store.snapshot()?;
     let mut digests = Vec::new();
     for cf in cfs {
         let mut hasher = Sha256::new();
-        let iter = snapshot.iter_prefix(cf, &[]).unwrap();
-        for item in iter.flatten() {
-            hasher.update(
-                u32::try_from(item.0.len())
-                    .unwrap_or(u32::MAX)
-                    .to_le_bytes(),
-            );
-            hasher.update(&item.0);
-            hasher.update(
-                u32::try_from(item.1.len())
-                    .unwrap_or(u32::MAX)
-                    .to_le_bytes(),
-            );
-            hasher.update(&item.1);
+        let iter = snapshot.iter_prefix(cf, &[])?;
+        for item in iter {
+            let (key, value) = item?;
+            hasher.update(u32::try_from(key.len())?.to_le_bytes());
+            hasher.update(&key);
+            hasher.update(u32::try_from(value.len())?.to_le_bytes());
+            hasher.update(&value);
         }
         digests.push(hasher.finalize().into());
     }
-    let leftover_files = std::fs::read_dir(scratch.path())
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .count();
-    BuildOutcome {
+    let mut leftover_files = 0;
+    for entry in std::fs::read_dir(scratch.path())? {
+        entry?;
+        leftover_files += 1;
+    }
+    Ok(BuildOutcome {
         digests,
         spills,
         leftover_files,
         retained_max,
-    }
+    })
 }
 
 // PRJ-03
 #[test]
 fn disabled_filters_skip_bulk_filter_build() {
     let blocks = synthetic_blocks(3);
-    BULK_FILTER_BUILDS.with(|builds| builds.set(0));
     let scratch = tempfile::tempdir().unwrap();
     let rows = BulkSegmentBuilder::new(
         Arc::new(UnboundedBudget),
@@ -306,9 +237,7 @@ fn disabled_filters_skip_bulk_filter_build() {
     .without_filter()
     .build_generation_rows(1, &blocks)
     .unwrap();
-    assert_eq!(BULK_FILTER_BUILDS.with(std::cell::Cell::get), 0);
     assert_eq!(rows.filters.len(), 0);
-    BULK_FILTER_BUILDS.with(|builds| builds.set(0));
     let scratch = tempfile::tempdir().unwrap();
     let rows = BulkSegmentBuilder::new(
         Arc::new(UnboundedBudget),
@@ -317,7 +246,7 @@ fn disabled_filters_skip_bulk_filter_build() {
     )
     .build_generation_rows(1, &blocks)
     .unwrap();
-    assert_eq!(BULK_FILTER_BUILDS.with(std::cell::Cell::get), blocks.len());
+    assert_eq!(rows.filters.len(), blocks.len());
     for (_, value) in &rows.filters {
         let (_, _, _, filter) = crate::segment::format::decode_filter_value(value).unwrap();
         assert!(!filter.is_empty());
@@ -469,18 +398,17 @@ fn truncated_run_fails_finish_without_fake_key() -> Result<(), StreamError> {
     ];
     for cf in families {
         let rows = snapshot.iter_prefix(cf, &[])?;
-        for row in rows.flatten() {
-            assert_ne!(
-                &row.0[..],
-                &[0xFFu8; 8][..],
-                "a truncated run must not ingest a fake key"
+        for row in rows {
+            let (_key, value) = row?;
+            assert!(
+                !value.is_empty(),
+                "a truncated run must not commit the poison row"
             );
         }
     }
     Ok(())
 }
 
-// PRJ-09
 #[test]
 fn second_builder_keeps_first_builder_runs() -> Result<(), StreamError> {
     let pool = Arc::new(PoolBudget::new(POOL_BYTES));
@@ -573,9 +501,10 @@ fn header_cut_run_fails_finish() -> Result<(), StreamError> {
 fn bounded_fan_in_matches_sorted_reference() -> Result<(), StreamError> {
     reset_cursor_peak();
     const ROWS: u64 = 24;
+    const ROW_BYTES: u64 = 8 + 8 + 64;
     let scratch = tempfile::tempdir()?;
     let mut sorter = SpillSorter::new(
-        Arc::new(PoolBudget::new(0)),
+        Arc::new(PoolBudget::new(ROW_BYTES)),
         BudgetOwner::IndexBuilder,
         scratch.path().to_path_buf(),
         0xA022,
@@ -593,7 +522,11 @@ fn bounded_fan_in_matches_sorted_reference() -> Result<(), StreamError> {
     expected.sort();
     assert_eq!(merged, expected);
     assert!(
-        cursor_peak() <= 16,
+        sorter.spilled > MAX_MERGE_FAN_IN,
+        "fixture must force a consolidation pass"
+    );
+    assert!(
+        cursor_peak() <= MAX_MERGE_FAN_IN,
         "merge held more open runs than the fan-in bound"
     );
     Ok(())

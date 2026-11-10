@@ -570,11 +570,17 @@ fn cancellation_after_spawn_resumes_panic_when_helper_panics() -> std::io::Resul
     assert!(release_tx.send(()).is_ok());
 
     let join_result = open_thread.join();
-    let _ = unwound_rx.recv_timeout(Duration::from_secs(5));
-
     assert!(
-        join_result.is_err(),
-        "open_derived_index_with_timeout must resume panic on cancellation when helper panicked"
+        unwound_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "helper must unwind its sentinel on cancellation"
+    );
+    let Err(payload) = join_result else {
+        panic!("open thread must resume the helper panic on cancellation");
+    };
+    assert_eq!(
+        payload.downcast_ref::<&str>().copied(),
+        Some("helper panic sentinel"),
+        "open thread must resume the helper panic, not another panic"
     );
 
     Ok(())

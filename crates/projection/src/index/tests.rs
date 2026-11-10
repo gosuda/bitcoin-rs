@@ -508,6 +508,7 @@ fn tx_dir_rows(store: &RocksDbStore) -> Result<StoredRows, IndexError> {
         .map_err(IndexError::Storage)
 }
 
+// IDX-05
 #[test]
 fn restart_clears_a_staged_segment_and_keeps_the_published_one()
 -> Result<(), crate::portable::TestError> {
@@ -584,6 +585,7 @@ fn restart_clears_a_staged_segment_and_keeps_the_published_one()
     Ok(())
 }
 
+// PRJ-06
 #[test]
 fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation()
 -> Result<(), crate::portable::TestError> {
@@ -677,10 +679,11 @@ fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation(
         }
     }
     let creation = creation.ok_or("the sealed generation names the creating transaction")?;
+    assert_eq!(creation, 0, "the first sealed transaction has ordinal zero");
     let spends: Vec<_> = snapshot
         .iter_prefix(ColumnFamily::SpendDir, &0_u64.to_be_bytes())?
         .collect::<Result<_, _>>()?;
-    let expected_key = encode_spend_dir_key(0, creation, 0);
+    let expected_key = encode_spend_dir_key(0, 0, 0);
     assert_eq!(
         spends.len(),
         1,

@@ -2277,6 +2277,7 @@ fn historical_reorg_below_anchor_stays_valid() -> Result<(), crate::portable::Te
     );
     let at = engine.transaction_at_prefix(&txid)?;
     assert!(at.value.is_some());
+    assert_eq!(at.coverage.height, 2);
     Ok(())
 }
 
@@ -2319,6 +2320,8 @@ fn historical_unknown_watermark_hash_scopes_absence() -> Result<(), crate::porta
     );
     let at = engine.transaction_at_prefix(&txid)?;
     assert_eq!(at.value, None);
+    assert_eq!(at.coverage.height, 0);
+    assert_eq!(at.coverage.floor, 0);
     Ok(())
 }
 
@@ -2906,6 +2909,9 @@ fn historical_deep_stale_branch_scopes_absence_under_serving_view()
     )?;
     let at = fixture.engine.transaction_at_prefix(&txid)?;
     assert_eq!(at.value, None);
+    assert_eq!(at.coverage.height, 320);
+    assert_eq!(at.coverage.floor, 0);
+    assert_eq!(*at.coverage.hash.as_byte_array(), stale_watermark.hash);
     Ok(())
 }
 

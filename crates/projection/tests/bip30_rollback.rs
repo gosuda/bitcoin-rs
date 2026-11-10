@@ -92,6 +92,7 @@ fn live_rows_for_outpoint(store: &MemoryStore, txid: &[u8; 32]) -> Result<Vec<Ve
     Ok(values)
 }
 
+// IDX-06
 #[test]
 fn rolling_back_a_bip30_duplicate_restores_the_earlier_coin_row() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());

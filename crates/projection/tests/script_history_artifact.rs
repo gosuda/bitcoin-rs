@@ -13,7 +13,7 @@ use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin::hex::FromHex as _;
 use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_projection::portable::{
-    IndexBundleError, ManifestArtifactTarget, ScriptHistoryArtifact,
+    IndexBundleError, ManifestArtifactTarget, ScriptHistoryArtifact, SpillBudget,
     attach_script_history_artifact, write_script_history_artifact,
 };
 use bitcoin_rs_projection::types::ScriptHistoryOccurrence;
@@ -25,7 +25,7 @@ use bitcoin_rs_projection::{
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit};
 use parking_lot::RwLock;
 
-use crate::support::common::MemoryStore;
+use crate::support::{TestError, common::MemoryStore};
 
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -177,11 +177,20 @@ fn produce(
     (path, artifact)
 }
 
+fn chain_tx_count(fixture: &Fixture) -> Result<u64, TestError> {
+    let mut total = 0u64;
+    for block in &fixture.blocks {
+        total += u64::try_from(block.txdata.len())?;
+    }
+    Ok(total)
+}
+
 fn target(
     artifact: &Path,
     base: IndexWatermark,
     sha256: [u8; 32],
     size_bytes: u64,
+    chain_tx_count: u64,
 ) -> ManifestArtifactTarget {
     ManifestArtifactTarget {
         artifact_path: artifact.to_path_buf(),
@@ -192,6 +201,7 @@ fn target(
         index_format: index_format_version(),
         sha256,
         size_bytes,
+        chain_tx_count,
     }
 }
 
@@ -237,8 +247,9 @@ fn base_at_tip(fixture: &Fixture) -> IndexWatermark {
     }
 }
 
+// SNP-05
 #[test]
-fn good_artifact_attaches_and_serves_the_live_rows_at_its_base() {
+fn good_artifact_attaches_and_serves_the_live_rows_at_its_base() -> Result<(), TestError> {
     let fixture = load_fixture();
     let (source_store, source) = build_source(&fixture);
     let root = tempfile::tempdir().expect("tempdir");
@@ -249,8 +260,16 @@ fn good_artifact_attaches_and_serves_the_live_rows_at_its_base() {
     let (receiver_store, receiver) = empty_receiver();
     let attached = attach_script_history_artifact(
         &receiver,
-        &target(&path, base, artifact.sha256, artifact.bytes),
+        &target(
+            &path,
+            base,
+            artifact.sha256,
+            artifact.bytes,
+            chain_tx_count(&fixture)?,
+        ),
+        &fixture.hashes,
         root.path(),
+        &SpillBudget::new(u64::MAX),
     )
     .expect("a verified artifact attaches");
     assert_eq!(
@@ -294,10 +313,12 @@ fn good_artifact_attaches_and_serves_the_live_rows_at_its_base() {
         rows_of(&source_store, ColumnFamily::Spending),
         "attached Spending rows equal the live rows"
     );
+    Ok(())
 }
 
+// SNP-03
 #[test]
-fn forged_digest_is_refused_without_rows_or_watermark() {
+fn forged_digest_is_refused_without_rows_or_watermark() -> Result<(), TestError> {
     let fixture = load_fixture();
     let (_source_store, source) = build_source(&fixture);
     let root = tempfile::tempdir().expect("tempdir");
@@ -308,8 +329,16 @@ fn forged_digest_is_refused_without_rows_or_watermark() {
     let (receiver_store, receiver) = empty_receiver();
     let error = attach_script_history_artifact(
         &receiver,
-        &target(&path, base_at_tip(&fixture), forged, artifact.bytes),
+        &target(
+            &path,
+            base_at_tip(&fixture),
+            forged,
+            artifact.bytes,
+            chain_tx_count(&fixture)?,
+        ),
+        &fixture.hashes,
         root.path(),
+        &SpillBudget::new(u64::MAX),
     )
     .expect_err("an artifact with a forged digest must be refused");
     assert!(
@@ -317,10 +346,12 @@ fn forged_digest_is_refused_without_rows_or_watermark() {
         "got {error:?}"
     );
     assert_untouched(&receiver_store);
+    Ok(())
 }
 
+// SNP-03
 #[test]
-fn foreign_base_hash_is_refused_without_rows_or_watermark() {
+fn foreign_base_hash_is_refused_without_rows_or_watermark() -> Result<(), TestError> {
     let fixture = load_fixture();
     let (_source_store, source) = build_source(&fixture);
     let root = tempfile::tempdir().expect("tempdir");
@@ -331,8 +362,16 @@ fn foreign_base_hash_is_refused_without_rows_or_watermark() {
     let (receiver_store, receiver) = empty_receiver();
     let error = attach_script_history_artifact(
         &receiver,
-        &target(&path, foreign, artifact.sha256, artifact.bytes),
+        &target(
+            &path,
+            foreign,
+            artifact.sha256,
+            artifact.bytes,
+            chain_tx_count(&fixture)?,
+        ),
+        &fixture.hashes,
         root.path(),
+        &SpillBudget::new(u64::MAX),
     )
     .expect_err("an artifact cut at another base must be refused");
     assert!(
@@ -340,10 +379,12 @@ fn foreign_base_hash_is_refused_without_rows_or_watermark() {
         "got {error:?}"
     );
     assert_untouched(&receiver_store);
+    Ok(())
 }
 
+// SNP-03
 #[test]
-fn foreign_network_magic_is_refused_without_rows_or_watermark() {
+fn foreign_network_magic_is_refused_without_rows_or_watermark() -> Result<(), TestError> {
     let fixture = load_fixture();
     let (_source_store, source) = build_source(&fixture);
     let root = tempfile::tempdir().expect("tempdir");
@@ -357,8 +398,11 @@ fn foreign_network_magic_is_refused_without_rows_or_watermark() {
             base_at_tip(&fixture),
             artifact.sha256,
             artifact.bytes,
+            chain_tx_count(&fixture)?,
         ),
+        &fixture.hashes,
         root.path(),
+        &SpillBudget::new(u64::MAX),
     )
     .expect_err("an artifact cut on another network must be refused");
     assert!(
@@ -366,10 +410,12 @@ fn foreign_network_magic_is_refused_without_rows_or_watermark() {
         "got {error:?}"
     );
     assert_untouched(&receiver_store);
+    Ok(())
 }
 
+// SNP-03
 #[test]
-fn truncated_payload_is_refused_without_rows_or_watermark() {
+fn truncated_payload_is_refused_without_rows_or_watermark() -> Result<(), TestError> {
     let fixture = load_fixture();
     let (_source_store, source) = build_source(&fixture);
     let root = tempfile::tempdir().expect("tempdir");
@@ -389,8 +435,11 @@ fn truncated_payload_is_refused_without_rows_or_watermark() {
             base,
             short_digest,
             u64::try_from(short_bytes.len()).expect("length fits"),
+            chain_tx_count(&fixture)?,
         ),
+        &fixture.hashes,
         root.path(),
+        &SpillBudget::new(u64::MAX),
     )
     .expect_err("a manifest matching a truncated payload must be refused");
     assert!(
@@ -400,8 +449,16 @@ fn truncated_payload_is_refused_without_rows_or_watermark() {
 
     let error = attach_script_history_artifact(
         &receiver,
-        &target(&short, base, artifact.sha256, artifact.bytes),
+        &target(
+            &short,
+            base,
+            artifact.sha256,
+            artifact.bytes,
+            chain_tx_count(&fixture)?,
+        ),
+        &fixture.hashes,
         root.path(),
+        &SpillBudget::new(u64::MAX),
     )
     .expect_err("a manifest declaring the full length must refuse the short file");
     assert!(
@@ -409,24 +466,43 @@ fn truncated_payload_is_refused_without_rows_or_watermark() {
         "got {error:?}"
     );
     assert_untouched(&receiver_store);
+    Ok(())
 }
 
 #[test]
-fn second_attach_over_a_populated_family_is_refused() {
+fn second_attach_over_a_populated_family_is_refused() -> Result<(), TestError> {
     let fixture = load_fixture();
     let (_source_store, source) = build_source(&fixture);
     let root = tempfile::tempdir().expect("tempdir");
     let (path, artifact) = produce(&source, Network::Regtest, root.path(), "twice.dat");
     let base = base_at_tip(&fixture);
-    let manifest = target(&path, base, artifact.sha256, artifact.bytes);
+    let manifest = target(
+        &path,
+        base,
+        artifact.sha256,
+        artifact.bytes,
+        chain_tx_count(&fixture)?,
+    );
 
     let (receiver_store, receiver) = empty_receiver();
-    attach_script_history_artifact(&receiver, &manifest, root.path())
-        .expect("the first attach succeeds");
+    attach_script_history_artifact(
+        &receiver,
+        &manifest,
+        &fixture.hashes,
+        root.path(),
+        &SpillBudget::new(u64::MAX),
+    )
+    .map_err(|e| e.to_string())?;
     let before = rows_of(&receiver_store, ColumnFamily::Funding);
 
-    let error = attach_script_history_artifact(&receiver, &manifest, root.path())
-        .expect_err("a populated ScriptHistory family must refuse a second attach");
+    let error = attach_script_history_artifact(
+        &receiver,
+        &manifest,
+        &fixture.hashes,
+        root.path(),
+        &SpillBudget::new(u64::MAX),
+    )
+    .expect_err("a populated ScriptHistory family must refuse a second attach");
     assert!(
         matches!(
             error,
@@ -439,10 +515,11 @@ fn second_attach_over_a_populated_family_is_refused() {
         before,
         "the refused attach leaves the attached rows unchanged"
     );
+    Ok(())
 }
 
 #[test]
-fn populated_rows_without_a_watermark_are_refused_and_kept() {
+fn populated_rows_without_a_watermark_are_refused_and_kept() -> Result<(), TestError> {
     let fixture = load_fixture();
     let (_source_store, source) = build_source(&fixture);
     let root = tempfile::tempdir().expect("tempdir");
@@ -461,8 +538,11 @@ fn populated_rows_without_a_watermark_are_refused_and_kept() {
             base_at_tip(&fixture),
             artifact.sha256,
             artifact.bytes,
+            chain_tx_count(&fixture)?,
         ),
+        &fixture.hashes,
         root.path(),
+        &SpillBudget::new(u64::MAX),
     )
     .expect_err("a family that already holds rows must refuse the attach");
     assert!(
@@ -477,4 +557,5 @@ fn populated_rows_without_a_watermark_are_refused_and_kept() {
         vec![(stray_key.to_vec(), stray_value)],
         "the refused attach keeps the rows it found"
     );
+    Ok(())
 }

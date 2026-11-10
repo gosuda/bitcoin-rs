@@ -1,4 +1,4 @@
-//! Committed-facts rows and the batch byte limit: `PRJ-01` and `PRJ-05`.
+//! Committed-facts rows and the batch byte limit: `PRJ-05`.
 
 use std::sync::Arc;
 

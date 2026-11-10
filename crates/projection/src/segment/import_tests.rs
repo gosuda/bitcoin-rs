@@ -59,6 +59,7 @@ fn stage_streamed_removes_runs_on_success() -> Result<(), StageError> {
     sorter.push(keyed(0, 2), vec![2u8; 4])?;
     sorter.push(keyed(0, 3), vec![3u8; 4])?;
     let runs = sorter.finish()?;
+    assert!(!runs.is_empty(), "the stage writes run files");
     let family = StreamedFamily { runs, rows: 3 };
     let dir = tempfile::tempdir()?;
     let store = RocksDbStore::open(dir.path())?;
@@ -69,7 +70,6 @@ fn stage_streamed_removes_runs_on_success() -> Result<(), StageError> {
     }
     let leftover: Vec<_> = std::fs::read_dir(scratch.path())?
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "bin"))
         .collect();
     if !leftover.is_empty() {
         return Err(StageError::RunsLeaked);

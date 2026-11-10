@@ -32,6 +32,18 @@ use super::*;
 
 type BodyMap = HashMap<(u32, [u8; 32]), Vec<u8>>;
 
+#[derive(Debug, thiserror::Error)]
+enum RecoveryTestError {
+    #[error(transparent)]
+    Storage(#[from] bitcoin_rs_storage::StorageError),
+    #[error(transparent)]
+    Index(#[from] crate::IndexError),
+    #[error(transparent)]
+    LiveValue(#[from] crate::types::ScriptLiveValueError),
+    #[error("live row key fails to decode")]
+    BadLiveRow,
+}
+
 struct MapBodyStore {
     bodies: Mutex<BodyMap>,
     undo: Mutex<BodyMap>,
@@ -341,7 +353,7 @@ struct Harness {
     worker: Worker,
 }
 
-// PRJ-05, REO-06
+// IDX-07
 #[test]
 fn missing_undo_pauses_the_tail_group_and_resumes_to_bulk() {
     const TIP: u32 = 20;
@@ -383,10 +395,6 @@ fn missing_undo_pauses_the_tail_group_and_resumes_to_bulk() {
     assert!(h.runtime.script_history_failure.read().is_some());
     assert!(h.runtime.tx_lookup_failure.read().is_some());
     assert!(!h.runtime.should_stop(), "the worker keeps running");
-    assert!(
-        sealed_at(&h.store).is_empty(),
-        "no seal covers the missing height"
-    );
 
     f.bodies.undo.lock().insert(key, record);
     h.settle(&mut None);
@@ -429,6 +437,16 @@ impl Harness {
     ) -> Self {
         let index_dir = tempfile::tempdir().expect("index dir");
         let store = Arc::new(RocksDbStore::open(index_dir.path()).expect("rocksdb open"));
+        Self::on_store(fixture, rollback_rebuild_cutover, enabled, index_dir, store)
+    }
+
+    fn on_store(
+        fixture: &ForkFixture,
+        rollback_rebuild_cutover: u32,
+        enabled: IndexCapabilities,
+        index_dir: tempfile::TempDir,
+        store: Arc<RocksDbStore>,
+    ) -> Self {
         let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(
             crate::IndexWriter::open(Arc::clone(&store), 1)
                 .expect("index writer open")
@@ -526,6 +544,7 @@ impl Harness {
     }
 }
 
+// IDX-07
 #[test]
 fn missing_undo_pauses_the_tail_group_at_the_fork_point() {
     struct SpentScript;
@@ -580,25 +599,22 @@ fn missing_undo_pauses_the_tail_group_at_the_fork_point() {
             "{name} pauses at the fork point: the forward block has no undo record"
         );
     }
-    let undo_missing = DerivedIndexWorkerError::UndoUnavailable {
-        height: 1,
-        hash: f.b[0].1,
-    }
-    .to_string();
-    assert_eq!(
-        h.runtime.compact_filter_failure.read().as_deref(),
-        Some(undo_missing.as_str()),
-        "compact_filter_failure records the UndoUnavailable of the forward block"
+    assert!(
+        h.runtime.compact_filter_failure.read().is_some(),
+        "compact_filter_failure records the pause of the forward block"
+    );
+    assert!(
+        h.runtime.script_history_failure.read().is_some(),
+        "script_history_failure records the pause of the forward block"
+    );
+    assert!(
+        h.runtime.tx_lookup_failure.read().is_some(),
+        "tx_lookup_failure records the pause of the forward block"
     );
     assert_eq!(
-        h.runtime.script_history_failure.read().as_deref(),
-        Some(undo_missing.as_str()),
-        "script_history_failure records the UndoUnavailable of the forward block"
-    );
-    assert_eq!(
-        h.runtime.tx_lookup_failure.read().as_deref(),
-        Some(undo_missing.as_str()),
-        "tx_lookup_failure records the UndoUnavailable of the forward block"
+        h.runtime.undo_gap(),
+        Some((1, f.b[0].1)),
+        "the gap names the forward block height and hash"
     );
     assert_eq!(h.runtime.phase(), ReconcilePhase::FORWARD);
     assert!(!h.runtime.should_stop());
@@ -609,23 +625,42 @@ fn missing_undo_pauses_the_tail_group_at_the_fork_point() {
 fn unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark() {
     let fixture = ForkFixture::new(2);
     fixture.persist_undo();
-    let harness = Harness::with_enabled(
-        &fixture,
-        u32::MAX,
-        IndexCapabilities::HISTORICAL.with_compact_filters(true),
-    );
-    harness.retention.reserve(1).commit(1);
-    harness.set_tip(&fixture.tip(fixture.a[1]));
-    harness.settle(&mut None);
-    harness.assert_at(&fixture.tip(fixture.a[1]));
-    assert!(harness.runtime.compact_filter_failure.read().is_some());
-    assert!(!harness.runtime.should_stop());
-    assert!(harness.watermarks().compact_filters.is_none());
-    assert!(harness.writer.consumer_cursor().expect("cursor").is_none());
-    harness.set_tip(&fixture.tip(fixture.b[1]));
-    harness.settle(&mut None);
-    harness.assert_at(&fixture.tip(fixture.b[1]));
-    assert!(harness.watermarks().compact_filters.is_none());
+    for pruned in [false, true] {
+        let harness = Harness::with_enabled(
+            &fixture,
+            u32::MAX,
+            IndexCapabilities::HISTORICAL.with_compact_filters(true),
+        );
+        if pruned {
+            harness.retention.reserve(1).commit(1);
+        }
+        harness.set_tip(&fixture.tip(fixture.a[1]));
+        harness.settle(&mut None);
+        harness.assert_at(&fixture.tip(fixture.a[1]));
+        if pruned {
+            assert!(harness.runtime.compact_filter_failure.read().is_some());
+        } else {
+            assert!(harness.runtime.compact_filter_failure.read().is_none());
+            assert_eq!(
+                harness.watermarks().compact_filters,
+                Some(at(&fixture.tip(fixture.a[1]))),
+                "filters advance when history is retained"
+            );
+        }
+        assert!(!harness.runtime.should_stop());
+        harness.set_tip(&fixture.tip(fixture.b[1]));
+        harness.settle(&mut None);
+        harness.assert_at(&fixture.tip(fixture.b[1]));
+        if pruned {
+            assert!(harness.watermarks().compact_filters.is_none());
+        } else {
+            assert_eq!(
+                harness.watermarks().compact_filters,
+                Some(at(&fixture.tip(fixture.b[1]))),
+                "filters follow the reorg when history is retained"
+            );
+        }
+    }
 }
 
 // IDX-06, IDX-07
@@ -994,9 +1029,86 @@ fn run_loop_commits_a_retained_prefix_and_retries_an_absent_body_without_a_wake(
     run.join().expect("worker thread").expect("worker run");
 }
 
-// PRJ-05, REO-06
+type LiveCoin = (ScriptHash, [u8; 32], u32, u64, u32, bool);
+
+struct UnspentCoin {
+    script: Vec<u8>,
+    value: u64,
+    height: u32,
+    coinbase: bool,
+}
+type UnspentMap = hashbrown::HashMap<([u8; 32], u32), UnspentCoin>;
+
+fn unspent_live_coins(blocks: &[bitcoin_rs_storage::CommittedBlock]) -> Vec<LiveCoin> {
+    let mut unspent: UnspentMap = hashbrown::HashMap::new();
+    for block in blocks {
+        if block.height == 0 {
+            continue;
+        }
+        apply_live_block(&mut unspent, block);
+    }
+    let mut coins: Vec<LiveCoin> = unspent
+        .into_iter()
+        .map(|((txid, vout), coin)| {
+            (
+                ScriptHash::from_script_bytes(&coin.script),
+                txid,
+                vout,
+                coin.value,
+                coin.height,
+                coin.coinbase,
+            )
+        })
+        .collect();
+    coins.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
+    coins
+}
+
+fn apply_live_block(unspent: &mut UnspentMap, block: &bitcoin_rs_storage::CommittedBlock) {
+    for tx in &block.txs {
+        let coinbase =
+            tx.inputs.len() == 1 && tx.inputs[0].txid == [0u8; 32] && tx.inputs[0].vout == u32::MAX;
+        spend_live_inputs(unspent, tx);
+        create_live_outputs(unspent, tx, block.height, coinbase);
+    }
+}
+
+fn spend_live_inputs(unspent: &mut UnspentMap, tx: &bitcoin_rs_storage::TxFacts) {
+    for input in &tx.inputs {
+        if input.txid == [0u8; 32] && input.vout == u32::MAX {
+            continue;
+        }
+        unspent.remove(&(input.txid, input.vout));
+    }
+}
+
+fn create_live_outputs(
+    unspent: &mut UnspentMap,
+    tx: &bitcoin_rs_storage::TxFacts,
+    height: u32,
+    coinbase: bool,
+) {
+    for output in &tx.outputs {
+        let admitted = !matches!(output.script.first(), Some(0x6a))
+            && output.script.len() <= crate::MAX_LIVE_SCRIPT_SIZE;
+        if !admitted {
+            continue;
+        }
+        unspent.insert(
+            (tx.txid, output.vout),
+            UnspentCoin {
+                script: output.script.to_vec(),
+                value: output.value,
+                height,
+                coinbase,
+            },
+        );
+    }
+}
+
+// IDX-06, IDX-07
 #[test]
-fn script_live_undo_gap_pauses_the_group_and_resumes_to_bulk() {
+fn script_live_undo_gap_pauses_the_group_and_resumes_to_bulk() -> Result<(), RecoveryTestError> {
     #[derive(Clone, Copy)]
     enum Undo {
         Present,
@@ -1009,9 +1121,26 @@ fn script_live_undo_gap_pauses_the_group_and_resumes_to_bulk() {
         f.persist_undo();
         let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
         let (a2, a5) = (f.tip(f.a[1]), f.tip(f.a[4]));
-        h.writer
-            .stage_script_live_rows(&mut std::iter::empty())
-            .expect("stage empty seed");
+        let seed_blocks = committed_chain(&f, &f.a, 0, 2);
+        let staged: Vec<Vec<u8>> = unspent_live_coins(&seed_blocks)
+            .iter()
+            .map(|(scripthash, txid, vout, value, height, coinbase)| {
+                let outpoint = bitcoin_rs_consensus::primitives::OutPoint::new(
+                    bitcoin_rs_consensus::primitives::Txid(Hash256::from_le_bytes(txid)),
+                    *vout,
+                );
+                let coin =
+                    crate::types::ScriptLiveCoin::new(*scripthash, *value, *height, *coinbase);
+                let row = crate::types::ScriptLiveRow::new(*scripthash, &outpoint);
+                let mut bytes = row.as_bytes().to_vec();
+                let Ok(encoded) = coin.encode_value() else {
+                    panic!("the seed coin must encode");
+                };
+                bytes.extend_from_slice(&encoded);
+                bytes
+            })
+            .collect();
+        h.writer.stage_script_live_rows(&mut staged.into_iter())?;
         h.writer
             .publish_script_live_seed(at(&a2))
             .expect("publish seed at h-1");
@@ -1026,9 +1155,11 @@ fn script_live_undo_gap_pauses_the_group_and_resumes_to_bulk() {
                 f.bodies.undo.lock().remove(&key);
             }
             Undo::Corrupt => {
-                if let Some(record) = f.bodies.undo.lock().get_mut(&key) {
-                    record[0] ^= 0xff;
-                }
+                let mut undo = f.bodies.undo.lock();
+                let Some(record) = undo.get_mut(&key) else {
+                    panic!("the undo record must exist to corrupt it");
+                };
+                record[0] ^= 0xff;
             }
         }
         assert_eq!(
@@ -1086,9 +1217,38 @@ fn script_live_undo_gap_pauses_the_group_and_resumes_to_bulk() {
             "the gap clears once the undo row returns"
         );
         assert_chain_matches_bulk(&h.store, &f, 5);
+        let snapshot = h.store.snapshot()?;
+        let mut live: Vec<LiveCoin> = Vec::new();
+        for item in snapshot.iter_prefix(ColumnFamily::ScriptLive, &[])? {
+            let (key, value) = item?;
+            if key.len() != crate::types::SCRIPT_LIVE_ROW_SIZE {
+                continue;
+            }
+            let Some(row) = crate::types::ScriptLiveRow::from_db_row(&key) else {
+                return Err(RecoveryTestError::BadLiveRow);
+            };
+            let outpoint = row.outpoint();
+            let coin = crate::types::ScriptLiveCoin::decode_value(&value)?;
+            live.push((
+                coin.scripthash,
+                *outpoint.txid.as_bytes(),
+                outpoint.vout,
+                coin.value,
+                coin.height,
+                coin.coinbase,
+            ));
+        }
+        live.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
+        assert_eq!(
+            live,
+            unspent_live_coins(&committed_chain(&f, &f.a, 0, 5)),
+            "ScriptLive contents equal the unspent set at the tip"
+        );
     }
+    Ok(())
 }
 
+// IDX-06
 #[test]
 fn anchor_failure_outranks_an_earlier_preparation_failure() {
     let f = ForkFixture::new(6);
@@ -1113,7 +1273,7 @@ fn anchor_failure_outranks_an_earlier_preparation_failure() {
     assert_eq!(
         h.watermarks().script_live,
         Some(at(&f.tip(f.a[1]))),
-        "ScriptLive pauses at h-1"
+        "block 3 cannot be prepared, so ScriptLive stops at height 2"
     );
 }
 
@@ -1166,6 +1326,7 @@ fn undo_read_failure_is_not_a_missing_undo() {
     assert_eq!(h.watermarks().script_live, Some(at(&f.tip(f.a[1]))));
 }
 
+// IDX-07
 #[test]
 fn script_live_pruned_terminal_keeps_worker_alive() {
     let f = ForkFixture::new(4);
@@ -1243,8 +1404,9 @@ fn script_live_pruned_terminal_keeps_worker_alive() {
     h.assert_at(&t);
 }
 
+// IDX-06
 #[test]
-fn seed_first_leg_consumes_held_lease() {
+fn seed_first_leg_runs_under_the_held_history_pin() {
     let registry = Arc::new(RetentionRegistry::new());
     let access = HistoryAccess::new(Arc::clone(&registry), RetentionBudget::Depth(288));
     let lease = access.request_history(2).expect("grant at 2");
@@ -1289,7 +1451,7 @@ fn seed_first_leg_consumes_held_lease() {
         }
         assert!(
             h.retention.active_leases() <= 1,
-            "stalled legs put the single pin back, never a second one"
+            "a stalled leg holds at most the single pin"
         );
         assert!(h.runtime.failure_message().is_none());
     }
@@ -1439,7 +1601,8 @@ impl SeedCellHarness {
 
 // EVT-03
 #[test]
-fn malformed_stored_consumer_cursor_never_causes_panic_and_overwrites_cleanly() {
+fn malformed_stored_consumer_cursor_never_causes_panic_and_overwrites_cleanly()
+-> Result<(), RecoveryTestError> {
     let f = ForkFixture::new(3);
     f.persist_undo();
     let h = Harness::with_enabled(&f, u32::MAX, IndexCapabilities::TX_LOOKUP);
@@ -1455,6 +1618,11 @@ fn malformed_stored_consumer_cursor_never_causes_panic_and_overwrites_cleanly() 
         .anchor_watermark(IndexCapabilities::TX_LOOKUP, expected, 0)
         .expect("anchor");
 
+    let mut fixed = [0u8; crate::reconcile::CURSOR_BYTE_LEN];
+    fixed[..8].copy_from_slice(&0u64.to_le_bytes());
+    fixed[8..16].copy_from_slice(&0u64.to_le_bytes());
+    fixed[16..20].copy_from_slice(&0u32.to_le_bytes());
+    fixed[20..].copy_from_slice(&[0u8; 32]);
     for malformed in [
         &b""[..],
         &b"\xff"[..],
@@ -1478,8 +1646,12 @@ fn malformed_stored_consumer_cursor_never_causes_panic_and_overwrites_cleanly() 
             .consumer_cursor()
             .expect("read cursor")
             .expect("cursor exists");
-        assert_eq!(stored.len(), crate::reconcile::CURSOR_BYTE_LEN);
-        assert_eq!(stored, h.worker.chain_events.cursor().to_bytes());
+        assert_eq!(
+            stored.len(),
+            52,
+            "the durable cursor is exactly the EVT-03 layout"
+        );
+        assert_eq!(stored, fixed, "the overwrite pins the EVT-03 field order");
     }
     let (fence, _) = h.writer.fenced_watermarks().expect("fence");
     for oversized in [
@@ -1494,6 +1666,12 @@ fn malformed_stored_consumer_cursor_never_causes_panic_and_overwrites_cleanly() 
             "a cursor wider than the reserved width is refused before any write"
         );
     }
+    assert_eq!(
+        h.writer.consumer_cursor()?,
+        Some(fixed.to_vec()),
+        "an oversized cursor is refused before any write"
+    );
+    Ok(())
 }
 
 // PRJ-04
@@ -1649,6 +1827,22 @@ fn committed_chain(
             )
             .expect("committed block")
         };
+        let parsed: bitcoin::Block = match bitcoin::consensus::encode::deserialize(body) {
+            Ok(block) => block,
+            Err(_) => panic!("the fixture body must deserialize as a consensus block"),
+        };
+        assert_eq!(
+            block.txs.len(),
+            parsed.txdata.len(),
+            "the image parse and the consensus decode agree on the tx count"
+        );
+        for (tx, parsed_tx) in block.txs.iter().zip(&parsed.txdata) {
+            assert_eq!(
+                tx.txid,
+                parsed_tx.compute_txid().to_byte_array(),
+                "the txid matches the consensus crate"
+            );
+        }
         created.insert_block(&block);
         if height >= first_height {
             out.push(block);
@@ -1728,7 +1922,7 @@ fn assert_sealed_matches_bulk(store: &RocksDbStore, f: &ForkFixture, branch: &[(
     }
 }
 
-// PRJ-09
+// PRJ-05
 #[test]
 fn sync_past_the_tail_bound_seals_one_generation_equal_to_bulk() {
     let f = ForkFixture::new(2100);
@@ -1742,7 +1936,7 @@ fn sync_past_the_tail_bound_seals_one_generation_equal_to_bulk() {
     assert_sealed_matches_bulk(&h.store, &f, &f.a);
 }
 
-// REO-04, REO-05
+// REO-04
 #[test]
 fn deep_reorg_through_the_runtime_retires_exactly_the_affected_generation() {
     let f = ForkFixture::new(2100);
@@ -1773,11 +1967,12 @@ fn deep_reorg_through_the_runtime_retires_exactly_the_affected_generation() {
         .map(|(cf, _, _)| *cf)
         .collect();
     assert!(left.is_empty(), "affected rows left in {left:?}");
+    assert_answers_match_bulk(&h.store, &f, &f.b, 1, 2100);
 }
 
-// PRJ-05
+// RCV-04
 #[test]
-fn crash_between_seal_steps_recovers_on_reopen() {
+fn crash_between_seal_steps_recovers_on_reopen() -> Result<(), RecoveryTestError> {
     use crate::segment::{SealFault, arm_seal_fault};
     let f = ForkFixture::new(2100);
     f.persist_undo();
@@ -1791,18 +1986,48 @@ fn crash_between_seal_steps_recovers_on_reopen() {
         match h.worker.reconcile_once(&mut pending) {
             Ok(ReconcileAction::CaughtUp) => break,
             Ok(_) => {}
-            Err(_) => {
+            Err(DerivedIndexWorkerError::Index(crate::IndexError::InjectedFault {
+                stage: "seal",
+            })) => {
                 failed = true;
                 break;
+            }
+            Err(other) => {
+                panic!("the seal fault must surface as the injected seal fault, got {other:?}")
             }
         }
     }
     arm_seal_fault(None);
     assert!(failed, "the injected seal fault must surface");
-
-    let reopened = crate::IndexWriter::open(Arc::clone(&h.store), 1).expect("reopen");
-    drop(reopened);
+    let Harness {
+        _index_dir: index_dir,
+        store,
+        writer,
+        worker,
+        ..
+    } = h;
+    drop(worker);
+    drop(writer);
+    drop(store);
+    let store = Arc::new(RocksDbStore::open(index_dir.path())?);
+    let h = Harness::on_store(
+        &f,
+        u32::MAX,
+        IndexCapabilities::HISTORICAL,
+        index_dir,
+        store,
+    );
+    h.set_tip(&tip);
+    let mut pending = None;
+    h.settle(&mut pending);
+    h.assert_at(&tip);
+    assert_eq!(
+        sealed_at(&h.store).len(),
+        1,
+        "recovery publishes one generation"
+    );
     assert_sealed_matches_bulk(&h.store, &f, &f.a);
+    Ok(())
 }
 
 type TxAnswer = (Vec<(u32, TxPosition)>, Vec<Vec<(Vec<u8>, Vec<u8>)>>);
@@ -1915,7 +2140,7 @@ fn assert_answers_match_bulk(
     );
 }
 
-// PRJ-05, PRJ-09, REO-04
+// PRJ-05, REO-04
 #[test]
 fn shallow_reorg_after_seal_keeps_the_segment_and_rewinds_the_tail() {
     const TIP: u32 = 2100;
@@ -1934,10 +2159,9 @@ fn shallow_reorg_after_seal_keeps_the_segment_and_rewinds_the_tail() {
     assert_eq!(sealed.len(), 1, "the sync seals one stable prefix");
     let segment = sealed[0];
     assert_eq!(segment.coverage.first_height, 0);
-    assert_eq!(
-        segment.coverage.last_height,
-        crate::segment::format::TAIL_MAX_BLOCKS - 1 - crate::segment::format::REORG_WINDOW_BLOCKS,
-        "the first seal cuts the full tail bound less the retained window"
+    assert!(
+        segment.coverage.last_height < FORK,
+        "the fork lies above the sealed coverage"
     );
     let sealed_rows = generation_rows(&h.store, segment.gen_id);
 

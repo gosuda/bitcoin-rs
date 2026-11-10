@@ -132,7 +132,7 @@ fn lookup_and_history_disabled_skip_script_hashes() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
-// PRJ-03
+// PRJ-09
 #[test]
 fn all_enabled_matches_bulk_builder_rows() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, writer) = open_writer()?;
@@ -219,6 +219,7 @@ fn disabled_compact_filters_seal_writes_no_filter_rows() -> Result<(), Box<dyn s
     Ok(())
 }
 
+// PRJ-05
 #[test]
 fn compact_filters_only_seal_and_reopen_keep_coverage() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
@@ -295,6 +296,12 @@ fn seal_and_open_skip_scans_when_hashes_known() -> Result<(), Box<dyn std::error
     crate::segment::seal_tail_generation(store.as_ref(), 1, 1, caps, scratch.path())?;
     drop(writer);
     let _writer = IndexWriter::open(std::sync::Arc::clone(&store), 1)?;
+    let snapshot = store.snapshot()?;
+    let sealed = crate::segment::sealed_generations(snapshot.as_ref(), IndexCapability::TxLookup)?;
+    assert_eq!(sealed.len(), 1);
+    assert_eq!(sealed[0].coverage.first_height, 0);
+    assert_eq!(sealed[0].coverage.last_height, 1);
+    assert_eq!(sealed[0].coverage.last_hash, blocks[1].hash);
     Ok(())
 }
 // PRJ-03

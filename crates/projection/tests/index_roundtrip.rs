@@ -445,6 +445,7 @@ fn restore_batch(ops: Vec<BatchOp>) -> BufferedWriteBatch {
     batch
 }
 
+// IDX-09
 #[test]
 fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), TestError> {
     for height in [0_u32, 170, 481_824] {
@@ -469,13 +470,9 @@ fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), TestError> 
             totals.funding, facts.funding_outputs,
             "height {height} writes one funding occurrence per output"
         );
-        assert!(
-            totals.spending >= facts.spending_transactions,
-            "height {height} names every non-coinbase transaction that spends"
-        );
-        assert!(
-            totals.spending <= facts.spending_inputs,
-            "height {height} never writes more spending occurrences than non-coinbase inputs"
+        assert_eq!(
+            totals.spending, facts.spending_inputs,
+            "height {height} writes one spending occurrence per non-coinbase input"
         );
         assert_eq!(
             spent_row_count(&indexer, &block)?,
@@ -721,6 +718,11 @@ fn format_4_open_refuses_for_rebuild() -> Result<(), TestError> {
             .watermark()?
             .is_none()
     );
+    assert_eq!(
+        store.count(ColumnFamily::TxDir),
+        0,
+        "derived rows are removed by the rebuild"
+    );
     Ok(())
 }
 
@@ -733,6 +735,7 @@ fn reset_index_replaces_an_incompatible_derived_format() -> Result<(), TestError
         &[0x00, b'V'],
         &2_u32.to_le_bytes(),
     )?;
+    store.put(bitcoin_rs_storage::ColumnFamily::TxDir, b"old", b"row")?;
 
     IndexWriter::reset_index(store.as_ref(), 1)?;
 
@@ -740,6 +743,11 @@ fn reset_index_replaces_an_incompatible_derived_format() -> Result<(), TestError
         IndexWriter::open(Arc::clone(&store), 1)?
             .watermark()?
             .is_none()
+    );
+    assert_eq!(
+        store.count(bitcoin_rs_storage::ColumnFamily::TxDir),
+        0,
+        "derived rows are removed by the rebuild"
     );
     Ok(())
 }
@@ -826,11 +834,14 @@ fn prepare_block_for_rejects_malformed_bodies() -> Result<(), TestError> {
             .err()
             .ok_or(TestError::Missing("expected a parse rejection"))?;
         assert!(check(&error), "{label}: unexpected error {error:?}");
-        assert_eq!(
-            store.count(ColumnFamily::BlockHeaders),
-            0,
-            "{label}: BlockHeaders must stay empty"
-        );
+        for cf in [
+            ColumnFamily::TxDir,
+            ColumnFamily::ScriptPost,
+            ColumnFamily::SpendDir,
+            ColumnFamily::BlockHeaders,
+        ] {
+            assert_eq!(store.count(cf), 0, "{label}: {cf:?} must stay empty");
+        }
     }
     Ok(())
 }
@@ -1117,6 +1128,7 @@ fn script_index_reset_preserves_tx_lookup_and_shared_identity() -> Result<(), Te
     Ok(())
 }
 
+// IDX-07
 #[test]
 fn group_rollback_releases_identity_and_refuses_a_second_member() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
@@ -1161,13 +1173,15 @@ fn group_rollback_releases_identity_and_refuses_a_second_member() -> Result<(), 
         "the tail group releases both identities"
     );
     assert!(
-        commit_rollback_one_for(
-            &mut writer,
-            IndexCapabilities::SCRIPT_HISTORY,
-            Some(watermark0),
-            &body1,
-        )
-        .is_err(),
+        matches!(
+            commit_rollback_one_for(
+                &mut writer,
+                IndexCapabilities::SCRIPT_HISTORY,
+                Some(watermark0),
+                &body1,
+            ),
+            Err(IndexError::NonContiguousPrepared { watermark: None })
+        ),
         "the group already moved ScriptHistory, so a second ScriptHistory rollback is refused"
     );
     Ok(())
@@ -1190,6 +1204,7 @@ fn resetting_the_only_cursor_removes_shared_identity() -> Result<(), TestError> 
 
     writer.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
 
+    assert_eq!(store.count(ColumnFamily::TxDir), 0);
     assert_eq!(store.count(ColumnFamily::BlockHeaders), 0);
     Ok(())
 }
@@ -1222,6 +1237,7 @@ fn open_resumes_interrupted_capability_reset() -> Result<(), TestError> {
     Ok(())
 }
 
+// IDX-05
 #[test]
 fn reset_claim_carries_mask_epoch_and_base_version() -> Result<(), TestError> {
     let store = Arc::new(CallTrackingStore::default());
@@ -1307,6 +1323,7 @@ fn ordinary_commits_are_excluded_by_a_reset_claim() -> Result<(), TestError> {
             )?;
             assert!(prepared.try_push(block).is_ok());
         }
+        let rows_before = store.rows(ColumnFamily::TxDir);
         let (fence, _) = writer.fenced_watermarks()?;
         if matches!(mutator, Mutator::Cursor) {
             writer.commit_consumer_cursor(fence, b"old-cursor")?;
@@ -1337,7 +1354,9 @@ fn ordinary_commits_are_excluded_by_a_reset_claim() -> Result<(), TestError> {
         };
 
         assert!(matches!(result, Err(IndexError::ResetInProgress)));
+        assert!(store.get(ColumnFamily::UtxoMeta, RESET_KEY)?.is_some());
         if mask != TX_LOOKUP_MASK {
+            assert_eq!(store.rows(ColumnFamily::TxDir), rows_before);
             assert_eq!(
                 writer.watermarks()?.tx_lookup.map(|mark| mark.height),
                 Some(0)
@@ -1346,30 +1365,6 @@ fn ordinary_commits_are_excluded_by_a_reset_claim() -> Result<(), TestError> {
         assert!(writer.consumer_cursor()?.is_none());
         assert_eq!(stored_idle_version(&store)?, 1);
     }
-    Ok(())
-}
-#[test]
-fn rollback_is_excluded_by_a_reset_fence() -> Result<(), TestError> {
-    let store = Arc::new(MemoryStore::default());
-    let body = read_fixture(0)?;
-    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
-    commit_block(&mut writer, 0, &body)?;
-    let mut claim = store.new_batch();
-    claim.put(
-        ColumnFamily::UtxoMeta,
-        RESET_KEY,
-        &claim_bytes(SCRIPT_HISTORY_MASK, 9, 0),
-    );
-    claim.put(ColumnFamily::UtxoMeta, FORMAT_KEY, &FORMAT_VALUE);
-    claim.delete(ColumnFamily::UtxoMeta, SCRIPT_WATERMARK_KEY);
-    claim.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
-    store.write_durable(claim)?;
-
-    assert!(matches!(
-        commit_rollback_one_for(&mut writer, IndexCapabilities::HISTORICAL, None, &body),
-        Err(IndexError::ResetInProgress)
-    ));
-    assert!(store.get(ColumnFamily::UtxoMeta, RESET_KEY)?.is_some());
     Ok(())
 }
 
@@ -1456,7 +1451,35 @@ fn dump_all(store: &MemoryStore) -> Vec<(ColumnFamily, Vec<u8>, Vec<u8>)> {
 #[test]
 fn interrupted_reset_resumes_from_every_crash_point() -> Result<(), TestError> {
     type CrashPoint = fn(&MemoryStore) -> Result<(), TestError>;
-    let cases: [(&str, CrashPoint); 1] = [("after the marker commit", |_store| Ok(()))];
+    let cases: [(&str, CrashPoint); 3] = [
+        ("after the marker commit", |_store| Ok(())),
+        ("mid-delete", |store| {
+            let mut partial = store.new_batch();
+            for (key, _) in store.rows(ColumnFamily::ScriptPost).into_iter().take(2) {
+                partial.delete(ColumnFamily::ScriptPost, &key);
+            }
+            store.write_durable(partial)?;
+            Ok(())
+        }),
+        (
+            "after the deletion loops, before the marker clear",
+            |store| {
+                for cf in [
+                    ColumnFamily::ScriptPost,
+                    ColumnFamily::ScriptDict,
+                    ColumnFamily::SpendDir,
+                    ColumnFamily::ScriptStats,
+                ] {
+                    let mut batch = store.new_batch();
+                    for (key, _) in store.rows(cf) {
+                        batch.delete(cf, &key);
+                    }
+                    store.write_durable(batch)?;
+                }
+                Ok(())
+            },
+        ),
+    ];
 
     for (label, crash) in cases {
         let (control, interrupted) = seed_populated_stores()?;
@@ -1692,6 +1715,9 @@ fn clear_loss_restarts_and_completes_the_merged_fence() -> Result<(), TestError>
     let writer = IndexWriter::open(Arc::clone(&store), 4)?;
 
     assert_eq!(stored_idle_version(&store)?, 1);
+    assert_eq!(store.count(ColumnFamily::TxDir), 0);
+    assert_eq!(store.count(ColumnFamily::ScriptPost), 0);
+    assert_eq!(store.count(ColumnFamily::SpendDir), 0);
     assert_eq!(store.count(ColumnFamily::BlockHeaders), 0);
     assert_eq!(writer.watermarks()?.tx_lookup, None);
     assert_eq!(writer.watermarks()?.script_history, None);
@@ -1713,11 +1739,14 @@ fn changed_claim_prevents_stale_row_deletion() -> Result<(), TestError> {
         "a stale reset operation deleted rows after the exact claim changed"
     );
     assert_eq!(stored_idle_version(&store)?, 1);
-    assert_eq!(
-        store.count(ColumnFamily::BlockHeaders),
-        0,
-        "BlockHeaders reset did not complete"
-    );
+    for cf in [
+        ColumnFamily::TxDir,
+        ColumnFamily::ScriptPost,
+        ColumnFamily::SpendDir,
+        ColumnFamily::BlockHeaders,
+    ] {
+        assert_eq!(store.count(cf), 0, "{cf:?} reset did not complete");
+    }
     Ok(())
 }
 
@@ -1743,6 +1772,13 @@ fn competing_claim_during_claim_merges_different_masks() -> Result<(), TestError
             .get(ColumnFamily::UtxoMeta, SCRIPT_WATERMARK_KEY)?
             .is_none()
     );
+    assert_eq!(store.count(ColumnFamily::TxDir), 0);
+    assert_eq!(
+        store.count(ColumnFamily::ScriptPost),
+        0,
+        "the raced-in capability joins the union and is cleared too"
+    );
+    assert_eq!(store.count(ColumnFamily::SpendDir), 0);
     assert_eq!(store.count(ColumnFamily::BlockHeaders), 0);
     Ok(())
 }
@@ -1768,11 +1804,14 @@ fn reset_index_adopts_a_foreign_fence_as_an_all_capability_reset() -> Result<(),
     assert_eq!(writer.watermarks()?.tx_lookup, None);
     assert_eq!(writer.watermarks()?.script_history, None);
     assert!(writer.consumer_cursor()?.is_none());
-    assert_eq!(
-        store.count(ColumnFamily::BlockHeaders),
-        0,
-        "BlockHeaders survived the full reset"
-    );
+    for cf in [
+        ColumnFamily::TxDir,
+        ColumnFamily::ScriptPost,
+        ColumnFamily::SpendDir,
+        ColumnFamily::BlockHeaders,
+    ] {
+        assert_eq!(store.count(cf), 0, "{cf:?} survived the full reset");
+    }
     Ok(())
 }
 
@@ -2300,6 +2339,8 @@ fn oversized_first_row_does_not_escape_reset() -> Result<(), TestError> {
     IndexWriter::reset_index(store.as_ref(), 4)?;
 
     assert_eq!(store.count(ColumnFamily::TxDir), 0);
+    assert_eq!(store.count(ColumnFamily::ScriptPost), 0);
+    assert_eq!(store.count(ColumnFamily::SpendDir), 0);
     assert_eq!(store.count(ColumnFamily::BlockHeaders), 0);
     assert_eq!(stored_idle_version(&store)?, 1);
     Ok(())
@@ -2673,6 +2714,7 @@ fn reset_counter_overflow_is_rejected_before_any_write() -> Result<(), TestError
     }
     Ok(())
 }
+// IDX-05
 #[test]
 fn same_mask_claim_is_adopted_cooperatively_without_rewrite() -> Result<(), TestError> {
     let store = Arc::new(CallTrackingStore::default());
@@ -2773,11 +2815,14 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state() -> Resul
     assert!(writer.watermarks()?.tx_lookup.is_none());
     assert!(writer.watermarks()?.script_history.is_none());
     assert!(writer.consumer_cursor()?.is_none());
-    assert_eq!(
-        store.count(ColumnFamily::BlockHeaders),
-        0,
-        "BlockHeaders joined the union reset"
-    );
+    for cf in [
+        ColumnFamily::TxDir,
+        ColumnFamily::ScriptPost,
+        ColumnFamily::SpendDir,
+        ColumnFamily::BlockHeaders,
+    ] {
+        assert_eq!(store.count(cf), 0, "{cf:?} joined the union reset");
+    }
     Ok(())
 }
 

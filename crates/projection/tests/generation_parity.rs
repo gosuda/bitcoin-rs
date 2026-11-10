@@ -16,7 +16,7 @@ use bitcoin_rs_storage::{
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tempfile::tempdir;
 
 use crate::support::TestError;
@@ -142,39 +142,36 @@ fn create_synthetic_blocks(count: u32) -> Vec<CommittedBlock> {
     blocks
 }
 
-fn hash_cf_entry(hasher: &mut Sha256, k: &[u8], v: &[u8]) {
-    let Ok(k_len) = u32::try_from(k.len()) else {
-        return;
-    };
-    let Ok(v_len) = u32::try_from(v.len()) else {
-        return;
-    };
+fn hash_cf_entry(hasher: &mut Sha256, k: &[u8], v: &[u8]) -> Result<(), TestError> {
+    let k_len = u32::try_from(k.len())?;
+    let v_len = u32::try_from(v.len())?;
     hasher.update(k_len.to_le_bytes());
     hasher.update(k);
     hasher.update(v_len.to_le_bytes());
     hasher.update(v);
+    Ok(())
 }
 
-fn compute_family_digest<S: KvStore>(store: &S, cf: ColumnFamily, gen_id: u64) -> [u8; 32] {
+fn compute_family_digest<S: KvStore>(
+    store: &S,
+    cf: ColumnFamily,
+    gen_id: u64,
+) -> Result<([u8; 32], u64), TestError> {
     let start = gen_id.to_be_bytes();
     let end = gen_id.saturating_add(1).to_be_bytes();
     let mut hasher = Sha256::new();
-    let Ok(snapshot) = store.snapshot() else {
-        return hasher.finalize().into();
-    };
-    let Ok(iter) = snapshot.iter_prefix(cf, &start) else {
-        return hasher.finalize().into();
-    };
+    let snapshot = store.snapshot()?;
+    let mut rows = 0u64;
+    let iter = snapshot.iter_prefix(cf, &start)?;
     for item in iter {
-        let Ok((k, v)) = item else {
-            continue;
-        };
+        let (k, v) = item?;
         if k.as_slice() >= end.as_slice() {
             break;
         }
-        hash_cf_entry(&mut hasher, &k, &v);
+        hash_cf_entry(&mut hasher, &k, &v)?;
+        rows = rows.saturating_add(1);
     }
-    hasher.finalize().into()
+    Ok((hasher.finalize().into(), rows))
 }
 
 // PRJ-09
@@ -223,8 +220,13 @@ fn bulk_and_live_generations_are_byte_identical() -> Result<(), TestError> {
     ];
 
     for &cf in &indexed_cfs {
-        let digest_a = compute_family_digest(&store_a, cf, gen_id);
-        let digest_b = compute_family_digest(&store_b, cf, gen_id);
+        let (digest_a, rows_a) = compute_family_digest(&store_a, cf, gen_id)?;
+        let (digest_b, rows_b) = compute_family_digest(&store_b, cf, gen_id)?;
+        assert!(rows_a > 0, "{cf:?} has no sealed rows in the tail build");
+        assert_eq!(
+            rows_a, rows_b,
+            "{cf:?} row count differs between tail and bulk"
+        );
         assert_eq!(digest_a, digest_b, "mismatch on {:?}", cf);
     }
     Ok(())
@@ -234,33 +236,55 @@ struct FamilyDigestPair {
     family: ColumnFamily,
     tail: [u8; 32],
     bulk: [u8; 32],
+    tail_rows: u64,
+    bulk_rows: u64,
 }
 
 fn cross_block_spend_generation() -> Vec<CommittedBlock> {
-    vec![CommittedBlock {
-        height: 1,
-        hash: [0x71; 32],
-        parent_hash: [0u8; 32],
-        header: [0u8; 80],
-        txs: vec![TxFacts {
-            txid: [0xD1; 32],
-            offset: 0,
-            len: 120,
-            inputs: vec![SpentPrevout {
-                txid: [0x99; 32],
-                vout: 3,
-                value: 20_000,
-                script: Bytes::copy_from_slice(b"\x51older_coin_script"),
-                height: 0,
-                coinbase: false,
+    let funded_script = Bytes::copy_from_slice(b"\x76\xa9\x14fresh_output\x88\xac");
+    vec![
+        CommittedBlock {
+            height: 1,
+            hash: [0x71; 32],
+            parent_hash: [0u8; 32],
+            header: [0u8; 80],
+            txs: vec![TxFacts {
+                txid: [0xD0; 32],
+                offset: 0,
+                len: 120,
+                inputs: Vec::new(),
+                outputs: vec![CreatedOutput {
+                    vout: 0,
+                    value: 20_000,
+                    script: funded_script.clone(),
+                }],
             }],
-            outputs: vec![CreatedOutput {
-                vout: 0,
-                value: 19_000,
-                script: Bytes::copy_from_slice(b"\x76\xa9\x14fresh_output\x88\xac"),
+        },
+        CommittedBlock {
+            height: 2,
+            hash: [0x72; 32],
+            parent_hash: [0x71; 32],
+            header: [0u8; 80],
+            txs: vec![TxFacts {
+                txid: [0xD1; 32],
+                offset: 0,
+                len: 120,
+                inputs: vec![SpentPrevout {
+                    txid: [0xD0; 32],
+                    vout: 0,
+                    value: 20_000,
+                    script: funded_script,
+                    height: 1,
+                    coinbase: false,
+                }],
+                outputs: vec![CreatedOutput {
+                    vout: 0,
+                    value: 19_000,
+                    script: Bytes::copy_from_slice(b"\x76\xa9\x14spent_output\x88\xac"),
+                }],
             }],
-        }],
-    }]
+        },
+    ]
 }
 
 fn tail_seal_and_bulk_family_digests(
@@ -310,33 +334,55 @@ fn tail_seal_and_bulk_family_digests(
         .map_err(|e| e.to_string())?;
     assert_eq!(coverage_tail, coverage_bulk);
 
-    Ok(indexed_cfs
-        .iter()
-        .map(|&cf| FamilyDigestPair {
+    let mut pairs = Vec::new();
+    for &cf in &indexed_cfs {
+        let (tail, tail_rows) = compute_family_digest(&store_tail, cf, gen_id)?;
+        let (bulk, bulk_rows) = compute_family_digest(&store_bulk, cf, gen_id)?;
+        pairs.push(FamilyDigestPair {
             family: cf,
-            tail: compute_family_digest(&store_tail, cf, gen_id),
-            bulk: compute_family_digest(&store_bulk, cf, gen_id),
-        })
-        .collect())
+            tail,
+            bulk,
+            tail_rows,
+            bulk_rows,
+        });
+    }
+    Ok(pairs)
 }
 
 // PRJ-09
 #[test]
 fn cross_block_spends_produce_identical_tail_and_bulk_segments() -> Result<(), TestError> {
     let blocks = cross_block_spend_generation();
+    assert_eq!(blocks.len(), 2, "the spend fixture spans two blocks");
+    assert_eq!(
+        blocks[1].txs[0].inputs[0].txid, blocks[0].txs[0].txid,
+        "block 2 spends an output created in block 1"
+    );
+    let mut spend_rows = 0u64;
     for pair in tail_seal_and_bulk_family_digests(&blocks, 1)? {
+        assert!(pair.tail_rows > 0, "{:?} has no sealed rows", pair.family);
+        assert_eq!(
+            pair.tail_rows, pair.bulk_rows,
+            "{:?} row count differs",
+            pair.family
+        );
         assert_eq!(
             pair.tail, pair.bulk,
             "{:?} diverges on cross-block spend",
             pair.family
         );
+        if pair.family == ColumnFamily::SpendDir {
+            spend_rows = pair.bulk_rows;
+        }
     }
+    assert!(spend_rows > 0, "the cross-block spend writes SpendDir rows");
     Ok(())
 }
 
-// PRJ-09
+// PRJ-07, PRJ-09
 #[test]
 fn same_tx_fund_and_spend_keeps_both_posting_occurrences() -> Result<(), TestError> {
+    use bitcoin_rs_projection::segment::format::decode_posting_items;
     let script = self_transfer_script(7);
     let blocks = vec![CommittedBlock {
         height: 1,
@@ -364,6 +410,18 @@ fn same_tx_fund_and_spend_keeps_both_posting_occurrences() -> Result<(), TestErr
     }];
 
     for pair in tail_seal_and_bulk_family_digests(&blocks, 1)? {
+        if pair.family == ColumnFamily::SpendDir {
+            assert_eq!(
+                pair.tail_rows, 0,
+                "input CC names no in-generation creation"
+            );
+            assert_eq!(
+                pair.bulk_rows, 0,
+                "input CC names no in-generation creation"
+            );
+        } else {
+            assert!(pair.tail_rows > 0, "{:?} has no sealed rows", pair.family);
+        }
         assert_eq!(
             pair.tail, pair.bulk,
             "{:?} diverges on same-tx fund and spend",
@@ -373,15 +431,67 @@ fn same_tx_fund_and_spend_keeps_both_posting_occurrences() -> Result<(), TestErr
             assert_ne!(pair.bulk, [0u8; 32], "stats row missing");
         }
     }
+    let dir = tempdir()?;
+    let scratch = tempdir()?;
+    let store = RocksDbStore::open(dir.path())?;
+    BulkSegmentBuilder::new(
+        Arc::new(UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    )
+    .build_and_ingest(&store, 1, &blocks)
+    .map_err(|e| e.to_string())?;
+    let snapshot = store.snapshot()?;
+    let mut postings = 0usize;
+    for item in snapshot.iter_prefix(ColumnFamily::ScriptPost, &1u64.to_be_bytes())? {
+        let (_, value) = item?;
+        postings += decode_posting_items(&value)
+            .ok_or("decode posting items")?
+            .len();
+    }
+    assert_eq!(
+        postings, 2,
+        "one funding and one spending posting share the script"
+    );
+    {
+        use bitcoin_rs_projection::segment::format::{
+            decode_tx_dir_key, decode_tx_dir_value, encode_spend_dir_key, encode_tx_dir_key,
+        };
+        let funded_key = encode_tx_dir_key(1, &[0xD2; 32], 1);
+        let funded_value = snapshot
+            .get(ColumnFamily::TxDir, &funded_key)?
+            .ok_or("funded D2 has a TxDir row at height 1")?;
+        let (_, creation, _, _) =
+            decode_tx_dir_value(&funded_value).ok_or("decode funded TxDir value")?;
+        for item in snapshot.iter_prefix(ColumnFamily::TxDir, &1u64.to_be_bytes())? {
+            let (key, _) = item?;
+            if let Some((_, txid, _)) = decode_tx_dir_key(&key) {
+                assert_ne!(
+                    txid, [0xCC; 32],
+                    "spent CC has no TxDir creation in generation 1"
+                );
+            }
+        }
+        let spend_key = encode_spend_dir_key(1, creation, 0);
+        assert!(
+            snapshot.get(ColumnFamily::SpendDir, &spend_key)?.is_none(),
+            "funded D2 vout 0 has no spender in generation 1"
+        );
+        let mut spend_rows = 0u64;
+        for item in snapshot.iter_prefix(ColumnFamily::SpendDir, &1u64.to_be_bytes())? {
+            let _ = item?;
+            spend_rows = spend_rows.saturating_add(1);
+        }
+        assert_eq!(spend_rows, 0, "input CC names no in-generation creation");
+    }
     Ok(())
 }
 
 // PRJ-08
 #[test]
 fn seal_repack_respects_posting_chunk_byte_cap() -> Result<(), TestError> {
-    use bitcoin_rs_projection::segment::format::{
-        SCRIPT_POST_CHUNK_MAX_BYTES, decode_posting_items, decode_script_post_key,
-    };
+    use bitcoin_rs_projection::segment::format::{decode_posting_items, decode_script_post_key};
+    const PRJ_08_CHUNK_MAX_BYTES: usize = 4096;
 
     fn one_script_block(txs: usize) -> CommittedBlock {
         let txs = (0..txs)
@@ -438,10 +548,10 @@ fn seal_repack_respects_posting_chunk_byte_cap() -> Result<(), TestError> {
         let (_, script_id, _) = decode_script_post_key(&key).ok_or("decode post key")?;
         assert_eq!(script_id, 0);
         assert!(
-            value.len() <= SCRIPT_POST_CHUNK_MAX_BYTES,
+            value.len() <= PRJ_08_CHUNK_MAX_BYTES,
             "sealed chunk is {} bytes, cap is {}",
             value.len(),
-            SCRIPT_POST_CHUNK_MAX_BYTES
+            PRJ_08_CHUNK_MAX_BYTES
         );
         chunks += 1;
         total_items += decode_posting_items(&value)
@@ -516,7 +626,7 @@ impl BudgetCharge for PoolBudget {
 }
 
 struct SpillOutcome {
-    digests: Vec<(ColumnFamily, [u8; 32])>,
+    digests: Vec<(ColumnFamily, ([u8; 32], u64))>,
     spills: usize,
     peak_outstanding: u64,
     leftover_files: usize,
@@ -547,10 +657,16 @@ fn run_stream_build(
         ColumnFamily::ScriptStats,
         ColumnFamily::Filters,
     ];
-    let digests = cfs
-        .iter()
-        .map(|&cf| (cf, compute_family_digest(&store, cf, gen_id)))
-        .collect();
+    let mut digests = Vec::new();
+    for &cf in &cfs {
+        let digest = compute_family_digest(&store, cf, gen_id)?;
+        assert!(
+            digest.1 > 0,
+            "{cf:?} has no sealed rows in the stream build"
+        );
+        digests.push((cf, digest));
+    }
+
     let leftover_files = std::fs::read_dir(scratch.path())?
         .filter_map(|entry| entry.ok())
         .count();
@@ -623,9 +739,15 @@ fn reset_offline_clears_segment_families_and_descriptors() -> Result<(), TestErr
         None,
         scratch.path().to_path_buf(),
     );
-    builder
+    let coverage = builder
         .build_and_ingest(&store, 1, &blocks)
         .map_err(|e| e.to_string())?;
+    assert!(coverage.last_height > 0, "the fixture covers blocks");
+    let pre = family_totals(&store)?;
+    assert!(
+        pre.iter().any(|(_, rows)| *rows > 0),
+        "the bulk build writes segment rows before reset"
+    );
 
     let mut batch = store.new_batch();
     batch.put(
@@ -905,7 +1027,7 @@ fn catch_up_from_watermarks<S: KvStore>(
     blocks: &[CommittedBlock],
     coverage: &Coverage,
     caps: IndexCapabilities,
-) -> Result<(), TestError> {
+) -> Result<usize, TestError> {
     let marks = writer.watermarks()?;
     let mut start = coverage.last_height.saturating_add(1);
     for mark in [marks.tx_lookup, marks.script_history, marks.compact_filters] {
@@ -915,7 +1037,7 @@ fn catch_up_from_watermarks<S: KvStore>(
         start = start.min(next);
     }
     if start > coverage.last_height {
-        return Ok(());
+        return Ok(0);
     }
     let first = usize::try_from(start.saturating_sub(coverage.first_height))?;
     let mut batch = PreparedBatch::new(PreparedBatchLimits {
@@ -928,8 +1050,9 @@ fn catch_up_from_watermarks<S: KvStore>(
             .try_push(prepared)
             .map_err(|_| TestError::Message("catch-up batch must admit the block".to_owned()))?;
     }
+    let caught = blocks.len().saturating_sub(first);
     writer.commit_forward(batch)?;
-    Ok(())
+    Ok(caught)
 }
 
 fn scan_pairs(rows: Vec<TxIndexScanRow>) -> Vec<(u32, Vec<u8>)> {
@@ -1015,16 +1138,18 @@ fn published_bulk_generation_needs_no_reindex_on_open() -> Result<(), TestError>
     }
     drop(snapshot);
 
-    catch_up_from_watermarks(&mut writer, &chain.blocks, &coverage, caps)?;
+    let caught = catch_up_from_watermarks(&mut writer, &chain.blocks, &coverage, caps)?;
+    assert_eq!(caught, 0, "covered heights need no catch-up writes");
 
     let after = family_totals(store.as_ref())?;
+    assert!(
+        before.iter().any(|(_, rows)| *rows > 0),
+        "the bulk build writes rows before open"
+    );
     assert_eq!(
         before, after,
         "node open must not write rows for bulk-covered heights"
     );
-    for (cf, rows) in gen_zero_totals(store.as_ref())? {
-        assert_eq!(rows, 0, "{cf:?} must hold no tail rows after open");
-    }
 
     let dir_live = tempdir()?;
     let scratch_live = tempdir()?;
@@ -1050,11 +1175,11 @@ fn published_bulk_generation_needs_no_reindex_on_open() -> Result<(), TestError>
         ColumnFamily::ScriptStats,
         ColumnFamily::Filters,
     ] {
-        assert_eq!(
-            compute_family_digest(store.as_ref(), cf, GEN_ID),
-            compute_family_digest(live.as_ref(), cf, GEN_ID),
-            "mismatch on {cf:?}"
-        );
+        let (sealed_digest, sealed_rows) = compute_family_digest(store.as_ref(), cf, GEN_ID)?;
+        let (live_digest, live_rows) = compute_family_digest(live.as_ref(), cf, GEN_ID)?;
+        assert!(sealed_rows > 0, "{cf:?} has no sealed rows after open");
+        assert_eq!(sealed_rows, live_rows, "row count differs on {cf:?}");
+        assert_eq!(sealed_digest, live_digest, "mismatch on {cf:?}");
     }
 
     let bulk_indexer = Indexer::new(Arc::clone(&store));
@@ -1103,6 +1228,7 @@ struct CrashAtDurableWrite {
     inner: RocksDbStore,
     crash_at: usize,
     durable_writes: AtomicU64,
+    crashed: AtomicBool,
 }
 
 impl KvStore for CrashAtDurableWrite {
@@ -1144,6 +1270,7 @@ impl KvStore for CrashAtDurableWrite {
         let ordinal = usize::try_from(self.durable_writes.fetch_add(1, Ordering::SeqCst) + 1)
             .unwrap_or(usize::MAX);
         if ordinal == self.crash_at {
+            self.crashed.store(true, Ordering::SeqCst);
             return Err(StorageError::Backend("injected crash".to_owned()));
         }
         self.inner.write_durable(batch)
@@ -1212,7 +1339,42 @@ fn bulk_publish_is_all_or_nothing_across_a_crash() -> Result<(), TestError> {
             .map(|block| block.txs.len())
             .sum::<usize>(),
     )?;
-    for crash_at in 1..=2 {
+    let writes_observed = {
+        let dir = tempdir()?;
+        let scratch = tempdir()?;
+        let store = Arc::new(CrashAtDurableWrite {
+            inner: RocksDbStore::open(dir.path())?,
+            crash_at: usize::MAX,
+            durable_writes: AtomicU64::new(0),
+            crashed: AtomicBool::new(false),
+        });
+        let coverage = BulkSegmentBuilder::new(
+            Arc::new(UnboundedBudget),
+            None,
+            scratch.path().to_path_buf(),
+        )
+        .build_and_ingest(store.as_ref(), GEN_ID, &chain.blocks)
+        .map_err(|e| e.to_string())?;
+        bitcoin_rs_projection::segment::publish_bulk_generation(
+            store.as_ref(),
+            GEN_ID,
+            coverage,
+            next_ordinal,
+            IndexCapabilities::ALL,
+        )
+        .map_err(|e| e.to_string())?;
+        store.durable_writes.load(Ordering::SeqCst)
+    };
+    assert!(
+        writes_observed > 0,
+        "the clean run must observe at least one durable publish write"
+    );
+    let mut crash_points = Vec::new();
+    for point in 1..=writes_observed {
+        crash_points.push(usize::try_from(point)?);
+    }
+    crash_points.push(usize::MAX);
+    for crash_at in crash_points {
         let dir = tempdir()?;
         let scratch = tempdir()?;
         let seal_scratch = tempdir()?;
@@ -1220,6 +1382,7 @@ fn bulk_publish_is_all_or_nothing_across_a_crash() -> Result<(), TestError> {
             inner: RocksDbStore::open(dir.path())?,
             crash_at,
             durable_writes: AtomicU64::new(0),
+            crashed: AtomicBool::new(false),
         });
         let coverage = BulkSegmentBuilder::new(
             Arc::new(UnboundedBudget),
@@ -1235,10 +1398,29 @@ fn bulk_publish_is_all_or_nothing_across_a_crash() -> Result<(), TestError> {
             next_ordinal,
             IndexCapabilities::ALL,
         );
-        if let Err(error) = publish {
+        if crash_at == usize::MAX {
             assert!(
-                matches!(error, IndexError::Storage(_)),
-                "publish failed for a reason other than the injected crash: {error}"
+                !store.crashed.load(Ordering::SeqCst),
+                "the clean publish must not trip the crash injection"
+            );
+        } else {
+            assert!(
+                store.crashed.load(Ordering::SeqCst),
+                "crash point {crash_at} never fired during publish"
+            );
+            let Err(error) = publish else {
+                panic!("publish at crash_at {crash_at} must fail on the injected crash");
+            };
+            let IndexError::Storage(storage) = &error else {
+                panic!("publish failed for a reason other than the injected crash: {error}");
+            };
+            let StorageError::Backend(detail) = storage else {
+                panic!("publish failed with a storage error other than the crash: {error}");
+            };
+            assert_eq!(
+                detail.as_str(),
+                "injected crash",
+                "publish must fail at the injected durable write"
             );
         }
 
@@ -1255,20 +1437,24 @@ fn bulk_publish_is_all_or_nothing_across_a_crash() -> Result<(), TestError> {
             );
             continue;
         }
-        assert!(
-            watermarked.iter().all(Option::is_some),
-            "crash at durable write {crash_at}: sealed records without all watermarks: {marks:?}"
-        );
         let mut writer = IndexWriter::open(Arc::clone(&store), GEN_ID)?
             .with_seal_scratch(seal_scratch.path().to_path_buf());
         writer.restore_tail_bounds()?;
         let before = family_totals(store.as_ref())?;
-        catch_up_from_watermarks(
+        assert!(
+            before.iter().any(|(_, rows)| *rows > 0),
+            "the bulk build writes rows before the crash"
+        );
+        let caught = catch_up_from_watermarks(
             &mut writer,
             &chain.blocks,
             &coverage,
             IndexCapabilities::ALL,
         )?;
+        assert_eq!(
+            caught, 0,
+            "reopen at crash_at {crash_at} must not rewrite covered heights"
+        );
         assert_eq!(
             before,
             family_totals(store.as_ref())?,

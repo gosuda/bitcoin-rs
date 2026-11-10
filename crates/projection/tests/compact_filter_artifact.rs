@@ -323,6 +323,10 @@ fn small_budget_compact_filter_restore_matches_live_rows() {
     .expect("a bounded re-encode attaches");
     assert_eq!(attached, artifact.records);
     assert!(
+        budget.peak_bytes() > 0,
+        "the bounded re-encode charges its rows to the budget"
+    );
+    assert!(
         budget.peak_bytes() <= 4096,
         "the re-encode buffered {} bytes above the 4096-byte budget",
         budget.peak_bytes()
@@ -514,7 +518,12 @@ fn compact_filter_artifact_second_attach_over_populated_family_is_refused() {
         &SpillBudget::new(u64::MAX),
     )
     .expect("the first attach succeeds");
-    let before = rows_with_prefix(&receiver_store, ColumnFamily::UtxoMeta, &UTXO_FILTER_PREFIX);
+    let before = rows_with_prefix(&receiver_store, ColumnFamily::Filters, &[]);
+    assert_eq!(
+        before,
+        fixture.hashes.len(),
+        "the first attach stores one height-keyed row per block"
+    );
 
     let error = attach_compact_filter_artifact(
         &receiver,
@@ -531,7 +540,7 @@ fn compact_filter_artifact_second_attach_over_populated_family_is_refused() {
         "got {error:?}"
     );
     assert_eq!(
-        rows_with_prefix(&receiver_store, ColumnFamily::UtxoMeta, &UTXO_FILTER_PREFIX),
+        rows_with_prefix(&receiver_store, ColumnFamily::Filters, &[]),
         before,
         "the refused attach leaves the rows as they were"
     );

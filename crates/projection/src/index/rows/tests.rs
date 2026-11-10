@@ -429,21 +429,41 @@ fn row_deletes_mirror_inserts_and_shared_headers_are_deleted_only_on_request()
         puts.iter().all(|op| matches!(op, BatchOp::Put { .. })),
         "put_rows emits only puts"
     );
-    let as_delete = |op: &BatchOp| match op {
-        BatchOp::Put { cf, key, .. } => BatchOp::Delete {
-            cf: *cf,
-            key: key.clone(),
+    let mut live_key1 = [0u8; crate::types::SCRIPT_LIVE_ROW_SIZE];
+    live_key1[0..8].copy_from_slice(&[10u8; 8]);
+    live_key1[8..40].copy_from_slice(&[1u8; 32]);
+    let mut live_key2 = [0u8; crate::types::SCRIPT_LIVE_ROW_SIZE];
+    live_key2[0..8].copy_from_slice(&[20u8; 8]);
+    live_key2[8..40].copy_from_slice(&[2u8; 32]);
+    live_key2[40..43].copy_from_slice(&[1u8, 0u8, 0u8]);
+    let live_deletes = vec![
+        BatchOp::Delete {
+            cf: ColumnFamily::ScriptLive,
+            key: live_key1.to_vec(),
         },
-        BatchOp::Delete { .. } | BatchOp::DeleteRange { .. } => {
-            unreachable!("put_rows emits only puts")
-        }
-    };
-    let all_deletes: Vec<BatchOp> = puts.iter().map(as_delete).collect();
-    let live_deletes: Vec<BatchOp> = puts
-        .iter()
-        .filter(|op| op_cf(op) == ColumnFamily::ScriptLive)
-        .map(as_delete)
-        .collect();
+        BatchOp::Delete {
+            cf: ColumnFamily::ScriptLive,
+            key: live_key2.to_vec(),
+        },
+    ];
+    let all_deletes = vec![
+        BatchOp::Delete {
+            cf: ColumnFamily::BlockHeaders,
+            key: vec![1u8; crate::types::HEADER_ROW_SIZE],
+        },
+        BatchOp::Delete {
+            cf: ColumnFamily::BlockHeaders,
+            key: vec![2u8; crate::types::HEADER_ROW_SIZE],
+        },
+        BatchOp::Delete {
+            cf: ColumnFamily::ScriptLive,
+            key: live_key1.to_vec(),
+        },
+        BatchOp::Delete {
+            cf: ColumnFamily::ScriptLive,
+            key: live_key2.to_vec(),
+        },
+    ];
     assert_eq!(live_deletes.len(), 2);
     assert_eq!(all_deletes.len(), 4);
 

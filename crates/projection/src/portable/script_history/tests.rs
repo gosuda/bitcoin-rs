@@ -3,7 +3,10 @@ use crate::portable::artifact::{ARTIFACT_VERSION, ArtifactHeader};
 use crate::portable::manifest::BundleFamily;
 use crate::portable::{IndexBundleError, ManifestArtifactTarget, SpillBudget};
 use crate::segment::bulk_builder::BulkSegmentBuilder;
-use crate::segment::format::{TX_KIND_TXID, tx_dir_kind_prefix};
+use crate::segment::format::{
+    TX_KIND_TXID, decode_spend_dir_key, decode_spend_dir_value, decode_tx_dir_key,
+    decode_tx_dir_value, tx_dir_kind_prefix,
+};
 use crate::segment::import::{ImportedSegment, put_segment};
 use crate::segment::import::{ScriptHistoryImportError, script_history_segment};
 use crate::segment::{
@@ -567,7 +570,7 @@ fn small_budget_restore_matches_the_live_export() -> TestResult {
     );
     Ok(())
 }
-// SNP-05
+// PRJ-06, PRJ-07
 #[test]
 fn one_spender_of_two_outpoints_names_one_transaction() -> TestResult {
     let script_a = Bytes::copy_from_slice(b"\x76\xa9\x14double_spend_script_a\x88\xac");
@@ -700,5 +703,53 @@ fn one_spender_of_two_outpoints_names_one_transaction() -> TestResult {
         family_rows(&live, ColumnFamily::TxDir)?,
         "one spender of two outpoints restores the live ordinals"
     );
+    let spender = [0xB1_u8; 32];
+    let funding = [0xA1_u8; 32];
+    let mut spender_ordinal = None;
+    let mut funding_ordinal = None;
+    for entry in receiver_store.iter_prefix(ColumnFamily::TxDir, &[])? {
+        let (key, value) = entry?;
+        let Some((_, txid, height)) = decode_tx_dir_key(&key) else {
+            continue;
+        };
+        if txid == spender {
+            let (block_hash, ordinal, offset, len) = decode_tx_dir_value(&value)
+                .ok_or_else(|| std::io::Error::other("spender directory value"))?;
+            assert_eq!(height, 2, "the spender row carries its confirming height");
+            assert_eq!(
+                block_hash, [0x22_u8; 32],
+                "the spender row carries its block hash"
+            );
+            assert_eq!(offset, 0, "the spender row carries its block offset");
+            assert_eq!(len, 120, "the spender row carries its block length");
+            spender_ordinal = Some(ordinal);
+        } else if txid == funding {
+            let (_, ordinal, _, _) = decode_tx_dir_value(&value)
+                .ok_or_else(|| std::io::Error::other("funding directory value"))?;
+            assert_eq!(height, 1, "the funding row carries its confirming height");
+            funding_ordinal = Some(ordinal);
+        }
+    }
+    let spender_ordinal =
+        spender_ordinal.ok_or_else(|| std::io::Error::other("the restore names the spender"))?;
+    let funding_ordinal =
+        funding_ordinal.ok_or_else(|| std::io::Error::other("the restore names the funding"))?;
+    let mut resolved = 0;
+    for entry in receiver_store.iter_prefix(ColumnFamily::SpendDir, &[])? {
+        let (key, value) = entry?;
+        let Some((_, creation_ordinal, vout)) = decode_spend_dir_key(&key) else {
+            continue;
+        };
+        if creation_ordinal == funding_ordinal && (vout == 0 || vout == 1) {
+            assert_eq!(
+                decode_spend_dir_value(&value)
+                    .ok_or_else(|| std::io::Error::other("spend directory value"))?,
+                spender_ordinal,
+                "both spent outpoints name the one spending transaction"
+            );
+            resolved += 1;
+        }
+    }
+    assert_eq!(resolved, 2, "both spent outpoints resolve to the spender");
     Ok(())
 }

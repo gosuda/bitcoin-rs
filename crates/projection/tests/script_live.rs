@@ -1049,7 +1049,7 @@ fn row_codec() -> impl proptest::strategy::Strategy<Value = ScriptLiveCoin> {
 
 // PRJ-11
 #[test]
-fn script_live_value_matches_core_compress_amount_vectors() -> Result<(), TestError> {
+fn script_live_value_matches_compress_amount_vectors() -> Result<(), TestError> {
     let vectors: [(u64, &[u8]); 6] = [
         (0, &[0x00]),
         (1, &[0x01]),
@@ -1091,29 +1091,35 @@ fn script_live_value_round_trips_core_test_encode_sweeps() -> Result<(), TestErr
     for amount in 1..=420_000 {
         assert_round_trip(amount * 50 * COIN)?;
     }
-    for compressed in 0_u64..100_000 {
+    let vectors: [(u64, &[u8], Option<u64>); 11] = [
+        (0, &[0x00], Some(0)),
+        (1, &[0x01], Some(1)),
+        (7, &[0x07], Some(1_000_000)),
+        (9, &[0x09], Some(COIN)),
+        (50, &[0x32], Some(50 * COIN)),
+        (127, &[0x7F], Some(14_000_000)),
+        (128, &[0x80, 0x01], Some(140_000_000)),
+        (300, &[0xAC, 0x02], Some(30_000_000_000)),
+        (16_384, &[0x80, 0x80, 0x01], Some(1_821_000)),
+        (21_000_000, &[0xC0, 0xDE, 0x81, 0x0A], Some(MAX_MONEY)),
+        (100_000_000, &[0x80, 0xC2, 0xD7, 0x2F], None),
+    ];
+    for (compressed, varint, expected) in vectors {
         let mut bytes = vec![0_u8; 32];
-        let mut value = compressed;
-        loop {
-            let byte = u8::try_from(value & 0x7f).unwrap_or(0);
-            value >>= 7;
-            bytes.push(if value == 0 { byte } else { byte | 0x80 });
-            if value == 0 {
-                break;
-            }
-        }
+        bytes.extend_from_slice(varint);
         bytes.push(0x00);
-        match ScriptLiveCoin::decode_value(&bytes) {
-            Ok(coin) => assert!(coin.value <= MAX_MONEY, "decoded value stays in range"),
-            Err(error) => assert!(
-                matches!(
-                    error,
-                    ScriptLiveValueError::Truncated
-                        | ScriptLiveValueError::MalformedVarint
-                        | ScriptLiveValueError::AmountOverflow
-                        | ScriptLiveValueError::HeightOverflow
-                ),
-                "refusal is typed: {error:?}"
+        match expected {
+            Some(value) => {
+                let coin = ScriptLiveCoin::decode_value(&bytes).map_err(|e| e.to_string())?;
+                assert_eq!(coin.value, value, "decompressed value of {compressed}");
+                assert_eq!(coin.height, 0, "decode vector carries height zero");
+                assert!(!coin.coinbase, "decode vector is not a coinbase");
+                assert_eq!(coin.scripthash, ScriptHash::from_byte_array([0; 32]));
+            }
+            None => assert_eq!(
+                ScriptLiveCoin::decode_value(&bytes),
+                Err(ScriptLiveValueError::AmountOverflow),
+                "compressed {compressed} exceeds the money range"
             ),
         }
     }

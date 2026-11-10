@@ -68,6 +68,7 @@ impl BlockBodyStore for CountingBlockBodyStore {
 
 struct PassthroughBodySource {
     bodies: Arc<RwLock<BodyMap>>,
+    calls: Arc<AtomicU64>,
 }
 
 impl BlockBodySource for PassthroughBodySource {
@@ -76,6 +77,7 @@ impl BlockBodySource for PassthroughBodySource {
         height: u32,
         hash: BlockHash,
     ) -> Result<Option<Vec<u8>>, BlockBodyReadError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let guard = self.bodies.read();
         Ok(guard
             .get(&(height, Hash256::from(hash).to_le_bytes()))
@@ -89,6 +91,7 @@ impl BlockBodySource for PassthroughBodySource {
         offset: u32,
         len: u32,
     ) -> Option<Vec<u8>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let guard = self.bodies.read();
         let body = guard.get(&(height, Hash256::from(hash).to_le_bytes()))?;
         let start = usize::try_from(offset).ok()?;
@@ -274,10 +277,10 @@ fn block_to_facts(
 fn live_index_path_reads_zero_block_bodies() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let data_dir = temp_dir.path();
-
+    let load_counter = Arc::new(AtomicU64::new(0));
+    let source_calls = Arc::new(AtomicU64::new(0));
     let mut tree = BlockTree::new();
     let bodies = Arc::new(RwLock::new(BodyMap::new()));
-    let load_counter = Arc::new(AtomicU64::new(0));
 
     let genesis = mine_test_block([0_u8; 32], 0, Vec::new());
     let gen_bytes = serialize(&genesis);
@@ -334,6 +337,7 @@ fn live_index_path_reads_zero_block_bodies() {
     });
     let body_source: Arc<dyn BlockBodySource> = Arc::new(PassthroughBodySource {
         bodies: Arc::clone(&bodies),
+        calls: Arc::clone(&source_calls),
     });
 
     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
@@ -427,6 +431,11 @@ fn live_index_path_reads_zero_block_bodies() {
     assert_eq!(
         reads, 0,
         "live index path must read zero block bodies, but read {reads}"
+    );
+    assert_eq!(
+        source_calls.load(Ordering::SeqCst),
+        0,
+        "live index path must not read bodies through the body source either"
     );
 
     let b1_txid = Txid::from(Hash256::from_le_bytes(

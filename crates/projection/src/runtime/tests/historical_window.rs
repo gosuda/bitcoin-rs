@@ -260,17 +260,25 @@ fn heights_above_the_base_come_only_from_committed_facts() -> Result<(), TestErr
     worker.facts_rx = Some(facts_rx);
     reset_parse_exact_call_count();
     let mut pending = None;
+    let mut stalled = false;
     for _ in 0..8 {
         match worker
             .reconcile_once(&mut pending)
             .map_err(|_| TestError::Missing("reconcile_once"))?
         {
-            crate::runtime::ReconcileAction::Stalled => break,
+            crate::runtime::ReconcileAction::Stalled => {
+                stalled = true;
+                break;
+            }
             crate::runtime::ReconcileAction::Progressed
             | crate::runtime::ReconcileAction::Buffered
             | crate::runtime::ReconcileAction::CaughtUp => continue,
         }
     }
+    assert!(
+        stalled,
+        "the worker must stall while heights await historical facts"
+    );
     assert_eq!(
         bodies.loads.load(Ordering::SeqCst),
         0,

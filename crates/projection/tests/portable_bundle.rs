@@ -1264,6 +1264,10 @@ fn small_budget_tx_lookup_restore_matches_backfill() {
     .expect("a bounded re-encode attaches");
     assert!(records > 0, "the attached artifact produced no rows");
     assert!(
+        budget.peak_bytes() > 0,
+        "the re-encode must charge the spill budget or the bound is vacuous"
+    );
+    assert!(
         decoded > budget.peak_bytes(),
         "the artifact must exceed the budget to prove streaming: {decoded} <= {}",
         budget.peak_bytes()
@@ -1484,9 +1488,10 @@ fn interrupted_import_is_cleared_on_restart_and_restore_retries() {
     );
     node.stop();
     let interrupted = durable(&receiver);
-    assert!(
-        !interrupted.tx_confirmed.is_empty(),
-        "the injected crash must leave unwatermarked generation rows on disk"
+    assert_eq!(
+        interrupted.tx_confirmed.len(),
+        source_state.tx_confirmed.len(),
+        "the injected crash must leave the full unwatermarked bulk import on disk"
     );
     let source_rows: HashSet<_> = source_state.tx_confirmed.iter().collect();
     assert!(

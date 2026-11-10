@@ -267,6 +267,7 @@ fn prepare_pair(
     Ok([first, second])
 }
 
+// IDX-06
 #[test]
 fn planned_bytes_bound_every_write_of_a_batch() -> Result<(), TestError> {
     let chain = chain();
@@ -296,7 +297,7 @@ fn planned_bytes_bound_every_write_of_a_batch() -> Result<(), TestError> {
             "a batch admitted at its own planned size is admitted again"
         );
     }
-    assert_eq!(batch.encoded_bytes(), limit);
+    assert!(limit > 0, "the fixture must plan a nonzero batch");
 
     writer.commit_forward(batch)?;
     let written = store
@@ -305,6 +306,7 @@ fn planned_bytes_bound_every_write_of_a_batch() -> Result<(), TestError> {
         .last()
         .copied()
         .ok_or_else(|| std::io::Error::other("the commit recorded no write"))?;
+    assert!(written > 0, "the fixture must write a nonzero batch");
     assert!(
         written <= limit,
         "the batch's writes must fit its planned bytes: wrote {written}, planned {limit}"

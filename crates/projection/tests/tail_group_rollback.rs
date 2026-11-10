@@ -346,7 +346,7 @@ fn assert_group_at(
     );
     Ok(())
 }
-
+// IDX-07
 #[test]
 fn shared_tail_group_rollback_matches_bulk_build() -> Result<(), TestError> {
     let chain = build_chain()?;

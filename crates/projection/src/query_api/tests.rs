@@ -334,7 +334,7 @@ fn query_miss_absent_maps_to_scoped_none() {
     assert_eq!(from_result, Ok(None));
 
     let try_err = TxQueryError::try_from(QueryMiss::Absent);
-    assert!(try_err.is_err(), "Absent inside coverage is not an error");
+    assert_eq!(try_err, Err(()), "Absent inside coverage is not an error");
 
     let unavailable = QueryMiss::Unavailable {
         capability: IndexCapability::TxLookup,

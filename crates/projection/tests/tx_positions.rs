@@ -2,6 +2,7 @@
 
 use crate::support::common;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bitcoin_rs_consensus::primitives::{
@@ -152,6 +153,7 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
         .collect();
     assert_eq!(funded.len(), 2, "two transactions funded this script");
 
+    let mut seen = BTreeSet::new();
     for occurrence in funded {
         let position = occurrence.position;
         let start = usize::try_from(position.offset()).expect("offset fits usize");
@@ -159,6 +161,7 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
         let decoded: Tx =
             deserialize(&bytes[start..end]).expect("position slices a whole transaction");
         assert_eq!(decoded.txid().as_bytes(), &occurrence.txid);
+        seen.insert(decoded.txid());
         assert!(
             decoded
                 .outputs
@@ -167,6 +170,11 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
             "position must address a transaction that funded the script"
         );
     }
+    assert_eq!(
+        seen,
+        BTreeSet::from([block.txs[0].txid(), block.txs[1].txid()]),
+        "funding positions must name exactly the two transactions that funded the script"
+    );
 }
 
 #[test]

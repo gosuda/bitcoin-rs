@@ -470,7 +470,7 @@ fn segment_rows(rows: Vec<TxIndexScanRow>) -> Vec<(u32, Vec<u8>)> {
     pairs
 }
 
-// PRJ-06, PRJ-07, PRJ-09
+// PRJ-06, PRJ-07
 #[test]
 fn segment_reads_match_bulk_build() -> Result<(), TestError> {
     let blocks = facts_chain(BLOCKS);
@@ -514,6 +514,8 @@ fn segment_reads_match_bulk_build() -> Result<(), TestError> {
     let bulk = bulk_indexer.snapshot()?;
 
     let mut funding_seen = 0_usize;
+    let mut tx_seen = 0_usize;
+    let mut spend_seen = 0_usize;
     for seed in 0..BLOCKS {
         let scripthash = ScriptHash::from_script_bytes(&script_for(seed));
         let expected = segment_rows(bulk.funding_rows(scripthash, SCAN_ALL)?.rows);
@@ -527,19 +529,28 @@ fn segment_reads_match_bulk_build() -> Result<(), TestError> {
         let txid = Txid(Hash256::from_le_bytes(&coinbase_txid(height)));
         let expected = segment_rows(bulk.transaction_rows(&txid, SCAN_ALL)?.rows);
         let actual = segment_rows(live.transaction_rows(&txid, SCAN_ALL)?.rows);
+        tx_seen += actual.len();
         assert_eq!(actual, expected, "transaction rows at height {height}");
 
         let outpoint = OutPoint::new(txid, 0);
         let expected = segment_rows(bulk.spending_rows(&outpoint, SCAN_ALL)?.rows);
         let actual = segment_rows(live.spending_rows(&outpoint, SCAN_ALL)?.rows);
+        spend_seen += actual.len();
         assert_eq!(actual, expected, "spending rows at height {height}");
 
         let hash = block_hash(height);
+        let live_filter = live.compact_filter(height, &hash)?;
+        assert!(
+            live_filter.is_some(),
+            "live serves the compact filter at height {height}"
+        );
         assert_eq!(
-            live.compact_filter(height, &hash)?,
+            live_filter,
             bulk.compact_filter(height, &hash)?,
             "compact filter at height {height}"
         );
     }
+    assert!(tx_seen > 0, "the fixture produces transaction rows");
+    assert!(spend_seen > 0, "the fixture produces spending rows");
     Ok(())
 }

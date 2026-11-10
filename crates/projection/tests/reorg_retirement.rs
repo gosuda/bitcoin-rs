@@ -11,17 +11,22 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 use crate::support::TestError;
-fn count_rows_in_prefix<S: KvStore>(store: &S, cf: ColumnFamily, prefix: &[u8]) -> usize {
-    let Ok(snapshot) = store.snapshot() else {
-        return 0;
-    };
-    let Ok(iter) = snapshot.iter_prefix(cf, prefix) else {
-        return 0;
-    };
-    iter.count()
+fn count_rows_in_prefix<S: KvStore>(
+    store: &S,
+    cf: ColumnFamily,
+    prefix: &[u8],
+) -> Result<usize, TestError> {
+    let snapshot = store.snapshot()?;
+    let iter = snapshot.iter_prefix(cf, prefix)?;
+    let mut rows = 0usize;
+    for item in iter {
+        let _ = item?;
+        rows = rows.saturating_add(1);
+    }
+    Ok(rows)
 }
 
-// REO-04, REO-05
+// REO-04
 #[test]
 fn deep_reorg_retires_one_generation_only() -> Result<(), TestError> {
     let gen_id = 1u64;
@@ -89,19 +94,23 @@ fn deep_reorg_retires_one_generation_only() -> Result<(), TestError> {
     store.write_durable(batch)?;
 
     let gen_prefix = gen_id.to_be_bytes();
-    assert!(count_rows_in_prefix(&store, ColumnFamily::TxDir, &gen_prefix) > 0);
-    assert!(count_rows_in_prefix(&store, ColumnFamily::ScriptDict, &gen_prefix) > 0);
+    assert!(count_rows_in_prefix(&store, ColumnFamily::TxDir, &gen_prefix)? > 0);
+    assert!(count_rows_in_prefix(&store, ColumnFamily::ScriptDict, &gen_prefix)? > 0);
 
+    let script_before = store.snapshot()?.get(
+        ColumnFamily::IdxMeta,
+        &meta_gen_key(IndexCapability::ScriptHistory),
+    )?;
     retire_generation(&store, IndexCapability::TxLookup, gen_id)?;
 
     assert_eq!(
-        count_rows_in_prefix(&store, ColumnFamily::TxDir, &gen_prefix),
+        count_rows_in_prefix(&store, ColumnFamily::TxDir, &gen_prefix)?,
         0
     );
 
-    assert!(count_rows_in_prefix(&store, ColumnFamily::ScriptDict, &gen_prefix) > 0);
-    assert!(count_rows_in_prefix(&store, ColumnFamily::ScriptPost, &gen_prefix) > 0);
-    assert!(count_rows_in_prefix(&store, ColumnFamily::ScriptStats, &gen_prefix) > 0);
+    assert!(count_rows_in_prefix(&store, ColumnFamily::ScriptDict, &gen_prefix)? > 0);
+    assert!(count_rows_in_prefix(&store, ColumnFamily::ScriptPost, &gen_prefix)? > 0);
+    assert!(count_rows_in_prefix(&store, ColumnFamily::ScriptStats, &gen_prefix)? > 0);
 
     let snapshot = store.snapshot()?;
     let tx_meta = snapshot.get(
@@ -130,6 +139,22 @@ fn deep_reorg_retires_one_generation_only() -> Result<(), TestError> {
         ColumnFamily::IdxMeta,
         &meta_gen_key(IndexCapability::ScriptHistory),
     )?;
+    assert_eq!(
+        script_meta, script_before,
+        "retirement must not rewrite the unaffected ScriptHistory descriptor"
+    );
     assert!(script_meta.is_some());
+    let script_sealed = snapshot.get(
+        ColumnFamily::IdxMeta,
+        &sealed_gen_key(IndexCapability::ScriptHistory, gen_id),
+    )?;
+    assert_eq!(
+        script_sealed
+            .as_deref()
+            .and_then(IndexGeneration::decode_meta_value)
+            .map(|desc| desc.gen_id),
+        Some(gen_id),
+        "retirement keeps the ScriptHistory sealed generation"
+    );
     Ok(())
 }

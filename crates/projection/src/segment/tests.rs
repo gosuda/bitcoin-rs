@@ -8,8 +8,6 @@ fn posting_holds_reference_and_flags_only() {
     let chunk = 0u32;
     let key = encode_script_post_key(gen_id, script_id, chunk);
 
-    assert_eq!(key.len(), SCRIPT_POST_KEY_LEN);
-    assert_eq!(key.len(), 16);
     assert!(key.len() < 32);
 
     let items = vec![
@@ -28,15 +26,20 @@ fn posting_holds_reference_and_flags_only() {
         panic!("posting decode failed");
     };
     assert_eq!(decoded, items);
-
-    for item in decoded {
-        assert!(item.flags == POSTING_FLAG_FUNDING || item.flags == POSTING_FLAG_SPENDING);
-    }
+    assert_eq!(
+        encoded.len(),
+        items.len() * 2,
+        "two bytes per posting: a one-byte ordinal varint and one flag byte"
+    );
+    assert!(
+        encoded.len() < 32,
+        "the posting value holds no script hash or txid"
+    );
 }
 
+// PRJ-08, IDX-12
 #[test]
-#[expect(clippy::expect_used)]
-fn history_pages_walk_more_than_256_posting_chunks() {
+fn history_pages_walk_more_than_256_posting_chunks() -> Result<(), crate::portable::TestError> {
     use crate::segment::import::{
         TxOccurrence, next_segment_id, put_segment, stage_segment, tx_lookup_segment,
     };
@@ -46,8 +49,8 @@ fn history_pages_walk_more_than_256_posting_chunks() {
     use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit, RocksDbStore};
 
     const TXS: u32 = 300;
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = RocksDbStore::open(dir.path()).expect("open store");
+    let dir = tempfile::tempdir()?;
+    let store = RocksDbStore::open(dir.path())?;
     let script = ScriptHash::from_script_bytes(b"paging script");
     let coverage = Coverage::new(1, TXS, [7_u8; 32]);
     let occurrences: Vec<TxOccurrence> = (0..TXS)
@@ -62,7 +65,7 @@ fn history_pages_walk_more_than_256_posting_chunks() {
             }
         })
         .collect();
-    let mut segment = tx_lookup_segment(occurrences, coverage, 0).expect("tx segment");
+    let mut segment = tx_lookup_segment(occurrences, coverage, 0)?;
     let dict_row = (
         encode_script_dict_key(0, &script.to_byte_array()).to_vec(),
         encode_script_dict_value(0).to_vec(),
@@ -84,21 +87,19 @@ fn history_pages_walk_more_than_256_posting_chunks() {
         .push((ColumnFamily::ScriptDict, vec![dict_row]));
     segment.families.push((ColumnFamily::ScriptPost, post_rows));
     let caps = IndexCapabilities::TX_LOOKUP.insert(IndexCapability::ScriptHistory);
-    let gen_id = next_segment_id(&store).expect("segment id");
-    stage_segment(&store, gen_id, &segment, dir.path()).expect("stage segment");
+    let gen_id = next_segment_id(&store)?;
+    stage_segment(&store, gen_id, &segment, dir.path())?;
     let mut batch = store.new_batch();
     put_segment(&mut batch, gen_id, &segment, caps);
-    store.write_durable(batch).expect("publish segment");
+    store.write_durable(batch)?;
 
-    let snapshot = SegmentSnapshot::open(store.snapshot().expect("snapshot")).expect("open view");
+    let snapshot = SegmentSnapshot::open(store.snapshot()?)?;
     let page_of = |max_rows| PrefixScanLimit {
         max_rows,
         max_bytes: usize::MAX,
     };
     let mut seen = Vec::new();
-    let mut page = snapshot
-        .funding_rows(script, page_of(7))
-        .expect("first page");
+    let mut page = snapshot.funding_rows(script, page_of(7))?;
     loop {
         seen.extend(page.rows.iter().map(|row| row.row.height()));
         if page.complete {
@@ -107,21 +108,18 @@ fn history_pages_walk_more_than_256_posting_chunks() {
         let last = page
             .rows
             .last()
-            .expect("a truncated page holds rows")
+            .ok_or("a truncated page holds rows")?
             .row
             .height();
-        page = snapshot
-            .funding_rows_from(script, last.saturating_sub(1), page_of(7))
-            .expect("next page");
+        page = snapshot.funding_rows_from(script, last.saturating_sub(1), page_of(7))?;
     }
     assert_eq!(seen, (1..=TXS).rev().collect::<Vec<u32>>());
-    let unpaged = snapshot
-        .funding_rows(script, page_of(usize::MAX))
-        .expect("unpaged history");
+    let unpaged = snapshot.funding_rows(script, page_of(usize::MAX))?;
     assert!(unpaged.complete);
     assert_eq!(unpaged.rows.len(), usize::try_from(TXS).unwrap_or(0));
+    Ok(())
 }
-
+// IDX-10
 #[test]
 #[expect(clippy::expect_used)]
 fn restore_orphan_cleanup_deletes_only_the_pending_segment() {
@@ -322,6 +320,8 @@ fn core_filter_vectors_read_back_through_the_segment_snapshot()
 
     let vectors: Vec<sonic_rs::Value> =
         sonic_rs::from_str(include_str!("../../tests/data/blockfilters-core-31.1.json"))?;
+    let expected = vectors.len().saturating_sub(1);
+    let mut compared = 0_usize;
     for vector in vectors.into_iter().skip(1) {
         let (height, _hash, body, prevouts, previous, expected_filter, expected_header, note): (
             u32,
@@ -356,7 +356,9 @@ fn core_filter_vectors_read_back_through_the_segment_snapshot()
         assert_eq!(filter.filter, Vec::from_hex(&expected_filter)?, "{note}");
         let expected: FilterHeader = expected_header.parse()?;
         assert_eq!(filter.header, expected.to_byte_array(), "{note}");
+        compared += 1;
     }
+    assert_eq!(compared, expected, "every fixture vector is compared");
     Ok(())
 }
 
@@ -687,6 +689,16 @@ fn window_history_for_a_shared_script_matches_bulk() {
         live_history, bulk_history,
         "live window and sealed history equal the bulk build"
     );
+    assert_eq!(
+        live_history.len(),
+        blocks.len(),
+        "one history row per committed height"
+    );
+    assert_eq!(
+        bulk_history.len(),
+        blocks.len(),
+        "the bulk build holds one history row per committed height"
+    );
 }
 
 fn dense_block(
@@ -858,7 +870,10 @@ fn oversized_crash_before_its_seal_is_sealed_before_the_next_append() {
         let outcome = try_commit_one(&mut writer, &oversized);
         arm_seal_fault(None);
         assert!(
-            outcome.is_err(),
+            matches!(
+                outcome,
+                Err(crate::IndexError::InjectedFault { stage: "seal" })
+            ),
             "the injected fault interrupts the seal that follows the commit"
         );
     }
@@ -1121,6 +1136,10 @@ fn history_pages_seek_from_cursor_across_segments() -> Result<(), Box<dyn std::e
         first_heights,
         page_from(top),
         "the first page starts at the tip"
+    );
+    assert!(
+        first_chunks >= 1,
+        "the first page reads at least one posting chunk"
     );
     assert!(
         first_chunks <= 2,
