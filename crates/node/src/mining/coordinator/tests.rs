@@ -1,11 +1,12 @@
 use super::*;
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::Amount;
 use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_consensus::primitives::LockTime;
 use bitcoin_rs_consensus::primitives::Script;
 use bitcoin_rs_consensus::primitives::Tx;
 use bitcoin_rs_consensus::primitives::TxOut;
-use bitcoin_rs_execution::chain::{ChainError, ChainTxCount, ChainWork, NodeId};
+use bitcoin_rs_execution::chain::{ChainError, ChainTxCount, NodeId};
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolLimits;
 use bitcoin_rs_mempool::MutationChange;

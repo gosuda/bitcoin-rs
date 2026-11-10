@@ -9,7 +9,8 @@ use bitcoin_rs_mempool::{
     MutationOutcome, PolicyError, RbfError, RemovalReason, ReplacementCandidate,
 };
 
-use bitcoin_rs_execution::chain::{ChainWork, NodeId, TipSnapshot, regtest_fixture};
+use bitcoin_rs_consensus::header_rules::ChainWork;
+use bitcoin_rs_execution::chain::{NodeId, TipSnapshot, regtest_fixture};
 
 use bitcoin_rs_node::{
     Network, NodeConfig,

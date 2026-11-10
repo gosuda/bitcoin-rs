@@ -3,9 +3,10 @@ use super::super::chain::HeaderAdmission;
 use super::super::chain::SyncChain;
 use super::super::chain::SyncChainError;
 use super::super::chain::WindowCommitError;
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::{Hash256, Header, Network};
 use bitcoin_rs_execution::chain::TipSnapshot;
-use bitcoin_rs_execution::chain::{BlockTree, ChainWork, NodeStatus};
+use bitcoin_rs_execution::chain::{BlockTree, NodeStatus};
 use parking_lot::RwLockReadGuard;
 use std::sync::Arc;
 

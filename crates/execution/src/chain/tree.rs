@@ -8,8 +8,9 @@ use slab::Slab;
 
 use crate::chain::{
     ChainError, ChainTxCount, TipSnapshot,
-    node::{BlockHeader, BlockTreeNode, NodeId, NodeStatus},
+    node::{BlockTreeNode, NodeId, NodeStatus},
 };
+use bitcoin_rs_consensus::header_rules::BlockHeader;
 
 mod active_index;
 use active_index::ActiveHeightIndex;

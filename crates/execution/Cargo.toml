@@ -36,7 +36,6 @@ mdbx = [
 bitcoin-rs-consensus.workspace = true
 bitcoin-rs-storage.workspace = true
 slab.workspace = true
-ruint.workspace = true
 
 arc-swap.workspace = true
 bytes.workspace = true

@@ -7,9 +7,10 @@ use super::{HeaderValidationMode, accept_headers, next_work_required};
 use crate::chain::test_error::TestError;
 use crate::chain::{
     ChainError,
-    node::{BlockHeader, ChainWork, NodeId, NodeStatus},
+    node::{NodeId, NodeStatus},
     tree::BlockTree,
 };
+use bitcoin_rs_consensus::header_rules::{BlockHeader, ChainWork};
 use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Network};
 
 const RETARGET_INTERVAL: u32 = 2016;

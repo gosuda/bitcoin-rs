@@ -6,6 +6,7 @@ use crate::mining::{
     BlockValidationResult, Candidate, CoinbaseBudget, MiningControl, MiningControlError,
     MiningError, STALE_PARENT_REASON,
 };
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, BlockImage, CompactTarget, Hash256, Header, Script, Tx, TxOut, Txid,
     Witness,
@@ -14,7 +15,7 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_consensus::script::VerifyFlags;
 use bitcoin_rs_consensus::transaction_sigop_cost;
-use bitcoin_rs_execution::chain::{ChainWork, compact_is_met_by};
+use bitcoin_rs_execution::chain::compact_is_met_by;
 use compact_str::CompactString;
 use ruint::Uint;
 use thiserror::Error;

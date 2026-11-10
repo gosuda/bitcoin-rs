@@ -4,8 +4,9 @@ use super::{BlockTree, Hash256};
 use crate::chain::test_error::TestError;
 use crate::chain::{
     ChainError, ChainTxCount,
-    node::{BlockHeader, NodeId, NodeStatus},
+    node::{NodeId, NodeStatus},
 };
+use bitcoin_rs_consensus::header_rules::BlockHeader;
 
 fn extend(tree: &mut BlockTree, parent: NodeId, nonce: u32) -> Result<NodeId, ChainError> {
     let header = test_header(BlockHash(tree.node(parent)?.hash), nonce);

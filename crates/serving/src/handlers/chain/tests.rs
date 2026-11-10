@@ -4,7 +4,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxIn, Txid};
 
 use super::*;
-use bitcoin_rs_execution::chain::{ChainWork, LatchReader, NodeId, TipSnapshot};
+use bitcoin_rs_consensus::header_rules::ChainWork;
+use bitcoin_rs_execution::chain::{LatchReader, NodeId, TipSnapshot};
 use bitcoin_rs_projection::block_log::BlockLog;
 
 struct SingleBlockSource {
@@ -1269,7 +1270,7 @@ fn getblockchaininfo_reports_tip_time_and_median_time_past() {
 
 #[test]
 fn getblockchaininfo_uses_one_applied_tip_snapshot() {
-    use bitcoin_rs_execution::chain::ChainWork;
+    use bitcoin_rs_consensus::header_rules::ChainWork;
 
     let ctx = context_with_tip(
         bitcoin_rs_consensus::primitives::Network::Regtest,

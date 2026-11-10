@@ -467,7 +467,7 @@ fn in_flight_activation_base(
 }
 
 pub struct ConvertedCheckpoint<'a> {
-    pub headers: &'a [crate::chain::BlockHeader],
+    pub headers: &'a [bitcoin_rs_consensus::header_rules::BlockHeader],
     pub tip_height: u32,
     pub tip_hash: bitcoin_rs_consensus::primitives::Hash256,
     pub chain_tx_count: u64,
@@ -655,7 +655,7 @@ pub fn publish_snapshot_base_checkpoint(
     target_data_dir: &cap_std::fs::Dir,
     target_host_dir: &Path,
     network: bitcoin_rs_consensus::primitives::Network,
-    headers: &[crate::chain::BlockHeader],
+    headers: &[bitcoin_rs_consensus::header_rules::BlockHeader],
     pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
     engine: &dyn bitcoin_rs_storage::KvStore,
 ) -> Result<(), ConvertedCheckpointError> {

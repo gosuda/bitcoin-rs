@@ -416,7 +416,6 @@ dependencies = [
  "proptest-state-machine",
  "quanta 0.13.0",
  "rayon",
- "ruint",
  "serde",
  "sha2",
  "slab",

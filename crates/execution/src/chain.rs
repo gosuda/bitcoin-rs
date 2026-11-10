@@ -17,6 +17,7 @@ mod transition;
 mod tree;
 mod view;
 
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::Hash256;
 use thiserror::Error;
 
@@ -33,7 +34,7 @@ pub use header_sync::{
     permitted_difficulty_transition, validate_contextual_header, validate_pow,
 };
 pub use ibd::InitialBlockDownload;
-pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
+pub use node::{BlockTreeNode, NodeId, NodeStatus};
 pub use progress::{ChainProgress, ChainProgressReader};
 pub use reorg::{ReorgPlan, plan_reorg};
 #[derive(Clone, Debug, PartialEq, Eq)]

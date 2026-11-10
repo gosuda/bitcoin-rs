@@ -4,8 +4,8 @@ use bitcoin_rs_consensus::primitives::{CompactTarget, Hash256, Network, i64_to_f
 
 use crate::chain::TipSnapshot;
 use crate::chain::ibd::InitialBlockDownload;
-use crate::chain::node::ChainWork;
 use crate::chain::view::{BlockTreeReader, TipReader};
+use bitcoin_rs_consensus::header_rules::ChainWork;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChainProgress {
@@ -153,9 +153,10 @@ mod reader_tests {
 
     use super::ChainProgressReader;
     use crate::chain::{
-        BlockTree, BlockTreeReader, ChainTxCount, ChainWork, InitialBlockDownload, NodeId,
-        TipReader, TipSnapshot,
+        BlockTree, BlockTreeReader, ChainTxCount, InitialBlockDownload, NodeId, TipReader,
+        TipSnapshot,
     };
+    use bitcoin_rs_consensus::header_rules::ChainWork;
 
     fn reader() -> (ChainProgressReader, TipReader, TipReader) {
         let header = TipReader::new(Arc::new(ArcSwapOption::empty()));

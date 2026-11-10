@@ -1,8 +1,9 @@
 use super::{chain_reject_reason, consensus_reject_reason, header_reject_reason};
 use crate::mining::MiningControlError;
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::{ConsensusError, ScriptEngine};
-use bitcoin_rs_execution::chain::{ChainError, ChainWork, NodeId};
+use bitcoin_rs_execution::chain::{ChainError, NodeId};
 
 // API-19
 #[test]

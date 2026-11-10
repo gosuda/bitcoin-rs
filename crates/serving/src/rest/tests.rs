@@ -909,7 +909,7 @@ fn tip_snapshot(height: u32, byte: u8, count: u64) -> Arc<TipSnapshot> {
     Arc::new(TipSnapshot {
         tip_id: bitcoin_rs_execution::chain::NodeId::new(height),
         height,
-        chainwork: bitcoin_rs_execution::chain::ChainWork::from(u128::from(count)),
+        chainwork: bitcoin_rs_consensus::header_rules::ChainWork::from(u128::from(count)),
         hash: Hash256::from_le_bytes(&[byte; 32]),
         chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::established(count),
     })

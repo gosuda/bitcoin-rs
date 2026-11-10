@@ -1,10 +1,10 @@
 use super::{map_apply_error, test_block_validity_error};
 use bitcoin_rs_consensus::ConsensusError;
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::Txid;
 use bitcoin_rs_execution::ApplyError;
 use bitcoin_rs_execution::chain::ChainError;
-use bitcoin_rs_execution::chain::ChainWork;
 use bitcoin_rs_execution::chain::NodeId;
 use bitcoin_rs_serving::mining::BlockValidationResult;
 use bitcoin_rs_serving::mining::MiningControlError;

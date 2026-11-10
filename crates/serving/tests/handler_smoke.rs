@@ -7,11 +7,12 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitcoin::hex::DisplayHex;
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
     Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
-use bitcoin_rs_execution::chain::{ChainWork, NodeId, NodeStatus, TipSnapshot};
+use bitcoin_rs_execution::chain::{NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_projection::block_log::BlockRecord;
 use bitcoin_rs_serving::context::{ChainControl, ChainControlError, Context};

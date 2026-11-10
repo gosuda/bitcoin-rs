@@ -1976,8 +1976,9 @@ mod getdifficulty_tests {
 mod pruneblockchain_tests {
     use alloc::sync::Arc;
 
+    use bitcoin_rs_consensus::header_rules::ChainWork;
     use bitcoin_rs_consensus::primitives::Hash256;
-    use bitcoin_rs_execution::chain::{ChainWork, NodeId, TipSnapshot};
+    use bitcoin_rs_execution::chain::{NodeId, TipSnapshot};
 
     use super::*;
 
@@ -2200,8 +2201,9 @@ mod chaintxstats_window_tests;
 mod verification_progress_wiring_tests {
     use alloc::sync::Arc;
 
+    use bitcoin_rs_consensus::header_rules::ChainWork;
     use bitcoin_rs_consensus::primitives::Hash256;
-    use bitcoin_rs_execution::chain::{ChainWork, NodeStatus, TipSnapshot};
+    use bitcoin_rs_execution::chain::{NodeStatus, TipSnapshot};
     use sonic_rs::{JsonValueTrait, json};
 
     use super::*;

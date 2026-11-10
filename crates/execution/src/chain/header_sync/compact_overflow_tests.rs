@@ -5,7 +5,8 @@
 
 use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Network};
 
-use crate::chain::{ChainError, ChainWork, NodeStatus, node::BlockHeader, validate_pow};
+use crate::chain::{ChainError, NodeStatus, validate_pow};
+use bitcoin_rs_consensus::header_rules::{BlockHeader, ChainWork};
 
 use super::compact_to_target;
 

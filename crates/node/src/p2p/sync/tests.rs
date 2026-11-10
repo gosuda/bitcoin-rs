@@ -13,12 +13,13 @@ use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use bitcoin::hashes::Hash;
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, BlockImage, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
     consensus_bytes,
 };
 use bitcoin_rs_execution::chain::{
-    BlockTree, ChainWork, HeaderRefusal, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot,
+    BlockTree, HeaderRefusal, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot,
     regtest_fixture,
 };
 use crossbeam_channel::unbounded;

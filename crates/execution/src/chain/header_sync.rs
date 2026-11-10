@@ -6,9 +6,10 @@ pub use pow::{compact_is_met_by, compact_to_target};
 
 use crate::chain::{
     ChainError,
-    node::{BlockHeader, ChainWork, NodeId, NodeStatus},
+    node::{NodeId, NodeStatus},
     tree::{BlockTree, Inserted},
 };
+use bitcoin_rs_consensus::header_rules::{BlockHeader, ChainWork};
 
 const MAX_FUTURE_TIME_SECONDS: u32 = 7200;
 
@@ -409,7 +410,7 @@ pub fn permitted_difficulty_transition(
 pub mod pow {
     use bitcoin_rs_consensus::primitives::{CompactTarget, Hash256};
 
-    use crate::chain::node::ChainWork;
+    use bitcoin_rs_consensus::header_rules::ChainWork;
 
     struct DecodedCompact {
         target: ChainWork,
@@ -490,7 +491,7 @@ pub mod pow {
 #[cfg(test)]
 mod fixture {
     use super::compact_is_met_by;
-    use crate::chain::node::BlockHeader;
+    use bitcoin_rs_consensus::header_rules::BlockHeader;
     use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256};
 
     pub(super) fn mine_regtest(

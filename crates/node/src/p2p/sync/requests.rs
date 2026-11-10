@@ -553,7 +553,8 @@ mod tests {
         super::super::SchedulerState,
         bitcoin_rs_consensus::primitives::Hash256,
     ) {
-        use bitcoin_rs_execution::chain::{ChainTxCount, ChainWork, TipSnapshot};
+        use bitcoin_rs_consensus::header_rules::ChainWork;
+        use bitcoin_rs_execution::chain::{ChainTxCount, TipSnapshot};
         let budget = crate::p2p::sync::default_sync_budget(
             bitcoin_rs_consensus::primitives::Network::Regtest,
         );

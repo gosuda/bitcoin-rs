@@ -1,11 +1,12 @@
 use alloc::sync::Arc;
 
 use bitcoin::hex::DisplayHex as _;
+use bitcoin_rs_consensus::header_rules::BlockHeader;
 use bitcoin_rs_consensus::primitives::{
     Amount, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Txid, Witness, consensus_bytes,
 };
-use bitcoin_rs_execution::chain::{BlockHeader, NodeId, NodeStatus, TipSnapshot};
+use bitcoin_rs_execution::chain::{NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 

@@ -6,7 +6,8 @@ use super::super::frontier::{
 };
 use crate::p2p::BlockStager;
 use crate::p2p::download_window::{BlameReason, BlockedContext, BlockedDecision, DownloadWindow};
-use bitcoin_rs_execution::chain::{ChainWork, NodeId};
+use bitcoin_rs_consensus::header_rules::ChainWork;
+use bitcoin_rs_execution::chain::NodeId;
 
 fn stall_blame(
     window: &mut DownloadWindow,

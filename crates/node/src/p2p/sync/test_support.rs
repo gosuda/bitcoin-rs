@@ -3,9 +3,10 @@ use super::chain::{
     WindowApplyDisposition, WindowCommitError,
 };
 use arc_swap::ArcSwapOption;
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::{Block, BlockImage, Hash256, Header, Network, Txid};
 use bitcoin_rs_execution::chain::{
-    BlockTree, ChainWork, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot, regtest_fixture,
+    BlockTree, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot, regtest_fixture,
 };
 use bitcoin_rs_wire::test_support::OrFail;
 use parking_lot::{Mutex, RwLock};

@@ -1568,14 +1568,14 @@ fn block_status_and_block_list_never_straddle_two_applied_branches() -> Result<(
             Arc::new(TipSnapshot {
                 tip_id: a1_id,
                 height: 1,
-                chainwork: bitcoin_rs_execution::chain::ChainWork::ZERO,
+                chainwork: bitcoin_rs_consensus::header_rules::ChainWork::ZERO,
                 hash: a1_hash.0,
                 chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
             }),
             Arc::new(TipSnapshot {
                 tip_id: b2_id,
                 height: 2,
-                chainwork: bitcoin_rs_execution::chain::ChainWork::ZERO,
+                chainwork: bitcoin_rs_consensus::header_rules::ChainWork::ZERO,
                 hash: b2_hash.0,
                 chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
             }),

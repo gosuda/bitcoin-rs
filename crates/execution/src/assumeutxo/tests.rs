@@ -1,8 +1,9 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use crate::chain::{ChainWork, NodeStatus};
+use crate::chain::NodeStatus;
 use arc_swap::ArcSwapOption;
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::{AssumeUtxoData, Block, BlockImage, Hash256, Network};
 use bitcoin_rs_storage::DurableHead;
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
