@@ -1367,7 +1367,7 @@ fn a_replacement_that_would_be_shed_leaves_the_pool_unchanged() {
     );
     let replacement_txid = replacement.txid();
     let before = (
-        pool.mining_snapshot().entries,
+        pool.mining_snapshot().entries.clone(),
         pool.estimator_history(),
         pool.policy_stamp(),
     );
@@ -1945,8 +1945,7 @@ fn pool_expiry_projection_releases_surviving_neighbor_link_sides() -> Result<(),
 }
 
 #[test]
-fn mining_snapshot_shared_reuses_cache_until_mutation() -> Result<(), crate::test_error::TestError>
-{
+fn mining_snapshot_reuses_cache_until_mutation() -> Result<(), crate::test_error::TestError> {
     let mut pool = Mempool::new(MempoolLimits::default());
     let parent = tx(31, Vec::new());
     let parent_id = OutPoint::new(parent.txid(), 0);
@@ -1959,8 +1958,8 @@ fn mining_snapshot_shared_reuses_cache_until_mutation() -> Result<(), crate::tes
         7,
         0,
     ))?;
-    let first = pool.mining_snapshot_shared();
-    let second = pool.mining_snapshot_shared();
+    let first = pool.mining_snapshot();
+    let second = pool.mining_snapshot();
     assert!(
         Arc::ptr_eq(&first, &second),
         "an unchanged mempool reuses its mining snapshot"
@@ -1972,7 +1971,7 @@ fn mining_snapshot_shared_reuses_cache_until_mutation() -> Result<(), crate::tes
         "the snapshot carries the current mempool sequence"
     );
     pool.prioritise(first.entries[0].txid, 500)?;
-    let third = pool.mining_snapshot_shared();
+    let third = pool.mining_snapshot();
     assert!(
         !Arc::ptr_eq(&second, &third),
         "a fee delta mutation invalidates the snapshot"
@@ -1982,15 +1981,10 @@ fn mining_snapshot_shared_reuses_cache_until_mutation() -> Result<(), crate::tes
         pool.fee_delta_sequence_number(),
         "the rebuilt snapshot carries the current fee delta sequence"
     );
-    pool.insert_entry(MempoolEntry::new(
-        Arc::new(tx(33, Vec::new())),
-        100,
-        3_000,
-        3,
-        7,
-        0,
-    ))?;
-    let fourth = pool.mining_snapshot_shared();
+    let lone = tx(33, Vec::new());
+    let lone_txid = lone.txid();
+    pool.insert_entry(MempoolEntry::new(Arc::new(lone), 100, 3_000, 3, 7, 0))?;
+    let fourth = pool.mining_snapshot();
     assert!(
         !Arc::ptr_eq(&third, &fourth),
         "an entry mutation invalidates the snapshot"
@@ -1999,6 +1993,62 @@ fn mining_snapshot_shared_reuses_cache_until_mutation() -> Result<(), crate::tes
         fourth.entries.len(),
         3,
         "the rebuilt snapshot holds every entry"
+    );
+    assert_eq!(
+        fourth
+            .entries
+            .iter()
+            .map(|entry| entry.txid)
+            .collect::<HashSet<_>>(),
+        pool.iter_txids().into_iter().collect::<HashSet<_>>(),
+        "the rebuilt snapshot holds the pool contents after admission"
+    );
+    pool.remove_for_reorg(&[lone_txid]);
+    let fifth = pool.mining_snapshot();
+    assert!(
+        !Arc::ptr_eq(&fourth, &fifth),
+        "a removal invalidates the snapshot"
+    );
+    assert_eq!(
+        fifth.entries.len(),
+        2,
+        "the rebuilt snapshot drops the removed entry"
+    );
+    assert_eq!(
+        fifth
+            .entries
+            .iter()
+            .map(|entry| entry.txid)
+            .collect::<HashSet<_>>(),
+        pool.iter_txids().into_iter().collect::<HashSet<_>>(),
+        "the rebuilt snapshot holds the pool contents after removal"
+    );
+    pool.insert_entry(MempoolEntry::new(
+        Arc::new(tx(33, Vec::new())),
+        100,
+        3_000,
+        3,
+        7,
+        0,
+    ))?;
+    let sixth = pool.mining_snapshot();
+    assert!(
+        !Arc::ptr_eq(&fifth, &sixth),
+        "a reorg resurrection invalidates the snapshot"
+    );
+    assert_eq!(
+        sixth.entries.len(),
+        3,
+        "the rebuilt snapshot holds the resurrected entry"
+    );
+    assert_eq!(
+        sixth
+            .entries
+            .iter()
+            .map(|entry| entry.txid)
+            .collect::<HashSet<_>>(),
+        pool.iter_txids().into_iter().collect::<HashSet<_>>(),
+        "the rebuilt snapshot holds the pool contents after resurrection"
     );
     Ok(())
 }

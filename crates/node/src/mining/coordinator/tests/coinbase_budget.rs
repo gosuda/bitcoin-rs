@@ -447,7 +447,7 @@ impl MempoolSnapshotSource for BudgetGate {
         &self,
         selection: &GenerateSelection,
         context: &CandidateContext,
-    ) -> Result<MempoolMiningSnapshot, MiningControlError> {
+    ) -> Result<Arc<MempoolMiningSnapshot>, MiningControlError> {
         self.inner.selection_snapshot(selection, context)
     }
 

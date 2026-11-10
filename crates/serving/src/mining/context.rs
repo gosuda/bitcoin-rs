@@ -1,3 +1,4 @@
+use alloc::sync::Arc;
 use bitcoin_rs_consensus::primitives::{BlockImage, CompactTarget, Hash256, Network, Txid};
 use bitcoin_rs_consensus::{LocktimeRule, locktime_cutoff};
 use bitcoin_rs_execution::chain::{
@@ -53,7 +54,7 @@ pub trait MempoolSnapshotSource: Send + Sync {
         &self,
         selection: &GenerateSelection,
         context: &CandidateContext,
-    ) -> Result<MempoolMiningSnapshot, MiningControlError>;
+    ) -> Result<Arc<MempoolMiningSnapshot>, MiningControlError>;
     fn pooled_transaction_count(&self) -> u64;
     fn min_relay_fee_sat_per_kvb(&self) -> u64;
 }

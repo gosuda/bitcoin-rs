@@ -1268,8 +1268,9 @@ fn generateblock_keeps_raw_transactions() {
         .read()
         .mining_snapshot()
         .entries
-        .into_iter()
+        .iter()
         .find(|entry| entry.txid == txid)
+        .cloned()
         .unwrap_or_else(|| panic!("pooled txid must resolve from mining snapshot"));
     assert_eq!(
         request.selection,

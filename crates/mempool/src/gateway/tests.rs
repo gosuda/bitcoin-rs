@@ -1791,7 +1791,7 @@ fn rejected_replacement_preserves_pool_history_and_publication() {
     let before = {
         let pool = gateway.read();
         (
-            pool.mining_snapshot().entries,
+            pool.mining_snapshot().entries.clone(),
             pool.estimator_history(),
             pool.prioritised_transactions(),
             pool.policy_stamp(),

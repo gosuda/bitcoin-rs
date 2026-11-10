@@ -1338,15 +1338,15 @@ fn template_from_candidate(
 }
 
 pub fn snapshot_for_selection(
-    full: MempoolMiningSnapshot,
+    full: Arc<MempoolMiningSnapshot>,
     selection: &GenerateSelection,
     prevouts: &[(OutPoint, TxOut)],
     segwit_active: bool,
-) -> Result<MempoolMiningSnapshot, MiningControlError> {
+) -> Result<Arc<MempoolMiningSnapshot>, MiningControlError> {
     match selection {
         GenerateSelection::Mempool => Ok(full),
         GenerateSelection::Ordered(items) => {
-            ordered_snapshot(&full, items, prevouts, segwit_active)
+            ordered_snapshot(&full, items, prevouts, segwit_active).map(Arc::new)
         }
     }
 }

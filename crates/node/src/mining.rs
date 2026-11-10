@@ -314,7 +314,7 @@ impl MempoolSnapshotSource for MempoolAdapter {
         &self,
         selection: &GenerateSelection,
         context: &CandidateContext,
-    ) -> Result<MempoolMiningSnapshot, MiningControlError> {
+    ) -> Result<Arc<MempoolMiningSnapshot>, MiningControlError> {
         if !matches!(selection, GenerateSelection::Ordered(items) if items.iter().any(|item| matches!(item, GenerateTx::Raw(_))))
         {
             return snapshot_for_selection(

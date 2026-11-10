@@ -106,7 +106,7 @@ impl MempoolSnapshotSource for Sources {
         &self,
         selection: &GenerateSelection,
         context: &CandidateContext,
-    ) -> Result<MempoolMiningSnapshot, MiningControlError> {
+    ) -> Result<Arc<MempoolMiningSnapshot>, MiningControlError> {
         snapshot_for_selection(
             self.pool.lock().mining_snapshot(),
             selection,

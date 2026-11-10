@@ -1206,12 +1206,7 @@ impl Mempool {
     }
 
     #[must_use]
-    pub fn mining_snapshot(&self) -> MempoolMiningSnapshot {
-        self.mining_snapshot_shared().as_ref().clone()
-    }
-
-    #[must_use]
-    pub(crate) fn mining_snapshot_shared(&self) -> Arc<MempoolMiningSnapshot> {
+    pub fn mining_snapshot(&self) -> Arc<MempoolMiningSnapshot> {
         let sequence = self.sequence_number();
         let fee_delta_sequence = self.fee_delta_sequence;
         if let Some(cached) = self.snapshot_cache.lock().as_ref() {

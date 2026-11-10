@@ -3016,6 +3016,18 @@ fn batch_requests_chain_package_shares_bodies_and_resolves_incrementally() {
         PACKAGE_LEN,
         "every package member yields one admission request"
     );
+    assert_eq!(
+        shared.len(),
+        25,
+        "the chain fixture holds twenty five bodies"
+    );
+    for body in &shared {
+        assert_eq!(
+            Arc::strong_count(body),
+            2,
+            "each package body is allocated once and shared with its request"
+        );
+    }
     let mut oracle_outputs = HashMap::new();
     oracle_outputs.insert(
         confirmed,
@@ -3074,8 +3086,12 @@ fn batch_requests_chain_package_shares_bodies_and_resolves_incrementally() {
         OUTPUT_VALUE, 9_000,
         "chain children carry no fee, so the oracle only prices the confirmed parent spend"
     );
-    assert!(
-        package_output_clones <= in_package_refs,
-        "incremental resolution clones package outputs only for in-package references"
+    assert_eq!(
+        in_package_refs, 24,
+        "a twenty five transaction chain spends twenty four package outputs"
+    );
+    assert_eq!(
+        package_output_clones, 24,
+        "incremental resolution clones one package output per in-package spend"
     );
 }

@@ -381,13 +381,13 @@ impl MempoolSnapshotSource for StaticPool {
         &self,
         _selection: &GenerateSelection,
         _context: &CandidateContext,
-    ) -> Result<MempoolMiningSnapshot, MiningControlError> {
+    ) -> Result<Arc<MempoolMiningSnapshot>, MiningControlError> {
         let (sequence, fee_delta_sequence) = *self.counters.lock();
-        Ok(MempoolMiningSnapshot {
+        Ok(Arc::new(MempoolMiningSnapshot {
             sequence,
             fee_delta_sequence,
             entries: Vec::new(),
-        })
+        }))
     }
 
     fn pooled_transaction_count(&self) -> u64 {
@@ -803,13 +803,13 @@ impl MempoolSnapshotSource for GatedPool {
         &self,
         _selection: &GenerateSelection,
         _context: &CandidateContext,
-    ) -> Result<MempoolMiningSnapshot, MiningControlError> {
+    ) -> Result<Arc<MempoolMiningSnapshot>, MiningControlError> {
         let (sequence, fee_delta_sequence) = *self.counters.lock();
-        Ok(MempoolMiningSnapshot {
+        Ok(Arc::new(MempoolMiningSnapshot {
             sequence,
             fee_delta_sequence,
             entries: Vec::new(),
-        })
+        }))
     }
 
     fn pooled_transaction_count(&self) -> u64 {
