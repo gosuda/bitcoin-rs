@@ -140,11 +140,18 @@ impl<'a> SpillSet<'a> {
             .write(true)
             .create_new(true)
             .open(&path)?;
-        let mut out = BufWriter::new(file);
-        for (key, value) in &self.sorters.borrow()[id].buffer {
-            write_row(&mut out, key, value)?;
+        let result = (|| -> std::io::Result<()> {
+            let mut out = BufWriter::new(file);
+            for (key, value) in &self.sorters.borrow()[id].buffer {
+                write_row(&mut out, key, value)?;
+            }
+            out.flush()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _unused = std::fs::remove_file(&path);
         }
-        out.flush()?;
+        result?;
         let mut sorters = self.sorters.borrow_mut();
         let state = &mut sorters[id];
         state.runs.push(RunFile { path });
@@ -228,10 +235,28 @@ fn read_row(reader: &mut impl Read) -> std::io::Result<Option<(Vec<u8>, Vec<u8>)
         std::io::Error::new(std::io::ErrorKind::InvalidData, "spill row is truncated")
     })?))
     .unwrap_or(usize::MAX);
-    let mut key = vec![0_u8; key_len];
-    reader.read_exact(&mut key)?;
-    let mut value = vec![0_u8; value_len];
-    reader.read_exact(&mut value)?;
+    let mut key = Vec::new();
+    reader
+        .by_ref()
+        .take(u64::try_from(key_len).unwrap_or(u64::MAX))
+        .read_to_end(&mut key)?;
+    if key.len() != key_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "spill row is truncated",
+        ));
+    }
+    let mut value = Vec::new();
+    reader
+        .by_ref()
+        .take(u64::try_from(value_len).unwrap_or(u64::MAX))
+        .read_to_end(&mut value)?;
+    if value.len() != value_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "spill row is truncated",
+        ));
+    }
     Ok(Some((key, value)))
 }
 
@@ -314,6 +339,24 @@ const MAX_MERGE_FAN_IN: usize = 16;
 
 static MERGE_TMP_ID: AtomicU64 = AtomicU64::new(0);
 
+struct OwnedIntermediates {
+    paths: Vec<PathBuf>,
+}
+
+impl OwnedIntermediates {
+    fn disarm(mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.paths)
+    }
+}
+
+impl Drop for OwnedIntermediates {
+    fn drop(&mut self) {
+        for path in std::mem::take(&mut self.paths) {
+            let _unused = std::fs::remove_file(path);
+        }
+    }
+}
+
 pub struct Merge {
     sources: Vec<RunCursor>,
     heap: BinaryHeap<Reverse<HeapRow>>,
@@ -354,7 +397,7 @@ impl Drop for Merge {
 }
 
 pub fn merge(runs: &[RunFile]) -> std::io::Result<Merge> {
-    let mut owned: Vec<PathBuf> = Vec::new();
+    let mut owned = OwnedIntermediates { paths: Vec::new() };
     let mut current: Vec<RunFile> = runs.to_vec();
     while current.len() > MAX_MERGE_FAN_IN {
         let dir = current
@@ -369,12 +412,24 @@ pub fn merge(runs: &[RunFile]) -> std::io::Result<Merge> {
             let id = MERGE_TMP_ID.fetch_add(1, SeqCst);
             let out = dir.join(format!("spill-merge-{id:016x}.bin"));
             merge_chunk(chunk, &out)?;
-            owned.push(out.clone());
+            for input in chunk {
+                if let Some(pos) = owned.paths.iter().position(|path| path == &input.path) {
+                    let path = owned.paths.remove(pos);
+                    let _unused = std::fs::remove_file(path);
+                }
+            }
+            owned.paths.push(out.clone());
             next.push(RunFile { path: out });
         }
         current = next;
     }
-    Merge::open(&current, owned)
+    match Merge::open(&current, Vec::new()) {
+        Ok(mut merged) => {
+            merged.owned = owned.disarm();
+            Ok(merged)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn merge_chunk(chunk: &[RunFile], out: &Path) -> std::io::Result<()> {
