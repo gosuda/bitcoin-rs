@@ -14,7 +14,7 @@ use bitcoin_rs_mempool::MutationOutcome;
 use bitcoin_rs_mempool::RemovalReason;
 use bitcoin_rs_serving::mining::{
     BlockTemplate, Candidate, MiningCapability, MiningChainContext, MiningRule,
-    PreparedTemplateBody, SelectedBody, TemplateId, select_template_body,
+    PreparedTemplateBody, SelectedBody, SelectedTx, TemplateId, select_template_body,
     select_template_body_after,
 };
 use std::sync::Arc;
@@ -299,6 +299,19 @@ struct StaticPool {
     counters: Mutex<(u64, u64)>,
     pool_reads: AtomicUsize,
     settled_commit: Mutex<u64>,
+    gated: Mutex<bool>,
+}
+
+fn gated_tx() -> Arc<Tx> {
+    Arc::new(Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: Vec::new(),
+        outputs: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: Script::new(),
+        }],
+    })
 }
 
 impl StaticPool {
@@ -307,6 +320,7 @@ impl StaticPool {
             counters: Mutex::new((sequence, fee_delta_sequence)),
             pool_reads: AtomicUsize::new(0),
             settled_commit: Mutex::new(0),
+            gated: Mutex::new(false),
         }
     }
 
@@ -316,6 +330,10 @@ impl StaticPool {
 
     fn set_settled_commit(&self, commit: u64) {
         *self.settled_commit.lock() = commit;
+    }
+
+    fn admit_gated(&self) {
+        *self.gated.lock() = true;
     }
 }
 
@@ -348,6 +366,21 @@ impl MempoolSnapshotSource for StaticPool {
             .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
         body.sequence = sequence;
         body.fee_delta_sequence = fee_delta_sequence;
+        if *self.gated.lock() {
+            let tx = gated_tx();
+            let weight = tx.weight();
+            let fee = 1_000;
+            body.transactions.push(SelectedTx {
+                txid: tx.txid(),
+                wtxid: tx.wtxid(),
+                fee,
+                sigop_cost: 0,
+                weight,
+                tx,
+            });
+            body.fees = body.fees.saturating_add(fee);
+            body.weight = body.weight.saturating_add(weight);
+        }
         Ok(Some(body))
     }
 
@@ -1541,14 +1574,21 @@ fn mining_template_never_references_unsettled_transaction() {
     };
     let candidate = service.candidate_for_key(key_epoch_1);
     assert!(candidate.is_ok());
+    let Ok(candidate) = candidate else {
+        panic!("a settled generation must produce a candidate");
+    };
+    assert_eq!(candidate.previous_block_hash, tip_a.hash);
+    assert!(candidate.transactions.is_empty());
 
+    pool.set(2, 0);
+    pool.admit_gated();
     let tip_b = tip_snapshot(Hash256::from_le_bytes(&[0x22; 32]));
     tip_source.set_epoch(Some(tip_b.clone()), 2);
 
     let key_epoch_2 = GenerationKey {
         tip_hash: tip_b.hash,
         commit_id: 2,
-        mempool_sequence: 1,
+        mempool_sequence: 2,
         fee_delta_sequence: 0,
     };
     let unsettled_candidate = service.candidate_for_key(key_epoch_2);
@@ -1560,4 +1600,15 @@ fn mining_template_never_references_unsettled_transaction() {
     pool.set_settled_commit(2);
     let settled_candidate = service.candidate_for_key(key_epoch_2);
     assert!(settled_candidate.is_ok());
+    let Ok(settled_candidate) = settled_candidate else {
+        panic!("a newly settled generation must produce a candidate");
+    };
+    assert_eq!(settled_candidate.previous_block_hash, tip_b.hash);
+    let gated_txid = gated_tx().txid();
+    assert!(
+        settled_candidate
+            .transactions
+            .iter()
+            .any(|transaction| transaction.txid == gated_txid)
+    );
 }
