@@ -23,9 +23,8 @@ pub(super) const FORMAT_VERSION_KEY: &[u8] = crate::types::INDEX_FORMAT_VERSION_
 /// (`UnsupportedTxIndexFormatVersion`), so `open_writer` resets the derived
 /// store and rebuilds it from chainstate; no in-place upgrade or dual-read
 /// path exists. `bitcoin-rs-storage-convert rebuild-index` performs the same
-/// reset offline.
+/// reset offline. On-disk format 9 carries the block hash anchor in every per-block tail log record.
 pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = crate::types::INDEX_FORMAT_VERSION_VALUE;
-
 pub(super) const LEGACY_FILTER_ROW_PREFIX: &[u8] = &[1, b'F'];
 
 pub(super) const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];

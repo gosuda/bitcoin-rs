@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 
 use super::Coverage;
 use super::format::*;
-
+use crate::{IndexCapabilities, IndexCapability};
 #[cfg(test)]
 thread_local! {
     pub(crate) static BULK_FILTER_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -69,6 +69,7 @@ pub struct BulkSegmentBuilder {
     cpu: Option<Arc<CpuShares>>,
     scratch_dir: PathBuf,
     build_filter: bool,
+    capabilities: IndexCapabilities,
 }
 
 impl BulkSegmentBuilder {
@@ -83,9 +84,23 @@ impl BulkSegmentBuilder {
             cpu,
             scratch_dir,
             build_filter: true,
+            capabilities: IndexCapabilities::ALL,
         }
     }
 
+    #[must_use]
+    pub fn with_tx_dir(mut self) -> Self {
+        self.capabilities = self.capabilities.insert(IndexCapability::TxLookup);
+        self.capabilities = self.capabilities.insert(IndexCapability::ScriptHistory);
+        self
+    }
+
+    #[must_use]
+    pub fn without_tx_dir(mut self) -> Self {
+        self.capabilities = self.capabilities.without(IndexCapability::TxLookup);
+        self.capabilities = self.capabilities.without(IndexCapability::ScriptHistory);
+        self
+    }
     #[must_use]
     pub fn with_filter(self) -> Self {
         self.set_build_filter(true)
@@ -137,13 +152,15 @@ impl BulkSegmentBuilder {
             .cpu
             .as_ref()
             .and_then(|cpu| cpu.try_acquire_background());
-        StreamingSegmentBuilder::new(
+        let mut stream = StreamingSegmentBuilder::new(
             gen_id,
             Arc::clone(&self.budget),
             permit,
             self.scratch_dir.clone(),
             self.build_filter,
-        )
+        );
+        stream.capabilities = self.capabilities;
+        stream
     }
 }
 
@@ -168,6 +185,7 @@ pub struct StreamingSegmentBuilder {
     occurrence_seq: u32,
     prev_filter_header: [u8; 32],
     build_filter: bool,
+    capabilities: IndexCapabilities,
     scratch_dir: PathBuf,
     builder_serial: u64,
 }
@@ -260,6 +278,7 @@ impl StreamingSegmentBuilder {
             occurrence_seq: 0,
             prev_filter_header: [0; 32],
             build_filter,
+            capabilities: IndexCapabilities::ALL,
             scratch_dir,
             builder_serial,
         }
@@ -286,14 +305,20 @@ impl StreamingSegmentBuilder {
         for tx in &block.txs {
             let ordinal = self.ordinal;
             self.ordinal = self.ordinal.saturating_add(1);
-            let tx_key = encode_tx_dir_key(self.gen_id, &tx.txid, block.height);
-            let tx_val = encode_tx_dir_value(&block.hash, ordinal, tx.offset, tx.len);
-            self.tx_dir.push_row(tx_key.to_vec(), tx_val.to_vec())?;
-            let rev_key = encode_tx_ordinal_key(self.gen_id, ordinal);
-            let rev_val = encode_tx_ordinal_value(&tx.txid, block.height, tx.offset, tx.len);
-            self.tx_dir.push_row(rev_key.to_vec(), rev_val.to_vec())?;
-            self.push_inputs(ordinal, &tx.inputs)?;
-            self.push_outputs(ordinal, &tx.outputs)?;
+            let needs_tx_dir = self.capabilities.contains(IndexCapability::TxLookup)
+                || self.capabilities.contains(IndexCapability::ScriptHistory);
+            if needs_tx_dir {
+                let tx_key = encode_tx_dir_key(self.gen_id, &tx.txid, block.height);
+                let tx_val = encode_tx_dir_value(&block.hash, ordinal, tx.offset, tx.len);
+                self.tx_dir.push_row(tx_key.to_vec(), tx_val.to_vec())?;
+                let rev_key = encode_tx_ordinal_key(self.gen_id, ordinal);
+                let rev_val = encode_tx_ordinal_value(&tx.txid, block.height, tx.offset, tx.len);
+                self.tx_dir.push_row(rev_key.to_vec(), rev_val.to_vec())?;
+            }
+            if self.capabilities.contains(IndexCapability::ScriptHistory) {
+                self.push_inputs(ordinal, &tx.inputs)?;
+                self.push_outputs(ordinal, &tx.outputs)?;
+            }
         }
 
         if self.build_filter {

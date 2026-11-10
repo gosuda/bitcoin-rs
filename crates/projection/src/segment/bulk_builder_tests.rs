@@ -31,6 +31,16 @@ impl BudgetCharge for RecordingBudget {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct TxDirEntry {
+    txid: [u8; 32],
+    height: u32,
+    block_hash: [u8; 32],
+    ordinal: u32,
+    offset: u32,
+    len: u32,
+}
+
 /// A byte pool that refuses once drained and records the peak
 /// outstanding charge so tests can assert the retained-memory bound.
 struct PoolBudget {
@@ -312,6 +322,64 @@ fn disabled_filters_skip_bulk_filter_build() {
         let (_, _, _, filter) = crate::segment::format::decode_filter_value(value).unwrap();
         assert!(!filter.is_empty());
     }
+}
+// PRJ-03
+#[test]
+fn tx_dir_gated_by_capabilities() -> Result<(), BulkBuilderError> {
+    let blocks = synthetic_blocks(2);
+    let scratch = tempfile::tempdir()?;
+    let full = BulkSegmentBuilder::new(
+        Arc::new(UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    )
+    .build_generation_rows(1, &blocks)?;
+    let mut found: Vec<TxDirEntry> = Vec::new();
+    for (key, value) in &full.tx_dir {
+        let Some((_, txid, height)) = crate::segment::format::decode_tx_dir_key(key) else {
+            continue;
+        };
+        let Some((block_hash, ordinal, offset, len)) =
+            crate::segment::format::decode_tx_dir_value(value)
+        else {
+            return Err(BulkBuilderError::InvalidBlockSequence);
+        };
+        found.push(TxDirEntry {
+            txid,
+            height,
+            block_hash,
+            ordinal,
+            offset,
+            len,
+        });
+    }
+    let mut expected: Vec<TxDirEntry> = Vec::new();
+    let mut ordinal = 0;
+    for block in &blocks {
+        for tx in &block.txs {
+            expected.push(TxDirEntry {
+                txid: tx.txid,
+                height: block.height,
+                block_hash: block.hash,
+                ordinal,
+                offset: tx.offset,
+                len: tx.len,
+            });
+            ordinal += 1;
+        }
+    }
+    assert_eq!(found, expected);
+    let scratch = tempfile::tempdir()?;
+    let gated = BulkSegmentBuilder::new(
+        Arc::new(UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    )
+    .without_tx_dir()
+    .build_generation_rows(1, &blocks)?;
+    assert!(gated.tx_dir.is_empty());
+    assert_eq!(gated.filters.len(), blocks.len());
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]

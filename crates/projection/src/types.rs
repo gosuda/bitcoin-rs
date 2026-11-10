@@ -175,7 +175,7 @@ pub(crate) const SCRIPT_LIVE_ROW_SIZE: usize = HASH_PREFIX_LEN + 32 + 3;
 /// letters and never collide.
 pub const INDEX_FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
 
-pub const INDEX_FORMAT_VERSION_VALUE: [u8; 4] = [0x08, 0x00, 0x00, 0x00];
+pub const INDEX_FORMAT_VERSION_VALUE: [u8; 4] = [0x09, 0x00, 0x00, 0x00];
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 #[repr(C)]

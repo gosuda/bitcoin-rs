@@ -110,7 +110,7 @@ fn family_removed(report: &RebuildIndexReport, family: &str) -> u64 {
 }
 
 #[test]
-fn rebuild_index_resets_derived_rows_and_stamps_format_eight() -> TestResult {
+fn rebuild_index_resets_derived_rows_and_stamps_the_current_format() -> TestResult {
     let root = tempfile::tempdir()?;
     let datadir = seeded_datadir(root.path())?;
 
@@ -121,7 +121,7 @@ fn rebuild_index_resets_derived_rows_and_stamps_format_eight() -> TestResult {
     ])?;
     let report = parse_rebuild_report(&output)?;
     assert_eq!(report.engine, "rocksdb");
-    assert_eq!(report.format_version, 8);
+    assert_eq!(report.format_version, 9);
     assert_eq!(family_removed(&report, "script_live"), 3);
     assert_eq!(family_removed(&report, "funding"), 1);
     assert_eq!(family_removed(&report, "tx_confirmed"), 1);
@@ -133,7 +133,7 @@ fn rebuild_index_resets_derived_rows_and_stamps_format_eight() -> TestResult {
     let marker = store
         .get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?
         .expect("reset stamps the format marker");
-    assert_eq!(marker.as_slice(), &[0x08, 0x00, 0x00, 0x00]);
+    assert_eq!(marker.as_slice(), &[0x09, 0x00, 0x00, 0x00]);
     drop(store);
 
     let store = Arc::new(RocksDbStore::open(datadir.join("txindex"))?);
@@ -254,13 +254,13 @@ fn rebuild_index_empty_txindex_follows_detected_chainstate_engine() -> TestResul
     ])?;
     let report = parse_rebuild_report(&output)?;
     assert_eq!(report.engine, "rocksdb");
-    assert_eq!(report.format_version, 8);
+    assert_eq!(report.format_version, 9);
 
     let store = RocksDbStore::open(datadir.join("txindex"))?;
     let marker = store
         .get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?
         .expect("format marker in UtxoMeta");
-    assert_eq!(marker.as_slice(), &[0x08, 0x00, 0x00, 0x00]);
+    assert_eq!(marker.as_slice(), &[0x09, 0x00, 0x00, 0x00]);
     let desc = store
         .get(
             ColumnFamily::IdxMeta,
