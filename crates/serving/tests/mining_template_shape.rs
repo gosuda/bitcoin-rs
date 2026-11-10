@@ -3,8 +3,8 @@ use crate::support::mining::fixtures as common;
 use crate::support::mining::TestError;
 
 use crate::mining::{
-    CandidateContext, TemplateId, WITNESS_RESERVED_VALUE, assemble_candidate,
-    assemble_ordered_candidate, solve_block,
+    CandidateContext, WITNESS_RESERVED_VALUE, assemble_candidate, assemble_ordered_candidate,
+    solve_block,
 };
 use bitcoin::Wtxid as OracleWtxid;
 use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
@@ -58,14 +58,13 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Tes
     };
     let candidate = assemble_candidate(&context, &mempool, PAYOUT)?;
 
-    assert_eq!(
-        candidate.template_id,
-        TemplateId::with_fee_revision(
-            &context.previous_block_hash,
-            snapshot.sequence,
-            snapshot.fee_delta_sequence
-        )
-    );
+    let mut expected_id = context.previous_block_hash.to_string_be();
+    expected_id.push_str(&snapshot.sequence.to_string());
+    if snapshot.fee_delta_sequence != 0 {
+        expected_id.push(':');
+        expected_id.push_str(&snapshot.fee_delta_sequence.to_string());
+    }
+    assert_eq!(candidate.template_id.as_str(), expected_id);
     assert_eq!(candidate.previous_block_hash, context.previous_block_hash);
     assert_eq!(candidate.height, context.height);
     assert_eq!(candidate.version, context.version);

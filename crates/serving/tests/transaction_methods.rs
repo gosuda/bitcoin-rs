@@ -233,7 +233,7 @@ fn sendrawtransaction_fee_argument_keeps_core_amount_semantics() -> Result<(), T
         (json!({"maxfeerate": false}), Some(core_type_error)),
         (json!(-0.1), Some(RpcError::INVALID_PARAMS)),
         (json!(1.0), Some(RpcError::INVALID_PARAMS)),
-        (json!("false"), None),
+        (json!("false"), Some(RpcError::INVALID_PARAMS)),
     ]
     .into_iter()
     .enumerate()

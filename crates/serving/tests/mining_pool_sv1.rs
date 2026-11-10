@@ -1852,9 +1852,7 @@ fn stratum_v1_enforces_stale_jobs_and_extranonce_overflow() {
     client.send(&long_en2);
     let en2_err = client.read_line();
     assert!(
-        en2_err.contains("Invalid extranonce2 length")
-            || en2_err.contains("-32602")
-            || en2_err.contains("20"),
+        en2_err.contains("\"error\":[-32602,\"Invalid extranonce2 length\",null]"),
         "overflow extranonce must reject: {en2_err}"
     );
 
