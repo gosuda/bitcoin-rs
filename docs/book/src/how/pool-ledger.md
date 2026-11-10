@@ -121,7 +121,7 @@ A receipt never broadcasts. `record_broadcast` requires that the chain already o
 - every signed transaction conclusively double-spent at the abandon depth: `Failed`, reservation released;
 - some transactions still possible: no decision.
 
-`a_batch_fails_only_when_every_signed_transaction_is_conclusively_double_spent` and `a_mid_reconcile_chain_transition_defers_a_permanent_fail` pin the asymmetry: a missing or inconclusive observation is never treated as nonpayment.
+`a_batch_fails_only_when_every_signed_transaction_is_conclusively_double_spent` and `an_aborted_reconcile_defers_a_permanent_fail` pin the asymmetry: a missing or inconclusive observation is never treated as nonpayment.
 
 `cancel_prepared` accepts only `Prepared` and only with an explicit `NeverHandedToSigner` or `SignerRevoked` basis; it releases the reservation and removes the batch from the active set (`store.rs:1113`). A failure, timeout, or rejection by the signer does not release anything by itself.
 
