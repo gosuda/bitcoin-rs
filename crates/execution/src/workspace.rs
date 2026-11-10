@@ -13,6 +13,18 @@ use bitcoin_rs_storage::utxo::set::UtxoError;
 use bitcoin_rs_storage::{CoinKey, CoinStore, StorageError, WindowDelta};
 use bytes::Bytes;
 use hashbrown::{HashMap, HashSet};
+#[cfg(test)]
+thread_local! {
+    static FOLD_EVENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_fold_event() {
+    FOLD_EVENTS.with(|events| events.set(events.get() + 1));
+}
+
+#[cfg(not(test))]
+const fn count_fold_event() {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CreatedOwned {
@@ -87,6 +99,7 @@ pub(crate) struct WindowWorkspace {
     coin_cursor: usize,
     coin_entries: HashMap<Txid, usize>,
     coin_bytes: usize,
+    coin_states: HashMap<Txid, Vec<OwnedUtxoOut>>,
 }
 
 impl WindowWorkspace {
@@ -105,6 +118,7 @@ impl WindowWorkspace {
             coin_cursor: 0,
             coin_entries: HashMap::new(),
             coin_bytes: 0,
+            coin_states: HashMap::new(),
         }
     }
     #[must_use]
@@ -147,6 +161,7 @@ impl WindowWorkspace {
         self.coin_cursor = end;
         self.coin_entries.clear();
         self.coin_bytes = 0;
+        self.coin_states.clear();
         Ok(delta)
     }
 
@@ -154,9 +169,25 @@ impl WindowWorkspace {
         let target = (self.flushed_transitions + pending_count).min(self.transitions.len());
         while self.coin_cursor < target {
             let index = self.coin_cursor;
+            Self::apply_transition(
+                &mut self.coin_states,
+                &self.initial_records,
+                &self.transitions[index],
+            );
+            let mut seen = HashSet::new();
             for txid in transition_txids(&self.transitions[index]) {
-                let entry = self.coin_entry(txid, index)?;
-                let bytes = entry.as_ref().map_or(0, entry_encoded_len);
+                if !seen.insert(txid) {
+                    continue;
+                }
+                let bytes = {
+                    let current: &[OwnedUtxoOut] = self
+                        .coin_states
+                        .get(&txid)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    let entry = txid_entry(&self.initial_records, txid, current)?;
+                    entry.as_ref().map_or(0, entry_encoded_len)
+                };
                 let previous = self.coin_entries.insert(txid, bytes).unwrap_or(0);
                 self.coin_bytes = self
                     .coin_bytes
@@ -166,20 +197,6 @@ impl WindowWorkspace {
             self.coin_cursor += 1;
         }
         Ok(self.coin_bytes)
-    }
-
-    fn coin_entry(&self, txid: Txid, through: usize) -> Result<Option<CoinEntry>, UtxoError> {
-        let mut current_outputs = initial_outputs_for_txid(&self.initial_records, txid);
-        for &index in self.touched.get(&txid).into_iter().flatten() {
-            if index >= self.flushed_transitions && index <= through {
-                apply_transition_to_txid_outputs(
-                    &self.transitions[index],
-                    txid,
-                    &mut current_outputs,
-                );
-            }
-        }
-        txid_entry(&self.initial_records, txid, &current_outputs)
     }
 
     pub(crate) fn resolve_external_batch(
@@ -357,18 +374,48 @@ impl WindowWorkspace {
         prefix: &[BlockTransition],
         initial_records: &HashMap<Txid, Option<UtxoRecord>>,
     ) -> Result<WindowDelta, UtxoError> {
+        let mut states: HashMap<Txid, Vec<OwnedUtxoOut>> = HashMap::new();
+        for transition in prefix {
+            Self::apply_transition(&mut states, initial_records, transition);
+        }
         let mut delta = WindowDelta::default();
-        for txid in touched_txids(prefix) {
-            let mut current_outputs = initial_outputs_for_txid(initial_records, txid);
-            for transition in prefix {
-                apply_transition_to_txid_outputs(transition, txid, &mut current_outputs);
-            }
+        for (txid, current_outputs) in states {
             if let Some((key, record)) = txid_entry(initial_records, txid, &current_outputs)? {
                 delta.push_final(key, record);
             }
         }
         delta.records.sort_by_key(|(key, _)| *key);
         Ok(delta)
+    }
+
+    fn apply_transition(
+        states: &mut HashMap<Txid, Vec<OwnedUtxoOut>>,
+        initial_records: &HashMap<Txid, Option<UtxoRecord>>,
+        transition: &BlockTransition,
+    ) {
+        let mut seen = HashSet::new();
+        for txid in transition_txids(transition) {
+            if seen.insert(txid) {
+                count_fold_event();
+            }
+        }
+        for overwrite in &transition.bip30_overwrites {
+            outputs_for(states, initial_records, overwrite.outpoint.txid).clear();
+        }
+        for created in &transition.created {
+            let outputs = outputs_for(states, initial_records, created.txid);
+            outputs.retain(|out| out.vout != created.vout);
+            outputs.push(OwnedUtxoOut {
+                vout: created.vout,
+                value: created.value,
+                script_pubkey: created.script_pubkey.to_vec(),
+                coinbase: created.coinbase,
+                height: created.height,
+            });
+        }
+        for spent in &transition.spent_outpoints {
+            outputs_for(states, initial_records, spent.txid).retain(|out| out.vout != spent.vout);
+        }
     }
 }
 
@@ -545,14 +592,14 @@ fn transition_txids(transition: &BlockTransition) -> impl Iterator<Item = Txid> 
         )
 }
 
-fn touched_txids(prefix: &[BlockTransition]) -> Vec<Txid> {
-    let mut touched = HashSet::new();
-    for transition in prefix {
-        touched.extend(transition_txids(transition));
-    }
-    let mut txids: Vec<Txid> = touched.into_iter().collect();
-    txids.sort_unstable();
-    txids
+fn outputs_for<'s>(
+    states: &'s mut HashMap<Txid, Vec<OwnedUtxoOut>>,
+    initial_records: &HashMap<Txid, Option<UtxoRecord>>,
+    txid: Txid,
+) -> &'s mut Vec<OwnedUtxoOut> {
+    states
+        .entry(txid)
+        .or_insert_with(|| initial_outputs_for_txid(initial_records, txid))
 }
 
 fn index_transition(
@@ -628,37 +675,6 @@ fn initial_outputs_for_txid(
             })
             .collect(),
         _ => Vec::new(),
-    }
-}
-
-fn apply_transition_to_txid_outputs(
-    transition: &BlockTransition,
-    txid: Txid,
-    current_outputs: &mut Vec<OwnedUtxoOut>,
-) {
-    if transition
-        .bip30_overwrites
-        .iter()
-        .any(|overwrite| overwrite.outpoint.txid == txid)
-    {
-        current_outputs.clear();
-    }
-    for created in &transition.created {
-        if created.txid == txid {
-            current_outputs.retain(|out| out.vout != created.vout);
-            current_outputs.push(OwnedUtxoOut {
-                vout: created.vout,
-                value: created.value,
-                script_pubkey: created.script_pubkey.to_vec(),
-                coinbase: created.coinbase,
-                height: created.height,
-            });
-        }
-    }
-    for spent in &transition.spent_outpoints {
-        if spent.txid == txid {
-            current_outputs.retain(|out| out.vout != spent.vout);
-        }
     }
 }
 
@@ -921,6 +937,271 @@ mod tests {
         assert!(
             workspace.coin_bytes > 0,
             "the churn blocks must stage coin bytes"
+        );
+        Ok(())
+    }
+    // WIN-03
+    #[test]
+    fn window_delta_matches_the_outpoint_model_and_folds_each_event_once()
+    -> Result<(), CoinBytesError> {
+        use super::{
+            BlockTransition, CreatedOwned, FOLD_EVENTS, HashSet, OutPoint, OwnedUtxoOut, TxOut,
+            UndoCoin, UndoKind, UtxoRecord,
+        };
+
+        let txid_a = Txid(Hash256::from_le_bytes(&[0xa0; 32]));
+        let txid_b = Txid(Hash256::from_le_bytes(&[0xb0; 32]));
+        let txid_c = Txid(Hash256::from_le_bytes(&[0xc0; 32]));
+        let txid_d = Txid(Hash256::from_le_bytes(&[0xd0; 32]));
+        let txid_e = Txid(Hash256::from_le_bytes(&[0xe0; 32]));
+        let script = Bytes::from_static(&[0x51]);
+        let create = |txid: Txid, vout: u32, value: u64, height: u32| CreatedOwned {
+            txid,
+            vout,
+            coinbase: false,
+            height,
+            value,
+            script_pubkey: script.clone(),
+        };
+        let overwrite = |txid: Txid, height: u32| UndoCoin {
+            outpoint: OutPoint::new(txid, 0),
+            txout: TxOut::default(),
+            height,
+            coinbase: false,
+            kind: UndoKind::Bip30Overwrite,
+        };
+        let block = |height: u32,
+                     created: Vec<CreatedOwned>,
+                     spent: Vec<OutPoint>,
+                     overwrites: Vec<UndoCoin>| BlockTransition {
+            height,
+            hash: Hash256::default(),
+            prev_hash: Hash256::default(),
+            created,
+            spent_external: Vec::new(),
+            spent_outpoints: spent,
+            bip30_overwrites: overwrites,
+        };
+        let prefix = vec![
+            block(
+                1,
+                vec![create(txid_c, 0, 100, 1), create(txid_c, 1, 101, 1)],
+                vec![OutPoint::new(txid_a, 0)],
+                Vec::new(),
+            ),
+            block(
+                2,
+                vec![create(txid_d, 0, 200, 2), create(txid_c, 2, 102, 2)],
+                vec![OutPoint::new(txid_c, 0), OutPoint::new(txid_b, 0)],
+                Vec::new(),
+            ),
+            block(
+                3,
+                vec![create(txid_e, 0, 300, 3), create(txid_a, 5, 305, 3)],
+                vec![OutPoint::new(txid_d, 0), OutPoint::new(txid_c, 1)],
+                vec![overwrite(txid_a, 3)],
+            ),
+        ];
+
+        let initial_outputs = vec![
+            (
+                txid_a,
+                vec![
+                    OwnedUtxoOut::new(0, 1_000, vec![0x51], false, 1),
+                    OwnedUtxoOut::new(1, 1_001, vec![0x51], false, 1),
+                ],
+            ),
+            (
+                txid_b,
+                vec![OwnedUtxoOut::new(0, 2_000, vec![0x51], false, 1)],
+            ),
+        ];
+        let mut initial_records = HashMap::new();
+        for (txid, outputs) in &initial_outputs {
+            let record = UtxoRecord::from_owned_outputs(txid.0, outputs)?;
+            initial_records.insert(*txid, Some(record));
+        }
+
+        let mut existed: HashSet<Txid> = HashSet::new();
+        for (txid, _) in &initial_outputs {
+            existed.insert(*txid);
+        }
+        let mut referenced: HashSet<Txid> = HashSet::new();
+        for transition in &prefix {
+            for created in &transition.created {
+                referenced.insert(created.txid);
+            }
+            for spent in &transition.spent_outpoints {
+                referenced.insert(spent.txid);
+            }
+            for overwrite in &transition.bip30_overwrites {
+                referenced.insert(overwrite.outpoint.txid);
+            }
+        }
+        let mut expected: Vec<(CoinKey, Option<Bytes>)> = Vec::new();
+        for txid in referenced {
+            let mut current: Vec<OwnedUtxoOut> = initial_outputs
+                .iter()
+                .find(|(id, _)| *id == txid)
+                .map(|(_, outputs)| outputs.clone())
+                .unwrap_or_default();
+            for transition in &prefix {
+                if transition
+                    .bip30_overwrites
+                    .iter()
+                    .any(|overwrite| overwrite.outpoint.txid == txid)
+                {
+                    current.clear();
+                }
+                for created in &transition.created {
+                    if created.txid == txid {
+                        current.retain(|out| out.vout != created.vout);
+                        current.push(OwnedUtxoOut {
+                            vout: created.vout,
+                            value: created.value,
+                            script_pubkey: created.script_pubkey.to_vec(),
+                            coinbase: created.coinbase,
+                            height: created.height,
+                        });
+                    }
+                }
+                for spent in &transition.spent_outpoints {
+                    if spent.txid == txid {
+                        current.retain(|out| out.vout != spent.vout);
+                    }
+                }
+            }
+            let key = CoinKey(txid.0.to_le_bytes());
+            match (existed.contains(&txid), current.is_empty()) {
+                (false, true) => {}
+                (true, true) => expected.push((key, None)),
+                (_, false) => {
+                    let record = UtxoRecord::from_owned_outputs(txid.0, &current)?;
+                    expected.push((key, Some(Bytes::copy_from_slice(record.bytes()))));
+                }
+            }
+        }
+        expected.sort_by_key(|(key, _)| *key);
+
+        let events_expected: usize = prefix
+            .iter()
+            .map(|transition| {
+                let mut seen = HashSet::new();
+                for created in &transition.created {
+                    seen.insert(created.txid);
+                }
+                for spent in &transition.spent_outpoints {
+                    seen.insert(spent.txid);
+                }
+                for overwrite in &transition.bip30_overwrites {
+                    seen.insert(overwrite.outpoint.txid);
+                }
+                seen.len()
+            })
+            .sum();
+        FOLD_EVENTS.with(|events| events.set(0));
+        let delta = WindowWorkspace::build_window_delta(&prefix, &initial_records)?;
+        assert_eq!(delta.records, expected);
+        assert_eq!(FOLD_EVENTS.with(std::cell::Cell::get), events_expected,);
+        Ok(())
+    }
+
+    // WIN-03
+    #[test]
+    fn window_fold_counts_one_event_per_transition_txid_pair_under_spend_churn()
+    -> Result<(), CoinBytesError> {
+        use super::{
+            BlockTransition, CreatedOwned, FOLD_EVENTS, OutPoint, OwnedUtxoOut, UtxoRecord,
+            index_transition,
+        };
+        let victim = Txid(Hash256::from_le_bytes(&[0xf0; 32]));
+        let script = Bytes::from_static(&[0x51]);
+        let create = |txid: Txid, vout: u32, value: u64, height: u32| CreatedOwned {
+            txid,
+            vout,
+            coinbase: false,
+            height,
+            value,
+            script_pubkey: script.clone(),
+        };
+        let block =
+            |height: u32, created: Vec<CreatedOwned>, spent: Vec<OutPoint>| BlockTransition {
+                height,
+                hash: Hash256::default(),
+                prev_hash: Hash256::default(),
+                created,
+                spent_external: Vec::new(),
+                spent_outpoints: spent,
+                bip30_overwrites: Vec::new(),
+            };
+        let mut prefix = Vec::new();
+        for (index, byte) in (0..16_u8).enumerate() {
+            let height = u32::try_from(index + 1)?;
+            let fresh = Txid(Hash256::from_le_bytes(&[byte; 32]));
+            prefix.push(block(
+                height,
+                vec![create(fresh, 0, 2_000, height)],
+                Vec::new(),
+            ));
+        }
+        let spends: Vec<OutPoint> = (0..200_u32)
+            .map(|vout| OutPoint::new(victim, vout))
+            .collect();
+        prefix.push(block(17, Vec::new(), spends));
+
+        let mut victim_outputs = Vec::new();
+        for vout in 0..200_u32 {
+            victim_outputs.push(OwnedUtxoOut::new(
+                vout,
+                1_000 + u64::from(vout),
+                vec![0x51],
+                false,
+                1,
+            ));
+        }
+        let mut initial_records = HashMap::new();
+        let victim_record = UtxoRecord::from_owned_outputs(victim.0, &victim_outputs)?;
+        initial_records.insert(victim, Some(victim_record));
+
+        let mut expected: Vec<(CoinKey, Option<Bytes>)> = Vec::new();
+        expected.push((CoinKey(victim.0.to_le_bytes()), None));
+        for (index, byte) in (0..16_u8).enumerate() {
+            let height = u32::try_from(index + 1)?;
+            let fresh = Txid(Hash256::from_le_bytes(&[byte; 32]));
+            let outputs = vec![OwnedUtxoOut::new(0, 2_000, vec![0x51], false, height)];
+            let record = UtxoRecord::from_owned_outputs(fresh.0, &outputs)?;
+            expected.push((
+                CoinKey(fresh.0.to_le_bytes()),
+                Some(Bytes::copy_from_slice(record.bytes())),
+            ));
+        }
+        expected.sort_by_key(|(key, _)| *key);
+        let reference_bytes: usize = expected
+            .iter()
+            .map(|(key, record)| key.as_bytes().len() + record.as_ref().map_or(0, Bytes::len))
+            .sum();
+
+        FOLD_EVENTS.with(|events| events.set(0));
+        let delta = WindowWorkspace::build_window_delta(&prefix, &initial_records)?;
+        assert_eq!(delta.records, expected);
+        assert_eq!(FOLD_EVENTS.with(std::cell::Cell::get), 16 + 1);
+        let mut workspace = WindowWorkspace::new(10_000);
+        workspace.transitions = prefix;
+        workspace.initial_records = initial_records;
+        for (index, transition) in workspace.transitions.iter().enumerate() {
+            index_transition(&mut workspace.touched, index, transition);
+        }
+        FOLD_EVENTS.with(|events| events.set(0));
+        workspace.staged_coin_bytes(16)?;
+        let staged = workspace.staged_coin_bytes(17)?;
+        assert_eq!(
+            FOLD_EVENTS.with(std::cell::Cell::get),
+            16 + 1,
+            "staging the churn block must not refold the prefix"
+        );
+        assert_eq!(
+            staged, reference_bytes,
+            "staged coin bytes must equal the modelled records"
         );
         Ok(())
     }
