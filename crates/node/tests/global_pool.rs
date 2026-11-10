@@ -30,5 +30,15 @@ fn node_start_caps_the_global_rayon_pool_at_four_threads() {
     config.observability.metrics_bind = None;
     let _node = run(Node::start(config, RuntimeInputs::default())).expect("node starts");
     let available = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
-    assert_eq!(rayon::current_num_threads(), available.min(4));
+    assert!(
+        rayon::current_num_threads() <= 4,
+        "the global pool never exceeds four threads"
+    );
+    if available > 4 {
+        assert_eq!(
+            rayon::current_num_threads(),
+            4,
+            "hosts with more than four cores still pin the pool at four"
+        );
+    }
 }

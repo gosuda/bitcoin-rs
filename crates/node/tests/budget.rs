@@ -6,8 +6,6 @@ use bitcoin_rs_storage::budget::{BudgetError, BudgetOwner, BudgetRefusal};
 use bitcoin_rs_wire::connection::OutboundLedger;
 use bitcoin_rs_wire::inbound::block_memory::BlockMemory;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 #[expect(clippy::expect_used)]
 fn open_test_node() -> (NodeState, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir succeeds");
@@ -85,23 +83,23 @@ fn full_budget_refuses_ingress_without_marking_invalid() {
         }
     }
 
-    let attempt_bytes = 1024 * 1024;
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_cb = {
-        let cancel = Arc::clone(&cancel);
-        move || cancel.load(Ordering::Acquire)
+    let Err(error) = budget.reserve(BudgetOwner::StagedImages, 1024 * 1024) else {
+        panic!("staged-image reservation must be refused when the budget is full");
     };
+    assert_eq!(
+        error,
+        BudgetError::BudgetExhausted,
+        "a full budget refuses staged images with BudgetExhausted"
+    );
+    assert_eq!(
+        error.refusal(),
+        Some(BudgetRefusal::RetryLater),
+        "a full-budget refusal is RetryLater backpressure"
+    );
 
-    let cancel_trigger = Arc::clone(&cancel);
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
-        cancel_trigger.store(true, Ordering::Release);
-    });
-
-    let result = block_memory.reserve(attempt_bytes, cancel_cb);
     assert!(
-        result.is_err(),
-        "ingress reservation must be refused when budget is full"
+        !block_memory.ledger().try_take(1024 * 1024),
+        "the ingress ledger must refuse block bytes when the budget is full"
     );
 
     assert!(
@@ -109,22 +107,17 @@ fn full_budget_refuses_ingress_without_marking_invalid() {
         "budget must record ingress refusal"
     );
 
-    let exhaustion_err = BudgetError::BudgetExhausted;
-    assert_eq!(
-        exhaustion_err.refusal(),
-        Some(BudgetRefusal::RetryLater),
-        "budget refusal must map to RetryLater backpressure"
-    );
-
+    let refused_hash = Network::Regtest.genesis_block_hash();
     let tree = state.chainstate().block_tree_reader();
     let tree_read = tree.read();
-    for id in tree_read.leaf_node_ids() {
-        if let Ok(node) = tree_read.node(id) {
-            assert_ne!(
-                node.status,
-                NodeStatus::Invalid,
-                "refused block must NEVER be marked Invalid in BlockTree (BUD-03)"
-            );
-        }
+    if let Some(id) = tree_read.lookup(refused_hash) {
+        let Ok(node) = tree_read.node(id) else {
+            panic!("BlockTree lookup returned an unknown node");
+        };
+        assert_ne!(
+            node.status,
+            NodeStatus::Invalid,
+            "refused block must NEVER be marked Invalid in BlockTree (BUD-03)"
+        );
     }
 }

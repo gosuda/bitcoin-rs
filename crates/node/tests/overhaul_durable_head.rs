@@ -219,6 +219,7 @@ fn disconnect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
             body_extent: committed.body_extent,
             undo_extent: committed.undo_extent,
         };
+        family.store.arm_persist_fault(*fault);
         let outcome = family
             .authority
             .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {

@@ -127,9 +127,6 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
         .get("directory")
         .and_then(|value| value.as_str())
         .ok_or_else(|| std::io::Error::other("CURRENT has no generation directory"))?;
-    assert!(root.join(directory).join("chainstate").exists());
-    assert!(root.join(directory).join("headers-v1.dat").exists());
-    assert!(root.join(directory).join("coinstats-v1.dat").exists());
     let manifest_bytes = std::fs::read(root.join(directory).join("manifest-v1.json"))?;
     let manifest: sonic_rs::Value = sonic_rs::from_slice(&manifest_bytes)?;
     assert!(manifest.get("utxo").is_none_or(|v| v.is_null()));

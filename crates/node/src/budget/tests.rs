@@ -101,7 +101,7 @@ fn assert_ledger_matches(budget: &NodeBudget, state: &budget_model::BudgetState,
 }
 
 fn random_action(rng: &mut XorShift, background: bool) -> Action {
-    let pick = rng.next() % 14;
+    let pick = rng.next() % 17;
     let amount = rng.amount();
     match pick {
         0 => Action::ReserveIngress(amount),
@@ -128,6 +128,9 @@ fn random_action(rng: &mut XorShift, background: bool) -> Action {
         10 => Action::ReservePeerOutbound(amount),
         11 => Action::AllocatePeerOutbound(amount),
         12 => Action::ReleasePeerOutbound(amount),
+        13 => Action::ReserveEngineCache(amount),
+        14 => Action::AllocateEngineCache(amount),
+        15 => Action::ReleaseEngineCache(amount),
         _ if background => Action::Stutter,
         _ => match rng.next() % 2 {
             0 => Action::Stutter,
@@ -240,6 +243,44 @@ fn implementation_tracks_the_reference_model_step_for_step() {
     for seed in [0x2A_1C, 0xDEAD_BEEF, 0x5EED_5EED] {
         run_byte_differential(seed);
         run_mdbx_differential(seed);
+    }
+    every_action_variant_tracks_the_model();
+}
+
+fn every_action_variant_tracks_the_model() {
+    let budget = NodeBudget::new(differential_caps(), 4);
+    let mut state = budget_model::BudgetState::init(MODEL_TOTAL, MODEL_FOREGROUND);
+    let mut variants = vec![
+        Action::ReserveIngress(7),
+        Action::RefuseIngress(7),
+        Action::AllocateIngress(7),
+        Action::ApplyBlock(7),
+        Action::ReserveCoinCache(7),
+        Action::AllocateCoinCache(7),
+        Action::ReleaseCoinCache(7),
+        Action::GrowEngineCache(7),
+        Action::ShrinkEngineCache(7),
+        Action::ReserveEngineCache(7),
+        Action::AllocateEngineCache(7),
+        Action::ReleaseEngineCache(7),
+        Action::ReservePeerOutbound(7),
+        Action::AllocatePeerOutbound(7),
+        Action::ReleasePeerOutbound(7),
+        Action::Stutter,
+    ];
+    for owner in [
+        AllocationOwner::FactsQueue,
+        AllocationOwner::IndexBuilder,
+        AllocationOwner::QueryViews,
+    ] {
+        variants.push(Action::ReserveBackground(owner, 7));
+        variants.push(Action::AllocateBackground(owner, 7));
+        variants.push(Action::ReleaseBackground(owner, 7));
+    }
+    for action in variants {
+        state = budget_model::step(&state, action);
+        apply_action(&budget, &action);
+        assert_ledger_matches(&budget, &state, "every action variant tracks the model");
     }
 }
 
