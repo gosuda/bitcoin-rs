@@ -656,6 +656,7 @@ fn truncated_snapshot_installs_no_coins_and_stays_uninitialized() -> Result<(), 
     std::fs::write(&truncated_path, &core_bytes[..core_bytes.len() / 2])?;
     let before_tip = state.chainstate().applied_tip_snapshot();
     let before_stats = state.chainstate().coin_stats_handle().snapshot();
+    let before_coverage = state.three_positions()?.projection_coverage;
     assert!(matches!(
         state.snapshots.import(&truncated_path),
         Err(SnapshotImportError::Codec(SnapshotError::Truncated { .. }))
@@ -671,6 +672,28 @@ fn truncated_snapshot_installs_no_coins_and_stays_uninitialized() -> Result<(), 
         AssumeUtxoDiskStatus::Uninitialized
     ));
     assert!(!state.chainstate().is_closed_for_recovery());
+    assert_eq!(
+        state.three_positions()?.projection_coverage,
+        before_coverage,
+        "a failed snapshot import must not publish index coverage"
+    );
+    assert_eq!(
+        state.three_positions()?.projection_coverage,
+        [None, None, None, None],
+        "no projection claims coverage without a verified commitment"
+    );
+    assert!(
+        !dir.path().join("node/assumeutxo").exists(),
+        "a failed snapshot import must leave no assumeutxo directory"
+    );
+    let staged = match state.snapshots.script_live_seed.as_ref() {
+        Some(seed) => seed.staged_rows(),
+        None => 0,
+    };
+    assert_eq!(
+        staged, 0,
+        "a failed snapshot import must leave no staged seed rows"
+    );
     Ok(())
 }
 
@@ -685,6 +708,7 @@ fn trailing_snapshot_bytes_install_no_coins_and_stay_uninitialized() -> Result<(
     std::fs::write(&trailing_path, &trailing)?;
     let before_tip = state.chainstate().applied_tip_snapshot();
     let before_stats = state.chainstate().coin_stats_handle().snapshot();
+    let before_coverage = state.three_positions()?.projection_coverage;
     assert!(matches!(
         state.snapshots.import(&trailing_path),
         Err(SnapshotImportError::Codec(SnapshotError::TrailingBytes))
@@ -700,6 +724,28 @@ fn trailing_snapshot_bytes_install_no_coins_and_stay_uninitialized() -> Result<(
         AssumeUtxoDiskStatus::Uninitialized
     ));
     assert!(!state.chainstate().is_closed_for_recovery());
+    assert_eq!(
+        state.three_positions()?.projection_coverage,
+        before_coverage,
+        "a failed snapshot import must not publish index coverage"
+    );
+    assert_eq!(
+        state.three_positions()?.projection_coverage,
+        [None, None, None, None],
+        "no projection claims coverage without a verified commitment"
+    );
+    assert!(
+        !dir.path().join("node/assumeutxo").exists(),
+        "a failed snapshot import must leave no assumeutxo directory"
+    );
+    let staged = match state.snapshots.script_live_seed.as_ref() {
+        Some(seed) => seed.staged_rows(),
+        None => 0,
+    };
+    assert_eq!(
+        staged, 0,
+        "a failed snapshot import must leave no staged seed rows"
+    );
     Ok(())
 }
 

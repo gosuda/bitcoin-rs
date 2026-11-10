@@ -276,7 +276,7 @@ fn fatal_window_settlement_closes_the_chain_for_recovery() -> Result<(), TestErr
         source: Box::new(ApplyError::CoinStoreRead(
             bitcoin_rs_storage::StorageError::InvalidOperation("fatal settlement probe"),
         )),
-        disposition: WindowApplyDisposition::Fatal,
+        disposition: WindowApplyDisposition::Operational,
         invalidated: Box::default(),
     };
     let settled = super::settle_window_failure(transition, change, fatal);
@@ -284,6 +284,10 @@ fn fatal_window_settlement_closes_the_chain_for_recovery() -> Result<(), TestErr
     assert!(
         handles.is_closed_for_recovery(),
         "a fatal window failure must close the chain for recovery"
+    );
+    assert!(
+        handles.shutdown_reader().is_triggered(),
+        "a fatal window failure must request node shutdown"
     );
     assert!(
         matches!(handles.begin_transition(), Err(ApplyError::Shutdown)),

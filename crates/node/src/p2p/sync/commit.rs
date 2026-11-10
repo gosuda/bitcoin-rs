@@ -60,8 +60,7 @@ impl BlockSync {
             applied = stopped,
             error = %source,
             "block sync: chain transition could not be settled; \
-             mempool admission is closed and the node will not \
-             retry until recovery or restart"
+             chainstate is closed for recovery and node shutdown was requested"
         );
     }
 

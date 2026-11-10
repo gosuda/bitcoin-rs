@@ -130,7 +130,6 @@ fn fatal_settlement_raises_the_halt_signal_exactly_once() -> TestResult {
     Ok(())
 }
 
-// SYNC-04
 #[test]
 fn fatal_window_failure_schedules_no_retry() -> TestResult {
     let (mut tree, blocks) = mined_chain(5, 0)?;
