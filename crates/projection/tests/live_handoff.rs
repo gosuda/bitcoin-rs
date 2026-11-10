@@ -12,11 +12,10 @@ use bitcoin::transaction::Version;
 use bitcoin::{
     Amount, CompactTarget, ScriptBuf, Sequence, Transaction, TxIn, TxMerkleNode, TxOut, Witness,
 };
+use bitcoin_rs_consensus::latch::LatchWriter;
 use bitcoin_rs_consensus::primitives::layout::ParsedBlock;
 use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Txid};
-use bitcoin_rs_execution::chain::{
-    BlockTree, BlockTreeReader, LatchWriter, NodeStatus, TipReader, TipSnapshot,
-};
+use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader, TipSnapshot};
 use bitcoin_rs_projection::IndexCapabilities;
 use bitcoin_rs_projection::portable::IndexBundleDirective;
 use bitcoin_rs_projection::query_api::DerivedIndexQuery;

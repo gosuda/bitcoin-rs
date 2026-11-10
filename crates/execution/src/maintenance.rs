@@ -14,14 +14,17 @@ pub enum MaintenanceError {
 
 fn spawn_chainstate_maintenance_worker(
     publisher: Arc<CheckpointPublisher>,
-    shutdown: crate::chain::LatchReader,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
 ) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("bitcoin-rs-execution-maintenance".into())
         .spawn(move || maintenance_loop(&publisher, &shutdown))
 }
 
-fn maintenance_loop(_publisher: &CheckpointPublisher, shutdown: &crate::chain::LatchReader) {
+fn maintenance_loop(
+    _publisher: &CheckpointPublisher,
+    shutdown: &bitcoin_rs_consensus::latch::LatchReader,
+) {
     let ticker = crossbeam_channel::tick(Duration::from_secs(1));
     loop {
         crossbeam_channel::select! {
@@ -47,7 +50,7 @@ impl crate::Chainstate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::LatchWriter;
+    use bitcoin_rs_consensus::latch::LatchWriter;
     use std::sync::Arc;
     use std::time::Instant;
 

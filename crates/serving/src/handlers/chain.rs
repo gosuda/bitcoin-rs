@@ -126,7 +126,7 @@ pub(crate) fn loadtxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 pub(crate) fn dumptxoutset(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     super::ensure_at_most_params(params, 2)?;
     let path = required_str(params, 0, "path is required")?;
@@ -918,7 +918,7 @@ pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 pub(crate) fn syncwithvalidationinterfacequeue(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let _settled = loop {
@@ -964,7 +964,7 @@ pub(crate) fn invalidateblock(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 pub(crate) fn verifychain(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     super::ensure_at_most_params(params, 2)?;
     let array = params_array(params)?;
@@ -1129,7 +1129,7 @@ fn execute_txoutset_scan(
     ctx: &Context,
     hash_type: &str,
     permit: &bitcoin_rs_storage::utxo::scan::UtxoScanPermit<'_>,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<(AppliedView, TxOutSetScan), RpcError> {
     let cancelled = || permit.aborted() || cancellation.is_triggered();
     for _ in 0..4 {
@@ -1178,7 +1178,7 @@ fn format_txoutsetinfo_response(
 pub(crate) fn gettxoutsetinfo(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     let hash_type = parse_txoutsetinfo_params(params)?;
     let scan_permit = ctx.chain.utxo.reserve_scan().map_err(|error| match error {
@@ -1315,7 +1315,7 @@ const MAX_SCAN_RESPONSE_BYTES: usize = 16 * 1_048_576;
 pub(crate) fn scantxoutset(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     let (action, objects) = scan_arguments(params)?;
     match action {
@@ -1382,7 +1382,7 @@ fn scantxoutset_scan(
     ctx: &Context,
     permit: &bitcoin_rs_storage::utxo::scan::UtxoScanPermit<'_>,
     scan_scripts: &std::collections::BTreeMap<Vec<u8>, String>,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     let scripts = scan_scripts.keys().cloned().collect();
     let (applied, complete, mut scan) = loop {
@@ -2329,7 +2329,7 @@ mod dumptxoutset_tests {
         fn dump_txoutset(
             &self,
             path: &std::path::Path,
-            cancellation: &bitcoin_rs_execution::chain::LatchReader,
+            cancellation: &bitcoin_rs_consensus::latch::LatchReader,
         ) -> Result<SnapshotExport, SnapshotControlError> {
             *self.seen.lock().unwrap_or_else(PoisonError::into_inner) = Some(path.to_path_buf());
             if cancellation.is_triggered() {
@@ -2356,7 +2356,7 @@ mod dumptxoutset_tests {
             &self,
             _check_level: u8,
             _nblocks: u32,
-            _cancellation: &bitcoin_rs_execution::chain::LatchReader,
+            _cancellation: &bitcoin_rs_consensus::latch::LatchReader,
         ) -> Result<bool, ChainControlError> {
             Ok(false)
         }

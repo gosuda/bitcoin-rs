@@ -455,7 +455,7 @@ fn an_idle_read_unblocks_on_the_cancel_latch() -> IoResult<()> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let client = std::net::TcpStream::connect(listener.local_addr()?)?;
     let (server, _) = listener.accept()?;
-    let latch = crate::latch::LatchWriter::new();
+    let latch = bitcoin_rs_consensus::latch::LatchWriter::new();
     let mut stream = CountingStream::from_connected(server, Arc::new(PeerCounters::default()))?
         .with_cancel(&latch.reader(), &std::net::TcpStream::try_clone)?;
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);

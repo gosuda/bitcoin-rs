@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use bitcoin_rs_consensus::latch::LatchReader;
 use bitcoin_rs_consensus::primitives::{Hash256, Network};
 use bitcoin_rs_execution::ActivatedSnapshot;
-use bitcoin_rs_execution::chain::LatchReader;
 use bitcoin_rs_execution::{
     ApplyError, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, Chainstate,
     ChainstateRole,

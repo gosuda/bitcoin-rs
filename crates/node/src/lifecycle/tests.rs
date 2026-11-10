@@ -212,7 +212,7 @@ fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> Re
         sync: state.sync(),
         snapshots: Arc::clone(&state.snapshots),
     };
-    let cancellation = bitcoin_rs_execution::chain::LatchReader::fixture_never();
+    let cancellation = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     for check_level in 0..=4 {
         for nblocks in [0, 2, 100] {
             assert!(
@@ -250,7 +250,7 @@ fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> Resul
         sync: state.sync(),
         snapshots: Arc::clone(&state.snapshots),
     };
-    let live = bitcoin_rs_execution::chain::LatchReader::fixture_never();
+    let live = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     for check_level in 0..=4 {
         for nblocks in [0, 1, 6] {
             assert!(
@@ -279,13 +279,13 @@ fn verify_chain_reports_cancellation_and_recovery_closure() -> Result<(), TestEr
         sync: state.sync(),
         snapshots: Arc::clone(&state.snapshots),
     };
-    let live = bitcoin_rs_execution::chain::LatchReader::fixture_never();
+    let live = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     assert!(
         matches!(control.verify_chain(3, 6, &live), Ok(true)),
         "an open chain must verify"
     );
     let fired = {
-        let trigger = bitcoin_rs_execution::chain::LatchWriter::new();
+        let trigger = bitcoin_rs_consensus::latch::LatchWriter::new();
         trigger.trigger();
         trigger.reader()
     };
@@ -1053,7 +1053,7 @@ impl ServedWitness {
     fn serve(
         &mut self,
         server: RpcServer,
-        shutdown: bitcoin_rs_execution::chain::LatchReader,
+        shutdown: bitcoin_rs_consensus::latch::LatchReader,
     ) -> Result<(), TestError> {
         self.server = Some(BoundedThread::spawn("verifychain-rpc-server", move || {
             server.serve_with_shutdown(shutdown)
@@ -1265,7 +1265,7 @@ fn verifychain_socket_reports_recovery_closure() -> Result<(), TestError> {
     let server = bind_test_rpc(&state)?;
     let addr = server.local_addr()?;
 
-    let stop = Arc::new(bitcoin_rs_execution::chain::LatchWriter::new());
+    let stop = Arc::new(bitcoin_rs_consensus::latch::LatchWriter::new());
     let mut witness = ServedWitness::new(
         {
             let stop = Arc::clone(&stop);

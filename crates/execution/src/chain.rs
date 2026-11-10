@@ -4,7 +4,6 @@ mod count;
 mod deployment;
 pub mod header_sync;
 mod ibd;
-mod latch;
 pub mod node;
 mod progress;
 #[cfg(feature = "test-seam")]
@@ -59,7 +58,6 @@ impl AppliedEpoch {
     }
 }
 
-pub use latch::{HookGuard, LatchReader, LatchWriter};
 pub use tip_wait::{ActiveTipWait, TipWaitCondition};
 pub use transition::{
     StableRead, StableReadGuard, TransitionAuthority, TransitionAuthorityGuard, TransitionDomain,

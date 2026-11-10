@@ -1,6 +1,7 @@
 use super::*;
+use bitcoin_rs_consensus::latch::LatchReader;
 use bitcoin_rs_consensus::primitives::{BlockImage, Sequence, TxIn, Txid, Witness};
-use bitcoin_rs_execution::chain::{BlockTree, ChainError, ChainTxCount, LatchReader, NodeStatus};
+use bitcoin_rs_execution::chain::{BlockTree, ChainError, ChainTxCount, NodeStatus};
 use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
 use bitcoin_rs_serving::mining::{
     MiningChainContext, SelectedBody, select_template_body, select_template_body_after,

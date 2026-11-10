@@ -1,9 +1,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use bitcoin_rs_consensus::latch::LatchReader;
 use bitcoin_rs_consensus::primitives::Hash256;
 
-use crate::chain::{LatchReader, TipSnapshot};
+use crate::chain::TipSnapshot;
 
 #[derive(Clone, Copy, Debug)]
 pub enum TipWaitCondition {

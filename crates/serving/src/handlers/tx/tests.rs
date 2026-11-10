@@ -1,9 +1,10 @@
 use alloc::sync::Arc;
 
+use bitcoin_rs_consensus::latch::LatchReader;
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
 };
-use bitcoin_rs_execution::chain::{LatchReader, NodeId, NodeStatus, TipSnapshot};
+use bitcoin_rs_execution::chain::{NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, arm_admission_park, reset_admission_park};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
@@ -185,7 +186,7 @@ fn sendrawtransaction_rejects_odd_length_and_invalid_and_oversize_hex() {
 #[test]
 fn decoderawtransaction_rejects_odd_length_and_invalid_and_oversize_hex() {
     let ctx = Arc::new(Context::new());
-    let latch = bitcoin_rs_execution::chain::LatchWriter::new().reader();
+    let latch = bitcoin_rs_consensus::latch::LatchWriter::new().reader();
     let odd = super::decoderawtransaction(&ctx, &json!(["abc"]), &latch)
         .expect_err("odd length hex must fail");
     assert_eq!(odd.code(), RpcError::CORE_DESERIALIZATION_ERROR);
@@ -312,7 +313,7 @@ fn testmempoolaccept_survives_one_oversize_row_with_package_too_large() {
 #[test]
 fn decoderawtransaction_decodes_oversize_hex_like_core() {
     let ctx = Arc::new(Context::new());
-    let latch = bitcoin_rs_execution::chain::LatchWriter::new().reader();
+    let latch = bitcoin_rs_consensus::latch::LatchWriter::new().reader();
     let raw = consensus_bytes(&many_output_tx(117_700)).to_lower_hex_string();
     let value = super::decoderawtransaction(&ctx, &json!([raw]), &latch)
         .unwrap_or_else(|err| panic!("Core decodes any hex that fits the request: {err}"));
@@ -1637,7 +1638,7 @@ fn gettxoutproof_utxo_path_answers_interrupted_when_cancelled() {
     ));
     ctx.chain.add_block(BlockRecord::from_block(1, &block));
     let ctx = Arc::new(ctx);
-    let latch = bitcoin_rs_execution::chain::LatchWriter::new();
+    let latch = bitcoin_rs_consensus::latch::LatchWriter::new();
     latch.trigger();
 
     let cancelled = super::gettxoutproof(&ctx, &json!([[txid.to_string()]]), &latch.reader());
@@ -1663,7 +1664,7 @@ fn gettxoutproof_utxo_path_interrupts_for_a_mixed_txid_list() {
     attach_body_for_block(&mut ctx, &block, 1);
     ctx.chain.add_block(BlockRecord::from_block(1, &block));
     let ctx = Arc::new(ctx);
-    let latch = bitcoin_rs_execution::chain::LatchWriter::new();
+    let latch = bitcoin_rs_consensus::latch::LatchWriter::new();
     latch.trigger();
 
     let cancelled = super::gettxoutproof(

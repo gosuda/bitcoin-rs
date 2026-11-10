@@ -37,13 +37,12 @@ use bitcoin::{
     script::Builder,
     transaction::Version as TxVersion,
 };
+use bitcoin_rs_consensus::latch::LatchReader;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::layout::{
     parse_exact_call_count, reset_parse_exact_call_count,
 };
-use bitcoin_rs_execution::chain::{
-    BlockTree, BlockTreeReader, LatchReader, NodeStatus, TipReader, TipSnapshot,
-};
+use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader, TipSnapshot};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::budget::CpuShares;
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget, RetentionRegistry};

@@ -4,8 +4,9 @@ use std::sync::Arc;
 use crate::chain::regtest_fixture::{
     merkle_root, mine_header_to_declared_target, mined_regtest_child_at,
 };
-use crate::chain::{LatchReader, LatchWriter, TipSnapshot, validate_pow};
+use crate::chain::{TipSnapshot, validate_pow};
 use bitcoin_rs_consensus::ConsensusError;
+use bitcoin_rs_consensus::latch::{LatchReader, LatchWriter};
 use bitcoin_rs_consensus::primitives::{
     Block, BlockImage, Hash256, Network, Script, Witness, consensus_bytes, deserialize,
 };

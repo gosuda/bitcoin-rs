@@ -20,9 +20,10 @@ use bitcoin::{
     pow::CompactTarget,
     script::Builder,
 };
+use bitcoin_rs_consensus::latch::LatchWriter;
 use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Network, Txid};
 use bitcoin_rs_execution::chain::{
-    BlockTree, BlockTreeReader, ChainTxCount, LatchWriter, NodeStatus, TipReader, TipSnapshot,
+    BlockTree, BlockTreeReader, ChainTxCount, NodeStatus, TipReader, TipSnapshot,
 };
 use bitcoin_rs_projection::portable::{
     IndexBundleDirective, IndexBundleRequest, ManifestArtifactTarget, SpillBudget,

@@ -1414,7 +1414,7 @@ impl ChainControl for NodeInvalidator {
     fn dump_txoutset(
         &self,
         _path: &std::path::Path,
-        _cancellation: &bitcoin_rs_execution::chain::LatchReader,
+        _cancellation: &bitcoin_rs_consensus::latch::LatchReader,
     ) -> Result<
         bitcoin_rs_serving::context::SnapshotExport,
         bitcoin_rs_serving::context::SnapshotControlError,
@@ -1430,7 +1430,7 @@ impl ChainControl for NodeInvalidator {
         &self,
         _check_level: u8,
         _nblocks: u32,
-        _cancellation: &bitcoin_rs_execution::chain::LatchReader,
+        _cancellation: &bitcoin_rs_consensus::latch::LatchReader,
     ) -> Result<bool, ChainControlError> {
         Ok(false)
     }

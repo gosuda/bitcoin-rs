@@ -340,7 +340,7 @@ fn getblockhash_zero_returns_mainnet_genesis_on_fresh_context() -> Result<(), Te
 #[test]
 fn getblockchaininfo_reports_the_apply_halt_fact() -> Result<(), TestError> {
     let mut ctx = Context::new();
-    let closed = bitcoin_rs_execution::chain::LatchWriter::new();
+    let closed = bitcoin_rs_consensus::latch::LatchWriter::new();
     ctx.chain.closed_for_recovery = closed.reader();
     let ctx = Arc::new(ctx);
     let handler = Handler::new(Arc::clone(&ctx));
@@ -387,7 +387,7 @@ impl ChainControl for RecordingChainControl {
     fn dump_txoutset(
         &self,
         _path: &std::path::Path,
-        _cancellation: &bitcoin_rs_execution::chain::LatchReader,
+        _cancellation: &bitcoin_rs_consensus::latch::LatchReader,
     ) -> Result<
         bitcoin_rs_serving::context::SnapshotExport,
         bitcoin_rs_serving::context::SnapshotControlError,
@@ -403,7 +403,7 @@ impl ChainControl for RecordingChainControl {
         &self,
         _check_level: u8,
         _nblocks: u32,
-        _cancellation: &bitcoin_rs_execution::chain::LatchReader,
+        _cancellation: &bitcoin_rs_consensus::latch::LatchReader,
     ) -> Result<bool, ChainControlError> {
         match &self.verify_error {
             Some(error) => Err(error.clone()),

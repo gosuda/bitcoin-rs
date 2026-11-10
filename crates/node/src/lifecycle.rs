@@ -2,7 +2,7 @@ use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitcoin_rs_execution::chain::LatchReader;
+use bitcoin_rs_consensus::latch::LatchReader;
 use bitcoin_rs_execution::verify::{
     CheckLevel, VerifyError, VerifyOutcome, VerifyRequest, verify_recent_blocks,
 };
@@ -364,7 +364,7 @@ pub(crate) struct NodeServices {
     event_loop: Option<std::thread::JoinHandle<()>>,
     shutdown_forwarder: Option<(
         std::thread::JoinHandle<()>,
-        Arc<bitcoin_rs_execution::chain::LatchWriter>,
+        Arc<bitcoin_rs_consensus::latch::LatchWriter>,
     )>,
     metrics: Option<crate::metrics::MetricsServer>,
     rpc_threads: Vec<std::thread::JoinHandle<std::io::Result<()>>>,

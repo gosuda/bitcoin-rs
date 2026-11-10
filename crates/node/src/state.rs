@@ -95,8 +95,8 @@ pub struct NodeState {
     recovery_reporter: Arc<storage::RecoveryReporter>,
     pub(crate) snapshots: Arc<crate::snapshot::SnapshotControl>,
     block_announce_rx: Mutex<Option<crate::p2p::block_announce::BlockAnnounceReceiver>>,
-    shutdown: Arc<bitcoin_rs_execution::chain::LatchWriter>,
-    _p2p_shutdown_guard: bitcoin_rs_execution::chain::HookGuard,
+    shutdown: Arc<bitcoin_rs_consensus::latch::LatchWriter>,
+    _p2p_shutdown_guard: bitcoin_rs_consensus::latch::HookGuard,
     block_memory: Arc<bitcoin_rs_wire::inbound::block_memory::BlockMemory>,
     #[cfg(any(test, feature = "test-seam"))]
     budget: Arc<crate::budget::NodeBudget>,
@@ -284,12 +284,12 @@ impl NodeState {
     }
 
     #[must_use]
-    pub fn shutdown_reader(&self) -> bitcoin_rs_execution::chain::LatchReader {
+    pub fn shutdown_reader(&self) -> bitcoin_rs_consensus::latch::LatchReader {
         self.shutdown.reader()
     }
 
     #[must_use]
-    pub fn shutdown_writer(&self) -> Arc<bitcoin_rs_execution::chain::LatchWriter> {
+    pub fn shutdown_writer(&self) -> Arc<bitcoin_rs_consensus::latch::LatchWriter> {
         Arc::clone(&self.shutdown)
     }
 

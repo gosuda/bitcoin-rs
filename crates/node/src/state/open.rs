@@ -488,7 +488,7 @@ impl NodeState {
         } else {
             P2P_OUTBOUND_FULL_RELAY_SLOTS
         };
-        let p2p_shutdown = Arc::new(bitcoin_rs_wire::latch::LatchWriter::new());
+        let p2p_shutdown = Arc::new(bitcoin_rs_consensus::latch::LatchWriter::new());
         let p2p_shutdown_guard = chainstate.shutdown_reader().on_cancel({
             let p2p_shutdown = Arc::clone(&p2p_shutdown);
             move || p2p_shutdown.trigger()

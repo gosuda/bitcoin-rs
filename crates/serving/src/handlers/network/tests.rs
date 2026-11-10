@@ -18,7 +18,7 @@ fn configured_overlay_route_is_reported_without_claiming_an_operational_peer() {
             },
             ..bitcoin_rs_wire::P2pServiceConfig::default()
         },
-        bitcoin_rs_wire::LatchReader::fixture_never(),
+        bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
     ));
     ctx.network.peer_table = p2p.table();
     ctx.network.p2p = p2p;
@@ -83,7 +83,7 @@ fn getnetworkinfo_reports_configured_overlay_state_without_probing()
             },
             ..bitcoin_rs_wire::P2pServiceConfig::default()
         },
-        bitcoin_rs_wire::LatchReader::fixture_never(),
+        bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
     ));
     ctx.network.peer_table = p2p.table();
     ctx.network.p2p = p2p;
@@ -154,7 +154,7 @@ fn getnetworkinfo_does_not_call_onion_reachable_with_control_only()
             },
             ..bitcoin_rs_wire::P2pServiceConfig::default()
         },
-        bitcoin_rs_wire::LatchReader::fixture_never(),
+        bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
     ));
     ctx.network.peer_table = p2p.table();
     ctx.network.p2p = p2p;
@@ -227,7 +227,7 @@ fn getnetworkinfo_calls_onion_reachable_with_an_outbound_socks_route()
                 overlay,
                 ..bitcoin_rs_wire::P2pServiceConfig::default()
             },
-            bitcoin_rs_wire::LatchReader::fixture_never(),
+            bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
         ));
         ctx.network.peer_table = p2p.table();
         ctx.network.p2p = p2p;
@@ -343,7 +343,7 @@ fn getnetworkinfo_reports_onlynet_and_credential_isolation()
             },
             ..bitcoin_rs_wire::P2pServiceConfig::default()
         },
-        bitcoin_rs_wire::LatchReader::fixture_never(),
+        bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
     ));
     ctx.network.peer_table = p2p.table();
     ctx.network.p2p = p2p;

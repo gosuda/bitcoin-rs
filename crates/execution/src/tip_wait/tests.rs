@@ -1,6 +1,6 @@
 use super::*;
-use crate::chain::LatchWriter;
 use crate::chain::regtest_fixture::mined_regtest_child_at;
+use bitcoin_rs_consensus::latch::LatchWriter;
 use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Network};
 use bitcoin_rs_storage::utxo::UtxoSet;
 use std::sync::mpsc;

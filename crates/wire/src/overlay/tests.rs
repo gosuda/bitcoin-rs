@@ -10,7 +10,7 @@ fn shared(owner: &Arc<OverlayTransport>) -> crate::listener::ConnectionShared {
         Arc::new(crate::NetworkActivity::from_shared(Arc::new(
             AtomicBool::new(true),
         ))),
-        crate::latch::LatchReader::fixture_never(),
+        bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
         None,
         bitcoin::p2p::Magic::REGTEST,
         crossbeam_channel::unbounded().0,
@@ -446,7 +446,7 @@ fn sam_session_recovery(mode: SamRecoveryMode) {
     })));
     let shared = shared(&owner);
     let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_latch = crate::latch::LatchWriter::new();
+    let shutdown_latch = bitcoin_rs_consensus::latch::LatchWriter::new();
     let controls = Arc::new(AtomicUsize::new(0));
     let break_control = Arc::new(AtomicBool::new(false));
     let public = identity::i2p_base64().encode([0; 387]);
@@ -538,7 +538,7 @@ fn sam_session_recovery(mode: SamRecoveryMode) {
 fn stop_sam_workers(
     workers: Vec<std::thread::JoinHandle<Result<(), crate::listener::ListenerError>>>,
     shutdown: &AtomicBool,
-    latch: &crate::latch::LatchWriter,
+    latch: &bitcoin_rs_consensus::latch::LatchWriter,
     replacement: &crate::PeerLease,
     independent: &crate::PeerLease,
     fixture: std::thread::JoinHandle<()>,

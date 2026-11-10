@@ -5,7 +5,8 @@ use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxIn, Txid};
 
 use super::*;
 use bitcoin_rs_consensus::header_rules::ChainWork;
-use bitcoin_rs_execution::chain::{LatchReader, NodeId, TipSnapshot};
+use bitcoin_rs_consensus::latch::LatchReader;
+use bitcoin_rs_execution::chain::{NodeId, TipSnapshot};
 use bitcoin_rs_projection::block_log::BlockLog;
 
 struct SingleBlockSource {
@@ -1791,7 +1792,7 @@ fn getchaintips_marks_active_from_applied_tip() {
 #[test]
 fn sync_with_validation_interface_queue_answers_null() {
     let ctx = Arc::new(Context::new());
-    let never = || bitcoin_rs_execution::chain::LatchReader::fixture_never();
+    let never = || bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     for params in [json!([]), Value::new_null()] {
         let reply = syncwithvalidationinterfacequeue(&ctx, &params, &never())
             .unwrap_or_else(|err| panic!("params {params:?} must answer: {err}"));
@@ -1821,7 +1822,7 @@ fn sync_with_validation_interface_queue_waits_out_a_held_transition() {
         syncwithvalidationinterfacequeue(
             &worker_ctx,
             &json!([]),
-            &bitcoin_rs_execution::chain::LatchReader::fixture_never(),
+            &bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
         )
     });
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1839,7 +1840,7 @@ fn sync_with_validation_interface_queue_waits_out_a_held_transition() {
     );
     let interrupted_ctx = Arc::new(Context::new());
     let _still_held = interrupted_ctx.chain.chain_transition.lock();
-    let stopped_latch = bitcoin_rs_execution::chain::LatchWriter::new();
+    let stopped_latch = bitcoin_rs_consensus::latch::LatchWriter::new();
     stopped_latch.trigger();
     let stopped = stopped_latch.reader();
     let error = syncwithvalidationinterfacequeue(&interrupted_ctx, &json!([]), &stopped)

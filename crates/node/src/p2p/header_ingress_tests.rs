@@ -59,7 +59,7 @@ fn full_header_ingress_observes_session_and_lease_cancellation() -> TestResult {
             headers_tx,
             blocks_tx,
         );
-        let session_cancel = bitcoin_rs_wire::latch::LatchWriter::new();
+        let session_cancel = bitcoin_rs_consensus::latch::LatchWriter::new();
         shared.session_cancel = session_cancel.reader();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let lease = bitcoin_rs_wire::PeerLease::new(tx);
@@ -159,7 +159,7 @@ fn run_sustained_ingress_case(delivery: HeaderDelivery) -> TestResult {
         ))?;
     let mut shared = test_shared(peers, headers_tx, blocks_tx);
     shared.block_sync = Some(sync.clone() as Arc<dyn bitcoin_rs_wire::listener::BlockSyncObserver>);
-    let stop = bitcoin_rs_wire::latch::LatchWriter::new();
+    let stop = bitcoin_rs_consensus::latch::LatchWriter::new();
     shared.session_cancel = stop.reader();
     let (producer, filled_rx) =
         spawn_ingress_producer(blocks, delivery, shared, lease, addr, Arc::clone(&sync));
@@ -220,7 +220,7 @@ fn drain_sustained_ingress(
     producer: std::thread::JoinHandle<()>,
     headers_rx: &crossbeam_channel::Receiver<bitcoin_rs_wire::InboundHeaders>,
     blocks_rx: &crossbeam_channel::Receiver<bitcoin_rs_wire::InboundBlock>,
-    stop: &bitcoin_rs_wire::latch::LatchWriter,
+    stop: &bitcoin_rs_consensus::latch::LatchWriter,
     started: Instant,
     initial_peak: usize,
 ) -> Result<IngressDrainMetrics, crate::test_support::TestError> {

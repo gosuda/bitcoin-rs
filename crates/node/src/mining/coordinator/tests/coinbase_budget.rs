@@ -473,11 +473,11 @@ fn gated_service() -> (
     Arc<MiningService>,
     Arc<BudgetGate>,
     GenerationKey,
-    bitcoin_rs_execution::chain::LatchWriter,
+    bitcoin_rs_consensus::latch::LatchWriter,
 ) {
     let tip = Hash256::from_le_bytes(&[0x71; 32]);
     let pool = Arc::new(BudgetGate::new(5, 2));
-    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
     let service = Arc::new(service_with_source(
         Some(tip_snapshot(tip)),
         pool.clone(),

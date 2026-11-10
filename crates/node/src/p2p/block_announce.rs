@@ -790,7 +790,7 @@ impl BlockAnnouncer {
 pub fn spawn_block_announce_worker(
     announcer: Arc<BlockAnnouncer>,
     rx: BlockAnnounceReceiver,
-    shutdown: bitcoin_rs_execution::chain::LatchReader,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<std::thread::JoinHandle<()>, std::io::Error> {
     spawn_block_announce_worker_polling(announcer, rx, shutdown, ANNOUNCE_POLL)
 }
@@ -798,7 +798,7 @@ pub fn spawn_block_announce_worker(
 fn spawn_block_announce_worker_polling(
     announcer: Arc<BlockAnnouncer>,
     rx: BlockAnnounceReceiver,
-    shutdown: bitcoin_rs_execution::chain::LatchReader,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
     poll: Duration,
 ) -> Result<std::thread::JoinHandle<()>, std::io::Error> {
     std::thread::Builder::new()

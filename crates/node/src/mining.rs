@@ -57,7 +57,7 @@ pub struct MiningCoordinator {
     chainstate: Arc<Chainstate>,
     block_tree: BlockTreeReader,
     followers: ChainFollowers,
-    shutdown: bitcoin_rs_execution::chain::LatchReader,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
     service: MiningService,
 }
 

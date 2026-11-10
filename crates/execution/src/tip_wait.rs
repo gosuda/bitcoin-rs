@@ -3,7 +3,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::chain::{ActiveTipWait, LatchReader, TipSnapshot, TipWaitCondition};
+use crate::chain::{ActiveTipWait, TipSnapshot, TipWaitCondition};
+use bitcoin_rs_consensus::latch::LatchReader;
 use parking_lot::{Condvar, Mutex};
 
 use crate::Chainstate;

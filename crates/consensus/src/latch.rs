@@ -243,3 +243,6 @@ impl Drop for HookGuard {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -436,7 +436,7 @@ fn rotation_saturated_restores_full_selection_in_place_and_retries() {
 }
 
 struct WorkerStop {
-    shutdown: bitcoin_rs_execution::chain::LatchWriter,
+    shutdown: bitcoin_rs_consensus::latch::LatchWriter,
     queue: Option<BlockAnnounceQueue>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -479,7 +479,7 @@ fn worker_timeout_retries_saturated_announcement_without_new_wake() {
     let hold = bitcoin_rs_wire::test_support::hog(&aggregate, 512);
     let (queue, worker_rx) = BlockAnnounceQueue::new();
     assert!(queue.wake(), "the wake enqueued the tip");
-    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
     let worker = spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, shutdown.reader())
         .expect("the announce worker spawns");
     let _stop = WorkerStop {
@@ -1000,7 +1000,7 @@ fn worker_retries_tip_with_no_ready_peers_until_connection_arrives() {
     assert_eq!(announcer.process_tip_retry(), Vec::new());
     let (_lease, rx) = setup_peer(&table, &announcer, test_addr(1014), false);
     let (queue, worker_rx) = BlockAnnounceQueue::new();
-    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
     let worker = spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, shutdown.reader())
         .expect("the announce worker spawns");
     let _stop = WorkerStop {
@@ -1943,7 +1943,7 @@ fn block_announce_worker_cancels_promptly_on_latch() {
         BlockAnnounceConfig::default(),
     ));
     let (_queue, worker_rx) = BlockAnnounceQueue::new();
-    let latch = bitcoin_rs_execution::chain::LatchWriter::new();
+    let latch = bitcoin_rs_consensus::latch::LatchWriter::new();
     let worker = spawn_block_announce_worker_polling(
         announcer,
         worker_rx,

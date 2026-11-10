@@ -88,7 +88,7 @@ fn deadline() -> Instant {
 
 type Listening = (
     PeerEndpoint,
-    crate::latch::LatchWriter,
+    bitcoin_rs_consensus::latch::LatchWriter,
     std::thread::JoinHandle<()>,
 );
 
@@ -99,7 +99,7 @@ fn listen(shared: ConnectionShared) -> Result<Listening, TestError> {
             .unwrap_or_else(|| panic!("expected IP fixture")),
     )?;
     let addr = listener.local_addr()?;
-    let shutdown = crate::latch::LatchWriter::new();
+    let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
     let reader = shutdown.reader();
     let handle = std::thread::spawn(move || {
         let _ = serve(listener, reader, shared);

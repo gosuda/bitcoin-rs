@@ -59,7 +59,7 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
             outbound_block_relay_slots: 1,
             ..P2pServiceConfig::default()
         },
-        bitcoin_rs_wire::LatchReader::fixture_never(),
+        bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
     );
     let ready: Arc<dyn Fn(PeerSource) + Send + Sync> = Arc::new(|_| {});
     service

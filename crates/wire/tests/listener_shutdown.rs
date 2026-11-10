@@ -21,12 +21,15 @@ enum TestError {
 }
 
 struct ServeGuard {
-    shutdown: Arc<bitcoin_rs_wire::LatchWriter>,
+    shutdown: Arc<bitcoin_rs_consensus::latch::LatchWriter>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl ServeGuard {
-    fn new(shutdown: &Arc<bitcoin_rs_wire::LatchWriter>, handle: thread::JoinHandle<()>) -> Self {
+    fn new(
+        shutdown: &Arc<bitcoin_rs_consensus::latch::LatchWriter>,
+        handle: thread::JoinHandle<()>,
+    ) -> Self {
         Self {
             shutdown: Arc::clone(shutdown),
             handle: Some(handle),
@@ -62,7 +65,7 @@ fn serve_exits_when_flag_set() -> Result<(), TestError> {
     )?;
     let addr = listener.local_addr()?;
 
-    let shutdown = Arc::new(bitcoin_rs_wire::LatchWriter::new());
+    let shutdown = Arc::new(bitcoin_rs_consensus::latch::LatchWriter::new());
     let listener_shutdown = shutdown.reader();
     let (tx, rx) = mpsc::channel();
     let peer_table = Arc::new(PeerTable::new());
@@ -116,7 +119,7 @@ fn serve_returns_without_accepting_when_flag_preset() -> Result<(), TestError> {
             .unwrap_or_else(|| panic!("expected IP fixture")),
     )?;
 
-    let shutdown = Arc::new(bitcoin_rs_wire::LatchWriter::new());
+    let shutdown = Arc::new(bitcoin_rs_consensus::latch::LatchWriter::new());
     shutdown.trigger();
     let listener_shutdown = shutdown.reader();
     let (tx, rx) = mpsc::channel();
@@ -144,7 +147,7 @@ fn serve_unblocks_promptly_on_latch_trigger() -> Result<(), TestError> {
             .socket_addr()
             .unwrap_or_else(|| panic!("expected IP fixture")),
     )?;
-    let latch = bitcoin_rs_wire::LatchWriter::new();
+    let latch = bitcoin_rs_consensus::latch::LatchWriter::new();
     let reader = latch.reader();
     let peer_table = Arc::new(PeerTable::new());
     let shared = wiring(Arc::clone(&peer_table));
@@ -174,7 +177,7 @@ fn wiring(peer_table: Arc<PeerTable>) -> ConnectionShared {
         Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
             true,
         )))),
-        bitcoin_rs_wire::LatchWriter::new().reader(),
+        bitcoin_rs_consensus::latch::LatchWriter::new().reader(),
         None,
         Magic::BITCOIN,
         headers_tx,

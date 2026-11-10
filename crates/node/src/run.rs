@@ -288,7 +288,7 @@ fn build_filter_directive(level: &str) -> String {
     }
 }
 
-fn wait_for_shutdown(shutdown: &bitcoin_rs_execution::chain::LatchReader) {
+fn wait_for_shutdown(shutdown: &bitcoin_rs_consensus::latch::LatchReader) {
     if !shutdown.is_triggered() {
         let _ = shutdown.closed().recv();
     }
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn wait_for_shutdown_wakes_promptly_on_trigger() {
-        let writer = bitcoin_rs_execution::chain::LatchWriter::new();
+        let writer = bitcoin_rs_consensus::latch::LatchWriter::new();
         let reader = writer.reader();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let handle = std::thread::spawn(move || {

@@ -15,6 +15,7 @@ pub mod bip9;
 mod block_view;
 mod engine;
 pub mod kernel;
+pub mod latch;
 pub mod script_cache;
 mod sha256d64;
 pub mod signet;

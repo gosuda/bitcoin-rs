@@ -1,4 +1,5 @@
 use super::*;
+use bitcoin_rs_consensus::latch::{LatchReader, LatchWriter};
 
 struct ReadySource;
 
@@ -252,7 +253,7 @@ fn from_handles_shares_chain_handles_with_caller() {
     );
     let p2p = Arc::new(bitcoin_rs_wire::P2pService::new(
         bitcoin_rs_wire::P2pServiceConfig::default(),
-        bitcoin_rs_wire::LatchReader::fixture_never(),
+        LatchReader::fixture_never(),
     ));
     let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let ctx = Context::from_handles(ContextHandles {
@@ -788,7 +789,7 @@ fn ibd_latch_judges_the_contexts_own_tree() {
             chain_network: Network::Mainnet,
             block_body_source: None,
             block_undo_source: None,
-            closed_for_recovery: bitcoin_rs_execution::chain::LatchWriter::new().reader(),
+            closed_for_recovery: LatchWriter::new().reader(),
             rollback_warnings: None,
         },
         mempool: MempoolHandles {

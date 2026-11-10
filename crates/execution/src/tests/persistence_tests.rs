@@ -58,7 +58,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched() -> TestResult {
     let next_hash = Hash256::from(next.block_hash());
 
     let observer = handles.clone();
-    let stop = crate::chain::LatchWriter::new();
+    let stop = bitcoin_rs_consensus::latch::LatchWriter::new();
     let cancellation = stop.reader();
     let (answer_tx, answer_rx) = mpsc::channel();
     let waiter = std::thread::spawn(move || {

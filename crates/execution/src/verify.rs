@@ -1,9 +1,8 @@
 use core::num::NonZeroU32;
 use std::sync::Arc;
 
-use crate::chain::{
-    BlockTreeReader, ChainError, LatchReader, NodeId, softfork_state, validate_pow,
-};
+use crate::chain::{BlockTreeReader, ChainError, NodeId, softfork_state, validate_pow};
+use bitcoin_rs_consensus::latch::LatchReader;
 use bitcoin_rs_consensus::primitives::{Block, DecodeError, Hash256, deserialize};
 use bitcoin_rs_consensus::{
     BlockRuleContext, ConsensusError, check_block_body_binding,

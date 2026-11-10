@@ -307,7 +307,7 @@ pub struct CountingStream<S> {
     inner: S,
     counters: Arc<PeerCounters>,
     lease: Option<crate::PeerLease>,
-    cancel_guard: Option<crate::latch::HookGuard>,
+    cancel_guard: Option<bitcoin_rs_consensus::latch::HookGuard>,
     /// The connection's send-activity clock, shared with the lease the
     /// message loop reads it through. Stamped beside the byte counters
     /// when the socket accepts bytes, so keepalive send silence tracks
@@ -392,7 +392,7 @@ impl CountingStream<std::net::TcpStream> {
     /// Returns the error `clone` returned.
     pub(crate) fn with_cancel(
         mut self,
-        cancel: &crate::latch::LatchReader,
+        cancel: &bitcoin_rs_consensus::latch::LatchReader,
         clone: &dyn Fn(&std::net::TcpStream) -> IoResult<std::net::TcpStream>,
     ) -> IoResult<Self> {
         let shutdown_stream = std::sync::Arc::new(clone(&self.inner)?);

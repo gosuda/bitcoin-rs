@@ -52,7 +52,7 @@ fn check_scan_cancellation(mode: CancellationMode) -> TestResult {
         false,
     )?;
     let address = server.local_addr()?;
-    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
     let flag = shutdown.reader();
     let serving = std::thread::spawn(move || server.serve_with_shutdown(flag));
     let mut control = Connection::new(address);

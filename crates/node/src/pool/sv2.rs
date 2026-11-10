@@ -85,7 +85,7 @@ fn settle_one_deferred(
 }
 
 pub(crate) struct Sv2Service {
-    cancel: bitcoin_rs_execution::chain::LatchWriter,
+    cancel: bitcoin_rs_consensus::latch::LatchWriter,
     listener: Option<JoinHandle<()>>,
     connections: Arc<Mutex<Vec<JoinHandle<()>>>>,
     worker_panicked: Arc<AtomicBool>,
@@ -194,7 +194,7 @@ struct ConnectionWorkerArgs {
     authority: Arc<AuthorityKeypair>,
     server_config: ServerConfig,
     services: Sv2Services,
-    cancel: bitcoin_rs_execution::chain::LatchReader,
+    cancel: bitcoin_rs_consensus::latch::LatchReader,
 }
 
 fn spawn_connection_worker(
@@ -233,7 +233,7 @@ pub(crate) fn start(
     core: Arc<PoolCore>,
     ledger: Arc<LedgerHost>,
     control: Arc<dyn MiningControl>,
-    cancel: bitcoin_rs_execution::chain::LatchReader,
+    cancel: bitcoin_rs_consensus::latch::LatchReader,
     limiter: Arc<ConnectionLimiter>,
 ) -> Result<Sv2Service, RunError> {
     let bind = config.sv2_bind.ok_or(RunError::PoolSv2BindMissing)?;
@@ -414,7 +414,7 @@ fn serve_connection(
     authority: &AuthorityKeypair,
     config: ServerConfig,
     services: &Sv2Services,
-    cancel: &bitcoin_rs_execution::chain::LatchReader,
+    cancel: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<(), RunError> {
     configure_connection_stream(&stream)?;
     let stream_clone = stream.try_clone()?;

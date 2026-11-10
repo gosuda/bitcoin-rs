@@ -16,7 +16,7 @@ pub(crate) enum Dispatch {
         fn(
             &Arc<Context>,
             &Value,
-            &bitcoin_rs_execution::chain::LatchReader,
+            &bitcoin_rs_consensus::latch::LatchReader,
         ) -> Result<Value, RpcError>,
     ),
 }

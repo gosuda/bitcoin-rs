@@ -236,7 +236,7 @@ impl OverlayTransport {
         address: SocketAddr,
         mut key: Option<String>,
         shared: &crate::listener::ConnectionShared,
-        shutdown: &crate::latch::LatchReader,
+        shutdown: &bitcoin_rs_consensus::latch::LatchReader,
     ) {
         let cancelled = || shutdown.is_triggered() || shared.is_session_cancelled();
         let mut backoff = Duration::from_secs(1);

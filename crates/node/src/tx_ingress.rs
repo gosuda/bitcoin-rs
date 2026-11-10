@@ -18,7 +18,7 @@ pub fn spawn_tx_ingress_consumer(
     state: &NodeState,
     gateway: Arc<MempoolGateway>,
     mining_control: Arc<dyn MiningControl>,
-    shutdown: bitcoin_rs_execution::chain::LatchReader,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
     tx_rx: Receiver<crate::p2p::InboundBody>,
     relay: TxRelayQueue,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
@@ -41,7 +41,7 @@ pub fn spawn_tx_ingress_consumer(
 
 fn run_consumer_loop(
     consumer: &TxIngressConsumer,
-    shutdown: &bitcoin_rs_execution::chain::LatchReader,
+    shutdown: &bitcoin_rs_consensus::latch::LatchReader,
     tx_rx: &Receiver<crate::p2p::InboundBody>,
 ) {
     while !shutdown.is_triggered() {

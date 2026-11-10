@@ -204,7 +204,7 @@ struct Node {
     addr: PeerEndpoint,
     table: Arc<PeerTable>,
     aggregate: Arc<SharedOutboundBudget>,
-    shutdown: bitcoin_rs_wire::latch::LatchWriter,
+    shutdown: bitcoin_rs_consensus::latch::LatchWriter,
     listener: Option<JoinHandle<Result<(), ListenerError>>>,
 }
 
@@ -224,7 +224,7 @@ impl Node {
                 .unwrap_or_else(|| panic!("expected IP fixture")),
         )?;
         let addr = listener.local_addr()?;
-        let shutdown = bitcoin_rs_wire::latch::LatchWriter::new();
+        let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
         let reader = shutdown.reader();
         let thread = std::thread::spawn(move || serve(listener, reader, shared));
         Ok(Self {

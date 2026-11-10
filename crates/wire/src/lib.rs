@@ -1,8 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-pub mod latch;
-
 #[cfg(feature = "fuzzing")]
 pub mod addrman;
 #[cfg(not(feature = "fuzzing"))]
@@ -80,7 +78,6 @@ pub use feature::{
     FeatureId,
 };
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
-pub use latch::{LatchReader, LatchWriter};
 
 pub use listener::{ListenerExtras, RelayOffers};
 pub use peer::{

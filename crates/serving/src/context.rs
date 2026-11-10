@@ -1,9 +1,10 @@
 use alloc::sync::Arc;
 #[cfg(any(test, feature = "test-seam"))]
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_execution::chain::{
-    BlockTreeReader, LatchReader, TipReader, TipSnapshot, softfork_state,
-};
+use bitcoin_rs_consensus::latch::LatchReader;
+#[cfg(any(test, feature = "test-seam"))]
+use bitcoin_rs_consensus::latch::LatchWriter;
+use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader, TipSnapshot, softfork_state};
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_mempool::BodyInterest;
 use bitcoin_rs_mempool::{AdmissionChain, ChainAdmissionSnapshot, MempoolGateway, PrevoutMeta};
@@ -541,7 +542,7 @@ impl ChainHandles {
             applied_tip,
             active_tip_wait: None,
             progress,
-            closed_for_recovery: bitcoin_rs_execution::chain::LatchWriter::new().reader(),
+            closed_for_recovery: LatchWriter::new().reader(),
             blocks: BlockLogReader::fixture_empty(),
             utxo,
             coin_stats: Arc::new(coin_stats_listener),
@@ -578,7 +579,7 @@ impl Default for NetworkHandles {
         let v2_transport = config.v2_transport;
         let p2p = Arc::new(bitcoin_rs_wire::P2pService::new(
             config,
-            bitcoin_rs_wire::LatchReader::fixture_never(),
+            LatchReader::fixture_never(),
         ));
         Self {
             peer_table: p2p.table(),

@@ -145,7 +145,7 @@ fn failed_durable_commit_halts_apply_and_trips_the_shutdown_latch() -> Result<()
         "a halted sync must not commit the redelivered blocks"
     );
 
-    let latch = Arc::new(bitcoin_rs_execution::chain::LatchWriter::new());
+    let latch = Arc::new(bitcoin_rs_consensus::latch::LatchWriter::new());
     let verify_reader = latch.reader();
     let loop_reader = latch.reader();
     let shutdown_for_request = Arc::clone(&latch);

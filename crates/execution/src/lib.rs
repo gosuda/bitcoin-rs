@@ -1,14 +1,15 @@
 #[cfg(any(test, feature = "test-seam"))]
 use crate::chain::TransitionDomain;
 use crate::chain::{
-    BlockTree, BlockTreeReader, ChainError, ChainTxCount, LatchReader, LatchWriter, TipReader,
-    TipSnapshot, TransitionAuthority, TransitionAuthorityGuard,
+    BlockTree, BlockTreeReader, ChainError, ChainTxCount, TipReader, TipSnapshot,
+    TransitionAuthority, TransitionAuthorityGuard,
 };
 pub use crate::error::{ApplyError, DisconnectError};
 use arc_swap::ArcSwapOption;
 use assumeutxo::commit_error;
 use bitcoin_rs_consensus::ScriptExecutionCache;
 use bitcoin_rs_consensus::UtxoView;
+use bitcoin_rs_consensus::latch::{LatchReader, LatchWriter};
 use bitcoin_rs_consensus::primitives::{Block, BlockImage, Network, OutPoint, TxOut, Txid};
 use bitcoin_rs_consensus::primitives::{Hash256, Header};
 use bitcoin_rs_storage::DurableHeadStore;
@@ -857,7 +858,7 @@ impl Chainstate {
     }
 
     #[must_use]
-    pub fn shutdown_reader(&self) -> crate::chain::LatchReader {
+    pub fn shutdown_reader(&self) -> bitcoin_rs_consensus::latch::LatchReader {
         self.shutdown.reader()
     }
 
@@ -878,7 +879,7 @@ impl Chainstate {
     }
 
     #[must_use]
-    pub fn closed_for_recovery_reader(&self) -> crate::chain::LatchReader {
+    pub fn closed_for_recovery_reader(&self) -> bitcoin_rs_consensus::latch::LatchReader {
         self.admission.closed_reader()
     }
 

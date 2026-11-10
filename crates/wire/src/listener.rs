@@ -184,7 +184,7 @@ pub struct ConnectionShared {
     pub(crate) address_book: Option<Arc<crate::addrman::AddressBook>>,
     pub(crate) feeler: bool,
     pub activity: Arc<crate::NetworkActivity>,
-    pub session_cancel: crate::latch::LatchReader,
+    pub session_cancel: bitcoin_rs_consensus::latch::LatchReader,
     pub peer_ready: PeerReadyHandle,
     pub magic: Magic,
     pub headers_tx: Sender<crate::InboundHeaders>,
@@ -241,7 +241,7 @@ impl ConnectionShared {
         peer_table: Arc<crate::PeerTable>,
         banned: impl Into<crate::BannedReader>,
         activity: Arc<crate::NetworkActivity>,
-        session_cancel: crate::latch::LatchReader,
+        session_cancel: bitcoin_rs_consensus::latch::LatchReader,
         peer_ready: PeerReadyHandle,
         magic: Magic,
         headers_tx: Sender<crate::InboundHeaders>,
@@ -658,7 +658,7 @@ pub fn bind_listener(addr: std::net::SocketAddr) -> Result<TcpListener, Listener
 
 pub fn serve(
     listener: TcpListener,
-    shutdown: impl Into<crate::latch::LatchReader>,
+    shutdown: impl Into<bitcoin_rs_consensus::latch::LatchReader>,
     shared: ConnectionShared,
 ) -> Result<(), ListenerError> {
     let shutdown = shutdown.into();
@@ -682,7 +682,7 @@ fn loopback_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
 fn accept_connections(
     addr: std::net::SocketAddr,
     listener: &TcpListener,
-    shutdown: &crate::latch::LatchReader,
+    shutdown: &bitcoin_rs_consensus::latch::LatchReader,
     shared: &ConnectionShared,
 ) {
     let mut accept_backoff = ACCEPT_BACKOFF_INITIAL;
@@ -3045,7 +3045,7 @@ pub fn test_shared(
         Arc::new(crate::NetworkActivity::from_shared(Arc::new(
             AtomicBool::new(true),
         ))),
-        crate::latch::LatchWriter::new().reader(),
+        bitcoin_rs_consensus::latch::LatchWriter::new().reader(),
         None,
         Magic::BITCOIN,
         headers_tx,
@@ -3439,7 +3439,7 @@ mod resilient_accept_tests {
         .expect("bind listener");
         let addr = listener.local_addr().expect("local_addr");
 
-        let shutdown = crate::latch::LatchWriter::new();
+        let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
         let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
         let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
         let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
@@ -3488,7 +3488,7 @@ mod inbound_admission_tests {
         let mut shared = test_shared(Arc::clone(&peer_table), headers_tx, blocks_tx);
         shared.max_inbound = 1;
 
-        let shutdown = crate::latch::LatchWriter::new();
+        let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
         let serve_shutdown = shutdown.reader();
         let handle = std::thread::spawn(move || serve(listener, serve_shutdown, shared));
 
@@ -3827,7 +3827,7 @@ mod address_tests {
             book.learn_dns("seed", &[target.into()], now - 31 * 86400);
             shared.address_book = Some(Arc::clone(&book));
             if cancelled {
-                let session_cancel = crate::latch::LatchWriter::new();
+                let session_cancel = bitcoin_rs_consensus::latch::LatchWriter::new();
                 session_cancel.trigger();
                 shared.session_cancel = session_cancel.reader();
             }

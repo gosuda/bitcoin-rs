@@ -365,6 +365,7 @@ dependencies = [
  "bitcoinkernel",
  "bytemuck",
  "bytes",
+ "crossbeam-channel",
  "hashbrown 0.17.1",
  "parking_lot",
  "proptest",

@@ -1,8 +1,7 @@
 use arc_swap::ArcSwap;
 
-use bitcoin_rs_execution::chain::{
-    BlockTree, BlockTreeReader, LatchReader, LatchWriter, TipReader,
-};
+use bitcoin_rs_consensus::latch::{LatchReader, LatchWriter};
+use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 
 use crate::{
