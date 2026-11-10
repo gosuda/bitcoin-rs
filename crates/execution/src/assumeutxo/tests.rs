@@ -1606,7 +1606,6 @@ fn assert_restores_at_snapshot_base(dir: &std::path::Path, pinned: &AssumeUtxoDa
     Ok(())
 }
 
-// RCV-01, RCV-04
 #[test]
 fn restart_without_checkpoint_at_snapshot_base_refuses() -> TestResult {
     let fixture = Fixture::new()?;
