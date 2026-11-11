@@ -546,6 +546,23 @@ fn check_complete_checkpoint(
     if h_meta.len() != manifest.headers.bytes {
         return Err(ConvertError::MissingCheckpoint);
     }
+    let expected_headers_digest: [u8; 32] = decode_hex(&manifest.headers.sha256).map_err(|_| {
+        ConvertError::IncompatibleData("manifest headers sha256 is malformed".into())
+    })?;
+    let mut headers_hasher = Sha256::new();
+    let mut headers_reader = headers_file;
+    let mut headers_chunk = vec![0_u8; 64 * 1024];
+    loop {
+        let read = headers_reader.read(&mut headers_chunk)?;
+        if read == 0 {
+            break;
+        }
+        headers_hasher.update(&headers_chunk[..read]);
+    }
+    let found_headers_digest: [u8; 32] = headers_hasher.finalize().into();
+    if found_headers_digest != expected_headers_digest {
+        return Err(ConvertError::CheckpointDigestMismatch { file: HEADERS_FILE });
+    }
 
     let coinstats_file = open_file_read_no_follow(&generation_dir, COINSTATS_FILE)
         .map_err(|_| ConvertError::MissingCheckpoint)?;
@@ -554,6 +571,26 @@ fn check_complete_checkpoint(
         .map_err(|_| ConvertError::MissingCheckpoint)?;
     if c_meta.len() != manifest.coinstats.bytes {
         return Err(ConvertError::MissingCheckpoint);
+    }
+    let expected_coinstats_digest: [u8; 32] =
+        decode_hex(&manifest.coinstats.sha256).map_err(|_| {
+            ConvertError::IncompatibleData("manifest coinstats sha256 is malformed".into())
+        })?;
+    let mut coinstats_hasher = Sha256::new();
+    let mut coinstats_reader = coinstats_file;
+    let mut coinstats_chunk = vec![0_u8; 64 * 1024];
+    loop {
+        let read = coinstats_reader.read(&mut coinstats_chunk)?;
+        if read == 0 {
+            break;
+        }
+        coinstats_hasher.update(&coinstats_chunk[..read]);
+    }
+    let found_coinstats_digest: [u8; 32] = coinstats_hasher.finalize().into();
+    if found_coinstats_digest != expected_coinstats_digest {
+        return Err(ConvertError::CheckpointDigestMismatch {
+            file: COINSTATS_FILE,
+        });
     }
 
     Ok((generation_dir, reference, manifest))
