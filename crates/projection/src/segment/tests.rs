@@ -1221,8 +1221,7 @@ fn compact_filters_only_restart_resumes_past_the_sealed_filters() {
         )
         .expect("read sealed filter")
         .expect("sealed filter row");
-    let (_, _, sealed_header, _) =
-        decode_filter_value(&sealed_row).expect("decode sealed filter");
+    let (_, _, sealed_header, _) = decode_filter_value(&sealed_row).expect("decode sealed filter");
     assert_eq!(
         super::tail::next_gen_id(snapshot.as_ref()).expect("next id"),
         newest.gen_id.saturating_add(1),
@@ -1251,5 +1250,60 @@ fn compact_filters_only_restart_resumes_past_the_sealed_filters() {
     assert_eq!(
         state.prev_filter_header, sealed_header,
         "the next filter chains from the sealed header"
+    );
+}
+// PRJ-05
+#[test]
+#[expect(clippy::expect_used)]
+fn script_stats_rows_count_toward_the_tail_byte_budget() {
+    use super::tail::{NoSealedTxOrdinals, TailWriterState, append_tail_block};
+    use bitcoin_rs_storage::{BatchOp, BufferedWriteBatch, ColumnFamily};
+    let block = dense_block(0, [0u8; 32], 8);
+    let mut state = TailWriterState::new();
+    let mut batch = BufferedWriteBatch::default();
+    append_tail_block(&mut batch, &block, &mut state, &NoSealedTxOrdinals).expect("append");
+    let recorded = state.window.back().expect("appended").bytes;
+    let mut row_bytes = 0_u64;
+    let mut stats_rows = 0_u64;
+    let mut log_len = 0_u64;
+    for op in batch.into_ops() {
+        let BatchOp::Put { cf, key, value } = op else {
+            continue;
+        };
+        if cf == ColumnFamily::IdxMeta {
+            log_len = u64::try_from(value.len()).expect("log len fits");
+            continue;
+        }
+        row_bytes = row_bytes
+            .saturating_add(u64::try_from(key.len()).expect("key len fits"))
+            .saturating_add(u64::try_from(value.len()).expect("value len fits"));
+        if cf == ColumnFamily::ScriptStats {
+            stats_rows = stats_rows.saturating_add(1);
+            assert_eq!(
+                key.len(),
+                SCRIPT_STATS_KEY_LEN,
+                "stats key holds gen and script"
+            );
+            assert_eq!(
+                value.len(),
+                SCRIPT_STATS_VALUE_LEN,
+                "stats value holds counts and sats"
+            );
+        }
+    }
+    assert_eq!(stats_rows, 8, "one stats row per funded script occurrence");
+    assert!(
+        recorded >= row_bytes.saturating_add(log_len),
+        "recorded {recorded} covers {row_bytes} row bytes plus {log_len} log bytes"
+    );
+    let bound = u64::try_from(TAIL_MAX_BYTES).expect("bound fits");
+    let room = bound.saturating_sub(row_bytes).saturating_sub(log_len);
+    assert!(
+        !state.admits(0, room.saturating_add(1)),
+        "the tail refuses the first byte past the recorded cost"
+    );
+    assert!(
+        state.admits(0, room.saturating_sub(512)),
+        "the tail admits bytes inside the recorded cost"
     );
 }

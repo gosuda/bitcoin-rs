@@ -295,8 +295,10 @@ pub fn block_tail_bytes_bound(block: &CommittedBlock) -> u64 {
         delta_ordinal: u32::MAX,
         flags: format::POSTING_FLAG_SPENDING,
     }]);
-    let occurrence =
-        row(format::encode_script_post_key(0, 0, 0).len(), posting.len()) + 2 * STATS_OP_LEN;
+    let occurrence = row(format::encode_script_post_key(0, 0, 0).len(), posting.len())
+        + 2 * STATS_OP_LEN
+        + u64::try_from(format::SCRIPT_STATS_KEY_LEN + format::SCRIPT_STATS_VALUE_LEN)
+            .unwrap_or(u64::MAX);
     let dict = row(
         format::encode_script_dict_key(0, &[0; 32]).len(),
         format::encode_script_dict_value(0).len(),
@@ -638,11 +640,11 @@ fn record_occurrence(
     rec.stats_delta(script_id, funding, sats);
     let stats = state.script_stats.entry(script_id).or_default();
     apply_delta(stats, funding, sats);
-    rec.batch.put(
-        ColumnFamily::ScriptStats,
-        &format::encode_script_stats_key(0, script_id),
-        &format::encode_script_stats_value(stats),
-    );
+    let key = format::encode_script_stats_key(0, script_id);
+    let value = format::encode_script_stats_value(stats);
+    let row_bytes = u64::try_from(key.len().saturating_add(value.len())).unwrap_or(u64::MAX);
+    rec.bytes = rec.bytes.saturating_add(row_bytes);
+    rec.batch.put(ColumnFamily::ScriptStats, &key, &value);
 }
 
 fn apply_delta(stats: &mut ScriptStats, funding: bool, sats: u64) {
@@ -1024,7 +1026,7 @@ fn newest_tail_sealed(snapshot: &dyn KvSnapshot) -> Result<Option<SealedGen>, In
     let mut newest: Option<SealedGen> = None;
     for capability in TAIL_SEALED {
         if let Some(sealed) = sealed_generations(snapshot, capability)?.last() {
-            if newest.map_or(true, |current| sealed.gen_id > current.gen_id) {
+            if newest.is_none_or(|current| sealed.gen_id > current.gen_id) {
                 newest = Some(*sealed);
             }
         }
@@ -1035,8 +1037,8 @@ fn newest_tail_sealed(snapshot: &dyn KvSnapshot) -> Result<Option<SealedGen>, In
 /// The generation id the next segment takes: the stored counter, or one past
 /// the newest sealed tail-bound generation when the counter is behind.
 pub fn next_gen_id(snapshot: &dyn KvSnapshot) -> Result<u64, IndexError> {
-    let after_sealed = newest_tail_sealed(snapshot)?
-        .map_or(1, |newest| newest.gen_id.saturating_add(1));
+    let after_sealed =
+        newest_tail_sealed(snapshot)?.map_or(1, |newest| newest.gen_id.saturating_add(1));
     let stored_next = snapshot
         .get(ColumnFamily::IdxMeta, crate::segment::SEAL_NEXT_GEN_KEY)?
         .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
