@@ -1207,3 +1207,43 @@ fn rebuild_index_spills_under_a_one_mib_budget_and_matches_unbounded() -> TestRe
     assert_generation_matches(&tight_store, &wide_store);
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn rebuild_index_refuses_symlinked_txindex_before_any_wipe() -> TestResult {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir()?;
+    let victim = root.path().join("victim");
+    fs::create_dir_all(&victim)?;
+    let store = RocksDbStore::open(&victim)?;
+    let mut batch = store.new_batch();
+    batch.put(ColumnFamily::Funding, &[0xAA; 10], &[0x01, 0x02]);
+    store.write_durable(batch)?;
+    drop(store);
+    let datadir = root.path().join("datadir");
+    fs::create_dir_all(&datadir)?;
+    fs::write(datadir.join("CURRENT_SCHEMA"), "6\n")?;
+    symlink(&victim, datadir.join("txindex"))?;
+    let output = run_converter(&[
+        "rebuild-index",
+        "--datadir",
+        datadir.to_string_lossy().as_ref(),
+    ])?;
+    assert!(
+        !output.status.success(),
+        "a symlinked txindex namespace must abort the rebuild"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("symlink"),
+        "refusal must name the symlinked namespace: {stderr}"
+    );
+    let store = RocksDbStore::open(&victim)?;
+    let Some(value) = store.get(ColumnFamily::Funding, &[0xAA; 10])? else {
+        return Err(TestError::Assertion(
+            "refused rebuild wiped the symlink target".to_owned(),
+        ));
+    };
+    assert_eq!(value.as_slice(), &[0x01, 0x02]);
+    Ok(())
+}

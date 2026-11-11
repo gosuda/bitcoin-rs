@@ -20,6 +20,7 @@ use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
 use crate::error::ConvertError;
+use crate::fs_util::check_symlink_final_component;
 use crate::report::{FamilyResetReport, RebuildIndexReport};
 use crate::target::open_destination_store;
 
@@ -186,6 +187,7 @@ pub(crate) fn run_rebuild_index(
     }
     read_datadir_epoch(datadir)?;
     let txindex_dir = datadir.join("txindex");
+    check_symlink_final_component(&txindex_dir)?;
     if !txindex_dir.is_dir() {
         return Err(ConvertError::InvalidOperation(format!(
             "datadir '{}' has no txindex namespace to rebuild",
@@ -218,7 +220,9 @@ pub(crate) fn run_rebuild_index(
         )?);
     }
 
-    let scratch_guard = ScratchGuard::create(datadir.join("txindex_rebuild_scratch"))?;
+    let scratch_dir = datadir.join("txindex_rebuild_scratch");
+    check_symlink_final_component(&scratch_dir)?;
+    let scratch_guard = ScratchGuard::create(scratch_dir)?;
     let budget = std::sync::Arc::new(RebuildBudget::new(
         u64::try_from(budget_bytes).unwrap_or(u64::MAX),
     ));
