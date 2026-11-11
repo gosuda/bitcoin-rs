@@ -238,6 +238,43 @@ fn height_bytes(key: &[u8], start: usize) -> Option<u32> {
     Some(u32::from_be_bytes(bytes))
 }
 
+/// Resolves the rolling coin stats of a restored chainstate.
+///
+/// The restore seeds the listener with the stats published at the restore
+/// base. Boot reconciliation can replay blocks between that base and the
+/// durable head over an engine that already holds the committed coin rows of
+/// the head. A replayed commit cannot advance seeded stats correctly: its
+/// stored pre-image is already the post-image. When the restored base differs
+/// from the durable head, the listener is reseeded from a full scan of the
+/// committed coin set at the head, so it equals that scan before the next
+/// commit advances it by the committed pre and post images.
+pub fn settle_restored_coin_stats(
+    chainstate: &crate::Chainstate,
+    restored_tip: Option<&TipSnapshot>,
+) -> Result<(), RecoveryError> {
+    let head = chainstate.durable_head.load()?;
+    let Some(head) = head else {
+        return Ok(());
+    };
+    if restored_tip.is_some_and(|tip| tip.hash == head.tip) {
+        return Ok(());
+    }
+    let applied = chainstate.applied_tip.load_full();
+    let Some(applied) = applied.as_ref().filter(|tip| tip.hash == head.tip) else {
+        return Ok(());
+    };
+    let stats = crate::assumeutxo::engine_coin_stats(chainstate.coins.store().as_ref(), applied)
+        .map_err(|error| match error {
+            crate::AssumeUtxoError::Storage(source) => RecoveryError::Storage(source),
+            crate::AssumeUtxoError::Utxo(source) => RecoveryError::Utxo(source),
+            other => {
+                RecoveryError::Storage(bitcoin_rs_storage::StorageError::backend(other.to_string()))
+            }
+        })?;
+    chainstate.coin_stats.reset(stats);
+    Ok(())
+}
+
 fn restored_initial(
     restored: crate::checkpoint::RestoredChainstate,
 ) -> Result<InitialChainstate, RecoveryError> {
