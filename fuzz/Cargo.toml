@@ -16,6 +16,7 @@ bitcoin = { version = ">=0.32.9, <0.33", default-features = false, features = [
 ] }
 bitcoin-rs-wire = { path = "../crates/wire", default-features = false, features = ["fuzzing"] }
 bitcoin-rs-consensus = { path = "../crates/consensus", default-features = false }
+bitcoin-rs-execution = { path = "../crates/execution", default-features = false, features = ["test-seam"] }
 bitcoin-rs-mempool = { path = "../crates/mempool", default-features = false }
 tempfile = "3"
 bitcoin-rs-projection = { path = "../crates/projection" }

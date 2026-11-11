@@ -288,7 +288,7 @@ fuzz_target!(|data: &[u8]| {
         );
 
         let decoded_retained = match &message {
-            Message::Block(payload) => payload.block().retained_heap_bytes(),
+            Message::Block(payload) => payload.retained_heap_bytes(),
             Message::Tx(tx) => tx.retained_heap_bytes(),
             _ => 0,
         };

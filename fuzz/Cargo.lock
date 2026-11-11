@@ -213,6 +213,7 @@ version = "0.0.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-consensus",
+ "bitcoin-rs-execution",
  "bitcoin-rs-mempool",
  "bitcoin-rs-projection",
  "bitcoin-rs-serving",
