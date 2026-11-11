@@ -626,10 +626,16 @@ impl SnapshotControl {
         path: &Path,
     ) -> Result<SnapshotImport, SnapshotImportError> {
         let _permit = self.claim_import()?;
-        if !path.is_file() {
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.data_dir.join(path)
+        };
+        let path = path.canonicalize()?;
+        if !path.metadata()?.is_file() {
             return Err(SnapshotImportError::NotRegular);
         }
-        let bytes = read_bounded_manifest(path)?;
+        let bytes = read_bounded_manifest(&path)?;
         let manifest = bitcoin_rs_execution::manifest::SnapshotManifest::parse(&bytes)?;
         if manifest.schema != bitcoin_rs_projection::index_format_version() {
             return Err(SnapshotImportError::Manifest(
@@ -652,7 +658,7 @@ impl SnapshotControl {
             )?;
         let genesis = self.network.genesis_block_hash().to_le_bytes();
         let trust = manifest.verify_against_anchor(self.network, genesis, anchor)?;
-        let dir = path.parent().unwrap_or(path);
+        let dir = path.parent().unwrap_or(&path);
 
         let utxo_path = manifest.artifact_path(dir, bitcoin_rs_execution::manifest::UTXO_SLOT)?;
         let mut file = BufReader::new(open_regular_input(&utxo_path)?);

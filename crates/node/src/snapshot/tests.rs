@@ -1613,3 +1613,26 @@ fn checkpoint_published_before_head_commit_restarts_cold() -> Result<(), TestErr
     );
     Ok(())
 }
+
+#[test]
+fn manifest_import_resolves_a_datadir_relative_path() -> Result<(), TestError> {
+    let pinned = regtest_pin()?;
+    let dir = tempfile::tempdir()?;
+    let (state, core_path) = snapshot_inputs(dir.path())?;
+    let core_bytes = std::fs::read(&core_path)?;
+    let data_dir = dir.path().join("node");
+    std::fs::create_dir_all(&data_dir)?;
+    std::fs::write(data_dir.join("core.dat"), &core_bytes)?;
+    let manifest_path = write_valid_manifest(&data_dir, pinned, &core_bytes)?;
+    let relative_name = "relative_snapshot_manifest.json";
+    std::fs::rename(&manifest_path, data_dir.join(relative_name))?;
+    let import = state.import_manifest(std::path::Path::new(relative_name))?;
+    assert_eq!(import.base_height, pinned.height);
+    assert_eq!(import.tip_hash, pinned.block_hash.to_string_be());
+    assert_eq!(import.coins_loaded, 200);
+    assert_eq!(
+        tip_identity(&state),
+        Some((pinned.height, pinned.block_hash))
+    );
+    Ok(())
+}
