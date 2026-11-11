@@ -243,6 +243,7 @@ dependencies = [
  "bitcoin_hashes 0.14.101",
  "bytemuck",
  "bytes",
+ "crossbeam-channel",
  "hashbrown 0.17.1",
  "parking_lot",
  "rayon",
@@ -273,7 +274,6 @@ dependencies = [
  "parking_lot",
  "quanta 0.13.0",
  "rayon",
- "ruint",
  "serde",
  "sha2 0.11.1",
  "slab",
@@ -287,6 +287,7 @@ name = "bitcoin-rs-mempool"
 version = "0.15.0"
 dependencies = [
  "bitcoin-rs-consensus",
+ "bitcoin-rs-storage",
  "bytemuck",
  "hashbrown 0.17.1",
  "metrics",
