@@ -213,9 +213,9 @@ impl DerivedIndexQueryEngine {
         required: IndexCapabilities,
     ) -> Result<(), TxQueryError> {
         for capability in required.iter() {
-            let covers_tip = view
-                .coverage_for(capability)
-                .is_some_and(|coverage| coverage.last_height == view.epoch.height);
+            let covers_tip = view.coverage_for(capability).is_some_and(|coverage| {
+                coverage.last_height == view.epoch.height && coverage.last_hash == view.epoch.hash
+            });
             if !covers_tip {
                 return Err(TxQueryError::Retry(RetryReason::TipMoved {
                     expected_commit: view.epoch.commit_id,
@@ -1162,5 +1162,66 @@ mod tests {
         assert!(weak_b.upgrade().is_some());
         drop(budget);
         assert!(weak_b.upgrade().is_none());
+    }
+
+    // IDX-03
+    #[test]
+    fn same_height_fork_watermark_fails_tip_coverage() {
+        let tip_hash = Hash256::from_le_bytes(&[0xaa; 32]);
+        let watermark_hash = Hash256::from_le_bytes(&[0xbb; 32]);
+        let forked = ServingView {
+            epoch: AppliedEpoch {
+                hash: tip_hash,
+                height: 9,
+                commit_id: 1,
+            },
+            generation_id: 0,
+            coverage: [
+                Some(CapabilityCoverage {
+                    floor: 0,
+                    last_height: 9,
+                    last_hash: watermark_hash,
+                }),
+                None,
+                None,
+                None,
+            ],
+            historical_verified_height: 9,
+            historical_verified_hash: tip_hash,
+            tip_id: NodeId::new(0),
+            deadline: Instant::now() + VIEW_DEADLINE,
+            _view_charge: None,
+        };
+        let refused = DerivedIndexQueryEngine::require_tip_coverage_on_view(
+            &forked,
+            IndexCapabilities::TX_LOOKUP,
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(TxQueryError::Retry(RetryReason::TipMoved { .. }))
+            ),
+            "a watermark on another chain at the same height must refuse tip reads"
+        );
+        let aligned = ServingView {
+            coverage: [
+                Some(CapabilityCoverage {
+                    floor: 0,
+                    last_height: 9,
+                    last_hash: tip_hash,
+                }),
+                None,
+                None,
+                None,
+            ],
+            ..forked
+        };
+        assert!(
+            DerivedIndexQueryEngine::require_tip_coverage_on_view(
+                &aligned,
+                IndexCapabilities::TX_LOOKUP
+            )
+            .is_ok()
+        );
     }
 }
