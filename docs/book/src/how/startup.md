@@ -21,7 +21,7 @@ The binary parses the CLI, resolves config, opens the data directory under a loc
 2. `initialize_data_dir` (`open.rs`) creates the process epoch used by recovery evidence.
 3. Split the dbcache budget between chainstate and txindex, then `NodeStorage::open` (`open.rs`).
 4. Bind ZMQ publisher sockets from `[[notifications.zmq]]` TOML endpoints (`open.rs`; key form in [reference/config-keys.md](../reference/config-keys.md)).
-5. `require_full_script_attestation` then `prepare_initial_chainstate` (`open.rs`): restore from checkpoint or journal, or start cold. The chosen source logs one line from `crates/execution/src/recovery.rs:339`, `:354`, or `:464`:
+5. `require_full_script_attestation` then `prepare_initial_chainstate` (`open.rs`): restore from a live assumeutxo snapshot, from checkpoint or journal, or start cold. A live assumeutxo anchor restores the snapshot before the checkpoint lookup (`restore_snapshot`, `crates/execution/src/recovery.rs:501`). The chosen source logs one line from `crates/execution/src/recovery.rs:339`, `:354`, or `:464`:
 
    ```
    INFO bitcoin_rs_execution::recovery: chainstate restore selected restore_source="checkpoint" checkpoint_generation=2 checkpoint_height=5 height=5 hash="0ef5cd..."
