@@ -1285,3 +1285,123 @@ fn rebuild_index_corrupt_source_leaves_existing_index_intact() -> TestResult {
     assert_eq!(value.as_slice(), &[0x07, 0x08]);
     Ok(())
 }
+
+#[cfg(target_os = "linux")]
+const LONG_CHAIN_BLOCKS: u32 = 100;
+
+#[cfg(target_os = "linux")]
+const SHORT_CHAIN_BLOCKS: u32 = 8;
+
+#[cfg(target_os = "linux")]
+const CHAIN_OUTPUTS_PER_BLOCK: u32 = 1_000;
+
+#[cfg(target_os = "linux")]
+const CHAIN_SCRIPT_LEN: usize = 512;
+
+#[cfg(target_os = "linux")]
+const CHAIN_PEAK_SLACK_KB: u64 = 24 * 1024;
+
+#[cfg(target_os = "linux")]
+fn chain_script() -> Vec<u8> {
+    vec![0x42; CHAIN_SCRIPT_LEN]
+}
+
+#[cfg(target_os = "linux")]
+fn uniform_chain(blocks: u32) -> TestResult<Vec<FixtureBlock>> {
+    let mut ledger = CoinLedger::new();
+    let mut out = Vec::new();
+    let mut parent = [0u8; 32];
+    for height in 0..blocks {
+        let tag = u8::try_from(height % 256)?;
+        let outputs = (0..CHAIN_OUTPUTS_PER_BLOCK)
+            .map(|i| (1_000 + u64::from(i), chain_script()))
+            .collect::<Vec<_>>();
+        let block = assemble_block(
+            BlockSpec {
+                height,
+                parent,
+                nonce: height,
+                txs: vec![coinbase_tx(tag, &outputs)],
+            },
+            &mut ledger,
+        );
+        parent = block.hash;
+        out.push(block);
+    }
+    Ok(out)
+}
+
+#[cfg(target_os = "linux")]
+fn timed_rebuild_peak(datadir: &Path) -> TestResult<(RebuildIndexReport, u64)> {
+    let bin = env!("CARGO_BIN_EXE_bitcoin-rs-storage-convert");
+    let output = std::process::Command::new("/usr/bin/time")
+        .args([
+            "-v",
+            bin,
+            "rebuild-index",
+            "--datadir",
+            datadir.to_string_lossy().as_ref(),
+            "--budget-mb",
+            "1",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(TestError::Assertion(format!(
+            "rebuild-index failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let report: RebuildIndexReport = sonic_rs::from_slice(&output.stdout)?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut peak = None;
+    for line in stderr.lines() {
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim() == "Maximum resident set size (kbytes)" {
+                peak = value
+                    .split_whitespace()
+                    .next()
+                    .and_then(|text| text.parse::<u64>().ok());
+            }
+        }
+    }
+    let Some(peak) = peak else {
+        return Err(TestError::Assertion(
+            "time reported no peak resident set size".to_owned(),
+        ));
+    };
+    Ok((report, peak))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn rebuild_index_long_chain_peak_stays_near_short_chain_peak() -> TestResult {
+    let short_root = tempfile::tempdir()?;
+    let short_dir = prepare_datadir(short_root.path())?;
+    let short_blocks = uniform_chain(SHORT_CHAIN_BLOCKS)?;
+    let short_refs = short_blocks.iter().collect::<Vec<_>>();
+    write_chainstate(
+        &short_dir,
+        &short_refs,
+        short_refs.last().copied(),
+        &short_refs,
+    )?;
+    write_block_records(&short_dir, &short_refs)?;
+    let (_, short_peak) = timed_rebuild_peak(&short_dir)?;
+    let long_root = tempfile::tempdir()?;
+    let long_dir = prepare_datadir(long_root.path())?;
+    let long_blocks = uniform_chain(LONG_CHAIN_BLOCKS)?;
+    let long_refs = long_blocks.iter().collect::<Vec<_>>();
+    write_chainstate(&long_dir, &long_refs, long_refs.last().copied(), &long_refs)?;
+    write_block_records(&long_dir, &long_refs)?;
+    let (long_report, long_peak) = timed_rebuild_peak(&long_dir)?;
+    assert!(
+        long_report.budget_refusals > 0,
+        "a 1 MiB budget over a long chain must refuse and spill: {long_report:?}"
+    );
+    let bound = short_peak.saturating_add(CHAIN_PEAK_SLACK_KB);
+    assert!(
+        long_peak <= bound,
+        "long-chain peak {long_peak} KiB exceeds short-chain peak {short_peak} KiB plus {CHAIN_PEAK_SLACK_KB} KiB"
+    );
+    Ok(())
+}

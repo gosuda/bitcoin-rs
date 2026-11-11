@@ -213,15 +213,6 @@ pub(crate) fn run_rebuild_index(
     clear_generations(store.as_ref())?;
     let gen_id = 1u64;
 
-    let mut blocks = Vec::with_capacity(canonical.len());
-    for hash in &canonical {
-        blocks.push(committed_block(
-            chainstate_store.as_deref(),
-            &archive,
-            hash,
-        )?);
-    }
-
     let scratch_dir = datadir.join("txindex_rebuild_scratch");
     check_symlink_final_component(&scratch_dir)?;
     let scratch_guard = ScratchGuard::create(scratch_dir)?;
@@ -229,13 +220,21 @@ pub(crate) fn run_rebuild_index(
         u64::try_from(budget_bytes).unwrap_or(u64::MAX),
     ));
     let builder = BulkSegmentBuilder::new(budget.clone(), None, scratch_guard.path.clone());
-    let coverage = if blocks.is_empty() {
+    let mut stream = builder.stream(gen_id);
+    let mut blocks = 0u64;
+    let mut tx_total = 0usize;
+    for hash in &canonical {
+        let block = committed_block(chainstate_store.as_deref(), &archive, hash)?;
+        tx_total = tx_total.saturating_add(block.txs.len());
+        stream.push_block(&block)?;
+        blocks = blocks.saturating_add(1);
+    }
+    let coverage = if blocks == 0 {
         Coverage::new(0, 0, [0u8; 32])
     } else {
-        builder.build_and_ingest(store.as_ref(), gen_id, &blocks)?
+        stream.finish(store.as_ref())?
     };
-    let next_ordinal = u32::try_from(blocks.iter().map(|block| block.txs.len()).sum::<usize>())
-        .unwrap_or(u32::MAX);
+    let next_ordinal = u32::try_from(tx_total).unwrap_or(u32::MAX);
     bitcoin_rs_projection::segment::publish_bulk_generation(
         store.as_ref(),
         gen_id,
@@ -250,7 +249,7 @@ pub(crate) fn run_rebuild_index(
         datadir: datadir.display().to_string(),
         engine: engine.as_str().to_owned(),
         format_version: reset.format_version,
-        blocks: u64::try_from(blocks.len()).unwrap_or(u64::MAX),
+        blocks,
         budget_refusals: budget.refusals(),
         families: reset
             .families
