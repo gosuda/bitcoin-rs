@@ -1607,6 +1607,22 @@ fn enforce_relay_role(
     Ok(Some(message))
 }
 
+pub(crate) fn record_fee_filter(
+    peer_table: &crate::PeerTable,
+    tx_policy: Option<&Arc<dyn TxPolicyObserver>>,
+    source: crate::PeerSource,
+    rate: i64,
+) {
+    if let Ok(rate) = u64::try_from(rate) {
+        if rate <= bitcoin_rs_consensus::primitives::Amount::MAX_MONEY.to_sat() {
+            peer_table.note_fee_filter(source, rate);
+        }
+    }
+    if let Some(policy) = tx_policy {
+        policy.receive_fee_filter(source, rate);
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum KeepaliveAction {
     Idle,
@@ -2394,14 +2410,12 @@ pub fn run_message_loop<S: std::io::Read + std::io::Write>(
         }
         match &message {
             crate::Message::FeeFilter(rate) => {
-                if let Ok(rate) = u64::try_from(*rate) {
-                    shared
-                        .peer_table
-                        .note_fee_filter(lease.source(peer_addr.endpoint()), rate);
-                }
-                if let Some(tp) = &shared.tx_policy {
-                    tp.receive_fee_filter(lease.source(peer_addr.endpoint()), *rate);
-                }
+                record_fee_filter(
+                    &shared.peer_table,
+                    shared.tx_policy.as_ref(),
+                    lease.source(peer_addr.endpoint()),
+                    *rate,
+                );
             }
             crate::Message::Tx(tx) => {
                 use bitcoin::hashes::Hash as _;
@@ -3207,6 +3221,19 @@ mod transaction_poll_tests {
             1,
             "polled transaction requests checks inventory"
         );
+    }
+    #[test]
+    fn oversized_fee_filter_leaves_announced_filter_unchanged() {
+        let table = Arc::new(crate::PeerTable::new());
+        let (sender, _receiver) = crossbeam_channel::bounded(4);
+        let lease = crate::PeerLease::new(sender);
+        let addr: PeerEndpoint = ([127, 0, 0, 1], 8333).into();
+        table.register(addr, lease.clone());
+        let source = lease.source(Some(addr));
+        record_fee_filter(&table, None, source, i64::MAX);
+        assert_eq!(table.transaction_fee_filter(source), 0);
+        record_fee_filter(&table, None, source, 1_000);
+        assert_eq!(table.transaction_fee_filter(source), 1_000);
     }
 }
 
