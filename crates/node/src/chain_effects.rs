@@ -61,6 +61,10 @@ impl EpochCell {
             tip, commit_id,
         ));
     }
+
+    pub fn reset(&self) {
+        *self.inner.write() = None;
+    }
 }
 
 #[derive(Clone)]
@@ -328,6 +332,7 @@ impl ChainFollowers {
             gateway.snapshot_changed();
         }
         self.blocks.write().clear();
+        self.epoch.reset();
         self.wake_index();
         self.mining.publish_generation();
     }

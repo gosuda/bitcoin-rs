@@ -941,3 +941,21 @@ fn refused_mempool_settlement_closes_the_chain_for_recovery() -> Result<(), Test
     );
     Ok(())
 }
+
+#[test]
+fn snapshot_clears_the_cached_epoch_with_the_block_log() -> Result<(), TestError> {
+    let genesis = Network::Regtest.genesis_block();
+    let tip = genesis_tip(&genesis)?;
+    let followers = ChainFollowers::noop();
+    let image = BlockImage::from_local(genesis.clone());
+    followers.on_connect(&image, &connect_outcome(&tip, &image))?;
+    assert!(followers.epoch().current().is_some());
+    assert_eq!(followers.block_log().read().len(), 1);
+    followers.on_snapshot();
+    assert!(followers.block_log().read().is_empty());
+    assert!(
+        followers.epoch().current().is_none(),
+        "a snapshot replaces the tip, so no pre-snapshot epoch survives"
+    );
+    Ok(())
+}
