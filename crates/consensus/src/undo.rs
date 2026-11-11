@@ -21,6 +21,8 @@ pub enum BoundedReadError {
     Unsupported,
     #[error("stored value has {size} bytes, exceeding the {limit}-byte read limit")]
     Limit { size: usize, limit: usize },
+    #[error("corrupt block frame: {0}")]
+    CorruptFrame(&'static str),
     #[error("storage: {0}")]
     Storage(String),
 }

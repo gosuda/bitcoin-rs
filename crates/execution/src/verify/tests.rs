@@ -39,6 +39,7 @@ struct Bodies {
     rows: Mutex<HashMap<(u32, Hash256), Vec<u8>>>,
     corrupt: Mutex<HashSet<(u32, Hash256)>>,
     before_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    fail_verification: Mutex<Option<BoundedReadError>>,
 }
 
 impl Bodies {
@@ -96,6 +97,10 @@ impl BlockBodyStore for Bodies {
         let hook = self.before_read.lock().take();
         if let Some(hook) = hook {
             hook();
+        }
+        let injected = self.fail_verification.lock().take();
+        if let Some(error) = injected {
+            return Err(error);
         }
         if self.corrupt.lock().contains(&(height, hash)) {
             return Err(BoundedReadError::from(StorageError::CorruptBlockFrame(
@@ -174,6 +179,10 @@ impl Fixture {
             .lock()
             .insert((height, self.hash(index)));
         Ok(())
+    }
+
+    fn fail_next_verification_read(&self, error: BoundedReadError) {
+        *self.bodies.fail_verification.lock() = Some(error);
     }
 
     fn outcome(&self, level: CheckLevel, depth: Option<u32>) -> Result<VerifyOutcome> {
@@ -840,5 +849,27 @@ fn a_pin_withdrawn_on_the_final_read_skips_instead_of_passing() -> Result {
         "a row readable under a withdrawn pin is skipped, never passed"
     );
     assert_eq!(f.retention.active_leases(), 0);
+    Ok(())
+}
+
+// SYNC-04
+#[test]
+fn a_backend_failure_that_names_corruption_is_a_read_failure_not_damage() -> Result {
+    let f = fixture(1)?;
+    f.fail_next_verification_read(BoundedReadError::Storage(
+        "backend-specific: database is corrupted".to_owned(),
+    ));
+    let error = f.damage(CheckLevel::ReadBodies, None)?;
+    assert!(
+        matches!(error, VerifyError::BodyRead { .. }),
+        "an index backend failure keeps its read-failure class: {error}"
+    );
+    let f = fixture(1)?;
+    f.corrupt_body(1)?;
+    let error = f.damage(CheckLevel::ReadBodies, None)?;
+    assert!(
+        matches!(error, VerifyError::BodyCorrupt { height: 1, .. }),
+        "a typed corrupt frame stays damage: {error}"
+    );
     Ok(())
 }
