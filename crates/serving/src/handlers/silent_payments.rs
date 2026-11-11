@@ -133,7 +133,9 @@ fn read_error(error: &BlockSpendsError) -> RpcError {
         | BlockSpendsError::Storage(_)
         | BlockSpendsError::Undo(_)
         | BlockSpendsError::BodyRead(BoundedReadError::Storage(_))
-        | BlockSpendsError::BoundedRead(BoundedReadError::Storage(_)) => {
+        | BlockSpendsError::BodyRead(BoundedReadError::CorruptFrame(_))
+        | BlockSpendsError::BoundedRead(BoundedReadError::Storage(_))
+        | BlockSpendsError::BoundedRead(BoundedReadError::CorruptFrame(_)) => {
             tracing::warn!(%error, "silent payment block input read failed");
             RpcError::Internal("Unable to read silent payment block inputs".to_owned())
         }

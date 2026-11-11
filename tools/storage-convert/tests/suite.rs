@@ -13,5 +13,6 @@ mod full_revalidation;
 mod historical_checkpoint;
 mod large_row;
 mod pool_ledger;
+mod scoped_peers;
 mod suffix_checkpoint;
 mod validation;

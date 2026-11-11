@@ -319,20 +319,70 @@ fn copy_independent_files(
     }
 
     for &file_name in INDEPENDENT_FILES {
-        let mut src_file = match open_file_read_no_follow(from_root, file_name) {
-            Ok(f) => f,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(ConvertError::Io(err)),
+        copy_independent_file(from_root, to_root, file_name, copied_files)?;
+    }
+
+    copy_scoped_peers_books(from_root, to_root, copied_files)?;
+
+    Ok(())
+}
+
+fn copy_independent_file(
+    from_root: &Dir,
+    to_root: &Dir,
+    file_name: &str,
+    copied_files: &mut Vec<CopiedFileReport>,
+) -> Result<(), ConvertError> {
+    let mut src_file = match open_file_read_no_follow(from_root, file_name) {
+        Ok(f) => f,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(ConvertError::Io(err)),
+    };
+
+    let mut dst_file = create_file_no_follow(to_root, file_name)?;
+    let bytes = io::copy(&mut src_file, &mut dst_file)?;
+    dst_file.sync_all()?;
+
+    copied_files.push(CopiedFileReport {
+        path: file_name.to_string(),
+        bytes,
+    });
+    Ok(())
+}
+
+fn is_scoped_peers_book(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("peers-") else {
+        return false;
+    };
+    let Some(hex) = rest.strip_suffix(".dat") else {
+        return false;
+    };
+    hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn copy_scoped_peers_books(
+    from_root: &Dir,
+    to_root: &Dir,
+    copied_files: &mut Vec<CopiedFileReport>,
+) -> Result<(), ConvertError> {
+    let mut scoped: Vec<String> = Vec::new();
+    for entry in from_root.entries()? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
         };
+        if is_scoped_peers_book(name) {
+            scoped.push(name.to_string());
+        }
+    }
+    scoped.sort();
 
-        let mut dst_file = create_file_no_follow(to_root, file_name)?;
-        let bytes = io::copy(&mut src_file, &mut dst_file)?;
-        dst_file.sync_all()?;
-
-        copied_files.push(CopiedFileReport {
-            path: file_name.to_string(),
-            bytes,
-        });
+    for name in &scoped {
+        copy_independent_file(from_root, to_root, name, copied_files)?;
     }
 
     Ok(())

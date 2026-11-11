@@ -215,7 +215,14 @@ impl TxIngressObserver for NodeTxIngress {
             Err(crossbeam_channel::TrySendError::Disconnected(b)) => Some(b),
         };
         if let Some(InboundBody::Tx(inbound)) = dropped {
-            let _ = inbound;
+            let source = inbound.source;
+            let txid = inbound.tx.txid();
+            let wtxid = inbound.tx.wtxid();
+            drop(inbound);
+            self.tx_policy
+                .transaction_response_completed(source, txid, wtxid);
+            self.tx_policy
+                .poll_transaction_response(self.inventory.as_ref(), txid, wtxid);
         }
     }
 

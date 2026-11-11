@@ -68,8 +68,10 @@ runs and hooks need no extra tooling.
 Plain `cargo test --workspace` and `cargo clippy --workspace` also enable the
 library defaults, which are now kernel-free (the `kernel` feature is an opt-in
 capability; the engine a run uses is `validation.engine` at runtime), so plain
-workspace commands need no C++ toolchain. The script passes the kernel-free
-feature selection. The binary and workspace test lanes expect the
+workspace commands need no kernel toolchain. The script passes the kernel-free
+feature selection. The mandatory default RocksDB storage engine still requires
+a C++ toolchain, even for kernel-free commands. The binary and workspace test
+lanes expect the
 pinned Core fixture:
 `bash scripts/provision-ci-reference-fixtures.sh core`.
 
