@@ -1247,3 +1247,41 @@ fn rebuild_index_refuses_symlinked_txindex_before_any_wipe() -> TestResult {
     assert_eq!(value.as_slice(), &[0x01, 0x02]);
     Ok(())
 }
+
+#[test]
+fn rebuild_index_corrupt_source_leaves_existing_index_intact() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let datadir = prepare_datadir(root.path())?;
+    let store = RocksDbStore::open(datadir.join("txindex"))?;
+    let mut batch = store.new_batch();
+    batch.put(ColumnFamily::Funding, &[0xCC; 10], &[0x07, 0x08]);
+    store.write_durable(batch)?;
+    drop(store);
+    let blocks = creating_chain();
+    let refs = blocks.iter().collect::<Vec<_>>();
+    write_chainstate(&datadir, &refs, refs.last().copied(), &refs)?;
+    write_block_records(&datadir, &refs)?;
+    let path = datadir.join("blocks").join("blk00000.dat");
+    let mut bytes = fs::read(&path)?;
+    let second_record = 44 + blocks[0].body.len();
+    bytes[second_record] = b'X';
+    fs::write(&path, bytes)?;
+    let output = rebuild(&datadir)?;
+    assert!(
+        !output.status.success(),
+        "a corrupt block record must abort the rebuild"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("magic"),
+        "refusal must name the bad magic: {stderr}"
+    );
+    let store = RocksDbStore::open(datadir.join("txindex"))?;
+    let Some(value) = store.get(ColumnFamily::Funding, &[0xCC; 10])? else {
+        return Err(TestError::Assertion(
+            "aborted rebuild wiped the live index".to_owned(),
+        ));
+    };
+    assert_eq!(value.as_slice(), &[0x07, 0x08]);
+    Ok(())
+}

@@ -197,11 +197,6 @@ pub(crate) fn run_rebuild_index(
     let chainstate_dir = datadir.join("chainstate");
     let engine = detect_engine(&txindex_dir, &chainstate_dir, datadir)?;
     let store = open_destination_store(&txindex_dir, engine)?;
-    let reset = bitcoin_rs_projection::reset_offline(store.as_ref())
-        .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
-    clear_generations(store.as_ref())?;
-    let gen_id = 1u64;
-
     let chainstate_store: Option<Box<dyn KvStore>> = if chainstate_dir.is_dir() {
         Some(open_destination_store(&chainstate_dir, engine)?)
     } else {
@@ -210,6 +205,13 @@ pub(crate) fn run_rebuild_index(
     let head = load_durable_head(chainstate_store.as_deref())?;
     let archive = scan_archive(&datadir.join("blocks"))?;
     let canonical = canonical_chain(&archive, head)?;
+    for hash in &canonical {
+        let _block = committed_block(chainstate_store.as_deref(), &archive, hash)?;
+    }
+    let reset = bitcoin_rs_projection::reset_offline(store.as_ref())
+        .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
+    clear_generations(store.as_ref())?;
+    let gen_id = 1u64;
 
     let mut blocks = Vec::with_capacity(canonical.len());
     for hash in &canonical {
