@@ -219,7 +219,18 @@ impl Worker {
                 if self.runtime.should_stop() {
                     return Ok(ChunkAction::Stalled);
                 }
-                if let Some(action) = self.admit_prepared(prepared, sub_chunk, state, history)? {
+                let (admitted, action) =
+                    self.admit_prepared(prepared, sub_chunk, state, history)?;
+                let mut guard = self.buffered_facts.lock();
+                for identity in &sub_chunk[..admitted] {
+                    if let Some(block) = guard.remove(&(identity.hash, identity.height)) {
+                        if let Some(charge) = &self.facts_charge {
+                            charge.release(block.size_bytes());
+                        }
+                    }
+                }
+                drop(guard);
+                if let Some(action) = action {
                     return Ok(action);
                 }
                 *identities = &identities[loaded..];
@@ -251,10 +262,11 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
 
-        if let Some(action) = self.admit_prepared(prepared, sub_chunk, state, history)? {
+        let (admitted, action) = self.admit_prepared(prepared, sub_chunk, state, history)?;
+        *identities = &identities[admitted..];
+        if let Some(action) = action {
             return Ok(action);
         }
-        *identities = &identities[loaded..];
         if let Some(action) = stop.action() {
             return Ok(action);
         }
@@ -447,13 +459,10 @@ impl Worker {
             return Ok(None);
         }
         drop(guard);
-        let mut guard = self.buffered_facts.lock();
+        let guard = self.buffered_facts.lock();
         let mut prepared = Vec::with_capacity(count);
         for identity in &identities[..count] {
-            if let Some(block) = guard.remove(&(identity.hash, identity.height)) {
-                if let Some(charge) = &self.facts_charge {
-                    charge.release(block.size_bytes());
-                }
+            if let Some(block) = guard.get(&(identity.hash, identity.height)).cloned() {
                 prepared.push(self.writer.prepare_block_from_facts(capabilities, block));
             }
         }
@@ -823,27 +832,39 @@ impl Worker {
         sub_chunk: &[BlockIdentity],
         state: &mut PendingForward,
         history: &HistoryLease,
-    ) -> Result<Option<ChunkAction>, DerivedIndexWorkerError> {
-        for (result, identity) in prepared.into_iter().zip(sub_chunk.iter()) {
+    ) -> Result<(usize, Option<ChunkAction>), DerivedIndexWorkerError> {
+        let mut admitted = 0;
+        for (identity, result) in sub_chunk.iter().zip(prepared) {
             let prepared = result.map_err(DerivedIndexWorkerError::Index)?;
             if identity.height > 0 && prepared.parent_hash != identity.parent_hash {
                 return Err(DerivedIndexWorkerError::MissingTargetChain {
                     height: identity.height,
                 });
             }
-            if state.batch.try_push(prepared).is_err() || state.batch.is_full() {
-                let action = if self
-                    .commit_forward(state.take(self.batch_limits), history)?
-                    .is_some()
-                {
-                    ChunkAction::Progressed
-                } else {
-                    ChunkAction::Stalled
-                };
-                return Ok(Some(action));
+            if state.batch.try_push(prepared).is_err() {
+                return Ok((admitted, Some(self.admit_filled_batch(state, history)?)));
+            }
+            admitted += 1;
+            if state.batch.is_full() {
+                return Ok((admitted, Some(self.admit_filled_batch(state, history)?)));
             }
         }
-        Ok(None)
+        Ok((admitted, None))
+    }
+
+    fn admit_filled_batch(
+        &self,
+        state: &mut PendingForward,
+        history: &HistoryLease,
+    ) -> Result<ChunkAction, DerivedIndexWorkerError> {
+        if self
+            .commit_forward(state.take(self.batch_limits), history)?
+            .is_some()
+        {
+            Ok(ChunkAction::Progressed)
+        } else {
+            Ok(ChunkAction::Stalled)
+        }
     }
 }
 impl Worker {

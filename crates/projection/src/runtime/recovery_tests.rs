@@ -1703,10 +1703,12 @@ fn buffered_facts_below_index_progress_are_evicted() {
         header: [0_u8; 80],
         txs: Vec::new(),
     };
+    let stale_key = (stale.hash, stale.height);
+    let window_key = (window.hash, window.height);
     {
         let mut guard = h.worker.buffered_facts.lock();
-        guard.insert((stale.hash, stale.height), stale);
-        guard.insert((window.hash, window.height), window.clone());
+        guard.insert(stale_key, stale);
+        guard.insert(window_key, window);
     }
 
     let prepared = h
@@ -1718,10 +1720,16 @@ fn buffered_facts_below_index_progress_are_evicted() {
         Some(1),
         "the fact inside the requested window must serve the fast path"
     );
+    let guard = h.worker.buffered_facts.lock();
     assert!(
-        h.worker.buffered_facts.lock().is_empty(),
+        !guard.contains_key(&stale_key),
         "facts below the requested height must be evicted instead of accumulating"
     );
+    assert!(
+        guard.contains_key(&window_key),
+        "a fact stays buffered until admission consumes it"
+    );
+    drop(guard);
 }
 
 // BUD-06, BUD-07
@@ -1825,6 +1833,48 @@ fn buffered_facts_hold_their_charge_while_the_queue_refills() {
         ledger.available_bytes(BudgetOwner::FactsQueue),
         capacity - buffered,
         "every retained buffered block must hold a ledger charge"
+    );
+}
+
+// IDX-06
+#[test]
+fn facts_batch_overflow_keeps_the_unadmitted_suffix() {
+    let f = ForkFixture::new(4);
+    let mut h = Harness::with_enabled(&f, u32::MAX, IndexCapabilities::TX_LOOKUP);
+    let blocks = committed_chain(&f, &f.a, 0, 2);
+    f.bodies.bodies.lock().clear();
+    let tip = f.tip(f.a[1]);
+    h.set_tip(&tip);
+    let (facts_tx, facts_rx) = crossbeam_channel::bounded(8);
+    h.worker.facts_rx = Some(facts_rx);
+    h.worker.batch_limits = PreparedBatchLimits {
+        max_rows: 1,
+        max_bytes: usize::MAX,
+    };
+    for (index, block) in blocks.iter().enumerate() {
+        facts_tx
+            .send(Arc::new(bitcoin_rs_storage::CommittedFacts {
+                commit_id: u64::try_from(index).expect("index fits") + 1,
+                blocks: vec![block.clone()],
+            }))
+            .expect("facts send");
+    }
+    let mut pending = None;
+    for _ in 0..8 {
+        if matches!(
+            h.worker.reconcile_once(&mut pending).expect("reconcile"),
+            ReconcileAction::CaughtUp
+        ) {
+            break;
+        }
+    }
+    assert_eq!(
+        h.watermarks().tx_lookup,
+        Some(IndexWatermark {
+            height: 2,
+            hash: blocks[2].hash,
+        }),
+        "every facts block must reach the watermark despite the one-row batch limit"
     );
 }
 
