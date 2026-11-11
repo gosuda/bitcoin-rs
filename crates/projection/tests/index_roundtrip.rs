@@ -142,6 +142,15 @@ fn stored_idle_version<S: KvStore>(store: &Arc<S>) -> Result<u64, TestError> {
     }
 }
 
+fn tail_log_keys<S: KvStore>(store: &Arc<S>) -> Result<Vec<Vec<u8>>, TestError> {
+    let mut keys = Vec::new();
+    for item in store.iter_prefix(ColumnFamily::IdxMeta, b"tail/log/")? {
+        let (key, _) = item?;
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
 #[derive(Clone, Debug)]
 struct BatchLog {
     durable: bool,
@@ -1250,6 +1259,12 @@ fn reset_claim_carries_mask_epoch_and_base_version() -> Result<(), TestError> {
     let (fence, _) = writer.fenced_watermarks()?;
     writer.commit_consumer_cursor(fence, b"before-reset")?;
 
+    let tail_logs_before = tail_log_keys(&store)?;
+    assert!(
+        !tail_logs_before.is_empty(),
+        "the committed block anchored shared tail undo logs"
+    );
+
     writer.reset_capabilities(IndexCapabilities::SCRIPT_HISTORY)?;
 
     let marker_puts: Vec<BatchLog> = store
@@ -1270,10 +1285,10 @@ fn reset_claim_carries_mask_epoch_and_base_version() -> Result<(), TestError> {
         "claim value is mask(1) || process_epoch(8 LE) || base_version(8 LE)"
     );
     assert_eq!(
-        marker_puts[0].deletes, 6,
-        "the claim atomically deletes the selected watermark, its coverage \
-         floor, the global cursor, the capability's segment descriptor and \
-         sealed segment records, and the tail undo logs"
+        tail_log_keys(&store)?,
+        tail_logs_before,
+        "a ScriptHistory reset leaves the shared tail undo logs for the \
+         surviving tail-bound capabilities"
     );
     assert_eq!(
         marker_puts[1].marker_put.as_deref(),
@@ -2777,6 +2792,11 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state() -> Resul
     store.write_durable(crash)?;
 
     let baseline = store.logged_batches().len();
+    let tail_logs_before = tail_log_keys(&store)?;
+    assert!(
+        !tail_logs_before.is_empty(),
+        "the seeded block anchored shared tail undo logs"
+    );
     writer.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
 
     let markers: Vec<BatchLog> = store.logged_batches()[baseline..]
@@ -2796,10 +2816,10 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state() -> Resul
         "growth changes byte zero only; width, process epoch, and base survive raw"
     );
     assert_eq!(
-        markers[0].deletes, 10,
-        "the claim deletes the union watermarks, their coverage floors, the \
-         consumer cursor, both capabilities' segment descriptors and sealed \
-         segment records, and the tail undo logs"
+        tail_log_keys(&store)?,
+        tail_logs_before,
+        "a union reset that omits the tail-bound CompactFilters keeps the \
+         shared tail undo logs"
     );
     assert_eq!(
         markers[1].marker_put.as_deref(),
