@@ -236,7 +236,7 @@ The manifest carries the identity the importer will re-check:
  },
  "index": {
   "mode": "utxo",
-  "format_version": 6,
+  "format_version": 9,
   "capabilities": [{"capability":"tx_lookup","floor":0,"height":20,
     "hash":"4883ac85963d18d3d05b3cd2bf0f2391ebfe9280e69748d90a3101091f39a2d7"}]
  },
