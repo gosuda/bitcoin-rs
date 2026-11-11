@@ -4,8 +4,9 @@ use std::collections::HashMap;
 
 use bitcoin_rs_execution::chain::regtest_fixture::{REGTEST_BITS, genesis_time};
 use bitcoin_rs_execution::chain::{
-    BlockTree, ChainWork, HeaderValidationMode, NodeId, accept_headers, plan_reorg,
+    BlockTree, HeaderValidationMode, NodeId, accept_headers, plan_reorg,
 };
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::{
     BlockHash, CompactTarget, Hash256, Header, Network, deserialize,
 };
