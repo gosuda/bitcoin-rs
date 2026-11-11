@@ -1724,6 +1724,110 @@ fn buffered_facts_below_index_progress_are_evicted() {
     );
 }
 
+// BUD-06, BUD-07
+#[test]
+fn buffered_facts_hold_their_charge_while_the_queue_refills() {
+    use bitcoin_rs_storage::CommittedBlock;
+    use bitcoin_rs_storage::CommittedFacts;
+    use bitcoin_rs_storage::budget::BudgetCharge;
+    use bitcoin_rs_storage::budget::BudgetError;
+    use bitcoin_rs_storage::budget::BudgetOwner;
+    use bitcoin_rs_storage::budget::ChargeHandle;
+    use std::sync::Mutex as StdMutex;
+
+    struct Ledger {
+        outstanding: StdMutex<u64>,
+        capacity: u64,
+    }
+    impl BudgetCharge for Ledger {
+        fn reserve_bytes(&self, _: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
+            let mut outstanding = self.outstanding.lock().expect("ledger lock");
+            let next = outstanding.saturating_add(bytes);
+            if next > self.capacity {
+                return Err(BudgetError::BudgetExhausted);
+            }
+            *outstanding = next;
+            Ok(())
+        }
+        fn allocate_bytes(&self, _: BudgetOwner, _: u64) -> Result<(), BudgetError> {
+            Ok(())
+        }
+        fn release_bytes(&self, _: BudgetOwner, bytes: u64) {
+            let mut outstanding = self.outstanding.lock().expect("ledger lock");
+            *outstanding = outstanding.saturating_sub(bytes);
+        }
+        fn available_bytes(&self, _: BudgetOwner) -> u64 {
+            self.capacity - *self.outstanding.lock().expect("ledger lock")
+        }
+    }
+
+    fn probe_block(height: u32, hash: u8) -> CommittedBlock {
+        CommittedBlock {
+            height,
+            hash: [hash; 32],
+            parent_hash: [hash.wrapping_sub(1); 32],
+            header: [0_u8; 80],
+            txs: Vec::new(),
+        }
+    }
+
+    let f = ForkFixture::new(2);
+    let mut h = Harness::with_enabled(&f, u32::MAX, IndexCapabilities::TX_LOOKUP);
+    let facts = Arc::new(CommittedFacts {
+        commit_id: 1,
+        blocks: vec![probe_block(1, 1)],
+    });
+    let facts_size = facts.size_bytes();
+    let capacity = facts_size * 4;
+    let ledger: Arc<dyn BudgetCharge> = Arc::new(Ledger {
+        outstanding: StdMutex::new(0),
+        capacity,
+    });
+    let charge = ChargeHandle::new(Arc::clone(&ledger), BudgetOwner::FactsQueue);
+    let (facts_tx, facts_rx) = crossbeam_channel::bounded(8);
+    h.worker.facts_rx = Some(facts_rx);
+    h.worker.facts_charge = Some(charge.clone());
+
+    let mut refused = false;
+    for index in 0..16_u8 {
+        if charge.charge(facts_size).is_err() {
+            refused = true;
+            break;
+        }
+        if facts_tx
+            .send(Arc::new(CommittedFacts {
+                commit_id: u64::from(index) + 2,
+                blocks: vec![probe_block(1, index + 2)],
+            }))
+            .is_err()
+        {
+            break;
+        }
+        let prepared = h
+            .worker
+            .try_prepare_from_facts(&[], IndexCapabilities::TX_LOOKUP)
+            .expect("facts drain");
+        assert!(prepared.is_none(), "no identities requested");
+    }
+    assert!(
+        refused,
+        "the sender budget must refuse while buffered facts are retained without a charge"
+    );
+
+    let buffered: u64 = h
+        .worker
+        .buffered_facts
+        .lock()
+        .values()
+        .map(|block| block.size_bytes())
+        .sum();
+    assert_eq!(
+        ledger.available_bytes(BudgetOwner::FactsQueue),
+        capacity - buffered,
+        "every retained buffered block must hold a ledger charge"
+    );
+}
+
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 
 const SEGMENT_FAMILIES: [ColumnFamily; 6] = [

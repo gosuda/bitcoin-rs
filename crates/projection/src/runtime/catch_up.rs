@@ -368,7 +368,29 @@ impl Worker {
                 }
             }
         }
-        self.buffered_facts.lock().clear();
+        let mut guard = self.buffered_facts.lock();
+        if let Some(charge) = &self.facts_charge {
+            let retained: u64 = guard.values().map(|block| block.size_bytes()).sum();
+            charge.release(retained);
+        }
+        guard.clear();
+    }
+
+    fn charge_and_retain_facts_block(
+        &self,
+        guard: &mut hashbrown::HashMap<([u8; 32], u32), bitcoin_rs_storage::CommittedBlock>,
+        block: bitcoin_rs_storage::CommittedBlock,
+    ) {
+        if let Some(charge) = &self.facts_charge {
+            if charge.charge(block.size_bytes()).is_err() {
+                return;
+            }
+        }
+        if let Some(previous) = guard.insert((block.hash, block.height), block) {
+            if let Some(charge) = &self.facts_charge {
+                charge.release(previous.size_bytes());
+            }
+        }
     }
 
     fn drain_facts_into_buffer(&self) {
@@ -379,7 +401,7 @@ impl Worker {
                 }
                 let mut guard = self.buffered_facts.lock();
                 for block in &facts.blocks {
-                    guard.insert((block.hash, block.height), block.clone());
+                    self.charge_and_retain_facts_block(&mut guard, block.clone());
                 }
             }
         }
@@ -396,7 +418,18 @@ impl Worker {
         self.drain_facts_into_buffer();
         if let Some(floor) = identities.first().map(|identity| identity.height) {
             let mut guard = self.buffered_facts.lock();
-            guard.retain(|_, block| block.height >= floor);
+            let mut evicted = 0_u64;
+            guard.retain(|_, block| {
+                if block.height >= floor {
+                    true
+                } else {
+                    evicted += block.size_bytes();
+                    false
+                }
+            });
+            if let Some(charge) = &self.facts_charge {
+                charge.release(evicted);
+            }
         }
         let guard = self.buffered_facts.lock();
         if guard.is_empty() {
@@ -418,6 +451,9 @@ impl Worker {
         let mut prepared = Vec::with_capacity(count);
         for identity in &identities[..count] {
             if let Some(block) = guard.remove(&(identity.hash, identity.height)) {
+                if let Some(charge) = &self.facts_charge {
+                    charge.release(block.size_bytes());
+                }
                 prepared.push(self.writer.prepare_block_from_facts(capabilities, block));
             }
         }
