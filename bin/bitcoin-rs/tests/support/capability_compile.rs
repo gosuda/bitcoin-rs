@@ -61,9 +61,11 @@ bitcoin-rs-node = {{ path = {node}, default-features = false }}
 
     fn check(&self, source: &str, locked: bool) -> Result<Output> {
         std::fs::write(self.directory.path().join("src/lib.rs"), source)?;
+        let target = self.directory.path().join("target");
         let mut command = Command::new(env!("CARGO"));
         command
             .current_dir(self.directory.path())
+            .env("CARGO_BUILD_BUILD_DIR", &target)
             .args([
                 "check",
                 "--offline",
@@ -74,7 +76,7 @@ bitcoin-rs-node = {{ path = {node}, default-features = false }}
             ])
             .arg(self.directory.path().join("Cargo.toml"))
             .arg("--target-dir")
-            .arg(self.directory.path().join("target"));
+            .arg(&target);
         if locked {
             command.arg("--locked");
         }
