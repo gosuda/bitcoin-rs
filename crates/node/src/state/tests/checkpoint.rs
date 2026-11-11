@@ -62,7 +62,7 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
     let genesis_tip = state.apply_block(&genesis)?;
     let expected_utxo_hash = state
         .chainstate()
-        .utxo_handle()
+        .utxo_reader()
         .with_stable_view(stable_hash)?;
     let expected_stats = state.chainstate().coin_stats_handle().snapshot();
     assert!(state.publish_checkpoint()?.is_some());
@@ -86,7 +86,7 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
     assert_eq!(
         resumed
             .chainstate()
-            .utxo_handle()
+            .utxo_reader()
             .with_stable_view(stable_hash)?,
         expected_utxo_hash
     );
@@ -110,7 +110,7 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
     let listener_after_apply = resumed.chainstate().coin_stats_handle().snapshot();
     let mut rescanned = resumed
         .chainstate()
-        .utxo_handle()
+        .utxo_reader()
         .with_stable_view(|view| {
             bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, next_tip.height, true)
         })?;
