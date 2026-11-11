@@ -224,7 +224,6 @@ pub(crate) fn build_disconnect_delta(
         entry.1.push(remove.vout);
     }
 
-    // Read current records for all affected txids in one batch.
     let txids: Vec<Txid> = affected.keys().copied().collect();
     let coin_keys: Vec<CoinKey> = txids
         .iter()
@@ -260,12 +259,10 @@ pub(crate) fn build_disconnect_delta(
             None => Vec::new(),
         };
 
-        // Remove outputs created by the disconnected block.
         for vout in to_remove {
             outputs.retain(|o| o.vout != *vout);
         }
 
-        // Restore outputs spent by the disconnected block.
         for restored in to_restore {
             if !outputs.iter().any(|o| o.vout == restored.vout) {
                 outputs.push(restored.clone());
