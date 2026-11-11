@@ -532,6 +532,18 @@ pub(super) fn resume_capability_reset<S: KvStore>(
         }
     }
 }
+const TAIL_BOUND_CAPABILITIES: [IndexCapability; 3] = [
+    IndexCapability::TxLookup,
+    IndexCapability::ScriptHistory,
+    IndexCapability::CompactFilters,
+];
+
+fn clears_shared_tail_logs(capabilities: IndexCapabilities) -> bool {
+    TAIL_BOUND_CAPABILITIES
+        .iter()
+        .all(|capability| capabilities.contains(*capability))
+}
+
 fn build_reset_batch<S: KvStore>(
     store: &S,
     work: &ResetWork,
@@ -558,11 +570,13 @@ fn build_reset_batch<S: KvStore>(
         let (sealed_start, sealed_end) = crate::segment::sealed_gen_range(capability);
         batch.delete_range(ColumnFamily::IdxMeta, &sealed_start, &sealed_end);
     }
-    batch.delete_range(
-        ColumnFamily::IdxMeta,
-        crate::segment::tail::LOG_PREFIX,
-        crate::segment::tail::LOG_END,
-    );
+    if clears_shared_tail_logs(capabilities) {
+        batch.delete_range(
+            ColumnFamily::IdxMeta,
+            crate::segment::tail::LOG_PREFIX,
+            crate::segment::tail::LOG_END,
+        );
+    }
     crate::index::capability::delete_selected_floors(&mut batch, capabilities);
     batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
     Ok(batch)
@@ -602,7 +616,7 @@ fn reset_scan_families<S: KvStore>(
             ));
         }
     }
-    if !capabilities.is_empty() {
+    if clears_shared_tail_logs(capabilities) {
         scans.push((
             ColumnFamily::IdxMeta,
             crate::segment::tail::LOG_PREFIX.to_vec(),

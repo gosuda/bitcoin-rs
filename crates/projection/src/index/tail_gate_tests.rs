@@ -594,3 +594,61 @@ fn tail_log_without_hash_is_corrupt() -> Result<(), crate::portable::TestError> 
     assert_eq!(height, 0);
     Ok(())
 }
+
+// IDX-04
+#[test]
+fn script_live_reset_keeps_the_shared_tail_logs() -> Result<(), crate::portable::TestError> {
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(RocksDbStore::open(dir.path())?);
+    let caps = IndexCapabilities::HISTORICAL;
+    let blocks = [
+        block_with_spends_at(0, 3, [0; 32]),
+        block_with_spends_at(1, 8, [3; 32]),
+    ];
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
+        max_rows: usize::MAX,
+        max_bytes: usize::MAX,
+    });
+    for block in &blocks {
+        let prepared = writer.prepare_block_from_facts(caps, block.clone())?;
+        batch
+            .try_push(prepared)
+            .map_err(|_| "seal batch must admit the block")?;
+    }
+    writer.commit_forward(batch)?;
+    writer.reset_capabilities(IndexCapabilities::SCRIPT_LIVE)?;
+    let snapshot = store.snapshot()?;
+    let mut kept_logs = 0_usize;
+    for item in snapshot.iter_prefix(
+        bitcoin_rs_storage::ColumnFamily::IdxMeta,
+        crate::segment::tail::LOG_PREFIX,
+    )? {
+        let _ = item?;
+        kept_logs += 1;
+    }
+    assert_eq!(
+        kept_logs,
+        blocks.len(),
+        "a ScriptLive reset must keep the shared tail undo logs"
+    );
+    drop(snapshot);
+    let tail_bound = IndexCapabilities::TX_LOOKUP
+        .insert(IndexCapability::ScriptHistory)
+        .insert(IndexCapability::CompactFilters);
+    writer.reset_capabilities(tail_bound)?;
+    let snapshot = store.snapshot()?;
+    let mut remaining_logs = 0_usize;
+    for item in snapshot.iter_prefix(
+        bitcoin_rs_storage::ColumnFamily::IdxMeta,
+        crate::segment::tail::LOG_PREFIX,
+    )? {
+        let _ = item?;
+        remaining_logs += 1;
+    }
+    assert_eq!(
+        remaining_logs, 0,
+        "a reset of every tail-bound capability clears the shared tail undo logs"
+    );
+    Ok(())
+}
