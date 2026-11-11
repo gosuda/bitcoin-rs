@@ -402,6 +402,20 @@ impl CoinStatsListener {
         guard.stats = stats;
     }
 
+    pub fn insert_utxo(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        self.state
+            .lock()
+            .stats
+            .insert_utxo(op, txout, height, coinbase);
+    }
+
+    pub fn remove_utxo(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        self.state
+            .lock()
+            .stats
+            .remove_utxo(op, txout, height, coinbase);
+    }
+
     pub fn finish_block(&self, height: u32, tx_delta: u64) {
         self.state.lock().stats.finish_block(height, tx_delta);
     }

@@ -1895,8 +1895,13 @@ fn block_spends_error(error: bitcoin_rs_storage::utxo::contract::BlockSpendsErro
     match error {
         E::UnknownBlock => RpcError::InvalidAddressOrKey("Block not found".to_owned()),
         E::History(HistoryUnavailable::Pruned { .. }) => RpcError::Misc("Block not available (pruned data)".to_owned()),
-        E::History(HistoryUnavailable::Missing) | E::BodyRead(BoundedReadError::Storage(_)) => RpcError::Misc("Block not found on disk".to_owned()),
-        E::Undo(_) | E::Corrupt(_) | E::BoundedRead(BoundedReadError::Storage(_)) => RpcError::CoreInternal(
+        E::History(HistoryUnavailable::Missing)
+        | E::BodyRead(BoundedReadError::Storage(_))
+        | E::BodyRead(BoundedReadError::CorruptFrame(_)) => RpcError::Misc("Block not found on disk".to_owned()),
+        E::Undo(_)
+        | E::Corrupt(_)
+        | E::BoundedRead(BoundedReadError::Storage(_))
+        | E::BoundedRead(BoundedReadError::CorruptFrame(_)) => RpcError::CoreInternal(
             "Undo data expected but can't be read. This could be due to disk corruption or a conflict with a pruning event.".to_owned()),
         other => RpcError::Misc(other.to_string()),
     }

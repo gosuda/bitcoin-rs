@@ -325,11 +325,7 @@ impl Walk<'_> {
         ) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Err(self.absent(height, VerifyError::BodyMissing { height, hash })),
-            Err(BoundedReadError::Storage(msg))
-                if msg.contains("corrupt")
-                    || msg.contains("truncated")
-                    || msg.contains("frame") =>
-            {
+            Err(BoundedReadError::CorruptFrame(_)) => {
                 return Err(Stop::Failed(VerifyError::BodyCorrupt {
                     height,
                     hash,

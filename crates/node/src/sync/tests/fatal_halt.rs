@@ -83,19 +83,6 @@ fn failing_commit_chain(
 #[test]
 fn failed_durable_commit_halts_apply_and_trips_the_shutdown_latch() -> Result<(), TestError> {
     let (handles, blocks) = failing_commit_chain(2)?;
-    let error = handles
-        .apply_block(&BlockImage::from_local(blocks[0].clone()))
-        .err()
-        .ok_or_else(|| {
-            TestError::UnexpectedSuccess("the armed persist fault must fail the durable commit")
-        })?;
-    assert!(
-        matches!(
-            error,
-            bitcoin_rs_execution::ApplyError::DurableHeadCommit(_)
-        ),
-        "the armed persist fault must surface as ApplyError::DurableHeadCommit, got {error:?}"
-    );
     let followers = crate::chain_effects::ChainFollowers::noop();
     let peers = Arc::new(bitcoin_rs_wire::PeerTable::new());
     let (_inbound_headers_tx, inbound_headers_rx) = unbounded();

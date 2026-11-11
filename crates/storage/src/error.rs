@@ -30,7 +30,10 @@ pub use bitcoin_rs_consensus::BoundedReadError;
 
 impl From<StorageError> for BoundedReadError {
     fn from(error: StorageError) -> Self {
-        Self::Storage(error.to_string())
+        match error {
+            StorageError::CorruptBlockFrame(evidence) => Self::CorruptFrame(evidence),
+            error => Self::Storage(error.to_string()),
+        }
     }
 }
 

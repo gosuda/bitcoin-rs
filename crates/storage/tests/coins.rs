@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bitcoin_rs_storage::{
-    BatchOp, CoinKey, CoinStore, ColumnFamily, KvStore, PersistFault, RocksDbStore, StorageError,
-    WindowDelta,
+    BatchOp, CoinKey, CoinStatsFeed, CoinStore, ColumnFamily, KvStore, PersistFault, RocksDbStore,
+    StorageError, WindowDelta,
 };
 use bytes::Bytes;
 
@@ -103,7 +103,10 @@ fn coin_store_multi_get_merges_cache_and_engine_in_input_order() -> TestResult {
 
     let coins = CoinStore::open(Arc::clone(&store), 64 * 1024);
     let committed = seeded[3].clone();
-    coins.install_committed(&committed_delta(committed.0, committed.1.clone()));
+    coins.install_committed(
+        &committed_delta(committed.0, committed.1.clone()),
+        CoinStatsFeed::default(),
+    );
 
     let query = [
         coin_key(9),
@@ -232,7 +235,7 @@ fn install_ordering_touches_cache_only_after_durable_success() -> TestResult {
     );
     assert_eq!(store.get(ColumnFamily::Coins, created.as_bytes())?, None);
 
-    coins.install_committed(&delta);
+    coins.install_committed(&delta, CoinStatsFeed::default());
     assert_eq!(
         coins.cache().lookup(&created_and_spent),
         Some(spent_once.clone())
@@ -260,7 +263,10 @@ fn ingest_sorted_replaces_values_rejects_unsorted_and_clears_cache() -> TestResu
     assert_eq!(coins.get(&k2)?, Some(v2));
 
     let stale = Bytes::from_static(b"stale-value");
-    coins.install_committed(&committed_delta(k1, stale.clone()));
+    coins.install_committed(
+        &committed_delta(k1, stale.clone()),
+        CoinStatsFeed::default(),
+    );
     assert_eq!(coins.cache().lookup(&k1), Some(stale));
 
     let v1_new = Bytes::from(vec![5_u8; 40]);
@@ -296,11 +302,11 @@ fn oversized_committed_replacement_evicts_old_resident_entry() -> TestResult {
     let coins = CoinStore::open(store, 16 * 1024);
     let k = coin_key(4);
     let v_old = Bytes::from(vec![1_u8; 256]);
-    coins.install_committed(&committed_delta(k, v_old.clone()));
+    coins.install_committed(&committed_delta(k, v_old.clone()), CoinStatsFeed::default());
     assert_eq!(coins.cache().lookup(&k), Some(v_old));
 
     let v_huge = Bytes::from(vec![2_u8; 32 * 1024]);
-    coins.install_committed(&committed_delta(k, v_huge));
+    coins.install_committed(&committed_delta(k, v_huge), CoinStatsFeed::default());
     assert_eq!(
         coins.cache().lookup(&k),
         None,
@@ -318,7 +324,10 @@ fn stale_read_fill_does_not_overwrite_newer_commit_or_resurrect_delete() -> Test
     let stale_epoch = coins.cache().epoch(k.shard());
 
     let v_committed = Bytes::from_static(b"committed-latest");
-    coins.install_committed(&committed_delta(k, v_committed.clone()));
+    coins.install_committed(
+        &committed_delta(k, v_committed.clone()),
+        CoinStatsFeed::default(),
+    );
     assert_eq!(coins.cache().lookup(&k), Some(v_committed.clone()));
 
     let v_stale = Bytes::from_static(b"stale-read-value");
@@ -334,7 +343,7 @@ fn stale_read_fill_does_not_overwrite_newer_commit_or_resurrect_delete() -> Test
     let epoch_before_delete = coins.cache().epoch(k.shard());
     let mut delete_delta = WindowDelta::default();
     delete_delta.push_final(k, None);
-    coins.install_committed(&delete_delta);
+    coins.install_committed(&delete_delta, CoinStatsFeed::default());
     assert_eq!(coins.cache().lookup(&k), None);
 
     coins

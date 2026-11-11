@@ -1746,3 +1746,105 @@ fn known_sweep_reroutes_a_dead_solicitation_through_its_parents() {
         );
     }
 }
+
+#[test]
+fn dropped_tx_body_releases_solicitation_for_repoll() -> Result<(), crate::test_support::TestError>
+{
+    use bitcoin_rs_wire::listener::TxIngressObserver;
+    let table = std::sync::Arc::new(NodeTxPolicy::default());
+    let (owner, owner_rx) = registered_source(&table, 8333);
+    let (alternate, alternate_rx) = registered_source(&table, 8334);
+    let tx = bitcoin_rs_consensus::primitives::Tx {
+        version: 2,
+        inputs: vec![bitcoin_rs_consensus::primitives::TxIn {
+            previous_output: bitcoin_rs_consensus::primitives::OutPoint::new(
+                bitcoin_rs_consensus::primitives::Txid(
+                    bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[7; 32]),
+                ),
+                0,
+            ),
+            script_sig: bitcoin_rs_consensus::primitives::Script::new(),
+            sequence: bitcoin_rs_consensus::primitives::Sequence::from_consensus(0xFFFF_FFFF),
+            witness: bitcoin_rs_consensus::primitives::Witness::new(),
+        }],
+        outputs: vec![bitcoin_rs_consensus::primitives::TxOut {
+            value: bitcoin_rs_consensus::primitives::Amount::from_sat(1_000),
+            script_pubkey: bitcoin_rs_consensus::primitives::Script::from_bytes(vec![0x51]),
+        }],
+        lock_time: bitcoin_rs_consensus::primitives::LockTime::ZERO,
+    };
+    let wtxid = tx.wtxid();
+    let item = bitcoin::p2p::message_blockdata::Inventory::WTx(bitcoin::Wtxid::from_byte_array(
+        *wtxid.as_bytes(),
+    ));
+    let now = std::time::Instant::now();
+    {
+        let mut policy = table.tx_policy.lock();
+        policy.announce(Announcement {
+            source: owner,
+            item,
+            ready: now,
+            preferred: true,
+            priority: 1,
+        });
+        policy.announce(Announcement {
+            source: alternate,
+            item,
+            ready: now,
+            preferred: false,
+            priority: 0,
+        });
+    }
+    let inventory = CountingInventory::default();
+    let key = Identity::from_inventory(item).ok_or("solicited item maps to an identity")?;
+    table.send_transaction_requests(now, Some(&inventory), Some(&[key]), || now);
+    let first = owner_rx
+        .try_recv()
+        .map_err(|_| "owner solicitation sends GetData")?;
+    assert!(matches!(first, Message::GetData(items) if items.contains(&item)));
+    assert!(alternate_rx.try_recv().is_err());
+    {
+        let policy = table.tx_policy.lock();
+        let owned = policy
+            .requests
+            .get(&key)
+            .and_then(|request| request.owner.map(|(peer, _)| peer));
+        assert_eq!(owned, Some(owner));
+    }
+    let (sender, _receiver) = crossbeam_channel::bounded::<crate::p2p::InboundBody>(1);
+    sender
+        .try_send(crate::p2p::InboundBody::from(
+            bitcoin_rs_wire::InboundTx::new(tx.clone(), alternate),
+        ))
+        .map_err(|_| "filler send succeeds")?;
+    let gateway = std::sync::Arc::new(bitcoin_rs_mempool::MempoolGateway::new(
+        std::sync::Arc::new(parking_lot::RwLock::new(bitcoin_rs_mempool::Mempool::new(
+            bitcoin_rs_mempool::MempoolLimits::default(),
+        ))),
+        None,
+        bitcoin_rs_consensus::ValidationEngine::Native,
+        None,
+    ));
+    let store = std::sync::Arc::new(crate::p2p::NodeTxInventory(std::sync::Arc::clone(&gateway)));
+    let ingress = crate::p2p::NodeTxIngress::new(
+        sender,
+        crate::p2p::PackageCapacity::new(100_000),
+        std::sync::Arc::clone(&table),
+        store,
+        bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
+    );
+    ingress.on_inbound_tx(owner, tx, None);
+    let second = alternate_rx
+        .try_recv()
+        .map_err(|_| "dropped body repolls the alternate")?;
+    assert!(matches!(second, Message::GetData(items) if items.contains(&item)));
+    {
+        let policy = table.tx_policy.lock();
+        let owned = policy
+            .requests
+            .get(&key)
+            .and_then(|request| request.owner.map(|(peer, _)| peer));
+        assert_eq!(owned, Some(alternate));
+    }
+    Ok(())
+}

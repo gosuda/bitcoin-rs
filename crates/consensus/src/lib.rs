@@ -212,11 +212,9 @@ pub const fn verify_coinbase_amount(
 }
 
 pub const MAX_BLOCK_SIGOPS_COST: u32 = 80_000;
-pub mod coin_read;
 pub mod header_rules;
 pub mod undo;
-pub use coin_read::{CoinRead, UtxoCoin};
 pub use undo::{
     BlockSpends, BlockSpendsError, BlockUndoSource, BoundedReadError, HistoryUnavailable,
-    UndoReadError,
+    UndoReadError, UtxoCoin,
 };

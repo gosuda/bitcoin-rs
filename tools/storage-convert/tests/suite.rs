@@ -15,5 +15,6 @@ mod historical_checkpoint;
 mod large_row;
 mod pool_ledger;
 mod rebuild_index;
+mod scoped_peers;
 mod suffix_checkpoint;
 mod validation;

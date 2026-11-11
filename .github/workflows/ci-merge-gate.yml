@@ -59,11 +59,6 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Kernel-gated consensus Clippy
         run: cargo clippy --locked -p bitcoin-rs-consensus --all-targets --features kernel -- -D warnings
-      # Script's `kernel` feature only forwards to consensus's, so the
-      # consensus pass above does not compile script's own kernel-gated
-      # targets (`core_vectors`, `segwit_v0_sighash_edges`).
-      - name: Kernel-gated script targets Clippy
-        run: cargo clippy --locked -p bitcoin-rs-consensus --all-targets --features kernel -- -D warnings
       # Focused kernel oracle parity tests at the merge-gate boundary (issue #1511).
       # The library and shared-sighash suite also exercise owned block-check
       # preparation; the oracle helpers below use the borrowed transaction API.

@@ -487,8 +487,9 @@ pub fn populate_block_changes<T: Borrow<TxOut>>(
     delta.records.sort_by_key(|(k, _)| *k);
     let mut batch = coin_store.store().new_batch();
     coin_store.append_window(&mut batch, &delta)?;
+    let stats_feed = coin_store.plan_stats_feed(&delta)?;
     coin_store.store().write_durable(batch)?;
-    coin_store.install_committed(&delta);
+    coin_store.install_committed(&delta, stats_feed);
     Ok(())
 }
 

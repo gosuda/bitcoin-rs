@@ -863,6 +863,54 @@ fn checkpoint_coinstats_mismatch_refuses() -> TestResult<()> {
 }
 
 #[test]
+fn corrupt_headers_or_coinstats_artifact_refuses_publish() -> TestResult<()> {
+    for artifact in [HEADERS_FILE, COINSTATS_FILE] {
+        let source_temp = tempdir()?;
+        let dest_temp = tempdir()?;
+        let from_path = source_temp.path();
+        let to_path = dest_temp.path().join("converted");
+
+        write_schema_marker(from_path, 3)?;
+        let txid1 = Hash256::from_le_bytes(&[16u8; 32]);
+        let checkpoint_tip = nonuniform_hash(0x41);
+        create_checkpoint_fixture(from_path, checkpoint_tip, 100, &[txid1])?;
+        let cs_store = RocksDbStore::open(from_path.join("chainstate"))?;
+        let durable_head = DurableHead {
+            assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
+            commit_id: 1,
+            height: 100,
+            tip: checkpoint_tip,
+            chain_tx_count: 100,
+            body_extent: None,
+            undo_extent: None,
+        };
+        cs_store.put(
+            ColumnFamily::UtxoMeta,
+            DURABLE_HEAD_KEY,
+            &durable_head.encode(),
+        )?;
+        drop(cs_store);
+
+        let artifact_path = from_path
+            .join(CHECKPOINT_ROOT)
+            .join("gen-00000000000000000001")
+            .join(artifact);
+        let mut bytes = fs::read(&artifact_path)?;
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        fs::write(&artifact_path, &bytes)?;
+
+        let stderr = run_conversion_expecting_failure(from_path, &to_path)?;
+        if !stderr.contains(artifact) {
+            return Err(TestError::Assertion(format!(
+                "expected stderr to name the corrupt artifact {artifact}, got: {stderr}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn durable_head_tx_count_mismatch_refuses() -> TestResult<()> {
     let source_temp = tempdir()?;
     let dest_temp = tempdir()?;

@@ -214,6 +214,7 @@ impl CommitAuthority {
 
         let mut batch = self.store.new_batch();
         self.stage_commit_rows(&mut batch, &prefix)?;
+        let stats_feed = self.coins.plan_stats_feed(&prefix.coin_delta)?;
         let fence = self.head_fence(prefix.expected_head.as_ref())?;
         batch.put(
             ColumnFamily::UtxoMeta,
@@ -226,7 +227,7 @@ impl CommitAuthority {
             Ok(true) => {
                 #[cfg(any(test, feature = "test-seam"))]
                 self.notify_commit(&prefix);
-                self.coins.install_committed(&prefix.coin_delta);
+                self.coins.install_committed(&prefix.coin_delta, stats_feed);
                 Ok(DurableReceipt::from_head(&prefix.next_head))
             }
             Ok(false) => Err(CommitError::PreconditionFailed),
@@ -268,6 +269,7 @@ impl CommitAuthority {
 
         let mut batch = self.store.new_batch();
         self.stage_commit_rows(&mut batch, &prefix)?;
+        let stats_feed = self.coins.plan_stats_feed(&prefix.coin_delta)?;
         let fence = self.head_fence(prefix.expected_head.as_ref())?;
         batch.put(
             ColumnFamily::UtxoMeta,
@@ -289,7 +291,7 @@ impl CommitAuthority {
             Ok(true) => {
                 #[cfg(any(test, feature = "test-seam"))]
                 self.notify_commit(&prefix);
-                self.coins.install_committed(&prefix.coin_delta);
+                self.coins.install_committed(&prefix.coin_delta, stats_feed);
                 Ok(DurableReceipt::from_head(&prefix.next_head))
             }
             Ok(false) => Err(CommitError::PreconditionFailed),
@@ -530,10 +532,11 @@ impl CommitAuthority {
             &next_head.encode(),
         );
         self.coins.append_window(&mut batch, &coin_delta)?;
+        let stats_feed = self.coins.plan_stats_feed(&coin_delta)?;
         let write_result = self.store.write_durable_if(&[condition], batch);
         match write_result {
             Ok(true) => {
-                self.coins.install_committed(&coin_delta);
+                self.coins.install_committed(&coin_delta, stats_feed);
                 Ok(DurableReceipt::from_head(next_head))
             }
             Ok(false) => Err(CommitError::PreconditionFailed),
@@ -563,10 +566,11 @@ impl CommitAuthority {
         let mut batch = self.store.new_batch();
         batch.put(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY, &head_bytes);
         self.coins.append_window(&mut batch, coin_delta)?;
+        let stats_feed = self.coins.plan_stats_feed(coin_delta)?;
         let write_result = self.store.write_durable_if(&[condition], batch);
         match write_result {
             Ok(true) => {
-                self.coins.install_committed(coin_delta);
+                self.coins.install_committed(coin_delta, stats_feed);
                 Ok(())
             }
             Ok(false) => Err(CommitError::PreconditionFailed),

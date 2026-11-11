@@ -20,8 +20,8 @@ use crate::target::{
 };
 use bitcoin_rs_consensus::bip30::{BIP30_DUPLICATE_TXID_EXCEPTIONS, is_bip30_exception};
 use bitcoin_rs_consensus::primitives::{
-    AssumeUtxoData, Block, BlockImage, ConsensusDecode, Hash256, Header, Network, OutPoint, Txid,
-    deserialize, hex::hex_encode,
+    Amount, AssumeUtxoData, Block, BlockImage, ConsensusDecode, Hash256, Header, Network, OutPoint,
+    Script, TxOut, Txid, deserialize, hex::hex_encode,
 };
 use bitcoin_rs_execution::recovery::{
     ConvertedCheckpoint, publish_converted_checkpoint, publish_snapshot_base_checkpoint,
@@ -459,20 +459,70 @@ fn copy_independent_files(
     }
 
     for &file_name in INDEPENDENT_FILES {
-        let mut src_file = match open_file_read_no_follow(from_root, file_name) {
-            Ok(f) => f,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(ConvertError::Io(err)),
+        copy_independent_file(from_root, to_root, file_name, copied_files)?;
+    }
+
+    copy_scoped_peers_books(from_root, to_root, copied_files)?;
+
+    Ok(())
+}
+
+fn copy_independent_file(
+    from_root: &Dir,
+    to_root: &Dir,
+    file_name: &str,
+    copied_files: &mut Vec<CopiedFileReport>,
+) -> Result<(), ConvertError> {
+    let mut src_file = match open_file_read_no_follow(from_root, file_name) {
+        Ok(f) => f,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(ConvertError::Io(err)),
+    };
+
+    let mut dst_file = create_file_no_follow(to_root, file_name)?;
+    let bytes = io::copy(&mut src_file, &mut dst_file)?;
+    dst_file.sync_all()?;
+
+    copied_files.push(CopiedFileReport {
+        path: file_name.to_string(),
+        bytes,
+    });
+    Ok(())
+}
+
+fn is_scoped_peers_book(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("peers-") else {
+        return false;
+    };
+    let Some(hex) = rest.strip_suffix(".dat") else {
+        return false;
+    };
+    hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn copy_scoped_peers_books(
+    from_root: &Dir,
+    to_root: &Dir,
+    copied_files: &mut Vec<CopiedFileReport>,
+) -> Result<(), ConvertError> {
+    let mut scoped: Vec<String> = Vec::new();
+    for entry in from_root.entries()? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
         };
+        if is_scoped_peers_book(name) {
+            scoped.push(name.to_string());
+        }
+    }
+    scoped.sort();
 
-        let mut dst_file = create_file_no_follow(to_root, file_name)?;
-        let bytes = io::copy(&mut src_file, &mut dst_file)?;
-        dst_file.sync_all()?;
-
-        copied_files.push(CopiedFileReport {
-            path: file_name.to_string(),
-            bytes,
-        });
+    for name in &scoped {
+        copy_independent_file(from_root, to_root, name, copied_files)?;
     }
 
     Ok(())
@@ -636,6 +686,23 @@ fn check_complete_checkpoint(
     if h_meta.len() != manifest.headers.bytes {
         return Err(ConvertError::MissingCheckpoint);
     }
+    let expected_headers_digest: [u8; 32] = decode_hex(&manifest.headers.sha256).map_err(|_| {
+        ConvertError::IncompatibleData("manifest headers sha256 is malformed".into())
+    })?;
+    let mut headers_hasher = Sha256::new();
+    let mut headers_reader = headers_file;
+    let mut headers_chunk = vec![0_u8; 64 * 1024];
+    loop {
+        let read = headers_reader.read(&mut headers_chunk)?;
+        if read == 0 {
+            break;
+        }
+        headers_hasher.update(&headers_chunk[..read]);
+    }
+    let found_headers_digest: [u8; 32] = headers_hasher.finalize().into();
+    if found_headers_digest != expected_headers_digest {
+        return Err(ConvertError::CheckpointDigestMismatch { file: HEADERS_FILE });
+    }
 
     let coinstats_file = open_file_read_no_follow(&generation_dir, COINSTATS_FILE)
         .map_err(|_| ConvertError::MissingCheckpoint)?;
@@ -644,6 +711,26 @@ fn check_complete_checkpoint(
         .map_err(|_| ConvertError::MissingCheckpoint)?;
     if c_meta.len() != manifest.coinstats.bytes {
         return Err(ConvertError::MissingCheckpoint);
+    }
+    let expected_coinstats_digest: [u8; 32] =
+        decode_hex(&manifest.coinstats.sha256).map_err(|_| {
+            ConvertError::IncompatibleData("manifest coinstats sha256 is malformed".into())
+        })?;
+    let mut coinstats_hasher = Sha256::new();
+    let mut coinstats_reader = coinstats_file;
+    let mut coinstats_chunk = vec![0_u8; 64 * 1024];
+    loop {
+        let read = coinstats_reader.read(&mut coinstats_chunk)?;
+        if read == 0 {
+            break;
+        }
+        coinstats_hasher.update(&coinstats_chunk[..read]);
+    }
+    let found_coinstats_digest: [u8; 32] = coinstats_hasher.finalize().into();
+    if found_coinstats_digest != expected_coinstats_digest {
+        return Err(ConvertError::CheckpointDigestMismatch {
+            file: COINSTATS_FILE,
+        });
     }
 
     Ok((generation_dir, reference, manifest))
@@ -1078,6 +1165,31 @@ fn replay_block_coin_effects(
                 height: add.height,
             });
     }
+
+    for txid in adds_by_txid.keys() {
+        let overwritten = store.get(ColumnFamily::Coins, &txid.to_le_bytes())?;
+        let Some(bytes) = overwritten else {
+            continue;
+        };
+        let record = UtxoRecord::from_encoded(bytes.into_boxed_slice())
+            .map_err(|e| ConvertError::IncompatibleData(format!("corrupt coin record: {e}")))?;
+        let spent = spent_by_txid.get(txid);
+        for out in record.outputs() {
+            if spent.is_some_and(|spent_vouts| spent_vouts.contains(&out.vout)) {
+                continue;
+            }
+            let txout = TxOut {
+                value: Amount::from_sat(out.value),
+                script_pubkey: Script::from_bytes(out.script_pubkey.to_vec()),
+            };
+            stats.remove_utxo(
+                &OutPoint::new((*txid).into(), out.vout),
+                &txout,
+                out.height,
+                out.coinbase,
+            );
+        }
+    }
     let mut batch = store.new_batch();
     for (txid, outputs) in adds_by_txid {
         let record = UtxoRecord::from_owned_outputs(txid, &outputs)
@@ -1291,9 +1403,22 @@ fn publish_epoch4_checkpoint(
 }
 
 fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), ConvertError> {
-    let mut file = std::fs::File::create(path)?;
+    let parent = path.parent().ok_or_else(|| {
+        ConvertError::IncompatibleData("checkpoint file path has no parent directory".into())
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        ConvertError::IncompatibleData("checkpoint file path has no file name".into())
+    })?;
+    let mut tmp_name = file_name.to_owned();
+    tmp_name.push(".tmp");
+    let tmp_path = parent.join(tmp_name);
+    let mut file = std::fs::File::create(&tmp_path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp_path, path)?;
+    let dir = Dir::open_ambient_dir(parent, ambient_authority())?;
+    sync_dir(&dir)?;
     Ok(())
 }
 
@@ -1880,7 +2005,8 @@ fn run_step_5_to_6(
 mod tests {
     use super::*;
     use bitcoin_rs_consensus::primitives::{
-        Amount, BlockHash, CompactTarget, Header, LockTime, Script, Sequence, Tx, TxIn, TxOut,
+        Amount, Block, BlockHash, CompactTarget, Header, LockTime, Script, Sequence, Tx, TxIn,
+        TxOut,
     };
     use bitcoin_rs_storage::memory_kv::MemoryKvStore;
     use bitcoin_rs_storage::utxo::contract::{decode_undo_record, encode_undo_record};
@@ -2035,6 +2161,129 @@ mod tests {
         assert!(decoded.removes().is_empty());
         let copied = decode_undo_record(&old_bytes, hash);
         assert!(copied.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn write_synced_replaces_without_touching_prior_readers() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let path = dir.path().join("CURRENT");
+        write_synced(&path, b"old").map_err(|e| e.to_string())?;
+        let link = dir.path().join("CURRENT.prior");
+        std::fs::hard_link(&path, &link).map_err(|e| e.to_string())?;
+        write_synced(&path, b"new").map_err(|e| e.to_string())?;
+        let current = std::fs::read(&path).map_err(|e| e.to_string())?;
+        if current != b"new" {
+            return Err("replacement write must publish the new bytes".to_owned());
+        }
+        let prior = std::fs::read(&link).map_err(|e| e.to_string())?;
+        if prior != b"old" {
+            return Err("replacement write must leave the prior committed bytes intact".to_owned());
+        }
+        if dir.path().join("CURRENT.tmp").exists() {
+            return Err("replacement write must not leave a temp file behind".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn replay_removes_outputs_destroyed_by_a_txid_overwrite() -> Result<(), String> {
+        let coinbase = Tx {
+            version: 1,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: Script::from_bytes(vec![0x51]),
+                sequence: Sequence::MAX,
+                witness: Default::default(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
+            }],
+            lock_time: LockTime::ZERO,
+        };
+        let txid = coinbase.txid();
+        let block = Block {
+            header: Header {
+                version: 1,
+                prev_blockhash: BlockHash(Hash256::default()),
+                merkle_root: Hash256::default(),
+                time: 1_300_000_000,
+                bits: CompactTarget::from_consensus(0x1d00ffff),
+                nonce: 1,
+            },
+            txs: vec![coinbase],
+        };
+        let height = 101_u32;
+        let hash = Hash256::from(block.block_hash());
+
+        let store = MemoryKvStore::default();
+        let overwritten = OwnedUtxoOut {
+            vout: 0,
+            value: 40_000,
+            script_pubkey: vec![0x51],
+            coinbase: true,
+            height: 91_722,
+        };
+        let old_record = UtxoRecord::from_owned_outputs(txid.into(), &[overwritten])
+            .map_err(|e| e.to_string())?;
+        store
+            .put(
+                ColumnFamily::Coins,
+                &Hash256::from(txid).to_le_bytes(),
+                old_record.bytes(),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let image = BlockImage::from_local(block.clone());
+        let txids = vec![txid];
+        let change_inputs = BlockChangeInputs {
+            block: &image,
+            height,
+            txids: &txids,
+            same_block_spent: None,
+            add_capacity: 1,
+            remove_capacity: 0,
+            max_script_size: 10_000,
+        };
+        let spent_lookup: HashMap<OutPoint, UtxoCoin> = HashMap::new();
+        let (_, undo, _) = build_block_changes(&change_inputs, &MapSpentLookup(&spent_lookup))
+            .map_err(|e| e.to_string())?;
+        store
+            .put(
+                ColumnFamily::UndoData,
+                &block_undo_key(height, hash),
+                &encode_undo_record(&undo, hash),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let mut checkpoint_accumulator = CoinStatsAccumulator::with_parallel_muhash(91_722);
+        checkpoint_accumulator.observe_coin(SnapshotCoin {
+            txid: txid.into(),
+            vout: 0,
+            value: 40_000,
+            script_pubkey: &[0x51],
+            height: 91_722,
+            coinbase: true,
+        });
+        let mut replayed = checkpoint_accumulator.into_stats();
+        replay_block_coin_effects(&store, height, hash, &block, &mut replayed)
+            .map_err(|e| e.to_string())?;
+
+        let (stored, _, _) = scan_destination_coins(&store, height).map_err(|e| e.to_string())?;
+        if replayed.utxo_count != 1 {
+            return Err(format!(
+                "replay must drop the overwritten output, found {} coins",
+                replayed.utxo_count
+            ));
+        }
+        if replayed.utxo_count != stored.utxo_count || replayed.total_amount != stored.total_amount
+        {
+            return Err("replay stats must match the destination scan".to_owned());
+        }
+        if hex_encode(&replayed.muhash.finalize()) != hex_encode(&stored.muhash.finalize()) {
+            return Err("replay muhash must match the destination scan".to_owned());
+        }
         Ok(())
     }
 }

@@ -150,6 +150,7 @@ pub fn install_restored_state(
     chain.coin_stats = std::sync::Arc::new(
         bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(restored.initial.coin_stats),
     );
+    chain.coins.track_coin_stats((*chain.coin_stats).clone());
     let mut utxo = restored.initial.utxo;
     utxo.track_coin_stats((*chain.coin_stats).clone());
     chain.utxo = std::sync::Arc::new(utxo);
