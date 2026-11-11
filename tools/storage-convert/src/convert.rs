@@ -20,7 +20,8 @@ use crate::target::{
 };
 use bitcoin_rs_consensus::bip30::{BIP30_DUPLICATE_TXID_EXCEPTIONS, is_bip30_exception};
 use bitcoin_rs_consensus::primitives::{
-    Block, BlockImage, ConsensusDecode, Hash256, Network, OutPoint, Txid, hex::hex_encode,
+    Amount, Block, BlockImage, ConsensusDecode, Hash256, Network, OutPoint, Script, TxOut, Txid,
+    hex::hex_encode,
 };
 use bitcoin_rs_execution::recovery::{ConvertedCheckpoint, publish_converted_checkpoint};
 use bitcoin_rs_storage::checkpoint::{
@@ -1025,6 +1026,31 @@ fn replay_block_coin_effects(
                 height: add.height,
             });
     }
+
+    for txid in adds_by_txid.keys() {
+        let overwritten = store.get(ColumnFamily::Coins, &txid.to_le_bytes())?;
+        let Some(bytes) = overwritten else {
+            continue;
+        };
+        let record = UtxoRecord::from_encoded(bytes.into_boxed_slice())
+            .map_err(|e| ConvertError::IncompatibleData(format!("corrupt coin record: {e}")))?;
+        let spent = spent_by_txid.get(txid);
+        for out in record.outputs() {
+            if spent.is_some_and(|spent_vouts| spent_vouts.contains(&out.vout)) {
+                continue;
+            }
+            let txout = TxOut {
+                value: Amount::from_sat(out.value),
+                script_pubkey: Script::from_bytes(out.script_pubkey.to_vec()),
+            };
+            stats.remove_utxo(
+                &OutPoint::new((*txid).into(), out.vout),
+                &txout,
+                out.height,
+                out.coinbase,
+            );
+        }
+    }
     let mut batch = store.new_batch();
     for (txid, outputs) in adds_by_txid {
         let record = UtxoRecord::from_owned_outputs(txid, &outputs)
@@ -1492,7 +1518,8 @@ fn run_step_3_to_4(
 mod tests {
     use super::*;
     use bitcoin_rs_consensus::primitives::{
-        Amount, BlockHash, CompactTarget, Header, LockTime, Script, Sequence, Tx, TxIn, TxOut,
+        Amount, Block, BlockHash, CompactTarget, Header, LockTime, Script, Sequence, Tx, TxIn,
+        TxOut,
     };
     use bitcoin_rs_storage::memory_kv::MemoryKvStore;
     use bitcoin_rs_storage::utxo::contract::{decode_undo_record, encode_undo_record};
@@ -1626,6 +1653,107 @@ mod tests {
         }
         if dir.path().join("CURRENT.tmp").exists() {
             return Err("replacement write must not leave a temp file behind".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn replay_removes_outputs_destroyed_by_a_txid_overwrite() -> Result<(), String> {
+        let coinbase = Tx {
+            version: 1,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: Script::from_bytes(vec![0x51]),
+                sequence: Sequence::MAX,
+                witness: Default::default(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
+            }],
+            lock_time: LockTime::ZERO,
+        };
+        let txid = coinbase.txid();
+        let block = Block {
+            header: Header {
+                version: 1,
+                prev_blockhash: BlockHash(Hash256::default()),
+                merkle_root: Hash256::default(),
+                time: 1_300_000_000,
+                bits: CompactTarget::from_consensus(0x1d00ffff),
+                nonce: 1,
+            },
+            txs: vec![coinbase],
+        };
+        let height = 101_u32;
+        let hash = Hash256::from(block.block_hash());
+
+        let store = MemoryKvStore::default();
+        let overwritten = OwnedUtxoOut {
+            vout: 0,
+            value: 40_000,
+            script_pubkey: vec![0x51],
+            coinbase: true,
+            height: 91_722,
+        };
+        let old_record = UtxoRecord::from_owned_outputs(txid.into(), &[overwritten])
+            .map_err(|e| e.to_string())?;
+        store
+            .put(
+                ColumnFamily::Coins,
+                &Hash256::from(txid).to_le_bytes(),
+                old_record.bytes(),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let image = BlockImage::from_local(block.clone());
+        let txids = vec![txid];
+        let change_inputs = BlockChangeInputs {
+            block: &image,
+            height,
+            txids: &txids,
+            same_block_spent: None,
+            add_capacity: 1,
+            remove_capacity: 0,
+            max_script_size: 10_000,
+        };
+        let spent_lookup: HashMap<OutPoint, UtxoCoin> = HashMap::new();
+        let (_, undo, _) = build_block_changes(&change_inputs, &MapSpentLookup(&spent_lookup))
+            .map_err(|e| e.to_string())?;
+        store
+            .put(
+                ColumnFamily::UndoData,
+                &block_undo_key(height, hash),
+                &encode_undo_record(&undo, hash),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let mut checkpoint_accumulator = CoinStatsAccumulator::with_parallel_muhash(91_722);
+        checkpoint_accumulator.observe_coin(SnapshotCoin {
+            txid: txid.into(),
+            vout: 0,
+            value: 40_000,
+            script_pubkey: &[0x51],
+            height: 91_722,
+            coinbase: true,
+        });
+        let mut replayed = checkpoint_accumulator.into_stats();
+        replay_block_coin_effects(&store, height, hash, &block, &mut replayed)
+            .map_err(|e| e.to_string())?;
+
+        let (stored, _, _) = scan_destination_coins(&store, height).map_err(|e| e.to_string())?;
+        if replayed.utxo_count != 1 {
+            return Err(format!(
+                "replay must drop the overwritten output, found {} coins",
+                replayed.utxo_count
+            ));
+        }
+        if replayed.utxo_count != stored.utxo_count || replayed.total_amount != stored.total_amount
+        {
+            return Err("replay stats must match the destination scan".to_owned());
+        }
+        if hex_encode(&replayed.muhash.finalize()) != hex_encode(&stored.muhash.finalize()) {
+            return Err("replay muhash must match the destination scan".to_owned());
         }
         Ok(())
     }
