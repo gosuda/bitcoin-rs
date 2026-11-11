@@ -1189,9 +1189,22 @@ fn publish_epoch4_checkpoint(
 }
 
 fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), ConvertError> {
-    let mut file = std::fs::File::create(path)?;
+    let parent = path.parent().ok_or_else(|| {
+        ConvertError::IncompatibleData("checkpoint file path has no parent directory".into())
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        ConvertError::IncompatibleData("checkpoint file path has no file name".into())
+    })?;
+    let mut tmp_name = file_name.to_owned();
+    tmp_name.push(".tmp");
+    let tmp_path = parent.join(tmp_name);
+    let mut file = std::fs::File::create(&tmp_path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp_path, path)?;
+    let dir = Dir::open_ambient_dir(parent, ambient_authority())?;
+    sync_dir(&dir)?;
     Ok(())
 }
 
@@ -1556,5 +1569,27 @@ mod tests {
             } => Ok(()),
             other => Err(format!("unexpected refusal: {other}")),
         }
+    }
+
+    #[test]
+    fn write_synced_replaces_without_touching_prior_readers() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let path = dir.path().join("CURRENT");
+        write_synced(&path, b"old").map_err(|e| e.to_string())?;
+        let link = dir.path().join("CURRENT.prior");
+        std::fs::hard_link(&path, &link).map_err(|e| e.to_string())?;
+        write_synced(&path, b"new").map_err(|e| e.to_string())?;
+        let current = std::fs::read(&path).map_err(|e| e.to_string())?;
+        if current != b"new" {
+            return Err("replacement write must publish the new bytes".to_owned());
+        }
+        let prior = std::fs::read(&link).map_err(|e| e.to_string())?;
+        if prior != b"old" {
+            return Err("replacement write must leave the prior committed bytes intact".to_owned());
+        }
+        if dir.path().join("CURRENT.tmp").exists() {
+            return Err("replacement write must not leave a temp file behind".to_owned());
+        }
+        Ok(())
     }
 }
