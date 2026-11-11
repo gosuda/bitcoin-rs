@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -48,7 +47,6 @@ struct SeedQueue {
     entries: VecDeque<SeedEntry>,
     memory_bytes: u64,
     spill: Option<File>,
-    spill_path: Option<PathBuf>,
     spill_bytes: u64,
 }
 
@@ -105,9 +103,10 @@ impl SeedQueue {
         self.entries.clear();
         self.memory_bytes = 0;
         self.spill_bytes = 0;
-        self.spill = None;
-        if let Some(path) = self.spill_path.take() {
-            let _removed = std::fs::remove_file(path);
+        if let Some(spill) = self.spill.as_mut() {
+            let _truncated = spill
+                .set_len(0)
+                .and_then(|_| spill.seek(SeekFrom::Start(0)));
         }
     }
 }
@@ -136,14 +135,12 @@ impl ScriptLiveSeedState {
     /// spent, so a mainnet coin set stages without holding it resident.
     pub fn set_spill_dir(&self, dir: &std::path::Path) {
         let mut queue = self.queue.lock();
-        let path = dir.join(SEED_SPILL_NAME);
-        queue.spill_path = Some(path.clone());
         queue.spill = File::options()
             .create(true)
             .truncate(true)
             .read(true)
             .write(true)
-            .open(path)
+            .open(dir.join(SEED_SPILL_NAME))
             .ok();
     }
 
@@ -399,5 +396,65 @@ mod tests {
             "every staged row must survive staging"
         );
         assert_eq!(seed.staged_rows(), rows);
+    }
+
+    // SNP-06
+    #[test]
+    fn a_new_session_keeps_the_spill_file() {
+        let dir = tempfile::tempdir().expect("spill dir");
+        let seed = Arc::new(ScriptLiveSeedState::new());
+        seed.set_spill_dir(dir.path());
+        let rows = 400_000_u64;
+        let session = seed.begin_session().expect("session");
+        {
+            let mut observer = session.observer();
+            for index in 0..rows {
+                observer.observe_coin(coin(index));
+            }
+        }
+        assert!(
+            session.take_error().is_none(),
+            "staging beyond the memory budget must spill instead of stalling"
+        );
+        let drained = seed.take_backlog(usize::MAX).expect("drained rows");
+        assert_eq!(
+            usize::try_from(rows).expect("rows fit"),
+            drained.len(),
+            "every staged row must survive the spill"
+        );
+        assert_eq!(
+            drained.first().expect("first row"),
+            &ScriptLiveSeedState::encode_row(&coin(0)).expect("encode first row"),
+            "the first staged row must round-trip"
+        );
+        assert_eq!(
+            drained.last().expect("last row"),
+            &ScriptLiveSeedState::encode_row(&coin(rows - 1)).expect("encode last row"),
+            "the last staged row must round-trip"
+        );
+        drop(session);
+        seed.complete_abort();
+        let next = seed.begin_session().expect("next session");
+        {
+            let mut observer = next.observer();
+            for index in 0..rows {
+                observer.observe_coin(coin(index));
+            }
+        }
+        assert!(
+            next.take_error().is_none(),
+            "a session after a reset must still spill instead of stalling"
+        );
+        let refilled = seed.take_backlog(usize::MAX).expect("drained rows");
+        assert_eq!(
+            usize::try_from(rows).expect("rows fit"),
+            refilled.len(),
+            "every refilled row must survive the spill"
+        );
+        assert_eq!(
+            refilled.last().expect("last refilled row"),
+            &ScriptLiveSeedState::encode_row(&coin(rows - 1)).expect("encode last row"),
+            "the last refilled row must round-trip"
+        );
     }
 }
