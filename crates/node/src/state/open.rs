@@ -350,6 +350,9 @@ impl NodeState {
         let coin_stats_listener =
             bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(initial_coin_stats);
         utxo_set.track_coin_stats(coin_stats_listener.clone());
+        storage
+            .coins()
+            .track_coin_stats(coin_stats_listener.clone());
         let utxo = Arc::new(utxo_set);
         let coin_stats = Arc::new(coin_stats_listener);
         let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));

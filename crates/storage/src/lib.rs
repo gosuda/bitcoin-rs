@@ -20,7 +20,7 @@ pub use cache_budget::{
 pub use column_families::ColumnFamily;
 
 pub use bytes::Bytes;
-pub use coins::{COIN_KEY_LEN, CoinCache, CoinKey, CoinStore, WindowDelta};
+pub use coins::{COIN_KEY_LEN, CoinCache, CoinKey, CoinStatsFeed, CoinStore, WindowDelta};
 #[cfg(any(test, feature = "test-seam"))]
 pub use commit::CommitFault;
 pub use commit::{AcceptedPrefix, CommitAuthority, CommitError, DurableReceipt};

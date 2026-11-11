@@ -1,8 +1,12 @@
 use std::sync::Arc;
 
+use bitcoin_rs_consensus::primitives::{Amount, OutPoint, Script, TxOut};
 use bytes::Bytes;
+use parking_lot::RwLock;
 
 use crate::batch::BufferedWriteBatch;
+use crate::utxo::record::UtxoRecord;
+use crate::utxo::stats::CoinStatsListener;
 use crate::{ColumnFamily, KvStore, StorageError};
 
 mod cache;
@@ -51,9 +55,100 @@ impl WindowDelta {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct CoinStatsFeed {
+    ops: Vec<CoinStatsFeedOp>,
+}
+
+#[derive(Clone, Debug)]
+enum CoinStatsFeedOp {
+    Insert {
+        op: OutPoint,
+        txout: TxOut,
+        height: u32,
+        coinbase: bool,
+    },
+    Remove {
+        op: OutPoint,
+        txout: TxOut,
+        height: u32,
+        coinbase: bool,
+    },
+}
+
+impl CoinStatsFeed {
+    fn apply(self, listener: &CoinStatsListener) {
+        for op in self.ops {
+            match op {
+                CoinStatsFeedOp::Insert {
+                    op,
+                    txout,
+                    height,
+                    coinbase,
+                } => {
+                    listener.insert_utxo(&op, &txout, height, coinbase);
+                }
+                CoinStatsFeedOp::Remove {
+                    op,
+                    txout,
+                    height,
+                    coinbase,
+                } => {
+                    listener.remove_utxo(&op, &txout, height, coinbase);
+                }
+            }
+        }
+    }
+}
+
+fn push_insert_ops(bytes: &Bytes, ops: &mut Vec<CoinStatsFeedOp>) -> Result<(), StorageError> {
+    push_record_ops(bytes, true, ops)
+}
+
+fn push_remove_ops(bytes: &Bytes, ops: &mut Vec<CoinStatsFeedOp>) -> Result<(), StorageError> {
+    push_record_ops(bytes, false, ops)
+}
+
+fn push_record_ops(
+    bytes: &Bytes,
+    insert: bool,
+    ops: &mut Vec<CoinStatsFeedOp>,
+) -> Result<(), StorageError> {
+    let record = UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice()).map_err(|error| {
+        StorageError::IncompatibleData(format!(
+            "coin row for stats feed is not a valid UTXO record: {error:?}"
+        ))
+    })?;
+    let txid = record.txid();
+    for out in record.outputs() {
+        let op = OutPoint::new(txid.into(), out.vout);
+        let txout = TxOut {
+            value: Amount::from_sat(out.value),
+            script_pubkey: Script::from_bytes(out.script_pubkey.to_vec()),
+        };
+        if insert {
+            ops.push(CoinStatsFeedOp::Insert {
+                op,
+                txout,
+                height: out.height,
+                coinbase: out.coinbase,
+            });
+        } else {
+            ops.push(CoinStatsFeedOp::Remove {
+                op,
+                txout,
+                height: out.height,
+                coinbase: out.coinbase,
+            });
+        }
+    }
+    Ok(())
+}
+
 pub struct CoinStore {
     store: Arc<dyn KvStore>,
     cache: CoinCache,
+    coin_stats: RwLock<Option<CoinStatsListener>>,
 }
 
 impl CoinStore {
@@ -61,7 +156,28 @@ impl CoinStore {
         Self {
             store,
             cache: CoinCache::new(budget_bytes),
+            coin_stats: RwLock::new(None),
         }
+    }
+
+    pub fn track_coin_stats(&self, listener: CoinStatsListener) {
+        *self.coin_stats.write() = Some(listener);
+    }
+
+    pub fn plan_stats_feed(&self, delta: &WindowDelta) -> Result<CoinStatsFeed, StorageError> {
+        if self.coin_stats.read().is_none() {
+            return Ok(CoinStatsFeed::default());
+        }
+        let mut ops = Vec::with_capacity(delta.records.len().saturating_mul(2));
+        for (key, record) in &delta.records {
+            if let Some(old) = self.get(key)? {
+                push_remove_ops(&old, &mut ops)?;
+            }
+            if let Some(new) = record {
+                push_insert_ops(new, &mut ops)?;
+            }
+        }
+        Ok(CoinStatsFeed { ops })
     }
 
     /// Point-in-time image of the `coins` keyspace for streaming scans.
@@ -145,10 +261,14 @@ impl CoinStore {
         Ok(())
     }
 
-    /// Installs the delta into the resident cache. The caller passes a delta
-    /// whose batch already returned success; a failed or ambiguous batch must
-    /// not reach this method.
-    pub fn install_committed(&self, delta: &WindowDelta) {
+    /// Installs the delta into the resident cache and replays its coin
+    /// mutations into the tracked listener. The caller passes a delta whose
+    /// batch already returned success plus the feed planned before that
+    /// write; a failed or ambiguous batch must not reach this method.
+    pub fn install_committed(&self, delta: &WindowDelta, feed: CoinStatsFeed) {
+        if let Some(listener) = self.coin_stats.read().as_ref() {
+            feed.apply(listener);
+        }
         for (key, record) in &delta.records {
             self.cache.install(key, record.clone());
         }

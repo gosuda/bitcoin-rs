@@ -410,3 +410,39 @@ fn every_undo_truncation_and_flip_is_refused_or_canonical() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn committed_blocks_advance_the_tracked_listener() -> TestResult {
+    use crate::utxo::stats::{CoinStats, CoinStatsListener};
+    use crate::{CoinStore, MemoryKvStore};
+    use std::sync::Arc;
+    let store = Arc::new(MemoryKvStore::new());
+    let coin_store = CoinStore::open(store, 64 * 1024 * 1024);
+    let listener = CoinStatsListener::new(CoinStats::new());
+    coin_store.track_coin_stats(listener.clone());
+
+    let mut block1 = BlockChanges::default();
+    block1.add(UtxoAdd::new(FUNDED, coin(900), false, 1));
+    block1.add(UtxoAdd::new(CREATED, coin(700), true, 1));
+    populate_block_changes(&coin_store, &block1)?;
+    listener.finish_block(1, 2);
+
+    let mut expected = CoinStats::new();
+    expected.insert_utxo(&FUNDED, &coin(900), 1, false);
+    expected.insert_utxo(&CREATED, &coin(700), 1, true);
+    expected.finish_block(1, 2);
+    assert_eq!(listener.snapshot(), expected);
+
+    let mut block2 = BlockChanges::default();
+    block2.remove(CREATED);
+    block2.add(UtxoAdd::new(FUNDED, coin(800), false, 2));
+    populate_block_changes(&coin_store, &block2)?;
+    listener.finish_block(2, 1);
+
+    expected.remove_utxo(&CREATED, &coin(700), 1, true);
+    expected.remove_utxo(&FUNDED, &coin(900), 1, false);
+    expected.insert_utxo(&FUNDED, &coin(800), 2, false);
+    expected.finish_block(2, 1);
+    assert_eq!(listener.snapshot(), expected);
+    Ok(())
+}

@@ -741,6 +741,7 @@ impl Chainstate {
             Arc::clone(&dyn_hist_store),
             64 * 1024 * 1024,
         ));
+        hist_coins.track_coin_stats((*historical_coin_stats).clone());
         let hist_commit_authority = Arc::new(bitcoin_rs_storage::CommitAuthority::new(
             dyn_hist_store,
             Arc::clone(&hist_coins),
