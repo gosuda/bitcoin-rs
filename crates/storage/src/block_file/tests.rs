@@ -642,9 +642,10 @@ fn torn_tail_recovery_is_visible_to_operator_filter() -> Result<(), crate::Stora
 
     impl tracing::Subscriber for OperatorFilter {
         fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-            metadata
-                .target()
-                .starts_with("bitcoin_rs_storage::block_file")
+            *metadata.level() <= tracing::Level::INFO
+                && metadata
+                    .target()
+                    .starts_with("bitcoin_rs_storage::block_file")
         }
 
         fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
