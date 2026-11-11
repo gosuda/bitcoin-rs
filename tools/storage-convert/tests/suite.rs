@@ -10,4 +10,5 @@ mod engine_rejection;
 mod epoch3_copy;
 mod large_row;
 mod pool_ledger;
+mod scoped_peers;
 mod validation;
