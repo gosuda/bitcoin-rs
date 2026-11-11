@@ -1,7 +1,14 @@
 use thiserror::Error;
 
-use crate::UtxoCoin;
-use crate::primitives::{Block, Hash256};
+use crate::primitives::{Block, Hash256, OutPoint, TxOut};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UtxoCoin {
+    pub outpoint: OutPoint,
+    pub txout: TxOut,
+    pub coinbase: bool,
+    pub height: u32,
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
 pub enum HistoryUnavailable {

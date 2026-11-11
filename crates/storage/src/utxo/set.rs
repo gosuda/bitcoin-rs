@@ -535,21 +535,6 @@ impl UtxoReader {
     }
 }
 
-impl bitcoin_rs_consensus::CoinRead for UtxoReader {
-    fn get_entry(&self, op: &OutPoint) -> Option<UtxoCoin> {
-        self.get_entry(op)
-    }
-    fn has_live_outputs_for_txid(&self, txid: &Hash256) -> bool {
-        self.has_live_outputs_for_txid(txid)
-    }
-    fn scan_progress(&self) -> Option<u8> {
-        self.scan_progress()
-    }
-    fn abort_scan(&self) -> bool {
-        self.abort_scan()
-    }
-}
-
 fn validate_add<T: Borrow<TxOut>>(add: &UtxoAdd<T>) -> Result<(), UtxoError> {
     let script_len = add.txout.borrow().script_pubkey.len();
     let _fits =
