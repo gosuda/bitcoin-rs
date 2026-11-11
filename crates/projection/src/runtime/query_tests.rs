@@ -12,7 +12,7 @@ use bitcoin_rs_execution::chain::{NodeStatus, regtest_fixture};
 use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};
 
 use super::*;
-use crate::{IndexCapability, IndexWatermark};
+use crate::{IndexCapability, IndexWatermark, RetryReason};
 use bitcoin_rs_execution::chain::TipSnapshot;
 use bitcoin_rs_execution::chain::{BlockTree, NodeId};
 use parking_lot::Mutex as ParkMutex;
@@ -590,6 +590,7 @@ fn block_with_spending_transaction() -> Result<(Block, OutPoint, ScriptHash, Txi
     Ok((block, outpoint, ScriptHash::new(&script), spend_txid))
 }
 
+// IDX-03
 #[test]
 fn transaction_rejects_watermark_from_rival_tip() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
@@ -612,8 +613,10 @@ fn transaction_rejects_watermark_from_rival_tip() -> Result<(), crate::portable:
         extra_blocks: Vec::new(),
     })?;
 
-    let res = fixture.engine.transaction(&txid)?;
-    assert!(res.is_some());
+    assert!(matches!(
+        fixture.engine.transaction(&txid),
+        Err(TxQueryError::Retry(RetryReason::TipMoved { .. }))
+    ));
     Ok(())
 }
 
