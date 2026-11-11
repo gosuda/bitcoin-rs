@@ -55,7 +55,7 @@ fuzz_target!(|data: &[u8]| {
     if let Ok((message, _raw)) = r1 {
         match &message {
             bitcoin_rs_wire::Message::Block(payload_block) => {
-                let decoded = payload_block.block().retained_heap_bytes();
+                let decoded = payload_block.retained_heap_bytes();
                 assert!(
                     payload.len() + decoded
                         <= bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len()),
