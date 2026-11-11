@@ -10,7 +10,7 @@ use bitcoin_rs_consensus::primitives::hex::hex_encode;
 use cap_std::fs::{Dir, File};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Component, Path};
+use std::path::Path;
 
 pub fn classify_checkpoint_error(error: CheckpointError) -> CheckpointLoadError {
     match error {
@@ -157,14 +157,12 @@ fn validate_engine_records(engine: Option<&EngineArtifactV1>) -> Result<(), Chec
 }
 
 fn is_relative_image_path(path: &str) -> bool {
-    let mut rebuilt = std::path::PathBuf::new();
-    for component in Path::new(path).components() {
-        let Component::Normal(name) = component else {
-            return false;
-        };
-        rebuilt.push(name);
+    if path.is_empty() {
+        return false;
     }
-    !rebuilt.as_os_str().is_empty() && rebuilt.as_os_str() == std::ffi::OsStr::new(path)
+    path.split('/').all(|component| {
+        !component.is_empty() && component != "." && component != ".." && !component.contains('\\')
+    })
 }
 
 pub(crate) fn open_regular_file(
@@ -313,4 +311,24 @@ pub fn open_current_checkpoint_at(
         generation_dir,
         reference: current.reference().map_err(classify_checkpoint_error)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_relative_image_path;
+
+    #[test]
+    fn engine_image_paths_follow_slash_separated_format() {
+        assert!(is_relative_image_path("MANIFEST-000001"));
+        assert!(is_relative_image_path("a/b"));
+        assert!(!is_relative_image_path(""));
+        assert!(!is_relative_image_path("/a"));
+        assert!(!is_relative_image_path("a/"));
+        assert!(!is_relative_image_path("a//b"));
+        assert!(!is_relative_image_path("a/./b"));
+        assert!(!is_relative_image_path("a/../b"));
+        assert!(!is_relative_image_path(".."));
+        assert!(!is_relative_image_path("a\\b"));
+        assert!(!is_relative_image_path("\\"));
+    }
 }
