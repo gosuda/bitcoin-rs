@@ -3230,9 +3230,8 @@ mod transaction_poll_tests {
         let addr: PeerEndpoint = ([127, 0, 0, 1], 8333).into();
         table.register(addr, lease.clone());
         let source = lease.source(Some(addr));
-        record_fee_filter(&table, None, source, i64::MAX);
-        assert_eq!(table.transaction_fee_filter(source), 0);
         record_fee_filter(&table, None, source, 1_000);
+        record_fee_filter(&table, None, source, i64::MAX);
         assert_eq!(table.transaction_fee_filter(source), 1_000);
     }
 }
