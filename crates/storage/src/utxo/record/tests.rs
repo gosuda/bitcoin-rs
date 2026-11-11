@@ -754,3 +754,26 @@ proptest::proptest! {
         }
     }
 }
+
+const PACKED_HEIGHT_JUST_ABOVE_U32: [u8; 5] = [0x80, 0x80, 0x80, 0x80, 0x20];
+
+#[test]
+fn validate_encoded_rejects_packed_height_above_u32() -> Result<(), UtxoError> {
+    let out = OwnedUtxoOut::new(0, 42, vec![0x51], false, u32::MAX);
+    let record = UtxoRecord::from_owned_outputs(Hash256::default(), core::slice::from_ref(&out))?;
+    let mut bytes = record.bytes().to_vec();
+    let layout = V5Layout::read(&bytes, 1)?;
+    let payload = payload_offset(&bytes, &layout, 0)?;
+    let body = bytes.get(payload..).ok_or(UtxoError::CorruptRecord)?;
+    let (_, amount_end) = crate::utxo::compress::read_varint(body, 0)?;
+    let (packed, packed_end) = crate::utxo::compress::read_varint(body, amount_end)?;
+    assert_eq!(packed, u64::from(u32::MAX) << 1);
+    assert_eq!(packed_end - amount_end, PACKED_HEIGHT_JUST_ABOVE_U32.len());
+    let start = payload + amount_end;
+    let end = start + PACKED_HEIGHT_JUST_ABOVE_U32.len();
+    let slot = bytes.get_mut(start..end).ok_or(UtxoError::CorruptRecord)?;
+    slot.copy_from_slice(&PACKED_HEIGHT_JUST_ABOVE_U32);
+    let decoded = UtxoRecord::from_encoded(bytes.into_boxed_slice());
+    assert!(matches!(decoded, Err(UtxoError::CorruptRecord)));
+    Ok(())
+}

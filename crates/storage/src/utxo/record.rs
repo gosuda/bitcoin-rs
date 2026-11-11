@@ -1011,7 +1011,8 @@ fn validate_encoded(
             body_cursor
         };
 
-        let (_packed, body_cursor) = crate::utxo::compress::read_varint(body, body_cursor)?;
+        let (packed, body_cursor) = crate::utxo::compress::read_varint(body, body_cursor)?;
+        u32::try_from(packed >> 1).map_err(|_| UtxoError::CorruptRecord)?;
 
         match header.framing {
             RecordFraming::V5Plain => {
