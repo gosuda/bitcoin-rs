@@ -272,14 +272,14 @@ impl SyncChain for NodeSyncChain {
                 Err(settle_window_failure(transition, mempool_change, error))
             }
         };
-        let mut result = result.map_err(|error| WindowCommitError {
+        let result = result.map_err(|error| WindowCommitError {
             applied: error.applied,
             disposition: error.disposition,
             invalidated: error.invalidated,
             source: (*error.source).into(),
         });
-        if let Some(refusal) = refused {
-            result = Err(refusal);
+        if let Some(refusal) = fold_follower_refusal(&result, refused) {
+            return Err(refusal);
         }
         result
     }
@@ -312,6 +312,19 @@ fn refused_window(index: usize, source: bitcoin_rs_mempool::MempoolError) -> Win
         invalidated: Box::default(),
         source: SyncChainError::Message(format!("mempool settlement refused: {source}")),
     }
+}
+
+fn fold_follower_refusal(
+    result: &Result<usize, WindowCommitError>,
+    refused: Option<WindowCommitError>,
+) -> Option<WindowCommitError> {
+    let Ok(committed) = result else {
+        return None;
+    };
+    refused.map(|refusal| WindowCommitError {
+        applied: *committed,
+        ..refusal
+    })
 }
 
 #[cfg(test)]

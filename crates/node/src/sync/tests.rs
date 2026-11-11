@@ -294,3 +294,45 @@ fn fatal_window_settlement_closes_the_chain_for_recovery() -> Result<(), TestErr
     );
     Ok(())
 }
+
+// SYNC-04
+#[test]
+fn follower_refusal_keeps_the_committed_count_and_the_fatal_disposition() -> Result<(), TestError> {
+    use crate::p2p::sync::chain::{SyncChainError, WindowCommitError};
+    use bitcoin_rs_execution::WindowApplyDisposition;
+    use bitcoin_rs_mempool::MempoolError;
+
+    let refusal_at = |index: usize| super::refused_window(index, MempoolError::DeliveryQueueFull);
+    let failed =
+        |applied: usize, disposition: WindowApplyDisposition, invalidated: Box<[Hash256]>| {
+            WindowCommitError {
+                applied,
+                disposition,
+                invalidated,
+                source: SyncChainError::Message("commit failed".to_string()),
+            }
+        };
+
+    let folded = super::fold_follower_refusal(&Ok(3), Some(refusal_at(1)));
+    let Some(kept) = folded else {
+        panic!("a committed window with a refused follower still reports the refusal");
+    };
+    assert_eq!(kept.applied, 3);
+    assert_eq!(kept.disposition, WindowApplyDisposition::Operational);
+
+    let fatal = failed(2, WindowApplyDisposition::Fatal, Box::default());
+    assert!(
+        super::fold_follower_refusal(&Err(fatal), Some(refusal_at(1))).is_none(),
+        "a fatal commit failure survives the follower refusal untouched"
+    );
+
+    let invalidated: Box<[Hash256]> = vec![Hash256::from_le_bytes(&[9; 32])].into_boxed_slice();
+    let permanent = failed(1, WindowApplyDisposition::Permanent, invalidated.clone());
+    assert!(
+        super::fold_follower_refusal(&Err(permanent), Some(refusal_at(0))).is_none(),
+        "a permanent commit failure survives the follower refusal untouched"
+    );
+
+    assert!(super::fold_follower_refusal(&Ok(2), None).is_none());
+    Ok(())
+}
