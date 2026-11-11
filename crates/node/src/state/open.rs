@@ -578,7 +578,7 @@ impl NodeState {
                 error: Box::new(error),
             }
         })?;
-        if engine.is_some() {
+        if engine.is_some() || resume_source == ResumeSource::Cold {
             bitcoin_rs_execution::recovery::install_engine_checkpoint(
                 &chainstate,
                 engine.as_ref(),

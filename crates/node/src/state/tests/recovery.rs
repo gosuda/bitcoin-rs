@@ -749,6 +749,50 @@ fn full_revalidation_marker_resumes_on_durable_head() -> Result<(), TestError> {
     );
     Ok(())
 }
+// SYNC-05
+#[test]
+fn full_revalidation_cold_open_wipes_stale_engine_coins() -> Result<(), TestError> {
+    let (_dir, state, config) = applied_regtest_chain(2, 1)?;
+    let remembered_tip = state
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("applied tip"))?;
+    let stale = bitcoin_rs_storage::CoinKey([0xA5; 32]);
+    assert!(
+        state.chainstate().coins().get(&stale)?.is_none(),
+        "the probe key must start absent from the engine coin namespace"
+    );
+    state.chainstate().coins().ingest_sorted(std::iter::once((
+        stale,
+        bitcoin_rs_storage::Bytes::from_static(b"stale"),
+    )))?;
+    assert!(
+        state.chainstate().coins().get(&stale)?.is_some(),
+        "the seeded row must read back before the cold reopen"
+    );
+    drop(state);
+    std::fs::write(
+        config
+            .data_dir
+            .join(bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER),
+        b"force full validation\n",
+    )?;
+    let reopened = NodeState::open(config, None)?;
+    assert!(
+        reopened.chainstate().coins().get(&stale)?.is_none(),
+        "a cold open with no engine image must wipe stale engine coin rows before replay"
+    );
+    let tip = reopened
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("replayed applied tip"))?;
+    assert_eq!(
+        (tip.hash, tip.height),
+        (remembered_tip.hash, remembered_tip.height),
+        "the wipe must keep the durable head chain that replay rebuilds"
+    );
+    Ok(())
+}
 
 type ForkPlan = (
     bitcoin_rs_execution::chain::NodeId,
