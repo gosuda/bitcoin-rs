@@ -1113,7 +1113,6 @@ pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
     match last_log {
         Some((height, value)) => {
             state.next_ordinal = read_u32_le(&value, 0);
-            state.prev_filter_header = read_hash(&value, 4);
             let mut log_hash = None;
             if let Some(ops) = parse_log(value.get(LOG_HEADER_LEN..).unwrap_or(&[])) {
                 for op in ops {
@@ -1130,10 +1129,10 @@ pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
                 let last = newest.coverage.last_height;
                 state.next_ordinal = newest.next_ordinal;
                 state.at = Some((last, newest.coverage.last_hash));
-                state.prev_filter_header = filter_header(snapshot, newest.gen_id, last)?;
             }
         }
     }
+    state.prev_filter_header = filter_chain_head(snapshot)?;
     Ok(state)
 }
 
@@ -1150,14 +1149,6 @@ fn read_u64_le(bytes: &[u8], at: usize) -> u64 {
         .and_then(|slice| <[u8; 8]>::try_from(slice).ok())
         .map_or(0, u64::from_le_bytes)
 }
-
-fn read_hash(bytes: &[u8], at: usize) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    if let Some(slice) = bytes.get(at..at + 32) {
-        out.copy_from_slice(slice);
-    }
-    out
-}
 fn log_hash_for(snapshot: &dyn KvSnapshot, height: u32) -> Result<[u8; 32], IndexError> {
     let key = log_key(height);
     let Some(value) = snapshot.get(ColumnFamily::IdxMeta, &key)? else {
@@ -1173,16 +1164,33 @@ fn log_hash_for(snapshot: &dyn KvSnapshot, height: u32) -> Result<[u8; 32], Inde
     Err(IndexError::CorruptTailLog { height })
 }
 
-fn filter_header(
-    snapshot: &dyn KvSnapshot,
-    gen_id: u64,
-    height: u32,
-) -> Result<[u8; 32], IndexError> {
-    let key = format::encode_filter_key(gen_id, height);
-    let Some(value) = snapshot.get(ColumnFamily::Filters, &key)? else {
-        return Ok([0u8; 32]);
-    };
-    Ok(format::decode_filter_value(&value).map_or([0u8; 32], |(_, _, header, _)| header))
+fn filter_chain_head(snapshot: &dyn KvSnapshot) -> Result<[u8; 32], IndexError> {
+    let gen_zero = format::encode_filter_key(0, 0);
+    let mut head = None;
+    for item in snapshot.iter_prefix(ColumnFamily::Filters, &gen_zero[..8])? {
+        let (_, value) = item?;
+        if let Some((_, _, header, _)) = format::decode_filter_value(&value) {
+            head = Some(header);
+        }
+    }
+    if let Some(header) = head {
+        return Ok(header);
+    }
+    let mut sealed: std::collections::BTreeMap<u64, u32> = std::collections::BTreeMap::new();
+    for capability in TAIL_SEALED {
+        for record in sealed_generations(snapshot, capability)? {
+            sealed.insert(record.gen_id, record.coverage.last_height);
+        }
+    }
+    for (gen_id, height) in sealed.iter().rev() {
+        let key = format::encode_filter_key(*gen_id, *height);
+        if let Some(value) = snapshot.get(ColumnFamily::Filters, &key)? {
+            return Ok(
+                format::decode_filter_value(&value).map_or([0u8; 32], |(_, _, header, _)| header)
+            );
+        }
+    }
+    Ok([0u8; 32])
 }
 
 /// Writes the `gen/<cap>` descriptor of every capability in `capabilities`

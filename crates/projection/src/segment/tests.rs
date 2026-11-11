@@ -1307,3 +1307,58 @@ fn script_stats_rows_count_toward_the_tail_byte_budget() {
         "the tail admits bytes inside the recorded cost"
     );
 }
+// PRJ-05
+#[test]
+#[expect(clippy::expect_used)]
+fn tail_resume_chains_onto_the_newest_durable_filter_row() {
+    use bitcoin_rs_storage::{ColumnFamily, KvStore as _};
+    let blocks = shared_script_blocks(4);
+    let dir = tempfile::tempdir().expect("dir");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let store =
+        std::sync::Arc::new(bitcoin_rs_storage::RocksDbStore::open(dir.path()).expect("store"));
+    let mut writer = crate::IndexWriter::open(std::sync::Arc::clone(&store), 1).expect("writer");
+    for (height, block) in blocks.iter().enumerate() {
+        let capabilities = if height < 2 {
+            crate::IndexCapabilities::TX_LOOKUP.with_compact_filters(true)
+        } else {
+            crate::IndexCapabilities::TX_LOOKUP
+        };
+        let prepared = writer
+            .prepare_block_from_facts(capabilities, block.clone())
+            .expect("prepare");
+        let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
+        assert!(batch.try_push(prepared).is_ok(), "contiguous block");
+        writer.commit_forward(batch).expect("commit");
+    }
+    super::seal_tail_generation(
+        store.as_ref(),
+        1,
+        1,
+        crate::IndexCapabilities::TX_LOOKUP.with_compact_filters(true),
+        scratch.path(),
+    )
+    .expect("seal the filter chain into generation 1");
+    super::seal_tail_generation(
+        store.as_ref(),
+        2,
+        3,
+        crate::IndexCapabilities::TX_LOOKUP,
+        scratch.path(),
+    )
+    .expect("seal generation 2 without filters");
+    let snapshot = store.snapshot().expect("snapshot");
+    let sealed_row = snapshot
+        .get(ColumnFamily::Filters, &encode_filter_key(1, 1))
+        .expect("read the sealed filter row")
+        .expect("generation 1 holds the filter chain");
+    let (_, _, chain_header, _) = decode_filter_value(&sealed_row).expect("decode sealed filter");
+    let state = tail_state(store.as_ref());
+    assert_eq!(
+        state.prev_filter_header, chain_header,
+        "the resumed tail chains onto the newest durable filter row"
+    );
+}
