@@ -29,10 +29,12 @@ $DATA
 ├── blocks/
 │   └── blk00000.dat
 ├── chainstate/
-│   ├── 0.jnl
-│   ├── lock
-│   ├── version
-│   └── keyspaces/
+│   ├── CURRENT
+│   ├── LOCK
+│   ├── LOG
+│   ├── MANIFEST-*
+│   ├── OPTIONS-*
+│   └── ...
 └── process-epoch
 ```
 
@@ -50,7 +52,7 @@ A clean shutdown adds the checkpoint and the owner-local files:
 
 `.lock` is the data-directory lock. `process-epoch` is a monotonically increasing number written at startup, and `.process-epoch.lock` guards it. A corrupt `process-epoch` refuses startup instead of reusing an epoch.
 
-`chainstate/` is the authoritative chainstate store. With the default `rocksdb` backend it contains a lock, a version file, and column families. Coins live in the `Coins` column family. `blocks/` holds block body files with `BRSB` framing.
+`chainstate/` is the authoritative chainstate store. With the default `rocksdb` backend it holds native RocksDB files. The exact file set varies with the RocksDB version; `CURRENT` marks the set. Coins live in the `coins` keyspace (`ColumnFamily::Coins`). `blocks/` holds block body files with `BRSB` framing.
 
 `.cookie` is generated with mode `0600` and rotated before each listener starts. `applied-tip-witness.json` records the published applied tip. `chainstate-checkpoints/` holds published checkpoints, and `CURRENT` names the active generation.
 
