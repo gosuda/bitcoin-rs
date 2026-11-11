@@ -776,3 +776,168 @@ fn reentrant_connect_past_the_ceiling_is_refused_before_the_epoch_advances() -> 
     );
     Ok(())
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NestedApply {
+    Refused,
+    Other,
+}
+
+struct RefusedSettlementObserver {
+    gateway: Mutex<Option<Arc<MempoolGateway>>>,
+    followers: Mutex<Option<Arc<ChainFollowers>>>,
+    chainstate: Mutex<Option<Arc<bitcoin_rs_execution::Chainstate>>>,
+    entered: Mutex<Option<crossbeam_channel::Sender<()>>>,
+    release: Mutex<Option<crossbeam_channel::Receiver<()>>>,
+    outcome: Mutex<Option<NestedApply>>,
+}
+
+impl MempoolObserver for RefusedSettlementObserver {
+    fn on_mutation(&self, envelope: &MutationEnvelope) {
+        if envelope.result.sequence_base != 1 {
+            return;
+        }
+        let Some(entered) = self.entered.lock().take() else {
+            return;
+        };
+        if entered.send(()).is_err() {
+            return;
+        }
+        let Some(release) = self.release.lock().take() else {
+            return;
+        };
+        if release.recv().is_err() {
+            return;
+        }
+        let (Some(gateway), Some(followers), Some(chainstate)) = (
+            self.gateway.lock().clone(),
+            self.followers.lock().clone(),
+            self.chainstate.lock().clone(),
+        ) else {
+            return;
+        };
+        for index in 0..8u32 {
+            if gateway
+                .insert_entry(
+                    AdmissionOrigin::Rpc,
+                    MempoolEntry::new(Arc::new(flood_tx(40, index)), 100, 1_000, 1, 0, 0),
+                )
+                .is_err()
+            {
+                *self.outcome.lock() = Some(NestedApply::Other);
+                return;
+            }
+        }
+        let image = BlockImage::from_local(Network::Regtest.genesis_block());
+        let applied = match followers.apply_connect(&chainstate, &image) {
+            Err(ConnectMutationError::CommittedButMempoolSettlementRefused { .. }) => {
+                NestedApply::Refused
+            }
+            _ => NestedApply::Other,
+        };
+        *self.outcome.lock() = Some(applied);
+    }
+}
+
+// EVT-02
+#[test]
+fn refused_mempool_settlement_closes_the_chain_for_recovery() -> Result<(), TestError> {
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded::<()>(1);
+    let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(1);
+    let observer = Arc::new(RefusedSettlementObserver {
+        gateway: Mutex::new(None),
+        followers: Mutex::new(None),
+        chainstate: Mutex::new(None),
+        entered: Mutex::new(Some(entered_tx)),
+        release: Mutex::new(Some(release_rx)),
+        outcome: Mutex::new(None),
+    });
+    let observer_handle: Arc<dyn MempoolObserver> = observer.clone();
+    let dir = tempfile::tempdir()?;
+    let mut config = crate::NodeConfig::default_for_network(Network::Regtest);
+    config.data_dir = dir.path().join("node");
+    config.p2p.listen.clear();
+    let state = crate::state::NodeState::open(config, None)?;
+    state
+        .mempool_gateway()
+        .attach_observer_leg(
+            "refused-settlement",
+            observer_handle,
+            BodyInterest::Metadata,
+        )
+        .map_err(TestError::message)?;
+    let followers = Arc::new(ChainFollowers::new(
+        Arc::new(RwLock::new(BlockLog::new())),
+        Arc::new(crate::NoOpZmqPublisher),
+        None,
+        None,
+        Arc::new(crate::mining::MiningGenerationSignal::new()),
+        Some(state.mempool_gateway()),
+    ));
+    *observer.gateway.lock() = Some(state.mempool_gateway());
+    *observer.followers.lock() = Some(Arc::clone(&followers));
+    *observer.chainstate.lock() = Some(state.chainstate());
+    let gateway = state.mempool_gateway();
+    let first = Arc::clone(&gateway);
+    let first_handle = std::thread::spawn(move || {
+        first
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(flood_tx(200, 0)), 100, 1_000, 1, 0, 0),
+            )
+            .map_err(TestError::Mempool)
+    });
+    entered_rx.recv_timeout(std::time::Duration::from_secs(10))?;
+    for index in 0..100u32 {
+        gateway.insert_entry(
+            AdmissionOrigin::Rpc,
+            MempoolEntry::new(Arc::new(flood_tx(10, index)), 100, 1_000, 1, 0, 0),
+        )?;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while gateway.publish_len() != 100 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the delivery queue never filled"
+        );
+        std::thread::yield_now();
+    }
+    release_tx.send(())?;
+    first_handle
+        .join()
+        .map_err(|_| TestError::Missing("first publisher"))??;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while observer.outcome.lock().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the nested connect never settled"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        observer.outcome.lock().clone(),
+        Some(NestedApply::Refused),
+        "a connect past the ceiling keeps its committed outcome with the refusal"
+    );
+    let committed = state
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("committed tip"))?;
+    assert_eq!(
+        committed.hash,
+        Hash256::from(Network::Regtest.genesis_block().block_hash())
+    );
+    assert!(
+        state.chainstate().is_closed_for_recovery(),
+        "a refused settlement after commit leaves the fence closed until recovery"
+    );
+    assert!(
+        gateway.stable_generation().is_none(),
+        "a refused settlement publishes no stable generation"
+    );
+    assert!(
+        followers.epoch().current().is_none(),
+        "a refused settlement never advances the epoch"
+    );
+    Ok(())
+}

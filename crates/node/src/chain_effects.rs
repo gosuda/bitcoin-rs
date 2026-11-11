@@ -361,29 +361,19 @@ impl ChainFollowers {
     ) -> core::result::Result<ConnectOutcome, ConnectMutationError> {
         match transition.connect(payload) {
             Ok(outcome) => {
-                let settled = self.on_connect(payload, &outcome);
-                let finished = Self::finish_transition(handles, transition, mempool_change);
-                match (settled, finished) {
-                    (Ok(()), Ok(())) => Ok(outcome),
-                    (Ok(()), Err(source)) => {
-                        Err(ConnectMutationError::CommittedButSettlementFailed {
-                            outcome: Box::new(outcome),
-                            source,
-                        })
-                    }
-                    (Err(source), finished) => {
-                        if let Err(finish) = finished {
-                            tracing::error!(
-                                %source,
-                                finish = %finish,
-                                "durable receipt failed after refused mempool settlement"
-                            );
-                        }
-                        Err(ConnectMutationError::CommittedButMempoolSettlementRefused {
-                            outcome: Box::new(outcome),
-                            source,
-                        })
-                    }
+                if let Err(source) = self.on_connect(payload, &outcome) {
+                    handles.fail_closed_for_recovery();
+                    return Err(ConnectMutationError::CommittedButMempoolSettlementRefused {
+                        outcome: Box::new(outcome),
+                        source,
+                    });
+                }
+                match Self::finish_transition(handles, transition, mempool_change) {
+                    Ok(()) => Ok(outcome),
+                    Err(source) => Err(ConnectMutationError::CommittedButSettlementFailed {
+                        outcome: Box::new(outcome),
+                        source,
+                    }),
                 }
             }
             Err(error) => {
