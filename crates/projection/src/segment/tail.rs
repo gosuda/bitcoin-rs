@@ -1014,17 +1014,33 @@ pub(crate) fn cut_generation_zero(batch: &mut BufferedWriteBatch, plan: &PrefixC
     }
 }
 
+const TAIL_SEALED: [IndexCapability; 3] = [
+    IndexCapability::TxLookup,
+    IndexCapability::ScriptHistory,
+    IndexCapability::CompactFilters,
+];
+
+fn newest_tail_sealed(snapshot: &dyn KvSnapshot) -> Result<Option<SealedGen>, IndexError> {
+    let mut newest: Option<SealedGen> = None;
+    for capability in TAIL_SEALED {
+        if let Some(sealed) = sealed_generations(snapshot, capability)?.last() {
+            if newest.map_or(true, |current| sealed.gen_id > current.gen_id) {
+                newest = Some(*sealed);
+            }
+        }
+    }
+    Ok(newest)
+}
+
 /// The generation id the next segment takes: the stored counter, or one past
-/// the newest sealed TxLookup generation when the counter is behind.
+/// the newest sealed tail-bound generation when the counter is behind.
 pub fn next_gen_id(snapshot: &dyn KvSnapshot) -> Result<u64, IndexError> {
-    let sealed = sealed_generations(snapshot, IndexCapability::TxLookup)?;
+    let after_sealed = newest_tail_sealed(snapshot)?
+        .map_or(1, |newest| newest.gen_id.saturating_add(1));
     let stored_next = snapshot
         .get(ColumnFamily::IdxMeta, crate::segment::SEAL_NEXT_GEN_KEY)?
         .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
         .map_or(1, u64::from_le_bytes);
-    let after_sealed = sealed
-        .last()
-        .map_or(1, |newest| newest.gen_id.saturating_add(1));
     Ok(stored_next.max(after_sealed))
 }
 
@@ -1108,7 +1124,7 @@ pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
             state.at = Some((height, hash));
         }
         None => {
-            if let Some(newest) = state.newest() {
+            if let Some(newest) = newest_tail_sealed(snapshot)? {
                 let last = newest.coverage.last_height;
                 state.next_ordinal = newest.next_ordinal;
                 state.at = Some((last, newest.coverage.last_hash));

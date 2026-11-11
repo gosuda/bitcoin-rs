@@ -1178,3 +1178,78 @@ fn history_pages_seek_from_cursor_across_segments() -> Result<(), Box<dyn std::e
     assert_eq!(walked, (1..=top).rev().collect::<Vec<u32>>());
     Ok(())
 }
+// PRJ-05
+#[test]
+#[expect(clippy::expect_used)]
+fn compact_filters_only_restart_resumes_past_the_sealed_filters() {
+    use bitcoin_rs_storage::{ColumnFamily, KvStore as _};
+    let blocks = shared_script_blocks(2);
+    let dir = tempfile::tempdir().expect("dir");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let store =
+        std::sync::Arc::new(bitcoin_rs_storage::RocksDbStore::open(dir.path()).expect("store"));
+    let mut writer = crate::IndexWriter::open(std::sync::Arc::clone(&store), 1).expect("writer");
+    for block in &blocks {
+        let prepared = writer
+            .prepare_block_from_facts(crate::IndexCapabilities::COMPACT_FILTERS, block.clone())
+            .expect("prepare");
+        let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
+        assert!(batch.try_push(prepared).is_ok(), "contiguous block");
+        writer.commit_forward(batch).expect("commit");
+    }
+    super::seal_tail_generation(
+        store.as_ref(),
+        1,
+        1,
+        crate::IndexCapabilities::COMPACT_FILTERS,
+        scratch.path(),
+    )
+    .expect("seal");
+    let snapshot = store.snapshot().expect("snapshot");
+    let sealed =
+        super::sealed_generations(snapshot.as_ref(), crate::IndexCapability::CompactFilters)
+            .expect("sealed scan");
+    let newest = sealed.last().expect("one sealed generation");
+    assert_eq!(newest.gen_id, 1, "the seal lands under compact_filters");
+    let sealed_row = snapshot
+        .get(
+            ColumnFamily::Filters,
+            &encode_filter_key(newest.gen_id, newest.coverage.last_height),
+        )
+        .expect("read sealed filter")
+        .expect("sealed filter row");
+    let (_, _, sealed_header, _) =
+        decode_filter_value(&sealed_row).expect("decode sealed filter");
+    assert_eq!(
+        super::tail::next_gen_id(snapshot.as_ref()).expect("next id"),
+        newest.gen_id.saturating_add(1),
+        "the next generation advances past the sealed filters"
+    );
+    drop(snapshot);
+    let state = tail_state(store.as_ref());
+    let expected_ordinals: u32 = blocks
+        .iter()
+        .map(|block| u32::try_from(block.txs.len()).expect("tx count fits"))
+        .sum();
+    assert_eq!(
+        state.next_gen_id,
+        newest.gen_id.saturating_add(1),
+        "the reopened writer seals the next generation"
+    );
+    assert_eq!(
+        state.next_ordinal, expected_ordinals,
+        "ordinals resume past the sealed prefix"
+    );
+    assert_eq!(
+        state.at,
+        Some((newest.coverage.last_height, newest.coverage.last_hash)),
+        "the tip resumes at the sealed filters"
+    );
+    assert_eq!(
+        state.prev_filter_header, sealed_header,
+        "the next filter chains from the sealed header"
+    );
+}
