@@ -114,6 +114,8 @@ fn body_identity_and_read_errors_are_preserved() -> Result {
         let disk = BoundedReadError::from(std::io::Error::other("private/path: disk read failed"));
         let error = read_error(&wrap(disk));
         assert_eq!(error.code(), RpcError::INTERNAL_ERROR);
+        let corrupt = BoundedReadError::CorruptFrame("bad frame");
+        assert_eq!(read_error(&wrap(corrupt)).code(), RpcError::INTERNAL_ERROR);
         for refusal in [
             BoundedReadError::Unsupported,
             BoundedReadError::Limit { size: 2, limit: 1 },

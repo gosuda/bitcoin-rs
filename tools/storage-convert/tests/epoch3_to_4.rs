@@ -906,6 +906,14 @@ fn corrupt_headers_or_coinstats_artifact_refuses_publish() -> TestResult<()> {
                 "expected stderr to name the corrupt artifact {artifact}, got: {stderr}"
             )));
         }
+        if to_path.exists() {
+            let entries: Vec<_> = fs::read_dir(&to_path)?.collect();
+            if !entries.is_empty() {
+                return Err(TestError::Assertion(format!(
+                    "destination was populated despite corrupt {artifact}"
+                )));
+            }
+        }
     }
     Ok(())
 }
