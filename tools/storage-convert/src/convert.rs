@@ -237,6 +237,7 @@ fn copy_independent_files(
     const INDEPENDENT_DIRS: &[&str] = &[
         "blocks",
         "chainstate-checkpoints",
+        "assumeutxo",
         "assumeutxo-historical-checkpoints",
         "chainstate-journal",
     ];
