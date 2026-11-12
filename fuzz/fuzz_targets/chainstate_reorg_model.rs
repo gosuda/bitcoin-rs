@@ -137,9 +137,8 @@ fn assert_state(chain: &FuzzChain, model: &Model) {
         "utxo output count must track the model"
     );
     for (outpoint, output) in &model.coins {
-        assert_eq!(
-            utxo.get(outpoint).as_ref(),
-            Some(output),
+        assert!(
+            matches!(utxo.get(outpoint), Ok(Some(found)) if &found == output),
             "utxo entry {outpoint:?} must track the model"
         );
     }
