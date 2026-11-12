@@ -9,8 +9,8 @@ use bitcoin_rs_storage::utxo::contract::{OutputSource, UndoLoadError, load_block
 
 /// Proof that a connect replays the committed gap below the durable head.
 ///
-/// The field is private to this module, so no other module can mint the claim:
-/// replay treatment is carried by a value only the gap replay path can build.
+/// In non-test builds, the private field ensures replay treatment is carried by
+/// a value only the gap replay path can build.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ReplayToken(());
 

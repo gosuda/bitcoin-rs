@@ -635,9 +635,7 @@ fn validate_undo_for_block(
     Ok(())
 }
 
-/// Rewrites a record so that every overwritten outpoint is deleted on
-/// disconnect instead of restored. Bitcoin Core removes all outputs a block
-/// created on disconnect, so an overwritten coin does not come back.
+/// Deletes overwritten outpoints on disconnect, matching Bitcoin Core.
 ///
 /// Returns `None` when the record restores no outpoint of a created txid.
 pub fn rewrite_overwrite_restores(

@@ -965,7 +965,6 @@ fn oracle_btc(sat: u64) -> f64 {
     f64::from(sat) / 100_000_000_f64
 }
 
-/// One expected `scantxoutset` row: txid LE bytes, vout, value, coinbase, script.
 type ExpectedUnspent<'a> = ([u8; 32], u32, u64, bool, &'a Vec<u8>);
 
 #[test]

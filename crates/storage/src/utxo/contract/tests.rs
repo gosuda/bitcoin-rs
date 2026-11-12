@@ -450,7 +450,7 @@ fn every_undo_truncation_and_flip_is_refused_or_canonical() -> TestResult {
 }
 
 #[test]
-fn committed_blocks_advance_the_tracked_listener() -> TestResult {
+fn coin_stats_feed_tracks_utxo_accounting_through_populate() -> TestResult {
     use crate::utxo::stats::{CoinStats, CoinStatsListener};
     use crate::{CoinStore, MemoryKvStore};
     use std::sync::Arc;
