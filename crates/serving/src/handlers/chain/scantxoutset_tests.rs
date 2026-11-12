@@ -1102,7 +1102,7 @@ fn scan_snapshot_ignores_commit_landing_mid_scan() {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             match commit_ctx.chain.utxo.scan_progress() {
-                Some(percent) if percent < 100 => break,
+                Some(percent) if percent > 0 => break,
                 _ => {}
             }
             if std::time::Instant::now() > deadline {
