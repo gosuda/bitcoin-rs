@@ -81,6 +81,7 @@ fn open_persistent(dir: &Path, pinned: &AssumeUtxoData) -> TestResult<Arc<Chains
     } else {
         Arc::try_unwrap(chainstate()).map_err(|_| TestError::Missing("shared fixture"))?
     };
+    coins.track_coin_stats((*active.coin_stats).clone());
     active.durable_head = head_store;
     active.undo_store = Arc::new(KvUndoStore::new(store.clone()));
     active.coins = Arc::clone(&coins);
@@ -210,6 +211,8 @@ fn finalize_snapshot_after_foreground_restart(
     manager.step_historical(&BlockImage::from_local(fixture.blocks[0].clone()))?;
     manager.step_historical(&BlockImage::from_local(fixture.blocks[1].clone()))?;
     let expected_stats = active.coin_stats.snapshot();
+    assert_eq!(expected_stats.utxo_count, 3);
+    assert_eq!(expected_stats.total_amount, 15_000_000_000);
     let expected_tip = active
         .applied_tip_snapshot()
         .ok_or(TestError::Missing("missing foreground tip"))?
