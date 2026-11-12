@@ -772,6 +772,14 @@ impl AssumeUtxoManager {
         self.pending_activation_mint.lock().take()
     }
 
+    /// Connects one historical block and records validation progress.
+    ///
+    /// The historical chainstate's coin statistics move with the commit: the
+    /// tracked `CoinStore` feeds the listener the coin delta of every committed
+    /// window, and the connect adds the block's transaction count. A step
+    /// therefore costs the block, not the accumulated coin set. The listener is
+    /// seeded from the checkpoint engine image on restore and starts empty
+    /// otherwise (`create_historical_counterpart`).
     pub fn step_historical(&self, payload: &BlockImage) -> Result<ConnectOutcome, AssumeUtxoError> {
         let _lifecycle = self.lifecycle.lock();
         let historical = self
@@ -781,28 +789,6 @@ impl AssumeUtxoManager {
             .ok_or(AssumeUtxoError::NoHistoricalChainstate)?;
         let (outcome, archived) = self.connect_historical_block(&historical, payload)?;
         if !archived {
-            let scratch = UtxoSet::new();
-            for item in historical
-                .commit_authority
-                .store()
-                .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
-            {
-                let (_, value) = item?;
-                let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
-                    value.into_boxed_slice(),
-                )
-                .map_err(|_| {
-                    AssumeUtxoError::Storage(bitcoin_rs_storage::StorageError::InvalidOperation(
-                        "bad coin record",
-                    ))
-                })?;
-                scratch.insert_parsed_record(record);
-            }
-            let mut stats = scratch.with_stable_view(|view| {
-                bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, outcome.height, true)
-            })?;
-            stats.tx_count = outcome.tip.chain_tx_count.to_wire();
-            historical.coin_stats.reset(stats);
             self.record_historical_progress(&historical, payload, &outcome)?;
         }
         historical
