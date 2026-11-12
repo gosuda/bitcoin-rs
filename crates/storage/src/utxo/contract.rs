@@ -167,31 +167,6 @@ impl OutputSource for UtxoSet {
         Self::get_entry(self, outpoint)
     }
 }
-impl OutputSource for crate::utxo::set::UtxoReader {
-    fn get_entry(&self, outpoint: &OutPoint) -> Option<UtxoCoin> {
-        self.get_entry(outpoint)
-    }
-}
-
-impl OutputSource for crate::CoinStore {
-    fn get_entry(&self, outpoint: &OutPoint) -> Option<UtxoCoin> {
-        let key = crate::CoinKey(outpoint.txid.0.to_le_bytes());
-        let bytes = self.get(&key).ok()??;
-        let record =
-            crate::utxo::record::UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice())
-                .ok()?;
-        let out = record.find_output(outpoint.vout)?;
-        Some(UtxoCoin {
-            outpoint: *outpoint,
-            txout: TxOut {
-                value: bitcoin_rs_consensus::primitives::Amount::from_sat(out.value),
-                script_pubkey: out.script_pubkey.to_vec().into(),
-            },
-            coinbase: out.coinbase,
-            height: out.height,
-        })
-    }
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoinEntryError {

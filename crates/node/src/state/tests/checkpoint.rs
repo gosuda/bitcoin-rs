@@ -130,6 +130,26 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
     let manifest_bytes = std::fs::read(root.join(directory).join("manifest-v1.json"))?;
     let manifest: sonic_rs::Value = sonic_rs::from_slice(&manifest_bytes)?;
     assert!(manifest.get("utxo").is_none_or(|v| v.is_null()));
+    let image =
+        bitcoin_rs_storage::open_checkpoint_store(&root.join(directory).join("chainstate"))?;
+    let image_coins = image
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(image);
+    let committed_coins = resumed
+        .chainstate()
+        .coins()
+        .scan_snapshot()?
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        !committed_coins.is_empty(),
+        "the committed set must hold the next block's coinbase"
+    );
+    assert_eq!(
+        image_coins, committed_coins,
+        "the checkpoint generation must carry exactly the committed coin rows"
+    );
     drop(resumed);
 
     let resumed_again = NodeState::open(reopen_config, None)?;

@@ -218,7 +218,7 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), crate::test_s
 
     let main_tip_hash = Hash256::from_le_bytes(main[100].block_hash().as_bytes());
     let main_coin = OutPoint::new(main[100].txs[1].txid(), 0);
-    let main_coin_before = handles.utxo_reader().get_entry(&main_coin);
+    let main_coin_before = handles.utxo_reader().get_entry(&main_coin)?;
     let utxo_len_before = handles.utxo().len();
     assert!(main_coin_before.is_some(), "main-tip spend must be live");
     let fork_root_hash = main[99].block_hash();
@@ -287,7 +287,7 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), crate::test_s
     );
     assert_eq!(handles.utxo().len(), utxo_len_before);
     assert_eq!(
-        handles.utxo_reader().get_entry(&main_coin),
+        handles.utxo_reader().get_entry(&main_coin)?,
         main_coin_before
     );
     Ok(())

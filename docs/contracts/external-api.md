@@ -106,6 +106,7 @@ wallet interoperability remain unverified.
 - With `blockhash`, it reads only that block.
 - Both forms take the request latch and poll it. Neither holds a blocking-quota slot (`API-34`).
 - The registry declares `Interruptible`.
+- `gettxout` and `gettxoutproof` answer Core `-32603` when the coin store cannot read or decode a coin row. They never answer `null` for that coin and never fall back to the txindex.
 
 #### Retained block inputs
 
@@ -261,6 +262,7 @@ wallet interoperability remain unverified.
 - JSON bodies, mixed input sources, malformed or trailing data, and oversized requests fail with HTTP 400.
 - Empty serialized vectors are valid; URI requests still require outpoints.
 - Plain coin reads capture tip and coins under the stable chain read role.
+- A coin store read or decode error returns HTTP 500 for `/rest/getutxos`, never a bitmap miss.
 - Mixed reads retain one pool view and reject a changed or odd chain generation.
 - Rendering happens after guards are dropped.
 - Pool-created outputs use Core REST `MEMPOOL_HEIGHT` (2147483647).

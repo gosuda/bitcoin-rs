@@ -142,6 +142,72 @@ fn disconnect_below_checkpoint_base_forces_full_validation() -> Result<()> {
     Ok(())
 }
 
+// SYNC-05
+#[test]
+fn recovery_publication_keeps_committed_coin_stats_across_restart() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = NodeConfig::default_for_network(Network::Regtest);
+    config.data_dir = dir.path().join("recovery-stats-node");
+    config.p2p.listen.clear();
+
+    let genesis = Network::Regtest.genesis_block();
+    let block1 = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
+    let block2 = regtest_fixture::mined_regtest_child_at(block1.block_hash(), 2)?;
+
+    let base = NodeState::open(config.clone(), None)?;
+    base.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+        genesis.clone(),
+    ))?;
+    base.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+        block1.clone(),
+    ))?;
+    let _ = base.publish_checkpoint()?;
+    drop(base);
+
+    let state = NodeState::open(config.clone(), None)?;
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+        block2.clone(),
+    ))?;
+    state
+        .undo_store()
+        .arm_disconnect(2, block2.block_hash().0)?;
+    drop(state);
+
+    let recovered = NodeState::open(config.clone(), None)?;
+    drop(recovered);
+
+    let resumed = NodeState::open(config, None)?;
+    let tip = resumed
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or_else(|| std::io::Error::other("recovery replay did not publish a tip"))?;
+    let expected = resumed
+        .chainstate()
+        .utxo_reader()
+        .with_stable_view(|view| {
+            bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, tip.height, true)
+        })?;
+    let served = resumed.chainstate().coin_stats_handle().snapshot();
+    assert_eq!(
+        served.height, expected.height,
+        "listener height must equal the committed tip height"
+    );
+    assert_eq!(
+        served.total_amount, expected.total_amount,
+        "listener amount must equal a full scan of the committed coin set"
+    );
+    assert_eq!(
+        served.utxo_count, expected.utxo_count,
+        "listener output count must equal a full scan of the committed coin set"
+    );
+    assert_eq!(
+        served.muhash.finalize_hash(),
+        expected.muhash.finalize_hash(),
+        "listener MuHash must equal a full scan of the committed coin set"
+    );
+    Ok(())
+}
+
 fn assert_semantic_coin_stats_eq(
     left: &bitcoin_rs_storage::utxo::stats::CoinStats,
     right: &bitcoin_rs_storage::utxo::stats::CoinStats,

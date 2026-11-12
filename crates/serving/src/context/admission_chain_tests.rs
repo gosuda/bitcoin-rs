@@ -198,6 +198,21 @@ fn admission_chain_uses_current_handles_and_one_applied_tip() -> TestResult {
     Ok(())
 }
 
+// MPL-04
+#[test]
+fn unreadable_coin_withholds_the_admission_snapshot() -> TestResult {
+    let unreadable = Hash256::from_le_bytes(&[0xD4; 32]);
+    let tx = spending(OutPoint::new(Txid::from(unreadable), 0));
+    let mut ctx = Context::new();
+
+    ctx.chain.utxo = crate::test_coins::utxo_reader_with_undecodable_coin(&unreadable)?;
+    assert!(ctx.chain.admission_chain().snapshot(&tx).is_none());
+
+    ctx.chain.utxo = crate::test_coins::utxo_reader_with_undecodable_coin(&tx.txid().0)?;
+    assert!(ctx.chain.admission_chain().snapshot(&tx).is_none());
+    Ok(())
+}
+
 #[test]
 #[expect(clippy::expect_used)]
 fn admission_envelopes_share_gateway_outcomes() -> TestResult {

@@ -91,6 +91,7 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
 - Rollback sequencing splits at the marker fence, which is exactly where the crate boundary runs. Chainstate refuses a stale tip before arming. It then executes durable head advance and publication. It disarms the marker only when the commit succeeds.
 - The contract surface is `bitcoin_rs_storage::utxo::contract`. The crate root keeps only read, snapshot, and statistics names. RPC and P2P admission read through `UtxoReader` (`UtxoCoin`, `UtxoScan`). Index is the read consumer that decodes the contract's `UndoBatch`. No caller assembles mutations outside tests.
 - The resident `UtxoSet` is a rebuilt scan image, not the coin authority. Committed coins live in `CoinStore`. Point reads through `UtxoReader` resolve through `CoinStore` when the reader is coin-store backed. A whole-set read primes the resident image from the engine coin store first (`UtxoReader::prime_from_coin_store`), so a whole-set answer and a point read describe the same committed coins.
+- `UtxoReader::get`, `get_entry`, and `has_live_outputs_for_txid` return `UtxoError` when the engine read fails or the coin row does not decode. They report an absent coin only when the row or the output is absent. A caller MUST NOT treat that error as an absent coin.
 
 ### `ARCH-07b`: AssumeUTXO chainstate roles and single active authority
 

@@ -51,33 +51,33 @@ fn recovers_from_key_prefix_collisions_in_utxo_set_and_snapshot() -> TestResult 
     block1.add(UtxoAdd::new(op_b2, txout_b2.clone(), false, 101));
     populate_block_changes(&coin_store, &block1)?;
 
-    assert!(reader.has_live_outputs_for_txid(&txid_a));
-    assert!(reader.has_live_outputs_for_txid(&txid_b));
-    assert_eq!(reader.get(&op_a0), Some(txout_a0));
-    assert_eq!(reader.get(&op_a1), Some(txout_a1.clone()));
-    assert_eq!(reader.get(&op_b0), Some(txout_b0.clone()));
-    assert_eq!(reader.get(&op_b2), Some(txout_b2.clone()));
+    assert!(reader.has_live_outputs_for_txid(&txid_a)?);
+    assert!(reader.has_live_outputs_for_txid(&txid_b)?);
+    assert_eq!(reader.get(&op_a0)?, Some(txout_a0));
+    assert_eq!(reader.get(&op_a1)?, Some(txout_a1.clone()));
+    assert_eq!(reader.get(&op_b0)?, Some(txout_b0.clone()));
+    assert_eq!(reader.get(&op_b2)?, Some(txout_b2.clone()));
 
     let mut block2 = BlockChanges::<TxOut>::default();
     block2.remove(op_a0);
     populate_block_changes(&coin_store, &block2)?;
 
-    assert!(reader.has_live_outputs_for_txid(&txid_a));
-    assert!(reader.has_live_outputs_for_txid(&txid_b));
-    assert_eq!(reader.get(&op_a0), None);
-    assert_eq!(reader.get(&op_a1), Some(txout_a1));
-    assert_eq!(reader.get(&op_b0), Some(txout_b0.clone()));
-    assert_eq!(reader.get(&op_b2), Some(txout_b2.clone()));
+    assert!(reader.has_live_outputs_for_txid(&txid_a)?);
+    assert!(reader.has_live_outputs_for_txid(&txid_b)?);
+    assert_eq!(reader.get(&op_a0)?, None);
+    assert_eq!(reader.get(&op_a1)?, Some(txout_a1));
+    assert_eq!(reader.get(&op_b0)?, Some(txout_b0.clone()));
+    assert_eq!(reader.get(&op_b2)?, Some(txout_b2.clone()));
 
     let mut block3 = BlockChanges::<TxOut>::default();
     block3.remove(op_a1);
     populate_block_changes(&coin_store, &block3)?;
 
-    assert!(!reader.has_live_outputs_for_txid(&txid_a));
-    assert!(reader.has_live_outputs_for_txid(&txid_b));
-    assert_eq!(reader.get(&op_a1), None);
-    assert_eq!(reader.get(&op_b0), Some(txout_b0.clone()));
-    assert_eq!(reader.get(&op_b2), Some(txout_b2.clone()));
+    assert!(!reader.has_live_outputs_for_txid(&txid_a)?);
+    assert!(reader.has_live_outputs_for_txid(&txid_b)?);
+    assert_eq!(reader.get(&op_a1)?, None);
+    assert_eq!(reader.get(&op_b0)?, Some(txout_b0.clone()));
+    assert_eq!(reader.get(&op_b2)?, Some(txout_b2.clone()));
 
     let mut block4 = BlockChanges::default();
     let op_a5 = OutPoint::new(Txid::from(txid_a), 5);
@@ -85,10 +85,10 @@ fn recovers_from_key_prefix_collisions_in_utxo_set_and_snapshot() -> TestResult 
     block4.add(UtxoAdd::new(op_a5, txout_a5.clone(), false, 104));
     populate_block_changes(&coin_store, &block4)?;
 
-    assert!(reader.has_live_outputs_for_txid(&txid_a));
-    assert!(reader.has_live_outputs_for_txid(&txid_b));
-    assert_eq!(reader.get(&op_a5), Some(txout_a5.clone()));
-    assert_eq!(reader.get(&op_b0), Some(txout_b0.clone()));
+    assert!(reader.has_live_outputs_for_txid(&txid_a)?);
+    assert!(reader.has_live_outputs_for_txid(&txid_b)?);
+    assert_eq!(reader.get(&op_a5)?, Some(txout_a5.clone()));
+    assert_eq!(reader.get(&op_b0)?, Some(txout_b0.clone()));
 
     let set = UtxoSet::new();
     let out_a5 = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
@@ -120,7 +120,7 @@ fn recovers_from_key_prefix_collisions_in_utxo_set_and_snapshot() -> TestResult 
     )?;
     set.insert_parsed_record(rec_a);
     set.insert_parsed_record(rec_b);
-    assert_eq!(reader.get(&op_b2), Some(txout_b2.clone()));
+    assert_eq!(reader.get(&op_b2)?, Some(txout_b2.clone()));
 
     let mut snapshot_bytes = Vec::new();
     let tip = Hash256::from_le_bytes(&[5; 32]);

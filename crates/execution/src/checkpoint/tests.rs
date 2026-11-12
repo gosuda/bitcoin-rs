@@ -198,6 +198,9 @@ mod artifact_consistency;
 mod storage_roundtrip;
 
 #[cfg(test)]
+mod engine_image;
+
+#[cfg(test)]
 mod tip_transitions;
 
 #[cfg(test)]

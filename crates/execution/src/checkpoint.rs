@@ -517,8 +517,6 @@ fn load_payloads_inner(
 
 /// Opens the engine image stored inside a checkpoint generation, if any.
 ///
-/// Generations written before engine images existed have no store; those
-/// restore as `None` and the caller falls back to replaying from genesis.
 #[expect(clippy::type_complexity)]
 fn open_generation_store(
     store_dir: &Dir,
@@ -588,14 +586,19 @@ fn open_generation_store(
             Ok((Some(std::sync::Arc::new(store)), None))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let Some(path) = store_path else {
+            let (Some(_), Some(path)) = (nested.as_ref(), store_path) else {
                 return Ok((None, None));
             };
-            match bitcoin_rs_storage::open_checkpoint_store(path) {
-                Ok(store) => Ok((Some(store), None)),
-                Err(bitcoin_rs_storage::StorageError::IncompatibleData(_)) => Ok((None, None)),
-                Err(error) => Err(error.into()),
-            }
+            bitcoin_rs_storage::open_checkpoint_store(path)
+                .map(|store| (Some(store), None))
+                .map_err(|error| match error {
+                    bitcoin_rs_storage::StorageError::IncompatibleData(reason) => {
+                        CheckpointError::Store(StoreError::Invalid(format!(
+                            "checkpoint engine image is unusable: {reason}"
+                        )))
+                    }
+                    other => other.into(),
+                })
         }
         Err(e) => Err(e.into()),
     }

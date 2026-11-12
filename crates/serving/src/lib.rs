@@ -34,3 +34,6 @@ pub use server::{handle_json, read_http_request};
 
 #[cfg(test)]
 pub(crate) mod test_error;
+
+#[cfg(test)]
+pub(crate) mod test_coins;

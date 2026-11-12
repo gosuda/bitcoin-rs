@@ -857,6 +857,74 @@ mod tests {
         }
     }
 
+    // WIN-07
+    #[test]
+    fn bip30_exception_block_stays_an_explicit_overwrite_of_the_engine_coin()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::CoinStore;
+        use bitcoin_rs_consensus::bip30::BIP30_DUPLICATE_TXID_EXCEPTIONS;
+        use bitcoin_rs_consensus::primitives::{Block, OutPoint, Tx, deserialize};
+        use bitcoin_rs_storage::KvStore as _;
+        use bitcoin_rs_storage::memory_kv::MemoryKvStore;
+        use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
+        use hashbrown::HashSet;
+        use std::sync::Arc;
+
+        let (exception_height, exception_hash) = BIP30_DUPLICATE_TXID_EXCEPTIONS[0];
+        let block: Block = deserialize(include_bytes!("../../consensus/tests/testdata/91842.bin"))?;
+        assert_eq!(Hash256::from(block.block_hash()), exception_hash);
+        let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
+        let duplicated = txids[0];
+        let earlier = OwnedUtxoOut {
+            vout: 0,
+            value: 5_000_000_000,
+            script_pubkey: vec![0x51],
+            coinbase: true,
+            height: 91_812,
+        };
+        let earlier_record = UtxoRecord::from_owned_outputs(duplicated.0, &[earlier])?;
+        let store = Arc::new(MemoryKvStore::new());
+        store.put(
+            bitcoin_rs_storage::ColumnFamily::Coins,
+            CoinKey(duplicated.0.to_le_bytes()).as_bytes(),
+            earlier_record.bytes(),
+        )?;
+        let coins = CoinStore::open(store, 1 << 20);
+
+        let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
+        workspace.resolve_external_batch(&coins, &[OutPoint::new(duplicated, 0)])?;
+        workspace.advance(&block, &txids, exception_height, &HashSet::new())?;
+
+        let overwritten = &workspace.transitions[0].bip30_overwrites;
+        assert_eq!(overwritten.len(), 1);
+        assert_eq!(overwritten[0].outpoint, OutPoint::new(duplicated, 0));
+        assert_eq!(overwritten[0].height, 91_812);
+        assert!(overwritten[0].coinbase);
+        assert_eq!(overwritten[0].txout.value.to_sat(), 5_000_000_000);
+        assert_eq!(
+            workspace.staged_coin_presence_before(duplicated, exception_height + 1),
+            Some(true),
+            "the exception block's own coin is unspent after it"
+        );
+
+        let delta = workspace.build_flush_delta(1)?;
+        let (_, row) = delta
+            .records
+            .iter()
+            .find(|(key, _)| *key == CoinKey(duplicated.0.to_le_bytes()))
+            .ok_or("the delta must rewrite the duplicated txid")?;
+        let row = row
+            .as_ref()
+            .ok_or("the exception block must leave its own coin")?;
+        let record = UtxoRecord::from_encoded(row.to_vec().into_boxed_slice())?;
+        let outputs: Vec<_> = record.outputs().collect();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].height, exception_height);
+        assert_eq!(outputs[0].value, block.txs[0].outputs[0].value.to_sat());
+        assert!(outputs[0].coinbase);
+        Ok(())
+    }
+
     #[derive(Debug, thiserror::Error)]
     enum CoinBytesError {
         #[error(transparent)]

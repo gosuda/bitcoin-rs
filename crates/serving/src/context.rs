@@ -347,8 +347,13 @@ impl AdmissionChain for ChainAdmissionView {
         let mut prevout_meta: HashMap<OutPoint, PrevoutMeta> = HashMap::new();
         let mut prevouts = Vec::new();
         for input in &tx.inputs {
-            let Some(coin) = self.utxo.get_entry(&input.previous_output) else {
-                continue;
+            let coin = match self.utxo.get_entry(&input.previous_output) {
+                Ok(Some(coin)) => coin,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::error!(%error, "admission snapshot unavailable: coin read failed");
+                    return None;
+                }
             };
             let mtp = *mtp_cache.entry(coin.height).or_insert_with(|| {
                 tip_node
@@ -370,9 +375,16 @@ impl AdmissionChain for ChainAdmissionView {
             );
             prevouts.push((input.previous_output, coin.txout));
         }
-        let confirmed = self
+        let confirmed = match self
             .utxo
-            .has_live_outputs_for_txid(&Hash256::from(tx.txid()));
+            .has_live_outputs_for_txid(&Hash256::from(tx.txid()))
+        {
+            Ok(confirmed) => confirmed,
+            Err(error) => {
+                tracing::error!(%error, "admission snapshot unavailable: coin read failed");
+                return None;
+            }
+        };
         Some(ChainAdmissionSnapshot {
             prevouts,
             prevout_meta,
@@ -965,7 +977,11 @@ impl<'ctx> RpcPrevoutResolver<'ctx> {
         &mut self,
         outpoint: &OutPoint,
     ) -> Result<Option<ResolvedPrevout>, LookupError> {
-        if let Some(coin) = self.ctx.chain.utxo.get_entry(outpoint) {
+        let coin = self.ctx.chain.utxo.get_entry(outpoint).map_err(|error| {
+            tracing::error!(%error, "prevout coin read failed");
+            LookupError::CoinReadFailed
+        })?;
+        if let Some(coin) = coin {
             return Ok(Some(ResolvedPrevout {
                 txout: coin.txout,
                 confirmed_height: Some(coin.height),

@@ -318,7 +318,7 @@ fn a_window_commits_a_block_that_spends_the_previous_blocks_output() -> TestResu
         "the dependent spend is committed and published as the window tip"
     );
     assert!(
-        chain.utxo_reader().get(&first_spend_outpoint).is_none(),
+        chain.utxo_reader().get(&first_spend_outpoint)?.is_none(),
         "the dependent block spends the funding block's output, so that coin leaves the utxo set"
     );
     Ok(())

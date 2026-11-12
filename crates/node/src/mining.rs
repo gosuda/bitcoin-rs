@@ -344,13 +344,16 @@ impl MempoolSnapshotSource for MempoolAdapter {
                             let outpoint = input.previous_output;
                             if let hashbrown::hash_map::Entry::Vacant(slot) =
                                 prevouts.entry(outpoint)
-                                && let Some(output) = self
-                                    .chainstate
-                                    .utxo_reader()
-                                    .get_entry(&outpoint)
-                                    .map(|coin| coin.txout)
+                                && let Some(coin) =
+                                    self.chainstate.utxo_reader().get_entry(&outpoint).map_err(
+                                        |error| {
+                                            MiningControlError::Failed(CompactString::from(
+                                                error.to_string(),
+                                            ))
+                                        },
+                                    )?
                             {
-                                slot.insert(output);
+                                slot.insert(coin.txout);
                             }
                         }
                     }
@@ -685,6 +688,7 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
         | ApplyError::DurableHeadGapUnrecoverable { .. }
         | ApplyError::WindowWorkspaceIncomplete { .. }
         | ApplyError::RecoveryPublication(_)
+        | ApplyError::RecoveryCoinStats(_)
         | ApplyError::CoinStoreRead(_)
         | ApplyError::CoinStatsRewind(_)
         | ApplyError::DisconnectBelowSnapshotBase { .. }

@@ -422,29 +422,12 @@ impl CommitAuthority {
         batch: &mut crate::batch::BufferedWriteBatch,
         prefix: &AcceptedPrefix,
     ) -> Result<(), CommitError> {
-        let previous = match prefix.expected_head.as_ref() {
-            Some(current) => self.load_attestation(current)?,
-            None => ScriptAttestation::Full,
-        };
-        let attestation = prefix
-            .attestation
-            .map_or(previous, |batch_att| previous.min(batch_att));
-        batch.put(
-            ColumnFamily::UtxoMeta,
-            SCRIPT_ATTESTATION_KEY,
-            &attestation.row(prefix.next_head.commit_id),
-        );
-        if let Some((level, commit_id)) = self.suffix_row(
+        self.stage_attestation_rows(
+            batch,
             prefix.expected_head.as_ref(),
             &prefix.next_head,
             prefix.attestation,
-        )? {
-            batch.put(
-                ColumnFamily::UtxoMeta,
-                SCRIPT_ATTESTATION_SUFFIX_KEY,
-                &level.row(commit_id),
-            );
-        }
+        )?;
 
         for (height, hash, record) in &prefix.undo_rows {
             batch.put(
@@ -490,6 +473,35 @@ impl CommitAuthority {
         Ok(())
     }
 
+    fn stage_attestation_rows(
+        &self,
+        batch: &mut crate::batch::BufferedWriteBatch,
+        expected_head: Option<&DurableHead>,
+        next_head: &DurableHead,
+        batch_attestation: Option<ScriptAttestation>,
+    ) -> Result<(), CommitError> {
+        let previous = match expected_head {
+            Some(current) => self.load_attestation(current)?,
+            None => ScriptAttestation::Full,
+        };
+        let attestation = batch_attestation.map_or(previous, |batch| previous.min(batch));
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            SCRIPT_ATTESTATION_KEY,
+            &attestation.row(next_head.commit_id),
+        );
+        if let Some((level, commit_id)) =
+            self.suffix_row(expected_head, next_head, batch_attestation)?
+        {
+            batch.put(
+                ColumnFamily::UtxoMeta,
+                SCRIPT_ATTESTATION_SUFFIX_KEY,
+                &level.row(commit_id),
+            );
+        }
+        Ok(())
+    }
+
     #[cfg(any(test, feature = "test-seam"))]
     fn notify_commit(&self, prefix: &AcceptedPrefix) {
         let receipt = DurableReceipt::from_head(&prefix.next_head);
@@ -526,6 +538,7 @@ impl CommitAuthority {
             },
         };
         let mut batch = self.store.new_batch();
+        self.stage_attestation_rows(&mut batch, Some(expected_head), next_head, None)?;
         batch.put(
             ColumnFamily::UtxoMeta,
             DURABLE_HEAD_KEY,
