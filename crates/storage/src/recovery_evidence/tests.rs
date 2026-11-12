@@ -486,3 +486,237 @@ fn unreadable_current_is_never_replaced_by_a_new_publication() {
         "the refused publication leaves the last valid record in place"
     );
 }
+
+fn marker_dir(path: &Path) -> Dir {
+    Dir::open_ambient_dir(path, cap_std::ambient_authority()).expect("open data dir")
+}
+
+fn full_revalidation_path(dir: &Path) -> PathBuf {
+    dir.join(FULL_REVALIDATION_MARKER)
+}
+
+fn injected_sync_failure(_: &Dir) -> std::io::Result<()> {
+    Err(std::io::Error::other("injected directory sync failure"))
+}
+
+// RCV-04, RCV-12
+#[test]
+fn marker_creation_syncs_the_directory_once_after_the_marker_holds_its_content() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = marker_dir(tmp.path());
+    let seen_at_sync = std::cell::RefCell::new(Vec::new());
+
+    mark_full_revalidation_with_sync(&dir, |synced| {
+        seen_at_sync
+            .borrow_mut()
+            .push(synced.read(FULL_REVALIDATION_MARKER).ok());
+        Ok(())
+    })
+    .expect("create marker");
+
+    assert_eq!(
+        seen_at_sync.into_inner(),
+        vec![Some(b"required\n".to_vec())],
+        "one directory sync, taken after the marker file exists with its content"
+    );
+}
+
+// RCV-04, RCV-12
+#[test]
+fn marker_creation_fails_closed_on_sync_failure_and_a_retry_syncs_again() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = marker_dir(tmp.path());
+
+    let first = mark_full_revalidation_with_sync(&dir, injected_sync_failure);
+    assert!(
+        matches!(first, Err(EvidenceError::Io(_))),
+        "a directory sync failure must reach the caller, got {first:?}"
+    );
+    assert!(
+        full_revalidation_path(tmp.path()).is_file(),
+        "the unsynced marker stays in place, so a surviving process keeps the gate"
+    );
+
+    let syncs = std::cell::Cell::new(0_u32);
+    mark_full_revalidation_with_sync(&dir, |_| {
+        syncs.set(syncs.get() + 1);
+        Ok(())
+    })
+    .expect("retry after the failed sync");
+    assert_eq!(
+        syncs.get(),
+        1,
+        "an already-present marker still needs its directory entry made durable"
+    );
+}
+
+// RCV-04, RCV-12
+#[test]
+fn marker_creation_reports_success_only_when_a_regular_marker_file_stands() {
+    type Seed = fn(&Path);
+    let mut cases: Vec<(&str, Seed, bool)> = vec![
+        ("absent", |_| {}, true),
+        (
+            "empty regular file",
+            |path| std::fs::write(path, b"").expect("seed"),
+            true,
+        ),
+        (
+            "foreign regular file",
+            |path| {
+                std::fs::write(path, b"journal fork crossed below checkpoint base\n")
+                    .expect("seed");
+            },
+            true,
+        ),
+        (
+            "directory",
+            |path| std::fs::create_dir(path).expect("seed"),
+            false,
+        ),
+    ];
+    #[cfg(unix)]
+    cases.push((
+        "dangling symlink",
+        |path| std::os::unix::fs::symlink("does-not-exist", path).expect("seed"),
+        false,
+    ));
+
+    for (label, seed, expect_success) in cases {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let marker = full_revalidation_path(tmp.path());
+        seed(&marker);
+        let before = std::fs::read(&marker).ok();
+        let dir = marker_dir(tmp.path());
+        let syncs = std::cell::Cell::new(0_u32);
+
+        let outcome = mark_full_revalidation_with_sync(&dir, |_| {
+            syncs.set(syncs.get() + 1);
+            Ok(())
+        });
+
+        assert_eq!(outcome.is_ok(), expect_success, "{label}: {outcome:?}");
+        if outcome.is_ok() {
+            assert!(
+                marker.is_file(),
+                "{label}: success must leave the file the consumer looks for"
+            );
+            assert_eq!(
+                syncs.get(),
+                1,
+                "{label}: success implies one directory sync"
+            );
+            if before.is_some() {
+                assert_eq!(
+                    std::fs::read(&marker).ok(),
+                    before,
+                    "{label}: existing marker content is never rewritten"
+                );
+            }
+        } else {
+            assert_eq!(
+                syncs.get(),
+                0,
+                "{label}: a refused marker is never synced as if written"
+            );
+        }
+    }
+}
+
+// RCV-04, RCV-12
+#[test]
+fn marker_retirement_syncs_the_directory_once_after_the_unlink() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(full_revalidation_path(tmp.path()), b"required\n").expect("seed marker");
+    let dir = marker_dir(tmp.path());
+    let present_at_sync = std::cell::RefCell::new(Vec::new());
+
+    clear_full_revalidation_marker_with_sync(&dir, |synced| {
+        present_at_sync
+            .borrow_mut()
+            .push(synced.exists(FULL_REVALIDATION_MARKER));
+        Ok(())
+    })
+    .expect("retire marker");
+
+    assert_eq!(
+        present_at_sync.into_inner(),
+        vec![false],
+        "one directory sync, taken after the marker is unlinked"
+    );
+}
+
+// RCV-04, RCV-12
+#[test]
+fn marker_retirement_fails_closed_on_sync_failure_and_a_retry_syncs_the_absent_marker() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(full_revalidation_path(tmp.path()), b"required\n").expect("seed marker");
+    let dir = marker_dir(tmp.path());
+
+    let first = clear_full_revalidation_marker_with_sync(&dir, injected_sync_failure);
+    assert!(
+        matches!(first, Err(EvidenceError::Io(_))),
+        "a directory sync failure must reach the caller, got {first:?}"
+    );
+    assert!(
+        !full_revalidation_path(tmp.path()).exists(),
+        "the unlink already took effect in the live directory"
+    );
+
+    let syncs = std::cell::Cell::new(0_u32);
+    clear_full_revalidation_marker_with_sync(&dir, |_| {
+        syncs.set(syncs.get() + 1);
+        Ok(())
+    })
+    .expect("retry after the failed sync");
+    assert_eq!(
+        syncs.get(),
+        1,
+        "an already-absent marker still needs its removal made durable"
+    );
+}
+
+// RCV-04, RCV-12
+#[test]
+fn marker_retirement_refused_by_the_filesystem_is_not_synced_as_success() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(full_revalidation_path(tmp.path())).expect("directory at marker path");
+    let dir = marker_dir(tmp.path());
+    let syncs = std::cell::Cell::new(0_u32);
+
+    let outcome = clear_full_revalidation_marker_with_sync(&dir, |_| {
+        syncs.set(syncs.get() + 1);
+        Ok(())
+    });
+
+    assert!(
+        matches!(outcome, Err(EvidenceError::Io(_))),
+        "removing a non-file must fail, got {outcome:?}"
+    );
+    assert_eq!(syncs.get(), 0, "a failed unlink is never reported durable");
+}
+
+// RCV-12
+#[test]
+fn marker_round_trip_through_the_public_seam_uses_the_real_directory_sync() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let marker = full_revalidation_path(tmp.path());
+
+    mark_full_revalidation_at(tmp.path()).expect("create marker");
+    assert_eq!(std::fs::read(&marker).expect("marker bytes"), b"required\n");
+    mark_full_revalidation_at(tmp.path()).expect("creating twice is idempotent");
+
+    clear_full_revalidation_marker_at(tmp.path()).expect("retire marker");
+    assert!(!marker.exists());
+    clear_full_revalidation_marker_at(tmp.path()).expect("retiring twice is idempotent");
+
+    let missing = tmp.path().join("no-such-data-dir");
+    clear_full_revalidation_marker_at(&missing).expect("no data dir means no marker");
+    assert!(
+        matches!(
+            mark_full_revalidation_at(&missing),
+            Err(EvidenceError::Io(_))
+        ),
+        "creating a marker in a missing data dir must fail, not be skipped"
+    );
+}
