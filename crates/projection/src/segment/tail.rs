@@ -199,14 +199,18 @@ impl CreationOrdinals for SealedTxOrdinals<'_> {
             let mut prefix =
                 format::tx_dir_kind_prefix(sealed.gen_id, format::TX_KIND_TXID).to_vec();
             prefix.extend_from_slice(txid);
+            let mut latest = None;
             for item in self.snapshot.iter_prefix(ColumnFamily::TxDir, &prefix)? {
                 let (key, value) = item?;
                 if format::decode_tx_dir_key(&key).is_none() {
                     continue;
                 }
                 if let Some((_, ordinal, _, _)) = format::decode_tx_dir_value(&value) {
-                    return Ok(Some(ordinal));
+                    latest = Some(ordinal);
                 }
+            }
+            if latest.is_some() {
+                return Ok(latest);
             }
         }
         Ok(None)

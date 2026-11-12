@@ -1442,3 +1442,101 @@ fn tail_resume_chains_onto_the_newest_durable_filter_row() {
         "the resumed tail chains onto the newest durable filter row"
     );
 }
+
+// PRJ-06, PRJ-07
+#[test]
+fn spend_after_seal_names_the_latest_duplicate_creation()
+-> Result<(), crate::portable::TestError> {
+    use super::tail::{NoSealedTxOrdinals, SealedTxOrdinals, TailWriterState, append_tail_block};
+    use super::{Coverage, SealedGen, seal_tail_generation};
+    use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
+    use bitcoin_rs_storage::{Bytes, ColumnFamily, KvStore, RocksDbStore};
+
+    let dir = tempfile::tempdir()?;
+    let scratch = tempfile::tempdir()?;
+    let store = RocksDbStore::open(dir.path())?;
+    let txid = [0x5a; 32];
+    let script = Bytes::from_static(b"\x51creator");
+    let creations: Vec<_> = (1_u8..=2)
+        .map(|height| CommittedBlock {
+            height: u32::from(height),
+            hash: [height; 32],
+            parent_hash: [height - 1; 32],
+            header: [0; 80],
+            txs: vec![TxFacts {
+                txid,
+                offset: 0,
+                len: 100,
+                inputs: Vec::new(),
+                outputs: vec![CreatedOutput {
+                    vout: 0,
+                    value: 5_000,
+                    script: script.clone(),
+                }],
+            }],
+        })
+        .collect();
+    let later_creation_ordinal = u32::try_from(creations[0].txs.len())?;
+    let spending_ordinal = u32::try_from(creations.iter().map(|b| b.txs.len()).sum::<usize>())?;
+    let mut state = TailWriterState::new();
+    for block in &creations {
+        let mut batch = store.new_batch();
+        append_tail_block(&mut batch, block, &mut state, &NoSealedTxOrdinals)?;
+        store.write_durable(batch)?;
+    }
+    let gen_id = 4;
+    seal_tail_generation(
+        &store,
+        gen_id,
+        2,
+        crate::IndexCapabilities::SCRIPT_HISTORY,
+        scratch.path(),
+    )?;
+    let gens = [SealedGen {
+        gen_id,
+        coverage: Coverage::new(1, 2, [2; 32]),
+        next_ordinal: spending_ordinal,
+    }];
+    let snapshot = store.snapshot()?;
+    let resolver = SealedTxOrdinals {
+        snapshot: snapshot.as_ref(),
+        gens: &gens,
+    };
+    let spending = CommittedBlock {
+        height: 3,
+        hash: [3; 32],
+        parent_hash: [2; 32],
+        header: [0; 80],
+        txs: vec![TxFacts {
+            txid: [0xb2; 32],
+            offset: 0,
+            len: 100,
+            inputs: vec![SpentPrevout {
+                txid,
+                vout: 0,
+                value: 5_000,
+                script,
+                height: 2,
+                coinbase: false,
+            }],
+            outputs: Vec::new(),
+        }],
+    };
+    let mut state = TailWriterState::new();
+    state.next_ordinal = spending_ordinal;
+    let mut batch = store.new_batch();
+    append_tail_block(&mut batch, &spending, &mut state, &resolver)?;
+    store.write_durable(batch)?;
+    let spends: Vec<_> = store
+        .iter_prefix(ColumnFamily::SpendDir, &0_u64.to_be_bytes())?
+        .collect::<Result<_, _>>()?;
+    assert_eq!(
+        spends,
+        vec![(
+            encode_spend_dir_key(0, later_creation_ordinal, 0).to_vec(),
+            encode_spend_dir_value(spending_ordinal).to_vec(),
+        )],
+        "the spend names the later creation in block order, not the overwritten occurrence"
+    );
+    Ok(())
+}
