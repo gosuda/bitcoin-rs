@@ -141,17 +141,14 @@ impl CoinCache {
             return;
         }
         let value_bytes = u64::try_from(value.len()).unwrap_or(u64::MAX);
-        if value_bytes > self.budget_bytes {
+        let Some(charged) = self.charge_with_eviction(shard_lock, Some(value_bytes)) else {
             return;
-        }
-        if !self.charge_delta(value_bytes) {
-            return;
-        }
+        };
         let (admitted, freed) =
             self.insert_fresh_locked(shard_lock, key, value, value_bytes, expected_epoch);
         self.release_delta(freed);
         if !admitted {
-            self.release_delta(value_bytes);
+            self.release_delta(charged);
         }
     }
 
@@ -196,13 +193,12 @@ impl CoinCache {
     /// and the shard epoch always advances, even when the new value is
     /// refused, so a stale read can never survive an install.
     pub fn install(&self, key: &CoinKey, record: Option<Bytes>) {
+        let released_prior = self.remove_resident_locked(key);
+        self.release_delta(released_prior);
         let wanted = record
             .as_ref()
             .map(|value| u64::try_from(value.len()).unwrap_or(u64::MAX));
-        let charged = match wanted {
-            Some(bytes) if bytes <= self.budget_bytes && self.charge_delta(bytes) => Some(bytes),
-            _ => None,
-        };
+        let charged = self.charge_with_eviction(&self.shards[usize::from(key.shard())], wanted);
         let value = record.filter(|_| charged.is_some());
         let (inserted, released) = self.replace_locked(key, value);
         self.release_delta(released);
@@ -211,6 +207,49 @@ impl CoinCache {
                 self.release_delta(bytes);
             }
         }
+    }
+
+    fn charge_with_eviction(&self, shard_lock: &ShardLock, wanted: Option<u64>) -> Option<u64> {
+        let bytes = wanted?;
+        if bytes > self.budget_bytes {
+            return None;
+        }
+        if !self.charge_delta(bytes) {
+            let available = self.charge.as_ref().map_or(0, |handle| handle.available());
+            let freed = self.evict_room_locked(shard_lock, bytes.saturating_sub(available));
+            self.release_delta(freed);
+            if !self.charge_delta(bytes) {
+                return None;
+            }
+        }
+        Some(bytes)
+    }
+
+    fn evict_room_locked(&self, shard_lock: &ShardLock, needed: u64) -> u64 {
+        let mut resident = self.resident.lock();
+        let mut shard = shard_lock.lock();
+        let mut freed = 0_u64;
+        while freed < needed && !shard.entries.is_empty() {
+            let evicted = clock_evict_one(&mut shard);
+            freed += evicted;
+            *resident -= evicted;
+        }
+        freed
+    }
+
+    fn remove_resident_locked(&self, key: &CoinKey) -> u64 {
+        let shard_lock = &self.shards[usize::from(key.shard())];
+        let mut resident = self.resident.lock();
+        let mut shard = shard_lock.lock();
+        let Some(position) = shard.entries.iter().position(|entry| entry.key == *key) else {
+            return 0;
+        };
+        let removed = shard.entries.remove(position);
+        fix_hand_after_removal(&mut shard, position);
+        let bytes = u64::try_from(removed.value.len()).unwrap_or(u64::MAX);
+        *resident -= bytes;
+        shard_lock.epoch.fetch_add(1, Ordering::Release);
+        bytes
     }
 
     /// Runs under the resident lock then the shard lock. Returns whether
@@ -251,16 +290,14 @@ impl CoinCache {
 
     pub fn note_bytes(&self, shard_index: u8, bytes: usize) {
         let charge = u64::try_from(bytes).unwrap_or(u64::MAX);
-        if charge > self.budget_bytes {
+        let shard_lock = &self.shards[usize::from(shard_index)];
+        let Some(charged) = self.charge_with_eviction(shard_lock, Some(charge)) else {
             return;
-        }
-        if !self.charge_delta(charge) {
-            return;
-        }
-        let (admitted, freed) = self.note_locked(shard_index, charge);
+        };
+        let (admitted, freed) = self.note_locked(shard_index, charged);
         self.release_delta(freed);
         if !admitted {
-            self.release_delta(charge);
+            self.release_delta(charged);
         }
     }
 
@@ -354,7 +391,9 @@ fn fix_hand_after_removal(shard: &mut ShardState, position: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::budget::{BudgetCharge, BudgetError, BudgetOwner, ChargeHandle};
     use proptest::prelude::*;
+    use std::sync::Arc;
 
     fn key(shard: u8, tail: u8) -> CoinKey {
         CoinKey([
@@ -530,6 +569,112 @@ mod tests {
             cache.lookup(&k).is_none(),
             "stale read fill must not resurrect deleted coin"
         );
+    }
+
+    #[derive(Default)]
+    struct CappedLedger {
+        outstanding: Mutex<u64>,
+    }
+
+    const LEDGER_CAP: u64 = 300;
+
+    impl BudgetCharge for CappedLedger {
+        fn reserve_bytes(&self, _owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
+            let mut outstanding = self.outstanding.lock();
+            let next = outstanding.saturating_add(bytes);
+            if next > LEDGER_CAP {
+                return Err(BudgetError::BudgetExhausted);
+            }
+            *outstanding = next;
+            Ok(())
+        }
+
+        fn allocate_bytes(&self, _owner: BudgetOwner, _bytes: u64) -> Result<(), BudgetError> {
+            Ok(())
+        }
+
+        fn release_bytes(&self, _owner: BudgetOwner, bytes: u64) {
+            let mut outstanding = self.outstanding.lock();
+            *outstanding = outstanding.saturating_sub(bytes);
+        }
+
+        fn available_bytes(&self, _owner: BudgetOwner) -> u64 {
+            LEDGER_CAP - *self.outstanding.lock()
+        }
+    }
+
+    fn equal_cap_cache() -> (CoinCache, Arc<CappedLedger>) {
+        let ledger = Arc::new(CappedLedger::default());
+        let cache = CoinCache::with_charge(
+            LEDGER_CAP,
+            Some(ChargeHandle::new(ledger.clone(), BudgetOwner::CoinCache)),
+        );
+        (cache, ledger)
+    }
+
+    fn ledger_outstanding(ledger: &CappedLedger) -> u64 {
+        *ledger.outstanding.lock()
+    }
+
+    // BUD-07
+    #[test]
+    fn equal_cap_fill_evicts_charged_bytes_to_admit_new_key() {
+        let (cache, ledger) = equal_cap_cache();
+        let k1 = key(1, 1);
+        let k2 = key(1, 2);
+        let k3 = key(1, 3);
+        let k4 = key(1, 4);
+        cache.fill_after_read(&k1, value(100));
+        cache.fill_after_read(&k2, value(100));
+        cache.fill_after_read(&k3, value(100));
+        assert_eq!(cache.resident_bytes(), LEDGER_CAP);
+        assert_eq!(ledger_outstanding(&ledger), LEDGER_CAP);
+
+        cache.fill_after_read(&k4, value(100));
+        assert_eq!(ledger_outstanding(&ledger), cache.resident_bytes());
+        assert_eq!(cache.resident_bytes(), LEDGER_CAP);
+        assert!(
+            cache.lookup(&k4).is_some(),
+            "a full ledger must not stall turnover the clock can fund"
+        );
+        assert!(cache.lookup(&k1).is_none());
+        assert!(cache.lookup(&k2).is_some());
+        assert!(cache.lookup(&k3).is_some());
+    }
+
+    // BUD-07
+    #[test]
+    fn equal_cap_install_releases_old_charge_and_turns_over() {
+        let (cache, ledger) = equal_cap_cache();
+        let k1 = key(1, 1);
+        let k2 = key(1, 2);
+        let k3 = key(1, 3);
+        cache.fill_after_read(&k1, value(100));
+        cache.fill_after_read(&k2, value(100));
+        cache.fill_after_read(&k3, value(100));
+        assert_eq!(cache.resident_bytes(), LEDGER_CAP);
+        assert_eq!(ledger_outstanding(&ledger), LEDGER_CAP);
+
+        cache.install(&k1, Some(value(150)));
+        assert_eq!(cache.lookup(&k1).map(|entry| entry.len()), Some(150));
+        assert!(
+            cache.lookup(&k2).is_none(),
+            "clock eviction funds the larger replacement"
+        );
+        assert!(cache.lookup(&k3).is_some());
+        let resident = cache.resident_bytes();
+        assert_eq!(resident, 250);
+        assert_eq!(
+            ledger_outstanding(&ledger),
+            resident,
+            "old charge released before the replacement is charged, no leak"
+        );
+
+        cache.install(&k3, Some(value(301)));
+        assert!(cache.lookup(&k3).is_none(), "overlarge items stay rejected");
+        assert_eq!(cache.lookup(&k1).map(|entry| entry.len()), Some(150));
+        assert_eq!(cache.resident_bytes(), 150);
+        assert_eq!(ledger_outstanding(&ledger), 150);
     }
 
     #[derive(Clone, Debug)]

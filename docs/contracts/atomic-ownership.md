@@ -453,6 +453,7 @@ Nothing below the owner facade can interpret or copy the same data again.
 ### `BUD-07`: Work refusal on budget exhaustion
 
 - When a resource budget is exhausted, the owner must release resources or refuse new work.
+- A refused coin-cache charge MUST release eligible resident records before one retry. Eviction MUST release their ledger charges before the retry.
 - The component must not add unbounded memory buffering.
 
 ### `MPS-01`: Mempool dependency graph and settlement
