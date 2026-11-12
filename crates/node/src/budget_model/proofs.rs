@@ -33,6 +33,7 @@ fn any_budget_state() -> BudgetState {
         is_mdbx,
         total_budget,
         foreground_reserve,
+        owner_caps: [total_budget; 7],
     }
 }
 

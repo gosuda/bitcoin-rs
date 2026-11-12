@@ -2,10 +2,11 @@
 //!
 //! One accountant owns the totals; all subsystem charges linearize through
 //! its single ledger lock, so every reader observes a whole reservation or
-//! none of it. Per-owner caps subdivide the total budget. Background owners
-//! stay inside the budget minus the foreground reserve (`BUD-05`), and a
-//! refusal is never a consensus invalidation (`BUD-03`). The owner vocabulary
-//! and charge interface live in `bitcoin_rs_storage::budget` so projection,
+//! none of it. Per-owner caps bound the sum of charges and reservations and
+//! subdivide the total budget. Background owners stay inside the budget minus
+//! the foreground reserve (`BUD-05`), and a refusal is never a consensus
+//! invalidation (`BUD-03`). The owner vocabulary and charge interface live in
+//! `bitcoin_rs_storage::budget` so projection,
 //! storage, and offline tools charge the same ledger.
 
 use bitcoin_rs_execution::WindowLimits;
@@ -158,8 +159,10 @@ impl NodeBudget {
         let Some(bytes) = sampled else {
             return;
         };
-        self.ledger.lock().charges[BudgetOwner::EngineCache.index()] =
-            bytes.min(self.caps.engine_cache);
+        let mut ledger = self.ledger.lock();
+        let idx = BudgetOwner::EngineCache.index();
+        ledger.charges[idx] =
+            bytes.min(self.caps.engine_cache.saturating_sub(ledger.reserved[idx]));
     }
 
     pub fn set_engine_cache_source(&self, source: Option<EngineCacheSource>) {
@@ -205,7 +208,12 @@ impl NodeBudget {
             return;
         }
         let committed = total_charges(&ledger).saturating_add(total_reserved(&ledger));
-        if committed.saturating_add(amount) <= self.caps.total() {
+        if committed.saturating_add(amount) <= self.caps.total()
+            && ledger.charges[idx]
+                .saturating_add(ledger.reserved[idx])
+                .saturating_add(amount)
+                <= self.caps.engine_cache
+        {
             ledger.charges[idx] = ledger.charges[idx].saturating_add(amount);
         }
     }
@@ -305,6 +313,8 @@ impl NodeBudget {
         total_charges(&ledger).saturating_add(total_reserved(&ledger)) <= total
             && background_committed_of(&ledger)
                 <= total.saturating_sub(self.caps.foreground_reserve)
+            && ledger.charges[engine_idx].saturating_add(ledger.reserved[engine_idx])
+                <= self.caps.engine_cache
             && (!self.is_mdbx.load(Ordering::Relaxed)
                 || (ledger.charges[engine_idx] == 0 && ledger.reserved[engine_idx] == 0))
     }
@@ -349,7 +359,11 @@ impl NodeBudget {
         }
         let total = self.caps.total();
         let committed = total_charges(ledger).saturating_add(total_reserved(ledger));
-        if committed.saturating_add(bytes) > total || bytes > self.caps.owner_cap(owner) {
+        let idx = owner.index();
+        let owner_committed = ledger.charges[idx].saturating_add(ledger.reserved[idx]);
+        if committed.saturating_add(bytes) > total
+            || bytes > self.caps.owner_cap(owner).saturating_sub(owner_committed)
+        {
             if owner == BudgetOwner::StagedImages {
                 ledger.ingress_refused = true;
             }
@@ -361,7 +375,6 @@ impl NodeBudget {
                 return Err(BudgetError::BudgetExhausted);
             }
         }
-        let idx = owner.index();
         ledger.reserved[idx] = ledger.reserved[idx].saturating_add(bytes);
         Ok(())
     }

@@ -60,6 +60,7 @@ pub(crate) struct BudgetState {
     pub(crate) is_mdbx: bool,
     pub(crate) total_budget: u32,
     pub(crate) foreground_reserve: u32,
+    pub(crate) owner_caps: [u32; 7],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +98,7 @@ impl BudgetState {
             is_mdbx: false,
             total_budget,
             foreground_reserve,
+            owner_caps: [total_budget; 7],
         }
     }
 
@@ -111,6 +113,7 @@ impl BudgetState {
             is_mdbx: true,
             total_budget,
             foreground_reserve,
+            owner_caps: [total_budget; 7],
         }
     }
 
@@ -142,7 +145,11 @@ impl BudgetState {
     pub(crate) fn reserve(&mut self, owner: AllocationOwner, amt: u32) -> Result<(), BudgetError> {
         let total = self.total_committed();
         let amt_u64 = u64::from(amt);
-        if total + amt_u64 > u64::from(self.total_budget) {
+        let idx = owner.index();
+        if total + amt_u64 > u64::from(self.total_budget)
+            || u64::from(self.charges[idx]) + u64::from(self.reserved[idx]) + amt_u64
+                > u64::from(self.owner_caps[idx])
+        {
             if owner == AllocationOwner::StagedImages {
                 self.block_refused = true;
             }
@@ -157,7 +164,6 @@ impl BudgetState {
         if self.is_mdbx && owner == AllocationOwner::EngineCache {
             return Err(BudgetError::EngineCacheUnsupported);
         }
-        let idx = owner.index();
         self.reserved[idx] = self.reserved[idx].saturating_add(amt);
         Ok(())
     }
@@ -254,7 +260,10 @@ pub(crate) fn step(s: &BudgetState, a: Action) -> BudgetState {
         Action::GrowEngineCache(amt) => {
             if !next.is_mdbx {
                 let idx = AllocationOwner::EngineCache.index();
-                if next.total_committed() + u64::from(amt) <= u64::from(next.total_budget) {
+                if next.total_committed() + u64::from(amt) <= u64::from(next.total_budget)
+                    && u64::from(next.charges[idx]) + u64::from(next.reserved[idx]) + u64::from(amt)
+                        <= u64::from(next.owner_caps[idx])
+                {
                     next.charges[idx] = next.charges[idx].saturating_add(amt);
                 }
             }
@@ -343,6 +352,9 @@ pub(crate) fn safety(s: &BudgetState) -> bool {
 
     total_committed <= u64::from(s.total_budget)
         && bg_committed <= u64::from(s.total_budget.saturating_sub(s.foreground_reserve))
+        && (0..7).all(|idx| {
+            u64::from(s.charges[idx]) + u64::from(s.reserved[idx]) <= u64::from(s.owner_caps[idx])
+        })
         && (!s.block_refused || !s.consensus_invalid)
         && (!s.is_mdbx || (s.charges[engine_idx] == 0 && s.reserved[engine_idx] == 0))
 }

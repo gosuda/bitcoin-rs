@@ -222,6 +222,7 @@ fn run_model_differential(budget: &NodeBudget, seed: u64, is_mdbx: bool) {
     } else {
         budget_model::BudgetState::init(MODEL_TOTAL, MODEL_FOREGROUND)
     };
+    state.owner_caps = [AMOUNT_CAP; 7];
     let mut rng = XorShift(seed);
     let mut trace: Vec<String> = Vec::new();
     for step in 0..DIFFERENTIAL_STEPS {
@@ -250,6 +251,7 @@ fn implementation_tracks_the_reference_model_step_for_step() {
 fn every_action_variant_tracks_the_model() {
     let budget = NodeBudget::new(differential_caps(), 4);
     let mut state = budget_model::BudgetState::init(MODEL_TOTAL, MODEL_FOREGROUND);
+    state.owner_caps = [AMOUNT_CAP; 7];
     let mut variants = vec![
         Action::ReserveIngress(7),
         Action::RefuseIngress(7),
@@ -455,4 +457,68 @@ fn coin_cache_fill_charges_the_coin_cache_owner_and_wipe_returns_it() {
         0,
         "wipe returns the coin cache charge"
     );
+}
+
+#[test]
+fn repeated_owner_requests_include_charges_and_reservations() {
+    for owner in ALL_OWNERS {
+        let budget = NodeBudget::new(differential_caps(), 4);
+        assert!(budget.reserve(owner, OWNER_CAP / 2).is_ok());
+        assert!(budget.allocate(owner, OWNER_CAP / 2).is_ok());
+        assert!(budget.reserve(owner, OWNER_CAP / 2).is_ok());
+        assert_eq!(budget.available(owner), 0);
+        for _ in 0..4 {
+            assert_eq!(budget.reserve(owner, 1), Err(BudgetError::BudgetExhausted));
+            assert_eq!(budget.total_committed(), OWNER_CAP);
+        }
+        assert!(budget.is_safe());
+    }
+}
+
+#[test]
+fn repeated_ingress_then_engine_sample_stays_within_total() {
+    use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
+
+    let caps = BudgetCaps::from_dbcache_bytes(450 * 1024 * 1024);
+    let budget = Arc::new(NodeBudget::new(caps, 4));
+    let ingress = super::BudgetedIngressLedger::new(Arc::clone(&budget));
+    let request = 256 * 1024 * 1024;
+    assert!(ingress.try_take(request));
+    assert!(ingress.try_take(request));
+    for _ in 0..2 {
+        assert!(!ingress.try_take(request));
+    }
+    budget.set_engine_cache_source(Some(Box::new(move || caps.engine_cache + 1)));
+    budget.sample_engine_cache();
+    assert_eq!(
+        budget.available_of_charges(BudgetOwner::EngineCache),
+        caps.engine_cache
+    );
+    assert_eq!(
+        budget.total_committed(),
+        caps.staged_images + caps.engine_cache
+    );
+    assert!(budget.is_safe());
+    assert!(budget.total_committed() <= caps.total());
+}
+
+#[test]
+fn engine_sampling_leaves_room_for_outstanding_reservations() {
+    let budget = NodeBudget::new(differential_caps(), 4);
+    assert!(
+        budget
+            .reserve(BudgetOwner::EngineCache, OWNER_CAP / 2)
+            .is_ok()
+    );
+    budget.set_engine_cache_source(Some(Box::new(|| OWNER_CAP + 1)));
+    budget.sample_engine_cache();
+    assert_eq!(
+        budget.available_of_charges(BudgetOwner::EngineCache),
+        OWNER_CAP / 2
+    );
+    assert_eq!(budget.total_committed(), OWNER_CAP);
+    assert_eq!(budget.available(BudgetOwner::EngineCache), 0);
+    assert!(!budget.ingress_refused());
+    assert!(budget.reserve(BudgetOwner::StagedImages, 1).is_ok());
+    assert!(budget.is_safe());
 }
