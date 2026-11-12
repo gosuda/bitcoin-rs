@@ -7,15 +7,35 @@ use crate::segment::tail::{
     self, CreationOrdinals, PreparedTail, SealedTxOrdinals, TailWriterState,
 };
 use crate::segment::{self, SealedGen, sealed_generations};
-use bitcoin_rs_storage::{BatchOp, BufferedWriteBatch, ColumnFamily, CommittedBlock, KvStore};
+use bitcoin_rs_storage::{
+    BatchOp, BufferedWriteBatch, ColumnFamily, CommittedBlock, KvSnapshot, KvStore,
+};
+use std::collections::BTreeMap;
 
 /// A stats row's undo-log entry carries its prior value: a length prefix and
 /// the fixed stats value.
 const STATS_PRIOR_LOG_BYTES: usize = 4 + SCRIPT_STATS_VALUE_LEN;
 
+/// One rollback step's tail plan (`REO-04`, `REO-05`). The plan carries the
+/// group's sealed generations, so neither the rewind nor the descriptor write
+/// has to guess which capability's records are authoritative.
 pub(super) enum RollbackTail {
-    Unwind,
-    Retire(SealedGen),
+    /// `current` still lives in the undo-logged tail; replay its log.
+    Unwind { newest: Option<SealedGen> },
+    /// `current` lies inside the newest sealed generation; retire it.
+    Retire {
+        newest: SealedGen,
+        older: Option<SealedGen>,
+    },
+}
+
+/// Everything one rollback step needs beyond the writer's own state.
+pub(super) struct RollbackStep<'a> {
+    pub plan: RollbackTail,
+    pub capabilities: IndexCapabilities,
+    pub current: IndexWatermark,
+    pub prev: Option<IndexWatermark>,
+    pub batch: &'a mut BufferedWriteBatch,
 }
 struct CreationsAcross<'a> {
     tail_gens: SealedTxOrdinals<'a>,
@@ -32,33 +52,68 @@ impl CreationOrdinals for CreationsAcross<'_> {
 }
 
 impl RollbackTail {
+    /// The generation the post-rollback descriptors publish: the newest
+    /// generation the capability group still holds after this step.
+    fn published_newest(&self) -> Option<SealedGen> {
+        match self {
+            Self::Unwind { newest } => *newest,
+            Self::Retire { older, .. } => *older,
+        }
+    }
+
+    /// The watermark this step rewinds to. Retiring a generation moves the
+    /// group to the adjacent older generation, so the plan carries that
+    /// generation itself instead of re-reading a TxLookup-only list.
     pub(super) fn rewind(
         &self,
-        state: &TailWriterState,
         prev: Option<IndexWatermark>,
     ) -> Result<Option<IndexWatermark>, IndexError> {
-        let Self::Retire(newest) = self else {
+        let Self::Retire { newest, older } = self else {
             return Ok(prev);
         };
         if newest.coverage.first_height == 0 {
             return Ok(None);
         }
-        let older = state
-            .sealed
-            .iter()
-            .filter(|sealed| sealed.gen_id < newest.gen_id)
-            .max_by_key(|sealed| sealed.gen_id)
-            .filter(|sealed| {
-                sealed.coverage.last_height.checked_add(1) == Some(newest.coverage.first_height)
-            })
-            .ok_or(IndexError::CorruptTailLog {
+        let older = older.ok_or(IndexError::CorruptTailLog {
+            height: newest.coverage.first_height,
+        })?;
+        if older.coverage.last_height.checked_add(1) != Some(newest.coverage.first_height) {
+            return Err(IndexError::CorruptTailLog {
                 height: newest.coverage.first_height,
-            })?;
+            });
+        }
         Ok(Some(IndexWatermark {
             height: older.coverage.last_height,
             hash: older.coverage.last_hash,
         }))
     }
+}
+
+/// The sealed generations the capability group holds, ascending by generation
+/// id (`REO-04`, `REO-05`).
+///
+/// Each tail-bound capability keeps its own sealed records, and a seal writes
+/// records only for the capabilities enabled at the time. Reading one
+/// capability's list therefore misses generations that a differently enabled
+/// configuration sealed, so the plan unions every capability in the group and
+/// refuses a generation whose records disagree on coverage.
+fn group_sealed_generations(
+    snapshot: &dyn KvSnapshot,
+    capabilities: IndexCapabilities,
+) -> Result<Vec<SealedGen>, IndexError> {
+    let mut sealed: BTreeMap<u64, SealedGen> = BTreeMap::new();
+    for capability in segment_capabilities(capabilities) {
+        for record in sealed_generations(snapshot, capability)? {
+            let existing = sealed.get(&record.gen_id);
+            if existing.is_some_and(|existing| existing != &record) {
+                return Err(IndexError::CorruptTailLog {
+                    height: record.coverage.first_height,
+                });
+            }
+            sealed.entry(record.gen_id).or_insert(record);
+        }
+    }
+    Ok(sealed.into_values().collect())
 }
 
 impl<S: KvStore> IndexWriter<S> {
@@ -99,36 +154,58 @@ impl<S: KvStore> IndexWriter<S> {
         Ok(())
     }
 
+    /// Plans one rollback step from the sealed state of the capability group
+    /// being rolled back (`REO-04`, `REO-05`): a generation counts as sealed
+    /// only for the capabilities that hold its record.
     pub(super) fn plan_rollback_tail(
-        state: &TailWriterState,
+        snapshot: &dyn KvSnapshot,
+        capabilities: IndexCapabilities,
         current: IndexWatermark,
     ) -> Result<RollbackTail, IndexError> {
-        let Some(newest) = state.newest() else {
-            return Ok(RollbackTail::Unwind);
+        let sealed = group_sealed_generations(snapshot, capabilities)?;
+        let Some(newest) = sealed.last().copied() else {
+            return Ok(RollbackTail::Unwind { newest: None });
         };
         if newest.coverage.last_height < current.height {
-            return Ok(RollbackTail::Unwind);
+            return Ok(RollbackTail::Unwind {
+                newest: Some(newest),
+            });
         }
-        Ok(RollbackTail::Retire(newest))
+        let older = sealed
+            .iter()
+            .copied()
+            .filter(|sealed| sealed.gen_id < newest.gen_id)
+            .max_by_key(|sealed| sealed.gen_id);
+        Ok(RollbackTail::Retire { newest, older })
     }
 
     pub(super) fn apply_rollback_tail(
         &self,
         state: &mut TailWriterState,
-        plan: RollbackTail,
-        capabilities: IndexCapabilities,
-        current: IndexWatermark,
-        prev: Option<IndexWatermark>,
-        batch: &mut BufferedWriteBatch,
+        step: RollbackStep<'_>,
     ) -> Result<(), IndexError> {
+        let RollbackStep {
+            plan,
+            capabilities,
+            current,
+            prev,
+            batch,
+        } = step;
+        let published_newest = plan.published_newest();
         let first_height = match plan {
-            RollbackTail::Unwind => {
+            RollbackTail::Unwind { .. } => {
                 let snapshot = self.indexer.store.snapshot()?;
-                tail::unwind_tail_block(batch, snapshot.as_ref(), current.height)?;
+                let undone = tail::unwind_tail_block(batch, snapshot.as_ref(), current.height)?;
+                drop(snapshot);
+                if !undone {
+                    return Err(IndexError::CorruptTailLog {
+                        height: current.height,
+                    });
+                }
                 state.pop_newest_block();
                 state.first_height()
             }
-            RollbackTail::Retire(newest) => {
+            RollbackTail::Retire { newest, .. } => {
                 state.sealed.retain(|sealed| sealed.gen_id != newest.gen_id);
                 for capability in segment_capabilities(capabilities) {
                     segment::stage_retirement(
@@ -146,7 +223,7 @@ impl<S: KvStore> IndexWriter<S> {
             batch,
             segment_capabilities(capabilities),
             tail::TailBounds {
-                newest: state.newest(),
+                newest: published_newest,
                 first_height,
                 at: prev.map(|watermark| (watermark.height, watermark.hash)),
             },
@@ -375,6 +452,222 @@ mod rollback_retire_tests {
                 &crate::segment::sealed_gen_prefix(IndexCapability::TxLookup),
             )?
             .count())
+    }
+
+    fn sealed_count(
+        store: &MemoryKvStore,
+        capability: IndexCapability,
+    ) -> Result<usize, crate::portable::TestError> {
+        Ok(store
+            .iter_prefix(
+                ColumnFamily::IdxMeta,
+                &crate::segment::sealed_gen_prefix(capability),
+            )?
+            .count())
+    }
+
+    fn prefix_rows(
+        store: &MemoryKvStore,
+        family: ColumnFamily,
+        prefix: &[u8],
+    ) -> Result<Vec<Vec<u8>>, crate::portable::TestError> {
+        let mut keys = Vec::new();
+        for item in store.iter_prefix(family, prefix)? {
+            let (key, _value) = item?;
+            keys.push(key);
+        }
+        Ok(keys)
+    }
+
+    fn generation(
+        store: &MemoryKvStore,
+        capability: IndexCapability,
+    ) -> Result<Option<crate::segment::GenerationDescriptor>, crate::portable::TestError> {
+        Ok(store
+            .get(
+                ColumnFamily::IdxMeta,
+                &crate::segment::meta_gen_key(capability),
+            )?
+            .as_deref()
+            .and_then(crate::segment::IndexGeneration::decode_meta_value))
+    }
+
+    fn commit_filter_block(
+        writer: &mut IndexWriter<MemoryKvStore>,
+        height: u32,
+        body: &[u8],
+    ) -> Result<IndexWatermark, crate::portable::TestError> {
+        let header = body
+            .get(..crate::types::HEADER_ROW_SIZE)
+            .ok_or("short body")?;
+        let hash = encode::double_sha256(header).to_le_bytes();
+        let prepared = writer.prepare_block_with_spent_scripts(
+            IndexCapabilities::COMPACT_FILTERS,
+            height,
+            hash,
+            body,
+            &FixtureScripts,
+        )?;
+        let mut batch = PreparedBatch::new(PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
+        if batch.try_push(prepared).is_err() {
+            return Err("non-contiguous prepare".into());
+        }
+        Ok(writer.commit_forward(batch)?)
+    }
+
+    fn filter_chain() -> (Vec<u8>, Vec<u8>) {
+        let first = block_with_prev(
+            vec![tx(
+                OutPoint::new(Txid(Hash256::from_le_bytes(&[0xa1; 32])), 0),
+                vec![0x51],
+            )],
+            BlockHash::default(),
+            1,
+        );
+        let first_body = consensus_bytes(&first);
+        let second = block_with_prev(
+            vec![tx(
+                OutPoint::new(Txid(Hash256::from_le_bytes(&[0xb2; 32])), 0),
+                vec![0x52],
+            )],
+            first.block_hash(),
+            2,
+        );
+        (first_body, consensus_bytes(&second))
+    }
+
+    // PRJ-05, REO-04, REO-05
+    #[test]
+    fn filter_only_rollback_across_a_seal_retires_the_generation()
+    -> Result<(), crate::portable::TestError> {
+        let scratch = tempfile::tempdir()?;
+        let store = Arc::new(MemoryKvStore::new());
+        let mut writer = IndexWriter::open(Arc::clone(&store), 1)?
+            .with_seal_scratch(scratch.path().to_path_buf());
+        let (first_body, second_body) = filter_chain();
+        let base = commit_filter_block(&mut writer, 0, &first_body)?;
+        let tip = commit_filter_block(&mut writer, 1, &second_body)?;
+
+        let state = writer.tail_for(Some(tip))?;
+        writer.seal_through(&state, tip.height, IndexCapabilities::COMPACT_FILTERS)?;
+        writer.tail = None;
+        assert_eq!(sealed_count(&store, IndexCapability::CompactFilters)?, 1);
+        assert_eq!(sealed_count(&store, IndexCapability::TxLookup)?, 0);
+        assert!(
+            prefix_rows(
+                &store,
+                ColumnFamily::IdxMeta,
+                crate::segment::tail::LOG_PREFIX
+            )?
+            .is_empty(),
+            "the seal moves every undo log into the generation"
+        );
+        let sealed_filters = prefix_rows(
+            &store,
+            ColumnFamily::Filters,
+            &crate::segment::format::gen_prefix_start(1),
+        )?;
+        assert_eq!(sealed_filters.len(), 2, "both heights live in generation 1");
+
+        let (fence, watermarks) = writer.fenced_watermarks()?;
+        assert_eq!(watermarks.compact_filters, Some(tip));
+        writer.commit_rollback_one_for_with_cursor_with_spent_scripts(
+            fence,
+            IndexCapabilities::COMPACT_FILTERS,
+            Some(base),
+            &second_body,
+            ConsumerCursorUpdate::Clear,
+            &FixtureScripts,
+        )?;
+
+        assert_eq!(
+            writer.watermarks()?.compact_filters,
+            None,
+            "retiring the generation removes every covered height, including the block below the sealed tip"
+        );
+        assert_eq!(
+            sealed_count(&store, IndexCapability::CompactFilters)?,
+            0,
+            "the retired generation leaves the published set"
+        );
+        assert!(
+            prefix_rows(
+                &store,
+                ColumnFamily::Filters,
+                &crate::segment::format::gen_prefix_start(1)
+            )?
+            .is_empty(),
+            "retirement clears the sealed filter rows"
+        );
+        assert!(
+            prefix_rows(&store, ColumnFamily::IdxMeta, b"retire/")?.is_empty(),
+            "retirement leaves no tombstone behind"
+        );
+        let desc = generation(&store, IndexCapability::CompactFilters)?.ok_or("descriptor")?;
+        assert_eq!(desc.gen_id, 0, "the descriptor names no retired generation");
+        assert!(
+            desc.tail.tail_lo > desc.tail.tail_hi,
+            "the retired tail window is empty"
+        );
+        Ok(())
+    }
+
+    // REO-02, REO-04
+    #[test]
+    fn rollback_without_a_required_undo_log_refuses_as_corrupt_tail_log()
+    -> Result<(), crate::portable::TestError> {
+        let scratch = tempfile::tempdir()?;
+        let store = Arc::new(MemoryKvStore::new());
+        let mut writer = IndexWriter::open(Arc::clone(&store), 1)?
+            .with_seal_scratch(scratch.path().to_path_buf());
+        let (first_body, second_body) = filter_chain();
+        let base = commit_filter_block(&mut writer, 0, &first_body)?;
+        let tip = commit_filter_block(&mut writer, 1, &second_body)?;
+
+        let mut batch = store.new_batch();
+        batch.delete(
+            ColumnFamily::IdxMeta,
+            &crate::segment::tail::log_key_for(tip.height),
+        );
+        store.write_durable(batch)?;
+        writer.tail = None;
+
+        let (fence, watermarks) = writer.fenced_watermarks()?;
+        assert_eq!(watermarks.compact_filters, Some(tip));
+        let outcome = writer.commit_rollback_one_for_with_cursor_with_spent_scripts(
+            fence,
+            IndexCapabilities::COMPACT_FILTERS,
+            Some(base),
+            &second_body,
+            ConsumerCursorUpdate::Clear,
+            &FixtureScripts,
+        );
+        assert!(
+            matches!(
+                outcome,
+                Err(IndexError::CorruptTailLog { height }) if height == tip.height
+            ),
+            "a height that must hold an undo log refuses instead of committing a rewind: {outcome:?}"
+        );
+        assert_eq!(
+            writer.watermarks()?.compact_filters,
+            Some(tip),
+            "the refused rollback commits nothing"
+        );
+        assert_eq!(
+            prefix_rows(
+                &store,
+                ColumnFamily::Filters,
+                &crate::segment::format::gen_prefix_start(0)
+            )?
+            .len(),
+            2,
+            "the refused rollback keeps every filter row"
+        );
+        Ok(())
     }
 
     // REO-04, REO-05

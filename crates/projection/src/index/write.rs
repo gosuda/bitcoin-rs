@@ -1,4 +1,4 @@
-use super::tail_writes::planned_tail_bytes;
+use super::tail_writes::{RollbackStep, planned_tail_bytes};
 use super::{
     block::BodyFacts, block::NoSpentScripts, block::SpentCoins, block::committed_block_from_image,
     block::parse_body, block::pending_rows_for_facts, block::pending_rows_for_image,
@@ -848,8 +848,10 @@ impl<S: KvStore> IndexWriter<S> {
             header,
         )?;
         let mut tail = self.tail_for(Some(current))?;
-        let tail_plan = Self::plan_rollback_tail(&tail, current)?;
-        let prev = tail_plan.rewind(&tail, prev)?;
+        let snapshot = self.indexer.store.snapshot()?;
+        let tail_plan = Self::plan_rollback_tail(snapshot.as_ref(), capabilities, current)?;
+        drop(snapshot);
+        let prev = tail_plan.rewind(prev)?;
         let mut store_batch = self.indexer.store.new_batch();
         let unselected_keeps_identity = IndexCapability::ALL.into_iter().any(|capability| {
             !capabilities.contains(capability)
@@ -871,11 +873,13 @@ impl<S: KvStore> IndexWriter<S> {
         put_selected_watermarks(&mut store_batch, capabilities, prev);
         self.apply_rollback_tail(
             &mut tail,
-            tail_plan,
-            capabilities,
-            current,
-            prev,
-            &mut store_batch,
+            RollbackStep {
+                plan: tail_plan,
+                capabilities,
+                current,
+                prev,
+                batch: &mut store_batch,
+            },
         )?;
         apply_cursor_update(&mut store_batch, cursor);
         commit_ordinary(
