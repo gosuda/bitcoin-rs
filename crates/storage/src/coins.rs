@@ -78,26 +78,20 @@ enum CoinStatsFeedOp {
 
 impl CoinStatsFeed {
     fn apply(self, listener: &CoinStatsListener) {
-        for op in self.ops {
-            match op {
-                CoinStatsFeedOp::Insert {
-                    op,
-                    txout,
-                    height,
-                    coinbase,
-                } => {
-                    listener.insert_utxo(&op, &txout, height, coinbase);
-                }
-                CoinStatsFeedOp::Remove {
-                    op,
-                    txout,
-                    height,
-                    coinbase,
-                } => {
-                    listener.remove_utxo(&op, &txout, height, coinbase);
-                }
-            }
-        }
+        listener.apply_utxos(self.ops.iter().map(|op| match op {
+            CoinStatsFeedOp::Insert {
+                op,
+                txout,
+                height,
+                coinbase,
+            } => (true, op, txout, *height, *coinbase),
+            CoinStatsFeedOp::Remove {
+                op,
+                txout,
+                height,
+                coinbase,
+            } => (false, op, txout, *height, *coinbase),
+        }));
     }
 }
 
