@@ -2,21 +2,20 @@ use crate::NodeConfig;
 use crate::config::ConfigError;
 use crate::run::RunError;
 use crate::snapshot::SnapshotImportError;
-use bitcoin_rs_chain::BlockBodySource;
 #[cfg(any(test, feature = "test-seam"))]
-use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_chainstate::events::ChainEventPublisher;
+use bitcoin_rs_execution::chain::TipSnapshot;
+use bitcoin_rs_execution::events::ChainEventPublisher;
 #[cfg(test)]
-pub(crate) use bitcoin_rs_chainstate::recovery::ResumeSource;
-use bitcoin_rs_index::runtime::DEFAULT_BATCH_LIMITS;
-use bitcoin_rs_index::runtime::OpenDerivedIndex;
-use bitcoin_rs_index::runtime::REDB_BATCH_LIMITS;
-use bitcoin_rs_index::runtime::open_derived_index_store_on_worker;
+pub(crate) use bitcoin_rs_execution::recovery::ResumeSource;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_mempool::Mempool;
-use bitcoin_rs_rpc::context::PruneService;
+use bitcoin_rs_projection::runtime::DEFAULT_BATCH_LIMITS;
+use bitcoin_rs_projection::runtime::OpenDerivedIndex;
+use bitcoin_rs_projection::runtime::open_derived_index_store_on_worker;
+use bitcoin_rs_serving::context::PruneService;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_storage::StorageBackend;
+use bitcoin_rs_storage::block_body::BlockBodySource;
 use crossbeam_channel::Receiver;
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
@@ -47,10 +46,10 @@ pub use index::IndexWorkerError;
 
 struct IndexChainCursorSource(Arc<ChainEventPublisher>);
 
-impl bitcoin_rs_index::reconcile::ChainCursorSource for IndexChainCursorSource {
-    fn cursor(&self) -> bitcoin_rs_index::reconcile::ConsumerCursor {
+impl bitcoin_rs_projection::reconcile::ChainCursorSource for IndexChainCursorSource {
+    fn cursor(&self) -> bitcoin_rs_projection::reconcile::ConsumerCursor {
         let snapshot = self.0.snapshot();
-        bitcoin_rs_index::reconcile::ConsumerCursor {
+        bitcoin_rs_projection::reconcile::ConsumerCursor {
             epoch: snapshot.epoch,
             sequence: snapshot.sequence,
             height: snapshot.tip_height,
@@ -82,34 +81,36 @@ pub struct NodeState {
     derived_index: index::DerivedIndexHost,
     prune_service: Option<Arc<dyn PruneService>>,
     mempool_gateway: Arc<bitcoin_rs_mempool::MempoolGateway>,
-    p2p: Arc<bitcoin_rs_p2p::P2pService>,
-    inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundBody>,
-    inbound_tx_rx: Mutex<Option<Receiver<bitcoin_rs_p2p::InboundBody>>>,
-    package_capacity: bitcoin_rs_p2p::PackageCapacity,
-    transition: bitcoin_rs_chain::TransitionDomain,
-    chainstate: Arc<bitcoin_rs_chainstate::Chainstate>,
+    p2p: Arc<bitcoin_rs_wire::P2pService>,
+    inbound_tx_tx: Sender<crate::p2p::tx_policy::ingress::InboundBody>,
+    inbound_tx_rx: Mutex<Option<Receiver<crate::p2p::tx_policy::ingress::InboundBody>>>,
+    package_capacity: crate::p2p::tx_policy::ingress::PackageCapacity,
+    pub tx_policy: Arc<crate::p2p::tx_policy::NodeTxPolicy>,
+    transition: bitcoin_rs_execution::chain::TransitionDomain,
+    chainstate: Arc<bitcoin_rs_execution::Chainstate>,
     followers: crate::chain_effects::ChainFollowers,
-    sync: Arc<crate::BlockSync>,
+    sync: Arc<crate::p2p::sync::BlockSync>,
     recovery_reporter: Arc<storage::RecoveryReporter>,
     pub(crate) snapshots: Arc<crate::snapshot::SnapshotControl>,
-    block_announce_rx: Mutex<Option<bitcoin_rs_p2p::BlockAnnounceReceiver>>,
-    shutdown: Arc<bitcoin_rs_chain::LatchWriter>,
+    block_announce_rx: Mutex<Option<crate::p2p::block_announce::BlockAnnounceReceiver>>,
+    shutdown: Arc<bitcoin_rs_execution::chain::LatchWriter>,
+    _p2p_shutdown_guard: bitcoin_rs_execution::chain::HookGuard,
 }
 
 impl Drop for NodeState {
     fn drop(&mut self) {
         self.shutdown.trigger();
-        self.chainstate.request_shutdown();
-        let _admission = self.chainstate.close();
-        self.p2p.shutdown();
-        if let Err(error) = self.p2p.join() {
-            tracing::warn!(%error, "failed to join p2p workers during node state drop");
-        }
         if let Err(error) = self
             .derived_index
             .shutdown(core::time::Duration::from_secs(5))
         {
             tracing::warn!(%error, "failed to shut down derived index during node state drop");
+        }
+        self.chainstate.request_shutdown();
+        let _admission = self.chainstate.close();
+        self.p2p.shutdown();
+        if let Err(error) = self.p2p.join() {
+            tracing::warn!(%error, "failed to join p2p workers during node state drop");
         }
         self.storage.retention().shutdown();
     }
@@ -140,7 +141,7 @@ impl NodeState {
     #[cfg(any(test, feature = "test-seam"))]
     #[doc(hidden)]
     #[must_use]
-    pub fn undo_store(&self) -> Arc<dyn bitcoin_rs_chainstate::UndoStore> {
+    pub fn undo_store(&self) -> Arc<dyn bitcoin_rs_execution::UndoStore> {
         self.storage.undo_store()
     }
 
@@ -185,14 +186,14 @@ impl NodeState {
     #[cfg(any(test, feature = "test-seam"))]
     pub fn attach_mining_coordinator(&self, coordinator: &Arc<crate::MiningCoordinator>) {
         let signal = self.mining_generation_signal();
-        let control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator.clone();
+        let control: Arc<dyn bitcoin_rs_serving::mining::MiningControl> = coordinator.clone();
         signal.attach(&control);
-        let wake: Arc<dyn bitcoin_rs_mining::MempoolSequenceWake> = coordinator.clone();
+        let wake: Arc<dyn bitcoin_rs_serving::mining::MempoolSequenceWake> = coordinator.clone();
         signal.attach_sequence_wake(&wake);
     }
 
     #[must_use]
-    pub fn block_log_reader(&self) -> bitcoin_rs_index::BlockLogReader {
+    pub fn block_log_reader(&self) -> bitcoin_rs_projection::BlockLogReader {
         self.followers.block_log_reader()
     }
 
@@ -207,17 +208,17 @@ impl NodeState {
     }
 
     #[must_use]
-    pub fn p2p(&self) -> Arc<bitcoin_rs_p2p::P2pService> {
+    pub fn p2p(&self) -> Arc<bitcoin_rs_wire::P2pService> {
         Arc::clone(&self.p2p)
     }
 
     #[must_use]
-    pub fn peer_table(&self) -> Arc<bitcoin_rs_p2p::PeerTable> {
+    pub fn peer_table(&self) -> Arc<bitcoin_rs_wire::PeerTable> {
         self.p2p.table()
     }
 
     #[cfg(any(test, feature = "test-seam"))]
-    pub fn inbound_blocks_sender(&self) -> Sender<bitcoin_rs_p2p::InboundBlock> {
+    pub fn inbound_blocks_sender(&self) -> Sender<bitcoin_rs_wire::InboundBlock> {
         self.p2p.inbound_blocks_sender()
     }
 
@@ -226,42 +227,46 @@ impl NodeState {
         Arc::clone(&self.recovery_reporter)
     }
 
-    pub fn inbound_tx_sender(&self) -> Sender<bitcoin_rs_p2p::InboundBody> {
+    pub fn inbound_tx_sender(&self) -> Sender<crate::p2p::tx_policy::ingress::InboundBody> {
         self.inbound_tx_tx.clone()
     }
 
     #[must_use]
-    pub fn take_inbound_tx_receiver(&self) -> Option<Receiver<bitcoin_rs_p2p::InboundBody>> {
+    pub fn take_inbound_tx_receiver(
+        &self,
+    ) -> Option<Receiver<crate::p2p::tx_policy::ingress::InboundBody>> {
         self.inbound_tx_rx.lock().take()
     }
 
     #[must_use]
-    pub fn package_capacity(&self) -> bitcoin_rs_p2p::PackageCapacity {
+    pub fn package_capacity(&self) -> crate::p2p::tx_policy::ingress::PackageCapacity {
         self.package_capacity.clone()
     }
 
     #[must_use]
-    pub fn take_block_announce_receiver(&self) -> Option<bitcoin_rs_p2p::BlockAnnounceReceiver> {
+    pub fn take_block_announce_receiver(
+        &self,
+    ) -> Option<crate::p2p::block_announce::BlockAnnounceReceiver> {
         self.block_announce_rx.lock().take()
     }
 
     #[must_use]
-    pub fn sync(&self) -> Arc<crate::BlockSync> {
+    pub fn sync(&self) -> Arc<crate::p2p::sync::BlockSync> {
         Arc::clone(&self.sync)
     }
 
     #[must_use]
-    pub(crate) fn ibd(&self) -> Arc<bitcoin_rs_chain::InitialBlockDownload> {
+    pub(crate) fn ibd(&self) -> Arc<bitcoin_rs_execution::chain::InitialBlockDownload> {
         self.chainstate.ibd_latch()
     }
 
     #[must_use]
-    pub fn shutdown_reader(&self) -> bitcoin_rs_chain::LatchReader {
+    pub fn shutdown_reader(&self) -> bitcoin_rs_execution::chain::LatchReader {
         self.shutdown.reader()
     }
 
     #[must_use]
-    pub fn shutdown_writer(&self) -> Arc<bitcoin_rs_chain::LatchWriter> {
+    pub fn shutdown_writer(&self) -> Arc<bitcoin_rs_execution::chain::LatchWriter> {
         Arc::clone(&self.shutdown)
     }
 
@@ -271,12 +276,12 @@ impl NodeState {
     }
 
     #[must_use]
-    pub fn chainstate(&self) -> Arc<bitcoin_rs_chainstate::Chainstate> {
+    pub fn chainstate(&self) -> Arc<bitcoin_rs_execution::Chainstate> {
         Arc::clone(&self.chainstate)
     }
 
     #[must_use]
-    pub fn stable_read(&self) -> bitcoin_rs_chain::StableRead {
+    pub fn stable_read(&self) -> bitcoin_rs_execution::chain::StableRead {
         self.transition.stable_read()
     }
 
@@ -288,7 +293,7 @@ impl NodeState {
     #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_block(
         &self,
-        payload: &bitcoin_rs_primitives::BlockPayload,
+        payload: &bitcoin_rs_consensus::primitives::BlockImage,
     ) -> core::result::Result<TipSnapshot, crate::chain_effects::ConnectMutationError> {
         let outcome = self.followers.apply_connect(&self.chainstate, payload)?;
         Ok(outcome.tip)
@@ -296,20 +301,20 @@ impl NodeState {
 
     pub fn publish_checkpoint(
         &self,
-    ) -> core::result::Result<Option<u64>, bitcoin_rs_chainstate::CheckpointError> {
+    ) -> core::result::Result<Option<u64>, bitcoin_rs_execution::CheckpointError> {
         self.chainstate.publish_checkpoint()
     }
 
     pub fn start_chainstate_maintenance(
         &self,
-    ) -> core::result::Result<std::thread::JoinHandle<()>, bitcoin_rs_chainstate::MaintenanceError>
+    ) -> core::result::Result<std::thread::JoinHandle<()>, bitcoin_rs_execution::MaintenanceError>
     {
         self.chainstate.start_maintenance()
     }
 
     pub fn chainstates_summary(
         &self,
-    ) -> Result<bitcoin_rs_chainstate::ChainstatesSummary, bitcoin_rs_chainstate::AssumeUtxoError>
+    ) -> Result<bitcoin_rs_execution::ChainstatesSummary, bitcoin_rs_execution::AssumeUtxoError>
     {
         self.snapshots.manager.chainstates_summary()
     }
@@ -324,7 +329,7 @@ impl NodeState {
     #[must_use]
     pub fn derived_index_query(
         &self,
-    ) -> Option<Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery>> {
+    ) -> Option<Arc<dyn bitcoin_rs_serving::context::DerivedIndexQuery>> {
         if !self.config.indexes.txindex {
             return None;
         }
@@ -334,37 +339,41 @@ impl NodeState {
     #[must_use]
     pub(crate) fn esplora_derived_index_query(
         &self,
-    ) -> Option<Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery>> {
+    ) -> Option<Arc<dyn bitcoin_rs_serving::context::DerivedIndexQuery>> {
         self.derived_index.adapter().map(|adapter| {
-            let q: Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery> = adapter.clone();
+            let q: Arc<dyn bitcoin_rs_serving::context::DerivedIndexQuery> = adapter.clone();
             q
         })
     }
 
     pub(crate) fn historical_index_adapter(
         &self,
-    ) -> Option<Arc<bitcoin_rs_index::runtime::DerivedIndexQueryAdapter>> {
+    ) -> Option<Arc<bitcoin_rs_projection::runtime::DerivedIndexQueryAdapter>> {
         self.derived_index.adapter().cloned()
     }
 
     #[must_use]
-    pub fn compact_filter_query(&self) -> Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>> {
+    pub fn compact_filter_query(
+        &self,
+    ) -> Option<Arc<dyn bitcoin_rs_projection::CompactFilterQuery>> {
         if !self.config.indexes.blockfilterindex {
             return None;
         }
         self.derived_index.adapter().map(|adapter| {
-            let query: Arc<dyn bitcoin_rs_index::CompactFilterQuery> = adapter.clone();
+            let query: Arc<dyn bitcoin_rs_projection::CompactFilterQuery> = adapter.clone();
             query
         })
     }
 
     #[must_use]
-    pub fn script_index_query(&self) -> Option<Arc<dyn bitcoin_rs_rpc::context::ScriptIndexQuery>> {
+    pub fn script_index_query(
+        &self,
+    ) -> Option<Arc<dyn bitcoin_rs_serving::context::ScriptIndexQuery>> {
         if !self.config.indexes.script_index.is_enabled() {
             return None;
         }
         self.derived_index.adapter().map(|adapter| {
-            let q: Arc<dyn bitcoin_rs_rpc::context::ScriptIndexQuery> = adapter.clone();
+            let q: Arc<dyn bitcoin_rs_serving::context::ScriptIndexQuery> = adapter.clone();
             q
         })
     }
@@ -375,7 +384,9 @@ impl NodeState {
     }
 
     #[must_use]
-    pub fn derived_index_status(&self) -> Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> {
+    pub fn derived_index_status(
+        &self,
+    ) -> Arc<dyn bitcoin_rs_projection::DerivedIndexCapabilitySource> {
         self.derived_index.status()
     }
 
@@ -392,7 +403,7 @@ impl NodeState {
     }
 }
 
-fn derived_index_capabilities(config: &NodeConfig) -> bitcoin_rs_index::IndexCapabilities {
+fn derived_index_capabilities(config: &NodeConfig) -> bitcoin_rs_projection::IndexCapabilities {
     config
         .indexes
         .script_index
@@ -405,8 +416,9 @@ fn build_derived_index_open_spec(
     txindex_cache_bytes: u64,
     epoch: u64,
     guard: &bitcoin_rs_storage::StoreGuard,
-    seed_slot: Option<bitcoin_rs_utxo::SeedOfferCell>,
-) -> core::result::Result<Option<bitcoin_rs_index::runtime::DerivedIndexOpenSpec>, ConfigError> {
+    seed_slot: Option<bitcoin_rs_storage::utxo::SeedOfferCell>,
+) -> core::result::Result<Option<bitcoin_rs_projection::runtime::DerivedIndexOpenSpec>, ConfigError>
+{
     let enabled = derived_index_capabilities(config);
     if enabled.is_empty() {
         return Ok(None);
@@ -421,14 +433,14 @@ fn build_derived_index_open_spec(
     let backend = config.storage.backend;
     let cache_bytes = txindex_cache_bytes;
     let guard = Arc::clone(guard);
-    Ok(Some(bitcoin_rs_index::runtime::DerivedIndexOpenSpec {
+    Ok(Some(bitcoin_rs_projection::runtime::DerivedIndexOpenSpec {
         scripthash_limit: config.indexes.scripthash_limit,
         data_dir: config.data_dir.clone(),
         namespace: TXINDEX_NAMESPACE,
         storage_backend: config.storage.backend,
         epoch,
         enabled,
-        rollback_rebuild_cutover: bitcoin_rs_index::runtime::DEFAULT_ROLLBACK_REBUILD_CUTOVER,
+        rollback_rebuild_cutover: bitcoin_rs_projection::runtime::DEFAULT_ROLLBACK_REBUILD_CUTOVER,
         canonical_data_root,
         open_store: Arc::new(move |dir| {
             crate::storage_backend::open_txindex(
@@ -448,8 +460,8 @@ fn build_derived_index_open_spec(
 
 fn index_bundle_directive(
     config: &NodeConfig,
-) -> core::result::Result<bitcoin_rs_index::portable::IndexBundleDirective, ConfigError> {
-    use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
+) -> core::result::Result<bitcoin_rs_projection::portable::IndexBundleDirective, ConfigError> {
+    use bitcoin_rs_projection::portable::{IndexBundleDirective, IndexBundleRequest};
     let request = |dir: &std::path::PathBuf| IndexBundleRequest {
         dir: dir.clone(),
         network: config.network,
@@ -469,23 +481,21 @@ struct DerivedIndexComposer {
 
 impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
     type Output = OpenDerivedIndex;
-    type Error = bitcoin_rs_index::runtime::DerivedIndexWorkerError;
+    type Error = bitcoin_rs_projection::runtime::DerivedIndexWorkerError;
 
     fn consume<S>(self, store: Arc<S>) -> Result<Self::Output, Self::Error>
     where
         S: KvStore,
     {
-        let batch_limits = match self.backend {
-            StorageBackend::RocksDb | StorageBackend::Fjall => DEFAULT_BATCH_LIMITS,
-            StorageBackend::Redb => REDB_BATCH_LIMITS,
-        };
+        let _ = self.backend;
+        let batch_limits = DEFAULT_BATCH_LIMITS;
         open_derived_index_store_on_worker(store, batch_limits, self.epoch)
     }
 }
 
 struct TxIndexSpawn {
-    spec: bitcoin_rs_index::runtime::DerivedIndexOpenSpec,
-    generation: bitcoin_rs_index::runtime::Generation,
+    spec: bitcoin_rs_projection::runtime::DerivedIndexOpenSpec,
+    generation: bitcoin_rs_projection::runtime::Generation,
     body_source: Arc<dyn BlockBodySource>,
     wake_rx: Receiver<()>,
     recovery_reporter: Arc<storage::RecoveryReporter>,

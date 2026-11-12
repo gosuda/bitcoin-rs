@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use hashbrown::HashSet;
 
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Tx, TxIn, TxOut};
 
 use super::*;
 use crate::rbf::LimitEnforcement;

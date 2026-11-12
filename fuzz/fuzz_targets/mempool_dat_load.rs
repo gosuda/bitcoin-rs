@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin_rs_mempool::snapshot::Snapshot;
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_consensus::primitives::Network;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_FUZZ_SNAPSHOT_BYTES: u64 = 1024 * 1024;

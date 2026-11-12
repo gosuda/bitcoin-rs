@@ -1,0 +1,57 @@
+use core::fmt;
+use core::str::FromStr;
+
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
+use crate::primitives::{Hash256, HashError};
+
+macro_rules! identifier_newtype {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        #[derive(
+            Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash,
+            FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+        )]
+        #[repr(transparent)]
+        pub struct $name(pub Hash256);
+
+        impl $name {
+            #[must_use]
+            pub const fn as_bytes(&self) -> &[u8; 32] {
+                self.0.as_byte_array()
+            }
+        }
+
+        impl From<Hash256> for $name {
+            fn from(hash: Hash256) -> Self {
+                Self(hash)
+            }
+        }
+
+        impl From<$name> for Hash256 {
+            fn from(id: $name) -> Self {
+                id.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt::Display::fmt(&self.0, f)
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = HashError;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Ok(Self(Hash256::from_str_be(s)?))
+            }
+        }
+    };
+}
+
+identifier_newtype!(Txid);
+
+identifier_newtype!(Wtxid);
+
+identifier_newtype!(BlockHash);

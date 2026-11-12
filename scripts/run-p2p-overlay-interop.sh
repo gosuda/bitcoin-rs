@@ -1072,7 +1072,7 @@ echo "==> node A i2p: ${I2P_A}"
 
 # Verify private key files exist and have mode 0600 on disk
 # Live transport persists JSON-enveloped keys under the regtest identity dir
-# overlay-fabfb5da (crates/node/src/config.rs, crates/p2p/src/overlay.rs).
+# overlay-fabfb5da (crates/node/src/config.rs, crates/wire/src/overlay.rs).
 ONION_KEY_FILE="${A_DATADIR}/overlay-fabfb5da/onion.key"
 I2P_KEY_FILE="${A_DATADIR}/overlay-fabfb5da/i2p.key"
 [[ -f "${ONION_KEY_FILE}" ]] || { echo "error: onion private key file missing: ${ONION_KEY_FILE}" >&2; exit 1; }

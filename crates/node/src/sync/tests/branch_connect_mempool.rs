@@ -5,7 +5,7 @@ use bitcoin_rs_consensus::ValidationEngine;
 #[test]
 fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
 -> Result<(), crate::test_support::TestError> {
-    use bitcoin_rs_primitives::{Amount, Script};
+    use bitcoin_rs_consensus::primitives::{Amount, Script};
     let (handles, main, mut bodies) = matured_chain(101)?;
     let fork_root_hash = main[49].block_hash();
     let mut fork_parent = handles
@@ -50,7 +50,7 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
     for block in &fork_blocks {
         bodies.insert(
             Hash256::from_le_bytes(block.block_hash().as_bytes()),
-            BlockPayload::from_local(block.clone()),
+            BlockImage::from_local(block.clone()),
         );
     }
 
@@ -79,7 +79,7 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
     assert_eq!(connected, 0, "nothing connected before the body mutation");
     assert_eq!(
         disposition,
-        bitcoin_rs_chainstate::WindowApplyDisposition::BodyMutated
+        bitcoin_rs_execution::WindowApplyDisposition::BodyMutated
     );
     assert!(
         invalidated.is_empty(),
@@ -103,11 +103,13 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
 fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
 -> Result<(), crate::test_support::TestError> {
     use bitcoin::hashes::{Hash as _, hash160};
+    use bitcoin_rs_consensus::primitives::{
+        Amount, LockTime, Script, Sequence, TxIn, TxOut, Witness,
+    };
     use bitcoin_rs_mempool::{
         AdmissionOrigin, BodyInterest, Mempool, MempoolGateway, MempoolLimits, MempoolObserver,
         MutationEnvelope,
     };
-    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, TxIn, TxOut, Witness};
     use bitcoin_rs_storage::StorageError;
     use bitcoin_rs_storage::block_body::BlockBodyStore;
     use parking_lot::Mutex;
@@ -161,7 +163,9 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         None,
     ));
     let followers = crate::chain_effects::ChainFollowers::new(
-        Arc::new(RwLock::new(bitcoin_rs_index::block_log::BlockLog::new())),
+        Arc::new(RwLock::new(
+            bitcoin_rs_projection::block_log::BlockLog::new(),
+        )),
         Arc::new(crate::NoOpZmqPublisher),
         None,
         Arc::new(crate::mining::MiningGenerationSignal::new()),
@@ -177,7 +181,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         ]
         .concat(),
     );
-    let redeem_sig = Script::from_bytes(bitcoin_rs_script::push_data(&redeem));
+    let redeem_sig = Script::from_bytes(bitcoin_rs_consensus::script::push_data(&redeem));
 
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
@@ -240,21 +244,23 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
     }
     let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
     let handles =
-        bitcoin_rs_chainstate::Chainstate::from_parts(bitcoin_rs_chainstate::ChainstateParts {
+        bitcoin_rs_execution::Chainstate::from_parts(bitcoin_rs_execution::ChainstateParts {
             network: Network::Regtest,
             block_tree: tree,
             restored_applied_tip: None,
             utxo: Arc::new(UtxoSet::new()),
-            coin_stats: Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
-                bitcoin_rs_utxo::stats::CoinStats::default(),
+            coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
+                bitcoin_rs_storage::utxo::stats::CoinStats::default(),
             )),
-            chain_events: Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
+            chain_events: Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
+                0,
+            )),
             block_body_store: Some(Arc::new(Bodies::default())),
             undo_store: Arc::new(bitcoin_rs_storage::undo::InMemoryUndoStore::default()),
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
-            chain_transition: bitcoin_rs_chain::TransitionDomain::new().authority(),
+            chain_transition: bitcoin_rs_execution::chain::TransitionDomain::new().authority(),
             assume_valid_height: 0,
-            validation_mode: bitcoin_rs_chainstate::ValidationMode::AssumeValid,
+            validation_mode: bitcoin_rs_execution::ValidationMode::AssumeValid,
             validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
             script_cache: None,
             journal: None,
@@ -265,11 +271,11 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
                 retention,
                 bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(288),
             ),
-            role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
+            role: bitcoin_rs_execution::ChainstateRole::Ordinary,
         });
-    handles.apply_block(&BlockPayload::from_local(genesis))?;
+    handles.apply_block(&BlockImage::from_local(genesis))?;
     for block in &blocks {
-        handles.apply_block(&BlockPayload::from_local(block.clone()))?;
+        handles.apply_block(&BlockImage::from_local(block.clone()))?;
     }
 
     let parent = parent_tx.ok_or(TestError::Missing("built package transaction"))?;
@@ -291,7 +297,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         lock_time: LockTime::from_consensus(GENESIS_TIME + 95),
     };
     let nonfinal_txid = nonfinal.txid();
-    let view = bitcoin_rs_rpc::context::ChainAdmissionView::new(
+    let view = bitcoin_rs_serving::context::ChainAdmissionView::new(
         handles.utxo_reader(),
         handles.applied_tip_reader(),
         handles.block_tree_reader(),
@@ -301,7 +307,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         Arc::new(nonfinal),
         bitcoin_rs_mempool::AdmissionOrigin::Rpc,
         None,
-        bitcoin_rs_primitives::unix_time_secs(),
+        bitcoin_rs_consensus::primitives::unix_time_secs(),
         &view,
     );
     assert!(
@@ -366,7 +372,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
 #[test]
 fn admit_headers_reports_the_tip_a_heavier_fork_displaced()
 -> Result<(), crate::test_support::TestError> {
-    use bitcoin_rs_p2p::sync::chain::HeaderAdmission;
+    use crate::p2p::sync::chain::HeaderAdmission;
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
     tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;

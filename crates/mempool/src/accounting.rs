@@ -1,6 +1,6 @@
+use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxOut};
+use bitcoin_rs_consensus::script::VerifyFlags;
 use bitcoin_rs_consensus::transaction_sigop_cost;
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
-use bitcoin_rs_script::VerifyFlags;
 
 use crate::standardness::PackageTxContext;
 
@@ -49,10 +49,10 @@ pub(crate) fn prepared_context(
 mod tests {
     use bitcoin::consensus::deserialize;
     use bitcoin::hashes::Hash as _;
-    use bitcoin_rs_primitives::{
+    use bitcoin_rs_consensus::primitives::{
         Amount, LockTime, Script, Sequence, TxIn, Txid, Witness, consensus_bytes,
     };
-    use bitcoin_rs_script::{opcode, push_data};
+    use bitcoin_rs_consensus::script::{opcode, push_data};
 
     use super::*;
 

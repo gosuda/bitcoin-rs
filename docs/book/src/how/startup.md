@@ -21,12 +21,12 @@ The binary parses the CLI, resolves config, opens the data directory under a loc
 2. `initialize_data_dir` (`open.rs`) creates the process epoch used by recovery evidence.
 3. Split the dbcache budget between chainstate and txindex, then `NodeStorage::open` (`open.rs`).
 4. Bind ZMQ publisher sockets from `[[notifications.zmq]]` TOML endpoints (`open.rs`; key form in [reference/config-keys.md](../reference/config-keys.md)).
-5. `require_full_script_attestation` then `prepare_initial_chainstate` (`open.rs`): restore from checkpoint or journal, or start cold. The chosen source logs one line from `crates/chainstate/src/recovery.rs:339`, `:354`, or `:464`:
+5. `require_full_script_attestation` then `prepare_initial_chainstate` (`open.rs`): restore from a live assumeutxo snapshot, from checkpoint or journal, or start cold. A live assumeutxo anchor enters `restore_snapshot` (`crates/execution/src/recovery.rs:208`) before the checkpoint lookup. It first loads a complete checkpoint and reuses it when the checkpoint is compatible with the pinned anchor. A checkpoint that disagrees at the anchor height fails with `PinnedCheckpointMismatch` (`recovery.rs:232`). Only without a compatible checkpoint does it load the verified snapshot. No anchor restore logs `chainstate restore selected`, whether it reuses the checkpoint or loads the snapshot. The checkpoint, journal, and cold sources each log one line from `crates/execution/src/recovery.rs:354`, `:464`, or `:339`:
 
    ```
-   INFO bitcoin_rs_chainstate::recovery: chainstate restore selected restore_source="checkpoint" checkpoint_generation=2 checkpoint_height=5 height=5 hash="0ef5cd..."
-   INFO bitcoin_rs_chainstate::recovery: chainstate restore selected restore_source="journal" checkpoint_generation=1 checkpoint_height=0 height=3 hash=7ae5b4e2... replayed_records=3 chain_tx_count=4 replay_seconds=0.0003619
-   INFO bitcoin_rs_chainstate::recovery: chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
+   INFO bitcoin_rs_execution::recovery: chainstate restore selected restore_source="checkpoint" checkpoint_generation=2 checkpoint_height=5 height=5 hash="0ef5cd..."
+   INFO bitcoin_rs_execution::recovery: chainstate restore selected restore_source="journal" checkpoint_generation=1 checkpoint_height=0 height=3 hash=7ae5b4e2... replayed_records=3 chain_tx_count=4 replay_seconds=0.0003619
+   INFO bitcoin_rs_execution::recovery: chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
    ```
 
    The journal variant is the replay path: `replayed_records=3` journal records were re-applied on top of the checkpoint, and `replay_seconds` times that work (`recovery.rs:464`). A checkpoint fallback with a gap above `STALE_RESTORE_ERROR_THRESHOLD` logs the `stale checkpoint restore` error (`open.rs`).
@@ -35,14 +35,14 @@ The binary parses the CLI, resolves config, opens the data directory under a loc
 8. Install the tip-staged hook for mining, the mempool gateway, block-announce queue, and chain followers (`open.rs`).
 9. Configure checkpointing and clear any disconnect marker (`open.rs`); an unrecoverable durable-head gap returns `UnrecoverableDurableHeadGap` naming the three on-disk paths to fix or wipe.
 10. Restore the mempool snapshot (`open.rs`) with its `mempool snapshot revalidation finished` line, then open the assumeutxo manager and the block sync.
-11. `verify_startup_window` (`open.rs`) re-verifies the last `STARTUP_VERIFY_DEPTH = 6` blocks (`crates/chainstate/src/verify.rs:24`) at `CheckLevel::CheckUndoAndCommitments`, logging `startup verification passed blocks=5` (`open.rs`). Failure returns `StartupVerification` with the four paths to inspect.
+11. `verify_startup_window` (`open.rs`) re-verifies the last `STARTUP_VERIFY_DEPTH = 6` blocks (`crates/execution/src/verify.rs:24`) at `CheckLevel::CheckUndoAndCommitments`, logging `startup verification passed blocks=5` (`open.rs`). Failure returns `StartupVerification` with the four paths to inspect.
 
 One real cold start, trimmed (timestamps and LSM-tree table recovery removed; `$DATA` is the data directory):
 
 ```
-INFO bitcoin_rs_chainstate::recovery: chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
+INFO bitcoin_rs_execution::recovery: chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
 INFO bitcoin_rs_node::state::open: no mempool snapshot; starting with an empty pool status="missing"
-INFO bitcoin_rs_node::state::open: opened storage backend with effective cache capacities backend="fjall" chainstate_cache_bytes=471859200 txindex_cache_bytes=0 total_cache_bytes=471859200
+INFO bitcoin_rs_node::state::open: opened storage backend with effective cache capacities backend="rocksdb" chainstate_cache_bytes=471859200 txindex_cache_bytes=0 total_cache_bytes=471859200
 INFO bitcoin_rs_node::lifecycle: bitcoin-rs node booting config=NodeConfig { network: Regtest, data_dir: "$DATA", ... }
 DEBUG bitcoin_rs_node::state::open: startup verification passed blocks=0
 ```
@@ -57,7 +57,7 @@ The bind order is:
    `INFO bitcoin_rs_node::lifecycle: rpc listener bound addr=127.0.0.1:46733 surface=Shared`
 2. Pool (feature-gated), after RPC.
 3. P2P: `P2pService::start` (`lifecycle.rs`) binds the listener:
-   `INFO bitcoin_rs_p2p::service: p2p listener bound addr=127.0.0.1:0` (port `:0` on regtest; the log shows the requested value, the actual socket appears in `ss`/metrics).
+   `INFO bitcoin_rs_wire::service: p2p listener bound addr=127.0.0.1:0` (port `:0` on regtest; the log shows the requested value, the actual socket appears in `ss`/metrics).
 4. Chainstate maintenance worker, then the event loop thread (`lifecycle.rs`).
 
 `bind 127.0.0.1:0` in the booting config line is what was requested; use the `rpc listener bound` line for the real RPC address, or `--rpc-bind 127.0.0.1:8332` style fixed ports to make it predictable.
@@ -79,7 +79,7 @@ The shutdown latch and chainstate shutdown request propagate to every service. `
 | Another process holds the datadir | `DataDirLock::acquire` (`open.rs`) | `DataDirLock` error from `NodeOpenError` |
 | Durable head gap that replay cannot close | `recover_disconnect_marker` (`open.rs`) | `UnrecoverableDurableHeadGap { chainstate, checkpoints, txindex, source }` |
 | Last 6 blocks fail undo/commitment checks | `verify_startup_window` (`open.rs`) | `StartupVerification` naming blocks, chainstate, checkpoints, txindex paths |
-| Stored chain was not fully script-validated | `require_full_script_attestation` (`open.rs`) | warning `the stored chain was not fully script-validated; rebuilding it with full validation` (`crates/chainstate/src/recovery.rs:135`) |
+| Stored chain was not fully script-validated | `require_full_script_attestation` (`open.rs`) | warning `the stored chain was not fully script-validated; rebuilding it with full validation` (`crates/execution/src/recovery.rs:135`) |
 | RPC port taken | `start_rpc_listeners` | `failed to bind RPC listener at {address}` (`run.rs:41`) |
 | Metrics evidence identity mismatch | `init_metrics_services` | `metrics recorder already serves a different evidence identity` (`run.rs:71`) |
 
@@ -88,8 +88,8 @@ The shutdown latch and chainstate shutdown request propagate to every service. `
 | Invariant | Test | Location |
 |---|---|---|
 | Event-loop progress uses elapsed time | `telemetry_uses_elapsed_time_not_wake_count` | `crates/node/src/event_loop.rs:105` |
-| Startup window depth and level | `STARTUP_VERIFY_DEPTH = 6`, `CheckLevel::CheckUndoAndCommitments` | `crates/chainstate/src/verify.rs:24`, `open.rs` |
-| Journal replay matches the durable head identity | `replayed_frontier_must_match_the_durable_head_identity` | `crates/chainstate/src/journal/replay_tests.rs` (also cited in [how/state-and-storage.md](state-and-storage.md)) |
+| Startup window depth and level | `STARTUP_VERIFY_DEPTH = 6`, `CheckLevel::CheckUndoAndCommitments` | `crates/execution/src/verify.rs:24`, `open.rs` |
+| Journal replay matches the durable head identity | `replayed_frontier_must_match_the_durable_head_identity` | `crates/execution/src/journal/replay_tests.rs` (also cited in [how/state-and-storage.md](state-and-storage.md)) |
 | Crash recovery end to end | `crates/node/tests/crash_recovery.rs` (clause `SYNC-05` evidence) |
 
 Commands run for this page: the regtest traces above come from `./target/release/bitcoin-rs --network regtest --data-dir $DATA --log-level debug` with `generatetoaddress` over RPC; the restart traces (checkpoint and journal restore lines) come from a second and third start on the same datadir.

@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
-use bitcoin_rs_primitives::{
-    Block, BlockHash, BlockPayload, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
+use bitcoin_rs_consensus::primitives::{
+    Block, BlockHash, BlockImage, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
 };
-use bitcoin_rs_script::push_int;
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_consensus::script::push_int;
+use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
+use bitcoin_rs_storage::utxo::UtxoSet;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
+use crate::p2p::sync::chain::{SyncChain, WindowApplyDisposition};
 use crate::test_support::TestError;
-use bitcoin_rs_chainstate::Chainstate;
-use bitcoin_rs_p2p::sync::chain::{SyncChain, WindowApplyDisposition};
+use bitcoin_rs_execution::Chainstate;
 
 #[test]
 fn window_failure_keeps_committed_followers_and_native_retry_policy()
@@ -73,9 +73,9 @@ fn window_failure_keeps_committed_followers_and_native_retry_policy()
     ] {
         let owned_payloads = blocks
             .iter()
-            .map(|block| BlockPayload::from_local((*block).clone()))
+            .map(|block| BlockImage::from_local((*block).clone()))
             .collect::<Vec<_>>();
-        let payloads: Vec<&BlockPayload> = owned_payloads.iter().collect();
+        let payloads: Vec<&BlockImage> = owned_payloads.iter().collect();
         let error = match adapter.commit_window(&payloads) {
             Ok(count) => panic!("invalid window committed {count} blocks"),
             Err(error) => error,
@@ -114,17 +114,19 @@ fn apply_handles(
         applied_tip,
         block_tree,
         Arc::new(UtxoSet::new()),
-        Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
-            bitcoin_rs_utxo::stats::CoinStats::default(),
+        Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
+            bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         )),
-        Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
+        Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
+            0,
+        )),
     )
 }
 
 const GENESIS_TIME: u32 = 1_296_688_602;
 
 fn mined_block_with_prev_hash(prev_blockhash: BlockHash, height: u32, txdata: Vec<Tx>) -> Block {
-    use bitcoin_rs_primitives::CompactTarget;
+    use bitcoin_rs_consensus::primitives::CompactTarget;
     let mut block = Block {
         header: Header {
             version: 1,
@@ -143,10 +145,10 @@ fn mined_block_with_prev_hash(prev_blockhash: BlockHash, height: u32, txdata: Ve
     block
 }
 
-type MaturedChain = (Chainstate, Vec<Block>, HashMap<Hash256, BlockPayload>);
+type MaturedChain = (Chainstate, Vec<Block>, HashMap<Hash256, BlockImage>);
 
 fn matured_chain(depth: u32) -> Result<MaturedChain, crate::test_support::TestError> {
-    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
+    use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
     let mut parent = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
@@ -186,16 +188,16 @@ fn matured_chain(depth: u32) -> Result<MaturedChain, crate::test_support::TestEr
         Arc::new(ArcSwapOption::empty()),
         Arc::new(RwLock::new(tree)),
     );
-    handles.apply_block(&BlockPayload::from_local(genesis))?;
+    handles.apply_block(&BlockImage::from_local(genesis))?;
     for block in &blocks {
-        handles.apply_block(&BlockPayload::from_local(block.clone()))?;
+        handles.apply_block(&BlockImage::from_local(block.clone()))?;
     }
     let bodies = blocks
         .iter()
         .map(|block| {
             (
                 Hash256::from_le_bytes(block.block_hash().as_bytes()),
-                BlockPayload::from_local(block.clone()),
+                BlockImage::from_local(block.clone()),
             )
         })
         .collect();

@@ -2,7 +2,7 @@
 
 Inbound peers enter through a listener; outbound peers are redialed by one drain thread from the address book, feelers, and pinned peers. Both paths end in the same handshake and peer machine, and the node negotiates BIP324 v2 transport by default.
 
-The p2p surface lives in [`crates/p2p`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/p2p). Wire compatibility and deviations are owned by [docs/contracts/p2p-wire.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/p2p-wire.md) and [docs/policies/p2p-compatibility.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/p2p-compatibility.md).
+The wire surface lives in [`crates/wire`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/wire), and sync, dispatch, and relay orchestration live in [`crates/node/src/p2p`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/node/src/p2p). Wire compatibility and deviations are owned by [docs/contracts/p2p-wire.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/p2p-wire.md) and [docs/policies/p2p-compatibility.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/p2p-compatibility.md).
 
 ```text
                      inbound                         outbound
@@ -30,14 +30,14 @@ Admission is not acceptance. A peer that exceeds the cap or loses the eviction c
 The listener log reports the configured address, not the bound one:
 
 ```text
-{"level":"INFO","fields":{"message":"p2p listener bound","addr":"127.0.0.1:0"},"target":"bitcoin_rs_p2p::service"}
+{"level":"INFO","fields":{"message":"p2p listener bound","addr":"127.0.0.1:0"},"target":"bitcoin_rs_wire::service"}
 ```
 
 A `:0` entry therefore does not reveal the chosen port in the log.
 
 ## Outbound
 
-One thread named `bitcoin-rs-p2p-outbound-drain` ticks every second. Each tick reaps finished dials, retires extra full-relay connections every 45 seconds, and starts dials for parked work when capacity frees. The default slot counts are 8 full-relay peers, 2 block-relay-only peers, and 200 total connections.
+One thread named `bitcoin-rs-wire-outbound-drain` ticks every second. Each tick reaps finished dials, retires extra full-relay connections every 45 seconds, and starts dials for parked work when capacity frees. The default slot counts are 8 full-relay peers, 2 block-relay-only peers, and 200 total connections.
 
 Automatic peers have no per-peer retry timer. The drain re-selects from `AddressBook` each tick. Pinned and manual peers retry from 1 second up to 60 seconds, with the delay reset when the peer is seen ready. A dial runs on its own thread and carries `DialPurpose::{Regular, Feeler, Anchor}`.
 
@@ -49,13 +49,13 @@ The node enables v2 by default: `config.p2p.v2_transport` defaults to true, and 
 
 The library default is the opposite. `P2pServiceConfig::default()` leaves `v2_transport` false, and `ConnectionShared` defaults it false too. A library caller that builds `P2pService` directly must opt in. The node always sets the field from config, so a daemon gets v2 unless the operator disables it.
 
-Outbound transport choice uses v2 only for manual peers or peers whose address-book entry advertises `P2P_V2`; everything else starts with `ForceV1`. The transport loop checks the handshake deadline on every iteration and returns either `Step::V1` or `Step::Established`. The key schedule, ciphers, handshake machine, and packet reader live in `crates/p2p/src/bip324` (`P2P-11`).
+Outbound transport choice uses v2 only for manual peers or peers whose address-book entry advertises `P2P_V2`; everything else starts with `ForceV1`. The transport loop checks the handshake deadline on every iteration and returns either `Step::V1` or `Step::Established`. The key schedule, ciphers, handshake machine, and packet reader live in `crates/wire/src/bip324` (`P2P-11`).
 
 Two regtest nodes from this build complete a v2 handshake:
 
 ```text
-{"level":"INFO","fields":{"message":"p2p handshake complete; entering message loop","peer_addr":"127.0.0.1:34899","inbound":false,"transport":"v2"},"target":"bitcoin_rs_p2p::listener"}
-{"level":"INFO","fields":{"message":"p2p handshake complete; entering message loop","peer_addr":"127.0.0.1:42156","inbound":true,"transport":"v2"},"target":"bitcoin_rs_p2p::listener"}
+{"level":"INFO","fields":{"message":"p2p handshake complete; entering message loop","peer_addr":"127.0.0.1:34899","inbound":false,"transport":"v2"},"target":"bitcoin_rs_wire::listener"}
+{"level":"INFO","fields":{"message":"p2p handshake complete; entering message loop","peer_addr":"127.0.0.1:42156","inbound":true,"transport":"v2"},"target":"bitcoin_rs_wire::listener"}
 ```
 
 With `--v2transport=false` on the dialing node, the same pair logs `"transport":"v1"` on both sides.
@@ -139,12 +139,12 @@ Inbound headers pass through `HeadersSyncState::process`, which decides presync,
 
 | Invariant | Test | File |
 | --- | --- | --- |
-| An outbound v2 dial negotiates BIP324 | `an_outbound_v2_dial_negotiates_bip324` | [`crates/p2p/src/listener/v2_transport_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/listener/v2_transport_tests.rs) |
-| A silent responder ends at the deadline | `a_silent_responder_ends_at_the_handshake_deadline` | [`crates/p2p/src/listener/v2_transport_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/listener/v2_transport_tests.rs) |
-| An unanswered v2 dial retries over v1 | `an_unanswered_v2_dial_retries_once_over_v1` | [`crates/p2p/src/listener/v2_transport_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/listener/v2_transport_tests.rs) |
-| Manual and protected peers never discourage an IP | `manual_and_protected_local_connections_never_discourage_an_ip` | [`crates/p2p/src/listener/discouragement_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/listener/discouragement_tests.rs) |
-| Missing compact-block transactions complete through `getblocktxn` | `missing_tx_requests_getblocktxn_and_completes_on_blocktxn` | [`crates/p2p/src/compact_blocks/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/compact_blocks/tests.rs) |
-| Invalid `getblocktxn` indexes disconnect | `invalid_getblocktxn_indexes_disconnect` | [`crates/p2p/src/dispatch/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/dispatch/tests.rs) |
-| A same-address reconnect does not inherit a stalled request | `same_address_reconnect_does_not_inherit_stalled_inflight` | [`crates/p2p/src/sync/tests/header_rotation.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/p2p/src/sync/tests/header_rotation.rs) |
+| An outbound v2 dial negotiates BIP324 | `an_outbound_v2_dial_negotiates_bip324` | [`crates/wire/src/listener/v2_transport_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/wire/src/listener/v2_transport_tests.rs) |
+| A silent responder ends at the deadline | `a_silent_responder_ends_at_the_handshake_deadline` | [`crates/wire/src/listener/v2_transport_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/wire/src/listener/v2_transport_tests.rs) |
+| An unanswered v2 dial retries over v1 | `an_unanswered_v2_dial_retries_once_over_v1` | [`crates/wire/src/listener/v2_transport_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/wire/src/listener/v2_transport_tests.rs) |
+| Manual and protected peers never discourage an IP | `manual_and_protected_local_connections_never_discourage_an_ip` | [`crates/wire/src/listener/discouragement_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/wire/src/listener/discouragement_tests.rs) |
+| Missing compact-block transactions complete through `getblocktxn` | `missing_tx_requests_getblocktxn_and_completes_on_blocktxn` | [`crates/wire/src/compact_blocks/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/wire/src/compact_blocks/tests.rs) |
+| Invalid `getblocktxn` indexes disconnect | `invalid_getblocktxn_indexes_disconnect` | [`crates/wire/src/dispatch/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/wire/src/dispatch/tests.rs) |
+| A same-address reconnect does not inherit a stalled request | `same_address_reconnect_does_not_inherit_stalled_inflight` | [`crates/node/src/p2p/sync/tests/header_rotation.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/p2p/sync/tests/header_rotation.rs) |
 
 The [architecture](architecture.md) chapter shows where a staged block goes next, and the [mempool](mempool.md) chapter covers transaction relay after admission.

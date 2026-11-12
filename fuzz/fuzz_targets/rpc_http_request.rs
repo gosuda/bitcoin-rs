@@ -35,15 +35,15 @@ impl Read for ChunkReader<'_> {
 
 fuzz_target!(|data: &[u8]| {
     let mut r1 = BufReader::new(ChunkReader::new(data, data.len()));
-    let res1 = bitcoin_rs_rpc::read_http_request(&mut r1);
+    let res1 = bitcoin_rs_serving::read_http_request(&mut r1);
 
     let mid = (data.len() / 2).max(1);
     let mut r2 = BufReader::new(ChunkReader::new(data, mid));
-    let res2 = bitcoin_rs_rpc::read_http_request(&mut r2);
+    let res2 = bitcoin_rs_serving::read_http_request(&mut r2);
 
     let third = (data.len() / 3).max(1);
     let mut r3 = BufReader::new(ChunkReader::new(data, third));
-    let res3 = bitcoin_rs_rpc::read_http_request(&mut r3);
+    let res3 = bitcoin_rs_serving::read_http_request(&mut r3);
 
     match (&res1, &res2) {
         (Ok(req1), Ok(req2)) => {
@@ -84,7 +84,7 @@ fuzz_target!(|data: &[u8]| {
             req.body.len()
         );
         if req.keep_alive {
-            let _ = bitcoin_rs_rpc::read_http_request(&mut r1);
+            let _ = bitcoin_rs_serving::read_http_request(&mut r1);
         }
     }
 });

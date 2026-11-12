@@ -1,10 +1,10 @@
 use super::*;
 use bitcoin::hashes::Hash as _;
-use bitcoin_rs_mining::{
+use bitcoin_rs_serving::mining::{
     BlockValidationResult, CoinbaseBudget, GenerateRequest, GenerateSelection, solve_block,
 };
-use bitcoin_rs_primitives::{
-    Amount, BlockPayload, Hash256, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+use bitcoin_rs_consensus::primitives::{
+    Amount, BlockImage, Hash256, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
     consensus_bytes,
 };
 use std::time::Instant;
@@ -15,8 +15,8 @@ enum TestError {
     Io(std::io::Error),
     AddrParse(std::net::AddrParseError),
     Node(bitcoin_rs_node::NodeError),
-    Mining(bitcoin_rs_mining::MiningError),
-    MiningControl(bitcoin_rs_mining::MiningControlError),
+    Mining(bitcoin_rs_serving::mining::MiningError),
+    MiningControl(bitcoin_rs_serving::mining::MiningControlError),
     Consensus(bitcoin::consensus::encode::Error),
     Join(tokio::task::JoinError),
     Elapsed(tokio::time::error::Elapsed),
@@ -75,8 +75,8 @@ impl From<bitcoin_rs_node::NodeError> for TestError {
     }
 }
 
-impl From<bitcoin_rs_mining::MiningError> for TestError {
-    fn from(e: bitcoin_rs_mining::MiningError) -> Self {
+impl From<bitcoin_rs_serving::mining::MiningError> for TestError {
+    fn from(e: bitcoin_rs_serving::mining::MiningError) -> Self {
         Self::Mining(e)
     }
 }
@@ -110,8 +110,8 @@ impl<T> From<tokio::sync::mpsc::error::SendError<T>> for TestError {
         Self::Send
     }
 }
-impl From<bitcoin_rs_mining::MiningControlError> for TestError {
-    fn from(e: bitcoin_rs_mining::MiningControlError) -> Self {
+impl From<bitcoin_rs_serving::mining::MiningControlError> for TestError {
+    fn from(e: bitcoin_rs_serving::mining::MiningControlError) -> Self {
         Self::MiningControl(e)
     }
 }
@@ -131,14 +131,14 @@ impl<T> From<crossbeam_channel::SendError<T>> for TestError {
 type TestResult = Result<(), TestError>;
 
 pub(super) fn empty_candidate(parent: u8) -> Arc<Candidate> {
-    use bitcoin_rs_mining::{CandidateContext, assemble_candidate};
+    use bitcoin_rs_serving::mining::{CandidateContext, assemble_candidate};
     Arc::new(
         assemble_candidate(
             &CandidateContext {
                 previous_block_hash: Hash256::from_le_bytes(&[parent; 32]),
                 height: 1,
                 version: 0x20000000,
-                bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x207fffff),
+                bits: bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x207fffff),
                 min_time: 1,
                 current_time: 1,
                 locktime_cutoff: 1,
@@ -288,7 +288,7 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
         tokio::task::spawn_blocking(move || submission_node
             .mining_control()
             .unwrap()
-            .submit_block(BlockPayload::from_local(assembled)))
+            .submit_block(BlockImage::from_local(assembled)))
         .await??,
         BlockValidationResult::Accepted
     );
@@ -297,7 +297,7 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
     assert!(Arc::ptr_eq(&hub.lookup(first.id).unwrap(), &first));
     assert_eq!(
         node.mining_control()?
-            .submit_block(BlockPayload::from_local(first.assemble_block(&solution)?))?,
+            .submit_block(BlockImage::from_local(first.assemble_block(&solution)?))?,
         BlockValidationResult::Duplicate
     );
     let funding = solved.txs[0].clone();
@@ -318,7 +318,7 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
     .await??;
     let tx = Tx {
         version: 2,
-        lock_time: bitcoin_rs_primitives::LockTime::ZERO,
+        lock_time: bitcoin_rs_consensus::primitives::LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(funding.txid(), 0),
             script_sig: Script::new(),
@@ -385,12 +385,12 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
     solve_block(&mut old_job, 1_000_000)?;
     assert_eq!(
         node.mining_control()?
-            .submit_block(BlockPayload::from_local(old_job))?,
+            .submit_block(BlockImage::from_local(old_job))?,
         BlockValidationResult::Accepted
     );
     assert!(matches!(
         node.mining_control()?
-            .submit_block(BlockPayload::from_local(projected))?,
+            .submit_block(BlockImage::from_local(projected))?,
         BlockValidationResult::Rejected(_)
     ));
 

@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_support::TestError;
-use bitcoin_rs_chain::regtest_fixture;
-use bitcoin_rs_primitives::{Block, BlockPayload, Network};
+use bitcoin_rs_consensus::primitives::{Block, BlockImage, Network};
+use bitcoin_rs_execution::chain::regtest_fixture;
 use std::{
     future::Future,
     task::{Context, Poll, Waker},
@@ -57,16 +57,16 @@ fn settled_poll_replays_gaps_disconnects_and_pinned_targets() -> Result<(), Test
     let genesis = node.snapshot().tip_hash.into();
     let mut sub = node.subscribe_chain()?;
     assert!(node.poll_chain(&mut sub)?.is_none());
-    let one = BlockPayload::from_local(block(genesis, 1, 0)?);
+    let one = BlockImage::from_local(block(genesis, 1, 0)?);
     node.state.apply_block(&one)?;
     let update = node
         .poll_chain(&mut sub)?
         .ok_or(TestError::Missing("connect hint"))?;
     assert!(!update.gap);
     let pinned_one = update.current;
-    let two = BlockPayload::from_local(block(one.block().block_hash(), 2, 0)?);
+    let two = BlockImage::from_local(block(one.block_hash(), 2, 0)?);
     node.state.apply_block(&two)?;
-    let three = BlockPayload::from_local(block(two.block().block_hash(), 3, 0)?);
+    let three = BlockImage::from_local(block(two.block_hash(), 3, 0)?);
     node.state.apply_block(&three)?;
     let update = node
         .poll_chain(&mut sub)?
@@ -84,20 +84,20 @@ fn settled_poll_replays_gaps_disconnects_and_pinned_targets() -> Result<(), Test
     );
     assert_eq!(
         node.replay_chain(genesis, &pinned_one, 1)?.position,
-        one.block().block_hash()
+        one.block_hash()
     );
     crate::reorg::invalidate_block(
         &node.state.chainstate(),
         &node.state.chain_followers(),
-        two.block().block_hash().into(),
+        two.block_hash().into(),
     )?;
-    let alternate = BlockPayload::from_local(block(one.block().block_hash(), 2, 1)?);
+    let alternate = BlockImage::from_local(block(one.block_hash(), 2, 1)?);
     node.state.apply_block(&alternate)?;
     let target = node.pin_chain()?;
-    let replay = node.replay_chain(three.block().block_hash(), &target, 10)?;
+    let replay = node.replay_chain(three.block_hash(), &target, 10)?;
     assert!(replay.complete);
     assert!(
-        matches!(&replay.steps[..], [ChainStep::Disconnected(a), ChainStep::Disconnected(b), ChainStep::Connected(c)] if a.height == 3 && b.height == 2 && c.header == alternate.block().header)
+        matches!(&replay.steps[..], [ChainStep::Disconnected(a), ChainStep::Disconnected(b), ChainStep::Connected(c)] if a.height == 3 && b.height == 2 && c.header == alternate.header())
     );
     assert!(node.replay_chain(genesis, &target, 0).is_err());
     assert!(node.replay_chain(genesis, &target, 257).is_err());
@@ -146,7 +146,7 @@ fn unsettled_or_failed_chain_fences_never_publish_a_stable_hint() -> Result<(), 
     bad.txs.clear();
     assert!(
         node.state
-            .apply_block(&BlockPayload::from_local(bad))
+            .apply_block(&BlockImage::from_local(bad))
             .is_err()
     );
     assert_eq!(node.settled_snapshot()?, before);

@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 #[cfg(any(test, feature = "test-seam"))]
-use bitcoin_rs_primitives::Tx;
+use bitcoin_rs_consensus::primitives::Tx;
 use hashbrown::HashSet;
 use thiserror::Error;
 
@@ -631,7 +631,7 @@ mod tests {
     use crate::pool::{entry_memory_usage, link_memory_usage};
     use crate::test_error::TestError;
     use alloc::sync::Arc;
-    use bitcoin_rs_primitives::{
+    use bitcoin_rs_consensus::primitives::{
         Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
     };
 

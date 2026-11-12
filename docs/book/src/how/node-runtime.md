@@ -17,19 +17,19 @@ The operator view of startup, recovery, and shutdown is in [Shutdown and upgrade
 | block announce worker | `lifecycle.rs` | p2p-owned thread | `join_core_services` (`lifecycle.rs`) |
 | tx relay worker | `lifecycle.rs` | p2p-owned thread | `join_core_services` (`lifecycle.rs`) |
 | tx ingress consumer | `lifecycle.rs` | `bitcoin-rs-tx-ingress` | `join_core_services` (`lifecycle.rs`) |
-| RPC listeners | `lifecycle.rs` | `bitcoin-rs-rpc` per listener, plus `rpc-connection` per request | `serve_surface_with_shutdown` drain, then join |
+| RPC listeners | `lifecycle.rs` | `bitcoin-rs-serving` per listener, plus `rpc-connection` per request | `serve_surface_with_shutdown` drain, then join |
 | pool service, if `--pool` | `lifecycle.rs` | SV1/SV2 listeners plus `pool-reconcile` | `pool.shutdown` (`lifecycle.rs`) |
 | P2P service | `lifecycle.rs` | peer workers | `state.p2p().shutdown()` then joins |
 | chainstate maintenance | `lifecycle.rs` | worker thread | joined after the P2P bootstrap drain (`lifecycle.rs`) |
 | event loop | `lifecycle.rs` | `bitcoin-rs-event-loop` | joined first among core services (`lifecycle.rs`) |
 
-The listener spawns the per-connection RPC threads itself, `rpc-connection` with a 2 MiB stack (`crates/rpc/src/server.rs`). The global rayon pool is capped at 4 threads at boot (`cap_global_thread_pool`, `lifecycle.rs`).
+The listener spawns the per-connection RPC threads itself, `rpc-connection` with a 2 MiB stack (`crates/serving/src/server.rs`). The global rayon pool is capped at 4 threads at boot (`cap_global_thread_pool`, `lifecycle.rs`).
 
 ## Event loop ticks
 
-The event loop is a `crossbeam` select over three inputs (`crates/node/src/event_loop.rs:31-58`): the shutdown latch, a 1 second tick (`SYNC_TICK`, `event_loop.rs:8`), and a bounded wake channel that P2P triggers when new headers or blocks arrive (`sync_wake`, `lifecycle.rs`; `on_peer_ready`, `lifecycle.rs`). Every tick or wake runs one `BlockSync::tick` (`crates/p2p/src/sync.rs:426`), measured into the `node.event_loop.tick_seconds` histogram, and every 1,024 iterations the loop emits a debug heartbeat with the iteration and tick counts (`event_loop.rs:37-39`). Two side conditions end the loop: a shutdown latch fires, or `sync.closed_for_recovery()` reports a chainstate closed for recovery, in which case the loop itself requests shutdown and the run exits (`event_loop.rs:60-65`, counter `node.sync.apply_halt_shutdowns`). The loop emits a sync progress line when 60 seconds have actually elapsed since the last one, not once per tick (`progress_due`, `event_loop.rs:82`); `telemetry_uses_elapsed_time_not_wake_count` (`event_loop.rs:92`) pins that rule.
+The event loop is a `crossbeam` select over three inputs (`crates/node/src/event_loop.rs:31-58`): the shutdown latch, a 1 second tick (`SYNC_TICK`, `event_loop.rs:8`), and a bounded wake channel that P2P triggers when new headers or blocks arrive (`sync_wake`, `lifecycle.rs`; `on_peer_ready`, `lifecycle.rs`). Every tick or wake runs one `BlockSync::tick` (`crates/node/src/p2p/sync.rs:426`), measured into the `node.event_loop.tick_seconds` histogram, and every 1,024 iterations the loop emits a debug heartbeat with the iteration and tick counts (`event_loop.rs:37-39`). Two side conditions end the loop: a shutdown latch fires, or `sync.closed_for_recovery()` reports a chainstate closed for recovery, in which case the loop itself requests shutdown and the run exits (`event_loop.rs:60-65`, counter `node.sync.apply_halt_shutdowns`). The loop emits a sync progress line when 60 seconds have actually elapsed since the last one, not once per tick (`progress_due`, `event_loop.rs:82`); `telemetry_uses_elapsed_time_not_wake_count` (`event_loop.rs:92`) pins that rule.
 
-`BlockSync::emit_sync_progress` (`crates/p2p/src/sync/telemetry.rs:4`) logs the applied height, header height, gap, live peers, and IBD state; it logs a `sync progress: frontier cannot advance` warning instead when the plan reports a stall reason other than being at the tip. The trace below shows both shapes of the line.
+`BlockSync::emit_sync_progress` (`crates/node/src/p2p/sync/telemetry.rs:4`) logs the applied height, header height, gap, live peers, and IBD state; it logs a `sync progress: frontier cannot advance` warning instead when the plan reports a stall reason other than being at the tip. The trace below shows both shapes of the line.
 
 ## Chain feed: stable hint and settled poll
 
@@ -39,9 +39,9 @@ On top of that primitive: `subscribe_chain` records a cursor snapshot, `poll_cha
 
 ## Transaction ingress: RPC and P2P into the mempool
 
-Every mutation enters through one gateway, `MempoolGateway`. The RPC and embedded paths call it directly: `sendrawtransaction` submits with `LocalOrigin::Rpc` (`crates/rpc/src/handlers/tx.rs:501-506`) and `Node::broadcast` submits through the same call with the same default fee-rate cap (`crates/node/src/embed.rs:158-176`); [EMB-05](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/embedding.md#invariants) states that no production path mutates the pool outside the gateway.
+Every mutation enters through one gateway, `MempoolGateway`. The RPC and embedded paths call it directly: `sendrawtransaction` submits with `LocalOrigin::Rpc` (`crates/serving/src/handlers/tx.rs:501-506`) and `Node::broadcast` submits through the same call with the same default fee-rate cap (`crates/node/src/embed.rs:158-176`); [EMB-05](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/embedding.md#invariants) states that no production path mutates the pool outside the gateway.
 
-The P2P path is asynchronous. The peer listener hands each inbound transaction or package to a bounded channel (`state.inbound_tx_sender`, `crates/node/src/state.rs:229`), and one consumer thread, `bitcoin-rs-tx-ingress`, drains it (`spawn_tx_ingress_consumer`, `crates/node/src/tx_ingress.rs:17-39`). The loop (`run_consumer_loop`, `tx_ingress.rs:41-62`) alternates between draining the channel and a 100 ms retry pass that runs `maintain_orphans` and `retry_orphans` (`tx_ingress.rs:185-194`), so an orphan whose parents arrive later is retried without any peer round trip. After a commit, three things happen in order (`dispatch_common_outcome`, `tx_ingress.rs:256-291`): the relay queue announces the txid to other peers, `mining_control.publish_generation()` wakes the template coordinator, and the peer table records the response. Package relay follows the same spine with a charge-overrun counter, `node.package_charge_overrun`, when a decoded package's measured heap exceeds its planned charge (`process_package`, `tx_ingress.rs:95-129`). ZMQ publication is not wired here; it is a gateway observer leg (`MempoolSequenceObserver`, `crates/rpc/src/zmq.rs:493`), so the RPC, P2P, and embedded paths all publish identically.
+The P2P path is asynchronous. The peer listener hands each inbound transaction or package to a bounded channel (`state.inbound_tx_sender`, `crates/node/src/state.rs:229`), and one consumer thread, `bitcoin-rs-tx-ingress`, drains it (`spawn_tx_ingress_consumer`, `crates/node/src/tx_ingress.rs:17-39`). The loop (`run_consumer_loop`, `tx_ingress.rs:41-62`) alternates between draining the channel and a 100 ms retry pass that runs `maintain_orphans` and `retry_orphans` (`tx_ingress.rs:185-194`), so an orphan whose parents arrive later is retried without any peer round trip. After a commit, three things happen in order (`dispatch_common_outcome`, `tx_ingress.rs:256-291`): the relay queue announces the txid to other peers, `mining_control.publish_generation()` wakes the template coordinator, and the peer table records the response. Package relay follows the same spine with a charge-overrun counter, `node.package_charge_overrun`, when a decoded package's measured heap exceeds its planned charge (`process_package`, `tx_ingress.rs:95-129`). ZMQ publication is not wired here; it is a gateway observer leg (`MempoolSequenceObserver`, `crates/serving/src/zmq.rs:493`), so the RPC, P2P, and embedded paths all publish identically.
 
 A worked refusal from the trace node: a well-formed transaction spending an unknown prevout is rejected at the gateway with the consensus reason string,
 
@@ -69,8 +69,8 @@ node_capability_txindex_readiness{state="Opening"} 0   (and seven other states)
 node_shutdown_requested ...
 node_package_charge_overrun ...
 node_sync_pending_blocks_high_water ... staged_* and inbound_* queue depths
-storage_writes_total{backend="fjall",durability="durable"} 105
-storage_writes_total{backend="fjall",durability="default"} 204
+storage_writes_total{backend="rocksdb",durability="durable"} 105
+storage_writes_total{backend="rocksdb",durability="default"} 204
 storage_flushes_total ... storage_write_bytes ... storage_cache_capacity_bytes
 index_family_planned_write_bytes ...
 rpc_connections_active{surface="shared"} ...
@@ -95,7 +95,7 @@ The mining coordinator is assembled at boot (`lifecycle.rs`): `MiningCoordinator
 
 Submission goes through the chain transition, not around it: `MiningCoordinator::submit` locks the transition, opens a mempool change, and applies the block through `apply_connect_in_transition` (`mining.rs:158-190`), so a mining submit races with block sync on the same terms as any other apply. Mapping from apply failures to BIP22 reject reasons lives in `bip22_reject_reason` (`mining.rs:593`). The propagate hook on the chainstate (`set_pow_valid_block`, `lifecycle.rs`) hands a solved block to the block announcer so a `submitblock` from RPC and a P2P announcement share one path. Template and generate behavior contracts are [API-05](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/external-api.md#api-05-solo-mining-generate-path) through [API-11](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/external-api.md#api-11-bip22bip23-template-extras); the pool service that serves shares is described in [Mining and the native pool](../use/mining-and-pool.md) and [pool-ledger](pool-ledger.md).
 
-Reorg control is glue too. `invalidateblock` reaches `crate::reorg::invalidate_block` through `RpcChainControl` (`lifecycle.rs`), which wraps `bitcoin_rs_chainstate::reorg::invalidate_block` with the node's mempool follower (`crates/node/src/reorg.rs:158-172`). The observer feeds every disconnect and connect to `ChainFollowers` and collects disconnected transactions for re-admission, capped at 20 MiB (`MAX_DISCONNECTED_TX_BYTES`, `reorg.rs:12`); settlement then reconsiders them, removes txs conflicted by the new branch, and trims the pool back under its size limit (`settle_node_reorg`, `reorg.rs:79-129`). After the branch switch, checkpoint debt is settled once (`settle_checkpoint_debt`, `reorg.rs:147-157`, log line `published checkpoint after branch switch`), and the sync engine is told to purge invalidated staged blocks and record the demoted tip (`lifecycle.rs`). The block-connect and reorg behavior itself is owned by [architecture](architecture.md) and [block-connect-and-reorg](block-connect-and-reorg.md).
+Reorg control is glue too. `invalidateblock` reaches `crate::reorg::invalidate_block` through `RpcChainControl` (`lifecycle.rs`), which wraps `bitcoin_rs_execution::reorg::invalidate_block` with the node's mempool follower (`crates/node/src/reorg.rs:158-172`). The observer feeds every disconnect and connect to `ChainFollowers` and collects disconnected transactions for re-admission, capped at 20 MiB (`MAX_DISCONNECTED_TX_BYTES`, `reorg.rs:12`); settlement then reconsiders them, removes txs conflicted by the new branch, and trims the pool back under its size limit (`settle_node_reorg`, `reorg.rs:79-129`). After the branch switch, checkpoint debt is settled once (`settle_checkpoint_debt`, `reorg.rs:147-157`, log line `published checkpoint after branch switch`), and the sync engine is told to purge invalidated staged blocks and record the demoted tip (`lifecycle.rs`). The block-connect and reorg behavior itself is owned by [architecture](architecture.md) and [block-connect-and-reorg](block-connect-and-reorg.md).
 
 ## Index worker and pool service shutdown
 
@@ -140,7 +140,7 @@ From the same run, the lines that show the runtime working, with boot noise remo
 
 ```text
 20:17:06.449480 INFO chainstate restore selected restore_source=cold reason=no_complete_checkpoint
-20:17:06.477694 INFO opened storage backend with effective cache capacities backend=fjall
+20:17:06.477694 INFO opened storage backend with effective cache capacities backend="rocksdb"
     chainstate_cache_bytes=377487360 txindex_cache_bytes=94371840
 20:17:06.477874 INFO bitcoin-rs node booting config=NodeConfig { ... esplora_max_queries: 2,
     rest: true, max_connections: 128, chainstate_journal: { blocks: 500, seconds: 5 } }
@@ -151,7 +151,7 @@ From the same run, the lines that show the runtime working, with boot noise remo
 20:20:15.890213 INFO sync progress applied_height=101 header_height=101 peers=0 ibd=false
 ```
 
-The 101 blocks between the second and third progress lines came from one `generatetoaddress 101` call; the progress line carries `gap` only while in IBD, matching `emit_sync_progress` (`crates/p2p/src/sync/telemetry.rs:22-34`). No DNS seeds resolve in this sandbox (`DNS bootstrap unavailable`), so `peers=0` throughout; block sync itself, the window and staging machinery, is owned by [header-sync-and-block-download](header-sync-and-block-download.md).
+The 101 blocks between the second and third progress lines came from one `generatetoaddress 101` call; the progress line carries `gap` only while in IBD, matching `emit_sync_progress` (`crates/node/src/p2p/sync/telemetry.rs:22-34`). No DNS seeds resolve in this sandbox (`DNS bootstrap unavailable`), so `peers=0` throughout; block sync itself, the window and staging machinery, is owned by [header-sync-and-block-download](header-sync-and-block-download.md).
 
 ## Where it is proven
 

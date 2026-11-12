@@ -1009,9 +1009,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.repo_root / "fuzz/fuzz_targets/script_eval.rs"
         )
         flags_bits_map = flag_bits(
-            args.repo_root / "crates/script/src/interpreter.rs"
+            args.repo_root / "crates/consensus/src/script/interpreter.rs"
         )
-        selectors = qa._commands(args.repo_root / "crates/p2p/src/compat.rs")
+        selectors = qa._commands(args.repo_root / "crates/wire/src/compat.rs")
     except (OSError, ValueError) as error:
         print(f"[import-reference] contract: {error}", file=sys.stderr)
         return 1

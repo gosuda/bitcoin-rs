@@ -17,7 +17,7 @@ The node writes JSON logs to stderr. On startup it reports the RPC address it bo
 
 ```
 {"timestamp":"...","level":"INFO","fields":{"message":"rpc listener bound","addr":"127.0.0.1:41701","surface":"Shared"},"target":"bitcoin_rs_node::lifecycle"}
-{"timestamp":"...","level":"INFO","fields":{"message":"p2p listener bound","addr":"127.0.0.1:0"},"target":"bitcoin_rs_p2p::service"}
+{"timestamp":"...","level":"INFO","fields":{"message":"p2p listener bound","addr":"127.0.0.1:0"},"target":"bitcoin_rs_wire::service"}
 ```
 
 The P2P line repeats the configured listen address, so with `:0` it does not tell you the chosen port. The RPC line reports the bound address. Use fixed ports when another program needs to dial P2P.
@@ -115,13 +115,13 @@ A clean shutdown publishes a chainstate checkpoint, saves fee-estimator history,
 The process exits with status 0. Starting again on the same data directory restores the checkpoint and reports it:
 
 ```
-{"timestamp":"...","level":"INFO","fields":{"message":"chainstate restore selected","restore_source":"checkpoint","checkpoint_generation":1,"checkpoint_height":1,"height":1,"hash":"4c3aaf6b9cdcd6bc22e27dc41d6aeca2c4429747b896a3bf6938549dfeec4691","replayed_records":0,"chain_tx_count":2,"replay_seconds":0.000111078},"target":"bitcoin_rs_chainstate::recovery"}
+{"timestamp":"...","level":"INFO","fields":{"message":"chainstate restore selected","restore_source":"checkpoint","checkpoint_generation":1,"checkpoint_height":1,"height":1,"hash":"4c3aaf6b9cdcd6bc22e27dc41d6aeca2c4429747b896a3bf6938549dfeec4691","replayed_records":0,"chain_tx_count":2,"replay_seconds":0.000111078},"target":"bitcoin_rs_execution::recovery"}
 ```
 
 Sync progress is logged every 60 seconds, with applied blocks and headers reported separately:
 
 ```
-{"timestamp":"...","level":"INFO","fields":{"message":"sync progress","applied_height":1,"header_height":1,"peers":0,"ibd":false},"target":"bitcoin_rs_p2p::sync::telemetry"}
+{"timestamp":"...","level":"INFO","fields":{"message":"sync progress","applied_height":1,"header_height":1,"peers":0,"ibd":false},"target":"bitcoin_rs_node::p2p::sync::telemetry"}
 ```
 
 ## Next

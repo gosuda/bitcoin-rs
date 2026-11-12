@@ -19,8 +19,10 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 const BASE: &str = "385901ccbd69dff6bbd00065d01fb8a9e464dede7cfe0372443884f9b1dcf6b9";
 const COMMITMENT: &str = "17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a";
-const CORE_SNAPSHOT: &[u8] = include_bytes!("../../crates/utxo/tests/fixtures/core-v2/core200.dat");
-const CORE_BLOCKS: &str = include_str!("../../crates/utxo/tests/fixtures/core-v2/blocks200.json");
+const CORE_SNAPSHOT: &[u8] =
+    include_bytes!("../../crates/storage/tests/fixtures/core-v2/core200.dat");
+const CORE_BLOCKS: &str =
+    include_str!("../../crates/storage/tests/fixtures/core-v2/blocks200.json");
 
 fn core_blocks() -> Result<Vec<Block>> {
     let hex: Vec<String> = sonic_rs::from_str(CORE_BLOCKS)?;

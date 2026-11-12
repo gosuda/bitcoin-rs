@@ -53,10 +53,9 @@ Contents: [Install](#install) · [Quick start](#quick-start) · [Why bitcoin-rs]
 | Requirement | Details |
 | --- | --- |
 | Rust toolchain | `stable` with Rust 2024 edition support and workspace MSRV `1.99.0` ([`rust-toolchain.toml`](rust-toolchain.toml), [source compatibility policy](docs/policies/source-compatibility.md)) |
-| Default build (`fjall`, `redb`, `zmq`) | C and C++ compilers plus `ar` (`build-essential` on Debian/Ubuntu); ZeroMQ is compiled from bundled sources, so no system ZeroMQ headers, `pkg-config`, `cmake`, or `libsodium` are needed |
-| Minimal lane (`--no-default-features --features fjall`) | Drops the bundled-ZeroMQ C++ build; a C compiler is still required for vendored secp256k1 and mimalloc |
+| Default build (`zmq`) | C and C++ (C++17) compilers, `clang`, `libclang-dev`, `cmake`, and `ar` (`build-essential`, `clang`, `libclang-dev`, `cmake` on Debian/Ubuntu); RocksDB is the mandatory default storage engine, and ZeroMQ is compiled from bundled sources |
+| Minimal lane (`--no-default-features`) | Drops the bundled-ZeroMQ C++ build; RocksDB, secp256k1, and mimalloc still require C/C++ compilers, `clang`, `libclang-dev`, and `cmake` |
 | Optional `--features kernel` | `cmake`, `libboost-dev`, and a C++ compiler for `libbitcoinkernel` |
-| Optional `--features rocksdb` | `clang` and `libclang-dev` |
 
 ### Build from source
 
@@ -70,7 +69,7 @@ cd bitcoin-rs
 cargo build --locked --profile quickstart -p bitcoin-rs
 
 # Or minimal native build without the ZeroMQ C library
-cargo build --locked --profile quickstart -p bitcoin-rs --no-default-features --features fjall
+cargo build --locked --profile quickstart -p bitcoin-rs --no-default-features
 ```
 
 For sustained synchronization or benchmarking, compile with `--release` (`cargo build --locked --release -p bitcoin-rs`) and record the exact profile and feature flags with any measurement. See [Getting started](docs/getting-started.md) for Docker and optional `kernel` build lanes.
@@ -120,9 +119,9 @@ wait "$NODE_PID"
 
 ### Mainnet, assume-valid, and kernel verification
 
-Run `./target/release/bitcoin-rs --data-dir .bitcoin-rs` without `--network` to start on `mainnet`. This command uses `fjall` storage, native Rust script verification, BIP324 v2 P2P transport, and loopback JSON-RPC on `127.0.0.1:8332`. Mainnet defaults to `--validation-mode assume-valid`. That mode skips historical script execution through the pinned assume-valid anchor (`938343`) while the active chain contains that anchor. Pass `--validation-mode full` or `--assume-valid-height 0` to verify every script from genesis.
+Run `./target/release/bitcoin-rs --data-dir .bitcoin-rs` without `--network` to start on `mainnet`. This command uses `rocksdb` storage, native Rust script verification, BIP324 v2 P2P transport, and loopback JSON-RPC on `127.0.0.1:8332`. Mainnet defaults to `--validation-mode assume-valid`. That mode skips historical script execution through the pinned assume-valid anchor (`938343`) while the active chain contains that anchor. Pass `--validation-mode full` or `--assume-valid-height 0` to verify every script from genesis.
 
-Consult [docs/getting-started.md](docs/getting-started.md) for the layered configuration precedence: defaults, `--config` TOML, `--bitcoin-conf`, `BITCOIN_RS_*` environment variables, and CLI flags. The same page covers storage backends (`fjall`, `redb`, `rocksdb`), pruning, REST (`--rest=true`), ZMQ, and optional `--features kernel` / `--validation-engine kernel` builds.
+Consult [docs/getting-started.md](docs/getting-started.md) for the layered configuration precedence: defaults, `--config` TOML, `--bitcoin-conf`, `BITCOIN_RS_*` environment variables, and CLI flags. The same page covers storage (RocksDB mandatory default engine; offline converter `tools/storage-convert` for retired epoch-2 datadirs), pruning, REST (`--rest=true`), ZMQ, and optional `--features kernel` / `--validation-engine kernel` builds.
 
 ---
 
@@ -153,7 +152,7 @@ See the [BIP adoption policy](docs/policies/bip-adoption.md) for the research-to
 
 ## Architecture
 
-The workspace is a five-layer, one-way dependency graph. `bin/bitcoin-rs` and `crates/node` compose the runtime. `crates/rpc` owns the external protocols. `chain`, `chainstate`, `utxo`, `p2p`, `mempool`, `index`, and `mining` own domain state. `crates/storage` confines every storage engine (`fjall`, `redb`, `rocksdb`). `primitives`, `script`, and `consensus` stay free of I/O. The daemon and `Node::start` share one lifecycle, and `libbitcoinkernel` FFI stays behind the optional `kernel` feature. Details live in the [architecture contract](docs/contracts/architecture.md) and [embedding contract](docs/contracts/embedding.md).
+The workspace is a five-layer, one-way dependency graph. `bin/bitcoin-rs` and `crates/node` compose the runtime. `crates/serving` owns the external protocols. `execution`, `projection`, `wire`, and `mempool` own domain state. `crates/storage` confines every storage engine (RocksDB mandatory default; `fjall` and `redb` retired to `tools/storage-convert`; `surrealkv` and `mdbx` optional). `consensus` stays free of I/O. The daemon and `Node::start` share one lifecycle, and `libbitcoinkernel` FFI stays behind the optional `kernel` feature. The layer model and permitted edges live in the [architecture contract](docs/contracts/architecture.md#arch-01-five-layer-one-way-dependency-direction) and the [embedding contract](docs/contracts/embedding.md).
 
 ---
 

@@ -1,14 +1,18 @@
 use crate::batch::{BatchOp, BufferedWriteBatch};
-use std::path::Path;
-
+use bytes::Bytes;
+use rust_rocksdb::checkpoint::Checkpoint;
 use rust_rocksdb::{
-    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBCompressionType, Direction, IteratorMode,
-    Options, PrefixRange, ReadOptions, WriteBatch as RocksWriteBatch, WriteOptions,
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBCompressionType, Direction,
+    IngestExternalFileOptions, IteratorMode, Options, PrefixRange, ReadOptions, SstFileWriter,
+    WriteBatch as RocksWriteBatch, WriteOptions,
 };
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
 
-const BLOCK_SIZE: usize = 4 * 1024 * 1024;
+const DEFAULT_BLOCK_SIZE: usize = 4 * 1024 * 1024;
+const COIN_RECORDS_BLOCK_SIZE: usize = 64 * 1024;
 pub const ROCKSDB_DEFAULT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const BLOOM_BITS_PER_KEY: f64 = 10.0;
 const WRITE_BUFFER_SIZE: usize = 128 << 20;
@@ -37,6 +41,7 @@ impl WriteDurability {
 pub struct RocksDbStore {
     db: rust_rocksdb::DB,
     write_lock: parking_lot::Mutex<()>,
+    cache: Cache,
     #[cfg(any(test, feature = "test-seam"))]
     faults: crate::trait_::PersistFaultSlot,
     /// Last field: drops after the database handle above has closed.
@@ -68,7 +73,9 @@ impl RocksDbStore {
         };
         let cache_bytes = usize::try_from(cache_bytes).unwrap_or(usize::MAX);
         metrics::gauge!("storage.cache_capacity_bytes", "backend" => "rocksdb").set(
-            bitcoin_rs_primitives::u64_to_f64(u64::try_from(cache_bytes).unwrap_or(u64::MAX)),
+            bitcoin_rs_consensus::primitives::u64_to_f64(
+                u64::try_from(cache_bytes).unwrap_or(u64::MAX),
+            ),
         );
         let mut db_options = Options::default();
         db_options.create_if_missing(true);
@@ -76,26 +83,35 @@ impl RocksDbStore {
         db_options.set_compression_type(DBCompressionType::Lz4);
         db_options.set_atomic_flush(false);
 
-        let mut table_options = BlockBasedOptions::default();
-        table_options.set_block_size(BLOCK_SIZE);
-        table_options.set_block_cache(&Cache::new_lru_cache(cache_bytes));
-        table_options.set_bloom_filter(BLOOM_BITS_PER_KEY, false);
-        table_options.set_cache_index_and_filter_blocks(true);
+        let cache = Cache::new_lru_cache(cache_bytes);
+        let cf_options_for = |block_size: usize| {
+            let mut table_options = BlockBasedOptions::default();
+            table_options.set_block_size(block_size);
+            table_options.set_block_cache(&cache);
+            table_options.set_bloom_filter(BLOOM_BITS_PER_KEY, false);
+            table_options.set_cache_index_and_filter_blocks(true);
+            let mut cf_options = Options::default();
+            cf_options.set_compression_type(DBCompressionType::Lz4);
+            cf_options.set_write_buffer_size(WRITE_BUFFER_SIZE);
+            cf_options.set_block_based_table_factory(&table_options);
+            cf_options
+        };
+        let default_cf_options = cf_options_for(DEFAULT_BLOCK_SIZE);
+        let coin_records_cf_options = cf_options_for(COIN_RECORDS_BLOCK_SIZE);
 
-        let mut cf_options = Options::default();
-        cf_options.set_compression_type(DBCompressionType::Lz4);
-        cf_options.set_write_buffer_size(WRITE_BUFFER_SIZE);
-        cf_options.set_block_based_table_factory(&table_options);
-
-        let descriptors = ColumnFamily::ALL
-            .iter()
-            .copied()
-            .map(|cf| ColumnFamilyDescriptor::new(cf.name(), cf_options.clone()));
+        let descriptors = ColumnFamily::ALL.iter().copied().map(|cf| {
+            let options = match cf {
+                ColumnFamily::CoinRecords => coin_records_cf_options.clone(),
+                _ => default_cf_options.clone(),
+            };
+            ColumnFamilyDescriptor::new(cf.name(), options)
+        });
         let db = rust_rocksdb::DB::open_cf_descriptors(&db_options, path, descriptors)
             .map_err(StorageError::backend)?;
         Ok(Self {
             db,
             write_lock: parking_lot::Mutex::new(()),
+            cache,
             #[cfg(any(test, feature = "test-seam"))]
             faults: crate::trait_::PersistFaultSlot::default(),
             guard: None,
@@ -298,13 +314,260 @@ impl KvStore for RocksDbStore {
     fn arm_persist_fault(&self, fault: crate::PersistFault) {
         self.faults.arm(fault);
     }
+
+    fn multi_get(
+        &self,
+        cf: ColumnFamily,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<Bytes>>, StorageError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let handle = self.cf_handle(cf)?;
+        let read_options = ReadOptions::default();
+        let is_sorted = keys.windows(2).all(|w| w[0] <= w[1]);
+
+        if is_sorted {
+            let results =
+                self.db
+                    .batched_multi_get_cf_opt(handle, keys.iter().copied(), true, &read_options);
+            let mut out = Vec::with_capacity(results.len());
+            for res in results {
+                match res {
+                    Ok(Some(pinned)) => out.push(Some(Bytes::copy_from_slice(&pinned))),
+                    Ok(None) => out.push(None),
+                    Err(e) => return Err(StorageError::backend(e)),
+                }
+            }
+            Ok(out)
+        } else {
+            let mut indexed: Vec<(usize, &&[u8])> = keys.iter().enumerate().collect();
+            indexed.sort_by_key(|(_, a)| *a);
+            let sorted_keys: Vec<&[u8]> = indexed.iter().map(|(_, k)| **k).collect();
+
+            let results = self.db.batched_multi_get_cf_opt(
+                handle,
+                sorted_keys.iter().copied(),
+                true,
+                &read_options,
+            );
+
+            let mut out = vec![None; keys.len()];
+            for ((orig_idx, _), res) in indexed.into_iter().zip(results) {
+                match res {
+                    Ok(Some(pinned)) => out[orig_idx] = Some(Bytes::copy_from_slice(&pinned)),
+                    Ok(None) => out[orig_idx] = None,
+                    Err(e) => return Err(StorageError::backend(e)),
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    fn ingest_sorted(
+        &self,
+        cf: ColumnFamily,
+        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        scratch: &Path,
+    ) -> Result<u64, StorageError> {
+        const TARGET_BYTES: u64 = 256 * 1024 * 1024;
+
+        let _guard = self.write_lock.lock();
+        let cf_handle = self.cf_handle(cf)?;
+        std::fs::create_dir_all(scratch).map_err(StorageError::Io)?;
+
+        let mut writer_opts = Options::default();
+        writer_opts.set_compression_type(DBCompressionType::Lz4);
+
+        let mut sst_paths: Vec<std::path::PathBuf> = Vec::new();
+        let call_id = NEXT_INGEST_ID.fetch_add(1, Ordering::SeqCst);
+        let mut file_idx = 0usize;
+        let mut current_writer: Option<SstFileWriter<'_>> = None;
+        let mut writer_rows = 0u64;
+        let mut total_count = 0u64;
+        let mut prev_key: Option<Vec<u8>> = None;
+
+        for (k, v) in rows {
+            if let Some(prev) = &prev_key {
+                if k.as_slice() <= prev.as_slice() {
+                    remove_scratch_files(&sst_paths);
+                    return Err(StorageError::InvalidOperation(
+                        "keys not strictly ascending",
+                    ));
+                }
+            }
+
+            let row_bytes = u64::try_from(k.len().saturating_add(v.len())).unwrap_or(u64::MAX);
+
+            if row_bytes >= TARGET_BYTES {
+                if let Some(mut w) = current_writer.take() {
+                    if writer_rows > 0 {
+                        w.finish().map_err(|e| {
+                            remove_scratch_files(&sst_paths);
+                            StorageError::backend(e)
+                        })?;
+                    }
+                    writer_rows = 0;
+                }
+
+                let (mut solo_writer, path) =
+                    create_sst_writer(scratch, call_id, file_idx, &writer_opts).inspect_err(
+                        |_| {
+                            remove_scratch_files(&sst_paths);
+                        },
+                    )?;
+                sst_paths.push(path);
+                file_idx += 1;
+                solo_writer.put(&k, &v).map_err(|e| {
+                    let _ = solo_writer.finish();
+                    remove_scratch_files(&sst_paths);
+                    StorageError::backend(e)
+                })?;
+                solo_writer.finish().map_err(|e| {
+                    remove_scratch_files(&sst_paths);
+                    StorageError::backend(e)
+                })?;
+            } else {
+                if let Some(mut w) = current_writer.take() {
+                    if writer_rows > 0 && w.file_size() >= TARGET_BYTES {
+                        w.finish().map_err(|e| {
+                            remove_scratch_files(&sst_paths);
+                            StorageError::backend(e)
+                        })?;
+                        writer_rows = 0;
+                    } else {
+                        current_writer = Some(w);
+                    }
+                }
+
+                if current_writer.is_none() {
+                    let (w, path) = create_sst_writer(scratch, call_id, file_idx, &writer_opts)
+                        .inspect_err(|_| {
+                            remove_scratch_files(&sst_paths);
+                        })?;
+                    sst_paths.push(path);
+                    file_idx += 1;
+                    current_writer = Some(w);
+                    writer_rows = 0;
+                }
+
+                let Some(writer) = current_writer.as_mut() else {
+                    remove_scratch_files(&sst_paths);
+                    return Err(StorageError::InvalidOperation("writer unavailable"));
+                };
+                writer.put(&k, &v).map_err(|e| {
+                    let _ = writer.finish();
+                    remove_scratch_files(&sst_paths);
+                    StorageError::backend(e)
+                })?;
+                writer_rows += 1;
+            }
+
+            prev_key = Some(k);
+            total_count += 1;
+        }
+
+        if let Some(mut w) = current_writer.take() {
+            if writer_rows > 0 {
+                w.finish().map_err(|e| {
+                    remove_scratch_files(&sst_paths);
+                    StorageError::backend(e)
+                })?;
+            }
+        }
+
+        if total_count > 0 && !sst_paths.is_empty() {
+            let mut ingest_opts = IngestExternalFileOptions::default();
+            ingest_opts.set_move_files(true);
+            self.db
+                .ingest_external_file_cf_opts(cf_handle, &ingest_opts, sst_paths.clone())
+                .map_err(|e| {
+                    remove_scratch_files(&sst_paths);
+                    StorageError::backend(e)
+                })?;
+        }
+
+        Ok(total_count)
+    }
+
+    fn delete_range(&self, cf: ColumnFamily, start: &[u8], end: &[u8]) -> Result<(), StorageError> {
+        if start >= end {
+            return Ok(());
+        }
+        let _guard = self.write_lock.lock();
+        let cf_handle = self.cf_handle(cf)?;
+
+        #[cfg(any(test, feature = "test-seam"))]
+        if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
+            return Err(fault.injected_error());
+        }
+        #[cfg(any(test, feature = "test-seam"))]
+        let sync_fault = self.faults.take_at(crate::trait_::PersistBoundary::Sync);
+        #[cfg(any(test, feature = "test-seam"))]
+        let effective_sync = sync_fault.is_none();
+        #[cfg(not(any(test, feature = "test-seam")))]
+        let effective_sync = true;
+
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(effective_sync);
+
+        self.db
+            .delete_range_cf_opt(cf_handle, start, end, &write_opts)
+            .map_err(StorageError::backend)?;
+
+        #[cfg(any(test, feature = "test-seam"))]
+        if let Some(fault) = sync_fault {
+            return Err(fault.injected_error());
+        }
+
+        Ok(())
+    }
+
+    fn checkpoint(&self, dir: &Path) -> Result<(), StorageError> {
+        let cp = Checkpoint::new(&self.db).map_err(StorageError::backend)?;
+        cp.create_checkpoint(dir).map_err(StorageError::backend)?;
+        Ok(())
+    }
+
+    fn engine_cache_bytes(&self) -> u64 {
+        let block_cache = u64::try_from(self.cache.get_usage()).unwrap_or(u64::MAX);
+        let memtables = self
+            .db
+            .property_int_value("rocksdb.cur-size-all-mem-tables")
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        block_cache.saturating_add(memtables)
+    }
+}
+static NEXT_INGEST_ID: AtomicU64 = AtomicU64::new(1);
+
+fn create_sst_writer<'opts>(
+    scratch: &Path,
+    call_id: u64,
+    index: usize,
+    opts: &'opts Options,
+) -> Result<(SstFileWriter<'opts>, std::path::PathBuf), StorageError> {
+    let path = scratch.join(format!("ingest-{call_id}-{index}.sst"));
+    let mut writer = SstFileWriter::create(opts);
+    writer.open(&path).map_err(StorageError::backend)?;
+    Ok((writer, path))
+}
+
+fn remove_scratch_files(paths: &[std::path::PathBuf]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn count_write(durability: &'static str, encoded_bytes: usize) {
     metrics::counter!("storage.writes_total", "backend" => "rocksdb", "durability" => durability)
         .increment(1);
     metrics::histogram!("storage.write_bytes", "backend" => "rocksdb").record(
-        bitcoin_rs_primitives::u64_to_f64(u64::try_from(encoded_bytes).unwrap_or(u64::MAX)),
+        bitcoin_rs_consensus::primitives::u64_to_f64(
+            u64::try_from(encoded_bytes).unwrap_or(u64::MAX),
+        ),
     );
 }
 

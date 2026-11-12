@@ -95,17 +95,7 @@ impl RetentionBudget {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
-pub enum HistoryUnavailable {
-    #[error("history below height {below} is pruned")]
-    Pruned { below: u32 },
-    #[error("history below height {below} is reserved by an in-flight prune pass")]
-    Reserved { below: u32 },
-    #[error("retained history is temporarily unavailable")]
-    Missing,
-    #[error("history is unavailable while the node shuts down")]
-    Shutdown,
-}
+pub use bitcoin_rs_consensus::HistoryUnavailable;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
 #[error("required history at height {requested} is already pruned (prune line {pruned_below})")]

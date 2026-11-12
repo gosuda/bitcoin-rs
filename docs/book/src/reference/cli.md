@@ -30,7 +30,7 @@ Boolean flags come in two forms. Some require an explicit true or false value. O
 
 | Flag | Value | Default | Purpose |
 | --- | --- | --- | --- |
-| `--storage-backend` | `rocksdb`, `fjall`, `redb` | `fjall` | Selects a backend compiled into the binary. |
+| `--storage-backend` | `rocksdb`, `surrealkv`, `mdbx` | `rocksdb` | Selects the storage backend: `rocksdb` (default, always compiled), `surrealkv` (requires cargo feature `surrealkv`), and `mdbx` (requires cargo feature `mdbx`). Reopening a data directory created by a different engine refuses startup with `<namespace> was created by <found>; start with --storage-backend <found> or convert with bitcoin-rs-storage-convert`. `fjall` and `redb` fail with `unsupported storage backend <value>`. |
 | `--dbcache-mb` | MiB | `450` | Splits the storage cache between chainstate and index storage. |
 | `--prune-target-mb` | MiB | `0` | Prunes block history to the target; `0` keeps everything. Indexes refuse pruning. |
 

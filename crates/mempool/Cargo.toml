@@ -18,9 +18,7 @@ default = []
 test-seam = []
 
 [dependencies]
-bitcoin-rs-primitives.workspace = true
 bitcoin-rs-consensus.workspace = true
-bitcoin-rs-script.workspace = true
 sha2.workspace = true
 hashbrown.workspace = true
 parking_lot.workspace = true
@@ -36,7 +34,7 @@ bitcoin.workspace = true
 proptest.workspace = true
 # Own integration tests are a separate crate: the lib compiles there without
 # `cfg(test)`, so the cross-crate admission park seam must arrive through the
-# `test-seam` feature, the same way `bitcoin-rs-node` and `bitcoin-rs-rpc`
+# `test-seam` feature, the same way `bitcoin-rs-node` and `bitcoin-rs-serving`
 # opt in.
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 

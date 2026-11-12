@@ -189,7 +189,7 @@ pub(crate) fn manifest_reference_sha256() -> Result<String> {
             std::env::consts::ARCH
         ))
     })?;
-    let table: toml::Table = bitcoin_rs_rpc::manifest::MANIFEST_TOML
+    let table: toml::Table = bitcoin_rs_serving::manifest::MANIFEST_TOML
         .parse()
         .map_err(|e| Error::Assertion(format!("cannot parse core-compat.toml: {e}")))?;
     let release = table
@@ -286,8 +286,6 @@ fn launch_command(
                 .arg("--config")
                 .arg(config_path)
                 .args([
-                    "--storage-backend",
-                    "fjall",
                     "--rpc-user",
                     AUTH_USER,
                     "--rpc-password",

@@ -1,0 +1,82 @@
+use std::io::{self, Read};
+
+pub(crate) const RECEIVE_CHUNK: usize = 256 * 1024;
+
+pub(crate) fn is_poll_timeout(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
+}
+
+pub(crate) fn fill<R: Read>(
+    reader: &mut R,
+    buffer: &mut [u8],
+    filled: &mut usize,
+) -> io::Result<()> {
+    while *filled < buffer.len() {
+        match reader.read(&mut buffer[*filled..]) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(read) => *filled += read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn fill_growing<R: Read>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+    len: usize,
+) -> io::Result<()> {
+    while buffer.len() < len {
+        let remaining = len - buffer.len();
+        let step = remaining.min(RECEIVE_CHUNK);
+        let start = buffer.len();
+        buffer.reserve_exact(step);
+        buffer.resize(start + step, 0);
+        let mut filled = start;
+        while filled < start + step {
+            match reader.read(&mut buffer[filled..start + step]) {
+                Ok(0) => {
+                    buffer.truncate(filled);
+                    return Err(io::ErrorKind::UnexpectedEof.into());
+                }
+                Ok(read) => filled += read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    buffer.truncate(filled);
+                    return Err(error);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn read_up_to<R: Read>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+    limit: usize,
+) -> io::Result<()> {
+    let start = buffer.len();
+    buffer.resize(start + limit, 0);
+    loop {
+        match reader.read(&mut buffer[start..]) {
+            Ok(0) => {
+                buffer.truncate(start);
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            Ok(read) => {
+                buffer.truncate(start + read);
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                buffer.truncate(start);
+                return Err(error);
+            }
+        }
+    }
+}

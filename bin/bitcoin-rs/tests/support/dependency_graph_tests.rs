@@ -16,27 +16,27 @@ fn dependency(name: &str, kind: Option<&str>, features: &[&str]) -> Value {
 fn fixture() -> Value {
     json!({"packages": [
         {
-            "name": "bitcoin-rs-chain",
+            "name": "bitcoin-rs-consensus",
             "dependencies": [],
             "features": {"default": [], "test-seam": []},
         },
         {
-            "name": "bitcoin-rs-chainstate",
-            "dependencies": [dependency("bitcoin-rs-chain", None, &[])],
+            "name": "bitcoin-rs-execution",
+            "dependencies": [dependency("bitcoin-rs-consensus", None, &[])],
             "features": {"default": [], "test-seam": []},
         },
         {
-            "name": "bitcoin-rs-rpc",
+            "name": "bitcoin-rs-serving",
             "dependencies": [dependency("zmq", None, &[])],
             "features": {"zmq": ["dep:zmq"]},
         },
         {
             "name": "bitcoin-rs-node",
             "dependencies": [
-                dependency("bitcoin-rs-chainstate", None, &[]),
-                dependency("bitcoin-rs-rpc", None, &[]),
+                dependency("bitcoin-rs-execution", None, &[]),
+                dependency("bitcoin-rs-serving", None, &[]),
             ],
-            "features": {"default": [], "zmq": ["bitcoin-rs-rpc/zmq"]},
+            "features": {"default": [], "zmq": ["bitcoin-rs-serving/zmq"]},
         },
     ]})
 }
@@ -74,8 +74,8 @@ fn normal_and_build_dependencies_cannot_select_test_seam() {
     for kind in [None, Some("build")] {
         let mut metadata = fixture();
         package(&mut metadata, "bitcoin-rs-node")["dependencies"][0] =
-            dependency("bitcoin-rs-chainstate", kind, &["test-seam"]);
-        assert_test_seam_rejected(&metadata, "bitcoin-rs-node", "bitcoin-rs-chainstate");
+            dependency("bitcoin-rs-execution", kind, &["test-seam"]);
+        assert_test_seam_rejected(&metadata, "bitcoin-rs-node", "bitcoin-rs-execution");
     }
 }
 
@@ -86,7 +86,7 @@ fn optional_target_dependency_cannot_select_test_seam() {
     node["dependencies"][0]["features"] = json!(["test-seam"]);
     node["dependencies"][0]["optional"] = json!(true);
     node["dependencies"][0]["target"] = json!("cfg(unix)");
-    assert_test_seam_rejected(&metadata, "bitcoin-rs-node", "bitcoin-rs-chainstate");
+    assert_test_seam_rejected(&metadata, "bitcoin-rs-node", "bitcoin-rs-execution");
 }
 
 #[test]
@@ -96,7 +96,7 @@ fn dev_only_fixture_selection_is_allowed_without_feature_unification() {
         .as_array_mut()
         .expect("fixture dependencies")
         .push(dependency(
-            "bitcoin-rs-chainstate",
+            "bitcoin-rs-execution",
             Some("dev"),
             &["test-seam"],
         ));
@@ -108,11 +108,11 @@ fn production_and_default_features_cannot_forward_test_seam() {
     for feature in ["default", "production"] {
         let mut metadata = fixture();
         package(&mut metadata, "bitcoin-rs-node")["features"][feature] =
-            json!(["bitcoin-rs-chainstate/test-seam"]);
+            json!(["bitcoin-rs-execution/test-seam"]);
         assert_test_seam_rejected(
             &metadata,
             &format!("bitcoin-rs-node/{feature}"),
-            "bitcoin-rs-chainstate",
+            "bitcoin-rs-execution",
         );
     }
 }
@@ -122,11 +122,11 @@ fn chained_local_and_cross_crate_features_cannot_enable_test_seam() {
     let mut metadata = fixture();
     let node = package(&mut metadata, "bitcoin-rs-node");
     node["features"]["default"] = json!(["production"]);
-    node["features"]["production"] = json!(["bitcoin-rs-chainstate/bridge"]);
-    let chainstate = package(&mut metadata, "bitcoin-rs-chainstate");
+    node["features"]["production"] = json!(["bitcoin-rs-execution/bridge"]);
+    let chainstate = package(&mut metadata, "bitcoin-rs-execution");
     chainstate["features"]["bridge"] = json!(["helper"]);
-    chainstate["features"]["helper"] = json!(["bitcoin-rs-chain/test-seam"]);
-    assert_test_seam_rejected(&metadata, "bitcoin-rs-node/default", "bitcoin-rs-chain");
+    chainstate["features"]["helper"] = json!(["bitcoin-rs-consensus/test-seam"]);
+    assert_test_seam_rejected(&metadata, "bitcoin-rs-node/default", "bitcoin-rs-consensus");
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn renamed_weak_feature_forwarding_cannot_enable_test_seam() {
     assert_test_seam_rejected(
         &metadata,
         "bitcoin-rs-node/production",
-        "bitcoin-rs-chainstate",
+        "bitcoin-rs-execution",
     );
 }
 
@@ -148,10 +148,10 @@ fn dependency_feature_alias_cannot_hide_test_seam() {
     for kind in [None, Some("build")] {
         let mut metadata = fixture();
         package(&mut metadata, "bitcoin-rs-node")["dependencies"][0] =
-            dependency("bitcoin-rs-chainstate", kind, &["fixture-alias"]);
-        package(&mut metadata, "bitcoin-rs-chainstate")["features"]["fixture-alias"] =
+            dependency("bitcoin-rs-execution", kind, &["fixture-alias"]);
+        package(&mut metadata, "bitcoin-rs-execution")["features"]["fixture-alias"] =
             json!(["test-seam"]);
-        assert_test_seam_rejected(&metadata, "bitcoin-rs-node", "bitcoin-rs-chainstate");
+        assert_test_seam_rejected(&metadata, "bitcoin-rs-node", "bitcoin-rs-execution");
     }
 }
 
@@ -160,18 +160,18 @@ fn dependency_defaults_cannot_enable_test_seam() {
     let mut metadata = fixture();
     package(&mut metadata, "bitcoin-rs-node")["dependencies"][0]["uses_default_features"] =
         json!(true);
-    package(&mut metadata, "bitcoin-rs-chainstate")["features"]["default"] = json!(["test-seam"]);
-    assert_test_seam_rejected(&metadata, "bitcoin-rs-node", "bitcoin-rs-chainstate");
+    package(&mut metadata, "bitcoin-rs-execution")["features"]["default"] = json!(["test-seam"]);
+    assert_test_seam_rejected(&metadata, "bitcoin-rs-node", "bitcoin-rs-execution");
 }
 
 #[test]
 fn dedicated_test_seam_forwarding_and_dev_only_features_are_allowed() {
     let mut metadata = fixture();
-    let chainstate = package(&mut metadata, "bitcoin-rs-chainstate");
-    chainstate["features"]["test-seam"] = json!(["bitcoin-rs-chain/test-seam"]);
+    let chainstate = package(&mut metadata, "bitcoin-rs-execution");
+    chainstate["features"]["test-seam"] = json!(["bitcoin-rs-consensus/test-seam"]);
     let node = package(&mut metadata, "bitcoin-rs-node");
     node["dependencies"][0]["kind"] = json!("dev");
-    node["features"]["fixtures"] = json!(["bitcoin-rs-chainstate/test-seam"]);
+    node["features"]["fixtures"] = json!(["bitcoin-rs-execution/test-seam"]);
     assert!(WorkspaceGraph::from_json(&metadata).validate().is_ok());
 }
 
@@ -183,6 +183,6 @@ fn feature_cycles_terminate_and_still_detect_a_test_seam_escape() {
     node["features"]["second"] = json!(["first"]);
     assert!(WorkspaceGraph::from_json(&metadata).validate().is_ok());
     package(&mut metadata, "bitcoin-rs-node")["features"]["second"] =
-        json!(["first", "bitcoin-rs-chainstate/test-seam"]);
-    assert_test_seam_rejected(&metadata, "bitcoin-rs-node/first", "bitcoin-rs-chainstate");
+        json!(["first", "bitcoin-rs-execution/test-seam"]);
+    assert_test_seam_rejected(&metadata, "bitcoin-rs-node/first", "bitcoin-rs-execution");
 }

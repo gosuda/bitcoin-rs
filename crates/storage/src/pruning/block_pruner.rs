@@ -2,7 +2,7 @@ use crate::{
     BlockFilePosition, BufferedWriteBatch, ColumnFamily, FlatFileBlockStore, KvStore, StorageError,
     decode_block_file_max_height,
 };
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 
 use crate::pruning::{PruneError, PruneOutcome, PrunePolicy, row_len_u64};
 

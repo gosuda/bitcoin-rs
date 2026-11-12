@@ -1,6 +1,6 @@
 /-
 Amount compression for the UTXO record codec
-(`crates/utxo/src/compress.rs`). `enc` and `dec` are Core's compressor formulas;
+(`crates/storage/src/utxo/compress.rs`). `enc` and `dec` are Core's compressor formulas;
 `dec_enc` proves they are inverse on every reachable compressed form, which is
 the bijection property the record codec relies on.
 -/

@@ -54,7 +54,7 @@ A clean shutdown adds the checkpoint and the owner-local files:
 
 `.lock` is the data-directory lock. `process-epoch` is a monotonically increasing number written at startup, and `.process-epoch.lock` guards it. A corrupt `process-epoch` refuses startup instead of reusing an epoch.
 
-`chainstate/` is the authoritative chainstate store. With the default `fjall` backend it contains a journal, a lock, a version file, and numbered keyspaces. `blocks/` holds block body files with `BRSB` framing. `chainstate-journal/` is a derived journal that may lag the durable head, never lead it.
+`chainstate/` is the authoritative chainstate store. With the default `rocksdb` backend it contains a lock, a version file, and column families. `blocks/` holds block body files with `BRSB` framing. `chainstate-journal/` is a derived journal that may lag the durable head, never lead it.
 
 `.cookie` is generated with mode `0600` and rotated before each listener starts. `applied-tip-witness.json` records the published applied tip. `chainstate-checkpoints/` holds published checkpoints, and `CURRENT` names the active generation.
 

@@ -2,12 +2,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::BlockTree;
-use bitcoin_rs_chainstate::Chainstate;
+use bitcoin_rs_execution::Chainstate;
+use bitcoin_rs_execution::chain::BlockTree;
 use bitcoin_rs_node::{BlockSync, Network};
-use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable, QueuedFrame};
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
+use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
+use bitcoin_rs_wire::{PeerInfo, PeerLease, PeerTable, QueuedFrame};
 use crossbeam_channel::unbounded;
 use parking_lot::RwLock;
 
@@ -27,7 +27,9 @@ fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
         block_tree,
         Arc::new(utxo),
         coin_stats,
-        Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
+        Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
+            0,
+        )),
     );
     let ibd = handles.ibd_latch();
     bitcoin_rs_node::sync::block_sync(
@@ -46,8 +48,8 @@ fn info(addr: SocketAddr) -> PeerInfo {
         wtxid_relay: false,
         relay_transactions: true,
         compact_block_relay: false,
-        endpoint: Some(bitcoin_rs_p2p::PeerEndpoint::Ip(addr)),
-        network: bitcoin_rs_p2p::PeerEndpoint::Ip(addr).net(),
+        endpoint: Some(bitcoin_rs_wire::PeerEndpoint::Ip(addr)),
+        network: bitcoin_rs_wire::PeerEndpoint::Ip(addr).net(),
         addr: addr.into(),
         send_headers: false,
         version: 70_016,
@@ -56,11 +58,11 @@ fn info(addr: SocketAddr) -> PeerInfo {
         start_height: 0,
         best_known_height: 0,
         conn_time: 0,
-        addr_bind: bitcoin_rs_p2p::TransportRemote::new(addr),
+        addr_bind: bitcoin_rs_wire::TransportRemote::new(addr),
         time_offset: 0,
-        counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+        counters: Arc::new(bitcoin_rs_wire::PeerCounters::default()),
         inbound: true,
-        transport: bitcoin_rs_p2p::TransportProtocol::V1,
+        transport: bitcoin_rs_wire::TransportProtocol::V1,
     }
 }
 
@@ -70,15 +72,15 @@ fn peer_table_owns_handshake_publication_and_replacement() {
     let addr = SocketAddr::from(([127, 0, 0, 1], 18_447));
     let (old_tx, _old_rx) = unbounded::<QueuedFrame>();
     let old = PeerLease::new(old_tx);
-    assert!(!table.register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr), old.clone()));
-    assert!(table.publish_info(bitcoin_rs_p2p::PeerEndpoint::Ip(addr), &old, info(addr)));
+    assert!(!table.register(bitcoin_rs_wire::PeerEndpoint::Ip(addr), old.clone()));
+    assert!(table.publish_info(bitcoin_rs_wire::PeerEndpoint::Ip(addr), &old, info(addr)));
     assert!(!old.is_cancelled());
     assert_eq!(table.len(), 1);
     assert_eq!(table.infos().len(), 1);
 
     let (new_tx, _new_rx) = unbounded::<QueuedFrame>();
     let new = PeerLease::new(new_tx);
-    assert!(table.register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr), new.clone()));
+    assert!(table.register(bitcoin_rs_wire::PeerEndpoint::Ip(addr), new.clone()));
     assert!(old.is_cancelled());
     assert!(!new.is_cancelled());
     assert!(table.is_current(new.source_ip(addr)));

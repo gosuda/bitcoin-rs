@@ -33,7 +33,7 @@ impl BlockBodyStore for Bodies {
 type MaturedBodyStore = (
     Chainstate,
     Vec<Block>,
-    HashMap<Hash256, BlockPayload>,
+    HashMap<Hash256, BlockImage>,
     Arc<Bodies>,
 );
 
@@ -48,21 +48,23 @@ fn matured_chain_with_body_store() -> Result<MaturedBodyStore, crate::test_suppo
     let bodies_store = Arc::new(Bodies::default());
     let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
     let handles =
-        bitcoin_rs_chainstate::Chainstate::from_parts(bitcoin_rs_chainstate::ChainstateParts {
+        bitcoin_rs_execution::Chainstate::from_parts(bitcoin_rs_execution::ChainstateParts {
             network: Network::Regtest,
             block_tree: tree,
             restored_applied_tip: None,
             utxo: Arc::new(UtxoSet::new()),
-            coin_stats: Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
-                bitcoin_rs_utxo::stats::CoinStats::default(),
+            coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
+                bitcoin_rs_storage::utxo::stats::CoinStats::default(),
             )),
-            chain_events: Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
+            chain_events: Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
+                0,
+            )),
             block_body_store: Some(bodies_store.clone()),
             undo_store: Arc::new(bitcoin_rs_storage::undo::InMemoryUndoStore::default()),
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
-            chain_transition: bitcoin_rs_chain::TransitionDomain::new().authority(),
+            chain_transition: bitcoin_rs_execution::chain::TransitionDomain::new().authority(),
             assume_valid_height: 0,
-            validation_mode: bitcoin_rs_chainstate::ValidationMode::AssumeValid,
+            validation_mode: bitcoin_rs_execution::ValidationMode::AssumeValid,
             validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
             script_cache: None,
             journal: None,
@@ -73,18 +75,18 @@ fn matured_chain_with_body_store() -> Result<MaturedBodyStore, crate::test_suppo
                 retention,
                 bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(288),
             ),
-            role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
+            role: bitcoin_rs_execution::ChainstateRole::Ordinary,
         });
-    handles.apply_block(&BlockPayload::from_local(genesis))?;
+    handles.apply_block(&BlockImage::from_local(genesis))?;
     for block in &main {
-        handles.apply_block(&BlockPayload::from_local(block.clone()))?;
+        handles.apply_block(&BlockImage::from_local(block.clone()))?;
     }
     let bodies = main
         .iter()
         .map(|block| {
             (
                 Hash256::from_le_bytes(block.block_hash().as_bytes()),
-                BlockPayload::from_local(block.clone()),
+                BlockImage::from_local(block.clone()),
             )
         })
         .collect();
@@ -94,7 +96,7 @@ fn matured_chain_with_body_store() -> Result<MaturedBodyStore, crate::test_suppo
 #[test]
 fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
 -> Result<(), crate::test_support::TestError> {
-    use bitcoin_rs_primitives::{Amount, Script};
+    use bitcoin_rs_consensus::primitives::{Amount, Script};
     let (handles, main, mut bodies) = matured_chain(101)?;
     let handles = Arc::new(handles);
     let followers = crate::chain_effects::ChainFollowers::noop();
@@ -131,7 +133,7 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
         }
         bodies.insert(
             Hash256::from_le_bytes(block.block_hash().as_bytes()),
-            BlockPayload::from_local(block.clone()),
+            BlockImage::from_local(block.clone()),
         );
         fork.push(block);
     }
@@ -151,7 +153,7 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
                 ref disposition,
                 ref invalidated,
                 ..
-            }) if *disposition == bitcoin_rs_chainstate::WindowApplyDisposition::BodyMutated
+            }) if *disposition == bitcoin_rs_execution::WindowApplyDisposition::BodyMutated
                 && invalidated.is_empty()
         ),
         "the mutated second body must fail as BodyMutated after one committed connect, \
@@ -235,7 +237,7 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), crate::test_s
         let staged = (*block).clone();
         bodies.insert(
             Hash256::from_le_bytes(staged.block_hash().as_bytes()),
-            BlockPayload::from_local(staged),
+            BlockImage::from_local(staged),
         );
     }
 
@@ -248,7 +250,7 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), crate::test_s
         matches!(
             &outcome,
             Err(crate::reorg::ReorgError::ConnectFailed {
-                disposition: bitcoin_rs_chainstate::WindowApplyDisposition::Permanent,
+                disposition: bitcoin_rs_execution::WindowApplyDisposition::Permanent,
                 invalidated,
                 ..
             }) if invalidated.len() == 2
@@ -303,7 +305,7 @@ fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
     )?;
     bodies.insert(
         Hash256::from_le_bytes(invalid.block_hash().as_bytes()),
-        BlockPayload::from_local(invalid),
+        BlockImage::from_local(invalid),
     );
 
     let mut old_body_reads = 0;
@@ -331,7 +333,7 @@ fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
     assert!(matches!(
         *original,
         crate::reorg::ReorgError::ConnectFailed {
-            disposition: bitcoin_rs_chainstate::WindowApplyDisposition::Permanent,
+            disposition: bitcoin_rs_execution::WindowApplyDisposition::Permanent,
             ..
         }
     ));
@@ -343,7 +345,7 @@ fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
 #[test]
 fn branch_switch_rejects_a_body_for_another_header_before_mutation()
 -> Result<(), crate::test_support::TestError> {
-    use bitcoin_rs_primitives::Script;
+    use bitcoin_rs_consensus::primitives::Script;
     let (handles, main, mut bodies) = matured_chain(101)?;
     let followers = crate::chain_effects::ChainFollowers::noop();
     let applied_tip = handles.applied_tip_reader();
@@ -371,7 +373,7 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
     let mut wrong_coinbase = regtest_fixture::coinbase(101);
     wrong_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
     let wrong = mined_block_with_prev_hash(fork_root_hash, 101, vec![wrong_coinbase]);
-    bodies.insert(target_hash, BlockPayload::from_local(wrong));
+    bodies.insert(target_hash, BlockImage::from_local(wrong));
 
     let outcome = crate::reorg::switch_to_branch(
         &handles,
@@ -403,7 +405,7 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
 #[test]
 fn branch_switch_rejects_malformed_body_before_mutation()
 -> Result<(), crate::test_support::TestError> {
-    use bitcoin_rs_primitives::Script;
+    use bitcoin_rs_consensus::primitives::Script;
     let (handles, main, bodies, bodies_store) = matured_chain_with_body_store()?;
     let followers = crate::chain_effects::ChainFollowers::noop();
     let applied_tip = handles.applied_tip_reader();
@@ -428,7 +430,7 @@ fn branch_switch_rejects_malformed_body_before_mutation()
         NodeStatus::HeaderValid,
     )?;
     let target_hash = Hash256::from_le_bytes(target.block_hash().as_bytes());
-    let mut malformed = BlockPayload::from_local(target).bytes().clone();
+    let mut malformed = BlockImage::from_local(target).bytes().clone();
     malformed.truncate(malformed.len() - 1);
     bodies_store
         .persist_block_body(101, target_hash, &malformed)

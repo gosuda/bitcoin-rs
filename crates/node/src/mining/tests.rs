@@ -1,13 +1,13 @@
 use super::{map_apply_error, test_block_validity_error};
-use bitcoin_rs_chain::ChainError;
-use bitcoin_rs_chain::ChainWork;
-use bitcoin_rs_chain::NodeId;
-use bitcoin_rs_chainstate::ApplyError;
 use bitcoin_rs_consensus::ConsensusError;
-use bitcoin_rs_mining::BlockValidationResult;
-use bitcoin_rs_mining::MiningControlError;
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::Txid;
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Txid;
+use bitcoin_rs_execution::ApplyError;
+use bitcoin_rs_execution::chain::ChainError;
+use bitcoin_rs_execution::chain::ChainWork;
+use bitcoin_rs_execution::chain::NodeId;
+use bitcoin_rs_serving::mining::BlockValidationResult;
+use bitcoin_rs_serving::mining::MiningControlError;
 use compact_str::CompactString;
 
 #[test]
@@ -29,7 +29,7 @@ fn operational_failures_are_not_block_rejections() {
                 expected: Hash256::default(),
                 found: Hash256::from_le_bytes(&[1; 32]),
             },
-            ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord),
+            ApplyError::UtxoCommit(bitcoin_rs_storage::utxo::UtxoError::CorruptRecord),
             ApplyError::BlockBodyPersistence(StorageError::InvalidOperation("body write failed")),
             ApplyError::UndoPersistence(StorageError::InvalidOperation("undo write failed")),
             ApplyError::DurableHeadCommit(StorageError::InvalidOperation("head write failed")),

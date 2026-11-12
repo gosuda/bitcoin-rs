@@ -54,7 +54,7 @@ Fuzz builds enable AddressSanitizer, value profiling, debug assertions, and inte
 The corpus verdict gate is separate from a live campaign:
 
 ```
-BITCOIN_RS_FUZZ_CORPUS=../bitcoin-rs-fuzz-corpus/corpus cargo test --locked -p bitcoin-rs-primitives --test suite differential::
+BITCOIN_RS_FUZZ_CORPUS=../bitcoin-rs-fuzz-corpus/corpus cargo test --locked -p bitcoin-rs-consensus --test suite differential::
 ```
 
 When the corpus directory is absent the gate skips with a notice. When `verdicts.json` is absent it degrades to the verdict-shape check and reports the downgrade. A seed that decodes to neither `accepted` nor `rejected:<kind>` fails the gate.
@@ -79,21 +79,21 @@ These tools prove bounded properties and named theorems. They do not prove that 
 
 ## TLA+ models
 
-Six TLA+ modules model chain admission, peer leases, and mining projections: `ChainAdmission/Commit`, `ChainAdmission/Frontier`, `PeerLeases/Lease`, `PeerLeases/Session`, `ProjectionMining/Mining`, and `ProjectionMining/Projection`.
+Eight TLA+ modules model chain admission, datadir schema, index startup, peer leases, and mining projections: `ChainAdmission/Commit`, `ChainAdmission/Frontier`, `DatadirSchema/Marker`, `IndexOpen/Open`, `PeerLeases/Lease`, `PeerLeases/Session`, `ProjectionMining/Mining`, and `ProjectionMining/Projection`.
 
 ```
 python3 scripts/check_models.py
 ```
 
-The checker runs one safety lane (`TypeOK,Safety`) and one temporal lane (`ConditionalProgress`) per module. Every lane starts at K = 128 or the module's K floor, whichever is larger. Resource exhaustion halves K down to the floor, never below it. `--check-only` verifies the tool and model identities; it does not evaluate a property.
+The default, `--checker configured`, selects the checker registered for each module. All eight modules currently select TLC. It explores the complete finite state graph and checks `TypeOK`, `Safety`, and `ConditionalProgress` without a depth limit. Results record `k = null` and the state count. Use `--checker apalache` for separate bounded safety and temporal checks. Apalache starts at K = 128 or the module's floor, whichever is larger. It can halve a higher starting bound after resource exhaustion, but cannot go below the floor. All current floors are 128, so default runs cannot halve their bound. `--check-only` checks tool and model identities, not properties.
 
 Read the evidence codes, not only the exit status. A counterexample is code 13. Code 14 means timeout, out-of-memory, or incomplete output. Code 16 means no run at or above the module's K floor. Codes 14 and 16 are unavailable evidence, not passes.
 
-The recorded table has no Apalache result. Every module says TLC 1.8.0 found no safety error at depth 16 with reduced constants, and every module adds "Apalache run pending". Do not read the TLC line as an Apalache pass.
+The [formal verification contract](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/formal-verification.md) owns the recorded outcomes. It records seven complete TLC checks. `ChainAdmission/Commit` remains blocked by an incomplete exhaustive run and a separate `TypeOK` counterexample. The full Apalache run also remains incomplete. A TLC result is not an Apalache result.
 
-The runner defaults to 3,600 seconds per solver invocation. The temporal lane at K = 128 is the long pole, and on this class of host it does not finish inside that budget. A run that reaches the budget records code 14, which is a failed-to-complete run. Treat a temporal run as an overnight operator job, not a pull-request gate.
+The default timeout is 3,600 seconds per solver invocation. This resource limit does not establish safety or progress.
 
-The tool pins are Apalache 0.62.4, its release archive, and the JAR digest. The contract records Java 26.0.2.1 as the observed runtime; provision that runtime before you treat a run as the pinned lane.
+The tool pins are Apalache 0.62.4, its release archive, and the JAR digest. The contract records Java 25.0.5 as the observed runtime; provision that runtime before you treat a run as the pinned lane.
 
 ## Differential oracle
 
@@ -108,7 +108,7 @@ cargo test --locked -p bitcoin-rs-consensus --features kernel --test suite -- ke
 The live Core lane is a process comparison, not an in-process oracle. Its evidence test is:
 
 ```
-P2P_CORE_INTEROP_EVIDENCE=target/core-differential/evidence.json cargo test --locked -p bitcoin-rs-p2p --test suite core_interop_live:: -- --ignored
+P2P_CORE_INTEROP_EVIDENCE=target/core-differential/evidence.json cargo test --locked -p bitcoin-rs-wire --test suite core_interop_live:: -- --ignored
 ```
 
 That test reads the evidence document produced by `scripts/run-p2p-core-interop.sh`. It does not run Core by itself. [Compatibility with Bitcoin Core](core-compatibility.md) owns the lane scopes and the main-only limits.
@@ -125,7 +125,7 @@ A gap clause has no tagged artifact. It is not a waiver and not a pass. Closing 
 
 ## What no layer proves
 
-There is no formal proof of the whole node. There is no recorded external JSON-RPC, REST, or ZMQ consumer run. There is no product benchmark cell at the acceptance threshold. The `CORE-05` and `CORE-06` live lanes are main-only, and `CORE-07` needs a local Core checkout. The TLA+ Apalache rows are pending.
+There is no formal proof of the whole node. There is no recorded external JSON-RPC, REST, or ZMQ consumer run. There is no product benchmark cell at the acceptance threshold. The `CORE-05` and `CORE-06` live lanes are main-only, and `CORE-07` needs a local Core checkout. The full formal model-checking gate remains unresolved.
 
 Use those limits when you describe a result. "Tested" names the layer and the scope. "Verified" without a scope names nothing.
 

@@ -2,7 +2,7 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait};
 use std::path::Path;
 
 use bitcoin::hex::FromHex;
-use bitcoin_rs_primitives::{ConsensusDecode, Hash256, SighashCache, Tx, deserialize};
+use bitcoin_rs_consensus::primitives::{ConsensusDecode, Hash256, SighashCache, Tx, deserialize};
 use sonic_rs::Value;
 
 #[test]
@@ -29,7 +29,7 @@ fn script_tests_vectors_load_and_flags_parse() {
         let Some(flags) = row.get(flags_index).and_then(Value::as_str) else {
             continue;
         };
-        if bitcoin_rs_script::VerifyFlags::from_core_names(flags).is_ok() {
+        if bitcoin_rs_consensus::script::VerifyFlags::from_core_names(flags).is_ok() {
             parsed_flags = parsed_flags.saturating_add(1);
         }
     }

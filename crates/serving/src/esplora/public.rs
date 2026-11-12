@@ -1,0 +1,790 @@
+use core::str::FromStr as _;
+use std::sync::Arc;
+
+use bitcoin::consensus::encode::serialize;
+use bitcoin::hashes::Hash as _;
+use bitcoin::hex::{DisplayHex as _, FromHex as _};
+use bitcoin::merkle_tree::MerkleBlock;
+use bitcoin_rs_consensus::primitives::encode::double_sha256;
+use bitcoin_rs_consensus::primitives::{
+    Block, Hash256, OutPoint, Tx, Txid, consensus_bytes, deserialize, unix_time_secs,
+};
+use bitcoin_rs_mempool::LocalOrigin;
+use bitcoin_rs_projection::ScriptHash;
+use sonic_rs::json;
+
+use super::http::{admission_error, query_error};
+use super::model::{
+    AddressTransactionSummary, BlockStatus, MempoolSummary, MerkleProof, Outspend,
+    RecentTransaction, ScriptSummary, TransactionValue,
+};
+use super::projection::{Confirmation, ParentSource, Projection};
+use crate::context::Context;
+use crate::convert;
+use crate::decimal::parse_ascii_decimal;
+use crate::handlers::Handler;
+use crate::rest::{
+    Response, bad_request, internal_error, json_ok, not_found, service_unavailable, text_response,
+};
+
+pub(super) const CHAIN_PAGE: usize = 25;
+const MEMPOOL_PAGE: usize = 50;
+
+const MAX_BROADCAST_FEE_RATE_SAT_PER_KVB: u64 = 10_000_000;
+
+pub(super) fn get(ctx: &Context, path: &str) -> Response {
+    let parts: Vec<_> = path.trim_matches('/').split('/').collect();
+    match parts.as_slice() {
+        ["blocks", "tip", "height"] => text_response(
+            "text/plain",
+            ctx.chain.applied_height().to_string().into_bytes(),
+        ),
+        ["blocks", "tip", "hash"] => text_response(
+            "text/plain",
+            ctx.chain.applied_hash().to_string_be().into_bytes(),
+        ),
+        ["tx", id, "hex"] => tx_hex(&ctx, id),
+        ["tx", id, "raw"] => tx_raw(&ctx, id),
+        ["tx", id, "status"] => tx_status(&ctx, id),
+        ["tx", id, "merkleblock-proof"] => tx_merkleblock_proof(&ctx, id),
+        ["tx", id, "merkle-proof"] => tx_merkle_proof(&ctx, id),
+        ["tx", id, "outspend", vout] => tx_outspend(&ctx, id, vout),
+        ["tx", id, "outspends"] => tx_outspends(&ctx, id),
+        ["tx", id] => tx(&ctx, id),
+        ["block", hash, "header"] => block_header(&ctx, hash),
+        ["block", hash, "status"] => block_status(&ctx, hash),
+        ["block", hash, "raw"] => block_raw(&ctx, hash),
+        ["block", hash, "txs"] => block_txs(&ctx, hash, 0),
+        ["block", hash, "txs", start] => match parse_ascii_decimal::<usize>(start) {
+            Some(n) if n % CHAIN_PAGE == 0 => block_txs(&ctx, hash, n),
+            _ => bad_request("transaction start index must be a multiple of 25"),
+        },
+        ["block", hash, "txids"] => block_txids(&ctx, hash),
+        ["block", hash, "txid", index] => block_txid(&ctx, hash, index),
+        ["block", hash] => block(&ctx, hash),
+        ["block-height", height] => parse_ascii_decimal::<u32>(height).map_or_else(
+            || bad_request("height must be an unsigned integer"),
+            |height| {
+                ctx.chain
+                    .block_hash_at_height(height)
+                    .map_or_else(not_found, |hash| {
+                        text_response("text/plain", hash.to_string_be().into_bytes())
+                    })
+            },
+        ),
+        ["blocks"] => blocks(&ctx, None),
+        ["blocks", height] => parse_ascii_decimal::<u32>(height).map_or_else(
+            || bad_request("start height must be an unsigned integer"),
+            |h| blocks(&ctx, Some(h)),
+        ),
+        ["mempool"] => mempool(&ctx),
+        ["mempool", "txids"] => json_ok(
+            ctx.mempool
+                .gateway
+                .read()
+                .iter_txids()
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>(),
+        ),
+        ["mempool", "recent"] => mempool_recent(&ctx),
+        ["fee-estimates"] => fee_estimates(ctx),
+        ["scripthash", hash] => summary(&ctx, hash, None),
+        ["address", address] => {
+            address_hash(&ctx, address).map_or_else(|r| r, |h| summary_for(&ctx, h, Some(address)))
+        }
+        ["scripthash", hash, "utxo"] => parse_script(hash).map_or_else(|r| r, |h| utxos(&ctx, h)),
+        ["address", address, "utxo"] => {
+            address_hash(&ctx, address).map_or_else(|r| r, |h| utxos(&ctx, h))
+        }
+        ["scripthash", hash, "txs"] => {
+            parse_script(hash).map_or_else(|r| r, |h| full_history(&ctx, h))
+        }
+        ["address", address, "txs"] => {
+            address_hash(&ctx, address).map_or_else(|r| r, |h| full_history(&ctx, h))
+        }
+        ["scripthash", hash, "txs", "summary"] => {
+            parse_script(hash).map_or_else(|r| r, |h| address_transaction_summary(&ctx, h))
+        }
+        ["address", address, "txs", "summary"] => {
+            address_hash(&ctx, address).map_or_else(|r| r, |h| address_transaction_summary(&ctx, h))
+        }
+        ["scripthash", hash, "txs", "mempool"] => {
+            parse_script(hash).map_or_else(|r| r, |h| mempool_history(&ctx, h))
+        }
+        ["address", address, "txs", "mempool"] => {
+            address_hash(&ctx, address).map_or_else(|r| r, |h| mempool_history(&ctx, h))
+        }
+        ["scripthash", hash, "txs", "chain"] => {
+            parse_script(hash).map_or_else(|r| r, |h| chain_history(&ctx, h, None))
+        }
+        ["address", address, "txs", "chain"] => {
+            address_hash(&ctx, address).map_or_else(|r| r, |h| chain_history(&ctx, h, None))
+        }
+        ["scripthash", hash, "txs", "chain", last] => {
+            parse_script(hash).map_or_else(|r| r, |h| chain_history(&ctx, h, Some(last)))
+        }
+        ["address", address, "txs", "chain", last] => {
+            address_hash(&ctx, address).map_or_else(|r| r, |h| chain_history(&ctx, h, Some(last)))
+        }
+        ["address-prefix", _] => {
+            service_unavailable("address prefix search requires an address index")
+        }
+        _ => not_found(),
+    }
+}
+
+pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Response {
+    match path {
+        "/tx" => {
+            let Ok(hex) = core::str::from_utf8(body) else {
+                return bad_request("transaction body must be UTF-8 hex");
+            };
+            let hex = hex.trim();
+            if let Err(error) = crate::handlers::tx::check_broadcast_hex_len(hex) {
+                return bad_request(error);
+            }
+            let transaction = Vec::<u8>::from_hex(hex)
+                .ok()
+                .and_then(|bytes| deserialize::<Tx>(&bytes).ok());
+            let Some(transaction) = transaction else {
+                return bad_request("TX decode failed. Make sure the tx has at least one input.");
+            };
+            let ctx = handler.context();
+            let txid = transaction.txid();
+            match ctx.mempool.gateway.submit_local_transaction(
+                Arc::new(transaction),
+                LocalOrigin::Esplora,
+                Some(MAX_BROADCAST_FEE_RATE_SAT_PER_KVB),
+                unix_time_secs(),
+                &ctx.chain.admission_chain(),
+            ) {
+                Ok(_) => text_response("text/plain", txid.to_string().into_bytes()),
+                Err(error) => admission_error(error),
+            }
+        }
+        _ => not_found(),
+    }
+}
+
+fn tx(ctx: &Context, id: &str) -> Response {
+    let projection = Projection::new(ctx);
+    projection.required_transaction(id).map_or_else(
+        |r| r,
+        |(tx, status)| {
+            projection
+                .transaction_values([(&tx, status)], None)
+                .map_or_else(|r| r, |values| json_ok(&values[0]))
+        },
+    )
+}
+fn tx_hex(ctx: &Context, id: &str) -> Response {
+    Projection::new(ctx).required_transaction(id).map_or_else(
+        |r| r,
+        |(tx, _)| {
+            text_response(
+                "text/plain",
+                consensus_bytes(&tx).to_lower_hex_string().into_bytes(),
+            )
+        },
+    )
+}
+fn tx_raw(ctx: &Context, id: &str) -> Response {
+    Projection::new(ctx).required_transaction(id).map_or_else(
+        |r| r,
+        |(tx, _)| Response {
+            status: 200,
+            reason: "OK",
+            content_type: "application/octet-stream",
+            body: consensus_bytes(&tx),
+        },
+    )
+}
+fn tx_status(ctx: &Context, id: &str) -> Response {
+    Projection::new(ctx).required_transaction(id).map_or_else(
+        |r| r,
+        |(_, status)| json_ok(Projection::status_value(status)),
+    )
+}
+
+fn tx_merkleblock_proof(ctx: &Context, id: &str) -> Response {
+    confirmed_block(ctx, id).map_or_else(
+        |r| r,
+        |(_record, bytes, txid, _render)| {
+            let Ok(block) = bitcoin::consensus::encode::deserialize::<bitcoin::Block>(&bytes)
+            else {
+                return internal_error("stored block body is corrupt");
+            };
+            let proof = MerkleBlock::from_block_with_predicate(&block, |candidate| {
+                candidate.as_byte_array() == txid.as_bytes()
+            });
+            text_response(
+                "text/plain",
+                serialize(&proof).to_lower_hex_string().into_bytes(),
+            )
+        },
+    )
+}
+
+fn tx_merkle_proof(ctx: &Context, id: &str) -> Response {
+    confirmed_block(ctx, id).map_or_else(
+        |r| r,
+        |(record, bytes, txid, _render)| {
+            let Ok(block) = deserialize::<Block>(&bytes) else {
+                return internal_error("stored block body is corrupt");
+            };
+            let txids = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
+            let Some(position) = txids.iter().position(|candidate| *candidate == txid) else {
+                return internal_error("confirmed transaction is absent from its block");
+            };
+            let proof = merkle_proof(txids, position);
+            json_ok(&MerkleProof {
+                block_height: record.height,
+                merkle: proof,
+                pos: position,
+            })
+        },
+    )
+}
+
+fn confirmed_block(
+    ctx: &Context,
+    id: &str,
+) -> Result<
+    (
+        bitcoin_rs_projection::block_log::BlockRecord,
+        Vec<u8>,
+        Txid,
+        crate::context::BlockRenderPermit,
+    ),
+    Response,
+> {
+    let (transaction, Some(status)) = Projection::new(ctx).required_transaction(id)? else {
+        return Err(not_found());
+    };
+    let txid = transaction.txid();
+    let record = ctx
+        .chain
+        .block_by_height(status.height)
+        .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+    let render = ctx
+        .try_acquire_block_render()
+        .ok_or_else(|| service_unavailable("too many concurrent full-block reads; retry"))?;
+    let bytes = ctx
+        .chain
+        .block_body_bytes(&record)
+        .ok_or_else(|| service_unavailable("confirming block body unavailable"))?;
+    Ok((record, bytes, txid, render))
+}
+
+fn merkle_proof(mut level: Vec<Txid>, mut position: usize) -> Vec<String> {
+    let mut proof = Vec::new();
+    while level.len() > 1 {
+        let sibling = if position.is_multiple_of(2) {
+            level.get(position + 1).unwrap_or(&level[position])
+        } else {
+            &level[position - 1]
+        };
+        proof.push(sibling.to_string());
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for pair in level.chunks(2) {
+            let right = pair.get(1).unwrap_or(&pair[0]);
+            let mut bytes = [0_u8; 64];
+            bytes[..32].copy_from_slice(pair[0].as_bytes());
+            bytes[32..].copy_from_slice(right.as_bytes());
+            next.push(Txid(double_sha256(&bytes)));
+        }
+        level = next;
+        position /= 2;
+    }
+    proof
+}
+
+fn tx_outspend(ctx: &Context, id: &str, vout: &str) -> Response {
+    let Some(vout) = parse_ascii_decimal::<u32>(vout) else {
+        return bad_request("vout must be an unsigned integer");
+    };
+    let projection = Projection::new(ctx);
+    projection.required_transaction(id).map_or_else(
+        |r| r,
+        |(transaction, _)| {
+            let Some(_) = transaction
+                .outputs
+                .get(usize::try_from(vout).unwrap_or(usize::MAX))
+            else {
+                return not_found();
+            };
+            outspend(&projection, OutPoint::new(transaction.txid(), vout))
+                .map_or_else(|r| r, json_ok)
+        },
+    )
+}
+
+fn tx_outspends(ctx: &Context, id: &str) -> Response {
+    let projection = Projection::new(ctx);
+    projection.required_transaction(id).map_or_else(
+        |r| r,
+        |(transaction, _)| {
+            outspends_for_transaction(&projection, &transaction).map_or_else(|r| r, json_ok)
+        },
+    )
+}
+
+pub(super) fn outspends_for_transaction(
+    projection: &Projection<'_>,
+    transaction: &Tx,
+) -> Result<Vec<Outspend>, Response> {
+    transaction
+        .outputs
+        .iter()
+        .enumerate()
+        .map(|(vout, _)| {
+            let vout =
+                u32::try_from(vout).map_err(|_| internal_error("output index is too large"))?;
+            outspend(projection, OutPoint::new(transaction.txid(), vout))
+        })
+        .collect()
+}
+
+pub(super) fn outspend(
+    projection: &Projection<'_>,
+    outpoint: OutPoint,
+) -> Result<Outspend, Response> {
+    let ctx = projection.ctx;
+    let pool = ctx.mempool.gateway.read();
+    if let Some(spender) = pool
+        .outpoint_spender(outpoint)
+        .map_err(|_| internal_error("mempool spending index is inconsistent"))?
+    {
+        return Ok(Outspend {
+            spent: true,
+            txid: Some(spender.entry.txid.to_string()),
+            vin: Some(spender.vin),
+            status: Some(Projection::status_value(None)),
+        });
+    }
+    drop(pool);
+
+    let index = ctx
+        .indexes
+        .script_index
+        .as_ref()
+        .ok_or_else(|| service_unavailable("script index is disabled"))?;
+    let Some(spender) = index.spender(outpoint).map_err(query_error)? else {
+        return Ok(Outspend::unspent());
+    };
+    let confirmation = projection
+        .confirmation_at_height(spender.height)
+        .ok_or_else(|| service_unavailable("spending block unavailable"))?;
+    Ok(Outspend {
+        spent: true,
+        txid: Some(spender.txid.to_string()),
+        vin: Some(spender.vin),
+        status: Some(Projection::status_value(Some(confirmation))),
+    })
+}
+
+fn block(ctx: &Context, text_hash: &str) -> Response {
+    let projection = Projection::new(ctx);
+    let record = match projection.required_block_record(text_hash) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    projection.block_value(&record).map_or_else(|r| r, json_ok)
+}
+fn block_header(ctx: &Context, h: &str) -> Response {
+    let record = match Projection::new(ctx).required_block_record(h) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    record.header_bytes().map_or_else(
+        || service_unavailable("block header unavailable"),
+        |bytes| text_response("text/plain", bytes.to_lower_hex_string().into_bytes()),
+    )
+}
+fn block_status(ctx: &Context, text_hash: &str) -> Response {
+    let record = match Projection::new(ctx).required_block_record(text_hash) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let view = ctx.chain.applied_view();
+    let in_best_chain =
+        ctx.chain.active_hash_in_view(&view, record.height) == Some(Hash256::from(record.hash));
+    json_ok(&BlockStatus {
+        in_best_chain,
+        height: record.height,
+        next_best: in_best_chain
+            .then(|| {
+                record
+                    .height
+                    .checked_add(1)
+                    .and_then(|next| ctx.chain.active_hash_in_view(&view, next))
+            })
+            .flatten()
+            .map(|hash| hash.to_string_be()),
+    })
+}
+fn block_raw(ctx: &Context, text_hash: &str) -> Response {
+    let record = match Projection::new(ctx).required_block_record(text_hash) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    let Some(bytes) = ctx.chain.block_body_bytes(&record) else {
+        return service_unavailable("block body unavailable");
+    };
+    Response {
+        status: 200,
+        reason: "OK",
+        content_type: "application/octet-stream",
+        body: bytes,
+    }
+}
+pub(super) fn block_txs(ctx: &Context, h: &str, start: usize) -> Response {
+    let projection = Projection::new(ctx);
+    let record = match projection.required_block_record(h) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    let (record, block) = match projection.block_from_record(record) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    block_transaction_values(ctx, &record, &block, start, CHAIN_PAGE).map_or_else(|r| r, json_ok)
+}
+
+pub(super) fn block_transaction_values(
+    ctx: &Context,
+    record: &bitcoin_rs_projection::block_log::BlockRecord,
+    block: &Block,
+    start: usize,
+    limit: usize,
+) -> Result<Vec<TransactionValue>, Response> {
+    let block_status = (ctx.chain.active_hash_at_height(record.height)
+        == Some(Hash256::from(record.hash)))
+    .then_some(Confirmation {
+        height: record.height,
+        hash: record.hash,
+        time: record.time,
+    });
+    let projection = Projection::new(ctx);
+    let transactions = block
+        .txs
+        .iter()
+        .skip(start)
+        .take(limit)
+        .map(|tx| {
+            let state = match block_status {
+                Some(state) => Some(state),
+                None => projection.confirmation(&tx.txid())?,
+            };
+            Ok((tx, state))
+        })
+        .collect::<Result<Vec<_>, Response>>()?;
+    projection.transaction_values(
+        transactions,
+        Some(ParentSource::Block(if block_status.is_some() {
+            block.txs.as_slice()
+        } else {
+            &[]
+        })),
+    )
+}
+fn block_txids(ctx: &Context, h: &str) -> Response {
+    let projection = Projection::new(ctx);
+    let record = match projection.required_block_record(h) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    let (_, block) = match projection.block_from_record(record) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    json_ok(
+        block
+            .txs
+            .iter()
+            .map(|tx| tx.txid().to_string())
+            .collect::<Vec<_>>(),
+    )
+}
+fn block_txid(ctx: &Context, h: &str, index: &str) -> Response {
+    let Some(index) = parse_ascii_decimal::<usize>(index) else {
+        return bad_request("transaction index must be an unsigned integer");
+    };
+    let projection = Projection::new(ctx);
+    let record = match projection.required_block_record(h) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    let (_, block) = match projection.block_from_record(record) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    block.txs.get(index).map_or_else(not_found, |tx| {
+        text_response("text/plain", tx.txid().to_string().into_bytes())
+    })
+}
+fn blocks(ctx: &Context, start_height: Option<u32>) -> Response {
+    let view = ctx.chain.applied_view();
+    let start = start_height.unwrap_or_else(|| view.height());
+    if ctx.chain.block_by_height_in_view(&view, start).is_none() {
+        return not_found();
+    }
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    let mut values = Vec::with_capacity(10);
+    let projection = Projection::new(ctx);
+    for height in (0..=start).rev().take(10) {
+        let Some(record) = ctx.chain.block_by_height_in_view(&view, height) else {
+            continue;
+        };
+        let value = match projection.block_value(&record) {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+        values.push(value);
+    }
+    json_ok(&values)
+}
+fn mempool(ctx: &Context) -> Response {
+    let (stats, fee_histogram) = {
+        let pool = ctx.mempool.gateway.read();
+        (pool.stats(), pool.fee_rate_histogram().collect::<Vec<_>>())
+    };
+    #[cfg(test)]
+    crate::esplora::tests::gate_mempool_summary_for_tests();
+    json_ok(&MempoolSummary {
+        count: stats.txs,
+        vsize: stats.bytes,
+        total_fee: stats.total_fee,
+        fee_histogram: fee_histogram
+            .into_iter()
+            .rev()
+            .map(|(rate, size)| (rate as f64 / 1000.0, size))
+            .collect(),
+    })
+}
+fn mempool_recent(ctx: &Context) -> Response {
+    const RECENT: usize = 10;
+    let latest = {
+        let pool = ctx.mempool.gateway.read();
+        let mut latest: Vec<(u64, Txid, u64, u32, &Arc<Tx>)> = Vec::with_capacity(RECENT);
+        for entry in pool.iter_entries() {
+            let rank = (entry.time, entry.txid);
+            let position = match latest.iter().position(|kept| rank > (kept.0, kept.1)) {
+                Some(position) => position,
+                None if latest.len() < RECENT => latest.len(),
+                None => continue,
+            };
+            latest.insert(
+                position,
+                (entry.time, entry.txid, entry.fee, entry.vsize, &entry.tx),
+            );
+            latest.truncate(RECENT);
+        }
+        latest
+            .into_iter()
+            .map(|(time, txid, fee, vsize, transaction)| {
+                (time, txid, fee, vsize, Arc::clone(transaction))
+            })
+            .collect::<Vec<_>>()
+    };
+    json_ok(
+        latest
+            .into_iter()
+            .map(|(_, txid, fee, vsize, transaction)| RecentTransaction {
+                txid: txid.to_string(),
+                fee,
+                vsize,
+                value: transaction.outputs.iter().fold(0_u64, |sum, output| {
+                    sum.saturating_add(output.value.to_sat())
+                }),
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+fn fee_estimates(ctx: &Context) -> Response {
+    let estimates = {
+        let pool = ctx.mempool.gateway.read();
+        (1_u32..=25)
+            .chain([144, 504, 1008])
+            .filter_map(|target| pool.estimate_fee_rate(target).map(|rate| (target, rate)))
+            .collect::<Vec<_>>()
+    };
+    let mut values = sonic_rs::Object::new();
+    for (target, rate) in estimates {
+        let fee = fee_rate_sat_per_vbyte(convert::sat_to_btc(rate.as_sat_per_kvb()));
+        values.insert(&target.to_string(), json!(fee));
+    }
+    json_ok(values.into_value())
+}
+
+pub(super) fn fee_rate_sat_per_vbyte(btc_per_kvb: f64) -> f64 {
+    btc_per_kvb * 100_000.0
+}
+pub(super) fn summary(ctx: &Context, text: &str, address: Option<&str>) -> Response {
+    parse_script(text).map_or_else(|r| r, |h| summary_for(ctx, h, address))
+}
+fn summary_for(ctx: &Context, h: ScriptHash, address: Option<&str>) -> Response {
+    let projection = Projection::new(ctx);
+    let activity = match projection.script_activity(h) {
+        Ok(activity) => activity,
+        Err(response) => return response,
+    };
+    let chain_stats = activity.chain_stats();
+    json_ok(&ScriptSummary {
+        address: address.map(str::to_owned),
+        scripthash: address
+            .is_none()
+            .then(|| h.to_byte_array().to_lower_hex_string()),
+        chain_stats,
+        mempool_stats: activity.mempool_stats(h),
+    })
+}
+fn utxos(ctx: &Context, h: ScriptHash) -> Response {
+    Projection::new(ctx)
+        .script_utxos(h)
+        .map_or_else(|response| response, json_ok)
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryScope {
+    Full,
+    Chain,
+}
+
+pub(super) fn full_history(ctx: &Context, h: ScriptHash) -> Response {
+    history_scoped(ctx, h, None, HistoryScope::Full)
+}
+
+pub(super) fn chain_history(ctx: &Context, h: ScriptHash, last: Option<&str>) -> Response {
+    history_scoped(ctx, h, last, HistoryScope::Chain)
+}
+
+pub(super) fn mempool_history(ctx: &Context, h: ScriptHash) -> Response {
+    let projection = Projection::new(ctx);
+    let mempool = match projection.mempool_activity_for(h) {
+        Ok(mempool) => mempool,
+        Err(response) => return response,
+    };
+    projection
+        .transaction_values(
+            mempool
+                .iter()
+                .take(MEMPOOL_PAGE)
+                .map(|tx| (tx.as_ref(), None)),
+            None,
+        )
+        .map_or_else(|r| r, json_ok)
+}
+
+fn history_scoped(
+    ctx: &Context,
+    h: ScriptHash,
+    last: Option<&str>,
+    scope: HistoryScope,
+) -> Response {
+    let projection = Projection::new(ctx);
+    let mempool = if scope == HistoryScope::Full {
+        let mempool = match projection.mempool_activity_for(h) {
+            Ok(mempool) => mempool,
+            Err(response) => return response,
+        };
+        mempool.into_iter().take(MEMPOOL_PAGE).collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let cursor = last.and_then(|text| {
+        Txid::from_str(text)
+            .ok()
+            .filter(|txid| txid.to_string() == text)
+    });
+    let records = match projection.confirmed_history_page(h, cursor, CHAIN_PAGE) {
+        Ok(records) => records,
+        Err(response) => return response,
+    };
+    let mut confirmations: std::collections::HashMap<u32, Confirmation> =
+        std::collections::HashMap::new();
+    let chain = match records
+        .into_iter()
+        .map(|record| {
+            let confirmation = if let Some(confirmation) = confirmations.get(&record.height) {
+                *confirmation
+            } else {
+                let confirmation = projection
+                    .confirmation_at_height(record.height)
+                    .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+                confirmations.insert(record.height, confirmation);
+                confirmation
+            };
+            let transaction = projection.confirmed_transaction(&record.txid)?;
+            Ok((transaction, Some(confirmation)))
+        })
+        .collect::<Result<Vec<_>, Response>>()
+    {
+        Ok(chain) => chain,
+        Err(r) => return r,
+    };
+    projection
+        .transaction_values(
+            mempool
+                .iter()
+                .map(|tx| (tx.as_ref(), None))
+                .chain(chain.iter().map(|(tx, status)| (tx, *status))),
+            None,
+        )
+        .map_or_else(|r| r, json_ok)
+}
+
+pub(super) fn address_transaction_summary(ctx: &Context, h: ScriptHash) -> Response {
+    let activity = match Projection::new(ctx).script_activity(h) {
+        Ok(activity) => activity,
+        Err(response) => return response,
+    };
+    let mut funded = std::collections::BTreeMap::<Txid, u64>::new();
+    for row in &activity.confirmed_funding {
+        let total = funded.entry(row.txid).or_default();
+        *total = total.saturating_add(row.value);
+    }
+    json_ok(
+        activity
+            .confirmed
+            .into_iter()
+            .map(|entry| AddressTransactionSummary {
+                txid: entry.record.txid.to_string(),
+                value: funded.get(&entry.record.txid).copied().unwrap_or_default(),
+                height: entry.confirmation.height,
+                time: entry.confirmation.time,
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+fn address_hash(ctx: &Context, a: &str) -> Result<ScriptHash, Response> {
+    let n = convert::bitcoin_network(ctx.chain.chain_network);
+    let a = bitcoin::Address::from_str(a)
+        .map_err(|_| bad_request("invalid address"))?
+        .require_network(n)
+        .map_err(|_| bad_request("address network does not match node"))?;
+    Ok(ScriptHash::from_script_bytes(a.script_pubkey().as_bytes()))
+}
+fn parse_script(s: &str) -> Result<ScriptHash, Response> {
+    Ok(ScriptHash::from_byte_array(
+        <[u8; 32]>::from_hex(s).map_err(|_| bad_request("scripthash must be 64 hex characters"))?,
+    ))
+}

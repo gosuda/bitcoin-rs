@@ -2,14 +2,14 @@
 
 One row decides what survives a crash: the durable head. A committed block is real only after the head row names it and the batch that wrote it returns. Persistent chain state either supports that row or can be rebuilt from the block bodies.
 
-The storage contract is owned by [`crates/storage`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/storage), the coin set by [`crates/utxo`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/utxo), and the transition order by [`crates/chainstate`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/chainstate). The normative commit protocol is [docs/contracts/recovery.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md).
+The storage contract is owned by [`crates/storage`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/storage), the coin set by [`crates/storage/src/utxo`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/storage/src/utxo), and the transition order by [`crates/execution`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/execution). The normative commit protocol is [docs/contracts/recovery.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md).
 
 ## What is stored
 
 ```text
 data-dir/
   .lock                     exclusive data-directory lock
-  chainstate/               key-value namespace (fjall, redb, or RocksDB)
+  chainstate/               key-value namespace (RocksDB)
     UtxoMeta                durable head, script attestation, snapshot status
     ...                     coin shards, undo rows, index rows
   blocks/                   append-only block files
@@ -21,7 +21,7 @@ data-dir/
 
 `.lock` holds a POSIX record lock (`F_SETLK`), which does not conflict with the `flock` that binaries from before this change take. Stop the old process before starting the new one during an upgrade or downgrade; overlapping binaries can otherwise open the same data directory.
 
-The key-value layer is one trait, `KvStore`, with `get`, ordered `iter_prefix`, bounded prefix scans, point-in-time `snapshot`, and one buffered write batch applied by `write`, `write_deferred`, or `write_durable`. `bitcoin-rs-storage` is the only crate allowed to depend on an engine crate (`ARCH-02`). The engine is selected at runtime by `storage.backend` (`fjall` by default, `redb` and `rocksdb` as compiled alternatives). A build that lacks the selected engine refuses to start.
+The key-value layer is one trait, `KvStore`, with `get`, ordered `iter_prefix`, bounded prefix scans, point-in-time `snapshot`, and one buffered write batch applied by `write`, `write_deferred`, or `write_durable`. `bitcoin-rs-storage` is the only crate allowed to depend on an engine crate (`ARCH-02`). The engine is selected at runtime by `storage.backend`: `rocksdb` (the default, always compiled), `surrealkv` (when compiled with cargo feature `surrealkv`), and `mdbx` (when compiled with cargo feature `mdbx`); `fjall` or `redb` fail at startup with `unsupported storage backend <value>`. If a datadir was created by a different engine, the node refuses startup with `<namespace> was created by <found>; start with --storage-backend <found> or convert with bitcoin-rs-storage-convert`. Datadirs from retired engines convert offline with `bitcoin-rs-storage-convert --from <old> --to <new>`.
 
 Block bodies do not go through the key-value store. `FlatFileBlockStore` appends them to flat files and addresses them by `BlockFilePosition`; the key-value row holds only the locator.
 
@@ -40,7 +40,7 @@ A connect commits in this order:
 
 The UTXO mutation is not carried inside the head batch. The batch names the undo and body records that make the mutation recoverable, and the compare-and-set makes exactly one head advance win.
 
-Body and undo records are retained under the head's certified extents. When a batch is 64 blocks or 8 MiB, the group flushes as one head commit; the limit is `DURABLE_HEAD_GROUP_BLOCKS` in `crates/chainstate/src/window.rs`.
+Body and undo records are retained under the head's certified extents. When a batch is 64 blocks or 8 MiB, the group flushes as one head commit; the limit is `DURABLE_HEAD_GROUP_BLOCKS` in `crates/execution/src/window.rs`.
 
 ## Undo and the journal
 
@@ -106,21 +106,21 @@ Pruning is rejected together with `txindex`, `blockfilterindex`, or a script ind
 A regtest start and one mined block produce these storage and commit lines. `$DATA` is the data directory passed to `--data-dir`. The binary emits one JSON object per line; fields are shown as `key=value` with the timestamp and unchanged diagnostic fields removed.
 
 ```text
-INFO bitcoin_rs_chainstate::recovery chainstate restore selected restore_source=cold reason=no_complete_checkpoint
-INFO bitcoin_rs_node::state::open opened storage backend with effective cache capacities backend=fjall chainstate_dir=$DATA/chainstate chainstate_cache_bytes=471859200 txindex_cache_bytes=0 total_cache_bytes=471859200
-DEBUG bitcoin_rs_chainstate::connect apply_block: tail begin height=1 outcome.hash=5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24
-DEBUG bitcoin_rs_chainstate::connect apply_block: publish profile height=1 durable_sync_us=4 durable_commit_us=67
+INFO bitcoin_rs_execution::recovery chainstate restore selected restore_source=cold reason=no_complete_checkpoint
+INFO bitcoin_rs_node::state::open opened storage backend with effective cache capacities backend="rocksdb" chainstate_dir=$DATA/chainstate chainstate_cache_bytes=471859200 txindex_cache_bytes=0 total_cache_bytes=471859200
+DEBUG bitcoin_rs_execution::connect apply_block: tail begin height=1 outcome.hash=5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24
+DEBUG bitcoin_rs_execution::connect apply_block: publish profile height=1 durable_sync_us=4 durable_commit_us=67
 INFO bitcoin_rs_node::lifecycle published clean chainstate checkpoint generation=1
 ```
 
-`restore_source=cold` means no complete checkpoint was available and the node restored from the durable state. `fjall` is the compiled default backend. The publish line follows the durable commit, not the other way around.
+`restore_source=cold` means no complete checkpoint was available and the node restored from the durable state. `rocksdb` is the compiled default backend. The publish line follows the durable commit, not the other way around.
 
 ## Tests that pin storage
 
 | Invariant | Test | File |
 | --- | --- | --- |
-| A matching head needs no replay | `matching_durable_head_requires_no_replay` | [`crates/chainstate/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chainstate/src/durable/tests.rs) |
-| Replayed frontier matches the head identity | `replayed_frontier_must_match_the_durable_head_identity` | [`crates/chainstate/src/journal/replay_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chainstate/src/journal/replay_tests.rs) |
+| A matching head needs no replay | `matching_durable_head_requires_no_replay` | [`crates/execution/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/durable/tests.rs) |
+| Replayed frontier matches the head identity | `replayed_frontier_must_match_the_durable_head_identity` | [`crates/execution/src/journal/replay_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/journal/replay_tests.rs) |
 | Pruning keeps retained reorg history | `prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs` | [`crates/node/src/state/tests/recovery.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state/tests/recovery.rs) |
 | A second open is refused while the first lives | `second_open_while_first_lives_refuses_and_reopen_succeeds_after_drop` | [`crates/node/src/state/tests/data_dir_lock.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state/tests/data_dir_lock.rs) |
 

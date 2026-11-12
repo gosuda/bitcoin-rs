@@ -23,10 +23,10 @@ The five layers map to crate directories:
 
 | Layer | Directory | Owns |
 | --- | --- | --- |
-| primitives | [`crates/primitives/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/primitives/src) | `Tx`, `TxIn`, `TxOut`, `Block`, `Header`, `OutPoint`, `Hash256`, `Amount`, sighash types and cache keys; no execution |
-| script | [`crates/script/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/script/src) | `Interpreter`, `VerifyFlags`, `PreparedTransaction`, Taproot, sigop counting, signature cache |
+| primitives | [`crates/consensus/src/primitives`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/consensus/src/primitives) | `Tx`, `TxIn`, `TxOut`, `Block`, `Header`, `OutPoint`, `Hash256`, `Amount`, sighash types and cache keys; no execution |
+| script | [`crates/consensus/src/script`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/consensus/src/script) | `Interpreter`, `VerifyFlags`, `PreparedTransaction`, Taproot, sigop counting, signature cache |
 | consensus | [`crates/consensus/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/consensus/src) | `ValidationEngine`, transaction rules, block rules, kernel dispatch |
-| chainstate | [`crates/chainstate/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/chainstate/src) | Validation mode, assume-valid gate, apply path and its skip decision |
+| chainstate | [`crates/execution/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/execution/src) | Validation mode, assume-valid gate, apply path and its skip decision |
 | mempool | [`crates/mempool/src`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/mempool/src) | Admission-time script checks, standardness, sigop policy |
 
 ## The native interpreter
@@ -61,7 +61,7 @@ $ bitcoin-rs --network regtest --data-dir $DATA \
 Error: validation engine `kernel` is not supported by this build: bitcoinkernel support is not compiled in (enable the `kernel` feature)
 ```
 
-The process exits with status 1. The default `bitcoin-rs` binary is kernel-free (`VAL-03`). The shipped Docker image builds `fjall,kernel` and selects kernel in its config file, so a bare container runs kernel while a bare binary runs native.
+The process exits with status 1. The default `bitcoin-rs` binary is kernel-free (`VAL-03`). The shipped Docker image builds `kernel` and selects kernel in its config file, so a bare container runs kernel while a bare binary runs native.
 
 With `Kernel` selected, block parsing uses `bitcoinkernel::Block::new` and script verification calls the kernel engine after native prevout validation. The kernel path ignores the signature cache; the cache is a native optimization, and the kernel engine does not use it.
 
@@ -94,7 +94,7 @@ Core's script vectors pin zero native mismatches on runnable rows:
 | `tx_valid.json` | 0 | 0 | 121 | none |
 | `tx_invalid.json` | 0 | 9 | 84 | `BADTX` parse-stage rows only |
 
-The counts are constants in [`crates/script/tests/core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/script/tests/core_vectors.rs); the vectors themselves are the pinned Core corpus, so they do not run without it. Kernel builds also run the same catalog through the kernel column and the parity test `kernel_verdict_matches_mandatory_core_catalogs`.
+The counts are constants in [`crates/consensus/tests/script_core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/consensus/tests/script_core_vectors.rs); the vectors themselves are the pinned Core corpus, so they do not run without it. Kernel builds also run the same catalog through the kernel column and the parity test `kernel_verdict_matches_mandatory_core_catalogs`.
 
 The kernel is an oracle, not a second production default. A recorded proxy comparison (signed-spend apply p50) measured native about 9.2 percent slower than the kernel lane, and the recorded verdict kept the native default. Full-mainnet replay is blocked on issue #34 and is not measured here. The signed-spend proxy is engine diagnostics, not a daemon throughput result.
 
@@ -104,11 +104,11 @@ Do not read "zero mismatches" as blanket consensus parity. The claim covers the 
 
 | Invariant | Test | File |
 | --- | --- | --- |
-| Native column of `script_tests.json` passes | `script_tests_native_column` | [`crates/script/tests/core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/script/tests/core_vectors.rs) |
-| Native column of `tx_valid.json` passes | `tx_valid_native_column` | [`crates/script/tests/core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/script/tests/core_vectors.rs) |
-| Native column of `tx_invalid.json` passes | `tx_invalid_native_column` | [`crates/script/tests/core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/script/tests/core_vectors.rs) |
-| An unmatched pin does not skip scripts | `assume_valid_without_matching_pin_does_not_skip_scripts` | [`crates/chainstate/src/tests/assumevalid_trust_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chainstate/src/tests/assumevalid_trust_tests.rs) |
-| A reorg that drops the pin revokes trust | `assume_valid_trust_is_revoked_when_a_reorg_drops_the_pin` | [`crates/chainstate/src/tests/assumevalid_trust_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chainstate/src/tests/assumevalid_trust_tests.rs) |
+| Native column of `script_tests.json` passes | `script_tests_native_column` | [`crates/consensus/tests/script_core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/consensus/tests/script_core_vectors.rs) |
+| Native column of `tx_valid.json` passes | `tx_valid_native_column` | [`crates/consensus/tests/script_core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/consensus/tests/script_core_vectors.rs) |
+| Native column of `tx_invalid.json` passes | `tx_invalid_native_column` | [`crates/consensus/tests/script_core_vectors.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/consensus/tests/script_core_vectors.rs) |
+| An unmatched pin does not skip scripts | `assume_valid_without_matching_pin_does_not_skip_scripts` | [`crates/execution/src/tests/assumevalid_trust_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/tests/assumevalid_trust_tests.rs) |
+| A reorg that drops the pin revokes trust | `assume_valid_trust_is_revoked_when_a_reorg_drops_the_pin` | [`crates/execution/src/tests/assumevalid_trust_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/tests/assumevalid_trust_tests.rs) |
 | The engine defaults to native across layers | `validation_engine_defaults_to_native_and_layers_field_by_field` | [`crates/node/src/config/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/config/tests.rs) |
 
 The [BIP support](../trust/bip-support.md) page lists the activated soft forks, and the [verification](../trust/verification.md) page covers the wider evidence set.

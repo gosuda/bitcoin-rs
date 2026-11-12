@@ -8,15 +8,15 @@ use dependency_graph::WorkspaceGraph;
 
 const READ_CONTROL: &str = r"
 use std::sync::Arc;
-use bitcoin_rs_chain::{BlockTreeReader, TipReader, TipSnapshot};
-use bitcoin_rs_chainstate::{Chainstate, ChainstateSnapshot};
-use bitcoin_rs_p2p::sync::SyncChain;
-use bitcoin_rs_p2p::sync::chain::{ReorgError, HistoricalAdvance, WindowApplyDisposition};
+use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader, TipSnapshot};
+use bitcoin_rs_execution::{Chainstate, ChainstateSnapshot};
+use bitcoin_rs_node::p2p::sync::SyncChain;
+use bitcoin_rs_node::p2p::sync::chain::{ReorgError, HistoricalAdvance, WindowApplyDisposition};
 
 pub fn sync_outcomes(
-    branch: bitcoin_rs_chainstate::reorg::ReorgError,
-    historical: bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance,
-    disposition: bitcoin_rs_chainstate::WindowApplyDisposition,
+    branch: bitcoin_rs_execution::reorg::ReorgError,
+    historical: bitcoin_rs_execution::assumeutxo::HistoricalAdvance,
+    disposition: bitcoin_rs_execution::WindowApplyDisposition,
 ) -> (ReorgError, HistoricalAdvance, WindowApplyDisposition) {
     (branch, historical, disposition)
 }
@@ -37,7 +37,7 @@ pub fn observe(state: &Chainstate) -> (Option<Arc<TipSnapshot>>, usize) {
 
 pub fn observe_undo(state: &Chainstate) {
     if let Some(tip) = state.applied_tip_snapshot() {
-        let reader: &dyn bitcoin_rs_utxo::contract::BlockUndoSource = state;
+        let reader: &dyn bitcoin_rs_storage::utxo::contract::BlockUndoSource = state;
         let _ = reader.block_spends(tip.hash, tip.hash);
     }
 }
@@ -49,7 +49,7 @@ pub fn observe_sync(chain: &dyn SyncChain) -> Option<Arc<TipSnapshot>> {
 }
 ";
 
-// ARCH-01, ARCH-02, ARCH-03, ARCH-04, FEAT-02
+// ARCH-01, ARCH-02, ARCH-03, ARCH-04, FEAT-02, MOD-01, MOD-03, MOD-05
 #[test]
 fn workspace_dependency_direction_is_one_way() {
     let graph = WorkspaceGraph::from_cargo_metadata();
@@ -120,7 +120,7 @@ fn fixture_owners_expose_no_production_injection_or_synthetic_constructors() -> 
         .canonicalize()?;
     let consumer = capability_compile::ProductionConsumer::with_fixture_owners(&root)?;
     consumer.allow_reads(&format!(
-        "{READ_CONTROL}\npub fn compose(handles: bitcoin_rs_rpc::context::ContextHandles) -> bitcoin_rs_rpc::context::Context {{ bitcoin_rs_rpc::context::Context::from_handles(handles) }}"
+        "{READ_CONTROL}\npub fn compose(handles: bitcoin_rs_serving::context::ContextHandles) -> bitcoin_rs_serving::context::Context {{ bitcoin_rs_serving::context::Context::from_handles(handles) }}"
     ))?;
     for (source, codes, member) in [
         (
@@ -144,17 +144,17 @@ fn fixture_owners_expose_no_production_injection_or_synthetic_constructors() -> 
             "arm_persist_fault",
         ),
         (
-            "pub fn denied() { let _ = bitcoin_rs_chainstate::Chainstate::new; }",
+            "pub fn denied() { let _ = bitcoin_rs_execution::Chainstate::new; }",
             &["E0599"][..],
             "new",
         ),
         (
-            "pub fn denied() { let _ = bitcoin_rs_rpc::context::Context::new; }",
+            "pub fn denied() { let _ = bitcoin_rs_serving::context::Context::new; }",
             &["E0599"][..],
             "new",
         ),
         (
-            "pub fn denied() { let _ = bitcoin_rs_rpc::context::ContextHandles::default; }",
+            "pub fn denied() { let _ = bitcoin_rs_serving::context::ContextHandles::default; }",
             &["E0599"][..],
             "default",
         ),
@@ -185,7 +185,7 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> Result<(), 
         )?;
     }
     consumer.deny(
-        &format!("{READ_CONTROL}\npub fn denied(reader: &dyn bitcoin_rs_utxo::contract::BlockUndoSource, state: &Chainstate) {{ if let Some(tip) = state.applied_tip_snapshot() {{ let _ = reader.persist_undo(tip.height, tip.hash, b\"\"); }} }}"),
+        &format!("{READ_CONTROL}\npub fn denied(reader: &dyn bitcoin_rs_storage::utxo::contract::BlockUndoSource, state: &Chainstate) {{ if let Some(tip) = state.applied_tip_snapshot() {{ let _ = reader.persist_undo(tip.height, tip.hash, b\"\"); }} }}"),
         &["E0599"],
         "persist_undo",
     )?;
@@ -244,7 +244,7 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> Result<(), 
     }
     consumer.deny(
         &format!(
-            "{READ_CONTROL}\npub fn denied(reader: &bitcoin_rs_utxo::UtxoReader) {{ let _ = reader.fixture_set(); }}"
+            "{READ_CONTROL}\npub fn denied(reader: &bitcoin_rs_storage::utxo::UtxoReader) {{ let _ = reader.fixture_set(); }}"
         ),
         &["E0599"],
         "fixture_set",

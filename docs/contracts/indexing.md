@@ -7,16 +7,16 @@ The normative contract for node-owned indexing runtimes, capability gating, and 
 Changes to capability, persistence or scheduling requirements must update the owning clause and its executable proof together.
 
 Owners:
-- `DerivedIndexRuntime` and worker state in `crates/index/src/runtime.rs`:
+- `DerivedIndexRuntime` and worker state in `crates/projection/src/runtime.rs`:
   - reconciliation, cursor commits, bounded preparation, and rollback in `reconciliation.rs`, `cursor.rs`, `catch_up.rs`, and `rollback.rs`.
-- `DerivedIndexQueryEngine` in `crates/index/src/runtime/query.rs`:
+- `DerivedIndexQueryEngine` in `crates/projection/src/runtime/query.rs`:
   - shared snapshot gate, public entrypoints, `query/transactions.rs` and `query/scripts.rs` ownership, and `QueryBudget` accounting.
 - Worker supervision and backend opening in `runtime/lifecycle.rs` and `runtime/startup.rs`.
-- Durable mutation `IndexWriter` (`crates/index/src/index/write.rs`).
-- Snapshot reads `IndexReader` (`crates/index/src/index/snapshot.rs`).
-- Capability and watermark representations (`crates/index/src/index/capability.rs`).
-- Status mapping by `DerivedIndexLifecycle` onto wire types in `crates/index/src/capabilities.rs` (no parallel status enum).
-- Portable bundles in `crates/index/src/portable.rs` and `portable/` modules run by the worker in `runtime/startup.rs`.
+- Durable mutation `IndexWriter` (`crates/projection/src/index/write.rs`).
+- Snapshot reads `IndexReader` (`crates/projection/src/index/snapshot.rs`).
+- Capability and watermark representations (`crates/projection/src/index/capability.rs`).
+- Status mapping by `DerivedIndexLifecycle` onto wire types in `crates/projection/src/capabilities.rs` (no parallel status enum).
+- Portable bundles in `crates/projection/src/portable.rs` and `portable/` modules run by the worker in `runtime/startup.rs`.
 - Node owns only the one-shot request:
   - option parsing in `crates/node/src/options.rs`, validation in `crates/node/src/config.rs`, directive in `crates/node/src/state.rs`.
 
@@ -69,14 +69,14 @@ Owners:
 - `getcapabilities` reports one compiled txindex row.
 - A missing worker is `enabled: false` / `Disabled`.
 - An attached worker supplies the row through `DerivedIndexCapabilitySource`.
-- Proof: `crates/index/src/capabilities.rs` (`missing_source_is_the_disabled_txindex_row`, `attached_source_is_the_worker_row`).
+- Proof: `crates/projection/src/capabilities.rs` (`missing_source_is_the_disabled_txindex_row`, `attached_source_is_the_worker_row`).
 - This row covers transaction and script capabilities only; filter-only operation leaves it disabled.
 - Filter progress, reconciliation, and local failures do not change that row.
 - `getindexinfo` and service flags report filter status.
 - Proof:
-  - `crates/index/src/runtime/query_tests.rs` (`filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries`)
-  - `crates/rpc/tests/handler_smoke.rs` (`compact_filter_rpc_exposes_only_enabled_ready_data`)
-  - `crates/p2p/src/listener.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
+  - `crates/projection/src/runtime/query_tests.rs` (`filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries`)
+  - `crates/serving/tests/handler_smoke.rs` (`compact_filter_rpc_exposes_only_enabled_ready_data`)
+  - `crates/wire/src/listener.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
 - `ScriptLive` is not a duplicate coin table.
 - Its empty-valued key is `script-hash-prefix || full-outpoint`.
 - The prefix is only a scan accelerator.
@@ -125,7 +125,7 @@ Owners:
 - Same-height ties, exclusive cursors, compact-prefix verification, and fallback reads retain their existing semantics.
 - This is not an O(page-size) history index.
 - Proof:
-  - `crates/index/src/runtime/query/scripts.rs`:
+  - `crates/projection/src/runtime/query/scripts.rs`:
     - `duplicated_txid_cursor_pages_cover_the_full_history`
     - `duplicated_txid_cursor_pages_terminate_for_every_limit`
 - Ready invariant: `ready` holds if and only if `cursor == applied_tip` on the active chain.
@@ -148,15 +148,15 @@ Owners:
 - An identity miss MUST evict the retained block before fetching another block.
 - Evicted identities are read and charged again.
 - Proof:
-  - `crates/index/src/runtime/query.rs`: `block_memo_retains_only_the_latest_identity`
-  - `crates/index/src/runtime/query_tests.rs`:
+  - `crates/projection/src/runtime/query.rs`: `block_memo_retains_only_the_latest_identity`
+  - `crates/projection/src/runtime/query_tests.rs`:
     - `history_limit_counts_occurrences_not_heights`
     - `confirmed_history_serves_stored_occurrences_without_block_bodies`
     - `history_summary_never_consults_spender_rows`
-  - `crates/index/src/runtime/query/scripts.rs`:
+  - `crates/projection/src/runtime/query/scripts.rs`:
     - `first_page_scan_work_is_constant_at_100_1000_and_10000_entries`
     - `cursor_page_continues_without_skipping_or_repeating`
-  - `crates/rpc/src/esplora/http.rs`: `script_work_limits_are_explicit_but_unavailable_indexes_remain_503`
+  - `crates/serving/src/esplora/http.rs`: `script_work_limits_are_explicit_but_unavailable_indexes_remain_503`
 
 ### `IDX-04`: Selective reset preserves sibling readiness
 
@@ -174,17 +174,17 @@ Owners:
 - The `data_dir/txindex` namespace maintains durable format versions and capability watermarks (`IndexWatermarks`, `ConsumerCursor`).
 - A stored schema or format version foreign to this build MUST reset and rebuild the store per `docs/policies/db-migration.md`.
 - The store MUST never perform an in-place migration.
-- `IndexWriter::open` (`crates/index/src/index/write.rs`) accepts row-format 6 as the current durability marker only.
+- `IndexWriter::open` (`crates/projection/src/index/write.rs`) accepts row-format 6 as the current durability marker only.
 - This format provides newest-first history-occurrence rows with inverted heights, 43-byte live rows, and 6-byte positions.
 - The row format is owned by this clause; any format change requires a new durability marker.
 - Every older marker returns `IndexError::UnsupportedTxIndexFormatVersion`.
-- In that case, `open_writer` in `crates/index/src/runtime/startup.rs` full-resets the derived store for rebuild without an in-place upgrade path.
+- In that case, `open_writer` in `crates/projection/src/runtime/startup.rs` full-resets the derived store for rebuild without an in-place upgrade path.
 - Selective reset under `IDX-04` covers corrupt watermarks, not versions.
 - Reset recovery accepts only current 17-byte claims and 9-byte Idle states.
 - Idle versions MUST remain monotonic generations to prevent ABA races.
 - Obsolete or malformed claims return `InvalidResetMarker` without modifying derived rows.
 - The worker reports failure through its existing startup boundary.
-- The dedicated redb store opens only the canonical 43-byte ScriptLive table.
+- The store opens only the canonical 43-byte ScriptLive table.
 - An incompatible declaration, empty or populated, MUST refuse open without changing data.
 - The operator MUST rebuild the derived index in a separately named directory, with no live-row conversion.
 - Current writers emit position values only for nonempty transaction groups.
@@ -218,7 +218,7 @@ Owners:
 - It emits one transaction row per indexed transaction.
 - For `ScriptHistory`, it emits one occurrence per `(script, height, transaction)` without duplicate hash-prefix rows.
 - `IndexRowCounts.funding` counts distinct occurrence rows, not occurrences.
-- Pinned tests in `crates/index/tests/index_roundtrip.rs` and `crates/index/tests/script_history_occurrences.rs` own these cardinalities.
+- Pinned tests in `crates/projection/tests/index_roundtrip.rs` and `crates/projection/tests/script_history_occurrences.rs` own these cardinalities.
 - `NodeState::open` restores the authenticated checkpoint.
 - When enabled, it replays the committed suffix of the journal (`docs/contracts/recovery.md`).
 - This replay finishes before `NodeState::start_index_workers()` spawns worker threads in `crates/node/src/run.rs`.
@@ -233,7 +233,7 @@ Owners:
 - Rollback depth is watermark height minus common ancestor height.
 - When rollback depth exceeds `txindex::DEFAULT_ROLLBACK_REBUILD_CUTOVER` (100,000 blocks), the worker routes to `reset_capabilities`.
 - It backfills forward instead of running a long block-by-block rollback.
-- Proof: `crates/index/src/runtime/recovery_tests.rs`:
+- Proof: `crates/projection/src/runtime/recovery_tests.rs`:
   - `index_ahead_of_restored_tip_is_reported_once_and_rewound`
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
 - Connect walk: the worker loads bodies from `BlockBodyStore`.
@@ -284,7 +284,7 @@ Owners:
 - Peak resident memory of these stages is unmeasured.
 - A window's bodies (at most 256, or 32 MiB plus one body), its in-flight anchors, prepared rows, and admitted batch are limited independently.
 - This contract claims no total resident bound and no bound that depends on script sizes.
-- Proof (all in `crates/index/src/runtime/recovery_tests.rs`):
+- Proof (all in `crates/projection/src/runtime/recovery_tests.rs`):
   - forward-group scheduling:
     - `absent_prefix_body_holds_back_only_its_own_group`
     - `shutdown_after_an_absent_body_does_not_run_a_higher_group`
@@ -327,13 +327,13 @@ Owners:
 - Block validation, UTXO commits, and chainstate progress continue without interruption.
 - The apply path MUST never depend on index writes.
 - Proof:
-  - `crates/index/src/runtime/supervisor_tests.rs`:
+  - `crates/projection/src/runtime/supervisor_tests.rs`:
     - `blocked_open_abandonment_detaches_and_poisons`
     - `shutdown_during_open_reports_abandonment_after_supervisor_exit`
     - `open_timeout_publishes_error_not_infinite_spin`
-  - `crates/index/src/runtime/query_tests.rs`:
+  - `crates/projection/src/runtime/query_tests.rs`:
     - `unusable_worker_makes_queries_unavailable`
-  - `crates/index/src/runtime/recovery_tests.rs`:
+  - `crates/projection/src/runtime/recovery_tests.rs`:
     - `undo_read_failure_is_not_a_missing_undo`
     - `rollback_without_undo_preserves_script_history_and_rewinds_siblings`
     - the `IDX-06`/`IDX-07` anchor and reseed tests cited above
@@ -490,15 +490,15 @@ That document gives consumer usage and defers to this clause for every consisten
   - `transaction_at_prefix(&self, txid: &Txid) -> Result<AtPrefix<Option<(u32, Tx)>>, HistoricalQueryError>`
   - `script_history_at_prefix(&self, script: ScriptHash) -> Result<AtPrefix<ScriptIndexSnapshot>, HistoricalQueryError>`
   - `spender_at_prefix(&self, outpoint: OutPoint) -> Result<AtPrefix<Option<SpendingRecord>>, HistoricalQueryError>`
-- New public types live in `bitcoin_rs_index::query_api` (already public; no re-export is added):
+- New public types live in `bitcoin_rs_projection::query_api` (already public; no re-export is added):
   - `CoveredPrefix { floor: u32, height: u32, hash: Hash256 }`
   - `AtPrefix<T> { prefix: CoveredPrefix, answer: T }`
   - `HistoricalQueryError { Retry, Unavailable(HistoricalUnavailableCause), Storage(CompactString) }`
   - `HistoricalUnavailableCause { Shared(TxUnavailableCause), NoCoveredPrefix { capability: IndexCapability }, AncestryBudgetExhausted { capability: IndexCapability, watermark_height: u32 }, PrefixBelowFloor { floor: u32 } }`
 - `CoveredPrefix.hash` is the full chain hash at `height`.
 - `floor` is the lowest provable height (`0` means genesis, positive means a pruned prefix).
-- `Txid`, `Tx`, and `OutPoint` are `bitcoin_rs_primitives` types.
-- `Hash256` is `bitcoin_rs_primitives::Hash256`.
+- `Txid`, `Tx`, and `OutPoint` are `bitcoin_rs_consensus::primitives` types.
+- `Hash256` is `bitcoin_rs_consensus::primitives::Hash256`.
 - `CompactString` is `compact_str::CompactString`.
 - `ScriptHash`, `IndexCapability`, `ScriptIndexSnapshot`, and `SpendingRecord` keep their existing paths.
 - `TxQueryError` and `TxUnavailableCause` are byte-for-byte unchanged:
@@ -601,7 +601,7 @@ That document gives consumer usage and defers to this clause for every consisten
 - The query engine captures immutable block identities and one index snapshot without acquiring chain-transition authority.
 - P2P resolves filter stop hashes against the applied chain.
 - A competing headers-only branch does not change which filters are servable.
-- Proof: `crates/p2p/src/chain_query.rs` (`compact_filters_follow_applied_chain_when_competing_headers_lead`).
+- Proof: `crates/node/src/p2p/chain_query.rs` (`compact_filters_follow_applied_chain_when_competing_headers_lead`).
 - P2P streams at most one filter payload at a time under the send-headroom gate.
 - Header and checkpoint replies retain only commitments.
 - Requests are bounded to 1,000 filters, 2,000 hashes, or 100,000 checkpoint headers (below the 4 MB envelope).
@@ -615,7 +615,7 @@ That document gives consumer usage and defers to this clause for every consisten
 - Disabled, unavailable, unknown, non-basic, and oversized requests receive no filter answer.
 - For decoded non-basic types, unknown or unapplied stops, inverted ranges, and oversized ranges, bitcoin-rs keeps the connection open without discouragement.
 - Core 31.1 disconnects those requests.
-- Proof: `crates/p2p/src/chain_query.rs` (`invalid_compact_filter_requests_are_ignored_without_querying_the_index`) and wire checks in `tools/compact-filter-interop/run.py`.
+- Proof: `crates/node/src/p2p/chain_query.rs` (`invalid_compact_filter_requests_are_ignored_without_querying_the_index`) and wire checks in `tools/compact-filter-interop/run.py`.
 - To bridge a just-announced tip and asynchronous publication, a valid P2P request can be deferred for up to five seconds.
 - Time refused by the aggregate outbound budget is not counted toward the five seconds.
 - Time taken by the index or the connection queue is counted toward the five seconds.
@@ -629,7 +629,7 @@ That document gives consumer usage and defers to this clause for every consisten
 
 - **Full-stack crash convergence**: the recovery model across chainstate, checkpoints, block bodies, and derived indexes is normative in [recovery.md](recovery.md) (`RCV-01` to `RCV-04`).
 - A `kill -9` gate that re-applies real block bodies through it is not yet exercised.
-- **Portable bundle cross-process scope**: `crates/index/tests/portable_bundle.rs` proves export/restore equality, damage refusal, existing-destination preservation, cancellation, missing-body withhold, restore-below-tip reconciliation, and reset over real Fjall stores (`IDX-11`).
+- **Portable bundle cross-process scope**: `crates/projection/tests/portable_bundle.rs` proves export/restore equality, damage refusal, existing-destination preservation, cancellation, missing-body withhold, restore-below-tip reconciliation, and reset over real RocksDB stores (`IDX-11`).
 - The live Core200/C150/withheld receipts are private external runs, not a repository portable process suite.
 - One scoped live run (`.outline/evidence/snapshot-stage2-live/runs/20261026T200208Z-remaining-1850397/`, binary SHA-256 `9406226483c7ac4c29f822e133a1f36bea82cc2c1078b8f16388a4e5df2`, PASS 64/0, error null, survivors empty) covers four selected cases:
   - base-200 bundle into same-chain receiver at 202 restores and serves all 202 txid/blockhash/sample queries.

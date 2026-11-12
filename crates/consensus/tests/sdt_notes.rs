@@ -1,17 +1,9 @@
 use std::fs;
-use std::io;
 use std::path::PathBuf;
 
 #[path = "sdt_notes_error.rs"]
 mod error;
 use error::TestError;
-
-#[derive(Debug)]
-struct ProbeDef {
-    provider: String,
-    name: String,
-    args: Vec<String>,
-}
 
 const CORE_ABI: &[(&str, &str, &[&str])] = &[
     (
@@ -32,72 +24,6 @@ const CORE_ABI: &[(&str, &str, &[&str])] = &[
         &["-8@", "8@", "8@", "8@", "8@", "8@"],
     ),
 ];
-
-fn layout_prefix(d_type: &str) -> &'static str {
-    match d_type {
-        "int8_t" => "-1@",
-        "uint8_t" => "1@",
-        "int16_t" => "-2@",
-        "uint16_t" => "2@",
-        "int32_t" => "-4@",
-        "uint32_t" => "4@",
-        "int64_t" => "-8@",
-        "uint64_t" | "char*" => "8@",
-        other => panic!("unhandled probe argument type `{other}`"),
-    }
-}
-
-fn layout_prefixes(def: &ProbeDef) -> Vec<&'static str> {
-    def.args.iter().map(|arg| layout_prefix(arg)).collect()
-}
-
-fn parse_probes_d(text: &str) -> Vec<ProbeDef> {
-    let mut stripped = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("/*") {
-        stripped.push_str(&rest[..start]);
-        rest = &rest[rest.find("*/").map_or(rest.len(), |end| end + 2)..];
-    }
-    stripped.push_str(rest);
-
-    let mut probes = Vec::new();
-    for block in stripped.split("provider").skip(1) {
-        let Some((head, _)) = block.split_once('}') else {
-            continue;
-        };
-        let Some((provider, body)) = head.split_once('{') else {
-            continue;
-        };
-        let provider = provider.trim().to_owned();
-        for decl in body.split(';') {
-            let decl = decl.trim();
-            let Some(sig) = decl.strip_prefix("probe") else {
-                continue;
-            };
-            let Some((name, args)) = sig.trim().split_once('(') else {
-                continue;
-            };
-            probes.push(ProbeDef {
-                provider: provider.clone(),
-                name: name.trim().to_owned(),
-                args: args
-                    .trim_end_matches(')')
-                    .split(',')
-                    .map(|arg| arg.trim().to_owned())
-                    .filter(|arg| !arg.is_empty())
-                    .collect(),
-            });
-        }
-    }
-    probes
-}
-
-fn probes_d() -> io::Result<Vec<ProbeDef>> {
-    let text = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/probes.d"))?;
-    let probes = parse_probes_d(&text);
-    assert!(!probes.is_empty(), "probes.d declares no probes");
-    Ok(probes)
-}
 
 struct SdtNote {
     provider: String,
@@ -211,26 +137,29 @@ const X86_REGISTERS: [&[&str]; 4] = [
     &["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"],
 ];
 
-fn width_index(d_type: &str) -> usize {
-    match d_type {
-        "int8_t" | "uint8_t" => 0,
-        "int16_t" | "uint16_t" => 1,
-        "int32_t" | "uint32_t" => 2,
-        "int64_t" | "uint64_t" | "char*" => 3,
-        other => panic!("unhandled probe argument type `{other}`"),
+fn width_index_of_prefix(prefix: &str) -> usize {
+    let digits = prefix
+        .split_once('@')
+        .map(|(digits, _)| digits)
+        .unwrap_or_else(|| panic!("unhandled probe operand prefix `{prefix}`"));
+    match digits.trim_start_matches('-').parse::<u8>() {
+        Ok(1) => 0,
+        Ok(2) => 1,
+        Ok(4) => 2,
+        Ok(8) => 3,
+        other => panic!("unhandled probe operand width `{other:?}`"),
     }
 }
 
-fn expected_layout(def: &ProbeDef, machine: u16) -> Option<String> {
+fn expected_layout(prefixes: &[&str], machine: u16) -> Option<String> {
     if machine != 0x3E {
         return None;
     }
     let mut operands = Vec::new();
-    for (index, arg) in def.args.iter().enumerate() {
+    for (index, prefix) in prefixes.iter().enumerate() {
         operands.push(format!(
-            "{}{}",
-            layout_prefix(arg),
-            X86_REGISTERS[width_index(arg)][index]
+            "{prefix}{}",
+            X86_REGISTERS[width_index_of_prefix(prefix)][index]
         ));
     }
     Some(operands.join(" "))
@@ -246,20 +175,6 @@ fn layout_prefixes_of(layout: &str) -> Vec<&str> {
                 .unwrap_or_default()
         })
         .collect()
-}
-
-#[test]
-fn probes_d_matches_core_argument_layout() -> io::Result<()> {
-    let probes = probes_d()?;
-    assert_eq!(probes.len(), CORE_ABI.len());
-    for (def, (provider, name, prefixes)) in probes.iter().zip(CORE_ABI) {
-        assert_eq!(
-            (def.provider.as_str(), def.name.as_str()),
-            (*provider, *name)
-        );
-        assert_eq!(&layout_prefixes(def), prefixes);
-    }
-    Ok(())
 }
 
 #[cfg(feature = "usdt")]
@@ -294,7 +209,6 @@ fn embedded_sdt_notes_match_core_layout() -> Result<(), TestError> {
         None => std::env::current_exe()?,
     };
     let bytes = fs::read(&path)?;
-    let probes = probes_d()?;
     if !cfg!(feature = "usdt") {
         let notes = match parse_sdt_notes(&bytes) {
             SdtParse::NotElf => Vec::new(),
@@ -307,9 +221,11 @@ fn embedded_sdt_notes_match_core_layout() -> Result<(), TestError> {
             SdtParse::Notes(_, notes) => notes,
         };
         assert!(
-            notes.iter().all(|note| probes
+            notes.iter().all(|note| CORE_ABI
                 .iter()
-                .all(|def| { note.provider != def.provider || note.name != def.name })),
+                .all(
+                    |(provider, name, _prefixes)| note.provider != *provider || note.name != *name
+                )),
             "a feature-off build must embed no Core-compatible probe notes"
         );
         return Ok(());
@@ -330,32 +246,28 @@ fn embedded_sdt_notes_match_core_layout() -> Result<(), TestError> {
         }
         SdtParse::Notes(machine, notes) => (machine, notes),
     };
-    for def in &probes {
+    for &(provider, name, prefixes) in CORE_ABI {
         let note = notes
             .iter()
-            .find(|note| note.provider == def.provider && note.name == def.name)
+            .find(|note| note.provider == provider && note.name == name)
             .ok_or(TestError::Missing("missing SDT note"))?;
-        if let Some(expected) = expected_layout(def, machine) {
+        if let Some(expected) = expected_layout(prefixes, machine) {
             assert_eq!(
                 note.args, expected,
-                "argument layout of {}:{} must match byte-for-byte",
-                def.provider, def.name,
+                "argument layout of {provider}:{name} must match byte-for-byte"
             );
         } else {
             assert_eq!(
                 layout_prefixes_of(&note.args),
-                layout_prefixes(def),
-                "argument layout of {}:{} does not match the Core-compatible table \
+                prefixes,
+                "argument layout of {provider}:{name} does not match the Core-compatible table \
                  (actual `{}`)",
-                def.provider,
-                def.name,
                 note.args,
             );
         }
         assert_ne!(
             note.semaphore, 0,
-            "SDT note {}:{} carries no semaphore address",
-            def.provider, def.name
+            "SDT note {provider}:{name} carries no semaphore address"
         );
     }
     Ok(())

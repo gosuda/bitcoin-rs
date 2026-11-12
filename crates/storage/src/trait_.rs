@@ -1,6 +1,7 @@
 use crate::batch::BufferedWriteBatch;
 use crate::{ColumnFamily, StorageError};
 use bytes::Bytes;
+use std::path::Path;
 
 pub type KvPair = (Vec<u8>, Vec<u8>);
 
@@ -78,10 +79,6 @@ impl PersistFault {
         }
     }
 
-    #[cfg_attr(
-        not(any(feature = "fjall", feature = "redb", feature = "rocksdb")),
-        allow(dead_code)
-    )]
     pub(crate) fn injected_error(self) -> StorageError {
         let boundary = self.boundary();
         StorageError::Io(std::io::Error::other(format!(
@@ -97,18 +94,10 @@ pub(crate) struct PersistFaultSlot(parking_lot::Mutex<Option<PersistFault>>);
 
 #[cfg(any(test, feature = "test-seam"))]
 impl PersistFaultSlot {
-    #[cfg_attr(
-        not(any(feature = "fjall", feature = "redb", feature = "rocksdb")),
-        allow(dead_code)
-    )]
     pub(crate) fn arm(&self, fault: PersistFault) {
         *self.0.lock() = Some(fault);
     }
 
-    #[cfg_attr(
-        not(any(feature = "fjall", feature = "redb", feature = "rocksdb")),
-        allow(dead_code)
-    )]
     pub(crate) fn take_at(&self, boundary: PersistBoundary) -> Option<PersistFault> {
         let mut guard = self.0.lock();
         match *guard {
@@ -191,6 +180,24 @@ pub trait KvStore: Send + Sync + 'static {
 
     fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError>;
 
+    fn multi_get(
+        &self,
+        cf: ColumnFamily,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<Bytes>>, StorageError>;
+
+    fn ingest_sorted(
+        &self,
+        cf: ColumnFamily,
+        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        scratch: &Path,
+    ) -> Result<u64, StorageError>;
+
+    fn delete_range(&self, cf: ColumnFamily, start: &[u8], end: &[u8]) -> Result<(), StorageError>;
+
+    fn checkpoint(&self, dir: &Path) -> Result<(), StorageError>;
+
+    fn engine_cache_bytes(&self) -> u64;
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-seam"))]
     fn arm_persist_fault(&self, fault: PersistFault);

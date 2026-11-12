@@ -1,12 +1,10 @@
-#![cfg(feature = "fjall")]
-
 use crate::support::TestResult;
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 
 #[test]
 fn kv_store_dispatches_through_a_trait_object() -> TestResult {
     let dir = tempfile::tempdir()?;
-    let store: Box<dyn KvStore> = Box::new(bitcoin_rs_storage::FjallStore::open(dir.path())?);
+    let store: Box<dyn KvStore> = Box::new(bitcoin_rs_storage::RocksDbStore::open(dir.path())?);
 
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::BlockBodies, b"dispatch-key", b"v");

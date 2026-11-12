@@ -18,7 +18,7 @@ Start with a TOML file that sets one storage value:
 # layer.toml
 network = "regtest"
 dns_seeds_enabled = false
-storage_backend = "fjall"
+storage_backend = "rocksdb"
 dbcache_mb = 100
 ```
 

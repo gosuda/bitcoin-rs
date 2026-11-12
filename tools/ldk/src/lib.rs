@@ -1,6 +1,6 @@
 use bitcoin::{BlockHash, Transaction, consensus, hashes::Hash};
 use bitcoin_rs_node::{Node, NodeError};
-use bitcoin_rs_primitives::{BlockHash as NativeBlockHash, Hash256, Tx, deserialize};
+use bitcoin_rs_consensus::primitives::{BlockHash as NativeBlockHash, Hash256, Tx, deserialize};
 use lightning::chain::chaininterface::{
     BroadcasterInterface, ConfirmationTarget, FEERATE_FLOOR_SATS_PER_KW, FeeEstimator,
 };
@@ -11,7 +11,7 @@ use lightning_block_sync::{
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
     #[error("transaction conversion failed: {0}")]
-    TransactionDecode(#[from] bitcoin_rs_primitives::DecodeError),
+    TransactionDecode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
     Node(#[from] NodeError),
 }
@@ -104,7 +104,7 @@ impl BlockSource for NativeBackend<'_> {
                 .await
                 .map_err(BlockSourceError::persistent)?
                 .ok_or_else(|| BlockSourceError::transient("block is not known to Node"))?;
-            let bytes = bitcoin_rs_primitives::consensus_bytes(&block);
+            let bytes = bitcoin_rs_consensus::primitives::consensus_bytes(&block);
             let block = consensus::deserialize(&bytes).map_err(BlockSourceError::persistent)?;
             Ok(BlockData::FullBlock(block))
         })

@@ -122,7 +122,7 @@ fn start_index_workers_twice_is_idempotent() -> Result<(), TestError> {
 
 #[test]
 fn derived_index_status_answers_when_disabled() -> Result<(), TestError> {
-    use bitcoin_rs_index::CapabilityState;
+    use bitcoin_rs_projection::CapabilityState;
 
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -212,8 +212,8 @@ fn script_index_builds_without_advertising_core_txindex() -> Result<(), TestErro
 
 #[test]
 fn script_index_modes_give_concrete_unspent_outputs_answers() -> Result<(), TestError> {
-    use bitcoin_rs_index::{IndexCapability, ScriptHash};
-    use bitcoin_rs_rpc::context::{TxQueryError, TxUnavailableCause};
+    use bitcoin_rs_projection::{IndexCapability, ScriptHash};
+    use bitcoin_rs_serving::context::{TxQueryError, TxUnavailableCause};
 
     let scripthash = ScriptHash::from_script_bytes(&[0x51, 0x01]);
 
@@ -224,7 +224,7 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> Result<(), Test
     config.indexes.txindex = false;
     config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
     let state = NodeState::open(config, None)?;
-    let _ = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    let _ = state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         crate::Network::Regtest.genesis_block(),
     ))?;
     assert!(
@@ -241,7 +241,7 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> Result<(), Test
     config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
     let mut state = NodeState::open(config, None)?;
     state.start_index_workers()?;
-    let _ = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    let _ = state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         crate::Network::Regtest.genesis_block(),
     ))?;
     let Some(query) = state.script_index_query() else {
@@ -279,7 +279,7 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> Result<(), Test
     config.indexes.script_index = crate::config::ScriptIndexMode::Full;
     let mut state = NodeState::open(config, None)?;
     state.start_index_workers()?;
-    let _ = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    let _ = state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         crate::Network::Regtest.genesis_block(),
     ))?;
     let Some(query) = state.script_index_query() else {

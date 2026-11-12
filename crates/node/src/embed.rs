@@ -1,23 +1,23 @@
-use bitcoin_rs_index::CapabilitySnapshot;
-use bitcoin_rs_index::IndexCapability;
-use bitcoin_rs_index::ScriptHash;
-use bitcoin_rs_index::query_api::{
+use bitcoin_rs_consensus::primitives::{
+    Block, BlockHash, Hash256, OutPoint, Tx, Txid, deserialize, unix_time_secs,
+};
+use bitcoin_rs_mempool::{FeeRate, LocalOrigin, MempoolStats, MutationResult};
+use bitcoin_rs_projection::CapabilitySnapshot;
+use bitcoin_rs_projection::IndexCapability;
+use bitcoin_rs_projection::ScriptHash;
+use bitcoin_rs_projection::query_api::{
     AtPrefix, HistoricalQueryError, HistoricalUnavailableCause, ScriptIndexSnapshot,
     SpendingRecord, TxUnavailableCause,
 };
-use bitcoin_rs_mempool::{FeeRate, LocalOrigin, MempoolStats, MutationResult};
-use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, OutPoint, Tx, Txid, deserialize, unix_time_secs,
-};
-pub(crate) use bitcoin_rs_rpc::context::SyncProgress;
-use bitcoin_rs_rpc::context::{ChainAdmissionView, DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB};
+pub(crate) use bitcoin_rs_serving::context::SyncProgress;
+use bitcoin_rs_serving::context::{ChainAdmissionView, DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB};
 use std::sync::Arc;
 use thiserror::Error;
 
 use crate::lifecycle::{NodeServices, TeardownMode, start_node};
 use crate::run::RunError;
 use crate::state::NodeState;
-use bitcoin_rs_chainstate::events::ChainSnapshot;
+use bitcoin_rs_execution::events::ChainSnapshot;
 
 #[derive(Debug, Error)]
 pub enum NodeError {
@@ -40,7 +40,7 @@ pub enum NodeError {
 pub struct Node {
     pub(crate) state: NodeState,
     pub(crate) services: Option<NodeServices>,
-    pub(crate) context: Arc<bitcoin_rs_rpc::context::Context>,
+    pub(crate) context: Arc<bitcoin_rs_serving::context::Context>,
 }
 
 // Synchronous embedding work is deferred until the returned future is polled.
@@ -57,7 +57,9 @@ impl Node {
         self.state.chainstate().chain_snapshot()
     }
 
-    pub fn mining_control(&self) -> Result<&dyn bitcoin_rs_mining::MiningControl, NodeError> {
+    pub fn mining_control(
+        &self,
+    ) -> Result<&dyn bitcoin_rs_serving::mining::MiningControl, NodeError> {
         self.context
             .mining
             .mining_control
@@ -67,7 +69,7 @@ impl Node {
 
     pub fn chainstates_summary(
         &self,
-    ) -> Result<bitcoin_rs_chainstate::ChainstatesSummary, NodeError> {
+    ) -> Result<bitcoin_rs_execution::ChainstatesSummary, NodeError> {
         self.state
             .chainstates_summary()
             .map_err(|error| NodeError::Unavailable(error.to_string()))
@@ -84,7 +86,7 @@ impl Node {
 
     #[must_use]
     pub fn capabilities(&self) -> CapabilitySnapshot {
-        bitcoin_rs_index::txindex_snapshot(Some(self.state.derived_index_status().as_ref()))
+        bitcoin_rs_projection::txindex_snapshot(Some(self.state.derived_index_status().as_ref()))
     }
 
     #[must_use]
@@ -268,16 +270,16 @@ mod tests {
 
     use super::*;
     use crate::NodeConfig;
-    use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
-    use bitcoin_rs_mempool::{MempoolEntry, MempoolObserver};
-    use bitcoin_rs_primitives::{
+    use bitcoin_rs_consensus::primitives::{
         Amount, LockTime, Network, OutPoint, Script, Sequence, TxIn, TxOut, Witness,
     };
-    use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+    use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
+    use bitcoin_rs_mempool::{MempoolEntry, MempoolObserver};
+    use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
     use parking_lot::Mutex;
 
-    use bitcoin_rs_rpc::zmq::MempoolSequenceObserver;
-    use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
+    use bitcoin_rs_serving::zmq::MempoolSequenceObserver;
+    use bitcoin_rs_serving::zmq::{SequenceEvent, ZmqPublisher};
 
     fn block_on<F: Future>(future: F) -> F::Output {
         use std::task::{Context, Poll, Waker};
@@ -344,7 +346,7 @@ mod tests {
     fn broadcast_publishes_one_ordered_a_event_through_the_shared_gateway() {
         let dir = tempfile::tempdir().expect("tempdir");
         let publisher = Arc::new(RecordingSequencePublisher::default());
-        let recording: Arc<dyn bitcoin_rs_rpc::zmq::ZmqPublisher> = publisher.clone();
+        let recording: Arc<dyn bitcoin_rs_serving::zmq::ZmqPublisher> = publisher.clone();
         let observer: Arc<dyn MempoolObserver> = Arc::new(MempoolSequenceObserver::new(recording));
         let config = embedded_config(&dir.path().join("node"));
 
@@ -390,7 +392,7 @@ mod tests {
                 1,
             ));
         }
-        bitcoin_rs_utxo::contract::commit_block_changes(
+        bitcoin_rs_storage::utxo::contract::commit_block_changes(
             &node.state.chainstate().utxo_handle(),
             &changes,
             &Hash256::from_le_bytes(&[0xAB; 32]),

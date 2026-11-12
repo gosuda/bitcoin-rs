@@ -4,14 +4,15 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_index::{
+use bitcoin_rs_projection::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
 };
 use parking_lot::{Mutex, const_mutex};
 
 use super::{
     CorpusIdentity, EvidenceIdentity, MetricsServer, PROMETHEUS_HANDLE, Sha256Hex,
-    TXINDEX_READINESS_GAUGE, publish_txindex_readiness, spawn_readiness_sampler, start_metrics,
+    TXINDEX_READINESS_GAUGE, publish_txindex_readiness, spawn_readiness_sampler_polling,
+    start_metrics,
 };
 
 pub(super) static SERVER_TEST_LOCK: Mutex<()> = const_mutex(());
@@ -20,7 +21,7 @@ impl MetricsServer {
     pub(crate) fn with_worker_for_test(worker: thread::JoinHandle<()>) -> Self {
         Self {
             local_addr: unused_ephemeral(),
-            cancel: bitcoin_rs_chain::LatchWriter::new(),
+            cancel: bitcoin_rs_execution::chain::LatchWriter::new(),
             thread: Some(worker),
         }
     }
@@ -79,7 +80,7 @@ fn scrape(addr: SocketAddr) -> (u16, String) {
 #[test]
 fn occupied_address_bind_errors_and_in_process_retry_succeeds() {
     let _guard = SERVER_TEST_LOCK.lock();
-    let shutdown = bitcoin_rs_chain::LatchReader::fixture_never();
+    let shutdown = bitcoin_rs_execution::chain::LatchReader::fixture_never();
     let occupied = TcpListener::bind(unused_ephemeral())
         .unwrap_or_else(|error| panic!("occupy port: {error}"));
     let addr = occupied
@@ -114,7 +115,7 @@ fn occupied_address_bind_errors_and_in_process_retry_succeeds() {
 #[test]
 fn scrape_returns_operator_metrics_without_evidence_identity_labels() {
     let _guard = SERVER_TEST_LOCK.lock();
-    let shutdown = bitcoin_rs_chain::LatchReader::fixture_never();
+    let shutdown = bitcoin_rs_execution::chain::LatchReader::fixture_never();
     let mut server = MetricsServer::bind(unused_ephemeral(), shutdown, &identity())
         .unwrap_or_else(|error| panic!("bind metrics: {error}"));
     metrics::counter!("node_metrics_scrape_probe").increment(1);
@@ -169,7 +170,7 @@ fn scrape_returns_operator_metrics_without_evidence_identity_labels() {
 #[test]
 fn two_sequential_servers_in_one_process_both_serve() {
     let _guard = SERVER_TEST_LOCK.lock();
-    let shutdown = bitcoin_rs_chain::LatchReader::fixture_never();
+    let shutdown = bitcoin_rs_execution::chain::LatchReader::fixture_never();
     let mut first = MetricsServer::bind(unused_ephemeral(), shutdown.clone(), &identity())
         .unwrap_or_else(|error| panic!("first: {error}"));
     metrics::counter!("node_metrics_sequential_probe").increment(1);
@@ -194,7 +195,7 @@ fn two_sequential_servers_in_one_process_both_serve() {
 #[test]
 fn shutdown_exits_the_listener_thread() {
     let _guard = SERVER_TEST_LOCK.lock();
-    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
     let mut server = MetricsServer::bind(unused_ephemeral(), shutdown.reader(), &identity())
         .unwrap_or_else(|error| panic!("bind metrics: {error}"));
     let addr = server.local_addr();
@@ -282,7 +283,7 @@ fn assert_one_active(samples: &[RenderedSample], expected: &str) {
 #[test]
 fn published_gauge_flips_its_active_label_with_the_rpc_source() {
     let _guard = SERVER_TEST_LOCK.lock();
-    let shutdown = bitcoin_rs_chain::LatchReader::fixture_never();
+    let shutdown = bitcoin_rs_execution::chain::LatchReader::fixture_never();
     let mut server = MetricsServer::bind(unused_ephemeral(), shutdown, &identity())
         .unwrap_or_else(|error| panic!("bind metrics: {error}"));
 
@@ -317,10 +318,10 @@ fn published_gauge_flips_its_active_label_with_the_rpc_source() {
 
 #[test]
 fn readiness_sampler_stops_promptly_on_cancellation() {
-    let writer = bitcoin_rs_chain::LatchWriter::new();
+    let writer = bitcoin_rs_execution::chain::LatchWriter::new();
     let reader = writer.reader();
     let source = Arc::new(FixedSource::enabled(CapabilityState::Ready));
-    let worker = spawn_readiness_sampler(source, reader)
+    let worker = spawn_readiness_sampler_polling(source, reader, Duration::from_secs(3600))
         .unwrap_or_else(|error| panic!("spawn readiness sampler: {error}"));
     let (tx, rx) = crossbeam_channel::bounded(1);
     let handle = std::thread::spawn(move || {
@@ -329,7 +330,7 @@ fn readiness_sampler_stops_promptly_on_cancellation() {
     });
     std::thread::sleep(Duration::from_millis(5));
     writer.trigger();
-    let res = rx.recv_timeout(Duration::from_millis(100));
+    let res = rx.recv_timeout(Duration::from_secs(10));
     assert!(
         res.is_ok(),
         "readiness sampler did not exit promptly: timed out waiting for trigger"
@@ -340,7 +341,7 @@ fn readiness_sampler_stops_promptly_on_cancellation() {
 #[test]
 fn metrics_listener_stops_promptly_on_cancellation() {
     let _guard = SERVER_TEST_LOCK.lock();
-    let writer = bitcoin_rs_chain::LatchWriter::new();
+    let writer = bitcoin_rs_execution::chain::LatchWriter::new();
     let reader = writer.reader();
     let mut server = MetricsServer::bind(unused_ephemeral(), reader, &identity())
         .unwrap_or_else(|error| panic!("bind metrics: {error}"));

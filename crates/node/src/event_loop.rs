@@ -11,12 +11,15 @@ const SYNC_PROGRESS_INTERVAL: Duration = Duration::from_mins(1);
 pub(crate) struct EventLoop {
     sync_tick: Receiver<Instant>,
     sync_wake: Receiver<()>,
-    sync: Arc<crate::BlockSync>,
+    sync: Arc<crate::p2p::sync::BlockSync>,
 }
 
 impl EventLoop {
     #[must_use]
-    pub(crate) fn with_sync_wake(sync: Arc<crate::BlockSync>, sync_wake: Receiver<()>) -> Self {
+    pub(crate) fn with_sync_wake(
+        sync: Arc<crate::p2p::sync::BlockSync>,
+        sync_wake: Receiver<()>,
+    ) -> Self {
         Self {
             sync_tick: tick(SYNC_TICK),
             sync_wake,
@@ -26,7 +29,7 @@ impl EventLoop {
 
     pub(crate) fn spin(
         self,
-        shutdown: &bitcoin_rs_chain::LatchReader,
+        shutdown: &bitcoin_rs_execution::chain::LatchReader,
         request_shutdown: impl Fn(),
     ) {
         let mut iterations: u64 = 0;

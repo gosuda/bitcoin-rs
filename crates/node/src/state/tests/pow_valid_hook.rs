@@ -27,8 +27,8 @@ fn open_hook_chain(heights: u32) -> Result<(tempfile::TempDir, NodeState, HookFi
                 .push((hash, height));
         }))
         .map_err(|_| TestError::message("pow-valid hook installs once"))?;
-    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
-    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis.clone(),
     ))?;
     let mut previous = genesis.block_hash();
@@ -36,7 +36,7 @@ fn open_hook_chain(heights: u32) -> Result<(tempfile::TempDir, NodeState, HookFi
     for height in 1..=heights {
         time += 1;
         let block = regtest_fixture::mined_regtest_child_at_time(previous, time, height)?;
-        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
             block.clone(),
         ))?;
         previous = block.block_hash();
@@ -58,7 +58,7 @@ fn connect_failure_after_early_send_keeps_tip_and_sends_nothing_more() -> Result
         tip_before_time(&state)? + 1,
         tip_before.height + 1,
     )?;
-    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         valid.clone(),
     ))?;
     let fired = fires.lock().expect("hook recorder poisoned").clone();
@@ -82,7 +82,7 @@ fn connect_failure_after_early_send_keeps_tip_and_sends_nothing_more() -> Result
         .outputs
         .first_mut()
         .ok_or_else(|| TestError::message("no coinbase output"))?;
-    coinbase.value = bitcoin_rs_primitives::Amount::from_sat(
+    coinbase.value = bitcoin_rs_consensus::primitives::Amount::from_sat(
         coinbase
             .value
             .to_sat()
@@ -95,7 +95,7 @@ fn connect_failure_after_early_send_keeps_tip_and_sends_nothing_more() -> Result
         .map_err(|error| TestError::message(format!("regrind overspend block: {error:?}")))?;
     assert!(
         state
-            .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            .apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 falling.clone(),
             ))
             .is_err(),

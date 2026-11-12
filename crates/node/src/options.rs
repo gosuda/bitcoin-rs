@@ -10,12 +10,11 @@ use serde::de::{Error as _, MapAccess, Visitor};
 
 use crate::config::{ConfigError, NetworkSelection, NotificationConfig, ScriptIndexMode};
 use bitcoin::hex::FromHex;
-use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_consensus::ValidationEngine;
+use bitcoin_rs_execution::ValidationMode;
 use bitcoin_rs_storage::StorageBackend;
 
-pub use bitcoin_rs_p2p::{IpSubnet, PeerNetwork};
-pub use bitcoin_rs_primitives::NetworkLabel;
+pub use bitcoin_rs_consensus::primitives::NetworkLabel;
 
 pub fn parse_network(value: &str) -> std::result::Result<NetworkSelection, OptionParseError> {
     NetworkSelection::from_str(value)
@@ -147,12 +146,12 @@ pub fn parse_connect_endpoint(value: &str) -> std::result::Result<String, Option
 
 pub fn parse_peer_network(
     value: &str,
-) -> std::result::Result<bitcoin_rs_p2p::PeerNetwork, OptionParseError> {
+) -> std::result::Result<bitcoin_rs_wire::PeerNetwork, OptionParseError> {
     value
         .parse()
         .map_err(|expected| OptionParseError::PeerNetwork { expected })
 }
-fn parse_peer_networks(value: &str) -> Result<Vec<bitcoin_rs_p2p::PeerNetwork>, OptionParseError> {
+fn parse_peer_networks(value: &str) -> Result<Vec<bitcoin_rs_wire::PeerNetwork>, OptionParseError> {
     if value.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -183,12 +182,12 @@ fn parse_connect_list(value: &str) -> Result<Vec<String>, OptionParseError> {
 
 pub fn parse_network_label(
     value: &str,
-) -> std::result::Result<bitcoin_rs_primitives::NetworkLabel, OptionParseError> {
+) -> std::result::Result<bitcoin_rs_consensus::primitives::NetworkLabel, OptionParseError> {
     match value {
-        "ipv4" => Ok(bitcoin_rs_primitives::NetworkLabel::Ipv4),
-        "ipv6" => Ok(bitcoin_rs_primitives::NetworkLabel::Ipv6),
-        "onion" => Ok(bitcoin_rs_primitives::NetworkLabel::Onion),
-        "i2p" => Ok(bitcoin_rs_primitives::NetworkLabel::I2p),
+        "ipv4" => Ok(bitcoin_rs_consensus::primitives::NetworkLabel::Ipv4),
+        "ipv6" => Ok(bitcoin_rs_consensus::primitives::NetworkLabel::Ipv6),
+        "onion" => Ok(bitcoin_rs_consensus::primitives::NetworkLabel::Onion),
+        "i2p" => Ok(bitcoin_rs_consensus::primitives::NetworkLabel::I2p),
         other => Err(OptionParseError::NetworkLabel {
             value: other.to_owned(),
         }),
@@ -197,13 +196,13 @@ pub fn parse_network_label(
 
 pub fn parse_noban_subnet(
     value: &str,
-) -> std::result::Result<bitcoin_rs_p2p::IpSubnet, bitcoin_rs_p2p::SubnetParseError> {
+) -> std::result::Result<bitcoin_rs_wire::IpSubnet, bitcoin_rs_wire::SubnetParseError> {
     value.parse()
 }
 
 fn parse_noban_list(
     value: &str,
-) -> Result<Vec<bitcoin_rs_p2p::IpSubnet>, bitcoin_rs_p2p::SubnetParseError> {
+) -> Result<Vec<bitcoin_rs_wire::IpSubnet>, bitcoin_rs_wire::SubnetParseError> {
     if value.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -543,7 +542,7 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_ASMAP", parse_path]
                         toml native("asmap")
                     }
-                    noban_subnets as p2p_noban: Option<Vec<$crate::options::IpSubnet>> {
+                    noban_subnets as p2p_noban: Option<Vec<bitcoin_rs_wire::IpSubnet>> {
                         cli[#[arg(long = "p2p-noban", value_delimiter = ',', value_parser = $crate::options::parse_noban_subnet)]]
                         env["BITCOIN_RS_P2P_NOBAN", parse_noban_list]
                         toml each("p2p_noban", parse_noban_subnet)
@@ -599,7 +598,7 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_OVERLAY_PORT", str::parse]
                         toml native("overlay_port")
                     }
-                    onlynet as onlynet: Option<Vec<$crate::options::PeerNetwork>> {
+                    onlynet as onlynet: Option<Vec<bitcoin_rs_wire::PeerNetwork>> {
                         cli[#[arg(long = "onlynet", value_delimiter = ',', value_parser = $crate::options::parse_peer_network)]]
                         env["BITCOIN_RS_ONLYNET", parse_peer_networks]
                         toml each("onlynet", parse_peer_network)
@@ -962,5 +961,30 @@ mod tests {
             matches!(&parse_p2p_magic(" eca5d404 "), Ok([0xec, 0xa5, 0xd4, 0x04])),
             "eight hexadecimal characters, optionally padded, are the only accepted --p2p-magic"
         );
+    }
+
+    // ARCH-03
+    #[test]
+    fn parse_storage_backend_accepts_the_three_engines_and_rejects_retired_names() {
+        for (name, expected) in [
+            ("rocksdb", StorageBackend::RocksDb),
+            ("surrealkv", StorageBackend::SurrealKv),
+            ("mdbx", StorageBackend::Mdbx),
+        ] {
+            assert!(
+                matches!(parse_storage_backend(name), Ok(backend) if backend == expected),
+                "{name} is a config-keys.md storage_backend value and must parse to {expected:?}"
+            );
+        }
+        for retired in ["fjall", "redb"] {
+            let error = parse_storage_backend(retired);
+            assert!(
+                matches!(
+                    &error,
+                    Err(OptionParseError::StorageBackend { value }) if value == retired
+                ),
+                "{retired} names a retired engine and is not an accepted storage_backend value, got {error:?}"
+            );
+        }
     }
 }

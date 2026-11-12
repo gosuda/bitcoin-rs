@@ -1,6 +1,6 @@
 use std::task::{Context, Poll, Waker};
 
-use bitcoin_rs_primitives::{Hash256, Script, Txid};
+use bitcoin_rs_consensus::primitives::{Hash256, Script, Txid};
 
 pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = std::pin::pin!(future);

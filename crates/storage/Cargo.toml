@@ -13,16 +13,22 @@ description = "bitcoin-rs :: storage"
 workspace = true
 
 [features]
-default = ["fjall"]
-rocksdb = ["dep:rust-rocksdb"]
-fjall = ["dep:fjall"]
-redb = ["dep:redb"]
+default = []
 # Explicit fixture/fault-injection surface; never a production default.
 test-seam = []
+surrealkv = ["dep:surrealkv", "dep:tokio"]
+mdbx = ["dep:signet-libmdbx"]
 
 [dependencies]
+crossbeam-utils.workspace = true
+nohash-hasher.workspace = true
+rayon.workspace = true
+ruint.workspace = true
+smallvec.workspace = true
+secp256k1.workspace = true
+zerocopy.workspace = true
 arc-swap.workspace = true
-bitcoin-rs-primitives.workspace = true
+bitcoin-rs-consensus.workspace = true
 cap-std.workspace = true
 cap-fs-ext.workspace = true
 sonic-rs.workspace = true
@@ -35,15 +41,18 @@ serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-rust-rocksdb = { workspace = true, optional = true }
-fjall = { workspace = true, optional = true }
-redb = { workspace = true, optional = true }
+rust-rocksdb.workspace = true
+
+signet-libmdbx = { workspace = true, optional = true }
+surrealkv = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 
 [target.'cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", target_os = "redox"))'.dependencies]
 rustix.workspace = true
 
 
 [dev-dependencies]
+bitcoin.workspace = true
 bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
 proptest.workspace = true
 tempfile.workspace = true

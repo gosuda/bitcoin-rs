@@ -89,7 +89,8 @@ On startup the worker reads its persisted watermarks and reconciles against the 
 - A watermark on an abandoned branch rolls back to the common ancestor and connects forward.
 - A rollback deeper than 100,000 blocks resets the capability and backfills from the active chain instead of walking block by block.
 - A schema or format version foreign to this build resets and rebuilds the affected store. There is no in-place migration.
-- A corrupt or missing block body or an invalid watermark resets only the degraded capability. Sibling capabilities keep serving while their watermarks match the tip.
+- A body that pruning has already deleted or an invalid watermark resets only the degraded capability. Sibling capabilities keep serving while their watermarks match the tip.
+- An ordinary read turns a corrupt flat-file frame into a missing body. Forward catch-up and rollback both stall on a missing body whose history is still retained: the affected capabilities keep their rows, make no progress past the unreadable block, and are retried after a quiet period instead of being reset. A stored body that passes the frame check and then fails parsing fails the worker with `IndexError::BlockParse` instead of resetting.
 - A missing undo record has narrower effects: `ScriptLive` resets, `ScriptHistory` becomes unavailable for the run when it needs the missing spent script, and compact filters become unavailable for the run. Durable rows and watermarks are preserved.
 
 Index writes never gate block validation or UTXO commits. A fatal storage error or panic marks the worker failed and stops it; chain progress continues. Queries then report unavailable until you restart and the worker reconciles.

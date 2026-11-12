@@ -9,7 +9,7 @@ use tempfile::tempdir;
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../crates/utxo/tests/fixtures/core-v2/core200.dat")
+        .join("../../crates/storage/tests/fixtures/core-v2/core200.dat")
 }
 
 fn run(args: &[&str], file: &Path) -> Result<Output, std::io::Error> {
@@ -150,7 +150,7 @@ fn corrupt_and_native_files_fail_with_nonzero_status_without_mutation() -> Resul
     cases.push(("truncated", fixture[..fixture.len() - 1].to_vec(), false));
     let native = fs::read(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../crates/utxo/tests/fixtures/utxo-v4-golden.dat"),
+            .join("../../crates/storage/tests/fixtures/utxo-v4-golden.dat"),
     )?;
     cases.push(("native-v4", native, true));
     for (name, bytes, header_invalid) in cases {

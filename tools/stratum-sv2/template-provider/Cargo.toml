@@ -10,9 +10,9 @@ description = "Embedded bitcoin-rs mining adapter for an external Stratum V2 poo
 [workspace]
 
 [dependencies]
-bitcoin-rs-node = { path = "../../../crates/node", default-features = false, features = ["fjall"] }
-bitcoin-rs-mining = { path = "../../../crates/mining" }
-bitcoin-rs-primitives = { path = "../../../crates/primitives" }
+bitcoin-rs-node = { path = "../../../crates/node", default-features = false }
+bitcoin-rs-serving = { path = "../../../crates/serving" }
+bitcoin-rs-consensus = { path = "../../../crates/consensus", default-features = false }
 crossbeam-channel = "0.5"
 futures-executor = "=0.3.32"
 # SRI protocol plumbing only: Noise_XX transport (`network`) and the SV2

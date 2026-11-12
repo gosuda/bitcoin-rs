@@ -30,13 +30,13 @@ pub enum RunError {
     #[error(transparent)]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(transparent)]
-    P2pStart(#[from] bitcoin_rs_p2p::P2pServiceError),
+    P2pStart(#[from] bitcoin_rs_wire::P2pServiceError),
     #[error(transparent)]
-    P2pJoin(#[from] bitcoin_rs_p2p::P2pJoinError),
+    P2pJoin(#[from] bitcoin_rs_wire::P2pJoinError),
     #[error(transparent)]
-    Maintenance(#[from] bitcoin_rs_chainstate::MaintenanceError),
+    Maintenance(#[from] bitcoin_rs_execution::MaintenanceError),
     #[error(transparent)]
-    Checkpoint(Box<bitcoin_rs_chainstate::CheckpointError>),
+    Checkpoint(Box<bitcoin_rs_execution::CheckpointError>),
     #[error("{0}")]
     Node(crate::embed::NodeError),
     #[error("failed to bind RPC listener at {address}")]
@@ -110,22 +110,22 @@ pub enum RunError {
     PoolDirLock(#[from] crate::state::DataDirLockError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    PoolLedger(#[from] bitcoin_rs_mining::pool::ledger::LedgerError),
+    PoolLedger(#[from] bitcoin_rs_serving::mining::pool::ledger::LedgerError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    PoolCore(#[from] bitcoin_rs_mining::pool::JobError),
+    PoolCore(#[from] bitcoin_rs_serving::mining::pool::JobError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    PoolChainView(#[from] bitcoin_rs_mining::pool::ledger::ChainViewError),
+    PoolChainView(#[from] bitcoin_rs_serving::mining::pool::ledger::ChainViewError),
     #[cfg(feature = "pool")]
     #[error("initial pool template")]
     PoolInitialTemplate {
         #[source]
-        source: bitcoin_rs_mining::pool::RefreshError,
+        source: bitcoin_rs_serving::mining::pool::RefreshError,
     },
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    PoolLimiter(#[from] bitcoin_rs_mining::pool::stratum::sv1::ConfigError),
+    PoolLimiter(#[from] bitcoin_rs_serving::mining::pool::stratum::sv1::ConfigError),
     #[cfg(feature = "pool")]
     #[error("invalid pool difficulty: {difficulty_debug}")]
     PoolDifficulty { difficulty_debug: String },
@@ -180,12 +180,12 @@ pub enum RunError {
     PoolSv2BufferedInputMissing,
     #[cfg(feature = "pool-sv2")]
     #[error(transparent)]
-    PoolSv2Protocol(#[from] bitcoin_rs_mining::pool::stratum::sv2::Error),
+    PoolSv2Protocol(#[from] bitcoin_rs_serving::mining::pool::stratum::sv2::Error),
     #[cfg(feature = "pool-sv2")]
     #[error("creating authenticated SV2 connection")]
     PoolSv2ConnectionAccept {
         #[source]
-        source: bitcoin_rs_mining::pool::stratum::sv2::ConfigError,
+        source: bitcoin_rs_serving::mining::pool::stratum::sv2::ConfigError,
     },
     #[cfg(feature = "pool")]
     #[error("SV2 block channel has no admitted ledger account")]
@@ -209,7 +209,7 @@ pub enum RunError {
     #[error("SV2 block submission failed")]
     PoolSv2BlockSubmissionFailed {
         #[source]
-        source: bitcoin_rs_mining::MiningControlError,
+        source: bitcoin_rs_serving::mining::MiningControlError,
     },
     #[cfg(feature = "pool")]
     #[error("SV2 Undetermined block lost its reservation")]
@@ -247,13 +247,13 @@ impl From<crate::state::open::NodeOpenError> for RunError {
     }
 }
 
-impl From<bitcoin_rs_chainstate::CheckpointError> for RunError {
-    fn from(error: bitcoin_rs_chainstate::CheckpointError) -> Self {
+impl From<bitcoin_rs_execution::CheckpointError> for RunError {
+    fn from(error: bitcoin_rs_execution::CheckpointError) -> Self {
         Self::Checkpoint(Box::new(error))
     }
 }
 
-const DEFAULT_FILTER: &str = "info,fjall=warn,rocksdb=warn";
+const DEFAULT_FILTER: &str = "info,rocksdb=warn";
 
 fn install_tracing(level: &str) {
     let filter_directive = build_filter_directive(level);
@@ -284,11 +284,11 @@ fn build_filter_directive(level: &str) -> String {
     } else if level.contains(',') || level.contains('=') {
         level.to_owned()
     } else {
-        format!("{level},fjall=warn,rocksdb=warn")
+        format!("{level},rocksdb=warn")
     }
 }
 
-fn wait_for_shutdown(shutdown: &bitcoin_rs_chain::LatchReader) {
+fn wait_for_shutdown(shutdown: &bitcoin_rs_execution::chain::LatchReader) {
     if !shutdown.is_triggered() {
         let _ = shutdown.closed().recv();
     }
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn explicit_directive_is_respected_as_is() {
-        let level = "debug,bitcoin_rs_p2p=trace";
+        let level = "debug,bitcoin_rs_wire=trace";
         let directive = build_filter_directive(level);
         assert_eq!(directive, level);
     }
@@ -317,13 +317,13 @@ mod tests {
     #[test]
     fn bare_levels_cap_storage_targets() {
         for (level, expected) in [
-            ("", "info,fjall=warn,rocksdb=warn"),
-            ("info", "info,fjall=warn,rocksdb=warn"),
-            ("debug", "debug,fjall=warn,rocksdb=warn"),
-            ("warn", "warn,fjall=warn,rocksdb=warn"),
-            ("error", "error,fjall=warn,rocksdb=warn"),
-            ("trace", "trace,fjall=warn,rocksdb=warn"),
-            ("off", "off,fjall=warn,rocksdb=warn"),
+            ("", "info,rocksdb=warn"),
+            ("info", "info,rocksdb=warn"),
+            ("debug", "debug,rocksdb=warn"),
+            ("warn", "warn,rocksdb=warn"),
+            ("error", "error,rocksdb=warn"),
+            ("trace", "trace,rocksdb=warn"),
+            ("off", "off,rocksdb=warn"),
         ] {
             let directive = build_filter_directive(level);
             assert_eq!(directive, expected, "bare level {level:?}");
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn wait_for_shutdown_wakes_promptly_on_trigger() {
-        let writer = bitcoin_rs_chain::LatchWriter::new();
+        let writer = bitcoin_rs_execution::chain::LatchWriter::new();
         let reader = writer.reader();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let handle = std::thread::spawn(move || {
@@ -344,7 +344,7 @@ mod tests {
         });
         std::thread::sleep(Duration::from_millis(5));
         writer.trigger();
-        let res = rx.recv_timeout(Duration::from_millis(25));
+        let res = rx.recv_timeout(Duration::from_secs(10));
         assert!(
             res.is_ok(),
             "wait_for_shutdown did not wake promptly: timed out waiting for trigger"

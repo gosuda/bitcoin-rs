@@ -19,8 +19,8 @@ results.
    If the hint is exactly the set of coins left unspent, the aggregate is the
    MuHash identity.
 2. **Reconstruction.** Apply the same blocks to the production in-memory UTXO
-   set through `bitcoin_rs_utxo::contract`, then scan the whole set with
-   `bitcoin_rs_utxo::stats::scan_coin_stats`. That scan is the code path behind
+   set through `bitcoin_rs_storage::utxo::contract`, then scan the whole set with
+   `bitcoin_rs_storage::utxo::stats::scan_coin_stats`. That scan is the code path behind
    `gettxoutsetinfo` with `hash_type = "muhash"`.
 
 The two runs must agree on the end-state MuHash. The fold must also reduce to
@@ -261,7 +261,7 @@ Scope limits of these numbers.
   export does. It does not model KV or shard write amplification, undo record
   framing, or fsync cost. The fold writes nothing, so the real gap on a large
   range is wider than the table shows, not narrower.
-- The reconstruction drives the `bitcoin-rs-utxo` contract directly: it builds
+- The reconstruction drives the `bitcoin-rs-storage` contract directly: it builds
   `BlockChanges`, calls `commit_block_changes`, and scans the set. It does not
   stand up a `Chainstate`, so block-tree, durable-head and publication cost stay
   outside these numbers.
@@ -278,7 +278,7 @@ Read only: this section maps the prototype against the owner contracts. No
 contract file was edited.
 
 `docs/contracts/architecture.md`, `ARCH-07` and `ARCH-07a`: chainstate owns
-applied-chain mutation, and `bitcoin-rs-utxo` is not a second mutation
+applied-chain mutation, and `bitcoin-rs-storage` is not a second mutation
 authority. A hint import therefore MUST be a chainstate transition, not a
 side-channel write into `UtxoSet`. The hinted set MUST enter as a
 `VerifiedSnapshotState`-style sealed value with its height, block hash and

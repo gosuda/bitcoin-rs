@@ -1,0 +1,167 @@
+#![expect(clippy::expect_used, reason = "test assertions")]
+
+use std::path::PathBuf;
+
+use bitcoin_rs_consensus::primitives::{
+    Amount, Script, Sighash, SighashCache, Tx as NativeTx, TxOut, encode::deserialize,
+};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
+
+use crate::support::primitives::TestError;
+
+type Result<T, E = TestError> = std::result::Result<T, E>;
+
+fn vectors_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors")
+}
+
+fn load_json(name: &str) -> Result<Value> {
+    let path = vectors_dir().join(name);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    Ok(sonic_rs::from_str(&text)?)
+}
+
+fn taproot_hash_type(byte: u8) -> Sighash {
+    match byte {
+        0 => Sighash::Default,
+        1 => Sighash::All,
+        2 => Sighash::None,
+        3 => Sighash::Single,
+        0x81 => Sighash::AllAnyoneCanPay,
+        0x82 => Sighash::NoneAnyoneCanPay,
+        0x83 => Sighash::SingleAnyoneCanPay,
+        other => panic!("unexpected BIP341 hash type {other:#x}"),
+    }
+}
+
+fn hex_decode(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|index| {
+            u8::from_str_radix(&hex[index..index + 2], 16)
+                .unwrap_or_else(|error| panic!("bad hex at {index}: {error}"))
+        })
+        .collect()
+}
+
+fn digest_hex(digest: &bitcoin_rs_consensus::primitives::Hash256) -> String {
+    digest
+        .as_byte_array()
+        .iter()
+        .fold(String::new(), |mut acc, b| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
+}
+
+#[test]
+fn bip143_examples_match_spec_digests() -> Result<()> {
+    let vectors = load_json("bip143.json")?;
+    for example in ["p2wpkh_example", "p2wsh_multisig_example"] {
+        let example = vectors
+            .get(example)
+            .unwrap_or_else(|| panic!("bip143.json missing {example}"));
+        let tx_bytes = hex_decode(example["unsigned_tx"].as_str().expect("tx hex"));
+        let tx = deserialize::<NativeTx>(&tx_bytes)
+            .unwrap_or_else(|error| panic!("{example}: native decode failed: {error}"));
+        let script_code = hex_decode(example["script_code"].as_str().expect("script code"));
+        let value_sats = example["value_sats"].as_u64().expect("value sats");
+        let input_index = usize::try_from(example["input_index"].as_u64().expect("input index"))
+            .expect("input index fits usize");
+        let cache = SighashCache::new(&tx);
+
+        for vector in example["vectors"].as_array().expect("vectors array") {
+            let hash_type = u32::try_from(vector["hash_type"].as_u64().expect("hash type"))
+                .expect("hash type fits u32");
+            let expected = vector["sighash"].as_str().expect("sighash hex");
+            let ty =
+                Sighash::from_consensus_u8(u8::try_from(hash_type).expect("hash type fits u8"))
+                    .unwrap_or_else(|error| panic!("bip143: hash type {hash_type:#x}: {error}"));
+
+            let cached = cache
+                .segwit_v0_signature_hash(
+                    input_index,
+                    &script_code,
+                    Amount::from_sat(value_sats),
+                    ty,
+                )
+                .unwrap_or_else(|error| panic!("bip143 {example}: cache failed: {error}"));
+            assert_eq!(
+                digest_hex(&cached),
+                expected,
+                "bip143 {example} hash type {hash_type:#x}"
+            );
+
+            let raw = cache
+                .segwit_v0_signature_hash_raw(
+                    input_index,
+                    &script_code,
+                    Amount::from_sat(value_sats),
+                    hash_type,
+                )
+                .unwrap_or_else(|error| panic!("bip143 {example}: raw failed: {error}"));
+            assert_eq!(
+                digest_hex(&raw),
+                expected,
+                "bip143 {example} raw hash type {hash_type:#x}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn bip341_keypath_vectors_match_spec_digests() -> Result<()> {
+    let vectors = load_json("bip341-wallet-test-vectors.json")?;
+    let spending = vectors["keyPathSpending"]
+        .as_array()
+        .expect("keyPathSpending array");
+
+    let mut checked = 0_usize;
+    for case in spending {
+        let tx_bytes = hex_decode(case["given"]["rawUnsignedTx"].as_str().expect("raw tx"));
+        let tx = deserialize::<NativeTx>(&tx_bytes)
+            .unwrap_or_else(|error| panic!("bip341: native decode failed: {error}"));
+        let prevouts: Vec<TxOut> = case["given"]["utxosSpent"]
+            .as_array()
+            .expect("utxosSpent array")
+            .iter()
+            .map(|utxo| TxOut {
+                value: Amount::from_sat(utxo["amountSats"].as_u64().expect("amount sats")),
+                script_pubkey: Script::from_bytes(hex_decode(
+                    utxo["scriptPubKey"].as_str().expect("script pubkey"),
+                )),
+            })
+            .collect();
+
+        let cache = SighashCache::new(&tx);
+        for input in case["inputSpending"]
+            .as_array()
+            .expect("inputSpending array")
+        {
+            let index = usize::try_from(input["given"]["txinIndex"].as_u64().expect("txin index"))
+                .expect("txin index fits usize");
+            let hash_type = input["given"]["hashType"].as_u64().expect("hash type");
+            let expected = input["intermediary"]["sigHash"]
+                .as_str()
+                .expect("sigHash hex");
+            let ty = taproot_hash_type(u8::try_from(hash_type).expect("hash type fits u8"));
+
+            let digest = cache
+                .taproot_signature_hash(index, &prevouts, None, None, ty)
+                .unwrap_or_else(|error| {
+                    panic!("bip341 keypath input {index} type {hash_type:#x}: {error}")
+                });
+            assert_eq!(
+                digest_hex(&digest),
+                expected,
+                "bip341 keypath input {index} hash type {hash_type:#x}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "bip341 keypath vectors must not be vacuous");
+    Ok(())
+}

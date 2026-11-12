@@ -40,7 +40,7 @@
 # 3. test_framework.authproxy.AuthServiceProxy.__call__: Core's stop takes a
 #    hidden numeric wait argument; bitcoin-rs's stop takes none and refuses
 #    any with the local parameter-shape error (a documented deviation in
-#    crates/rpc/src/registry.rs). The framework's stop_node() teardown sends
+#    crates/serving/src/registry.rs). The framework's stop_node() teardown sends
 #    stop(wait=0) unconditionally, so exactly that default form (wait 0 or
 #    absent) is stripped client-side - it is semantically identical to a bare
 #    stop. Non-zero waits (feature_shutdown.py, wait=1000) are forwarded
@@ -56,7 +56,7 @@
 #   both were rewritten CLIENT-side to positional arrays around node gap
 #   NG-1. The node now accepts the empty object for every method
 #   unconditionally and binds generatetoaddress's named form
-#   (crates/rpc/src/server.rs, crates/rpc/src/handlers/mining.rs), so the
+#   (crates/serving/src/server.rs, crates/serving/src/handlers/mining.rs), so the
 #   patch was deleted; raw failures reproduced with it gone pass the first
 #   probe.
 
@@ -92,7 +92,7 @@ NOOP_RPC_METHODS = frozenset({"setmocktime"})
 def _strip_default_stop_wait(proxy_cls):
     # Core's stop takes a hidden numeric "wait" (milliseconds); bitcoin-rs's
     # stop takes no arguments and refuses any (documented deviation in
-    # crates/rpc/src/registry.rs). The framework's stop_node() always sends
+    # crates/serving/src/registry.rs). The framework's stop_node() always sends
     # stop(wait=0), which is semantically identical to a bare stop, so that
     # exact form is stripped client-side. A non-zero wait (only
     # feature_shutdown.py, wait=1000) is forwarded untouched and fails

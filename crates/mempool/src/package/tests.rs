@@ -7,7 +7,7 @@ use crate::{
 use alloc::sync::Arc;
 use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin_rs_consensus::ValidationEngine;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, Script, Sequence, TxIn, TxOut, Txid, Witness, unix_time_secs,
 };
 
@@ -883,7 +883,7 @@ fn rpc_package_retries_fee_revision_and_chain_fences_without_membership_leaks() 
     struct MovingChain<'a> {
         gateway: &'a MempoolGateway,
         chain: Coins,
-        marker: bitcoin_rs_primitives::Txid,
+        marker: bitcoin_rs_consensus::primitives::Txid,
     }
     impl AdmissionChain for MovingChain<'_> {
         fn snapshot(&self, tx: &Tx) -> Option<ChainAdmissionSnapshot> {
@@ -1080,8 +1080,9 @@ fn package_count_order_conflicts_and_weight_boundaries() -> TestResult {
     for tx in &mut weighted {
         let padding = usize::try_from(202_000 - tx.weight() - 8)?;
         tx.inputs[0].witness = Witness::from_stack(vec![vec![0; padding]]);
-        let oracle: bitcoin::Transaction =
-            bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(tx))?;
+        let oracle: bitcoin::Transaction = bitcoin::consensus::deserialize(
+            &bitcoin_rs_consensus::primitives::consensus_bytes(tx),
+        )?;
         assert_eq!(oracle.weight().to_wu(), 202_000);
     }
     assert!(check_structure(&weighted).is_ok());

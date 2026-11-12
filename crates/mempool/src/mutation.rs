@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use bitcoin_rs_primitives::{Hash256, PeerEndpoint, Txid};
+use bitcoin_rs_consensus::primitives::{Hash256, PeerEndpoint, Txid};
 
 pub(crate) struct MutationSequence;
 
@@ -102,7 +102,7 @@ impl MutationResult {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct PeerToken {
     pub endpoint: Option<PeerEndpoint>,
-    pub addr: Option<bitcoin_rs_primitives::PeerEndpoint>,
+    pub addr: Option<bitcoin_rs_consensus::primitives::PeerEndpoint>,
     pub connection_id: u64,
 }
 
@@ -140,7 +140,10 @@ pub struct MutationEnvelope {
     /// Accepted transaction bodies as `(index into `result.changes`, body)`
     /// pairs in change order. The list is empty when no observer asked for
     /// bodies.
-    pub accepted_transactions: Vec<(usize, alloc::sync::Arc<bitcoin_rs_primitives::Tx>)>,
+    pub accepted_transactions: Vec<(
+        usize,
+        alloc::sync::Arc<bitcoin_rs_consensus::primitives::Tx>,
+    )>,
 }
 
 #[cfg(test)]

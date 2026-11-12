@@ -1,5 +1,5 @@
-use bitcoin_rs_primitives::{
-    Header, Tx, TxOut, Txid, Wtxid,
+use crate::primitives::{
+    BlockImage, Header, Tx, TxOut, TxView, Txid, Wtxid,
     encode::{double_sha256, finalize_double_sha256},
     layout::{ParsedBlock, ParsedTransaction},
     varint,
@@ -12,7 +12,7 @@ use crate::verify_block::merkle_root_and_mutation_borrowed;
     clippy::as_conversions,
     reason = "the fixed 80-byte header fits in u64"
 )]
-const HEADER_LEN: u64 = Header::LEN as u64;
+pub(crate) const HEADER_LEN: u64 = Header::LEN as u64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockFacts {
@@ -54,6 +54,48 @@ impl BlockFacts {
             .saturating_add(u64::from(parsed.tx_count_span().len()))
             .saturating_add(base_sizes);
         let total = len_u64(parsed.consumed_len());
+        let weight = stripped.saturating_mul(3).saturating_add(total);
+        let (merkle_root, merkle_mutated) = merkle_root_and_mutation(&txids);
+
+        Self {
+            txids,
+            wtxids,
+            has_witness,
+            weight,
+            merkle_root,
+            merkle_mutated,
+        }
+    }
+    #[must_use]
+    pub fn from_image(image: &BlockImage) -> Self {
+        let identities = image.identities();
+        let tx_count = identities.len();
+        let mut txids = Vec::with_capacity(tx_count);
+        let mut wtxids: Option<Vec<Wtxid>> = None;
+        let mut base_sizes = 0_u64;
+        let mut has_witness = false;
+
+        for id in identities {
+            let txid = id.txid();
+            if let Some(wtxid) = id.wtxid() {
+                has_witness = true;
+                let ids = wtxids.get_or_insert_with(|| {
+                    let mut ids = Vec::with_capacity(tx_count);
+                    ids.extend(txids.iter().copied().map(|id: Txid| Wtxid(id.0)));
+                    ids
+                });
+                ids.push(wtxid);
+            } else if let Some(ids) = wtxids.as_mut() {
+                ids.push(Wtxid(txid.0));
+            }
+            base_sizes = base_sizes.saturating_add(u64::from(id.base_size()));
+            txids.push(txid);
+        }
+
+        let stripped = HEADER_LEN
+            .saturating_add(u64::from(image.layout().tx_count().len()))
+            .saturating_add(base_sizes);
+        let total = len_u64(image.bytes().len());
         let weight = stripped.saturating_mul(3).saturating_add(total);
         let (merkle_root, merkle_mutated) = merkle_root_and_mutation(&txids);
 
@@ -145,8 +187,14 @@ impl BlockFacts {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum BlockViewSource<'b> {
+    Txs(&'b [Tx]),
+    Image(&'b BlockImage),
+}
+
 pub struct BlockView<'b> {
-    txs: &'b [Tx],
+    source: BlockViewSource<'b>,
     facts: BlockFacts,
     resolved: Vec<Vec<Option<TxOut>>>,
 }
@@ -160,7 +208,21 @@ impl<'b> BlockView<'b> {
             "block view needs one fact row per transaction"
         );
         Self {
-            txs,
+            source: BlockViewSource::Txs(txs),
+            facts,
+            resolved: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn from_image(image: &'b BlockImage, facts: BlockFacts) -> Self {
+        debug_assert_eq!(
+            image.tx_count(),
+            facts.tx_count(),
+            "block view needs one fact row per transaction"
+        );
+        Self {
+            source: BlockViewSource::Image(image),
             facts,
             resolved: Vec::new(),
         }
@@ -177,17 +239,47 @@ impl<'b> BlockView<'b> {
     }
 
     #[must_use]
-    pub fn txs(&self) -> &[Tx] {
-        self.txs
+    pub fn tx_count(&self) -> usize {
+        match self.source {
+            BlockViewSource::Txs(txs) => txs.len(),
+            BlockViewSource::Image(img) => img.tx_count(),
+        }
     }
 
     #[must_use]
-    pub fn merkle_root_matches(&self, merkle_root: bitcoin_rs_primitives::Hash256) -> bool {
+    pub fn tx_view(&self, index: usize) -> TxView<'b> {
+        match self.source {
+            BlockViewSource::Txs(txs) => TxView::Owned(&txs[index]),
+            BlockViewSource::Image(img) => TxView::View(img.tx(index)),
+        }
+    }
+
+    #[must_use]
+    pub fn txs(&self) -> Option<&'b [Tx]> {
+        match self.source {
+            BlockViewSource::Txs(txs) => Some(txs),
+            BlockViewSource::Image(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn image(&self) -> Option<&'b BlockImage> {
+        match self.source {
+            BlockViewSource::Image(img) => Some(img),
+            BlockViewSource::Txs(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn merkle_root_matches(&self, merkle_root: crate::primitives::Hash256) -> bool {
         self.facts.merkle_root() == Some(Txid(merkle_root))
     }
 
     pub fn witness_ids(&mut self) -> &[Wtxid] {
-        self.facts.or_insert_wtxids_from(self.txs);
+        match self.source {
+            BlockViewSource::Txs(txs) => self.facts.or_insert_wtxids_from(txs),
+            BlockViewSource::Image(_) => {}
+        }
         self.facts
             .wtxids()
             .unwrap_or_else(|| unreachable!("witness IDs were just computed"))
@@ -202,8 +294,8 @@ impl<'b> BlockView<'b> {
         self.facts.into_txids()
     }
 
-    pub(crate) fn parts_mut(&mut self) -> (&'b [Tx], &mut Vec<Vec<Option<TxOut>>>) {
-        (self.txs, &mut self.resolved)
+    pub(crate) fn parts_mut(&mut self) -> (BlockViewSource<'b>, &mut Vec<Vec<Option<TxOut>>>) {
+        (self.source, &mut self.resolved)
     }
 }
 

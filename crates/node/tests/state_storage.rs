@@ -14,12 +14,7 @@ use metrics::{
 
 #[test]
 fn opens_storage_backend() -> Result<()> {
-    #[cfg(feature = "rocksdb")]
     assert_backend_opens("rocksdb")?;
-    #[cfg(feature = "fjall")]
-    assert_backend_opens("fjall")?;
-    #[cfg(feature = "redb")]
-    assert_backend_opens("redb")?;
     Ok(())
 }
 
@@ -39,16 +34,10 @@ fn assert_backend_opens(backend: &str) -> Result<()> {
 
 #[test]
 fn open_gives_every_chainstate_backend_its_budgeted_cache_share() -> Result<()> {
-    #[cfg(feature = "rocksdb")]
     assert_chainstate_cache_share("rocksdb")?;
-    #[cfg(feature = "fjall")]
-    assert_chainstate_cache_share("fjall")?;
-    #[cfg(feature = "redb")]
-    assert_chainstate_cache_share("redb")?;
     Ok(())
 }
 
-#[cfg(any(feature = "rocksdb", feature = "fjall", feature = "redb"))]
 fn assert_chainstate_cache_share(backend: &str) -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
@@ -82,27 +71,16 @@ fn assert_chainstate_cache_share(backend: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(feature = "rocksdb", feature = "fjall", feature = "redb"))]
 fn engine_default_cache_bytes(backend: &str) -> u64 {
     match backend {
-        #[cfg(feature = "rocksdb")]
         "rocksdb" => bitcoin_rs_storage::ROCKSDB_DEFAULT_CACHE_BYTES,
-        #[cfg(feature = "fjall")]
-        "fjall" => bitcoin_rs_storage::FJALL_DEFAULT_CACHE_BYTES,
-        #[cfg(feature = "redb")]
-        "redb" => bitcoin_rs_storage::REDB_DEFAULT_CACHE_BYTES,
-        #[cfg(feature = "redb")]
-        "redb-txindex" => bitcoin_rs_storage::REDB_TXINDEX_DEFAULT_CACHE_BYTES,
         other => panic!("no engine default recorded for {other}"),
     }
 }
 
-#[cfg(any(feature = "rocksdb", feature = "fjall", feature = "redb"))]
 fn clamp_budget(config: &NodeConfig) -> u64 {
     bitcoin_rs_storage::clamp_dbcache_bytes(config.storage.dbcache_mb)
 }
-
-#[cfg(any(feature = "rocksdb", feature = "fjall", feature = "redb"))]
 fn txindex_enabled(config: &NodeConfig) -> bool {
     !config
         .indexes
@@ -111,7 +89,6 @@ fn txindex_enabled(config: &NodeConfig) -> bool {
         .is_empty()
 }
 
-#[cfg(any(feature = "rocksdb", feature = "fjall", feature = "redb"))]
 #[expect(
     clippy::cast_precision_loss,
     reason = "byte counts < 2^31, lossless in f64"

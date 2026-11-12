@@ -33,15 +33,14 @@ Historical prefix reads are blocking and take no live UTXO or chain-transition l
 
 ## Feature flags
 
-The node crate's default features are `fjall` and `zmq`. Storage backend features only compile an engine in; the runtime `storage.backend` setting selects it, and a build that lacks the selected backend refuses to start.
+The node crate's default features are `["zmq"]`. RocksDB is always compiled as the mandatory default storage engine. `surrealkv` and `mdbx` are optional backend features, off by default.
 
 | Feature | Effect | Use |
 | --- | --- | --- |
-| `fjall` | Compiles the default storage engine | Keep unless packaging a different backend |
-| `redb` | Compiles the redb backend and its fixed-width transaction index | Alternative backend |
-| `rocksdb` | Compiles the RocksDB backend | Alternative backend |
 | `zmq` | Compiles the ZeroMQ publisher surface | Only when notifications are needed |
 | `kernel` | Compiles bitcoinkernel support in | Oracle runs; never selects the engine by itself |
+| `surrealkv` | Forwards the optional SurrealKV backend feature to `bitcoin-rs-storage` | Only when that engine is selected |
+| `mdbx` | Forwards the optional libmdbx backend feature to `bitcoin-rs-storage` | Only when that engine is selected |
 | `silent-payments` | Enables the silent-payments RPC subset | Only when that surface is needed |
 | `pool` | Enables the native pool surface | Pool operators |
 | `pool-sv2` | Adds Stratum V2 transport on top of `pool` | Pool operators |
@@ -53,7 +52,7 @@ The `kernel` feature is a capability, not a choice. A build with it still runs n
 
 ## A Cargo.toml that compiles
 
-The workspace crates are path dependencies in this repository. Point the path at your checkout; set `default-features = false` and choose the backends you ship.
+The workspace crates are path dependencies in this repository. Point the path at your checkout; set `default-features = false` if ZeroMQ notifications are not needed.
 
 ```toml
 [package]
@@ -62,7 +61,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bitcoin-rs-node = { path = "../bitcoin-rs/crates/node", default-features = false, features = ["fjall"] }
+bitcoin-rs-node = { path = "../bitcoin-rs/crates/node", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tempfile = "3"
 ```

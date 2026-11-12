@@ -1,0 +1,701 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
+
+use crate::p2p::RefTxInventory;
+use bitcoin::bip152::{BlockTransactions, HeaderAndShortIds, PrefilledTransaction, ShortId};
+use bitcoin::blockdata::block::Block as RegistryBlock;
+use bitcoin::hashes::Hash as _;
+use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
+use bitcoin_rs_consensus::primitives::{
+    Amount, Block, BlockHash, Hash256, Header, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid,
+    Witness, Wtxid, consensus_bytes, unix_time_secs,
+};
+use bitcoin_rs_wire::compact_blocks::{
+    CompactBlockHints, MAX_BLOCK_TX_COUNT, MAX_PENDING_RETAINED_BYTES, Outcome, PENDING_DEADLINE,
+    Reconstruction,
+};
+use bitcoin_rs_wire::inv::wire_block_hash;
+use bitcoin_rs_wire::peer::COMPACT_BLOCK_VERSION;
+
+struct SetHints {
+    txs: Vec<Tx>,
+}
+
+impl CompactBlockHints for SetHints {
+    fn for_each_identity(&self, f: &mut dyn FnMut(Txid, Wtxid)) {
+        for tx in &self.txs {
+            f(tx.txid(), tx.wtxid());
+        }
+    }
+
+    fn get_tx_by_txid(&self, txid: Txid) -> Option<Tx> {
+        self.txs.iter().find(|tx| tx.txid() == txid).cloned()
+    }
+
+    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+        self.txs.iter().find(|tx| tx.wtxid() == wtxid).cloned()
+    }
+}
+
+struct CountingHints {
+    inner: SetHints,
+    scans: AtomicUsize,
+}
+
+impl CompactBlockHints for CountingHints {
+    fn for_each_identity(&self, f: &mut dyn FnMut(Txid, Wtxid)) {
+        self.scans.fetch_add(1, Ordering::Relaxed);
+        self.inner.for_each_identity(f);
+    }
+
+    fn get_tx_by_txid(&self, txid: Txid) -> Option<Tx> {
+        self.inner.get_tx_by_txid(txid)
+    }
+
+    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+        self.inner.get_tx_by_wtxid(wtxid)
+    }
+}
+
+fn test_coinbase(byte: u8) -> Tx {
+    let mut tx = test_tx(byte);
+    tx.inputs[0].previous_output = OutPoint::null();
+    assert!(tx.is_coinbase(), "fixture must be a coinbase");
+    tx
+}
+
+fn test_tx(byte: u8) -> Tx {
+    Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from(Hash256::from_le_bytes(&[byte; 32])),
+                vout: 0,
+            },
+            script_sig: vec![byte].into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: vec![byte].into(),
+        }],
+        lock_time: LockTime::ZERO,
+    }
+}
+
+fn registry_tx(tx: &Tx) -> bitcoin::Transaction {
+    bitcoin::consensus::encode::deserialize(&consensus_bytes(tx))
+        .unwrap_or_else(|error| panic!("test tx must bridge: {error}"))
+}
+
+fn registry_block(native: &Block) -> RegistryBlock {
+    bitcoin::consensus::encode::deserialize(&consensus_bytes(native))
+        .unwrap_or_else(|error| panic!("test block must bridge: {error}"))
+}
+
+fn conforming_block(txs: Vec<Tx>) -> Block {
+    let mut native = Block {
+        header: Header {
+            version: 1,
+            prev_blockhash: BlockHash::from(Hash256::from_le_bytes(&[0xab; 32])),
+            merkle_root: Hash256::default(),
+            time: 7,
+            bits: bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(
+                bitcoin_rs_execution::chain::regtest_fixture::REGTEST_BITS,
+            ),
+            nonce: 9,
+        },
+        txs,
+    };
+    let root = registry_block(&native)
+        .compute_merkle_root()
+        .unwrap_or_else(|| panic!("a non-empty block has a merkle root"));
+    native.header.merkle_root = Hash256::from_le_bytes(&root.to_byte_array());
+    assert_eq!(
+        registry_block(&native).header.merkle_root,
+        root,
+        "merkle bytes must bridge losslessly"
+    );
+    native
+}
+
+fn compact_of(native: &Block, version: u64, nonce: u64) -> CmpctBlock {
+    let version =
+        u32::try_from(version).unwrap_or_else(|error| panic!("version fits u32: {error}"));
+    let compact = HeaderAndShortIds::from_block(&registry_block(native), nonce, version, &[])
+        .unwrap_or_else(|error| panic!("sample compact block must build: {error}"));
+    CmpctBlock {
+        compact_block: compact,
+    }
+}
+
+fn sample_cmpct(txs: Vec<Tx>, version: u64, nonce: u64) -> (Block, CmpctBlock) {
+    let native = conforming_block(txs);
+    let cmpct = compact_of(&native, version, nonce);
+    (native, cmpct)
+}
+
+fn cmpct_with_slots(native: &Block, nonce: u64, short_ids: Vec<ShortId>) -> CmpctBlock {
+    CmpctBlock {
+        compact_block: HeaderAndShortIds {
+            header: registry_block(native).header,
+            nonce,
+            short_ids,
+            prefilled_txs: vec![PrefilledTransaction {
+                idx: 0,
+                tx: registry_tx(&native.txs[0]),
+            }],
+        },
+    }
+}
+
+fn wtxid_short_id(native: &Block, nonce: u64, tx: &Tx) -> ShortId {
+    let keys = ShortId::calculate_siphash_keys(&registry_block(native).header, nonce);
+    ShortId::with_siphash_keys(tx.wtxid().as_bytes(), keys)
+}
+
+fn now() -> Instant {
+    Instant::now()
+}
+
+struct MissingCoins;
+impl bitcoin_rs_mempool::AdmissionChain for MissingCoins {
+    fn snapshot(&self, _: &Tx) -> Option<bitcoin_rs_mempool::ChainAdmissionSnapshot> {
+        Some(bitcoin_rs_mempool::ChainAdmissionSnapshot {
+            prevouts: Vec::new(),
+            height: 0,
+            locktime_cutoff: 0,
+            prevout_meta: hashbrown::HashMap::new(),
+            csv_active: false,
+            ..bitcoin_rs_mempool::ChainAdmissionSnapshot::default()
+        })
+    }
+}
+
+fn test_gateway() -> bitcoin_rs_mempool::MempoolGateway {
+    bitcoin_rs_mempool::MempoolGateway::new(
+        Arc::new(parking_lot::RwLock::new(bitcoin_rs_mempool::Mempool::new(
+            bitcoin_rs_mempool::MempoolLimits::default(),
+        ))),
+        None,
+        bitcoin_rs_consensus::ValidationEngine::Native,
+        None,
+    )
+}
+
+fn peer_source(connection_id: u64) -> bitcoin_rs_mempool::PeerToken {
+    bitcoin_rs_mempool::PeerToken {
+        endpoint: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::Ip(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+        )),
+        addr: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::from((
+            [127, 0, 0, 1],
+            8333,
+        ))),
+        connection_id,
+    }
+}
+
+fn orphan_tx(prev_byte: u8, witness_byte: u8) -> Tx {
+    Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from(Hash256::from_le_bytes(&[prev_byte; 32])),
+                vout: 0,
+            },
+            script_sig: Vec::<u8>::new().into(),
+            sequence: Sequence::MAX,
+            witness: Witness::from_stack(vec![vec![witness_byte]]),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: vec![0x6a, 4, 1, 2, 3, 4].into(),
+        }],
+        lock_time: LockTime::ZERO,
+    }
+}
+
+fn p2sh_true_output() -> Vec<u8> {
+    bitcoin::ScriptBuf::from_bytes(vec![0x51])
+        .to_p2sh()
+        .into_bytes()
+}
+
+fn p2sh_true_script_sig() -> Vec<u8> {
+    vec![0x01, 0x51]
+}
+
+fn p2p_parent() -> Tx {
+    Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0xD0; 32])), 0),
+            script_sig: Vec::<u8>::new().into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(10_000),
+            script_pubkey: p2sh_true_output().into(),
+        }],
+    }
+}
+
+fn p2p_child(parent_txid: Txid, marker: u8) -> Tx {
+    let mut script = vec![0x76, 0xa9, 0x14];
+    script.extend_from_slice(&[marker; 20]);
+    script.extend_from_slice(&[0x88, 0xac]);
+    Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(parent_txid, 0),
+            script_sig: p2sh_true_script_sig().into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(9_000),
+            script_pubkey: script.into(),
+        }],
+    }
+}
+
+#[track_caller]
+fn hold_orphan(gateway: &bitcoin_rs_mempool::MempoolGateway, tx: &Arc<Tx>) {
+    let outcome = gateway.submit_transaction(
+        Arc::clone(tx),
+        bitcoin_rs_mempool::AdmissionOrigin::Peer(peer_source(1)),
+        None,
+        0,
+        &MissingCoins,
+    );
+    assert!(
+        matches!(outcome, Ok(bitcoin_rs_mempool::SubmitOutcome::Held { .. })),
+        "a peer tx with missing parents must be orphan-held, got {outcome:?}"
+    );
+}
+
+#[test]
+fn extra_ring_orphan_only_hint_completes_reconstruction() {
+    let gateway = test_gateway();
+    let orphan = Arc::new(orphan_tx(0xA1, 0x01));
+    hold_orphan(&gateway, &orphan);
+    assert!(
+        !gateway.read().contains_txid(&orphan.txid()),
+        "an orphan-held tx must not be pool-resident"
+    );
+    assert_eq!(gateway.get_tx(orphan.txid()), None);
+
+    let native = conforming_block(vec![test_tx(0xC0), (*orphan).clone()]);
+    let cmpct = compact_of(&native, COMPACT_BLOCK_VERSION, 0x60);
+    let mut reconstruction = Reconstruction::new();
+    let outcome = reconstruction.receive_cmpctblock(
+        &cmpct,
+        COMPACT_BLOCK_VERSION,
+        &RefTxInventory(&gateway),
+        now(),
+    );
+    let Outcome::Complete(block) = outcome else {
+        panic!("a ring-only hint must complete the block, got {outcome:?}");
+    };
+    assert_eq!(block.block_hash(), native.block_hash());
+    assert_eq!(block.materialize().txs, native.txs);
+    assert!(
+        !gateway.read().contains_txid(&orphan.txid()),
+        "reconstruction must never admit a hinted body"
+    );
+    assert_eq!(gateway.get_tx(orphan.txid()), None);
+}
+
+#[test]
+fn pool_and_ring_share_identity_without_false_collision() {
+    let gateway = test_gateway();
+    let parent = p2p_parent();
+    let parent_txid = parent.txid();
+    let child = Arc::new(p2p_child(parent_txid, 0x07));
+    hold_orphan(&gateway, &child);
+    let fresh_time = unix_time_secs();
+    gateway
+        .insert_entry(
+            bitcoin_rs_mempool::AdmissionOrigin::Rpc,
+            bitcoin_rs_mempool::MempoolEntry::new(Arc::new(parent), 100, 1_000, fresh_time, 1, 0),
+        )
+        .unwrap_or_else(|error| panic!("parent insertion failed: {error}"));
+    let retried = gateway.retry_orphans(&MissingCoins, fresh_time);
+    assert!(
+        retried.iter().any(|retry| matches!(
+            retry.result,
+            Ok(bitcoin_rs_mempool::SubmitOutcome::Committed(_))
+        )),
+        "the orphan child must admit once its parent commits"
+    );
+    assert!(gateway.read().contains_txid(&child.txid()));
+
+    let native = conforming_block(vec![test_tx(0xC1), (*child).clone()]);
+    let cmpct = compact_of(&native, COMPACT_BLOCK_VERSION, 0x61);
+    let mut reconstruction = Reconstruction::new();
+    let outcome = reconstruction.receive_cmpctblock(
+        &cmpct,
+        COMPACT_BLOCK_VERSION,
+        &RefTxInventory(&gateway),
+        now(),
+    );
+    let Outcome::Complete(block) = outcome else {
+        panic!("a pool+ring duplicate identity must complete, got {outcome:?}");
+    };
+    assert_eq!(block.materialize().txs, native.txs);
+}
+
+#[test]
+fn v2_witness_variants_stay_distinct() {
+    let gateway = test_gateway();
+    let first = Arc::new(orphan_tx(0xA2, 0x01));
+    let second = Arc::new(orphan_tx(0xA2, 0x02));
+    assert_eq!(first.txid(), second.txid(), "variants must share a txid");
+    assert_ne!(
+        first.wtxid(),
+        second.wtxid(),
+        "variants must differ in wtxid"
+    );
+    hold_orphan(&gateway, &first);
+    hold_orphan(&gateway, &second);
+
+    let native_first = conforming_block(vec![test_tx(0xC2), (*first).clone()]);
+    let cmpct_first = compact_of(&native_first, COMPACT_BLOCK_VERSION, 0x62);
+    let mut reconstruction = Reconstruction::new();
+    let outcome = reconstruction.receive_cmpctblock(
+        &cmpct_first,
+        COMPACT_BLOCK_VERSION,
+        &RefTxInventory(&gateway),
+        now(),
+    );
+    let Outcome::Complete(block) = outcome else {
+        panic!("v2 must resolve the first variant, got {outcome:?}");
+    };
+    assert_eq!(block.materialize().txs, native_first.txs);
+
+    let native_second = conforming_block(vec![test_tx(0xC2), (*second).clone()]);
+    let cmpct_second = compact_of(&native_second, COMPACT_BLOCK_VERSION, 0x66);
+    let mut reconstruction = Reconstruction::new();
+    let outcome = reconstruction.receive_cmpctblock(
+        &cmpct_second,
+        COMPACT_BLOCK_VERSION,
+        &RefTxInventory(&gateway),
+        now(),
+    );
+    let Outcome::Complete(block) = outcome else {
+        panic!("v2 must resolve the second variant, got {outcome:?}");
+    };
+    assert_eq!(block.materialize().txs, native_second.txs);
+}
+
+#[test]
+fn v1_shared_txid_ambiguity_requests_missing() {
+    let gateway = test_gateway();
+    let first = Arc::new(orphan_tx(0xA3, 0x01));
+    let second = Arc::new(orphan_tx(0xA3, 0x02));
+    assert_eq!(first.txid(), second.txid(), "variants must share a txid");
+    assert_ne!(
+        first.wtxid(),
+        second.wtxid(),
+        "variants must differ in wtxid"
+    );
+    hold_orphan(&gateway, &first);
+    hold_orphan(&gateway, &second);
+
+    let native = conforming_block(vec![test_tx(0xC3), (*first).clone()]);
+    let cmpct_v1 = compact_of(&native, 1, 0x63);
+    let mut reconstruction = Reconstruction::new();
+    let outcome = reconstruction.receive_cmpctblock(&cmpct_v1, 1, &RefTxInventory(&gateway), now());
+    let Outcome::RequestMissing(request) = outcome else {
+        panic!("v1 txid ambiguity must safely request the slot, got {outcome:?}");
+    };
+    assert_eq!(request.txs_request.indexes, vec![1]);
+    assert_eq!(
+        request.txs_request.block_hash,
+        wire_block_hash(native.block_hash())
+    );
+
+    let cmpct_v2 = compact_of(&native, COMPACT_BLOCK_VERSION, 0x63);
+    let mut reconstruction = Reconstruction::new();
+    let outcome = reconstruction.receive_cmpctblock(
+        &cmpct_v2,
+        COMPACT_BLOCK_VERSION,
+        &RefTxInventory(&gateway),
+        now(),
+    );
+    let Outcome::Complete(block) = outcome else {
+        panic!("v2 must resolve the same variants, got {outcome:?}");
+    };
+    assert_eq!(block.materialize().txs, native.txs);
+}
+
+struct EvictAfterWalk<'a> {
+    hints: &'a dyn CompactBlockHints,
+    gateway: &'a bitcoin_rs_mempool::MempoolGateway,
+    evict: Vec<Tx>,
+}
+
+impl CompactBlockHints for EvictAfterWalk<'_> {
+    fn for_each_identity(&self, f: &mut dyn FnMut(Txid, Wtxid)) {
+        self.hints.for_each_identity(f);
+        for tx in &self.evict {
+            hold_orphan(self.gateway, &Arc::new(tx.clone()));
+        }
+    }
+
+    fn get_tx_by_txid(&self, txid: Txid) -> Option<Tx> {
+        self.hints.get_tx_by_txid(txid)
+    }
+
+    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+        self.hints.get_tx_by_wtxid(wtxid)
+    }
+}
+
+#[test]
+fn eviction_between_walk_and_fetch_requests_missing() {
+    let gateway = test_gateway();
+    let victim = Arc::new(orphan_tx(0xB0, 0xB0));
+    hold_orphan(&gateway, &victim);
+    let native = conforming_block(vec![test_tx(0xC4), (*victim).clone()]);
+    let cmpct = compact_of(&native, COMPACT_BLOCK_VERSION, 0x64);
+
+    let mut baseline = Reconstruction::new();
+    let outcome = baseline.receive_cmpctblock(
+        &cmpct,
+        COMPACT_BLOCK_VERSION,
+        &RefTxInventory(&gateway),
+        now(),
+    );
+    let Outcome::Complete(block) = outcome else {
+        panic!("the held victim must complete before eviction, got {outcome:?}");
+    };
+    assert_eq!(block.block_hash(), native.block_hash());
+    assert_eq!(block.materialize().txs, native.txs);
+
+    let evict: Vec<Tx> = (0..100_u8).map(|i| orphan_tx(0x10 + i, 0x20 + i)).collect();
+    let racing = EvictAfterWalk {
+        hints: &RefTxInventory(&gateway),
+        gateway: &gateway,
+        evict,
+    };
+    let mut reconstruction = Reconstruction::new();
+    let outcome = reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &racing, now());
+    let Outcome::RequestMissing(request) = outcome else {
+        panic!("a body evicted after the walk must be requested, got {outcome:?}");
+    };
+    assert_eq!(request.txs_request.indexes, vec![1]);
+    assert_eq!(
+        request.txs_request.block_hash,
+        wire_block_hash(native.block_hash())
+    );
+}
+
+#[test]
+fn gateway_hints_do_not_rescue_merkle_mismatch() {
+    let gateway = test_gateway();
+    let orphan = Arc::new(orphan_tx(0xA5, 0x05));
+    hold_orphan(&gateway, &orphan);
+    let txs = vec![test_tx(0xC5), (*orphan).clone()];
+    let header = Header {
+        version: 1,
+        prev_blockhash: BlockHash::from(Hash256::from_le_bytes(&[0xab; 32])),
+        merkle_root: Hash256::from_le_bytes(&[0; 32]),
+        time: 7,
+        bits: bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x207f_ffff),
+        nonce: 9,
+    };
+    let bridged =
+        bitcoin::consensus::encode::deserialize::<RegistryBlock>(&consensus_bytes(&Block {
+            header,
+            txs,
+        }))
+        .unwrap_or_else(|error| panic!("sample block must decode: {error}"));
+    let compact = HeaderAndShortIds::from_block(&bridged, 0x65, 2, &[])
+        .unwrap_or_else(|error| panic!("sample compact block must build: {error}"));
+    let mut reconstruction = Reconstruction::new();
+    let outcome = reconstruction.receive_cmpctblock(
+        &CmpctBlock {
+            compact_block: compact,
+        },
+        COMPACT_BLOCK_VERSION,
+        &RefTxInventory(&gateway),
+        now(),
+    );
+    assert!(
+        matches!(outcome, Outcome::Fallback(_)),
+        "ring hints must never rescue a merkle mismatch, got {outcome:?}"
+    );
+    assert!(gateway.read().is_empty(), "hints are read-only");
+}
+
+fn blocks_with_prefilled_witness_items(items: usize) -> (Block, CmpctBlock) {
+    let mut heavy = test_coinbase(1);
+    heavy.inputs[0].witness = Witness::from_stack(vec![Vec::new(); items]);
+    let native = conforming_block(vec![heavy, test_tx(2)]);
+    let short_id = wtxid_short_id(&native, 7, &native.txs[1]);
+    let cmpct = cmpct_with_slots(&native, 7, vec![short_id]);
+    (native, cmpct)
+}
+
+#[test]
+fn prefilled_witness_heap_counts_against_the_pending_retention_cap() {
+    let hints = SetHints { txs: Vec::new() };
+
+    let (_, light) = blocks_with_prefilled_witness_items(100);
+    assert!(
+        matches!(
+            Reconstruction::new().receive_cmpctblock(&light, 2, &hints, now()),
+            Outcome::RequestMissing(_)
+        ),
+        "control: a small prefilled witness stays well under the 8 MiB cap"
+    );
+
+    let (_, heavy) = blocks_with_prefilled_witness_items(2_200_000);
+    assert!(
+        matches!(
+            Reconstruction::new().receive_cmpctblock(&heavy, 2, &hints, now()),
+            Outcome::Fallback(_)
+        ),
+        "decoded witness heap must be charged, not only the serialized length"
+    );
+}
+
+#[test]
+fn slot_metadata_over_budget_falls_back_before_hint_scan() {
+    let (_, mut cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2)], 2, 0x81);
+    let slots = MAX_BLOCK_TX_COUNT;
+    let slot_count =
+        u64::try_from(slots).unwrap_or_else(|error| panic!("slot count fits: {error}"));
+    cmpct.compact_block.short_ids = (1..slot_count)
+        .map(|index: u64| {
+            let bytes = index.to_le_bytes();
+            ShortId::from(
+                <[u8; 6]>::try_from(&bytes[..6])
+                    .unwrap_or_else(|error| panic!("short ID has six bytes: {error}")),
+            )
+        })
+        .collect();
+    let hints = CountingHints {
+        inner: SetHints { txs: Vec::new() },
+        scans: AtomicUsize::new(0),
+    };
+    let mut reconstruction = Reconstruction::new();
+    let mut prefill = test_tx(3);
+    prefill.outputs[0].script_pubkey = vec![3; MAX_PENDING_RETAINED_BYTES / 2].into();
+    let (_, pending) = sample_cmpct(vec![prefill, test_tx(4)], 2, 0x82);
+    assert!(matches!(
+        reconstruction.receive_cmpctblock(&pending, 2, &hints, now()),
+        Outcome::RequestMissing(_)
+    ));
+    let retained_before = reconstruction.retained_bytes();
+    assert!(
+        retained_before + slots * core::mem::size_of::<Option<Tx>>() > MAX_PENDING_RETAINED_BYTES
+    );
+    assert!(matches!(
+        reconstruction.receive_cmpctblock(&cmpct, 2, &hints, now()),
+        Outcome::Fallback(_)
+    ));
+    assert_eq!(hints.scans.load(Ordering::Relaxed), 1);
+    assert_eq!(reconstruction.retained_bytes(), retained_before);
+}
+
+#[test]
+fn metadata_inclusive_budget_is_reusable_after_pending_release() {
+    let hints = SetHints { txs: Vec::new() };
+    for release in 0..3 {
+        let mut reconstruction = Reconstruction::new();
+        let received_at = now();
+        let mut blocks = Vec::new();
+        for seed in 1..=3 {
+            let mut txs: Vec<Tx> = (0..=128).map(test_tx).collect();
+            txs[0].lock_time = LockTime::from_consensus(seed);
+            let overhead = 129 * core::mem::size_of::<Option<Tx>>()
+                + 128 * core::mem::size_of::<u64>()
+                + 128 * 6
+                + core::mem::size_of::<Tx>()
+                + txs[0].retained_heap_bytes()
+                - txs[0].outputs[0].script_pubkey.len();
+            txs[0].outputs[0].script_pubkey =
+                vec![1; MAX_PENDING_RETAINED_BYTES / 2 - overhead].into();
+            blocks.push(sample_cmpct(txs, 2, u64::from(seed)));
+        }
+        for (index, (_, cmpct)) in blocks[..2].iter().enumerate() {
+            if index == 1 {
+                let mut oversized = blocks[1].0.txs.clone();
+                let script_len = oversized[0].outputs[0].script_pubkey.len();
+                oversized[0].outputs[0].script_pubkey = vec![1; script_len + 1].into();
+                let (_, over_budget) = sample_cmpct(oversized, 2, 0x83);
+                assert!(matches!(
+                    reconstruction.receive_cmpctblock(&over_budget, 2, &hints, received_at),
+                    Outcome::Fallback(_)
+                ));
+                assert_eq!(
+                    reconstruction.retained_bytes(),
+                    MAX_PENDING_RETAINED_BYTES / 2
+                );
+            }
+            assert!(matches!(
+                reconstruction.receive_cmpctblock(cmpct, 2, &hints, received_at),
+                Outcome::RequestMissing(_)
+            ));
+            assert_eq!(
+                reconstruction.retained_bytes(),
+                (index + 1) * (MAX_PENDING_RETAINED_BYTES / 2)
+            );
+        }
+        assert!(matches!(
+            reconstruction.receive_cmpctblock(&blocks[2].1, 2, &hints, received_at),
+            Outcome::Fallback(_)
+        ));
+        assert_eq!(reconstruction.pending_len(), 2);
+        let retry_at = if release == 2 {
+            let expired_at = received_at + PENDING_DEADLINE;
+            reconstruction.prune(expired_at);
+            assert_eq!(reconstruction.retained_bytes(), 0);
+            expired_at
+        } else {
+            let native = &blocks[0].0;
+            let transactions = if release == 0 {
+                native.txs[1..].iter().map(registry_tx).collect()
+            } else {
+                Vec::new()
+            };
+            let result = reconstruction.receive_blocktxn(
+                &BlockTxn {
+                    transactions: BlockTransactions {
+                        block_hash: wire_block_hash(native.block_hash()),
+                        transactions,
+                    },
+                },
+                received_at,
+            );
+            if release == 0 {
+                let Outcome::Complete(block) = result else {
+                    panic!("expected complete block, got {result:?}");
+                };
+                assert_eq!(block.materialize().txs, native.txs);
+            } else {
+                assert!(matches!(result, Outcome::Fallback(_)));
+            }
+            assert_eq!(
+                reconstruction.retained_bytes(),
+                MAX_PENDING_RETAINED_BYTES / 2
+            );
+            received_at
+        };
+        let mut retry = blocks[2].1.clone();
+        retry.compact_block.header.nonce += 1;
+        assert!(matches!(
+            reconstruction.receive_cmpctblock(&retry, 2, &hints, retry_at),
+            Outcome::RequestMissing(_)
+        ));
+        assert!(reconstruction.retained_bytes() <= MAX_PENDING_RETAINED_BYTES);
+    }
+}

@@ -213,22 +213,22 @@ pub enum OfflineImportError {
     #[error("block at height {height} does not decode: {decode_error}")]
     BlockDecode {
         height: u32,
-        decode_error: bitcoin_rs_primitives::DecodeError,
+        decode_error: bitcoin_rs_consensus::primitives::DecodeError,
     },
     #[error("connect at block {hash} failed: {connect_error}")]
     ConnectFailed {
-        hash: bitcoin_rs_primitives::BlockHash,
+        hash: bitcoin_rs_consensus::primitives::BlockHash,
         connect_error: Box<crate::ConnectMutationError>,
     },
     #[error("journal backpressure relief checkpoint failed at block {hash}")]
     BackpressureCheckpointFailed {
-        hash: bitcoin_rs_primitives::BlockHash,
+        hash: bitcoin_rs_consensus::primitives::BlockHash,
         #[source]
-        source: Box<bitcoin_rs_chainstate::CheckpointError>,
+        source: Box<bitcoin_rs_execution::CheckpointError>,
     },
     #[error("journal backpressure relief checkpoint skipped at block {hash}: no applied tip")]
     BackpressureCheckpointSkipped {
-        hash: bitcoin_rs_primitives::BlockHash,
+        hash: bitcoin_rs_consensus::primitives::BlockHash,
     },
     #[error("cannot check archive trailing bytes: {io_error}")]
     TrailingBytesCheck { io_error: std::io::Error },
@@ -324,15 +324,15 @@ pub enum OfflineImportError {
     VerificationSkippedData { height: u32 },
     #[error("verification of the applied tip failed: {verify_error}")]
     VerificationFailed {
-        verify_error: Box<bitcoin_rs_chainstate::verify::VerifyError>,
+        verify_error: Box<bitcoin_rs_execution::verify::VerifyError>,
     },
     #[error("coin stats scan failed: {scan_error}")]
     CoinStatsScan {
-        scan_error: bitcoin_rs_utxo::UtxoError,
+        scan_error: bitcoin_rs_storage::utxo::UtxoError,
     },
     #[error("hash_serialized_3 failed: {hash_error}")]
     HashSerialized3 {
-        hash_error: bitcoin_rs_utxo::UtxoError,
+        hash_error: bitcoin_rs_storage::utxo::UtxoError,
     },
     #[error("txout count does not fit: {count_error}")]
     TxoutCountDoesNotFit {
@@ -340,7 +340,7 @@ pub enum OfflineImportError {
     },
     #[error("clean checkpoint publication failed: {checkpoint_error}")]
     CheckpointPublicationFailed {
-        checkpoint_error: Box<bitcoin_rs_chainstate::CheckpointError>,
+        checkpoint_error: Box<bitcoin_rs_execution::CheckpointError>,
     },
     #[error("clean checkpoint publication skipped: no applied tip")]
     CheckpointPublicationSkipped,
@@ -445,7 +445,7 @@ fn validate_offline_import_config_and_manifest(
 
 fn determine_resume_skip(
     manifest_doc: &Manifest,
-    chainstate: &bitcoin_rs_chainstate::Chainstate,
+    chainstate: &bitcoin_rs_execution::Chainstate,
     data_dir: &Path,
 ) -> Result<usize, OfflineImportError> {
     let already = chainstate.applied_tip_snapshot();
@@ -493,7 +493,7 @@ fn import_corpus_archive(
     let mut stream = open_corpus(task.corpus)?;
     let mut hasher = sha2::Sha256::new();
     let mut total: u64 = 0;
-    let mut payloads: Vec<bitcoin_rs_primitives::BlockPayload> = Vec::new();
+    let mut payloads: Vec<bitcoin_rs_consensus::primitives::BlockImage> = Vec::new();
     for (index, entry) in task.manifest.blocks.iter().enumerate() {
         let record = read_record(&mut stream, task.expected_magic, entry)?;
         check_payload_against_entry(entry, &record.payload)?;
@@ -503,13 +503,13 @@ fn import_corpus_archive(
         if index < task.skip {
             continue;
         }
-        let payload = bitcoin_rs_primitives::BlockPayload::from_raw(Bytes::from(record.payload))
-            .map_err(|decode_error| OfflineImportError::BlockDecode {
-                height: entry.height,
-                decode_error,
-            })?;
+        let payload =
+            bitcoin_rs_consensus::primitives::BlockImage::from_raw(Bytes::from(record.payload))
+                .map_err(|decode_error| OfflineImportError::BlockDecode {
+                    height: entry.height,
+                    decode_error,
+                })?;
         if !payload
-            .block()
             .block_hash()
             .to_string()
             .eq_ignore_ascii_case(&entry.hash)
@@ -540,7 +540,7 @@ fn import_corpus_archive(
     if total != task.manifest.archive_bytes {
         return Err(OfflineImportError::ArchiveSizeMismatch);
     }
-    let digest = bitcoin_rs_primitives::hex::hex_encode(&hasher.finalize());
+    let digest = bitcoin_rs_consensus::primitives::hex::hex_encode(&hasher.finalize());
     if digest != task.manifest.archive_sha256.to_ascii_lowercase() {
         return Err(OfflineImportError::ArchiveDigestMismatch);
     }
@@ -619,17 +619,17 @@ fn read_record(
 
 fn connect_batch(
     node: &crate::state::NodeState,
-    batch: &mut Vec<bitcoin_rs_primitives::BlockPayload>,
+    batch: &mut Vec<bitcoin_rs_consensus::primitives::BlockImage>,
 ) -> Result<(), OfflineImportError> {
     let chainstate = node.chainstate();
     let followers = node.chain_followers();
     for payload in batch.drain(..) {
-        let hash = payload.block().block_hash();
+        let hash = payload.block_hash();
         if let Err(error) = followers.apply_connect(&chainstate, &payload) {
             let retention_limited = matches!(
                 &error,
                 crate::ConnectMutationError::NotCommitted(
-                    bitcoin_rs_chainstate::ApplyError::JournalBackpressure(inner)
+                    bitcoin_rs_execution::ApplyError::JournalBackpressure(inner)
                 ) if matches!(
                     inner.as_ref(),
                     bitcoin_rs_storage::chainstate_journal::JournalWriterError::RetentionLimit { .. }
@@ -777,7 +777,7 @@ fn block_index_for_height(start_height: u32, height: u32) -> Result<usize, Offli
 
 fn require_full_validation_provenance(
     data_dir: &Path,
-    tip: &bitcoin_rs_chain::TipSnapshot,
+    tip: &bitcoin_rs_execution::chain::TipSnapshot,
 ) -> Result<(), OfflineImportError> {
     match read_full_validation_provenance(data_dir) {
         Ok(record)
@@ -825,7 +825,7 @@ fn read_full_validation_provenance(
 
 fn write_full_validation_provenance(
     data_dir: &Path,
-    tip: &bitcoin_rs_chain::TipSnapshot,
+    tip: &bitcoin_rs_execution::chain::TipSnapshot,
 ) -> Result<(), OfflineImportError> {
     let doc = FullValidationProvenance {
         schema: FULL_VALIDATION_PROVENANCE_SCHEMA.to_owned(),
@@ -866,9 +866,9 @@ fn write_full_validation_provenance(
 }
 
 fn resolve_offline_validation_mode(
-    _inherited: bitcoin_rs_chainstate::ValidationMode,
-) -> bitcoin_rs_chainstate::ValidationMode {
-    bitcoin_rs_chainstate::ValidationMode::Full
+    _inherited: bitcoin_rs_execution::ValidationMode,
+) -> bitcoin_rs_execution::ValidationMode {
+    bitcoin_rs_execution::ValidationMode::Full
 }
 
 fn check_payload_against_entry(
@@ -880,7 +880,7 @@ fn check_payload_against_entry(
         .ok_or(OfflineImportError::PayloadShorterThanHeader {
             height: entry.height,
         })?;
-    let hash = bitcoin_rs_primitives::encode::double_sha256(header);
+    let hash = bitcoin_rs_consensus::primitives::encode::double_sha256(header);
     if !hash.to_string().eq_ignore_ascii_case(&entry.hash) {
         return Err(OfflineImportError::BlockHeaderHashDiverged {
             height: entry.height,
@@ -905,7 +905,7 @@ fn namespace_has_content(path: &Path) -> bool {
 }
 
 fn parse_magic_hex(text: &str) -> Result<[u8; 4], OfflineImportError> {
-    bitcoin_rs_primitives::hex::hex_decode_array(text)
+    bitcoin_rs_consensus::primitives::hex::hex_decode_array(text)
         .map_err(|_| OfflineImportError::ManifestMagicHex)
 }
 
@@ -998,14 +998,14 @@ fn verify_and_certify(
     if body.is_none() {
         return Err(OfflineImportError::TipBodyUnavailable);
     }
-    let request = bitcoin_rs_chainstate::verify::VerifyRequest {
-        level: bitcoin_rs_chainstate::verify::CheckLevel::CheckUndoAndCommitments,
+    let request = bitcoin_rs_execution::verify::VerifyRequest {
+        level: bitcoin_rs_execution::verify::CheckLevel::CheckUndoAndCommitments,
         depth: NonZeroU32::new(1),
         cancellation: None,
     };
-    match bitcoin_rs_chainstate::verify::verify_recent_blocks(&chainstate, request) {
-        Ok(bitcoin_rs_chainstate::verify::VerifyOutcome::Passed { .. }) => {}
-        Ok(bitcoin_rs_chainstate::verify::VerifyOutcome::SkippedNoBlockData { height }) => {
+    match bitcoin_rs_execution::verify::verify_recent_blocks(&chainstate, request) {
+        Ok(bitcoin_rs_execution::verify::VerifyOutcome::Passed { .. }) => {}
+        Ok(bitcoin_rs_execution::verify::VerifyOutcome::SkippedNoBlockData { height }) => {
             return Err(OfflineImportError::VerificationSkippedData { height });
         }
         Err(verify_error) => {
@@ -1016,7 +1016,7 @@ fn verify_and_certify(
     }
     let (txouts, total_amount_sat, muhash, set_hash) =
         node.chainstate().utxo_reader().with_stable_view(|view| {
-            let stats = bitcoin_rs_utxo::stats::scan_coin_stats(view, tip.height, true)
+            let stats = bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, tip.height, true)
                 .map_err(|scan_error| OfflineImportError::CoinStatsScan { scan_error })?;
             let set_hash = view
                 .hash_serialized_3()

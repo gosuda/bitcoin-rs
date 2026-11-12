@@ -6,15 +6,15 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_mining::MiningControl;
-use bitcoin_rs_mining::pool::ledger::MinerId;
-use bitcoin_rs_mining::pool::stratum::sv1::{ConnectionLimiter, ConnectionPermit};
-use bitcoin_rs_mining::pool::stratum::sv2::{
+use bitcoin_rs_consensus::primitives::BlockHash;
+use bitcoin_rs_serving::mining::MiningControl;
+use bitcoin_rs_serving::mining::pool::ledger::MinerId;
+use bitcoin_rs_serving::mining::pool::stratum::sv1::{ConnectionLimiter, ConnectionPermit};
+use bitcoin_rs_serving::mining::pool::stratum::sv2::{
     AdmitError, AuthorityKeypair, BlockSubmission, Connection, ERROR_CODE_SHARE_NOT_RECORDED,
     ERROR_CODE_SUBMIT_SHARES_STALE_SHARE, Event, Limits, MAX_FEED_LEN, PendingBlock, ServerConfig,
 };
-use bitcoin_rs_mining::pool::{BlockStatus, PoolCore, RecordOutcome, ShareTarget};
-use bitcoin_rs_primitives::BlockHash;
+use bitcoin_rs_serving::mining::pool::{BlockStatus, PoolCore, RecordOutcome, ShareTarget};
 
 use super::authority;
 use super::ledger::{BlockRecordOutcome, BlockRecordPermit, DeferredCharge, LedgerHost};
@@ -85,7 +85,7 @@ fn settle_one_deferred(
 }
 
 pub(crate) struct Sv2Service {
-    cancel: bitcoin_rs_chain::LatchWriter,
+    cancel: bitcoin_rs_execution::chain::LatchWriter,
     listener: Option<JoinHandle<()>>,
     connections: Arc<Mutex<Vec<JoinHandle<()>>>>,
     worker_panicked: Arc<AtomicBool>,
@@ -194,7 +194,7 @@ struct ConnectionWorkerArgs {
     authority: Arc<AuthorityKeypair>,
     server_config: ServerConfig,
     services: Sv2Services,
-    cancel: bitcoin_rs_chain::LatchReader,
+    cancel: bitcoin_rs_execution::chain::LatchReader,
 }
 
 fn spawn_connection_worker(
@@ -233,7 +233,7 @@ pub(crate) fn start(
     core: Arc<PoolCore>,
     ledger: Arc<LedgerHost>,
     control: Arc<dyn MiningControl>,
-    cancel: bitcoin_rs_chain::LatchReader,
+    cancel: bitcoin_rs_execution::chain::LatchReader,
     limiter: Arc<ConnectionLimiter>,
 ) -> Result<Sv2Service, RunError> {
     let bind = config.sv2_bind.ok_or(RunError::PoolSv2BindMissing)?;
@@ -414,7 +414,7 @@ fn serve_connection(
     authority: &AuthorityKeypair,
     config: ServerConfig,
     services: &Sv2Services,
-    cancel: &bitcoin_rs_chain::LatchReader,
+    cancel: &bitcoin_rs_execution::chain::LatchReader,
 ) -> Result<(), RunError> {
     configure_connection_stream(&stream)?;
     let stream_clone = stream.try_clone()?;
@@ -787,5 +787,5 @@ fn wait_until_finished(
     Ok(())
 }
 
-#[cfg(all(test, any(feature = "fjall", feature = "redb")))]
+#[cfg(test)]
 mod tests;

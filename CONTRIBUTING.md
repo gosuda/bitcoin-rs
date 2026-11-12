@@ -5,14 +5,12 @@ This guide covers the development workflow, coding standards, and verification c
 ## Prerequisites
 
 - Use the current stable Rust toolchain (Rust 2024 edition).
-- Install C/C++ build tools for native dependencies such as ZeroMQ. The default
-  binary excludes `libbitcoinkernel`, but this does not make every dependency
-  Rust-only.
-- Kernel-enabled checks additionally require CMake and Boost headers
-  (`cmake` and `libboost-dev` on Debian/Ubuntu). Checks that build the
-  `rocksdb` backend (notably the dependency-range minimal lane, which
-  checks `--all-features`) additionally require libclang (`libclang-dev`
-  on Debian/Ubuntu). No manifest enables `kernel` by default: the feature is
+- Install C/C++ build tools (C++17 compiler such as `g++`), `clang`,
+  `libclang-dev`, and `cmake` for native dependencies (RocksDB and bundled ZeroMQ).
+  The default binary excludes `libbitcoinkernel`, but RocksDB and ZeroMQ require
+  native build tooling.
+- Kernel-enabled checks additionally require Boost headers
+  (`libboost-dev` on Debian/Ubuntu). No manifest enables `kernel` by default: the feature is
   an opt-in capability on the consensus, script, chainstate, node, and binary
   crates, and engine
   selection is the runtime `validation.engine` setting. The exact defaults are
@@ -25,7 +23,7 @@ From the repository root, install and select stable:
 rustup toolchain install stable --component rustfmt --component clippy
 rustup override set stable
 cargo install --locked cargo-deny
-cargo install --locked cargo-nextest --version 0.9.143  # optional: speeds the test lanes up; ci-pr.sh falls back to cargo test
+cargo install --locked cargo-nextest --version 0.9.151  # optional: speeds the test lanes up; ci-pr.sh falls back to cargo test
 ```
 
 [`rust-toolchain.toml`](rust-toolchain.toml), CI, pre-commit hooks, and the
@@ -52,7 +50,7 @@ pre-commit hooks, and this guide all invoke:
 ./scripts/ci-pr.sh fmt            # format check
 ./scripts/ci-pr.sh clippy         # four kernel-free all-target Clippy profiles + production silent-payments check
 ./scripts/ci-pr.sh test-crates    # per-crate profiles, including checked-in fixtures
-./scripts/ci-pr.sh test-binary    # binary profile (rocksdb,fjall,redb)
+./scripts/ci-pr.sh test-binary    # binary profile
 ./scripts/ci-pr.sh test-workspace # workspace kernel-free pass
 ./scripts/ci-pr.sh test           # every test lane in sequence, smallest first
 ./scripts/ci-pr.sh deny           # full dependency graph, metadata only
@@ -70,8 +68,10 @@ runs and hooks need no extra tooling.
 Plain `cargo test --workspace` and `cargo clippy --workspace` also enable the
 library defaults, which are now kernel-free (the `kernel` feature is an opt-in
 capability; the engine a run uses is `validation.engine` at runtime), so plain
-workspace commands need no C++ toolchain. The script passes the kernel-free
-feature selection. The binary and workspace test lanes expect the
+workspace commands need no kernel toolchain. The script passes the kernel-free
+feature selection. The mandatory default RocksDB storage engine still requires
+a C++ toolchain, even for kernel-free commands. The binary and workspace test
+lanes expect the
 pinned Core fixture:
 `bash scripts/provision-ci-reference-fixtures.sh core`.
 
@@ -120,15 +120,15 @@ Pull-request-triggered checks are defined in
 
 ### Full-node feature set
 
-Compiles all retained storage engines (`fjall`, `redb`, `rocksdb`) and the
+Compiles with the mandatory default RocksDB storage engine and the
 `libbitcoinkernel` verification oracle (requires `cmake` and `libboost-dev`):
 
 ```sh
 cargo test -p bitcoin-rs --no-fail-fast \
-  --no-default-features --features "rocksdb,fjall,redb,kernel"
+  --features "kernel"
 
 cargo clippy -p bitcoin-rs --all-targets \
-  --no-default-features --features "rocksdb,fjall,redb,kernel" -- -D warnings
+  --features "kernel" -- -D warnings
 
 cargo clippy -p bitcoin-rs-node --all-targets --features kernel -- -D warnings
 cargo clippy -p bitcoin-rs-consensus --all-targets --features kernel -- -D warnings
@@ -203,7 +203,7 @@ Live observable-behavior check against a pinned Core 31.1 `bitcoind`
 reproduction details in [`docs/validation-tooling.md`](docs/validation-tooling.md#1-live-bitcoin-core-p2p-and-chain-identity-differential)):
 
 ```sh
-cargo build --locked -p bitcoin-rs --profile quickstart --no-default-features --features fjall,zmq
+cargo build --locked -p bitcoin-rs --profile quickstart --features zmq
 scripts/run-p2p-core-interop.sh \
   --bitcoind-command "$(scripts/install-bitcoind.sh --print-path)" \
   --bitcoin-rs-command target/quickstart/bitcoin-rs
@@ -216,7 +216,7 @@ The supported combinations are the rows in
 
 ```sh
 scripts/check-feature-matrix.sh        # every row (needs cmake/libboost for kernel)
-scripts/check-feature-matrix.sh pure   # fjall/redb/zmq only
+scripts/check-feature-matrix.sh pure   # kernel-free and C++-engine-free crate rows
 ```
 
 CI runs the matrix and the MSRV gate in the scheduled/manual

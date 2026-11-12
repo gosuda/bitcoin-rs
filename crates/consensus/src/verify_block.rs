@@ -1,8 +1,10 @@
-use bitcoin_rs_primitives::{Block, Hash256, Network, Tx, Txid, Wtxid, encode::double_sha256};
+use crate::primitives::{
+    Block, BlockImage, Hash256, Network, TransactionView, Tx, Txid, Wtxid, encode::double_sha256,
+};
 
 use crate::ConsensusError;
 use crate::bip9::SoftforkState;
-use crate::block_view::BlockFacts;
+use crate::block_view::{BlockFacts, HEADER_LEN};
 use crate::sha256d64::{self, Avx2Sha256d64, detect_avx2};
 
 const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
@@ -33,8 +35,8 @@ pub fn verify_flags(
     height: u32,
     block_hash: Hash256,
     softfork_state: SoftforkState,
-) -> bitcoin_rs_script::VerifyFlags {
-    use bitcoin_rs_script::VerifyFlags;
+) -> crate::script::VerifyFlags {
+    use crate::script::VerifyFlags;
 
     let mut flags = VerifyFlags::NONE;
     if !network.is_bip16_p2sh_exception(block_hash) {
@@ -87,6 +89,194 @@ pub fn verify_block_rules_precomputed(
     verify_block_transactions_and_legacy_sigops(&block.txs)?;
     verify_block_witness_rules(block, context, facts)?;
     verify_block_weight(facts)
+}
+
+/// The image entry of the same rules: the header and the merkle root are read
+/// from the image bytes, and the per-transaction structure checks read
+/// `TransactionView`s, so no owned transaction graph is built.
+pub fn verify_block_image_rules(
+    image: &BlockImage,
+    context: BlockRuleContext,
+    facts: &BlockFacts,
+) -> Result<(), ConsensusError> {
+    verify_image_merkle_and_size(image, facts)?;
+    verify_image_coinbase_placement(image)?;
+    verify_image_transactions_and_legacy_sigops(image)?;
+    verify_image_witness_rules(image, context, facts)?;
+    verify_block_weight(facts)
+}
+
+fn verify_image_merkle_and_size(
+    image: &BlockImage,
+    facts: &BlockFacts,
+) -> Result<(), ConsensusError> {
+    let (root, mutated): (Hash256, bool) = match facts.merkle_root() {
+        Some(root) => (root.into(), facts.merkle_mutated()),
+        None if image.tx_count() == 0 => (Hash256::from_le_bytes(&[0; 32]), false),
+        None => return Err(ConsensusError::MerkleRoot),
+    };
+    if image.header().merkle_root != root {
+        return Err(ConsensusError::MerkleRoot);
+    }
+    if mutated {
+        return Err(ConsensusError::MerkleMutation);
+    }
+    let stripped = HEADER_LEN
+        .saturating_add(u64::from(image.layout().tx_count().len()))
+        .saturating_add(
+            image
+                .identities()
+                .iter()
+                .map(|identity| u64::from(identity.base_size()))
+                .sum(),
+        );
+    let max = MAX_BLOCK_WEIGHT / WITNESS_SCALE_FACTOR;
+    if image.tx_count() == 0 || stripped > max {
+        return Err(ConsensusError::BlockBaseSize {
+            size: stripped,
+            max,
+        });
+    }
+    Ok(())
+}
+
+fn verify_image_coinbase_placement(image: &BlockImage) -> Result<(), ConsensusError> {
+    let tx_count = image.tx_count();
+    if tx_count == 0 {
+        return Ok(());
+    }
+    if !image.tx(0).is_coinbase() {
+        return Err(if is_image_sixty_four_byte_mutation(image) {
+            ConsensusError::SixtyFourByteMutation
+        } else {
+            ConsensusError::MissingCoinbase
+        });
+    }
+    for tx_index in 1..tx_count {
+        if image.tx(tx_index).is_coinbase() {
+            return Err(ConsensusError::ExtraCoinbase { tx_index });
+        }
+    }
+    Ok(())
+}
+
+#[must_use]
+pub fn is_image_sixty_four_byte_mutation(image: &BlockImage) -> bool {
+    image.tx_count() > 0
+        && !image.tx(0).is_coinbase()
+        && (0..image.tx_count())
+            .any(|index| image.tx(index).base_size() == MERKLE_NODE_SERIALIZED_SIZE)
+}
+
+fn verify_image_transactions_and_legacy_sigops(image: &BlockImage) -> Result<(), ConsensusError> {
+    let mut sigop_cost = 0_u32;
+    for index in 0..image.tx_count() {
+        let tx = image.tx(index);
+        crate::verify_tx::verify_transaction_structure_view(tx.into())?;
+        sigop_cost = sigop_cost.saturating_add(
+            crate::script::sigops::count_tx_legacy_view(tx.into()).saturating_mul(4),
+        );
+    }
+    if sigop_cost > crate::MAX_BLOCK_SIGOPS_COST {
+        return Err(ConsensusError::SigopsLimit {
+            cost: sigop_cost,
+            max: crate::MAX_BLOCK_SIGOPS_COST,
+        });
+    }
+    Ok(())
+}
+
+fn verify_image_witness_rules(
+    image: &BlockImage,
+    context: BlockRuleContext,
+    facts: &BlockFacts,
+) -> Result<(), ConsensusError> {
+    if let Some(wtxids) = facts.wtxids() {
+        return check_image_witness_malleation(image, context, wtxids);
+    }
+    if context.segwit_active && image_witness_commitment(image).is_some() {
+        return Err(ConsensusError::WitnessNonceSize);
+    }
+    if facts.has_witness() {
+        return Err(ConsensusError::UnexpectedWitness);
+    }
+    Ok(())
+}
+
+fn image_witness_commitment(image: &BlockImage) -> Option<&[u8]> {
+    if image.tx_count() == 0 {
+        return None;
+    }
+    let coinbase = image.tx(0);
+    let index = image_witness_commitment_index(&coinbase)?;
+    coinbase
+        .output_script(index)
+        .get(6..MINIMUM_WITNESS_COMMITMENT)
+}
+
+pub(crate) fn image_witness_commitment_index(coinbase: &TransactionView<'_>) -> Option<usize> {
+    (0..coinbase.output_count()).rev().find(|index| {
+        let script = coinbase.output_script(*index);
+        script.len() >= MINIMUM_WITNESS_COMMITMENT && script[..6] == WITNESS_COMMITMENT_PREFIX
+    })
+}
+
+fn check_image_witness_malleation(
+    image: &BlockImage,
+    context: BlockRuleContext,
+    wtxids: &[Wtxid],
+) -> Result<(), ConsensusError> {
+    if context.segwit_active {
+        if let Some(commitment) = image_witness_commitment(image) {
+            let coinbase = image.tx(0);
+            if coinbase.input_count() == 0 {
+                return Err(ConsensusError::WitnessNonceSize);
+            }
+            if coinbase.witness_item_count(0) != 1 || coinbase.witness_item(0, 0).len() != 32 {
+                return Err(ConsensusError::WitnessNonceSize);
+            }
+            if !image_witness_commitment_hash_matches(
+                image,
+                wtxids,
+                commitment,
+                coinbase.witness_item(0, 0),
+            ) {
+                return Err(ConsensusError::WitnessCommitment);
+            }
+            return Ok(());
+        }
+    }
+    if image.has_witness() {
+        return Err(ConsensusError::UnexpectedWitness);
+    }
+    Ok(())
+}
+
+fn image_witness_commitment_hash_matches(
+    image: &BlockImage,
+    wtxids: &[Wtxid],
+    commitment: &[u8],
+    reserved: &[u8],
+) -> bool {
+    if wtxids.len() != image.tx_count() {
+        return false;
+    }
+    let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(image.tx_count());
+    for (index, wtxid) in wtxids.iter().enumerate() {
+        leaves.push(if index == 0 {
+            [0_u8; 32]
+        } else {
+            *wtxid.as_bytes()
+        });
+    }
+    let Some(root) = compute_merkle_root(&mut leaves) else {
+        return false;
+    };
+
+    let mut buffer = [0_u8; 64];
+    buffer[..32].copy_from_slice(&root);
+    buffer[32..].copy_from_slice(reserved);
+    &double_sha256(&buffer).to_le_bytes()[..] == commitment
 }
 
 fn verify_block_merkle_and_size(block: &Block, facts: &BlockFacts) -> Result<(), ConsensusError> {
@@ -178,8 +368,8 @@ fn verify_block_transactions_and_legacy_sigops(txs: &[Tx]) -> Result<(), Consens
     let mut sigop_cost = 0_u32;
     for tx in txs {
         crate::verify_tx::verify_transaction_structure(tx)?;
-        sigop_cost = sigop_cost
-            .saturating_add(bitcoin_rs_script::sigops::count_tx_legacy(tx).saturating_mul(4));
+        sigop_cost =
+            sigop_cost.saturating_add(crate::script::sigops::count_tx_legacy(tx).saturating_mul(4));
     }
     if sigop_cost > crate::MAX_BLOCK_SIGOPS_COST {
         return Err(ConsensusError::SigopsLimit {
@@ -400,6 +590,49 @@ pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool
     )
     .is_ok()
 }
+
+#[must_use]
+pub fn block_image_witness_commitment_matches(image: &BlockImage, wtxids: &[Wtxid]) -> bool {
+    if image.tx_count() == 0 || wtxids.len() != image.tx_count() {
+        return false;
+    }
+    let coinbase = image.tx(0);
+    let mut commitment = None;
+    for i in (0..coinbase.output_count()).rev() {
+        let script = coinbase.output_script(i);
+        if script.len() >= MINIMUM_WITNESS_COMMITMENT
+            && script.get(..6) == Some(&WITNESS_COMMITMENT_PREFIX)
+        {
+            commitment = script.get(6..MINIMUM_WITNESS_COMMITMENT);
+            break;
+        }
+    }
+    if let Some(commitment) = commitment {
+        if coinbase.input_count() == 0 {
+            return false;
+        }
+        if coinbase.witness_item_count(0) != 1 || coinbase.witness_item(0, 0).len() != 32 {
+            return false;
+        }
+        let nonce = coinbase.witness_item(0, 0);
+        let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(wtxids.len());
+        for (index, wtxid) in wtxids.iter().enumerate() {
+            leaves.push(if index == 0 {
+                [0_u8; 32]
+            } else {
+                *wtxid.as_bytes()
+            });
+        }
+        let Some(root) = compute_merkle_root(&mut leaves) else {
+            return false;
+        };
+        let mut buffer = [0_u8; 64];
+        buffer[..32].copy_from_slice(&root);
+        buffer[32..].copy_from_slice(nonce);
+        return &double_sha256(&buffer).to_le_bytes()[..] == commitment;
+    }
+    !image.has_witness()
+}
 pub fn check_block_body_binding(
     block: &Block,
     context: BlockRuleContext,
@@ -424,6 +657,48 @@ pub fn check_block_body_binding(
     }
     let wtxids: Vec<Wtxid> = block.txs.iter().map(Tx::wtxid).collect();
     check_witness_malleation(block, context, &wtxids)
+}
+
+/// The image entry of the same body-binding gate for the download window:
+/// identities supply the transaction ids and the witness commitment reads
+/// the coinbase through its view.
+pub fn check_image_body_binding(
+    image: &BlockImage,
+    context: BlockRuleContext,
+) -> Result<(), ConsensusError> {
+    let txids: Vec<Txid> = image.identities().iter().map(|id| id.txid()).collect();
+    let (root, mutated) = merkle_root_and_mutation_borrowed(&txids)
+        .map(|(root, mutated)| (Hash256::from(root), mutated))
+        .ok_or(ConsensusError::MerkleRoot)?;
+    if image.header().merkle_root != root {
+        return Err(ConsensusError::MerkleRoot);
+    }
+    if mutated {
+        return Err(ConsensusError::MerkleMutation);
+    }
+    if is_image_sixty_four_byte_mutation(image) {
+        return Err(ConsensusError::SixtyFourByteMutation);
+    }
+
+    let commitment = image_witness_commitment(image);
+    if commitment.is_none() && !image.has_witness() {
+        return Ok(());
+    }
+    if context.segwit_active && commitment.is_some() {
+        let coinbase = image.tx(0);
+        if coinbase.input_count() == 0 {
+            return Err(ConsensusError::WitnessNonceSize);
+        }
+        if coinbase.witness_item_count(0) != 1 || coinbase.witness_item(0, 0).len() != 32 {
+            return Err(ConsensusError::WitnessNonceSize);
+        }
+    }
+    let wtxids: Vec<Wtxid> = image
+        .identities()
+        .iter()
+        .map(|identity| identity.wtxid().unwrap_or_else(|| Wtxid(identity.txid().0)))
+        .collect();
+    check_image_witness_malleation(image, context, &wtxids)
 }
 
 fn witness_commitment_hash_matches(

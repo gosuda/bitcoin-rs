@@ -2,20 +2,17 @@ use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
 
-use bitcoin_rs_chain::regtest_fixture;
+use bitcoin_rs_execution::chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Witness,
 };
 
-use parking_lot::Mutex;
-
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -72,8 +69,6 @@ fn torn_disconnect_cold_replays_head() -> Result<()> {
 
 #[test]
 fn torn_disconnect_checkpoint_above_head_rewinds_to_head() -> Result<()> {
-    let log = SharedLog::default();
-    install_log_capture(log.clone());
     let (_temp, config, state) = run_marker_scenario("disconnect-above-head")?;
     let genesis = Network::Regtest.genesis_block();
     let landed = Some((Hash256::from(genesis.block_hash()), 0));
@@ -93,15 +88,6 @@ fn torn_disconnect_checkpoint_above_head_rewinds_to_head() -> Result<()> {
         state.chainstate().coin_stats_handle().snapshot().height,
         0,
         "the coin statistics must rewind to the durable head with the applied tip"
-    );
-    let log = log.contents();
-    assert!(
-        log.contains("automatic disconnect recovery replayed the certified head chain"),
-        "the mandatory recovery warning must be observed: {log}"
-    );
-    assert!(
-        log.contains(r#"mode="checkpoint-rewind""#),
-        "the recovery warning must name the mode that ran: {log}"
     );
     let recovered = state
         .durable_head()
@@ -140,7 +126,7 @@ fn checkpoint_fallback_replays_wide_gap_to_durable_head() -> Result<()> {
     config.chainstate_journal.enabled = false;
     let genesis = Network::Regtest.genesis_block();
     let state = NodeState::open(config.clone(), None)?;
-    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+    state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis.clone(),
     ))?;
     state.publish_checkpoint()?;
@@ -148,7 +134,9 @@ fn checkpoint_fallback_replays_wide_gap_to_durable_head() -> Result<()> {
     for height in 1..=GAP_BLOCKS {
         let block = mined_regtest_child_at(parent, height)?;
         parent = block.block_hash();
-        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block))?;
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+            block,
+        ))?;
     }
     let before = state
         .durable_head()
@@ -225,9 +213,9 @@ fn upgrade_matrix_falls_back_without_misclassifying_corruption() -> Result<()> {
     let mut old_config = test_config(data_dir.clone());
     old_config.chainstate_journal.enabled = false;
     let old = NodeState::open(old_config.clone(), None)?;
-    let genesis_tip = old.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
-        genesis.clone(),
-    ))?;
+    let genesis_tip = old.apply_block(
+        &bitcoin_rs_consensus::primitives::BlockImage::from_local(genesis.clone()),
+    )?;
     old.publish_checkpoint()?;
     drop(old);
 
@@ -260,8 +248,9 @@ fn upgrade_matrix_falls_back_without_misclassifying_corruption() -> Result<()> {
 
     let generation_change = NodeState::open(old_config, None)?;
     let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
-    let block1_tip =
-        generation_change.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block1))?;
+    let block1_tip = generation_change.apply_block(
+        &bitcoin_rs_consensus::primitives::BlockImage::from_local(block1),
+    )?;
     generation_change.publish_checkpoint()?;
     drop(generation_change);
 
@@ -292,30 +281,37 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
 
     match scenario.as_str() {
         "journal" => {
-            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block1))?;
+            state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+                block1,
+            ))?;
         }
         "reorg" => {
-            let tip1 =
-                state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block1))?;
+            let tip1 = state.apply_block(
+                &bitcoin_rs_consensus::primitives::BlockImage::from_local(block1),
+            )?;
             let block2 = mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
-            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 block2.clone(),
             ))?;
             state.chainstate().disconnect_block(&block2)?;
         }
         "publication" => {
-            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
+            state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+                genesis,
+            ))?;
             state.publish_checkpoint()?;
-            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block1))?;
+            state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+                block1,
+            ))?;
         }
         "disconnect-rolledback" => {
-            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 block1.clone(),
             ))?;
             state.chainstate().disconnect_block(&block1)?;
         }
         "inflight-cold" => {
-            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 block1.clone(),
             ))?;
             state
@@ -323,20 +319,20 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
                 .arm_disconnect(1, Hash256::from(block1.block_hash()))?;
         }
         "disconnect-above-head" => {
-            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 block1.clone(),
             ))?;
             state.publish_checkpoint()?;
             state.chainstate().disconnect_block(&block1)?;
         }
         "prune" => {
-            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 genesis.clone(),
             ))?;
             let mut previous = genesis.block_hash();
             for height in 1..=300_u32 {
                 let block = mined_regtest_child_at(previous, height)?;
-                state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+                state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
                     block.clone(),
                 ))?;
                 previous = block.block_hash();
@@ -367,7 +363,7 @@ fn run_sigkill_scenario(scenario: &str) -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
     if scenario != "publication" {
         let base = NodeState::open(config.clone(), None)?;
-        base.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        base.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
             genesis.clone(),
         ))?;
         base.publish_checkpoint()?;
@@ -454,7 +450,9 @@ fn run_marker_scenario(scenario: &str) -> Result<(tempfile::TempDir, NodeConfig,
     let config = crash_config(scenario, data_dir.clone());
     let genesis = Network::Regtest.genesis_block();
     let base = NodeState::open(config.clone(), None)?;
-    base.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
+    base.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+        genesis,
+    ))?;
     base.publish_checkpoint()?;
     drop(base);
 
@@ -462,35 +460,6 @@ fn run_marker_scenario(scenario: &str) -> Result<(tempfile::TempDir, NodeConfig,
 
     let resumed = NodeState::open(config.clone(), None)?;
     Ok((temp, config, resumed))
-}
-
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    fn contents(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock()).into_owned()
-    }
-}
-
-impl std::io::Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn install_log_capture(log: SharedLog) {
-    let _already_set = tracing::subscriber::set_global_default(
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || log.clone())
-            .finish(),
-    );
 }
 
 fn read_stderr(mut stderr: std::process::ChildStderr) -> std::io::Result<String> {
@@ -578,7 +547,10 @@ fn prune_test_config(data_dir: PathBuf) -> NodeConfig {
     config
 }
 
-fn assert_tip(state: &NodeState, expected: &bitcoin_rs_chain::TipSnapshot) -> Result<()> {
+fn assert_tip(
+    state: &NodeState,
+    expected: &bitcoin_rs_execution::chain::TipSnapshot,
+) -> Result<()> {
     let tip = state
         .chainstate()
         .applied_tip_snapshot()

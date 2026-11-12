@@ -1,7 +1,9 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 /// Maximum consensus script size in bytes.
-pub use bitcoin_rs_script::MAX_SCRIPT_SIZE;
+pub mod primitives;
+pub mod script;
+pub use script::MAX_SCRIPT_SIZE;
 /// Maximum distance a BIP94 candidate timestamp may fall below its parent
 /// block's timestamp at a difficulty-adjustment boundary (`MAX_TIMEWARP`, Core
 pub const MAX_TIMEWARP: u32 = 600;
@@ -72,22 +74,24 @@ mod bip113_tests {
     }
 }
 
-pub use block_view::{BlockFacts, BlockView};
+pub use block_view::{BlockFacts, BlockView, BlockViewSource};
 pub use engine::ValidationEngine;
 pub use script_cache::{SCRIPT_EXECUTION_CACHE_ENTRIES, ScriptExecutionCache, WindowCacheTakes};
 pub use signet::check_signet_block_solution;
-pub use sigops::transaction_sigop_cost;
+pub use sigops::{transaction_sigop_cost, transaction_sigop_cost_view};
 pub use verify_block::{
     BlockRuleContext, MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_WEIGHT, WITNESS_SCALE_FACTOR,
-    check_block_body_binding, compute_merkle_root, is_sixty_four_byte_mutation, verify_block_rules,
+    block_image_witness_commitment_matches, check_block_body_binding, check_image_body_binding,
+    compute_merkle_root, is_sixty_four_byte_mutation, verify_block_image_rules, verify_block_rules,
     verify_block_rules_precomputed, verify_flags, verify_merkle_root_with_txids,
 };
 pub use verify_tx::{
-    ScriptStageTimings, check_coinbase_maturity, is_final_tx, verify_block_input_scripts,
-    verify_coinbase_script_sig_size, verify_transaction, verify_transaction_non_script,
+    ScriptStageTimings, check_coinbase_maturity, is_final_tx, is_final_tx_view,
+    verify_block_input_scripts, verify_coinbase_script_sig_size, verify_transaction,
+    verify_transaction_non_script,
 };
 
-use bitcoin_rs_primitives::{OutPoint, TxOut};
+use crate::primitives::{OutPoint, TxOut};
 use thiserror::Error;
 
 pub trait UtxoView {
@@ -207,3 +211,9 @@ pub const fn verify_coinbase_amount(
 }
 
 pub const MAX_BLOCK_SIGOPS_COST: u32 = 80_000;
+pub mod header_rules;
+pub mod undo;
+pub use undo::{
+    BlockSpends, BlockSpendsError, BlockUndoSource, BoundedReadError, HistoryUnavailable,
+    UndoReadError, UtxoCoin,
+};

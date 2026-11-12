@@ -1,15 +1,15 @@
 use super::*;
 use crate::test_support::TestError;
-use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::ValidationEngine;
+use bitcoin_rs_consensus::primitives::{
+    Amount, BlockImage, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+};
+use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolLimits,
     MutationOutcome, PeerToken, SubmitError, SubmitOutcome,
 };
-use bitcoin_rs_mining::{BlockValidationResult, MiningControl};
-use bitcoin_rs_primitives::{
-    Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
-};
+use bitcoin_rs_serving::mining::{BlockValidationResult, MiningControl};
 use parking_lot::Mutex;
 
 #[derive(Debug, Default)]
@@ -32,7 +32,7 @@ impl ZmqPublisher for RecordingPublisher {
         self.events.lock().push(format!("hashblock:{hash}"));
     }
 
-    fn publish_hashtx(&self, txid: bitcoin_rs_primitives::Txid) {
+    fn publish_hashtx(&self, txid: bitcoin_rs_consensus::primitives::Txid) {
         self.events.lock().push(format!("hashtx:{txid}"));
     }
 
@@ -70,7 +70,7 @@ impl ZmqPublisher for MoveGenerationOnBlockEvent {
 
     fn publish_hashblock(&self, _: Hash256) {}
 
-    fn publish_hashtx(&self, _: bitcoin_rs_primitives::Txid) {}
+    fn publish_hashtx(&self, _: bitcoin_rs_consensus::primitives::Txid) {}
 
     fn publish_rawblock(&self, _: &[u8]) {}
 
@@ -108,16 +108,14 @@ fn noop_asks_for_no_payloads() {
     assert!(followers.block_log().read().is_empty());
 }
 
-fn connect_outcome(tip: &TipSnapshot, block: &Block) -> ConnectOutcome {
+fn connect_outcome(tip: &TipSnapshot, block: &BlockImage) -> ConnectOutcome {
     ConnectOutcome {
         commit_id: 0,
         height: tip.height,
         hash: tip.hash,
         tip: tip.clone(),
-        txids: block
-            .txs
-            .iter()
-            .map(bitcoin_rs_primitives::Tx::txid)
+        txids: (0..block.tx_count())
+            .map(|tx| block.identity(tx).txid())
             .collect(),
         block_bytes: bytes::Bytes::new(),
         raw_txs: None,
@@ -134,7 +132,8 @@ fn connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order() -> Result<()
     let followers = ChainFollowers::noop().with_zmq_publisher(zmq);
     let tip = genesis_tip(&genesis)?;
 
-    followers.on_connect(&genesis, &connect_outcome(&tip, &genesis));
+    let image = BlockImage::from_local(genesis.clone());
+    followers.on_connect(&image, &connect_outcome(&tip, &image));
     assert_eq!(followers.block_log().read().len(), 1);
     assert_eq!(
         publisher.events(),
@@ -164,7 +163,8 @@ fn disconnect_does_not_pop_a_different_tail() -> Result<(), TestError> {
     let genesis = Network::Regtest.genesis_block();
     let tip = genesis_tip(&genesis)?;
     let followers = ChainFollowers::noop();
-    followers.on_connect(&genesis, &connect_outcome(&tip, &genesis));
+    let image = BlockImage::from_local(genesis.clone());
+    followers.on_connect(&image, &connect_outcome(&tip, &image));
     followers.on_disconnect(&DisconnectOutcome {
         hash: Hash256::from_le_bytes(&[0xAB; 32]),
         restored_parents: Vec::new(),
@@ -178,10 +178,10 @@ struct ReceiptWake {
     receipts: Mutex<Vec<(Hash256, usize)>>,
 }
 
-impl bitcoin_rs_mining::MempoolSequenceWake for ReceiptWake {
+impl bitcoin_rs_serving::mining::MempoolSequenceWake for ReceiptWake {
     fn publish_generation_from(&self, _: u64) {}
 
-    fn stage_tip(&self, _: &TipSnapshot, _: &Block) {}
+    fn stage_tip(&self, _: &TipSnapshot, _: &BlockImage) {}
 
     fn publish_block_generation(&self, tip_hash: Hash256, removals: &MutationResult) {
         self.receipts
@@ -195,12 +195,13 @@ fn gatewayless_connect_publishes_an_empty_receipt_for_the_tip() -> Result<(), Te
     let genesis = Network::Regtest.genesis_block();
     let tip = genesis_tip(&genesis)?;
     let wake = Arc::new(ReceiptWake::default());
-    let wake_handle: Arc<dyn bitcoin_rs_mining::MempoolSequenceWake> = wake.clone();
+    let wake_handle: Arc<dyn bitcoin_rs_serving::mining::MempoolSequenceWake> = wake.clone();
     let followers = ChainFollowers::noop();
     followers.mining().attach_sequence_wake(&wake_handle);
     assert!(followers.mempool_gateway().is_none());
 
-    followers.on_connect(&genesis, &connect_outcome(&tip, &genesis));
+    let image = BlockImage::from_local(genesis.clone());
+    followers.on_connect(&image, &connect_outcome(&tip, &image));
     assert_eq!(
         *wake.receipts.lock(),
         vec![(tip.hash, 0)],
@@ -222,7 +223,7 @@ impl AdmissionChain for AdmissionCoins {
             locktime_cutoff: 0,
             prevout_meta: hashbrown::HashMap::new(),
             csv_active: false,
-            next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+            next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
             confirmed: false,
         })
     }
@@ -250,7 +251,7 @@ fn orphan_child(outpoint: OutPoint) -> Arc<Tx> {
     })
 }
 
-fn genesis_tip(block: &bitcoin_rs_primitives::Block) -> Result<TipSnapshot, TestError> {
+fn genesis_tip(block: &bitcoin_rs_consensus::primitives::Block) -> Result<TipSnapshot, TestError> {
     let mut tree = BlockTree::new();
     let tip_id = tree.insert_node(None, block.header, NodeStatus::HeaderValid)?;
     let node = tree.node(tip_id)?;
@@ -310,7 +311,7 @@ fn snapshot_retries_each_resident_orphan_once_after_settlement() -> Result<(), T
         None,
     ));
     let followers = followers_with_gateway(&gateway);
-    let now = bitcoin_rs_primitives::unix_time_secs();
+    let now = bitcoin_rs_consensus::primitives::unix_time_secs();
     let parent = Network::Regtest.genesis_block().txs[0].txid();
     let available = orphan_child(OutPoint::new(parent, 0));
     let missing = orphan_child(OutPoint::new(Hash256::from_le_bytes(&[43; 32]).into(), 0));
@@ -401,7 +402,7 @@ fn assert_admission_followers_after_chain_change(connect: bool) -> Result<(), Te
         None,
     ));
     let followers = followers_with_gateway(&gateway);
-    let now = bitcoin_rs_primitives::unix_time_secs();
+    let now = bitcoin_rs_consensus::primitives::unix_time_secs();
     let block = Network::Regtest.genesis_block();
     let parent = block.txs[0].txid();
     let outpoint = OutPoint::new(parent, 0);
@@ -444,9 +445,10 @@ fn assert_admission_followers_after_chain_change(connect: bool) -> Result<(), Te
 
     let tip = genesis_tip(&block)?;
     let hash = tip.hash;
+    let image = BlockImage::from_local(block.clone());
     let change = gateway.begin_chain_change()?;
     if connect {
-        followers.on_connect(&block, &connect_outcome(&tip, &block));
+        followers.on_connect(&image, &connect_outcome(&tip, &image));
     } else {
         followers.on_disconnect(&DisconnectOutcome {
             hash,
@@ -516,7 +518,7 @@ fn active_chain_change_is_retryable_not_shutdown() -> Result<(), TestError> {
 
     assert!(matches!(
         followers.begin_mempool_change(),
-        Err(bitcoin_rs_chainstate::ApplyError::ConcurrentChainChange)
+        Err(bitcoin_rs_execution::ApplyError::ConcurrentChainChange)
     ));
     active.finish()?;
     assert!(followers.begin_mempool_change()?.is_some());
@@ -533,8 +535,8 @@ fn committed_connect_settlement_failure_retains_outcome_and_forbids_retry() -> R
     config.p2p.listen.clear();
     let state = crate::state::NodeState::open(config, None)?;
     let followers = settlement_breaking_followers(state.mempool_gateway(), 3);
-    let genesis = BlockPayload::from_local(Network::Regtest.genesis_block());
-    let hash = Hash256::from(genesis.block().block_hash());
+    let genesis = BlockImage::from_local(Network::Regtest.genesis_block());
+    let hash = Hash256::from(genesis.block_hash());
 
     let error = match followers.apply_connect(&state.chainstate(), &genesis) {
         Ok(outcome) => panic!("forced generation move settled connect {outcome:?}"),
@@ -547,10 +549,7 @@ fn committed_connect_settlement_failure_retains_outcome_and_forbids_retry() -> R
         }
     };
     assert_eq!(outcome.hash, hash);
-    assert!(matches!(
-        source,
-        bitcoin_rs_chainstate::ApplyError::Shutdown
-    ));
+    assert!(matches!(source, bitcoin_rs_execution::ApplyError::Shutdown));
     let Some(committed_tip) = state.chainstate().applied_tip_snapshot() else {
         panic!("committed tip missing");
     };
@@ -558,7 +557,7 @@ fn committed_connect_settlement_failure_retains_outcome_and_forbids_retry() -> R
     assert!(matches!(
         followers.apply_connect(&state.chainstate(), &genesis),
         Err(ConnectMutationError::NotCommitted(
-            bitcoin_rs_chainstate::ApplyError::Shutdown
+            bitcoin_rs_execution::ApplyError::Shutdown
         ))
     ));
     Ok(())
@@ -581,7 +580,7 @@ fn mining_reports_a_committed_settlement_failure_as_accepted() -> Result<(), Tes
     );
 
     assert_eq!(
-        mining.submit_block(BlockPayload::from_local(Network::Regtest.genesis_block()))?,
+        mining.submit_block(BlockImage::from_local(Network::Regtest.genesis_block()))?,
         BlockValidationResult::Accepted,
         "submitblock must not invite retry after authoritative commit"
     );

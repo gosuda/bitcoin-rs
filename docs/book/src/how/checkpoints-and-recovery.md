@@ -24,12 +24,12 @@ The manifest (`CheckpointManifestV1`) records, among other fields: generation nu
 
 ## The publish protocol
 
-`CheckpointPublisher` (`crates/chainstate/src/checkpoint/publisher.rs`) drives publication in `publish_transaction`. The node publishes on clean shutdown (`crates/node/src/lifecycle.rs`, the `published clean chainstate checkpoint` line) and when recovery work completes. The sequence:
+`CheckpointPublisher` (`crates/execution/src/checkpoint/publisher.rs`) drives publication in `publish_transaction`. The node publishes on clean shutdown (`crates/node/src/lifecycle.rs`, the `published clean chainstate checkpoint` line) and when recovery work completes. The sequence:
 
 1. Pause block admission (`ApplyAdmission::pause`) and freeze the chainstate journal writer, so the state cannot move under the write.
 2. Refuse if a disconnect marker is `InFlight` (`publisher.rs:205-220`), or if the applied tip is ahead of the durable head (`CheckpointError::AheadOfDurableHead`, `publisher.rs:225-235`). The durable head is the commit point; a checkpoint can never legitimately name a tip the head has not certified.
 3. Sync and flush the block body store, so the headers restored later have their bodies available.
-4. Stage the three artifacts into a fresh generation directory (`write_checkpoint_from_dir` in `crates/chainstate/src/checkpoint.rs:521`). Each artifact is written through a `HashingWriter` that computes bytes and SHA-256 while writing, then the file is `sync_all`-ed.
+4. Stage the three artifacts into a fresh generation directory (`write_checkpoint_from_dir` in `crates/execution/src/checkpoint.rs:521`). Each artifact is written through a `HashingWriter` that computes bytes and SHA-256 while writing, then the file is `sync_all`-ed.
 5. Cross-check the fused CoinStats (recomputed from the written UTXO coins) against the listener's CoinStats. On any mismatch the publication gate withholds the witness token and the run fails (`gated_witness`, `checkpoint.rs:576`).
 6. Confirm the best header tip did not change while writing (`check_best_tip_unchanged`).
 7. Write `manifest-v1.json`, fsync the staging directory, `rename_noreplace` the staged directory to its final `gen-...` name, fsync the root, then write `CURRENT` to a temp file and rename it over the old one (`commit_publication`, `crates/storage/src/checkpoint/publish.rs:169-238`). With `CheckpointRetention::Replace`, older generations are removed after the rename.
@@ -46,7 +46,7 @@ Publication also feeds the index worker. When the UTXO write produced a `V4Witne
 
 ## Restore source selection at boot
 
-`prepare_initial_chainstate` (`crates/chainstate/src/recovery.rs:486`) picks the restore source in this order and logs the choice as `restore_source`:
+`prepare_initial_chainstate` (`crates/execution/src/recovery.rs:486`) picks the restore source in this order and logs the choice as `restore_source`:
 
 ```text
 full-revalidation marker present?  -> cold  (reason=fork_below_checkpoint_base)
@@ -61,7 +61,7 @@ otherwise                          -> cold  (reason=no_complete_checkpoint)
 - **Journal**: replay the chainstate journal on top of the checkpoint base up to the durable head. If the journal is rejected (checksum failure, truncated record, identity mismatch), the node logs `chainstate journal rejected; checkpoint recovery selected` and falls back to the checkpoint alone, replaying the remaining gap from block bodies. With the journal disabled by configuration, the checkpoint restores directly (`restore_source=checkpoint`, `reason=journal_disabled`).
 - **Snapshot**: the assumeutxo restore path, covered in [Snapshots and assumeutxo](snapshots-and-assumeutxo.md). It runs before the ordinary `CURRENT` lookup: a datadir with a live assumeutxo anchor in its durable head takes the pinned-anchor branch, and `restore_snapshot` still prefers an ordinary checkpoint when one exists that matches the pin's height, hash, commitment, and tx count.
 
-Corrupt checkpoints do not fall back silently. Load errors classify into `CheckpointLoadError`, and anything semantic (bad codec, wrong tip, mutated bytes that fail only semantic checks) surfaces as a `Corrupt` variant whose message says what to do: re-sync. The distinction matters: transient I/O errors stay retryable, but a checkpoint whose contents hash to the manifest digest yet decode wrong is datadir corruption, and the node refuses instead of silently building a different chain. Tests in `crates/chainstate/src/checkpoint/tests/artifact_consistency.rs` pin this split: `authenticated_header_semantics_require_resync`, `authenticated_coinstats_semantics_require_resync`, and `authenticated_utxo_value_mutation_requires_resync` each mutate one authenticated artifact and require the `Corrupt` error.
+Corrupt checkpoints do not fall back silently. Load errors classify into `CheckpointLoadError`, and anything semantic (bad codec, wrong tip, mutated bytes that fail only semantic checks) surfaces as a `Corrupt` variant whose message says what to do: re-sync. The distinction matters: transient I/O errors stay retryable, but a checkpoint whose contents hash to the manifest digest yet decode wrong is datadir corruption, and the node refuses instead of silently building a different chain. Tests in `crates/execution/src/checkpoint/tests/artifact_consistency.rs` pin this split: `authenticated_header_semantics_require_resync`, `authenticated_coinstats_semantics_require_resync`, and `authenticated_utxo_value_mutation_requires_resync` each mutate one authenticated artifact and require the `Corrupt` error.
 
 ## The full-revalidation marker and its retirement
 
@@ -80,11 +80,11 @@ A reorg disconnect is the one operation that moves the UTXO set without a forwar
 checkpoint refused while disconnect of block {hash} at height {height} is in flight
 ```
 
-The refusal preserves everything: the marker stays armed, `CURRENT` is untouched, and no generation directory appears. `crates/chainstate/src/tests/checkpoint_debt_tests.rs::checkpoint_refuses_inflight_disconnect_and_preserves_state` arms a disconnect marker, calls `publish_checkpoint`, and asserts the error plus byte-identical `CURRENT` and directory listing. After the disconnect completes, `settle_disconnect_debt` (`publisher.rs:168`) finds the marker in a completed phase and publishes normally, which also retires the disconnect marker through `undo_store.retire_disconnect_marker`.
+The refusal preserves everything: the marker stays armed, `CURRENT` is untouched, and no generation directory appears. `crates/execution/src/tests/checkpoint_debt_tests.rs::checkpoint_refuses_inflight_disconnect_and_preserves_state` arms a disconnect marker, calls `publish_checkpoint`, and asserts the error plus byte-identical `CURRENT` and directory listing. After the disconnect completes, `settle_disconnect_debt` (`publisher.rs:168`) finds the marker in a completed phase and publishes normally, which also retires the disconnect marker through `undo_store.retire_disconnect_marker`.
 
 ## Header checkpoint file
 
-`headers-v1.dat` restores the whole block tree, not only the active chain (`crates/chainstate/src/checkpoint/headers.rs`). After a fixed 56-byte prefix (magic `BRSHEAD\0`, version, counts, tips) come the active-chain headers in order, then a `u64` side-header count and that many 80-byte headers: the tips of competing forks the node knows about. The file carries two domain-separated SHA-256 commitments over the best chain and the applied prefix, both recorded in the manifest and rechecked at load.
+`headers-v1.dat` restores the whole block tree, not only the active chain (`crates/execution/src/checkpoint/headers.rs`). After a fixed 56-byte prefix (magic `BRSHEAD\0`, version, counts, tips) come the active-chain headers in order, then a `u64` side-header count and that many 80-byte headers: the tips of competing forks the node knows about. The file carries two domain-separated SHA-256 commitments over the best chain and the applied prefix, both recorded in the manifest and rechecked at load.
 
 At load, `read_headers` replays the active chain into a fresh `BlockTree`, re-attaches side branches, and rejects a side header that adds no new node, a side section that displaces the checkpoint best tip, or a count that overflows the node-id domain. A version 1 file (active chain only, `ACTIVE_ONLY_HEADER_VERSION`) still loads; the node just relearns side branches from the network.
 
@@ -118,7 +118,7 @@ Restarting on the same data directory restores from the checkpoint with zero rep
 ```
 {"message":"chainstate restore selected","restore_source":"checkpoint","checkpoint_generation":1,
  "checkpoint_height":205,"height":205,"hash":"474cb06e...37fa7e","replayed_records":0,
- "chain_tx_count":206,"replay_seconds":0.000131045},"target":"bitcoin_rs_chainstate::recovery"}
+ "chain_tx_count":206,"replay_seconds":0.000131045},"target":"bitcoin_rs_execution::recovery"}
 ```
 
 The matching live IBD case (checkpoint plus journal replay) is documented with verified output in [First start](../run/first-start.md).
@@ -141,8 +141,8 @@ The matching live IBD case (checkpoint plus journal replay) is documented with v
 
 - [`RCV-10`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md): a checkpoint is not recovery authority; the durable head is. Enforcement lives in the publish-time refusals above.
 - [`RCV-14`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md): the publisher freezes the published state before writing and reconciles against the durable head.
-- Crash-at-every-boundary coverage: `crates/storage/src/checkpoint/publish.rs` accepts injected failpoints at each write, sync, and rename step (`CheckpointFailpoint`); `crates/chainstate/src/checkpoint/tests/artifact_consistency.rs::publish_swap_between_commit_and_open_yields_integrity` fails a publication between manifest commit and `CURRENT` open and requires the old generation to stay intact. Both tests ran at HEAD for this chapter.
-- Disconnect refusal and preservation: `crates/chainstate/src/tests/checkpoint_debt_tests.rs::checkpoint_refuses_inflight_disconnect_and_preserves_state`.
+- Crash-at-every-boundary coverage: `crates/storage/src/checkpoint/publish.rs` accepts injected failpoints at each write, sync, and rename step (`CheckpointFailpoint`); `crates/execution/src/checkpoint/tests/artifact_consistency.rs::publish_swap_between_commit_and_open_yields_integrity` fails a publication between manifest commit and `CURRENT` open and requires the old generation to stay intact. Both tests ran at HEAD for this chapter.
+- Disconnect refusal and preservation: `crates/execution/src/tests/checkpoint_debt_tests.rs::checkpoint_refuses_inflight_disconnect_and_preserves_state`.
 - Contract-clause and proof coverage counts live in [`docs/contracts/evidence-index.md`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/evidence-index.md).
 
 Difference from Bitcoin Core worth knowing: Core checkpoints the UTXO set only through `dumptxoutset`/assumeutxo machinery and rebuilds the block tree from headers on restart; bitcoin-rs writes the full tree including side branches into the checkpoint, so a restart preserves knowledge of competing fork tips without a network round trip.

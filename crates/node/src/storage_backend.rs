@@ -23,38 +23,44 @@ pub(crate) fn open_generic<C>(
 where
     C: StoreConsumer,
 {
-    let _ = namespace;
+    if let Some(found) = bitcoin_rs_storage::detect_engine(path)? {
+        if found != backend {
+            return Err(StorageError::Backend(format!(
+                "{namespace} was created by {found}; start with --storage-backend {found} or convert with bitcoin-rs-storage-convert"
+            ))
+            .into());
+        }
+    }
+
     match backend {
-        #[cfg(feature = "rocksdb")]
-        StorageBackend::RocksDb => consumer.consume(Arc::new(
-            match cache_bytes {
-                Some(bytes) => bitcoin_rs_storage::RocksDbStore::open_with_cache(path, bytes)?,
-                None => bitcoin_rs_storage::RocksDbStore::open(path)?,
-            }
-            .guarded_by(Arc::clone(guard)),
-        )),
-        #[cfg(feature = "fjall")]
-        StorageBackend::Fjall => consumer.consume(Arc::new(
-            match cache_bytes {
-                Some(bytes) => bitcoin_rs_storage::FjallStore::open_with_cache(path, bytes)?,
-                None => bitcoin_rs_storage::FjallStore::open(path)?,
-            }
-            .guarded_by(Arc::clone(guard)),
-        )),
-        #[cfg(feature = "redb")]
-        StorageBackend::Redb => consumer.consume(Arc::new(
-            match cache_bytes {
-                Some(bytes) => bitcoin_rs_storage::RedbStore::open_with_cache(path, bytes)?,
-                None => bitcoin_rs_storage::RedbStore::open(path)?,
-            }
-            .guarded_by(Arc::clone(guard)),
-        )),
-        #[cfg(any(
-            not(feature = "rocksdb"),
-            not(feature = "fjall"),
-            not(feature = "redb")
-        ))]
-        other => Err(unsupported(namespace, other).into()),
+        StorageBackend::RocksDb => {
+            let cache_bytes =
+                cache_bytes.unwrap_or(bitcoin_rs_storage::ROCKSDB_DEFAULT_CACHE_BYTES);
+            consumer.consume(Arc::new(
+                bitcoin_rs_storage::RocksDbStore::open_with_cache(path, cache_bytes)?
+                    .guarded_by(Arc::clone(guard)),
+            ))
+        }
+        #[cfg(feature = "surrealkv")]
+        StorageBackend::SurrealKv => {
+            let cache_bytes = cache_bytes.unwrap_or(0);
+            consumer.consume(Arc::new(
+                bitcoin_rs_storage::SurrealKvStore::open_with_cache(path, cache_bytes)?
+                    .guarded_by(Arc::clone(guard)),
+            ))
+        }
+        #[cfg(not(feature = "surrealkv"))]
+        StorageBackend::SurrealKv => Err(unsupported(namespace, StorageBackend::SurrealKv).into()),
+        #[cfg(feature = "mdbx")]
+        StorageBackend::Mdbx => {
+            let cache_bytes = cache_bytes.unwrap_or(0);
+            consumer.consume(Arc::new(
+                bitcoin_rs_storage::MdbxStore::open_with_cache(path, cache_bytes)?
+                    .guarded_by(Arc::clone(guard)),
+            ))
+        }
+        #[cfg(not(feature = "mdbx"))]
+        StorageBackend::Mdbx => Err(unsupported(namespace, StorageBackend::Mdbx).into()),
     }
 }
 
@@ -68,24 +74,10 @@ pub(crate) fn open_txindex<C>(
 where
     C: StoreConsumer,
 {
-    match backend {
-        #[cfg(feature = "redb")]
-        StorageBackend::Redb => consumer.consume(Arc::new(
-            bitcoin_rs_storage::open_redb_tx_index_store_with_cache(
-                path,
-                cache_bytes.unwrap_or(0),
-                Some(Arc::clone(guard)),
-            )?,
-        )),
-        other => open_generic("txindex", other, path, cache_bytes, guard, consumer),
-    }
+    open_generic("txindex", backend, path, cache_bytes, guard, consumer)
 }
 
-#[cfg(any(
-    not(feature = "rocksdb"),
-    not(feature = "fjall"),
-    not(feature = "redb")
-))]
+#[cfg(any(not(feature = "surrealkv"), not(feature = "mdbx")))]
 fn unsupported(namespace: &str, backend: StorageBackend) -> StorageError {
     StorageError::Backend(format!(
         "unsupported storage backend for {namespace}: {backend}"
@@ -98,9 +90,8 @@ mod tests {
 
     const CONCRETE_OPEN_TOKENS: &[&str] = &[
         "RocksDbStore::open",
-        "FjallStore::open",
-        "RedbStore::open",
-        "open_redb_tx_index_store",
+        "SurrealKvStore::open",
+        "MdbxStore::open",
     ];
 
     #[test]
@@ -108,8 +99,8 @@ mod tests {
         let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         for src in [
             crates.join("node/src"),
-            crates.join("chainstate/src"),
-            crates.join("index/src"),
+            crates.join("execution/src"),
+            crates.join("projection/src"),
         ] {
             assert_no_concrete_opens(&src);
         }

@@ -39,19 +39,19 @@ fn zmq_publisher_handle_reports_active_metadata() -> Result<(), TestError> {
     config.data_dir = dir.path().join("node");
     config.p2p.listen.clear();
     config.notifications.zmq = vec![
-        bitcoin_rs_rpc::zmq::ZmqEndpointConfig {
+        bitcoin_rs_serving::zmq::ZmqEndpointConfig {
             endpoint: "inproc://state-zmq-block".to_owned(),
             topics: vec![
-                bitcoin_rs_rpc::zmq::ZmqTopic::HashBlock,
-                bitcoin_rs_rpc::zmq::ZmqTopic::RawBlock,
+                bitcoin_rs_serving::zmq::ZmqTopic::HashBlock,
+                bitcoin_rs_serving::zmq::ZmqTopic::RawBlock,
             ],
             hwm: Some(17),
         },
-        bitcoin_rs_rpc::zmq::ZmqEndpointConfig {
+        bitcoin_rs_serving::zmq::ZmqEndpointConfig {
             endpoint: "inproc://state-zmq-tx".to_owned(),
             topics: vec![
-                bitcoin_rs_rpc::zmq::ZmqTopic::HashTx,
-                bitcoin_rs_rpc::zmq::ZmqTopic::RawTx,
+                bitcoin_rs_serving::zmq::ZmqTopic::HashTx,
+                bitcoin_rs_serving::zmq::ZmqTopic::RawTx,
             ],
             hwm: Some(20),
         },
@@ -83,12 +83,12 @@ fn inbound_blocks_channel_is_bounded_against_flood() -> Result<(), TestError> {
     config.p2p.listen.clear();
     let state = NodeState::open(config, None)?;
     let tx = state.inbound_blocks_sender();
-    let block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    let block = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
     for _ in 0..super::INBOUND_BLOCK_CHANNEL_LIMIT {
-        tx.try_send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
+        tx.try_send(bitcoin_rs_wire::InboundBlock::from_local(block.clone()))
             .unwrap_or_else(|e| panic!("send within the bound must succeed: {e}"));
     }
-    let overflow = tx.try_send(bitcoin_rs_p2p::InboundBlock::from_local(block));
+    let overflow = tx.try_send(bitcoin_rs_wire::InboundBlock::from_local(block));
     assert!(
         matches!(overflow, Err(crossbeam_channel::TrySendError::Full(_))),
         "channel must reject blocks past INBOUND_BLOCK_CHANNEL_LIMIT, got {overflow:?}",
@@ -105,9 +105,9 @@ fn inbound_tx_channel_is_bounded_against_flood() -> Result<(), TestError> {
     let state = NodeState::open(config, None)?;
     let sender = state.inbound_tx_sender();
     let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
-    let lease = bitcoin_rs_p2p::PeerLease::new(lease_tx);
+    let lease = bitcoin_rs_wire::PeerLease::new(lease_tx);
     let source = lease.source_ip(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
-    let tx = bitcoin_rs_primitives::Tx {
+    let tx = bitcoin_rs_consensus::primitives::Tx {
         version: 1,
         inputs: Vec::new(),
         outputs: Vec::new(),
@@ -115,13 +115,13 @@ fn inbound_tx_channel_is_bounded_against_flood() -> Result<(), TestError> {
     };
     for _ in 0..super::INBOUND_TX_CHANNEL_LIMIT {
         sender
-            .try_send(bitcoin_rs_p2p::InboundBody::from(
-                bitcoin_rs_p2p::InboundTx::new(tx.clone(), source),
+            .try_send(crate::p2p::InboundBody::from(
+                bitcoin_rs_wire::InboundTx::new(tx.clone(), source),
             ))
             .unwrap_or_else(|error| panic!("send within the bound must succeed: {error}"));
     }
-    let overflow = sender.try_send(bitcoin_rs_p2p::InboundBody::from(
-        bitcoin_rs_p2p::InboundTx::new(tx, source),
+    let overflow = sender.try_send(crate::p2p::InboundBody::from(
+        bitcoin_rs_wire::InboundTx::new(tx, source),
     ));
     assert!(
         matches!(overflow, Err(crossbeam_channel::TrySendError::Full(_))),
@@ -161,7 +161,7 @@ fn unmarked_nonempty_datadir_is_refused_without_modification() -> Result<(), Tes
     std::fs::write(config.data_dir.join("legacy-state"), b"old")?;
 
     let data_dir = config.data_dir.clone();
-    let Err(NodeOpenError::DataDir(bitcoin_rs_chainstate::events::DataDirError::ValidateSchema {
+    let Err(NodeOpenError::DataDir(bitcoin_rs_execution::events::DataDirError::ValidateSchema {
         source,
         ..
     })) = NodeState::open(config, None)
@@ -230,7 +230,7 @@ fn mismatched_datadir_schema_is_refused_before_storage_opens() -> Result<(), Tes
     )?;
 
     let data_dir = config.data_dir.clone();
-    let Err(NodeOpenError::DataDir(bitcoin_rs_chainstate::events::DataDirError::ValidateSchema {
+    let Err(NodeOpenError::DataDir(bitcoin_rs_execution::events::DataDirError::ValidateSchema {
         source,
         ..
     })) = NodeState::open(config, None)
@@ -239,9 +239,11 @@ fn mismatched_datadir_schema_is_refused_before_storage_opens() -> Result<(), Tes
             "mismatched datadir schema is refused with ValidateSchema",
         ));
     };
-    let message = source.to_string();
-    assert!(message.contains("CURRENT_SCHEMA is not the current datadir schema epoch"));
-    assert!(message.contains("full resync"));
+    assert_eq!(
+        source.kind(),
+        std::io::ErrorKind::InvalidData,
+        "a stale schema epoch is refused as invalid datadir data: {source}"
+    );
     assert!(!data_dir.join("chainstate").exists());
     Ok(())
 }

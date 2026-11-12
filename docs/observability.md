@@ -26,7 +26,7 @@ migration.
 Metrics MUST NOT carry per-event payloads, block/tx/peer identity, or any
 other high-cardinality label value. The only label values allowed are
 enumerations: backend names, durability modes, and closed reason taxonomies
-(see `node.sync.stall_episodes_cleared{reason}` in `crates/p2p/src/download_window.rs`
+(see `node.sync.stall_episodes_cleared{reason}` in `crates/node/src/p2p/download_window.rs`
 for the pattern). They also include the enum capability states of `node.capability.txindex_readiness`, and
 the closed family labels of `index.family_planned_write_bytes{family}` where
 `family` in `{tx_lookup, script_history, script_live, headers, filters}`.
@@ -112,12 +112,12 @@ filters}`. The families are the transaction-id lookup rows, the script funding
 and spending rows, the live-view mutations, the block header identity rows, and
 the basic compact-filter rows. A forward batch commit records one observation
 for each family whose planned bytes are non-zero, after the store commit
-succeeds (`commit_forward_with_cursor` in `crates/index/src/index/write.rs`;
+succeeds (`commit_forward_with_cursor` in `crates/projection/src/index/write.rs`;
 `commit_forward` and `commit_block` use it). A failed commit records nothing,
 and no other commit path records this metric. The value is the sum, over the
 blocks of the batch, of the bytes each block planned for that family under the
 rule in the next table (`PendingRows::encoded_bytes_by_family` in
-`crates/index/src/index/rows.rs`). The sum is fixed as blocks join the batch,
+`crates/projection/src/index/rows.rs`). The sum is fixed as blocks join the batch,
 before the commit merges, sorts, and de-duplicates the batch rows. The value is
 row-size arithmetic over the prepared rows. It does not read the store, so it
 does not include write-ahead-log, storage-engine, or device write volume, and
@@ -244,7 +244,7 @@ if verification runs. Consumers must not require every field on a single event.
 - The chainstate observability fixtures check retired metric names only on the
   caller thread. The fixtures connect coinbase-only apply/window cases on
   top of a directly published genesis seed. Seeding alone (`seed_genesis` in
-  `crates/chainstate/src/test_fixtures.rs`) publishes the genesis tip with
+  `crates/execution/src/test_fixtures.rs`) publishes the genesis tip with
   count 1 without connect and without hooks, so it emits no apply/window
   observation. Nonzero stage observations require at least one connected mined
   coinbase-only child: `apply_block` for the apply timers, a `connect_window`
@@ -260,7 +260,7 @@ if verification runs. Consumers must not require every field on a single event.
   valid-block fixture.
 - `composite_isolates_a_panicking_leg` exercises the real observer failure
   path and requires the operator counter to have no leg label.
-- `family_byte_histograms_recording` (`crates/index/src/index/rows.rs`) drives
+- `family_byte_histograms_recording` (`crates/projection/src/index/rows.rs`) drives
   `record_family_byte_histograms` against a local recorder. It checks the five
   `family` label values with their byte values, and that a family with zero
   planned bytes records nothing. It does not drive a commit.

@@ -63,45 +63,6 @@ fn dropped_flat_file_store_releases_its_guard() -> TestResult {
     Ok(())
 }
 
-#[cfg(feature = "fjall")]
-#[test]
-fn fjall_guard_install_is_single() -> TestResult {
-    use bitcoin_rs_storage::FjallStore;
-
-    let dir = tempfile::TempDir::new()?;
-    let (first, first_live) = probe();
-    let store = FjallStore::open(dir.path())?.guarded_by(first);
-    assert!(first_live.load(Ordering::SeqCst));
-    let (second, second_live) = probe();
-    let refused = std::panic::catch_unwind(AssertUnwindSafe(|| store.guarded_by(second)));
-    assert!(
-        refused.is_err(),
-        "a second guard must not silently replace the first"
-    );
-    assert!(!second_live.load(Ordering::SeqCst));
-    Ok(())
-}
-
-#[cfg(feature = "redb")]
-#[test]
-fn redb_guard_install_is_single() -> TestResult {
-    use bitcoin_rs_storage::RedbStore;
-
-    let dir = tempfile::TempDir::new()?;
-    let (first, first_live) = probe();
-    let store = RedbStore::open(dir.path())?.guarded_by(first);
-    assert!(first_live.load(Ordering::SeqCst));
-    let (second, second_live) = probe();
-    let refused = std::panic::catch_unwind(AssertUnwindSafe(|| store.guarded_by(second)));
-    assert!(
-        refused.is_err(),
-        "a second guard must not silently replace the first"
-    );
-    assert!(!second_live.load(Ordering::SeqCst));
-    Ok(())
-}
-
-#[cfg(feature = "rocksdb")]
 #[test]
 fn rocksdb_guard_install_is_single() -> TestResult {
     use bitcoin_rs_storage::RocksDbStore;

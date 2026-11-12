@@ -1,62 +1,63 @@
 use crate::chain_effects::{ChainFollowers, ConnectMutationError};
 use alloc::sync::Arc;
-use bitcoin_rs_chain::ChainError;
-use bitcoin_rs_chain::NodeStatus;
-use bitcoin_rs_chain::StableRead;
-use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_chain::signalling_deployments;
-use bitcoin_rs_chain::{BlockTreeReader, TipReader};
-use bitcoin_rs_chainstate::ApplyError;
-use bitcoin_rs_chainstate::Chainstate;
+use bitcoin_rs_execution::ApplyError;
+use bitcoin_rs_execution::Chainstate;
+use bitcoin_rs_execution::chain::ChainError;
+use bitcoin_rs_execution::chain::NodeStatus;
+use bitcoin_rs_execution::chain::StableRead;
+use bitcoin_rs_execution::chain::TipSnapshot;
+use bitcoin_rs_execution::chain::signalling_deployments;
+use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::MempoolReader;
 use bitcoin_rs_mempool::MutationResult;
-use bitcoin_rs_mining::AppliedTipSource;
-use bitcoin_rs_mining::AvailableMiningRule;
-use bitcoin_rs_mining::BlockTemplateMode;
-use bitcoin_rs_mining::BlockTemplateRequest;
-use bitcoin_rs_mining::BlockTemplateResult;
-use bitcoin_rs_mining::BlockValidationResult;
+pub mod coordinator;
+pub use coordinator::*;
+
+use bitcoin_rs_consensus::primitives::Block;
+use bitcoin_rs_consensus::primitives::BlockImage;
+use bitcoin_rs_consensus::primitives::CompactTarget;
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Header;
+use bitcoin_rs_consensus::primitives::Network;
+use bitcoin_rs_serving::mining::AppliedTipSource;
+use bitcoin_rs_serving::mining::AvailableMiningRule;
+use bitcoin_rs_serving::mining::BlockTemplateMode;
+use bitcoin_rs_serving::mining::BlockTemplateRequest;
+use bitcoin_rs_serving::mining::BlockTemplateResult;
+use bitcoin_rs_serving::mining::BlockValidationResult;
 #[cfg(any(test, feature = "test-seam"))]
-use bitcoin_rs_mining::Candidate;
-use bitcoin_rs_mining::CandidateContext;
-use bitcoin_rs_mining::ChainContextSource;
-use bitcoin_rs_mining::CoinbaseBudget;
-use bitcoin_rs_mining::GenerateRequest;
-use bitcoin_rs_mining::GenerateSelection;
-use bitcoin_rs_mining::GenerateTx;
-use bitcoin_rs_mining::GeneratedBlock;
-use bitcoin_rs_mining::MempoolSequenceWake;
-use bitcoin_rs_mining::MempoolSnapshotSource;
-use bitcoin_rs_mining::MiningChainContext;
-use bitcoin_rs_mining::MiningControl;
-use bitcoin_rs_mining::MiningControlError;
-pub use bitcoin_rs_mining::MiningGenerationSignal;
-use bitcoin_rs_mining::MiningInfo;
-use bitcoin_rs_mining::MiningRule;
-use bitcoin_rs_mining::MiningService;
-use bitcoin_rs_mining::PreparedTemplateBody;
-use bitcoin_rs_mining::SelectedBody;
-use bitcoin_rs_mining::header_reject_reason;
-use bitcoin_rs_mining::needs_witness_reserved_value;
-use bitcoin_rs_mining::select_template_body;
-use bitcoin_rs_mining::select_template_body_after;
-use bitcoin_rs_mining::snapshot_for_selection;
-use bitcoin_rs_mining::solve_block;
-use bitcoin_rs_mining::update_uncommitted_block_structures;
-use bitcoin_rs_primitives::Block;
-use bitcoin_rs_primitives::BlockPayload;
-use bitcoin_rs_primitives::CompactTarget;
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::Header;
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_serving::mining::Candidate;
+use bitcoin_rs_serving::mining::CandidateContext;
+use bitcoin_rs_serving::mining::ChainContextSource;
+use bitcoin_rs_serving::mining::CoinbaseBudget;
+use bitcoin_rs_serving::mining::GenerateRequest;
+use bitcoin_rs_serving::mining::GenerateSelection;
+use bitcoin_rs_serving::mining::GenerateTx;
+use bitcoin_rs_serving::mining::GeneratedBlock;
+use bitcoin_rs_serving::mining::MempoolSequenceWake;
+use bitcoin_rs_serving::mining::MempoolSnapshotSource;
+use bitcoin_rs_serving::mining::MiningChainContext;
+use bitcoin_rs_serving::mining::MiningControl;
+use bitcoin_rs_serving::mining::MiningControlError;
+pub use bitcoin_rs_serving::mining::MiningGenerationSignal;
+use bitcoin_rs_serving::mining::MiningInfo;
+use bitcoin_rs_serving::mining::MiningRule;
+use bitcoin_rs_serving::mining::PreparedTemplateBody;
+use bitcoin_rs_serving::mining::SelectedBody;
+use bitcoin_rs_serving::mining::header_reject_reason;
+use bitcoin_rs_serving::mining::image_needs_witness_reserved_value;
+use bitcoin_rs_serving::mining::select_template_body;
+use bitcoin_rs_serving::mining::select_template_body_after;
+use bitcoin_rs_serving::mining::solve_block;
+use bitcoin_rs_serving::mining::update_uncommitted_block_structures;
 use compact_str::CompactString;
 
 pub struct MiningCoordinator {
     chainstate: Arc<Chainstate>,
     block_tree: BlockTreeReader,
     followers: ChainFollowers,
-    shutdown: bitcoin_rs_chain::LatchReader,
+    shutdown: bitcoin_rs_execution::chain::LatchReader,
     service: MiningService,
 }
 
@@ -113,8 +114,8 @@ impl MiningCoordinator {
         self.service.wait_for_prepared_candidate(tip_hash, timeout)
     }
 
-    fn propose(&self, payload: &BlockPayload) -> Result<BlockValidationResult, MiningControlError> {
-        if let Some(known) = self.known_block_result(payload.block().block_hash().into()) {
+    fn propose(&self, payload: &BlockImage) -> Result<BlockValidationResult, MiningControlError> {
+        if let Some(known) = self.known_block_result(payload.block_hash().into()) {
             return Ok(known);
         }
         match self.chainstate.validate_block(payload) {
@@ -171,8 +172,8 @@ impl MiningCoordinator {
                 .map(|input| input.witness.len())
     }
 
-    fn submit(&self, payload: &BlockPayload) -> Result<BlockValidationResult, MiningControlError> {
-        let block_hash: Hash256 = payload.block().block_hash().into();
+    fn submit(&self, payload: &BlockImage) -> Result<BlockValidationResult, MiningControlError> {
+        let block_hash: Hash256 = payload.block_hash().into();
         let lock = match self.chainstate.lock_transition() {
             Ok(lock) => lock,
             Err(error) => return map_apply_error(error),
@@ -378,7 +379,7 @@ impl MempoolSequenceWake for MiningCoordinator {
         self.service.publish_generation_from(sequence);
     }
 
-    fn stage_tip(&self, tip: &TipSnapshot, block: &Block) {
+    fn stage_tip(&self, tip: &TipSnapshot, block: &BlockImage) {
         self.service.stage_tip(tip, block);
     }
 
@@ -394,7 +395,7 @@ impl MiningControl for MiningCoordinator {
     ) -> Result<BlockTemplateResult, MiningControlError> {
         match request.mode {
             BlockTemplateMode::Proposal(block) => {
-                let payload = BlockPayload::from_local(block);
+                let payload = BlockImage::from_local(block);
                 Ok(BlockTemplateResult::Proposal(self.propose(&payload)?))
             }
             BlockTemplateMode::Template => Ok(BlockTemplateResult::Template(
@@ -409,7 +410,7 @@ impl MiningControl for MiningCoordinator {
         let network_hashes_per_second = {
             let tree = self.block_tree.read();
             tip.as_ref().map_or(0.0, |tip| {
-                bitcoin_rs_mining::estimate_network_hashps(
+                bitcoin_rs_serving::mining::estimate_network_hashps(
                     &tree,
                     tip.tip_id,
                     120,
@@ -425,7 +426,7 @@ impl MiningControl for MiningCoordinator {
     fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError> {
         let tree = self.block_tree.read();
         let tip = self.chainstate.applied_tip_snapshot();
-        bitcoin_rs_mining::network_hash_ps(
+        bitcoin_rs_serving::mining::network_hash_ps(
             &tree,
             tip.as_deref(),
             lookup,
@@ -440,11 +441,11 @@ impl MiningControl for MiningCoordinator {
     )]
     fn submit_block(
         &self,
-        payload: BlockPayload,
+        payload: BlockImage,
     ) -> Result<BlockValidationResult, MiningControlError> {
         let segwit_active = {
             let tree = self.block_tree.read();
-            tree.lookup(payload.block().header.prev_blockhash.into())
+            tree.lookup(payload.header().prev_blockhash.into())
                 .map(|prev_id| {
                     tree.node(prev_id)
                         .expect("node exists for looked-up id under block_tree read guard")
@@ -455,10 +456,10 @@ impl MiningControl for MiningCoordinator {
                         .is_segwit_active(prev.height.saturating_add(1))
                 })
         };
-        if needs_witness_reserved_value(payload.block(), segwit_active == Some(true)) {
-            let mut trial = payload.block().clone();
+        if image_needs_witness_reserved_value(&payload, segwit_active == Some(true)) {
+            let mut trial = payload.materialize();
             if self.fill_uncommitted_witness(&mut trial) {
-                let filled = BlockPayload::from_local(trial);
+                let filled = BlockImage::from_local(trial);
                 return self.submit(&filled);
             }
         }
@@ -482,10 +483,10 @@ impl MiningControl for MiningCoordinator {
         }
         match self.chainstate.admit_headers(std::slice::from_ref(&header)) {
             Ok(_) => Ok(()),
-            Err(bitcoin_rs_chainstate::HeaderAdmissionError::Rejected(error)) => {
+            Err(bitcoin_rs_execution::HeaderAdmissionError::Rejected(error)) => {
                 Err(header_reject_reason(error))
             }
-            Err(bitcoin_rs_chainstate::HeaderAdmissionError::Refused(error)) => Err(
+            Err(bitcoin_rs_execution::HeaderAdmissionError::Refused(error)) => Err(
                 MiningControlError::Unavailable(CompactString::from(error.to_string())),
             ),
         }
@@ -526,7 +527,7 @@ impl MiningControl for MiningCoordinator {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
             })?;
             if matches!(request.selection, GenerateSelection::Ordered(_)) {
-                let payload = BlockPayload::from_local(block);
+                let payload = BlockImage::from_local(block);
                 self.chainstate
                     .validate_block(&payload)
                     .map_err(|error| test_block_validity_error(&error))?;
@@ -537,8 +538,8 @@ impl MiningControl for MiningCoordinator {
             })?;
             let hash = block.block_hash();
             if request.submit {
-                let payload = BlockPayload::from_local(block);
-                let hex = bitcoin_rs_primitives::hex::hex_encode(payload.bytes());
+                let payload = BlockImage::from_local(block);
+                let hex = bitcoin_rs_consensus::primitives::hex::hex_encode(payload.bytes());
                 match self.submit(&payload)? {
                     BlockValidationResult::Accepted => {}
                     other => {
@@ -549,14 +550,14 @@ impl MiningControl for MiningCoordinator {
                 }
                 generated.push(GeneratedBlock { hash, hex });
             } else {
-                let payload = BlockPayload::from_local(block);
+                let payload = BlockImage::from_local(block);
                 let validation = self.propose(&payload)?;
                 if validation != BlockValidationResult::Accepted {
                     return Err(MiningControlError::Failed(CompactString::from(format!(
                         "generated block failed validation: {validation:?}"
                     ))));
                 }
-                let hex = bitcoin_rs_primitives::hex::hex_encode(payload.bytes());
+                let hex = bitcoin_rs_consensus::primitives::hex::hex_encode(payload.bytes());
                 generated.push(GeneratedBlock { hash, hex });
             }
         }
@@ -592,7 +593,7 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
     let reason = match error {
         ApplyError::ProofOfWork { .. } => CompactString::from("high-hash"),
         ApplyError::PrevHashMismatch { .. } => {
-            CompactString::from(bitcoin_rs_mining::STALE_PARENT_REASON)
+            CompactString::from(bitcoin_rs_serving::mining::STALE_PARENT_REASON)
         }
         ApplyError::BlockOutputsExceedInputs | ApplyError::BlockValueOverflow => {
             CompactString::from("bad-cb-amount")
@@ -601,14 +602,16 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             CompactString::from("bad-txns-inputs-missingorspent")
         }
         ApplyError::Consensus(_)
-            if bitcoin_rs_chainstate::classify_apply_error(error)
-                == bitcoin_rs_chainstate::WindowApplyDisposition::Operational =>
+            if bitcoin_rs_execution::classify_apply_error(error)
+                == bitcoin_rs_execution::WindowApplyDisposition::Operational =>
         {
             return Err(MiningControlError::Failed(CompactString::from(
                 error.to_string(),
             )));
         }
-        ApplyError::Consensus(consensus) => bitcoin_rs_mining::consensus_reject_reason(consensus),
+        ApplyError::Consensus(consensus) => {
+            bitcoin_rs_serving::mining::consensus_reject_reason(consensus)
+        }
         ApplyError::Chain(
             chain @ (ChainError::MissingParent { .. }
             | ChainError::InvalidParent { .. }
@@ -623,7 +626,7 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             | ChainError::TimestampTooFarAhead { .. }
             | ChainError::BadVersion { .. }
             | ChainError::TimewarpAttack { .. }),
-        ) => bitcoin_rs_mining::chain_reject_reason(chain),
+        ) => bitcoin_rs_serving::mining::chain_reject_reason(chain),
         ApplyError::Shutdown
         | ApplyError::JournalBackpressure(_)
         | ApplyError::ConcurrentChainChange => {

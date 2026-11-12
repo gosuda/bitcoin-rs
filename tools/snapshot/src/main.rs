@@ -6,8 +6,8 @@ use std::{
     time::Instant,
 };
 
-use bitcoin_rs_primitives::{AssumeUtxoData, Network};
-use bitcoin_rs_utxo::core_snapshot::{
+use bitcoin_rs_consensus::primitives::{AssumeUtxoData, Network};
+use bitcoin_rs_storage::utxo::core_snapshot::{
     SnapshotError, SnapshotLimits, SnapshotMetadata, read_and_verify, read_metadata,
 };
 use clap::{Parser, Subcommand, ValueEnum};

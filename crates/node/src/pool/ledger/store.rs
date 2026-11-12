@@ -1,0 +1,2775 @@
+use super::kv::{Database, Table, TableDefinition, WriteTransaction};
+use bitcoin_rs_storage::KvStore;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+#[cfg(feature = "test-seam")]
+use std::sync::Mutex;
+
+use bitcoin_rs_serving::mining::pool::ledger::codec::{Dec, Enc};
+use bitcoin_rs_serving::mining::pool::ledger::{
+    AuditKind, AuditRecord, Balance, BatchState, BatchTransition, BlockFound, BlockRecorded,
+    CancelBasis, ChainView, Closure, Confirmation, ExternalSigner, Hash32, LedgerError,
+    MAX_BATCH_OUTPUTS, MAX_MONEY_SAT, MAX_PAYOUT_OUTPUT_WEIGHT_WU, MAX_SCRIPT_LEN,
+    MAX_SHARE_TUPLE_LEN, MinerId, ObservedCoinbase, OutPoint, PayoutBatch, PayoutOutput,
+    PayoutPolicy, PayoutReceipt, PayoutRequest, PoolConfig, PoolLedgerStore, ReceiptError, Round,
+    RoundAnomaly, RoundReconcileReport, RoundState, RoundTransition, ShareCredit, ShareReceipt,
+    SignedTx, TxStatus, WindowAccumulator, check_outputs, compute_batch_id, parse_transaction,
+    payout_output_weight_wu, sha256, split_pool_fee, split_reward, validate_script,
+    verify_payout_transaction,
+};
+
+pub const MAX_SIGNED_TXS_PER_BATCH: usize = 32;
+pub const RECONCILE_ROUND_BATCH_LIMIT: usize = 32;
+pub const RECONCILE_PAYOUT_BATCH_LIMIT: usize = 16;
+const MAX_INPUTS_PER_TX: usize = 100_000;
+const SCHEMA_VERSION: u64 = 1;
+const AUDIT_DOMAIN: &[u8] = b"btcrs.pool.audit.v1";
+const AUDIT_BODY_LEN: usize = 1 + 8 + 32 + 32 + 24;
+const ZERO_HASH: Hash32 = [0u8; 32];
+
+type U64Bytes = TableDefinition<'static, u64, &'static [u8]>;
+type BytesBytes = TableDefinition<'static, &'static [u8], &'static [u8]>;
+type BytesU64 = TableDefinition<'static, &'static [u8], u64>;
+type BytesU128 = TableDefinition<'static, &'static [u8], u128>;
+type U64Unit = TableDefinition<'static, u64, ()>;
+
+type AccountTotals = BTreeMap<u64, u128>;
+
+const META_U64: TableDefinition<'static, &'static str, u64> =
+    TableDefinition::new("pplns_meta_u64_v1");
+const META_BYTES: TableDefinition<'static, &'static str, &'static [u8]> =
+    TableDefinition::new("pplns_meta_bytes_v1");
+const SHARES: U64Bytes = TableDefinition::new("pplns_shares_v1");
+const SHARE_HASHES: BytesBytes = TableDefinition::new("pplns_share_hashes_v1");
+const RETIRED_HASHES: BytesBytes = TableDefinition::new("pplns_retired_hashes_v1");
+const SHARE_TUPLES: BytesBytes = TableDefinition::new("pplns_share_tuples_v1");
+const RETIRED_JOBS: U64Unit = TableDefinition::new("pplns_retired_jobs_v1");
+const ROUNDS: U64Bytes = TableDefinition::new("pplns_rounds_v1");
+const ROUND_BY_BLOCK: BytesU64 = TableDefinition::new("pplns_round_by_block_v1");
+const ROUND_WEIGHTS: BytesU128 = TableDefinition::new("pplns_round_weights_v1");
+const ROUND_ALLOCS: BytesU64 = TableDefinition::new("pplns_round_allocs_v1");
+const OPEN_ROUNDS: U64Unit = TableDefinition::new("pplns_open_rounds_v1");
+const BALANCES: U64Bytes = TableDefinition::new("pplns_balances_v1");
+const SCRIPTS: U64Bytes = TableDefinition::new("pplns_scripts_v1");
+const BATCHES: BytesBytes = TableDefinition::new("pplns_batches_v1");
+const ACTIVE_BATCHES: U64Bytes = TableDefinition::new("pplns_active_batches_v1");
+const BATCH_IDEM: BytesBytes = TableDefinition::new("pplns_batch_idem_v1");
+const BATCH_TXIDS: BytesBytes = TableDefinition::new("pplns_batch_txids_v1");
+const AUDIT: U64Bytes = TableDefinition::new("pplns_audit_v1");
+
+const M_SCHEMA: &str = "schema";
+const M_NEXT_RUN_EPOCH: &str = "next_run_epoch";
+const M_NEXT_SHARE: &str = "next_share_seq";
+const M_NEXT_ROUND: &str = "next_round_id";
+const M_NEXT_BATCH: &str = "next_batch_seq";
+const M_NEXT_AUDIT: &str = "next_audit_seq";
+const M_PRUNED_BELOW: &str = "pruned_below_seq";
+const M_CONFIG: &str = "config";
+const M_AUDIT_HEAD: &str = "audit_head";
+
+pub const OP_RECORD_SHARE: &str = "record_share";
+pub const OP_RETIRE_JOB: &str = "retire_job";
+pub const OP_PRUNE_SHARES: &str = "prune_shares";
+pub const OP_RECORD_BLOCK: &str = "record_found_block";
+pub const OP_RECONCILE_ROUNDS: &str = "reconcile_rounds";
+pub const OP_SET_SCRIPT: &str = "set_payout_script";
+pub const OP_PREPARE_PAYOUT: &str = "prepare_payout_batch";
+pub const OP_RECORD_SIGNED: &str = "record_signed";
+pub const OP_RECORD_BROADCAST: &str = "record_broadcast";
+pub const OP_CANCEL_PREPARED: &str = "cancel_prepared";
+pub const OP_RECONCILE_PAYOUTS: &str = "reconcile_payouts";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "test-seam")]
+pub enum FailPoint {
+    BeforeCommit,
+    AfterCommit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "test-seam")]
+pub enum FailAction {
+    ReturnError,
+    AbortProcess,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "test-seam")]
+pub struct FailPlan {
+    pub op: &'static str,
+    pub point: FailPoint,
+    pub action: FailAction,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InvariantReport {
+    pub accounts: usize,
+    pub rounds: usize,
+    pub batches: usize,
+    pub credited_sat: u128,
+    pub available_sat: u128,
+    pub reserved_sat: u128,
+    pub paid_sat: u128,
+    pub deficit_sat: u128,
+}
+
+pub struct Ledger {
+    db: Database,
+    config: PoolConfig,
+    #[cfg(feature = "test-seam")]
+    fail_plan: Mutex<Option<FailPlan>>,
+}
+
+struct Tables<'t> {
+    meta_u64: Table<'t, &'static str, u64>,
+    meta_bytes: Table<'t, &'static str, &'static [u8]>,
+    shares: Table<'t, u64, &'static [u8]>,
+    share_hashes: Table<'t, &'static [u8], &'static [u8]>,
+    retired_hashes: Table<'t, &'static [u8], &'static [u8]>,
+    share_tuples: Table<'t, &'static [u8], &'static [u8]>,
+    retired_jobs: Table<'t, u64, ()>,
+    rounds: Table<'t, u64, &'static [u8]>,
+    round_by_block: Table<'t, &'static [u8], u64>,
+    round_weights: Table<'t, &'static [u8], u128>,
+    round_allocs: Table<'t, &'static [u8], u64>,
+    open_rounds: Table<'t, u64, ()>,
+    balances: Table<'t, u64, &'static [u8]>,
+    scripts: Table<'t, u64, &'static [u8]>,
+    batches: Table<'t, &'static [u8], &'static [u8]>,
+    active_batches: Table<'t, u64, &'static [u8]>,
+    batch_idem: Table<'t, &'static [u8], &'static [u8]>,
+    batch_txids: Table<'t, &'static [u8], &'static [u8]>,
+    audit: Table<'t, u64, &'static [u8]>,
+}
+
+impl<'t> Tables<'t> {
+    fn open(txn: &'t WriteTransaction<'_>) -> Result<Self, LedgerError> {
+        Ok(Self {
+            meta_u64: txn.open_table(META_U64)?,
+            meta_bytes: txn.open_table(META_BYTES)?,
+            shares: txn.open_table(SHARES)?,
+            share_hashes: txn.open_table(SHARE_HASHES)?,
+            retired_hashes: txn.open_table(RETIRED_HASHES)?,
+            share_tuples: txn.open_table(SHARE_TUPLES)?,
+            retired_jobs: txn.open_table(RETIRED_JOBS)?,
+            rounds: txn.open_table(ROUNDS)?,
+            round_by_block: txn.open_table(ROUND_BY_BLOCK)?,
+            round_weights: txn.open_table(ROUND_WEIGHTS)?,
+            round_allocs: txn.open_table(ROUND_ALLOCS)?,
+            open_rounds: txn.open_table(OPEN_ROUNDS)?,
+            balances: txn.open_table(BALANCES)?,
+            scripts: txn.open_table(SCRIPTS)?,
+            batches: txn.open_table(BATCHES)?,
+            active_batches: txn.open_table(ACTIVE_BATCHES)?,
+            batch_idem: txn.open_table(BATCH_IDEM)?,
+            batch_txids: txn.open_table(BATCH_TXIDS)?,
+            audit: txn.open_table(AUDIT)?,
+        })
+    }
+}
+
+enum Claim {
+    Existing(BlockRecorded),
+    Fresh {
+        solving_seq: u64,
+        receipt: ShareReceipt,
+    },
+}
+
+impl Ledger {
+    pub fn create(store: Arc<dyn KvStore>, config: PoolConfig) -> Result<Self, LedgerError> {
+        config.validate()?;
+        let encoded = config.encode()?;
+        let db = Database::new(store);
+        let txn = db.begin_write()?;
+        if !txn.namespace_is_empty()? {
+            return Err(LedgerError::PathExists);
+        }
+        {
+            let tables = Tables::open(&txn)?;
+            tables.meta_bytes.insert(M_CONFIG, encoded.as_slice())?;
+            tables.meta_u64.insert(M_SCHEMA, SCHEMA_VERSION)?;
+        }
+        txn.commit()?;
+        Ok(Self {
+            db,
+            config,
+            #[cfg(feature = "test-seam")]
+            fail_plan: Mutex::new(None),
+        })
+    }
+
+    pub fn open(store: Arc<dyn KvStore>, config: PoolConfig) -> Result<Self, LedgerError> {
+        config.validate()?;
+        let encoded = config.encode()?;
+        let db = Database::new(store);
+        {
+            let read = db.begin_read()?;
+            let bytes_table = read.open_table(META_BYTES)?;
+            let counter_table = read.open_table(META_U64)?;
+            let schema = counter_table.get(M_SCHEMA)?.map(|guard| guard.value());
+            if schema != Some(SCHEMA_VERSION) || !read.has_revision() {
+                return Err(LedgerError::NotALedger);
+            }
+            let stored = bytes_table
+                .get(M_CONFIG)?
+                .map(|guard| guard.value().to_vec());
+            match stored {
+                Some(existing) if existing == encoded => {}
+                Some(_) => return Err(LedgerError::ConfigMismatch),
+                None => return Err(LedgerError::NotALedger),
+            }
+        }
+        Ok(Self {
+            db,
+            config,
+            #[cfg(feature = "test-seam")]
+            fail_plan: Mutex::new(None),
+        })
+    }
+
+    #[must_use]
+    pub fn config(&self) -> &PoolConfig {
+        &self.config
+    }
+
+    pub fn allocate_run_epoch(&self) -> Result<u32, LedgerError> {
+        let txn = self.db.begin_write()?;
+        let epoch = {
+            let tables = Tables::open(&txn)?;
+            let epoch = bump(&tables.meta_u64, M_NEXT_RUN_EPOCH, 1)?;
+            u32::try_from(epoch).map_err(|_| LedgerError::Overflow("pool run epoch"))?
+        };
+        self.commit(txn, "allocate_run_epoch")?;
+        Ok(epoch)
+    }
+
+    #[cfg(feature = "test-seam")]
+    pub fn arm_fail_plan(&self, plan: FailPlan) {
+        let mut slot = self
+            .fail_plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(plan);
+    }
+
+    #[cfg(feature = "test-seam")]
+    pub fn disarm_fail_plan(&self) {
+        let mut slot = self
+            .fail_plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = None;
+    }
+
+    #[cfg(feature = "test-seam")]
+    fn inject(&self, op: &'static str, point: FailPoint) -> Result<(), LedgerError> {
+        let fired = {
+            let mut slot = self
+                .fail_plan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match *slot {
+                Some(plan) if plan.op == op && plan.point == point => {
+                    *slot = None;
+                    Some(plan)
+                }
+                _ => None,
+            }
+        };
+        match fired {
+            None => Ok(()),
+            Some(plan) => match plan.action {
+                FailAction::ReturnError => Err(LedgerError::Injected(op)),
+                FailAction::AbortProcess => std::process::abort(),
+            },
+        }
+    }
+
+    #[cfg_attr(
+        not(feature = "test-seam"),
+        expect(
+            clippy::unused_self,
+            unused_variables,
+            reason = "fault injection seam uses self and op when test-seam is enabled"
+        )
+    )]
+    fn commit(&self, txn: WriteTransaction<'_>, op: &'static str) -> Result<(), LedgerError> {
+        #[cfg(feature = "test-seam")]
+        self.inject(op, FailPoint::BeforeCommit)?;
+        txn.commit()?;
+        #[cfg(feature = "test-seam")]
+        self.inject(op, FailPoint::AfterCommit)?;
+        Ok(())
+    }
+
+    pub fn record_share(&self, share: &ShareCredit) -> Result<ShareReceipt, LedgerError> {
+        share.validate()?;
+        let txn = self.db.begin_write()?;
+        let receipt = {
+            let tables = Tables::open(&txn)?;
+            credit_share(&tables, share)?
+        };
+        if matches!(receipt, ShareReceipt::Credited { .. }) {
+            self.commit(txn, OP_RECORD_SHARE)?;
+        }
+        Ok(receipt)
+    }
+
+    pub fn retire_job(&self, job: u64) -> Result<usize, LedgerError> {
+        let txn = self.db.begin_write()?;
+        let removed = {
+            let tables = Tables::open(&txn)?;
+            if tables.retired_jobs.get(job)?.is_some() {
+                return Ok(0);
+            }
+            let start = job.to_be_bytes();
+            let upper = job.checked_add(1).map(u64::to_be_bytes);
+            let mut rows: Vec<(Vec<u8>, Hash32)> = Vec::new();
+            {
+                let iter = match upper.as_ref() {
+                    Some(end) => tables
+                        .share_tuples
+                        .range(start.as_slice()..end.as_slice())?,
+                    None => tables.share_tuples.range(start.as_slice()..)?,
+                };
+                for item in iter {
+                    let (key, value) = item?;
+                    rows.push((key.value().to_vec(), hash_from(value.value())?));
+                }
+            }
+            for (key, hash) in &rows {
+                tables.share_tuples.remove(key.as_slice())?;
+                if let Some(entry) = tables.share_hashes.get(hash.as_slice())? {
+                    tables
+                        .retired_hashes
+                        .insert(hash.as_slice(), entry.value())?;
+                    tables.share_hashes.remove(hash.as_slice())?;
+                }
+            }
+            tables.retired_jobs.insert(job, ())?;
+            rows.len()
+        };
+        self.commit(txn, OP_RETIRE_JOB)?;
+        Ok(removed)
+    }
+
+    const PRUNE_BATCH_SIZE: usize = 1024;
+
+    pub fn prune_shares(&self, keep_work: u128) -> Result<u64, LedgerError> {
+        if keep_work < self.config.window_work {
+            return Err(LedgerError::InvalidInput(
+                "keep_work must cover the PPLNS window",
+            ));
+        }
+        let Some((boundary, cumulative)) = self.prune_boundary(keep_work)? else {
+            return Ok(0);
+        };
+        let mut removed_total: u64 = 0;
+        while let Some(removed) = self.prune_batch(boundary, cumulative)? {
+            removed_total = removed_total
+                .checked_add(removed)
+                .ok_or(LedgerError::Overflow("count"))?;
+        }
+        Ok(removed_total)
+    }
+
+    fn prune_boundary(&self, keep_work: u128) -> Result<Option<(u64, u128)>, LedgerError> {
+        let read = self.db.begin_read()?;
+        let shares = read.open_table(SHARES)?;
+        let mut cumulative: u128 = 0;
+        for item in shares.rows_iter()?.rev() {
+            let (key, value) = item?;
+            let (_, work) = decode_share(value.value())?;
+            cumulative = cumulative
+                .checked_add(work)
+                .ok_or(LedgerError::Overflow("retained share work"))?;
+            if cumulative >= keep_work {
+                return Ok(Some((key.value(), cumulative)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn prune_batch(&self, boundary: u64, cumulative: u128) -> Result<Option<u64>, LedgerError> {
+        let txn = self.db.begin_write()?;
+        let removed = {
+            let tables = Tables::open(&txn)?;
+            let start = meta_u64(&tables.meta_u64, M_PRUNED_BELOW)?;
+            if start >= boundary {
+                return Ok(None);
+            }
+            let batch_cap = u64::try_from(Self::PRUNE_BATCH_SIZE)
+                .map_err(|_| LedgerError::Overflow("count"))?;
+            let batch_end = start
+                .checked_add(batch_cap)
+                .ok_or(LedgerError::Overflow("count"))?
+                .min(boundary);
+            let capacity = usize::try_from(batch_end - start).unwrap_or(Self::PRUNE_BATCH_SIZE);
+            let mut doomed: Vec<u64> = Vec::with_capacity(capacity);
+            for seq in start..batch_end {
+                if tables.shares.get(seq)?.is_some() {
+                    doomed.push(seq);
+                }
+            }
+            let previous = meta_u64(&tables.meta_u64, M_PRUNED_BELOW)?;
+            let floor = batch_end;
+            if doomed.is_empty() {
+                if floor <= previous {
+                    return Ok(None);
+                }
+                tables.meta_u64.insert(M_PRUNED_BELOW, floor)?;
+                0
+            } else {
+                for seq in &doomed {
+                    tables.shares.remove(*seq)?;
+                }
+                let batch =
+                    u64::try_from(doomed.len()).map_err(|_| LedgerError::Overflow("count"))?;
+                if floor > previous {
+                    tables.meta_u64.insert(M_PRUNED_BELOW, floor)?;
+                }
+                append_audit(
+                    &tables,
+                    AuditKind::SharesPruned,
+                    0,
+                    &ZERO_HASH,
+                    &ZERO_HASH,
+                    [boundary, batch, low64(cumulative)],
+                )?;
+                batch
+            }
+        };
+        self.commit(txn, OP_PRUNE_SHARES)?;
+        Ok(Some(removed))
+    }
+
+    pub fn current_window(&self) -> Result<Vec<(MinerId, u128)>, LedgerError> {
+        let read = self.db.begin_read()?;
+        let shares = read.open_table(SHARES)?;
+        let meta = read.open_table(META_U64)?;
+        let newest = shares.last()?.map(|(key, _)| key.value());
+        let Some(newest) = newest else {
+            return Ok(Vec::new());
+        };
+        let pruned_below = meta_u64(&meta, M_PRUNED_BELOW)?;
+        let window = collect_window(&shares, pruned_below, newest, self.config.window_work)?;
+        Ok(window.into_weights())
+    }
+
+    pub fn share_by_hash(&self, header_hash: &Hash32) -> Result<Option<(u64, u128)>, LedgerError> {
+        let read = self.db.begin_read()?;
+        let hashes = read.open_table(SHARE_HASHES)?;
+        let entry = if let Some(guard) = hashes.get(header_hash.as_slice())? {
+            Some(decode_hash_entry(guard.value())?)
+        } else {
+            let retired = read.open_table(RETIRED_HASHES)?;
+            retired
+                .get(header_hash.as_slice())?
+                .map(|guard| decode_hash_entry(guard.value()))
+                .transpose()?
+        };
+        Ok(entry.map(|(seq, work, _)| (seq, work)))
+    }
+
+    pub fn share_count(&self) -> Result<u64, LedgerError> {
+        let read = self.db.begin_read()?;
+        let meta = read.open_table(META_U64)?;
+        let next = meta_u64(&meta, M_NEXT_SHARE)?;
+        let pruned = meta_u64(&meta, M_PRUNED_BELOW)?;
+        next.checked_sub(pruned).ok_or_else(|| {
+            LedgerError::Invariant("pruned share prefix runs past the sequence".into())
+        })
+    }
+
+    pub fn record_found_block(&self, found: &BlockFound) -> Result<BlockRecorded, LedgerError> {
+        found.share.validate()?;
+        let block_hash = found.share.header_hash;
+        let (solving_seq, share_receipt) = match self.credit_solving_share(found, block_hash)? {
+            Claim::Existing(recorded) => return Ok(recorded),
+            Claim::Fresh {
+                solving_seq,
+                receipt,
+            } => (solving_seq, receipt),
+        };
+        let (window_total, weights) = self.solving_window(solving_seq)?;
+        self.store_found_round(
+            found,
+            block_hash,
+            solving_seq,
+            share_receipt,
+            window_total,
+            &weights,
+        )
+    }
+
+    fn credit_solving_share(
+        &self,
+        found: &BlockFound,
+        block_hash: Hash32,
+    ) -> Result<Claim, LedgerError> {
+        let txn = self.db.begin_write()?;
+        let tables = Tables::open(&txn)?;
+        if let Some(id) = round_id_for_block(&tables.round_by_block, &block_hash)? {
+            return Ok(Claim::Existing(Self::existing_round(&tables, id, found)?));
+        }
+        let share_receipt = credit_share(&tables, &found.share)?;
+        if matches!(share_receipt, ShareReceipt::Credited { .. }) {
+            self.commit(txn, OP_RECORD_BLOCK)?;
+        }
+        Ok(Claim::Fresh {
+            solving_seq: share_receipt.seq(),
+            receipt: share_receipt,
+        })
+    }
+
+    fn existing_round(
+        tables: &Tables<'_>,
+        id: u64,
+        found: &BlockFound,
+    ) -> Result<BlockRecorded, LedgerError> {
+        let round = load_round(&tables.rounds, id)?
+            .ok_or_else(|| LedgerError::Corrupt("round index points at no round".into()))?;
+        Self::check_round_claim(&round, found)?;
+        let seq = round.solving_seq;
+        Ok(BlockRecorded {
+            round,
+            share: ShareReceipt::Duplicate { seq },
+            newly_recorded: false,
+        })
+    }
+
+    fn solving_window(
+        &self,
+        solving_seq: u64,
+    ) -> Result<(u128, Vec<(MinerId, u128)>), LedgerError> {
+        let read = self.db.begin_read()?;
+        let tables = Tables::open(&read)?;
+        let pruned_below = meta_u64(&tables.meta_u64, M_PRUNED_BELOW)?;
+        if solving_seq < pruned_below {
+            return Err(LedgerError::WindowPruned);
+        }
+        let window = collect_window(
+            &tables.shares,
+            pruned_below,
+            solving_seq,
+            self.config.window_work,
+        )?;
+        Ok((window.total(), window.into_weights()))
+    }
+
+    fn store_found_round(
+        &self,
+        found: &BlockFound,
+        block_hash: Hash32,
+        solving_seq: u64,
+        share_receipt: ShareReceipt,
+        window_total: u128,
+        weights: &[(MinerId, u128)],
+    ) -> Result<BlockRecorded, LedgerError> {
+        let txn = self.db.begin_write()?;
+        let recorded = {
+            let tables = Tables::open(&txn)?;
+            if let Some(id) = round_id_for_block(&tables.round_by_block, &block_hash)? {
+                return Self::existing_round(&tables, id, found);
+            }
+            let pruned_below = meta_u64(&tables.meta_u64, M_PRUNED_BELOW)?;
+            if solving_seq < pruned_below {
+                return Err(LedgerError::WindowPruned);
+            }
+            let id = bump(&tables.meta_u64, M_NEXT_ROUND, 1)?;
+            let round = Round {
+                id,
+                block_hash,
+                height: found.height,
+                solving_seq,
+                coinbase_txid: found.coinbase_txid,
+                claimed_coinbase_value_sat: found.claimed_coinbase_value_sat,
+                window_work_total: window_total,
+                reward_fixed: false,
+                gross_sat: 0,
+                pool_fee_sat: 0,
+                net_sat: 0,
+                state: RoundState::Pending,
+            };
+            store_round(&tables.rounds, &round)?;
+            tables.round_by_block.insert(block_hash.as_slice(), id)?;
+            for (account, weight) in weights {
+                tables
+                    .round_weights
+                    .insert(round_key(id, *account).as_slice(), *weight)?;
+            }
+            tables.open_rounds.insert(id, ())?;
+            append_audit(
+                &tables,
+                AuditKind::RoundRecorded,
+                id,
+                &block_hash,
+                &ZERO_HASH,
+                [u64::from(found.height), low64(window_total), solving_seq],
+            )?;
+            BlockRecorded {
+                round,
+                share: share_receipt,
+                newly_recorded: true,
+            }
+        };
+        self.commit(txn, OP_RECORD_BLOCK)?;
+        Ok(recorded)
+    }
+
+    fn check_round_claim(round: &Round, found: &BlockFound) -> Result<(), LedgerError> {
+        if round.height != found.height
+            || round.coinbase_txid != found.coinbase_txid
+            || round.claimed_coinbase_value_sat != found.claimed_coinbase_value_sat
+        {
+            return Err(LedgerError::BlockConflict);
+        }
+        Ok(())
+    }
+
+    pub fn reconcile_rounds(
+        &self,
+        chain: &dyn ChainView,
+    ) -> Result<RoundReconcileReport, LedgerError> {
+        self.reconcile_rounds_checked(chain, &|| false)
+    }
+
+    pub fn reconcile_rounds_checked(
+        &self,
+        chain: &dyn ChainView,
+        abort: &dyn Fn() -> bool,
+    ) -> Result<RoundReconcileReport, LedgerError> {
+        let open = self.open_round_list()?;
+        let mut report = RoundReconcileReport::default();
+        if open.is_empty() {
+            return Ok(report);
+        }
+        let tip = chain.tip_height()?;
+        let mut observations = Vec::with_capacity(open.len());
+        for round in &open {
+            let canon = match chain.block_location(&round.block_hash, round.height)? {
+                super::BlockLocation::Canonical { height } if height == round.height => {
+                    Canon::Canonical
+                }
+                super::BlockLocation::Canonical { .. } | super::BlockLocation::Side => {
+                    Canon::Displaced
+                }
+                super::BlockLocation::Unknown => Canon::Unknown,
+            };
+            let coinbase = if canon == Canon::Canonical && !round.reward_fixed {
+                chain.coinbase_of(&round.block_hash)?
+            } else {
+                None
+            };
+            observations.push(RoundObservation {
+                id: round.id,
+                block_hash: round.block_hash,
+                canon,
+                coinbase,
+            });
+        }
+        let txn = self.db.begin_write()?;
+        if abort() {
+            return Ok(RoundReconcileReport::default());
+        }
+        let mut dirty = false;
+        {
+            let tables = Tables::open(&txn)?;
+            for observation in &observations {
+                let outcome = apply_round_observation(&tables, &self.config, observation, tip)?;
+                dirty |= outcome.dirty;
+                if let Some(transition) = outcome.transition {
+                    report.transitions.push(transition);
+                }
+                if let Some(reason) = outcome.anomaly {
+                    report.anomalies.push(RoundAnomaly {
+                        round: observation.id,
+                        reason,
+                    });
+                }
+            }
+        }
+        if dirty {
+            self.commit(txn, OP_RECONCILE_ROUNDS)?;
+        }
+        Ok(report)
+    }
+
+    pub fn reconcile_rounds_checked_limit(
+        &self,
+        chain: &dyn ChainView,
+        abort: &dyn Fn() -> bool,
+        limit: usize,
+        after: Option<u64>,
+    ) -> Result<(RoundReconcileReport, bool, Option<u64>), LedgerError> {
+        let (open, more, next) = {
+            let read = self.db.begin_read()?;
+            let open_tbl = read.open_table(OPEN_ROUNDS)?;
+            let rounds_tbl = read.open_table(ROUNDS)?;
+            let (page, more) = open_tbl.page_after(after, limit)?;
+            let mut list = Vec::new();
+            let mut last: Option<u64> = after;
+            for (seq_guard, _) in &page {
+                let seq = seq_guard.value();
+                last = Some(seq);
+                if let Some(round) = load_round(&rounds_tbl, seq)? {
+                    list.push(round);
+                }
+            }
+            let next = if page.is_empty() { after } else { last };
+            (list, more, next)
+        };
+        if open.is_empty() {
+            return Ok((RoundReconcileReport::default(), more, next));
+        }
+        let mut report = RoundReconcileReport::default();
+        let tip = chain.tip_height()?;
+        let mut observations = Vec::with_capacity(open.len());
+        for round in open {
+            let canon = match chain.block_location(&round.block_hash, round.height)? {
+                super::BlockLocation::Canonical { height } if height == round.height => {
+                    Canon::Canonical
+                }
+                super::BlockLocation::Canonical { .. } | super::BlockLocation::Side => {
+                    Canon::Displaced
+                }
+                super::BlockLocation::Unknown => Canon::Unknown,
+            };
+            let coinbase = if canon == Canon::Canonical && !round.reward_fixed {
+                chain.coinbase_of(&round.block_hash)?
+            } else {
+                None
+            };
+            observations.push(RoundObservation {
+                id: round.id,
+                block_hash: round.block_hash,
+                canon,
+                coinbase,
+            });
+        }
+        let txn = self.db.begin_write()?;
+        if abort() {
+            return Ok((RoundReconcileReport::default(), more, next));
+        }
+        let mut dirty = false;
+        {
+            let tables = Tables::open(&txn)?;
+            for observation in &observations {
+                let outcome = apply_round_observation(&tables, &self.config, observation, tip)?;
+                dirty |= outcome.dirty;
+                if let Some(transition) = outcome.transition {
+                    report.transitions.push(transition);
+                }
+                if let Some(reason) = outcome.anomaly {
+                    report.anomalies.push(RoundAnomaly {
+                        round: observation.id,
+                        reason,
+                    });
+                }
+            }
+        }
+        if dirty {
+            self.commit(txn, OP_RECONCILE_ROUNDS)?;
+        }
+        Ok((report, more, next))
+    }
+
+    fn open_round_list(&self) -> Result<Vec<Round>, LedgerError> {
+        let read = self.db.begin_read()?;
+        let open = read.open_table(OPEN_ROUNDS)?;
+        let rounds = read.open_table(ROUNDS)?;
+        let mut list = Vec::new();
+        for item in open.rows_iter()? {
+            let (key, _) = item?;
+            if let Some(round) = load_round(&rounds, key.value())? {
+                list.push(round);
+            }
+        }
+        Ok(list)
+    }
+
+    pub fn round(&self, id: u64) -> Result<Option<Round>, LedgerError> {
+        let read = self.db.begin_read()?;
+        load_round(&read.open_table(ROUNDS)?, id)
+    }
+
+    pub fn round_for_block(&self, block_hash: &Hash32) -> Result<Option<Round>, LedgerError> {
+        let read = self.db.begin_read()?;
+        let index = read.open_table(ROUND_BY_BLOCK)?;
+        match round_id_for_block(&index, block_hash)? {
+            Some(id) => load_round(&read.open_table(ROUNDS)?, id),
+            None => Ok(None),
+        }
+    }
+
+    pub fn round_allocations(&self, id: u64) -> Result<Vec<(MinerId, u64)>, LedgerError> {
+        let read = self.db.begin_read()?;
+        load_allocs(&read.open_table(ROUND_ALLOCS)?, id)
+    }
+
+    pub fn round_weights(&self, id: u64) -> Result<Vec<(MinerId, u128)>, LedgerError> {
+        let read = self.db.begin_read()?;
+        load_weights(&read.open_table(ROUND_WEIGHTS)?, id)
+    }
+
+    pub fn balance(&self, account: MinerId) -> Result<Balance, LedgerError> {
+        let read = self.db.begin_read()?;
+        load_balance(&read.open_table(BALANCES)?, account)
+    }
+
+    pub fn payout_script(&self, account: MinerId) -> Result<Option<Vec<u8>>, LedgerError> {
+        let read = self.db.begin_read()?;
+        let scripts = read.open_table(SCRIPTS)?;
+        Ok(scripts.get(account.0)?.map(|guard| guard.value().to_vec()))
+    }
+
+    pub fn set_payout_script(&self, account: MinerId, script: &[u8]) -> Result<(), LedgerError> {
+        validate_script(script)?;
+        let txn = self.db.begin_write()?;
+        let changed = {
+            let tables = Tables::open(&txn)?;
+            let same = match tables.scripts.get(account.0)? {
+                Some(guard) => guard.value() == script,
+                None => false,
+            };
+            if same {
+                false
+            } else {
+                tables.scripts.insert(account.0, script)?;
+                append_audit(
+                    &tables,
+                    AuditKind::PayoutScriptSet,
+                    account.0,
+                    &sha256(script),
+                    &ZERO_HASH,
+                    [0, 0, 0],
+                )?;
+                true
+            }
+        };
+        if changed {
+            self.commit(txn, OP_SET_SCRIPT)?;
+        }
+        Ok(())
+    }
+
+    pub fn prepare_payout_batch(
+        &self,
+        idempotency_key: Hash32,
+        policy: PayoutPolicy,
+    ) -> Result<Option<PayoutBatch>, LedgerError> {
+        self.validate_payout_policy(&policy)?;
+        let txn = self.db.begin_write()?;
+        let created = {
+            let tables = Tables::open(&txn)?;
+            if let Some(batch) = load_batch_by_idempotency(&tables, &idempotency_key)? {
+                return Ok(Some(batch));
+            }
+            let picks = select_payout_outputs(&tables, &policy)?;
+            if picks.is_empty() {
+                return Ok(None);
+            }
+            reserve_payout_batch(&tables, idempotency_key, picks)?
+        };
+        self.commit(txn, OP_PREPARE_PAYOUT)?;
+        Ok(Some(created))
+    }
+
+    fn validate_payout_policy(&self, policy: &PayoutPolicy) -> Result<(), LedgerError> {
+        if policy.min_payout_sat < self.config.dust_limit_sat
+            || policy.min_payout_sat > MAX_MONEY_SAT
+        {
+            return Err(LedgerError::InvalidInput(
+                "min_payout_sat below the dust limit",
+            ));
+        }
+        if policy.max_outputs == 0 || policy.max_outputs > MAX_BATCH_OUTPUTS {
+            return Err(LedgerError::InvalidInput("max_outputs out of range"));
+        }
+        Ok(())
+    }
+
+    pub fn batch(&self, id: &Hash32) -> Result<Option<PayoutBatch>, LedgerError> {
+        let read = self.db.begin_read()?;
+        load_batch(&read.open_table(BATCHES)?, id)
+    }
+
+    pub fn batch_for_idempotency_key(
+        &self,
+        key: &Hash32,
+    ) -> Result<Option<PayoutBatch>, LedgerError> {
+        let read = self.db.begin_read()?;
+        let index = read.open_table(BATCH_IDEM)?;
+        let id = match index.get(key.as_slice())? {
+            Some(guard) => Some(hash_from(guard.value())?),
+            None => None,
+        };
+        match id {
+            Some(id) => load_batch(&read.open_table(BATCHES)?, &id),
+            None => Ok(None),
+        }
+    }
+
+    pub fn active_batches(&self) -> Result<Vec<PayoutBatch>, LedgerError> {
+        let read = self.db.begin_read()?;
+        let active = read.open_table(ACTIVE_BATCHES)?;
+        let batches = read.open_table(BATCHES)?;
+        let mut list = Vec::new();
+        for item in active.rows_iter()? {
+            let (_, value) = item?;
+            let id = hash_from(value.value())?;
+            if let Some(batch) = load_batch(&batches, &id)? {
+                list.push(batch);
+            }
+        }
+        Ok(list)
+    }
+
+    pub fn request_for(&self, id: &Hash32) -> Result<PayoutRequest, LedgerError> {
+        let batch = self.batch(id)?.ok_or(LedgerError::UnknownBatch(*id))?;
+        if !batch.state.holds_reservation() {
+            return Err(LedgerError::IllegalTransition {
+                batch: *id,
+                from: batch.state,
+                action: "export a payout request",
+            });
+        }
+        Ok(PayoutRequest {
+            batch_id: batch.id,
+            outputs: batch.outputs,
+            total_sat: batch.total_sat,
+            allowed_change_scripts: self.config.change_scripts.clone(),
+        })
+    }
+
+    pub fn sign_via(
+        &self,
+        id: &Hash32,
+        signer: &dyn ExternalSigner,
+    ) -> Result<PayoutBatch, LedgerError> {
+        let request = self.request_for(id)?;
+        let receipt = signer.sign(&request)?;
+        if receipt.batch_id != *id {
+            return Err(LedgerError::InvalidInput(
+                "signer answered for a different batch",
+            ));
+        }
+        self.record_signed(&receipt)
+    }
+
+    pub fn record_signed(&self, receipt: &PayoutReceipt) -> Result<PayoutBatch, LedgerError> {
+        let parsed = parse_transaction(&receipt.raw_tx).map_err(ReceiptError::from)?;
+        if parsed.txid != receipt.txid {
+            return Err(ReceiptError::TxidMismatch.into());
+        }
+        let txn = self.db.begin_write()?;
+        let batch = {
+            let tables = Tables::open(&txn)?;
+            let mut batch = load_batch(&tables.batches, &receipt.batch_id)?
+                .ok_or(LedgerError::UnknownBatch(receipt.batch_id))?;
+            if batch.transactions.iter().any(|tx| tx.txid == parsed.txid) {
+                return Ok(batch);
+            }
+            if !batch.state.holds_reservation() {
+                return Err(LedgerError::IllegalTransition {
+                    batch: batch.id,
+                    from: batch.state,
+                    action: "record a signed transaction",
+                });
+            }
+            if batch.transactions.len() >= MAX_SIGNED_TXS_PER_BATCH {
+                return Err(LedgerError::InvalidInput(
+                    "too many signed transactions for one batch",
+                ));
+            }
+            if tables.batch_txids.get(parsed.txid.as_slice())?.is_some() {
+                return Err(ReceiptError::TxidInOtherBatch.into());
+            }
+            verify_payout_transaction(&batch.outputs, &self.config.change_scripts, &parsed)?;
+            let new_inputs: BTreeSet<OutPoint> = parsed.inputs.iter().copied().collect();
+            for existing in &batch.transactions {
+                if !existing
+                    .inputs
+                    .iter()
+                    .any(|input| new_inputs.contains(input))
+                {
+                    return Err(ReceiptError::NotConflicting {
+                        existing_txid: existing.txid,
+                    }
+                    .into());
+                }
+            }
+            let input_count =
+                u64::try_from(parsed.inputs.len()).map_err(|_| LedgerError::Overflow("count"))?;
+            batch.transactions.push(SignedTx {
+                txid: parsed.txid,
+                inputs: parsed.inputs.clone(),
+            });
+            if batch.state == BatchState::Prepared {
+                batch.state = BatchState::ExternallySigned;
+            }
+            batch.rev = next_rev(batch.rev)?;
+            store_batch(&tables.batches, &batch)?;
+            tables
+                .batch_txids
+                .insert(parsed.txid.as_slice(), batch.id.as_slice())?;
+            append_audit(
+                &tables,
+                AuditKind::BatchSigned,
+                batch.seq,
+                &batch.id,
+                &parsed.txid,
+                [input_count, 0, 0],
+            )?;
+            batch
+        };
+        self.commit(txn, OP_RECORD_SIGNED)?;
+        Ok(batch)
+    }
+
+    pub fn record_broadcast(
+        &self,
+        batch_id: &Hash32,
+        txid: &Hash32,
+        chain: &dyn ChainView,
+    ) -> Result<PayoutBatch, LedgerError> {
+        let current = self
+            .batch(batch_id)?
+            .ok_or(LedgerError::UnknownBatch(*batch_id))?;
+        if !current.transactions.iter().any(|tx| tx.txid == *txid) {
+            return Err(LedgerError::InvalidInput(
+                "txid is not a signed transaction of this batch",
+            ));
+        }
+        if chain.tx_status(txid)? == TxStatus::Unknown {
+            return Err(LedgerError::NotObserved(*txid));
+        }
+        let txn = self.db.begin_write()?;
+        let (batch, changed) = {
+            let tables = Tables::open(&txn)?;
+            let mut batch = load_batch(&tables.batches, batch_id)?
+                .ok_or(LedgerError::UnknownBatch(*batch_id))?;
+            if !batch.transactions.iter().any(|tx| tx.txid == *txid) {
+                return Err(LedgerError::InvalidInput(
+                    "txid is not a signed transaction of this batch",
+                ));
+            }
+            let changed = match batch.state {
+                BatchState::ExternallySigned => {
+                    batch.state = BatchState::Broadcast;
+                    batch.broadcast_txid = Some(*txid);
+                    true
+                }
+                BatchState::Broadcast => {
+                    if batch.broadcast_txid == Some(*txid) {
+                        false
+                    } else {
+                        batch.broadcast_txid = Some(*txid);
+                        true
+                    }
+                }
+                BatchState::Confirmed => false,
+                other => {
+                    return Err(LedgerError::IllegalTransition {
+                        batch: batch.id,
+                        from: other,
+                        action: "record a broadcast",
+                    });
+                }
+            };
+            if changed {
+                batch.rev = next_rev(batch.rev)?;
+                store_batch(&tables.batches, &batch)?;
+                append_audit(
+                    &tables,
+                    AuditKind::BatchBroadcast,
+                    batch.seq,
+                    &batch.id,
+                    txid,
+                    [0, 0, 0],
+                )?;
+            }
+            (batch, changed)
+        };
+        if changed {
+            self.commit(txn, OP_RECORD_BROADCAST)?;
+        }
+        Ok(batch)
+    }
+
+    pub fn cancel_prepared(
+        &self,
+        id: &Hash32,
+        basis: CancelBasis,
+    ) -> Result<PayoutBatch, LedgerError> {
+        let txn = self.db.begin_write()?;
+        let (batch, changed) = {
+            let tables = Tables::open(&txn)?;
+            let mut batch =
+                load_batch(&tables.batches, id)?.ok_or(LedgerError::UnknownBatch(*id))?;
+            match batch.state {
+                BatchState::Prepared => {}
+                BatchState::Cancelled if batch.closure == Some(Closure::Cancelled(basis)) => {
+                    return Ok(batch);
+                }
+                other => {
+                    return Err(LedgerError::IllegalTransition {
+                        batch: batch.id,
+                        from: other,
+                        action: "cancel",
+                    });
+                }
+            }
+            release_reservation(&tables, &batch)?;
+            batch.state = BatchState::Cancelled;
+            batch.closure = Some(Closure::Cancelled(basis));
+            batch.rev = next_rev(batch.rev)?;
+            store_batch(&tables.batches, &batch)?;
+            tables.active_batches.remove(batch.seq)?;
+            append_audit(
+                &tables,
+                AuditKind::BatchCancelled,
+                batch.seq,
+                &batch.id,
+                &ZERO_HASH,
+                [u64::from(basis.code()), batch.total_sat, 0],
+            )?;
+            (batch, true)
+        };
+        if changed {
+            self.commit(txn, OP_CANCEL_PREPARED)?;
+        }
+        Ok(batch)
+    }
+
+    pub fn reconcile_payouts(
+        &self,
+        chain: &dyn ChainView,
+    ) -> Result<Vec<BatchTransition>, LedgerError> {
+        self.reconcile_payouts_checked(chain, &|| false)
+    }
+
+    pub fn reconcile_payouts_checked(
+        &self,
+        chain: &dyn ChainView,
+        abort: &dyn Fn() -> bool,
+    ) -> Result<Vec<BatchTransition>, LedgerError> {
+        let active = self.active_batches()?;
+        let (observations, tip) = self.observe_batches(chain, &active)?;
+        if observations.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.settle_observations(&observations, tip.unwrap_or(0), abort)
+    }
+
+    pub fn reconcile_payouts_checked_limit(
+        &self,
+        chain: &dyn ChainView,
+        abort: &dyn Fn() -> bool,
+        limit: usize,
+        after: Option<u64>,
+    ) -> Result<(Vec<BatchTransition>, bool, Option<u64>), LedgerError> {
+        let (observable, more, next) = self.page_observable_batches(after, limit)?;
+        if observable.is_empty() {
+            return Ok((Vec::new(), more, next));
+        }
+        let (observations, tip) = self.observe_batches(chain, &observable)?;
+        if observations.is_empty() {
+            return Ok((Vec::new(), more, next));
+        }
+        let transitions = self.settle_observations(&observations, tip.unwrap_or(0), abort)?;
+        Ok((transitions, more, next))
+    }
+
+    fn page_observable_batches(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<(Vec<PayoutBatch>, bool, Option<u64>), LedgerError> {
+        let read = self.db.begin_read()?;
+        let active_tbl = read.open_table(ACTIVE_BATCHES)?;
+        let batches_tbl = read.open_table(BATCHES)?;
+        let (page, more) = active_tbl.page_after(after, limit)?;
+        let mut list = Vec::new();
+        let mut last: Option<u64> = after;
+        for (seq_guard, value) in &page {
+            let seq = seq_guard.value();
+            last = Some(seq);
+            let id = hash_from(value.value())?;
+            let Some(batch) = load_batch(&batches_tbl, &id)? else {
+                continue;
+            };
+            if !batch.state_is_observable() {
+                continue;
+            }
+            list.push(batch);
+            if list.len() >= limit {
+                break;
+            }
+        }
+        let next = if page.is_empty() {
+            after
+        } else if list.len() >= limit {
+            list.last().map(|batch: &PayoutBatch| batch.seq)
+        } else {
+            last
+        };
+        Ok((list, more, next))
+    }
+
+    fn observe_batches(
+        &self,
+        chain: &dyn ChainView,
+        batches: &[PayoutBatch],
+    ) -> Result<(Vec<BatchObservation>, Option<u32>), LedgerError> {
+        let mut observations = Vec::with_capacity(batches.len());
+        let mut tip: Option<u32> = None;
+        for batch in batches {
+            if !batch.state_is_observable() {
+                continue;
+            }
+            let tip_height = if let Some(height) = tip {
+                height
+            } else {
+                let height = chain.tip_height()?;
+                tip = Some(height);
+                height
+            };
+            observations.push(observe_batch(chain, &self.config, batch, tip_height)?);
+        }
+        Ok((observations, tip))
+    }
+
+    fn settle_observations(
+        &self,
+        observations: &[BatchObservation],
+        tip: u32,
+        abort: &dyn Fn() -> bool,
+    ) -> Result<Vec<BatchTransition>, LedgerError> {
+        let txn = self.db.begin_write()?;
+        if abort() {
+            return Ok(Vec::new());
+        }
+        let mut transitions = Vec::new();
+        let mut dirty = false;
+        {
+            let tables = Tables::open(&txn)?;
+            for observation in observations {
+                let Some(mut batch) = load_batch(&tables.batches, &observation.id)? else {
+                    continue;
+                };
+                if batch.rev != observation.rev {
+                    continue;
+                }
+                dirty |= apply_batch_decision(
+                    &tables,
+                    &mut batch,
+                    observation,
+                    &self.config,
+                    &mut transitions,
+                )?;
+                if batch.state == BatchState::Confirmed
+                    && let Some(confirmation) = batch.confirmation
+                    && u64::from(tip)
+                        >= u64::from(confirmation.height) + u64::from(self.config.reorg_watch_depth)
+                {
+                    tables.active_batches.remove(batch.seq)?;
+                    dirty = true;
+                }
+            }
+        }
+        if dirty {
+            self.commit(txn, OP_RECONCILE_PAYOUTS)?;
+        }
+        Ok(transitions)
+    }
+
+    pub fn audit_records(
+        &self,
+        from_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<AuditRecord>, LedgerError> {
+        let read = self.db.begin_read()?;
+        let audit = read.open_table(AUDIT)?;
+        let end = from_seq.saturating_add(u64::try_from(limit).unwrap_or(u64::MAX));
+        let mut records = Vec::new();
+        for item in audit.range(from_seq..end)?.take(limit) {
+            let (key, value) = item?;
+            records.push(decode_audit(key.value(), value.value())?);
+        }
+        Ok(records)
+    }
+
+    pub fn audit_tail(&self, limit: usize) -> Result<Vec<AuditRecord>, LedgerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let read = self.db.begin_read()?;
+        let counters = read.open_table(META_U64)?;
+        let next = meta_u64(&counters, M_NEXT_AUDIT)?;
+        let count = u64::try_from(limit).unwrap_or(u64::MAX);
+        let start = next.saturating_sub(count);
+        let audit = read.open_table(AUDIT)?;
+        let mut records = Vec::new();
+        for item in audit.range(start..next)?.take(limit) {
+            let (key, value) = item?;
+            records.push(decode_audit(key.value(), value.value())?);
+        }
+        Ok(records)
+    }
+
+    pub fn verify_audit_chain(&self) -> Result<u64, LedgerError> {
+        let read = self.db.begin_read()?;
+        verify_audit_tables(
+            &read.open_table(AUDIT)?,
+            &read.open_table(META_U64)?,
+            &read.open_table(META_BYTES)?,
+        )
+    }
+
+    pub fn check_invariants(&self) -> Result<InvariantReport, LedgerError> {
+        let read = self.db.begin_read()?;
+        verify_audit_tables(
+            &read.open_table(AUDIT)?,
+            &read.open_table(META_U64)?,
+            &read.open_table(META_BYTES)?,
+        )?;
+        let rounds = read.open_table(ROUNDS)?;
+        let allocs = read.open_table(ROUND_ALLOCS)?;
+        let batches = read.open_table(BATCHES)?;
+        let balances = read.open_table(BALANCES)?;
+        let mut report = InvariantReport::default();
+        let credited = check_round_ledger(&rounds, &allocs, &mut report)?;
+        let (reserved, paid) = check_batch_ledger(&batches, &mut report)?;
+        verify_account_conservation(&balances, &credited, &reserved, &paid, &mut report)?;
+        Ok(report)
+    }
+}
+
+impl PoolLedgerStore for Ledger {
+    fn config(&self) -> &PoolConfig {
+        self.config()
+    }
+    fn share_count(&self) -> Result<u64, LedgerError> {
+        self.share_count()
+    }
+    fn balance(&self, account: MinerId) -> Result<Balance, LedgerError> {
+        self.balance(account)
+    }
+    fn payout_script(&self, account: MinerId) -> Result<Option<Vec<u8>>, LedgerError> {
+        self.payout_script(account)
+    }
+    fn round(&self, id: u64) -> Result<Option<Round>, LedgerError> {
+        self.round(id)
+    }
+    fn audit_tail(&self, limit: usize) -> Result<Vec<AuditRecord>, LedgerError> {
+        self.audit_tail(limit)
+    }
+    fn set_payout_script(&self, account: MinerId, script: Vec<u8>) -> Result<(), LedgerError> {
+        self.set_payout_script(account, &script)
+    }
+    fn prepare_payout_batch(
+        &self,
+        idempotency_key: Hash32,
+        policy: PayoutPolicy,
+    ) -> Result<Option<PayoutBatch>, LedgerError> {
+        self.prepare_payout_batch(idempotency_key, policy)
+    }
+    fn request_for(&self, prepared_id: &Hash32) -> Result<PayoutRequest, LedgerError> {
+        self.request_for(prepared_id)
+    }
+    fn record_signed(&self, receipt: &PayoutReceipt) -> Result<PayoutBatch, LedgerError> {
+        self.record_signed(receipt)
+    }
+    fn batch(&self, id: &Hash32) -> Result<Option<PayoutBatch>, LedgerError> {
+        self.batch(id)
+    }
+    fn cancel_prepared(&self, id: &Hash32, basis: CancelBasis) -> Result<PayoutBatch, LedgerError> {
+        self.cancel_prepared(id, basis)
+    }
+    fn record_found_block(&self, found: &BlockFound) -> Result<BlockRecorded, LedgerError> {
+        self.record_found_block(found)
+    }
+    fn reconcile_rounds(&self, chain: &dyn ChainView) -> Result<RoundReconcileReport, LedgerError> {
+        self.reconcile_rounds(chain)
+    }
+}
+
+fn check_round_ledger(
+    rounds: &Table<'_, u64, &'static [u8]>,
+    allocs: &Table<'_, &'static [u8], u64>,
+    report: &mut InvariantReport,
+) -> Result<AccountTotals, LedgerError> {
+    let mut credited: BTreeMap<u64, u128> = BTreeMap::new();
+    for item in rounds.rows_iter()? {
+        let (_, value) = item?;
+        let round = decode_round(value.value())?;
+        report.rounds += 1;
+        let list = load_allocs(allocs, round.id)?;
+        let mut sum: u64 = 0;
+        for (_, amount) in &list {
+            sum = sum
+                .checked_add(*amount)
+                .ok_or(LedgerError::Overflow("allocation sum"))?;
+        }
+        if round.reward_fixed {
+            if round.gross_sat.checked_sub(round.pool_fee_sat) != Some(round.net_sat) {
+                return Err(LedgerError::Invariant(format!(
+                    "round {} fee + net != gross",
+                    round.id
+                )));
+            }
+            if sum != round.net_sat {
+                return Err(LedgerError::Invariant(format!(
+                    "round {} allocations differ from net",
+                    round.id
+                )));
+            }
+        } else if !list.is_empty() || round.state == RoundState::Matured {
+            return Err(LedgerError::Invariant(format!(
+                "round {} has allocations without a fixed reward",
+                round.id
+            )));
+        }
+        if round.state == RoundState::Matured {
+            for (account, amount) in &list {
+                let entry = credited.entry(account.0).or_insert(0);
+                *entry += u128::from(*amount);
+                report.credited_sat += u128::from(*amount);
+            }
+        }
+    }
+    Ok(credited)
+}
+
+fn check_batch_ledger(
+    batches: &Table<'_, &'static [u8], &'static [u8]>,
+    report: &mut InvariantReport,
+) -> Result<(AccountTotals, AccountTotals), LedgerError> {
+    let mut reserved: BTreeMap<u64, u128> = BTreeMap::new();
+    let mut paid: BTreeMap<u64, u128> = BTreeMap::new();
+    for item in batches.rows_iter()? {
+        let (_, value) = item?;
+        let batch = decode_batch(value.value())?;
+        report.batches += 1;
+        let mut sum: u64 = 0;
+        for output in &batch.outputs {
+            sum = sum
+                .checked_add(output.amount_sat)
+                .ok_or(LedgerError::Overflow("batch total"))?;
+        }
+        if sum != batch.total_sat {
+            return Err(LedgerError::Invariant(
+                "batch total differs from outputs".into(),
+            ));
+        }
+        if batch.state == BatchState::Confirmed && batch.confirmation.is_none() {
+            return Err(LedgerError::Invariant(
+                "confirmed batch without confirmation".into(),
+            ));
+        }
+        let target = if batch.state.holds_reservation() {
+            Some(&mut reserved)
+        } else if batch.state == BatchState::Confirmed {
+            Some(&mut paid)
+        } else {
+            None
+        };
+        if let Some(target) = target {
+            for output in &batch.outputs {
+                *target.entry(output.account.0).or_insert(0) += u128::from(output.amount_sat);
+            }
+        }
+    }
+    Ok((reserved, paid))
+}
+
+fn load_batch_by_idempotency(
+    tables: &Tables<'_>,
+    idempotency_key: &Hash32,
+) -> Result<Option<PayoutBatch>, LedgerError> {
+    let Some(guard) = tables.batch_idem.get(idempotency_key.as_slice())? else {
+        return Ok(None);
+    };
+    let id = hash_from(guard.value())?;
+    match load_batch(&tables.batches, &id)? {
+        Some(batch) => Ok(Some(batch)),
+        None => Err(LedgerError::Corrupt(
+            "idempotency index points at no batch".into(),
+        )),
+    }
+}
+
+fn select_payout_outputs(
+    tables: &Tables<'_>,
+    policy: &PayoutPolicy,
+) -> Result<Vec<PayoutOutput>, LedgerError> {
+    let mut picks: Vec<PayoutOutput> = Vec::new();
+    let mut picks_weight_wu: u64 = 0;
+    for item in tables.balances.rows_iter()? {
+        let (key, value) = item?;
+        let balance = decode_balance(value.value())?;
+        if balance.available_sat < policy.min_payout_sat {
+            continue;
+        }
+        let account = MinerId(key.value());
+        let script = match tables.scripts.get(account.0)? {
+            Some(guard) => guard.value().to_vec(),
+            None => continue,
+        };
+        let weight = payout_output_weight_wu(script.len());
+        if picks_weight_wu.saturating_add(weight) > MAX_PAYOUT_OUTPUT_WEIGHT_WU {
+            break;
+        }
+        picks_weight_wu = picks_weight_wu.saturating_add(weight);
+        picks.push(PayoutOutput {
+            account,
+            script_pubkey: script,
+            amount_sat: balance.available_sat,
+        });
+        if picks.len() == policy.max_outputs {
+            break;
+        }
+    }
+    Ok(picks)
+}
+
+fn reserve_payout_batch(
+    tables: &Tables<'_>,
+    idempotency_key: Hash32,
+    picks: Vec<PayoutOutput>,
+) -> Result<PayoutBatch, LedgerError> {
+    let total = check_outputs(&picks)?;
+    let id = compute_batch_id(&idempotency_key, &picks)?;
+    let seq = bump(&tables.meta_u64, M_NEXT_BATCH, 1)?;
+    for pick in &picks {
+        let mut balance = load_balance(&tables.balances, pick.account)?;
+        balance.available_sat = balance
+            .available_sat
+            .checked_sub(pick.amount_sat)
+            .ok_or(LedgerError::Overflow("reserve exceeds available"))?;
+        balance.reserved_sat = balance
+            .reserved_sat
+            .checked_add(pick.amount_sat)
+            .ok_or(LedgerError::Overflow("reserved balance"))?;
+        store_balance(&tables.balances, pick.account, &balance)?;
+    }
+    let batch = PayoutBatch {
+        id,
+        seq,
+        idempotency_key,
+        state: BatchState::Prepared,
+        rev: 1,
+        outputs: picks,
+        total_sat: total,
+        transactions: Vec::new(),
+        broadcast_txid: None,
+        confirmation: None,
+        closure: None,
+    };
+    store_batch(&tables.batches, &batch)?;
+    tables.active_batches.insert(seq, id.as_slice())?;
+    tables
+        .batch_idem
+        .insert(idempotency_key.as_slice(), id.as_slice())?;
+    let outputs = u64::try_from(batch.outputs.len()).map_err(|_| LedgerError::Overflow("count"))?;
+    append_audit(
+        tables,
+        AuditKind::BatchPrepared,
+        seq,
+        &id,
+        &ZERO_HASH,
+        [total, outputs, 0],
+    )?;
+    Ok(batch)
+}
+
+fn verify_audit_tables(
+    audit: &Table<'_, u64, &'static [u8]>,
+    counters: &Table<'_, &'static str, u64>,
+    meta_bytes: &Table<'_, &'static str, &'static [u8]>,
+) -> Result<u64, LedgerError> {
+    let mut previous = ZERO_HASH;
+    let mut expected_seq = 0u64;
+    for item in audit.rows_iter()? {
+        let (key, value) = item?;
+        let seq = key.value();
+        if seq != expected_seq {
+            return Err(LedgerError::Invariant(format!(
+                "audit gap at {expected_seq}"
+            )));
+        }
+        let bytes = value.value();
+        if bytes.len() != AUDIT_BODY_LEN + 32 {
+            return Err(LedgerError::Invariant(format!(
+                "audit record {seq} has a bad length"
+            )));
+        }
+        let (body, stored) = bytes.split_at(AUDIT_BODY_LEN);
+        let chain = audit_chain_hash(&previous, seq, body);
+        if stored != chain.as_slice() {
+            return Err(LedgerError::Invariant(format!(
+                "audit chain broken at {seq}"
+            )));
+        }
+        previous = chain;
+        expected_seq = expected_seq
+            .checked_add(1)
+            .ok_or(LedgerError::Overflow("audit seq"))?;
+    }
+    if meta_u64(counters, M_NEXT_AUDIT)? != expected_seq {
+        return Err(LedgerError::Invariant(
+            "audit counter differs from records".into(),
+        ));
+    }
+    let head = match meta_bytes.get(M_AUDIT_HEAD)? {
+        Some(guard) => hash_from(guard.value())?,
+        None => ZERO_HASH,
+    };
+    if head != previous {
+        return Err(LedgerError::Invariant(
+            "audit head differs from records".into(),
+        ));
+    }
+    Ok(expected_seq)
+}
+
+fn verify_account_conservation(
+    balances: &Table<'_, u64, &'static [u8]>,
+    credited: &BTreeMap<u64, u128>,
+    reserved: &BTreeMap<u64, u128>,
+    paid: &BTreeMap<u64, u128>,
+    report: &mut InvariantReport,
+) -> Result<(), LedgerError> {
+    let mut accounts = BTreeSet::new();
+    accounts.extend(credited.keys().copied());
+    accounts.extend(reserved.keys().copied());
+    accounts.extend(paid.keys().copied());
+    for item in balances.rows_iter()? {
+        let (key, _) = item?;
+        accounts.insert(key.value());
+    }
+    for account in &accounts {
+        let balance = load_balance(balances, MinerId(*account))?;
+        let want_credited = credited.get(account).copied().unwrap_or(0);
+        let want_reserved = reserved.get(account).copied().unwrap_or(0);
+        let want_paid = paid.get(account).copied().unwrap_or(0);
+        if u128::from(balance.reserved_sat) != want_reserved {
+            return Err(LedgerError::Invariant(format!(
+                "account {account} reserved differs from open batches"
+            )));
+        }
+        if u128::from(balance.paid_sat) != want_paid {
+            return Err(LedgerError::Invariant(format!(
+                "account {account} paid differs from confirmed batches"
+            )));
+        }
+        let positive = u128::from(balance.available_sat)
+            + u128::from(balance.reserved_sat)
+            + u128::from(balance.paid_sat);
+        if positive.checked_sub(u128::from(balance.deficit_sat)) != Some(want_credited) {
+            return Err(LedgerError::Invariant(format!(
+                "account {account} balance does not equal credited allocations"
+            )));
+        }
+        report.available_sat += u128::from(balance.available_sat);
+        report.reserved_sat += u128::from(balance.reserved_sat);
+        report.paid_sat += u128::from(balance.paid_sat);
+        report.deficit_sat += u128::from(balance.deficit_sat);
+    }
+    report.accounts = accounts.len();
+    Ok(())
+}
+
+fn credit_share(tables: &Tables<'_>, share: &ShareCredit) -> Result<ShareReceipt, LedgerError> {
+    if tables.retired_jobs.get(share.job)?.is_some() {
+        return Err(LedgerError::JobRetired(share.job));
+    }
+    let tuple = share.tuple_key();
+    let existing = match tables.share_hashes.get(share.header_hash.as_slice())? {
+        Some(guard) => Some(decode_hash_entry(guard.value())?),
+        None => None,
+    };
+    if let Some((seq, work, stored_tuple)) = existing {
+        if work != share.work || stored_tuple != tuple {
+            return Err(LedgerError::ShareConflict { seq });
+        }
+        return Ok(ShareReceipt::Duplicate { seq });
+    }
+    if let Some(guard) = tables.retired_hashes.get(share.header_hash.as_slice())? {
+        let (seq, _, _) = decode_hash_entry(guard.value())?;
+        return Err(LedgerError::ShareConflict { seq });
+    }
+    let owner = match tables.share_tuples.get(tuple.as_slice())? {
+        Some(guard) => Some(hash_from(guard.value())?),
+        None => None,
+    };
+    if let Some(owner_hash) = owner {
+        let seq = match tables.share_hashes.get(owner_hash.as_slice())? {
+            Some(guard) => decode_hash_entry(guard.value())?.0,
+            None => {
+                return Err(LedgerError::Corrupt(
+                    "share tuple index points at no share".into(),
+                ));
+            }
+        };
+        return Err(LedgerError::ShareIdentityConflict { seq });
+    }
+    let seq = bump(&tables.meta_u64, M_NEXT_SHARE, 0)?;
+    tables
+        .shares
+        .insert(seq, encode_share(share.account, share.work)?.as_slice())?;
+    tables.share_hashes.insert(
+        share.header_hash.as_slice(),
+        encode_hash_entry(seq, share.work, &tuple)?.as_slice(),
+    )?;
+    tables
+        .share_tuples
+        .insert(tuple.as_slice(), share.header_hash.as_slice())?;
+    Ok(ShareReceipt::Credited { seq })
+}
+
+fn collect_window(
+    shares: &Table<'_, u64, &'static [u8]>,
+    pruned_below: u64,
+    end_seq: u64,
+    target: u128,
+) -> Result<WindowAccumulator, LedgerError> {
+    let mut window = WindowAccumulator::new(target);
+    let mut seq = end_seq;
+    loop {
+        if seq < pruned_below {
+            break;
+        }
+        if let Some(guard) = shares.get(seq)? {
+            let (account, work) = decode_share(guard.value())?;
+            window.push_older(account, work)?;
+            if window.is_full() {
+                return Ok(window);
+            }
+        }
+        if seq == pruned_below {
+            break;
+        }
+        seq -= 1;
+    }
+    if pruned_below > 0 {
+        return Err(LedgerError::WindowPruned);
+    }
+    Ok(window)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Canon {
+    Canonical,
+    Displaced,
+    Unknown,
+}
+
+fn apply_batch_decision(
+    tables: &Tables<'_>,
+    batch: &mut PayoutBatch,
+    observation: &BatchObservation,
+    config: &PoolConfig,
+    transitions: &mut Vec<BatchTransition>,
+) -> Result<bool, LedgerError> {
+    let from = batch.state;
+    let (kind, hash, fields) = match decide(batch, observation, config) {
+        Decision::None => return Ok(false),
+        Decision::Confirm(confirmation) => {
+            settle_paid(tables, batch)?;
+            batch.state = BatchState::Confirmed;
+            batch.broadcast_txid = Some(confirmation.txid);
+            batch.confirmation = Some(confirmation);
+            (
+                AuditKind::BatchConfirmed,
+                confirmation.txid,
+                [u64::from(confirmation.height), 0, 0],
+            )
+        }
+        Decision::Reconfirm(confirmation) => {
+            batch.broadcast_txid = Some(confirmation.txid);
+            batch.confirmation = Some(confirmation);
+            (
+                AuditKind::BatchConfirmed,
+                confirmation.txid,
+                [u64::from(confirmation.height), 1, 0],
+            )
+        }
+        Decision::Revert => {
+            unsettle_paid(tables, batch)?;
+            batch.state = BatchState::Broadcast;
+            batch.confirmation = None;
+            (
+                AuditKind::BatchReverted,
+                ZERO_HASH,
+                [
+                    u64::from(BatchState::Confirmed.code()),
+                    u64::from(BatchState::Broadcast.code()),
+                    0,
+                ],
+            )
+        }
+        Decision::Fail(conflicting_txid) => {
+            release_reservation(tables, batch)?;
+            batch.state = BatchState::Failed;
+            batch.closure = Some(Closure::Failed { conflicting_txid });
+            tables.active_batches.remove(batch.seq)?;
+            (
+                AuditKind::BatchFailed,
+                conflicting_txid,
+                [batch.total_sat, 0, 0],
+            )
+        }
+    };
+    batch.rev = next_rev(batch.rev)?;
+    store_batch(&tables.batches, batch)?;
+    append_audit(tables, kind, batch.seq, &batch.id, &hash, fields)?;
+    transitions.push(BatchTransition {
+        batch_id: batch.id,
+        from,
+        to: batch.state,
+    });
+    Ok(true)
+}
+
+struct RoundObservation {
+    id: u64,
+    block_hash: Hash32,
+    canon: Canon,
+    coinbase: Option<ObservedCoinbase>,
+}
+
+struct RoundOutcome {
+    transition: Option<RoundTransition>,
+    anomaly: Option<&'static str>,
+    dirty: bool,
+}
+
+impl RoundOutcome {
+    fn unchanged() -> Self {
+        Self {
+            transition: None,
+            anomaly: None,
+            dirty: false,
+        }
+    }
+}
+
+fn confirmations(tip: u32, height: u32) -> u64 {
+    tip.checked_sub(height)
+        .map_or(0, |depth| u64::from(depth) + 1)
+}
+
+#[derive(Default)]
+struct RoundTotals {
+    credited_sat: u64,
+    reversed_sat: u64,
+    deficit_created_sat: u64,
+}
+
+enum RoundStep {
+    Continue,
+    Anomaly(&'static str),
+    MissingCoinbase,
+}
+
+fn apply_round_observation(
+    tables: &Tables<'_>,
+    config: &PoolConfig,
+    observation: &RoundObservation,
+    tip: u32,
+) -> Result<RoundOutcome, LedgerError> {
+    let Some(mut round) = load_round(&tables.rounds, observation.id)? else {
+        return Ok(RoundOutcome::unchanged());
+    };
+    if round.block_hash != observation.block_hash {
+        return Ok(RoundOutcome::unchanged());
+    }
+    let from = round.state;
+    let was_fixed = round.reward_fixed;
+    let depth = confirmations(tip, round.height);
+    let mut totals = RoundTotals::default();
+    match apply_round_state(tables, config, &mut round, observation, depth, &mut totals)? {
+        RoundStep::Continue => {}
+        RoundStep::Anomaly(reason) => {
+            let mut outcome = RoundOutcome::unchanged();
+            outcome.anomaly = Some(reason);
+            return Ok(outcome);
+        }
+        RoundStep::MissingCoinbase => return Ok(RoundOutcome::unchanged()),
+    }
+    let mut outcome = RoundOutcome::unchanged();
+    let settled = u64::from(tip) >= u64::from(round.height) + u64::from(config.reorg_watch_depth)
+        && (observation.canon != Canon::Canonical || round.reward_fixed);
+    if settled {
+        if matches!(round.state, RoundState::Pending | RoundState::Immature) {
+            round.state = RoundState::Orphaned;
+            append_audit(
+                tables,
+                AuditKind::RoundOrphaned,
+                round.id,
+                &round.block_hash,
+                &ZERO_HASH,
+                [0, 0, 0],
+            )?;
+        }
+        tables.open_rounds.remove(round.id)?;
+        outcome.dirty = true;
+    }
+    if round.state != from || settled || round.reward_fixed != was_fixed {
+        store_round(&tables.rounds, &round)?;
+        outcome.dirty = true;
+    }
+    if round.state != from {
+        outcome.transition = Some(RoundTransition {
+            round: round.id,
+            from,
+            to: round.state,
+            credited_sat: totals.credited_sat,
+            reversed_sat: totals.reversed_sat,
+            deficit_created_sat: totals.deficit_created_sat,
+        });
+    }
+    Ok(outcome)
+}
+
+fn apply_round_state(
+    tables: &Tables<'_>,
+    config: &PoolConfig,
+    round: &mut Round,
+    observation: &RoundObservation,
+    depth: u64,
+    totals: &mut RoundTotals,
+) -> Result<RoundStep, LedgerError> {
+    let from = round.state;
+    match (from, observation.canon) {
+        (RoundState::Matured, Canon::Displaced) => {
+            let (reversed, deficit) = reverse_round_credits(tables, round.id)?;
+            totals.reversed_sat = reversed;
+            totals.deficit_created_sat = deficit;
+            round.state = RoundState::Orphaned;
+            append_audit(
+                tables,
+                AuditKind::RoundOrphaned,
+                round.id,
+                &round.block_hash,
+                &ZERO_HASH,
+                [reversed, deficit, 1],
+            )?;
+        }
+        (RoundState::Matured, Canon::Canonical) => {
+            if depth < u64::from(config.coinbase_maturity) {
+                let (reversed, deficit) = reverse_round_credits(tables, round.id)?;
+                totals.reversed_sat = reversed;
+                totals.deficit_created_sat = deficit;
+                round.state = RoundState::Immature;
+                append_audit(
+                    tables,
+                    AuditKind::RoundOrphaned,
+                    round.id,
+                    &round.block_hash,
+                    &ZERO_HASH,
+                    [reversed, deficit, 1],
+                )?;
+            }
+        }
+        (_, Canon::Unknown) => {}
+        (_, Canon::Displaced) => {
+            if from != RoundState::Orphaned {
+                round.state = RoundState::Orphaned;
+                append_audit(
+                    tables,
+                    AuditKind::RoundOrphaned,
+                    round.id,
+                    &round.block_hash,
+                    &ZERO_HASH,
+                    [0, 0, 0],
+                )?;
+            }
+        }
+        (_, Canon::Canonical) => {
+            match apply_canonical_round(tables, config, round, observation, depth)? {
+                CanonicalApply::Applied(credited) => totals.credited_sat = credited,
+                CanonicalApply::Anomaly(reason) => return Ok(RoundStep::Anomaly(reason)),
+                CanonicalApply::MissingCoinbase => return Ok(RoundStep::MissingCoinbase),
+            }
+        }
+    }
+    Ok(RoundStep::Continue)
+}
+
+enum CanonicalApply {
+    MissingCoinbase,
+    Anomaly(&'static str),
+    Applied(u64),
+}
+
+fn apply_canonical_round(
+    tables: &Tables<'_>,
+    config: &PoolConfig,
+    round: &mut Round,
+    observation: &RoundObservation,
+    depth: u64,
+) -> Result<CanonicalApply, LedgerError> {
+    let from = round.state;
+    if !round.reward_fixed {
+        let Some(coinbase) = observation.coinbase.as_ref() else {
+            return Ok(CanonicalApply::MissingCoinbase);
+        };
+        if let Some(reason) = fix_reward(tables, config, round, coinbase)? {
+            return Ok(CanonicalApply::Anomaly(reason));
+        }
+    }
+    if depth >= u64::from(config.coinbase_maturity) {
+        let credited = credit_round_allocations(tables, round.id)?;
+        round.state = RoundState::Matured;
+        append_audit(
+            tables,
+            AuditKind::RoundMatured,
+            round.id,
+            &round.block_hash,
+            &ZERO_HASH,
+            [credited, 0, 0],
+        )?;
+        return Ok(CanonicalApply::Applied(credited));
+    }
+    if from != RoundState::Immature {
+        round.state = RoundState::Immature;
+        if from == RoundState::Orphaned {
+            append_audit(
+                tables,
+                AuditKind::RoundRevived,
+                round.id,
+                &round.block_hash,
+                &ZERO_HASH,
+                [0, 0, 0],
+            )?;
+        }
+    }
+    Ok(CanonicalApply::Applied(0))
+}
+
+fn fix_reward(
+    tables: &Tables<'_>,
+    config: &PoolConfig,
+    round: &mut Round,
+    coinbase: &ObservedCoinbase,
+) -> Result<Option<&'static str>, LedgerError> {
+    if coinbase.txid != round.coinbase_txid {
+        return Ok(Some("observed coinbase txid differs from the claimed txid"));
+    }
+    let mut total: u64 = 0;
+    let mut pool: u64 = 0;
+    for output in &coinbase.outputs {
+        let Some(next_total) = total.checked_add(output.value_sat) else {
+            return Ok(Some("observed coinbase total overflows"));
+        };
+        total = next_total;
+        if output.script_pubkey == config.pool_coinbase_script {
+            let Some(next_pool) = pool.checked_add(output.value_sat) else {
+                return Ok(Some("observed pool coinbase output total overflows"));
+            };
+            pool = next_pool;
+        }
+    }
+    if total > MAX_MONEY_SAT {
+        return Ok(Some("observed coinbase exceeds the money supply"));
+    }
+    if total != round.claimed_coinbase_value_sat {
+        return Ok(Some(
+            "observed coinbase total differs from the claimed value",
+        ));
+    }
+    let (fee, net) = split_pool_fee(pool, config.pool_fee_bps)?;
+    let weights = load_weights(&tables.round_weights, round.id)?;
+    let allocations = split_reward(net, &weights)?;
+    for (account, amount) in &allocations {
+        tables
+            .round_allocs
+            .insert(round_key(round.id, *account).as_slice(), *amount)?;
+    }
+    round.reward_fixed = true;
+    round.gross_sat = pool;
+    round.pool_fee_sat = fee;
+    round.net_sat = net;
+    append_audit(
+        tables,
+        AuditKind::RewardFixed,
+        round.id,
+        &round.block_hash,
+        &ZERO_HASH,
+        [pool, fee, net],
+    )?;
+    Ok(None)
+}
+
+fn credit_round_allocations(tables: &Tables<'_>, round_id: u64) -> Result<u64, LedgerError> {
+    let allocations = load_allocs(&tables.round_allocs, round_id)?;
+    let mut total: u64 = 0;
+    for (account, amount) in allocations {
+        let mut balance = load_balance(&tables.balances, account)?;
+        let offset = balance.deficit_sat.min(amount);
+        balance.deficit_sat -= offset;
+        balance.available_sat = balance
+            .available_sat
+            .checked_add(amount - offset)
+            .ok_or(LedgerError::Overflow("available balance"))?;
+        store_balance(&tables.balances, account, &balance)?;
+        total = total
+            .checked_add(amount)
+            .ok_or(LedgerError::Overflow("credited total"))?;
+    }
+    Ok(total)
+}
+
+fn reverse_round_credits(tables: &Tables<'_>, round_id: u64) -> Result<(u64, u64), LedgerError> {
+    let allocations = load_allocs(&tables.round_allocs, round_id)?;
+    let mut reversed: u64 = 0;
+    let mut deficit_total: u64 = 0;
+    for (account, amount) in allocations {
+        let mut balance = load_balance(&tables.balances, account)?;
+        let take = balance.available_sat.min(amount);
+        balance.available_sat -= take;
+        let shortfall = amount - take;
+        balance.deficit_sat = balance
+            .deficit_sat
+            .checked_add(shortfall)
+            .ok_or(LedgerError::Overflow("deficit balance"))?;
+        store_balance(&tables.balances, account, &balance)?;
+        reversed = reversed
+            .checked_add(amount)
+            .ok_or(LedgerError::Overflow("reversed total"))?;
+        deficit_total = deficit_total
+            .checked_add(shortfall)
+            .ok_or(LedgerError::Overflow("deficit total"))?;
+    }
+    Ok((reversed, deficit_total))
+}
+
+struct TxObservation {
+    txid: Hash32,
+    status: TxStatus,
+    canonical: bool,
+    confirmations: u64,
+    dead_by: Option<Hash32>,
+}
+
+struct BatchObservation {
+    id: Hash32,
+    rev: u64,
+    txs: Vec<TxObservation>,
+}
+
+enum Decision {
+    None,
+    Confirm(Confirmation),
+    Reconfirm(Confirmation),
+    Revert,
+    Fail(Hash32),
+}
+
+fn observe_batch(
+    chain: &dyn ChainView,
+    config: &PoolConfig,
+    batch: &PayoutBatch,
+    tip: u32,
+) -> Result<BatchObservation, LedgerError> {
+    let mut confirmed = Vec::with_capacity(batch.transactions.len());
+    for tx in &batch.transactions {
+        let status = chain.tx_status(&tx.txid)?;
+        let (canonical, depth) = match status {
+            TxStatus::Confirmed { block_hash, height } => (
+                matches!(chain.block_location(&block_hash, height)?, super::BlockLocation::Canonical { height: observed } if observed == height),
+                confirmations(tip, height),
+            ),
+            _ => (false, 0),
+        };
+        confirmed.push((tx, status, canonical, depth));
+    }
+    let conclusive = confirmed.iter().any(|(_, _, canonical, depth)| {
+        *canonical && *depth >= u64::from(config.payout_confirmations)
+    });
+    let mut txs = Vec::with_capacity(batch.transactions.len());
+    for (tx, status, canonical, depth) in confirmed {
+        let confirmed_here = canonical && matches!(status, TxStatus::Confirmed { .. });
+        let dead_by = if conclusive || confirmed_here || status == TxStatus::InMempool {
+            None
+        } else {
+            find_dead_spend(chain, config, batch, tx, tip)?
+        };
+        txs.push(TxObservation {
+            txid: tx.txid,
+            status,
+            canonical,
+            confirmations: depth,
+            dead_by,
+        });
+    }
+    Ok(BatchObservation {
+        id: batch.id,
+        rev: batch.rev,
+        txs,
+    })
+}
+
+fn find_dead_spend(
+    chain: &dyn ChainView,
+    config: &PoolConfig,
+    batch: &PayoutBatch,
+    tx: &SignedTx,
+    tip: u32,
+) -> Result<Option<Hash32>, LedgerError> {
+    for input in &tx.inputs {
+        let Some(spend) = chain.confirmed_spender(input)? else {
+            continue;
+        };
+        if batch
+            .transactions
+            .iter()
+            .any(|known| known.txid == spend.spender_txid)
+        {
+            continue;
+        }
+        let canonical = matches!(chain.block_location(&spend.block_hash, spend.height)?, super::BlockLocation::Canonical { height } if height == spend.height);
+        if canonical && confirmations(tip, spend.height) >= u64::from(config.abandon_confirmations)
+        {
+            return Ok(Some(spend.spender_txid));
+        }
+    }
+    Ok(None)
+}
+
+fn decide(batch: &PayoutBatch, observation: &BatchObservation, config: &PoolConfig) -> Decision {
+    let enough = observation
+        .txs
+        .iter()
+        .find(|tx| tx.canonical && tx.confirmations >= u64::from(config.payout_confirmations))
+        .and_then(|tx| match tx.status {
+            TxStatus::Confirmed { block_hash, height } => Some(Confirmation {
+                txid: tx.txid,
+                block_hash,
+                height,
+            }),
+            _ => None,
+        });
+    match batch.state {
+        BatchState::ExternallySigned | BatchState::Broadcast => {
+            if let Some(confirmation) = enough {
+                return Decision::Confirm(confirmation);
+            }
+            if !observation.txs.is_empty()
+                && observation.txs.iter().all(|tx| tx.dead_by.is_some())
+                && let Some(conflicting) = observation.txs.iter().find_map(|tx| tx.dead_by)
+            {
+                return Decision::Fail(conflicting);
+            }
+            Decision::None
+        }
+        BatchState::Confirmed => {
+            let still_confirmed = batch.confirmation.is_some_and(|recorded| {
+                observation.txs.iter().any(|tx| {
+                    tx.txid == recorded.txid
+                        && tx.canonical
+                        && tx.confirmations >= u64::from(config.payout_confirmations)
+                        && matches!(
+                            tx.status,
+                            TxStatus::Confirmed { block_hash, height }
+                                if block_hash == recorded.block_hash && height == recorded.height
+                        )
+                })
+            });
+            if still_confirmed {
+                Decision::None
+            } else if let Some(confirmation) = enough {
+                Decision::Reconfirm(confirmation)
+            } else {
+                Decision::Revert
+            }
+        }
+        _ => Decision::None,
+    }
+}
+
+fn apply_to_outputs(
+    tables: &Tables<'_>,
+    outputs: &[PayoutOutput],
+    mut mutate: impl FnMut(&mut Balance, u64) -> Result<(), LedgerError>,
+) -> Result<(), LedgerError> {
+    for output in outputs {
+        let mut balance = load_balance(&tables.balances, output.account)?;
+        mutate(&mut balance, output.amount_sat)?;
+        store_balance(&tables.balances, output.account, &balance)?;
+    }
+    Ok(())
+}
+
+fn settle_paid(tables: &Tables<'_>, batch: &PayoutBatch) -> Result<(), LedgerError> {
+    apply_to_outputs(tables, &batch.outputs, |balance, amount| {
+        balance.reserved_sat = balance.reserved_sat.checked_sub(amount).ok_or_else(|| {
+            LedgerError::Corrupt("confirming a payout exceeds the reservation".into())
+        })?;
+        balance.paid_sat = balance
+            .paid_sat
+            .checked_add(amount)
+            .ok_or(LedgerError::Overflow("paid balance"))?;
+        Ok(())
+    })
+}
+
+fn unsettle_paid(tables: &Tables<'_>, batch: &PayoutBatch) -> Result<(), LedgerError> {
+    apply_to_outputs(tables, &batch.outputs, |balance, amount| {
+        balance.paid_sat = balance.paid_sat.checked_sub(amount).ok_or_else(|| {
+            LedgerError::Corrupt("reverting a payout exceeds the paid balance".into())
+        })?;
+        balance.reserved_sat = balance
+            .reserved_sat
+            .checked_add(amount)
+            .ok_or(LedgerError::Overflow("reserved balance"))?;
+        Ok(())
+    })
+}
+
+fn release_reservation(tables: &Tables<'_>, batch: &PayoutBatch) -> Result<(), LedgerError> {
+    apply_to_outputs(tables, &batch.outputs, |balance, amount| {
+        balance.reserved_sat = balance.reserved_sat.checked_sub(amount).ok_or_else(|| {
+            LedgerError::Corrupt("releasing a payout exceeds the reservation".into())
+        })?;
+        let offset = balance.deficit_sat.min(amount);
+        balance.deficit_sat -= offset;
+        balance.available_sat = balance
+            .available_sat
+            .checked_add(amount - offset)
+            .ok_or(LedgerError::Overflow("available balance"))?;
+        Ok(())
+    })
+}
+
+fn next_rev(rev: u64) -> Result<u64, LedgerError> {
+    rev.checked_add(1)
+        .ok_or(LedgerError::Overflow("batch revision"))
+}
+
+fn meta_u64(meta: &Table<'_, &'static str, u64>, key: &'static str) -> Result<u64, LedgerError> {
+    Ok(meta.get(key)?.map_or(0, |guard| guard.value()))
+}
+
+fn bump(
+    meta: &Table<'_, &'static str, u64>,
+    key: &'static str,
+    first: u64,
+) -> Result<u64, LedgerError> {
+    let current = meta.get(key)?.map_or(first, |guard| guard.value());
+    let next = current
+        .checked_add(1)
+        .ok_or(LedgerError::Overflow("counter"))?;
+    meta.insert(key, next)?;
+    Ok(current)
+}
+
+fn low64(value: u128) -> u64 {
+    u64::try_from(value & u128::from(u64::MAX)).unwrap_or(u64::MAX)
+}
+
+fn audit_chain_hash(previous: &Hash32, seq: u64, body: &[u8]) -> Hash32 {
+    let mut hasher = Sha256::new();
+    hasher.update(AUDIT_DOMAIN);
+    hasher.update(previous);
+    hasher.update(seq.to_be_bytes());
+    hasher.update(body);
+    hasher.finalize().into()
+}
+
+fn append_audit(
+    tables: &Tables<'_>,
+    kind: AuditKind,
+    subject: u64,
+    hash: &Hash32,
+    hash2: &Hash32,
+    values: [u64; 3],
+) -> Result<(), LedgerError> {
+    let seq = bump(&tables.meta_u64, M_NEXT_AUDIT, 0)?;
+    let previous = match tables.meta_bytes.get(M_AUDIT_HEAD)? {
+        Some(guard) => hash_from(guard.value())?,
+        None => ZERO_HASH,
+    };
+    let mut body = Enc::new();
+    body.u8(kind.code());
+    body.u64(subject);
+    body.hash(hash);
+    body.hash(hash2);
+    for value in values {
+        body.u64(value);
+    }
+    let body = body.finish()?;
+    let chain = audit_chain_hash(&previous, seq, &body);
+    let mut record = body;
+    record.extend_from_slice(&chain);
+    tables.audit.insert(seq, record.as_slice())?;
+    tables.meta_bytes.insert(M_AUDIT_HEAD, chain.as_slice())?;
+    Ok(())
+}
+
+fn decode_audit(seq: u64, bytes: &[u8]) -> Result<AuditRecord, LedgerError> {
+    let mut dec = Dec::new(bytes);
+    let kind = AuditKind::from_code(dec.u8()?).ok_or(LedgerError::Codec("unknown audit kind"))?;
+    let subject = dec.u64()?;
+    let hash = dec.hash()?;
+    let hash2 = dec.hash()?;
+    let values = [dec.u64()?, dec.u64()?, dec.u64()?];
+    let chain = dec.hash()?;
+    dec.finish()?;
+    Ok(AuditRecord {
+        seq,
+        kind,
+        subject,
+        hash,
+        hash2,
+        values,
+        chain,
+    })
+}
+
+fn hash_from(bytes: &[u8]) -> Result<Hash32, LedgerError> {
+    bytes
+        .try_into()
+        .map_err(|_| LedgerError::Corrupt("stored hash has the wrong length".into()))
+}
+
+fn round_key(round: u64, account: MinerId) -> [u8; 16] {
+    let mut key = [0u8; 16];
+    key[..8].copy_from_slice(&round.to_be_bytes());
+    key[8..].copy_from_slice(&account.0.to_be_bytes());
+    key
+}
+
+fn encode_share(account: MinerId, work: u128) -> Result<Vec<u8>, LedgerError> {
+    let mut enc = Enc::new();
+    enc.u64(account.0);
+    enc.u128(work);
+    enc.finish()
+}
+
+fn decode_share(bytes: &[u8]) -> Result<(MinerId, u128), LedgerError> {
+    let mut dec = Dec::new(bytes);
+    let account = MinerId(dec.u64()?);
+    let work = dec.u128()?;
+    dec.finish()?;
+    Ok((account, work))
+}
+
+fn encode_hash_entry(seq: u64, work: u128, tuple: &[u8]) -> Result<Vec<u8>, LedgerError> {
+    let mut enc = Enc::new();
+    enc.u64(seq);
+    enc.u128(work);
+    enc.bytes(tuple);
+    enc.finish()
+}
+
+fn decode_hash_entry(bytes: &[u8]) -> Result<(u64, u128, Vec<u8>), LedgerError> {
+    let mut dec = Dec::new(bytes);
+    let seq = dec.u64()?;
+    let work = dec.u128()?;
+    let tuple = dec.bytes(MAX_SHARE_TUPLE_LEN)?.to_vec();
+    dec.finish()?;
+    Ok((seq, work, tuple))
+}
+
+fn encode_balance(balance: &Balance) -> Result<Vec<u8>, LedgerError> {
+    let mut enc = Enc::new();
+    enc.u64(balance.available_sat);
+    enc.u64(balance.reserved_sat);
+    enc.u64(balance.paid_sat);
+    enc.u64(balance.deficit_sat);
+    enc.finish()
+}
+
+fn decode_balance(bytes: &[u8]) -> Result<Balance, LedgerError> {
+    let mut dec = Dec::new(bytes);
+    let balance = Balance {
+        available_sat: dec.u64()?,
+        reserved_sat: dec.u64()?,
+        paid_sat: dec.u64()?,
+        deficit_sat: dec.u64()?,
+    };
+    dec.finish()?;
+    Ok(balance)
+}
+
+fn load_balance(
+    balances: &Table<'_, u64, &'static [u8]>,
+    account: MinerId,
+) -> Result<Balance, LedgerError> {
+    match balances.get(account.0)? {
+        Some(guard) => decode_balance(guard.value()),
+        None => Ok(Balance::default()),
+    }
+}
+
+fn store_balance(
+    balances: &Table<'_, u64, &'static [u8]>,
+    account: MinerId,
+    balance: &Balance,
+) -> Result<(), LedgerError> {
+    balances.insert(account.0, encode_balance(balance)?.as_slice())?;
+    Ok(())
+}
+
+fn encode_round(round: &Round) -> Result<Vec<u8>, LedgerError> {
+    let mut enc = Enc::new();
+    enc.u64(round.id);
+    enc.hash(&round.block_hash);
+    enc.u32(round.height);
+    enc.u64(round.solving_seq);
+    enc.hash(&round.coinbase_txid);
+    enc.u64(round.claimed_coinbase_value_sat);
+    enc.u128(round.window_work_total);
+    enc.u8(u8::from(round.reward_fixed));
+    enc.u64(round.gross_sat);
+    enc.u64(round.pool_fee_sat);
+    enc.u64(round.net_sat);
+    enc.u8(round.state.code());
+    enc.finish()
+}
+
+fn decode_round(bytes: &[u8]) -> Result<Round, LedgerError> {
+    let mut dec = Dec::new(bytes);
+    let id = dec.u64()?;
+    let block_hash = dec.hash()?;
+    let height = dec.u32()?;
+    let solving_seq = dec.u64()?;
+    let coinbase_txid = dec.hash()?;
+    let claimed_coinbase_value_sat = dec.u64()?;
+    let window_work_total = dec.u128()?;
+    let reward_fixed = match dec.u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(LedgerError::Codec("bad reward_fixed flag")),
+    };
+    let gross_sat = dec.u64()?;
+    let pool_fee_sat = dec.u64()?;
+    let net_sat = dec.u64()?;
+    let state = RoundState::from_code(dec.u8()?).ok_or(LedgerError::Codec("bad round state"))?;
+    dec.finish()?;
+    Ok(Round {
+        id,
+        block_hash,
+        height,
+        solving_seq,
+        coinbase_txid,
+        claimed_coinbase_value_sat,
+        window_work_total,
+        reward_fixed,
+        gross_sat,
+        pool_fee_sat,
+        net_sat,
+        state,
+    })
+}
+
+fn load_round(
+    rounds: &Table<'_, u64, &'static [u8]>,
+    id: u64,
+) -> Result<Option<Round>, LedgerError> {
+    match rounds.get(id)? {
+        Some(guard) => Ok(Some(decode_round(guard.value())?)),
+        None => Ok(None),
+    }
+}
+
+fn store_round(rounds: &Table<'_, u64, &'static [u8]>, round: &Round) -> Result<(), LedgerError> {
+    rounds.insert(round.id, encode_round(round)?.as_slice())?;
+    Ok(())
+}
+
+fn round_id_for_block(
+    index: &Table<'_, &'static [u8], u64>,
+    block_hash: &Hash32,
+) -> Result<Option<u64>, LedgerError> {
+    Ok(index.get(block_hash.as_slice())?.map(|guard| guard.value()))
+}
+
+fn load_allocs(
+    allocs: &Table<'_, &'static [u8], u64>,
+    round: u64,
+) -> Result<Vec<(MinerId, u64)>, LedgerError> {
+    let start = round_key(round, MinerId(0));
+    let end = round_key(round, MinerId(u64::MAX));
+    let mut list = Vec::new();
+    for item in allocs.range(start.as_slice()..=end.as_slice())? {
+        let (key, value) = item?;
+        list.push((account_from_round_key(key.value())?, value.value()));
+    }
+    Ok(list)
+}
+
+fn load_weights(
+    weights: &Table<'_, &'static [u8], u128>,
+    round: u64,
+) -> Result<Vec<(MinerId, u128)>, LedgerError> {
+    let start = round_key(round, MinerId(0));
+    let end = round_key(round, MinerId(u64::MAX));
+    let mut list = Vec::new();
+    for item in weights.range(start.as_slice()..=end.as_slice())? {
+        let (key, value) = item?;
+        list.push((account_from_round_key(key.value())?, value.value()));
+    }
+    Ok(list)
+}
+
+fn account_from_round_key(key: &[u8]) -> Result<MinerId, LedgerError> {
+    let tail: [u8; 8] = key
+        .get(8..)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| LedgerError::Corrupt("round key has the wrong length".into()))?;
+    Ok(MinerId(u64::from_be_bytes(tail)))
+}
+
+fn encode_batch(batch: &PayoutBatch) -> Result<Vec<u8>, LedgerError> {
+    let mut enc = Enc::new();
+    enc.hash(&batch.id);
+    enc.u64(batch.seq);
+    enc.hash(&batch.idempotency_key);
+    enc.u8(batch.state.code());
+    enc.u64(batch.rev);
+    enc.u64(batch.total_sat);
+    enc.len32(batch.outputs.len());
+    for output in &batch.outputs {
+        enc.u64(output.account.0);
+        enc.u64(output.amount_sat);
+        enc.bytes(&output.script_pubkey);
+    }
+    enc.len32(batch.transactions.len());
+    for tx in &batch.transactions {
+        enc.hash(&tx.txid);
+        enc.len32(tx.inputs.len());
+        for input in &tx.inputs {
+            enc.hash(&input.txid);
+            enc.u32(input.vout);
+        }
+    }
+    match batch.broadcast_txid {
+        Some(txid) => {
+            enc.u8(1);
+            enc.hash(&txid);
+        }
+        None => enc.u8(0),
+    }
+    match batch.confirmation {
+        Some(confirmation) => {
+            enc.u8(1);
+            enc.hash(&confirmation.txid);
+            enc.hash(&confirmation.block_hash);
+            enc.u32(confirmation.height);
+        }
+        None => enc.u8(0),
+    }
+    match batch.closure {
+        None => enc.u8(0),
+        Some(Closure::Cancelled(basis)) => {
+            enc.u8(1);
+            enc.u8(basis.code());
+        }
+        Some(Closure::Failed { conflicting_txid }) => {
+            enc.u8(2);
+            enc.hash(&conflicting_txid);
+        }
+    }
+    enc.finish()
+}
+
+fn decode_batch(bytes: &[u8]) -> Result<PayoutBatch, LedgerError> {
+    let mut dec = Dec::new(bytes);
+    let id = dec.hash()?;
+    let seq = dec.u64()?;
+    let idempotency_key = dec.hash()?;
+    let state = BatchState::from_code(dec.u8()?).ok_or(LedgerError::Codec("bad batch state"))?;
+    let rev = dec.u64()?;
+    let total_sat = dec.u64()?;
+    let output_count = dec.count(MAX_BATCH_OUTPUTS, 20)?;
+    let mut outputs = Vec::with_capacity(output_count);
+    for _ in 0..output_count {
+        let account = MinerId(dec.u64()?);
+        let amount_sat = dec.u64()?;
+        let script_pubkey = dec.bytes(MAX_SCRIPT_LEN)?.to_vec();
+        outputs.push(PayoutOutput {
+            account,
+            script_pubkey,
+            amount_sat,
+        });
+    }
+    let tx_count = dec.count(MAX_SIGNED_TXS_PER_BATCH, 36)?;
+    let mut transactions = Vec::with_capacity(tx_count);
+    for _ in 0..tx_count {
+        let txid = dec.hash()?;
+        let input_count = dec.count(MAX_INPUTS_PER_TX, 36)?;
+        let mut inputs = Vec::with_capacity(input_count);
+        for _ in 0..input_count {
+            let outpoint_txid = dec.hash()?;
+            let vout = dec.u32()?;
+            inputs.push(OutPoint {
+                txid: outpoint_txid,
+                vout,
+            });
+        }
+        transactions.push(SignedTx { txid, inputs });
+    }
+    let broadcast_txid = match dec.u8()? {
+        0 => None,
+        1 => Some(dec.hash()?),
+        _ => return Err(LedgerError::Codec("bad broadcast flag")),
+    };
+    let confirmation = match dec.u8()? {
+        0 => None,
+        1 => Some(Confirmation {
+            txid: dec.hash()?,
+            block_hash: dec.hash()?,
+            height: dec.u32()?,
+        }),
+        _ => return Err(LedgerError::Codec("bad confirmation flag")),
+    };
+    let closure = match dec.u8()? {
+        0 => None,
+        1 => Some(Closure::Cancelled(
+            CancelBasis::from_code(dec.u8()?).ok_or(LedgerError::Codec("bad cancel basis"))?,
+        )),
+        2 => Some(Closure::Failed {
+            conflicting_txid: dec.hash()?,
+        }),
+        _ => return Err(LedgerError::Codec("bad closure tag")),
+    };
+    dec.finish()?;
+    Ok(PayoutBatch {
+        id,
+        seq,
+        idempotency_key,
+        state,
+        rev,
+        outputs,
+        total_sat,
+        transactions,
+        broadcast_txid,
+        confirmation,
+        closure,
+    })
+}
+
+fn load_batch(
+    batches: &Table<'_, &'static [u8], &'static [u8]>,
+    id: &Hash32,
+) -> Result<Option<PayoutBatch>, LedgerError> {
+    match batches.get(id.as_slice())? {
+        Some(guard) => Ok(Some(decode_batch(guard.value())?)),
+        None => Ok(None),
+    }
+}
+
+fn store_batch(
+    batches: &Table<'_, &'static [u8], &'static [u8]>,
+    batch: &PayoutBatch,
+) -> Result<(), LedgerError> {
+    batches.insert(batch.id.as_slice(), encode_batch(batch)?.as_slice())?;
+    Ok(())
+}

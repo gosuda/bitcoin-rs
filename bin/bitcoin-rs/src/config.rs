@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use bitcoin_rs_chainstate::ValidationMode;
+use bitcoin_rs_execution::ValidationMode;
 use bitcoin_rs_node::options::{
     PoolOverrides, parse_connect_endpoint, parse_network, parse_p2p_magic, parse_script_index,
     parse_storage_backend, parse_validation_engine, parse_validation_mode,
@@ -471,7 +471,7 @@ impl CoreValue for Option<Vec<bitcoin_rs_node::options::NetworkLabel>> {
     }
 }
 
-impl CoreValue for Option<Vec<bitcoin_rs_node::options::PeerNetwork>> {
+impl CoreValue for Option<Vec<bitcoin_rs_wire::PeerNetwork>> {
     fn apply(key: &str, value: &str, slot: &mut Self) -> Result<(), String> {
         let mut parsed = Vec::new();
         for item in value.split(',') {
@@ -829,8 +829,8 @@ onlynet=onion,i2p
         assert_eq!(
             conf_with_overlays.p2p.overlay.onlynet,
             vec![
-                bitcoin_rs_node::options::PeerNetwork::Onion,
-                bitcoin_rs_node::options::PeerNetwork::I2p
+                bitcoin_rs_wire::PeerNetwork::Onion,
+                bitcoin_rs_wire::PeerNetwork::I2p
             ]
         );
         Ok(())

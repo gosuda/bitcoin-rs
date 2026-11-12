@@ -5,6 +5,7 @@
 ## Index
 <!-- contract-index:start -->
 - [architecture.md](architecture.md): `ARCH-01`–`ARCH-07`, `ARCH-07a`, `ARCH-07b`, `ARCH-08`–`ARCH-09`.
+- [atomic-ownership.md](atomic-ownership.md): `BLK-01`–`BLK-08`, `SCR-01`–`SCR-06`, `WIN-01`–`WIN-08`, `CMT-01`–`CMT-09`, `REO-01`–`REO-06`, `PRJ-01`–`PRJ-13`, `QRY-01`–`QRY-08`, `SNP-01`–`SNP-11`, `BUD-01`–`BUD-07`, `MPS-01`–`MPS-04`, `MOD-01`–`MOD-05`.
 - [chain-events.md](chain-events.md): `EVT-01`–`EVT-06`.
 - [core-differential.md](core-differential.md): `CORE-01`–`CORE-07`.
 - [dependency-range.md](dependency-range.md): `DEP-01`–`DEP-03`, `FEAT-01`–`FEAT-02`.

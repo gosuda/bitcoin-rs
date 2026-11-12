@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use crate::chain_effects::ChainFollowers;
-use bitcoin_rs_chain::{InvalidationOutcome, NodeId};
-pub use bitcoin_rs_chainstate::reorg::ReorgError;
-use bitcoin_rs_chainstate::reorg::ReorgObserver;
-use bitcoin_rs_chainstate::{ApplyError, Chainstate, ConnectOutcome, DisconnectOutcome};
-use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Tx, Txid};
+use bitcoin_rs_execution::chain::{InvalidationOutcome, NodeId};
+pub use bitcoin_rs_execution::reorg::ReorgError;
+use bitcoin_rs_execution::reorg::ReorgObserver;
+use bitcoin_rs_execution::{ApplyError, Chainstate, ConnectOutcome, DisconnectOutcome};
 use hashbrown::HashSet;
 
 const MAX_DISCONNECTED_TX_BYTES: usize = 20_000_000;
@@ -40,18 +40,19 @@ impl ReorgObserver for NodeReorgObserver<'_> {
         self.followers.on_disconnect(outcome);
     }
 
-    fn connected(&mut self, block: &Block, outcome: &ConnectOutcome) {
+    fn connected(&mut self, block: &BlockImage, outcome: &ConnectOutcome) {
         self.reconnected
-            .extend(block.txs.iter().map(bitcoin_rs_primitives::Tx::txid));
+            .extend((0..block.tx_count()).map(|tx| block.identity(tx).txid()));
         self.followers.on_connect(block, outcome);
         (self.connected_body)(outcome.hash);
     }
 
-    fn reconsider_disconnected(&mut self, block: &Block) {
+    fn reconsider_disconnected(&mut self, block: &BlockImage) {
         if self.disconnected_full {
             return;
         }
-        for tx in &block.txs {
+        for index in 0..block.tx_count() {
+            let tx = block.tx(index).materialize();
             let coinbase = tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null();
             if self.reconnected.contains(&tx.txid()) || coinbase {
                 continue;
@@ -62,7 +63,7 @@ impl ReorgObserver for NodeReorgObserver<'_> {
                 return;
             }
             self.disconnected_bytes += tx_size;
-            self.disconnected.push(Arc::new(tx.clone()));
+            self.disconnected.push(Arc::new(tx));
         }
     }
 }
@@ -72,7 +73,7 @@ fn trim_after_reorg(
 ) -> Result<(), bitcoin_rs_mempool::MempoolError> {
     let _ = gateway.expire(
         bitcoin_rs_mempool::AdmissionOrigin::Reorg,
-        bitcoin_rs_primitives::unix_time_secs(),
+        bitcoin_rs_consensus::primitives::unix_time_secs(),
     );
     let max_bytes = gateway.max_total_bytes();
     if max_bytes == 0 || gateway.read().dynamic_memory_usage() <= max_bytes {
@@ -105,7 +106,7 @@ fn settle_node_reorg(
             mempool_change.as_ref(),
             observer.followers.mempool_gateway(),
         ) {
-            let chain = bitcoin_rs_rpc::context::ChainAdmissionView::new(
+            let chain = bitcoin_rs_serving::context::ChainAdmissionView::new(
                 handles.utxo_reader(),
                 handles.applied_tip_reader(),
                 handles.block_tree_reader(),
@@ -118,7 +119,7 @@ fn settle_node_reorg(
                 let _ = gateway.reconsider_disconnected(
                     change,
                     &chain,
-                    bitcoin_rs_primitives::unix_time_secs(),
+                    bitcoin_rs_consensus::primitives::unix_time_secs(),
                     observer.disconnected.drain(..),
                 );
             }
@@ -175,7 +176,7 @@ pub fn invalidate_block(
         .map_err(|source| ReorgError::Unavailable(Box::new(source)))?;
     let mut connected_body = |_| {};
     let mut observer = NodeReorgObserver::new(followers, &mut connected_body);
-    let outcome = bitcoin_rs_chainstate::reorg::invalidate_block(
+    let outcome = bitcoin_rs_execution::reorg::invalidate_block(
         handles,
         &mut observer,
         hash,
@@ -192,14 +193,14 @@ pub fn switch_to_branch<F, G>(
     mut connected_body: G,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_consensus::primitives::BlockImage>,
     G: FnMut(Hash256),
 {
     let mut mempool_change = followers
         .begin_mempool_change()
         .map_err(|source| ReorgError::Unavailable(Box::new(source)))?;
     let mut observer = NodeReorgObserver::new(followers, &mut connected_body);
-    let outcome = bitcoin_rs_chainstate::reorg::switch_to_branch(
+    let outcome = bitcoin_rs_execution::reorg::switch_to_branch(
         handles,
         target,
         &mut staged_body,

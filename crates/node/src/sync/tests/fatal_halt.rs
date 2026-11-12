@@ -1,15 +1,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitcoin_rs_chain::{BlockTree, NodeStatus, regtest_fixture};
-use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{Block, BlockImage, Hash256, Network};
+use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, regtest_fixture};
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
 use bitcoin_rs_storage::undo::InMemoryUndoStore;
+use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::{
     DisconnectMarker, InMemoryDurableHeadStore, MandatoryRetention, RetentionRegistry,
     StorageError, UndoStore,
 };
-use bitcoin_rs_utxo::UtxoSet;
 use crossbeam_channel::{bounded, unbounded};
 
 use crate::event_loop::EventLoop;
@@ -24,7 +24,7 @@ impl UndoStore for PoisonedUndoStore {
         if height == 0 {
             return self.inner.persist_undo(height, hash, record);
         }
-        Err(StorageError::backend("FjallError: Poisoned"))
+        Err(StorageError::backend("RocksDbError: Poisoned"))
     }
 
     fn load_undo(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
@@ -54,8 +54,8 @@ impl UndoStore for PoisonedUndoStore {
 
 fn poisoned_chain(
     depth: u32,
-) -> Result<(Arc<bitcoin_rs_chainstate::Chainstate>, Vec<Block>), TestError> {
-    use bitcoin_rs_chainstate::{Chainstate, ChainstateParts, ChainstateRole, ValidationMode};
+) -> Result<(Arc<bitcoin_rs_execution::Chainstate>, Vec<Block>), TestError> {
+    use bitcoin_rs_execution::{Chainstate, ChainstateParts, ChainstateRole, ValidationMode};
 
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
@@ -78,16 +78,18 @@ fn poisoned_chain(
         block_tree: tree,
         restored_applied_tip: None,
         utxo: Arc::new(UtxoSet::new()),
-        coin_stats: Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
-            bitcoin_rs_utxo::stats::CoinStats::default(),
+        coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
+            bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         )),
-        chain_events: Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
+        chain_events: Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
+            0,
+        )),
         block_body_store: None,
         undo_store: Arc::new(PoisonedUndoStore {
             inner: InMemoryUndoStore::default(),
         }),
         durable_head: Arc::new(InMemoryDurableHeadStore::new()),
-        chain_transition: bitcoin_rs_chain::TransitionDomain::new().authority(),
+        chain_transition: bitcoin_rs_execution::chain::TransitionDomain::new().authority(),
         assume_valid_height: 0,
         validation_mode: ValidationMode::AssumeValid,
         validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
@@ -100,7 +102,7 @@ fn poisoned_chain(
         role: ChainstateRole::Ordinary,
     }));
     handles
-        .apply_block(&BlockPayload::from_local(genesis))
+        .apply_block(&BlockImage::from_local(genesis))
         .map_err(|error| TestError::Apply(Box::new(error)))?;
     Ok((handles, blocks))
 }
@@ -110,10 +112,10 @@ fn poisoned_chain(
 fn poisoned_undo_store_halts_apply_and_trips_the_shutdown_latch() -> Result<(), TestError> {
     let (handles, blocks) = poisoned_chain(2)?;
     let followers = crate::chain_effects::ChainFollowers::noop();
-    let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
+    let peers = Arc::new(bitcoin_rs_wire::PeerTable::new());
     let (_inbound_headers_tx, inbound_headers_rx) = unbounded();
     let (inbound_blocks_tx, inbound_blocks_rx) = unbounded();
-    let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+    let ibd = Arc::new(bitcoin_rs_execution::chain::InitialBlockDownload::new(
         handles.applied_tip_reader(),
         handles.block_tree_reader(),
     ));
@@ -128,7 +130,7 @@ fn poisoned_undo_store_halts_apply_and_trips_the_shutdown_latch() -> Result<(), 
     ));
 
     inbound_blocks_tx
-        .send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))
+        .send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))
         .map_err(|_| TestError::Missing("inbound block channel closed"))?;
     sync.tick();
     assert!(
@@ -143,7 +145,7 @@ fn poisoned_undo_store_halts_apply_and_trips_the_shutdown_latch() -> Result<(), 
 
     for block in [&blocks[1], &blocks[0]] {
         inbound_blocks_tx
-            .send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
+            .send(bitcoin_rs_wire::InboundBlock::from_local(block.clone()))
             .map_err(|_| TestError::Missing("inbound block channel closed"))?;
     }
     sync.tick();
@@ -157,7 +159,7 @@ fn poisoned_undo_store_halts_apply_and_trips_the_shutdown_latch() -> Result<(), 
         "a halted sync must not commit the redelivered blocks"
     );
 
-    let latch = Arc::new(bitcoin_rs_chain::LatchWriter::new());
+    let latch = Arc::new(bitcoin_rs_execution::chain::LatchWriter::new());
     let verify_reader = latch.reader();
     let loop_reader = latch.reader();
     let shutdown_for_request = Arc::clone(&latch);

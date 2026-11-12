@@ -2,19 +2,19 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::time::Instant;
 
-use bitcoin_rs_primitives::{Amount, OutPoint, Sequence, Tx, TxOut, Wtxid};
+use crate::primitives::{Amount, OutPoint, Sequence, Tx, TxOut, TxView, Wtxid};
 
-use crate::block_view::BlockView;
-use crate::sigops::transaction_sigop_cost;
-use bitcoin_rs_script::PreparedTransaction;
-use bitcoin_rs_script::VerifyFlags;
+use crate::block_view::{BlockView, BlockViewSource};
+use crate::script::PreparedTransaction;
+use crate::script::VerifyFlags;
+use crate::sigops::transaction_sigop_cost_view;
 use rayon::prelude::*;
 
 use crate::ScriptEngine;
 use crate::UtxoView;
 use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST, ValidationEngine};
 
-use bitcoin_rs_primitives::{LOCKTIME_THRESHOLD, SEQUENCE_FINAL};
+use crate::primitives::{LOCKTIME_THRESHOLD, SEQUENCE_FINAL};
 const MIN_COINBASE_SCRIPT_SIG_SIZE: usize = 2;
 const MAX_COINBASE_SCRIPT_SIG_SIZE: usize = 100;
 
@@ -32,8 +32,8 @@ static SCRIPT_VERIFY_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
 });
 
 #[must_use]
-pub fn is_final_tx(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
-    let lock_time = tx.lock_time.to_consensus();
+pub fn is_final_tx_view(tx: TxView<'_>, block_height: u32, locktime_cutoff: u32) -> bool {
+    let lock_time = tx.lock_time().to_consensus();
     if lock_time == 0 {
         return true;
     }
@@ -47,19 +47,31 @@ pub fn is_final_tx(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
         return true;
     }
 
-    tx.inputs
-        .iter()
-        .all(|input| input.sequence == Sequence::from_consensus(SEQUENCE_FINAL))
+    for i in 0..tx.input_count() {
+        if tx.input_sequence(i) != Sequence::from_consensus(SEQUENCE_FINAL) {
+            return false;
+        }
+    }
+    true
 }
 
-pub fn verify_coinbase_script_sig_size(tx: &Tx) -> Result<(), ConsensusError> {
-    if let Some(input) = tx.inputs.first().filter(|_| tx.is_coinbase()) {
-        let len = input.script_sig.len();
+#[must_use]
+pub fn is_final_tx(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
+    is_final_tx_view(tx.into(), block_height, locktime_cutoff)
+}
+
+pub fn verify_coinbase_script_sig_size_view(tx: TxView<'_>) -> Result<(), ConsensusError> {
+    if tx.is_coinbase() && tx.input_count() > 0 {
+        let len = tx.input_script_sig(0).len();
         if !(MIN_COINBASE_SCRIPT_SIG_SIZE..=MAX_COINBASE_SCRIPT_SIG_SIZE).contains(&len) {
             return Err(ConsensusError::CoinbaseScriptSigSize { len });
         }
     }
     Ok(())
+}
+
+pub fn verify_coinbase_script_sig_size(tx: &Tx) -> Result<(), ConsensusError> {
+    verify_coinbase_script_sig_size_view(tx.into())
 }
 
 pub fn check_coinbase_maturity(
@@ -86,10 +98,10 @@ pub fn verify_transaction(
     locktime_cutoff: u32,
     flags: VerifyFlags,
     engine: ValidationEngine,
-    signature_cache: Option<&bitcoin_rs_script::SignatureCache>,
+    signature_cache: Option<&crate::script::SignatureCache>,
 ) -> Result<(), ConsensusError> {
     verify_transaction_with_locktime_cutoff(
-        tx,
+        tx.into(),
         prevouts,
         height,
         locktime_cutoff,
@@ -107,6 +119,24 @@ pub fn verify_transaction_non_script(
     flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
     verify_transaction_with_locktime_cutoff(
+        tx.into(),
+        prevouts,
+        height,
+        locktime_cutoff,
+        flags,
+        None,
+        None,
+    )
+}
+
+pub fn verify_transaction_non_script_view(
+    tx: TxView<'_>,
+    prevouts: &impl UtxoView,
+    height: u32,
+    locktime_cutoff: u32,
+    flags: VerifyFlags,
+) -> Result<(), ConsensusError> {
+    verify_transaction_with_locktime_cutoff(
         tx,
         prevouts,
         height,
@@ -118,13 +148,13 @@ pub fn verify_transaction_non_script(
 }
 
 fn verify_transaction_with_locktime_cutoff(
-    tx: &Tx,
+    tx: TxView<'_>,
     prevouts: &impl UtxoView,
     height: u32,
     locktime_cutoff: u32,
     flags: VerifyFlags,
     engine: Option<ValidationEngine>,
-    signature_cache: Option<&bitcoin_rs_script::SignatureCache>,
+    signature_cache: Option<&crate::script::SignatureCache>,
 ) -> Result<(), ConsensusError> {
     if let Some(engine) = engine
         && !engine.is_supported()
@@ -139,7 +169,7 @@ fn verify_transaction_with_locktime_cutoff(
     };
 
     if let Some(engine) = engine {
-        crate::kernel::verify_tx_scripts(tx, &prep.prevouts, flags, engine, signature_cache)?;
+        crate::kernel::verify_tx_scripts_view(tx, &prep.prevouts, flags, engine, signature_cache)?;
     }
 
     finalize_tx_value_and_sigops(tx, &prep, flags)
@@ -151,69 +181,92 @@ struct TxPrep {
     output_value: u64,
 }
 
-pub fn verify_transaction_input_outpoints(tx: &Tx) -> Result<(), ConsensusError> {
+pub fn verify_transaction_input_outpoints_view(tx: TxView<'_>) -> Result<(), ConsensusError> {
     if tx.is_coinbase() {
         return Ok(());
     }
     let mut seen = HashSet::new();
-    for (input_index, input) in tx.inputs.iter().enumerate() {
-        if input.previous_output.is_null() {
+    for input_index in 0..tx.input_count() {
+        let outpoint = tx.input_outpoint(input_index);
+        if outpoint.is_null() {
             return Err(ConsensusError::NullPrevout { input_index });
         }
-        if !seen.insert(input.previous_output) {
+        if !seen.insert(outpoint) {
             return Err(ConsensusError::DuplicateInput { input_index });
         }
     }
     Ok(())
 }
 
-pub(crate) fn verify_transaction_structure(tx: &Tx) -> Result<u64, ConsensusError> {
-    if tx.inputs.is_empty() {
+pub fn verify_transaction_input_outpoints(tx: &Tx) -> Result<(), ConsensusError> {
+    verify_transaction_input_outpoints_view(tx.into())
+}
+
+pub(crate) fn verify_transaction_structure_view(tx: TxView<'_>) -> Result<u64, ConsensusError> {
+    if tx.input_count() == 0 {
         return Err(ConsensusError::EmptyInputs);
     }
-    if tx.outputs.is_empty() {
+    if tx.output_count() == 0 {
         return Err(ConsensusError::EmptyOutputs);
     }
-    let output_value = total_output_value(tx)?;
+    let output_value = total_output_value_view(tx)?;
     if tx.is_coinbase() {
-        verify_coinbase_script_sig_size(tx)?;
+        verify_coinbase_script_sig_size_view(tx)?;
     } else {
-        verify_transaction_input_outpoints(tx)?;
+        verify_transaction_input_outpoints_view(tx)?;
     }
     Ok(output_value)
 }
 
+pub(crate) fn verify_transaction_structure(tx: &Tx) -> Result<u64, ConsensusError> {
+    verify_transaction_structure_view(tx.into())
+}
+
+fn total_output_value_view(tx: TxView<'_>) -> Result<u64, ConsensusError> {
+    let mut sum = 0u64;
+    for i in 0..tx.output_count() {
+        let next = sum
+            .checked_add(tx.output_value(i).to_sat())
+            .ok_or(ConsensusError::OutputValueOverflow)?;
+        if Amount::from_sat(next) > Amount::MAX_MONEY {
+            return Err(ConsensusError::OutputValueOverflow);
+        }
+        sum = next;
+    }
+    Ok(sum)
+}
+
 fn prepare_tx_checks(
-    tx: &Tx,
+    tx: TxView<'_>,
     height: u32,
     locktime_cutoff: u32,
     mut lookup: impl FnMut(usize, &OutPoint) -> Option<TxOut>,
 ) -> Result<Option<TxPrep>, ConsensusError> {
-    if !is_final_tx(tx, height, locktime_cutoff) {
+    if !is_final_tx_view(tx, height, locktime_cutoff) {
         return Err(ConsensusError::Bip {
             bip: "BIP113",
             reason: format!(
                 "non-final transaction at height {height} locktime cutoff \
                  {locktime_cutoff}: locktime {}",
-                tx.lock_time
+                tx.lock_time()
             ),
         });
     }
 
-    let output_value = verify_transaction_structure(tx)?;
+    let output_value = verify_transaction_structure_view(tx)?;
     if tx.is_coinbase() {
         return Ok(None);
     }
 
     let mut input_value = 0u64;
-    let mut prevouts = Vec::with_capacity(tx.inputs.len());
-    for (input_index, input) in tx.inputs.iter().enumerate() {
-        let prevout = lookup(input_index, &input.previous_output)
+    let mut prevouts = Vec::with_capacity(tx.input_count());
+    for input_index in 0..tx.input_count() {
+        let prevout = lookup(input_index, &tx.input_outpoint(input_index))
             .ok_or(ConsensusError::MissingPrevout { input_index })?;
         input_value = input_value
             .checked_add(prevout.value.to_sat())
             .ok_or(ConsensusError::OutputValueOverflow)?;
-        prevouts.push((input.previous_output, prevout));
+        prevouts.push((tx.input_outpoint(input_index), prevout));
     }
 
     Ok(Some(TxPrep {
@@ -224,7 +277,7 @@ fn prepare_tx_checks(
 }
 
 fn finalize_tx_value_and_sigops(
-    tx: &Tx,
+    tx: TxView<'_>,
     prep: &TxPrep,
     flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
@@ -235,7 +288,7 @@ fn finalize_tx_value_and_sigops(
         });
     }
 
-    let sigop_cost = transaction_sigop_cost(tx, &prep.prevouts, flags);
+    let sigop_cost = transaction_sigop_cost_view(tx, &prep.prevouts, flags);
     if sigop_cost > MAX_BLOCK_SIGOPS_COST {
         return Err(ConsensusError::SigopsLimit {
             cost: sigop_cost,
@@ -249,7 +302,7 @@ pub(crate) fn verify_input_script_native(
     prepared: &PreparedTransaction<'_>,
     input_index: usize,
     flags: VerifyFlags,
-    signature_cache: Option<&bitcoin_rs_script::SignatureCache>,
+    signature_cache: Option<&crate::script::SignatureCache>,
 ) -> Result<(), ConsensusError> {
     prepared
         .verify_input(input_index, flags, signature_cache)
@@ -343,21 +396,25 @@ where
     } else {
         Vec::new()
     };
-    let (txs, resolved) = view.parts_mut();
-    if txs.len() != resolved.len() {
+    let (source, resolved) = view.parts_mut();
+    let tx_count = match source {
+        BlockViewSource::Txs(txs) => txs.len(),
+        BlockViewSource::Image(img) => img.tx_count(),
+    };
+    if tx_count != resolved.len() {
         return Err(ConsensusError::PrevoutMatrixSize {
-            expected: txs.len(),
+            expected: tx_count,
             actual: resolved.len(),
         });
     }
-    if takes.is_some() && txs.len() != wtxids.len() {
+    if takes.is_some() && tx_count != wtxids.len() {
         return Err(ConsensusError::PrevoutMatrixSize {
-            expected: txs.len(),
+            expected: tx_count,
             actual: wtxids.len(),
         });
     }
     let (prepared, checks) = prepare_block_input_checks(
-        txs,
+        source,
         resolved,
         &wtxids,
         height,
@@ -464,7 +521,7 @@ fn first_prepared_error(
 }
 
 fn prepare_block_input_checks<'b>(
-    txs: &'b [Tx],
+    source: BlockViewSource<'b>,
     resolved: &mut [Vec<Option<TxOut>>],
     wtxids: &[Wtxid],
     height: u32,
@@ -473,9 +530,17 @@ fn prepare_block_input_checks<'b>(
     script_source: &'b crate::kernel::BlockScriptSource,
     mut takes: Option<&mut crate::script_cache::WindowCacheTakes<'_>>,
 ) -> (Vec<PreparedTx<'b>>, Vec<InputCheck>) {
-    let mut prepared = Vec::with_capacity(txs.len());
+    let tx_count = match source {
+        BlockViewSource::Txs(txs) => txs.len(),
+        BlockViewSource::Image(img) => img.tx_count(),
+    };
+    let mut prepared = Vec::with_capacity(tx_count);
     let mut checks = Vec::new();
-    for (tx_index, tx) in txs.iter().enumerate() {
+    for tx_index in 0..tx_count {
+        let tx = match source {
+            BlockViewSource::Txs(txs) => TxView::Owned(&txs[tx_index]),
+            BlockViewSource::Image(img) => TxView::View(img.tx(tx_index)),
+        };
         let resolved_inputs = &mut resolved[tx_index];
         let prep = match prepare_tx_checks(tx, height, locktime_cutoff, |input_index, _| {
             resolved_inputs.get_mut(input_index).and_then(Option::take)
@@ -539,13 +604,13 @@ fn prepare_block_input_checks<'b>(
 
         let prepared_index = prepared.len();
         let checks_start = checks.len();
-        for input_index in 0..tx.inputs.len() {
+        for input_index in 0..tx.input_count() {
             checks.push(InputCheck {
                 prepared_index,
                 input_index,
             });
         }
-        let checks_len = tx.inputs.len();
+        let checks_len = tx.input_count();
 
         let stop_after_tx = post_error.is_some();
         prepared.push(PreparedTx {
@@ -568,19 +633,6 @@ fn check_input(unit: &BlockScriptChecks<'_>, check: &InputCheck) -> Result<(), C
         ConsensusError::Kernel("clean non-coinbase tx lost prepared script state".to_owned())
     })?;
     crate::kernel::verify_prepared_input(script_state, check.input_index, unit.flags)
-}
-
-fn total_output_value(tx: &Tx) -> Result<u64, ConsensusError> {
-    tx.outputs.iter().try_fold(0u64, |sum, output| {
-        let next = sum
-            .checked_add(output.value.to_sat())
-            .ok_or(ConsensusError::OutputValueOverflow)?;
-        if Amount::from_sat(next) > Amount::MAX_MONEY {
-            Err(ConsensusError::OutputValueOverflow)
-        } else {
-            Ok(next)
-        }
-    })
 }
 
 #[cfg(test)]

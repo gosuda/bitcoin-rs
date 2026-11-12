@@ -61,7 +61,7 @@ fn check_hex(s: &str) {
 
 fn check_scripthash(s: &str) {
     if let Ok(raw) = <[u8; 32]>::from_hex(s) {
-        let hash = bitcoin_rs_index::ScriptHash::from_byte_array(raw);
+        let hash = bitcoin_rs_projection::ScriptHash::from_byte_array(raw);
         let formatted = hash.to_byte_array().to_lower_hex_string();
         assert_eq!(
             Ok(raw),
@@ -119,8 +119,8 @@ fuzz_target!(|data: &[u8]| {
     };
 
     check_hex(s);
-    check_lower_hex_format::<bitcoin_rs_primitives::Txid>(s, "txid");
-    check_lower_hex_format::<bitcoin_rs_primitives::BlockHash>(s, "blockhash");
+    check_lower_hex_format::<bitcoin_rs_consensus::primitives::Txid>(s, "txid");
+    check_lower_hex_format::<bitcoin_rs_consensus::primitives::BlockHash>(s, "blockhash");
     check_scripthash(s);
     check_address(s);
     check_descriptor(s);

@@ -1,6 +1,6 @@
-use bitcoin_rs_chain::BlockTree;
-pub use bitcoin_rs_chainstate::events::ChainSnapshot;
-use bitcoin_rs_primitives::{BlockHash, Hash256, Header};
+use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Header};
+use bitcoin_rs_execution::chain::BlockTree;
+pub use bitcoin_rs_execution::events::ChainSnapshot;
 
 use crate::{Node, NodeError};
 
@@ -18,7 +18,7 @@ pub struct ChainSubscription {
 #[derive(Clone, Debug)]
 pub struct ChainTarget {
     snapshot: ChainSnapshot,
-    source: std::sync::Weak<bitcoin_rs_chainstate::Chainstate>,
+    source: std::sync::Weak<bitcoin_rs_execution::Chainstate>,
 }
 
 impl ChainTarget {

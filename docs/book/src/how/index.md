@@ -2,7 +2,7 @@
 
 Indexes are optional derived state. Every index is off by default, and when one is enabled a single worker thread maintains all of them from committed chain events. The node's applied tip never waits for index writes.
 
-The index lives in [`crates/index`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/index). Its contract is [docs/contracts/indexing.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/indexing.md).
+The index lives in [`crates/projection`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/projection). Its contract is [docs/contracts/indexing.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/indexing.md).
 
 | Index | Enabled by | What it answers |
 | --- | --- | --- |
@@ -77,7 +77,7 @@ A regtest node started with `--txindex true --scriptindex=full` logs index store
 $ bitcoin-rs --network regtest --data-dir $DATA \
     --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 \
     --txindex true --scriptindex=full
-{"timestamp":"2026-11-01T17:01:17.243411Z","level":"INFO","fields":{"message":"index store recovery in progress","capability":"txindex","namespace":"txindex","backend":"fjall","elapsed_secs":0},"target":"bitcoin_rs_index::runtime::startup"}
+{"timestamp":"2026-11-01T17:01:17.243411Z","level":"INFO","fields":{"message":"index store recovery in progress","capability":"txindex","namespace":"txindex","backend":"rocksdb","elapsed_secs":0},"target":"bitcoin_rs_projection::runtime::startup"}
 ```
 
 The `txindex` namespace exists only because the index was enabled. With all indexes off, the node starts no worker and creates no index namespace (`IDX-01`).
@@ -105,10 +105,10 @@ The worker's catch-up and row writes do not log at `info` in this build, so the 
 
 | Invariant | Test | File |
 | --- | --- | --- |
-| A positive floor scopes absence and refuses a low anchor | `historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor` | [`crates/index/src/runtime/query_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/index/src/runtime/query_tests.rs) |
-| Full history above a positive floor is unproven | `historical_full_history_positive_floor_is_unproven` | [`crates/index/src/runtime/query_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/index/src/runtime/query_tests.rs) |
-| A coverage floor is stamped and cleared on reset | `anchor_watermark_stamps_a_coverage_floor_that_reset_clears` | [`crates/index/src/index/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/index/src/index/tests.rs) |
-| Cursor paging neither skips nor repeats | `cursor_page_continues_without_skipping_or_repeating` | [`crates/index/src/runtime/query/scripts.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/index/src/runtime/query/scripts.rs) |
+| A positive floor scopes absence and refuses a low anchor | `historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor` | [`crates/projection/src/runtime/query_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/runtime/query_tests.rs) |
+| Full history above a positive floor is unproven | `historical_full_history_positive_floor_is_unproven` | [`crates/projection/src/runtime/query_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/runtime/query_tests.rs) |
+| A coverage floor is stamped and cleared on reset | `anchor_watermark_stamps_a_coverage_floor_that_reset_clears` | [`crates/projection/src/index/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/index/tests.rs) |
+| Cursor paging neither skips nor repeats | `cursor_page_continues_without_skipping_or_repeating` | [`crates/projection/src/runtime/query/scripts.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/runtime/query/scripts.rs) |
 | Starting workers twice is idempotent | `start_index_workers_twice_is_idempotent` | [`crates/node/src/state/tests/index.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state/tests/index.rs) |
 
 The [state and storage](state-and-storage.md) chapter covers the durable records the worker reads, and the [architecture](architecture.md) chapter covers the wake call site.

@@ -3,12 +3,12 @@ use alloc::vec::Vec;
 use hashbrown::{HashMap, HashSet};
 
 use bitcoin_rs_consensus::bip68;
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, Witness, Wtxid};
+use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxOut, Txid, Witness, Wtxid};
 
 #[cfg(test)]
-use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence};
-use bitcoin_rs_script::sigops::count_accurate;
-use bitcoin_rs_script::{
+use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence};
+use bitcoin_rs_consensus::script::sigops::count_accurate;
+use bitcoin_rs_consensus::script::{
     Instruction, instructions, is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_p2tr,
     is_p2wpkh, is_p2wsh, is_push_only, minimal_non_dust, multisig_key_count, opcode,
     witness_program,
@@ -220,7 +220,7 @@ pub(crate) fn bip68_final(pool: &Mempool, tx: &Tx, finality: &Bip68Admission<'_>
     let resolved = finality.resolved_prevouts.unwrap_or(&empty_set);
     for input in &tx.inputs {
         let sequence = input.sequence.to_consensus();
-        if sequence & bitcoin_rs_primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
+        if sequence & bitcoin_rs_consensus::primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
             continue;
         }
         let (prevout_height, prevout_mtp) =
@@ -394,7 +394,7 @@ fn check_outputs(tx: &Tx, policy: &StandardnessPolicy) -> Result<(), Standardnes
             let Some(limit) = policy.max_datacarrier_bytes else {
                 return Err(StandardnessError::DataCarrierDisabled);
             };
-            let serialized_script_bytes = bitcoin_rs_primitives::varint::encoded_len(
+            let serialized_script_bytes = bitcoin_rs_consensus::primitives::varint::encoded_len(
                 u64::try_from(script.len()).unwrap_or(u64::MAX),
             )
             .checked_add(script.len())

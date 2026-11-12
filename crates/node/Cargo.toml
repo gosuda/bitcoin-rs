@@ -19,65 +19,46 @@ workspace = true
 # Exposes the internal `NodeState` composition root to integration tests and
 # benchmarks. Production embedders use the typed `Node` surface instead.
 test-seam = [
-    "bitcoin-rs-chainstate/test-seam",
+    "bitcoin-rs-execution/test-seam",
     "bitcoin-rs-mempool/test-seam",
-    "bitcoin-rs-index/test-seam",
-    "bitcoin-rs-mining/test-seam",
+    "bitcoin-rs-projection/test-seam",
+    "bitcoin-rs-serving/test-seam",
     "dep:toml",
 ]
 
-# A node is non-functional without a storage backend, and its `NodeStorage` /
-# `TxIndexStorage` enums are entirely backend-cfg-gated — with zero backends the
-# `match self` arms are non-exhaustive and the crate fails to compile.  fjall
-# is the performance-oriented default backend so per-crate `cargo publish` / `cargo check`
-# works out of the box.  CI and local dev build via `bin/bitcoin-rs`, whose
-# default features are `fjall,redb,zmq` (pure-Rust storage; rocksdb and kernel
-# stay selectable but non-default). Full-matrix lanes request the other
-# backends explicitly through `bin/bitcoin-rs`'s feature table.
-# Note: `--workspace --features "..."` in a virtual workspace (no root [package])
-# does NOT forward CLI features to library crates; always use -p when features
-# must reach a specific crate.
 # `kernel` is capability ("bitcoinkernel support is compiled in"), not
 # selection: the engine a run uses is `validation.engine` at runtime. The
-# default is kernel-free so the C++ toolchain is opt-in.
-default = ["fjall", "zmq"]
-# Component crates own the storage-backend fan-out: each of chainstate's and
-# index's backend features already forwards to storage + utxo under the same
-# feature name, so listing storage/utxo here duplicates those edges.
-rocksdb = [
-    "bitcoin-rs-chainstate/rocksdb",
-    "bitcoin-rs-index/rocksdb",
-]
-fjall = [
-    "bitcoin-rs-chainstate/fjall",
-    "bitcoin-rs-index/fjall",
-]
-redb = [
-    "bitcoin-rs-chainstate/redb",
-    "bitcoin-rs-index/redb",
-]
+# default is kernel-free so the bitcoinkernel C++ engine is opt-in.
+default = ["zmq"]
 # chainstate's kernel feature is the kernel-capability propagator for the
 # chain stack and already forwards to `bitcoin-rs-consensus/kernel`.
-kernel = ["bitcoin-rs-chainstate/kernel"]
-zmq = ["bitcoin-rs-rpc/zmq"]
-silent-payments = ["bitcoin-rs-rpc/silent-payments"]
-pool = ["bitcoin-rs-rpc/pool", "bitcoin-rs-mining/pool"]
-pool-sv2 = ["pool", "bitcoin-rs-mining/pool-sv2", "dep:zeroize"]
+kernel = ["bitcoin-rs-execution/kernel"]
+zmq = ["bitcoin-rs-serving/zmq"]
+silent-payments = ["bitcoin-rs-serving/silent-payments"]
+pool = ["bitcoin-rs-serving/pool"]
+pool-sv2 = ["pool", "bitcoin-rs-serving/pool-sv2", "dep:zeroize"]
+surrealkv = [
+    "bitcoin-rs-storage/surrealkv",
+    "bitcoin-rs-execution/surrealkv",
+    "bitcoin-rs-projection/surrealkv",
+]
+mdbx = [
+    "bitcoin-rs-storage/mdbx",
+    "bitcoin-rs-execution/mdbx",
+    "bitcoin-rs-projection/mdbx",
+]
 
 [dependencies]
 hashbrown.workspace = true
-bitcoin-rs-primitives.workspace = true
 bitcoin-rs-consensus.workspace = true
+smallvec.workspace = true
 bitcoin-rs-storage.workspace = true
-bitcoin-rs-utxo.workspace = true
-bitcoin-rs-chain.workspace = true
-bitcoin-rs-chainstate.workspace = true
-bitcoin-rs-index.workspace = true
+bitcoin-rs-execution.workspace = true
+bitcoin-rs-projection.workspace = true
+bitcoin-rs-wire.workspace = true
 
 bitcoin-rs-mempool.workspace = true
-bitcoin-rs-p2p.workspace = true
-bitcoin-rs-mining.workspace = true
-bitcoin-rs-rpc.workspace = true
+bitcoin-rs-serving.workspace = true
 zeroize = { workspace = true, optional = true }
 
 bitcoin.workspace = true
@@ -106,20 +87,18 @@ rustix.workspace = true
 
 [dev-dependencies]
 bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
-bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-serving = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-wire = { workspace = true, features = ["test-seam"] }
 tempfile.workspace = true
+proptest.workspace = true
 # Own integration tests are separate crates, so they opt into the same
 # explicit seam used by the subsystem crates below.
 bitcoin-rs-node = { workspace = true, default-features = false, features = ["test-seam"] }
-bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
-bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }
-bitcoin-rs-chainstate = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-execution = { workspace = true, features = ["test-seam"] }
 sonic-rs.workspace = true
 toml.workspace = true
 rustix.workspace = true
-bitcoin-rs-script.workspace = true
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
-bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
 # Miner side of the SV2 host-path regression in `pool/sv2.rs`: the same pinned
 # SRI release family the pool adapter links, never a second wire version.
 binary_sv2.workspace = true
@@ -137,3 +116,7 @@ path = "tests/suite.rs"
 [[test]]
 name = "crash_recovery"
 path = "tests/crash_recovery.rs"
+
+[[test]]
+name = "pool_ledger"
+path = "tests/pool_ledger.rs"

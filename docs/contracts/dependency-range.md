@@ -32,7 +32,7 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - Each of those crates MUST resolve to exactly one version per graph.
 - Exactly one pool-only exception is approved.
 - The pinned SRI release family is `noise_sv2 2.0.0`.
-- The `pool-sv2` feature in `crates/mining/Cargo.toml` reaches this family.
+- The `pool-sv2` feature in `crates/serving/Cargo.toml` reaches this family.
 - This family carries its own audited `secp256k1 0.28.2` and `secp256k1-sys 0.9.2` authority-key line.
 - This family also carries its own `bitcoin_hashes 0.13.1` transport line.
 - `deny.toml` `[bans].skip` pins those exact versions with the `noise_sv2 2.0.0` reason.
@@ -42,7 +42,7 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - Each entry leaves one unskipped anchor, so a new version of a skipped crate fails.
 - Package-id cardinality beyond one version per name is not checked mechanically.
 - Lockfile review pins that cardinality.
-- The Noise-family dependencies in `crates/mining/Cargo.toml` are optional normal dependencies.
+- The Noise-family dependencies in `crates/serving/Cargo.toml` are optional normal dependencies.
 - The `pool-sv2` feature enables these dependencies.
 - Cargo forbids `optional` dev-dependencies.
 - Cargo does not honor `cfg(feature)` in target dev tables.
@@ -116,11 +116,11 @@ Empty backend markers on non-storage crates are not combinations.
 - Owner: `scripts/feature-matrix.tsv`.
 - Scope: operator `bitcoin-rs` and `bitcoin-rs-node` backend and kernel flags plus reached storage and consensus crates.
 - Each row is one combination CI MUST `cargo check` independently.
-- `lane=pure` carries fjall, redb, zmq, and optional `silent-payments` with the native interpreter.
+- The `pure` lane covers engine-free crates such as `bitcoin-rs-consensus` (`--no-default-features`, and `--features usdt`).
 - `lane=native` requires cmake, libboost (kernel), or C storage engines.
 - Kernel rows (`portable-kernel`, `full-node`, `consensus-kernel`) are capability builds with `kernel` compiled in.
 - Engine selection stays runtime via `validation.engine`.
-- The `bitcoin-rs-node` crate default (`fjall,zmq`) is a pure row.
+- The `bitcoin-rs-node` crate default (`zmq`) is a native row.
 - The checker selects the repository-root workspace from nested workspaces such as `fuzz/`.
 - Adding a Cargo feature is not enough.
 - Add a row here in the same commit, or do not add the feature.

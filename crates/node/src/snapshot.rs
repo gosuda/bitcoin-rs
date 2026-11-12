@@ -6,21 +6,23 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bitcoin_rs_chain::LatchReader;
-use bitcoin_rs_chainstate::{
+use bitcoin_rs_consensus::primitives::{Hash256, Network};
+use bitcoin_rs_execution::chain::LatchReader;
+use bitcoin_rs_execution::{
     ApplyError, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, Chainstate,
     ChainstateRole,
 };
-use bitcoin_rs_primitives::{Hash256, Network};
-use bitcoin_rs_rpc::context::{
+use bitcoin_rs_serving::context::{
     ChainstateInfo, ChainstatesInfo, SnapshotControlError, SnapshotExport, SnapshotImport,
 };
 use bitcoin_rs_storage::checkpoint::fs::{HAS_ATOMIC_NOREPLACE_RENAME, rename_noreplace};
 use bitcoin_rs_storage::checkpoint::{create_file, open_data_dir, sync_dir};
-use bitcoin_rs_utxo::core_snapshot::{
+use bitcoin_rs_storage::utxo::core_snapshot::{
     CoreV2Base, CoreV2WriteReport, SnapshotError, SnapshotLimits, read_verified, write_core_v2,
 };
-use bitcoin_rs_utxo::{SeedOfferCell, SeedProvenance, V4Witness, VerifiedSnapshotArtifact};
+use bitcoin_rs_storage::utxo::{
+    SeedOfferCell, SeedProvenance, V4Witness, VerifiedSnapshotArtifact,
+};
 use parking_lot::Mutex;
 
 use crate::chain_effects::ChainFollowers;
@@ -172,13 +174,13 @@ pub enum SnapshotImportError {
     #[error("snapshot input cannot be in the node's snapshot recovery namespace")]
     RecoveryInput,
     #[error("invalid Core snapshot: {0}")]
-    Codec(#[from] bitcoin_rs_utxo::core_snapshot::SnapshotError),
+    Codec(#[from] bitcoin_rs_storage::utxo::core_snapshot::SnapshotError),
     #[error("snapshot activation failed: {0}")]
     Activation(#[from] AssumeUtxoError),
     #[error("invalid native snapshot: {0}")]
-    Native(#[from] bitcoin_rs_utxo::UtxoError),
+    Native(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error("snapshot admission failed: {0}")]
-    Admission(#[from] bitcoin_rs_chainstate::ApplyError),
+    Admission(#[from] bitcoin_rs_execution::ApplyError),
     #[error("snapshot consumer reconciliation failed: {0}")]
     Settlement(#[from] bitcoin_rs_mempool::ChainChangeError),
     #[error("snapshot activation failed: {activation}; consumer settlement failed: {settlement}")]
@@ -194,9 +196,9 @@ impl From<SnapshotImportError> for SnapshotControlError {
             SnapshotImportError::File(_)
             | SnapshotImportError::NotRegular
             | SnapshotImportError::RecoveryInput => Self::File(error.to_string()),
-            SnapshotImportError::Codec(bitcoin_rs_utxo::core_snapshot::SnapshotError::Io(_)) => {
-                Self::Failed(error.to_string())
-            }
+            SnapshotImportError::Codec(
+                bitcoin_rs_storage::utxo::core_snapshot::SnapshotError::Io(_),
+            ) => Self::Failed(error.to_string()),
             SnapshotImportError::Codec(_) | SnapshotImportError::Native(_) => {
                 Self::Invalid(error.to_string())
             }
@@ -500,7 +502,7 @@ impl SnapshotControl {
     pub(crate) fn import_native(&self, path: &Path) -> Result<(), SnapshotImportError> {
         let _permit = self.claim_import()?;
         let mut file = BufReader::new(open_regular_input(path)?);
-        let snapshot = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut file)?;
+        let snapshot = bitcoin_rs_storage::utxo::read_snapshot_strict_v4(&mut file)?;
         let base_hash = snapshot.tip_hash;
         self.activate(base_hash, |manager| {
             manager.activate_snapshot_state(snapshot.set, snapshot.tip_hash, snapshot.height)
@@ -565,7 +567,7 @@ impl SnapshotControl {
         let _ = self.manager.take_pending_activation_witness();
     }
 
-    fn offer_activation_seed(&self, base_hash: bitcoin_rs_primitives::Hash256) {
+    fn offer_activation_seed(&self, base_hash: bitcoin_rs_consensus::primitives::Hash256) {
         let Some(witness) = self.manager.take_pending_activation_witness() else {
             return;
         };
@@ -581,7 +583,7 @@ impl SnapshotControl {
         seed_offer: Option<&SeedOfferCell>,
         data_dir: &Path,
         witness: &V4Witness,
-        base_hash: bitcoin_rs_primitives::Hash256,
+        base_hash: bitcoin_rs_consensus::primitives::Hash256,
     ) {
         let Some(cell) = seed_offer else {
             return;
@@ -635,7 +637,7 @@ impl SnapshotControl {
         }
         let active = summary.active_chainstate;
         let snapshot_blockhash = active_snapshot_base(active.role, &summary.status)
-            .map(bitcoin_rs_primitives::Hash256::to_string_be);
+            .map(bitcoin_rs_consensus::primitives::Hash256::to_string_be);
         chainstates.push(ChainstateInfo {
             blocks: active.height.unwrap_or(0),
             bestblockhash: active
@@ -660,7 +662,7 @@ fn micros(elapsed: Duration) -> u64 {
 fn active_snapshot_base(
     role: ChainstateRole,
     status: &AssumeUtxoDiskStatus,
-) -> Option<bitcoin_rs_primitives::Hash256> {
+) -> Option<bitcoin_rs_consensus::primitives::Hash256> {
     match role {
         ChainstateRole::AssumedActive { base_hash, .. } => Some(base_hash),
         ChainstateRole::Ordinary => match status {

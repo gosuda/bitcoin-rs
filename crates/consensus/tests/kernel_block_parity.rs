@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 
 use bitcoin::hex::FromHex;
 use bitcoin_rs_consensus::ConsensusError;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, consensus_bytes,
     deserialize,
 };
-use bitcoin_rs_script::{Interpreter, VerifyFlags};
+use bitcoin_rs_consensus::script::{Interpreter, VerifyFlags};
 use serde::Deserialize;
 
 use crate::support::error::{OracleFault, TestError};

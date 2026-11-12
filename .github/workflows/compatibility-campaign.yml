@@ -43,7 +43,7 @@ jobs:
       matrix:
         range: [minimal, maximum]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # The minimal lane checks --all-features and the maximum lane runs an
@@ -56,9 +56,9 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: dep-range-${{ matrix.range }}
-      - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-deny
+      - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-deny@0.20.2
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.20.2
       - run: KEEP_LOCK=1 scripts/check-dep-range.sh ${{ matrix.range }}
 
   # Scheduled (issue #174 / FEAT-01): the named combinations in
@@ -73,7 +73,7 @@ jobs:
       matrix:
         lane: [pure, native]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -99,9 +99,10 @@ jobs:
   msrv:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/native-deps
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         id: toolchain
         with:
@@ -121,4 +122,4 @@ jobs:
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: |
           cargo check --locked -p bitcoin-rs-node \
-            --no-default-features --features fjall,zmq
+            --no-default-features --features zmq

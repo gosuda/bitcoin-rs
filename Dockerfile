@@ -7,6 +7,7 @@ RUN apt-get update \
         build-essential \
         clang \
         cmake \
+        g++ \
         libboost-dev \
         libclang-dev \
         libzmq3-dev \
@@ -16,12 +17,8 @@ RUN apt-get update \
 WORKDIR /workspace
 COPY . .
 
-# Build the production verifier with the default fjall storage backend, while
-# leaving the other storage engines out of the runtime image. `kernel` is a
-# capability ("bitcoinkernel support is compiled in"); the shipped image then
-# selects it in its default config file below.
 RUN cargo build --locked --release -p bitcoin-rs \
-    --no-default-features --features fjall,kernel
+    --no-default-features --features kernel
 
 FROM debian:bookworm-slim AS runtime
 

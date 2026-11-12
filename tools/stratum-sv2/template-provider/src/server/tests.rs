@@ -2,8 +2,8 @@ use super::*;
 
 use crate::{EXAMPLE_PRIVATE_KEY_HEX, Network, NodeConfig, RETAINED_TEMPLATES, RuntimeInputs};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolObserver, MutationEnvelope};
-use bitcoin_rs_mining::{GenerateRequest, GenerateSelection, GeneratedBlock, solve_block};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_serving::mining::{GenerateRequest, GenerateSelection, GeneratedBlock, solve_block};
+use bitcoin_rs_consensus::primitives::{
     Amount, BlockHash, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, consensus_bytes,
 };
 use futures_executor::block_on;
@@ -257,7 +257,7 @@ impl EmbeddedNode {
             .clone();
         let spend = Tx {
             version: 2,
-            lock_time: bitcoin_rs_primitives::LockTime::ZERO,
+            lock_time: bitcoin_rs_consensus::primitives::LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(funding.txid(), 0),
                 script_sig: Script::new(),

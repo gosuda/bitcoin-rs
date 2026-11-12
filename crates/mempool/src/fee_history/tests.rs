@@ -1,6 +1,6 @@
 use super::*;
 use crate::{MempoolEntry, MempoolLimits};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 use std::sync::Arc;

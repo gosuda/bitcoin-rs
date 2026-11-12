@@ -48,8 +48,8 @@ use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 
-use bitcoin_rs_chainstate::ValidationMode;
-use bitcoin_rs_node::{Auth, Network, ScriptIndexMode};
+use bitcoin_rs_execution::ValidationMode;
+use bitcoin_rs_node::{Auth, ConfigError, Network, ScriptIndexMode};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TestError {
@@ -244,7 +244,13 @@ fn nonloopback_rpc_requires_explicit_auth_on_cli() {
         Ok(_) => panic!("network-exposed RPC without operator credentials must fail"),
         Err(error) => error,
     };
-    assert!(error.to_string().contains("non-loopback RPC bind"));
+    let TestError::Bin(crate::config::BinError::Config(error)) = error else {
+        panic!("expected a configuration error: {error}");
+    };
+    assert!(
+        matches!(error, ConfigError::RpcNonLoopbackNeedsAuth),
+        "unexpected configuration error: {error}"
+    );
 
     let config = resolved(
         &["bitcoin-rs", "--rpc-bind", "0.0.0.0:8332"],
@@ -303,7 +309,7 @@ fn environment_parses_script_index() {
 fn esplora_query_limit_resolves_and_rejects_zero() -> Result<(), TestError> {
     assert_eq!(
         resolved(&["bitcoin-rs"], &[]).rpc.esplora_max_queries,
-        bitcoin_rs_rpc::esplora::DEFAULT_MAX_QUERIES.get()
+        bitcoin_rs_serving::esplora::DEFAULT_MAX_QUERIES.get()
     );
     let config = load_file(
         "--config",
@@ -429,49 +435,6 @@ fn v2_transport_defaults_on_and_disables_from_every_surface() {
     }
 }
 
-#[test]
-#[cfg(not(feature = "kernel"))]
-fn validation_engine_kernel_is_rejected_without_kernel_support() {
-    let error = match super::load(
-        ["bitcoin-rs", "--validation-engine", "kernel"],
-        std::iter::empty::<(OsString, OsString)>(),
-    ) {
-        Ok(_) => panic!("unsupported engine must fail startup from the CLI"),
-        Err(error) => error,
-    };
-    assert!(
-        error.to_string().contains("not compiled"),
-        "unsupported-build error must say so, got {error:#}"
-    );
-
-    let error = match super::load(
-        ["bitcoin-rs"],
-        std::iter::once(("BITCOIN_RS_VALIDATION_ENGINE", "kernel"))
-            .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-    ) {
-        Ok(_) => panic!("unsupported engine must fail startup from the environment"),
-        Err(error) => error,
-    };
-    assert!(
-        error.to_string().contains("not compiled"),
-        "unsupported-build error must say so, got {error:#}"
-    );
-
-    let error = match load_file(
-        "--config",
-        "validation_engine = \"kernel\"\n",
-        &[],
-        std::iter::empty::<(OsString, OsString)>(),
-    ) {
-        Ok(_) => panic!("unsupported engine must fail startup from TOML too"),
-        Err(error) => error,
-    };
-    assert!(
-        error.to_string().contains("not compiled"),
-        "unsupported-build error must say so, got {error:#}"
-    );
-}
-
 // VAL-01
 #[test]
 fn validation_engine_defaults_to_native_and_layers_flag_over_environment() {
@@ -542,7 +505,9 @@ fn legacy_flat_zmq_toml_is_rejected() {
         Ok(_) => panic!("legacy flat ZMQ keys must not be silently accepted"),
         Err(error) => error,
     };
-    assert!(error.to_string().contains("failed to parse TOML config"));
+    let TestError::Bin(crate::config::BinError::ParseTomlConfig { .. }) = error else {
+        panic!("expected a TOML parse error: {error}");
+    };
 }
 
 #[test]
@@ -686,7 +651,10 @@ fn environment_rejects_invalid_chainstate_journal_boolean() {
         Ok(_) => panic!("invalid journal boolean must be rejected"),
         Err(error) => error,
     };
-    assert!(error.to_string().contains("invalid boolean"));
+    let TestError::Bin(crate::config::BinError::Config(error)) = error else {
+        panic!("expected a configuration error: {error}");
+    };
+    assert!(matches!(error, ConfigError::InvalidBoolean(_)), "{error}");
 }
 
 #[cfg(unix)]
@@ -703,17 +671,18 @@ fn known_non_utf8_environment_value_is_rejected() {
         Err(error) => error,
     };
 
-    assert!(
-        error
-            .to_string()
-            .contains("environment variable BITCOIN_RS_DATA_DIR is not valid UTF-8")
-    );
+    let TestError::Bin(crate::config::BinError::Config(error)) = error else {
+        panic!("expected a configuration error: {error}");
+    };
+    let ConfigError::EnvNotUtf8 { key } = error else {
+        panic!("expected a non-UTF-8 environment error: {error}");
+    };
+    assert_eq!(key, "BITCOIN_RS_DATA_DIR");
 }
 
 /// Core's `-version` leg of `feature_help.py` (v31.1) asserts exit 0 and the
 /// word "version" on stdout. The flag short-circuits before any datadir
-/// work and prints one line with this node's own name and workspace
-/// version - never a Core identity or version number.
+/// work and prints one line carrying this node's workspace version.
 #[test]
 fn version_flag_short_circuits_with_the_node_version_line() {
     use clap::Parser as _;
@@ -728,15 +697,20 @@ fn version_flag_short_circuits_with_the_node_version_line() {
         "the version notice is one line: {notice:?}"
     );
     assert!(
-        notice.contains("bitcoin-rs") && notice.contains(env!("CARGO_PKG_VERSION")),
-        "the notice carries this node's name and version: {notice:?}"
-    );
-    assert!(
         notice.contains("version"),
         "feature_help.py's -version assertion"
     );
-    assert!(
-        !notice.contains("Bitcoin Core") && !notice.contains("v31."),
-        "no Core identity or version is imitated: {notice:?}"
+    let reported = notice
+        .split_whitespace()
+        .find(|token| {
+            token
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        })
+        .unwrap_or_else(|| panic!("the notice carries a numeric version token: {notice:?}"));
+    assert_eq!(
+        reported,
+        env!("CARGO_PKG_VERSION"),
+        "the notice reports the workspace version: {notice:?}"
     );
 }

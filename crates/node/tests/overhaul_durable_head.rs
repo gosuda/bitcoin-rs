@@ -4,10 +4,10 @@ use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
 
-use bitcoin_rs_chain::regtest_fixture;
+use bitcoin_rs_execution::chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
-use bitcoin_rs_primitives::{BlockHash, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockHash, Hash256};
 
 use bitcoin_rs_storage::block_body::{BlockBodyStore, IndexedBlockBodyStore};
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_FORMAT_VERSION, DURABLE_HEAD_KEY};
@@ -29,16 +29,17 @@ const ALL_FAULTS: &[PersistFault] = &[
 ];
 
 struct ChainFamily {
-    store: Arc<bitcoin_rs_storage::FjallStore>,
+    store: Arc<bitcoin_rs_storage::RocksDbStore>,
     _files: Arc<FlatFileBlockStore>,
-    bodies: Arc<IndexedBlockBodyStore<bitcoin_rs_storage::FjallStore>>,
-    undo: KvUndoStore<bitcoin_rs_storage::FjallStore>,
-    head: KvDurableHeadStore<bitcoin_rs_storage::FjallStore>,
+    bodies: Arc<IndexedBlockBodyStore<bitcoin_rs_storage::RocksDbStore>>,
+    undo: KvUndoStore<bitcoin_rs_storage::RocksDbStore>,
+    head: KvDurableHeadStore<bitcoin_rs_storage::RocksDbStore>,
 }
 
 fn open_family(data_dir: &std::path::Path) -> Result<ChainFamily> {
-    let store = Arc::new(bitcoin_rs_storage::FjallStore::open(
+    let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
         data_dir.join("chainstate"),
+        0,
     )?);
     let head = KvDurableHeadStore::new(Arc::clone(&store));
     let files = Arc::new(match head.load()?.and_then(|head| head.body_extent) {
@@ -232,11 +233,13 @@ fn durable_head_precedes_publication_and_survives_restart() -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
 
     let state = NodeState::open(test_config(data_dir.clone()), None)?;
-    let mut tip = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
+    let mut tip = state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+        genesis,
+    ))?;
     let mut blocks = Vec::new();
     for height in 1..=3_u32 {
         let block = regtest_fixture::mined_regtest_child_at(BlockHash(tip.hash), height)?;
-        tip = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        tip = state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
             block.clone(),
         ))?;
         blocks.push(block);
@@ -266,7 +269,7 @@ fn durable_head_precedes_publication_and_survives_restart() -> Result<()> {
         let stored_body = family.bodies.load_block_body(height, block_hash)?;
         assert_eq!(
             stored_body.as_deref(),
-            Some(bitcoin_rs_primitives::consensus_bytes(block).as_slice()),
+            Some(bitcoin_rs_consensus::primitives::consensus_bytes(block).as_slice()),
             "committed body bytes must be reachable through the block files"
         );
     }
@@ -279,7 +282,9 @@ fn durable_head_precedes_publication_and_survives_restart() -> Result<()> {
         .ok_or_else(|| TestError::message("restart must restore an applied tip"))?;
     assert_eq!(restored.hash, tip.hash);
     let block4 = regtest_fixture::mined_regtest_child_at(BlockHash(restored.hash), 4)?;
-    let new_tip = resumed.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block4))?;
+    let new_tip = resumed.apply_block(
+        &bitcoin_rs_consensus::primitives::BlockImage::from_local(block4),
+    )?;
     assert_eq!(new_tip.height, 4);
     drop(resumed);
 
@@ -300,11 +305,14 @@ fn corrupt_head_rows_fail_startup_fail_closed() -> Result<()> {
         let data_dir = temp.path().join("corrupt-node");
         let genesis = Network::Regtest.genesis_block();
         let state = NodeState::open(test_config(data_dir.clone()), None)?;
-        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
+        state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+            genesis,
+        ))?;
         drop(state);
 
-        let raw = Arc::new(bitcoin_rs_storage::FjallStore::open(
+        let raw = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
             data_dir.join("chainstate"),
+            0,
         )?);
         let frame = raw
             .get(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY)?
