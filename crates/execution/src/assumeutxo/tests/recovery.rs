@@ -111,6 +111,7 @@ fn open_persistent_over(
     } else {
         Arc::try_unwrap(chainstate()).map_err(|_| TestError::Missing("shared fixture"))?
     };
+    coins.track_coin_stats((*active.coin_stats).clone());
     active.durable_head = head_store;
     active.undo_store = Arc::new(KvUndoStore::new(store.clone()));
     active.coins = Arc::clone(&coins);
