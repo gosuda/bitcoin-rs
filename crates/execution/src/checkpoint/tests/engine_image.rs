@@ -31,6 +31,7 @@ fn replace_image_with_files(image: &Path, names: &[std::ffi::OsString]) -> TestR
 #[test]
 fn a_published_engine_image_restores_with_its_engine() -> TestResult {
     let dir = tempfile::tempdir()?;
+    crate::events::initialize_data_dir(dir.path())?;
     publish_checkpoint_with_engine_image(dir.path())?;
     let CheckpointLoad::Complete(restored) = load_checkpoint(dir.path(), config())? else {
         return Err(TestError::UnexpectedSuccess(
@@ -38,6 +39,17 @@ fn a_published_engine_image_restores_with_its_engine() -> TestResult {
         ));
     };
     assert!(restored.engine.is_some());
+    let Ok(runtime) = crate::recovery::prepare_initial_state_with_engine(dir.path(), NETWORK, None)
+    else {
+        return Err(TestError::UnexpectedSuccess(
+            "valid runtime checkpoint did not load",
+        ));
+    };
+    assert!(runtime.engine.is_some());
+    assert_eq!(
+        runtime.initial.applied_tip.as_ref().map(|tip| tip.height),
+        Some(0)
+    );
     Ok(())
 }
 
@@ -53,6 +65,71 @@ fn a_generation_without_an_engine_image_restores_without_an_engine() -> TestResu
         ));
     };
     assert!(restored.engine.is_none());
+    Ok(())
+}
+
+// RCV-10
+#[test]
+fn runtime_rejects_a_missing_checkpoint_image_without_mutating_newer_committed_state() -> TestResult
+{
+    use std::sync::Arc;
+
+    use bitcoin_rs_consensus::primitives::BlockImage;
+    use bitcoin_rs_storage::{ColumnFamily, KvStore};
+
+    let dir = tempfile::tempdir()?;
+    crate::events::initialize_data_dir(dir.path())?;
+    let image = publish_checkpoint_with_engine_image(dir.path())?;
+    let store = Arc::new(bitcoin_rs_storage::memory_kv::MemoryKvStore::new());
+    let chain = crate::test_fixtures::handles_with_store(
+        NETWORK,
+        Arc::new(UtxoSet::new()),
+        Arc::clone(&store),
+    );
+    let genesis = crate::test_fixtures::seed_genesis(&chain)?;
+    chain.coin_stats.finish_block(0, 1);
+    let child = crate::chain::regtest_fixture::mined_regtest_child_at(BlockHash(genesis.hash), 1)?;
+    chain.admit_headers(&[child.header])?;
+    chain.apply_block(&BlockImage::from_local(child))?;
+    let head = chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("committed child head"))?;
+    assert_eq!(head.height, 1);
+    let coins_before = store
+        .snapshot()?
+        .iter_prefix(ColumnFamily::Coins, &[])?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(!coins_before.is_empty());
+    let root = dir.path().join(CHECKPOINT_ROOT);
+    let current_before = fs::read(root.join(CURRENT_FILE))?;
+    let generation = image
+        .parent()
+        .ok_or(TestError::Missing("checkpoint generation"))?;
+    let headers_before = fs::read(generation.join(HEADERS_FILE))?;
+    let stats_before = fs::read(generation.join(COINSTATS_FILE))?;
+    let manifest_before = fs::read(generation.join(MANIFEST_FILE))?;
+    fs::remove_dir_all(&image)?;
+
+    let result =
+        crate::recovery::prepare_initial_state_with_engine(dir.path(), NETWORK, Some(&head));
+    assert!(matches!(
+        result,
+        Err(crate::recovery::RecoveryError::CheckpointEngineImageMissing)
+    ));
+    assert_eq!(chain.durable_head.load()?, Some(head));
+    assert_eq!(
+        store
+            .snapshot()?
+            .iter_prefix(ColumnFamily::Coins, &[])?
+            .collect::<Result<Vec<_>, _>>()?,
+        coins_before
+    );
+    assert_eq!(fs::read(root.join(CURRENT_FILE))?, current_before);
+    assert_eq!(fs::read(generation.join(HEADERS_FILE))?, headers_before);
+    assert_eq!(fs::read(generation.join(COINSTATS_FILE))?, stats_before);
+    assert_eq!(fs::read(generation.join(MANIFEST_FILE))?, manifest_before);
+    assert!(!image.exists());
     Ok(())
 }
 

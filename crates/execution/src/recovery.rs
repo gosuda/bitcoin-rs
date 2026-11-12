@@ -56,6 +56,10 @@ pub enum RecoveryError {
     #[error("snapshot-base checkpoint does not match the pinned commitment/count")]
     PinnedCheckpointMismatch,
     #[error(
+        "runtime checkpoint is missing its engine image; recover a complete checkpoint or resync into a new datadir"
+    )]
+    CheckpointEngineImageMissing,
+    #[error(
         "full validation requires an unpruned datadir; restart with --validation-mode assume-valid or resync"
     )]
     PrunedDatadirNeedsFullValidation,
@@ -327,33 +331,16 @@ fn restore_snapshot_with_engine(
             .and_then(|id| restored.tree.node(id).ok())
             .is_some_and(|node| node.hash == pinned.block_hash);
         if compatible {
+            let image = restored
+                .engine
+                .as_ref()
+                .ok_or(RecoveryError::CheckpointEngineImageMissing)?;
             if restored.applied_tip.height == pinned.height {
-                let coins_match = match restored.engine.as_ref() {
-                    Some(image) => {
-                        let snap = image.snapshot().map_err(RecoveryError::Storage)?;
-                        let coins = bitcoin_rs_storage::utxo::UtxoSet::new();
-                        for row in snap.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
-                            let (_key, value) = row?;
-                            coins.insert_parsed_record(
-                                bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(
-                                    value.into_boxed_slice(),
-                                )
-                                .map_err(RecoveryError::Utxo)?,
-                            );
-                        }
-                        coins
-                            .lock_stable_view()
-                            .hash_serialized_3_at_height(pinned.height)?
-                            == pinned.hash_serialized
-                    }
-                    None => {
-                        restored
-                            .utxo
-                            .lock_stable_view()
-                            .hash_serialized_3_at_height(pinned.height)?
-                            == pinned.hash_serialized
-                    }
-                };
+                let snap = image.snapshot().map_err(RecoveryError::Storage)?;
+                let coins_match = bitcoin_rs_storage::utxo::snapshot::hash_serialized_3_snapshot(
+                    snap.as_ref(),
+                    Some(pinned.height),
+                )? == pinned.hash_serialized;
                 if !coins_match
                     || restored.applied_tip.chain_tx_count.to_wire() != pinned.chain_tx_count
                 {
@@ -477,6 +464,9 @@ pub fn prepare_initial_state_with_engine(
             engine: None,
         });
     };
+    if restored.engine.is_none() {
+        return Err(RecoveryError::CheckpointEngineImageMissing);
+    }
     let engine = restored.engine.clone();
     Ok(RestoredState {
         initial: restored_initial(*restored)?,
