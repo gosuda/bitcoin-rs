@@ -1137,6 +1137,30 @@ fn script_index_reset_preserves_tx_lookup_and_shared_identity() -> Result<(), Te
     Ok(())
 }
 
+// IDX-04
+#[test]
+fn tx_lookup_reset_preserves_script_history_directories() -> Result<(), TestError> {
+    let store = Arc::new(MemoryStore::default());
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let body = read_fixture(0)?;
+    let hash = block_hash(&body);
+    let script = coinbase_scripthash(&body)?;
+    let block = prepare_for(&writer, IndexCapabilities::HISTORICAL, 0, hash, &body)?;
+    writer.commit_forward(common::single_block_batch(block))?;
+
+    writer.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
+
+    assert_eq!(
+        writer.watermarks()?.script_history,
+        Some(IndexWatermark { height: 0, hash })
+    );
+    assert_eq!(writer.watermarks()?.tx_lookup, None);
+    let snapshot = writer.snapshot()?;
+    let funding = snapshot.funding_rows(script, SCAN_ALL)?.rows;
+    assert_eq!(funding.len(), 1);
+    Ok(())
+}
+
 // IDX-07
 #[test]
 fn group_rollback_releases_identity_and_refuses_a_second_member() -> Result<(), TestError> {

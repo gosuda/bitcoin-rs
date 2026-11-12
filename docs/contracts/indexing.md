@@ -165,6 +165,7 @@ Owners:
 - Surviving sibling capabilities remain ready.
 - Resetting and rebuilding `ScriptHistory` leaves `TxLookup` and `ScriptLive` online and serving while their watermarks match the applied tip.
 - The same rule applies vice versa.
+- A selective reset MUST preserve shared transaction directories while an unselected published capability uses them.
 - Switching `full` to `utxo` resets only leftover persisted families.
 - Dropping internal `TxLookup` when explicit `--txindex` is off resets only leftover persisted families.
 - Configured families never rebuild as a side effect.

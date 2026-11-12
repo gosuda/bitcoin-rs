@@ -594,12 +594,16 @@ fn reset_scan_families<S: KvStore>(
     let unselected_cursor_remains = IndexCapability::ALL.into_iter().try_fold(
         false,
         |remains, capability| -> Result<bool, IndexError> {
-            if remains || capabilities.contains(capability) {
+            if capabilities.contains(capability) {
                 return Ok(remains);
             }
-            Ok(store
+            let published = store
                 .get(ColumnFamily::UtxoMeta, capability.watermark_key())?
-                .is_some())
+                .is_some();
+            if published {
+                scans.retain(|(family, _)| !capability.column_families().contains(family));
+            }
+            Ok(remains || published)
         },
     )?;
     if !unselected_cursor_remains {

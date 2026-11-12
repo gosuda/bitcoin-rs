@@ -78,6 +78,7 @@ impl IndexCapability {
         match self {
             Self::TxLookup => &[ColumnFamily::TxConfirmed, ColumnFamily::TxDir],
             Self::ScriptHistory => &[
+                ColumnFamily::TxDir,
                 ColumnFamily::Funding,
                 ColumnFamily::Spending,
                 ColumnFamily::ScriptDict,
