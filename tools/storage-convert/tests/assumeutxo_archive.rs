@@ -59,14 +59,7 @@ fn convert_and_assert_snapshot_archive(source_epoch: u32) -> TestResult<()> {
         ));
     };
 
-    let output = run_converter(&[
-        "--from",
-        from_str,
-        "--to",
-        to_str,
-        "--to-engine",
-        "rocksdb",
-    ])?;
+    let output = run_converter(&["--from", from_str, "--to", to_str, "--to-engine", "rocksdb"])?;
     let report = parse_report(&output)?;
 
     let source_digest_after = recursive_dir_digest(from_path)?;
