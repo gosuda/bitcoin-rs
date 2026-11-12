@@ -497,8 +497,11 @@ fn load_payloads_inner(
 
 /// Opens the engine image stored inside a checkpoint generation, if any.
 ///
-/// Generations written before engine images existed have no store; those
-/// restore as `None` and the caller falls back to replaying from genesis.
+/// A generation with no `chainstate` entry carries no image and restores as
+/// `None`; the caller decides whether that is acceptable. An entry that is
+/// present but cannot be opened as an engine image (an empty directory,
+/// unknown files, several engines, a non-UTF-8 name) fails the load as a
+/// corrupt checkpoint and is never read as an absent image.
 fn open_generation_store(
     store_dir: &Dir,
     store_path: Option<&std::path::Path>,
@@ -522,14 +525,19 @@ fn open_generation_store(
             Ok(Some(std::sync::Arc::new(store)))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let Some(path) = store_path else {
+            let (Some(_), Some(path)) = (nested.as_ref(), store_path) else {
                 return Ok(None);
             };
-            match bitcoin_rs_storage::open_checkpoint_store(path) {
-                Ok(store) => Ok(Some(store)),
-                Err(bitcoin_rs_storage::StorageError::IncompatibleData(_)) => Ok(None),
-                Err(error) => Err(error.into()),
-            }
+            bitcoin_rs_storage::open_checkpoint_store(path)
+                .map(Some)
+                .map_err(|error| match error {
+                    bitcoin_rs_storage::StorageError::IncompatibleData(reason) => {
+                        CheckpointError::Store(StoreError::Invalid(format!(
+                            "checkpoint engine image is unusable: {reason}"
+                        )))
+                    }
+                    other => other.into(),
+                })
         }
         Err(e) => Err(e.into()),
     }
