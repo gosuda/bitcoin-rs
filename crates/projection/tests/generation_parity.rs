@@ -488,10 +488,12 @@ fn same_tx_fund_and_spend_keeps_both_posting_occurrences() -> Result<(), TestErr
     Ok(())
 }
 
+type ScriptHistoryPair = (u32, [u8; 32], [u8; 32], u8);
+
 fn script_history_pairs(
     view: &dyn TxIndexSnapshot,
     scripthash: ScriptHash,
-) -> Result<Vec<(u32, [u8; 32], [u8; 32], u8)>, TestError> {
+) -> Result<Vec<ScriptHistoryPair>, TestError> {
     const SCAN_ALL: PrefixScanLimit = PrefixScanLimit {
         max_rows: 100_000,
         max_bytes: 64 << 20,

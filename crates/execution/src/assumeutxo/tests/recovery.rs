@@ -1831,12 +1831,12 @@ fn failed_orphan_cleanup_keeps_the_marker_and_the_next_boot_retries_the_rollback
     let marker = bitcoin_rs_storage::SnapshotActivationMarker {
         base_hash: fixture.pinned.block_hash,
         coin_count: 0,
-        coin_digest: Hash256::from_le_bytes([0_u8; 32]),
+        coin_digest: Hash256::from_le_bytes(&[0_u8; 32]),
     };
     active
         .commit_authority
         .begin_snapshot_activation(None, &marker)
-        .map_err(commit_error)?;
+        .map_err(crate::assumeutxo::commit_error)?;
 
     let root = dir
         .path()

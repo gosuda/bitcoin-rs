@@ -233,7 +233,7 @@ fn overwriting_block_disconnect_derives_removal_as_before() -> TestResult {
     let txids = [txid];
     let tx_plan = crate::prepare::plan_block_transactions(&image, &txids);
     let resolved = Arc::new(crate::ResolvedUtxoView::resolve(
-        chain.coins.as_ref(),
+        &crate::connect::ChainstateUtxoSource::new(&chain),
         &image,
         &tx_plan,
     ));
