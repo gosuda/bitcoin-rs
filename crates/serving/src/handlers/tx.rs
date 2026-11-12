@@ -363,17 +363,24 @@ fn block_from_utxo(
         if cancellation.is_triggered() {
             return Err(proof_interrupted());
         }
-        if !ctx
+        let key = bitcoin_rs_storage::CoinKey(txid.0.to_le_bytes());
+        let Some(bytes) = ctx
             .chain
             .utxo
-            .has_live_outputs_for_txid(&Hash256::from(*txid))?
-        {
+            .coin_store()
+            .get(&key)
+            .map_err(bitcoin_rs_storage::utxo::UtxoError::from)?
+        else {
             continue;
-        }
-        for vout in 0..MAX_OUTPUTS_PER_BLOCK {
-            let Some(coin) = ctx.chain.utxo.get_entry(&OutPoint::new(*txid, vout))? else {
-                continue;
-            };
+        };
+        let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
+            bytes.to_vec().into_boxed_slice(),
+        )?;
+        if let Some(coin) = record
+            .outputs()
+            .filter(|output| output.vout < MAX_OUTPUTS_PER_BLOCK)
+            .min_by_key(|output| output.vout)
+        {
             return Ok(ctx.chain.block_by_height(coin.height));
         }
     }
