@@ -81,6 +81,7 @@ struct DurableHead {
 - Activation first syncs immutable `coins.dat` and `headers.dat` under `assumeutxo/<base_hash>/`.
 - Activation then commits the pinned base, count, and lifecycle in the head.
 - An unreferenced import is an orphan, never a checkpoint or activation authority.
+- Interrupted activation recovery MUST sync orphan checkpoint deletions in the checkpoint root before it clears the activation marker. A sync failure MUST retain the marker for retry.
 - Historical updates advance `commit_id` without changing the active tip.
 - Each new candidate body is synced and referenced as pending before validation.
 - Its locator becomes visible to derived readers only with the validated undo/progress batch.

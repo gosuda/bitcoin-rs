@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -206,8 +208,9 @@ pub(crate) fn engine_coin_stats(
 /// activation; a crash after the head commit finds the checkpoint on
 /// restart. The orphan removal is linearizable with the marker clear by
 /// ordering: the coins are wiped and the marker handed back here, the
-/// orphan generation is removed next, and the marker is only cleared once
-/// the removal succeeded. A failed removal propagates the error before the
+/// orphan generation is removed next, the checkpoint root is synced so the
+/// removal is durable, and the marker is only cleared once that sync
+/// succeeded. A failed removal or sync propagates the error before the
 /// marker is cleared, so no restart can observe a cleared marker next to a
 /// loadable orphan checkpoint and adopt it as ordinary state; the next boot
 /// re-runs this rollback.
@@ -241,17 +244,23 @@ pub fn recover_snapshot_activation(
 
 /// Removes the checkpoint generation the given snapshot base orphaned.
 ///
-/// Fail-closed: any read, parse, or deletion failure other than an absent
-/// target is returned, so the caller keeps the activation marker durable
-/// and the next restart retries the removal. An absent CURRENT names no
-/// generation, and a generation with no manifest cannot be loaded, so those
-/// still remove what they can and report success.
+/// Fail-closed: any read, parse, deletion, or directory-sync failure other
+/// than an absent target is returned, so the caller keeps the activation
+/// marker durable and the next restart retries the removal. Every path that
+/// deleted entries, and the path that finds CURRENT already absent because
+/// a prior boot may have deleted them but failed the root sync, syncs the
+/// checkpoint root before reporting success; a missing root has nothing to
+/// sync and succeeds. An absent CURRENT names no generation, and a
+/// generation with no manifest cannot be loaded, so those still remove what
+/// they can and report success.
 fn remove_orphan_base_checkpoint(data_dir: &Path, base: &Hash256) -> Result<(), std::io::Error> {
     let root = data_dir.join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT);
     let current_path = root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE);
     let current_bytes = match std::fs::read(&current_path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return sync_checkpoint_root(&root);
+        }
         Err(error) => {
             tracing::warn!(%error, "interrupted activation checkpoint CURRENT was not inspected");
             return Err(error);
@@ -309,7 +318,44 @@ fn remove_orphan_base_checkpoint(data_dir: &Path, base: &Hash256) -> Result<(), 
             return Err(error);
         }
     }
-    Ok(())
+    sync_checkpoint_root(&root)
+}
+
+fn sync_checkpoint_root(root: &Path) -> Result<(), std::io::Error> {
+    #[cfg(test)]
+    {
+        if let Some(message) = ORPHAN_ROOT_SYNC_FAILPOINT.with(Cell::take) {
+            return Err(std::io::Error::other(message));
+        }
+    }
+    let dir = match bitcoin_rs_storage::checkpoint::fs::open_data_dir(root) {
+        Ok(dir) => dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "interrupted activation checkpoint root was not opened for sync"
+            );
+            return Err(error);
+        }
+    };
+    match bitcoin_rs_storage::checkpoint::fs::sync_dir(&dir) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            tracing::warn!(%error, "interrupted activation checkpoint root was not synced");
+            Err(error)
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static ORPHAN_ROOT_SYNC_FAILPOINT: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+fn inject_orphan_root_sync_failure(message: &'static str) {
+    ORPHAN_ROOT_SYNC_FAILPOINT.with(|slot| slot.set(Some(message)));
 }
 
 fn reset_rolled_back_chainstate(active: &Chainstate) -> Result<(), AssumeUtxoError> {

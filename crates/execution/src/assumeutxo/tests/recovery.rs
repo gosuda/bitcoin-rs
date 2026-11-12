@@ -1908,3 +1908,110 @@ fn failed_orphan_cleanup_keeps_the_marker_and_the_next_boot_retries_the_rollback
     );
     Ok(())
 }
+
+// RCV-03
+#[test]
+fn orphan_rollback_syncs_checkpoint_root_before_clearing_the_marker() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let store = chainstate_store(dir.path())?;
+    let active = open_persistent_over(dir.path(), &fixture.pinned, Arc::clone(&store))?;
+    active.admit_headers(
+        &fixture
+            .blocks
+            .iter()
+            .map(|block| block.header)
+            .collect::<Vec<_>>(),
+    )?;
+    let marker = bitcoin_rs_storage::SnapshotActivationMarker {
+        base_hash: fixture.pinned.block_hash,
+        coin_count: 0,
+        coin_digest: Hash256::from_le_bytes(&[0_u8; 32]),
+    };
+    let arm_marker = || -> TestResult<()> {
+        active
+            .commit_authority
+            .begin_snapshot_activation(None, &marker)
+            .map_err(crate::assumeutxo::commit_error)?;
+        Ok(())
+    };
+    let marker_bytes = || -> TestResult<Option<Vec<u8>>> {
+        Ok(active
+            .commit_authority
+            .store()
+            .get(
+                bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+                bitcoin_rs_storage::SNAPSHOT_ACTIVATION_KEY,
+            )?
+            .map(|bytes| bytes.to_vec()))
+    };
+    let root = dir
+        .path()
+        .join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT);
+    std::fs::create_dir_all(&root)?;
+    let current = bitcoin_rs_storage::checkpoint::CurrentV1 {
+        format: bitcoin_rs_storage::checkpoint::CURRENT_FORMAT.to_owned(),
+        version: 1,
+        generation: 1,
+        directory: "generation-000001".to_owned(),
+        manifest_sha256: String::new(),
+    };
+    std::fs::write(
+        root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE),
+        sonic_rs::to_vec(&current)?,
+    )?;
+    arm_marker()?;
+
+    crate::assumeutxo::inject_orphan_root_sync_failure("injected checkpoint root sync failure");
+    let outcome = crate::recover_snapshot_activation(&active, dir.path());
+    assert!(
+        matches!(
+            &outcome,
+            Err(AssumeUtxoError::Storage(
+                bitcoin_rs_storage::StorageError::Io(_)
+            ))
+        ),
+        "a failed checkpoint root sync must keep the recovery fail-closed: {outcome:?}"
+    );
+    assert!(
+        marker_bytes()?.is_some(),
+        "a failed checkpoint root sync must keep the activation marker durable"
+    );
+    assert!(
+        !root
+            .join(bitcoin_rs_storage::checkpoint::CURRENT_FILE)
+            .exists(),
+        "the orphan deletion lands before the root sync decides the marker clear"
+    );
+
+    crate::assumeutxo::inject_orphan_root_sync_failure("injected checkpoint root sync failure");
+    let outcome = crate::recover_snapshot_activation(&active, dir.path());
+    assert!(
+        matches!(
+            &outcome,
+            Err(AssumeUtxoError::Storage(
+                bitcoin_rs_storage::StorageError::Io(_)
+            ))
+        ),
+        "a failed retry root sync must keep the recovery fail-closed: {outcome:?}"
+    );
+    assert!(
+        marker_bytes()?.is_some(),
+        "a failed retry root sync must keep the activation marker durable"
+    );
+
+    crate::recover_snapshot_activation(&active, dir.path())?;
+    assert!(
+        marker_bytes()?.is_none(),
+        "a retry without CURRENT must sync the existing checkpoint root and clear the marker"
+    );
+
+    arm_marker()?;
+    std::fs::remove_dir_all(&root)?;
+    crate::recover_snapshot_activation(&active, dir.path())?;
+    assert!(
+        marker_bytes()?.is_none(),
+        "a missing checkpoint root has nothing to sync and must clear the marker"
+    );
+    Ok(())
+}
