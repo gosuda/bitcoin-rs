@@ -240,6 +240,8 @@ fn finalize_snapshot_after_foreground_restart(
     manager.step_historical(&BlockImage::from_local(fixture.blocks[0].clone()))?;
     manager.step_historical(&BlockImage::from_local(fixture.blocks[1].clone()))?;
     let expected_stats = active.coin_stats.snapshot();
+    assert_eq!(expected_stats.utxo_count, 3);
+    assert_eq!(expected_stats.total_amount, 15_000_000_000);
     let expected_tip = active
         .applied_tip_snapshot()
         .ok_or(TestError::Missing("missing foreground tip"))?
