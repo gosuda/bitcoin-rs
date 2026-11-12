@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 use proptest::prelude::*;
 use std::sync::Arc;
 
-use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
+use crate::test_fixtures::{TestError, TestResult, handles, handles_with_store, seed_genesis};
 use crate::test_support::MemoryBodies;
 use crate::{ApplyError, Chainstate};
 
@@ -674,7 +674,12 @@ proptest! {
             .persist_block_body(1, child1_hash, &consensus_bytes(&child1))
             .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
 
-        let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        let store = Arc::new(bitcoin_rs_storage::MemoryKvStore::new());
+        let mut chain = handles_with_store(
+            Network::Regtest,
+            Arc::new(UtxoSet::new()),
+            Arc::clone(&store),
+        );
         chain
             .commit_authority
             .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
@@ -704,10 +709,16 @@ proptest! {
             prop_assert!(apply_result.is_ok(), "clean write must succeed");
         }
 
-        let mut reopened = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        let committed_head = chain
+            .durable_head
+            .load()
+            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+        let mut reopened = handles_with_store(
+            Network::Regtest,
+            Arc::new(UtxoSet::new()),
+            Arc::clone(&store),
+        );
         let _ = seed_genesis(&reopened).map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
-        reopened.durable_head = Arc::clone(&chain.durable_head);
-        reopened.undo_store = Arc::clone(&chain.undo_store);
         reopened.block_body_store = Some(bodies);
         if cold_boot {
             reopened.applied_tip.store(None);
@@ -730,6 +741,11 @@ proptest! {
 
         prop_assert_eq!(recovered_tip.height, recovered_head.height);
         prop_assert_eq!(recovered_tip.hash, recovered_head.tip);
+        prop_assert_eq!(
+            Some(recovered_head),
+            committed_head,
+            "boot replay must leave the durable head exactly as it was committed"
+        );
 
         let is_state_before = recovered_head == prior_head
             && recovered_tip.height == 0
