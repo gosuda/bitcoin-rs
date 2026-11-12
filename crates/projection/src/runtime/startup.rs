@@ -60,6 +60,7 @@ pub(super) fn run_worker_with_open(
     lifecycle: &Arc<ArcSwap<DerivedIndexLifecycle>>,
     generation: &Generation,
     applied_tip: TipReader,
+    historical_verified: Option<super::HistoricalVerifiedReader>,
     block_tree: BlockTreeReader,
     body_store: Option<Arc<dyn BlockBodyStore>>,
     history: HistoryAccess,
@@ -99,6 +100,7 @@ pub(super) fn run_worker_with_open(
         lifecycle,
         generation,
         applied_tip: &applied_tip,
+        historical_verified: &historical_verified,
         block_tree: &block_tree,
         body_source,
         shutdown,
@@ -175,6 +177,7 @@ pub(super) struct WorkerSetup<'a> {
     lifecycle: &'a Arc<ArcSwap<DerivedIndexLifecycle>>,
     generation: &'a Generation,
     applied_tip: &'a TipReader,
+    historical_verified: &'a Option<super::HistoricalVerifiedReader>,
     block_tree: &'a BlockTreeReader,
     body_source: Option<Arc<dyn BlockBodySource>>,
     shutdown: &'a LatchReader,
@@ -245,7 +248,7 @@ fn publish_serving_query_engine(open: &OpenDerivedIndex, setup: &WorkerSetup<'_>
             QueryEngineLive {
                 enabled: setup.spec.enabled,
                 generation: std::sync::Arc::new(setup.generation.clone()),
-                historical_verified: None,
+                historical_verified: setup.historical_verified.clone(),
                 #[cfg(any(test, feature = "test-seam"))]
                 chain_transition: None,
             },

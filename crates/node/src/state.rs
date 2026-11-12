@@ -413,7 +413,22 @@ impl NodeState {
 
     pub fn start_index_workers(&mut self) -> core::result::Result<(), IndexWorkerError> {
         let history = self.storage.bounded_history();
-        self.derived_index.start(&self.chainstate, history)
+        let manager = Arc::clone(&self.snapshots.manager);
+        let historical_verified = Arc::new(move || {
+            manager
+                .status()
+                .map(|status| match status {
+                    bitcoin_rs_execution::AssumeUtxoDiskStatus::Validating {
+                        historical_height,
+                        historical_hash,
+                        ..
+                    } => Some((historical_height, historical_hash)),
+                    _ => None,
+                })
+                .map_err(|error| bitcoin_rs_projection::TxQueryError::Storage(error.to_string().into()))
+        });
+        self.derived_index
+            .start(&self.chainstate, history, historical_verified)
     }
 
     #[must_use]

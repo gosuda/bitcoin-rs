@@ -2455,6 +2455,78 @@ fn historical_off_chain_watermark_refuses_prefix_reads()
     Ok(())
 }
 
+// SYNC-01
+#[test]
+fn assumed_history_view_reports_verified_frontier() -> Result<(), crate::portable::TestError> {
+    let genesis = Network::Regtest.genesis_block();
+    let child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
+    let txid = child.txs[0].txid();
+    let mut tree = BlockTree::new();
+    tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let child_id = tree.insert_header(child.header, NodeStatus::HeaderValid)?;
+    let tip = tip_snapshot_for(&tree, child_id)?;
+    let tip_cell = Arc::new(ArcSwapOption::empty());
+    tip_cell.store(Some(Arc::new(tip)));
+    let frontier = Arc::new(RwLock::new(None));
+    let reader_frontier = Arc::clone(&frontier);
+    let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+    let runtime = DerivedIndexRuntime::new(wake_tx);
+    let watermark = watermark_for(&tree, child_id)?;
+    let reader = Arc::new(HistoricalReader {
+        snapshot: HistoricalSnapshot {
+            tx_watermark: Some(watermark),
+            sh_watermark: Some(watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: vec![scan_response(
+                ColumnFamily::TxConfirmed,
+                TxidRow::scan_prefix(&txid),
+                vec![(TxidRow::row(&txid, 1).to_db_row().to_vec(), vec![0])],
+                true,
+            )],
+        },
+    });
+    let engine = DerivedIndexQueryEngine::new(
+        runtime,
+        reader,
+        bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_execution::chain::TipReader::new(tip_cell),
+        Some(Arc::new(MovingBody::new(
+            vec![(1, child.block_hash(), consensus_bytes(&child))],
+            None,
+        ))),
+        QueryEngineLive {
+            enabled: IndexCapabilities::TX_LOOKUP,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: Some(Arc::new(move || Ok(*reader_frontier.read()))),
+            chain_transition: None,
+        },
+    );
+    let verified_hash: Hash256 = genesis.block_hash().into();
+    *frontier.write() = Some((0, verified_hash));
+    let assumed = engine.transaction_at_prefix(&txid)?;
+    assert_eq!(
+        assumed.verification_state,
+        crate::query_api::VerificationState::AssumedHistory {
+            verified_height: 0,
+            verified_hash,
+        }
+    );
+    *frontier.write() = Some((1, child.block_hash().into()));
+    let caught_up = engine.transaction_at_prefix(&txid)?;
+    assert_eq!(
+        caught_up.verification_state,
+        crate::query_api::VerificationState::ChainVerified
+    );
+    *frontier.write() = None;
+    let verified = engine.transaction_at_prefix(&txid)?;
+    assert_eq!(
+        verified.verification_state,
+        crate::query_api::VerificationState::ChainVerified
+    );
+    Ok(())
+}
+
 // IDX-12
 #[test]
 fn historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor()

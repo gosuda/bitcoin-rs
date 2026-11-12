@@ -66,7 +66,7 @@ pub use startup::{open_derived_index_store_on_worker, open_derived_index_store_w
 pub use capability::DerivedIndexCapability;
 use query::IndexProgress;
 pub(crate) use query::QueryEngineLive;
-pub use query::{DEFAULT_SCRIPTHASH_LIMIT, DerivedIndexQueryEngine};
+pub use query::{DEFAULT_SCRIPTHASH_LIMIT, DerivedIndexQueryEngine, HistoricalVerifiedReader};
 
 const NO_HISTORICAL_BASE: u64 = u64::MAX;
 

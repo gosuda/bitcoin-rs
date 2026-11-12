@@ -380,6 +380,7 @@ fn live_index_path_reads_zero_block_bodies() {
         Arc::clone(&lifecycle),
         Generation::new(1),
         tip_reader,
+        None,
         tree_reader,
         Some(body_store),
         HistoryAccess::new(

@@ -619,6 +619,7 @@ impl Node {
             Arc::clone(&lifecycle),
             Generation::new(epoch),
             TipReader::new(Arc::new(ArcSwapOption::new(Some(Arc::clone(&fixture.tip))))),
+            None,
             BlockTreeReader::new(Arc::clone(&fixture.tree)),
             Some(body_store),
             HistoryAccess::new(

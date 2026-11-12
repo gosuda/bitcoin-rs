@@ -103,6 +103,7 @@ fn blocked_open_abandonment_detaches_and_poisons() {
         Arc::clone(&inputs.lifecycle),
         inputs.generation.clone(),
         bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&inputs.applied_tip)),
+        None,
         bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(&inputs.block_tree)),
         None,
         bitcoin_rs_storage::pruning::HistoryAccess::new(
@@ -202,6 +203,7 @@ fn shutdown_during_open_joins_helper_releases_lock_and_leaves_namespace_reusable
         Arc::clone(&inputs.lifecycle),
         inputs.generation.clone(),
         bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&inputs.applied_tip)),
+        None,
         bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(&inputs.block_tree)),
         None,
         bitcoin_rs_storage::pruning::HistoryAccess::new(
@@ -300,6 +302,7 @@ fn stalled_open_at_shutdown_deadline_yields_poison_and_safely_cleans_up() {
         Arc::clone(&inputs.lifecycle),
         inputs.generation.clone(),
         bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&inputs.applied_tip)),
+        None,
         bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(&inputs.block_tree)),
         None,
         bitcoin_rs_storage::pruning::HistoryAccess::new(
@@ -398,6 +401,7 @@ fn caught_up_idle_worker_wakes_on_shutdown_latch_and_joins_promptly() {
         Arc::clone(&inputs.lifecycle),
         inputs.generation.clone(),
         bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&inputs.applied_tip)),
+        None,
         bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(&inputs.block_tree)),
         None,
         bitcoin_rs_storage::pruning::HistoryAccess::new(

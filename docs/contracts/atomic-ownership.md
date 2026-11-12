@@ -320,6 +320,7 @@ Nothing below the owner facade can interpret or copy the same data again.
 ### `QRY-04`: Provenance metadata in query responses
 
 - Each query answer must report the block hash, height, coverage range, and verification state of its serving view.
+- At view capture, read the current committed historical validation position. If that position is below the captured epoch, report `AssumedHistory` with its height and hash. If no historical chainstate exists, report `ChainVerified`. Do not use the applied tip as the historical validation position.
 
 ### `QRY-05`: Explicit coverage and unavailable status
 

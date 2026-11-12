@@ -166,10 +166,13 @@ impl QueryBudget {
 /// deadline so a long reader cannot pin a stale generation indefinitely.
 pub(crate) const VIEW_DEADLINE: Duration = Duration::from_secs(60);
 
+pub type HistoricalVerifiedReader =
+    Arc<dyn Fn() -> Result<Option<(u32, Hash256)>, TxQueryError> + Send + Sync>;
+
 pub(crate) struct QueryEngineLive {
     pub(crate) enabled: IndexCapabilities,
     pub(crate) generation: Arc<Generation>,
-    pub(crate) historical_verified: Option<(u32, Hash256)>,
+    pub(crate) historical_verified: Option<HistoricalVerifiedReader>,
     #[cfg(any(test, feature = "test-seam"))]
     pub(crate) chain_transition: Option<bitcoin_rs_execution::chain::StableRead>,
 }
@@ -254,7 +257,7 @@ pub struct DerivedIndexQueryEngine {
     body_source: Option<Arc<dyn BlockBodySource>>,
     enabled: IndexCapabilities,
     generation: Arc<Generation>,
-    historical_verified: Option<(u32, Hash256)>,
+    historical_verified: Option<HistoricalVerifiedReader>,
     query_charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
     #[cfg(any(test, feature = "test-seam"))]
     #[expect(dead_code, reason = "test seam field")]
@@ -269,8 +272,7 @@ pub(crate) struct ServingView {
     pub epoch: AppliedEpoch,
     pub generation_id: u64,
     pub coverage: [Option<CapabilityCoverage>; 4],
-    pub historical_verified_height: u32,
-    pub historical_verified_hash: Hash256,
+    pub historical_verified: Option<(u32, Hash256)>,
     pub(super) tip_id: NodeId,
     deadline: Instant,
     _view_charge: Option<ViewCharge>,
@@ -490,8 +492,10 @@ impl DerivedIndexQueryEngine {
             }
         }
 
-        let (historical_verified_height, historical_verified_hash) =
-            self.historical_verified.unwrap_or((tip.height, tip.hash));
+        let historical_verified = match &self.historical_verified {
+            Some(read) => read()?,
+            None => None,
+        };
         let view_charge = self.charge_view()?;
         Ok((
             ServingView {
@@ -502,8 +506,7 @@ impl DerivedIndexQueryEngine {
                 },
                 generation_id: self.generation.id(),
                 coverage,
-                historical_verified_height,
-                historical_verified_hash,
+                historical_verified,
                 tip_id: tip.tip_id,
                 deadline: Instant::now() + VIEW_DEADLINE,
                 _view_charge: view_charge,
@@ -568,13 +571,14 @@ impl DerivedIndexQueryEngine {
         let (floor, height, hash) = coverage.map_or((0, view.epoch.height, view.epoch.hash), |c| {
             (c.floor, c.last_height, c.last_hash)
         });
-        let verification_state = if view.historical_verified_height >= view.epoch.height {
-            VerificationState::ChainVerified
-        } else {
-            VerificationState::AssumedHistory {
-                verified_height: view.historical_verified_height,
-                verified_hash: view.historical_verified_hash,
+        let verification_state = match view.historical_verified {
+            Some((verified_height, verified_hash)) if verified_height < view.epoch.height => {
+                VerificationState::AssumedHistory {
+                    verified_height,
+                    verified_hash,
+                }
             }
+            _ => VerificationState::ChainVerified,
         };
         Answer {
             value,
@@ -1200,8 +1204,7 @@ mod tests {
                 None,
                 None,
             ],
-            historical_verified_height: 9,
-            historical_verified_hash: tip_hash,
+            historical_verified: None,
             tip_id: NodeId::new(0),
             deadline: Instant::now() + VIEW_DEADLINE,
             _view_charge: None,
