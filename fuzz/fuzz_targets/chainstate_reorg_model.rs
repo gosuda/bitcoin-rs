@@ -132,7 +132,7 @@ fn assert_state(chain: &FuzzChain, model: &Model) {
     );
     let utxo = chain.utxo();
     assert_eq!(
-        utxo.len(),
+        utxo.with_stable_view(|view| view.len()),
         model.coins.len(),
         "utxo output count must track the model"
     );
