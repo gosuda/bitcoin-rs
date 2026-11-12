@@ -14,6 +14,19 @@ use bitcoin_rs_storage::{CoinKey, CoinStore, StorageError, WindowDelta};
 use bytes::Bytes;
 use hashbrown::{HashMap, HashSet};
 
+#[cfg(test)]
+thread_local! {
+    static FOLD_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_fold_visit() {
+    FOLD_VISITS.with(|visits| visits.set(visits.get() + 1));
+}
+
+#[cfg(not(test))]
+const fn count_fold_visit() {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CreatedOwned {
     pub txid: Txid,
@@ -316,17 +329,18 @@ impl WindowWorkspace {
         prefix: &[BlockTransition],
         initial_records: &HashMap<Txid, Option<UtxoRecord>>,
     ) -> Result<WindowDelta, UtxoError> {
-        let touched_txids = touched_txids(prefix);
+        let mut states: HashMap<Txid, Vec<OwnedUtxoOut>> = HashMap::new();
+        for transition in prefix {
+            fold_transition(&mut states, initial_records, transition);
+        }
+        let mut folded: Vec<(Txid, Vec<OwnedUtxoOut>)> = states.into_iter().collect();
+        folded.sort_unstable_by_key(|(txid, _)| *txid);
         let mut delta = WindowDelta::default();
-        for txid in touched_txids {
+        for (txid, current_outputs) in folded {
             let existed_before = initial_records
                 .get(&txid)
                 .and_then(Option::as_ref)
                 .is_some();
-            let mut current_outputs = initial_outputs_for_txid(initial_records, txid);
-            for transition in prefix {
-                apply_transition_to_txid_outputs(transition, txid, &mut current_outputs);
-            }
             match (existed_before, current_outputs.is_empty()) {
                 (false, true) => {}
                 (true, true) => delta.push_final(CoinKey(txid.0.to_le_bytes()), None),
@@ -506,24 +520,6 @@ fn install_resolved_records(
     Ok(())
 }
 
-fn touched_txids(prefix: &[BlockTransition]) -> Vec<Txid> {
-    let mut touched = HashSet::new();
-    for transition in prefix {
-        for created in &transition.created {
-            touched.insert(created.txid);
-        }
-        for spent in &transition.spent_outpoints {
-            touched.insert(spent.txid);
-        }
-        for overwrite in &transition.bip30_overwrites {
-            touched.insert(overwrite.outpoint.txid);
-        }
-    }
-    let mut txids: Vec<Txid> = touched.into_iter().collect();
-    txids.sort_unstable();
-    txids
-}
-
 fn index_transition(
     touched: &mut HashMap<Txid, Vec<usize>>,
     index: usize,
@@ -582,35 +578,41 @@ fn initial_outputs_for_txid(
     }
 }
 
-fn apply_transition_to_txid_outputs(
+fn fold_transition(
+    states: &mut HashMap<Txid, Vec<OwnedUtxoOut>>,
+    initial_records: &HashMap<Txid, Option<UtxoRecord>>,
     transition: &BlockTransition,
-    txid: Txid,
-    current_outputs: &mut Vec<OwnedUtxoOut>,
 ) {
-    if transition
-        .bip30_overwrites
-        .iter()
-        .any(|overwrite| overwrite.outpoint.txid == txid)
-    {
-        current_outputs.clear();
+    for overwrite in &transition.bip30_overwrites {
+        count_fold_visit();
+        outputs_for(states, initial_records, overwrite.outpoint.txid).clear();
     }
     for created in &transition.created {
-        if created.txid == txid {
-            current_outputs.retain(|out| out.vout != created.vout);
-            current_outputs.push(OwnedUtxoOut {
-                vout: created.vout,
-                value: created.value,
-                script_pubkey: created.script_pubkey.to_vec(),
-                coinbase: created.coinbase,
-                height: created.height,
-            });
-        }
+        count_fold_visit();
+        let outputs = outputs_for(states, initial_records, created.txid);
+        outputs.retain(|out| out.vout != created.vout);
+        outputs.push(OwnedUtxoOut {
+            vout: created.vout,
+            value: created.value,
+            script_pubkey: created.script_pubkey.to_vec(),
+            coinbase: created.coinbase,
+            height: created.height,
+        });
     }
     for spent in &transition.spent_outpoints {
-        if spent.txid == txid {
-            current_outputs.retain(|out| out.vout != spent.vout);
-        }
+        count_fold_visit();
+        outputs_for(states, initial_records, spent.txid).retain(|out| out.vout != spent.vout);
     }
+}
+
+fn outputs_for<'s>(
+    states: &'s mut HashMap<Txid, Vec<OwnedUtxoOut>>,
+    initial_records: &HashMap<Txid, Option<UtxoRecord>>,
+    txid: Txid,
+) -> &'s mut Vec<OwnedUtxoOut> {
+    states
+        .entry(txid)
+        .or_insert_with(|| initial_outputs_for_txid(initial_records, txid))
 }
 
 impl OutputSource for WindowWorkspace {
@@ -644,7 +646,11 @@ mod tests {
 
     use bytes::Bytes;
 
-    use super::{CoinKey, Hash256, HashMap, Txid, UtxoError, WindowWorkspace, merge_delta_records};
+    use super::{
+        Amount, BlockTransition, CoinKey, CreatedOwned, FOLD_VISITS, Hash256, HashMap, OutPoint,
+        OwnedUtxoOut, TxOut, Txid, UndoCoin, UndoKind, UtxoError, UtxoRecord, WindowWorkspace,
+        merge_delta_records,
+    };
 
     // WIN-05
     #[test]
@@ -818,5 +824,367 @@ mod tests {
                 workspace.build_flush_delta(1).expect("flush one block");
             }
         }
+    }
+
+    type Outputs = std::collections::BTreeMap<u32, (u64, Vec<u8>, bool, u32)>;
+    type Model = std::collections::BTreeMap<(u32, u32), (u64, Vec<u8>, bool, u32)>;
+
+    const POOL: u32 = 5;
+    const VOUTS: u32 = 4;
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, bound: u32) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            u32::try_from((self.0 >> 33) % u64::from(bound)).expect("below the bound")
+        }
+    }
+
+    fn indexed_txid(index: u32) -> Txid {
+        let mut bytes = [0_u8; 32];
+        bytes[..4].copy_from_slice(&index.to_le_bytes());
+        Txid(Hash256::from_le_bytes(&bytes))
+    }
+
+    fn index_of(key: &CoinKey) -> u32 {
+        let bytes = key.as_bytes();
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    }
+
+    fn empty_transition(height: u32) -> BlockTransition {
+        BlockTransition {
+            height,
+            hash: Hash256::from_le_bytes(&[0xb0; 32]),
+            prev_hash: Hash256::from_le_bytes(&[0xb1; 32]),
+            created: Vec::new(),
+            spent_external: Vec::new(),
+            spent_outpoints: Vec::new(),
+            bip30_overwrites: Vec::new(),
+        }
+    }
+
+    fn created_output(index: u32, vout: u32, value: u64, height: u32) -> CreatedOwned {
+        CreatedOwned {
+            txid: indexed_txid(index),
+            vout,
+            coinbase: value.is_multiple_of(2),
+            height,
+            value,
+            script_pubkey: Bytes::from(vec![0x51, u8::try_from(value % 200).expect("byte")]),
+        }
+    }
+
+    fn overwrite_of(index: u32) -> UndoCoin {
+        UndoCoin {
+            outpoint: OutPoint::new(indexed_txid(index), 0),
+            txout: TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: vec![0x51].into(),
+            },
+            height: 1,
+            coinbase: true,
+            kind: UndoKind::Bip30Overwrite,
+        }
+    }
+
+    fn model_apply(model: &mut Model, transition: &BlockTransition) {
+        for overwrite in &transition.bip30_overwrites {
+            let index = index_of(&CoinKey(overwrite.outpoint.txid.0.to_le_bytes()));
+            model.retain(|(owner, _), _| *owner != index);
+        }
+        for created in &transition.created {
+            let index = index_of(&CoinKey(created.txid.0.to_le_bytes()));
+            model.insert(
+                (index, created.vout),
+                (
+                    created.value,
+                    created.script_pubkey.to_vec(),
+                    created.coinbase,
+                    created.height,
+                ),
+            );
+        }
+        for spent in &transition.spent_outpoints {
+            let index = index_of(&CoinKey(spent.txid.0.to_le_bytes()));
+            model.remove(&(index, spent.vout));
+        }
+    }
+
+    fn outputs_of(record: &UtxoRecord) -> Outputs {
+        record
+            .outputs()
+            .map(|out| {
+                (
+                    out.vout,
+                    (
+                        out.value,
+                        out.script_pubkey.to_vec(),
+                        out.coinbase,
+                        out.height,
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    fn model_outputs(model: &Model, index: u32) -> Outputs {
+        model
+            .iter()
+            .filter(|((owner, _), _)| *owner == index)
+            .map(|((_, vout), out)| (*vout, out.clone()))
+            .collect()
+    }
+
+    fn random_initial(
+        rng: &mut Lcg,
+        value: &mut u64,
+    ) -> (HashMap<Txid, Option<UtxoRecord>>, Model) {
+        let mut records = HashMap::new();
+        let mut model = Model::new();
+        for index in 0..POOL {
+            if rng.below(2) == 0 {
+                continue;
+            }
+            let mut outs = Vec::new();
+            for vout in 0..VOUTS {
+                if rng.below(2) == 0 {
+                    *value += 1;
+                    outs.push(OwnedUtxoOut {
+                        vout,
+                        value: *value,
+                        script_pubkey: vec![0x52],
+                        coinbase: false,
+                        height: 3,
+                    });
+                    model.insert((index, vout), (*value, vec![0x52], false, 3));
+                }
+            }
+            if !outs.is_empty() {
+                let record = UtxoRecord::from_owned_outputs(indexed_txid(index).0, &outs)
+                    .expect("initial record");
+                records.insert(indexed_txid(index), Some(record));
+            }
+        }
+        (records, model)
+    }
+
+    fn random_transition(rng: &mut Lcg, value: &mut u64, height: u32) -> BlockTransition {
+        let mut transition = empty_transition(height);
+        for index in 0..POOL {
+            if rng.below(6) == 0 {
+                transition.bip30_overwrites.push(overwrite_of(index));
+            }
+        }
+        for _ in 0..rng.below(5) {
+            *value += 1;
+            let (index, vout) = (rng.below(POOL), rng.below(VOUTS));
+            transition
+                .created
+                .push(created_output(index, vout, *value, height));
+        }
+        for _ in 0..rng.below(5) {
+            let (index, vout) = (rng.below(POOL), rng.below(VOUTS));
+            transition
+                .spent_outpoints
+                .push(OutPoint::new(indexed_txid(index), vout));
+        }
+        transition
+    }
+
+    fn touched_indexes(transitions: &[BlockTransition]) -> std::collections::BTreeSet<u32> {
+        let mut touched = std::collections::BTreeSet::new();
+        for transition in transitions {
+            for overwrite in &transition.bip30_overwrites {
+                touched.insert(index_of(&CoinKey(overwrite.outpoint.txid.0.to_le_bytes())));
+            }
+            for created in &transition.created {
+                touched.insert(index_of(&CoinKey(created.txid.0.to_le_bytes())));
+            }
+            for spent in &transition.spent_outpoints {
+                touched.insert(index_of(&CoinKey(spent.txid.0.to_le_bytes())));
+            }
+        }
+        touched
+    }
+
+    // WIN-03, WIN-07
+    #[test]
+    fn window_delta_matches_an_outpoint_model_across_overwrites_and_flushes() {
+        let mut rng = Lcg(0x5eed);
+        let mut value = 0_u64;
+        for round in 0..300_u32 {
+            let (initial, seed_model) = random_initial(&mut rng, &mut value);
+            let count = 1 + rng.below(8);
+            let transitions: Vec<BlockTransition> = (1..=count)
+                .map(|height| random_transition(&mut rng, &mut value, height))
+                .collect();
+            let mut model = seed_model.clone();
+            for transition in &transitions {
+                model_apply(&mut model, transition);
+            }
+
+            let delta =
+                WindowWorkspace::build_window_delta(&transitions, &initial).expect("window delta");
+            assert!(
+                delta.records.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                "round {round}: records must be strictly sorted by key"
+            );
+            let mut expected: std::collections::BTreeMap<u32, Option<Outputs>> =
+                std::collections::BTreeMap::new();
+            for index in touched_indexes(&transitions) {
+                let outputs = model_outputs(&model, index);
+                let existed = initial
+                    .get(&indexed_txid(index))
+                    .and_then(Option::as_ref)
+                    .is_some();
+                if !outputs.is_empty() {
+                    expected.insert(index, Some(outputs));
+                } else if existed {
+                    expected.insert(index, None);
+                }
+            }
+            let actual: std::collections::BTreeMap<u32, Option<Outputs>> = delta
+                .records
+                .iter()
+                .map(|(key, bytes)| {
+                    let outputs = bytes.as_ref().map(|bytes| {
+                        outputs_of(
+                            &UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice())
+                                .expect("record"),
+                        )
+                    });
+                    (index_of(key), outputs)
+                })
+                .collect();
+            assert_eq!(
+                actual, expected,
+                "round {round}: delta diverged from the model"
+            );
+
+            let split = usize::try_from(rng.below(count + 1)).expect("split");
+            let mut state = initial.clone();
+            for part in [&transitions[..split], &transitions[split..]] {
+                let delta = WindowWorkspace::build_window_delta(part, &state).expect("part delta");
+                merge_delta_records(&mut state, delta.records.iter()).expect("merge");
+            }
+            for index in 0..POOL {
+                let held = state
+                    .get(&indexed_txid(index))
+                    .and_then(Option::as_ref)
+                    .map(outputs_of)
+                    .unwrap_or_default();
+                assert_eq!(
+                    held,
+                    model_outputs(&model, index),
+                    "round {round}: state after flushing at {split} diverged for txid {index}"
+                );
+            }
+        }
+    }
+
+    // WIN-07
+    #[test]
+    fn repeated_overwrites_keep_only_the_last_creations() {
+        let mut initial = HashMap::new();
+        let seeded = [
+            OwnedUtxoOut {
+                vout: 0,
+                value: 900,
+                script_pubkey: vec![0x52],
+                coinbase: true,
+                height: 1,
+            },
+            OwnedUtxoOut {
+                vout: 1,
+                value: 901,
+                script_pubkey: vec![0x52],
+                coinbase: true,
+                height: 1,
+            },
+        ];
+        initial.insert(
+            indexed_txid(0),
+            Some(UtxoRecord::from_owned_outputs(indexed_txid(0).0, &seeded).expect("seed")),
+        );
+
+        let mut first = empty_transition(2);
+        first.bip30_overwrites.push(overwrite_of(0));
+        first.created.push(created_output(0, 0, 10, 2));
+        let mut second = empty_transition(3);
+        second
+            .spent_outpoints
+            .push(OutPoint::new(indexed_txid(0), 0));
+        let mut third = empty_transition(4);
+        third.created.push(created_output(0, 0, 11, 4));
+        third.created.push(created_output(0, 2, 12, 4));
+        let mut fourth = empty_transition(5);
+        fourth.bip30_overwrites.push(overwrite_of(0));
+        let mut fifth = empty_transition(6);
+        fifth.created.push(created_output(0, 1, 13, 6));
+        let transitions = [first, second, third, fourth, fifth];
+
+        for split in 0..=transitions.len() {
+            let mut state = initial.clone();
+            for part in [&transitions[..split], &transitions[split..]] {
+                let delta = WindowWorkspace::build_window_delta(part, &state).expect("part delta");
+                merge_delta_records(&mut state, delta.records.iter()).expect("merge");
+            }
+            let held = state
+                .get(&indexed_txid(0))
+                .and_then(Option::as_ref)
+                .map(outputs_of)
+                .expect("the txid survives with its last creation");
+            let expected: Outputs = [(1, (13, vec![0x51, 13], false, 6))].into_iter().collect();
+            assert_eq!(held, expected, "flush split at {split}");
+        }
+    }
+
+    // WIN-03
+    #[test]
+    fn window_delta_visits_each_transition_entry_once() {
+        let count = 200_u32;
+        let mut transitions = Vec::new();
+        for index in 0..count {
+            let mut transition = empty_transition(index + 1);
+            transition
+                .created
+                .push(created_output(index, 0, u64::from(index) + 1, index + 1));
+            if index > 0 {
+                transition
+                    .spent_outpoints
+                    .push(OutPoint::new(indexed_txid(index - 1), 0));
+            }
+            if index % 10 == 0 {
+                transition.bip30_overwrites.push(overwrite_of(index));
+            }
+            transitions.push(transition);
+        }
+        let entries: usize = transitions
+            .iter()
+            .map(|transition| {
+                transition.created.len()
+                    + transition.spent_outpoints.len()
+                    + transition.bip30_overwrites.len()
+            })
+            .sum();
+
+        FOLD_VISITS.with(|visits| visits.set(0));
+        let delta = WindowWorkspace::build_window_delta(&transitions, &HashMap::new())
+            .expect("window delta");
+
+        assert_eq!(
+            delta.records.len(),
+            1,
+            "only the last creation stays unspent"
+        );
+        assert_eq!(
+            FOLD_VISITS.with(std::cell::Cell::get),
+            entries,
+            "every created, spent and overwrite entry is visited once, not once per touched txid"
+        );
     }
 }
