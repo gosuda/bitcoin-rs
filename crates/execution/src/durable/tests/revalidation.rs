@@ -271,11 +271,11 @@ fn cold_revalidation_rejects_script_invalid_commits_and_preserves_recovery_evide
             assert_eq!(chain.chain_snapshot().tip_hash, tip.hash);
             assert_eq!(chain.chain_snapshot().tip_height, 100);
             assert_eq!(chain.coin_stats.snapshot().height, 100);
-            assert!(chain.utxo_reader().get(&funding).is_some());
+            assert!(chain.utxo_reader().get(&funding)?.is_some());
             assert!(
                 chain
                     .utxo_reader()
-                    .get(&OutPoint::new(invalid.txs[1].txid(), 0))
+                    .get(&OutPoint::new(invalid.txs[1].txid(), 0))?
                     .is_none()
             );
             assert_eq!(chain.durable_head.load()?, head);
@@ -330,11 +330,11 @@ fn valid_cold_revalidation_reuses_the_durable_receipt() -> TestResult {
         assert_eq!(tip.chain_tx_count.to_wire(), head.chain_tx_count);
         assert_eq!(chain.durable_head.load()?, Some(head));
         assert_eq!(chain.chain_snapshot().tip_hash, head.tip);
-        assert!(chain.utxo_reader().get(&funding).is_none());
+        assert!(chain.utxo_reader().get(&funding)?.is_none());
         assert!(
             chain
                 .utxo_reader()
-                .get(&OutPoint::new(valid.txs[1].txid(), 0))
+                .get(&OutPoint::new(valid.txs[1].txid(), 0))?
                 .is_some()
         );
         assert!(chain.begin_transition().is_ok());
@@ -389,11 +389,11 @@ fn valid_warm_revalidation_reuses_the_durable_receipt_and_undo_preparation() -> 
     assert_eq!(tip.chain_tx_count.to_wire(), head.chain_tx_count);
     assert_eq!(chain.durable_head.load()?, Some(head));
     assert_eq!(chain.chain_snapshot().tip_hash, head.tip);
-    assert!(chain.utxo_reader().get(&funding).is_none());
+    assert!(chain.utxo_reader().get(&funding)?.is_none());
     assert!(
         chain
             .utxo_reader()
-            .get(&OutPoint::new(valid.txs[1].txid(), 0))
+            .get(&OutPoint::new(valid.txs[1].txid(), 0))?
             .is_some()
     );
     assert!(chain.begin_transition().is_ok());
@@ -416,11 +416,11 @@ fn warm_assume_valid_start_over_an_accepted_checkpoint_reuses_the_durable_receip
     assert_eq!(tip.chain_tx_count.to_wire(), head.chain_tx_count);
     assert_eq!(chain.durable_head.load()?, Some(head));
     assert_eq!(chain.chain_snapshot().tip_hash, head.tip);
-    assert!(chain.utxo_reader().get(&funding).is_none());
+    assert!(chain.utxo_reader().get(&funding)?.is_none());
     assert!(
         chain
             .utxo_reader()
-            .get(&OutPoint::new(invalid.txs[1].txid(), 0))
+            .get(&OutPoint::new(invalid.txs[1].txid(), 0))?
             .is_some()
     );
     assert!(chain.begin_transition().is_ok());
@@ -483,7 +483,7 @@ fn full_start_over_an_assume_valid_commit_rebuilds_cold_and_rejects_the_invalid_
         (100, invalid.header.prev_blockhash.0),
         "nothing publishes at the invalid height"
     );
-    assert!(chain.utxo_reader().get(&funding).is_some());
+    assert!(chain.utxo_reader().get(&funding)?.is_some());
     drop(dir);
     Ok(())
 }

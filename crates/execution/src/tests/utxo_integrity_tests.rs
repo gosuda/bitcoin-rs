@@ -133,7 +133,7 @@ fn coinbase_maturity_refuses_depth_99_and_accepts_depth_100() -> TestResult {
         refused
             .chain
             .utxo_reader()
-            .get(&OutPoint::new(spend_tx.txid(), 0))
+            .get(&OutPoint::new(spend_tx.txid(), 0))?
             .is_none(),
         "a refused coinbase spend must not enter the UTXO set"
     );
@@ -160,7 +160,7 @@ fn coinbase_maturity_refuses_depth_99_and_accepts_depth_100() -> TestResult {
         accepted
             .chain
             .utxo_reader()
-            .get(&OutPoint::new(spend_tx.txid(), 0))
+            .get(&OutPoint::new(spend_tx.txid(), 0))?
             .is_some(),
         "depth 100 coinbase spend must enter the UTXO set"
     );
@@ -219,7 +219,7 @@ fn disconnect_refuses_undo_whose_removed_outpoint_differs_from_the_block() -> Te
         fixture
             .chain
             .utxo_reader()
-            .get(&coinbase_outpoint(block))
+            .get(&coinbase_outpoint(block))?
             .is_some(),
         "a refused disconnect must not drop block coins"
     );
@@ -281,7 +281,7 @@ fn disconnect_refuses_missing_or_truncated_undo_and_keeps_state() -> TestResult 
             fixture
                 .chain
                 .utxo_reader()
-                .get(&coinbase_outpoint(block))
+                .get(&coinbase_outpoint(block))?
                 .is_some(),
             "truncated={truncated}: a refused disconnect must not drop block coins"
         );
@@ -505,14 +505,14 @@ fn a_block_may_spend_a_same_block_output_only_in_creation_order() -> TestResult 
         "a forward same-block spend must be refused, got {outcome:?}"
     );
     assert!(
-        forward_fixture.chain.utxo_reader().get(&funding).is_some(),
+        forward_fixture.chain.utxo_reader().get(&funding)?.is_some(),
         "a refused forward spend must leave the funding coin"
     );
     assert!(
         forward_fixture
             .chain
             .utxo_reader()
-            .get(&OutPoint::new(child.txid(), 0))
+            .get(&OutPoint::new(child.txid(), 0))?
             .is_none(),
         "a refused forward spend must not create its output"
     );
@@ -533,7 +533,7 @@ fn a_block_may_spend_a_same_block_output_only_in_creation_order() -> TestResult 
         ordered_fixture
             .chain
             .utxo_reader()
-            .get(&OutPoint::new(child.txid(), 0))
+            .get(&OutPoint::new(child.txid(), 0))?
             .is_some(),
         "an in-order same-block spend must create its output"
     );
@@ -541,7 +541,7 @@ fn a_block_may_spend_a_same_block_output_only_in_creation_order() -> TestResult 
         ordered_fixture
             .chain
             .utxo_reader()
-            .get(&OutPoint::new(parent.txid(), 0))
+            .get(&OutPoint::new(parent.txid(), 0))?
             .is_none(),
     );
     Ok(())
@@ -569,7 +569,7 @@ fn a_block_cannot_spend_one_coin_twice() -> TestResult {
         "a repeated same-block spend must be refused, got {outcome:?}"
     );
     assert!(
-        fixture.chain.utxo_reader().get(&funding).is_some(),
+        fixture.chain.utxo_reader().get(&funding)?.is_some(),
         "a refused double spend must leave the funding coin"
     );
     for tx in [&first, &second] {
@@ -577,7 +577,7 @@ fn a_block_cannot_spend_one_coin_twice() -> TestResult {
             fixture
                 .chain
                 .utxo_reader()
-                .get(&OutPoint::new(tx.txid(), 0))
+                .get(&OutPoint::new(tx.txid(), 0))?
                 .is_none(),
             "a refused double spend must not create outputs"
         );

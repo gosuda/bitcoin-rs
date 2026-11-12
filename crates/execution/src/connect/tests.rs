@@ -105,15 +105,15 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
 
         let utxo = handles.utxo_reader();
         assert!(
-            utxo.get_entry(&spent_outpoint).is_none(),
+            utxo.get_entry(&spent_outpoint)?.is_none(),
             "external coin spent"
         );
         assert!(
-            utxo.get_entry(&intermediate_outpoint).is_none(),
+            utxo.get_entry(&intermediate_outpoint)?.is_none(),
             "same-block coin spent"
         );
         let final_coin = utxo
-            .get_entry(&final_outpoint)
+            .get_entry(&final_outpoint)?
             .ok_or(TestError::Missing("final same-block output must be live"))?;
         assert_eq!(final_coin.txout.value.to_sat(), 900);
 
@@ -140,11 +140,11 @@ fn capture_rawtx_changes_only_the_outcome_payload() -> TestResult {
         handles.disconnect_block(&block)?;
         let utxo = handles.utxo_reader();
         assert!(
-            utxo.get_entry(&spent_outpoint).is_some(),
+            utxo.get_entry(&spent_outpoint)?.is_some(),
             "undo restores coin"
         );
         assert!(
-            utxo.get_entry(&final_outpoint).is_none(),
+            utxo.get_entry(&final_outpoint)?.is_none(),
             "undo removes output"
         );
         outcomes.push(outcome);

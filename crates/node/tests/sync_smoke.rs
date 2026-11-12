@@ -142,11 +142,11 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
         assert!(
             handles
                 .utxo_reader()
-                .get(&OutPoint::new(block_one.txs[0].txid(), 0))
+                .get(&OutPoint::new(block_one.txs[0].txid(), 0))?
                 .is_none()
                 && handles
                     .utxo_reader()
-                    .get(&OutPoint::new(block_two.txs[0].txid(), 0))
+                    .get(&OutPoint::new(block_two.txs[0].txid(), 0))?
                     .is_none(),
             "unapplied bodies must not create coins",
         );
@@ -199,7 +199,7 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
         assert_eq!(
             handles
                 .utxo_reader()
-                .get(&OutPoint::new(block.txs[0].txid(), 0)),
+                .get(&OutPoint::new(block.txs[0].txid(), 0))?,
             Some(block.txs[0].outputs[0].clone()),
             "coinbase output at height {} must be live in the engine coin store",
             height + 1,
@@ -278,19 +278,22 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats() -> Result<()
     assert!(
         handles
             .utxo_reader()
-            .get(&fixture.mature_coinbase_outpoint)
+            .get(&fixture.mature_coinbase_outpoint)?
             .is_none(),
         "mature coinbase prevout must be removed by the height-101 spend",
     );
     assert!(
         handles
             .utxo_reader()
-            .get(&fixture.funding_outpoint)
+            .get(&fixture.funding_outpoint)?
             .is_none(),
         "funding prevout must be removed by the height-102 spend",
     );
     assert!(
-        handles.utxo_reader().get(&fixture.spend_outpoint).is_some(),
+        handles
+            .utxo_reader()
+            .get(&fixture.spend_outpoint)?
+            .is_some(),
         "height-102 spend output must remain live",
     );
 

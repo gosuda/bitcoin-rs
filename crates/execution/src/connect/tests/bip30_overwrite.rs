@@ -69,7 +69,7 @@ fn exception_block_undo_removes_the_coin_it_overwrites() -> TestResult {
     let txids = [txid];
     let tx_plan = crate::prepare::plan_block_transactions(&image, &txids);
     let resolved = Arc::new(crate::ResolvedUtxoView::resolve(
-        chain.coins.as_ref(),
+        &crate::connect::ChainstateUtxoSource::new(&chain),
         &image,
         &tx_plan,
     ));
@@ -142,7 +142,7 @@ fn exception_block_disconnect_drops_the_overwritten_engine_coin() -> TestResult 
     let txids = [txid];
     let tx_plan = crate::prepare::plan_block_transactions(&image, &txids);
     let resolved = Arc::new(crate::ResolvedUtxoView::resolve(
-        chain.coins.as_ref(),
+        &crate::connect::ChainstateUtxoSource::new(&chain),
         &image,
         &tx_plan,
     ));
@@ -263,7 +263,7 @@ fn read_bip30_overwrite_undo_removes_the_overwritten_coin() -> TestResult {
 
     let tx_plan = crate::prepare::plan_block_transactions(&image, &txids);
     let resolved = Arc::new(crate::ResolvedUtxoView::resolve(
-        chain.coins.as_ref(),
+        &crate::connect::ChainstateUtxoSource::new(&chain),
         &image,
         &tx_plan,
     ));

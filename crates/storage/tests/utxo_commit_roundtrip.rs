@@ -116,12 +116,12 @@ fn owned_and_borrowed_commits_match_independent_state_hashes() -> TestResult {
             let reader_owned = UtxoReader::from_coin_store(Arc::clone(&owned));
             let reader_borrowed = UtxoReader::from_coin_store(Arc::clone(&borrowed));
             for (outpoint, txout, _, _) in &entries {
-                assert_eq!(reader_owned.get(outpoint), Some(txout.clone()));
-                assert_eq!(reader_borrowed.get(outpoint), Some(txout.clone()));
+                assert_eq!(reader_owned.get(outpoint)?, Some(txout.clone()));
+                assert_eq!(reader_borrowed.get(outpoint)?, Some(txout.clone()));
             }
             for outpoint in &removes {
-                assert_eq!(reader_owned.get(outpoint), None);
-                assert_eq!(reader_borrowed.get(outpoint), None);
+                assert_eq!(reader_owned.get(outpoint)?, None);
+                assert_eq!(reader_borrowed.get(outpoint)?, None);
             }
             removes = entries.drain(..16).map(|entry| entry.0).collect();
             for (_, txout, coinbase, height) in &mut entries {
@@ -175,17 +175,17 @@ fn an_invalid_add_rejects_the_whole_commit_in_every_commit_path() -> TestResult 
                 "unexpected error: {error}"
             );
             assert_eq!(
-                reader.get(&retained),
+                reader.get(&retained)?,
                 Some(retained_txout),
                 "a rejected commit applied its removes"
             );
-            assert_eq!(reader.get(&peer), Some(peer_txout));
+            assert_eq!(reader.get(&peer)?, Some(peer_txout));
             assert_eq!(
-                reader.get(&valid_add),
+                reader.get(&valid_add)?,
                 None,
                 "a rejected commit applied an earlier add"
             );
-            assert_eq!(reader.get(&invalid_add), None);
+            assert_eq!(reader.get(&invalid_add)?, None);
         }
     }
     Ok(())
@@ -227,13 +227,13 @@ fn output_boundaries_roundtrip_through_get_scan_and_spend() -> TestResult {
         .collect();
     commit_owned(&coin_store, &entries, &[], &txid(90))?;
 
-    assert!(reader.has_live_outputs_for_txid(&live));
-    assert!(!reader.has_live_outputs_for_txid(&txid(89)));
+    assert!(reader.has_live_outputs_for_txid(&live)?);
+    assert!(!reader.has_live_outputs_for_txid(&txid(89))?);
 
     for (outpoint, txout, coinbase, height) in &entries {
-        assert_eq!(reader.get(outpoint).as_ref(), Some(txout));
+        assert_eq!(reader.get(outpoint)?.as_ref(), Some(txout));
         let entry = reader
-            .get_entry(outpoint)
+            .get_entry(outpoint)?
             .ok_or(TestError::Missing("expected a committed output to be live"))?;
         assert_eq!(&entry.txout, txout);
         assert_eq!(entry.coinbase, *coinbase, "coinbase lost at {outpoint:?}");
@@ -241,12 +241,12 @@ fn output_boundaries_roundtrip_through_get_scan_and_spend() -> TestResult {
     }
 
     for (index, (outpoint, _txout, _coinbase, _height)) in entries.iter().enumerate() {
-        assert!(reader.has_live_outputs_for_txid(&live));
+        assert!(reader.has_live_outputs_for_txid(&live)?);
         let block = txid(91 + u64::try_from(index)?);
         commit_owned(&coin_store, &[], std::slice::from_ref(outpoint), &block)?;
-        assert_eq!(reader.get(outpoint), None);
+        assert_eq!(reader.get(outpoint)?, None);
     }
-    assert!(!reader.has_live_outputs_for_txid(&live));
+    assert!(!reader.has_live_outputs_for_txid(&live)?);
     Ok(())
 }
 
@@ -272,9 +272,9 @@ fn high_vout_full_record_delete_removes_all_outputs_in_one_commit() -> TestResul
     commit_owned(&coin_store, &[], &removes, &txid(95))?;
 
     for remove in &removes {
-        assert_eq!(reader.get(remove), None);
+        assert_eq!(reader.get(remove)?, None);
     }
-    assert!(!reader.has_live_outputs_for_txid(&live));
+    assert!(!reader.has_live_outputs_for_txid(&live)?);
     Ok(())
 }
 
@@ -303,14 +303,14 @@ fn a_shared_txid_prefix_keeps_records_and_deletes_independent() -> TestResult {
         commit_owned(&coin_store, &adds, &[], &txid(300))?;
 
         commit_owned(&coin_store, &[], &[first_a], &txid(301))?;
-        assert_eq!(reader.get(&first_a), None);
-        assert_eq!(reader.get(&first_b), Some(first_b_txout));
-        assert_eq!(reader.get(&peer), Some(peer_txout.clone()));
+        assert_eq!(reader.get(&first_a)?, None);
+        assert_eq!(reader.get(&first_b)?, Some(first_b_txout));
+        assert_eq!(reader.get(&peer)?, Some(peer_txout.clone()));
 
         commit_owned(&coin_store, &[], &[first_b], &txid(302))?;
-        assert_eq!(reader.get(&peer), Some(peer_txout));
-        assert!(!reader.has_live_outputs_for_txid(&first));
-        assert!(reader.has_live_outputs_for_txid(&second));
+        assert_eq!(reader.get(&peer)?, Some(peer_txout));
+        assert!(!reader.has_live_outputs_for_txid(&first)?);
+        assert!(reader.has_live_outputs_for_txid(&second)?);
     }
     Ok(())
 }
@@ -332,9 +332,9 @@ fn duplicate_remove_does_not_fast_delete_unspent_vout() -> TestResult {
 
     commit_owned(&coin_store, &[], &[removed, removed], &txid(703))?;
 
-    assert_eq!(reader.get(&removed), None);
-    assert_eq!(reader.get(&retained), Some(retained_txout));
-    assert!(reader.has_live_outputs_for_txid(&live));
+    assert_eq!(reader.get(&removed)?, None);
+    assert_eq!(reader.get(&retained)?, Some(retained_txout));
+    assert!(reader.has_live_outputs_for_txid(&live)?);
     Ok(())
 }
 

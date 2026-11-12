@@ -316,9 +316,8 @@ impl UtxoReader {
         crate::utxo::contract::populate_block_changes(&self.coin_store, changes)
     }
 
-    #[must_use]
-    pub fn get(&self, op: &OutPoint) -> Option<TxOut> {
-        self.get_entry(op).map(|coin| coin.txout)
+    pub fn get(&self, op: &OutPoint) -> Result<Option<TxOut>, UtxoError> {
+        Ok(self.get_entry(op)?.map(|coin| coin.txout))
     }
 
     #[must_use]
@@ -326,13 +325,13 @@ impl UtxoReader {
         &self.coin_store
     }
 
-    #[must_use]
-    pub fn get_entry(&self, op: &OutPoint) -> Option<UtxoCoin> {
+    pub fn get_entry(&self, op: &OutPoint) -> Result<Option<UtxoCoin>, UtxoError> {
         let key = crate::CoinKey(op.txid.0.to_le_bytes());
-        let bytes = self.coin_store.get(&key).ok()??;
-        let record = UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice()).ok()?;
-        let out = record.find_output(op.vout)?;
-        Some(UtxoCoin {
+        let Some(bytes) = self.coin_store.get(&key)? else {
+            return Ok(None);
+        };
+        let record = UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice())?;
+        Ok(record.find_output(op.vout).map(|out| UtxoCoin {
             outpoint: *op,
             txout: TxOut {
                 value: Amount::from_sat(out.value),
@@ -340,20 +339,16 @@ impl UtxoReader {
             },
             coinbase: out.coinbase,
             height: out.height,
-        })
+        }))
     }
 
-    #[must_use]
-    pub fn has_live_outputs_for_txid(&self, txid: &Hash256) -> bool {
+    pub fn has_live_outputs_for_txid(&self, txid: &Hash256) -> Result<bool, UtxoError> {
         let key = crate::CoinKey(txid.to_le_bytes());
-        self.coin_store
-            .get(&key)
-            .ok()
-            .flatten()
-            .is_some_and(|bytes| {
-                UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice())
-                    .is_ok_and(|record| !record.is_empty())
-            })
+        let Some(bytes) = self.coin_store.get(&key)? else {
+            return Ok(false);
+        };
+        let record = UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice())?;
+        Ok(!record.is_empty())
     }
 
     fn rebuild_from_coin_store(&self) {

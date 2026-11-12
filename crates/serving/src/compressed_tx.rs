@@ -60,6 +60,8 @@ pub(crate) enum LookupError {
     CorruptBody(u32),
     #[error("block body at height {0} could not be read")]
     BodyReadFailed(u32),
+    #[error("coin set could not be read")]
+    CoinReadFailed,
     #[error("compressed transaction resource limit exceeded")]
     LimitExceeded(Limit),
     #[error("compressed transaction request cancelled")]
@@ -109,6 +111,8 @@ pub(crate) enum CodecError {
     CorruptBody(u32),
     #[error("block body at height {0} could not be read")]
     BodyReadFailed(u32),
+    #[error("coin set could not be read")]
+    CoinReadFailed,
     #[error("compressed signature could not be recovered")]
     SignatureUnrecoverable,
     #[error("compressed transaction request cancelled")]
@@ -136,6 +140,9 @@ impl From<CodecError> for RpcError {
             CodecError::BodyReadFailed(height) => Self::Misc(format!(
                 "block body at height {height} could not be read; retry"
             )),
+            CodecError::CoinReadFailed => {
+                Self::Misc("coin set could not be read; retry".to_owned())
+            }
         }
     }
 }
@@ -146,6 +153,7 @@ fn lookup_failure(error: LookupError, missing: CodecError) -> CodecError {
         LookupError::BodyMissing(height) => CodecError::BodyMissing(height),
         LookupError::CorruptBody(height) => CodecError::CorruptBody(height),
         LookupError::BodyReadFailed(height) => CodecError::BodyReadFailed(height),
+        LookupError::CoinReadFailed => CodecError::CoinReadFailed,
         LookupError::LimitExceeded(limit) => CodecError::LimitExceeded(limit),
         LookupError::Cancelled => CodecError::Cancelled,
     }
@@ -834,6 +842,7 @@ fn resolve_inputs_prevouts(
                     LookupError::BodyReadFailed(height) => {
                         format!("prevout block body at height {height} could not be read")
                     }
+                    LookupError::CoinReadFailed => "prevout coin could not be read".to_owned(),
                     LookupError::LimitExceeded(_) | LookupError::Cancelled => {
                         "prevout context is unavailable".to_owned()
                     }
@@ -920,6 +929,9 @@ fn build_compression_plans(
                         Some(Err(LookupError::BodyReadFailed(h))) => Some(format!(
                             "prevout block body at height {h} could not be read"
                         )),
+                        Some(Err(LookupError::CoinReadFailed)) => {
+                            Some("prevout coin could not be read".to_owned())
+                        }
                         None => Some("prevout context is unavailable".to_owned()),
                     },
                 },

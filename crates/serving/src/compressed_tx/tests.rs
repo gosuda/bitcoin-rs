@@ -248,6 +248,7 @@ fn codec_error_wire_matrix() {
         (CodecError::BodyMissing(7), -1),
         (CodecError::CorruptBody(7), -1),
         (CodecError::BodyReadFailed(7), -1),
+        (CodecError::CoinReadFailed, -1),
     ] {
         assert_eq!(RpcError::from(error).code(), code);
     }

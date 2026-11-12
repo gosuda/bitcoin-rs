@@ -18,6 +18,7 @@ mod utxo_coin_stats_roundtrip;
 mod utxo_commit_roundtrip;
 mod utxo_key_prefix_collisions;
 mod utxo_muhash_unit;
+mod utxo_reader_faults;
 mod utxo_snapshot_roundtrip;
 mod utxo_snapshot_v4_golden;
 mod utxo_snapshot_with_muhash;

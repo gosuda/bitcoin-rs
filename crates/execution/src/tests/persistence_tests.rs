@@ -109,7 +109,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched() -> TestResult {
     assert!(
         handles
             .utxo_reader()
-            .get(&OutPoint::new(next.txs[0].txid(), 0))
+            .get(&OutPoint::new(next.txs[0].txid(), 0))?
             .is_none(),
         "a failed durable commit must not commit coin rows"
     );
@@ -233,7 +233,7 @@ fn disconnect_off_durable_head_refuses_without_mutation() -> TestResult {
     let first = mined_child(genesis.block_hash(), 1)?;
     handles.apply_block(&BlockImage::from_local(first.clone()))?;
     let first_outpoint = OutPoint::new(first.txs[0].txid(), 0);
-    assert!(handles.utxo_reader().get(&first_outpoint).is_some());
+    assert!(handles.utxo_reader().get(&first_outpoint)?.is_some());
 
     handles.durable_head = Arc::new(InMemoryDurableHeadStore::new());
 
@@ -251,7 +251,7 @@ fn disconnect_off_durable_head_refuses_without_mutation() -> TestResult {
         "a refused disconnect must not move the applied tip"
     );
     assert!(
-        handles.utxo_reader().get(&first_outpoint).is_some(),
+        handles.utxo_reader().get(&first_outpoint)?.is_some(),
         "a refused disconnect must not roll back the UTXO set"
     );
     assert_eq!(handles.undo_store.load_disconnect_marker()?, None);
