@@ -389,11 +389,13 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 - The live-output projection base must be constructed during the same streaming snapshot decode that populates the coin store.
 - The node must not traverse snapshot coins a second time.
+- Snapshot seed staging MUST bound resident rows and use fixed-size spill cursors. Spilled rows MUST NOT retain resident descriptors for each row. Delivery MUST preserve decode order.
 
 ### `SNP-07`: Atomically gated snapshot publication
 
 - Neither the coin store nor the index base can be published before the UTXO commitment is verified.
 - The node must discard temporary data from an invalid snapshot.
+- Closing a rejected seed session MUST wake the worker after the abort transition. The callback MUST run without the phase lock.
 
 ### `SNP-08`: Single historical block interpreter
 

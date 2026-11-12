@@ -36,73 +36,98 @@ pub enum ScriptLiveSeedPhase {
 const SEED_BACKLOG_BYTES: u64 = 16 * 1024 * 1024;
 const SEED_SPILL_NAME: &str = "script-live-seed.spill";
 const SEED_WAKE_ROWS: u64 = 16_384;
-
-enum SeedEntry {
-    Memory(Vec<u8>),
-    Spill { offset: u64, len: usize },
-}
+const SEED_SPILL_FRAME_BYTES: usize = size_of::<u64>();
 
 #[derive(Default)]
 struct SeedQueue {
-    entries: VecDeque<SeedEntry>,
+    pending: VecDeque<Vec<u8>>,
     memory_bytes: u64,
     spill: Option<File>,
-    spill_bytes: u64,
+    spill_read: u64,
+    spill_write: u64,
 }
 
 impl SeedQueue {
     fn push(&mut self, row: Vec<u8>) -> Result<(), IndexError> {
         let len = u64::try_from(row.len()).map_err(|_| IndexError::SeedBacklogStalled)?;
-        if self.memory_bytes.saturating_add(len) <= SEED_BACKLOG_BYTES {
+        if self.spill_read == self.spill_write
+            && self.memory_bytes.saturating_add(len) <= SEED_BACKLOG_BYTES
+        {
             self.memory_bytes = self.memory_bytes.saturating_add(len);
-            self.entries.push_back(SeedEntry::Memory(row));
+            self.pending.push_back(row);
             return Ok(());
         }
+        self.append_spilled(&row, len)
+    }
+
+    fn append_spilled(&mut self, row: &[u8], len: u64) -> Result<(), IndexError> {
+        let frame_bytes =
+            u64::try_from(SEED_SPILL_FRAME_BYTES).map_err(|_| IndexError::SeedBacklogStalled)?;
         let spill = self.spill.as_mut().ok_or(IndexError::SeedBacklogStalled)?;
-        let offset = self.spill_bytes;
         spill
-            .seek(SeekFrom::Start(offset))
-            .and_then(|_| spill.write_all(&row))
+            .seek(SeekFrom::Start(self.spill_write))
+            .and_then(|_| spill.write_all(&len.to_le_bytes()))
+            .and_then(|_| spill.write_all(row))
             .map_err(|_| IndexError::SeedBacklogStalled)?;
-        self.spill_bytes = offset.saturating_add(len);
-        self.entries.push_back(SeedEntry::Spill {
-            offset,
-            len: row.len(),
-        });
+        self.spill_write = self
+            .spill_write
+            .saturating_add(frame_bytes)
+            .saturating_add(len);
         Ok(())
     }
 
     fn pop_batch(&mut self, max_rows: usize) -> Result<Vec<Vec<u8>>, IndexError> {
         let mut rows = Vec::new();
         while rows.len() < max_rows {
-            let Some(entry) = self.entries.pop_front() else {
-                break;
-            };
-            match entry {
-                SeedEntry::Memory(row) => {
-                    self.memory_bytes = self
-                        .memory_bytes
-                        .saturating_sub(u64::try_from(row.len()).unwrap_or(u64::MAX));
-                    rows.push(row);
-                }
-                SeedEntry::Spill { offset, len } => {
-                    let spill = self.spill.as_mut().ok_or(IndexError::SeedBacklogStalled)?;
-                    let mut row = vec![0_u8; len];
-                    spill
-                        .seek(SeekFrom::Start(offset))
-                        .and_then(|_| spill.read_exact(&mut row))
-                        .map_err(|_| IndexError::SeedBacklogStalled)?;
-                    rows.push(row);
-                }
+            if let Some(row) = self.pending.pop_front() {
+                self.memory_bytes = self
+                    .memory_bytes
+                    .saturating_sub(u64::try_from(row.len()).unwrap_or(u64::MAX));
+                rows.push(row);
+                continue;
             }
+            if self.spill_read == self.spill_write {
+                break;
+            }
+            rows.push(self.take_spilled()?);
         }
         Ok(rows)
     }
 
+    fn take_spilled(&mut self) -> Result<Vec<u8>, IndexError> {
+        let frame_bytes =
+            u64::try_from(SEED_SPILL_FRAME_BYTES).map_err(|_| IndexError::SeedBacklogStalled)?;
+        let spill = self.spill.as_mut().ok_or(IndexError::SeedBacklogStalled)?;
+        let mut frame = [0_u8; SEED_SPILL_FRAME_BYTES];
+        spill
+            .seek(SeekFrom::Start(self.spill_read))
+            .and_then(|_| spill.read_exact(&mut frame))
+            .map_err(|_| IndexError::SeedBacklogStalled)?;
+        let frame_len = u64::from_le_bytes(frame);
+        let remaining = self
+            .spill_write
+            .saturating_sub(self.spill_read)
+            .saturating_sub(frame_bytes);
+        if frame_len > SEED_BACKLOG_BYTES || frame_len > remaining {
+            return Err(IndexError::SeedBacklogStalled);
+        }
+        let row_len = usize::try_from(frame_len).map_err(|_| IndexError::SeedBacklogStalled)?;
+        let mut row = vec![0_u8; row_len];
+        spill
+            .read_exact(&mut row)
+            .map_err(|_| IndexError::SeedBacklogStalled)?;
+        self.spill_read = self
+            .spill_read
+            .saturating_add(frame_bytes)
+            .saturating_add(frame_len);
+        Ok(row)
+    }
+
     fn reset(&mut self) {
-        self.entries.clear();
+        self.pending.clear();
         self.memory_bytes = 0;
-        self.spill_bytes = 0;
+        self.spill_read = 0;
+        self.spill_write = 0;
         if let Some(spill) = self.spill.as_mut() {
             let _truncated = spill
                 .set_len(0)
@@ -220,9 +245,15 @@ impl ScriptLiveSeedState {
     }
 
     pub(crate) fn request_abort(&self) {
-        let mut phase = self.phase.lock();
-        if matches!(*phase, ScriptLiveSeedPhase::Seeding) {
+        {
+            let mut phase = self.phase.lock();
+            if !matches!(*phase, ScriptLiveSeedPhase::Seeding) {
+                return;
+            }
             *phase = ScriptLiveSeedPhase::AbortPending;
+        }
+        if let Some(wake) = self.wake.lock().as_ref() {
+            wake();
         }
     }
 
@@ -455,6 +486,127 @@ mod tests {
             refilled.last().expect("last refilled row"),
             &ScriptLiveSeedState::encode_row(&coin(rows - 1)).expect("encode last row"),
             "the last refilled row must round-trip"
+        );
+    }
+
+    // SNP-06
+    #[test]
+    fn spilled_backlog_keeps_push_order_across_interleaved_drain_and_refill() {
+        const ROW_BYTES: usize = 512 * 1024;
+        let dir = tempfile::tempdir().expect("spill dir");
+        let mut queue = SeedQueue {
+            spill: Some(
+                File::options()
+                    .create(true)
+                    .truncate(true)
+                    .read(true)
+                    .write(true)
+                    .open(dir.path().join(SEED_SPILL_NAME))
+                    .expect("spill file"),
+            ),
+            ..SeedQueue::default()
+        };
+        let row_bytes = u64::try_from(ROW_BYTES).expect("row fits");
+        let retained_rows =
+            usize::try_from(SEED_BACKLOG_BYTES.div_ceil(row_bytes)).expect("bound fits");
+
+        fn stage(queue: &mut SeedQueue, tag: u64, row_bytes: usize, retained_rows: usize) {
+            let mut row = vec![0_u8; row_bytes];
+            row[..size_of::<u64>()].copy_from_slice(&tag.to_le_bytes());
+            queue
+                .push(row)
+                .expect("staging with a spill file must not stall");
+            assert!(
+                queue.memory_bytes <= SEED_BACKLOG_BYTES,
+                "retained staging bytes must stay within the backlog budget"
+            );
+            assert!(
+                queue.pending.len() <= retained_rows,
+                "retained queue state must stay bounded while rows spill"
+            );
+        }
+
+        fn drain(queue: &mut SeedQueue, max_rows: usize) -> Vec<u64> {
+            queue
+                .pop_batch(max_rows)
+                .expect("draining staged rows must not stall")
+                .iter()
+                .map(|row| {
+                    u64::from_le_bytes(row[..size_of::<u64>()].try_into().expect("tag prefix"))
+                })
+                .collect()
+        }
+
+        let mut drained: Vec<u64> = Vec::new();
+        for tag in 0..40_u64 {
+            stage(&mut queue, tag, ROW_BYTES, retained_rows);
+        }
+        assert!(
+            queue.spill_read < queue.spill_write,
+            "rows large enough to exhaust the memory budget must spill"
+        );
+        drained.extend(drain(&mut queue, 8));
+        for tag in 40..80_u64 {
+            stage(&mut queue, tag, ROW_BYTES, retained_rows);
+        }
+        drained.extend(drain(&mut queue, 24));
+        for tag in 80..128_u64 {
+            stage(&mut queue, tag, ROW_BYTES, retained_rows);
+        }
+        loop {
+            let batch = drain(&mut queue, 9);
+            if batch.is_empty() {
+                break;
+            }
+            drained.extend(batch);
+        }
+        assert_eq!(queue.pending.len(), 0);
+        assert_eq!(queue.memory_bytes, 0);
+        assert_eq!(queue.spill_read, queue.spill_write);
+        let expected: Vec<u64> = (0..128_u64).collect();
+        assert_eq!(
+            drained, expected,
+            "rows must drain in staged order across interleaved drain and refill"
+        );
+    }
+
+    // SNP-07
+    #[test]
+    fn dropped_session_wakes_worker_with_abort_pending() {
+        let seed = Arc::new(ScriptLiveSeedState::new());
+        let wake_count = Arc::new(AtomicU64::new(0));
+        let observed = Arc::new(Mutex::new(None));
+        let cb_seed = Arc::downgrade(&seed);
+        let cb_observed = Arc::clone(&observed);
+        let cb_wakes = Arc::clone(&wake_count);
+        seed.set_wake(Arc::new(move || {
+            let Some(cb_seed) = cb_seed.upgrade() else {
+                return;
+            };
+            *cb_observed.lock() = Some(cb_seed.phase());
+            cb_wakes.fetch_add(1, Ordering::AcqRel);
+        }));
+        let session = seed.begin_session().expect("session");
+        {
+            let mut observer = session.observer();
+            observer.observe_coin(coin(0));
+        }
+        assert_eq!(
+            wake_count.load(Ordering::Acquire),
+            0,
+            "staging below the wake threshold must not wake the worker"
+        );
+        drop(session);
+        assert_eq!(seed.phase(), ScriptLiveSeedPhase::AbortPending);
+        assert_eq!(
+            wake_count.load(Ordering::Acquire),
+            1,
+            "closing the session must wake the worker"
+        );
+        assert_eq!(
+            *observed.lock(),
+            Some(ScriptLiveSeedPhase::AbortPending),
+            "wake must observe the abort transition, proving the phase lock was released"
         );
     }
 }
