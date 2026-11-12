@@ -12,7 +12,7 @@
 [Contributing](CONTRIBUTING.md) ·
 [Limitations](#compatibility-and-limitations)
 
-The [mdBook handbook](docs/book/src/SUMMARY.md) is the chapter-by-chapter guide to running, embedding, and verifying the node; build it with `mdbook build docs/book`.
+The [mdBook handbook](https://bitcoin-rs.org) is the chapter-by-chapter guide to running, embedding, and verifying the node; build it with `mdbook build docs/book`.
 
 ---
 
