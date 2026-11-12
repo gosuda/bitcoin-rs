@@ -1007,6 +1007,86 @@ fn block_tail_bound_covers_the_bytes_the_append_records() {
     }
 }
 
+fn fund_and_spend_blocks(outputs: u32, script: &[u8]) -> [bitcoin_rs_storage::CommittedBlock; 2] {
+    use bitcoin_rs_storage::Bytes;
+    use bitcoin_rs_storage::committed_facts::{CreatedOutput, SpentPrevout, TxFacts};
+    let funding_txid = [0xD0; 32];
+    let fund = bitcoin_rs_storage::CommittedBlock {
+        height: 1,
+        hash: [0x81; 32],
+        parent_hash: [0; 32],
+        header: [0; 80],
+        txs: vec![TxFacts {
+            txid: funding_txid,
+            offset: 0,
+            len: 120,
+            inputs: Vec::new(),
+            outputs: (0..outputs)
+                .map(|vout| CreatedOutput {
+                    vout,
+                    value: 1,
+                    script: Bytes::copy_from_slice(script),
+                })
+                .collect(),
+        }],
+    };
+    let spend = bitcoin_rs_storage::CommittedBlock {
+        height: 2,
+        hash: [0x82; 32],
+        parent_hash: fund.hash,
+        header: [0; 80],
+        txs: vec![TxFacts {
+            txid: [0xD1; 32],
+            offset: 0,
+            len: 120,
+            inputs: (0..outputs)
+                .map(|vout| SpentPrevout {
+                    txid: funding_txid,
+                    vout,
+                    value: 1,
+                    script: Bytes::copy_from_slice(script),
+                    height: 1,
+                    coinbase: false,
+                })
+                .collect(),
+            outputs: Vec::new(),
+        }],
+    };
+    [fund, spend]
+}
+
+// PRJ-05
+#[test]
+#[expect(clippy::expect_used)]
+fn block_tail_bound_counts_empty_script_occurrences() {
+    use crate::segment::tail::{
+        NoSealedTxOrdinals, TailWriterState, append_tail_block, block_tail_bytes_bound,
+    };
+    use bitcoin_rs_storage::KvStore as _;
+    let dir = tempfile::tempdir().expect("dir");
+    let store = bitcoin_rs_storage::RocksDbStore::open(dir.path()).expect("store");
+    let mut state = TailWriterState::new();
+    let empty_script = fund_and_spend_blocks(64, &[]);
+    let shared_script = fund_and_spend_blocks(64, &[0x51]);
+    for (block, same_shape) in empty_script.iter().zip(&shared_script) {
+        let mut batch = store.new_batch();
+        append_tail_block(&mut batch, block, &mut state, &NoSealedTxOrdinals).expect("append");
+        let recorded = state.window.back().expect("appended").bytes;
+        let bound = block_tail_bytes_bound(block);
+        assert!(
+            bound >= recorded,
+            "height {}: bound {bound} < recorded {recorded}",
+            block.height
+        );
+        assert_eq!(
+            bound,
+            block_tail_bytes_bound(same_shape),
+            "height {}: an empty script costs what any other script costs",
+            block.height
+        );
+    }
+}
+
 struct ChunkCounter<'a> {
     inner: Box<dyn bitcoin_rs_storage::KvSnapshot + 'a>,
     chunks: std::sync::Arc<std::sync::atomic::AtomicUsize>,

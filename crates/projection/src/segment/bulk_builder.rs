@@ -371,7 +371,7 @@ impl StreamingSegmentBuilder {
         flags: u8,
         sats: u64,
     ) -> Result<(), BulkBuilderError> {
-        if script.is_empty() || (flags == POSTING_FLAG_FUNDING && script[0] == 0x6a) {
+        if flags == POSTING_FLAG_FUNDING && script.first() == Some(&0x6a) {
             return Ok(());
         }
         let hash: [u8; 32] = Sha256::digest(script).into();

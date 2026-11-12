@@ -6,7 +6,8 @@ use bitcoin_rs_projection::segment::{
 };
 use bitcoin_rs_projection::{
     IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWriter,
-    Indexer, PreparedBatch, PreparedBatchLimits, ScriptHash, TxIndexScanRow,
+    Indexer, PreparedBatch, PreparedBatchLimits, ScriptHash, ScriptHistoryOccurrence,
+    TxIndexScanRow, TxIndexSnapshot,
 };
 use bitcoin_rs_storage::budget::{BudgetCharge, BudgetError, BudgetOwner, UnboundedBudget};
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
@@ -484,6 +485,137 @@ fn same_tx_fund_and_spend_keeps_both_posting_occurrences() -> Result<(), TestErr
         }
         assert_eq!(spend_rows, 0, "input CC names no in-generation creation");
     }
+    Ok(())
+}
+
+fn script_history_pairs(
+    view: &dyn TxIndexSnapshot,
+    scripthash: ScriptHash,
+) -> Result<Vec<(u32, [u8; 32], [u8; 32], u8)>, TestError> {
+    const SCAN_ALL: PrefixScanLimit = PrefixScanLimit {
+        max_rows: 100_000,
+        max_bytes: 64 << 20,
+    };
+    let scan = view.funding_rows(scripthash, SCAN_ALL)?;
+    assert!(scan.complete, "the history scan must be complete");
+    let mut pairs = Vec::new();
+    for row in scan.rows {
+        let occurrences = ScriptHistoryOccurrence::decode_all(&row.value)
+            .ok_or("history occurrence decode failed")?;
+        for occurrence in occurrences {
+            pairs.push((
+                row.row.height(),
+                occurrence.scripthash.to_byte_array(),
+                occurrence.txid,
+                occurrence.flags,
+            ));
+        }
+    }
+    pairs.sort_unstable();
+    Ok(pairs)
+}
+
+// IDX-09
+#[test]
+fn empty_script_history_matches_bulk_and_live() -> Result<(), TestError> {
+    const FUND_TXID: [u8; 32] = [0xD0; 32];
+    const SPEND_TXID: [u8; 32] = [0xD1; 32];
+    let blocks = vec![
+        CommittedBlock {
+            height: 1,
+            hash: [0x81; 32],
+            parent_hash: [0u8; 32],
+            header: [0u8; 80],
+            txs: vec![TxFacts {
+                txid: FUND_TXID,
+                offset: 0,
+                len: 120,
+                inputs: Vec::new(),
+                outputs: vec![CreatedOutput {
+                    vout: 0,
+                    value: 20_000,
+                    script: Bytes::new(),
+                }],
+            }],
+        },
+        CommittedBlock {
+            height: 2,
+            hash: [0x82; 32],
+            parent_hash: [0x81; 32],
+            header: [0u8; 80],
+            txs: vec![TxFacts {
+                txid: SPEND_TXID,
+                offset: 0,
+                len: 120,
+                inputs: vec![SpentPrevout {
+                    txid: FUND_TXID,
+                    vout: 0,
+                    value: 20_000,
+                    script: Bytes::new(),
+                    height: 1,
+                    coinbase: false,
+                }],
+                outputs: vec![CreatedOutput {
+                    vout: 0,
+                    value: 19_000,
+                    script: Bytes::copy_from_slice(b"\x51"),
+                }],
+            }],
+        },
+    ];
+    let empty_script_hash = ScriptHash::from_byte_array(Sha256::digest(b"").into());
+
+    let live_pairs = {
+        let dir = tempdir()?;
+        let scratch = tempdir()?;
+        let store = Arc::new(RocksDbStore::open(dir.path())?);
+        let mut tail_state = TailWriterState::new();
+        for block in &blocks {
+            let mut batch = store.new_batch();
+            append_tail_block(&mut batch, block, &mut tail_state, &NoSealedTxOrdinals)?;
+            store.write_durable(batch)?;
+        }
+        seal_tail_generation(store.as_ref(), 1, 2, IndexCapabilities::ALL, scratch.path())?;
+        let indexer = Indexer::new(Arc::clone(&store));
+        let view = indexer.snapshot()?;
+        script_history_pairs(view.as_ref(), empty_script_hash)?
+    };
+
+    let bulk_pairs = {
+        let dir = tempdir()?;
+        let scratch = tempdir()?;
+        let store = Arc::new(RocksDbStore::open(dir.path())?);
+        let builder = BulkSegmentBuilder::new(
+            Arc::new(UnboundedBudget),
+            None,
+            scratch.path().to_path_buf(),
+        );
+        let coverage = builder
+            .build_and_ingest(store.as_ref(), 1, &blocks)
+            .map_err(|e| e.to_string())?;
+        publish_rebuild_index_generation(store.as_ref(), 1, coverage, &blocks)?;
+        let indexer = Indexer::new(Arc::clone(&store));
+        let view = indexer.snapshot()?;
+        script_history_pairs(view.as_ref(), empty_script_hash)?
+    };
+
+    let expected = vec![
+        (
+            1,
+            empty_script_hash.to_byte_array(),
+            FUND_TXID,
+            ScriptHistoryOccurrence::FUNDING,
+        ),
+        (
+            2,
+            empty_script_hash.to_byte_array(),
+            SPEND_TXID,
+            ScriptHistoryOccurrence::SPENDING,
+        ),
+    ];
+    assert_eq!(live_pairs, expected, "live tail empty-script history");
+    assert_eq!(bulk_pairs, expected, "bulk empty-script history");
+    assert_eq!(live_pairs, bulk_pairs, "bulk and live generations agree");
     Ok(())
 }
 

@@ -326,13 +326,11 @@ pub fn block_tail_bytes_bound(block: &CommittedBlock) -> u64 {
             }
             elements += 1;
             total = total.saturating_add(spend);
-            if !input.script.is_empty() {
-                total = total.saturating_add(dict.saturating_add(occurrence));
-            }
+            total = total.saturating_add(dict.saturating_add(occurrence));
         }
         for output in &tx.outputs {
             elements += 1;
-            if !output.script.is_empty() && output.script[0] != 0x6a {
+            if output.script.first() != Some(&0x6a) {
                 total = total.saturating_add(dict.saturating_add(occurrence));
             }
         }
@@ -381,10 +379,8 @@ impl PreparedTail {
                 tx.inputs
                     .iter()
                     .map(|input| {
-                        (needs_hashes
-                            && !is_coinbase_marker(&input.txid, input.vout)
-                            && !input.script.is_empty())
-                        .then(|| script_hash(&input.script))
+                        (needs_hashes && !is_coinbase_marker(&input.txid, input.vout))
+                            .then(|| script_hash(&input.script))
                     })
                     .collect()
             })
@@ -396,7 +392,7 @@ impl PreparedTail {
                 tx.outputs
                     .iter()
                     .map(|output| {
-                        (needs_hashes && !output.script.is_empty() && output.script[0] != 0x6a)
+                        (needs_hashes && output.script.first() != Some(&0x6a))
                             .then(|| script_hash(&output.script))
                     })
                     .collect()
