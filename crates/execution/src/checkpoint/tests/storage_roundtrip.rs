@@ -27,6 +27,19 @@ fn scanned_trailer_restores_independently_scanned_stats() -> TestResult {
         return Err(std::io::Error::other("scanned generation did not restore").into());
     };
     assert_eq!(restored.coin_stats, expected);
+    drop(utxo);
+
+    let engine = restored.engine.as_ref().ok_or(TestError::Missing(
+        "the checkpoint generation carries no engine image",
+    ))?;
+    let restored_utxo = utxo_from_engine(engine.as_ref())?;
+    let rescanned = restored_utxo
+        .with_stable_view(|view| scan_coin_stats(view, restored.applied_tip.height, true))?;
+    assert_eq!(
+        rescanned.to_bytes(),
+        restored.coin_stats.to_bytes(),
+        "the engine image must hold exactly the coins the coinstats artifact counted"
+    );
 
     let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5a; 32])), 42);
     let txout = TxOut {
@@ -47,9 +60,21 @@ fn scanned_trailer_restores_independently_scanned_stats() -> TestResult {
         Hash256::from_le_bytes(&[0x5a; 32]),
         &[out],
     )?;
-    utxo.insert_parsed_record(record);
-    let continued =
-        utxo.with_stable_view(|view| scan_coin_stats(view, restored.applied_tip.height, true))?;
+    restored_utxo.insert_parsed_record(record);
+    let continued = restored_utxo
+        .with_stable_view(|view| scan_coin_stats(view, restored.applied_tip.height, true))?;
     assert_eq!(listener.snapshot().to_bytes(), continued.to_bytes());
     Ok(())
+}
+
+fn utxo_from_engine(engine: &dyn bitcoin_rs_storage::KvStore) -> Result<UtxoSet, TestError> {
+    let utxo = UtxoSet::new();
+    for row in engine.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
+        let (_key, value) = row?;
+        let record =
+            bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(value.into_boxed_slice())
+                .map_err(|_| TestError::Missing("the engine image holds a corrupt coin record"))?;
+        utxo.insert_parsed_record(record);
+    }
+    Ok(utxo)
 }
