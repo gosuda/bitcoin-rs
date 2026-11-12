@@ -29,9 +29,7 @@ pub use committed_facts::{CommittedBlock, CommittedFacts, CreatedOutput, SpentPr
 pub use bytes::Bytes;
 pub use error::{BoundedReadError, StorageError};
 pub use memory_kv::MemoryKvStore;
-pub use snapshot_activation::{
-    SNAPSHOT_ACTIVATION_KEY, SnapshotActivationMarker, SnapshotActivationRecovery,
-};
+pub use snapshot_activation::{SNAPSHOT_ACTIVATION_KEY, SnapshotActivationMarker};
 
 #[cfg(any(test, feature = "test-seam"))]
 pub use trait_::PersistFault;

@@ -336,13 +336,19 @@ impl CommitAuthority {
     /// Reconcile an interrupted snapshot activation at boot (CMT-03).
     ///
     /// A marker without its activation head means the coin ingest was
-    /// interrupted: the staged coins are wiped and the marker cleared before
-    /// anything reads the coins keyspace. A marker whose base hash matches the
-    /// durable head is corruption, because the head commit clears the marker
-    /// atomically.
+    /// interrupted: the staged coins are wiped before anything reads the
+    /// coins keyspace and the marker is handed back to the caller. The
+    /// caller clears the marker with [`Self::clear_snapshot_activation_marker`]
+    /// only after the out-of-band rollback cleanup (the orphan snapshot-base
+    /// checkpoint removal) succeeds, so a failed cleanup keeps the marker
+    /// durable and the next restart re-runs the rollback instead of adopting
+    /// an uncommitted checkpoint. Calling this again after a partial
+    /// rollback is idempotent: the coins are wiped again and the same marker
+    /// is returned. A marker whose base hash matches the durable head is
+    /// corruption, because the head commit clears the marker atomically.
     pub fn recover_snapshot_activation(
         &self,
-    ) -> Result<crate::snapshot_activation::SnapshotActivationRecovery, CommitError> {
+    ) -> Result<Option<crate::snapshot_activation::SnapshotActivationMarker>, CommitError> {
         let outcome = self.recover_snapshot_activation_inner();
         if let Err(CommitError::Storage(_)) = &outcome {
             self.close_admission();
@@ -350,18 +356,33 @@ impl CommitAuthority {
         outcome
     }
 
+    /// Durably clear the activation marker after the rollback cleanup
+    /// succeeded. Absent-marker no-ops are fine: this runs only after
+    /// [`Self::recover_snapshot_activation`] returned a marker.
+    pub fn clear_snapshot_activation_marker(&self) -> Result<(), CommitError> {
+        use crate::snapshot_activation::SNAPSHOT_ACTIVATION_KEY;
+
+        let mut batch = self.store.new_batch();
+        batch.delete(ColumnFamily::UtxoMeta, SNAPSHOT_ACTIVATION_KEY);
+        match self.store.write_durable_if(&[], batch) {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                self.close_admission();
+                Err(CommitError::Storage(err))
+            }
+        }
+    }
+
     fn recover_snapshot_activation_inner(
         &self,
-    ) -> Result<crate::snapshot_activation::SnapshotActivationRecovery, CommitError> {
-        use crate::snapshot_activation::{
-            SNAPSHOT_ACTIVATION_KEY, SnapshotActivationMarker, SnapshotActivationRecovery,
-        };
+    ) -> Result<Option<crate::snapshot_activation::SnapshotActivationMarker>, CommitError> {
+        use crate::snapshot_activation::{SNAPSHOT_ACTIVATION_KEY, SnapshotActivationMarker};
 
         let Some(marker_bytes) = self
             .store
             .get(ColumnFamily::UtxoMeta, SNAPSHOT_ACTIVATION_KEY)?
         else {
-            return Ok(SnapshotActivationRecovery::Clean);
+            return Ok(None);
         };
         let marker = SnapshotActivationMarker::decode(&marker_bytes).ok_or_else(|| {
             CommitError::Storage(StorageError::IncompatibleData(
@@ -387,15 +408,7 @@ impl CommitAuthority {
             }
         }
         self.coins.wipe()?;
-        let mut batch = self.store.new_batch();
-        batch.delete(ColumnFamily::UtxoMeta, SNAPSHOT_ACTIVATION_KEY);
-        if !self
-            .store
-            .write_durable_if(&[fence.as_condition()], batch)?
-        {
-            return Err(CommitError::PreconditionFailed);
-        }
-        Ok(SnapshotActivationRecovery::RolledBack { marker })
+        Ok(Some(marker))
     }
 
     /// The stored head bytes as a write fence, refusing a stale caller view.

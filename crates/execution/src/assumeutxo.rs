@@ -204,8 +204,13 @@ pub(crate) fn engine_coin_stats(
 /// The rollback below removes that orphan generation and resets the
 /// in-memory applied state to cold, so the same restart re-runs the
 /// activation; a crash after the head commit finds the checkpoint on
-/// restart. The orphan removal and the reset are linearizable with the
-/// marker clear: no reader observes the orphan after this returns.
+/// restart. The orphan removal is linearizable with the marker clear by
+/// ordering: the coins are wiped and the marker handed back here, the
+/// orphan generation is removed next, and the marker is only cleared once
+/// the removal succeeded. A failed removal propagates the error before the
+/// marker is cleared, so no restart can observe a cleared marker next to a
+/// loadable orphan checkpoint and adopt it as ordinary state; the next boot
+/// re-runs this rollback.
 /// Callers must run this before installing a checkpoint engine image and
 /// before boot replay, so the wipe cannot erase rows the replay cannot
 /// rebuild.
@@ -213,34 +218,46 @@ pub fn recover_snapshot_activation(
     active: &Chainstate,
     data_dir: &Path,
 ) -> Result<(), AssumeUtxoError> {
-    match active
+    let Some(marker) = active
         .commit_authority
         .recover_snapshot_activation()
         .map_err(commit_error)?
-    {
-        bitcoin_rs_storage::SnapshotActivationRecovery::Clean => Ok(()),
-        bitcoin_rs_storage::SnapshotActivationRecovery::RolledBack { marker } => {
-            remove_orphan_base_checkpoint(data_dir, &marker.base_hash);
-            reset_rolled_back_chainstate(active)?;
-            tracing::warn!(
-                base_hash = %marker.base_hash.to_string_be(),
-                coin_count = marker.coin_count,
-                "interrupted snapshot activation rolled back; staged coins wiped and the pre-activation head kept; re-run the activation"
-            );
-            Ok(())
-        }
-    }
+    else {
+        return Ok(());
+    };
+    remove_orphan_base_checkpoint(data_dir, &marker.base_hash).map_err(storage_io)?;
+    active
+        .commit_authority
+        .clear_snapshot_activation_marker()
+        .map_err(commit_error)?;
+    reset_rolled_back_chainstate(active)?;
+    tracing::warn!(
+        base_hash = %marker.base_hash.to_string_be(),
+        coin_count = marker.coin_count,
+        "interrupted snapshot activation rolled back; staged coins wiped and the pre-activation head kept; re-run the activation"
+    );
+    Ok(())
 }
 
-fn remove_orphan_base_checkpoint(data_dir: &Path, base: &Hash256) {
+/// Removes the checkpoint generation the given snapshot base orphaned.
+///
+/// Fail-closed: any read, parse, or deletion failure other than an absent
+/// target is returned, so the caller keeps the activation marker durable
+/// and the next restart retries the removal. An absent CURRENT names no
+/// generation, and a generation with no manifest cannot be loaded, so those
+/// still remove what they can and report success.
+fn remove_orphan_base_checkpoint(
+    data_dir: &Path,
+    base: &Hash256,
+) -> Result<(), std::io::Error> {
     let root = data_dir.join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT);
     let current_path = root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE);
     let current_bytes = match std::fs::read(&current_path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             tracing::warn!(%error, "interrupted activation checkpoint CURRENT was not inspected");
-            return;
+            return Err(error);
         }
     };
     let current: bitcoin_rs_storage::checkpoint::CurrentV1 = match sonic_rs::from_slice(
@@ -249,45 +266,53 @@ fn remove_orphan_base_checkpoint(data_dir: &Path, base: &Hash256) {
         Ok(current) => current,
         Err(error) => {
             tracing::warn!(%error, "interrupted activation left an unreadable checkpoint CURRENT");
-            return;
+            return Err(std::io::Error::other(error));
         }
     };
     let manifest_path = root
         .join(&current.directory)
         .join(bitcoin_rs_storage::checkpoint::MANIFEST_FILE);
-    let manifest_bytes = match std::fs::read(&manifest_path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+    let names_the_orphan = match std::fs::read(&manifest_path) {
+        Ok(bytes) => {
+            let manifest: bitcoin_rs_storage::checkpoint::CheckpointManifestV1 =
+                match sonic_rs::from_slice(&bytes) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "interrupted activation left an unreadable checkpoint manifest"
+                        );
+                        return Err(std::io::Error::other(error));
+                    }
+                };
+            manifest.applied_tip.hash == base.to_string_be()
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
         Err(error) => {
             tracing::warn!(%error, "interrupted activation checkpoint manifest was not inspected");
-            return;
+            return Err(error);
         }
     };
-    let manifest: bitcoin_rs_storage::checkpoint::CheckpointManifestV1 = match sonic_rs::from_slice(
-        &manifest_bytes,
-    ) {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            tracing::warn!(%error, "interrupted activation left an unreadable checkpoint manifest");
-            return;
-        }
-    };
-    if manifest.applied_tip.hash != base.to_string_be() {
-        return;
+    if !names_the_orphan {
+        return Ok(());
     }
     match std::fs::remove_dir_all(root.join(&current.directory)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             tracing::warn!(%error, "interrupted activation orphan checkpoint was not removed");
-            return;
+            return Err(error);
         }
     }
-    if let Err(error) = std::fs::remove_file(&current_path)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(%error, "interrupted activation orphan checkpoint CURRENT was not removed");
+    match std::fs::remove_file(&current_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(%error, "interrupted activation orphan checkpoint CURRENT was not removed");
+            return Err(error);
+        }
     }
+    Ok(())
 }
 
 fn reset_rolled_back_chainstate(active: &Chainstate) -> Result<(), AssumeUtxoError> {
@@ -1051,7 +1076,15 @@ impl AssumeUtxoManager {
                         }
                     };
                     if !landed {
-                        remove_orphan_base_checkpoint(&self.data_dir, &pinned.block_hash);
+                        if let Err(error) = remove_orphan_base_checkpoint(
+                            &self.data_dir,
+                            &pinned.block_hash,
+                        ) {
+                            tracing::warn!(
+                                %error,
+                                "failed activation orphan checkpoint was not removed; the durable activation marker retries the rollback on the next boot"
+                            );
+                        }
                     }
                     return Err(commit_error(error));
                 }

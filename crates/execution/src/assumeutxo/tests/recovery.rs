@@ -1814,3 +1814,88 @@ fn crash_mid_ingest_is_rolled_back_by_the_marker_and_the_retry_matches_the_snaps
     );
     assert_engine_matches_snapshot(&reopened, &fixture)
 }
+
+#[test]
+fn failed_orphan_cleanup_keeps_the_marker_and_the_next_boot_retries_the_rollback() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let store = chainstate_store(dir.path())?;
+    let active = open_persistent_over(dir.path(), &fixture.pinned, Arc::clone(&store))?;
+    active.admit_headers(
+        &fixture
+            .blocks
+            .iter()
+            .map(|block| block.header)
+            .collect::<Vec<_>>(),
+    )?;
+    let marker = bitcoin_rs_storage::SnapshotActivationMarker {
+        base_hash: fixture.pinned.block_hash,
+        coin_count: 0,
+        coin_digest: Hash256::from_le_bytes([0_u8; 32]),
+    };
+    active
+        .commit_authority
+        .begin_snapshot_activation(None, &marker)
+        .map_err(commit_error)?;
+
+    let root = dir
+        .path()
+        .join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT);
+    std::fs::create_dir_all(&root)?;
+    let generation_name = "generation-000001";
+    let current = bitcoin_rs_storage::checkpoint::CurrentV1 {
+        format: bitcoin_rs_storage::checkpoint::CURRENT_FORMAT.to_owned(),
+        version: 1,
+        generation: 1,
+        directory: generation_name.to_owned(),
+        manifest_sha256: String::new(),
+    };
+    std::fs::write(
+        root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE),
+        sonic_rs::to_vec(&current)?,
+    )?;
+    let generation = root.join(generation_name);
+    std::fs::write(&generation, b"obstruction where the orphan generation belongs")?;
+
+    let marker_bytes = || -> TestResult<Option<Vec<u8>>> {
+        Ok(active
+            .commit_authority
+            .store()
+            .get(
+                bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+                bitcoin_rs_storage::SNAPSHOT_ACTIVATION_KEY,
+            )?
+            .map(|bytes| bytes.to_vec()))
+    };
+
+    let outcome = crate::recover_snapshot_activation(&active, dir.path());
+    assert!(
+        matches!(
+            &outcome,
+            Err(AssumeUtxoError::Storage(
+                bitcoin_rs_storage::StorageError::Io(error)
+            )) if error.kind() == std::io::ErrorKind::NotADirectory
+        ),
+        "a failed orphan cleanup must fail the recovery before the marker is cleared: {outcome:?}"
+    );
+    assert!(
+        marker_bytes()?.is_some(),
+        "a failed orphan cleanup must keep the activation marker durable"
+    );
+    assert!(
+        root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE).is_file(),
+        "a failed orphan cleanup must keep the orphan checkpoint root selected"
+    );
+
+    std::fs::remove_file(&generation)?;
+    crate::recover_snapshot_activation(&active, dir.path())?;
+    assert!(
+        marker_bytes()?.is_none(),
+        "a successful orphan cleanup must clear the activation marker"
+    );
+    assert!(
+        !root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE).exists(),
+        "a successful orphan cleanup must remove the orphan CURRENT"
+    );
+    Ok(())
+}
