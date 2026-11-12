@@ -943,20 +943,8 @@ fn write_payload(
 fn validate_encoded(
     bytes: &[u8],
 ) -> Result<(RecordHeader, Option<Arc<DecompressedScripts>>), UtxoError> {
-    let header = match decode_header(bytes) {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::error!(target: "utxo", "decode_header failed: {e:?}");
-            return Err(e);
-        }
-    };
-    let layout = match V5Layout::read(bytes, header.output_count) {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(target: "utxo", "V5Layout::read failed: {e:?}");
-            return Err(e);
-        }
-    };
+    let header = decode_header(bytes)?;
+    let layout = V5Layout::read(bytes, header.output_count)?;
     let mut max_vout = 0_u64;
     let mut max_len = 0_u64;
     let mut cursor = layout.payloads;
@@ -990,38 +978,13 @@ fn validate_encoded(
         let next = cursor.checked_add(len).ok_or(UtxoError::CorruptRecord)?;
         let body = bytes.get(cursor..next).ok_or(UtxoError::CorruptRecord)?;
 
-        let (amount, body_cursor) = crate::utxo::compress::read_varint(body, 0)?;
-        let body_cursor = if amount == AMOUNT_ESCAPE {
-            let end = body_cursor
-                .checked_add(core::mem::size_of::<u64>())
-                .ok_or(UtxoError::CorruptRecord)?;
-            let raw: [u8; 8] = body
-                .get(body_cursor..end)
-                .ok_or(UtxoError::CorruptRecord)?
-                .try_into()
-                .map_err(|_| UtxoError::CorruptRecord)?;
-            let value = u64::from_le_bytes(raw);
-            if value <= crate::utxo::compress::MAX_COMPRESSIBLE_AMOUNT {
-                return Err(UtxoError::CorruptRecord);
-            }
-            end
-        } else {
-            let _ =
-                crate::utxo::compress::decompress_amount(amount).ok_or(UtxoError::CorruptRecord)?;
-            body_cursor
-        };
-
-        let (packed, body_cursor) = crate::utxo::compress::read_varint(body, body_cursor)?;
-        u32::try_from(packed >> 1).map_err(|_| UtxoError::CorruptRecord)?;
-
-        match header.framing {
-            RecordFraming::V5Plain => {
-                let script_pubkey = body.get(body_cursor..).ok_or(UtxoError::CorruptRecord)?;
-                u16::try_from(script_pubkey.len()).map_err(|_| UtxoError::CorruptRecord)?;
-            }
-            RecordFraming::B => {
-                let (tag, tag_cursor) = crate::utxo::compress::read_varint(body, body_cursor)?;
-                let script_data = body.get(tag_cursor..).ok_or(UtxoError::CorruptRecord)?;
+        let parsed = parse_output_payload(body, header.framing)?;
+        match parsed.script {
+            EncodedScript::Plain(_) => {}
+            EncodedScript::Core {
+                tag,
+                data: script_data,
+            } => {
                 let offset = decompressed_data.len();
                 crate::utxo::compress::decompress_script_into(
                     tag,
@@ -1116,6 +1079,59 @@ fn decode_output_at<'a>(
     let next = payload.checked_add(len).ok_or(UtxoError::CorruptRecord)?;
     let body = bytes.get(payload..next).ok_or(UtxoError::CorruptRecord)?;
 
+    let parsed = parse_output_payload(body, framing)?;
+
+    let script_pubkey: &'a [u8] = match decompressed {
+        Some(dec) => {
+            let &(offset, script_len) = dec.spans.get(index).ok_or(UtxoError::CorruptRecord)?;
+            let offset_usize = usize::try_from(offset).map_err(|_| UtxoError::CorruptRecord)?;
+            let len_usize = usize::try_from(script_len).map_err(|_| UtxoError::CorruptRecord)?;
+            let end = offset_usize
+                .checked_add(len_usize)
+                .ok_or(UtxoError::CorruptRecord)?;
+            dec.data
+                .get(offset_usize..end)
+                .ok_or(UtxoError::CorruptRecord)?
+        }
+        None => match parsed.script {
+            EncodedScript::Plain(script) => script,
+            EncodedScript::Core { tag, data }
+                if tag >= crate::utxo::compress::SCRIPT_SPECIAL_SCRIPTS_COUNT =>
+            {
+                data
+            }
+            EncodedScript::Core { .. } => return Err(UtxoError::CorruptRecord),
+        },
+    };
+
+    Ok((
+        OneUtxoOut {
+            vout,
+            value: parsed.value,
+            script_pubkey,
+            coinbase: parsed.coinbase,
+            height: parsed.height,
+        },
+        next,
+    ))
+}
+
+enum EncodedScript<'a> {
+    Plain(&'a [u8]),
+    Core { tag: u64, data: &'a [u8] },
+}
+
+struct OutputPayload<'a> {
+    value: u64,
+    height: u32,
+    coinbase: bool,
+    script: EncodedScript<'a>,
+}
+
+fn parse_output_payload(
+    body: &[u8],
+    framing: RecordFraming,
+) -> Result<OutputPayload<'_>, UtxoError> {
     let (amount, cursor) = crate::utxo::compress::read_varint(body, 0)?;
     let (value, cursor) = if amount == AMOUNT_ESCAPE {
         let end = cursor
@@ -1137,67 +1153,35 @@ fn decode_output_at<'a>(
             cursor,
         )
     };
-
     let (packed, cursor) = crate::utxo::compress::read_varint(body, cursor)?;
     let height = u32::try_from(packed >> 1).map_err(|_| UtxoError::CorruptRecord)?;
-    let coinbase = packed & 1 == 1;
-
-    let script_pubkey: &'a [u8] = match decompressed {
-        Some(dec) => {
-            let &(offset, script_len) = dec.spans.get(index).ok_or(UtxoError::CorruptRecord)?;
-            let offset_usize = usize::try_from(offset).map_err(|_| UtxoError::CorruptRecord)?;
-            let len_usize = usize::try_from(script_len).map_err(|_| UtxoError::CorruptRecord)?;
-            let end = offset_usize
-                .checked_add(len_usize)
-                .ok_or(UtxoError::CorruptRecord)?;
-            dec.data
-                .get(offset_usize..end)
-                .ok_or(UtxoError::CorruptRecord)?
-        }
-        None => encoded_script_at(body, cursor, framing)?,
-    };
-
-    Ok((
-        OneUtxoOut {
-            vout,
-            value,
-            script_pubkey,
-            coinbase,
-            height,
-        },
-        next,
-    ))
-}
-
-fn encoded_script_at(
-    body: &[u8],
-    cursor: usize,
-    framing: RecordFraming,
-) -> Result<&[u8], UtxoError> {
-    match framing {
+    let script = match framing {
         RecordFraming::V5Plain => {
             let script = body.get(cursor..).ok_or(UtxoError::CorruptRecord)?;
             u16::try_from(script.len()).map_err(|_| UtxoError::CorruptRecord)?;
-            Ok(script)
+            EncodedScript::Plain(script)
         }
         RecordFraming::B => {
-            let (tag, tag_cursor) = crate::utxo::compress::read_varint(body, cursor)?;
-            if tag < crate::utxo::compress::SCRIPT_SPECIAL_SCRIPTS_COUNT {
-                return Err(UtxoError::CorruptRecord);
+            let (tag, cursor) = crate::utxo::compress::read_varint(body, cursor)?;
+            let data = body.get(cursor..).ok_or(UtxoError::CorruptRecord)?;
+            if tag >= crate::utxo::compress::SCRIPT_SPECIAL_SCRIPTS_COUNT {
+                let raw_len =
+                    usize::try_from(tag - crate::utxo::compress::SCRIPT_SPECIAL_SCRIPTS_COUNT)
+                        .map_err(|_| UtxoError::CorruptRecord)?;
+                u16::try_from(raw_len).map_err(|_| UtxoError::CorruptRecord)?;
+                if raw_len != data.len() {
+                    return Err(UtxoError::CorruptRecord);
+                }
             }
-            let raw_len =
-                usize::try_from(tag - crate::utxo::compress::SCRIPT_SPECIAL_SCRIPTS_COUNT)
-                    .map_err(|_| UtxoError::CorruptRecord)?;
-            u16::try_from(raw_len).map_err(|_| UtxoError::CorruptRecord)?;
-            let end = tag_cursor
-                .checked_add(raw_len)
-                .ok_or(UtxoError::CorruptRecord)?;
-            if end != body.len() {
-                return Err(UtxoError::CorruptRecord);
-            }
-            body.get(tag_cursor..end).ok_or(UtxoError::CorruptRecord)
+            EncodedScript::Core { tag, data }
         }
-    }
+    };
+    Ok(OutputPayload {
+        value,
+        height,
+        coinbase: packed & 1 == 1,
+        script,
+    })
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
