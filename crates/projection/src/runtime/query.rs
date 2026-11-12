@@ -483,7 +483,9 @@ impl DerivedIndexQueryEngine {
                 let Some(entry) = coverage[capability.index()] else {
                     continue;
                 };
-                if Self::hash_at_height(&tree, tip.tip_id, entry.last_height) != Some(entry.last_hash) {
+                if Self::hash_at_height(&tree, tip.tip_id, entry.last_height)
+                    != Some(entry.last_hash)
+                {
                     return Err(TxQueryError::Retry(RetryReason::TipMoved {
                         expected_commit: revision,
                         current_commit: revision,

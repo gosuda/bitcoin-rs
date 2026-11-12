@@ -246,10 +246,7 @@ pub fn recover_snapshot_activation(
 /// and the next restart retries the removal. An absent CURRENT names no
 /// generation, and a generation with no manifest cannot be loaded, so those
 /// still remove what they can and report success.
-fn remove_orphan_base_checkpoint(
-    data_dir: &Path,
-    base: &Hash256,
-) -> Result<(), std::io::Error> {
+fn remove_orphan_base_checkpoint(data_dir: &Path, base: &Hash256) -> Result<(), std::io::Error> {
     let root = data_dir.join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT);
     let current_path = root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE);
     let current_bytes = match std::fs::read(&current_path) {

@@ -1445,11 +1445,13 @@ fn tail_resume_chains_onto_the_newest_durable_filter_row() {
 
 // PRJ-06, PRJ-07
 #[test]
-fn spend_after_seal_names_the_latest_duplicate_creation()
--> Result<(), crate::portable::TestError> {
+fn spend_after_seal_names_the_latest_duplicate_creation() -> Result<(), crate::portable::TestError>
+{
     use super::tail::{NoSealedTxOrdinals, SealedTxOrdinals, TailWriterState, append_tail_block};
     use super::{Coverage, SealedGen, seal_tail_generation};
-    use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
+    use bitcoin_rs_storage::committed_facts::{
+        CommittedBlock, CreatedOutput, SpentPrevout, TxFacts,
+    };
     use bitcoin_rs_storage::{Bytes, ColumnFamily, KvStore, RocksDbStore};
 
     let dir = tempfile::tempdir()?;

@@ -1855,7 +1855,10 @@ fn failed_orphan_cleanup_keeps_the_marker_and_the_next_boot_retries_the_rollback
         sonic_rs::to_vec(&current)?,
     )?;
     let generation = root.join(generation_name);
-    std::fs::write(&generation, b"obstruction where the orphan generation belongs")?;
+    std::fs::write(
+        &generation,
+        b"obstruction where the orphan generation belongs",
+    )?;
 
     let marker_bytes = || -> TestResult<Option<Vec<u8>>> {
         Ok(active
@@ -1883,7 +1886,8 @@ fn failed_orphan_cleanup_keeps_the_marker_and_the_next_boot_retries_the_rollback
         "a failed orphan cleanup must keep the activation marker durable"
     );
     assert!(
-        root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE).is_file(),
+        root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE)
+            .is_file(),
         "a failed orphan cleanup must keep the orphan checkpoint root selected"
     );
 
@@ -1894,7 +1898,9 @@ fn failed_orphan_cleanup_keeps_the_marker_and_the_next_boot_retries_the_rollback
         "a successful orphan cleanup must clear the activation marker"
     );
     assert!(
-        !root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE).exists(),
+        !root
+            .join(bitcoin_rs_storage::checkpoint::CURRENT_FILE)
+            .exists(),
         "a successful orphan cleanup must remove the orphan CURRENT"
     );
     Ok(())

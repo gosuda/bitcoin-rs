@@ -2329,8 +2329,7 @@ fn historical_unknown_watermark_hash_refuses_prefix() -> Result<(), crate::porta
 }
 
 #[test]
-fn historical_stale_watermark_refuses_prefix()
--> Result<(), crate::portable::TestError> {
+fn historical_stale_watermark_refuses_prefix() -> Result<(), crate::portable::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let main_child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
     let stale_child = {
@@ -2389,8 +2388,7 @@ fn historical_stale_watermark_refuses_prefix()
 
 // SYNC-05
 #[test]
-fn historical_off_chain_watermark_refuses_prefix_reads()
--> Result<(), crate::portable::TestError> {
+fn historical_off_chain_watermark_refuses_prefix_reads() -> Result<(), crate::portable::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let main_child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
     let stale_child = {
@@ -3013,8 +3011,7 @@ fn historical_budgets_health_and_capability_map_to_shared() -> Result<(), crate:
 }
 
 #[test]
-fn historical_deep_stale_branch_refuses_prefix()
--> Result<(), crate::portable::TestError> {
+fn historical_deep_stale_branch_refuses_prefix() -> Result<(), crate::portable::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;

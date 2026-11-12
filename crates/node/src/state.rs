@@ -425,7 +425,9 @@ impl NodeState {
                     } => Some((historical_height, historical_hash)),
                     _ => None,
                 })
-                .map_err(|error| bitcoin_rs_projection::TxQueryError::Storage(error.to_string().into()))
+                .map_err(|error| {
+                    bitcoin_rs_projection::TxQueryError::Storage(error.to_string().into())
+                })
         });
         self.derived_index
             .start(&self.chainstate, history, historical_verified)
