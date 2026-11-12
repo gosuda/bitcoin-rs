@@ -1,9 +1,10 @@
-use core::hash::{BuildHasher, BuildHasherDefault};
+use core::hash::BuildHasher;
+use std::collections::hash_map::RandomState;
+use std::sync::LazyLock;
 
 use bitcoin_rs_consensus::primitives::Txid;
-use nohash_hasher::NoHashHasher;
 
-pub(crate) type UtxoBuildHasher = BuildHasherDefault<NoHashHasher<u64>>;
+static PROCESS_KEY_HASH_STATE: LazyLock<RandomState> = LazyLock::new(RandomState::default);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct UtxoKey([u8; 8]);
@@ -46,7 +47,7 @@ impl UtxoKey {
     #[must_use]
     #[inline]
     pub(crate) fn hash(self) -> u64 {
-        UtxoBuildHasher::default().hash_one(self.as_u64())
+        PROCESS_KEY_HASH_STATE.hash_one(self.as_u64())
     }
 }
 

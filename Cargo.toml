@@ -153,9 +153,6 @@ mio = { version = ">=1.2.4, <2", default-features = false, features = ["os-poll"
 # Rayon — no default features at all on 1.12; nothing to disable/add.
 rayon = { version = ">=1.12, <2" }
 
-# --- Hashing ------------------------------------------------------------------
-nohash-hasher = { version = ">=0.2, <0.3", default-features = false, features = ["std"] }
-
 # --- Small vectors / strings --------------------------------------------------
 # tinyvec: no default features; explicitly enable alloc.
 tinyvec     = { version = ">=1.11, <2", default-features = false, features = ["alloc"] }

@@ -21,7 +21,6 @@ mdbx = ["dep:signet-libmdbx"]
 
 [dependencies]
 crossbeam-utils.workspace = true
-nohash-hasher.workspace = true
 rayon.workspace = true
 ruint.workspace = true
 smallvec.workspace = true
