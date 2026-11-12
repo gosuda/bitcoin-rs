@@ -437,6 +437,7 @@ fn copy_independent_files(
     if include_journal {
         independent_dirs.push("chainstate-journal");
     }
+
     const INDEPENDENT_FILES: &[&str] = &[
         "peers.dat",
         "mempool-snapshot.dat",

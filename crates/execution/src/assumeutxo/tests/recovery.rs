@@ -634,6 +634,48 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
     )
 }
 
+#[test]
+fn restored_historical_stats_keep_following_commits_after_a_checkpoint_restart() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let mut unaccepted = UnacceptedCheckpoint::default();
+    publish_unaccepted_historical_checkpoint(dir.path(), &fixture, &mut unaccepted)?;
+    let active = open_persistent(dir.path(), &fixture.pinned)?;
+    let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
+        Network::Regtest,
+        active,
+        dir.path().to_path_buf(),
+        1,
+    )?;
+    let historical = manager
+        .historical_chainstate()
+        .ok_or(TestError::Missing("missing restored historical chainstate"))?;
+    let restored_tip = historical
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("missing historical checkpoint tip"))?;
+    assert_same_stats(
+        &historical.coin_stats.snapshot(),
+        &scanned_historical_stats(
+            &historical,
+            restored_tip.height,
+            restored_tip.chain_tx_count.to_wire(),
+        )?,
+        restored_tip.height,
+    );
+    let outcome = manager.step_historical(&BlockImage::from_local(fixture.blocks[2].clone()))?;
+    assert!(outcome.height > restored_tip.height);
+    assert_same_stats(
+        &historical.coin_stats.snapshot(),
+        &scanned_historical_stats(
+            &historical,
+            outcome.height,
+            outcome.tip.chain_tx_count.to_wire(),
+        )?,
+        outcome.height,
+    );
+    Ok(())
+}
+
 fn accepted_historical_generation(dir: &Path, fixture: &Fixture) -> TestResult<u64> {
     let active = open_persistent(dir, &fixture.pinned)?;
     let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(

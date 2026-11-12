@@ -73,7 +73,6 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> TestResult<Self> {
-        let source = chainstate();
         let mut blocks = vec![Network::Regtest.genesis_block()];
         for height in 1..=2 {
             blocks.push(crate::chain::regtest_fixture::mined_regtest_child_at(
@@ -84,6 +83,11 @@ impl Fixture {
                 height,
             )?);
         }
+        Self::from_blocks(blocks)
+    }
+
+    fn from_blocks(blocks: Vec<Block>) -> TestResult<Self> {
+        let source = chainstate();
         for block in &blocks {
             source
                 .lock_transition()?
@@ -908,6 +912,138 @@ fn historical_replay_preserves_active_durable_head_and_notifications() -> TestRe
         AssumeUtxoDiskStatus::Finalized { .. }
     ));
     assert_eq!(manager.status()?, disk_status(&fixture.active)?);
+    Ok(())
+}
+
+fn scanned_historical_stats(
+    historical: &Chainstate,
+    height: u32,
+    chain_tx_count: u64,
+) -> TestResult<CoinStats> {
+    let mut stats = engine_coin_set(historical)?.with_stable_view(|view| {
+        bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, height, true)
+    })?;
+    stats.tx_count = chain_tx_count;
+    Ok(stats)
+}
+
+fn assert_same_stats(actual: &CoinStats, expected: &CoinStats, height: u32) {
+    assert_eq!(
+        (
+            actual.height,
+            actual.tx_count,
+            actual.utxo_count,
+            actual.total_amount,
+            actual.bogo_size,
+        ),
+        (
+            expected.height,
+            expected.tx_count,
+            expected.utxo_count,
+            expected.total_amount,
+            expected.bogo_size,
+        ),
+        "historical coin statistics at height {height} must equal a full scan of the engine coins"
+    );
+    assert_eq!(
+        actual.muhash.finalize(),
+        expected.muhash.finalize(),
+        "historical MuHash at height {height} must equal a full scan of the engine coins"
+    );
+}
+
+fn spending_chain() -> TestResult<(Vec<Block>, bitcoin_rs_consensus::primitives::OutPoint)> {
+    use crate::chain::regtest_fixture::{
+        coinbase, mined_block_with_prev_hash, mined_regtest_child_at,
+    };
+    use bitcoin_rs_consensus::primitives::{
+        Amount, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Witness,
+    };
+    use bitcoin_rs_consensus::script::opcode::OP_PUSHNUM_1;
+
+    let mut blocks = vec![Network::Regtest.genesis_block()];
+    for height in 1..=100 {
+        let prev = blocks
+            .last()
+            .ok_or(TestError::Missing("missing predecessor"))?
+            .block_hash();
+        blocks.push(mined_regtest_child_at(prev, height)?);
+    }
+    let funding = OutPoint::new(blocks[1].txs[0].txid(), 0);
+    let spend = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: funding,
+            script_sig: vec![OP_PUSHNUM_1].into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: vec![OP_PUSHNUM_1].into(),
+        }],
+        lock_time: LockTime::ZERO,
+    };
+    let prev = blocks
+        .last()
+        .ok_or(TestError::Missing("missing predecessor"))?
+        .block_hash();
+    blocks.push(mined_block_with_prev_hash(
+        prev,
+        101,
+        vec![coinbase(101), spend],
+    )?);
+    Ok((blocks, funding))
+}
+
+#[test]
+fn historical_stats_equal_a_full_scan_after_every_step_including_a_spend() -> TestResult {
+    let (blocks, funding) = spending_chain()?;
+    let fixture = Fixture::from_blocks(blocks)?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let historical = manager
+        .historical_chainstate()
+        .ok_or(TestError::Missing("historical missing"))?;
+    for block in &fixture.blocks {
+        let outcome = manager.step_historical(&BlockImage::from_local((*block).clone()))?;
+        let expected = scanned_historical_stats(
+            &historical,
+            outcome.height,
+            outcome.tip.chain_tx_count.to_wire(),
+        )?;
+        assert_same_stats(&historical.coin_stats.snapshot(), &expected, outcome.height);
+    }
+    assert!(
+        engine_coin_set(&historical)?.get(&funding).is_none(),
+        "the height-101 spend must have removed the funding coin"
+    );
+    Ok(())
+}
+
+#[test]
+fn historical_step_advances_the_rolling_stats_without_rescanning_the_store() -> TestResult {
+    const MARKER: u64 = 1_000_000;
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let historical = manager
+        .historical_chainstate()
+        .ok_or(TestError::Missing("historical missing"))?;
+    manager.step_historical(&BlockImage::from_local(fixture.blocks[0].clone()))?;
+    let mut marked = historical.coin_stats.snapshot();
+    marked.tx_count += MARKER;
+    historical.coin_stats.reset(marked);
+    let outcome = manager.step_historical(&BlockImage::from_local(fixture.blocks[1].clone()))?;
+    let mut expected = scanned_historical_stats(
+        &historical,
+        outcome.height,
+        outcome.tip.chain_tx_count.to_wire(),
+    )?;
+    expected.tx_count += MARKER;
+    assert_same_stats(&historical.coin_stats.snapshot(), &expected, outcome.height);
     Ok(())
 }
 

@@ -30,7 +30,7 @@ policy_line = min(pruner_tip, durable_tip_height) - retention_depth
 retention_depth = max(keep_below_tip, 288)
 ```
 
-`durable_tip_height` is not the applied tip. The node initializes it from the tip restored at open and updates it only when the node publishes a checkpoint (`crates/node/src/state/open.rs`, `crates/execution/src/checkpoint/publisher.rs:281-282`). So the effective line never exceeds `checkpoint_height - 288`. A prune pass that asks for more records its request but deletes only what the checkpoint base already makes safe.
+`durable_tip_height` is not the applied tip. The node initializes it from the tip restored at open and updates it only when the node publishes a checkpoint (`crates/node/src/state/open.rs`, `crates/execution/src/checkpoint/publisher.rs:221-222`). The execution maintenance worker publishes a checkpoint at most once every ten minutes while the node runs, and only when the applied tip is above the checkpoint height (`crates/execution/src/maintenance.rs`). So the effective line never exceeds `checkpoint_height - 288`. A prune pass that asks for more records its request but deletes only what the checkpoint base already makes safe.
 
 That clamp is visible in the live trace and is the reason two height keys exist. On a cold datadir with 300 blocks and no checkpoint yet, `pruneblockchain 5` returned 5 and stored `node:pruneheight = 5`, but every block was still served because `durable_tip_height` was 0 and the policy line was 0. After a clean stop published checkpoint generation 1 at height 300, a restart made the same call delete heights 0 through 4.
 

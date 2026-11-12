@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use cap_std::fs::Dir;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_FILE_BYTES: usize = 4096;
@@ -12,18 +13,49 @@ const MARKER_FILE: &str = "chain-rollback-event.json";
 pub const FULL_REVALIDATION_MARKER: &str = "full-revalidation";
 
 pub fn mark_full_revalidation_at(data_dir: &Path) -> Result<(), EvidenceError> {
-    let path = data_dir.join(FULL_REVALIDATION_MARKER);
-    std::fs::write(&path, b"required\n")?;
+    let dir = crate::checkpoint::fs::open_data_dir(data_dir)?;
+    mark_full_revalidation_with_sync(&dir, crate::checkpoint::fs::sync_dir)
+}
+
+fn mark_full_revalidation_with_sync(
+    dir: &Dir,
+    sync_dir: impl FnOnce(&Dir) -> std::io::Result<()>,
+) -> Result<(), EvidenceError> {
+    use std::io::Write as _;
+
+    match crate::checkpoint::fs::create_file(dir, FULL_REVALIDATION_MARKER) {
+        Ok(mut file) => {
+            file.write_all(b"required\n")?;
+            file.sync_all()?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            crate::checkpoint::fs::open_file(dir, FULL_REVALIDATION_MARKER)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    sync_dir(dir)?;
     Ok(())
 }
 
 pub fn clear_full_revalidation_marker_at(data_dir: &Path) -> Result<(), EvidenceError> {
-    let path = data_dir.join(FULL_REVALIDATION_MARKER);
-    if let Err(e) = std::fs::remove_file(&path)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(EvidenceError::Io(e));
+    let dir = match crate::checkpoint::fs::open_data_dir(data_dir) {
+        Ok(dir) => dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    clear_full_revalidation_marker_with_sync(&dir, crate::checkpoint::fs::sync_dir)
+}
+
+fn clear_full_revalidation_marker_with_sync(
+    dir: &Dir,
+    sync_dir: impl FnOnce(&Dir) -> std::io::Result<()>,
+) -> Result<(), EvidenceError> {
+    match dir.remove_file(FULL_REVALIDATION_MARKER) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
+    sync_dir(dir)?;
     Ok(())
 }
 

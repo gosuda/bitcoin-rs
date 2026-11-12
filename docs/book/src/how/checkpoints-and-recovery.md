@@ -24,7 +24,7 @@ The manifest (`CheckpointManifestV1`) records, among other fields: generation nu
 
 ## The publish protocol
 
-`CheckpointPublisher` (`crates/execution/src/checkpoint/publisher.rs`) drives publication in `publish_transaction`. The node publishes on clean shutdown (`crates/node/src/lifecycle.rs`, the `published clean chainstate checkpoint` line) and when recovery work completes. The sequence:
+`CheckpointPublisher` (`crates/execution/src/checkpoint/publisher.rs`) drives publication in `publish_transaction`. The node publishes on clean shutdown (`crates/node/src/lifecycle.rs`, the `published clean chainstate checkpoint` line), when recovery work completes, and from the execution maintenance worker at most once every ten minutes while the node runs. The worker publishes only when the applied tip is above the published checkpoint height, so an idle node publishes nothing. The sequence:
 
 1. Pause block admission (`ApplyAdmission::pause`), so the state cannot move under the write.
 2. Refuse if a disconnect marker is `InFlight`, or if the applied tip is ahead of the durable head (`CheckpointError::DisconnectInFlight`, `CheckpointError::AheadOfDurableHead`, both raised in `publish_frozen`). The durable head is the commit point; a checkpoint can never legitimately name a tip the head has not certified.

@@ -435,20 +435,10 @@ impl KvStore for MdbxStore {
         check_key(key)?;
         let db = self.db_for_cf(cf)?;
         let tx = self.env.begin_ro_sync().map_err(StorageError::backend)?;
-        let val: Option<Vec<u8>> = tx.get(db.dbi(), key).map_err(StorageError::backend)?;
-        match val {
-            Some(v) => {
-                if v.len() > max_bytes {
-                    Err(BoundedReadError::Limit {
-                        size: v.len(),
-                        limit: max_bytes,
-                    })
-                } else {
-                    Ok(Some(v))
-                }
-            }
-            None => Ok(None),
-        }
+        let val: Option<std::borrow::Cow<'_, [u8]>> =
+            tx.get(db.dbi(), key).map_err(StorageError::backend)?;
+        val.map(|value| crate::error::copy_bounded(&value, max_bytes))
+            .transpose()
     }
 
     fn iter_prefix<'a>(

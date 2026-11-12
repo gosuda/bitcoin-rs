@@ -1090,9 +1090,6 @@ impl AssumeUtxoManager {
             .ok_or(AssumeUtxoError::NoHistoricalChainstate)?;
         let (outcome, archived) = self.connect_historical_block(&historical, payload)?;
         if !archived {
-            let mut stats = historical.coins.commitment(outcome.height, None)?.stats;
-            stats.tx_count = outcome.tip.chain_tx_count.to_wire();
-            historical.coin_stats.reset(stats);
             self.record_historical_progress(&historical, payload, &outcome)?;
         }
         historical
