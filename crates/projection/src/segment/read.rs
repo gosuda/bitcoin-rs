@@ -361,8 +361,6 @@ impl<'a> SegmentSnapshot<'a> {
         Ok(())
     }
 
-    /// Largest ordinal of `scope` whose transaction sits at or below `start`.
-    /// Ordinals ascend with height, so the predicate is monotone.
     fn last_ordinal_at_or_below(
         &self,
         scope: Scope,
@@ -373,10 +371,13 @@ impl<'a> SegmentSnapshot<'a> {
                 .resolve_ordinal(scope, ordinal)?
                 .is_some_and(|tx| tx.height <= start))
         };
-        if !within(0)? {
+        let Some(first) = self.first_stored_ordinal(scope)? else {
+            return Ok(None);
+        };
+        if !within(first)? {
             return Ok(None);
         }
-        let (mut low, mut high) = (0_u32, u32::MAX);
+        let (mut low, mut high) = (first, u32::MAX);
         while low < high {
             let middle = low + (high - low).div_ceil(2);
             if within(middle)? {
@@ -386,6 +387,26 @@ impl<'a> SegmentSnapshot<'a> {
             }
         }
         Ok(Some(low))
+    }
+
+    fn first_stored_ordinal(&self, scope: Scope) -> Result<Option<u32>, IndexError> {
+        let prefix = format::tx_dir_kind_prefix(scope.segment_id(), format::TX_KIND_ORDINAL);
+        let scan = self.scan(
+            ColumnFamily::TxDir,
+            &prefix,
+            PrefixScanLimit {
+                max_rows: 1,
+                max_bytes: usize::MAX,
+            },
+        )?;
+        let Some((key, _)) = scan.rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let ordinal: [u8; 4] = key
+            .get(format::TX_ORDINAL_KEY_LEN - 4..)
+            .and_then(|slice| slice.try_into().ok())
+            .ok_or_else(|| malformed("tx ordinal key"))?;
+        Ok(Some(u32::from_be_bytes(ordinal)))
     }
 
     fn history_rows(

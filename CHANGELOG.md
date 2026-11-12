@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Script-history reads include sealed generations whose transaction ordinals start above zero.
 - Streaming index artifact restore (`crates/projection/src/portable/restore.rs`, `segment/spill.rs`, `segment/import.rs`, `index/write.rs`). `TxLookup` and `ScriptHistory` artifacts now attach through one bounded streaming re-encode: the verified artifact decodes into spill runs on scratch, the merge orders rows, and one segment attach seals them. The re-encode holds no more than 64 MiB of decoded rows in memory at once. The portable attach functions take the spill budget as a new argument.
 - BREAKING CHANGE: `attach_tx_lookup_artifact`, `attach_script_history_artifact`, and `attach_compact_filter_artifact` take a `&SpillBudget` argument; the `TxIndexWriter` attach methods for `TxLookup` and `ScriptHistory` take streamed run families instead of `ImportedSegment`.
 - BREAKING CHANGE: `MempoolGateway::remove_for_block`, `settle_block_facts`, `expire`, `clear` and `evict_below_fee_rate` return `Result` carrying `MempoolError::DeliveryQueueFull` when a reentrant observer callback commits past the bounded delivery queue; callers propagate the error.

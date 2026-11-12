@@ -119,6 +119,100 @@ fn history_pages_walk_more_than_256_posting_chunks() -> Result<(), crate::portab
     assert_eq!(unpaged.rows.len(), usize::try_from(TXS).unwrap_or(0));
     Ok(())
 }
+
+// PRJ-06
+#[test]
+fn rekeyed_sealed_generation_serves_its_script_history() -> Result<(), crate::portable::TestError> {
+    use crate::segment::import::{
+        TxOccurrence, next_segment_id, put_segment, stage_segment, tx_lookup_segment,
+    };
+    use crate::segment::{Coverage, SegmentSnapshot};
+    use crate::types::{ScriptHash, TxPosition};
+    use crate::{IndexCapabilities, IndexCapability, TxIndexSnapshot};
+    use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit, RocksDbStore};
+
+    let dir = tempfile::tempdir()?;
+    let store = RocksDbStore::open(dir.path())?;
+    let script = ScriptHash::from_script_bytes(b"rekeyed script");
+    let dict_row = (
+        encode_script_dict_key(0, &script.to_byte_array()).to_vec(),
+        encode_script_dict_value(0).to_vec(),
+    );
+    let occurrence = |index: u32, height: u32| {
+        let mut txid = [0_u8; 32];
+        txid[..4].copy_from_slice(&index.to_be_bytes());
+        TxOccurrence {
+            txid,
+            height,
+            block_hash: [9_u8; 32],
+            position: TxPosition::new(0, 10),
+        }
+    };
+    let funding_postings = |ordinals: &[u32]| {
+        ordinals
+            .iter()
+            .map(|&ordinal| {
+                (
+                    encode_script_post_chunk_key(0, 0, ordinal).to_vec(),
+                    encode_posting_items(&[PostingItem {
+                        delta_ordinal: 0,
+                        flags: POSTING_FLAG_FUNDING,
+                    }]),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let seal = |occurrences: Vec<TxOccurrence>,
+                coverage: Coverage,
+                ordinal_base: u32,
+                chunk_ordinals: &[u32]|
+     -> Result<(), crate::portable::TestError> {
+        let mut segment = tx_lookup_segment(occurrences, coverage, ordinal_base)?;
+        segment
+            .families
+            .push((ColumnFamily::ScriptDict, vec![dict_row.clone()]));
+        segment
+            .families
+            .push((ColumnFamily::ScriptPost, funding_postings(chunk_ordinals)));
+        let caps = IndexCapabilities::TX_LOOKUP.insert(IndexCapability::ScriptHistory);
+        let gen_id = next_segment_id(&store)?;
+        stage_segment(&store, gen_id, &segment, dir.path())?;
+        let mut batch = store.new_batch();
+        put_segment(&mut batch, gen_id, &segment, caps);
+        store.write_durable(batch)?;
+        Ok(())
+    };
+
+    seal(
+        vec![occurrence(0, 1), occurrence(1, 2)],
+        Coverage::new(1, 2, [1_u8; 32]),
+        0,
+        &[0, 1],
+    )?;
+    seal(
+        vec![occurrence(5, 11), occurrence(6, 12)],
+        Coverage::new(11, 12, [2_u8; 32]),
+        5,
+        &[5, 6],
+    )?;
+
+    let snapshot = SegmentSnapshot::open(store.snapshot()?)?;
+    let unlimited = PrefixScanLimit {
+        max_rows: usize::MAX,
+        max_bytes: usize::MAX,
+    };
+    let scan = snapshot.funding_rows(script, unlimited)?;
+    assert!(scan.complete);
+    let heights: Vec<_> = scan.rows.iter().map(|row| row.row.height()).collect();
+    assert_eq!(heights, [12, 11, 2, 1]);
+    let rekeyed = crate::types::ScriptHistoryOccurrence::decode_all(&scan.rows[0].value)
+        .ok_or("malformed occurrences")?;
+    let mut expected_txid = [0_u8; 32];
+    expected_txid[..4].copy_from_slice(&6_u32.to_be_bytes());
+    assert_eq!(rekeyed.len(), 1);
+    assert_eq!(rekeyed[0].txid, expected_txid);
+    Ok(())
+}
 // IDX-10
 #[test]
 #[expect(clippy::expect_used)]
