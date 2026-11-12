@@ -171,6 +171,10 @@ fn populate_block_changes_applies_adds_and_spends_to_coin_store() -> TestResult 
 
     let mut block1 = BlockChanges::default();
     block1.add(UtxoAdd::new(FUNDED, coin(900), false, 1));
+    let untouched = OutPoint::new(FUNDED.txid, 3);
+    block1.add(UtxoAdd::new(untouched, coin(125), true, 2));
+    let spent = OutPoint::new(FUNDED.txid, 1);
+    block1.add(UtxoAdd::new(spent, coin(200), false, 2));
     populate_block_changes(&coin_store, &block1)?;
 
     let key_funded = CoinKey(FUNDED.txid.0.to_le_bytes());
@@ -182,10 +186,44 @@ fn populate_block_changes_applies_adds_and_spends_to_coin_store() -> TestResult 
 
     let mut block2 = BlockChanges::default();
     block2.remove(FUNDED);
+    block2.remove(spent);
+    block2.add(UtxoAdd::new(FUNDED, coin(700), false, 3));
+    block2.add(UtxoAdd::new(
+        FUNDED,
+        TxOut {
+            value: Amount::from_sat(650),
+            script_pubkey: Script::from_bytes(vec![0x52, 0x53]),
+        },
+        true,
+        4,
+    ));
     block2.add(UtxoAdd::new(CREATED, coin(850), false, HEIGHT));
     populate_block_changes(&coin_store, &block2)?;
 
-    assert_eq!(coin_store.get(&key_funded)?, None);
+    let funded = coin_store.get(&key_funded)?.ok_or(TestError::Missing(
+        "replacement and untouched outputs exist",
+    ))?;
+    let funded_record =
+        crate::utxo::record::UtxoRecord::from_encoded(funded.to_vec().into_boxed_slice())?;
+    let funded_outputs: Vec<_> = funded_record
+        .outputs()
+        .map(|out| {
+            (
+                out.vout,
+                out.value,
+                out.script_pubkey.to_vec(),
+                out.coinbase,
+                out.height,
+            )
+        })
+        .collect();
+    assert_eq!(
+        funded_outputs,
+        vec![
+            (0, 650, vec![0x52, 0x53], true, 4),
+            (3, 125, vec![0x51], true, 2),
+        ]
+    );
     let key_created = CoinKey(CREATED.txid.0.to_le_bytes());
     let coin2 = coin_store
         .get(&key_created)?

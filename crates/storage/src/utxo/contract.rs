@@ -346,10 +346,15 @@ pub fn populate_block_changes<T: Borrow<TxOut>>(
         }
 
         if let Some(adds) = adds_by_txid.get(&txid) {
-            for add in adds {
-                outputs.retain(|out| out.vout != add.outpoint.vout);
+            let mut add_vouts: HashSet<u32> = adds.iter().map(|add| add.outpoint.vout).collect();
+            outputs.retain(|out| !add_vouts.contains(&out.vout));
+            for add in adds.iter().rev() {
+                let vout = add.outpoint.vout;
+                if !add_vouts.remove(&vout) {
+                    continue;
+                }
                 outputs.push(OwnedUtxoOut {
-                    vout: add.outpoint.vout,
+                    vout,
                     value: add.txout.borrow().value.to_sat(),
                     script_pubkey: add.txout.borrow().script_pubkey.to_vec(),
                     coinbase: add.coinbase,
