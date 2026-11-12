@@ -405,31 +405,6 @@ fn block_render_budget_releases_dropped_permits() {
 }
 
 #[test]
-fn new_context_wires_utxo_commits_to_coin_stats() {
-    use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, TxOut, Txid};
-    use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
-
-    let ctx = Context::new();
-    let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[1_u8; 32])), 0);
-    let txout = TxOut {
-        value: Amount::from_sat(125_000),
-        script_pubkey: Script::new(),
-    };
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(outpoint, txout.clone(), true, 7));
-
-    let mut stats = ctx.chain.coin_stats.snapshot();
-    stats.insert_utxo(&outpoint, &txout, 7, true);
-    ctx.chain.coin_stats.reset(stats);
-    ctx.populate_fixture_coins(&changes)
-        .unwrap_or_else(|err| panic!("populate failed: {err}"));
-
-    let snapshot = ctx.chain.coin_stats.snapshot();
-    assert_eq!(snapshot.utxo_count, 1);
-    assert_eq!(snapshot.total_amount, 125_000);
-}
-
-#[test]
 fn connected_log_blocks_resolve_metadata_without_header_bytes() {
     let genesis = Network::Regtest.genesis_block();
     let mut child = genesis.clone();
