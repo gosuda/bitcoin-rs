@@ -1,8 +1,12 @@
 use std::fs;
 use std::path::Path;
 
+use bitcoin_rs_consensus::primitives::Hash256;
+use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
+use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore};
 use tempfile::tempdir;
 
+use super::epoch3_to_4::create_checkpoint_fixture;
 use super::support::error::{TestError, TestResult};
 use super::support::harness::{parse_report, recursive_dir_digest, run_converter};
 use super::support::oracle::write_schema_marker;
@@ -44,6 +48,21 @@ fn convert_and_assert_snapshot_archive(source_epoch: u32) -> TestResult<()> {
     let to_path = dest_temp.path().join("converted");
 
     write_schema_marker(from_path, source_epoch)?;
+    if source_epoch == 3 {
+        let checkpoint_tip = Hash256::from_le_bytes(&[0x31; 32]);
+        create_checkpoint_fixture(from_path, checkpoint_tip, 100, &[])?;
+        let store = RocksDbStore::open(from_path.join("chainstate"))?;
+        let head = DurableHead {
+            assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
+            commit_id: 1,
+            height: 100,
+            tip: checkpoint_tip,
+            chain_tx_count: 100,
+            body_extent: None,
+            undo_extent: None,
+        };
+        store.put(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY, &head.encode())?;
+    }
     write_snapshot_archive(from_path)?;
 
     let source_digest_before = recursive_dir_digest(from_path)?;
