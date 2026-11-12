@@ -319,10 +319,11 @@ mod tests {
         assert_eq!(checkpoint.coin_count(), first.txs[0].outputs.len());
         let reopened = chain.reopen(&checkpoint)?;
         let outpoint = OutPoint::new(first.txs[0].txid(), 0);
-        assert_eq!(
-            reopened.utxo().get(&outpoint).as_ref(),
-            first.txs[0].outputs.first()
-        );
+        let coin = reopened
+            .utxo()
+            .get(&outpoint)
+            .map_err(|_| "coin read failed")?;
+        assert_eq!(coin.as_ref(), first.txs[0].outputs.first());
         Ok(())
     }
 }
