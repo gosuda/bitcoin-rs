@@ -532,7 +532,7 @@ That document gives consumer usage and defers to this clause for every consisten
   - `history_cursor` resolves an `API-09` transaction id to that cursor.
   - Each page reads the captured snapshot.
   - Endpoints that promise current-tip data verify at capture that every required watermark equals the applied-tip height and return `Retry` otherwise.
-  - The embedded prefix reads keep watermark-pinned coverage and answer from the covered prefix without that check.
+  - The embedded prefix reads keep watermark-pinned coverage. They return `Retry(TipMoved)` if a required watermark hash does not match the block at its height on the captured applied chain.
   - Independent calls never share an anchor automatically: each returns its own prefix.
   - Callers composing answers compare the returned `floor`/`height`/`hash` metadata themselves.
 - Floor and range:

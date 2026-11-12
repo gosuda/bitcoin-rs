@@ -475,6 +475,20 @@ impl DerivedIndexQueryEngine {
                 last_hash: Hash256::from_le_bytes(&watermark.hash),
             });
         }
+        {
+            let tree = self.block_tree.read();
+            for capability in required.iter() {
+                let Some(entry) = coverage[capability.index()] else {
+                    continue;
+                };
+                if Self::hash_at_height(&tree, tip.tip_id, entry.last_height) != Some(entry.last_hash) {
+                    return Err(TxQueryError::Retry(RetryReason::TipMoved {
+                        expected_commit: revision,
+                        current_commit: revision,
+                    }));
+                }
+            }
+        }
 
         let (historical_verified_height, historical_verified_hash) =
             self.historical_verified.unwrap_or((tip.height, tip.hash));

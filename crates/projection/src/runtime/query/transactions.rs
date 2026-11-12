@@ -18,7 +18,7 @@ impl DerivedIndexQueryEngine {
         ))
     }
 
-    fn hash_at_height(
+    pub(super) fn hash_at_height(
         tree: &BlockTree,
         tip_id: bitcoin_rs_execution::chain::NodeId,
         height: u32,

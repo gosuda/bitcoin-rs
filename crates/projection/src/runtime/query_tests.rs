@@ -2285,7 +2285,7 @@ fn historical_reorg_below_anchor_stays_valid() -> Result<(), crate::portable::Te
 }
 
 #[test]
-fn historical_unknown_watermark_hash_scopes_absence() -> Result<(), crate::portable::TestError> {
+fn historical_unknown_watermark_hash_refuses_prefix() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let mut tree = BlockTree::new();
@@ -2321,15 +2321,15 @@ fn historical_unknown_watermark_hash_scopes_absence() -> Result<(), crate::porta
             chain_transition: None,
         },
     );
-    let at = engine.transaction_at_prefix(&txid)?;
-    assert_eq!(at.value, None);
-    assert_eq!(at.coverage.height, 0);
-    assert_eq!(at.coverage.floor, 0);
+    assert!(matches!(
+        engine.transaction_at_prefix(&txid),
+        Err(TxQueryError::Retry(RetryReason::TipMoved { .. }))
+    ));
     Ok(())
 }
 
 #[test]
-fn historical_stale_watermark_anchors_at_fork_and_excludes_orphans()
+fn historical_stale_watermark_refuses_prefix()
 -> Result<(), crate::portable::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let main_child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
@@ -2380,10 +2380,78 @@ fn historical_stale_watermark_anchors_at_fork_and_excludes_orphans()
             chain_transition: None,
         },
     );
-    let at = engine.transaction_at_prefix(&stale_txid)?;
-    assert_eq!(at.coverage.height, 1);
-    assert_eq!(at.coverage.floor, 0);
-    assert_eq!(at.value, None);
+    assert!(matches!(
+        engine.transaction_at_prefix(&stale_txid),
+        Err(TxQueryError::Retry(RetryReason::TipMoved { .. }))
+    ));
+    Ok(())
+}
+
+// SYNC-05
+#[test]
+fn historical_off_chain_watermark_refuses_prefix_reads()
+-> Result<(), crate::portable::TestError> {
+    let genesis = Network::Regtest.genesis_block();
+    let main_child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
+    let stale_child = {
+        let mut tx = genesis.txs[0].clone();
+        tx.outputs[0].value = tx.outputs[0].value.saturating_add(Amount::from_sat(5));
+        child_block(&genesis, vec![tx])?
+    };
+    let stale_txid = stale_child.txs[0].txid();
+    let script = ScriptHash::from_script_bytes(&[0x51]);
+    let mut tree = BlockTree::new();
+    let _genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+    let main_id = tree.insert_header(main_child.header, NodeStatus::HeaderValid)?;
+    let stale_id = tree.insert_header(stale_child.header, NodeStatus::HeaderValid)?;
+    let stale_watermark = watermark_for(&tree, stale_id)?;
+    let main_tip = tip_snapshot_for(&tree, main_id)?;
+    let tip_cell = Arc::new(ArcSwapOption::empty());
+    tip_cell.store(Some(Arc::new(main_tip)));
+    let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+    let runtime = DerivedIndexRuntime::new(wake_tx);
+    let stale_prefix = TxidRow::scan_prefix(&stale_txid);
+    let reader = Arc::new(HistoricalReader {
+        snapshot: HistoricalSnapshot {
+            tx_watermark: Some(stale_watermark),
+            sh_watermark: Some(stale_watermark),
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: vec![scan_response(
+                ColumnFamily::TxConfirmed,
+                stale_prefix,
+                vec![(TxidRow::row(&stale_txid, 1).to_db_row().to_vec(), vec![0])],
+                true,
+            )],
+        },
+    });
+    let engine = DerivedIndexQueryEngine::new(
+        runtime,
+        reader,
+        bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+        bitcoin_rs_execution::chain::TipReader::new(tip_cell),
+        Some(Arc::new(MovingBody::new(
+            vec![
+                (1, main_child.block_hash(), consensus_bytes(&main_child)),
+                (1, stale_child.block_hash(), consensus_bytes(&stale_child)),
+            ],
+            None,
+        ))),
+        QueryEngineLive {
+            enabled: IndexCapabilities::ALL,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: None,
+            chain_transition: None,
+        },
+    );
+    assert!(matches!(
+        engine.transaction_at_prefix(&stale_txid),
+        Err(TxQueryError::Retry(RetryReason::TipMoved { .. }))
+    ));
+    assert!(matches!(
+        engine.script_history_at_prefix(script),
+        Err(TxQueryError::Retry(RetryReason::TipMoved { .. }))
+    ));
     Ok(())
 }
 
@@ -2873,7 +2941,7 @@ fn historical_budgets_health_and_capability_map_to_shared() -> Result<(), crate:
 }
 
 #[test]
-fn historical_deep_stale_branch_scopes_absence_under_serving_view()
+fn historical_deep_stale_branch_refuses_prefix()
 -> Result<(), crate::portable::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
@@ -2910,11 +2978,10 @@ fn historical_deep_stale_branch_scopes_absence_under_serving_view()
             enabled: IndexCapabilities::ALL,
         },
     )?;
-    let at = fixture.engine.transaction_at_prefix(&txid)?;
-    assert_eq!(at.value, None);
-    assert_eq!(at.coverage.height, 320);
-    assert_eq!(at.coverage.floor, 0);
-    assert_eq!(*at.coverage.hash.as_byte_array(), stale_watermark.hash);
+    assert!(matches!(
+        fixture.engine.transaction_at_prefix(&txid),
+        Err(TxQueryError::Retry(RetryReason::TipMoved { .. }))
+    ));
     Ok(())
 }
 
