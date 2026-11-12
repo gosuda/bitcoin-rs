@@ -205,6 +205,7 @@ impl DerivedIndexQueryEngine {
         Self::require_full_history(prefix)?;
         let rows = self.scan_funding_rows(snapshot, budget, scripthash)?;
         let mut history = Vec::new();
+        let mut reported_transactions = std::collections::BTreeSet::new();
         let mut funding_outputs = Vec::new();
         let mut examined = 0_usize;
         for row in rows {
@@ -218,7 +219,9 @@ impl DerivedIndexQueryEngine {
                     continue;
                 }
                 let txid = occurrence.txid();
-                history.push(ScriptHistoryRecord { txid, height });
+                if reported_transactions.insert((txid, height)) {
+                    history.push(ScriptHistoryRecord { txid, height });
+                }
                 if occurrence.flags & ScriptHistoryOccurrence::FUNDING == 0 {
                     continue;
                 }

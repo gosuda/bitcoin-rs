@@ -1279,6 +1279,125 @@ fn funding_prefix_scan_ignores_occurrences_of_other_scripts()
     Ok(())
 }
 
+// IDX-02
+#[test]
+fn history_snapshot_reports_each_confirmed_transaction_once()
+-> Result<(), crate::portable::TestError> {
+    use crate::types::ScriptHistoryOccurrence;
+    let mut block = Network::Regtest.genesis_block();
+    let script = block.txs[0].outputs[0].script_pubkey.clone();
+    let scripthash = ScriptHash::new(&script);
+    let value = block.txs[0].outputs[0].value;
+    let coinbase_txid = block.txs[0].txid();
+    let duplicate_outputs = Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![
+            TxOut {
+                value,
+                script_pubkey: script.clone(),
+            },
+            TxOut {
+                value,
+                script_pubkey: script.clone(),
+            },
+        ],
+    };
+    let self_spend = Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: OutPoint {
+                txid: coinbase_txid,
+                vout: 0,
+            },
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value,
+            script_pubkey: script.clone(),
+        }],
+    };
+    block.txs.push(duplicate_outputs);
+    block.txs.push(self_spend);
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
+        .ok_or_else(|| std::io::Error::other("block has transactions"))?;
+    let duplicate_txid = block.txs[1].txid();
+    let self_spend_txid = block.txs[2].txid();
+    let duplicate_at = position_of_transaction(&block, 1)?;
+    let self_spend_at = position_of_transaction(&block, 2)?;
+    let occurrences = [
+        (
+            duplicate_txid,
+            duplicate_at,
+            ScriptHistoryOccurrence::FUNDING,
+        ),
+        (
+            duplicate_txid,
+            duplicate_at,
+            ScriptHistoryOccurrence::FUNDING,
+        ),
+        (
+            self_spend_txid,
+            self_spend_at,
+            ScriptHistoryOccurrence::SPENDING,
+        ),
+        (
+            self_spend_txid,
+            self_spend_at,
+            ScriptHistoryOccurrence::FUNDING,
+        ),
+    ];
+    let fixture = QueryFixture::new(FixtureConfig {
+        block,
+        retain_body: true,
+        scans: vec![scan_response(
+            ColumnFamily::Funding,
+            ScriptHashRow::scan_prefix(scripthash),
+            vec![history_row(scripthash, 0, &occurrences)],
+            true,
+        )],
+        watermark: None,
+        extra_blocks: Vec::new(),
+    })?;
+
+    let snapshot = fixture.engine.history_snapshot(scripthash)?;
+    let mut history_txids: Vec<_> = snapshot.history.iter().map(|record| record.txid).collect();
+    history_txids.sort();
+    let mut expected_txids = vec![duplicate_txid, self_spend_txid];
+    expected_txids.sort();
+    assert_eq!(history_txids, expected_txids);
+    assert_eq!(
+        snapshot.funding.len(),
+        3,
+        "funding keeps every distinct output"
+    );
+    let duplicate_vouts: Vec<u32> = snapshot
+        .funding
+        .iter()
+        .filter(|record| record.txid == duplicate_txid)
+        .map(|record| record.vout)
+        .collect();
+    assert_eq!(duplicate_vouts, [0, 1]);
+    assert_eq!(
+        snapshot
+            .funding
+            .iter()
+            .filter(|record| record.txid == self_spend_txid)
+            .count(),
+        1
+    );
+    Ok(())
+}
+
 #[test]
 fn history_summary_never_consults_spender_rows() -> Result<(), crate::portable::TestError> {
     use crate::types::ScriptHistoryOccurrence;
