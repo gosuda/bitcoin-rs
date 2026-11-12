@@ -136,11 +136,11 @@ pub struct RestoredState {
 
 /// Installs a restored state into `chain` before any replayed block runs.
 ///
-/// Warm: copies the checkpoint engine snapshot's rows into the chain engine
-/// (every column family except `UtxoMeta`; the live durable head and its
-/// attestation stay authoritative and are re-certified by replay). Cold: wipes
-/// the derived coin namespace and leaves head, undo and body-index rows in
-/// place. The resident UtxoSet is replaced but never seeds the engine.
+/// Warm: copies absent `UndoData`, `BlockBodies` and `Coins` rows from the
+/// checkpoint engine snapshot into the chain engine; existing rows, the live
+/// durable head and its attestation stay authoritative. Cold: wipes the derived
+/// coin namespace and leaves head, undo and body-index rows in place. The
+/// resident UtxoSet is replaced but never seeds the engine.
 pub fn install_restored_state(
     chain: &mut crate::Chainstate,
     restored: RestoredState,
@@ -207,25 +207,34 @@ pub fn install_engine_checkpoint(
         }
         target.write_durable(batch)?;
     }
-    let rows = snap
-        .iter_prefix(Coins, &[])?
-        .map(|row| {
-            let (key, value) = row?;
-            Ok((
-                bitcoin_rs_storage::CoinKey::from_slice(&key)?,
-                bytes::Bytes::from(value),
-            ))
-        })
-        .collect::<Result<Vec<_>, bitcoin_rs_storage::StorageError>>()?;
-    let absent_rows: Vec<(bitcoin_rs_storage::CoinKey, bytes::Bytes)> = rows
-        .into_iter()
-        .filter_map(|(key, value)| match target.get(Coins, key.as_bytes()) {
-            Ok(None) => Some(Ok((key, value))),
-            Ok(Some(_)) => None,
-            Err(e) => Some(Err(e)),
-        })
-        .collect::<Result<Vec<_>, bitcoin_rs_storage::StorageError>>()?;
-    chain.coins.ingest_sorted(absent_rows.into_iter())
+    let mut rows = snap.iter_prefix(Coins, &[])?;
+    let mut source_error = None;
+    let absent_rows = std::iter::from_fn(|| {
+        if source_error.is_some() {
+            return None;
+        }
+        loop {
+            let row = rows.next()?;
+            let absent_row = (|| {
+                let (key, value) = row?;
+                let key = bitcoin_rs_storage::CoinKey::from_slice(&key)?;
+                if target.get(Coins, key.as_bytes())?.is_some() {
+                    return Ok(None);
+                }
+                Ok(Some((key, bytes::Bytes::from(value))))
+            })();
+            match absent_row {
+                Ok(Some(row)) => return Some(row),
+                Ok(None) => continue,
+                Err(error) => {
+                    source_error = Some(error);
+                    return None;
+                }
+            }
+        }
+    });
+    chain.coins.ingest_sorted(absent_rows)?;
+    source_error.map_or(Ok(()), Err)
 }
 
 fn height_bytes(key: &[u8], start: usize) -> Option<u32> {
