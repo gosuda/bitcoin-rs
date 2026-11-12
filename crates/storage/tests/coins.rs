@@ -404,3 +404,68 @@ fn committed_record_with_440_outputs_survives_store_reopen() -> TestResult {
     assert_eq!(observed, wanted, "every output must round-trip");
     Ok(())
 }
+
+#[test]
+fn duplicate_final_images_match_last_engine_write_and_stats() -> TestResult {
+    use bitcoin_rs_consensus::primitives::Hash256;
+    use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
+    use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
+
+    for delete_final in [false, true] {
+        let temp = tempfile::TempDir::new()?;
+        let store: Arc<dyn KvStore> = Arc::new(RocksDbStore::open(temp.path())?);
+        let coins = CoinStore::open(Arc::clone(&store), 1 << 20);
+        let listener = CoinStatsListener::new(CoinStats::new());
+        coins.track_coin_stats(listener.clone());
+        let key = coin_key(20);
+        let other = coin_key(21);
+        let image = |key: CoinKey, amount| -> TestResult<Bytes> {
+            let record = UtxoRecord::from_owned_outputs(
+                Hash256::from_le_bytes(&key.0),
+                &[OwnedUtxoOut::new(0, amount, vec![0x51], false, 3)],
+            )?;
+            Ok(Bytes::copy_from_slice(record.bytes()))
+        };
+        let initial = WindowDelta {
+            records: vec![
+                (key, Some(image(key, 100)?)),
+                (other, Some(image(other, 700)?)),
+            ],
+        };
+        let feed = coins.plan_stats_feed(&initial)?;
+        let mut batch = store.new_batch();
+        coins.append_window(&mut batch, &initial)?;
+        store.write_durable(batch)?;
+        coins.install_committed(&initial, feed);
+
+        let final_image = if delete_final {
+            None
+        } else {
+            Some(image(key, 250)?)
+        };
+        let delta = WindowDelta {
+            records: vec![
+                (key, Some(image(key, 900)?)),
+                (key, None),
+                (key, final_image.clone()),
+            ],
+        };
+        let feed = coins.plan_stats_feed(&delta)?;
+        let mut batch = store.new_batch();
+        coins.append_window(&mut batch, &delta)?;
+        store.write_durable(batch)?;
+        coins.install_committed(&delta, feed);
+
+        assert_eq!(
+            store
+                .get(ColumnFamily::Coins, key.as_bytes())?
+                .map(Bytes::from),
+            final_image
+        );
+        assert_eq!(coins.get(&key)?, final_image);
+        let stats = listener.snapshot();
+        assert_eq!(stats.utxo_count, if delete_final { 1 } else { 2 });
+        assert_eq!(stats.total_amount, if delete_final { 700 } else { 950 });
+    }
+    Ok(())
+}
