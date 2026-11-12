@@ -57,6 +57,20 @@ fn commit(
         })
 }
 
+fn disconnect(
+    authority: &CommitAuthority,
+    expected: &DurableHead,
+    next: &DurableHead,
+) -> Result<(), StorageError> {
+    authority
+        .commit_disconnect(expected, next, WindowDelta::default())
+        .map(|_receipt| ())
+        .map_err(|error| match error {
+            CommitError::Storage(storage) => storage,
+            other => StorageError::backend(other),
+        })
+}
+
 fn run_reopen_and_fence_laws() -> Result<(), StorageError> {
     let temp = tempfile::tempdir()?;
     let backend = Arc::new(bitcoin_rs_storage::RocksDbStore::open(temp.path())?);
@@ -559,6 +573,67 @@ fn rocksdb_suffix_attestation_tracks_only_pending_validation_commits() -> Result
         family.head.load_suffix_attestation(&finalized)?,
         ScriptAttestation::Unattested,
         "the suffix row names only a pending-validation head"
+    );
+    Ok(())
+}
+
+// RCV-02, RCV-08
+#[test]
+fn a_disconnect_carries_the_attestation_to_the_new_commit() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let first = head(1, 1);
+    let disconnected = head(2, 2);
+    let back = head(3, 1);
+    {
+        let family = open_store(temp.path())?;
+        commit(
+            &family.authority,
+            None,
+            &first,
+            batch_of(ScriptAttestation::Full),
+        )?;
+        commit(
+            &family.authority,
+            Some(&first),
+            &disconnected,
+            CommitRecords::default(),
+        )?;
+        disconnect(&family.authority, &disconnected, &back)?;
+    }
+    let reopened = open_store(temp.path())?;
+    assert_eq!(reopened.head.load()?, Some(back));
+    assert_eq!(
+        reopened.head.load_attestation(&back)?,
+        ScriptAttestation::Full,
+        "a disconnect re-labels the previous attestation under the new commit id"
+    );
+    Ok(())
+}
+
+// RCV-02, RCV-08
+#[test]
+fn a_disconnect_carries_the_suffix_attestation_to_the_new_commit() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let base = validating_head(1, 2);
+    let skipped = validating_head(2, 3);
+    let back = validating_head(3, 2);
+    {
+        let family = open_store(temp.path())?;
+        commit(&family.authority, None, &base, CommitRecords::default())?;
+        commit(
+            &family.authority,
+            Some(&base),
+            &skipped,
+            batch_of(ScriptAttestation::AssumeValid),
+        )?;
+        disconnect(&family.authority, &skipped, &back)?;
+    }
+    let reopened = open_store(temp.path())?;
+    assert_eq!(reopened.head.load()?, Some(back));
+    assert_eq!(
+        reopened.head.load_suffix_attestation(&back)?,
+        ScriptAttestation::AssumeValid,
+        "a disconnect re-labels the suffix level under the new commit id"
     );
     Ok(())
 }
