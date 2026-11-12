@@ -654,6 +654,7 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
         | ApplyError::DurableHeadGapUnrecoverable { .. }
         | ApplyError::WindowWorkspaceIncomplete { .. }
         | ApplyError::RecoveryPublication(_)
+        | ApplyError::RecoveryCoinStats(_)
         | ApplyError::CoinStoreRead(_)
         | ApplyError::CoinStatsRewind(_)
         | ApplyError::DisconnectBelowSnapshotBase { .. }

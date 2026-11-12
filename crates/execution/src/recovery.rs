@@ -246,8 +246,8 @@ fn height_bytes(key: &[u8], start: usize) -> Option<u32> {
 /// the head. A replayed commit cannot advance seeded stats correctly: its
 /// stored pre-image is already the post-image. When the restored base differs
 /// from the durable head, the listener is reseeded from a full scan of the
-/// committed coin set at the head, so it equals that scan before the next
-/// commit advances it by the committed pre and post images.
+/// committed coin set at the head before boot recovery publishes a checkpoint
+/// or the next commit advances it by the committed pre and post images.
 pub fn settle_restored_coin_stats(
     chainstate: &crate::Chainstate,
     restored_tip: Option<&TipSnapshot>,

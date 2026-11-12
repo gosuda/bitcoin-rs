@@ -363,7 +363,6 @@ impl NodeState {
         let chain_events_raw = ChainEventPublisher::new(initial_snapshot);
         let transition = bitcoin_rs_execution::chain::TransitionDomain::new();
         let chain_events = Arc::new(chain_events_raw);
-        let restored_tip_for_stats = restored_applied_tip.clone();
         let mut chainstate = bitcoin_rs_execution::Chainstate::from_parts(ChainstateParts {
             network: config.network,
             block_tree: block_tree_value,
@@ -599,10 +598,6 @@ impl NodeState {
             }
             Err(error) => return Err(NodeOpenError::Apply(Box::new(error))),
         }
-        bitcoin_rs_execution::recovery::settle_restored_coin_stats(
-            &chainstate,
-            restored_tip_for_stats.as_ref(),
-        )?;
         let chainstate = Arc::new(chainstate);
         if config.persist_mempool {
             let started = std::time::Instant::now();

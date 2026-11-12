@@ -79,6 +79,8 @@ pub enum ApplyError {
     },
     #[error("recovery checkpoint publication failed: {0}")]
     RecoveryPublication(#[source] Box<crate::checkpoint::CheckpointError>),
+    #[error("recovery coin statistics: {0}")]
+    RecoveryCoinStats(#[source] Box<crate::recovery::RecoveryError>),
     #[error("coinstats rewind: {0}")]
     CoinStatsRewind(#[source] bitcoin_rs_storage::utxo::stats::CoinStatsRewindError),
     #[error(

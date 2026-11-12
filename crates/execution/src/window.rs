@@ -480,6 +480,7 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
         | ApplyError::UndoPersistence(_)
         | ApplyError::WindowWorkspaceIncomplete { .. }
         | ApplyError::CoinStoreRead(_)
+        | ApplyError::RecoveryCoinStats(_)
         | ApplyError::RecoveryPublication(_) => Fatal,
         ApplyError::ProofOfWork { .. }
         | ApplyError::BlockValueOverflow

@@ -182,9 +182,6 @@ pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError>
     let needs_rewind = restored
         .as_deref()
         .is_some_and(|tip| !anchor.contains_tip(handles, tip));
-    if marker.is_none() && !needs_rewind {
-        return reconcile_at_boot(handles);
-    }
     let mode = match restored.as_deref() {
         None => "cold-replay",
         Some(tip) => {
@@ -197,6 +194,11 @@ pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError>
         }
     };
     reconcile_at_boot(handles)?;
+    crate::recovery::settle_restored_coin_stats(handles, restored.as_deref())
+        .map_err(|error| ApplyError::RecoveryCoinStats(Box::new(error)))?;
+    if marker.is_none() && !needs_rewind {
+        return Ok(());
+    }
     let marker_height = marker.as_ref().map_or(head.height, |m| m.height);
     let marker_hash = marker.as_ref().map_or(head.tip, |m| m.hash);
     tracing::warn!(
