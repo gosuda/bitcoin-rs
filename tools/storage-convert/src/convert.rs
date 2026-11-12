@@ -291,13 +291,14 @@ fn copy_independent_files(
     include_journal: bool,
     include_checkpoints: bool,
 ) -> Result<(), ConvertError> {
-    let mut independent_dirs = vec!["blocks", "assumeutxo-historical-checkpoints"];
+    let mut independent_dirs = vec!["blocks", "assumeutxo", "assumeutxo-historical-checkpoints"];
     if include_checkpoints {
         independent_dirs.push("chainstate-checkpoints");
     }
     if include_journal {
         independent_dirs.push("chainstate-journal");
     }
+
     const INDEPENDENT_FILES: &[&str] = &[
         "peers.dat",
         "mempool-snapshot.dat",

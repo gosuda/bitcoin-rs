@@ -60,3 +60,7 @@ tempfile.workspace = true
 [[test]]
 name = "suite"
 path = "tests/suite.rs"
+
+[[test]]
+name = "mdbx_bounded_read_allocation"
+path = "tests/mdbx_bounded_read_allocation.rs"
