@@ -236,7 +236,35 @@ fn disconnect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
             .commit_disconnect(&committed, &parent, removed);
         drop(family);
 
-        let _ = outcome;
+        match fault {
+            PersistFault::FailApply
+            | PersistFault::LostApply
+            | PersistFault::PartialApply
+            | PersistFault::FailSync
+            | PersistFault::LostSync => match outcome {
+                Err(bitcoin_rs_storage::CommitError::Storage(
+                    bitcoin_rs_storage::StorageError::Io(_),
+                )) => {}
+                Err(other) => {
+                    panic!("fault {fault:?}: expected the injected StorageError::Io, got {other:?}")
+                }
+                Ok(receipt) => panic!(
+                    "fault {fault:?}: armed fault was not consumed at the commit boundary; \
+                         commit succeeded with receipt {receipt:?}"
+                ),
+            },
+            PersistFault::FailFlush | PersistFault::LostFlush => {
+                let receipt = outcome.unwrap_or_else(|error| {
+                    panic!(
+                        "fault {fault:?}: disconnect commit must complete despite an armed \
+                         flush-boundary fault; got {error:?}"
+                    )
+                });
+                assert_eq!(receipt.commit_id(), parent.commit_id);
+                assert_eq!(receipt.tip(), parent.tip);
+                assert_eq!(receipt.height(), parent.height);
+            }
+        }
         assert_whole_state(
             &data_dir,
             &committed,
