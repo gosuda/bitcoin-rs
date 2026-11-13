@@ -292,15 +292,22 @@ impl SyncChain for NodeSyncChain {
                         mempool_change,
                         error,
                     ))),
-                    Err(refusal) => Err(settle_window_refused(
-                        transition,
-                        mempool_change,
-                        WindowCommitError {
-                            applied: error.applied,
-                            invalidated: error.invalidated,
-                            ..refused_window(refusal)
-                        },
-                    )),
+                    Err(refusal) => {
+                        tracing::error!(
+                            original = %error.source,
+                            refusal = %refusal,
+                            "window application failed before follower settlement was refused"
+                        );
+                        Err(settle_window_refused(
+                            transition,
+                            mempool_change,
+                            WindowCommitError {
+                                applied: error.applied,
+                                invalidated: error.invalidated,
+                                ..refused_window(refusal)
+                            },
+                        ))
+                    }
                 }
             }
         }
