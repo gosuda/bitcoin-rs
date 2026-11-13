@@ -5,6 +5,11 @@
 - Network ingress leaves the existing foreground reserve available within the staged-image allowance. Its capacity and atomic admission check use the reduced ceiling; execution retains the full owner cap. The node-wide total, cache shares, and resource-refusal classification are unchanged.
 - Epoch-5 conversion converts retained ordinary and historical checkpoint engine images to the requested backend and schema-6 undo format. Epoch-5 and current-epoch backend copies preserve the root `full-revalidation` marker.
 - Projection preserves blockwise ScriptLive rollback when sealed historical generations retire. Compact-filter attachment and restart preserve transaction ordinals. Same-height capability backfill merges undo logs and retains the original rollback frontier.
+- Production UTXO readers no longer expose writable coin stores or mutable backing sets. Whole-set query images belong to their captured views and are released when those views drop. Transaction confirmation-height lookup uses the typed reader query.
+- Recreated outpoints remain readable after earlier incarnations are spent.
+- Window coin effects use ordered vout indexes instead of repeated output-vector scans.
+- Execution preserves valid committed prefixes when later window header admission fails.
+- Epoch-3 equal-head conversion streams authenticated checkpoint artifacts into synced atomic target files. Valid canonical header artifacts larger than 64 MiB no longer fail an extra whole-file publication limit.
 - The chainstate cache allowance is split equally between the storage engine and `CoinStore`, after the unchanged txindex reservation. The engine receives half, floored to whole bytes. Coins receive the remainder, including any odd byte. The node ledger uses these shares as the engine and coin owner caps. The dbcache total and clamp, other owner budgets, foreground reserve, and startup log fields are unchanged. MDBX's unused engine share is not reassigned to coins.
 - Script-history reads include sealed generations whose transaction ordinals start above zero.
 - Script activity counts each confirmed transaction once when it has several outputs or both funding and spending occurrences for the same script. Funding results still retain each distinct output.
