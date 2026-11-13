@@ -915,31 +915,14 @@ impl AssumeUtxoManager {
                 found: outcome_hash,
             });
         }
-        let scratch = UtxoSet::new();
-        for item in historical
-            .commit_authority
-            .store()
-            .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
-        {
-            let (_, value) = item?;
-            let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
-                value.into_boxed_slice(),
-            )
-            .map_err(|_| {
-                AssumeUtxoError::Storage(bitcoin_rs_storage::StorageError::InvalidOperation(
-                    "bad coin record",
-                ))
-            })?;
-            scratch.insert_parsed_record(record);
-        }
-        let actual_hash_serialized =
-            scratch
-                .lock_stable_view()
-                .hash_serialized_3()
-                .inspect_err(|_| {
-                    self.active_chainstate.fail_closed_for_recovery();
-                    historical.fail_closed_for_recovery();
-                })?;
+        let actual_hash_serialized = (|| {
+            let snapshot = historical.commit_authority.store().snapshot()?;
+            bitcoin_rs_storage::utxo::snapshot::hash_serialized_3_snapshot(snapshot.as_ref(), None)
+        })()
+        .inspect_err(|_| {
+            self.active_chainstate.fail_closed_for_recovery();
+            historical.fail_closed_for_recovery();
+        })?;
         let actual_count = historical
             .applied_tip_snapshot()
             .map_or(0, |tip| tip.chain_tx_count.to_wire());
@@ -1141,24 +1124,12 @@ impl AssumeUtxoManager {
             ..
         } = self.status()?
         {
-            let scratch = UtxoSet::new();
-            for item in historical
-                .commit_authority
-                .store()
-                .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
-            {
-                let (_, value) = item?;
-                let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
-                    value.into_boxed_slice(),
-                )
-                .map_err(|_| {
-                    AssumeUtxoError::Storage(bitcoin_rs_storage::StorageError::InvalidOperation(
-                        "bad coin record",
-                    ))
-                })?;
-                scratch.insert_parsed_record(record);
-            }
-            let actual_hash_serialized = scratch.lock_stable_view().hash_serialized_3()?;
+            let snapshot = historical.commit_authority.store().snapshot()?;
+            let actual_hash_serialized =
+                bitcoin_rs_storage::utxo::snapshot::hash_serialized_3_snapshot(
+                    snapshot.as_ref(),
+                    None,
+                )?;
             let failed = AssumeUtxoDiskStatus::Failed {
                 base_height,
                 base_hash,
