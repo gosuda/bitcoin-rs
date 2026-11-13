@@ -1385,6 +1385,24 @@ fn convert_historical_checkpoints(
         )
         .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?
         .into_std();
+        bitcoin_rs_storage::checkpoint::require_filename(&manifest.headers.file, HEADERS_FILE)
+            .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
+        bitcoin_rs_storage::checkpoint::verify_artifact(
+            &generation_dir,
+            HEADERS_FILE,
+            manifest.headers.bytes,
+            &manifest.headers.sha256,
+        )
+        .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
+        bitcoin_rs_storage::checkpoint::require_filename(&manifest.coinstats.file, COINSTATS_FILE)
+            .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
+        bitcoin_rs_storage::checkpoint::verify_artifact(
+            &generation_dir,
+            COINSTATS_FILE,
+            manifest.coinstats.bytes,
+            &manifest.coinstats.sha256,
+        )
+        .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
         utxo_file.rewind()?;
         let collector = CoinRecordCollector::new(manifest.applied_tip.height);
         let (snapshot_load, collector) =

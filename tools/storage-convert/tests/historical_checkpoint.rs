@@ -5,7 +5,8 @@ use bitcoin_rs_consensus::primitives::{Hash256, Network, OutPoint, Txid};
 use bitcoin_rs_execution::{AssumeUtxoManager, HistoricalCheckpointRef};
 use bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus;
 use bitcoin_rs_storage::checkpoint::{
-    CheckpointManifestV1, CheckpointReference, HISTORICAL_CHECKPOINT_ROOT, MANIFEST_FILE,
+    COINSTATS_FILE, CheckpointManifestV1, CheckpointReference, HEADERS_FILE,
+    HISTORICAL_CHECKPOINT_ROOT, MANIFEST_FILE,
 };
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
 use bitcoin_rs_storage::utxo::record::UtxoRecord;
@@ -268,6 +269,43 @@ fn historical_payload_requires_independent_manifest_commitments() -> TestResult 
         assert!(!target_generation.join("chainstate").exists());
         assert_eq!(fs::read(generation.join(UTXO_FILE))?, payload);
         assert_eq!(fs::read(generation.join(MANIFEST_FILE))?, manifest_bytes);
+    }
+    Ok(())
+}
+
+#[test]
+fn retained_historical_artifacts_require_manifest_commitments() -> TestResult {
+    for artifact in [HEADERS_FILE, COINSTATS_FILE] {
+        let source = tempdir()?;
+        let dest = tempdir()?;
+        let from = source.path();
+        let to = dest.path().join("converted");
+        stage_historical_source(from)?;
+        let generation = converted_generation(from);
+        let payload = fs::read(generation.join(artifact))?;
+        let manifest_bytes = fs::read(generation.join(MANIFEST_FILE))?;
+        let mut corrupted = payload.clone();
+        corrupted[0] ^= 0xff;
+        fs::write(generation.join(artifact), &corrupted)?;
+        let source_digest = recursive_dir_digest(from)?;
+
+        let output = run_converter(&["--from", str_path(from)?, "--to", str_path(&to)?])?;
+        assert!(
+            !output.status.success(),
+            "retained historical {artifact} without a matching manifest commitment must refuse"
+        );
+        assert!(!to.join("CURRENT_SCHEMA").exists());
+        let target_generation = converted_generation(&to);
+        assert!(!target_generation.join("chainstate").exists());
+        assert!(
+            target_generation.join(UTXO_FILE).exists(),
+            "refusal must retire no historical utxo payload"
+        );
+        assert_eq!(
+            fs::read(target_generation.join(MANIFEST_FILE))?,
+            manifest_bytes
+        );
+        assert_eq!(recursive_dir_digest(from)?, source_digest);
     }
     Ok(())
 }
