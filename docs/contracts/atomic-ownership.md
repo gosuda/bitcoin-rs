@@ -446,6 +446,13 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 - Foreground chain progress must have reserved execution capacity.
 - Historical validation and background projections receive bounded, fair service.
+- Network ingress MUST leave `foreground_reserve` outside its admission ceiling within `StagedImages`.
+- The ingress check MUST use current `StagedImages` charges and reservations.
+- The check and reservation MUST occur under one ledger lock.
+- Ingress MUST report `staged_images.saturating_sub(foreground_reserve)` as its capacity.
+- Execution MAY reserve against the full staged-images owner cap.
+
+Proof: `crates/node/src/budget/tests.rs::saturated_ingress_preserves_execution_headroom_and_recovers_after_release` checks execution credit at ingress saturation and resumed ingress admission after release.
 
 ### `BUD-06`: Unified retained memory budget
 
