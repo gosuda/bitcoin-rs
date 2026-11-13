@@ -298,6 +298,12 @@ pub fn block_spent_outputs(
     Ok(spent)
 }
 
+/// Applies UTXO changes directly to the coin store without advancing chain durability.
+///
+/// This updates coin rows and CoinStore statistics only; it does not advance the durable head
+/// or write undo data. Offline fixtures and rebuilds may use it. Active chainstate commits MUST
+/// use [`crate::CommitAuthority`] so coin rows, the durable head, and undo data are published as
+/// one commit.
 pub fn populate_block_changes<T: Borrow<TxOut>>(
     coin_store: &crate::CoinStore,
     changes: &BlockChanges<T>,
