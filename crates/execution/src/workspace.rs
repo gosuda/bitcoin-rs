@@ -220,6 +220,9 @@ impl WindowWorkspace {
             );
             created_owned.extend(created);
             if !live_outs.is_empty() {
+                for out in &live_outs {
+                    self.spent.remove(&OutPoint::new(txid, out.vout));
+                }
                 self.live.insert(txid, live_outs);
             }
 
@@ -676,6 +679,105 @@ mod tests {
             initial_records.is_empty(),
             "a corrupt record must not be stored as an absent coin"
         );
+    }
+
+    #[test]
+    fn recreated_outpoint_is_readable_and_its_next_spend_undo_names_the_new_incarnation() {
+        use crate::chain::regtest_fixture::{coinbase, mined_block_with_prev_hash};
+        use bitcoin_rs_consensus::primitives::Network;
+        use bitcoin_rs_storage::KvStore as _;
+        use bitcoin_rs_storage::utxo::contract::OutputSource;
+        use hashbrown::HashSet;
+        use std::sync::Arc;
+
+        let original = coinbase(1);
+        let txid = original.txid();
+        let outpoint = OutPoint::new(txid, 0);
+        let mut spend = coinbase(2);
+        spend.inputs[0].previous_output = outpoint;
+        let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
+        let mut prev = Network::Regtest.genesis_block().block_hash();
+        for (height, tx) in [(1, original.clone()), (101, spend.clone()), (102, original)] {
+            let txids = [tx.txid()];
+            let block = mined_block_with_prev_hash(prev, height, vec![tx]).expect("fixture block");
+            workspace
+                .advance(&block, &txids, height, &HashSet::new())
+                .expect("advance");
+            prev = block.block_hash();
+            if height == 101 {
+                assert_eq!(workspace.get_entry(&outpoint), None);
+            }
+        }
+
+        let replacement = workspace
+            .get_entry(&outpoint)
+            .expect("recreated output is live");
+        assert_eq!(replacement.height, 102);
+        assert!(replacement.coinbase);
+        assert_eq!(replacement.txout, coinbase(1).outputs[0]);
+        let delta = workspace.build_flush_delta(3).expect("flush recreation");
+        let bytes = delta
+            .records
+            .iter()
+            .find(|(key, _)| *key == CoinKey(txid.0.to_le_bytes()))
+            .and_then(|(_, bytes)| bytes.as_ref())
+            .expect("replacement record");
+        let record = UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice()).expect("record");
+        let outputs: Vec<_> = record.outputs().collect();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!((outputs[0].vout, outputs[0].height), (0, 102));
+
+        let spend_id = spend.txid();
+        let block = mined_block_with_prev_hash(prev, 202, vec![spend]).expect("spend block");
+        workspace
+            .advance(&block, &[spend_id], 202, &HashSet::new())
+            .expect("spend replacement");
+        assert_eq!(workspace.get_entry(&outpoint), None);
+        let transition = workspace.transitions.last().expect("spend transition");
+        assert_eq!(transition.spent_outpoints, vec![outpoint]);
+        assert!(transition.spent_external.is_empty());
+        let spent_delta = workspace
+            .build_flush_delta(1)
+            .expect("flush replacement spend");
+        assert!(
+            spent_delta
+                .records
+                .iter()
+                .any(|(key, value)| { *key == CoinKey(txid.0.to_le_bytes()) && value.is_none() }),
+            "spending the replacement removes its published record"
+        );
+
+        let store = Arc::new(bitcoin_rs_storage::MemoryKvStore::new());
+        store
+            .put(
+                bitcoin_rs_storage::ColumnFamily::Coins,
+                CoinKey(txid.0.to_le_bytes()).as_bytes(),
+                bytes.as_ref(),
+            )
+            .expect("publish replacement record");
+        let coins = super::CoinStore::open(store, 1 << 20);
+        let mut next_workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
+        next_workspace
+            .resolve_external_batch(&coins, &[outpoint])
+            .expect("resolve published replacement");
+        assert_eq!(
+            next_workspace.get_entry(&outpoint),
+            Some(replacement.clone())
+        );
+        next_workspace
+            .advance(&block, &[spend_id], 202, &HashSet::new())
+            .expect("spend published replacement");
+        assert_eq!(next_workspace.get_entry(&outpoint), None);
+        let undo = &next_workspace
+            .transitions
+            .last()
+            .expect("external spend transition")
+            .spent_external;
+        assert_eq!(undo.len(), 1);
+        assert_eq!(undo[0].outpoint, outpoint);
+        assert_eq!(undo[0].height, 102);
+        assert_eq!(undo[0].txout, replacement.txout);
+        assert_eq!(undo[0].kind, UndoKind::ExternalSpend);
     }
 
     #[test]

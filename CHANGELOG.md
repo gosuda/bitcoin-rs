@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Recreated outpoints remain readable after earlier incarnations are spent.
 - Window coin effects use ordered vout indexes instead of repeated output-vector scans.
 - Execution preserves valid committed prefixes when later window header admission fails.
 - Epoch-3 equal-head conversion streams authenticated checkpoint artifacts into synced atomic target files. Valid canonical header artifacts larger than 64 MiB no longer fail an extra whole-file publication limit.
