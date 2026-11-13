@@ -1,6 +1,5 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-/// Maximum consensus script size in bytes.
 pub mod primitives;
 pub mod script;
 pub use script::MAX_SCRIPT_SIZE;
