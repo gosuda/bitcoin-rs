@@ -5,6 +5,7 @@ impl From<SnapshotExportError> for TestError {
     fn from(error: SnapshotExportError) -> Self {
         match error {
             SnapshotExportError::Codec(inner) => Self::from(inner),
+            SnapshotExportError::Utxo(inner) => Self::from(inner),
             SnapshotExportError::Admission(inner) => Self::from(inner),
             SnapshotExportError::Output(inner)
             | SnapshotExportError::Write(inner)

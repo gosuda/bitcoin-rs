@@ -534,6 +534,8 @@ impl ChainHandles {
             bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         );
         let utxo = bitcoin_rs_storage::utxo::UtxoReader::fixture_new();
+        utxo.coin_store()
+            .track_coin_stats(coin_stats_listener.clone());
         let chain_tip = TipReader::new(Arc::new(ArcSwapOption::empty()));
         let applied_tip = TipReader::new(Arc::new(ArcSwapOption::empty()));
         let block_tree = BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(

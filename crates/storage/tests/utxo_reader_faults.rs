@@ -17,9 +17,16 @@ const CACHE_BUDGET: u64 = 64 * 1024 * 1024;
 const VALUE_SATS: u64 = 12_345;
 const COIN_HEIGHT: u32 = 7;
 
+#[derive(Clone, Copy)]
+enum ScanFault {
+    Open,
+    Row,
+}
+
 struct ReadFaultStore {
     inner: MemoryKvStore,
     poisoned: Mutex<HashSet<Vec<u8>>>,
+    scan_fault: Mutex<Option<ScanFault>>,
 }
 
 impl ReadFaultStore {
@@ -27,6 +34,7 @@ impl ReadFaultStore {
         Arc::new(Self {
             inner: MemoryKvStore::new(),
             poisoned: Mutex::new(HashSet::new()),
+            scan_fault: Mutex::new(None),
         })
     }
 
@@ -50,6 +58,15 @@ impl KvStore for ReadFaultStore {
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError> {
+        if cf == ColumnFamily::Coins
+            && let Some(fault) = *self.scan_fault.lock()
+        {
+            let error = StorageError::Io(std::io::Error::other("injected coin scan failure"));
+            return match fault {
+                ScanFault::Open => Err(error),
+                ScanFault::Row => Ok(Box::new(std::iter::once(Err(error)))),
+            };
+        }
         self.inner.iter_prefix(cf, prefix)
     }
 
@@ -212,6 +229,84 @@ fn undecodable_coin_row_is_an_error_never_an_absent_coin() -> TestResult {
     assert!(matches!(
         reader.has_live_outputs_for_txid(&txid(0xD4)),
         Err(UtxoError::CorruptRecord)
+    ));
+    assert!(matches!(
+        reader.lock_stable_view(),
+        Err(UtxoError::CorruptRecord)
+    ));
+    assert!(matches!(
+        reader.with_stable_view(|_| panic!("corrupt scan must not expose a view")),
+        Err(UtxoError::CorruptRecord)
+    ));
+    Ok(())
+}
+
+#[test]
+fn stable_view_scan_failures_are_typed_errors() -> TestResult {
+    for fault in [ScanFault::Open, ScanFault::Row] {
+        let store = ReadFaultStore::new();
+        commit_coins(&store, &[outpoint(0xA1, 0)])?;
+        *store.scan_fault.lock() = Some(fault);
+        let reader = reader_over(&store);
+        assert!(matches!(
+            reader.lock_stable_view(),
+            Err(UtxoError::Storage(StorageError::Io(_)))
+        ));
+        assert!(matches!(
+            reader.with_stable_view(|_| panic!("failed scan must not expose a view")),
+            Err(UtxoError::Storage(StorageError::Io(_)))
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn miskeyed_coin_row_is_an_error_for_stable_views() -> TestResult {
+    use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
+
+    let store = ReadFaultStore::new();
+    let record = UtxoRecord::from_owned_outputs(
+        txid(0xA1),
+        &[OwnedUtxoOut::new(
+            0,
+            VALUE_SATS,
+            vec![0x51],
+            true,
+            COIN_HEIGHT,
+        )],
+    )?;
+    store.put(
+        ColumnFamily::Coins,
+        CoinKey(txid(0xB2).to_le_bytes()).as_bytes(),
+        record.bytes(),
+    )?;
+    let reader = reader_over(&store);
+    assert!(matches!(
+        reader.lock_stable_view(),
+        Err(UtxoError::CorruptRecord)
+    ));
+    Ok(())
+}
+
+#[test]
+fn malformed_coin_key_is_an_error_for_stable_views() -> TestResult {
+    use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
+
+    let store = ReadFaultStore::new();
+    let record = UtxoRecord::from_owned_outputs(
+        txid(0xA1),
+        &[OwnedUtxoOut::new(
+            0,
+            VALUE_SATS,
+            vec![0x51],
+            true,
+            COIN_HEIGHT,
+        )],
+    )?;
+    store.put(ColumnFamily::Coins, &[0xA1; 31], record.bytes())?;
+    assert!(matches!(
+        reader_over(&store).lock_stable_view(),
+        Err(UtxoError::Storage(StorageError::InvalidOperation(_)))
     ));
     Ok(())
 }

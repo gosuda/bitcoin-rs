@@ -25,6 +25,8 @@ pub enum FuzzError {
     Chain(#[from] ChainError),
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error("no durable head is committed")]
     MissingDurableHead,
     #[error("durable head is not above the checkpoint tip")]
@@ -154,7 +156,7 @@ impl FuzzChain {
         if height != tip.height || hash != tip.hash {
             return Err(FuzzError::HeadBelowCheckpoint);
         }
-        let coin_count = self.utxo().with_stable_view(|view| view.len());
+        let coin_count = self.utxo().with_stable_view(|view| view.len())?;
         let coin_stats = self.chain.coin_stats.snapshot();
         Ok(FuzzCheckpoint {
             tip,
@@ -306,7 +308,7 @@ mod tests {
         reopened.disconnect(&first)?;
         let tip = reopened.applied_tip().ok_or("missing tip")?;
         assert_eq!(tip.hash, Hash256::from(genesis.block_hash()));
-        assert_eq!(reopened.utxo().with_stable_view(|view| view.len()), 0);
+        assert_eq!(reopened.utxo().with_stable_view(|view| view.len())?, 0);
         Ok(())
     }
 
