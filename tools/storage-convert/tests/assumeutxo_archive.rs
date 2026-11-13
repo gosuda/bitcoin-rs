@@ -7,8 +7,7 @@ use super::support::error::{TestError, TestResult};
 use super::support::harness::{parse_report, recursive_dir_digest, run_converter};
 use super::support::oracle::write_schema_marker;
 
-const ANCHORED_BASE_HASH: &str =
-    "06e5c2437917d314b424eb249ad2ae9d5408e530b7abf33b03cb0d0a084ca528";
+const ANCHORED_BASE_HASH: &str = "06e5c2437917d314b424eb249ad2ae9d5408e530b7abf33b03cb0d0a084ca528";
 const HEADERS_PAYLOAD: &[u8] = b"assumeutxo-headers-immutable-archive-bytes";
 const COINS_PAYLOAD: &[u8] = b"assumeutxo-coins-immutable-archive-bytes";
 
