@@ -12,5 +12,5 @@
 - BREAKING CHANGE: `UtxoReader::with_stable_view`, `lock_stable_view` and `fixture_with_set` return `Result`. Fixture constructors require `test-seam`. Stable views report read failures, and indexed point queries avoid a full coin scan. CoinStats uses each coin key's final image and applies each committed feed under one lock.
 - The `3 -> 4` converter validates canonical checkpoint artifacts and historical references, and bounds recovery-marker reads.
 - The `4 -> 4` backend conversion also converts ordinary and historical checkpoint engine images, preserves their metadata, and verifies each image's row counts and digests.
-- Memory-engine checkpoint publication syncs the checkpoint file and its directory.
+- Memory-engine checkpoint publication syncs the checkpoint file and its directory. It releases the coin-map read lock before file I/O, after it has copied a consistent checkpoint image.
 - Genesis-and-child bootstrap accounts for the valid committed prefix, and recovery streams engine coins instead of collecting the full coin image.

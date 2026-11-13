@@ -356,6 +356,7 @@ impl KvStore for MemoryKvStore {
                 bytes.extend_from_slice(v);
             }
         }
+        drop(guard);
         let mut file = std::fs::File::create(&file_path).map_err(StorageError::Io)?;
         file.write_all(&bytes).map_err(StorageError::Io)?;
         file.sync_all().map_err(StorageError::Io)?;
