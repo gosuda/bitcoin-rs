@@ -89,9 +89,11 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - The DEP-01 lanes run `check bans` only.
 
 ## Selected range prerequisites
-- `proptest` is bounded at `>=1.11, <1.12` in the root `Cargo.toml` `[workspace.dependencies]`.
-- Version `1.12` moves to the `rand_core 0.10` and `rand_xorshift 0.5` family.
-- The bound retains the selected `rand 0.9` family used elsewhere.
+- `proptest` is bounded at `>=1.12, <1.13` and `proptest-state-machine` is pinned at `=0.9.0` in the root `Cargo.toml` `[workspace.dependencies]`.
+- Version `1.12` moves to the `rand_core 0.10` and `rand_xorshift 0.5` family, so the lock carries `rand_core@0.10.1` beside `rand_core@0.9.5` from the selected `rand 0.9` family.
+- That `rand_core` pair is an approved exact-version split. It approves no other `rand` family change.
+- `parking_lot` is bounded at `>=0.13.0, <0.14`. Transitive crates on the `0.12` line (`rust-rocksdb`, `signet-libmdbx`, `surrealkv`, `quick_cache`, `affinitypool`) keep `parking_lot@0.12.5`, with its `parking_lot_core@0.9.12` and `lock_api@0.4.14`.
+- That `parking_lot`/`parking_lot_core`/`lock_api` pair with the `0.13`/`0.10`/`0.5` lines is an approved exact-version split. It approves no other `parking_lot` family change.
 - The `syn@3.0.9` exception in `deny.toml` `[bans]` is an exact-version pin for the proc-macro chain.
 - When the `syn 3.0.x` patch in the root or `fuzz` lock moves, update the exception to that exact version in the same change.
 - The entry describes this `syn` pin only.

@@ -138,8 +138,10 @@ slab = { version = ">=0.4.12, <0.5", default-features = false, features = [
 # arc-swap (registry name uses hyphen, NOT underscore).
 arc-swap = { version = ">=1.9.1, <2", default-features = false }
 
-# parking_lot 0.12 line (0.13 does not exist).
-parking_lot = { version = ">=0.12.5, <0.13", default-features = false, features = [
+# parking_lot: workspace uses 0.13; transitive crates still pin the 0.12 line
+# (rust-rocksdb, signet-libmdbx, surrealkv, quick_cache, affinitypool), an
+# exact-version duplicate split approved in deny.toml.
+parking_lot = { version = ">=0.13.0, <0.14", default-features = false, features = [
     "arc_lock", "send_guard",
 ] }
 
@@ -235,8 +237,8 @@ thiserror = { version = ">=2.0.18, <3",       default-features = false, features
 zmq       = { version = ">=0.10, <0.11", default-features = false }
 
 # --- Test / bench -------------------------------------------------------------
-proptest        = { version = ">=1.11, <1.12", default-features = false, features = ["std"] }
-proptest-state-machine = "=0.8.0"
+proptest        = { version = ">=1.12, <1.13", default-features = false, features = ["std"] }
+proptest-state-machine = "=0.9.0"
 tempfile        = { version = ">=3.20.0, <4" }
 
 # ============================================================================
