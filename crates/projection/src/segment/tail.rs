@@ -457,7 +457,7 @@ pub fn append_tail_block(
     older: &dyn CreationOrdinals,
 ) -> Result<(), IndexError> {
     let prepared = PreparedTail::new_gated(block, true, true);
-    append_prepared_tail_block(batch, block, &prepared, state, older)
+    append_prepared_tail_block(batch, block, &prepared, state, older, None)
 }
 
 /// Appends one block whose block-only rows were prepared from `block`.
@@ -467,25 +467,57 @@ pub(crate) fn append_prepared_tail_block(
     prepared: &PreparedTail,
     state: &mut TailWriterState,
     older: &dyn CreationOrdinals,
+    existing_log: Option<&[u8]>,
 ) -> Result<(), IndexError> {
+    if let Some(value) = existing_log {
+        let ops =
+            value
+                .get(LOG_HEADER_LEN..)
+                .and_then(parse_log)
+                .ok_or(IndexError::CorruptTailLog {
+                    height: block.height,
+                })?;
+        if !ops
+            .iter()
+            .any(|op| matches!(op, LogOp::Hash { hash } if *hash == block.hash))
+        {
+            return Err(IndexError::CorruptTailLog {
+                height: block.height,
+            });
+        }
+    }
     let mut rec = Recorder {
         batch,
         log: Vec::new(),
         bytes: 0,
     };
     rec.hash_anchor(&block.hash);
+    let mut block_next_ordinal =
+        existing_log.map_or(state.next_ordinal, |value| read_u32_le(value, 0));
     for (tx, (input_hashes, output_hashes)) in block
         .txs
         .iter()
         .zip(prepared.inputs.iter().zip(&prepared.outputs))
     {
-        let ordinal = state.next_ordinal;
-        state.next_ordinal = state.next_ordinal.saturating_add(1);
+        let ordinal =
+            if let Some(ordinal) = existing_log.and_then(|_| state.txid_to_ordinal.get(&tx.txid)) {
+                *ordinal
+            } else if needs_transaction_directory(prepared) {
+                let ordinal = state.next_ordinal;
+                state.next_ordinal = state.next_ordinal.saturating_add(1);
+                ordinal
+            } else {
+                state.next_ordinal
+            };
+        if needs_transaction_directory(prepared) {
+            block_next_ordinal = block_next_ordinal.max(ordinal.saturating_add(1));
+        }
         let needs_tx_dir = prepared.capabilities.contains(IndexCapability::TxLookup)
             || prepared
                 .capabilities
                 .contains(IndexCapability::ScriptHistory);
-        if needs_tx_dir {
+        if needs_tx_dir && (existing_log.is_none() || !state.txid_to_ordinal.contains_key(&tx.txid))
+        {
             state.txid_to_ordinal.insert(tx.txid, ordinal);
             let tx_key = format::encode_tx_dir_key(0, &tx.txid, block.height);
             let tx_val = format::encode_tx_dir_value(&block.hash, ordinal, tx.offset, tx.len);
@@ -517,23 +549,48 @@ pub(crate) fn append_prepared_tail_block(
         append_filter(&mut rec, block, prepared, state);
     }
 
-    let block_bytes = rec.bytes;
+    let block_bytes = rec
+        .bytes
+        .saturating_add(existing_log.map_or(0, |value| read_u64_le(value, 36)));
     let log = std::mem::take(&mut rec.log);
-    let mut value = Vec::with_capacity(LOG_HEADER_LEN + log.len());
-    value.extend_from_slice(&state.next_ordinal.to_le_bytes());
+    let prior_ops = existing_log
+        .and_then(|value| value.get(LOG_HEADER_LEN..))
+        .unwrap_or(&[]);
+    let mut value = Vec::with_capacity(LOG_HEADER_LEN + prior_ops.len() + log.len());
+    value.extend_from_slice(&block_next_ordinal.to_le_bytes());
     value.extend_from_slice(&state.prev_filter_header);
     value.extend_from_slice(&block_bytes.to_le_bytes());
+    value.extend_from_slice(prior_ops);
     value.extend_from_slice(&log);
     rec.batch
         .put(ColumnFamily::IdxMeta, &log_key(block.height), &value);
 
     let value_len = u64::try_from(value.len()).unwrap_or(u64::MAX);
-    state.window.push_back(TailBlock {
+    let retained = TailBlock {
         height: block.height,
         bytes: block_bytes.saturating_add(value_len),
-    });
+    };
+    if let Some(prior) = state
+        .window
+        .iter_mut()
+        .find(|entry| entry.height == block.height)
+    {
+        *prior = retained;
+    } else {
+        let at = state
+            .window
+            .partition_point(|entry| entry.height < block.height);
+        state.window.insert(at, retained);
+    }
     state.at = Some((block.height, block.hash));
     Ok(())
+}
+
+fn needs_transaction_directory(prepared: &PreparedTail) -> bool {
+    prepared.capabilities.contains(IndexCapability::TxLookup)
+        || prepared
+            .capabilities
+            .contains(IndexCapability::ScriptHistory)
 }
 
 /// The spending inputs of one transaction, with the script hash of each.
@@ -1068,6 +1125,7 @@ pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
             height,
             bytes: block_bytes.saturating_add(value_len),
         });
+        state.next_ordinal = state.next_ordinal.max(read_u32_le(&value, 0));
         last_log = Some((height, value));
     }
 
@@ -1082,6 +1140,7 @@ pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
             continue;
         };
         state.txid_to_ordinal.insert(txid, ordinal);
+        state.next_ordinal = state.next_ordinal.max(ordinal.saturating_add(1));
     }
     for item in snapshot.iter_prefix(ColumnFamily::ScriptDict, &gen0)? {
         let (key, value) = item?;
@@ -1112,7 +1171,6 @@ pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
 
     match last_log {
         Some((height, value)) => {
-            state.next_ordinal = read_u32_le(&value, 0);
             let mut log_hash = None;
             if let Some(ops) = parse_log(value.get(LOG_HEADER_LEN..).unwrap_or(&[])) {
                 for op in ops {
@@ -1127,9 +1185,13 @@ pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
         None => {
             if let Some(newest) = newest_tail_sealed(snapshot)? {
                 let last = newest.coverage.last_height;
-                state.next_ordinal = newest.next_ordinal;
                 state.at = Some((last, newest.coverage.last_hash));
             }
+        }
+    }
+    for capability in [IndexCapability::TxLookup, IndexCapability::ScriptHistory] {
+        for generation in sealed_generations(snapshot, capability)? {
+            state.next_ordinal = state.next_ordinal.max(generation.next_ordinal);
         }
     }
     state.prev_filter_header = filter_chain_head(snapshot)?;

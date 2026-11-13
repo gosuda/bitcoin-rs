@@ -259,7 +259,7 @@ fn from_handles_shares_chain_handles_with_caller() {
     let fixture_reader = bitcoin_rs_storage::utxo::UtxoReader::fixture_with_set(Arc::clone(&utxo))
         .expect("seed fixture coin store");
     fixture_reader
-        .coin_store()
+        .fixture_coin_store()
         .track_coin_stats(coin_stats.as_ref().clone());
     let ctx = Context::from_handles(ContextHandles {
         chain: ChainHandles {

@@ -3,7 +3,7 @@ use std::io::Cursor;
 use crate::support::utxo::{TestError, TestResult};
 use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut, Txid};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
-use bitcoin_rs_storage::utxo::{read_snapshot_strict_v4, write_snapshot_observed};
+use bitcoin_rs_storage::utxo::read_snapshot_strict_v4;
 
 fn make_txid(prefix: [u8; 8], suffix_byte: u8) -> Hash256 {
     let mut bytes = [suffix_byte; 32];
@@ -132,13 +132,12 @@ fn recovers_from_key_prefix_collisions_in_utxo_set_and_snapshot() -> TestResult 
     }
     assert!(view.get_entry(&op_a0).is_none());
     assert!(view.get_entry(&op_a1).is_none());
-    assert_eq!(reader.set().len(), 3);
-    assert_eq!(reader.set().record_count(), 2);
-    drop(view);
+    assert_eq!(view.len(), 3);
+    assert_eq!(view.record_count(), 2);
 
     let mut snapshot_bytes = Vec::new();
     let tip = Hash256::from_le_bytes(&[5; 32]);
-    write_snapshot_observed(reader.set(), &tip, 104, &mut snapshot_bytes, ())?;
+    view.write_snapshot_observed(&tip, 104, &mut snapshot_bytes, ())?;
     let loaded = read_snapshot_strict_v4(&mut Cursor::new(&snapshot_bytes))?;
     assert_eq!(loaded.set.len(), 3);
     assert_eq!(loaded.set.record_count(), 2);

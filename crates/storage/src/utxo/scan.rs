@@ -322,17 +322,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, 10), (0, 12)]
         );
-        assert!(
-            reader.set().all_records().is_empty(),
-            "snapshot scan must not rebuild the resident coin image"
-        );
+        let view = reader
+            .lock_stable_view()
+            .unwrap_or_else(|error| panic!("committed view: {error}"));
+        assert_eq!(view.len(), 3);
+        assert_eq!(view.record_count(), 3);
     }
 
     #[test]
     fn snapshot_scan_rejects_undecodable_coin_row() {
         let reader = UtxoReader::fixture_new();
         reader
-            .coin_store()
+            .fixture_coin_store()
             .store()
             .put(ColumnFamily::Coins, &[7_u8; 32], &[0xff, 0xff])
             .unwrap_or_else(|error| panic!("corrupt row write: {error}"));

@@ -218,6 +218,52 @@ fn a_window_commits_every_block_in_order() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn partial_header_admission_commits_the_valid_prefix_and_remains_usable() -> TestResult {
+    let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chain)?;
+    commit_genesis_head(&chain)?;
+    let first = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
+    let missing_parent = BlockHash::from(Hash256::from_le_bytes(&[0x37; 32]));
+    let orphan = mined_child(missing_parent, 2)?;
+    let payloads = dump_payloads(&[first.clone(), orphan]);
+    let window: Vec<&BlockImage> = payloads.iter().collect();
+
+    let error = chain
+        .apply_window(&window)
+        .err()
+        .ok_or(TestError::Missing("missing parent rejects the suffix"))?;
+    assert_eq!(error.disposition, WindowApplyDisposition::Operational);
+    assert_eq!(error.applied, 1);
+    assert_eq!(error.committed.len(), 1);
+    assert_eq!(error.committed[0].hash, Hash256::from(first.block_hash()));
+    let head = chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("prefix head"))?;
+    assert_eq!(
+        (head.height, head.tip),
+        (1, Hash256::from(first.block_hash()))
+    );
+    assert_eq!(
+        chain
+            .applied_tip_snapshot()
+            .ok_or(TestError::Missing("prefix tip"))?
+            .hash,
+        Hash256::from(first.block_hash())
+    );
+
+    let next = mined_child(first.block_hash(), 2)?;
+    let next_image = BlockImage::from_local(next.clone());
+    let outcomes = chain.apply_window(&[&next_image])?;
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        (outcomes[0].height, outcomes[0].hash),
+        (2, Hash256::from(next.block_hash()))
+    );
+    Ok(())
+}
+
 // SYNC-04
 #[test]
 fn a_poisoned_undo_store_settles_the_window_fatal() -> TestResult {

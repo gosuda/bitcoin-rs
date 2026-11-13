@@ -478,6 +478,78 @@ fn repeated_owner_requests_include_charges_and_reservations() {
     }
 }
 
+// BUD-01, BUD-02, BUD-05, BUD-06, BUD-07
+#[test]
+fn saturated_ingress_preserves_execution_headroom_and_recovers_after_release() {
+    use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
+
+    let caps = BudgetCaps {
+        staged_images: 4_096,
+        foreground_reserve: 1_024,
+        engine_cache: 512,
+        coin_cache: 512,
+        facts_queue: 256,
+        index_builder: 256,
+        query_views: 256,
+        peer_outbound: 256,
+    };
+    let ingress_ceiling = caps.staged_images - caps.foreground_reserve;
+    let budget = Arc::new(NodeBudget::new(caps, 4));
+    let ingress = super::BudgetedIngressLedger::new(Arc::clone(&budget));
+    let execution = ChargeHandle::new(budget.clone(), BudgetOwner::StagedImages);
+    let initial_limits = budget.window_limits();
+    let held = ingress.capacity();
+    assert_eq!(
+        initial_limits.max_bytes,
+        usize::try_from(caps.staged_images)
+            .unwrap_or(usize::MAX)
+            .min(WindowLimits::durable_head_defaults().max_bytes)
+    );
+    assert!(ingress.try_take(held));
+    assert!(!ingress.try_take(1));
+
+    assert_eq!(
+        execution.charge(caps.foreground_reserve),
+        Ok(()),
+        "download saturation must leave the declared foreground reserve for execution"
+    );
+    assert_eq!(u64::try_from(held), Ok(ingress_ceiling));
+    assert_eq!(budget.available(BudgetOwner::StagedImages), 0);
+    assert_eq!(
+        execution.reserve(1),
+        Err(BudgetError::BudgetExhausted),
+        "execution still obeys the shared staged-image owner cap"
+    );
+    for owner in ALL_OWNERS {
+        assert!(
+            budget.available_of_charges(owner) + budget.available_of_reservations(owner)
+                <= caps.owner_cap(owner)
+        );
+    }
+    assert_eq!(budget.total_committed(), caps.staged_images);
+    assert!(budget.total_committed() <= caps.total());
+    assert!(budget.is_safe());
+
+    execution.release(caps.foreground_reserve);
+    assert!(!ingress.try_take(1));
+    assert_eq!(
+        budget.window_limits().max_bytes,
+        usize::try_from(caps.foreground_reserve)
+            .unwrap_or(usize::MAX)
+            .min(initial_limits.max_bytes)
+    );
+    ingress.give_back(held);
+    assert_eq!(budget.total_committed(), 0);
+    assert_eq!(budget.window_limits(), initial_limits);
+    assert!(
+        ingress.try_take(held),
+        "released ingress credits must be reusable"
+    );
+    ingress.give_back(held);
+    assert_eq!(budget.total_committed(), 0);
+    assert!(budget.is_safe());
+}
+
 #[test]
 fn repeated_ingress_then_engine_sample_stays_within_total() {
     use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
@@ -486,11 +558,13 @@ fn repeated_ingress_then_engine_sample_stays_within_total() {
         BudgetCaps::from_chainstate_cache_budget(split_chainstate_cache_budget(450 * 1024 * 1024));
     let budget = Arc::new(NodeBudget::new(caps, 4));
     let ingress = super::BudgetedIngressLedger::new(Arc::clone(&budget));
-    let request = 256 * 1024 * 1024;
+    let ingress_ceiling = caps.staged_images - caps.foreground_reserve;
+    assert_eq!(u64::try_from(ingress.capacity()), Ok(ingress_ceiling));
+    let request = ingress.capacity() / 2;
     assert!(ingress.try_take(request));
-    assert!(ingress.try_take(request));
+    assert!(ingress.try_take(ingress.capacity() - request));
     for _ in 0..2 {
-        assert!(!ingress.try_take(request));
+        assert!(!ingress.try_take(1));
     }
     budget.set_engine_cache_source(Some(Box::new(move || caps.engine_cache + 1)));
     budget.sample_engine_cache();
@@ -500,7 +574,7 @@ fn repeated_ingress_then_engine_sample_stays_within_total() {
     );
     assert_eq!(
         budget.total_committed(),
-        caps.staged_images + caps.engine_cache
+        ingress_ceiling + caps.engine_cache
     );
     assert!(budget.is_safe());
     assert!(budget.total_committed() <= caps.total());

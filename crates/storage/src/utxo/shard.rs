@@ -128,11 +128,6 @@ impl Shard {
         let mut table = self.inner.write();
         replace_record(&mut table, record.key(), record.txid(), record);
     }
-
-    pub(crate) fn clear(&self) {
-        let mut table = self.inner.write();
-        table.table.clear();
-    }
 }
 
 impl Default for Shard {

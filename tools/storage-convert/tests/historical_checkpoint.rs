@@ -441,3 +441,189 @@ fn historical_current_with_wrong_source_digest_is_not_reauthenticated() -> TestR
     assert_eq!(fs::read(current_path)?, bytes);
     Ok(())
 }
+
+fn streaming_tree_digest(root: &Path) -> TestResult<[u8; 32]> {
+    use std::io::Read;
+    fn visit(path: &Path, hash: &mut Sha256) -> TestResult {
+        let mut entries = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            hash.update(entry.file_name().as_encoded_bytes());
+            if entry.file_type()?.is_dir() {
+                hash.update(b"directory");
+                visit(&entry.path(), hash)?;
+            } else {
+                hash.update(fs::metadata(entry.path())?.len().to_le_bytes());
+                let mut file = fs::File::open(entry.path())?;
+                let mut buffer = [0_u8; 16 * 1024];
+                loop {
+                    let count = file.read(&mut buffer)?;
+                    if count == 0 {
+                        break;
+                    }
+                    hash.update(&buffer[..count]);
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut hash = Sha256::new();
+    visit(root, &mut hash)?;
+    Ok(hash.finalize().into())
+}
+
+#[test]
+fn equal_head_epoch3_conversion_preserves_canonical_headers_over_64_mib() -> TestResult {
+    use bitcoin_rs_consensus::primitives::hex::hex_encode;
+    use bitcoin_rs_consensus::primitives::{Header, deserialize};
+    use bitcoin_rs_execution::chain::compact_is_met_by;
+    use bitcoin_rs_storage::checkpoint::{CHECKPOINT_ROOT, CURRENT_FILE, CurrentV1};
+    use std::io::{BufWriter, Read, Write};
+
+    let source = tempdir()?;
+    let dest = tempdir()?;
+    let from = source.path();
+    let to = dest.path().join("converted");
+    copy_tree(&fixture_dir(), from)?;
+    let checkpoint_root = from.join(CHECKPOINT_ROOT);
+    let generation = checkpoint_root.join(GENERATION);
+    let (_, mut manifest) = read_manifest(&generation)?;
+    let path = generation.join(HEADERS_FILE);
+    let original = fs::read(&path)?;
+    let active_end = 56
+        + usize::try_from(manifest.headers.header_count)
+            .map_err(|error| TestError::Assertion(error.to_string()))?
+            * Header::LEN;
+    assert_eq!(original.len(), active_end + 8);
+    assert_eq!(&original[active_end..], &0_u64.to_le_bytes());
+    let genesis: Header = deserialize(&original[56..56 + Header::LEN])
+        .map_err(|error| TestError::Assertion(error.to_string()))?;
+    let mut sibling: Header = deserialize(&original[56 + Header::LEN..56 + 2 * Header::LEN])
+        .map_err(|error| TestError::Assertion(error.to_string()))?;
+    assert_eq!(sibling.prev_blockhash, genesis.compute_hash());
+    let active_bytes =
+        u64::try_from(active_end).map_err(|error| TestError::Assertion(error.to_string()))?;
+    let side_count = (64_u64 * 1024 * 1024 - active_bytes - 8) / 80 + 1;
+    let mut digest = Sha256::new();
+    let mut writer = BufWriter::new(fs::File::create(&path)?);
+    writer.write_all(&original[..active_end])?;
+    digest.update(&original[..active_end]);
+    writer.write_all(&side_count.to_le_bytes())?;
+    digest.update(side_count.to_le_bytes());
+    for index in 0..side_count {
+        let mut root = [0_u8; 32];
+        root[..8].copy_from_slice(&index.to_le_bytes());
+        root[31] = 0xa5;
+        sibling.merkle_root = Hash256::from_le_bytes(&root);
+        sibling.nonce = 0;
+        while !compact_is_met_by(sibling.bits, Hash256::from(sibling.compute_hash())) {
+            sibling.nonce = sibling
+                .nonce
+                .checked_add(1)
+                .ok_or_else(|| TestError::Assertion("fixture nonce exhausted".into()))?;
+        }
+        let encoded = sibling.to_bytes();
+        writer.write_all(&encoded)?;
+        digest.update(encoded);
+    }
+    writer.flush()?;
+    drop(writer);
+    manifest.headers.bytes = active_bytes + 8 + side_count * 80;
+    assert!(manifest.headers.bytes > 64 * 1024 * 1024);
+    assert_eq!(fs::metadata(&path)?.len(), manifest.headers.bytes);
+    manifest.headers.sha256 = hex_encode(&digest.finalize());
+    let manifest_bytes =
+        sonic_rs::to_vec(&manifest).map_err(|error| TestError::Assertion(error.to_string()))?;
+    fs::write(generation.join(MANIFEST_FILE), &manifest_bytes)?;
+    let reference = CheckpointReference {
+        generation: manifest.generation,
+        manifest_sha256: Sha256::digest(&manifest_bytes).into(),
+    };
+    let current_path = checkpoint_root.join(CURRENT_FILE);
+    let mut current: CurrentV1 = sonic_rs::from_slice(&fs::read(&current_path)?)
+        .map_err(|error| TestError::Assertion(error.to_string()))?;
+    current.manifest_sha256 = hex_encode(&reference.manifest_sha256);
+    fs::write(
+        &current_path,
+        sonic_rs::to_vec(&current).map_err(|error| TestError::Assertion(error.to_string()))?,
+    )?;
+    let source_head = {
+        let store = RocksDbStore::open(from.join("chainstate"))?;
+        store
+            .get(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY)?
+            .ok_or_else(|| TestError::Assertion("source head missing".into()))?
+    };
+    let head = DurableHead::decode(&source_head)
+        .ok_or_else(|| TestError::Assertion("source head malformed".into()))?;
+    assert_eq!(head.height, manifest.applied_tip.height);
+    assert_eq!(head.tip.to_string_be(), manifest.applied_tip.hash);
+    let dir = bitcoin_rs_storage::checkpoint::open_data_dir(&generation)?;
+    bitcoin_rs_execution::recovery::validate_conversion_checkpoint_artifacts(
+        &dir,
+        &reference,
+        Network::Regtest,
+    )
+    .map_err(|error| TestError::Assertion(format!("canonical precondition: {error}")))?;
+    drop(dir);
+    let source_digest = streaming_tree_digest(from)?;
+    let output = run_converter(&["--from", str_path(from)?, "--to", str_path(&to)?])?;
+    assert_eq!(streaming_tree_digest(from)?, source_digest);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("checkpoint entry \"headers-v1.dat\" exceeds its size bound"),
+            "conversion failed before the publication size guard: {stderr}"
+        );
+        panic!("valid canonical artifact exceeds only the whole-file publication limit: {stderr}");
+    }
+    let report = parse_report(&output)?;
+    assert_eq!((report.source_epoch, report.target_epoch), (3, 6));
+    assert_eq!(fs::read(to.join("CURRENT_SCHEMA"))?, b"6\n");
+    let target_generation = to.join(CHECKPOINT_ROOT).join(GENERATION);
+    for artifact in [HEADERS_FILE, COINSTATS_FILE] {
+        let mut source_file = fs::File::open(generation.join(artifact))?;
+        let mut target_file = fs::File::open(target_generation.join(artifact))?;
+        assert_eq!(source_file.metadata()?.len(), target_file.metadata()?.len());
+        let mut expected = [0_u8; 16 * 1024];
+        let mut actual = [0_u8; 16 * 1024];
+        loop {
+            let count = source_file.read(&mut expected)?;
+            if count == 0 {
+                break;
+            }
+            target_file.read_exact(&mut actual[..count])?;
+            assert_eq!(&actual[..count], &expected[..count]);
+        }
+    }
+    let (_, target_manifest) = read_manifest(&target_generation)?;
+    manifest.utxo = None;
+    let image_dir =
+        bitcoin_rs_storage::checkpoint::open_data_dir(&target_generation.join("chainstate"))?;
+    manifest.engine = Some(
+        bitcoin_rs_storage::checkpoint::digest_engine_dir(&image_dir)
+            .map_err(|error| TestError::Assertion(format!("target engine image: {error}")))?,
+    );
+    drop(image_dir);
+    assert_eq!(
+        sonic_rs::to_vec(&target_manifest)
+            .map_err(|error| TestError::Assertion(error.to_string()))?,
+        sonic_rs::to_vec(&manifest).map_err(|error| TestError::Assertion(error.to_string()))?
+    );
+    let target_current: CurrentV1 =
+        sonic_rs::from_slice(&fs::read(to.join(CHECKPOINT_ROOT).join(CURRENT_FILE))?)
+            .map_err(|error| TestError::Assertion(error.to_string()))?;
+    assert_eq!(target_current.generation, reference.generation);
+    assert_eq!(target_current.directory, GENERATION);
+    assert_eq!(
+        target_current.manifest_sha256,
+        hex_encode(&Sha256::digest(fs::read(
+            target_generation.join(MANIFEST_FILE)
+        )?))
+    );
+    let target_store = RocksDbStore::open(to.join("chainstate"))?;
+    assert_eq!(
+        target_store.get(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY)?,
+        Some(source_head)
+    );
+    Ok(())
+}

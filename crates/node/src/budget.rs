@@ -267,6 +267,22 @@ impl NodeBudget {
         self.reserve_locked(&mut ledger, owner, bytes)
     }
 
+    fn reserve_ingress(&self, bytes: u64) -> Result<(), BudgetError> {
+        let mut ledger = self.ledger.lock();
+        let owner = BudgetOwner::StagedImages;
+        let idx = owner.index();
+        let committed = ledger.charges[idx].saturating_add(ledger.reserved[idx]);
+        let ceiling = self
+            .caps
+            .staged_images
+            .saturating_sub(self.caps.foreground_reserve);
+        if bytes > ceiling.saturating_sub(committed) {
+            ledger.ingress_refused = true;
+            return Err(BudgetError::BudgetExhausted);
+        }
+        self.reserve_locked(&mut ledger, owner, bytes)
+    }
+
     /// `BUD-07`: reclaim from optional owners, then reserve, then refuse.
     pub fn ensure_available(&self, owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
         self.sample_engine_cache();
@@ -422,14 +438,18 @@ impl BudgetedIngressLedger {
 
 impl bitcoin_rs_wire::inbound::block_memory::IngressLedger for BudgetedIngressLedger {
     fn capacity(&self) -> usize {
-        usize::try_from(self.budget.caps().staged_images).unwrap_or(usize::MAX)
+        usize::try_from(
+            self.budget
+                .caps
+                .staged_images
+                .saturating_sub(self.budget.caps.foreground_reserve),
+        )
+        .unwrap_or(usize::MAX)
     }
 
     fn try_take(&self, bytes: usize) -> bool {
         let bytes_u64 = u64::try_from(bytes).unwrap_or(u64::MAX);
-        self.budget
-            .reserve(BudgetOwner::StagedImages, bytes_u64)
-            .is_ok()
+        self.budget.reserve_ingress(bytes_u64).is_ok()
             && self
                 .budget
                 .allocate(BudgetOwner::StagedImages, bytes_u64)

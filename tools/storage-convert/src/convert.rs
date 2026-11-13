@@ -171,7 +171,7 @@ pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertE
         };
         convert_nested_checkpoint_images(&mut ctx)?;
     }
-    let carried_markers = if source_epoch == 4 {
+    let carried_markers = if source_epoch == 4 || source_epoch == 6 {
         copy_full_revalidation_marker(&roots.from_dir, &roots.to_dir)?
     } else {
         Vec::new()
@@ -1976,8 +1976,6 @@ fn copy_full_revalidation_marker(
     Ok(vec![FULL_REVALIDATION_MARKER.to_owned()])
 }
 
-const EPOCH3_ARTIFACT_LIMIT: u64 = 64 * 1024 * 1024;
-
 fn publish_epoch4_checkpoint(
     checkpoint_dir: &Dir,
     manifest: &CheckpointManifestV1,
@@ -1988,10 +1986,24 @@ fn publish_epoch4_checkpoint(
     let directory = format!("gen-{generation:020}");
     let root_path = to_path.join(CHECKPOINT_ROOT);
     let generation_path = root_path.join(&directory);
-    std::fs::create_dir_all(&generation_path)?;
-    for name in [HEADERS_FILE, COINSTATS_FILE] {
-        let bytes = read_file(checkpoint_dir, name, EPOCH3_ARTIFACT_LIMIT)?;
-        write_synced(&generation_path.join(name), &bytes)?;
+    let data_dir = Dir::open_ambient_dir(to_path, ambient_authority())?;
+    let root_dir = open_or_create_dir_nofollow(&data_dir, CHECKPOINT_ROOT)?;
+    let generation_dir = open_or_create_dir_nofollow(&root_dir, &directory)?;
+    sync_dir(&data_dir)?;
+    sync_dir(&root_dir)?;
+    for (name, bytes, sha256) in [
+        (
+            HEADERS_FILE,
+            manifest.headers.bytes,
+            manifest.headers.sha256.as_str(),
+        ),
+        (
+            COINSTATS_FILE,
+            manifest.coinstats.bytes,
+            manifest.coinstats.sha256.as_str(),
+        ),
+    ] {
+        copy_checkpoint_artifact_synced(checkpoint_dir, &generation_dir, name, bytes, sha256)?;
     }
     engine.flush()?;
     engine.checkpoint(&generation_path.join("chainstate"))?;
@@ -2015,6 +2027,57 @@ fn publish_epoch4_checkpoint(
     let current_bytes = sonic_rs::to_vec(&current)
         .map_err(|error| ConvertError::IncompatibleData(format!("CURRENT: {error}")))?;
     write_synced(&root_path.join(CURRENT_FILE), &current_bytes)?;
+    Ok(())
+}
+
+fn copy_checkpoint_artifact_synced(
+    source: &Dir,
+    destination: &Dir,
+    name: &str,
+    expected_bytes: u64,
+    expected_sha256: &str,
+) -> Result<(), ConvertError> {
+    let expected_digest = decode_hex::<32>(expected_sha256)
+        .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
+    let input = open_file_read_no_follow(source, name)?;
+    let metadata = input.metadata()?;
+    if !metadata.is_file() || metadata.len() != expected_bytes {
+        return Err(ConvertError::IncompatibleData(format!(
+            "checkpoint artifact {name:?} length or type mismatch"
+        )));
+    }
+    let mut input = input.take(expected_bytes.saturating_add(1));
+    let temporary = format!("{name}.tmp");
+    let mut output = create_file_no_follow(destination, &temporary)?;
+    let mut buffer = [0_u8; 16 * 1024];
+    let mut hasher = Sha256::new();
+    let mut bytes = 0_u64;
+    loop {
+        let count = input.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(u64::try_from(count).map_err(io::Error::other)?)
+            .ok_or_else(|| ConvertError::IncompatibleData("artifact byte count overflow".into()))?;
+        if bytes > expected_bytes {
+            return Err(ConvertError::IncompatibleData(format!(
+                "checkpoint artifact {name:?} length or SHA256 mismatch"
+            )));
+        }
+        hasher.update(&buffer[..count]);
+        output.write_all(&buffer[..count])?;
+    }
+    let digest: [u8; 32] = hasher.finalize().into();
+    if bytes != expected_bytes || digest != expected_digest {
+        return Err(ConvertError::IncompatibleData(format!(
+            "checkpoint artifact {name:?} length or SHA256 mismatch"
+        )));
+    }
+    output.sync_all()?;
+    drop(output);
+    destination.rename(&temporary, destination, name)?;
+    sync_dir(destination)?;
     Ok(())
 }
 
@@ -2659,17 +2722,32 @@ fn run_step_5_to_6(
         &mut copied_files,
         IndependentCopyPlan {
             journal: false,
-            checkpoints: true,
-            historical_checkpoints: true,
+            checkpoints: false,
+            historical_checkpoints: false,
             assumeutxo_archive: false,
         },
     )?;
+    let mut ctx = NestedImageContext {
+        from_root: &roots.from_dir,
+        to_root: &roots.to_dir,
+        to_base: to_path,
+        source_epoch: 5,
+        target_engine,
+        copied_files: &mut copied_files,
+        reports: &mut namespaces_report,
+        historical_generations: BTreeMap::new(),
+        checkpoint_generations: BTreeMap::new(),
+    };
+    convert_nested_checkpoint_images(&mut ctx)?;
     let SnapshotStepOutcome {
         checkpoint_stats,
         final_stats,
         published_checkpoint,
     } = finalize_snapshot_base(roots, to_path, target_engine, &mut namespaces_report)?;
-    let carried_markers = carry_full_revalidation_marker(&roots.from_dir, &roots.to_dir)?;
+    let mut carried_markers = copy_full_revalidation_marker(&roots.from_dir, &roots.to_dir)?;
+    if carried_markers.is_empty() {
+        carried_markers = carry_full_revalidation_marker(&roots.from_dir, &roots.to_dir)?;
+    }
     cleanup_scratch(&roots.to_dir)?;
     if let Some(pool_to_dir) = &roots.pool_to_dir {
         cleanup_scratch(pool_to_dir)?;

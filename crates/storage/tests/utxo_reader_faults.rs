@@ -23,6 +23,45 @@ enum ScanFault {
     Row,
 }
 
+struct ReadFaultSnapshot<'a> {
+    inner: Box<dyn KvSnapshot + 'a>,
+    fault: Option<ScanFault>,
+}
+
+impl KvSnapshot for ReadFaultSnapshot<'_> {
+    fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.get(cf, key)
+    }
+
+    fn iter_prefix<'a>(
+        &'a self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+    ) -> Result<KvIter<'a>, StorageError> {
+        if cf == ColumnFamily::Coins
+            && let Some(fault) = self.fault
+        {
+            let error = StorageError::Io(std::io::Error::other("injected coin scan failure"));
+            return match fault {
+                ScanFault::Open => Err(error),
+                ScanFault::Row => Ok(Box::new(std::iter::once(Err(error)))),
+            };
+        }
+        self.inner.iter_prefix(cf, prefix)
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<PrefixScan, StorageError> {
+        self.inner
+            .scan_prefix_from_bounded(cf, prefix, start, limit)
+    }
+}
+
 struct ReadFaultStore {
     inner: MemoryKvStore,
     poisoned: Mutex<HashSet<Vec<u8>>>,
@@ -102,7 +141,10 @@ impl KvStore for ReadFaultStore {
     }
 
     fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
-        self.inner.snapshot()
+        Ok(Box::new(ReadFaultSnapshot {
+            inner: self.inner.snapshot()?,
+            fault: *self.scan_fault.lock(),
+        }))
     }
 
     fn multi_get(
@@ -188,6 +230,10 @@ fn engine_read_fault_is_an_error_never_an_absent_coin() -> TestResult {
         Err(UtxoError::Storage(StorageError::Io(_)))
     ));
     assert!(matches!(
+        reader.confirmation_height(&txid(0xA1), u32::MAX),
+        Err(UtxoError::Storage(StorageError::Io(_)))
+    ));
+    assert!(matches!(
         reader.has_live_outputs_for_txid(&txid(0xA1)),
         Err(UtxoError::Storage(StorageError::Io(_)))
     ));
@@ -204,6 +250,11 @@ fn engine_read_fault_is_an_error_never_an_absent_coin() -> TestResult {
     assert!(reader.get_entry(&never_stored)?.is_none());
     assert!(reader.get_entry(&outpoint(0xB2, 0))?.is_none());
     assert!(!reader.has_live_outputs_for_txid(&txid(0xC3))?);
+    assert_eq!(
+        reader.confirmation_height(&txid(0xB2), 2)?,
+        Some(COIN_HEIGHT)
+    );
+    assert_eq!(reader.confirmation_height(&txid(0xC3), u32::MAX)?, None);
     Ok(())
 }
 
@@ -228,6 +279,10 @@ fn undecodable_coin_row_is_an_error_never_an_absent_coin() -> TestResult {
     ));
     assert!(matches!(
         reader.has_live_outputs_for_txid(&txid(0xD4)),
+        Err(UtxoError::CorruptRecord)
+    ));
+    assert!(matches!(
+        reader.confirmation_height(&txid(0xD4), u32::MAX),
         Err(UtxoError::CorruptRecord)
     ));
     assert!(matches!(
