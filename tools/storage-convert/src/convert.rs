@@ -171,7 +171,7 @@ pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertE
         };
         convert_nested_checkpoint_images(&mut ctx)?;
     }
-    let carried_markers = if source_epoch == 4 {
+    let carried_markers = if source_epoch == 4 || source_epoch == 6 {
         copy_full_revalidation_marker(&roots.from_dir, &roots.to_dir)?
     } else {
         Vec::new()
@@ -2659,17 +2659,32 @@ fn run_step_5_to_6(
         &mut copied_files,
         IndependentCopyPlan {
             journal: false,
-            checkpoints: true,
-            historical_checkpoints: true,
+            checkpoints: false,
+            historical_checkpoints: false,
             assumeutxo_archive: false,
         },
     )?;
+    let mut ctx = NestedImageContext {
+        from_root: &roots.from_dir,
+        to_root: &roots.to_dir,
+        to_base: to_path,
+        source_epoch: 5,
+        target_engine,
+        copied_files: &mut copied_files,
+        reports: &mut namespaces_report,
+        historical_generations: BTreeMap::new(),
+        checkpoint_generations: BTreeMap::new(),
+    };
+    convert_nested_checkpoint_images(&mut ctx)?;
     let SnapshotStepOutcome {
         checkpoint_stats,
         final_stats,
         published_checkpoint,
     } = finalize_snapshot_base(roots, to_path, target_engine, &mut namespaces_report)?;
-    let carried_markers = carry_full_revalidation_marker(&roots.from_dir, &roots.to_dir)?;
+    let mut carried_markers = copy_full_revalidation_marker(&roots.from_dir, &roots.to_dir)?;
+    if carried_markers.is_empty() {
+        carried_markers = carry_full_revalidation_marker(&roots.from_dir, &roots.to_dir)?;
+    }
     cleanup_scratch(&roots.to_dir)?;
     if let Some(pool_to_dir) = &roots.pool_to_dir {
         cleanup_scratch(pool_to_dir)?;

@@ -218,15 +218,14 @@ fn artifact_bytes(tag: &[u8]) -> Vec<u8> {
 
 /// One generation directory: canonical gen-{generation:020} name, sonic_rs
 /// manifest whose artifact commitments match the literal bytes we stage, a
-/// headers-v1.dat and coinstats-v1.dat artifact, and, when `with_image`, a
-/// real flushed RocksDB checkpoint image checkpointed into `chainstate` and
-/// pinned by the manifest engine commitment. The manifest carries no utxo
-/// artifact, matching the epoch-4 published form.
+/// headers-v1.dat and coinstats-v1.dat artifact, and, when an image is supplied, a
+/// flushed backend checkpoint under `chainstate`, pinned by the manifest engine
+/// commitment. The manifest carries no utxo artifact.
 fn stage_generation(
     root: &Path,
     generation: u64,
     tag: &str,
-    with_image: bool,
+    image: Option<(StorageBackend, u32)>,
 ) -> TestResult<GenerationFixture> {
     let directory = format!("gen-{generation:020}");
     let generation_path = root.join(&directory);
@@ -277,11 +276,22 @@ fn stage_generation(
     fs::write(root.join(&directory).join(HEADERS_FILE), &headers_bytes)?;
     fs::write(root.join(&directory).join(COINSTATS_FILE), &coinstats_bytes)?;
 
-    let rows = if with_image {
-        let image_rows = checkpoint_image_rows(tag)?;
+    let rows = if let Some((backend, source_epoch)) = image {
+        let mut image_rows = checkpoint_image_rows(tag)?;
+        if source_epoch == 5 {
+            image_rows.push((
+                ColumnFamily::UndoData,
+                vec![(undo_key(101, 0x33), undo_value_v1_empty(0x33))],
+            ));
+        }
         let staging_path = generation_path.join("chainstate-staging");
-        super::support::oracle::write_rocksdb_namespace(&staging_path, &image_rows)?;
-        let store = RocksDbStore::open_with_cache(&staging_path, 0)?;
+        let store = open_engine_store(&staging_path, backend)?;
+        for (family, rows) in &image_rows {
+            for (key, value) in rows {
+                store.put(*family, key, value)?;
+            }
+        }
+        store.flush()?;
         store.checkpoint(&generation_path.join("chainstate"))?;
         drop(store);
         fs::remove_dir_all(&staging_path)?;
@@ -290,7 +300,7 @@ fn stage_generation(
         Vec::new()
     };
 
-    if with_image {
+    if image.is_some() {
         let image_dir =
             Dir::open_ambient_dir(generation_path.join("chainstate"), ambient_authority())?;
         manifest.engine = Some(digest_engine_dir(&image_dir).map_err(|error| {
@@ -299,7 +309,6 @@ fn stage_generation(
     }
     let manifest_bytes = sonic_rs::to_vec(&manifest)
         .map_err(|error| TestError::Assertion(format!("manifest serialization failed: {error}")))?;
-
     let manifest_rel = format!("{directory}/{MANIFEST_FILE}");
     fs::write(root.join(&manifest_rel), &manifest_bytes)?;
     let mut metadata = BTreeMap::new();
@@ -323,10 +332,20 @@ fn stage_nested_checkpoints(
     root: &Path,
     current_generation: u64,
 ) -> TestResult<NestedCheckpointFixture> {
+    stage_nested_checkpoints_for_epoch(root, current_generation, StorageBackend::RocksDb, 4)
+}
+
+fn stage_nested_checkpoints_for_epoch(
+    root: &Path,
+    current_generation: u64,
+    backend: StorageBackend,
+    source_epoch: u32,
+) -> TestResult<NestedCheckpointFixture> {
     fs::create_dir_all(root)?;
-    let retained = stage_generation(root, current_generation - 1, "old", true)?;
-    let current = stage_generation(root, current_generation, "cur", true)?;
-    let bare = stage_generation(root, current_generation + 1, "bare", false)?;
+    let image = Some((backend, source_epoch));
+    let retained = stage_generation(root, current_generation - 1, "old", image)?;
+    let current = stage_generation(root, current_generation, "cur", image)?;
+    let bare = stage_generation(root, current_generation + 1, "bare", None)?;
 
     let current_manifest = current
         .metadata
@@ -628,7 +647,10 @@ fn verify_image_manifest_binding(
     let mut stripped_dest = dest_manifest;
     stripped_dest.engine = None;
     let dest_metadata_bytes = sonic_rs::to_vec(&stripped_dest).map_err(|error| {
-        site.fail(format!("{} manifest re-encode failed: {error}", check.directory))
+        site.fail(format!(
+            "{} manifest re-encode failed: {error}",
+            check.directory
+        ))
     })?;
     let source_metadata_bytes = sonic_rs::to_vec(&stripped_source).map_err(|error| {
         site.fail(format!(
@@ -1173,4 +1195,250 @@ fn engine_copy_current_epoch_undo_row_copies_verbatim() -> TestResult<()> {
     }
     assert_independent_files_copied_and_ignored_skipped(&to_path, &independent_files)?;
     Ok(())
+}
+
+#[cfg(feature = "surrealkv")]
+#[test]
+fn epoch5_nested_images_reopen_as_rocksdb_with_schema6_undo() -> TestResult<()> {
+    let source = tempdir()?;
+    let destination = tempdir()?;
+    let from = source.path();
+    let to = destination.path().join("converted");
+    write_schema_marker(from, 5)?;
+    let store = open_engine_store(&from.join("chainstate"), StorageBackend::SurrealKv)?;
+    store.put(
+        ColumnFamily::UndoData,
+        &undo_key(101, 0x33),
+        &undo_value_v1_empty(0x33),
+    )?;
+    store.flush()?;
+    drop(store);
+    let mut fixtures = Vec::new();
+    for (root, generation) in [
+        (CHECKPOINT_ROOT, ORDINARY_CKPT_CURRENT_GENERATION),
+        (
+            HISTORICAL_CHECKPOINT_ROOT,
+            HISTORICAL_CKPT_CURRENT_GENERATION,
+        ),
+    ] {
+        let mut fixture = stage_nested_checkpoints_for_epoch(
+            &from.join(root),
+            generation,
+            StorageBackend::SurrealKv,
+            5,
+        )?;
+        for image in &mut fixture.generations {
+            for (family, rows) in &mut image.rows {
+                if *family == ColumnFamily::UndoData {
+                    *rows = vec![(undo_key(101, 0x33), undo_value_v2(0x33))];
+                }
+            }
+        }
+        fixtures.push((root, fixture));
+    }
+    let historical_directory = format!("gen-{HISTORICAL_CKPT_CURRENT_GENERATION:020}");
+    let historical_bytes = fs::read(
+        from.join(HISTORICAL_CHECKPOINT_ROOT)
+            .join(&historical_directory)
+            .join(MANIFEST_FILE),
+    )?;
+    let historical_manifest: CheckpointManifestV1 = sonic_rs::from_slice(&historical_bytes)?;
+    let historical_hash = bitcoin_rs_consensus::primitives::Hash256::from_str_be(
+        &historical_manifest.applied_tip.hash,
+    )
+    .map_err(|error| TestError::Assertion(error.to_string()))?;
+    let reference = bitcoin_rs_storage::assumeutxo::HistoricalCheckpointRef {
+        checkpoint: bitcoin_rs_storage::checkpoint::CheckpointReference {
+            generation: HISTORICAL_CKPT_CURRENT_GENERATION,
+            manifest_sha256: Sha256::digest(&historical_bytes).into(),
+        },
+        height: historical_manifest.applied_tip.height,
+        hash: historical_hash,
+    };
+    let head = bitcoin_rs_storage::durable_head::DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Validating {
+            base_height: reference.height,
+            base_hash: reference.hash,
+            expected_hash_serialized: reference.hash,
+            chain_tx_count: 0,
+            historical_height: reference.height,
+            historical_hash: reference.hash,
+            pending: None,
+            checkpoint: Some(reference),
+        },
+        commit_id: 1,
+        height: historical_manifest.applied_tip.height,
+        tip: historical_hash,
+        chain_tx_count: 0,
+        body_extent: None,
+        undo_extent: None,
+    };
+    let ordinary_directory = format!("gen-{ORDINARY_CKPT_CURRENT_GENERATION:020}");
+    let ordinary_root = from.join(CHECKPOINT_ROOT);
+    let image_path = ordinary_root.join(&ordinary_directory).join("chainstate");
+    let store = open_engine_store(&image_path, StorageBackend::SurrealKv)?;
+    store.put(
+        ColumnFamily::UtxoMeta,
+        bitcoin_rs_storage::durable_head::DURABLE_HEAD_KEY,
+        &head.encode(),
+    )?;
+    store.flush()?;
+    drop(store);
+    let manifest_path = ordinary_root.join(&ordinary_directory).join(MANIFEST_FILE);
+    let mut manifest: CheckpointManifestV1 = sonic_rs::from_slice(&fs::read(&manifest_path)?)?;
+    let image_dir = Dir::open_ambient_dir(&image_path, ambient_authority())?;
+    manifest.engine = Some(
+        digest_engine_dir(&image_dir).map_err(|error| TestError::Assertion(error.to_string()))?,
+    );
+    let manifest_bytes = sonic_rs::to_vec(&manifest)?;
+    fs::write(manifest_path, &manifest_bytes)?;
+    let mut current: CurrentV1 =
+        sonic_rs::from_slice(&fs::read(ordinary_root.join(CURRENT_FILE))?)?;
+    current.manifest_sha256 = hex_lower(&Sha256::digest(&manifest_bytes));
+    let current_bytes = sonic_rs::to_vec(&current)?;
+    fs::write(ordinary_root.join(CURRENT_FILE), &current_bytes)?;
+    let ordinary_fixture = &mut fixtures[0].1;
+    ordinary_fixture.root_metadata = current_bytes;
+    ordinary_fixture.generations[1].metadata.insert(
+        format!("{ordinary_directory}/{MANIFEST_FILE}"),
+        manifest_bytes,
+    );
+    let mut live_head = head;
+    live_head.assumeutxo = bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized;
+    let store = open_engine_store(&from.join("chainstate"), StorageBackend::SurrealKv)?;
+    store.put(
+        ColumnFamily::UtxoMeta,
+        bitcoin_rs_storage::durable_head::DURABLE_HEAD_KEY,
+        &live_head.encode(),
+    )?;
+    store.flush()?;
+    drop(store);
+    let before = recursive_dir_digest(from)?;
+    let output = run_converter(&[
+        "--from",
+        from.to_str()
+            .ok_or_else(|| TestError::Assertion("utf8 source".into()))?,
+        "--to",
+        to.to_str()
+            .ok_or_else(|| TestError::Assertion("utf8 destination".into()))?,
+        "--to-engine",
+        "rocksdb",
+    ])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(recursive_dir_digest(from)?, before);
+    let report = parse_report(&output)?;
+    assert_eq!((report.source_epoch, report.target_epoch), (5, 6));
+    assert_eq!(fs::read(to.join("CURRENT_SCHEMA"))?, b"6\n");
+    verify_final_rocksdb_data(
+        &to,
+        "chainstate",
+        &[(
+            ColumnFamily::UndoData,
+            vec![(undo_key(101, 0x33), undo_value_v2(0x33))],
+        )],
+    )?;
+    verify_final_rocksdb_data(
+        &to,
+        "chainstate",
+        &[(
+            ColumnFamily::UtxoMeta,
+            vec![(
+                bitcoin_rs_storage::durable_head::DURABLE_HEAD_KEY.to_vec(),
+                live_head.encode().to_vec(),
+            )],
+        )],
+    )?;
+    let destination_manifest = fs::read(
+        to.join(HISTORICAL_CHECKPOINT_ROOT)
+            .join(historical_directory)
+            .join(MANIFEST_FILE),
+    )?;
+    let destination_manifest_sha256: [u8; 32] = Sha256::digest(destination_manifest).into();
+    let mut expected_head = head;
+    let bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Validating {
+        checkpoint: Some(expected_reference),
+        ..
+    } = &mut expected_head.assumeutxo
+    else {
+        return Err(TestError::Assertion(
+            "fixture historical reference missing".into(),
+        ));
+    };
+    expected_reference.checkpoint.manifest_sha256 = destination_manifest_sha256;
+    let ordinary_rows = &mut fixtures[0].1.generations[1].rows;
+    let (_, metadata_rows) = ordinary_rows
+        .iter_mut()
+        .find(|(family, _)| *family == ColumnFamily::UtxoMeta)
+        .ok_or_else(|| TestError::Assertion("fixture metadata family missing".into()))?;
+    metadata_rows.push((
+        bitcoin_rs_storage::durable_head::DURABLE_HEAD_KEY.to_vec(),
+        expected_head.encode().to_vec(),
+    ));
+    for (root, fixture) in fixtures {
+        verify_nested_checkpoint_images(
+            &to,
+            root,
+            &fixture,
+            StorageBackend::RocksDb,
+            "epoch 5 to 6",
+        )?;
+    }
+    Ok(())
+}
+
+fn assert_root_marker_survives_conversion(source_epoch: u32) -> TestResult<()> {
+    use bitcoin_rs_consensus::primitives::Network;
+    use bitcoin_rs_execution::recovery::{
+        ResumeSource, prepare_initial_state_with_engine, requires_full_revalidation,
+    };
+    use bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER;
+
+    let source = tempdir()?;
+    let destination = tempdir()?;
+    let to = destination.path().join("converted");
+    write_schema_marker(source.path(), source_epoch)?;
+    write_rocksdb_namespace(&source.path().join("chainstate"), &[])?;
+    fs::write(source.path().join(FULL_REVALIDATION_MARKER), b"required\n")?;
+    let before = recursive_dir_digest(source.path())?;
+    let output = run_converter(&[
+        "--from",
+        source
+            .path()
+            .to_str()
+            .ok_or_else(|| TestError::Assertion("utf8 source".into()))?,
+        "--to",
+        to.to_str()
+            .ok_or_else(|| TestError::Assertion("utf8 destination".into()))?,
+    ])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(recursive_dir_digest(source.path())?, before);
+    assert_eq!(fs::read(to.join(FULL_REVALIDATION_MARKER))?, b"required\n");
+    assert_eq!(
+        parse_report(&output)?.carried_markers,
+        vec![FULL_REVALIDATION_MARKER]
+    );
+    assert!(requires_full_revalidation(&to));
+    let state = prepare_initial_state_with_engine(&to, Network::Regtest, None, None)
+        .map_err(|error| TestError::Assertion(error.to_string()))?;
+    assert_eq!(state.initial.resume_source, ResumeSource::Cold);
+    assert!(state.engine.is_none());
+    Ok(())
+}
+
+#[test]
+fn epoch5_root_marker_preserves_full_replay_startup() -> TestResult<()> {
+    assert_root_marker_survives_conversion(5)
+}
+
+#[test]
+fn epoch6_root_marker_preserves_full_replay_startup() -> TestResult<()> {
+    assert_root_marker_survives_conversion(6)
 }
