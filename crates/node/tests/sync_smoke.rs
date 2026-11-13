@@ -410,10 +410,17 @@ fn assert_engine_coin_stats(handles: &Chainstate, expected: &CoinStats) -> Resul
                 .map_err(TestError::Utxo)?,
         );
     }
-    let mut scanned = coins.with_stable_view(|view| {
+    let scanned = coins.with_stable_view(|view| {
         bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, expected.height, true)
     })?;
-    scanned.tx_count = expected.tx_count;
+    assert_eq!(
+        handles
+            .applied_tip_snapshot()
+            .ok_or_else(|| TestError::message("missing applied tip"))?
+            .chain_tx_count
+            .to_wire(),
+        expected.tx_count,
+    );
     assert_eq!(scanned.height, expected.height);
     assert_eq!(scanned.total_amount, expected.total_amount);
     assert_eq!(scanned.bogo_size, expected.bogo_size);

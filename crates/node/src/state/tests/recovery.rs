@@ -194,7 +194,10 @@ fn below_base_invalidate_settles_debt_against_engine() -> Result<(), TestError> 
         .applied_tip()
         .load_full()
         .ok_or(TestError::Missing("reopened tip"))?;
-    assert_eq!(reopened_tip.height, 2);
+    assert_eq!(
+        (reopened_tip.height, reopened_tip.hash),
+        (2, Hash256::from(previous)),
+    );
     Ok(())
 }
 
