@@ -42,3 +42,4 @@
 - Offline import reports a stable UTXO view rebuild failure separately from a CoinStats scan failure and preserves the underlying error.
 - Workspace `sha3` dependency upgraded from `>=0.11, <0.12` to `>=0.12, <0.13`; `default-features = false` is preserved and no source changes were required. The Tor v3 onion address checksum encoding is unchanged.
 - The workspace locks `arc-swap` to version 1.9.5.
+- The workspace locks `surrealkv` to version 1.4.0. Its manifest write-path change keeps the existing storage format.
