@@ -307,6 +307,8 @@ mod tests {
             .populate_fixture_coins(&changes)
             .unwrap_or_else(|error| panic!("engine coin write: {error}"));
         let snapshot = coin_snapshot(&reader);
+        let resident_insertions =
+            crate::utxo::set::PARSED_RECORD_INSERTIONS.with(|count| count.get());
         let permit = reader
             .reserve_scan()
             .unwrap_or_else(|error| panic!("reserve: {error}"));
@@ -322,11 +324,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, 10), (0, 12)]
         );
-        let view = reader
-            .lock_stable_view()
-            .unwrap_or_else(|error| panic!("committed view: {error}"));
-        assert_eq!(view.len(), 3);
-        assert_eq!(view.record_count(), 3);
+        assert_eq!(
+            crate::utxo::set::PARSED_RECORD_INSERTIONS.with(|count| count.get()),
+            resident_insertions,
+            "snapshot scan must not materialize the resident coin image"
+        );
     }
 
     #[test]

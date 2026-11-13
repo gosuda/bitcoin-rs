@@ -126,6 +126,7 @@ fn write_snapshot_view<O: SnapshotCoinObserver, W: Write + ?Sized>(
         record_count: record_count.to_le(),
     };
     writer.write_all(header.as_bytes())?;
+    let mut snapshot_stats = view.snapshot_muhash_accumulator();
 
     for shard_idx in 0_u8..=u8::MAX {
         view.shard(usize::from(shard_idx)).with_table(|table| {
@@ -163,23 +164,31 @@ fn write_snapshot_view<O: SnapshotCoinObserver, W: Write + ?Sized>(
                     };
                     writer.write_all(vout_header.as_bytes())?;
                     writer.write_all(output.script_pubkey)?;
-                    observer.observe_coin(SnapshotCoin {
+                    let coin = SnapshotCoin {
                         txid,
                         vout: output.vout,
                         value: output.value,
                         script_pubkey: output.script_pubkey,
                         height: output.height,
                         coinbase: output.coinbase,
-                    });
+                    };
+                    if let Some(stats) = &mut snapshot_stats {
+                        stats.observe_coin(coin);
+                    }
+                    observer.observe_coin(coin);
                 }
             }
             Ok::<(), UtxoError>(())
         })?;
     }
 
-    let fallback = view
-        .listener_muhash3072()
-        .unwrap_or([0_u8; MUHASH_TRAILER_LEN]);
+    let fallback = snapshot_stats.map_or_else(
+        || {
+            view.listener_muhash3072()
+                .unwrap_or([0_u8; MUHASH_TRAILER_LEN])
+        },
+        |stats| stats.into_stats().muhash.finalize(),
+    );
     let trailer = observer.select_trailer(fallback);
     writer.write_all(&trailer)?;
     Ok((trailer, observer, audit))
