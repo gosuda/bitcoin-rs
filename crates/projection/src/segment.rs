@@ -382,6 +382,23 @@ fn retirement_target_families<S: bitcoin_rs_storage::KvStore>(
             families.extend_from_slice(retirement_families(other));
         }
     }
+    // REO-05
+    let mut published: Vec<bitcoin_rs_storage::ColumnFamily> = Vec::new();
+    for other in IndexCapability::ALL {
+        if other == capability {
+            continue;
+        }
+        if snapshot
+            .get(
+                bitcoin_rs_storage::ColumnFamily::IdxMeta,
+                &sealed_gen_key(other, gen_id),
+            )?
+            .is_some()
+        {
+            published.extend_from_slice(other.column_families());
+        }
+    }
+    families.retain(|family| !published.contains(family));
     Ok(families)
 }
 

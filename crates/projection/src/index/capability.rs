@@ -74,7 +74,7 @@ impl IndexCapability {
         }
     }
 
-    pub(super) const fn column_families(self) -> &'static [ColumnFamily] {
+    pub(crate) const fn column_families(self) -> &'static [ColumnFamily] {
         match self {
             Self::TxLookup => &[ColumnFamily::TxConfirmed, ColumnFamily::TxDir],
             Self::ScriptHistory => &[
