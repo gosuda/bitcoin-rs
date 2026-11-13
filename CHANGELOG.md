@@ -14,3 +14,4 @@
 - The `4 -> 4` backend conversion also converts ordinary and historical checkpoint engine images, preserves their metadata, and verifies each image's row counts and digests.
 - Memory-engine checkpoint publication syncs the checkpoint file and its directory. It releases the coin-map read lock before file I/O, after it has copied a consistent checkpoint image.
 - Genesis-and-child bootstrap accounts for the valid committed prefix, and recovery streams engine coins instead of collecting the full coin image.
+- Offline import reports a stable UTXO view rebuild failure separately from a CoinStats scan failure and preserves the underlying error.

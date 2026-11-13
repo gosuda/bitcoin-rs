@@ -434,3 +434,63 @@ fn manifest_read_refuses_oversized_input_without_buffering_it() {
         "{error:?}"
     );
 }
+
+#[test]
+fn offline_import_classifies_malformed_coin_row_as_stable_view_rebuild() {
+    let archive = two_block_archive();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data_dir = dir.path().join("node");
+    let (corpus, manifest) = write_archive_fixture(dir.path(), &archive);
+    let state_path = dir.path().join("state.json");
+    let mut config = offline_import_config(&data_dir);
+    config.storage.backend = bitcoin_rs_storage::StorageBackend::RocksDb;
+
+    run_offline_import(config.clone(), &corpus, &manifest, &state_path)
+        .expect("initial offline import succeeds");
+    let state_before = std::fs::read(&state_path).expect("read certified state");
+    let provenance_before =
+        std::fs::read(provenance_path(&data_dir)).expect("read certification provenance");
+
+    {
+        use bitcoin_rs_storage::KvStore as _;
+
+        let store = bitcoin_rs_storage::RocksDbStore::open(data_dir.join("chainstate"))
+            .expect("open configured RocksDB chainstate");
+        let malformed_key = [0xa5_u8; 32];
+        store
+            .put(
+                bitcoin_rs_storage::ColumnFamily::Coins,
+                &malformed_key,
+                b"malformed",
+            )
+            .expect("insert malformed coin row");
+        store.flush().expect("flush malformed coin row");
+    }
+
+    let resume_state = dir.path().join("state-resume.json");
+    let error = run_offline_import(config, &corpus, &manifest, &resume_state)
+        .expect_err("malformed coin row must refuse certification");
+    match error {
+        OfflineImportError::StableViewRebuild { source } => {
+            assert!(
+                matches!(&source, bitcoin_rs_storage::utxo::UtxoError::CorruptRecord),
+                "stable-view failure must preserve the corrupt-record source, got {source:?}"
+            );
+        }
+        other => panic!("malformed coin row must fail during stable-view rebuild, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read(&state_path).expect("read certified state after refusal"),
+        state_before,
+        "certified state must remain unchanged on refusal"
+    );
+    assert_eq!(
+        std::fs::read(provenance_path(&data_dir)).expect("read provenance after refusal"),
+        provenance_before,
+        "certification provenance must remain unchanged on refusal"
+    );
+    assert!(
+        !resume_state.exists(),
+        "refusal must not write a replacement certified state"
+    );
+}

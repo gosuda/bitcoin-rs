@@ -316,6 +316,11 @@ pub enum OfflineImportError {
     VerificationFailed {
         verify_error: Box<bitcoin_rs_execution::verify::VerifyError>,
     },
+    #[error("stable UTXO view rebuild failed: {source}")]
+    StableViewRebuild {
+        #[source]
+        source: bitcoin_rs_storage::utxo::UtxoError,
+    },
     #[error("coin stats scan failed: {scan_error}")]
     CoinStatsScan {
         scan_error: bitcoin_rs_storage::utxo::UtxoError,
@@ -992,7 +997,7 @@ fn verify_and_certify(
                 set_hash.to_string(),
             ))
         })
-        .map_err(|scan_error| OfflineImportError::CoinStatsScan { scan_error })??;
+        .map_err(|source| OfflineImportError::StableViewRebuild { source })??;
     let certified = CertifiedState {
         height: tip.height,
         bestblock: tip.hash.to_string(),
