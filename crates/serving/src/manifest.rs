@@ -107,13 +107,16 @@ pub fn entries_of_kind(kind: SurfaceKind) -> impl Iterator<Item = &'static Entry
 }
 
 fn feature_active(feature: &str) -> bool {
-    match feature {
-        "" => true,
-        "zmq" => cfg!(feature = "zmq"),
-        "pool" => cfg!(feature = "pool"),
-        "silent-payments" => cfg!(feature = "silent-payments"),
-        _ => false,
-    }
+    const ENABLED_FEATURES: &[&str] = &[
+        "",
+        #[cfg(feature = "zmq")]
+        "zmq",
+        #[cfg(feature = "pool")]
+        "pool",
+        #[cfg(feature = "silent-payments")]
+        "silent-payments",
+    ];
+    ENABLED_FEATURES.contains(&feature)
 }
 
 const SECTIONS: [Status; 6] = [
