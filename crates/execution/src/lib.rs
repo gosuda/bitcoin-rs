@@ -951,24 +951,16 @@ impl Chainstate {
             Arc::clone(&self.coins),
         )
     }
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn coins(&self) -> &bitcoin_rs_storage::CoinStore {
         &self.coins
     }
 
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn commit_authority(&self) -> &Arc<bitcoin_rs_storage::CommitAuthority> {
         &self.commit_authority
-    }
-
-    #[must_use]
-    pub fn coin_store(&self) -> &bitcoin_rs_storage::CoinStore {
-        &self.coins
-    }
-
-    #[must_use]
-    pub fn coin_store_handle(&self) -> Arc<bitcoin_rs_storage::CoinStore> {
-        Arc::clone(&self.coins)
     }
 
     #[must_use]

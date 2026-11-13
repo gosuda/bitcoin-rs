@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+Production chainstate readers no longer expose writable coin-store or commit-authority handles. The retained fixture accessors require the existing test seam.
 Snapshot serialization derives a reader-owned view's MuHash trailer from the captured coins, not from a later live listener or a zero fallback.
 - Production UTXO readers no longer expose writable coin stores or mutable backing sets. Whole-set query images belong to their captured views and are released when those views drop. Transaction confirmation-height lookup uses the typed reader query.
 - Recreated outpoints remain readable after earlier incarnations are spent.

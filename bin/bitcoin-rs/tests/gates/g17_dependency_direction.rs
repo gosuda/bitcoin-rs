@@ -231,6 +231,10 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> Result<(), 
         "read_fence",
         "utxo",
         "utxo_handle",
+        "coins",
+        "commit_authority",
+        "coin_store",
+        "coin_store_handle",
         "apply_block",
         "apply_block_with_serialized",
         "disconnect_block",
@@ -252,6 +256,7 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> Result<(), 
     Ok(())
 }
 
+// ARCH-07a
 #[test]
 fn utxo_queries_expose_no_production_mutation_capability() -> Result<(), TestError> {
     let manifest = dependency_graph::workspace_root_manifest();
