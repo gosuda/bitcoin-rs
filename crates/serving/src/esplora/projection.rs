@@ -9,7 +9,7 @@ use bitcoin_rs_consensus::script::{instructions, is_p2sh, is_p2wsh};
 use bitcoin_rs_consensus::{BlockRuleContext, check_block_body_binding};
 use bitcoin_rs_execution::chain::{TipSnapshot, softfork_state};
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
-use bitcoin_rs_projection::ScriptHash;
+use bitcoin_rs_projection::{ScriptHash, TransactionBlock};
 
 use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
 use crate::convert::{self};
@@ -163,15 +163,14 @@ impl<'a> Projection<'a> {
             .esplora_tx_index
             .as_ref()
             .ok_or_else(|| service_unavailable("transaction lookup index is disabled"))?;
-        let transaction = index.transaction(txid).map_err(query_error)?;
-        transaction.map_or(Ok(None), |transaction| {
-            self.confirmation(txid).and_then(|confirmation| {
-                confirmation.map_or_else(
-                    || Err(service_unavailable("transaction confirmation unavailable")),
-                    |confirmation| Ok(Some((transaction, Some(confirmation), TxSource::Confirmed))),
-                )
+        index
+            .transaction_block(txid)
+            .map_err(query_error)?
+            .map(|(transaction, block)| {
+                let confirmation = self.confirmation_in_block(block)?;
+                Ok((transaction, Some(confirmation), TxSource::Confirmed))
             })
-        })
+            .transpose()
     }
 
     pub(super) fn confirmed_transaction(&self, txid: &Txid) -> Result<Tx, Response> {
@@ -202,10 +201,25 @@ impl<'a> Projection<'a> {
             .esplora_tx_index
             .as_ref()
             .ok_or_else(|| service_unavailable("transaction lookup index is disabled"))?;
-        Ok(index
-            .transaction_height(txid)
+        index
+            .transaction_block(txid)
             .map_err(query_error)?
-            .and_then(|height| self.confirmation_at_height(height)))
+            .map(|(_, block)| self.confirmation_in_block(block))
+            .transpose()
+    }
+
+    fn confirmation_in_block(&self, block: TransactionBlock) -> Result<Confirmation, Response> {
+        let record = self
+            .ctx
+            .chain
+            .block_by_hash(block.hash)
+            .filter(|record| record.height == block.height)
+            .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+        Ok(Confirmation {
+            height: block.height,
+            hash: record.hash,
+            time: record.time,
+        })
     }
 
     pub(super) fn confirmation_at_height(&self, height: u32) -> Option<Confirmation> {

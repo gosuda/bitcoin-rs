@@ -1069,7 +1069,7 @@ fn production_resolver_resolves_through_block_bodies() {
         }
     }
 
-    struct StubTxIndex(Txid);
+    struct StubTxIndex(Tx, bitcoin_rs_projection::TransactionBlock);
     impl bitcoin_rs_projection::DerivedIndexQuery for StubTxIndex {
         fn transaction(
             &self,
@@ -1083,11 +1083,14 @@ fn production_resolver_resolves_through_block_bodies() {
         ) -> Result<Option<u64>, bitcoin_rs_projection::TxQueryError> {
             Ok(None)
         }
-        fn transaction_height(
+        fn transaction_block(
             &self,
             txid: &Txid,
-        ) -> Result<Option<u32>, bitcoin_rs_projection::TxQueryError> {
-            Ok((self.0 == *txid).then_some(100))
+        ) -> Result<
+            Option<(Tx, bitcoin_rs_projection::TransactionBlock)>,
+            bitcoin_rs_projection::TxQueryError,
+        > {
+            Ok((self.0.txid() == *txid).then(|| (self.0.clone(), self.1)))
         }
         fn index_info(
             &self,
@@ -1131,12 +1134,16 @@ fn production_resolver_resolves_through_block_bodies() {
     let mut ctx = Context::new();
     ctx.compressed_transactions = true;
     ctx.chain.block_body_source = Some(Arc::new(StubBody(body)));
-    ctx.indexes.derived_index = Some(Arc::new(StubTxIndex(prev_tx.txid())));
+    ctx.indexes.derived_index = Some(Arc::new(StubTxIndex(
+        prev_tx.clone(),
+        bitcoin_rs_projection::TransactionBlock {
+            height: 100,
+            hash: block.block_hash().into(),
+        },
+    )));
     ctx.chain
         .add_block(bitcoin_rs_projection::block_log::BlockRecord {
-            hash: bitcoin_rs_consensus::primitives::BlockHash::from(
-                bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[9_u8; 32]),
-            ),
+            hash: block.block_hash(),
             height: 100,
             body_size: 0,
             header: None,
@@ -1593,7 +1600,7 @@ fn production_resolver_clones_only_the_requested_output() {
         }
     }
 
-    struct StubTxIndex(Txid);
+    struct StubTxIndex(Tx, bitcoin_rs_projection::TransactionBlock);
     impl bitcoin_rs_projection::DerivedIndexQuery for StubTxIndex {
         fn transaction(
             &self,
@@ -1607,11 +1614,14 @@ fn production_resolver_clones_only_the_requested_output() {
         ) -> Result<Option<u64>, bitcoin_rs_projection::TxQueryError> {
             Ok(None)
         }
-        fn transaction_height(
+        fn transaction_block(
             &self,
             txid: &Txid,
-        ) -> Result<Option<u32>, bitcoin_rs_projection::TxQueryError> {
-            Ok((self.0 == *txid).then_some(100))
+        ) -> Result<
+            Option<(Tx, bitcoin_rs_projection::TransactionBlock)>,
+            bitcoin_rs_projection::TxQueryError,
+        > {
+            Ok((self.0.txid() == *txid).then(|| (self.0.clone(), self.1)))
         }
         fn index_info(
             &self,
@@ -1660,12 +1670,16 @@ fn production_resolver_clones_only_the_requested_output() {
 
     let mut ctx = Context::new();
     ctx.chain.block_body_source = Some(Arc::new(StubBody(body)));
-    ctx.indexes.derived_index = Some(Arc::new(StubTxIndex(txid)));
+    ctx.indexes.derived_index = Some(Arc::new(StubTxIndex(
+        funding.clone(),
+        bitcoin_rs_projection::TransactionBlock {
+            height: 100,
+            hash: block.block_hash().into(),
+        },
+    )));
     ctx.chain
         .add_block(bitcoin_rs_projection::block_log::BlockRecord {
-            hash: bitcoin_rs_consensus::primitives::BlockHash::from(
-                bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[9_u8; 32]),
-            ),
+            hash: block.block_hash(),
             height: 100,
             body_size: 0,
             header: None,
