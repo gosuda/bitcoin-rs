@@ -12,7 +12,7 @@ use tempfile::tempdir;
 
 use super::support::error::{TestError, TestResult};
 use super::support::harness::{parse_report, run_converter};
-use super::support::oracle::write_schema_marker;
+use super::support::oracle::{write_rocksdb_namespace, write_schema_marker};
 
 const MARKER_TEXT: &[u8] = b"required\n";
 
@@ -130,14 +130,66 @@ fn epoch4_backend_copy_preserves_root_marker() -> TestResult {
     let to = dest.path().join("converted");
     write_schema_marker(source.path(), 4)?;
     fs::write(source.path().join(FULL_REVALIDATION_MARKER), MARKER_TEXT)?;
+
+    let height_key = b"head:height".to_vec();
+    let height_value = 101_u64.to_le_bytes().to_vec();
+    let tip_key = b"head:tip".to_vec();
+    let tip_value = b"000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f".to_vec();
+    let rows = vec![(
+        ColumnFamily::UtxoMeta,
+        vec![
+            (height_key.clone(), height_value.clone()),
+            (tip_key.clone(), tip_value.clone()),
+        ],
+    )];
+    write_rocksdb_namespace(&source.path().join("chainstate"), &rows)?;
+
     let output = run_converter(&["--from", path_str(source.path())?, "--to", path_str(&to)?])?;
     let report = parse_report(&output)?;
+
+    let chainstate = report
+        .namespaces
+        .iter()
+        .find(|namespace| namespace.namespace == "chainstate")
+        .ok_or_else(|| TestError::Assertion("chainstate namespace report missing".into()))?;
+    if chainstate.engine != "rocksdb" {
+        return Err(TestError::Assertion(format!(
+            "the epoch-4 source chainstate must be converted from a real rocksdb backend, found engine {:?}",
+            chainstate.engine
+        )));
+    }
+    let meta = chainstate
+        .families
+        .iter()
+        .find(|family| family.family == ColumnFamily::UtxoMeta.name())
+        .ok_or_else(|| TestError::Assertion("utxo_meta family report missing".into()))?;
+    if meta.row_count != 2 {
+        return Err(TestError::Assertion(format!(
+            "converted chainstate must carry both seeded rows, found {}",
+            meta.row_count
+        )));
+    }
+
     assert_eq!(report.carried_markers, vec![FULL_REVALIDATION_MARKER]);
     assert_eq!(fs::read(to.join(FULL_REVALIDATION_MARKER))?, MARKER_TEXT);
     assert_eq!(
         fs::read(source.path().join(FULL_REVALIDATION_MARKER))?,
         MARKER_TEXT
     );
+
+    let store = RocksDbStore::open(to.join("chainstate"))?;
+    assert_eq!(
+        store.get(ColumnFamily::UtxoMeta, &height_key)?,
+        Some(height_value)
+    );
+    assert_eq!(
+        store.get(ColumnFamily::UtxoMeta, &tip_key)?,
+        Some(tip_value)
+    );
+    drop(store);
+
+    let schema = fs::read_to_string(to.join("CURRENT_SCHEMA"))?;
+    assert_eq!(schema, "4\n");
     Ok(())
 }
 
