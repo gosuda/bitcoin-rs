@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::{
     AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, ChainstateRole, known_progress,
 };
-use crate::test_fixtures::{TestError, TestResult, handles};
+use crate::test_fixtures::{TestError, TestResult, handles, seed_durable_head, seed_genesis};
 use crate::{ApplyError, Chainstate};
 
 fn chainstate() -> Arc<Chainstate> {
@@ -1793,5 +1793,58 @@ fn rejects_assumeutxo_snapshot_with_truncated_headers() -> TestResult {
         result,
         Err(crate::assumeutxo_snapshot::SnapshotArchiveError::HeaderArchiveLength)
     ));
+    Ok(())
+}
+
+#[test]
+fn restored_coin_stats_scan_preserves_the_corrupt_row_utxo_error() -> TestResult {
+    let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chain)?;
+    seed_durable_head(
+        &chain,
+        DurableHead {
+            assumeutxo: AssumeUtxoDiskStatus::Uninitialized,
+            commit_id: 1,
+            height: 0,
+            tip: Hash256::from(Network::Regtest.genesis_block().block_hash()),
+            chain_tx_count: 1,
+            body_extent: None,
+            undo_extent: None,
+        },
+    )?;
+
+    let txid = Hash256::from_le_bytes(&[0x5A; 32]);
+    let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
+        txid,
+        &[bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+            vout: 0,
+            value: 1_000,
+            script_pubkey: vec![0x51],
+            coinbase: false,
+            height: 0,
+        }],
+    )?;
+    let mut row = record.bytes().to_vec();
+    row.truncate(20);
+    chain.commit_authority.store().put(
+        bitcoin_rs_storage::ColumnFamily::Coins,
+        bitcoin_rs_storage::CoinKey(txid.to_le_bytes()).as_bytes(),
+        &row,
+    )?;
+
+    let error = crate::recovery::settle_restored_coin_stats(&chain, None)
+        .err()
+        .ok_or(TestError::UnexpectedSuccess(
+            "a malformed coin row must fail the restored coin statistics scan",
+        ))?;
+    let crate::recovery::RecoveryError::Utxo(source) = error else {
+        return Err(TestError::Missing(
+            "the scan failure must keep its UtxoError cause",
+        ));
+    };
+    assert!(
+        matches!(source, bitcoin_rs_storage::utxo::UtxoError::CorruptRecord),
+        "the preserved cause must name the corrupt row, got {source:?}"
+    );
     Ok(())
 }
