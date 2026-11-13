@@ -172,6 +172,15 @@ impl UtxoSetView<'_> {
         &self.backing_set().shards[idx]
     }
 
+    pub(crate) fn snapshot_muhash_accumulator(
+        &self,
+    ) -> Option<crate::utxo::stats::CoinStatsAccumulator> {
+        match &self.backing {
+            ViewBacking::Owned(_) => Some(crate::utxo::stats::CoinStatsAccumulator::with_muhash(0)),
+            ViewBacking::Borrowed { .. } => None,
+        }
+    }
+
     pub(crate) fn listener_muhash3072(&self) -> Option<[u8; 384]> {
         self.backing_set()
             .listener
@@ -460,6 +469,7 @@ mod tests {
         Ok(())
     }
 
+    // ARCH-07a
     #[test]
     fn query_views_keep_independent_committed_snapshots() -> Result<(), UtxoError> {
         use crate::utxo::contract::UtxoAdd;
@@ -494,6 +504,51 @@ mod tests {
         drop(second);
         assert_eq!(first.get_entry(&outpoint).map(|coin| coin.height), Some(7));
         assert!(reader.get_entry(&outpoint)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn reader_snapshot_trailers_hash_the_captured_image_not_the_live_listener()
+    -> Result<(), UtxoError> {
+        use crate::utxo::contract::UtxoAdd;
+        use crate::utxo::stats::CoinStats;
+
+        let outpoint = OutPoint::new(Hash256::from_le_bytes(&[0xD1; 32]).into(), 3);
+        let txout = TxOut {
+            value: Amount::from_sat(29),
+            script_pubkey: Script::from_bytes(vec![0x51, 0x52]),
+        };
+        let mut expected = CoinStats::new();
+        expected.insert_utxo(&outpoint, &txout, 11, true);
+        let listener = CoinStatsListener::new(expected.clone());
+        let mut source = UtxoSet::new();
+        source.track_coin_stats(listener.clone());
+        let reader = UtxoReader::fixture_with_set(Arc::new(source))?;
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(outpoint, txout.clone(), true, 11));
+        reader.populate_fixture_coins(&changes)?;
+        let captured = reader.lock_stable_view()?;
+
+        let mut removal = BlockChanges::<TxOut>::default();
+        removal.remove(outpoint);
+        reader.populate_fixture_coins(&removal)?;
+        listener.reset(CoinStats::new());
+        let empty = reader.lock_stable_view()?;
+
+        let tip = Hash256::from_le_bytes(&[0xD2; 32]);
+        let mut bytes = Vec::new();
+        let (trailer, ()) = captured.write_snapshot_observed(&tip, 11, &mut bytes, ())?;
+        let expected_trailer = expected.muhash.finalize();
+        assert_ne!(expected_trailer, [0_u8; 384]);
+        assert_eq!(trailer, expected_trailer);
+        assert_eq!(&bytes[bytes.len() - 384..], &expected_trailer);
+        let decoded = crate::utxo::read_snapshot_strict_v4(&mut bytes.as_slice())?;
+        assert_eq!(decoded.set.get(&outpoint), Some(txout));
+
+        let mut empty_bytes = Vec::new();
+        let (empty_trailer, ()) = empty.write_snapshot_observed(&tip, 12, &mut empty_bytes, ())?;
+        assert_eq!(empty_trailer, CoinStats::new().muhash.finalize());
+        assert_ne!(trailer, empty_trailer);
         Ok(())
     }
 

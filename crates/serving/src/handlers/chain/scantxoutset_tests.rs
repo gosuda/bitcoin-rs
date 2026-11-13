@@ -1067,6 +1067,10 @@ fn scan_streams_engine_coins_without_resident_image() {
         );
     }
 
+    assert!(
+        ctx.chain.utxo.fixture_set().all_records().is_empty(),
+        "scantxoutset must not rebuild the resident coin image",
+    );
     let view = ctx
         .chain
         .utxo
@@ -1171,6 +1175,10 @@ fn scan_snapshot_ignores_commit_landing_mid_scan() {
     assert_eq!(
         result["total_amount"].as_f64(),
         Some(oracle_btc(expected_total)),
+    );
+    assert!(
+        ctx.chain.utxo.fixture_set().all_records().is_empty(),
+        "scantxoutset must not rebuild the resident coin image",
     );
     let view = ctx
         .chain
