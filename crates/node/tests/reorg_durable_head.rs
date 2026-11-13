@@ -197,6 +197,10 @@ fn recovery_publication_keeps_committed_coin_stats_across_restart() -> Result<()
         "listener amount must equal a full scan of the committed coin set"
     );
     assert_eq!(
+        served.bogo_size, expected.bogo_size,
+        "listener bogo_size must equal a full scan of the committed coin set"
+    );
+    assert_eq!(
         served.utxo_count, expected.utxo_count,
         "listener output count must equal a full scan of the committed coin set"
     );

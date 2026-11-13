@@ -41,6 +41,7 @@ struct ExpectedCacheAllocation {
     engine_capacity_bytes: u64,
 }
 
+// BUD-06
 #[test]
 fn opened_coin_cache_enforces_no_txindex_coin_share() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -61,6 +62,7 @@ fn opened_coin_cache_enforces_no_txindex_coin_share() -> Result<()> {
     )
 }
 
+// BUD-06
 #[test]
 fn opened_coin_cache_enforces_txindex_coin_share() -> Result<()> {
     let temp = tempfile::tempdir()?;

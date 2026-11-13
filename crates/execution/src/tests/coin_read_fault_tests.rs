@@ -25,7 +25,7 @@ use bitcoin_rs_storage::{
 use parking_lot::Mutex;
 
 use crate::test_fixtures::{TestError, TestResult, handles_with_store, seed_genesis};
-use crate::{ApplyError, Chainstate, WindowApplyDisposition};
+use crate::{ApplyError, Chainstate, DisconnectError, WindowApplyDisposition};
 
 struct PoisonedStore {
     inner: MemoryKvStore,
@@ -154,6 +154,7 @@ struct CoinReadFixture {
     chain: Chainstate,
     store: Arc<PoisonedStore>,
     payload: BlockImage,
+    block: Block,
     coin_key: CoinKey,
 }
 
@@ -216,7 +217,8 @@ fn coin_read_fixture() -> TestResult<CoinReadFixture> {
     Ok(CoinReadFixture {
         chain,
         store,
-        payload: BlockImage::from_local(block),
+        payload: BlockImage::from_local(block.clone()),
+        block,
         coin_key,
     })
 }
@@ -330,6 +332,81 @@ fn coin_read_error_never_invalidates_the_block() -> TestResult {
     assert_eq!(
         head.height, 0,
         "the refused window must not advance the head"
+    );
+    Ok(())
+}
+
+// CMT-04
+#[test]
+fn disconnect_coin_read_error_is_fatal_and_keeps_the_committed_head() -> TestResult {
+    let fixture = coin_read_fixture()?;
+    fixture.chain.apply_block(&fixture.payload)?;
+
+    let head_before = fixture
+        .chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("durable head"))?;
+    let tip_before = fixture
+        .chain
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("applied tip"))?;
+    let spend_outpoint = OutPoint::new(fixture.block.txs[1].txid(), 0);
+    fixture.store.fail_multi_get();
+
+    let Err(DisconnectError::Fatal {
+        hash,
+        height,
+        source,
+    }) = fixture.chain.disconnect_block(&fixture.block)
+    else {
+        return Err(TestError::UnexpectedSuccess(
+            "a coin read failure must refuse the disconnect",
+        ));
+    };
+    assert_eq!(hash, Hash256::from(fixture.block.block_hash()));
+    assert_eq!(height, 1);
+    let ApplyError::CoinStoreRead(storage_error) = source.as_ref() else {
+        return Err(TestError::Missing(
+            "the fatal disconnect must carry a coin store read error",
+        ));
+    };
+    assert!(
+        matches!(
+            storage_error,
+            StorageError::Io(injected) if injected.kind() == std::io::ErrorKind::Other
+        ),
+        "the fatal source must be the injected coin read fault, got {storage_error}"
+    );
+
+    let head_after = fixture
+        .chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("durable head"))?;
+    assert_eq!(
+        head_after.height, head_before.height,
+        "a failed disconnect must not move the committed head height"
+    );
+    assert_eq!(
+        head_after.tip, head_before.tip,
+        "a failed disconnect must not move the committed head tip"
+    );
+    assert_eq!(
+        head_after.commit_id, head_before.commit_id,
+        "a failed disconnect must not commit a new head"
+    );
+    let tip_after = fixture
+        .chain
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("applied tip"))?;
+    assert_eq!(
+        tip_after.hash, tip_before.hash,
+        "a failed disconnect must not move the applied tip"
+    );
+    assert!(
+        fixture.chain.utxo_reader().get(&spend_outpoint)?.is_some(),
+        "a failed disconnect must not drop the connected block's coins"
     );
     Ok(())
 }
