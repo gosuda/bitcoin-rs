@@ -170,6 +170,11 @@ Owners:
 - Dropping internal `TxLookup` when explicit `--txindex` is off resets only leftover persisted families.
 - Configured families never rebuild as a side effect.
 
+- Proof:
+  - `crates/projection/tests/index_roundtrip.rs`:
+    - `script_index_reset_preserves_tx_lookup_and_shared_identity`
+    - `tx_lookup_reset_preserves_script_history_directories`
+
 ### `IDX-05`: Restart reconciliation and schema version refusal
 
 - The `data_dir/txindex` namespace maintains durable format versions and capability watermarks (`IndexWatermarks`, `ConsumerCursor`).
