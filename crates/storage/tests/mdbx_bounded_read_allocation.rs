@@ -47,6 +47,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
 #[global_allocator]
 static ALLOCATOR: TrackingAllocator = TrackingAllocator;
 
+// API-02
 #[test]
 fn bounded_read_rejects_before_value_allocation() -> TestResult {
     let dir = tempfile::tempdir()?;
