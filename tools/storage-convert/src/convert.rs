@@ -515,6 +515,7 @@ fn convert_generation_root(
     for name in &generation_names {
         convert_generation_image(&src_root, &dst_root, ctx, root_name, name)?;
     }
+    sync_dir(&dst_root)?;
     Ok(())
 }
 
@@ -582,7 +583,10 @@ fn convert_generation_image(
     copy_generation_sidecars(&mut copy, name)?;
     let engine_dir = match src_gen.open_dir_nofollow(GENERATION_ENGINE_DIR) {
         Ok(dir) => dir,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            sync_dir(&dst_gen)?;
+            return Ok(());
+        }
         Err(err) if err.kind() == io::ErrorKind::NotADirectory => {
             return Err(ConvertError::IncompatibleData(format!(
                 "checkpoint generation {name} has a malformed engine entry"
@@ -609,6 +613,7 @@ fn convert_generation_image(
     };
     let report = convert_namespace(paths, 4, ctx.target_engine)?;
     cleanup_scratch(&dst_gen)?;
+    sync_dir(&dst_gen)?;
     if report.engine != "empty" {
         ctx.reports.push(report);
     }
