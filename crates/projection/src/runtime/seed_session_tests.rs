@@ -187,3 +187,164 @@ fn staging_needs_no_draining_worker() -> Result<(), SeedSessionTestError> {
     );
     Ok(())
 }
+
+// SNP-07
+#[test]
+fn a_seed_replaces_the_published_live_base() -> Result<(), SeedSessionTestError> {
+    let f = ForkFixture::new(4);
+    f.persist_undo();
+    let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
+    let first = f.tip(f.a[1]);
+    h.stage_seed_rows(&first, 4);
+    h.set_tip(&first);
+    let mut pending = None;
+    h.settle(&mut pending);
+    assert_eq!(h.watermarks().script_live, Some(at(&first)));
+    assert_eq!(h.live_row_count(), 4, "the first seed owns the live base");
+
+    let second = f.tip(f.a[3]);
+    h.stage_seed_rows(&second, 2);
+    h.set_tip(&second);
+    h.settle(&mut pending);
+    assert_eq!(
+        h.watermarks().script_live,
+        Some(at(&second)),
+        "the higher seed must publish over the replaced base"
+    );
+    assert_eq!(
+        h.live_row_count(),
+        2,
+        "the replaced base holds only the new seed's rows"
+    );
+    h.assert_at(&second);
+    assert_eq!(
+        h.runtime.script_live_seed().phase(),
+        ScriptLiveSeedPhase::Idle
+    );
+    Ok(())
+}
+
+// SNP-07
+#[test]
+fn an_abort_before_decode_preserves_the_published_live_base() -> Result<(), SeedSessionTestError> {
+    let f = ForkFixture::new(2);
+    f.persist_undo();
+    let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
+    let base = f.tip(f.a[1]);
+    h.stage_seed_rows(&base, 4);
+    h.set_tip(&base);
+    let mut pending = None;
+    h.settle(&mut pending);
+    assert_eq!(h.watermarks().script_live, Some(at(&base)));
+    assert_eq!(h.live_row_count(), 4);
+
+    let seed = h.runtime.script_live_seed();
+    let session = seed.begin_session()?;
+    session.abort();
+    drop(session);
+    h.settle(&mut pending);
+    assert_eq!(seed.phase(), ScriptLiveSeedPhase::Idle);
+    assert_eq!(seed.staged_rows(), 0);
+    assert!(seed.take_backlog(usize::MAX)?.is_empty());
+    assert_eq!(
+        h.watermarks().script_live,
+        Some(at(&base)),
+        "a seed rejected before decoding must preserve the published base"
+    );
+    assert_eq!(
+        h.live_row_count(),
+        4,
+        "the published rows must survive the abort"
+    );
+    Ok(())
+}
+
+// SNP-07
+#[test]
+fn an_abort_after_staging_preserves_the_published_live_base() -> Result<(), SeedSessionTestError> {
+    let f = ForkFixture::new(3);
+    f.persist_undo();
+    let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
+    let first = f.tip(f.a[1]);
+    h.stage_seed_rows(&first, 4);
+    h.set_tip(&first);
+    let mut pending = None;
+    h.settle(&mut pending);
+    assert_eq!(h.watermarks().script_live, Some(at(&first)));
+
+    let second = f.tip(f.a[2]);
+    let seed = h.runtime.script_live_seed();
+    let session = seed.begin_session()?;
+    {
+        let mut observer = session.observer();
+        for index in 0..3 {
+            observer.observe_coin(coin(index, 3));
+        }
+    }
+    assert!(session.take_error().is_none());
+    h.set_tip(&second);
+    assert!(
+        h.stalled_pass(&mut pending),
+        "an open seed pass must stall while the published base is present"
+    );
+    session.abort();
+    drop(session);
+    h.settle(&mut pending);
+    assert_eq!(seed.phase(), ScriptLiveSeedPhase::Idle);
+    assert_eq!(seed.staged_rows(), 0);
+    assert!(seed.take_backlog(usize::MAX)?.is_empty());
+    assert_eq!(
+        h.watermarks().script_live,
+        Some(at(&second)),
+        "the preserved base must carry forward to the applied tip"
+    );
+    Ok(())
+}
+
+// SNP-07
+#[test]
+fn a_seed_at_or_below_the_published_base_is_already_covered() -> Result<(), SeedSessionTestError> {
+    let f = ForkFixture::new(3);
+    f.persist_undo();
+    let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
+    let tip = f.tip(f.a[2]);
+    h.stage_seed_rows(&tip, 4);
+    h.set_tip(&tip);
+    let mut pending = None;
+    h.settle(&mut pending);
+    assert_eq!(h.watermarks().script_live, Some(at(&tip)));
+    let rows_before = h.live_row_count();
+    assert!(rows_before > 0, "the published base must hold rows");
+
+    let seed = h.runtime.script_live_seed();
+    let lower = f.tip(f.a[1]);
+    let session = seed.begin_session()?;
+    {
+        let mut observer = session.observer();
+        for index in 0..2 {
+            observer.observe_coin(coin(index, lower.height));
+        }
+    }
+    session.publish(at(&lower));
+    assert!(h.stalled_pass(&mut pending));
+    assert_eq!(
+        seed.phase(),
+        ScriptLiveSeedPhase::PublishPending { tip: at(&lower) }
+    );
+    drop(session);
+    h.settle(&mut pending);
+    assert_eq!(seed.phase(), ScriptLiveSeedPhase::Idle);
+    assert_eq!(seed.staged_rows(), 0);
+    assert!(seed.take_backlog(usize::MAX)?.is_empty());
+    assert_eq!(
+        h.watermarks().script_live,
+        Some(at(&tip)),
+        "a seed at or below the published base must not move the watermark"
+    );
+    assert_eq!(
+        h.live_row_count(),
+        rows_before,
+        "a covered seed must leave the published rows untouched"
+    );
+    Ok(())
+}

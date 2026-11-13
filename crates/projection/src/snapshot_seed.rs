@@ -176,9 +176,17 @@ impl ScriptLiveSeedState {
     }
 
     fn notify_wake(&self, staged: u64) {
-        if staged.is_multiple_of(SEED_WAKE_ROWS)
-            && let Some(wake) = self.wake.lock().as_ref()
-        {
+        if staged.is_multiple_of(SEED_WAKE_ROWS) {
+            self.wake_worker();
+        }
+    }
+
+    /// SNP-07: the one owner for worker wake on seed lifecycle changes. The
+    /// caller publishes the new state first, and the callback runs with neither
+    /// the phase lock, the queue lock, nor the wake lock held.
+    fn wake_worker(&self) {
+        let wake = self.wake.lock().clone();
+        if let Some(wake) = wake {
             wake();
         }
     }
@@ -234,26 +242,33 @@ impl ScriptLiveSeedState {
 
     pub(crate) fn close_session(&self) {
         self.closed.store(true, Ordering::Release);
-        self.request_abort();
+        self.request_transition(ScriptLiveSeedPhase::AbortPending);
     }
 
     pub(crate) fn request_publish(&self, tip: IndexWatermark) {
-        let mut phase = self.phase.lock();
-        if matches!(*phase, ScriptLiveSeedPhase::Seeding) {
-            *phase = ScriptLiveSeedPhase::PublishPending { tip };
-        }
+        self.request_transition(ScriptLiveSeedPhase::PublishPending { tip });
     }
 
     pub(crate) fn request_abort(&self) {
-        {
+        self.request_transition(ScriptLiveSeedPhase::AbortPending);
+    }
+
+    /// SNP-07: publishes the requested transition, then wakes the worker. A
+    /// closed session always wakes, because an abort requested before the drop
+    /// may have woken a worker that found staging still open and the queue
+    /// empty, and no later end-of-stream event would reach it.
+    fn request_transition(&self, next: ScriptLiveSeedPhase) {
+        let transitioned = {
             let mut phase = self.phase.lock();
-            if !matches!(*phase, ScriptLiveSeedPhase::Seeding) {
-                return;
+            if matches!(*phase, ScriptLiveSeedPhase::Seeding) {
+                *phase = next;
+                true
+            } else {
+                false
             }
-            *phase = ScriptLiveSeedPhase::AbortPending;
-        }
-        if let Some(wake) = self.wake.lock().as_ref() {
-            wake();
+        };
+        if transitioned || self.is_closed() {
+            self.wake_worker();
         }
     }
 
@@ -571,42 +586,163 @@ mod tests {
     }
 
     // SNP-07
-    #[test]
-    fn dropped_session_wakes_worker_with_abort_pending() {
-        let seed = Arc::new(ScriptLiveSeedState::new());
-        let wake_count = Arc::new(AtomicU64::new(0));
-        let observed = Arc::new(Mutex::new(None));
-        let cb_seed = Arc::downgrade(&seed);
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct SeedWake {
+        phase: ScriptLiveSeedPhase,
+        closed: bool,
+    }
+
+    fn watch_wakes(seed: &Arc<ScriptLiveSeedState>) -> Arc<Mutex<Vec<SeedWake>>> {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let cb_seed = Arc::downgrade(seed);
         let cb_observed = Arc::clone(&observed);
-        let cb_wakes = Arc::clone(&wake_count);
         seed.set_wake(Arc::new(move || {
             let Some(cb_seed) = cb_seed.upgrade() else {
                 return;
             };
-            *cb_observed.lock() = Some(cb_seed.phase());
-            cb_wakes.fetch_add(1, Ordering::AcqRel);
+            let sample = SeedWake {
+                phase: cb_seed.phase(),
+                closed: cb_seed.is_closed(),
+            };
+            cb_observed.lock().push(sample);
         }));
+        observed
+    }
+
+    // SNP-07
+    #[test]
+    fn dropped_session_wakes_worker_with_abort_pending() {
+        let seed = Arc::new(ScriptLiveSeedState::new());
+        let observed = watch_wakes(&seed);
         let session = seed.begin_session().expect("session");
         {
             let mut observer = session.observer();
             observer.observe_coin(coin(0));
         }
-        assert_eq!(
-            wake_count.load(Ordering::Acquire),
-            0,
+        assert!(
+            observed.lock().is_empty(),
             "staging below the wake threshold must not wake the worker"
         );
         drop(session);
         assert_eq!(seed.phase(), ScriptLiveSeedPhase::AbortPending);
         assert_eq!(
-            wake_count.load(Ordering::Acquire),
-            1,
-            "closing the session must wake the worker"
+            *observed.lock(),
+            vec![SeedWake {
+                phase: ScriptLiveSeedPhase::AbortPending,
+                closed: true,
+            }],
+            "closing the session must wake the worker with the abort and the close visible"
         );
+    }
+
+    // SNP-07
+    #[test]
+    fn abort_before_drop_wakes_on_the_close_transition() {
+        let seed = Arc::new(ScriptLiveSeedState::new());
+        let observed = watch_wakes(&seed);
+        let session = seed.begin_session().expect("session");
+        {
+            let mut observer = session.observer();
+            observer.observe_coin(coin(0));
+            observer.observe_coin(coin(1));
+        }
+        session.abort();
+        assert_eq!(seed.phase(), ScriptLiveSeedPhase::AbortPending);
+        assert!(!seed.is_closed(), "an abort must not close staging");
         assert_eq!(
             *observed.lock(),
-            Some(ScriptLiveSeedPhase::AbortPending),
-            "wake must observe the abort transition, proving the phase lock was released"
+            vec![SeedWake {
+                phase: ScriptLiveSeedPhase::AbortPending,
+                closed: false,
+            }],
+            "the abort wake must observe the pending abort while staging is open"
+        );
+        drop(session);
+        assert!(seed.is_closed());
+        assert_eq!(
+            *observed.lock(),
+            vec![
+                SeedWake {
+                    phase: ScriptLiveSeedPhase::AbortPending,
+                    closed: false,
+                },
+                SeedWake {
+                    phase: ScriptLiveSeedPhase::AbortPending,
+                    closed: true,
+                },
+            ],
+            "closing an already-aborted session must wake the worker with the close visible"
+        );
+        assert_eq!(
+            seed.take_backlog(usize::MAX).expect("staged rows").len(),
+            2,
+            "an aborted seed keeps its staged rows for the discard pass"
+        );
+        seed.complete_abort();
+        assert_eq!(seed.phase(), ScriptLiveSeedPhase::Idle);
+        assert_eq!(seed.staged_rows(), 0);
+        assert!(
+            seed.take_backlog(usize::MAX)
+                .expect("drained rows")
+                .is_empty(),
+            "completing the abort must clear the staged rows"
+        );
+    }
+
+    // SNP-07
+    #[test]
+    fn publish_wakes_worker_before_the_session_drops() {
+        let seed = Arc::new(ScriptLiveSeedState::new());
+        let observed = watch_wakes(&seed);
+        let session = seed.begin_session().expect("session");
+        {
+            let mut observer = session.observer();
+            observer.observe_coin(coin(0));
+        }
+        let tip = IndexWatermark {
+            height: 7,
+            hash: [0x11; 32],
+        };
+        session.publish(tip);
+        assert_eq!(seed.phase(), ScriptLiveSeedPhase::PublishPending { tip });
+        assert!(!seed.is_closed(), "publishing must not close staging");
+        assert_eq!(
+            *observed.lock(),
+            vec![SeedWake {
+                phase: ScriptLiveSeedPhase::PublishPending { tip },
+                closed: false,
+            }],
+            "publishing must wake the worker with the pending tip visible"
+        );
+        drop(session);
+        assert_eq!(
+            *observed.lock(),
+            vec![
+                SeedWake {
+                    phase: ScriptLiveSeedPhase::PublishPending { tip },
+                    closed: false,
+                },
+                SeedWake {
+                    phase: ScriptLiveSeedPhase::PublishPending { tip },
+                    closed: true,
+                },
+            ],
+            "closing a published session must wake the worker with the close visible"
+        );
+        let rows = seed.take_backlog(usize::MAX).expect("staged rows");
+        assert_eq!(
+            rows,
+            vec![ScriptLiveSeedState::encode_row(&coin(0)).expect("encoded row")],
+            "publishing keeps the staged rows for the publish pass"
+        );
+        seed.complete_publish();
+        assert_eq!(seed.phase(), ScriptLiveSeedPhase::Idle);
+        assert_eq!(seed.staged_rows(), 0);
+        assert!(
+            seed.take_backlog(usize::MAX)
+                .expect("drained rows")
+                .is_empty(),
+            "completing the publish must clear the staged rows"
         );
     }
 }

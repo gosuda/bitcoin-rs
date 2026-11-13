@@ -120,6 +120,9 @@ impl Worker {
 
     fn seed_pass_stage_rows(&self) -> Result<SeedPass, DerivedIndexWorkerError> {
         self.prepare_seed_rows()?;
+        if self.published_live_seed()?.is_some() {
+            return Ok(SeedPass::Stall);
+        }
         loop {
             match self.collect_seed_batch()? {
                 SeedBatch::Rows(rows) => self.stage_seed_rows(rows)?,
@@ -158,16 +161,29 @@ impl Worker {
         watermarks: &mut IndexWatermarks,
     ) -> Result<SeedPass, DerivedIndexWorkerError> {
         self.prepare_seed_rows()?;
-        loop {
-            match self.collect_seed_batch()? {
-                SeedBatch::Rows(rows) => self.stage_seed_rows(rows)?,
-                SeedBatch::Empty => return Ok(SeedPass::Stall),
-                SeedBatch::Disconnected => break,
-            }
+        let published = self.published_live_seed()?;
+        let covered = published.is_some_and(|watermark| tip.height <= watermark.height);
+        if covered && !seed.is_closed() {
+            return Ok(SeedPass::Stall);
         }
-        self.writer
-            .publish_script_live_seed(tip)
-            .map_err(DerivedIndexWorkerError::Index)?;
+        if published.is_some() && !covered {
+            self.writer
+                .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
+                .map_err(DerivedIndexWorkerError::Index)?;
+            tracing::warn!("replaced the published ScriptLive base for the snapshot seed");
+        }
+        if !covered {
+            loop {
+                match self.collect_seed_batch()? {
+                    SeedBatch::Rows(rows) => self.stage_seed_rows(rows)?,
+                    SeedBatch::Empty => return Ok(SeedPass::Stall),
+                    SeedBatch::Disconnected => break,
+                }
+            }
+            self.writer
+                .publish_script_live_seed(tip)
+                .map_err(DerivedIndexWorkerError::Index)?;
+        }
         self.runtime.clear_script_live();
         seed.complete_publish();
         let (next_fence, next_watermarks) = self
@@ -190,9 +206,13 @@ impl Worker {
                 SeedBatch::Disconnected => break,
             }
         }
-        self.writer
-            .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
-            .map_err(DerivedIndexWorkerError::Index)?;
+        if self
+            .writer
+            .reset_interrupted_script_live_seed()
+            .map_err(DerivedIndexWorkerError::Index)?
+        {
+            tracing::warn!("cleared ScriptLive rows left by an aborted seed");
+        }
         seed.complete_abort();
         Ok(SeedPass::Discarded)
     }
@@ -202,6 +222,21 @@ impl Worker {
             .stage_script_live_rows(&mut rows.into_iter())
             .map_err(DerivedIndexWorkerError::Index)?;
         Ok(())
+    }
+
+    /// SNP-07: a published ScriptLive watermark means the live base already
+    /// covers committed history; a seed replaces it only at publish time,
+    /// when the seed tip is known to be higher.
+    fn published_live_seed(&self) -> Result<Option<IndexWatermark>, DerivedIndexWorkerError> {
+        if !self.enabled.contains(IndexCapability::ScriptLive) {
+            return Ok(None);
+        }
+        Ok(self
+            .writer
+            .fenced_watermarks()
+            .map_err(DerivedIndexWorkerError::Index)?
+            .1
+            .script_live)
     }
 
     fn collect_seed_batch(&self) -> Result<SeedBatch, DerivedIndexWorkerError> {

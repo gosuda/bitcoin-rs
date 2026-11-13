@@ -395,7 +395,8 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 - Neither the coin store nor the index base can be published before the UTXO commitment is verified.
 - The node must discard temporary data from an invalid snapshot.
-- Closing a rejected seed session MUST wake the worker after the abort transition. The callback MUST run without the phase lock.
+- Closing a rejected seed session MUST wake the worker after the abort transition, and requesting publish MUST wake it after the pending transition is visible; closing a session MUST wake the worker after `closed` is stored even when the phase already left `Seeding`. The callback MUST run without the phase, queue, or wake lock held.
+- An aborted or rejected seed MUST preserve an already-published ScriptLive base; a seed whose tip exceeds the published watermark replaces that base only at publish time.
 
 ### `SNP-08`: Single historical block interpreter
 

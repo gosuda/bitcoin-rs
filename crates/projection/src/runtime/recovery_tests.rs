@@ -1570,6 +1570,21 @@ impl SeedCellHarness {
         self.writer.fenced_watermarks().expect("watermarks").1
     }
 
+    pub(super) fn live_row_count(&self) -> usize {
+        self.store
+            .iter_prefix(ColumnFamily::ScriptLive, &[])
+            .expect("live scan")
+            .filter_map(std::result::Result::ok)
+            .count()
+    }
+
+    pub(super) fn stalled_pass(&self, pending: &mut Option<PendingForward>) -> bool {
+        matches!(
+            self.worker.reconcile_once(pending).expect("reconcile pass"),
+            ReconcileAction::Stalled
+        )
+    }
+
     pub(super) fn assert_at(&self, tip: &TipSnapshot) {
         let expected = Some(IndexWatermark {
             height: tip.height,
