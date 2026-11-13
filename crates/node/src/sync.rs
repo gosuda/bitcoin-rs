@@ -83,6 +83,23 @@ fn settle_window_failure(
     error
 }
 
+fn settle_window_refused(
+    transition: bitcoin_rs_execution::ChainTransition<'_>,
+    mempool_change: Option<bitcoin_rs_mempool::ChainChangeGuard>,
+    refusal: WindowCommitError,
+) -> WindowCommitError {
+    let handles = transition.chainstate();
+    handles.fail_closed_for_recovery();
+    drop(mempool_change);
+    drop(transition);
+    tracing::error!(
+        refusal = %refusal.source,
+        "chain transition halted after a committed window: a follower refused settlement; \
+         mempool admission stays closed until recovery or restart"
+    );
+    refusal
+}
+
 fn settle_window_success(
     transition: bitcoin_rs_execution::ChainTransition<'_>,
     mempool_change: Option<bitcoin_rs_mempool::ChainChangeGuard>,
@@ -249,39 +266,44 @@ impl SyncChain for NodeSyncChain {
                     source: source.into(),
                 })?;
         let _foreground = self.budget.cpu().acquire_foreground();
-        let mut refused = None;
-        let result = match transition.connect_window(payloads) {
+        match transition.connect_window(payloads) {
             Ok(outcomes) => {
-                for (index, (payload, outcome)) in payloads.iter().zip(&outcomes).enumerate() {
-                    if let Err(source) = self.followers.on_connect(payload, outcome) {
-                        refused = Some(refused_window(index, source));
-                        break;
+                match settle_committed_followers(&self.followers, payloads, &outcomes) {
+                    Ok(()) => {
+                        settle_window_success(transition, mempool_change, outcomes.len(), outcomes)
+                            .map_err(window_commit_error)
                     }
+                    Err(refusal) => Err(settle_window_refused(
+                        transition,
+                        mempool_change,
+                        WindowCommitError {
+                            applied: outcomes.len(),
+                            ..refused_window(refusal)
+                        },
+                    )),
                 }
-                let applied = outcomes.len();
-                settle_window_success(transition, mempool_change, applied, outcomes)
             }
             Err(error) => {
-                for (index, (payload, outcome)) in payloads.iter().zip(&error.committed).enumerate()
-                {
-                    if let Err(source) = self.followers.on_connect(payload, outcome) {
-                        refused = Some(refused_window(index, source));
-                        break;
-                    }
+                let settled =
+                    settle_committed_followers(&self.followers, payloads, &error.committed);
+                match settled {
+                    Ok(()) => Err(window_commit_error(settle_window_failure(
+                        transition,
+                        mempool_change,
+                        error,
+                    ))),
+                    Err(refusal) => Err(settle_window_refused(
+                        transition,
+                        mempool_change,
+                        WindowCommitError {
+                            applied: error.applied,
+                            invalidated: error.invalidated,
+                            ..refused_window(refusal)
+                        },
+                    )),
                 }
-                Err(settle_window_failure(transition, mempool_change, error))
             }
-        };
-        let result = result.map_err(|error| WindowCommitError {
-            applied: error.applied,
-            disposition: error.disposition,
-            invalidated: error.invalidated,
-            source: (*error.source).into(),
-        });
-        if let Some(refusal) = fold_follower_refusal(&result, refused) {
-            return Err(refusal);
         }
-        result
     }
 
     fn switch_to_branch(
@@ -305,26 +327,33 @@ impl SyncChain for NodeSyncChain {
     }
 }
 
-fn refused_window(index: usize, source: bitcoin_rs_mempool::MempoolError) -> WindowCommitError {
+fn refused_window(source: bitcoin_rs_mempool::MempoolError) -> WindowCommitError {
     WindowCommitError {
-        applied: index,
-        disposition: WindowApplyDisposition::Operational,
+        applied: 0,
+        disposition: WindowApplyDisposition::Fatal,
         invalidated: Box::default(),
         source: SyncChainError::Message(format!("mempool settlement refused: {source}")),
     }
 }
 
-fn fold_follower_refusal(
-    result: &Result<usize, WindowCommitError>,
-    refused: Option<WindowCommitError>,
-) -> Option<WindowCommitError> {
-    let Ok(committed) = result else {
-        return None;
-    };
-    refused.map(|refusal| WindowCommitError {
-        applied: *committed,
-        ..refusal
-    })
+fn settle_committed_followers(
+    followers: &crate::chain_effects::ChainFollowers,
+    payloads: &[&BlockImage],
+    committed: &[bitcoin_rs_execution::ConnectOutcome],
+) -> core::result::Result<(), bitcoin_rs_mempool::MempoolError> {
+    for (payload, outcome) in payloads.iter().zip(committed) {
+        followers.on_connect(payload, outcome)?;
+    }
+    Ok(())
+}
+
+fn window_commit_error(error: bitcoin_rs_execution::WindowApplyError) -> WindowCommitError {
+    WindowCommitError {
+        applied: error.applied,
+        disposition: error.disposition,
+        invalidated: error.invalidated,
+        source: (*error.source).into(),
+    }
 }
 
 #[cfg(test)]
