@@ -63,7 +63,7 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
     let expected_utxo_hash = state
         .chainstate()
         .utxo_reader()
-        .with_stable_view(stable_hash)?;
+        .with_stable_view(stable_hash)??;
     let expected_stats = state.chainstate().coin_stats_handle().snapshot();
     assert!(state.publish_checkpoint()?.is_some());
     drop(state);
@@ -87,7 +87,7 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
         resumed
             .chainstate()
             .utxo_reader()
-            .with_stable_view(stable_hash)?,
+            .with_stable_view(stable_hash)??,
         expected_utxo_hash
     );
     assert_eq!(
@@ -113,7 +113,7 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
         .utxo_reader()
         .with_stable_view(|view| {
             bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, next_tip.height, true)
-        })?;
+        })??;
     rescanned.tx_count = listener_after_apply.tx_count;
     assert_eq!(
         listener_after_apply.total_amount, rescanned.total_amount,

@@ -1,4 +1,5 @@
 use crate::chain::TipSnapshot;
+pub use crate::checkpoint::validate_conversion_checkpoint_artifacts;
 use bitcoin_rs_storage::ScriptAttestation;
 use bitcoin_rs_storage::checkpoint::CheckpointLoadError;
 use bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER;
@@ -54,6 +55,10 @@ pub enum RecoveryError {
     },
     #[error("snapshot-base checkpoint does not match the pinned commitment/count")]
     PinnedCheckpointMismatch,
+    #[error(
+        "runtime checkpoint is missing its engine image; recover a complete checkpoint or resync into a new datadir"
+    )]
+    CheckpointEngineImageMissing,
     #[error(
         "full validation requires an unpruned datadir; restart with --validation-mode assume-valid or resync"
     )]
@@ -135,11 +140,11 @@ pub struct RestoredState {
 
 /// Installs a restored state into `chain` before any replayed block runs.
 ///
-/// Warm: copies the checkpoint engine snapshot's rows into the chain engine
-/// (every column family except `UtxoMeta`; the live durable head and its
-/// attestation stay authoritative and are re-certified by replay). Cold: wipes
-/// the derived coin namespace and leaves head, undo and body-index rows in
-/// place. The resident UtxoSet is replaced but never seeds the engine.
+/// Warm: copies absent `UndoData`, `BlockBodies` and `Coins` rows from the
+/// checkpoint engine snapshot into the chain engine; existing rows, the live
+/// durable head and its attestation stay authoritative. Cold: wipes the derived
+/// coin namespace and leaves head, undo and body-index rows in place. The
+/// resident UtxoSet is replaced but never seeds the engine.
 pub fn install_restored_state(
     chain: &mut crate::Chainstate,
     restored: RestoredState,
@@ -206,25 +211,34 @@ pub fn install_engine_checkpoint(
         }
         target.write_durable(batch)?;
     }
-    let rows = snap
-        .iter_prefix(Coins, &[])?
-        .map(|row| {
-            let (key, value) = row?;
-            Ok((
-                bitcoin_rs_storage::CoinKey::from_slice(&key)?,
-                bytes::Bytes::from(value),
-            ))
-        })
-        .collect::<Result<Vec<_>, bitcoin_rs_storage::StorageError>>()?;
-    let absent_rows: Vec<(bitcoin_rs_storage::CoinKey, bytes::Bytes)> = rows
-        .into_iter()
-        .filter_map(|(key, value)| match target.get(Coins, key.as_bytes()) {
-            Ok(None) => Some(Ok((key, value))),
-            Ok(Some(_)) => None,
-            Err(e) => Some(Err(e)),
-        })
-        .collect::<Result<Vec<_>, bitcoin_rs_storage::StorageError>>()?;
-    chain.coins.ingest_sorted(absent_rows.into_iter())
+    let mut rows = snap.iter_prefix(Coins, &[])?;
+    let mut source_error = None;
+    let absent_rows = std::iter::from_fn(|| {
+        if source_error.is_some() {
+            return None;
+        }
+        loop {
+            let row = rows.next()?;
+            let absent_row = (|| {
+                let (key, value) = row?;
+                let key = bitcoin_rs_storage::CoinKey::from_slice(&key)?;
+                if target.get(Coins, key.as_bytes())?.is_some() {
+                    return Ok(None);
+                }
+                Ok(Some((key, bytes::Bytes::from(value))))
+            })();
+            match absent_row {
+                Ok(Some(row)) => return Some(row),
+                Ok(None) => continue,
+                Err(error) => {
+                    source_error = Some(error);
+                    return None;
+                }
+            }
+        }
+    });
+    chain.coins.ingest_sorted(absent_rows)?;
+    source_error.map_or(Ok(()), Err)
 }
 
 fn height_bytes(key: &[u8], start: usize) -> Option<u32> {
@@ -326,33 +340,16 @@ fn restore_snapshot_with_engine(
             .and_then(|id| restored.tree.node(id).ok())
             .is_some_and(|node| node.hash == pinned.block_hash);
         if compatible {
+            let image = restored
+                .engine
+                .as_ref()
+                .ok_or(RecoveryError::CheckpointEngineImageMissing)?;
             if restored.applied_tip.height == pinned.height {
-                let coins_match = match restored.engine.as_ref() {
-                    Some(image) => {
-                        let snap = image.snapshot().map_err(RecoveryError::Storage)?;
-                        let coins = bitcoin_rs_storage::utxo::UtxoSet::new();
-                        for row in snap.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
-                            let (_key, value) = row?;
-                            coins.insert_parsed_record(
-                                bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(
-                                    value.into_boxed_slice(),
-                                )
-                                .map_err(RecoveryError::Utxo)?,
-                            );
-                        }
-                        coins
-                            .lock_stable_view()
-                            .hash_serialized_3_at_height(pinned.height)?
-                            == pinned.hash_serialized
-                    }
-                    None => {
-                        restored
-                            .utxo
-                            .lock_stable_view()
-                            .hash_serialized_3_at_height(pinned.height)?
-                            == pinned.hash_serialized
-                    }
-                };
+                let snap = image.snapshot().map_err(RecoveryError::Storage)?;
+                let coins_match = bitcoin_rs_storage::utxo::snapshot::hash_serialized_3_snapshot(
+                    snap.as_ref(),
+                    Some(pinned.height),
+                )? == pinned.hash_serialized;
                 if !coins_match
                     || restored.applied_tip.chain_tx_count.to_wire() != pinned.chain_tx_count
                 {
@@ -482,6 +479,9 @@ pub fn prepare_initial_state_with_engine(
             engine: None,
             _scratch: None,
         });
+    }
+    if restored.engine.is_none() {
+        return Err(RecoveryError::CheckpointEngineImageMissing);
     }
     let engine = restored.engine.clone();
     let (initial, scratch) = restored_initial(*restored)?;

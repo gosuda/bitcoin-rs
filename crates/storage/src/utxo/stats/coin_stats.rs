@@ -416,6 +416,25 @@ impl CoinStatsListener {
             .remove_utxo(op, txout, height, coinbase);
     }
 
+    pub(crate) fn apply_utxos<'a>(
+        &self,
+        updates: impl IntoIterator<Item = (bool, &'a OutPoint, &'a TxOut, u32, bool)>,
+    ) {
+        let mut guard = self.state.lock();
+        let stats = &mut guard.stats;
+        let mut encoded = Vec::new();
+        for (insert, op, txout, height, coinbase) in updates {
+            coin_hash_bytes_into(&mut encoded, op, txout, height, coinbase);
+            if insert {
+                stats.muhash.insert(&encoded);
+                stats.account_insert(txout);
+            } else {
+                stats.muhash.remove(&encoded);
+                stats.account_remove(txout);
+            }
+        }
+    }
+
     pub fn finish_block(&self, height: u32, tx_delta: u64) {
         self.state.lock().stats.finish_block(height, tx_delta);
     }

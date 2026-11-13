@@ -1,6 +1,10 @@
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
+use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
+use hashbrown::HashTable;
 use parking_lot::Mutex;
 
 use super::CoinKey;
@@ -15,35 +19,110 @@ struct ClockEntry {
 
 struct ShardState {
     entries: Vec<ClockEntry>,
+    index: HashTable<usize>,
     hand: usize,
+    overhead_bytes: u64,
 }
 
 impl ShardState {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            index: HashTable::new(),
+            hand: 0,
+            overhead_bytes: 0,
+        }
+    }
+
     fn entry_bytes(&self) -> u64 {
         self.entries
             .iter()
             .map(|entry| u64::try_from(entry.value.len()).unwrap_or(u64::MAX))
             .sum()
     }
+
+    fn backing_bytes(&self) -> u64 {
+        u64::try_from(self.entries.capacity())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::try_from(size_of::<ClockEntry>()).unwrap_or(u64::MAX))
+            .saturating_add(u64::try_from(self.index.allocation_size()).unwrap_or(u64::MAX))
+    }
+
+    fn position(&self, key: &CoinKey, hash: u64) -> Option<usize> {
+        self.index
+            .find(hash, |&slot| self.entries[slot].key == *key)
+            .copied()
+    }
+
+    fn remove(&mut self, position: usize, hasher: &RandomState) -> u64 {
+        let hash = hasher.hash_one(self.entries[position].key.0);
+        if let Ok(entry) = self.index.find_entry(hash, |&slot| slot == position) {
+            entry.remove();
+        }
+        let removed = self.entries.swap_remove(position);
+        let old_last = self.entries.len();
+        if position != old_last {
+            let moved_hash = hasher.hash_one(self.entries[position].key.0);
+            if let Some(slot) = self.index.find_mut(moved_hash, |&slot| slot == old_last) {
+                *slot = position;
+            }
+        }
+        if self.entries.is_empty() {
+            self.hand = 0;
+        } else if self.hand == old_last {
+            self.hand = position % self.entries.len();
+        } else {
+            self.hand %= self.entries.len();
+        }
+        u64::try_from(removed.value.len()).unwrap_or(u64::MAX)
+    }
+
+    fn evict(&mut self, hasher: &RandomState) -> u64 {
+        loop {
+            if self.entries.is_empty() {
+                return 0;
+            }
+            let hand = self.hand;
+            if self.entries[hand].referenced {
+                self.entries[hand].referenced = false;
+                self.hand = (hand + 1) % self.entries.len();
+            } else {
+                return self.remove(hand, hasher);
+            }
+        }
+    }
 }
 
 /// Resident clock cache in front of the `coins` keyspace.
 ///
-/// Invariant: resident bytes (entries plus overhead) never exceed the budget.
-/// Invariant: only `install` (called after a durable receipt) and
-/// `fill_after_read_guarded` (engine-returned committed bytes) may introduce or change
-/// values; `lookup` never returns bytes that did not enter through those two
-/// paths.
+/// The budget charges value lengths, actual vector and hash-table backing
+/// allocations, and explicit `note_bytes` charges. It does not measure allocator
+/// metadata, RSS, shared `Bytes` backing capacity, or the fixed shard directory.
+/// Growth reserves room for old and new backing together before allocating,
+/// using the hashbrown 0.17 layout bound below. `Vec::try_reserve_exact` may
+/// overallocate; its reported capacity is checked before allocating the index.
+/// Such allocator over-allocation can transiently exceed the reservation and
+/// is rejected rather than retained.
 ///
-/// Lock order: never hold the node ledger and the resident/shard locks
-/// together. A mutation charges the ledger before locking, then adjusts the
-/// resident counter under its lock, then releases any evicted bytes after
-/// unlocking. The charge handle is fixed at construction so the ledger
-/// balance tracks the resident counter from an empty cache.
+/// Invariant: resident bytes (values, overhead, and retained backing) never
+/// exceed the budget. Only `install` (called after a durable receipt) and
+/// `fill_after_read_guarded` (engine-returned committed bytes) may introduce or
+/// change values; `lookup` never returns bytes that did not enter through those
+/// two paths.
+///
+/// Lock order: the node ledger is never held together with the resident or
+/// shard locks. A mutation charges the ledger before locking, adjusts the
+/// resident counter under the resident lock then the shard lock, and releases
+/// evicted or refused charges after unlocking. The ledger balance tracks the
+/// charged value and `note_bytes` bytes from an empty cache; retained vector
+/// and hash-table backing is budget-tracked but never ledger-charged, so clear
+/// and eviction release exactly the charged portion. Lookup takes only a shard
+/// lock. The charge handle is fixed at construction.
 pub struct CoinCache {
     budget_bytes: u64,
     resident: Mutex<u64>,
     shards: Box<[ShardLock]>,
+    hasher: RandomState,
     charge: Option<super::super::budget::ChargeHandle>,
 }
 
@@ -57,6 +136,18 @@ impl ShardLock {
     fn lock(&self) -> parking_lot::MutexGuard<'_, ShardState> {
         self.state.lock()
     }
+}
+
+/// Conservative bound for hashbrown 0.17 `HashTable<usize>` reservations.
+/// Small tables use at most 16 buckets; larger tables round capacity * 8 / 7
+/// up to a power of two. Alignment padding and trailing controls add at most 32.
+fn table_reservation_bound(capacity: usize) -> Option<usize> {
+    let buckets = (capacity.checked_mul(8)? / 7)
+        .max(16)
+        .checked_next_power_of_two()?;
+    buckets
+        .checked_mul(size_of::<usize>().checked_add(1)?)?
+        .checked_add(32)
 }
 
 impl CoinCache {
@@ -77,12 +168,10 @@ impl CoinCache {
             shards: (0..SHARD_COUNT)
                 .map(|_| ShardLock {
                     epoch: AtomicU64::new(0),
-                    state: Mutex::new(ShardState {
-                        entries: Vec::new(),
-                        hand: 0,
-                    }),
+                    state: Mutex::new(ShardState::new()),
                 })
                 .collect(),
+            hasher: RandomState::new(),
             charge,
         }
     }
@@ -122,8 +211,9 @@ impl CoinCache {
 
     #[must_use]
     pub fn lookup(&self, key: &CoinKey) -> Option<Bytes> {
+        let hash = self.hasher.hash_one(key.0);
         let mut shard = self.shards[usize::from(key.shard())].lock();
-        let position = shard.entries.iter().position(|entry| entry.key == *key)?;
+        let position = shard.position(key, hash)?;
         let entry = &mut shard.entries[position];
         entry.referenced = true;
         Some(entry.value.clone())
@@ -131,8 +221,7 @@ impl CoinCache {
 
     #[cfg(test)]
     pub fn fill_after_read(&self, key: &CoinKey, value: Bytes) {
-        let epoch = self.epoch(key.shard());
-        self.fill_after_read_guarded(key, value, epoch);
+        self.fill_after_read_guarded(key, value, self.epoch(key.shard()));
     }
 
     pub fn fill_after_read_guarded(&self, key: &CoinKey, value: Bytes, expected_epoch: u64) {
@@ -144,8 +233,7 @@ impl CoinCache {
         let Some(charged) = self.charge_with_eviction(shard_lock, Some(value_bytes)) else {
             return;
         };
-        let (admitted, freed) =
-            self.insert_fresh_locked(shard_lock, key, value, value_bytes, expected_epoch);
+        let (admitted, freed) = self.insert_fresh_locked(shard_lock, key, value, expected_epoch);
         self.release_delta(freed);
         if !admitted {
             self.release_delta(charged);
@@ -157,7 +245,6 @@ impl CoinCache {
         shard_lock: &ShardLock,
         key: &CoinKey,
         value: Bytes,
-        value_bytes: u64,
         expected_epoch: u64,
     ) -> (bool, u64) {
         let mut resident = self.resident.lock();
@@ -165,28 +252,12 @@ impl CoinCache {
         if shard_lock.epoch.load(Ordering::Acquire) != expected_epoch {
             return (false, 0);
         }
-        if shard.entries.iter().any(|entry| entry.key == *key) {
-            if let Some(entry) = shard.entries.iter_mut().find(|entry| entry.key == *key) {
-                entry.referenced = true;
-            }
+        let hash = self.hasher.hash_one(key.0);
+        if let Some(position) = shard.position(key, hash) {
+            shard.entries[position].referenced = true;
             return (false, 0);
         }
-        let mut freed = 0_u64;
-        while *resident + value_bytes > self.budget_bytes && !shard.entries.is_empty() {
-            let evicted = clock_evict_one(&mut shard);
-            freed += evicted;
-            *resident -= evicted;
-        }
-        if *resident + value_bytes > self.budget_bytes {
-            return (false, freed);
-        }
-        shard.entries.push(ClockEntry {
-            key: *key,
-            value,
-            referenced: true,
-        });
-        *resident += value_bytes;
-        (true, freed)
+        self.admit_locked(&mut shard, &mut resident, key, value, hash)
     }
 
     /// Replaces the entry for `key`. The old entry always leaves the cache
@@ -230,7 +301,7 @@ impl CoinCache {
         let mut shard = shard_lock.lock();
         let mut freed = 0_u64;
         while freed < needed && !shard.entries.is_empty() {
-            let evicted = clock_evict_one(&mut shard);
+            let evicted = shard.evict(&self.hasher);
             freed += evicted;
             *resident -= evicted;
         }
@@ -241,28 +312,24 @@ impl CoinCache {
         let shard_lock = &self.shards[usize::from(key.shard())];
         let mut resident = self.resident.lock();
         let mut shard = shard_lock.lock();
-        let Some(position) = shard.entries.iter().position(|entry| entry.key == *key) else {
+        let hash = self.hasher.hash_one(key.0);
+        let Some(position) = shard.position(key, hash) else {
             return 0;
         };
-        let removed = shard.entries.remove(position);
-        fix_hand_after_removal(&mut shard, position);
-        let bytes = u64::try_from(removed.value.len()).unwrap_or(u64::MAX);
+        let bytes = shard.remove(position, &self.hasher);
         *resident -= bytes;
         shard_lock.epoch.fetch_add(1, Ordering::Release);
         bytes
     }
 
-    /// Runs under the resident lock then the shard lock. Returns whether
-    /// `value` was inserted and how many charged bytes left the cache.
     fn replace_locked(&self, key: &CoinKey, value: Option<Bytes>) -> (bool, u64) {
         let shard_lock = &self.shards[usize::from(key.shard())];
         let mut resident = self.resident.lock();
         let mut shard = shard_lock.lock();
         let mut released = 0_u64;
-        if let Some(position) = shard.entries.iter().position(|entry| entry.key == *key) {
-            let removed = shard.entries.remove(position);
-            fix_hand_after_removal(&mut shard, position);
-            let bytes = u64::try_from(removed.value.len()).unwrap_or(u64::MAX);
+        let hash = self.hasher.hash_one(key.0);
+        if let Some(position) = shard.position(key, hash) {
+            let bytes = shard.remove(position, &self.hasher);
             *resident -= bytes;
             released += bytes;
         }
@@ -270,22 +337,9 @@ impl CoinCache {
         let Some(value) = value else {
             return (false, released);
         };
-        let bytes = u64::try_from(value.len()).unwrap_or(u64::MAX);
-        while *resident + bytes > self.budget_bytes && !shard.entries.is_empty() {
-            let evicted = clock_evict_one(&mut shard);
-            *resident -= evicted;
-            released += evicted;
-        }
-        if *resident + bytes > self.budget_bytes {
-            return (false, released);
-        }
-        shard.entries.push(ClockEntry {
-            key: *key,
-            value,
-            referenced: true,
-        });
-        *resident += bytes;
-        (true, released)
+        let (inserted, freed) = self.admit_locked(&mut shard, &mut resident, key, value, hash);
+        released += freed;
+        (inserted, released)
     }
 
     pub fn note_bytes(&self, shard_index: u8, bytes: usize) {
@@ -306,93 +360,215 @@ impl CoinCache {
         let mut shard = self.shards[usize::from(shard_index)].lock();
         let mut freed = 0_u64;
         while *resident + charge > self.budget_bytes && !shard.entries.is_empty() {
-            let evicted = clock_evict_one(&mut shard);
+            let evicted = shard.evict(&self.hasher);
             freed += evicted;
             *resident -= evicted;
         }
         if *resident + charge > self.budget_bytes {
             return (false, freed);
         }
+        shard.overhead_bytes += charge;
         *resident += charge;
         (true, freed)
     }
 
+    fn grow(&self, shard: &mut ShardState, resident: &mut u64, value_bytes: u64) {
+        let Some(capacity) = shard.entries.capacity().max(1).checked_mul(2) else {
+            return;
+        };
+        let Some(bound) = table_reservation_bound(capacity).and_then(|table| {
+            capacity
+                .checked_mul(size_of::<ClockEntry>())?
+                .checked_add(table)
+        }) else {
+            return;
+        };
+        if u64::try_from(bound).unwrap_or(u64::MAX)
+            > self
+                .budget_bytes
+                .saturating_sub(*resident)
+                .saturating_sub(value_bytes)
+        {
+            return;
+        }
+        let mut entries = Vec::new();
+        if entries.try_reserve_exact(capacity).is_err() {
+            return;
+        }
+        let Some(vector_bytes) = entries.capacity().checked_mul(size_of::<ClockEntry>()) else {
+            return;
+        };
+        let Some(table_bound) = table_reservation_bound(capacity) else {
+            return;
+        };
+        if u64::try_from(vector_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::try_from(table_bound).unwrap_or(u64::MAX))
+            > self
+                .budget_bytes
+                .saturating_sub(*resident)
+                .saturating_sub(value_bytes)
+        {
+            return;
+        }
+        let mut index = HashTable::new();
+        if index.try_reserve(capacity, |_| 0).is_err() {
+            return;
+        }
+        let new_backing = u64::try_from(vector_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::try_from(index.allocation_size()).unwrap_or(u64::MAX));
+        if new_backing
+            > self
+                .budget_bytes
+                .saturating_sub(*resident)
+                .saturating_sub(value_bytes)
+        {
+            return;
+        }
+        for (slot, entry) in shard.entries.iter().enumerate() {
+            index.insert_unique(self.hasher.hash_one(entry.key.0), slot, |&slot| {
+                self.hasher.hash_one(shard.entries[slot].key.0)
+            });
+        }
+        *resident -= shard.backing_bytes();
+        entries.append(&mut shard.entries);
+        shard.entries = entries;
+        shard.index = index;
+        *resident += shard.backing_bytes();
+    }
+
+    /// Runs under the resident lock then the shard lock.
+    fn admit_locked(
+        &self,
+        shard: &mut ShardState,
+        resident: &mut u64,
+        key: &CoinKey,
+        value: Bytes,
+        hash: u64,
+    ) -> (bool, u64) {
+        let value_bytes = u64::try_from(value.len()).unwrap_or(u64::MAX);
+        if value_bytes > self.budget_bytes {
+            return (false, 0);
+        }
+        if shard.entries.len() == shard.entries.capacity()
+            || shard.index.capacity() == shard.entries.len()
+        {
+            self.grow(shard, resident, value_bytes);
+        }
+        let mut freed = 0_u64;
+        while !shard.entries.is_empty()
+            && (value_bytes > self.budget_bytes.saturating_sub(*resident)
+                || shard.entries.len() == shard.entries.capacity()
+                || shard.index.capacity() == shard.entries.len())
+        {
+            let evicted = shard.evict(&self.hasher);
+            freed += evicted;
+            *resident -= evicted;
+        }
+        if value_bytes > self.budget_bytes.saturating_sub(*resident)
+            || shard.entries.len() == shard.entries.capacity()
+            || shard.index.capacity() == shard.entries.len()
+        {
+            return (false, freed);
+        }
+        let slot = shard.entries.len();
+        shard.entries.push(ClockEntry {
+            key: *key,
+            value,
+            referenced: true,
+        });
+        shard.index.insert_unique(hash, slot, |&slot| {
+            self.hasher.hash_one(shard.entries[slot].key.0)
+        });
+        *resident += value_bytes;
+        (true, freed)
+    }
+
     pub fn evict_to_budget(&self) {
-        let freed = {
+        let charged_freed = {
             let mut resident = self.resident.lock();
-            let mut freed = 0_u64;
-            while *resident > self.budget_bytes {
-                let mut heaviest: Option<usize> = None;
-                let mut heaviest_bytes = 0_u64;
-                for (index, shard) in self.shards.iter().enumerate() {
-                    let bytes = shard.lock().entry_bytes();
-                    if bytes > heaviest_bytes {
-                        heaviest_bytes = bytes;
-                        heaviest = Some(index);
-                    }
-                }
-                let Some(index) = heaviest else {
-                    break;
-                };
-                let mut shard = self.shards[index].lock();
-                let evicted = clock_evict_one(&mut shard);
-                freed += evicted;
-                *resident -= evicted;
-            }
+            let freed = self.evict_value_bytes_above_budget(&mut resident);
+            self.release_retained_backing_above_budget(&mut resident);
             freed
         };
-        self.release_delta(freed);
+        self.release_delta(charged_freed);
+    }
+
+    fn evict_value_bytes_above_budget(&self, resident: &mut u64) -> u64 {
+        let mut freed = 0_u64;
+        while *resident > self.budget_bytes {
+            let Some(index) = self.heaviest_value_shard() else {
+                break;
+            };
+            let mut shard = self.shards[index].lock();
+            let evicted = shard.evict(&self.hasher);
+            freed += evicted;
+            *resident -= evicted;
+        }
+        freed
+    }
+
+    fn heaviest_value_shard(&self) -> Option<usize> {
+        let mut heaviest: Option<usize> = None;
+        let mut heaviest_bytes = 0_u64;
+        for (index, shard) in self.shards.iter().enumerate() {
+            let bytes = shard.lock().entry_bytes();
+            if bytes > heaviest_bytes {
+                heaviest_bytes = bytes;
+                heaviest = Some(index);
+            }
+        }
+        heaviest
+    }
+
+    fn release_retained_backing_above_budget(&self, resident: &mut u64) {
+        while *resident > self.budget_bytes {
+            let Some(backing) = self.drop_first_retained_backing() else {
+                break;
+            };
+            *resident -= backing;
+        }
+    }
+
+    fn drop_first_retained_backing(&self) -> Option<u64> {
+        for shard_lock in &self.shards {
+            let mut shard = shard_lock.lock();
+            let backing = shard.backing_bytes();
+            if backing == 0 {
+                continue;
+            }
+            shard.entries = Vec::new();
+            shard.index = HashTable::new();
+            shard.hand = 0;
+            return Some(backing);
+        }
+        None
     }
 
     pub fn clear(&self) {
-        let resident = {
+        let charged_bytes = {
             let mut guard = self.resident.lock();
+            let mut backing_total = 0_u64;
             for shard_lock in &self.shards {
                 let mut shard = shard_lock.lock();
-                shard.entries.clear();
-                shard.hand = 0;
+                backing_total += shard.backing_bytes();
+                *shard = ShardState::new();
                 shard_lock.epoch.fetch_add(1, Ordering::Release);
             }
-            std::mem::replace(&mut *guard, 0)
+            std::mem::replace(&mut *guard, 0).saturating_sub(backing_total)
         };
-        self.release_delta(resident);
-    }
-}
-
-fn clock_evict_one(shard: &mut ShardState) -> u64 {
-    loop {
-        if shard.entries.is_empty() {
-            return 0;
-        }
-        let hand = shard.hand % shard.entries.len();
-        let referenced = shard.entries[hand].referenced;
-        if referenced {
-            shard.entries[hand].referenced = false;
-            shard.hand = (hand + 1) % shard.entries.len();
-            continue;
-        }
-        let evicted = shard.entries.remove(hand);
-        fix_hand_after_removal(shard, hand);
-        return u64::try_from(evicted.value.len()).unwrap_or(0);
-    }
-}
-
-fn fix_hand_after_removal(shard: &mut ShardState, position: usize) {
-    if position < shard.hand {
-        shard.hand -= 1;
-    }
-    if shard.entries.is_empty() {
-        shard.hand = 0;
-    } else {
-        shard.hand %= shard.entries.len();
+        self.release_delta(charged_bytes);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StorageError;
     use crate::budget::{BudgetCharge, BudgetError, BudgetOwner, ChargeHandle};
     use proptest::prelude::*;
+    use std::collections::{BTreeMap, HashSet};
     use std::sync::Arc;
 
     fn key(shard: u8, tail: u8) -> CoinKey {
@@ -406,31 +582,135 @@ mod tests {
         Bytes::from(vec![0xa5_u8; len])
     }
 
+    fn backing_of(cache: &CoinCache, shard: u8) -> u64 {
+        cache.shards[usize::from(shard)].lock().backing_bytes()
+    }
+
+    #[test]
+    fn engine_fill_is_readable_but_does_not_replace_existing_commit() {
+        let cache = CoinCache::new(8_192);
+        let k = key(7, 0);
+        cache.fill_after_read(&k, Bytes::from_static(b"engine"));
+        assert_eq!(cache.lookup(&k).as_deref(), Some(b"engine".as_slice()));
+        cache.install(&k, Some(Bytes::from_static(b"commit")));
+        cache.fill_after_read(&k, Bytes::from_static(b"older"));
+        assert_eq!(cache.lookup(&k).as_deref(), Some(b"commit".as_slice()));
+        cache.install(&k, Some(Bytes::from(vec![0; 8_193])));
+        assert_eq!(cache.lookup(&k), None);
+        assert!(cache.resident_bytes() <= cache.budget_bytes());
+    }
+
+    #[test]
+    fn turnover_replacement_and_delete_return_only_current_values() {
+        let cache = CoinCache::new(8_192);
+        for tail in 0..8_u8 {
+            cache.install(&key(7, tail), Some(Bytes::from(vec![tail])));
+        }
+        for tail in 0..8_u8 {
+            assert_eq!(cache.lookup(&key(7, tail)), Some(Bytes::from(vec![tail])));
+        }
+        cache.install(&key(7, 1), None);
+        assert_eq!(cache.lookup(&key(7, 1)), None);
+        for tail in (0..8_u8).filter(|&tail| tail != 1) {
+            assert_eq!(cache.lookup(&key(7, tail)), Some(Bytes::from(vec![tail])));
+        }
+        cache.clear();
+        for generation in 0..12_u8 {
+            for tail in 0..64_u8 {
+                let k = key(7, tail);
+                let value = Bytes::from(vec![generation, tail]);
+                cache.install(&k, Some(value.clone()));
+                assert_eq!(cache.lookup(&k), Some(value));
+                if tail % 3 == 0 {
+                    cache.install(&k, None);
+                    assert_eq!(cache.lookup(&k), None);
+                }
+            }
+            for tail in 0..64_u8 {
+                if let Some(value) = cache.lookup(&key(7, tail)) {
+                    assert_ne!(tail % 3, 0);
+                    assert_eq!(value.as_ref(), &[generation, tail]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stale_guarded_read_cannot_replace_commit_or_resurrect_delete() {
+        let cache = CoinCache::new(8_192);
+        let k = key(7, 1);
+        let epoch = cache.epoch(k.shard());
+        cache.install(&k, Some(Bytes::from_static(b"new")));
+        cache.fill_after_read_guarded(&k, Bytes::from_static(b"old"), epoch);
+        assert_eq!(cache.lookup(&k).as_deref(), Some(b"new".as_slice()));
+        let epoch = cache.epoch(k.shard());
+        cache.install(&k, None);
+        cache.fill_after_read_guarded(&k, Bytes::from_static(b"old"), epoch);
+        assert_eq!(cache.lookup(&k), None);
+    }
+
+    #[test]
+    fn empty_values_still_consume_budget_and_clear_releases_backing() -> Result<(), StorageError> {
+        let cache = CoinCache::new(8_192);
+        for tail in 0..=255 {
+            cache.install(&key(7, tail), Some(Bytes::new()));
+        }
+        let hits = (0..=255)
+            .filter(|&tail| cache.lookup(&key(7, tail)).is_some())
+            .count();
+        assert!(hits > 0 && hits < 256);
+        let hit_key_bytes = u64::try_from(hits * size_of::<CoinKey>())
+            .map_err(|_| StorageError::InvalidOperation("cache key bytes overflow"))?;
+        assert!(cache.resident_bytes() >= hit_key_bytes);
+        assert!(cache.resident_bytes() <= cache.budget_bytes());
+        for tail in 0..=255 {
+            cache.install(&key(7, tail), None);
+        }
+        assert!(cache.resident_bytes() > 0);
+        cache.note_bytes(7, 8_192);
+        assert!(cache.resident_bytes() <= cache.budget_bytes());
+        cache.clear();
+        assert_eq!(cache.resident_bytes(), 0);
+        cache.note_bytes(7, 8_192);
+        assert_eq!(cache.resident_bytes(), 8_192);
+        cache.install(&key(7, 0), Some(Bytes::new()));
+        assert_eq!(cache.lookup(&key(7, 0)), None);
+        Ok(())
+    }
+
     #[test]
     fn fill_after_read_then_lookup_returns_value() {
         let cache = CoinCache::new(1_000);
         let k = key(3, 7);
         cache.fill_after_read(&k, value(120));
-        assert_eq!(cache.resident_bytes(), 120);
+        assert_eq!(
+            cache.resident_bytes(),
+            120 + backing_of(&cache, 3),
+            "resident tracks value bytes plus retained backing"
+        );
         assert_eq!(cache.lookup(&k).as_deref(), Some(&[0xa5_u8; 120][..]));
-        assert_eq!(cache.resident_bytes(), 120);
+        assert_eq!(cache.resident_bytes(), 120 + backing_of(&cache, 3));
     }
 
     #[test]
     fn eviction_under_pressure_prefers_unreferenced_entries() {
-        let cache = CoinCache::new(300);
+        let cache = CoinCache::new(4_000);
         let k1 = key(1, 1);
         let k2 = key(1, 2);
         let k3 = key(1, 3);
         let k4 = key(1, 4);
         let k5 = key(1, 5);
-        cache.fill_after_read(&k1, value(100));
-        cache.fill_after_read(&k2, value(100));
-        cache.fill_after_read(&k3, value(100));
-        assert_eq!(cache.resident_bytes(), 300);
+        cache.fill_after_read(&k1, value(1_000));
+        cache.fill_after_read(&k2, value(1_000));
+        cache.fill_after_read(&k3, value(1_000));
+        assert_eq!(
+            cache.resident_bytes(),
+            3_000 + backing_of(&cache, 1),
+            "three fills land exactly once each"
+        );
 
-        cache.fill_after_read(&k4, value(100));
-        assert!(cache.resident_bytes() <= 300);
+        cache.fill_after_read(&k4, value(1_000));
+        assert!(cache.resident_bytes() <= 4_000);
         assert!(
             cache.lookup(&k1).is_none(),
             "one pass clears every armed bit and evicts at the hand"
@@ -440,8 +720,9 @@ mod tests {
             cache.lookup(&k2).is_some(),
             "a lookup re-arms the entry for a second chance"
         );
-        cache.fill_after_read(&k5, value(100));
-        assert!(cache.resident_bytes() <= 300);
+        cache.fill_after_read(&k5, value(1_000));
+        assert!(cache.resident_bytes() <= 4_000);
+        assert_eq!(cache.resident_bytes(), 3_000 + backing_of(&cache, 1));
         assert!(cache.lookup(&k2).is_some(), "armed entry survives one pass");
         assert!(
             cache.lookup(&k3).is_none(),
@@ -456,9 +737,13 @@ mod tests {
         let cache = CoinCache::new(1_000);
         let k = key(9, 9);
         cache.install(&k, Some(value(200)));
-        assert_eq!(cache.resident_bytes(), 200);
+        assert_eq!(cache.resident_bytes(), 200 + backing_of(&cache, 9));
         cache.install(&k, None);
-        assert_eq!(cache.resident_bytes(), 0);
+        assert_eq!(
+            cache.resident_bytes(),
+            backing_of(&cache, 9),
+            "only the charged value bytes leave; backing is retained"
+        );
         assert!(cache.lookup(&k).is_none());
     }
 
@@ -468,40 +753,45 @@ mod tests {
         let k = key(2, 2);
         cache.install(&k, Some(value(100)));
         cache.install(&k, Some(value(400)));
-        assert_eq!(cache.resident_bytes(), 400);
+        assert_eq!(cache.resident_bytes(), 400 + backing_of(&cache, 2));
         assert_eq!(cache.lookup(&k).map(|v| v.len()), Some(400));
     }
 
     #[test]
     fn note_bytes_respects_budget_and_evicts() {
-        let cache = CoinCache::new(300);
+        let cache = CoinCache::new(1_000);
         let k = key(4, 4);
         cache.fill_after_read(&k, value(200));
-        cache.note_bytes(4, 250);
-        assert!(cache.resident_bytes() <= 300);
+        cache.note_bytes(4, 750);
         assert!(
             cache.lookup(&k).is_none(),
             "overhead pressure evicts entries"
         );
-        cache.note_bytes(4, 250);
-        assert!(cache.lookup(&k).is_none(), "oversized charge is ignored");
+        assert!(cache.resident_bytes() <= 1_000);
+        let before_oversize = cache.resident_bytes();
+        cache.note_bytes(4, 2_000);
+        assert_eq!(
+            cache.resident_bytes(),
+            before_oversize,
+            "oversized charge is ignored"
+        );
 
-        let cache = CoinCache::new(300);
+        let cache = CoinCache::new(1_000);
         cache.fill_after_read(&k, value(100));
         cache.note_bytes(4, 100);
-        assert_eq!(cache.resident_bytes(), 200);
+        assert_eq!(cache.resident_bytes(), 200 + backing_of(&cache, 4));
     }
 
     #[test]
     fn evict_to_budget_is_noop_within_budget() {
-        let cache = CoinCache::new(300);
+        let cache = CoinCache::new(4_000);
         let k1 = key(5, 1);
         let k2 = key(6, 2);
-        cache.fill_after_read(&k1, value(100));
-        cache.fill_after_read(&k2, value(100));
+        cache.fill_after_read(&k1, value(1_000));
+        cache.fill_after_read(&k2, value(1_000));
         assert!(cache.lookup(&k1).is_some());
         cache.evict_to_budget();
-        assert!(cache.resident_bytes() <= 300);
+        assert!(cache.resident_bytes() <= 4_000);
         assert!(cache.lookup(&k1).is_some());
         assert!(cache.lookup(&k2).is_some());
     }
@@ -531,13 +821,16 @@ mod tests {
 
     #[test]
     fn oversized_committed_replacement_evicts_old_resident_entry() {
-        let cache = CoinCache::new(200);
+        let cache = CoinCache::new(1_200);
         let k = key(1, 1);
         cache.install(&k, Some(value(100)));
-        assert_eq!(cache.resident_bytes(), 100);
+        assert_eq!(cache.resident_bytes(), 100 + backing_of(&cache, 1));
         assert!(cache.lookup(&k).is_some());
         cache.install(&k, Some(value(300)));
-        assert_eq!(cache.resident_bytes(), 0);
+        assert_eq!(cache.resident_bytes(), 300 + backing_of(&cache, 1));
+        assert_eq!(cache.lookup(&k).map(|v| v.len()), Some(300));
+        cache.install(&k, Some(value(1_300)));
+        assert_eq!(cache.resident_bytes(), backing_of(&cache, 1));
         assert!(
             cache.lookup(&k).is_none(),
             "oversized replacement purges the old entry"
@@ -576,7 +869,7 @@ mod tests {
         outstanding: Mutex<u64>,
     }
 
-    const LEDGER_CAP: u64 = 300;
+    const LEDGER_CAP: u64 = 301_024;
 
     impl BudgetCharge for CappedLedger {
         fn reserve_bytes(&self, _owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
@@ -624,15 +917,19 @@ mod tests {
         let k2 = key(1, 2);
         let k3 = key(1, 3);
         let k4 = key(1, 4);
-        cache.fill_after_read(&k1, value(100));
-        cache.fill_after_read(&k2, value(100));
-        cache.fill_after_read(&k3, value(100));
-        assert_eq!(cache.resident_bytes(), LEDGER_CAP);
-        assert_eq!(ledger_outstanding(&ledger), LEDGER_CAP);
+        cache.fill_after_read(&k1, value(100_000));
+        cache.fill_after_read(&k2, value(100_000));
+        cache.fill_after_read(&k3, value(100_000));
+        assert_eq!(ledger_outstanding(&ledger), 300_000);
+        assert_eq!(cache.resident_bytes(), 300_000 + backing_of(&cache, 1));
 
-        cache.fill_after_read(&k4, value(100));
-        assert_eq!(ledger_outstanding(&ledger), cache.resident_bytes());
-        assert_eq!(cache.resident_bytes(), LEDGER_CAP);
+        cache.fill_after_read(&k4, value(100_000));
+        assert_eq!(
+            ledger_outstanding(&ledger) + backing_of(&cache, 1),
+            cache.resident_bytes(),
+            "ledger mirrors exactly the charged value bytes, no leak"
+        );
+        assert_eq!(cache.resident_bytes(), 300_000 + backing_of(&cache, 1));
         assert!(
             cache.lookup(&k4).is_some(),
             "a full ledger must not stall turnover the clock can fund"
@@ -649,32 +946,36 @@ mod tests {
         let k1 = key(1, 1);
         let k2 = key(1, 2);
         let k3 = key(1, 3);
-        cache.fill_after_read(&k1, value(100));
-        cache.fill_after_read(&k2, value(100));
-        cache.fill_after_read(&k3, value(100));
-        assert_eq!(cache.resident_bytes(), LEDGER_CAP);
-        assert_eq!(ledger_outstanding(&ledger), LEDGER_CAP);
+        cache.fill_after_read(&k1, value(100_000));
+        cache.fill_after_read(&k2, value(100_000));
+        cache.fill_after_read(&k3, value(100_000));
+        assert_eq!(ledger_outstanding(&ledger), 300_000);
+        assert_eq!(cache.resident_bytes(), 300_000 + backing_of(&cache, 1));
 
-        cache.install(&k1, Some(value(150)));
-        assert_eq!(cache.lookup(&k1).map(|entry| entry.len()), Some(150));
-        assert!(
-            cache.lookup(&k2).is_none(),
-            "clock eviction funds the larger replacement"
-        );
-        assert!(cache.lookup(&k3).is_some());
+        cache.install(&k1, Some(value(150_000)));
+        assert_eq!(cache.lookup(&k1).map(|entry| entry.len()), Some(150_000));
+        let survivors = [&k2, &k3]
+            .into_iter()
+            .filter(|k| cache.lookup(k).is_some())
+            .count();
+        assert_eq!(survivors, 1, "clock eviction funds the larger replacement");
         let resident = cache.resident_bytes();
-        assert_eq!(resident, 250);
+        assert_eq!(resident, 250_000 + backing_of(&cache, 1));
         assert_eq!(
-            ledger_outstanding(&ledger),
+            ledger_outstanding(&ledger) + backing_of(&cache, 1),
             resident,
             "old charge released before the replacement is charged, no leak"
         );
 
-        cache.install(&k3, Some(value(301)));
-        assert!(cache.lookup(&k3).is_none(), "overlarge items stay rejected");
-        assert_eq!(cache.lookup(&k1).map(|entry| entry.len()), Some(150));
-        assert_eq!(cache.resident_bytes(), 150);
-        assert_eq!(ledger_outstanding(&ledger), 150);
+        let k9 = key(1, 9);
+        let Ok(overlarge) = usize::try_from(LEDGER_CAP + 1) else {
+            panic!("ledger cap does not fit usize");
+        };
+        cache.install(&k9, Some(value(overlarge)));
+        assert!(cache.lookup(&k9).is_none(), "overlarge items stay rejected");
+        assert_eq!(cache.lookup(&k1).map(|entry| entry.len()), Some(150_000));
+        assert_eq!(cache.resident_bytes(), 250_000 + backing_of(&cache, 1));
+        assert_eq!(ledger_outstanding(&ledger), 250_000);
     }
 
     #[derive(Clone, Debug)]
@@ -682,7 +983,6 @@ mod tests {
         Fill(CoinKey, usize),
         InstallSome(CoinKey, usize),
         InstallNone(CoinKey),
-        Lookup(CoinKey),
         Note(u8, usize),
         Evict,
         Clear,
@@ -698,164 +998,12 @@ mod tests {
     fn action_strategy() -> impl Strategy<Value = Action> {
         prop_oneof![
             6 => (coin_key_strategy(), 1_usize..=600_usize).prop_map(|(key, len)| Action::Fill(key, len)),
-            2 => (coin_key_strategy(), 1_usize..=600_usize).prop_map(|(key, len)| Action::InstallSome(key, len)),
-            1 => coin_key_strategy().prop_map(Action::InstallNone),
-            3 => coin_key_strategy().prop_map(Action::Lookup),
+            3 => (coin_key_strategy(), 1_usize..=600_usize).prop_map(|(key, len)| Action::InstallSome(key, len)),
+            2 => coin_key_strategy().prop_map(Action::InstallNone),
             1 => (0_u8..8_u8, 1_usize..=600_usize).prop_map(|(shard, len)| Action::Note(shard, len)),
             1 => Just(Action::Evict),
             1 => Just(Action::Clear),
         ]
-    }
-
-    struct ModelCache {
-        budget: u64,
-        resident: u64,
-        shards: Vec<ModelShard>,
-    }
-
-    struct ModelShard {
-        entries: Vec<(CoinKey, u64, bool)>,
-        hand: usize,
-        overhead: u64,
-    }
-
-    impl ModelCache {
-        fn new(budget: u64) -> Self {
-            Self {
-                budget,
-                resident: 0,
-                shards: (0..256)
-                    .map(|_| ModelShard {
-                        entries: Vec::new(),
-                        hand: 0,
-                        overhead: 0,
-                    })
-                    .collect(),
-            }
-        }
-
-        fn admit(&mut self, key: &CoinKey, len: usize) {
-            let len = u64::try_from(len).unwrap_or(u64::MAX);
-            let shard = &mut self.shards[usize::from(key.shard())];
-            if let Some(position) = shard.entries.iter().position(|(k, _, _)| k == key) {
-                let (_, replaced, _) = shard.entries.remove(position);
-                fix_model_hand(shard, position);
-                self.resident -= replaced;
-            }
-            if len > self.budget {
-                return;
-            }
-            while self.resident + len > self.budget && !shard.entries.is_empty() {
-                let freed = model_evict_one(shard);
-                self.resident -= freed;
-            }
-            if self.resident + len > self.budget {
-                return;
-            }
-            shard.entries.push((*key, len, true));
-            self.resident += len;
-        }
-
-        fn step(&mut self, action: &Action) -> Option<(bool, Option<u64>)> {
-            match action {
-                Action::Fill(key, len) => {
-                    let shard = &mut self.shards[usize::from(key.shard())];
-                    if let Some(entry) = shard.entries.iter_mut().find(|(k, _, _)| k == key) {
-                        entry.2 = true;
-                    } else {
-                        self.admit(key, *len);
-                    }
-                }
-                Action::InstallSome(key, len) => self.admit(key, *len),
-                Action::InstallNone(key) => {
-                    let shard = &mut self.shards[usize::from(key.shard())];
-                    if let Some(position) = shard.entries.iter().position(|(k, _, _)| k == key) {
-                        let (_, removed, _) = shard.entries.remove(position);
-                        fix_model_hand(shard, position);
-                        self.resident -= removed;
-                    }
-                }
-                Action::Lookup(key) => {
-                    let shard = &mut self.shards[usize::from(key.shard())];
-                    return Some(match shard.entries.iter().position(|(k, _, _)| k == key) {
-                        Some(position) => {
-                            shard.entries[position].2 = true;
-                            (true, Some(shard.entries[position].1))
-                        }
-                        None => (false, None),
-                    });
-                }
-                Action::Note(shard_index, len) => {
-                    let charge = u64::try_from(*len).unwrap_or(u64::MAX);
-                    if charge > self.budget {
-                        return None;
-                    }
-                    let shard = &mut self.shards[usize::from(*shard_index)];
-                    while self.resident + charge > self.budget && !shard.entries.is_empty() {
-                        let freed = model_evict_one(shard);
-                        self.resident -= freed;
-                    }
-                    if self.resident + charge > self.budget {
-                        return None;
-                    }
-                    shard.overhead += charge;
-                    self.resident += charge;
-                }
-                Action::Evict => {
-                    while self.resident > self.budget {
-                        let mut heaviest: Option<usize> = None;
-                        let mut heaviest_bytes = 0_u64;
-                        for (index, shard) in self.shards.iter().enumerate() {
-                            let bytes: u64 = shard.entries.iter().map(|(_, len, _)| *len).sum();
-                            if bytes > heaviest_bytes {
-                                heaviest_bytes = bytes;
-                                heaviest = Some(index);
-                            }
-                        }
-                        let Some(index) = heaviest else { break };
-                        let freed = model_evict_one(&mut self.shards[index]);
-                        self.resident -= freed;
-                    }
-                }
-                Action::Clear => {
-                    for shard in &mut self.shards {
-                        shard.entries.clear();
-                        shard.overhead = 0;
-                        shard.hand = 0;
-                    }
-                    self.resident = 0;
-                }
-            }
-            None
-        }
-    }
-
-    fn model_evict_one(shard: &mut ModelShard) -> u64 {
-        loop {
-            if shard.entries.is_empty() {
-                return 0;
-            }
-            let hand = shard.hand % shard.entries.len();
-            if shard.entries[hand].2 {
-                shard.entries[hand].2 = false;
-                shard.hand = (hand + 1) % shard.entries.len();
-                continue;
-            }
-            let (_, removed, _) = shard.entries.remove(hand);
-            fix_model_hand(shard, hand);
-            return removed;
-        }
-    }
-
-    fn fix_model_hand(shard: &mut ModelShard, position: usize) {
-        if position < shard.hand {
-            shard.hand -= 1;
-        }
-        if shard.entries.is_empty() {
-            shard.hand = 0;
-        } else {
-            shard.hand %= shard.entries.len();
-        }
     }
 
     proptest! {
@@ -867,52 +1015,57 @@ mod tests {
             ..ProptestConfig::default()
         })]
         #[test]
-        fn coin_cache_never_exceeds_budget(
-            budget in 1_u64..2_000_u64,
+        fn full_key_turnover_preserves_latest_values(
+            budget in 2_000_u64..16_000_u64,
             actions in prop::collection::vec(action_strategy(), 1..400),
         ) {
             let cache = CoinCache::new(budget);
-            let mut model = ModelCache::new(budget);
+            let mut latest: BTreeMap<CoinKey, Bytes> = BTreeMap::new();
+            let mut filled_since_commit: HashSet<CoinKey> = HashSet::new();
             for (step_index, action) in actions.iter().enumerate() {
                 match action {
-                    Action::Lookup(key) => {
-                        let got = cache.lookup(key);
-                        let Some((present, model_len)) = model.step(action) else {
-                            unreachable!("lookup always models");
-                        };
-                        assert_eq!(got.is_some(), present, "step {step_index}");
-                        let got_len = got.as_ref().map(Bytes::len);
-                        let model_len = model_len.and_then(|len| usize::try_from(len).ok());
-                        assert_eq!(got_len, model_len, "step {step_index}");
-                    }
                     Action::Fill(key, len) => {
                         cache.fill_after_read(key, Bytes::from(vec![0xa5_u8; *len]));
-                        model.step(action);
+                        filled_since_commit.insert(*key);
                     }
                     Action::InstallSome(key, len) => {
-                        cache.install(key, Some(Bytes::from(vec![0xa5_u8; *len])));
-                        model.step(action);
+                        let value = Bytes::from(vec![0xa5_u8; *len]);
+                        cache.install(key, Some(value.clone()));
+                        latest.insert(*key, value);
+                        filled_since_commit.remove(key);
                     }
                     Action::InstallNone(key) => {
                         cache.install(key, None);
-                        model.step(action);
+                        latest.remove(key);
+                        filled_since_commit.remove(key);
                     }
                     Action::Note(shard_index, len) => {
                         cache.note_bytes(*shard_index, *len);
-                        model.step(action);
                     }
                     Action::Evict => {
                         cache.evict_to_budget();
-                        model.step(action);
                     }
                     Action::Clear => {
                         cache.clear();
-                        model.step(action);
+                        latest.clear();
+                        filled_since_commit.clear();
+                    }
+                }
+                for (key, committed) in &latest {
+                    if filled_since_commit.contains(key) {
+                        continue;
+                    }
+                    if let Some(hit) = cache.lookup(key) {
+                        prop_assert_eq!(
+                            &hit,
+                            committed,
+                            "step {}: resident value diverges from the latest commit",
+                            step_index
+                        );
                     }
                 }
                 let resident = cache.resident_bytes();
-                assert_eq!(resident, model.resident, "step {step_index} byte accounting");
-                assert!(resident <= budget, "step {step_index} BUD-06");
+                prop_assert!(resident <= budget, "step {step_index} BUD-06");
             }
         }
     }

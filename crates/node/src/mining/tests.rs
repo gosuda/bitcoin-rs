@@ -37,6 +37,16 @@ fn operational_failures_are_not_block_rejections() {
                 head: Hash256::default(),
                 prev: Hash256::from_le_bytes(&[1; 32]),
             },
+            ApplyError::WindowWorkspaceIncomplete {
+                staged: 2,
+                covered: 1,
+            },
+            ApplyError::RecoveryCoinStats(Box::new(
+                bitcoin_rs_execution::recovery::RecoveryError::Storage(
+                    StorageError::InvalidOperation("recovery coin statistics read failed"),
+                ),
+            )),
+            ApplyError::CoinStoreRead(StorageError::InvalidOperation("coin read failed")),
             ApplyError::Consensus(ConsensusError::Kernel("verifier unavailable".to_owned())),
             ApplyError::Consensus(ConsensusError::PrevoutMatrixSize {
                 expected: 1,

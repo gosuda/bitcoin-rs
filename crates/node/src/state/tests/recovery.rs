@@ -1,6 +1,7 @@
 use super::*;
 use crate::state::open::NodeOpenError;
 use crate::test_support::TestError;
+use sonic_rs::JsonValueTrait as _;
 
 const CRASH_TEST_BACKEND_ENV: &str = "BITCOIN_RS_CRASH_TEST_BACKEND";
 
@@ -194,7 +195,10 @@ fn below_base_invalidate_settles_debt_against_engine() -> Result<(), TestError> 
         .applied_tip()
         .load_full()
         .ok_or(TestError::Missing("reopened tip"))?;
-    assert_eq!(reopened_tip.height, 2);
+    assert_eq!(
+        (reopened_tip.height, reopened_tip.hash),
+        (2, Hash256::from(previous)),
+    );
     Ok(())
 }
 
@@ -591,9 +595,41 @@ fn missing_checkpoint_replays_durable_head_chain_at_startup() -> Result<(), Test
         .chainstate()
         .applied_tip_snapshot()
         .ok_or(TestError::Missing("applied tip"))?;
+    let committed_coins = state
+        .chainstate()
+        .coins()
+        .scan_snapshot()?
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+        .collect::<Result<Vec<_>, _>>()?;
+    let root = config.data_dir.join("chainstate-checkpoints");
+    let current: sonic_rs::Value = sonic_rs::from_slice(&std::fs::read(root.join("CURRENT"))?)?;
+    let directory = current
+        .get("directory")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| std::io::Error::other("CURRENT has no generation directory"))?;
+    let image = root.join(directory).join("chainstate");
+    let missing_image = root.join(directory).join("chainstate.missing");
+    std::fs::rename(&image, &missing_image)?;
     drop(state);
-    std::fs::remove_dir_all(config.data_dir.join("chainstate-checkpoints"))?;
 
+    let open_result = NodeState::open(config.clone(), None);
+    std::fs::rename(&missing_image, &image)?;
+    let error = open_result.err().ok_or(TestError::UnexpectedSuccess(
+        "missing checkpoint engine image was accepted",
+    ))?;
+    assert!(
+        matches!(
+            &error,
+            NodeOpenError::Recovery(source)
+                if matches!(
+                    source.as_ref(),
+                    bitcoin_rs_execution::recovery::RecoveryError::CheckpointEngineImageMissing
+                )
+        ),
+        "unexpected missing-image refusal: {error:#}"
+    );
+
+    std::fs::remove_dir_all(root)?;
     let reopened = NodeState::open(config, None)?;
     let tip = reopened
         .chainstate()
@@ -603,6 +639,16 @@ fn missing_checkpoint_replays_durable_head_chain_at_startup() -> Result<(), Test
         (tip.hash, tip.height),
         (remembered_tip.hash, remembered_tip.height),
         "a missing checkpoint must replay the durable head chain from genesis"
+    );
+    let reopened_coins = reopened
+        .chainstate()
+        .coins()
+        .scan_snapshot()?
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        reopened_coins, committed_coins,
+        "newer committed coin rows must survive the missing-image refusal"
     );
     Ok(())
 }

@@ -93,7 +93,7 @@ fn commit_owned(
 }
 
 #[test]
-fn owned_and_borrowed_commits_match_independent_state_hashes() -> TestResult {
+fn owned_and_borrowed_commits_preserve_coin_fields() -> TestResult {
     for shard_count in [1_u8, 20] {
         let store1 = Arc::new(MemoryKvStore::new());
         let owned = Arc::new(CoinStore::open(store1, 64 * 1024 * 1024));
@@ -115,9 +115,24 @@ fn owned_and_borrowed_commits_match_independent_state_hashes() -> TestResult {
             commit_borrowed(&borrowed, &entries, &removes, &txid(round))?;
             let reader_owned = UtxoReader::from_coin_store(Arc::clone(&owned));
             let reader_borrowed = UtxoReader::from_coin_store(Arc::clone(&borrowed));
-            for (outpoint, txout, _, _) in &entries {
-                assert_eq!(reader_owned.get(outpoint)?, Some(txout.clone()));
-                assert_eq!(reader_borrowed.get(outpoint)?, Some(txout.clone()));
+            for (outpoint, txout, coinbase, height) in &entries {
+                let expected = Some((txout.clone(), *coinbase, *height));
+                assert_eq!(
+                    reader_owned.get_entry(outpoint)?.map(|coin| (
+                        coin.txout,
+                        coin.coinbase,
+                        coin.height
+                    )),
+                    expected
+                );
+                assert_eq!(
+                    reader_borrowed.get_entry(outpoint)?.map(|coin| (
+                        coin.txout,
+                        coin.coinbase,
+                        coin.height
+                    )),
+                    expected
+                );
             }
             for outpoint in &removes {
                 assert_eq!(reader_owned.get(outpoint)?, None);
@@ -239,6 +254,43 @@ fn output_boundaries_roundtrip_through_get_scan_and_spend() -> TestResult {
         assert_eq!(entry.coinbase, *coinbase, "coinbase lost at {outpoint:?}");
         assert_eq!(entry.height, *height, "height lost at {outpoint:?}");
     }
+
+    let view = reader.lock_stable_view()?;
+    let mut remaining: std::collections::HashSet<_> =
+        entries.iter().map(|(outpoint, ..)| *outpoint).collect();
+    let mut scan_failure: Option<TestError> = None;
+    view.for_each_all(|outpoint, script| {
+        assert!(
+            remaining.remove(outpoint),
+            "unexpected or duplicate output {outpoint:?}"
+        );
+        if scan_failure.is_some() {
+            return;
+        }
+        let Some((_, txout, coinbase, height)) = entries
+            .iter()
+            .find(|(expected_outpoint, ..)| expected_outpoint == outpoint)
+        else {
+            scan_failure = Some(TestError::Missing(
+                "scanned output does not belong to the supplied inputs",
+            ));
+            return;
+        };
+        assert_eq!(script, txout.script_pubkey.as_slice());
+        let Some(coin) = view.get_entry(outpoint) else {
+            scan_failure = Some(TestError::Missing("scanned coin must be live"));
+            return;
+        };
+        assert_eq!(
+            (&coin.txout, coin.coinbase, coin.height),
+            (txout, *coinbase, *height)
+        );
+    });
+    if let Some(failure) = scan_failure {
+        return Err(failure);
+    }
+    assert!(remaining.is_empty());
+    drop(view);
 
     for (index, (outpoint, _txout, _coinbase, _height)) in entries.iter().enumerate() {
         assert!(reader.has_live_outputs_for_txid(&live)?);

@@ -20,7 +20,8 @@ fn path_str(path: &Path) -> TestResult<&str> {
         .ok_or_else(|| TestError::Assertion("utf8 path".into()))
 }
 
-fn regtest_pin() -> TestResult<&'static bitcoin_rs_consensus::primitives::AssumeUtxoData> {
+pub(super) fn regtest_pin() -> TestResult<&'static bitcoin_rs_consensus::primitives::AssumeUtxoData>
+{
     Network::Regtest
         .assume_utxo_for_height(200)
         .ok_or_else(|| TestError::Assertion("regtest height-200 anchor".into()))
@@ -137,7 +138,7 @@ fn write_snapshot_engine(from: &Path) -> TestResult<()> {
     Ok(())
 }
 
-fn write_valid_epoch4_snapshot_source(from: &Path) -> TestResult<()> {
+pub(super) fn write_valid_epoch4_snapshot_source(from: &Path) -> TestResult<()> {
     write_schema_marker(from, 4)?;
     write_snapshot_engine(from)?;
     write_snapshot_archive(from)?;

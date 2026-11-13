@@ -2,15 +2,24 @@ use super::*;
 
 use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
 
-const COINS: [(u8, u32, u64, &[u8], bool); 4] = [
+const COINS: [(u8, u32, u64, &[u8], bool); 13] = [
     (7, 3, 50_000, &[0x51, 0x21], true),
     (0x11, 0, 1_000, &[0x51], false),
     (0x11, 3, 2_500, &[0x51, 0x52], false),
     (0x33, 0, 7, &[0x6a; 25], false),
+    (0x39, 1, 10_000, &[0x51, 0x00, 0xac], true),
+    (0x39, 4, 10_137, &[0x51, 0x01, 0xac], false),
+    (0x39, 7, 10_274, &[0x51, 0x02, 0xac], true),
+    (0x39, 10, 10_411, &[0x51, 0x03, 0xac], false),
+    (0x39, 13, 10_548, &[0x51, 0x04, 0xac], true),
+    (0x39, 16, 10_685, &[0x51, 0x05, 0xac], false),
+    (0x39, 19, 10_822, &[0x51, 0x06, 0xac], true),
+    (0x39, 22, 10_959, &[0x51, 0x07, 0xac], false),
+    (0x39, 25, 11_096, &[0x51, 0x08, 0xac], true),
 ];
-const EXPECTED_UTXO_COUNT: u64 = 4;
-const EXPECTED_TOTAL_AMOUNT: u64 = 53_507;
-const EXPECTED_BOGO_SIZE: u64 = 52 + 51 + 52 + 75;
+const EXPECTED_UTXO_COUNT: u64 = 13;
+const EXPECTED_TOTAL_AMOUNT: u64 = 148_439;
+const EXPECTED_BOGO_SIZE: u64 = 52 + 51 + 52 + 75 + 53 * 9;
 
 fn record(
     txid_byte: u8,
@@ -36,6 +45,20 @@ fn hand_built_utxo() -> Result<UtxoSet, bitcoin_rs_storage::utxo::UtxoError> {
         &[(0, 1_000, &[0x51], false), (3, 2_500, &[0x51, 0x52], false)],
     )?);
     utxo.insert_parsed_record(record(0x33, &[(0, 7, &[0x6a; 25], false)])?);
+    utxo.insert_parsed_record(record(
+        0x39,
+        &[
+            (1, 10_000, &[0x51, 0x00, 0xac], true),
+            (4, 10_137, &[0x51, 0x01, 0xac], false),
+            (7, 10_274, &[0x51, 0x02, 0xac], true),
+            (10, 10_411, &[0x51, 0x03, 0xac], false),
+            (13, 10_548, &[0x51, 0x04, 0xac], true),
+            (16, 10_685, &[0x51, 0x05, 0xac], false),
+            (19, 10_822, &[0x51, 0x06, 0xac], true),
+            (22, 10_959, &[0x51, 0x07, 0xac], false),
+            (25, 11_096, &[0x51, 0x08, 0xac], true),
+        ],
+    )?);
     Ok(utxo)
 }
 
@@ -85,12 +108,27 @@ fn scanned_trailer_restores_independently_scanned_stats() -> TestResult {
     assert_eq!(restored.coin_stats.total_amount, EXPECTED_TOTAL_AMOUNT);
     assert_eq!(restored.coin_stats.bogo_size, EXPECTED_BOGO_SIZE);
     assert_eq!(restored.coin_stats, expected);
-    drop(utxo);
 
     let engine = restored.engine.as_ref().ok_or(TestError::Missing(
         "the checkpoint generation carries no engine image",
     ))?;
     let restored_utxo = utxo_from_engine(engine.as_ref())?;
+    restored_utxo.with_stable_view(|view| -> Result<(), TestError> {
+        assert_eq!(view.record_count(), 4);
+        assert_eq!(view.len(), COINS.len());
+        for (txid_byte, vout, value, script, coinbase) in COINS {
+            let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[txid_byte; 32])), vout);
+            let coin = view.get_entry(&outpoint).ok_or(TestError::Missing(
+                "the restored engine image is missing a fixture output",
+            ))?;
+            assert_eq!(coin.outpoint, outpoint);
+            assert_eq!(coin.txout.value, Amount::from_sat(value));
+            assert_eq!(coin.txout.script_pubkey.as_bytes(), script);
+            assert_eq!(coin.coinbase, coinbase);
+            assert_eq!(coin.height, 0);
+        }
+        Ok(())
+    })?;
     let rescanned = restored_utxo
         .with_stable_view(|view| scan_coin_stats(view, restored.applied_tip.height, true))?;
     assert_eq!(
@@ -104,7 +142,7 @@ fn scanned_trailer_restores_independently_scanned_stats() -> TestResult {
         value: Amount::from_sat(123_456),
         script_pubkey: Script::from_bytes(vec![0x51, 0xac]),
     };
-    let mut stats = restored.coin_stats.clone();
+    let mut stats = expected;
     stats.insert_utxo(&outpoint, &txout, restored.applied_tip.height, false);
     let listener = CoinStatsListener::new(stats);
     let out = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
@@ -122,6 +160,10 @@ fn scanned_trailer_restores_independently_scanned_stats() -> TestResult {
     let continued = restored_utxo
         .with_stable_view(|view| scan_coin_stats(view, restored.applied_tip.height, true))?;
     assert_eq!(listener.snapshot().to_bytes(), continued.to_bytes());
+    restored_utxo.with_stable_view(|view| {
+        assert_eq!(view.record_count(), 5);
+        assert_eq!(view.len(), COINS.len() + 1);
+    });
     Ok(())
 }
 

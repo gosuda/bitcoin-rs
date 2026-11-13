@@ -337,6 +337,24 @@ pub(super) fn apply_window_admitted(
     handles: &Chainstate,
     payloads: &[&BlockImage],
 ) -> core::result::Result<Vec<ConnectOutcome>, WindowApplyError> {
+    if payloads.len() > 1
+        && handles.applied_tip.load_full().is_none()
+        && payloads[0].block_hash().0 == handles.network.genesis_block_hash()
+    {
+        let mut committed = apply_window_admitted(handles, &payloads[..1])?;
+        return match apply_window_admitted(handles, &payloads[1..]) {
+            Ok(outcomes) => {
+                committed.extend(outcomes);
+                Ok(committed)
+            }
+            Err(mut error) => {
+                committed.append(&mut error.committed);
+                error.applied = committed.len();
+                error.committed = committed;
+                Err(error)
+            }
+        };
+    }
     let mut window = proved_window(handles, payloads)?;
     if window.workspace.is_none() && !payloads.is_empty() && admit_window_headers(handles, payloads)
     {
@@ -1084,6 +1102,85 @@ mod workspace_guard_tests {
                 coin_delta: WindowDelta::default(),
             })
             .expect("genesis head");
+    }
+
+    // CMT-02, CMT-03, SYNC-05, WIN-03
+    #[test]
+    fn cold_genesis_window_commits_child_with_its_coin() {
+        let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        let genesis = Network::Regtest.genesis_block();
+        let child = mined_regtest_child_at(genesis.block_hash(), 1).expect("mine child");
+        let child_hash = child.block_hash().0;
+        let child_key = bitcoin_rs_storage::CoinKey(child.txs[0].txid().0.to_le_bytes());
+        let payloads = [
+            BlockImage::from_local(genesis),
+            BlockImage::from_local(child),
+        ];
+
+        let outcomes = chain
+            .apply_window(&[&payloads[0], &payloads[1]])
+            .expect("cold genesis window");
+
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].height, 0);
+        assert_eq!(outcomes[0].hash, Network::Regtest.genesis_block_hash());
+        assert_eq!(outcomes[1].height, 1);
+        assert_eq!(outcomes[1].hash, child_hash);
+        assert!(outcomes[0].commit_id < outcomes[1].commit_id);
+        let head = chain.durable_head.load().expect("head read").expect("head");
+        assert_eq!(head.height, 1);
+        assert_eq!(head.tip, child_hash);
+        assert_eq!(head.commit_id, outcomes[1].commit_id);
+        let applied = chain.applied_tip.load_full().expect("applied tip");
+        assert_eq!(applied.height, 1);
+        assert_eq!(applied.hash, child_hash);
+        assert!(chain.coins.get(&child_key).expect("child coin").is_some());
+        assert!(
+            chain
+                .commit_authority
+                .store()
+                .get(ColumnFamily::Coins, child_key.as_bytes())
+                .expect("durable child coin")
+                .is_some()
+        );
+    }
+
+    // WIN-08, SYNC-04, CMT-03
+    #[test]
+    fn cold_genesis_window_reports_bootstrap_once_when_child_is_invalid() {
+        let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        let genesis = Network::Regtest.genesis_block();
+        let genesis_hash = genesis.block_hash().0;
+        let mut child = mined_regtest_child_at(genesis.block_hash(), 1).expect("mine child");
+        child.txs[0].outputs[0].value =
+            bitcoin_rs_consensus::primitives::Amount::from_sat(500_000_000_000);
+        child.header.merkle_root =
+            crate::chain::regtest_fixture::merkle_root(&child.txs).expect("merkle root");
+        crate::chain::regtest_fixture::mine_block_to_declared_target(&mut child)
+            .expect("remine invalid child");
+        let child_key = bitcoin_rs_storage::CoinKey(child.txs[0].txid().0.to_le_bytes());
+        let payloads = [
+            BlockImage::from_local(genesis),
+            BlockImage::from_local(child),
+        ];
+
+        let error = chain
+            .apply_window(&[&payloads[0], &payloads[1]])
+            .expect_err("invalid child");
+
+        assert_eq!(error.disposition, WindowApplyDisposition::Permanent);
+        assert_eq!(error.applied, 1);
+        assert_eq!(error.committed.len(), 1);
+        assert_eq!(error.committed[0].height, 0);
+        assert_eq!(error.committed[0].hash, genesis_hash);
+        let head = chain.durable_head.load().expect("head read").expect("head");
+        assert_eq!(head.height, 0);
+        assert_eq!(head.tip, genesis_hash);
+        assert_eq!(head.commit_id, error.committed[0].commit_id);
+        let applied = chain.applied_tip.load_full().expect("applied tip");
+        assert_eq!(applied.height, 0);
+        assert_eq!(applied.hash, genesis_hash);
+        assert!(chain.coins.get(&child_key).expect("child coin").is_none());
     }
 
     // CMT-02

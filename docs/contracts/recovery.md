@@ -337,12 +337,14 @@ The crash and error points produce exactly these results:
 ### `RCV-10`: Checkpoint as engine state image
 
 - A checkpoint is an engine image of the committed durable head state, created through the storage seam `KvStore::checkpoint(&self, dir: &Path)`.
+- The engine MUST synchronize the image contents and its containing directory before `KvStore::checkpoint` returns success. A synchronization failure MUST prevent generation publication.
 - A checkpoint is not an independent recovery authority.
 - The durable root and the ordered atomic commit protocol are the only recovery authority.
 - Checkpoints are created as a maintenance and export mechanism, published under the generation protocol (manifest, `CURRENT`, sync, rename).
 - Checkpoints do not write a standalone UTXO snapshot file; coins reside directly in the cloned `coins` column family in the engine image.
 - No code path treats a checkpoint as chainstate authority.
 - State restoration uses the accepted checkpoint plus its certified committed suffix replayed from canonical block files and undo records.
+- Proof: `memory_kv::tests::checkpoint_propagates_image_sync_failure` proves that an image-file synchronization failure returns an error. `checkpoint::tests::engine_image::a_published_engine_image_restores_with_its_engine` proves image restoration. `checkpoint::tests::engine_image::runtime_rejects_a_missing_checkpoint_image` proves missing-image refusal. `state::tests::recovery::missing_checkpoint_replays_durable_head_chain_at_startup` proves that startup refusal preserves newer committed state. These tests do not prove directory synchronization for each backend.
 
 ### `RCV-11`: Owner-local schema versions
 

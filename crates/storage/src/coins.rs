@@ -1,4 +1,5 @@
 use bitcoin_rs_consensus::primitives::{Amount, OutPoint, Script, TxOut};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -50,7 +51,7 @@ impl CoinKey {
 
 /// One final coin image per touched txid for the valid prefix of a window.
 ///
-/// Invariant: at most one entry per `CoinKey`; `None` commits as a delete
+/// Each key's last entry is its final image; `None` commits as a delete
 /// (create-and-spend txids never enter the store), `Some` as a replacement.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WindowDelta {
@@ -86,26 +87,20 @@ enum CoinStatsFeedOp {
 
 impl CoinStatsFeed {
     fn apply(self, listener: &CoinStatsListener) {
-        for op in self.ops {
-            match op {
-                CoinStatsFeedOp::Insert {
-                    op,
-                    txout,
-                    height,
-                    coinbase,
-                } => {
-                    listener.insert_utxo(&op, &txout, height, coinbase);
-                }
-                CoinStatsFeedOp::Remove {
-                    op,
-                    txout,
-                    height,
-                    coinbase,
-                } => {
-                    listener.remove_utxo(&op, &txout, height, coinbase);
-                }
-            }
-        }
+        listener.apply_utxos(self.ops.iter().map(|op| match op {
+            CoinStatsFeedOp::Insert {
+                op,
+                txout,
+                height,
+                coinbase,
+            } => (true, op, txout, *height, *coinbase),
+            CoinStatsFeedOp::Remove {
+                op,
+                txout,
+                height,
+                coinbase,
+            } => (false, op, txout, *height, *coinbase),
+        }));
     }
 }
 
@@ -185,7 +180,11 @@ impl CoinStore {
             return Ok(CoinStatsFeed::default());
         }
         let mut ops = Vec::with_capacity(delta.records.len().saturating_mul(2));
-        for (key, record) in &delta.records {
+        let mut seen = HashSet::with_capacity(delta.records.len());
+        for (key, record) in delta.records.iter().rev() {
+            if !seen.insert(*key) {
+                continue;
+            }
             if let Some(old) = self.get(key)? {
                 push_remove_ops(&old, &mut ops)?;
             }

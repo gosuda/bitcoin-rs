@@ -6,15 +6,16 @@ The whole path lives in `crates/execution/src`: `window.rs` owns the apply windo
 
 ## The apply window
 
-The sync layer hands the chainstate a batch of consecutive blocks, not one at a time. `apply_window_admitted` in `crates/execution/src/window.rs` walks the batch and stages each validated block in a `WindowGroup` in `crates/execution/src/window.rs`. Staging means: the block is fully validated, its undo record and coin delta are built, but nothing is on disk and no reader sees the new tip.
+The sync layer hands the chainstate a batch of consecutive blocks, not one at a time. `apply_window_admitted` in `crates/execution/src/window.rs` walks the batch and stages each validated block in a `WindowGroup` in `crates/execution/src/window.rs`. Staging means: the block is fully validated, its undo record is built, and its coin effects accumulate in the window workspace; block bodies are appended, but the durable head and published applied tip do not advance, and no reader sees the new tip. The final `WindowDelta` is built at flush.
 
 A group flushes when it holds 64 blocks (`DURABLE_HEAD_GROUP_BLOCKS` in `crates/execution/src/window_limits.rs`) or 8 MiB of staged block bytes (`DURABLE_HEAD_GROUP_MAX_BYTES` in `crates/execution/src/window_limits.rs`). `flush` in `crates/execution/src/window.rs` then does one group commit:
 
 ```
-staged blocks 1..n  --sync_appended_blocks-->  bodies durable
-undo rows + body rows + attestation + coin replacements --commit_prefix--> one receipt
-receipt.commit_id backfilled into every ConnectOutcome
-coin delta installed into the coin cache, then tips published per block
+staged blocks 1..n  --sync_appended_blocks-->  appended bodies durable
+window workspace  --build_flush_delta-->  final coin replacements
+undo rows + body locator rows + attestation + coin replacements + head
+  --commit_prefix--> durable batch, then coin-cache and stats-feed installation, then receipt
+receipt.commit_id backfilled into every ConnectOutcome, then tips published per block
 ```
 
 Each block in the group must continue the previous one: `WindowGroup::predecessor` in `crates/execution/src/window.rs` returns the last staged tip as the parent and rejects a `prev_hash` mismatch with `PrevHashMismatch { tip, prev }`. This lets validation chain block N+1 against block N's in-memory tip without a storage round trip.
@@ -48,7 +49,7 @@ Error precedence here is fixed by call order: the early `check_bip34` in `crates
 
 ## Undo records
 
-Every committed block produces an `UndoRecord`: the prevouts its inputs spent, built inside `build_block_changes_checked` in `crates/execution/src/connect.rs`. The window stage holds it as `PendingBlockCommit.undo_record` in `crates/execution/src/window.rs`, and `flush` writes all undo rows in the same `CommitRecords` batch in `crates/storage/src/durable_head.rs` as the body rows and durable-head facts. Disconnects load the record back with `load_block_undo_for_block` in `crates/storage/src/utxo/contract.rs` and replay it through `plan_disconnect` and `disconnect_block_admitted` in `crates/execution/src/disconnect.rs`. A disconnect whose removed outpoints differ from the stored undo fails (`disconnect_refuses_undo_whose_removed_outpoint_differs_from_the_block` in `crates/execution/src/tests/utxo_integrity_tests.rs`); a missing or truncated undo keeps state and refuses (in `crates/execution/src/tests/utxo_integrity_tests.rs`).
+Every committed block produces an `UndoRecord`: the prevouts its inputs spent, built inside `build_block_changes_checked` in `crates/execution/src/connect.rs`. The window stage holds it as `PendingBlockCommit.undo_record` in `crates/execution/src/window.rs`, and `flush` writes all undo rows in the same `CommitRecords` batch in `crates/storage/src/durable_head.rs` as the body locator rows and durable-head facts. Disconnects load the record back with `load_block_undo_for_block` in `crates/storage/src/utxo/contract.rs` and replay it through `plan_disconnect` and `disconnect_block_admitted` in `crates/execution/src/disconnect.rs`. A disconnect whose removed outpoints differ from the stored undo fails (`disconnect_refuses_undo_whose_removed_outpoint_differs_from_the_block` in `crates/execution/src/tests/utxo_integrity_tests.rs`); a missing or truncated undo keeps state and refuses (in `crates/execution/src/tests/utxo_integrity_tests.rs`).
 
 ## Reorg attempt and settlement
 

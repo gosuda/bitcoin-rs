@@ -1105,24 +1105,28 @@ fn scan_txoutset_view(
         return Err(RpcError::Misc("gettxoutsetinfo interrupted".to_owned()));
     }
     let want_muhash = hash_type == "muhash";
-    ctx.chain.utxo.with_stable_view(|stable| {
-        let stats = bitcoin_rs_storage::utxo::stats::scan_coin_stats_cancellable(
-            stable,
-            view.height(),
-            want_muhash,
-            cancelled,
-        )
-        .map_err(txoutset_walk_error)?;
-        let set_hash = compute_txoutset_hash(stable, &stats, hash_type, cancelled)?;
-        let disk_size = u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX);
-        Ok(TxOutSetScan {
-            stats,
-            txouts: stable.len(),
-            transactions: stable.record_count(),
-            set_hash,
-            disk_size,
+    ctx.chain
+        .utxo
+        .with_stable_view(|stable| {
+            let stats = bitcoin_rs_storage::utxo::stats::scan_coin_stats_cancellable(
+                stable,
+                view.height(),
+                want_muhash,
+                cancelled,
+            )
+            .map_err(txoutset_walk_error)?;
+            let set_hash = compute_txoutset_hash(stable, &stats, hash_type, cancelled)?;
+            let disk_size =
+                u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX);
+            Ok(TxOutSetScan {
+                stats,
+                txouts: stable.len(),
+                transactions: stable.record_count(),
+                set_hash,
+                disk_size,
+            })
         })
-    })
+        .map_err(txoutset_walk_error)?
 }
 
 fn execute_txoutset_scan(

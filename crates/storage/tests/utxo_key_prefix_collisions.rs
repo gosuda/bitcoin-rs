@@ -1,9 +1,9 @@
 use std::io::Cursor;
 
-use crate::support::utxo::TestResult;
+use crate::support::utxo::{TestError, TestResult};
 use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut, Txid};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
-use bitcoin_rs_storage::utxo::{UtxoSet, read_snapshot_strict_v4, write_snapshot_observed};
+use bitcoin_rs_storage::utxo::{read_snapshot_strict_v4, write_snapshot_observed};
 
 fn make_txid(prefix: [u8; 8], suffix_byte: u8) -> Hash256 {
     let mut bytes = [suffix_byte; 32];
@@ -90,46 +90,72 @@ fn recovers_from_key_prefix_collisions_in_utxo_set_and_snapshot() -> TestResult 
     assert_eq!(reader.get(&op_a5)?, Some(txout_a5.clone()));
     assert_eq!(reader.get(&op_b0)?, Some(txout_b0.clone()));
 
-    let set = UtxoSet::new();
-    let out_a5 = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
-        vout: 5,
-        value: 5_000,
-        script_pubkey: txout_a5.script_pubkey.to_vec(),
-        coinbase: false,
-        height: 104,
-    };
-    let out_b0 = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
-        vout: 0,
-        value: 3_000,
-        script_pubkey: txout_b0.script_pubkey.to_vec(),
-        coinbase: false,
-        height: 101,
-    };
-    let out_b2 = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
-        vout: 2,
-        value: 4_000,
-        script_pubkey: txout_b2.script_pubkey.to_vec(),
-        coinbase: false,
-        height: 101,
-    };
-    let rec_a =
-        bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(txid_a, &[out_a5])?;
-    let rec_b = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
-        txid_b,
-        &[out_b0, out_b2],
-    )?;
-    set.insert_parsed_record(rec_a);
-    set.insert_parsed_record(rec_b);
-    assert_eq!(reader.get(&op_b2)?, Some(txout_b2.clone()));
+    let expected = [
+        (op_a5, txout_a5, false, 104),
+        (op_b0, txout_b0, false, 101),
+        (op_b2, txout_b2, false, 101),
+    ];
+    let view = reader.lock_stable_view()?;
+    let mut remaining: std::collections::HashSet<_> =
+        expected.iter().map(|(outpoint, ..)| *outpoint).collect();
+    let mut first_error: Option<TestError> = None;
+    view.for_each_all(|outpoint, script| {
+        assert!(
+            remaining.remove(outpoint),
+            "unexpected or duplicate output {outpoint:?}"
+        );
+        if first_error.is_some() {
+            return;
+        }
+        let Some((_, txout, coinbase, height)) = expected
+            .iter()
+            .find(|(expected_outpoint, ..)| expected_outpoint == outpoint)
+        else {
+            first_error = Some(TestError::Missing(
+                "scanned output must belong to the supplied inputs",
+            ));
+            return;
+        };
+        assert_eq!(script, txout.script_pubkey.as_slice());
+        let Some(coin) = view.get_entry(outpoint) else {
+            first_error = Some(TestError::Missing("scanned coin must be live"));
+            return;
+        };
+        assert_eq!(
+            (&coin.txout, coin.coinbase, coin.height),
+            (txout, *coinbase, *height)
+        );
+    });
+    assert!(remaining.is_empty());
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    assert!(view.get_entry(&op_a0).is_none());
+    assert!(view.get_entry(&op_a1).is_none());
+    assert_eq!(reader.set().len(), 3);
+    assert_eq!(reader.set().record_count(), 2);
+    drop(view);
 
     let mut snapshot_bytes = Vec::new();
     let tip = Hash256::from_le_bytes(&[5; 32]);
-    write_snapshot_observed(&set, &tip, 104, &mut snapshot_bytes, ())?;
+    write_snapshot_observed(reader.set(), &tip, 104, &mut snapshot_bytes, ())?;
     let loaded = read_snapshot_strict_v4(&mut Cursor::new(&snapshot_bytes))?;
     assert_eq!(loaded.set.len(), 3);
     assert_eq!(loaded.set.record_count(), 2);
     assert!(loaded.set.has_live_outputs_for_txid(&txid_a));
     assert!(loaded.set.has_live_outputs_for_txid(&txid_b));
+    assert!(loaded.set.get_entry(&op_a0).is_none());
+    assert!(loaded.set.get_entry(&op_a1).is_none());
+    for (outpoint, txout, coinbase, height) in &expected {
+        let coin = loaded
+            .set
+            .get_entry(outpoint)
+            .ok_or(TestError::Missing("snapshot coin must be live"))?;
+        assert_eq!(
+            (&coin.txout, coin.coinbase, coin.height),
+            (txout, *coinbase, *height)
+        );
+    }
 
     Ok(())
 }

@@ -743,6 +743,43 @@ fn read_snapshot_output(reader: &mut impl Read) -> Result<OwnedUtxoOut, UtxoErro
     Ok(OwnedUtxoOut::new(vout, value, script, coinbase, height))
 }
 
+/// Computes Core's `hash_serialized_3` from a consistent engine snapshot.
+///
+/// Coin rows must have strictly ascending full little-endian txid keys matching
+/// their records. Outputs are sorted numerically within each record. Hash-owned
+/// buffering retains only one decoded record and its borrowed output descriptors;
+/// backend snapshot and iterator backing storage are excluded from this bound.
+/// If supplied, `snapshot_height` bounds every coin's creation height.
+pub fn hash_serialized_3_snapshot(
+    snapshot: &dyn crate::KvSnapshot,
+    snapshot_height: Option<u32>,
+) -> Result<Hash256, UtxoError> {
+    let mut hasher = SerializedUtxoHasher::new();
+    let mut previous = None;
+    for row in snapshot.iter_prefix(crate::ColumnFamily::Coins, &[])? {
+        let (key, value) = row?;
+        let key = crate::coins::CoinKey::from_slice(&key)?;
+        if previous.is_some_and(|previous| previous >= key) {
+            return Err(crate::StorageError::InvalidOperation(
+                "coin snapshot keys are not strictly ascending",
+            )
+            .into());
+        }
+        previous = Some(key);
+        let record = UtxoRecord::from_encoded(value.into_boxed_slice())?;
+        let txid_le = record.txid().to_le_bytes();
+        if key.as_bytes() != &txid_le {
+            return Err(UtxoError::CorruptRecord);
+        }
+        let mut outputs: Vec<_> = record.outputs().collect();
+        outputs.sort_unstable_by_key(|output| output.vout);
+        for output in outputs {
+            hasher.add(txid_le, output, snapshot_height)?;
+        }
+    }
+    Ok(hasher.finish())
+}
+
 pub(crate) fn hash_serialized_3_stable(view: &UtxoSetView<'_>) -> Result<Hash256, UtxoError> {
     hash_serialized_3_stable_inner(view, None, &|| false)
 }
@@ -1276,5 +1313,123 @@ mod walk_tests {
             "the first check must run after the documented interval"
         );
         assert_eq!(checks.get(), 1, "one walk asks once before stopping");
+    }
+}
+
+#[cfg(test)]
+mod engine_commitment_tests {
+    use super::*;
+    use crate::utxo::test_support::TestResult;
+    use crate::{ColumnFamily, KvIter, KvSnapshot, PrefixScan, PrefixScanLimit, StorageError};
+
+    #[derive(Default)]
+    struct Rows {
+        rows: Vec<(Vec<u8>, Vec<u8>)>,
+        fail_read: bool,
+    }
+
+    impl KvSnapshot for Rows {
+        fn get(&self, _: ColumnFamily, _: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            Err(StorageError::InvalidOperation("unused test lookup"))
+        }
+
+        fn iter_prefix<'a>(
+            &'a self,
+            _: ColumnFamily,
+            _: &[u8],
+        ) -> Result<KvIter<'a>, StorageError> {
+            Ok(Box::new(
+                self.rows.iter().cloned().map(Ok).chain(
+                    self.fail_read
+                        .then_some(())
+                        .into_iter()
+                        .map(|()| Err(StorageError::InvalidOperation("test row read failure"))),
+                ),
+            ))
+        }
+
+        fn scan_prefix_from_bounded(
+            &self,
+            _: ColumnFamily,
+            _: &[u8],
+            _: &[u8],
+            _: PrefixScanLimit,
+        ) -> Result<PrefixScan, StorageError> {
+            Err(StorageError::InvalidOperation("unused test scan"))
+        }
+    }
+
+    // API-33
+    #[test]
+    fn engine_commitment_matches_independent_stable_view_ordering() -> TestResult {
+        let set = UtxoSet::new();
+        let mut snapshot = Rows::default();
+        let mut p2pkh = vec![0x76, 0xa9, 0x14];
+        p2pkh.extend_from_slice(&[7; 20]);
+        p2pkh.extend_from_slice(&[0x88, 0xac]);
+        for (first, suffix) in [(255, 0), (1, 255), (0, 9), (1, 0), (0, 2)] {
+            let mut key = [0_u8; 32];
+            key[0] = first;
+            key[31] = suffix;
+            let outputs = [300, 1, 256, 0].map(|vout| OwnedUtxoOut {
+                vout,
+                value: u64::from(vout) + 1,
+                script_pubkey: if vout == 1 {
+                    p2pkh.clone()
+                } else {
+                    vec![0x51, 0x75]
+                },
+                coinbase: vout == 0,
+                height: 10,
+            });
+            let record = UtxoRecord::from_owned_outputs(Hash256::from_le_bytes(&key), &outputs)?;
+            snapshot.rows.push((key.to_vec(), record.bytes().to_vec()));
+            set.insert_parsed_record(record);
+        }
+        snapshot
+            .rows
+            .sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let expected = set.lock_stable_view().hash_serialized_3()?;
+        assert_eq!(hash_serialized_3_snapshot(&snapshot, None)?, expected);
+        assert_eq!(hash_serialized_3_snapshot(&snapshot, Some(10))?, expected);
+        assert!(matches!(
+            hash_serialized_3_snapshot(&snapshot, Some(9)),
+            Err(UtxoError::SnapshotCoinHeightOutOfRange {
+                height: 10,
+                snapshot_height: 9
+            })
+        ));
+
+        snapshot.rows.swap(0, 1);
+        assert!(matches!(
+            hash_serialized_3_snapshot(&snapshot, None),
+            Err(UtxoError::Storage(StorageError::InvalidOperation(_)))
+        ));
+        snapshot.rows.swap(0, 1);
+        snapshot.rows[0].0[31] ^= 1;
+        assert!(matches!(
+            hash_serialized_3_snapshot(&snapshot, None),
+            Err(UtxoError::CorruptRecord)
+        ));
+        snapshot.rows[0].0.pop();
+        assert!(matches!(
+            hash_serialized_3_snapshot(&snapshot, None),
+            Err(UtxoError::Storage(StorageError::InvalidOperation(_)))
+        ));
+        snapshot.rows[0].0.push(9);
+        snapshot.rows[0].1.clear();
+        assert!(matches!(
+            hash_serialized_3_snapshot(&snapshot, None),
+            Err(UtxoError::CorruptRecord)
+        ));
+        snapshot.rows.clear();
+        snapshot.fail_read = true;
+        assert!(matches!(
+            hash_serialized_3_snapshot(&snapshot, None),
+            Err(UtxoError::Storage(StorageError::InvalidOperation(
+                "test row read failure"
+            )))
+        ));
+        Ok(())
     }
 }

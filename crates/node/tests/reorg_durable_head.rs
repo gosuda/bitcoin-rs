@@ -41,7 +41,7 @@ fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
     let expected_utxo = state
         .chainstate()
         .utxo_reader()
-        .with_stable_view(stable_utxo_hash)?;
+        .with_stable_view(stable_utxo_hash)??;
     let expected_stats = state.chainstate().coin_stats_handle().snapshot();
     drop(state);
 
@@ -55,7 +55,7 @@ fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
         resumed
             .chainstate()
             .utxo_reader()
-            .with_stable_view(stable_utxo_hash)?,
+            .with_stable_view(stable_utxo_hash)??,
         expected_utxo
     );
     assert_semantic_coin_stats_eq(
@@ -186,7 +186,7 @@ fn recovery_publication_keeps_committed_coin_stats_across_restart() -> Result<()
         .utxo_reader()
         .with_stable_view(|view| {
             bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, tip.height, true)
-        })?;
+        })??;
     let served = resumed.chainstate().coin_stats_handle().snapshot();
     assert_eq!(
         served.height, expected.height,

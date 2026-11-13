@@ -1,8 +1,7 @@
-//! In-memory [`KvStore`] for tests that need a real store without an engine.
-//!
-//! Only compiled under `test` or `test-seam`.
+//! In-memory [`KvStore`] with durable checkpoint images for historical chainstate.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -176,12 +175,13 @@ impl KvSnapshot for MemorySnapshot {
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError> {
-        let rows: Result<Vec<_>, StorageError> = self.cfs[cf.index()]
-            .iter()
-            .filter(|(key, _value)| key.starts_with(prefix))
-            .map(|(key, value)| Ok((key.clone(), value.clone())))
-            .collect();
-        Ok(Box::new(rows?.into_iter().map(Ok)))
+        let prefix = prefix.to_vec();
+        Ok(Box::new(
+            self.cfs[cf.index()]
+                .iter()
+                .filter(move |(key, _value)| key.starts_with(&prefix))
+                .map(|(key, value)| Ok((key.clone(), value.clone()))),
+        ))
     }
 
     fn scan_prefix_from_bounded(
@@ -356,7 +356,13 @@ impl KvStore for MemoryKvStore {
                 bytes.extend_from_slice(v);
             }
         }
-        std::fs::write(&file_path, &bytes).map_err(StorageError::Io)?;
+        drop(guard);
+        let mut file = std::fs::File::create(&file_path).map_err(StorageError::Io)?;
+        file.write_all(&bytes).map_err(StorageError::Io)?;
+        file.sync_all().map_err(StorageError::Io)?;
+        let directory = cap_std::fs::Dir::open_ambient_dir(dir, cap_std::ambient_authority())
+            .map_err(StorageError::Io)?;
+        crate::checkpoint::fs::sync_dir(&directory).map_err(StorageError::Io)?;
         Ok(())
     }
 
@@ -378,4 +384,61 @@ pub fn memory_commit_authority(budget_bytes: u64) -> Arc<CommitAuthority> {
     let store: Arc<dyn KvStore> = Arc::new(MemoryKvStore::default());
     let coins = Arc::new(CoinStore::open(Arc::clone(&store), budget_bytes));
     Arc::new(CommitAuthority::new(store, coins))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TestResult;
+
+    #[test]
+    fn checkpoint_roundtrip_preserves_rows_and_empty_families() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let destination = temp.path().join("chainstate");
+        let store = MemoryKvStore::new();
+        store.put(ColumnFamily::Coins, b"coin-z", b"unspent")?;
+        store.put(ColumnFamily::Coins, b"coin-a", b"")?;
+        store.put(ColumnFamily::UndoData, b"undo-17", b"prior-output")?;
+
+        store.checkpoint(&destination)?;
+        store.put(ColumnFamily::Coins, b"coin-z", b"changed-after-checkpoint")?;
+        let reopened = MemoryKvStore::open_checkpoint(&destination)?;
+
+        for &family in ColumnFamily::ALL {
+            let rows = reopened
+                .iter_prefix(family, &[])?
+                .collect::<Result<Vec<_>, _>>()?;
+            let expected = match family {
+                ColumnFamily::Coins => vec![
+                    (b"coin-a".to_vec(), Vec::new()),
+                    (b"coin-z".to_vec(), b"unspent".to_vec()),
+                ],
+                ColumnFamily::UndoData => {
+                    vec![(b"undo-17".to_vec(), b"prior-output".to_vec())]
+                }
+                _ => Vec::new(),
+            };
+            assert_eq!(rows, expected, "checkpoint family {family:?}");
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    // RCV-10
+    #[test]
+    fn checkpoint_propagates_image_sync_failure() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        std::os::unix::fs::symlink("/dev/null", temp.path().join(MEMORY_KV_FILE))?;
+        let store = MemoryKvStore::new();
+        store.put(ColumnFamily::Coins, b"durable-coin", b"coin-value")?;
+
+        let result = store.checkpoint(temp.path());
+
+        assert!(
+            matches!(&result, Err(StorageError::Io(error))
+                if error.raw_os_error() == Some(rustix::io::Errno::INVAL.raw_os_error())),
+            "checkpoint must propagate the image fsync EINVAL, got {result:?}"
+        );
+        Ok(())
+    }
 }

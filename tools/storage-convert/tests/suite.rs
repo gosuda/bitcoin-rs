@@ -2,6 +2,7 @@
 
 mod support;
 
+mod assumeutxo_archive;
 mod conversion;
 mod empty_namespaces;
 #[cfg(any(feature = "mdbx", feature = "surrealkv"))]
