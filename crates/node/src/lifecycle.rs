@@ -75,11 +75,7 @@ impl ChainControl for RpcChainControl {
         bitcoin_rs_serving::context::SnapshotImport,
         bitcoin_rs_serving::context::SnapshotControlError,
     > {
-        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-            self.snapshots.import_manifest(path).map_err(Into::into)
-        } else {
-            self.snapshots.import(path).map_err(Into::into)
-        }
+        self.snapshots.import(path).map_err(Into::into)
     }
 
     fn dump_txoutset(

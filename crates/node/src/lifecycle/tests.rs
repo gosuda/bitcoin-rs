@@ -307,6 +307,96 @@ fn verify_chain_reports_cancellation_and_recovery_closure() -> Result<(), TestEr
     Ok(())
 }
 
+#[test]
+fn rpc_load_txoutset_follows_core_import_behavior_independent_of_filename() -> Result<(), TestError>
+{
+    use bitcoin_rs_execution::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
+    use sha2::Digest;
+
+    let pinned = bitcoin_rs_consensus::primitives::Network::Regtest
+        .assume_utxo_for_height(200)
+        .ok_or(TestError::Missing("regtest height-200 anchor"))?;
+    let dir = tempfile::tempdir()?;
+    let mut config = isolated_config(dir.path());
+    config.data_dir = dir.path().join("node");
+    let state = NodeState::open(config, None)?;
+    state.apply_block(&BlockImage::from_local(
+        bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
+    ))?;
+    let headers: Vec<bitcoin_rs_consensus::primitives::Header> = sonic_rs::from_str::<Vec<String>>(
+        include_str!("../../../storage/tests/fixtures/core-v2/blocks200.json"),
+    )?
+    .iter()
+    .map(|hex| {
+        let block: bitcoin::Block = bitcoin::consensus::encode::deserialize_hex(hex)?;
+        bitcoin_rs_consensus::primitives::deserialize(&bitcoin::consensus::serialize(&block.header))
+            .map_err(TestError::from)
+    })
+    .collect::<Result<_, _>>()?;
+    state.chainstate().admit_headers(&headers)?;
+    let core_bytes =
+        include_bytes!("../../../storage/tests/fixtures/core-v2/core200.dat").as_slice();
+
+    let applied_tip = || {
+        state
+            .chainstate()
+            .applied_tip_snapshot()
+            .map(|tip| tip.height)
+    };
+    assert_eq!(applied_tip(), Some(0));
+
+    let control = RpcChainControl {
+        handles: state.chainstate(),
+        followers: state.chain_followers(),
+        sync: state.sync(),
+        snapshots: Arc::clone(&state.snapshots),
+    };
+
+    let mut sizes = [0_u64; ARTIFACT_SLOTS];
+    let mut hashes = [[0_u8; 32]; ARTIFACT_SLOTS];
+    sizes[UTXO_SLOT] = u64::try_from(core_bytes.len()).map_err(std::io::Error::other)?;
+    hashes[UTXO_SLOT] = sha2::Sha256::digest(core_bytes).into();
+    let manifest = SnapshotManifest {
+        manifest_version: 1,
+        network: "regtest".to_string(),
+        genesis: bitcoin_rs_consensus::primitives::Network::Regtest
+            .genesis_block_hash()
+            .to_le_bytes(),
+        base_hash: pinned.block_hash.to_le_bytes(),
+        base_height: pinned.height,
+        schema: bitcoin_rs_projection::index_format_version(),
+        utxo_commitment: pinned.hash_serialized.to_le_bytes(),
+        index_commitments: [None; 4],
+        coverage: [None; 4],
+        sizes,
+        hashes,
+        historical_verified_height: 0,
+    };
+    let manifest_path = dir.path().join("snapshot_manifest.json");
+    std::fs::write(&manifest_path, sonic_rs::to_vec_pretty(&manifest)?)?;
+
+    assert!(
+        control.load_txoutset(&manifest_path).is_err(),
+        "a valid manifest JSON must not activate through the RPC surface"
+    );
+    assert_eq!(
+        applied_tip(),
+        Some(0),
+        "the refused manifest attempt must install nothing"
+    );
+
+    let renamed = dir.path().join("core200.json");
+    std::fs::write(&renamed, core_bytes)?;
+    let imported = control.load_txoutset(&renamed)?;
+    assert_eq!(imported.base_height, 200);
+    assert_eq!(
+        applied_tip(),
+        Some(200),
+        "a Core binary named .json must follow the same Core import behavior as extensionless"
+    );
+    Ok(())
+}
+
 fn seed_checkpoint(state: &NodeState) -> Result<(PathBuf, Vec<u8>), TestError> {
     state.apply_block(&BlockImage::from_local(
         bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
