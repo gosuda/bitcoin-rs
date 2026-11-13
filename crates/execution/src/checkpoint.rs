@@ -1,6 +1,6 @@
 use crate::chain::{BlockTree, ChainTxCount, ChainWork, NodeId, TipSnapshot};
-use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::hex::hex_encode;
+use bitcoin_rs_consensus::primitives::{Hash256, Network};
 #[cfg(test)]
 pub(crate) use bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT;
 pub(crate) use bitcoin_rs_storage::checkpoint::COINSTATS_ARTIFACT_LEN;
@@ -292,6 +292,52 @@ fn load_opened_checkpoint(
         Ok(restored) => Ok(CheckpointLoad::Complete(Box::new(restored))),
         Err(error) => Err(classify_checkpoint_error(error)),
     }
+}
+
+/// Validates a conversion source's canonical artifacts without opening its engine.
+pub fn validate_conversion_checkpoint_artifacts(
+    generation_dir: &Dir,
+    reference: &bitcoin_rs_storage::checkpoint::CheckpointReference,
+    network: Network,
+) -> Result<(), CheckpointError> {
+    let config = headers::HeaderCheckpointConfig {
+        network,
+        genesis: network.genesis_block_hash(),
+    };
+    let manifest = read_manifest(
+        generation_dir,
+        reference,
+        CheckpointIdentity {
+            network,
+            genesis: config.genesis,
+        },
+    )?;
+    if !headers::is_readable_version(manifest.headers.version)
+        || manifest.headers.codec != HEADER_CODEC
+        || manifest.coinstats.codec != COINSTATS_CODEC
+    {
+        return Err(CheckpointError::Store(StoreError::Invalid(
+            "unsupported conversion checkpoint artifact codec or version".to_owned(),
+        )));
+    }
+    let _headers = load_headers(generation_dir, config, &manifest)?;
+    require_filename(&manifest.coinstats.file, COINSTATS_FILE)?;
+    let file = verify_artifact(
+        generation_dir,
+        COINSTATS_FILE,
+        manifest.coinstats.bytes,
+        &manifest.coinstats.sha256,
+    )?;
+    let stats = read_coinstats(file, &manifest)?;
+    if stats.height != manifest.applied_tip.height {
+        return Err(CheckpointError::Store(StoreError::Invalid(
+            "CoinStats height does not match applied tip".to_owned(),
+        )));
+    }
+    validate_chain_tx_count(
+        ChainTxCount::from_wire(manifest.applied_tip.chain_tx_count),
+        &stats,
+    )
 }
 
 #[cfg(test)]

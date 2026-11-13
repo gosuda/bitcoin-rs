@@ -1,4 +1,5 @@
 use crate::chain::TipSnapshot;
+pub use crate::checkpoint::validate_conversion_checkpoint_artifacts;
 use bitcoin_rs_storage::ScriptAttestation;
 use bitcoin_rs_storage::checkpoint::CheckpointLoadError;
 use bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER;

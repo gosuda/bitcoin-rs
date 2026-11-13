@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use bitcoin_rs_consensus::primitives::{Hash256, Network};
+use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_execution::recovery::{
     ResumeSource, prepare_initial_state_with_engine, requires_full_revalidation,
 };
@@ -10,12 +10,11 @@ use bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER;
 use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore};
 use tempfile::tempdir;
 
-use super::epoch3_to_4::create_checkpoint_fixture;
 use super::support::error::{TestError, TestResult};
 use super::support::harness::{parse_report, run_converter};
 use super::support::oracle::write_schema_marker;
 
-const MARKER_TEXT: &[u8] = b"full revalidation required after the checkpoint base\n";
+const MARKER_TEXT: &[u8] = b"required\n";
 
 fn path_str(path: &Path) -> TestResult<&str> {
     path.to_str()
@@ -23,22 +22,20 @@ fn path_str(path: &Path) -> TestResult<&str> {
 }
 
 fn write_epoch3_base(from: &Path) -> TestResult<()> {
-    write_schema_marker(from, 3)?;
-    let txid = Hash256::from_le_bytes(&[21u8; 32]);
-    let tip = Hash256::from_le_bytes(&[0x5a; 32]);
-    create_checkpoint_fixture(from, tip, 100, &[txid])?;
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/epoch3-regtest");
+    copy_fixture(&fixture, from)
+}
 
-    let store = RocksDbStore::open(from.join("chainstate"))?;
-    let head = DurableHead {
-        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
-        commit_id: 1,
-        height: 100,
-        tip,
-        chain_tx_count: 100,
-        body_extent: None,
-        undo_extent: None,
-    };
-    store.put(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY, &head.encode())?;
+fn copy_fixture(from: &Path, to: &Path) -> TestResult<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            copy_fixture(&entry.path(), &to.join(entry.file_name()))?;
+        } else {
+            fs::copy(entry.path(), to.join(entry.file_name()))?;
+        }
+    }
     Ok(())
 }
 
@@ -122,6 +119,50 @@ fn converted_datadir_without_marker_does_not_require_full_revalidation() -> Test
         return Err(TestError::Assertion(
             "a source without the marker must not produce one".into(),
         ));
+    }
+    Ok(())
+}
+
+#[test]
+fn epoch4_backend_copy_preserves_root_marker() -> TestResult {
+    let source = tempdir()?;
+    let dest = tempdir()?;
+    let to = dest.path().join("converted");
+    write_schema_marker(source.path(), 4)?;
+    fs::write(source.path().join(FULL_REVALIDATION_MARKER), MARKER_TEXT)?;
+    let output = run_converter(&["--from", path_str(source.path())?, "--to", path_str(&to)?])?;
+    let report = parse_report(&output)?;
+    assert_eq!(report.carried_markers, vec![FULL_REVALIDATION_MARKER]);
+    assert_eq!(fs::read(to.join(FULL_REVALIDATION_MARKER))?, MARKER_TEXT);
+    assert_eq!(
+        fs::read(source.path().join(FULL_REVALIDATION_MARKER))?,
+        MARKER_TEXT
+    );
+    Ok(())
+}
+
+#[test]
+fn oversized_revalidation_markers_refuse_without_publication() -> TestResult {
+    for epoch in [3, 4] {
+        let source = tempdir()?;
+        let dest = tempdir()?;
+        let to = dest.path().join("converted");
+        let marker_dir = if epoch == 3 {
+            write_epoch3_base(source.path())?;
+            let journal = source.path().join("chainstate-journal");
+            fs::create_dir_all(&journal)?;
+            journal
+        } else {
+            write_schema_marker(source.path(), 4)?;
+            source.path().to_path_buf()
+        };
+        let bytes = b"required\nx";
+        fs::write(marker_dir.join(FULL_REVALIDATION_MARKER), bytes)?;
+        let output = run_converter(&["--from", path_str(source.path())?, "--to", path_str(&to)?])?;
+        assert!(!output.status.success(), "oversized marker must refuse");
+        assert!(!to.join("CURRENT_SCHEMA").exists());
+        assert!(!to.join(FULL_REVALIDATION_MARKER).exists());
+        assert_eq!(fs::read(marker_dir.join(FULL_REVALIDATION_MARKER))?, bytes);
     }
     Ok(())
 }

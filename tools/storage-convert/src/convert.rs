@@ -27,10 +27,11 @@ use bitcoin_rs_execution::recovery::{ConvertedCheckpoint, publish_converted_chec
 use bitcoin_rs_storage::checkpoint::{
     CHECKPOINT_ROOT, COINSTATS_FILE, CURRENT_FILE, CURRENT_FORMAT, CURRENT_VERSION,
     CheckpointManifestV1, CheckpointOpen, CheckpointReference, CurrentV1, HEADERS_FILE,
-    MANIFEST_FILE, decode_hex, open_current_checkpoint_at, read_file,
+    HISTORICAL_CHECKPOINT_ROOT, MANIFEST_FILE, decode_hex, open_current_checkpoint_at, read_file,
 };
 pub(crate) const UTXO_FILE: &str = "utxo-v4.dat";
 const EPOCH3_JOURNAL_DIR: &str = "chainstate-journal";
+use bitcoin_rs_storage::assumeutxo::{AssumeUtxoDiskStatus, HistoricalCheckpointRef};
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
 use bitcoin_rs_storage::pruning::{block_body_key, block_undo_key};
 use bitcoin_rs_storage::utxo::UtxoCoin;
@@ -53,6 +54,7 @@ use sha2::{Digest, Sha256};
 
 struct NamespacePaths<'a> {
     name: &'a str,
+    report_name: &'a str,
     dst_path: &'a Path,
     scratch_path: &'a Path,
     from_root: &'a Dir,
@@ -88,6 +90,7 @@ pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertE
 
         let paths = NamespacePaths {
             name: ns_name,
+            report_name: ns_name,
             dst_path: &dst_path,
             scratch_path: &scratch_path,
             from_root: &roots.from_dir,
@@ -111,6 +114,7 @@ pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertE
 
         let paths = NamespacePaths {
             name: "ledger",
+            report_name: "ledger",
             dst_path: &dst_path,
             scratch_path: &scratch_path,
             from_root: pool_from_dir,
@@ -122,13 +126,32 @@ pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertE
 
     let mut copied_files = Vec::new();
     let include_journal = source_epoch == 2;
+    let include_checkpoints = source_epoch == 2;
+    let include_historical = source_epoch != 4;
     copy_independent_files(
         &roots.from_dir,
         &roots.to_dir,
         &mut copied_files,
         include_journal,
-        true,
+        include_checkpoints,
+        include_historical,
     )?;
+    if source_epoch == 4 {
+        let mut ctx = NestedImageContext {
+            from_root: &roots.from_dir,
+            to_root: &roots.to_dir,
+            to_base: &args.to,
+            target_engine,
+            copied_files: &mut copied_files,
+            reports: &mut namespaces_report,
+        };
+        convert_nested_checkpoint_images(&mut ctx)?;
+    }
+    let carried_markers = if source_epoch == 4 {
+        copy_full_revalidation_marker(&roots.from_dir, &roots.to_dir)?
+    } else {
+        Vec::new()
+    };
 
     cleanup_scratch(&roots.to_dir)?;
     if let Some(pool_to_dir) = &roots.pool_to_dir {
@@ -150,7 +173,7 @@ pub(crate) fn run_conversion(args: CliArgs) -> Result<ConversionReport, ConvertE
         checkpoint_stats: None,
         final_stats: None,
         normalized_undo_rows: Vec::new(),
-        carried_markers: Vec::new(),
+        carried_markers,
         published_checkpoint: false,
     })
 }
@@ -191,7 +214,7 @@ fn convert_namespace(
         Ok(dir) => dir,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             return Ok(NamespaceReport {
-                namespace: paths.name.to_string(),
+                namespace: paths.report_name.to_string(),
                 engine: "empty".to_string(),
                 families: Vec::new(),
             });
@@ -224,7 +247,7 @@ fn convert_namespace(
     let detected = detect_engine(paths.scratch_path, &scratch_dir, source_epoch)?;
     let Some(engine) = detected else {
         return Ok(NamespaceReport {
-            namespace: paths.name.to_string(),
+            namespace: paths.report_name.to_string(),
             engine: "empty".to_string(),
             families: Vec::new(),
         });
@@ -260,7 +283,7 @@ fn convert_namespace(
         let (dst_count, dst_digest_hex) = compute_destination_digest(dest_store.as_ref(), cf)?;
         if row_count != dst_count || src_digest_hex != dst_digest_hex {
             return Err(ConvertError::DigestMismatch {
-                namespace: paths.name.to_string(),
+                namespace: paths.report_name.to_string(),
                 family: cf.name().to_string(),
             });
         }
@@ -278,7 +301,7 @@ fn convert_namespace(
     sync_dir(&dst_dir)?;
 
     Ok(NamespaceReport {
-        namespace: paths.name.to_string(),
+        namespace: paths.report_name.to_string(),
         engine: engine_label.to_string(),
         families: family_reports,
     })
@@ -290,8 +313,12 @@ fn copy_independent_files(
     copied_files: &mut Vec<CopiedFileReport>,
     include_journal: bool,
     include_checkpoints: bool,
+    include_historical: bool,
 ) -> Result<(), ConvertError> {
-    let mut independent_dirs = vec!["blocks", "assumeutxo", "assumeutxo-historical-checkpoints"];
+    let mut independent_dirs = vec!["blocks", "assumeutxo"];
+    if include_historical {
+        independent_dirs.push("assumeutxo-historical-checkpoints");
+    }
     if include_checkpoints {
         independent_dirs.push("chainstate-checkpoints");
     }
@@ -321,7 +348,7 @@ fn copy_independent_files(
     }
 
     for &file_name in INDEPENDENT_FILES {
-        copy_independent_file(from_root, to_root, file_name, copied_files)?;
+        copy_independent_file(from_root, to_root, file_name, file_name, copied_files)?;
     }
 
     copy_scoped_peers_books(from_root, to_root, copied_files)?;
@@ -333,6 +360,7 @@ fn copy_independent_file(
     from_root: &Dir,
     to_root: &Dir,
     file_name: &str,
+    report_path: &str,
     copied_files: &mut Vec<CopiedFileReport>,
 ) -> Result<(), ConvertError> {
     let mut src_file = match open_file_read_no_follow(from_root, file_name) {
@@ -346,7 +374,7 @@ fn copy_independent_file(
     dst_file.sync_all()?;
 
     copied_files.push(CopiedFileReport {
-        path: file_name.to_string(),
+        path: report_path.to_string(),
         bytes,
     });
     Ok(())
@@ -384,7 +412,7 @@ fn copy_scoped_peers_books(
     scoped.sort();
 
     for name in &scoped {
-        copy_independent_file(from_root, to_root, name, copied_files)?;
+        copy_independent_file(from_root, to_root, name, name, copied_files)?;
     }
 
     Ok(())
@@ -426,6 +454,195 @@ fn cleanup_scratch(dest_dir: &Dir) -> Result<(), ConvertError> {
             Ok(()) => {}
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => return Err(ConvertError::Io(err)),
+        }
+    }
+    Ok(())
+}
+
+struct NestedImageContext<'a> {
+    from_root: &'a Dir,
+    to_root: &'a Dir,
+    to_base: &'a Path,
+    target_engine: StorageBackend,
+    copied_files: &'a mut Vec<CopiedFileReport>,
+    reports: &'a mut Vec<NamespaceReport>,
+}
+
+const GENERATION_ENGINE_DIR: &str = "chainstate";
+
+fn convert_nested_checkpoint_images(ctx: &mut NestedImageContext<'_>) -> Result<(), ConvertError> {
+    for root_name in [CHECKPOINT_ROOT, HISTORICAL_CHECKPOINT_ROOT] {
+        convert_generation_root(ctx, root_name)?;
+    }
+    Ok(())
+}
+
+fn convert_generation_root(
+    ctx: &mut NestedImageContext<'_>,
+    root_name: &str,
+) -> Result<(), ConvertError> {
+    let src_root = match ctx.from_root.open_dir_nofollow(root_name) {
+        Ok(dir) => dir,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(ConvertError::Io(err)),
+    };
+    let dst_root = open_or_create_dir_nofollow(ctx.to_root, root_name)?;
+
+    let mut generation_names = Vec::new();
+    for entry in src_root.entries()? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            return Err(ConvertError::InvalidOperation(
+                "non-UTF8 file name encountered in checkpoint root".into(),
+            ));
+        };
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() && is_generation_dir_name(name_str) {
+            generation_names.push(name_str.to_string());
+        } else {
+            let report_prefix = format!("{root_name}/{name_str}");
+            let mut copy = GenerationCopy {
+                src: &src_root,
+                dst: &dst_root,
+                report_prefix: &report_prefix,
+                copied_files: &mut *ctx.copied_files,
+            };
+            copy_generation_root_entry(&mut copy, name_str, file_type)?;
+        }
+    }
+    generation_names.sort();
+    for name in &generation_names {
+        convert_generation_image(&src_root, &dst_root, ctx, root_name, name)?;
+    }
+    Ok(())
+}
+
+struct GenerationCopy<'a> {
+    src: &'a Dir,
+    dst: &'a Dir,
+    report_prefix: &'a str,
+    copied_files: &'a mut Vec<CopiedFileReport>,
+}
+
+fn copy_generation_root_entry(
+    ctx: &mut GenerationCopy<'_>,
+    name: &str,
+    file_type: cap_std::fs::FileType,
+) -> Result<(), ConvertError> {
+    if file_type.is_file() {
+        copy_independent_file(ctx.src, ctx.dst, name, ctx.report_prefix, ctx.copied_files)?;
+        return Ok(());
+    }
+    if !file_type.is_dir() {
+        return Err(ConvertError::InvalidOperation(format!(
+            "unsupported entry '{name}' in checkpoint root"
+        )));
+    }
+    let child_src = ctx.src.open_dir_nofollow(name)?;
+    let child_dst = open_or_create_dir_nofollow(ctx.dst, name)?;
+    copy_dir_recursive(&child_src, &child_dst)?;
+    collect_copied_files_from_dir(&child_src, ctx.report_prefix, ctx.copied_files)
+}
+
+fn is_generation_dir_name(name: &str) -> bool {
+    match name.strip_prefix("gen-") {
+        Some(digits) => digits.len() == 20 && digits.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
+}
+
+fn open_or_create_dir_nofollow(parent: &Dir, name: &str) -> Result<Dir, ConvertError> {
+    match parent.open_dir_nofollow(name) {
+        Ok(dir) => Ok(dir),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            parent.create_dir(name)?;
+            Ok(parent.open_dir_nofollow(name)?)
+        }
+        Err(err) => Err(ConvertError::Io(err)),
+    }
+}
+
+fn convert_generation_image(
+    src_root: &Dir,
+    dst_root: &Dir,
+    ctx: &mut NestedImageContext<'_>,
+    root_name: &str,
+    name: &str,
+) -> Result<(), ConvertError> {
+    let src_gen = src_root.open_dir_nofollow(name)?;
+    let dst_gen = open_or_create_dir_nofollow(dst_root, name)?;
+    let report_prefix = format!("{root_name}/{name}");
+    let mut copy = GenerationCopy {
+        src: &src_gen,
+        dst: &dst_gen,
+        report_prefix: &report_prefix,
+        copied_files: &mut *ctx.copied_files,
+    };
+    copy_generation_sidecars(&mut copy, name)?;
+    let engine_dir = match src_gen.open_dir_nofollow(GENERATION_ENGINE_DIR) {
+        Ok(dir) => dir,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotADirectory => {
+            return Err(ConvertError::IncompatibleData(format!(
+                "checkpoint generation {name} has a malformed engine entry"
+            )));
+        }
+        Err(err) => return Err(ConvertError::Io(err)),
+    };
+    drop(engine_dir);
+    let report_name = format!("{root_name}/{name}/{GENERATION_ENGINE_DIR}");
+    let scratch_base = ctx.to_base.join(root_name).join(name).join(".convert-src");
+    let scratch_path = scratch_base.join(GENERATION_ENGINE_DIR);
+    let dst_path = ctx
+        .to_base
+        .join(root_name)
+        .join(name)
+        .join(GENERATION_ENGINE_DIR);
+    let paths = NamespacePaths {
+        name: GENERATION_ENGINE_DIR,
+        report_name: &report_name,
+        dst_path: &dst_path,
+        scratch_path: &scratch_path,
+        from_root: &src_gen,
+        to_root: &dst_gen,
+    };
+    let report = convert_namespace(paths, 4, ctx.target_engine)?;
+    cleanup_scratch(&dst_gen)?;
+    if report.engine != "empty" {
+        ctx.reports.push(report);
+    }
+    Ok(())
+}
+
+fn copy_generation_sidecars(
+    copy: &mut GenerationCopy<'_>,
+    generation: &str,
+) -> Result<(), ConvertError> {
+    for entry in copy.src.entries()? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let child_name = entry.file_name();
+        let Some(child) = child_name.to_str() else {
+            return Err(ConvertError::InvalidOperation(
+                "non-UTF8 file name encountered in checkpoint generation".into(),
+            ));
+        };
+        if child == GENERATION_ENGINE_DIR {
+            continue;
+        }
+        let report_path = format!("{}/{child}", copy.report_prefix);
+        if file_type.is_file() {
+            copy_independent_file(copy.src, copy.dst, child, &report_path, copy.copied_files)?;
+        } else if file_type.is_dir() {
+            let child_src = copy.src.open_dir_nofollow(child)?;
+            let child_dst = open_or_create_dir_nofollow(copy.dst, child)?;
+            copy_dir_recursive(&child_src, &child_dst)?;
+            collect_copied_files_from_dir(&child_src, &report_path, copy.copied_files)?;
+        } else {
+            return Err(ConvertError::InvalidOperation(format!(
+                "unsupported entry '{child}' in checkpoint generation {generation}"
+            )));
         }
     }
     Ok(())
@@ -1101,15 +1318,16 @@ fn convert_historical_checkpoints(
     from_dir: &Dir,
     to_path: &Path,
     target_engine: StorageBackend,
-) -> Result<(), ConvertError> {
+) -> Result<Vec<(HistoricalCheckpointRef, HistoricalCheckpointRef)>, ConvertError> {
     let source = match from_dir.open_dir(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT)
     {
         Ok(dir) => dir,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
     let scratch_path = to_path.join(".convert-scratch");
     std::fs::create_dir_all(&scratch_path)?;
+    let mut references = Vec::new();
     for entry in source.entries()? {
         let entry = entry?;
         let name = entry.file_name();
@@ -1117,11 +1335,16 @@ fn convert_historical_checkpoints(
             continue;
         };
         let generation_dir = source.open_dir(name)?;
-        let mut utxo_file = match open_file_read_no_follow(&generation_dir, UTXO_FILE) {
-            Ok(file) => file.into_std(),
+        match generation_dir.symlink_metadata(UTXO_FILE) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => {
+                return Err(ConvertError::IncompatibleData(
+                    "historical utxo payload must be a regular file".into(),
+                ));
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
-        };
+        }
         let manifest_bytes = read_file(&generation_dir, MANIFEST_FILE, 1024 * 1024)
             .map_err(|_| ConvertError::MissingCheckpoint)?;
         let manifest: CheckpointManifestV1 =
@@ -1130,6 +1353,33 @@ fn convert_historical_checkpoints(
                     "historical checkpoint {name} manifest: {error}"
                 ))
             })?;
+        let old_reference = HistoricalCheckpointRef {
+            checkpoint: CheckpointReference {
+                generation: manifest.generation,
+                manifest_sha256: Sha256::digest(&manifest_bytes).into(),
+            },
+            height: manifest.applied_tip.height,
+            hash: checkpoint_tip_hash(&manifest)?,
+        };
+        if name != format!("gen-{:020}", manifest.generation) {
+            return Err(ConvertError::IncompatibleData(
+                "historical generation does not match manifest".into(),
+            ));
+        }
+        let utxo = manifest
+            .utxo
+            .as_ref()
+            .ok_or(ConvertError::MissingCheckpoint)?;
+        bitcoin_rs_storage::checkpoint::require_filename(&utxo.file, UTXO_FILE)
+            .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
+        let mut utxo_file = bitcoin_rs_storage::checkpoint::verify_artifact(
+            &generation_dir,
+            UTXO_FILE,
+            utxo.bytes,
+            &utxo.sha256,
+        )
+        .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?
+        .into_std();
         utxo_file.rewind()?;
         let collector = CoinRecordCollector::new(manifest.applied_tip.height);
         let (snapshot_load, collector) =
@@ -1167,15 +1417,51 @@ fn convert_historical_checkpoints(
         let generation_dir = to_root
             .open_dir_nofollow(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT)?
             .open_dir_nofollow(name)?;
-        retire_historical_utxo_payload(&generation_dir, manifest)?;
+        let manifest_sha256 = retire_historical_utxo_payload(&generation_dir, manifest)?;
+        let mut new_reference = old_reference;
+        new_reference.checkpoint.manifest_sha256 = manifest_sha256;
+        references.push((old_reference, new_reference));
     }
-    Ok(())
+    match read_file(&source, CURRENT_FILE, 1024 * 1024) {
+        Ok(bytes) => {
+            let mut current: CurrentV1 = sonic_rs::from_slice(&bytes)
+                .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
+            let old_sha256 = decode_hex::<32>(&current.manifest_sha256)
+                .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
+            let (_, replacement) = references
+                .iter()
+                .find(|(old, _)| {
+                    old.checkpoint.generation == current.generation
+                        && old.checkpoint.manifest_sha256 == old_sha256
+                        && current.directory == format!("gen-{:020}", current.generation)
+                        && current.format == CURRENT_FORMAT
+                        && current.version == CURRENT_VERSION
+                })
+                .ok_or_else(|| {
+                    ConvertError::IncompatibleData(
+                        "historical CURRENT does not authenticate a converted generation".into(),
+                    )
+                })?;
+            current.manifest_sha256 = hex_encode(&replacement.checkpoint.manifest_sha256);
+            let bytes = sonic_rs::to_vec(&current)
+                .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
+            write_synced(
+                &to_path
+                    .join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT)
+                    .join(CURRENT_FILE),
+                &bytes,
+            )?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(references)
 }
 
 fn retire_historical_utxo_payload(
     generation_dir: &Dir,
     mut manifest: CheckpointManifestV1,
-) -> Result<(), ConvertError> {
+) -> Result<[u8; 32], ConvertError> {
     manifest.utxo = None;
     let bytes = sonic_rs::to_vec(&manifest).map_err(|error| {
         ConvertError::IncompatibleData(format!("historical manifest encode: {error}"))
@@ -1190,7 +1476,7 @@ fn retire_historical_utxo_payload(
         Err(error) => return Err(error.into()),
     }
     sync_dir(generation_dir)?;
-    Ok(())
+    Ok(Sha256::digest(&bytes).into())
 }
 
 fn carry_full_revalidation_marker(
@@ -1202,13 +1488,19 @@ fn carry_full_revalidation_marker(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
-    let mut marker = match open_file_read_no_follow(&journal, FULL_REVALIDATION_MARKER) {
-        Ok(file) => file,
+    copy_full_revalidation_marker(&journal, to_dir)
+}
+
+fn copy_full_revalidation_marker(
+    from_dir: &Dir,
+    to_dir: &Dir,
+) -> Result<Vec<String>, ConvertError> {
+    const REQUIRED_MARKER_BYTES: u64 = 9;
+    let bytes = match read_file(from_dir, FULL_REVALIDATION_MARKER, REQUIRED_MARKER_BYTES) {
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
-    let mut bytes = Vec::new();
-    marker.read_to_end(&mut bytes)?;
     let mut copy = create_file_no_follow(to_dir, FULL_REVALIDATION_MARKER)?;
     copy.write_all(&bytes)?;
     copy.sync_all()?;
@@ -1302,6 +1594,7 @@ fn run_step_3_to_4(
 
         let paths = NamespacePaths {
             name: ns_name,
+            report_name: ns_name,
             dst_path: &dst_path,
             scratch_path: &scratch_path,
             from_root: &roots.from_dir,
@@ -1325,6 +1618,7 @@ fn run_step_3_to_4(
 
         let paths = NamespacePaths {
             name: "ledger",
+            report_name: "ledger",
             dst_path: &dst_path,
             scratch_path: &scratch_path,
             from_root: pool_from_dir,
@@ -1341,9 +1635,11 @@ fn run_step_3_to_4(
         &mut copied_files,
         false,
         false,
+        true,
     )?;
 
-    convert_historical_checkpoints(&roots.from_dir, &args.to, target_engine)?;
+    let historical_references =
+        convert_historical_checkpoints(&roots.from_dir, &args.to, target_engine)?;
 
     let cs_dst_path = args.to.join("chainstate");
     let dest_store = open_destination_store(&cs_dst_path, target_engine)?;
@@ -1399,11 +1695,35 @@ fn run_step_3_to_4(
             "missing durable head row".into(),
         ));
     };
-    let Some(durable_head) = DurableHead::decode(&bytes) else {
+    let Some(mut durable_head) = DurableHead::decode(&bytes) else {
         return Err(ConvertError::IncompatibleData(
             "corrupt durable head frame".into(),
         ));
     };
+    let mut head_rebound = false;
+    if let AssumeUtxoDiskStatus::Validating {
+        checkpoint: Some(reference),
+        ..
+    } = &mut durable_head.assumeutxo
+    {
+        let (_, replacement) = historical_references
+            .iter()
+            .find(|(old, _)| old == reference)
+            .ok_or_else(|| {
+                ConvertError::IncompatibleData(
+                    "durable head does not authenticate a converted historical checkpoint".into(),
+                )
+            })?;
+        *reference = *replacement;
+        let mut writer = BatchWriter::new(dest_store.as_ref());
+        writer.put(
+            ColumnFamily::UtxoMeta,
+            DURABLE_HEAD_KEY,
+            &durable_head.encode(),
+        )?;
+        writer.flush()?;
+        head_rebound = true;
+    }
 
     let checkpoint_height = manifest.applied_tip.height;
     if durable_head.height < checkpoint_height {
@@ -1452,6 +1772,14 @@ fn run_step_3_to_4(
             ColumnFamily::UndoData,
         )?)
     };
+    let meta_digest = if head_rebound {
+        Some(compute_destination_digest(
+            dest_store.as_ref(),
+            ColumnFamily::UtxoMeta,
+        )?)
+    } else {
+        None
+    };
     drop(dest_store);
 
     let final_stats_report = coin_stats_report(&replay_stats, replay_stats.tx_count);
@@ -1461,6 +1789,9 @@ fn run_step_3_to_4(
         .find(|n| n.namespace == "chainstate")
     {
         set_family_report(cs_report, ColumnFamily::Coins, coins_count, coins_digest);
+        if let Some((count, digest)) = meta_digest {
+            set_family_report(cs_report, ColumnFamily::UtxoMeta, count, digest);
+        }
         if let Some((undo_count, undo_digest)) = undo_digest {
             set_family_report(cs_report, ColumnFamily::UndoData, undo_count, undo_digest);
         }
@@ -1480,6 +1811,12 @@ fn run_step_3_to_4(
         durable_head.height == checkpoint_height && durable_head.tip == checkpoint_hash;
     let engine = open_destination_store(&cs_dst_path, target_engine)?;
     if equal_head {
+        bitcoin_rs_execution::recovery::validate_conversion_checkpoint_artifacts(
+            &checkpoint_dir,
+            &_reference,
+            checkpoint_network(&manifest.network)?,
+        )
+        .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
         publish_epoch4_checkpoint(&checkpoint_dir, &manifest, &args.to, engine.as_ref())?;
     } else {
         final_stats.tx_count = durable_head.chain_tx_count;

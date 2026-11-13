@@ -76,6 +76,6 @@ pub(crate) enum ConvertError {
         found: String,
     },
 
-    #[error("checkpoint publication at the durable head failed")]
+    #[error("checkpoint publication at the durable head failed: {0}")]
     CheckpointPublish(#[source] bitcoin_rs_execution::recovery::ConvertedCheckpointError),
 }
