@@ -329,4 +329,42 @@ mod tests {
         assert_eq!(coin.as_ref(), first.txs[0].outputs.first());
         Ok(())
     }
+
+    #[test]
+    fn reopen_resumes_coin_stats_for_the_next_committed_block() -> TestResult {
+        let chain = FuzzChain::new(Network::Regtest)?;
+        let genesis = Network::Regtest.genesis_block();
+        let first = mined_regtest_child_at(genesis.block_hash(), 1)?;
+        chain.apply(&first)?;
+        let checkpoint = chain.flush()?;
+        let first_subsidy = first.txs[0].outputs[0].value.to_sat();
+        assert_eq!(checkpoint.coin_stats.utxo_count, 1);
+        assert_eq!(checkpoint.coin_stats.total_amount, first_subsidy);
+        assert_eq!(checkpoint.coin_stats.height, 1);
+        assert_eq!(checkpoint.coin_stats.tx_count, 2);
+        let reopened = chain.reopen(&checkpoint)?;
+        let second = mined_regtest_child_at(first.block_hash(), 2)?;
+        reopened.apply(&second)?;
+        let second_subsidy = second.txs[0].outputs[0].value.to_sat();
+        let stats = reopened.chain.coin_stats.snapshot();
+        assert_eq!(stats.utxo_count, 2);
+        assert_eq!(stats.total_amount, first_subsidy + second_subsidy);
+        assert_eq!(stats.height, 2);
+        assert_eq!(stats.tx_count, 3);
+        let coin_count = reopened.utxo().with_stable_view(|view| view.len())?;
+        assert_eq!(usize::try_from(stats.utxo_count)?, coin_count);
+        let first_coin = reopened
+            .utxo()
+            .get(&OutPoint::new(first.txs[0].txid(), 0))?
+            .ok_or("first coin missing after reopen")?;
+        let second_coin = reopened
+            .utxo()
+            .get(&OutPoint::new(second.txs[0].txid(), 0))?
+            .ok_or("second coin missing after reopen")?;
+        assert_eq!(
+            first_coin.value.to_sat() + second_coin.value.to_sat(),
+            stats.total_amount
+        );
+        Ok(())
+    }
 }
