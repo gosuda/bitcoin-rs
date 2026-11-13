@@ -2,7 +2,9 @@ use super::{BudgetCaps, NodeBudget, STAGED_IMAGE_BUDGET_BYTES};
 use crate::budget_model::{self, Action, AllocationOwner};
 use bitcoin_rs_execution::WindowLimits;
 use bitcoin_rs_storage::budget::{BudgetError, BudgetOwner, BudgetRefusal, ChargeHandle};
-use bitcoin_rs_storage::{CoinKey, CoinStore, MemoryKvStore, WindowDelta};
+use bitcoin_rs_storage::{
+    CoinKey, CoinStore, MemoryKvStore, WindowDelta, split_chainstate_cache_budget,
+};
 use bytes::Bytes;
 use std::sync::Arc;
 
@@ -289,7 +291,7 @@ fn every_action_variant_tracks_the_model() {
 // BUD-03
 #[test]
 fn exhausted_ingress_refuses_without_consent_invalidation() {
-    let budget = NodeBudget::from_dbcache_bytes(64, 4);
+    let budget = NodeBudget::from_chainstate_cache_budget(split_chainstate_cache_budget(64), 4);
     let oversized = STAGED_IMAGE_BUDGET_BYTES + 1;
     assert_eq!(
         budget.reserve(BudgetOwner::StagedImages, oversized),
@@ -376,7 +378,7 @@ fn mdbx_reports_a_zero_engine_cache_charge() {
 
 #[test]
 fn window_limits_shrink_with_staged_headroom() {
-    let budget = NodeBudget::from_dbcache_bytes(16, 4);
+    let budget = NodeBudget::from_chainstate_cache_budget(split_chainstate_cache_budget(16), 4);
     assert_eq!(
         budget.window_limits(),
         WindowLimits::durable_head_defaults()
@@ -398,7 +400,7 @@ fn window_limits_shrink_with_staged_headroom() {
 
 #[test]
 fn background_cpu_permits_stop_at_the_foreground_share() {
-    let budget = NodeBudget::from_dbcache_bytes(16, 4);
+    let budget = NodeBudget::from_chainstate_cache_budget(split_chainstate_cache_budget(16), 4);
     let cpu = budget.cpu();
     let Some(first) = cpu.try_acquire_background() else {
         panic!("one background permit inside the share must be granted");
@@ -428,11 +430,12 @@ fn background_cpu_permits_stop_at_the_foreground_share() {
 #[test]
 #[expect(clippy::expect_used)]
 fn coin_cache_fill_charges_the_coin_cache_owner_and_wipe_returns_it() {
-    let budget = Arc::new(NodeBudget::from_dbcache_bytes(64 * 1024 * 1024, 4));
+    let allocation = split_chainstate_cache_budget(64 * 1024 * 1024);
+    let budget = Arc::new(NodeBudget::from_chainstate_cache_budget(allocation, 4));
     let charge = ChargeHandle::new(budget.clone(), BudgetOwner::CoinCache);
     let coins = CoinStore::open_with_charge(
         Arc::new(MemoryKvStore::new()),
-        64 * 1024 * 1024,
+        allocation.coin_bytes,
         Some(charge),
     );
     let key = CoinKey([7; 32]);
@@ -479,7 +482,8 @@ fn repeated_owner_requests_include_charges_and_reservations() {
 fn repeated_ingress_then_engine_sample_stays_within_total() {
     use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
 
-    let caps = BudgetCaps::from_dbcache_bytes(450 * 1024 * 1024);
+    let caps =
+        BudgetCaps::from_chainstate_cache_budget(split_chainstate_cache_budget(450 * 1024 * 1024));
     let budget = Arc::new(NodeBudget::new(caps, 4));
     let ingress = super::BudgetedIngressLedger::new(Arc::clone(&budget));
     let request = 256 * 1024 * 1024;

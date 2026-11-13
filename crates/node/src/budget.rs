@@ -10,6 +10,7 @@
 //! storage, and offline tools charge the same ledger.
 
 use bitcoin_rs_execution::WindowLimits;
+use bitcoin_rs_storage::ChainstateCacheBudget;
 use bitcoin_rs_storage::budget::{
     BudgetCharge, BudgetError, BudgetOwner, BudgetReclaimer, CpuShares,
 };
@@ -38,15 +39,15 @@ pub struct BudgetCaps {
 }
 
 impl BudgetCaps {
-    /// `dbcache_mb` is the operator knob for the cache-class owners
-    /// (`BUD-06`). The coin cache and the engine each get the full budget as
-    /// their cap; the chainstate coin share is at most the full budget.
+    /// The chainstate cache allowance, already split between the engine and
+    /// the coin cache (`BUD-06`). Each cache owner is capped at its own share,
+    /// so the ledger never grants either one more than the cache it backs.
     #[must_use]
-    pub fn from_dbcache_bytes(dbcache_bytes: u64) -> Self {
+    pub fn from_chainstate_cache_budget(cache_allocation: ChainstateCacheBudget) -> Self {
         Self {
             staged_images: STAGED_IMAGE_BUDGET_BYTES,
-            engine_cache: dbcache_bytes,
-            coin_cache: dbcache_bytes,
+            engine_cache: cache_allocation.engine_bytes,
+            coin_cache: cache_allocation.coin_bytes,
             facts_queue: FACTS_QUEUE_BUDGET_BYTES,
             index_builder: INDEX_BUILDER_BUDGET_BYTES,
             query_views: QUERY_VIEW_BUDGET_BYTES,
@@ -121,8 +122,14 @@ impl NodeBudget {
     }
 
     #[must_use]
-    pub fn from_dbcache_bytes(dbcache_bytes: u64, total_workers: u32) -> Self {
-        Self::new(BudgetCaps::from_dbcache_bytes(dbcache_bytes), total_workers)
+    pub fn from_chainstate_cache_budget(
+        cache_allocation: ChainstateCacheBudget,
+        total_workers: u32,
+    ) -> Self {
+        Self::new(
+            BudgetCaps::from_chainstate_cache_budget(cache_allocation),
+            total_workers,
+        )
     }
 
     #[must_use]

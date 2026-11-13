@@ -13,8 +13,8 @@ pub use block_file::{
 };
 
 pub use cache_budget::{
-    CacheBudgetShare, clamp_dbcache_bytes, split_cache_budget_with_txindex,
-    split_cache_budget_without_txindex,
+    CacheBudgetShare, ChainstateCacheBudget, clamp_dbcache_bytes, split_cache_budget_with_txindex,
+    split_cache_budget_without_txindex, split_chainstate_cache_budget,
 };
 
 pub use column_families::ColumnFamily;

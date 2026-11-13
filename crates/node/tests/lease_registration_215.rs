@@ -40,9 +40,12 @@ fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
         inbound_blocks_rx: blocks_rx,
         ibd,
         assumeutxo: None,
-        budget: Arc::new(bitcoin_rs_node::budget::NodeBudget::from_dbcache_bytes(
-            16, 1,
-        )),
+        budget: Arc::new(
+            bitcoin_rs_node::budget::NodeBudget::from_chainstate_cache_budget(
+                bitcoin_rs_storage::split_chainstate_cache_budget(16),
+                1,
+            ),
+        ),
     })
 }
 

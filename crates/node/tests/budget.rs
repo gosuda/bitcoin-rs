@@ -2,7 +2,10 @@ use bitcoin_rs_execution::chain::NodeStatus;
 use bitcoin_rs_node::budget::{BudgetedIngressLedger, BudgetedOutboundLedger, NodeBudget};
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, NodeConfig};
-use bitcoin_rs_storage::budget::{BudgetError, BudgetOwner, BudgetRefusal};
+use bitcoin_rs_storage::{
+    budget::{BudgetError, BudgetOwner, BudgetRefusal},
+    split_chainstate_cache_budget,
+};
 use bitcoin_rs_wire::connection::OutboundLedger;
 use bitcoin_rs_wire::inbound::block_memory::BlockMemory;
 use std::sync::Arc;
@@ -19,7 +22,10 @@ fn open_test_node() -> (NodeState, tempfile::TempDir) {
 #[test]
 #[expect(clippy::expect_used)]
 fn ingress_and_peer_outbound_charges_return_to_their_owner_on_release() {
-    let budget = Arc::new(NodeBudget::from_dbcache_bytes(64 * 1024 * 1024, 8));
+    let budget = Arc::new(NodeBudget::from_chainstate_cache_budget(
+        split_chainstate_cache_budget(64 * 1024 * 1024),
+        8,
+    ));
     let ledger = Arc::new(BudgetedIngressLedger::new(Arc::clone(&budget)));
     let block_memory = Arc::new(BlockMemory::new(ledger));
     let outbound = BudgetedOutboundLedger::new(Arc::clone(&budget));

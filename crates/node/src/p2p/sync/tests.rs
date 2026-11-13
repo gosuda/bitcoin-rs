@@ -22,6 +22,7 @@ use bitcoin_rs_execution::chain::{
     BlockTree, HeaderRefusal, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot,
     regtest_fixture,
 };
+use bitcoin_rs_storage::split_chainstate_cache_budget;
 use crossbeam_channel::unbounded;
 use hashbrown::HashMap;
 use metrics::Counter;
@@ -599,8 +600,8 @@ fn staged_images_charge_follows_retained_images() -> TestResult {
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
 
-    let budget = Arc::new(crate::budget::NodeBudget::from_dbcache_bytes(
-        64 * 1024 * 1024,
+    let budget = Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+        split_chainstate_cache_budget(64 * 1024 * 1024),
         4,
     ));
     let ledger = Arc::new(crate::budget::BudgetedIngressLedger::new(Arc::clone(

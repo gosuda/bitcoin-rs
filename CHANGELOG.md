@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The chainstate cache allowance is split equally between the storage engine and `CoinStore`, after the unchanged txindex reservation. The engine receives half, floored to whole bytes. Coins receive the remainder, including any odd byte. The node ledger uses these shares as the engine and coin owner caps. The dbcache total and clamp, other owner budgets, foreground reserve, and startup log fields are unchanged. MDBX's unused engine share is not reassigned to coins.
 - Script-history reads include sealed generations whose transaction ordinals start above zero.
 - Script activity counts each confirmed transaction once when it has several outputs or both funding and spending occurrences for the same script. Funding results still retain each distinct output.
 - Retiring one sealed index capability preserves transaction and spender directories while another published capability still needs them. Retiring the last owner reclaims those rows.

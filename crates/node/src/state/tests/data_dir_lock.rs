@@ -261,9 +261,13 @@ fn block_files_alone_keep_the_directory_locked_until_dropped() -> Result<(), Tes
     let config = lock_config(dir.path());
     let guard: bitcoin_rs_storage::StoreGuard = Arc::new(DataDirLock::acquire(dir.path())?);
 
-    let budget = Arc::new(crate::budget::NodeBudget::from_dbcache_bytes(32 << 20, 4));
+    let cache_allocation = bitcoin_rs_storage::split_chainstate_cache_budget(32 << 20);
+    let budget = Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+        cache_allocation,
+        4,
+    ));
     let (storage, block_files) =
-        crate::state::storage::NodeStorage::open(&config, 32 << 20, &guard, budget)?;
+        crate::state::storage::NodeStorage::open(&config, cache_allocation, &guard, budget)?;
     drop(storage);
     drop(guard);
     assert_directory_locked(dir.path());
@@ -335,7 +339,11 @@ fn index_open_spec_and_opened_store_each_keep_the_directory_locked() -> Result<(
     config.indexes.txindex = true;
     let guard: bitcoin_rs_storage::StoreGuard = Arc::new(DataDirLock::acquire(dir.path())?);
 
-    let budget = Arc::new(crate::budget::NodeBudget::from_dbcache_bytes(32 << 20, 4));
+    let cache_allocation = bitcoin_rs_storage::split_chainstate_cache_budget(32 << 20);
+    let budget = Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+        cache_allocation,
+        4,
+    ));
     let spec = crate::state::build_derived_index_open_spec(&config, 32 << 20, 1, &guard, &budget)?
         .ok_or(TestError::Missing("txindex open spec"))?;
     drop(guard);

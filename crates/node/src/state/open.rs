@@ -213,14 +213,6 @@ impl NodeState {
         let epoch = initialize_data_dir(&config.data_dir)?;
 
         let cache_budget = bitcoin_rs_storage::clamp_dbcache_bytes(config.storage.dbcache_mb);
-        let budget = Arc::new(crate::budget::NodeBudget::from_dbcache_bytes(
-            cache_budget,
-            crate::lifecycle::worker_shares(),
-        ));
-        let window_limits_source: bitcoin_rs_execution::WindowLimitsSource = {
-            let budget = Arc::clone(&budget);
-            Arc::new(move || budget.window_limits())
-        };
         let cache_shares = if derived_index_capabilities(&config).is_empty() {
             bitcoin_rs_storage::split_cache_budget_without_txindex(cache_budget)
         } else {
@@ -228,9 +220,19 @@ impl NodeState {
         };
         let chainstate_cache_bytes = cache_shares[0].bytes;
         let txindex_cache_bytes = cache_shares[1].bytes;
+        let cache_allocation =
+            bitcoin_rs_storage::split_chainstate_cache_budget(chainstate_cache_bytes);
+        let budget = Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+            cache_allocation,
+            crate::lifecycle::worker_shares(),
+        ));
+        let window_limits_source: bitcoin_rs_execution::WindowLimitsSource = {
+            let budget = Arc::clone(&budget);
+            Arc::new(move || budget.window_limits())
+        };
         let (storage, block_files) = NodeStorage::open(
             &config,
-            chainstate_cache_bytes,
+            cache_allocation,
             &data_dir_guard,
             Arc::clone(&budget),
         )?;

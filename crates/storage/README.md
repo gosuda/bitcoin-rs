@@ -52,16 +52,30 @@ refuses a lease over deleted history.
 
 ## Cache budget
 
-`dbcache` is one process-wide budget. `cache_budget::split_cache_budget_with_txindex`
-divides it across the persistent namespaces: chainstate 80% and txindex 20%.
+`dbcache` is one cache budget, clamped to `[16 MiB, 1 TiB]`.
+`cache_budget::split_cache_budget_with_txindex` first divides it across the
+persistent namespaces. Txindex receives 20%, floored to whole bytes.
+Chainstate receives the remainder.
 `cache_budget::split_cache_budget_without_txindex` gives the whole budget to
-chainstate when the transaction index is disabled. Both floor the txindex share
-and hand the remainder to chainstate, so the shares always sum to at most the
-budget. The backend accepts its namespace's share through `open_with_cache`; RocksDB
-sizes its LRU block cache.
-Clamping bounds: budgets land in
-`[16 MiB, 1 TiB]`, and the node logs the effective per-namespace capacities at
-startup.
+chainstate when the transaction index is disabled.
+
+`cache_budget::split_chainstate_cache_budget` then splits the chainstate allowance
+equally between the storage engine and the `CoinStore` cache.
+It returns a `ChainstateCacheBudget`. The engine receives half, floored to whole
+bytes. Coins receive the remainder, including the extra byte when the allowance
+is odd. The backend receives only the engine share through `open_with_cache`.
+RocksDB uses it to size its LRU block cache. MDBX ignores the engine share.
+That share is not reassigned to coins. The txindex share is unchanged.
+
+The node ledger uses these engine and coin shares as the corresponding owner
+caps, not the full `dbcache` for each owner.
+Engine cache sampling and `CoinStore` charges remain separate.
+The other owner budgets and the foreground reserve are unchanged.
+
+The startup log's `chainstate_cache_bytes` field reports the full chainstate
+allowance before the engine/coin split, not either owner's capacity.
+`txindex_cache_bytes` and `total_cache_bytes` retain their namespace and total
+budget meanings. Cache allowances and resident accounting do not limit process RSS.
 
 ## Store guard
 

@@ -6,7 +6,7 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_consensus::script::push_int;
 use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
-use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::{split_chainstate_cache_budget, utxo::UtxoSet};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 
@@ -53,7 +53,10 @@ fn window_failure_keeps_committed_followers_and_native_retry_policy()
         handles: Arc::clone(&handles),
         followers: followers.clone(),
         assumeutxo: None,
-        budget: Arc::new(crate::budget::NodeBudget::from_dbcache_bytes(16, 1)),
+        budget: Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+            split_chainstate_cache_budget(16),
+            1,
+        )),
     };
     adapter.bootstrap_genesis();
     let mut mutated = invalid.clone();
@@ -219,7 +222,10 @@ mod fatal_halt;
 
 #[test]
 fn with_historical_background_permit_holds_one_permit_during_closure() {
-    let budget = crate::budget::NodeBudget::from_dbcache_bytes(16, 4);
+    let budget = crate::budget::NodeBudget::from_chainstate_cache_budget(
+        split_chainstate_cache_budget(16),
+        4,
+    );
     let cpu = budget.cpu();
     let observed = super::with_historical_background_permit(&budget, || cpu.background_in_flight());
     assert_eq!(
@@ -454,7 +460,10 @@ fn refusal_window_fixture(payload_blocks: &[Block]) -> Result<RefusalWindowFixtu
         handles: Arc::clone(&handles),
         followers: followers.clone(),
         assumeutxo: None,
-        budget: Arc::new(crate::budget::NodeBudget::from_dbcache_bytes(16, 1)),
+        budget: Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+            split_chainstate_cache_budget(16),
+            1,
+        )),
     });
     adapter.bootstrap_genesis();
     assert!(

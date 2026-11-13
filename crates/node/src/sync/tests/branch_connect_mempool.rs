@@ -403,7 +403,10 @@ fn admit_headers_reports_the_tip_a_heavier_fork_displaced()
         handles: Arc::clone(&handles),
         followers: crate::chain_effects::ChainFollowers::noop(),
         assumeutxo: None,
-        budget: Arc::new(crate::budget::NodeBudget::from_dbcache_bytes(16, 1)),
+        budget: Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+            bitcoin_rs_storage::split_chainstate_cache_budget(16),
+            1,
+        )),
     };
     let headers = |heights: std::ops::RangeInclusive<u32>| -> Vec<Header> {
         let mut prev = genesis.block_hash();

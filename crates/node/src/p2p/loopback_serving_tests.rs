@@ -14,7 +14,10 @@ use bitcoin_rs_consensus::primitives::{
     OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader};
-use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
+use bitcoin_rs_storage::{
+    block_body::{BlockBodyReadError, BlockBodySource},
+    split_chainstate_cache_budget,
+};
 use parking_lot::RwLock;
 
 use crate::p2p::chain_query::{ActiveChainQuery, RecentBlockSlot};
@@ -718,7 +721,9 @@ fn node_outbound_ledger(
     Arc<crate::budget::NodeBudget>,
     Arc<crate::budget::BudgetedOutboundLedger>,
 ) {
-    let mut caps = crate::budget::BudgetCaps::from_dbcache_bytes(64 * 1024 * 1024);
+    let mut caps = crate::budget::BudgetCaps::from_chainstate_cache_budget(
+        split_chainstate_cache_budget(64 * 1024 * 1024),
+    );
     caps.peer_outbound = peer_outbound;
     let budget = Arc::new(crate::budget::NodeBudget::new(caps, 4));
     let ledger = Arc::new(crate::budget::BudgetedOutboundLedger::new(Arc::clone(

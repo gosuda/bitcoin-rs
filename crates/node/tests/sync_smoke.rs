@@ -46,9 +46,12 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), TestErr
         inbound_blocks_rx,
         ibd,
         assumeutxo: None,
-        budget: Arc::new(bitcoin_rs_node::budget::NodeBudget::from_dbcache_bytes(
-            16, 1,
-        )),
+        budget: Arc::new(
+            bitcoin_rs_node::budget::NodeBudget::from_chainstate_cache_budget(
+                bitcoin_rs_storage::split_chainstate_cache_budget(16),
+                1,
+            ),
+        ),
     });
 
     inbound_headers_tx
@@ -110,9 +113,12 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
         inbound_blocks_rx,
         ibd: handles.ibd_latch(),
         assumeutxo: None,
-        budget: Arc::new(bitcoin_rs_node::budget::NodeBudget::from_dbcache_bytes(
-            16, 1,
-        )),
+        budget: Arc::new(
+            bitcoin_rs_node::budget::NodeBudget::from_chainstate_cache_budget(
+                bitcoin_rs_storage::split_chainstate_cache_budget(16),
+                1,
+            ),
+        ),
     });
     sync.tick();
     let before = handles.chain_snapshot();
@@ -252,9 +258,12 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats() -> Result<()
         inbound_blocks_rx,
         ibd,
         assumeutxo: None,
-        budget: Arc::new(bitcoin_rs_node::budget::NodeBudget::from_dbcache_bytes(
-            16, 1,
-        )),
+        budget: Arc::new(
+            bitcoin_rs_node::budget::NodeBudget::from_chainstate_cache_budget(
+                bitcoin_rs_storage::split_chainstate_cache_budget(16),
+                1,
+            ),
+        ),
     });
 
     inbound_headers_tx

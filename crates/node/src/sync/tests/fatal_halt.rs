@@ -99,7 +99,10 @@ fn failed_durable_commit_halts_apply_and_trips_the_shutdown_latch() -> Result<()
         inbound_blocks_rx,
         ibd,
         assumeutxo: None,
-        budget: Arc::new(crate::budget::NodeBudget::from_dbcache_bytes(16, 1)),
+        budget: Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+            bitcoin_rs_storage::split_chainstate_cache_budget(16),
+            1,
+        )),
     }));
 
     inbound_blocks_tx
