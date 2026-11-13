@@ -851,7 +851,7 @@ impl<S: KvStore> IndexWriter<S> {
         let snapshot = self.indexer.store.snapshot()?;
         let tail_plan = Self::plan_rollback_tail(snapshot.as_ref(), capabilities, current)?;
         drop(snapshot);
-        let prev = tail_plan.rewind(prev)?;
+        let historical_prev = tail_plan.rewind(prev)?;
         let mut store_batch = self.indexer.store.new_batch();
         let unselected_keeps_identity = IndexCapability::ALL.into_iter().any(|capability| {
             !capabilities.contains(capability)
@@ -870,14 +870,21 @@ impl<S: KvStore> IndexWriter<S> {
             FORMAT_VERSION_KEY,
             &FORMAT_VERSION_VALUE,
         );
-        put_selected_watermarks(&mut store_batch, capabilities, prev);
+        put_selected_watermarks(
+            &mut store_batch,
+            capabilities.without(IndexCapability::ScriptLive),
+            historical_prev,
+        );
+        if capabilities.contains(IndexCapability::ScriptLive) {
+            put_selected_watermarks(&mut store_batch, IndexCapabilities::SCRIPT_LIVE, prev);
+        }
         self.apply_rollback_tail(
             &mut tail,
             RollbackStep {
                 plan: tail_plan,
                 capabilities,
                 current,
-                prev,
+                prev: historical_prev,
                 batch: &mut store_batch,
             },
         )?;
