@@ -151,7 +151,7 @@ pub(super) fn disconnect_block_admitted(
             crate::DisconnectError::Refused(Box::new(ApplyError::UndoPersistence(source)))
         })?;
     let coin_delta = build_disconnect_delta(&handles.coins, &undo)
-        .map_err(|e| fatal(ApplyError::DurableHeadCommit(e)))?;
+        .map_err(|e| fatal(ApplyError::CoinStoreRead(e)))?;
 
     handles
         .coin_stats
