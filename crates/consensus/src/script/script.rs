@@ -566,6 +566,21 @@ mod tests {
     }
 
     #[test]
+    fn push_data_above_u16_round_trips_as_pushdata4() {
+        let payload = vec![0xa5; 65_536];
+        let mut pushed = vec![opcode::OP_PUSHDATA4];
+        pushed.extend_from_slice(&65_536_u32.to_le_bytes());
+        pushed.extend_from_slice(&payload);
+        assert_eq!(push_data(&payload), pushed);
+        let parsed: Vec<_> = instructions(&pushed)
+            .map(|instruction| {
+                instruction.unwrap_or_else(|error| panic!("script is well formed: {error:?}"))
+            })
+            .collect();
+        assert_eq!(parsed, vec![Instruction::PushBytes(payload.as_slice())]);
+    }
+
+    #[test]
     fn truncated_push_reports_error_once() {
         let script = [push_data(&[1, 2, 3])[..2].to_vec(), vec![opcode::OP_DUP]].concat();
         let parsed: Vec<_> = instructions(&script).collect();
