@@ -1108,6 +1108,7 @@ fn aligned_capabilities_share_one_atomic_commit() -> Result<(), TestError> {
     Ok(())
 }
 
+// IDX-04
 #[test]
 fn script_index_reset_preserves_tx_lookup_and_shared_identity() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
@@ -1148,6 +1149,14 @@ fn tx_lookup_reset_preserves_script_history_directories() -> Result<(), TestErro
     let block = prepare_for(&writer, IndexCapabilities::HISTORICAL, 0, hash, &body)?;
     writer.commit_forward(common::single_block_batch(block))?;
 
+    let txid = coinbase_txid(&body)?;
+    let shared_dir_rows = store.count(ColumnFamily::TxDir);
+    assert!(
+        shared_dir_rows > 0,
+        "the fixture publishes transaction directory rows"
+    );
+    assert_eq!(tx_row_count(&store, &txid)?, 1);
+
     writer.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
 
     assert_eq!(
@@ -1155,9 +1164,23 @@ fn tx_lookup_reset_preserves_script_history_directories() -> Result<(), TestErro
         Some(IndexWatermark { height: 0, hash })
     );
     assert_eq!(writer.watermarks()?.tx_lookup, None);
+    assert_eq!(
+        store.count(ColumnFamily::TxDir),
+        shared_dir_rows,
+        "the reset keeps the transaction directory ScriptHistory still publishes"
+    );
+    assert_eq!(
+        tx_row_count(&store, &txid)?,
+        0,
+        "the reset TxLookup answers no transaction rows"
+    );
     let snapshot = writer.snapshot()?;
     let funding = snapshot.funding_rows(script, SCAN_ALL)?.rows;
-    assert_eq!(funding.len(), 1);
+    assert_eq!(
+        funding.len(),
+        1,
+        "the retained ScriptHistory rows still answer funding"
+    );
     Ok(())
 }
 
