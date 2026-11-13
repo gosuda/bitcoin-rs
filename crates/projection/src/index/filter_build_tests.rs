@@ -29,7 +29,7 @@ fn facts(height: u32, hash: [u8; 32], parent_hash: [u8; 32], txid: u8) -> Commit
 }
 
 #[test]
-fn live_commit_builds_each_block_filter_once() -> Result<(), Box<dyn std::error::Error>> {
+fn live_commit_builds_each_block_filter_once() -> Result<(), crate::portable::TestError> {
     let dir = tempfile::tempdir()?;
     let store = Arc::new(RocksDbStore::open(dir.path())?);
     let mut writer = IndexWriter::open(store, 1)?;
