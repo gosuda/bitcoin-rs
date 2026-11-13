@@ -336,6 +336,7 @@ The crash and error points produce exactly these results:
 ### `RCV-10`: Checkpoint as engine state image
 
 - A checkpoint is an engine image of the committed durable head state, created through the storage seam `KvStore::checkpoint(&self, dir: &Path)`.
+- The engine MUST synchronize the image contents and its containing directory before `KvStore::checkpoint` returns success. A synchronization failure MUST prevent generation publication.
 - A checkpoint is not an independent recovery authority.
 - The durable root and the ordered atomic commit protocol are the only recovery authority.
 - Checkpoints are created as a maintenance and export mechanism, published under the generation protocol (manifest, `CURRENT`, sync, rename).

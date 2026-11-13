@@ -55,10 +55,10 @@ The peer thread never applies a block. It builds an `InboundBlock`, sends it on 
 Inside chainstate, each block is applied with `PublishMode::Grouped`:
 
 1. Consensus gates run before any write.
-2. The undo row is persisted and the block body is appended.
-3. The applied header tip advances and the window workspace builds the block's coin effects (`WindowWorkspace`, `WindowDelta`). No coin is written here.
-4. When the group reaches 64 blocks or 8 MiB, one durable-head batch commits through `CommitAuthority::commit_prefix`: undo rows, body locator rows, the script attestation, the coin replacements in the engine `Coins` keyspace, and the new head, with a compare-and-set on the previous head.
-5. After the batch returns its receipt, `CoinStore::install_committed` installs the committed coin delta into the byte-bounded `CoinCache`. The head batch is the only write for the group.
+2. The block body is appended; the undo record is retained for the group commit.
+3. The staged header tip advances and the window workspace accumulates the block's coin effects. Neither the published applied tip nor the engine coins advance here.
+4. When the group reaches 64 blocks or 8 MiB, the appended bodies are synced and the workspace builds the final `WindowDelta`. One durable-head batch then commits through `CommitAuthority::commit_prefix`: undo rows, body locator rows, the script attestation, the coin replacements in the engine `Coins` keyspace, and the new head, with a compare-and-set on the previous head.
+5. After the durable batch succeeds, `CommitAuthority::commit_prefix` calls `CoinStore::install_committed` to install the coin-cache delta and stats feed before returning its receipt. Body append and sync precede this batch; it is not the group's only write.
 6. `publish_applied` stores the applied tip and advances the event sequence.
 
 The durable receipt exists before the tip is published. Apply returns only after the batch receipt, so a reader that sees the new tip is seeing a head that survives a crash. A head that does not match the restored tip at startup is a replay gap; `matching_durable_head_requires_no_replay` in [`crates/execution/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/durable/tests.rs) pins that rule.

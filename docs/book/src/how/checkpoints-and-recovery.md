@@ -42,11 +42,11 @@ A checkpoint is a copy of the published state taken under a freeze, so it can la
 
 `CheckpointRetention::Replace` keeps exactly one generation: `cleanup_after_publication` removes every directory that is not the newly published one. The assumeutxo historical namespace retains generations explicitly instead (`retire_checkpoint_generations_at`), because startup must be able to name a specific accepted generation from the durable head regardless of what `CURRENT` says.
 
-Publication offers no index seed. The engine-checkpoint writer returns no `V4Witness`, and the publisher's `offer_committed_seed` hook does nothing.
+Publication offers no index seed. The engine-checkpoint writer returns only the published checkpoint reference.
 
 ## Restore source selection at boot
 
-`prepare_initial_chainstate` (`crates/execution/src/recovery.rs:398`) picks the restore source in this order and logs the choice as `restore_source`:
+`prepare_initial_chainstate` (`crates/execution/src/recovery.rs`) picks the restore source in this order:
 
 ```text
 full-revalidation marker present?  -> cold  (reason=fork_below_checkpoint_base)
@@ -55,9 +55,11 @@ complete checkpoint in CURRENT?    -> checkpoint
 otherwise                          -> cold  (reason=no_complete_checkpoint)
 ```
 
+The cold paths log `restore_source="cold"` with the corresponding `reason` shown above (`recovery.rs`). Checkpoint startup logs `restored chainstate checkpoint` with `height` and `hash` (`crates/node/src/state/open.rs`). These are not a universal `restore_source` log for all three sources.
+
 `ResumeSource` (`recovery.rs:14`) is `Snapshot`, `Cold`, or `Checkpoint`. The non-cold cases:
 
-- **Checkpoint**: load the manifest, verify every digest, rebuild the block tree from `headers-v1.dat`, open the engine image in `chainstate/`, and read CoinStats from `coinstats-v1.dat`; all of it must agree with the manifest. The applied tip's chain tx count must match the CoinStats tx count (`validate_chain_tx_count`), and ancestors of the applied tip are seeded with the explicit `ChainTxCount::UNKNOWN` sentinel rather than guessed values. Log line: `restored chainstate checkpoint height=... hash=...` (`open.rs`).
+- **Checkpoint**: verify the manifest digest and the byte counts and SHA-256 digests of `headers-v1.dat` and `coinstats-v1.dat`, rebuild the block tree, and validate the header commitments and CoinStats fields against the manifest. Open the engine image in `chainstate/` through the storage engine; the manifest contains no digest for that image, and loading does not recompute CoinStats from its coins. If the applied tip's chain tx count is known, it must match the CoinStats tx count (`validate_chain_tx_count`); ancestors of the applied tip are seeded with the explicit `ChainTxCount::UNKNOWN` sentinel rather than guessed values. Log line: `restored chainstate checkpoint height=... hash=...` (`open.rs`).
 - **Snapshot**: the assumeutxo restore path, covered in [Snapshots and assumeutxo](snapshots-and-assumeutxo.md). It runs before the ordinary `CURRENT` lookup: a datadir with a live assumeutxo anchor in its durable head takes the pinned-anchor branch, and `restore_snapshot` still prefers an ordinary checkpoint when one exists that matches the pin's height, hash, commitment, and tx count.
 
 Corrupt checkpoints do not fall back silently. Load errors classify into `CheckpointLoadError`, and anything semantic (bad codec, wrong tip, mutated bytes that fail only semantic checks) surfaces as a `Corrupt` variant whose message says what to do: re-sync. The distinction matters: transient I/O errors stay retryable, but a checkpoint whose contents hash to the manifest digest yet decode wrong is datadir corruption, and the node refuses instead of silently building a different chain. Tests in `crates/execution/src/checkpoint/tests/artifact_consistency.rs` pin this split: `authenticated_header_semantics_require_resync` and `authenticated_coinstats_semantics_require_resync` each mutate one authenticated artifact and require the `Corrupt` error.

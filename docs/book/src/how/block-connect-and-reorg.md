@@ -6,15 +6,16 @@ The whole path lives in `crates/execution/src`: `window.rs` owns the apply windo
 
 ## The apply window
 
-The sync layer hands the chainstate a batch of consecutive blocks, not one at a time. `apply_window_admitted` (`window.rs:240`) walks the batch and stages each validated block in a `WindowGroup` (`window.rs:40`). Staging means: the block is fully validated, its undo record and coin delta are built, but nothing is on disk and no reader sees the new tip.
+The sync layer hands the chainstate a batch of consecutive blocks, not one at a time. `apply_window_admitted` (`window.rs`) walks the batch and stages each validated block in a `WindowGroup`. Staging builds the undo record and accumulates coin effects in the window workspace; block bodies are appended, but the durable head and published applied tip do not advance. The final `WindowDelta` is built at flush.
 
 A group flushes when it holds 64 blocks (`DURABLE_HEAD_GROUP_BLOCKS`, `window.rs:16`) or 8 MiB of staged block bytes (`DURABLE_HEAD_GROUP_MAX_BYTES`, `window.rs:18`). `flush` (`window.rs:77`) then does one group commit:
 
 ```
-staged blocks 1..n  --sync_appended_blocks-->  bodies durable
-undo rows + body rows + attestation + coin replacements --commit_prefix--> one receipt
-receipt.commit_id backfilled into every ConnectOutcome
-coin delta installed into the coin cache, then tips published per block
+staged blocks 1..n  --sync_appended_blocks-->  appended bodies durable
+window workspace  --build_flush_delta-->  final coin replacements
+undo rows + body locator rows + attestation + coin replacements + head
+  --commit_prefix--> durable batch, then coin-cache and stats-feed installation, then receipt
+receipt.commit_id backfilled into every ConnectOutcome, then tips published per block
 ```
 
 Each block in the group must continue the previous one: `WindowGroup::predecessor` (`window.rs:46`) returns the last staged tip as the parent and rejects a `prev_hash` mismatch with `PrevHashMismatch { tip, prev }`. This lets validation chain block N+1 against block N's in-memory tip without a storage round trip.
