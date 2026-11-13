@@ -297,10 +297,16 @@ version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9daa31138eb443d5751b207f3f64154e2bb09cd59960562ccc7a7112be38147f"
 dependencies = [
- "bitcoin-internals",
+ "bitcoin-internals 0.7.0",
  "hex-conservative 1.3.0",
  "serde",
 ]
+
+[[package]]
+name = "bitcoin-internals"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d573f4cf32996a8dce612e4348cece65a241f1882ed594047c9ba348e8869fa5"
 
 [[package]]
 name = "bitcoin-internals"
@@ -346,7 +352,7 @@ version = "0.15.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-e2e",
- "bitcoin_hashes 0.14.101",
+ "bitcoin_hashes 1.2.0",
  "bitcoinkernel",
  "bytemuck",
  "bytes",
@@ -498,7 +504,7 @@ dependencies = [
  "bitcoin-rs-consensus",
  "bitcoin-rs-execution",
  "bitcoin-rs-storage",
- "bitcoin_hashes 0.14.101",
+ "bitcoin_hashes 1.2.0",
  "compact_str",
  "crossbeam-channel",
  "hashbrown 0.17.1",
@@ -704,6 +710,17 @@ dependencies = [
  "bitcoin-io",
  "hex-conservative 0.2.3",
  "serde",
+]
+
+[[package]]
+name = "bitcoin_hashes"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5304e53726dbe5f93141535e102ed97b5bf4714fbecefdda8f9fb98d7fdaff0e"
+dependencies = [
+ "bitcoin-consensus-encoding",
+ "bitcoin-internals 0.6.0",
+ "hex-conservative 1.3.0",
 ]
 
 [[package]]

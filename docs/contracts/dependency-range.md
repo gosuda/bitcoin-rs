@@ -24,23 +24,24 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - The scheduled compatibility workflow uses a disposable runner.
 - These lanes are not pull-request merge gates.
 
-### `DEP-02`: One copy of each consensus-stack crate
+### `DEP-02`: One copy of each consensus-stack crate except listed exact-version splits
 - **Owner**: `deny.toml` `[bans]`.
 - **Scope**: the resolved graph of each DEP-01 lane.
 - Check both lanes under `deny.toml` `[graph]` with `all-features = true`, not each lane's own feature set.
 - Scope covers `bitcoin`, `bitcoin_hashes`, `secp256k1`, and `secp256k1-sys`.
-- Each of those crates MUST resolve to exactly one version per graph.
-- Exactly one pool-only exception is approved.
+- Each of those crates MUST resolve to exactly one version per graph, except the exact-version splits listed here.
+- The Bitcoin 0.32.102 reference dependency retains `bitcoin_hashes 0.14.101` alongside direct `bitcoin_hashes 1.2.0`.
+- The pool-only exception below remains approved.
 - The pinned SRI release family is `noise_sv2 2.1.0`.
 - The `pool-sv2` feature in `crates/serving/Cargo.toml` reaches this family.
 - This family carries its own audited `secp256k1 0.28.2` and `secp256k1-sys 0.9.2` authority-key line.
 - This family also carries its own `bitcoin_hashes 0.13.1` transport line.
 - `deny.toml` `[bans].skip` pins those exact versions with the `noise_sv2 2.1.0` reason.
-- `multiple-versions = "deny"` fails any other second version.
-- No further skip is approved for these four names.
+- `multiple-versions = "deny"` fails any split not covered by the listed exact-version skips.
+- No further skip is approved for these four names beyond the listed exact-version splits.
 - The skip entries are audited splits.
 - Each entry leaves one unskipped anchor, so a new version of a skipped crate fails.
-- Package-id cardinality beyond one version per name is not checked mechanically.
+- Package-id cardinality beyond the listed exact-version splits is not checked mechanically.
 - Lockfile review pins that cardinality.
 - For `base64`, only direct `0.23.1`, the Bitcoin dependency chain's `0.21.7`, and the metrics exporter's `0.22.1` may coexist.
 - These exact-version splits do not approve other `base64` versions.
@@ -91,6 +92,7 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - The DEP-01 lanes run `check bans` only.
 
 ## Selected range prerequisites
+- `bitcoin_hashes 1.2.0` requires `bitcoin-internals 0.6.0` directly and `bitcoin-internals 0.7.0` through `bitcoin-consensus-encoding 1.3`; only that exact-version split is approved, with `deny.toml` `[bans].skip` pinning `bitcoin-internals@0.6.0`.
 - `base64` is bounded to `>=0.23.1, <0.24` with defaults disabled and `std` (including `alloc`) enabled.
 - `simd-unsafe` remains disabled.
 - The metrics exporter's `base64 0.22.1` is an approved exact-version duplicate, not approval for other versions.

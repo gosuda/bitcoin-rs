@@ -1655,7 +1655,7 @@ fn signature_cache_warmed_still_rejects_mutated_sighash_input() {
 }
 
 fn sigcache_p2wpkh_s_twins() -> (Tx, Tx, Vec<(OutPoint, TxOut)>) {
-    use bitcoin_hashes::{Hash as _, hash160};
+    use bitcoin_hashes::hash160;
     use bitcoin_rs_consensus::primitives::{Hash256, Sighash, SighashCache};
     use secp256k1::{Message, PublicKey, SECP256K1, SecretKey, ecdsa};
 

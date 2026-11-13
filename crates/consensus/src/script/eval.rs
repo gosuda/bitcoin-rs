@@ -9,7 +9,7 @@ use crate::script::interpreter::{ScriptErrCode, ScriptError, VerifyFlags};
 use crate::script::stack::{ScriptItem, Stack};
 use crate::script::{Instruction, instructions, minimal_push, opcode, push_data};
 
-use bitcoin_hashes::{Hash as _, ripemd160, sha1};
+use bitcoin_hashes::{ripemd160, sha1};
 
 pub(crate) use crate::script::opcode::*;
 
@@ -838,12 +838,12 @@ fn invalid_stack() -> ScriptError {
 
 fn hash_bytes(op: u8, data: &[u8]) -> SmallVec<[u8; 32]> {
     match op {
-        OP_RIPEMD160 => SmallVec::from_slice(&ripemd160::Hash::hash(data)[..]),
-        OP_SHA1 => SmallVec::from_slice(&sha1::Hash::hash(data)[..]),
+        OP_RIPEMD160 => SmallVec::from_slice(ripemd160::Hash::hash(data).as_byte_array()),
+        OP_SHA1 => SmallVec::from_slice(sha1::Hash::hash(data).as_byte_array()),
         OP_SHA256 => SmallVec::from_slice(&sha2::Sha256::digest(data)),
         OP_HASH160 => {
             let sha = sha2::Sha256::digest(data);
-            SmallVec::from_slice(&ripemd160::Hash::hash(&sha)[..])
+            SmallVec::from_slice(ripemd160::Hash::hash(&sha).as_byte_array())
         }
         _ => {
             let once = sha2::Sha256::digest(data);
