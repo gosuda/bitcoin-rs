@@ -311,6 +311,100 @@ fn tx_dir_gated_by_capabilities() -> Result<(), BulkBuilderError> {
     Ok(())
 }
 
+// PRJ-07
+#[test]
+fn duplicate_txid_spends_resolve_to_the_creation_before_each_spend() -> Result<(), BulkBuilderError>
+{
+    let dup = [0xaa; 32];
+    let script = |byte: u8| Bytes::copy_from_slice(&[byte]);
+    let output = |byte: u8| CreatedOutput {
+        vout: 0,
+        value: 5_000,
+        script: script(byte),
+    };
+    let spend = |height: u32| SpentPrevout {
+        txid: dup,
+        vout: 0,
+        value: 5_000,
+        script: script(0x51),
+        height,
+        coinbase: false,
+    };
+    let block = |height: u32, txs: Vec<TxFacts>| CommittedBlock {
+        height,
+        hash: {
+            let mut hash = [0u8; 32];
+            hash[..4].copy_from_slice(&height.to_be_bytes());
+            hash
+        },
+        parent_hash: [0u8; 32],
+        header: [0u8; 80],
+        txs,
+    };
+    let tx = |txid: [u8; 32], inputs: Vec<SpentPrevout>| TxFacts {
+        txid,
+        offset: 0,
+        len: 100,
+        inputs,
+        outputs: vec![output(0x52)],
+    };
+    let blocks = vec![
+        block(1, vec![tx(dup, Vec::new())]),
+        block(2, vec![tx([0xbb; 32], vec![spend(1)])]),
+        block(3, vec![tx(dup, Vec::new())]),
+        block(4, vec![tx([0xcc; 32], vec![spend(3)])]),
+    ];
+
+    let scratch = tempfile::tempdir()?;
+    let generation = BulkSegmentBuilder::new(
+        Arc::new(UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    )
+    .build_generation_rows(1, &blocks)?;
+
+    let creations: Vec<u32> = generation
+        .tx_dir
+        .iter()
+        .filter_map(|(key, value)| {
+            let (_, txid, _height) = crate::segment::format::decode_tx_dir_key(key)?;
+            if txid != dup {
+                return None;
+            }
+            let (_hash, ordinal, _offset, _len) =
+                crate::segment::format::decode_tx_dir_value(value)?;
+            Some(ordinal)
+        })
+        .collect();
+    assert_eq!(
+        creations,
+        vec![0, 2],
+        "the range recreates the txid at ordinals 0 and 2"
+    );
+
+    let rows = &generation.spend_dir;
+    assert_eq!(rows.len(), 2, "each spend names its own preceding creation");
+    assert_eq!(
+        crate::segment::format::decode_spend_dir_key(&rows[0].0),
+        Some((1, 0, 0)),
+        "the spend at ordinal 1 resolves to the first creation"
+    );
+    assert_eq!(
+        crate::segment::format::decode_spend_dir_value(&rows[0].1),
+        Some(1)
+    );
+    assert_eq!(
+        crate::segment::format::decode_spend_dir_key(&rows[1].0),
+        Some((1, 2, 0)),
+        "the spend at ordinal 3 resolves to the recreation, not the first creation"
+    );
+    assert_eq!(
+        crate::segment::format::decode_spend_dir_value(&rows[1].1),
+        Some(3)
+    );
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 enum StreamError {
     #[error(transparent)]

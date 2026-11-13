@@ -345,8 +345,8 @@ impl StreamingSegmentBuilder {
             }
             let mut candidate_key = Vec::with_capacity(40);
             candidate_key.extend_from_slice(&input.txid);
-            candidate_key.extend_from_slice(&input.vout.to_be_bytes());
             candidate_key.extend_from_slice(&ordinal.to_be_bytes());
+            candidate_key.extend_from_slice(&input.vout.to_be_bytes());
             self.spend_candidates.push_row(candidate_key, Vec::new())?;
             self.push_occurrence(&input.script, ordinal, POSTING_FLAG_SPENDING, input.value)?;
         }
@@ -499,10 +499,10 @@ impl StreamingSegmentBuilder {
     }
 
     /// Merge-joins spend candidates against the sorted transaction
-    /// directory: in-generation creations resolve to the last directory
-    /// ordinal for the spent txid (BIP30 duplicates included), older coins
-    /// leave no spender row, and repeated spends of one creation reuse the
-    /// cached resolution.
+    /// directory: in-generation creations resolve to the newest creation
+    /// ordinal strictly before the spending transaction (BIP30 duplicates
+    /// included), older coins leave no spender row, and spends ordered by
+    /// ordinal share one forward directory cursor.
     fn resolve_spends(&mut self) -> Result<(), BulkBuilderError> {
         self.tx_dir.finalize()?;
         self.spend_candidates.finalize()?;
@@ -512,14 +512,26 @@ impl StreamingSegmentBuilder {
         };
         directory.front = next_directory_row(&mut directory.rows)?;
         let mut candidates = self.spend_candidates.sorted_rows()?;
-        let mut resolved: Option<([u8; 32], u32)> = None;
+        let mut group_txid: Option<[u8; 32]> = None;
+        let mut creation: Option<u32> = None;
         while let Some(candidate) = candidates.try_next()? {
-            let (spent_txid, vout, spending_ordinal) = decode_candidate(&candidate)?;
-            let Some(creation) = resolve_creation(&mut directory, &mut resolved, spent_txid)?
-            else {
+            let (spent_txid, spending_ordinal, vout) = decode_candidate(&candidate)?;
+            if group_txid != Some(spent_txid) {
+                group_txid = Some(spent_txid);
+                creation = None;
+                advance_directory_to(&mut directory, spent_txid)?;
+            }
+            while let Some((txid, ordinal)) = directory.front {
+                if txid != spent_txid || ordinal >= spending_ordinal {
+                    break;
+                }
+                creation = Some(ordinal);
+                directory.front = next_directory_row(&mut directory.rows)?;
+            }
+            let Some(creation_ordinal) = creation else {
                 continue;
             };
-            let spend_key = encode_spend_dir_key(self.gen_id, creation, vout);
+            let spend_key = encode_spend_dir_key(self.gen_id, creation_ordinal, vout);
             let spend_val = encode_spend_dir_value(spending_ordinal);
             self.spend_dir
                 .push_row(spend_key.to_vec(), spend_val.to_vec())?;
@@ -635,41 +647,14 @@ fn decode_candidate(
     let txid: [u8; 32] = key[..32]
         .try_into()
         .map_err(|_| BulkBuilderError::InvalidBlockSequence)?;
-    let vout = u32::from_be_bytes(decode_array4(&key[32..36])?);
-    let ordinal = u32::from_be_bytes(decode_array4(&key[36..40])?);
-    Ok((txid, vout, ordinal))
+    let spending_ordinal = u32::from_be_bytes(decode_array4(&key[32..36])?);
+    let vout = u32::from_be_bytes(decode_array4(&key[36..40])?);
+    Ok((txid, spending_ordinal, vout))
 }
 
 struct DirectoryScan {
     rows: SortedRows,
     front: Option<([u8; 32], u32)>,
-}
-
-fn resolve_creation(
-    directory: &mut DirectoryScan,
-    cached: &mut Option<([u8; 32], u32)>,
-    spent_txid: [u8; 32],
-) -> Result<Option<u32>, BulkBuilderError> {
-    if cached.is_some_and(|(txid, _)| txid == spent_txid) {
-        return Ok(cached.map(|(_, ordinal)| ordinal));
-    }
-    *cached = None;
-    let Some((txid, first_ordinal)) = advance_directory_to(directory, spent_txid)? else {
-        return Ok(None);
-    };
-    if txid != spent_txid {
-        return Ok(None);
-    }
-    let mut last = first_ordinal;
-    while let Some((same, ordinal)) = directory.front {
-        if same != spent_txid {
-            break;
-        }
-        last = ordinal;
-        directory.front = next_directory_row(&mut directory.rows)?;
-    }
-    *cached = Some((spent_txid, last));
-    Ok(Some(last))
 }
 
 fn advance_directory_to(
