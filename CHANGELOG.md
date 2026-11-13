@@ -41,5 +41,6 @@
 - Genesis-and-child bootstrap accounts for the valid committed prefix, and recovery streams engine coins instead of collecting the full coin image.
 - Offline import reports a stable UTXO view rebuild failure separately from a CoinStats scan failure and preserves the underlying error.
 - Workspace `sha3` dependency upgraded from `>=0.11, <0.12` to `>=0.12, <0.13`; `default-features = false` is preserved and no source changes were required. The Tor v3 onion address checksum encoding is unchanged.
+- Upgrade direct `base64` to `>=0.23.1, <0.24` with `std` and without its new default `simd-unsafe` feature. Existing encodings and decoder configurations are unchanged.
 - The workspace locks `arc-swap` to version 1.9.5.
 - The workspace locks `surrealkv` to version 1.4.0. Its manifest write-path change keeps the existing storage format.

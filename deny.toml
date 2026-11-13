@@ -61,10 +61,10 @@ deny = [
     { crate = "chrono", reason = "wall clock is std::time and monotonic timing is quanta; a calendar type would use jiff", use-instead = "jiff" },
     { crate = "chrono-tz", reason = "no timezone database is needed, and chrono is banned", use-instead = "jiff" },
     { crate = "time", reason = "one time stack: std::time for the wall clock, quanta for monotonic timing, jiff for calendar types", use-instead = "jiff" },
-    # Only the two audited base64 releases may coexist.
-    { crate = "base64:<0.21.7", reason = "only audited base64 versions 0.21.7 and 0.22.1 are allowed" },
-    { crate = "base64:>0.21.7,<0.22.1", reason = "only audited base64 versions 0.21.7 and 0.22.1 are allowed" },
-    { crate = "base64:>0.22.1", reason = "only audited base64 versions 0.21.7 and 0.22.1 are allowed" },
+    { crate = "base64:<0.21.7", reason = "only audited base64 versions 0.21.7, 0.22.1 and 0.23.1 are allowed" },
+    { crate = "base64:>0.21.7,<0.22.1", reason = "only audited base64 versions 0.21.7, 0.22.1 and 0.23.1 are allowed" },
+    { crate = "base64:>0.22.1,<0.23.1", reason = "only audited base64 versions 0.21.7, 0.22.1 and 0.23.1 are allowed" },
+    { crate = "base64:>0.23.1", reason = "only audited base64 versions 0.21.7, 0.22.1 and 0.23.1 are allowed" },
     # Forbid disallowed crates discovered during the 2026-05-19 dependency audit:
     { crate = "openssl", reason = "use rustls with default-features = false and a reviewed non-C provider", use-instead = "rustls" },
     { crate = "openssl-sys", reason = "use rustls with default-features = false and a reviewed non-C provider", use-instead = "rustls" },
@@ -118,6 +118,7 @@ deny = [
 skip = [
     # bitcoin 0.32 and metrics-exporter-prometheus 0.18 require disjoint base64 lines.
     { crate = "base64@0.21.7", reason = "bitcoin 0.32 via corepc-types 0.16.0" },
+    { crate = "base64@0.22.1", reason = "metrics-exporter-prometheus 0.18 requires base64 0.22" },
     # zmq 0.10 (zmq-sys build chain) pins the bitflags 1.x line.
     { crate = "bitflags@1.3.2", reason = "zmq 0.10" },
     # rand 0.8 (secp256k1 0.29 rand-std, also via bitcoin rand-std) vs 0.9 ecosystem.

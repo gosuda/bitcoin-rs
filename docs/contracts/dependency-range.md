@@ -42,6 +42,8 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - Each entry leaves one unskipped anchor, so a new version of a skipped crate fails.
 - Package-id cardinality beyond one version per name is not checked mechanically.
 - Lockfile review pins that cardinality.
+- For `base64`, only direct `0.23.1`, the Bitcoin dependency chain's `0.21.7`, and the metrics exporter's `0.22.1` may coexist.
+- These exact-version splits do not approve other `base64` versions.
 - The Noise-family dependencies in `crates/serving/Cargo.toml` are optional normal dependencies.
 - The `pool-sv2` feature enables these dependencies.
 - Cargo forbids `optional` dev-dependencies.
@@ -89,6 +91,9 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - The DEP-01 lanes run `check bans` only.
 
 ## Selected range prerequisites
+- `base64` is bounded to `>=0.23.1, <0.24` with defaults disabled and `std` (including `alloc`) enabled.
+- `simd-unsafe` remains disabled.
+- The metrics exporter's `base64 0.22.1` is an approved exact-version duplicate, not approval for other versions.
 - `proptest` is bounded at `>=1.12, <1.13` and `proptest-state-machine` is pinned at `=0.9.0` in the root `Cargo.toml` `[workspace.dependencies]`.
 - Version `1.12` moves to the `rand_core 0.10` and `rand_xorshift 0.5` family, so the lock carries `rand_core@0.10.1` beside `rand_core@0.9.5` from the selected `rand 0.9` family.
 - That `rand_core` pair is an approved exact-version split. It approves no other `rand` family change.
