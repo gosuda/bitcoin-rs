@@ -5,9 +5,11 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::record::UtxoRecord;
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_storage::{
-    CommitRecords, DurableHead, DurableHeadStore, InMemoryDurableHeadStore, StorageError,
+    CoinKey, ColumnFamily, CommitRecords, DurableHead, DurableHeadStore, InMemoryDurableHeadStore,
+    KvStore, StorageError,
 };
 use parking_lot::Mutex;
 use proptest::prelude::*;
@@ -670,6 +672,8 @@ proptest! {
         let child1 = mined_child(BlockHash(genesis_hash), 1)
             .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
         let child1_hash = Hash256::from(child1.block_hash());
+        let child_coinbase_txid = child1.txs[0].txid();
+        let child_coinbase_value = child1.txs[0].outputs[0].value.to_sat();
         bodies
             .persist_block_body(1, child1_hash, &consensus_bytes(&child1))
             .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
@@ -754,6 +758,44 @@ proptest! {
             && recovered_head.tip == child1_hash
             && recovered_tip.height == 1
             && recovered_tip.hash == child1_hash;
+
+        let child_coinbase_key = CoinKey(child_coinbase_txid.0.to_le_bytes());
+        let authoritative_coin = store
+            .get(ColumnFamily::Coins, child_coinbase_key.as_bytes())
+            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+        let reopened_coin = reopened
+            .coins
+            .get(&child_coinbase_key)
+            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+        prop_assert_eq!(
+            reopened_coin.is_some(),
+            is_state_after,
+            "reopened coin view must expose the child coinbase exactly when the block is committed"
+        );
+        prop_assert_eq!(
+            authoritative_coin.is_some(),
+            is_state_after,
+            "authoritative KV must hold the child coinbase row exactly when the block is committed"
+        );
+        if is_state_after {
+            let committed_bytes = authoritative_coin.as_ref().ok_or_else(|| {
+                TestCaseError::fail("committed coin row missing from authoritative store")
+            })?;
+            prop_assert_eq!(
+                reopened_coin.as_deref(),
+                authoritative_coin.as_deref(),
+                "reopened coin store must read the committed authoritative row unchanged"
+            );
+            let record = UtxoRecord::from_encoded(committed_bytes.to_vec().into_boxed_slice())
+                .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+            prop_assert_eq!(record.txid(), child_coinbase_txid.0);
+            let coinbase_out = record
+                .find_output(0)
+                .ok_or_else(|| TestCaseError::fail("committed coinbase record lost output 0"))?;
+            prop_assert_eq!(coinbase_out.height, 1_u32);
+            prop_assert!(coinbase_out.coinbase, "committed coinbase row must be marked coinbase");
+            prop_assert_eq!(coinbase_out.value, child_coinbase_value);
+        }
 
         if fail_mode == 0 {
             prop_assert!(
