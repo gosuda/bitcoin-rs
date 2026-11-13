@@ -232,11 +232,7 @@ impl<'a> TxSignatureChecker<'a> {
             return false;
         }
         let input_sequence = self.tx.input_sequence(self.input_index);
-        if input_sequence.to_consensus() == SEQUENCE_FINAL {
-            return false;
-        }
-
-        true
+        input_sequence.to_consensus() != SEQUENCE_FINAL
     }
 
     #[must_use]
