@@ -220,6 +220,15 @@ pub(crate) fn run_rebuild_index(
         u64::try_from(budget_bytes).unwrap_or(u64::MAX),
     ));
     let builder = BulkSegmentBuilder::new(budget.clone(), None, scratch_guard.path.clone());
+    let from_genesis = canonical
+        .first()
+        .is_some_and(|hash| archive.records[hash].height == 0);
+    let capabilities = IndexCapabilities::TX_AND_SCRIPTS.with_compact_filters(from_genesis);
+    let builder = if from_genesis {
+        builder
+    } else {
+        builder.without_filter()
+    };
     let mut stream = builder.stream(gen_id);
     let mut blocks = 0u64;
     let mut tx_total = 0usize;
@@ -240,7 +249,7 @@ pub(crate) fn run_rebuild_index(
         gen_id,
         coverage,
         next_ordinal,
-        IndexCapabilities::ALL,
+        capabilities,
     )
     .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
     drop(scratch_guard);

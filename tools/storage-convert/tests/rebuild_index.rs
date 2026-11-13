@@ -1083,6 +1083,61 @@ fn rebuild_index_generation_opens_on_the_node_path_without_writes() -> TestResul
     Ok(())
 }
 
+// PRJ-09
+#[test]
+fn pruned_rebuild_withholds_unanchored_compact_filters() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let datadir = prepare_datadir(root.path())?;
+    let blocks = creating_chain();
+    let retained = blocks[2..].iter().collect::<Vec<_>>();
+    let all = blocks.iter().collect::<Vec<_>>();
+    write_chainstate(&datadir, &retained, retained.last().copied(), &all)?;
+    write_block_records(&datadir, &retained)?;
+
+    parse_rebuild_report(&rebuild(&datadir)?)?;
+    let store = Arc::new(RocksDbStore::open(datadir.join("txindex"))?);
+    let mut writer = IndexWriter::open(Arc::clone(&store), BULK_GEN_ID)?;
+    let (_, marks) = writer.fenced_watermarks()?;
+    let tip = blocks.last().expect("fixture has a tip");
+    let expected = Some(IndexWatermark {
+        height: tip.height,
+        hash: tip.hash,
+    });
+    assert_eq!(marks.tx_lookup, expected);
+    assert_eq!(marks.script_history, expected);
+    assert_eq!(marks.compact_filters, None);
+    assert_eq!(
+        store.get(
+            ColumnFamily::IdxMeta,
+            &meta_gen_key(IndexCapability::CompactFilters),
+        )?,
+        None
+    );
+    assert_eq!(count_rows(&store, ColumnFamily::Filters)?, 0);
+    use bitcoin_rs_projection::IndexReader as _;
+
+    let snapshot = writer.snapshot()?;
+    assert!(!snapshot.capability_published(IndexCapability::CompactFilters)?);
+    for block in retained {
+        let txid = block.facts.txs[0].txid;
+        let rows = snapshot.transaction_rows(
+            &Txid::from(Hash256::from_le_bytes(&txid)),
+            bitcoin_rs_storage::PrefixScanLimit {
+                max_rows: 100,
+                max_bytes: 1_000_000,
+            },
+        )?;
+        assert!(rows.complete);
+        let heights = rows
+            .rows
+            .iter()
+            .map(|row| row.row.height())
+            .collect::<Vec<_>>();
+        assert_eq!(heights, vec![block.height]);
+    }
+    Ok(())
+}
+
 // PRJ-05
 #[test]
 fn rebuild_index_matches_the_live_tail_and_seal_generation() -> TestResult {
