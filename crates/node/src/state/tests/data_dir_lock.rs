@@ -261,8 +261,9 @@ fn block_files_alone_keep_the_directory_locked_until_dropped() -> Result<(), Tes
     let config = lock_config(dir.path());
     let guard: bitcoin_rs_storage::StoreGuard = Arc::new(DataDirLock::acquire(dir.path())?);
 
+    let cache_allocation = bitcoin_rs_storage::split_chainstate_cache_budget(32 << 20);
     let (storage, block_files) =
-        crate::state::storage::NodeStorage::open(&config, 32 << 20, &guard)?;
+        crate::state::storage::NodeStorage::open(&config, cache_allocation, &guard)?;
     drop(storage);
     drop(guard);
     assert_directory_locked(dir.path());

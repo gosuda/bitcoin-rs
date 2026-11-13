@@ -218,8 +218,9 @@ impl NodeState {
         };
         let chainstate_cache_bytes = cache_shares[0].bytes;
         let txindex_cache_bytes = cache_shares[1].bytes;
-        let (storage, block_files) =
-            NodeStorage::open(&config, chainstate_cache_bytes, &data_dir_guard)?;
+        let cache_allocation =
+            bitcoin_rs_storage::split_chainstate_cache_budget(chainstate_cache_bytes);
+        let (storage, block_files) = NodeStorage::open(&config, cache_allocation, &data_dir_guard)?;
         let undo_store = storage.undo_store();
         let durable_head = storage.durable_head();
 

@@ -32,7 +32,7 @@ struct ChainstateComposer<'a> {
     backend: StorageBackend,
     data_dir: &'a std::path::Path,
     guard: &'a StoreGuard,
-    chainstate_cache_bytes: u64,
+    cache_allocation: bitcoin_rs_storage::ChainstateCacheBudget,
 }
 
 impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
@@ -52,7 +52,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
         let dyn_store: Arc<dyn bitcoin_rs_storage::KvStore> = store.clone();
         let coins = Arc::new(bitcoin_rs_storage::CoinStore::open(
             Arc::clone(&dyn_store),
-            self.chainstate_cache_bytes,
+            self.cache_allocation.coin_bytes,
         ));
         let commit_authority = Arc::new(bitcoin_rs_storage::CommitAuthority::new(
             dyn_store,
@@ -96,7 +96,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
 impl NodeStorage {
     pub(super) fn open(
         config: &NodeConfig,
-        chainstate_cache_bytes: u64,
+        cache_allocation: bitcoin_rs_storage::ChainstateCacheBudget,
         guard: &StoreGuard,
     ) -> Result<(Self, Arc<FlatFileBlockStore>), NodeOpenError> {
         let chainstate_dir = config.data_dir.join("chainstate");
@@ -112,13 +112,13 @@ impl NodeStorage {
             "chainstate",
             backend,
             &chainstate_dir,
-            Some(chainstate_cache_bytes),
+            Some(cache_allocation.engine_bytes),
             guard,
             ChainstateComposer {
                 backend,
                 data_dir: &config.data_dir,
                 guard,
-                chainstate_cache_bytes,
+                cache_allocation,
             },
         )?;
         Ok(opened)
