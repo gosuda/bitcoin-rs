@@ -207,15 +207,12 @@ impl<S: KvStore> IndexWriter<S> {
             }
             RollbackTail::Retire { newest, .. } => {
                 state.sealed.retain(|sealed| sealed.gen_id != newest.gen_id);
-                for capability in segment_capabilities(capabilities) {
-                    segment::stage_retirement(
-                        self.indexer.store.as_ref(),
-                        batch,
-                        capability,
-                        newest.gen_id,
-                    )?;
-                    segment::clear_retirement_markers(batch, capability, newest.gen_id);
-                }
+                segment::stage_retirement(
+                    self.indexer.store.as_ref(),
+                    batch,
+                    segment_capabilities(capabilities).collect(),
+                    newest.gen_id,
+                )?;
                 None
             }
         };
@@ -323,11 +320,12 @@ mod rollback_retire_tests {
         ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexWatermark,
         IndexWriter, PreparedBatch, PreparedBatchLimits, SpentCoin, SpentCoins,
     };
+    use crate::{IndexReader, ScriptHash};
     use bitcoin_rs_consensus::primitives::{
         Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
         Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, encode,
     };
-    use bitcoin_rs_storage::{ColumnFamily, KvStore, MemoryKvStore};
+    use bitcoin_rs_storage::{ColumnFamily, KvStore, MemoryKvStore, PrefixScanLimit};
     use std::sync::Arc;
 
     #[derive(Debug, PartialEq, Eq)]
@@ -611,6 +609,98 @@ mod rollback_retire_tests {
         assert!(
             desc.tail.tail_lo > desc.tail.tail_hi,
             "the retired tail window is empty"
+        );
+        Ok(())
+    }
+
+    // REO-04, REO-05
+    #[test]
+    fn joint_historical_rollback_reclaims_the_shared_transaction_directory()
+    -> Result<(), crate::portable::TestError> {
+        const ROW_LIMIT: PrefixScanLimit = PrefixScanLimit {
+            max_rows: 16,
+            max_bytes: 1 << 20,
+        };
+        let scratch = tempfile::tempdir()?;
+        let store = Arc::new(MemoryKvStore::new());
+        let mut writer = IndexWriter::open(Arc::clone(&store), 1)?
+            .with_seal_scratch(scratch.path().to_path_buf());
+
+        let funded = tx(
+            OutPoint::new(Txid(Hash256::from_le_bytes(&[0xa1; 32])), 0),
+            vec![0x51],
+        );
+        let funding_txid = funded.txid();
+        let first = block_with_prev(vec![funded], BlockHash::default(), 1);
+        let first_body = consensus_bytes(&first);
+        let base = commit_block(&mut writer, 0, &first_body)?;
+
+        let spender = tx(
+            OutPoint::new(Txid(Hash256::from_le_bytes(&[0xb2; 32])), 0),
+            vec![0x52],
+        );
+        let second = block_with_prev(vec![spender], first.block_hash(), 2);
+        let second_body = consensus_bytes(&second);
+        let tip = commit_block(&mut writer, 1, &second_body)?;
+
+        let state = writer.tail_for(Some(tip))?;
+        writer.seal_through(&state, tip.height, IndexCapabilities::HISTORICAL)?;
+        writer.tail = None;
+
+        assert_eq!(sealed_count(&store, IndexCapability::TxLookup)?, 1);
+        assert_eq!(sealed_count(&store, IndexCapability::ScriptHistory)?, 1);
+        let gen_prefix = crate::segment::format::gen_prefix_start(1);
+        assert!(!prefix_rows(&store, ColumnFamily::TxDir, &gen_prefix)?.is_empty());
+        assert!(!prefix_rows(&store, ColumnFamily::ScriptPost, &gen_prefix)?.is_empty());
+        assert_eq!(
+            writer
+                .snapshot()?
+                .transaction_rows(&funding_txid, ROW_LIMIT)?
+                .rows
+                .len(),
+            1,
+            "the sealed generation answers the funding transaction"
+        );
+
+        let (fence, _) = writer.fenced_watermarks()?;
+        writer.commit_rollback_one_for_with_cursor_with_spent_scripts(
+            fence,
+            IndexCapabilities::HISTORICAL,
+            Some(base),
+            &second_body,
+            ConsumerCursorUpdate::Clear,
+            &FixtureScripts,
+        )?;
+
+        for family in [
+            ColumnFamily::TxDir,
+            ColumnFamily::ScriptDict,
+            ColumnFamily::ScriptPost,
+            ColumnFamily::SpendDir,
+            ColumnFamily::ScriptStats,
+        ] {
+            assert!(
+                prefix_rows(&store, family, &gen_prefix)?.is_empty(),
+                "joint retirement reclaims the generation's {family:?} rows"
+            );
+        }
+        assert_eq!(sealed_count(&store, IndexCapability::TxLookup)?, 0);
+        assert_eq!(sealed_count(&store, IndexCapability::ScriptHistory)?, 0);
+        assert!(prefix_rows(&store, ColumnFamily::IdxMeta, b"retire/")?.is_empty());
+        let snapshot = writer.snapshot()?;
+        assert!(
+            snapshot
+                .transaction_rows(&funding_txid, ROW_LIMIT)?
+                .rows
+                .is_empty(),
+            "the retired generation answers no transaction rows"
+        );
+        assert!(
+            snapshot
+                .funding_rows(ScriptHash::from_script_bytes(&[0x51]), ROW_LIMIT)?
+                .rows
+                .is_empty(),
+            "the retired generation answers no funding rows"
         );
         Ok(())
     }

@@ -176,6 +176,10 @@ fn deep_reorg_retires_one_generation_only() -> Result<(), TestError> {
     assert!(count_rows_in_prefix(store.as_ref(), ColumnFamily::ScriptDict, &gen_prefix)? > 0);
     assert!(count_rows_in_prefix(store.as_ref(), ColumnFamily::ScriptPost, &gen_prefix)? > 0);
     assert!(count_rows_in_prefix(store.as_ref(), ColumnFamily::ScriptStats, &gen_prefix)? > 0);
+    assert!(
+        count_rows_in_prefix(store.as_ref(), ColumnFamily::TxDir, &gen_prefix)? > 0,
+        "retiring TxLookup alone keeps the directory ScriptHistory still publishes"
+    );
 
     let tx_meta = snapshot.get(
         ColumnFamily::IdxMeta,
