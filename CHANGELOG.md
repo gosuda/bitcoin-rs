@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Execution preserves valid committed prefixes when later window header admission fails.
 - Epoch-3 equal-head conversion streams authenticated checkpoint artifacts into synced atomic target files. Valid canonical header artifacts larger than 64 MiB no longer fail an extra whole-file publication limit.
 - The chainstate cache allowance is split equally between the storage engine and `CoinStore`: the engine half is floored to whole bytes and coins receive the remainder. The dbcache clamp, chainstate/txindex allocation, and startup log fields are unchanged; MDBX's unused engine share is not reassigned to coins.
 - Coins live in the engine `coins` keyspace. Windows and blocks commit their coin replacements in the same atomic batch as the durable head, undo rows and body index. The resident `UtxoSet` is the snapshot reader only.

@@ -237,7 +237,7 @@ fn restore_uncommitted_takes(
     }
 }
 
-fn admit_window_headers(handles: &Chainstate, payloads: &[&BlockImage]) -> bool {
+fn admit_window_headers(handles: &Chainstate, payloads: &[&BlockImage]) {
     let mut tree = handles.block_tree.write();
     for payload in payloads {
         let header = payload.header();
@@ -246,10 +246,9 @@ fn admit_window_headers(handles: &Chainstate, payloads: &[&BlockImage]) -> bool 
             continue;
         }
         if tree.insert_header(header, NodeStatus::HeaderValid).is_err() {
-            return false;
+            return;
         }
     }
-    true
 }
 
 fn proved_window<'a, 'h>(
@@ -288,8 +287,8 @@ pub(super) fn apply_window_admitted(
         };
     }
     let mut window = proved_window(handles, payloads)?;
-    if window.workspace.is_none() && !payloads.is_empty() && admit_window_headers(handles, payloads)
-    {
+    if window.workspace.is_none() && !payloads.is_empty() {
+        admit_window_headers(handles, payloads);
         window = proved_window(handles, payloads)?;
     }
     let covered = window.proven.len();
