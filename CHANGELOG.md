@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+// refused_by: statement_fold · collision: none (no common ancestor text)
 - The chainstate cache allowance is split equally between the storage engine and `CoinStore`, after the unchanged txindex reservation. The engine receives half, floored to whole bytes. Coins receive the remainder, including any odd byte. The node ledger uses these shares as the engine and coin owner caps. The dbcache total and clamp, other owner budgets, foreground reserve, and startup log fields are unchanged. MDBX's unused engine share is not reassigned to coins.
 - Script-history reads include sealed generations whose transaction ordinals start above zero.
 - Script activity counts each confirmed transaction once when it has several outputs or both funding and spending occurrences for the same script. Funding results still retain each distinct output.
@@ -9,6 +10,7 @@
 - Synchronization stops when a follower refuses settlement after a durable window commit. The committed block count stays intact, admission remains fenced, and the node requires recovery instead of retrying committed blocks.
 - Snapshot seed staging keeps the published ScriptLive base available. Aborting a staged seed preserves that base, and a completed replacement becomes visible only when the worker publishes it.
 - Bulk index rebuilds resolve each spend to the latest earlier creation when the same transaction ID occurs more than once in the rebuild range.
+- Upgrade the Stratum V2 dependency family to binary 8.0.0, framing 9.0.0, codec 8.1.0, Noise 2.1.0, mining 13.0.0, and common messages 10.0.0. Update the mining server and clients for the new decoder and message fields. Remove duplicate-crypto allowances for dependencies that left the resolved graph.
 - Streaming index artifact restore (`crates/projection/src/portable/restore.rs`, `segment/spill.rs`, `segment/import.rs`, `index/write.rs`). `TxLookup` and `ScriptHistory` artifacts now attach through one bounded streaming re-encode: the verified artifact decodes into spill runs on scratch, the merge orders rows, and one segment attach seals them. The re-encode holds no more than 64 MiB of decoded rows in memory at once. The portable attach functions take the spill budget as a new argument.
 - BREAKING CHANGE: `attach_tx_lookup_artifact`, `attach_script_history_artifact`, and `attach_compact_filter_artifact` take a `&SpillBudget` argument; the `TxIndexWriter` attach methods for `TxLookup` and `ScriptHistory` take streamed run families instead of `ImportedSegment`.
 - BREAKING CHANGE: `MempoolGateway::remove_for_block`, `settle_block_facts`, `expire`, `clear` and `evict_below_fee_rate` return `Result` carrying `MempoolError::DeliveryQueueFull` when a reentrant observer callback commits past the bounded delivery queue; callers propagate the error.

@@ -31,11 +31,11 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - Scope covers `bitcoin`, `bitcoin_hashes`, `secp256k1`, and `secp256k1-sys`.
 - Each of those crates MUST resolve to exactly one version per graph.
 - Exactly one pool-only exception is approved.
-- The pinned SRI release family is `noise_sv2 2.0.0`.
+- The pinned SRI release family is `noise_sv2 2.1.0`.
 - The `pool-sv2` feature in `crates/serving/Cargo.toml` reaches this family.
 - This family carries its own audited `secp256k1 0.28.2` and `secp256k1-sys 0.9.2` authority-key line.
 - This family also carries its own `bitcoin_hashes 0.13.1` transport line.
-- `deny.toml` `[bans].skip` pins those exact versions with the `noise_sv2 2.0.0` reason.
+- `deny.toml` `[bans].skip` pins those exact versions with the `noise_sv2 2.1.0` reason.
 - `multiple-versions = "deny"` fails any other second version.
 - No further skip is approved for these four names.
 - The skip entries are audited splits.
@@ -96,7 +96,7 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - When the `syn 3.0.x` patch in the root or `fuzz` lock moves, update the exception to that exact version in the same change.
 - The entry describes this `syn` pin only.
 - It does not approve other splits.
-- The `secp256k1@0.28.2`, `secp256k1-sys@0.9.2`, and `bitcoin_hashes@0.13.1` exceptions in `deny.toml` `[bans]` are exact-version pins for the `noise_sv2 2.0.0` SV2 chain.
+- The `secp256k1@0.28.2`, `secp256k1-sys@0.9.2`, and `bitcoin_hashes@0.13.1` exceptions in `deny.toml` `[bans]` are exact-version pins for the `noise_sv2 2.1.0` SV2 chain.
 - This policy matches the `syn` pin above, including their RustCrypto transport companions.
 - When the pinned SRI release family moves, update those exceptions to the exact resolved versions in the same change.
 - The entries approve no other split.

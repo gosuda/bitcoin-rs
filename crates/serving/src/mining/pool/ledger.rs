@@ -1339,6 +1339,7 @@ impl LedgerError {
 pub mod codec {
     use super::{Hash32, LedgerError};
 
+    #[derive(Default)]
     pub struct Enc {
         buf: Vec<u8>,
         overflow: bool,

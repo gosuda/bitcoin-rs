@@ -27,7 +27,7 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 pub const SPEC_REVISION: &str = "025e2f76802d5942a10f6f3fea07941522b108ca";
-pub const SRI_RELEASE: &str = "v1.12.0";
+pub const SRI_RELEASE: &str = "v1.13.0";
 pub const PROTOCOL_VERSION: u16 = 2;
 pub const U24_MAX: usize = 0x00ff_ffff;
 /// Largest `B0_32` field: a standard channel's full extranonce must fit it.
@@ -62,7 +62,7 @@ pub const ROLES: &[Role] = &[
         name: "Noise_NX authenticated transport, responder",
         spec: "04 §4.5",
         status: RoleStatus::Implemented,
-        detail: "noise_sv2 2.0.0 / codec_sv2 7.0.0; certificate signed by the pool authority key",
+        detail: "noise_sv2 2.1.0 / codec_sv2 8.1.0; certificate signed by the pool authority key",
     },
     Role {
         name: "SetupConnection (mining protocol), Success, Error",
@@ -168,8 +168,6 @@ pub enum TransportError {
     FrameTooLarge { limit: usize },
     #[error("read of {len} bytes exceeds the {max}-byte feed bound")]
     FeedTooLarge { len: usize, max: usize },
-    #[error("decoder made no progress")]
-    Stalled,
     #[error("cannot encode outbound frame: {0}")]
     Encode(String),
     #[error("outbound byte queue would exceed {limit}")]
@@ -296,7 +294,7 @@ impl Transport {
 
     fn read_hint(&self) -> usize {
         self.decoder
-            .writable_len()
+            .read_len()
             .saturating_sub(self.inbuf.len())
             .max(1)
     }
@@ -331,47 +329,45 @@ impl Transport {
 
     fn pump(&mut self) -> Result<Vec<Frame>, TransportError> {
         let mut frames = Vec::new();
-        let mut idle = 0_u8;
         loop {
-            let want = self.decoder.writable_len();
+            let progressed = if matches!(self.stage, Stage::Handshake(_)) {
+                self.step_handshake()?
+            } else {
+                self.step_transport(&mut frames)?
+            };
+            if progressed {
+                continue;
+            }
+            let want = self.decoder.read_len();
             if self.inbuf.len() < want {
                 break;
-            }
-            if want == 0 {
-                idle += 1;
-                if idle > 2 {
-                    return Err(TransportError::Stalled);
-                }
-            } else {
-                idle = 0;
             }
             if self.fed.saturating_add(want) > self.ceiling() {
                 return Err(TransportError::FrameTooLarge {
                     limit: self.max_payload,
                 });
             }
-            if want > 0 {
-                let window = self.decoder.writable();
-                window.copy_from_slice(&self.inbuf[..want]);
-                self.inbuf.drain(..want);
-                self.fed += want;
-            }
-            if matches!(self.stage, Stage::Handshake(_)) {
-                self.step_handshake()?;
-            } else {
-                self.step_transport(&mut frames)?;
+            let window = self.decoder.read_buf();
+            window.copy_from_slice(&self.inbuf[..want]);
+            self.inbuf.drain(..want);
+            self.fed += want;
+            if let Err(error) = self.decoder.advance(want) {
+                return Err(match self.stage {
+                    Stage::Handshake(_) => TransportError::Handshake(error.to_string()),
+                    _ => TransportError::Decrypt(error.to_string()),
+                });
             }
         }
         Ok(frames)
     }
 
-    fn step_handshake(&mut self) -> Result<(), TransportError> {
+    fn step_handshake(&mut self) -> Result<bool, TransportError> {
         let message = match self
             .decoder
             .next_handshake_frame::<Responder>()
             .map_err(|e| TransportError::Handshake(e.to_string()))?
         {
-            Decoded::Incomplete(_) => return Ok(()),
+            Decoded::Incomplete => return Ok(false),
             Decoded::Frame(message) => message,
         };
         let initiator_key: [u8; ELLSWIFT_ENCODING_SIZE] = message
@@ -399,10 +395,10 @@ impl Transport {
             dec: Some(dec),
         };
         self.fed = 0;
-        Ok(())
+        Ok(true)
     }
 
-    fn step_transport(&mut self, frames: &mut Vec<Frame>) -> Result<(), TransportError> {
+    fn step_transport(&mut self, frames: &mut Vec<Frame>) -> Result<bool, TransportError> {
         let state = match &mut self.stage {
             Stage::Open { dec, .. } => dec.take().ok_or(TransportError::Failed)?,
             _ => return Err(TransportError::NotOpen),
@@ -426,13 +422,13 @@ impl Transport {
                     channel_msg: header.channel_msg(),
                     payload,
                 });
-                Ok(())
+                Ok(true)
             }
-            Ok(Decrypted::Incomplete(_, state)) => {
+            Ok(Decrypted::Incomplete(state)) => {
                 if let Stage::Open { dec, .. } = &mut self.stage {
                     *dec = Some(state);
                 }
-                Ok(())
+                Ok(false)
             }
             Err(e) => Err(TransportError::Decrypt(e.to_string())),
         }
