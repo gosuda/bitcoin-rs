@@ -67,6 +67,7 @@ fn over_store(mut chain: Chainstate, store: &Arc<bitcoin_rs_storage::MemoryKvSto
         Arc::clone(&dyn_store),
         64 * 1024 * 1024,
     ));
+    coins.track_coin_stats((*chain.coin_stats).clone());
     chain.durable_head = Arc::new(bitcoin_rs_storage::KvDurableHeadStore::new(Arc::clone(
         store,
     )));
