@@ -628,7 +628,10 @@ fn verify_image_manifest_binding(
     let mut stripped_dest = dest_manifest;
     stripped_dest.engine = None;
     let dest_metadata_bytes = sonic_rs::to_vec(&stripped_dest).map_err(|error| {
-        site.fail(format!("{} manifest re-encode failed: {error}", check.directory))
+        site.fail(format!(
+            "{} manifest re-encode failed: {error}",
+            check.directory
+        ))
     })?;
     let source_metadata_bytes = sonic_rs::to_vec(&stripped_source).map_err(|error| {
         site.fail(format!(
