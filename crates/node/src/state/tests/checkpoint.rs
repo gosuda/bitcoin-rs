@@ -130,8 +130,12 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
     let manifest_bytes = std::fs::read(root.join(directory).join("manifest-v1.json"))?;
     let manifest: sonic_rs::Value = sonic_rs::from_slice(&manifest_bytes)?;
     assert!(manifest.get("utxo").is_none_or(|v| v.is_null()));
-    let image =
-        bitcoin_rs_storage::open_checkpoint_store(&root.join(directory).join("chainstate"))?;
+    let inspection_dir = tempfile::tempdir()?;
+    for entry in std::fs::read_dir(root.join(directory).join("chainstate"))? {
+        let entry = entry?;
+        std::fs::copy(entry.path(), inspection_dir.path().join(entry.file_name()))?;
+    }
+    let image = bitcoin_rs_storage::open_checkpoint_store(inspection_dir.path())?;
     let image_coins = image
         .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
         .collect::<Result<Vec<_>, _>>()?;
