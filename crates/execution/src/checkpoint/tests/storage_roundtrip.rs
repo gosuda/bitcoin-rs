@@ -7,7 +7,48 @@ fn scanned_trailer_restores_independently_scanned_stats() -> TestResult {
     let applied_tip = tip_snapshot(&tree, applied)?;
     let tree = RwLock::new(tree);
     let utxo = populated_utxo()?;
-    let expected = utxo.with_stable_view(|view| scan_coin_stats(view, 0, true))?;
+    let large_txid = Hash256::from_le_bytes(&[0x39; 32]);
+    let large_outputs: Vec<_> = (0_u8..9)
+        .map(|index| bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+            vout: u32::from(index) * 3 + 1,
+            value: 10_000 + u64::from(index) * 137,
+            script_pubkey: vec![0x51, index, 0xac],
+            coinbase: index % 2 == 0,
+            height: 0,
+        })
+        .collect();
+    utxo.insert_parsed_record(
+        bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
+            large_txid,
+            &large_outputs,
+        )?,
+    );
+    let initial_txid = Hash256::from_le_bytes(&[7_u8; 32]);
+    let initial_output = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+        vout: 3,
+        value: 50_000,
+        script_pubkey: vec![0x51, 0x21],
+        coinbase: true,
+        height: 0,
+    };
+    let fixture = || {
+        std::iter::once((initial_txid, &initial_output))
+            .chain(large_outputs.iter().map(|output| (large_txid, output)))
+    };
+    let mut expected = CoinStats::new();
+    for (txid, output) in fixture() {
+        expected.insert_utxo(
+            &OutPoint::new(Txid(txid), output.vout),
+            &TxOut {
+                value: Amount::from_sat(output.value),
+                script_pubkey: Script::from_bytes(output.script_pubkey.clone()),
+            },
+            output.height,
+            output.coinbase,
+        );
+    }
+    let scanned = utxo.with_stable_view(|view| scan_coin_stats(view, 0, true))?;
+    assert_eq!(scanned, expected);
     super::super::write_checkpoint(
         dir.path(),
         config(),
@@ -33,6 +74,22 @@ fn scanned_trailer_restores_independently_scanned_stats() -> TestResult {
         "the checkpoint generation carries no engine image",
     ))?;
     let restored_utxo = utxo_from_engine(engine.as_ref())?;
+    restored_utxo.with_stable_view(|view| -> Result<(), TestError> {
+        assert_eq!(view.record_count(), 2);
+        assert_eq!(view.len(), 1 + large_outputs.len());
+        for (txid, output) in fixture() {
+            let outpoint = OutPoint::new(Txid(txid), output.vout);
+            let coin = view.get_entry(&outpoint).ok_or(TestError::Missing(
+                "the restored engine image is missing a fixture output",
+            ))?;
+            assert_eq!(coin.outpoint, outpoint);
+            assert_eq!(coin.txout.value, Amount::from_sat(output.value));
+            assert_eq!(coin.txout.script_pubkey.as_bytes(), output.script_pubkey);
+            assert_eq!(coin.coinbase, output.coinbase);
+            assert_eq!(coin.height, output.height);
+        }
+        Ok(())
+    })?;
     let rescanned = restored_utxo
         .with_stable_view(|view| scan_coin_stats(view, restored.applied_tip.height, true))?;
     assert_eq!(
@@ -46,7 +103,7 @@ fn scanned_trailer_restores_independently_scanned_stats() -> TestResult {
         value: Amount::from_sat(123_456),
         script_pubkey: Script::from_bytes(vec![0x51, 0xac]),
     };
-    let mut stats = restored.coin_stats.clone();
+    let mut stats = expected;
     stats.insert_utxo(&outpoint, &txout, restored.applied_tip.height, false);
     let listener = CoinStatsListener::new(stats);
     let out = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
@@ -64,6 +121,10 @@ fn scanned_trailer_restores_independently_scanned_stats() -> TestResult {
     let continued = restored_utxo
         .with_stable_view(|view| scan_coin_stats(view, restored.applied_tip.height, true))?;
     assert_eq!(listener.snapshot().to_bytes(), continued.to_bytes());
+    restored_utxo.with_stable_view(|view| {
+        assert_eq!(view.record_count(), 3);
+        assert_eq!(view.len(), 2 + large_outputs.len());
+    });
     Ok(())
 }
 
