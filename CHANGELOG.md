@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-// refused_by: statement_fold · collision: none (no common ancestor text)
-// refused_by: statement_fold · collision: none (no common ancestor text)
 - The chainstate cache allowance is split equally between the storage engine and `CoinStore`, after the unchanged txindex reservation. The engine receives half, floored to whole bytes. Coins receive the remainder, including any odd byte. The node ledger uses these shares as the engine and coin owner caps. The dbcache total and clamp, other owner budgets, foreground reserve, and startup log fields are unchanged. MDBX's unused engine share is not reassigned to coins.
 - Script-history reads include sealed generations whose transaction ordinals start above zero.
 - Script activity counts each confirmed transaction once when it has several outputs or both funding and spending occurrences for the same script. Funding results still retain each distinct output.
@@ -34,7 +32,6 @@
 - `loadtxoutset` RPC always decodes the input as a Core portable v2 snapshot, independent of the filename; a `.json` suffix no longer routes a real Core file into the manifest decoder, and manifest bundles keep activating only through `Node::import_manifest`.
 - Epoch 6 datadir format (`crates/storage/src/utxo/undo_codec.rs`, `tools/storage-convert`). An undo record holds only the coins that its block spends (`UNDO_FORMAT_VERSION = 2`), and the node derives the created outputs from the block bytes on disconnect. The `5 -> 6` step of `bitcoin-rs-storage-convert` recodes each version 1 undo row. Epoch 3 and epoch 4 sources chain their steps with that recode and write marker `6`.
 - BREAKING CHANGE: a datadir at schema 5 or older is refused until `bitcoin-rs-storage-convert` writes it to schema 6.
-// refused_by: statement_fold · collision: none (no common ancestor text)
 - `UtxoReader::get`, `get_entry` and `has_live_outputs_for_txid` return `UtxoError` when the coin store cannot read or decode a coin row, and no longer report that coin as absent. `gettxout` and `gettxoutproof` answer Core `-32603`, `/rest/getutxos` answers HTTP 500, compressed-transaction decompression answers `coin set could not be read; retry` while compression reports the prevout as unreadable in its warnings, `generateblock` with raw transactions fails, and the mempool admission view returns no snapshot. Each of these previously answered as if the coin did not exist.
 - BREAKING CHANGE: `UtxoReader::with_stable_view`, `lock_stable_view` and `fixture_with_set` return `Result`. Fixture constructors require `test-seam`. Stable views report read failures, and indexed point queries avoid a full coin scan. CoinStats uses each coin key's final image and applies each committed feed under one lock.
 - The `3 -> 4` converter validates canonical checkpoint artifacts and historical references, and bounds recovery-marker reads.
