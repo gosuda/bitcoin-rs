@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Epoch-3 equal-head conversion streams authenticated checkpoint artifacts into synced atomic target files. Valid canonical header artifacts larger than 64 MiB no longer fail an extra whole-file publication limit.
 - The chainstate cache allowance is split equally between the storage engine and `CoinStore`: the engine half is floored to whole bytes and coins receive the remainder. The dbcache clamp, chainstate/txindex allocation, and startup log fields are unchanged; MDBX's unused engine share is not reassigned to coins.
 - Coins live in the engine `coins` keyspace. Windows and blocks commit their coin replacements in the same atomic batch as the durable head, undo rows and body index. The resident `UtxoSet` is the snapshot reader only.
 - Epoch 4 datadir format. The `3 -> 4` step of `bitcoin-rs-storage-convert` loads the coin image of the newest checkpoint into the engine, replays the suffix to the durable head, and carries the epoch-3 `assumeutxo-historical-checkpoints` generations with their engine coins. Epoch-4 coin records use the Core-compressed txout value framing.
