@@ -400,8 +400,8 @@ fn expected_coin_stats(blocks: &[&Block]) -> Result<CoinStats, TestError> {
 /// bookkeeping carry removals in different internal accumulator fields, so
 /// raw-struct equality is not the identity.
 fn assert_engine_coin_stats(handles: &Chainstate, expected: &CoinStats) -> Result<(), TestError> {
-    let coin_store = handles.utxo_reader().coin_store().clone();
-    let snapshot = coin_store.store().snapshot()?;
+    let reader = handles.utxo_reader();
+    let snapshot = reader.scan_coin_snapshot()?;
     let coins = UtxoSet::new();
     for row in snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
         let (_key, value) = row?;

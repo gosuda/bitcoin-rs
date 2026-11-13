@@ -65,3 +65,7 @@ path = "tests/suite.rs"
 name = "mdbx_bounded_read_allocation"
 path = "tests/mdbx_bounded_read_allocation.rs"
 required-features = ["mdbx"]
+
+[[test]]
+name = "utxo_query_lifetime"
+path = "tests/utxo_query_lifetime.rs"

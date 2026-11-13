@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Production UTXO readers no longer expose writable coin stores or mutable backing sets. Whole-set query images belong to their captured views and are released when those views drop. Transaction confirmation-height lookup uses the typed reader query.
 - Recreated outpoints remain readable after earlier incarnations are spent.
 - Window coin effects use ordered vout indexes instead of repeated output-vector scans.
 - Execution preserves valid committed prefixes when later window header admission fails.

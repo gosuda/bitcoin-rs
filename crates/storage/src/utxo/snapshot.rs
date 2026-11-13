@@ -86,11 +86,21 @@ pub fn write_snapshot_observed<O: SnapshotCoinObserver, W: Write + ?Sized>(
     writer: &mut W,
     observer: O,
 ) -> Result<([u8; MUHASH_TRAILER_LEN], O), UtxoError> {
-    set.with_stable_view(|view| {
+    set.with_stable_view(|view| view.write_snapshot_observed(tip_hash, height, writer, observer))
+}
+
+impl UtxoSetView<'_> {
+    pub fn write_snapshot_observed<O: SnapshotCoinObserver, W: Write + ?Sized>(
+        &self,
+        tip_hash: &Hash256,
+        height: u32,
+        writer: &mut W,
+        observer: O,
+    ) -> Result<([u8; MUHASH_TRAILER_LEN], O), UtxoError> {
         let (trailer, observer, _audit) =
-            write_snapshot_view(view, tip_hash, height, writer, observer)?;
+            write_snapshot_view(self, tip_hash, height, writer, observer)?;
         Ok((trailer, observer))
-    })
+    }
 }
 
 fn write_snapshot_view<O: SnapshotCoinObserver, W: Write + ?Sized>(

@@ -84,15 +84,33 @@ impl UtxoMemoryReport {
     }
 }
 
+enum ViewBacking<'a> {
+    Borrowed {
+        set: &'a UtxoSet,
+        _guard: RwLockReadGuard<'a, ()>,
+    },
+    Owned(Box<UtxoSet>),
+}
+
 pub struct UtxoSetView<'a> {
-    set: &'a UtxoSet,
-    _guard: RwLockReadGuard<'a, ()>,
+    backing: ViewBacking<'a>,
 }
 
 impl UtxoSetView<'_> {
+    fn backing_set(&self) -> &UtxoSet {
+        match &self.backing {
+            ViewBacking::Borrowed { set, .. } => set,
+            ViewBacking::Owned(set) => set,
+        }
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
-        self.set.shards.iter().map(Shard::output_count).sum()
+        self.backing_set()
+            .shards
+            .iter()
+            .map(Shard::output_count)
+            .sum()
     }
 
     #[must_use]
@@ -102,13 +120,17 @@ impl UtxoSetView<'_> {
 
     #[must_use]
     pub fn record_count(&self) -> usize {
-        self.set.shards.iter().map(Shard::record_count).sum()
+        self.backing_set()
+            .shards
+            .iter()
+            .map(Shard::record_count)
+            .sum()
     }
 
     #[must_use]
     pub fn memory_report(&self) -> UtxoMemoryReport {
         let mut report = UtxoMemoryReport::default();
-        for shard in &self.set.shards {
+        for shard in &self.backing_set().shards {
             report.records += shard.record_count();
             report.outputs += shard.output_count();
             report.record_payload_bytes += shard.record_payload_bytes();
@@ -133,7 +155,7 @@ impl UtxoSetView<'_> {
     }
 
     pub fn for_each_all(&self, mut f: impl FnMut(&OutPoint, &[u8])) {
-        for shard in &self.set.shards {
+        for shard in &self.backing_set().shards {
             shard.for_each_all(&mut f);
         }
     }
@@ -141,15 +163,15 @@ impl UtxoSetView<'_> {
     #[must_use]
     pub fn get_entry(&self, op: &OutPoint) -> Option<UtxoCoin> {
         let key = UtxoKey::from_txid(&op.txid);
-        self.set.shards[usize::from(key.shard())].get_entry(key, &op.txid.into(), op.vout)
+        self.backing_set().shards[usize::from(key.shard())].get_entry(key, &op.txid.into(), op.vout)
     }
 
-    pub(crate) const fn shard(&self, idx: usize) -> &Shard {
-        &self.set.shards[idx]
+    pub(crate) fn shard(&self, idx: usize) -> &Shard {
+        &self.backing_set().shards[idx]
     }
 
     pub(crate) fn listener_muhash3072(&self) -> Option<[u8; 384]> {
-        self.set
+        self.backing_set()
             .listener
             .as_ref()
             .map(CoinStatsListener::muhash3072)
@@ -178,8 +200,10 @@ impl UtxoSet {
     #[must_use]
     pub fn lock_stable_view(&self) -> UtxoSetView<'_> {
         UtxoSetView {
-            set: self,
-            _guard: self.stable_view_lock.read(),
+            backing: ViewBacking::Borrowed {
+                set: self,
+                _guard: self.stable_view_lock.read(),
+            },
         }
     }
 
@@ -201,11 +225,6 @@ impl UtxoSet {
         self.shards[usize::from(key.shard())].has_live_outputs_for_txid(key, txid)
     }
 
-    pub(crate) fn clear(&self) {
-        for shard in &self.shards {
-            shard.clear();
-        }
-    }
     #[must_use]
     pub fn len(&self) -> usize {
         self.shards.iter().map(Shard::output_count).sum()
@@ -336,8 +355,9 @@ impl UtxoReader {
         Ok(self.get_entry(op)?.map(|coin| coin.txout))
     }
 
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
-    pub fn coin_store(&self) -> &Arc<crate::CoinStore> {
+    pub fn fixture_coin_store(&self) -> &Arc<crate::CoinStore> {
         &self.coin_store
     }
 
@@ -367,22 +387,21 @@ impl UtxoReader {
         Ok(!record.is_empty())
     }
 
-    fn rebuild_from_coin_store(&self) -> Result<(), UtxoError> {
-        self.set.clear();
-        let iter = self
-            .coin_store
-            .store()
-            .iter_prefix(crate::ColumnFamily::Coins, &[])?;
-        for res in iter {
-            let (key, value) = res?;
-            let key = crate::CoinKey::from_slice(&key)?;
-            let record = UtxoRecord::from_encoded(value.to_vec().into_boxed_slice())?;
-            if key.0 != record.txid().to_le_bytes() {
-                return Err(UtxoError::CorruptRecord);
-            }
-            self.set.insert_parsed_record(record);
-        }
-        Ok(())
+    pub fn confirmation_height(
+        &self,
+        txid: &Hash256,
+        output_limit: u32,
+    ) -> Result<Option<u32>, UtxoError> {
+        let key = crate::CoinKey(txid.to_le_bytes());
+        let Some(bytes) = self.coin_store.get(&key)? else {
+            return Ok(None);
+        };
+        let record = UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice())?;
+        Ok(record
+            .outputs()
+            .filter(|output| output.vout < output_limit)
+            .min_by_key(|output| output.vout)
+            .map(|output| output.height))
     }
 
     pub fn with_stable_view<R>(
@@ -394,16 +413,21 @@ impl UtxoReader {
     }
 
     pub fn lock_stable_view(&self) -> Result<UtxoSetView<'_>, UtxoError> {
-        let exclusive = self.set.stable_view_lock.write();
-        self.rebuild_from_coin_store()?;
+        let snapshot = self.scan_coin_snapshot()?;
+        let set = Box::new(UtxoSet::new());
+        let rows = snapshot.iter_prefix(crate::ColumnFamily::Coins, &[])?;
+        for row in rows {
+            let (key, value) = row?;
+            let key = crate::CoinKey::from_slice(&key)?;
+            let record = UtxoRecord::from_encoded(value.to_vec().into_boxed_slice())?;
+            if key.0 != record.txid().to_le_bytes() {
+                return Err(UtxoError::CorruptRecord);
+            }
+            set.insert_parsed_record(record);
+        }
         Ok(UtxoSetView {
-            set: &self.set,
-            _guard: parking_lot::RwLockWriteGuard::downgrade(exclusive),
+            backing: ViewBacking::Owned(set),
         })
-    }
-    #[must_use]
-    pub fn set(&self) -> &Arc<UtxoSet> {
-        &self.set
     }
 }
 
@@ -411,6 +435,66 @@ impl UtxoReader {
 mod tests {
     use super::*;
     use crate::utxo::record::{OwnedUtxoOut, UtxoRecord};
+    #[test]
+    fn confirmation_height_uses_lowest_eligible_live_vout() -> Result<(), UtxoError> {
+        let set = Arc::new(UtxoSet::new());
+        let txid = Hash256::from_le_bytes(&[0xB1; 32]);
+        set.insert_parsed_record(UtxoRecord::from_owned_outputs(
+            txid,
+            &[
+                OwnedUtxoOut::new(2, 100, vec![0x51], false, 20),
+                OwnedUtxoOut::new(9, 200, vec![0x52], false, 3),
+            ],
+        )?);
+        let reader = UtxoReader::fixture_with_set(set)?;
+        assert_eq!(reader.confirmation_height(&txid, 0)?, None);
+        assert_eq!(reader.confirmation_height(&txid, 2)?, None);
+        assert_eq!(reader.confirmation_height(&txid, 3)?, Some(20));
+        assert_eq!(reader.confirmation_height(&txid, u32::MAX)?, Some(20));
+        assert_eq!(
+            reader.confirmation_height(&Hash256::default(), u32::MAX)?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn query_views_keep_independent_committed_snapshots() -> Result<(), UtxoError> {
+        use crate::utxo::contract::UtxoAdd;
+
+        let reader = UtxoReader::fixture_new();
+        let outpoint = OutPoint::new(Hash256::from_le_bytes(&[0xC1; 32]).into(), 0);
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(17),
+                script_pubkey: Script::from_bytes(vec![0x51]),
+            },
+            false,
+            7,
+        ));
+        reader.populate_fixture_coins(&changes)?;
+        let first = reader.lock_stable_view()?;
+        let mut removal = BlockChanges::<TxOut>::default();
+        removal.remove(outpoint);
+        reader.populate_fixture_coins(&removal)?;
+        let second = reader.lock_stable_view()?;
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            first
+                .get_entry(&outpoint)
+                .map(|coin| coin.txout.value.to_sat()),
+            Some(17)
+        );
+        assert!(second.is_empty());
+        assert!(second.get_entry(&outpoint).is_none());
+        drop(second);
+        assert_eq!(first.get_entry(&outpoint).map(|coin| coin.height), Some(7));
+        assert!(reader.get_entry(&outpoint)?.is_none());
+        Ok(())
+    }
+
     #[test]
     fn fixture_with_set_seeds_authoritative_coin_reads() -> Result<(), UtxoError> {
         let set = Arc::new(UtxoSet::new());

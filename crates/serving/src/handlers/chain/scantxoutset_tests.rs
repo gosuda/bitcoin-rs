@@ -1066,10 +1066,24 @@ fn scan_streams_engine_coins_without_resident_image() {
         );
     }
 
-    assert!(
-        ctx.chain.utxo.set().all_records().is_empty(),
-        "scantxoutset must stream the engine coins keyspace, not rebuild the resident coin image",
-    );
+    let view = ctx
+        .chain
+        .utxo
+        .lock_stable_view()
+        .unwrap_or_else(|error| panic!("committed view: {error}"));
+    assert_eq!(view.len(), coins.len());
+    for coin in &coins {
+        let outpoint = OutPoint::new(Txid::from(test_txid(coin.seed)), 0);
+        let actual = view
+            .get_entry(&outpoint)
+            .unwrap_or_else(|| panic!("committed coin missing: {outpoint:?}"));
+        assert_eq!(actual.txout.value.to_sat(), coin.value_sat);
+        assert_eq!(
+            actual.txout.script_pubkey.as_slice(),
+            coin.script.as_slice()
+        );
+        assert_eq!(actual.coinbase, coin.coinbase);
+    }
 }
 
 #[test]
@@ -1157,5 +1171,16 @@ fn scan_snapshot_ignores_commit_landing_mid_scan() {
         result["total_amount"].as_f64(),
         Some(oracle_btc(expected_total)),
     );
-    assert!(ctx.chain.utxo.set().all_records().is_empty());
+    let view = ctx
+        .chain
+        .utxo
+        .lock_stable_view()
+        .unwrap_or_else(|error| panic!("post-commit view: {error}"));
+    assert_eq!(view.len(), 40_001);
+    let late_outpoint = OutPoint::new(Txid::from(test_txid(999_999)), 0);
+    assert_eq!(
+        view.get_entry(&late_outpoint)
+            .map(|coin| coin.txout.value.to_sat()),
+        Some(777),
+    );
 }
