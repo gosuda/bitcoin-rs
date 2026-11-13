@@ -5,6 +5,8 @@
 //! window prefix is linearized by the durable head batch; cache install is
 //! strictly ordered after it (CMT-02, CMT-03).
 
+use std::collections::BTreeMap;
+
 use bitcoin_rs_consensus::primitives::{Amount, Block, Hash256, OutPoint, TxOut, Txid};
 use bitcoin_rs_storage::utxo::UtxoCoin;
 use bitcoin_rs_storage::utxo::contract::OutputSource;
@@ -329,11 +331,11 @@ impl WindowWorkspace {
         prefix: &[BlockTransition],
         initial_records: &HashMap<Txid, Option<UtxoRecord>>,
     ) -> Result<WindowDelta, UtxoError> {
-        let mut states: HashMap<Txid, Vec<OwnedUtxoOut>> = HashMap::new();
+        let mut states: HashMap<Txid, BTreeMap<u32, OwnedUtxoOut>> = HashMap::new();
         for transition in prefix {
             fold_transition(&mut states, initial_records, transition);
         }
-        let mut folded: Vec<(Txid, Vec<OwnedUtxoOut>)> = states.into_iter().collect();
+        let mut folded: Vec<_> = states.into_iter().collect();
         folded.sort_unstable_by_key(|(txid, _)| *txid);
         let mut delta = WindowDelta::default();
         for (txid, current_outputs) in folded {
@@ -345,6 +347,7 @@ impl WindowWorkspace {
                 (false, true) => {}
                 (true, true) => delta.push_final(CoinKey(txid.0.to_le_bytes()), None),
                 (_, false) => {
+                    let current_outputs: Vec<_> = current_outputs.into_values().collect();
                     let record = UtxoRecord::from_owned_outputs(
                         Hash256::from_le_bytes(&txid.0.to_le_bytes()),
                         &current_outputs,
@@ -562,24 +565,29 @@ fn merge_delta_records<'r>(
 fn initial_outputs_for_txid(
     initial_records: &HashMap<Txid, Option<UtxoRecord>>,
     txid: Txid,
-) -> Vec<OwnedUtxoOut> {
+) -> BTreeMap<u32, OwnedUtxoOut> {
     match initial_records.get(&txid) {
         Some(Some(record)) => record
             .outputs()
-            .map(|out| OwnedUtxoOut {
-                vout: out.vout,
-                value: out.value,
-                script_pubkey: out.script_pubkey.to_vec(),
-                coinbase: out.coinbase,
-                height: out.height,
+            .map(|out| {
+                (
+                    out.vout,
+                    OwnedUtxoOut {
+                        vout: out.vout,
+                        value: out.value,
+                        script_pubkey: out.script_pubkey.to_vec(),
+                        coinbase: out.coinbase,
+                        height: out.height,
+                    },
+                )
             })
             .collect(),
-        _ => Vec::new(),
+        _ => BTreeMap::new(),
     }
 }
 
 fn fold_transition(
-    states: &mut HashMap<Txid, Vec<OwnedUtxoOut>>,
+    states: &mut HashMap<Txid, BTreeMap<u32, OwnedUtxoOut>>,
     initial_records: &HashMap<Txid, Option<UtxoRecord>>,
     transition: &BlockTransition,
 ) {
@@ -590,26 +598,29 @@ fn fold_transition(
     for created in &transition.created {
         count_fold_visit();
         let outputs = outputs_for(states, initial_records, created.txid);
-        outputs.retain(|out| out.vout != created.vout);
-        outputs.push(OwnedUtxoOut {
-            vout: created.vout,
-            value: created.value,
-            script_pubkey: created.script_pubkey.to_vec(),
-            coinbase: created.coinbase,
-            height: created.height,
-        });
+        outputs.insert(
+            created.vout,
+            OwnedUtxoOut {
+                vout: created.vout,
+                value: created.value,
+                script_pubkey: created.script_pubkey.to_vec(),
+                coinbase: created.coinbase,
+                height: created.height,
+            },
+        );
     }
     for spent in &transition.spent_outpoints {
         count_fold_visit();
-        outputs_for(states, initial_records, spent.txid).retain(|out| out.vout != spent.vout);
+        let vout = spent.vout;
+        outputs_for(states, initial_records, spent.txid).remove(&vout);
     }
 }
 
 fn outputs_for<'s>(
-    states: &'s mut HashMap<Txid, Vec<OwnedUtxoOut>>,
+    states: &'s mut HashMap<Txid, BTreeMap<u32, OwnedUtxoOut>>,
     initial_records: &HashMap<Txid, Option<UtxoRecord>>,
     txid: Txid,
-) -> &'s mut Vec<OwnedUtxoOut> {
+) -> &'s mut BTreeMap<u32, OwnedUtxoOut> {
     states
         .entry(txid)
         .or_insert_with(|| initial_outputs_for_txid(initial_records, txid))
@@ -665,6 +676,68 @@ mod tests {
             initial_records.is_empty(),
             "a corrupt record must not be stored as an absent coin"
         );
+    }
+
+    #[test]
+    fn many_outputs_preserve_last_creation_then_spend_and_overwrite_order() {
+        let mut first = empty_transition(10);
+        first.created = (0..512)
+            .rev()
+            .map(|vout| created_output(1, vout, 1000 + u64::from(vout), 10))
+            .collect();
+        let mut second = empty_transition(11);
+        second.created.push(created_output(1, 7, 7777, 11));
+        first.created.push(created_output(2, 4, 4444, 10));
+        second.created.push(created_output(1, 7, 8888, 11));
+        second.spent_outpoints = (0..512)
+            .filter(|vout| vout % 3 == 0)
+            .map(|vout| OutPoint::new(indexed_txid(1), vout))
+            .collect();
+        let mut third = empty_transition(12);
+        third.bip30_overwrites.push(overwrite_of(2));
+        third.created.push(created_output(2, 9, 9999, 12));
+        let initial = HashMap::new();
+        let delta =
+            WindowWorkspace::build_window_delta(&[first, second, third], &initial).expect("delta");
+        let mut expected = Outputs::new();
+        for vout in 0..512 {
+            if vout % 3 != 0 {
+                let (value, height) = if vout == 7 {
+                    (8888, 11)
+                } else {
+                    (1000 + u64::from(vout), 10)
+                };
+                expected.insert(
+                    vout,
+                    (
+                        value,
+                        vec![0x51, u8::try_from(value % 200).expect("byte")],
+                        value.is_multiple_of(2),
+                        height,
+                    ),
+                );
+            }
+        }
+        assert_eq!(delta.records.len(), 2);
+        for (key, bytes) in &delta.records {
+            let record = UtxoRecord::from_encoded(
+                bytes
+                    .as_ref()
+                    .expect("live record")
+                    .to_vec()
+                    .into_boxed_slice(),
+            )
+            .expect("record");
+            if *key == CoinKey(indexed_txid(1).0.to_le_bytes()) {
+                assert_eq!(outputs_of(&record), expected);
+            } else {
+                assert_eq!(*key, CoinKey(indexed_txid(2).0.to_le_bytes()));
+                let expected_other = [(9, (9999, vec![0x51, 199], false, 12))]
+                    .into_iter()
+                    .collect();
+                assert_eq!(outputs_of(&record), expected_other);
+            }
+        }
     }
 
     #[test]
