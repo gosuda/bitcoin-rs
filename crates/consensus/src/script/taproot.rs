@@ -59,15 +59,21 @@ pub(crate) fn verify_taproot_commitment(
     let Some(internal_bytes) = control.get(1..TAPROOT_CONTROL_BASE_SIZE) else {
         return false;
     };
-    let Ok(internal) = XOnlyPublicKey::from_slice(internal_bytes) else {
+    let Ok(internal) = <[u8; 32]>::try_from(internal_bytes)
+        .map_err(|_| secp256k1::Error::InvalidPublicKey)
+        .and_then(XOnlyPublicKey::from_byte_array)
+    else {
         return false;
     };
-    let Ok(output) = XOnlyPublicKey::from_slice(program) else {
+    let Ok(output) = <[u8; 32]>::try_from(program)
+        .map_err(|_| secp256k1::Error::InvalidPublicKey)
+        .and_then(XOnlyPublicKey::from_byte_array)
+    else {
         return false;
     };
     let merkle_root = compute_taproot_merkle_root(control, tapleaf_hash);
     let mut engine = LazyLock::force(&TAPTWEAK_ENGINE).clone();
-    Digest::update(&mut engine, internal.serialize());
+    Digest::update(&mut engine, internal.to_byte_array());
     Digest::update(&mut engine, merkle_root.as_byte_array());
     let tweak_bytes = engine.finalize().into();
     let Ok(tweak) = Scalar::from_be_bytes(tweak_bytes) else {
@@ -78,7 +84,7 @@ pub(crate) fn verify_taproot_commitment(
     } else {
         Parity::Odd
     };
-    internal.tweak_add_check(secp256k1::SECP256K1, &output, parity, tweak)
+    internal.tweak_add_check(&output, parity, tweak)
 }
 
 #[cfg(test)]

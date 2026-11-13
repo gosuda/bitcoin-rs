@@ -2,7 +2,7 @@
 
 use bitcoin_rs_consensus::primitives::{Amount, Script, Tx, TxOut, Witness, deserialize};
 use bitcoin_rs_consensus::script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
-use secp256k1::{PublicKey, SECP256K1, SecretKey};
+use secp256k1::{PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
 
 const TX_HEX: &str = concat!(
@@ -25,7 +25,8 @@ fn fixture() -> Tx {
 }
 
 fn test_key() -> SecretKey {
-    SecretKey::from_slice(&hex(TEST_KEY)).expect("public BIP143 test key")
+    SecretKey::from_secret_bytes(hex(TEST_KEY).try_into().expect("32-byte test key"))
+        .expect("public BIP143 test key")
 }
 
 fn verify_witness(
@@ -124,7 +125,7 @@ fn negative_multisig_script(pubkey: &[u8]) -> Vec<u8> {
 #[test]
 fn empty_signature_cannot_bypass_key_encoding_policy() {
     let tx = fixture();
-    let uncompressed = PublicKey::from_secret_key(SECP256K1, &test_key()).serialize_uncompressed();
+    let uncompressed = PublicKey::from_secret_key(&test_key()).serialize_uncompressed();
     let cases = [
         (
             Vec::new(),
@@ -228,7 +229,7 @@ fn encoding_error_precedence_matches_core() {
 #[test]
 fn empty_signature_policy_matrix_preserves_error_order_and_clean_false() {
     let tx = fixture();
-    let public = PublicKey::from_secret_key(SECP256K1, &test_key());
+    let public = PublicKey::from_secret_key(&test_key());
     let mut off_curve = vec![0xff; 33];
     off_curve[0] = 0x02;
     let keys = [

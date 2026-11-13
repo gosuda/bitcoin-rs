@@ -63,7 +63,7 @@ fn taproot_sighash_byte(sighash_type: TapSighashType) -> u8 {
 }
 
 fn serialize_taproot_signature(
-    sig: secp256k1::schnorr::Signature,
+    sig: bitcoin::secp256k1::schnorr::Signature,
     sighash_type: TapSighashType,
 ) -> Vec<u8> {
     let mut bytes = sig.serialize().to_vec();

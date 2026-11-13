@@ -31,6 +31,7 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - Scope covers `bitcoin`, `bitcoin_hashes`, `secp256k1`, and `secp256k1-sys`.
 - Each of those crates MUST resolve to exactly one version per graph, except the exact-version splits listed here.
 - The Bitcoin 0.32.102 reference dependency retains `bitcoin_hashes 0.14.101` alongside direct `bitcoin_hashes 1.2.0`.
+- The direct `secp256k1 0.33.1` line coexists with Bitcoin's exact `secp256k1 0.29.1` and `secp256k1-sys 0.10.1` reference line; versioned native links keep the two libraries distinct.
 - The pool-only exception below remains approved.
 - The pinned SRI release family is `noise_sv2 2.1.0`.
 - The `pool-sv2` feature in `crates/serving/Cargo.toml` reaches this family.
@@ -95,6 +96,7 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - `bitcoin_hashes 1.2.0` requires `bitcoin-internals 0.6.0` directly and `bitcoin-internals 0.7.0` through `bitcoin-consensus-encoding 1.3`; only that exact-version split is approved, with `deny.toml` `[bans].skip` pinning `bitcoin-internals@0.6.0`.
 - `base64` is bounded to `>=0.23.1, <0.24` with defaults disabled and `std` (including `alloc`) enabled.
 - `simd-unsafe` remains disabled.
+- `secp256k1` is bounded to `>=0.33.1, <0.34` with `std`, `alloc`, `recovery`, `rand`, and `global-context` enabled. Bitcoin's exact `secp256k1 0.29.1` and `secp256k1-sys 0.10.1` reference line is an approved split, pinned in `deny.toml` `[bans].skip`; it approves no other version.
 - The metrics exporter's `base64 0.22.1` is an approved exact-version duplicate, not approval for other versions.
 - `proptest` is bounded at `>=1.12, <1.13` and `proptest-state-machine` is pinned at `=0.9.0` in the root `Cargo.toml` `[workspace.dependencies]`.
 - Version `1.12` moves to the `rand_core 0.10` and `rand_xorshift 0.5` family, so the lock carries `rand_core@0.10.1` beside `rand_core@0.9.5` from the selected `rand 0.9` family.
