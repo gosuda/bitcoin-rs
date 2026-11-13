@@ -20,6 +20,11 @@ Do not use a scheduled chain halt to make adoption compulsory.
 It creates an availability dependency without deciding which replacement rules
 operators will accept.
 
+The proposed circuit breaker starts in soft mode and can enter hard mode.
+These names describe enforcement modes. A stricter hard mode can remain a
+soft fork. Use manual review of external risk and automatic enforcement of
+an agreed activation rule. Local monitoring has no consensus authority.
+
 This is a research assessment. It defines no activation height, deployed BIP
 support, mainnet rule change, or production cryptographic suite.
 PQC here means transaction authorization. Proof of work, transport security,
@@ -255,6 +260,193 @@ data. These figures are arithmetic bounds, not throughput measurements.
 The experiment must measure validation time, memory, relay behavior, and full
 block costs before it selects operational limits.
 
+## Circuit breaker: soft mode to hard mode
+
+This section specifies the proposed design boundary. It adds no runtime
+breaker, trigger authority, quantum detector, or activation parameters.
+The target is a prepared transition into stricter spending rules when an
+emergency justifies it.
+
+### Mode semantics
+
+PQ output rules must already be active before an output is described as PQ
+protected. Emergency activation is a later restriction on legacy use.
+Soft mode never means accepting an unchecked PQ signature.
+
+| State | PQ outputs | Legacy outputs | Transition condition |
+| --- | --- | --- | --- |
+| `SOFT` | Full PQ authorization on every usable path | Existing permitted operations remain available | A valid activation schedule or event is adopted. |
+| `ARMED` | The same full PQ authorization | Soft-mode rules continue until the boundary | The candidate block reaches the specified activation boundary. |
+| `HARD` | The same full PQ authorization | The predefined restrictions apply | No discretionary reset or rule relaxation. |
+
+`ARMED` is the pending activation state, not a third authorization regime.
+For the same predecessor context, a soft-fork design requires
+`V_hard` to be a subset of `V_soft`, and `V_soft` to be a subset of
+`V_Bitcoin`. A mode name does not change this requirement.
+
+Define the mode of candidate block `B` from the adopted rule profile,
+`parent(B)` ancestry, and the candidate height.
+Identical inputs must produce identical modes on every implementing node.
+An on-chain event takes effect at a specified descendant boundary.
+It must not change the interpretation of the block that contains it.
+[BIP9][bip9] provides the relevant ancestor-based deployment pattern.
+It does not provide a quantum-risk detector.
+
+### Detection and immediate local protection
+
+Use anomaly detection to raise alerts and preserve evidence.
+Local service protection can act immediately under the operator's policy.
+For example, a wallet can pause signing or a service can pause outgoing
+payments. Bitcoin-RS can expose observations to that external consumer.
+Signing remains outside the node under the [wallet contract][wallet].
+
+Local admission or mining exclusions remain policy decisions.
+They do not authorize rejection of otherwise consensus-valid received blocks.
+A local service pause also cannot prevent another party from spending an
+output whose authorization it can satisfy.
+
+| Signal | Permitted automatic use in this design | Consensus limitation |
+| --- | --- | --- |
+| Unusual spends or dormant-output movements | Alert and apply local service policy | The movement does not prove theft or identify how a signature was produced. |
+| Research publications or quantum-hardware announcements | Inform human risk assessment | Sources and interpretation are not committed chain data. |
+| Local mempool, peer, clock, or model observations | Alert and preserve diagnostics | Honest nodes can observe different inputs. |
+| A specified chain-derived activation predicate | Apply the predetermined transition | The predicate, evidence format, and trust assumptions must be adopted first. |
+
+A normal valid ECC signature does not identify the method used to produce it.
+The [P2PK research issue][p2pk-issue] already separates exposure, movement,
+and proof of theft. A cryptographic challenge could prove a defined
+capability under its assumptions. It would not by itself identify quantum
+hardware or justify every proposed restriction.
+
+Do not let a web feed, local anomaly score, or runtime administrative flag
+change block validity. Such a change would make the same chain depend on
+each node's observation history.
+
+### Manual decision with automatic enforcement
+
+Choose coordinated manual activation for the first design.
+Automate detection and execution at the agreed boundary.
+This avoids assigning a new standing emergency authority to a key holder.
+
+For the first isolated prototype, fix the height in the experiment profile
+before the run. All participating nodes must use the same profile.
+An actual risk-driven activation needs a coordinated activation release or a
+separately adopted chain-derived activation mechanism.
+Preinstalled hard-mode code reduces implementation work during an incident.
+It does not make a locally changed activation setting a network decision.
+
+Specify the exact hard-mode rules, affected output classes, network identity,
+and activation boundary. Operators must be able to inspect those facts.
+The activation must affect future validation only.
+It does not undo spends already accepted before the boundary.
+
+Existing miner signaling can report readiness under a specified deployment.
+It does not measure quantum capability. Its thresholds and delay must not be
+presented as a ready-made emergency response.
+Detection, coordination, trigger inclusion, and activation each add delay.
+A block-height boundary also has no guaranteed wall-clock arrival time.
+The design cannot promise containment before the first loss.
+
+### A remote trigger without another release
+
+If the requirement is a remote manual switch that preinstalled clients obey,
+a preauthorized quorum certificate can supply an activation event.
+That mechanism adds a consensus authority. It requires explicit adoption of
+that trust model and is not the default Bitcoin-compatible recommendation.
+
+The certificate may select only the one predefined stricter transition.
+It must not install arbitrary code, change coin ownership, choose new
+cryptographic parameters, or relax hard-mode rules.
+Fix membership, quorum, network and ruleset binding, canonical encoding,
+replay handling, conflict rules, verification limits, and activation delay.
+
+The authorization must survive the threat that motivates the breaker.
+Do not rely solely on ECC credentials for a quantum emergency trigger.
+PQ-authenticated independent approvals can implement a quorum policy.
+That does not require or establish a PQ threshold-signature protocol.
+A hybrid authorization must require its PQ component.
+
+Commit an accepted event to the chain before it affects consensus.
+Receiving a certificate from an API or peer is insufficient.
+Its authentication proves that the designated authority approved activation.
+It does not prove that the authority's scientific assessment is correct.
+
+### Fully automatic consensus activation
+
+A fully automatic global switch requires a separately specified predicate
+that all validators can evaluate from the same chain evidence.
+The predicate must be deterministic, bounded, and reproducible during replay.
+The trigger must also remain admissible before hard mode begins.
+
+No such quantum-capability predicate is defined by this assessment.
+A deterministic unusual-spend threshold is not automatically sound evidence
+of quantum compromise. Normal activity can satisfy an ill-chosen threshold.
+The resulting restriction could prevent legitimate spending.
+
+Add an automatic consensus trigger only after its evidence and failure cases
+are independently reviewed. Automatic local alerts can exist before that
+work is complete. They must not be labeled automatic network protection.
+
+### Hard mode must constrain authorization
+
+Requiring a legacy spend to create a PQ output is insufficient after its
+legacy secret is compromised. Any holder of that secret can choose a new
+PQ destination. A secure destination does not establish legitimate source
+authorization.
+
+For each protected class, hard mode must require previously bound PQ
+authorization, a specified rescue condition, or rejection of unsupported
+legacy spends. A rescue must still satisfy old rules if soft-fork
+compatibility is required. A freeze affects legitimate owners too.
+
+Prefer actual migration into protected outputs during soft mode.
+A binding first created after the old authorization becomes forgeable does
+not, by itself, identify the original owner.
+Do not infer universal recovery from [BIP361][bip361]; its coverage remains
+unresolved. Specify treatment of change, coinbase outputs, and recovery
+paths so that hard mode has a defined continuing transaction model.
+
+### Reorganizations, restart, and reset
+
+Make escalation monotonic along descendants of a given activation history.
+Do not implement consensus mode as a permanent local "ever activated" flag.
+
+A reorganization can remove a chain-derived activation event.
+Recompute mode from the replacement ancestry, as [BIP9][bip9] requires for
+deployment state. A newly synchronized node and an existing node must agree.
+Report a reorg-driven mode change explicitly.
+An independent local service pause may remain latched until an operator
+acknowledges it. That local latch must not change block validity.
+
+Making consensus activation irreversible across arbitrary reorganizations
+would require another finality or checkpoint assumption.
+Do not introduce that assumption through the breaker implementation.
+Reopening permanently frozen outputs also requires the compatibility review
+in the recovery section below; it is not an ordinary reset button.
+
+### Implementation and evidence boundary
+
+The current [deployment owner][deployment] supplies branch-aware state.
+The consensus owner defines mode-dependent validity.
+Admission and mining must use the next candidate block's mode.
+Revalidate affected mempool entries and templates when that mode changes.
+Key script-execution reuse by every relevant rule flag.
+The [validation contract][validation] and [synchronization contract][sync]
+remain authoritative for those boundaries.
+
+Monitoring has no mutation authority over chainstate or consensus parameters.
+Keep its work bounded and outside authoritative validation locks.
+Do not create another UTXO set or global synchronization controller.
+Reject unsupported validation-engine combinations for the experiment.
+Replay, restart, and snapshot paths must preserve the adopted profile and
+derive the same mode as ordinary block validation.
+
+The experiment must show agreement despite different local alerts, correct
+activation boundaries, reorg removal of a trigger, and restart equivalence.
+It must also show that hard mode continues to accept valid protected spends
+while rejecting the specified unsupported legacy class.
+No such execution evidence is established by this documentation change.
+
 ## What can be mandatory
 
 The classifications below follow from the validity-set test above.
@@ -348,6 +540,9 @@ The required results are:
    Measurements identify hardware, build profile, and algorithm parameters.
 7. Any legacy restriction has a separate compatibility matrix for owners,
    recovery eligibility, and clients from each migration stage.
+8. Circuit-breaker state is identical for the same profile and ancestry,
+   despite different local alerts. Activation, reorg, and restart preserve
+   that result without reusing a weaker validation outcome.
 
 No result in this list is established by this source review.
 The next implementation milestone is the isolated commitment and verifier
