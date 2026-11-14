@@ -23,6 +23,7 @@
 - A filter catch-up that seals a shared transaction tail preserves publication for every existing capability whose rows move. Seal recovery uses the same owners, and unrelated capability watermarks do not advance.
 - BREAKING CHANGE: `DerivedIndexQuery::transaction_height` is replaced by `transaction_block`, which returns the transaction body with its captured occurrence height and block hash. Esplora confirmation metadata uses that block identity across reorgs, including ABA publication changes.
 - Confirmed transaction Merkle proofs load the block body by the occurrence block hash captured with the transaction metadata, not by a later active block at the same height.
+- Esplora transaction pages for a block that is no longer on the applied chain return the retry refusal when their confirmed transactions resolve to different blocks. They no longer mix confirmations from two applied branches in one page.
 - Projection enforces serving-view expiry at read completion and between emitted compact-filter records.
 - Network ingress leaves the existing foreground reserve available within the staged-image allowance. Its capacity and atomic admission check use the reduced ceiling; execution retains the full owner cap. The node-wide total, cache shares, and resource-refusal classification are unchanged.
 - Epoch-5 conversion converts retained ordinary and historical checkpoint engine images to the requested backend and schema-6 undo format. Epoch-5 and current-epoch backend copies preserve the root `full-revalidation` marker.

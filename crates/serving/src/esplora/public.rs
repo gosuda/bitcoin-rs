@@ -515,6 +515,18 @@ pub(super) fn block_transaction_values(
             Ok((tx, state))
         })
         .collect::<Result<Vec<_>, Response>>()?;
+    if block_status.is_none() {
+        let mut hashes = transactions
+            .iter()
+            .filter_map(|(_, state)| state.as_ref().map(|confirmation| confirmation.hash));
+        if let Some(first) = hashes.next()
+            && hashes.any(|hash| hash != first)
+        {
+            return Err(service_unavailable(
+                "transaction index changed during query; retry",
+            ));
+        }
+    }
     projection.transaction_values(
         transactions,
         Some(ParentSource::Block(if block_status.is_some() {

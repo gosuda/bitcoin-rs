@@ -2049,6 +2049,196 @@ fn block_status_and_block_list_never_straddle_two_applied_branches() -> Result<(
     Ok(())
 }
 
+// WF-02
+#[test]
+fn block_page_never_mixes_confirmations_from_two_branches() -> Result<(), TestError> {
+    use bitcoin_rs_consensus::primitives::Header;
+    use bitcoin_rs_execution::chain::{NodeStatus, TipSnapshot};
+
+    struct MidPageReorgTxIndex {
+        transactions: Vec<Tx>,
+        before: TransactionBlock,
+        after: TransactionBlock,
+        reads: AtomicUsize,
+        reorged: Arc<AtomicBool>,
+    }
+
+    impl crate::context::DerivedIndexQuery for MidPageReorgTxIndex {
+        fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
+            Ok(self
+                .transactions
+                .iter()
+                .find(|transaction| transaction.txid() == *txid)
+                .cloned())
+        }
+
+        fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
+            let (out_txid, out_vout) = (outpoint.txid, outpoint.vout);
+            Ok(self
+                .transactions
+                .iter()
+                .find(|transaction| transaction.txid() == out_txid)
+                .and_then(|transaction| {
+                    transaction
+                        .outputs
+                        .get(usize::try_from(out_vout).unwrap_or(usize::MAX))
+                })
+                .map(|output| output.value.to_sat()))
+        }
+
+        fn transaction_block(
+            &self,
+            txid: &Txid,
+        ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
+            let Some(transaction) = self
+                .transactions
+                .iter()
+                .find(|transaction| transaction.txid() == *txid)
+            else {
+                return Ok(None);
+            };
+            let read = self.reads.fetch_add(1, Ordering::SeqCst);
+            let before = read.is_multiple_of(self.transactions.len());
+            let block = if before {
+                self.before
+            } else {
+                self.reorged.store(true, Ordering::SeqCst);
+                self.after
+            };
+            Ok(Some((transaction.clone(), block)))
+        }
+
+        fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+            Ok(crate::context::DerivedIndexInfo {
+                synced: true,
+                best_block_height: 1,
+                applied_height: 1,
+                historical_height: 1,
+                verified_height: 1,
+                coverage_height: 1,
+            })
+        }
+    }
+
+    let header = |prev: BlockHash, nonce: u32, time: u32| Header {
+        version: 1,
+        prev_blockhash: prev,
+        merkle_root: Hash256::default(),
+        time,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
+        nonce,
+    };
+    let coinbase = paying_transaction(&[OutPoint::null()], &[(5_000_000_000, vec![0x51])]);
+    let first = paying_transaction(
+        &[OutPoint::new(coinbase.txid(), 0)],
+        &[(4_999_999_000, vec![0x52])],
+    );
+    let second = paying_transaction(
+        &[OutPoint::new(coinbase.txid(), 0)],
+        &[(4_999_998_000, vec![0x53])],
+    );
+    let block_at = |block_header: Header, txs: Vec<Tx>| {
+        let mut block = Block {
+            header: block_header,
+            txs,
+        };
+        block.header.merkle_root = merkle_root(&block.txs).expect("fixture block has transactions");
+        block
+    };
+    let genesis = block_at(
+        header(BlockHash::default(), 0, 1_000_000),
+        vec![coinbase.clone()],
+    );
+    let genesis_hash = genesis.block_hash();
+    let a1 = block_at(
+        header(genesis_hash, 1, 1_000_900),
+        vec![coinbase.clone(), first.clone(), second.clone()],
+    );
+    let a1_hash = a1.block_hash();
+    let b1 = block_at(header(genesis_hash, 2, 1_000_901), vec![coinbase.clone()]);
+    let b1_hash = b1.block_hash();
+    let b2 = block_at(header(b1_hash, 3, 1_001_800), vec![coinbase.clone()]);
+    let b2_hash = b2.block_hash();
+    assert_ne!(
+        a1_hash, b1_hash,
+        "the two branches must publish different blocks at height 1"
+    );
+
+    let mut context = Context::new();
+    context.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Regtest;
+    let b_tip = {
+        let mut tree = context.chain.block_tree.write();
+        let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::Active)?;
+        tree.insert_node(Some(genesis_id), a1.header, NodeStatus::Active)?;
+        let b1_id = tree.insert_node(Some(genesis_id), b1.header, NodeStatus::Active)?;
+        let b2_id = tree.insert_node(Some(b1_id), b2.header, NodeStatus::Active)?;
+        Arc::new(TipSnapshot {
+            tip_id: b2_id,
+            height: 2,
+            chainwork: bitcoin_rs_consensus::header_rules::ChainWork::ZERO,
+            hash: b2_hash.0,
+            chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
+        })
+    };
+    let mut bodies = Vec::new();
+    for (height, block) in [(0u32, &genesis), (1, &a1), (1, &b1), (2, &b2)] {
+        let record = BlockRecord::from_block(height, block);
+        bodies.push((record.height, record.hash, consensus_bytes(block)));
+        context.chain.add_block(record);
+    }
+    context.chain.block_body_source = Some(Arc::new(BlockBodies { bodies }));
+    context.chain.applied_tip.store(Some(b_tip));
+    let reorged = Arc::new(AtomicBool::new(false));
+    context.indexes.esplora_tx_index = Some(Arc::new(MidPageReorgTxIndex {
+        transactions: vec![coinbase, first, second],
+        before: TransactionBlock {
+            height: 1,
+            hash: Hash256::from(a1_hash),
+        },
+        after: TransactionBlock {
+            height: 1,
+            hash: Hash256::from(b1_hash),
+        },
+        reads: AtomicUsize::new(0),
+        reorged: Arc::clone(&reorged),
+    }));
+    assert_eq!(
+        context.chain.active_hash_at_height(1),
+        Some(Hash256::from(b1_hash)),
+        "the fixture must resolve height 1 to the applied b branch"
+    );
+
+    let handler = Handler::new(Arc::new(context));
+    let a1_text = a1_hash.to_string();
+    let public_response = route(&handler, &format!("/block/{a1_text}/txs"), "");
+    assert_eq!(
+        public_response.status,
+        503,
+        "public block page body: {}",
+        String::from_utf8_lossy(&public_response.body)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&public_response.body),
+        "transaction index changed during query; retry"
+    );
+    let backend_response = backend_route(&handler, &format!("/internal/block/{a1_text}/txs"), "");
+    assert_eq!(
+        backend_response.status,
+        503,
+        "backend block page body: {}",
+        String::from_utf8_lossy(&backend_response.body)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&backend_response.body),
+        "transaction index changed during query; retry"
+    );
+    assert!(
+        reorged.load(Ordering::SeqCst),
+        "each page must read confirmations from both applied branches for the refusal to prove coherence"
+    );
+    Ok(())
+}
+
 #[test]
 fn internal_mempool_routes_return_live_transactions() {
     let transaction = transaction(
