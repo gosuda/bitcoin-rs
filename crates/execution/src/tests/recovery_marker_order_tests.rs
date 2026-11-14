@@ -11,7 +11,9 @@ use parking_lot::RwLock;
 use crate::checkpoint;
 use crate::checkpoint::headers::HeaderCheckpointConfig;
 use crate::checkpoint::{CHECKPOINT_ROOT, CURRENT_FILE, MANIFEST_FILE};
-use crate::recovery::{ResumeSource, prepare_initial_chainstate};
+use crate::recovery::{
+    ResumeSource, prepare_initial_chainstate, prepare_initial_state_with_engine,
+};
 
 use crate::test_fixtures::TestResult;
 const NETWORK: Network = Network::Regtest;
@@ -123,5 +125,56 @@ fn valid_checkpoint_with_marker_selects_cold_replay() -> TestResult {
         "a valid checkpoint must be bypassed when the marker is armed, got {:?}",
         state.resume_source
     );
+    Ok(())
+}
+
+#[test]
+fn older_published_checkpoint_with_activation_marker_returns_cold_and_no_engine_image() -> TestResult
+{
+    let dir = tempfile::tempdir()?;
+    let data_dir = dir.path();
+    crate::events::initialize_data_dir(data_dir)?;
+
+    let (tree, tip) = genesis_tip()?;
+    let store = bitcoin_rs_storage::checkpoint::open_data_dir(data_dir)?;
+    let _ = checkpoint::write_checkpoint(
+        data_dir,
+        checkpoint_config(),
+        &tree,
+        &UtxoSet::new(),
+        &CoinStatsListener::new(CoinStats::new()),
+        Some(&tip),
+    )?;
+    drop(store);
+
+    let restored = prepare_initial_state_with_engine(data_dir, NETWORK, None, None)?;
+    assert!(
+        matches!(restored.initial.resume_source, ResumeSource::Checkpoint),
+        "marker-free checkpoint must restore to Checkpoint, got {:?}",
+        restored.initial.resume_source
+    );
+    assert!(
+        restored.engine.is_some(),
+        "marker-free checkpoint must restore with its engine image"
+    );
+
+    let in_flight = bitcoin_rs_storage::SnapshotActivationMarker {
+        base_hash: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[0x42; 32]),
+        coin_count: 100,
+        coin_digest: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[0x77; 32]),
+    };
+
+    let in_flight_state =
+        prepare_initial_state_with_engine(data_dir, NETWORK, None, Some(&in_flight))?;
+    assert!(
+        matches!(in_flight_state.initial.resume_source, ResumeSource::Cold),
+        "in-flight activation marker must select Cold resume, got {:?}",
+        in_flight_state.initial.resume_source
+    );
+    assert!(
+        in_flight_state.engine.is_none(),
+        "in-flight activation marker must return no engine image (None)"
+    );
+
     Ok(())
 }
