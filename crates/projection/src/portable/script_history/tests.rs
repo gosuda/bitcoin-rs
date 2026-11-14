@@ -753,3 +753,187 @@ fn one_spender_of_two_outpoints_names_one_transaction() -> TestResult {
     assert_eq!(resolved, 2, "both spent outpoints resolve to the spender");
     Ok(())
 }
+
+// PRJ-05, PRJ-06, PRJ-07, IDX-07
+#[test]
+fn restored_history_identity_resolves_subsequent_spender() -> TestResult {
+    use crate::types::{TxPosition, TxPositionValue};
+    use crate::{IndexReader, PreparedBatch, PreparedBatchLimits};
+    use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
+
+    let script = Bytes::from_static(&[0x51]);
+    let header = [0_u8; 80];
+    let hash = bitcoin_rs_consensus::primitives::encode::double_sha256(&header).to_le_bytes();
+    let funding_id = [0x22; 32];
+    let funding = CommittedBlock {
+        height: 0,
+        hash,
+        parent_hash: [0; 32],
+        header,
+        txs: vec![
+            TxFacts {
+                txid: funding_id,
+                offset: 81,
+                len: 100,
+                inputs: Vec::new(),
+                outputs: vec![CreatedOutput {
+                    vout: 0,
+                    value: 5_000,
+                    script: script.clone(),
+                }],
+            },
+            TxFacts {
+                txid: [0x33; 32],
+                offset: 181,
+                len: 100,
+                inputs: Vec::new(),
+                outputs: vec![CreatedOutput {
+                    vout: 0,
+                    value: 0,
+                    script: Bytes::from_static(&[0x6a, 0x00]),
+                }],
+            },
+        ],
+    };
+    let base = IndexWatermark { height: 0, hash };
+    let (_source_dir, source) = live_store(std::slice::from_ref(&funding))?;
+    let source_snapshot = SegmentSnapshot::open(source.snapshot()?)?;
+    let scratch = tempdir()?;
+    let receiver_dir = tempdir()?;
+    let receiver_store = Arc::new(RocksDbStore::open(receiver_dir.path())?);
+    let receiver = RwLock::new(
+        IndexWriter::open(Arc::clone(&receiver_store), 1)?
+            .with_seal_scratch(scratch.path().to_path_buf()),
+    );
+    let budget = SpillBudget::new(u64::MAX);
+    for family in [BundleFamily::TxLookup, BundleFamily::ScriptHistory] {
+        let mut body = Vec::new();
+        let records = match family {
+            BundleFamily::TxLookup => {
+                for tx in &funding.txs {
+                    crate::portable::artifact::write_record(
+                        &mut body,
+                        &tx.txid,
+                        0,
+                        &[TxPosition::new(tx.offset, tx.len)],
+                    )?;
+                }
+                2
+            }
+            BundleFamily::ScriptHistory => {
+                write_records(
+                    &source_snapshot,
+                    Cut {
+                        base,
+                        floor: 0,
+                        path: scratch.path(),
+                    },
+                    &mut body,
+                )?
+                .records
+            }
+            BundleFamily::CompactFilters => unreachable!(),
+        };
+        let mut bytes = ArtifactHeader {
+            family,
+            artifact_version: ARTIFACT_VERSION,
+            index_format: index_format_version(),
+            network_magic: Network::Regtest.magic(),
+            base_height: 0,
+            base_hash: hash,
+            records,
+            payload_bytes: u64::try_from(body.len())?,
+        }
+        .encode()
+        .to_vec();
+        bytes.extend_from_slice(&body);
+        let artifact_path = scratch.path().join(family.file_name());
+        std::fs::write(&artifact_path, &bytes)?;
+        let target = ManifestArtifactTarget {
+            artifact_path,
+            base_height: 0,
+            base_hash: hash,
+            floor: 0,
+            network: Network::Regtest,
+            index_format: index_format_version(),
+            sha256: Sha256::digest(&bytes).into(),
+            size_bytes: u64::try_from(bytes.len())?,
+            chain_tx_count: 2,
+        };
+        match family {
+            BundleFamily::TxLookup => {
+                crate::portable::restore::attach_tx_lookup_artifact(
+                    &receiver,
+                    &target,
+                    &[&header],
+                    scratch.path(),
+                    &budget,
+                )?;
+                let rows = receiver.read().snapshot()?.transaction_rows(
+                    &Txid(Hash256::from_le_bytes(&funding_id)),
+                    whole_page_limit(),
+                )?;
+                assert!(rows.complete);
+                assert_eq!(rows.rows.len(), 1);
+                let positions = TxPositionValue::decode(&rows.rows[0].value)
+                    .ok_or("lookup-only funding positions")?;
+                assert_eq!(positions.len(), 1);
+                assert_eq!(positions[0].offset(), 81);
+                assert_eq!(positions[0].byte_len(), 100);
+            }
+            BundleFamily::ScriptHistory => {
+                crate::portable::restore::attach_script_history_artifact(
+                    &receiver,
+                    &target,
+                    &[hash],
+                    scratch.path(),
+                    &budget,
+                )?;
+            }
+            BundleFamily::CompactFilters => unreachable!(),
+        }
+    }
+    let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&funding_id)), 0);
+    let spending = CommittedBlock {
+        height: 1,
+        hash: [0x33; 32],
+        parent_hash: hash,
+        header: [0; 80],
+        txs: vec![TxFacts {
+            txid: [0x44; 32],
+            offset: 81,
+            len: 120,
+            inputs: vec![SpentPrevout {
+                txid: funding_id,
+                vout: 0,
+                value: 5_000,
+                script,
+                height: 0,
+                coinbase: false,
+            }],
+            outputs: vec![CreatedOutput {
+                vout: 0,
+                value: 4_000,
+                script: Bytes::from_static(&[0x52]),
+            }],
+        }],
+    };
+    let mut writer = receiver.write();
+    let prepared = writer.prepare_block_from_facts(IndexCapabilities::HISTORICAL, spending)?;
+    let mut batch = PreparedBatch::new(PreparedBatchLimits {
+        max_rows: usize::MAX,
+        max_bytes: usize::MAX,
+    });
+    assert!(batch.try_push(prepared).is_ok());
+    writer.commit_forward(batch)?;
+    let snapshot = writer.snapshot()?;
+    let rows = snapshot.spending_rows(&outpoint, whole_page_limit())?;
+    assert!(rows.complete);
+    assert_eq!(rows.rows.len(), 1, "the committed spend must be visible");
+    assert_eq!(rows.rows[0].row.height(), 1);
+    let positions = TxPositionValue::decode(&rows.rows[0].value).ok_or("spender positions")?;
+    assert_eq!(positions.len(), 1);
+    assert_eq!(positions[0].offset(), 81);
+    assert_eq!(positions[0].byte_len(), 120);
+    Ok(())
+}

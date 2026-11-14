@@ -363,6 +363,11 @@ fn seal_publishes_descriptors_only_for_built_capabilities() -> Result<(), TestEr
 // REO-04
 #[test]
 fn retire_fault_after_tombstone_recovers_by_completion() -> Result<(), TestError> {
+    use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
+    use bitcoin_rs_projection::types::{ScriptHash, ScriptHistoryOccurrence, TxPositionValue};
+    use bitcoin_rs_projection::{IndexReader, Indexer};
+    use bitcoin_rs_storage::PrefixScanLimit;
+
     let blocks = one_spend_generation();
     let dir = tempdir()?;
     let scratch = tempdir()?;
@@ -391,11 +396,69 @@ fn retire_fault_after_tombstone_recovers_by_completion() -> Result<(), TestError
     assert!(retired.is_err(), "injected fault must abort the retire");
 
     recover_segments(&store)?;
+    assert!(
+        store
+            .snapshot()?
+            .get(
+                ColumnFamily::IdxMeta,
+                &bitcoin_rs_projection::segment::sealed_gen_key(IndexCapability::TxLookup, 1),
+            )?
+            .is_none(),
+        "recovery must remove the retired capability's sealed publication"
+    );
 
+    let store = Arc::new(store);
+    let indexer = Indexer::new(Arc::clone(&store));
+    let view = indexer.snapshot()?;
+    let limit = PrefixScanLimit {
+        max_rows: 16,
+        max_bytes: 1 << 20,
+    };
+    let history = view.funding_rows(
+        ScriptHash::from_script_bytes(b"\x51recovery_script\x88\xac"),
+        limit,
+    )?;
+    assert!(history.complete, "surviving history scan must complete");
+    let mut occurrences = Vec::new();
+    for row in &history.rows {
+        for occurrence in ScriptHistoryOccurrence::decode_all(&row.value)
+            .ok_or("surviving history must decode")?
+        {
+            occurrences.push((
+                row.row.height(),
+                occurrence.txid,
+                occurrence.position.offset(),
+                occurrence.position.byte_len(),
+                occurrence.flags,
+            ));
+        }
+    }
+    occurrences.sort_unstable();
     assert_eq!(
-        family_rows(&store, ColumnFamily::TxDir, &gen_prefix())?,
-        0,
-        "retired TxDir gen rows must clear"
+        occurrences,
+        vec![
+            (1, [0xE1; 32], 0, 100, ScriptHistoryOccurrence::FUNDING),
+            (1, [0xE2; 32], 100, 120, ScriptHistoryOccurrence::SPENDING),
+        ],
+        "tombstone recovery must preserve the published sibling's funding and spending occurrences"
+    );
+    let spender = view.spending_rows(
+        &OutPoint {
+            txid: Txid::from(Hash256::from_le_bytes(&[0xE1; 32])),
+            vout: 0,
+        },
+        limit,
+    )?;
+    assert!(spender.complete, "surviving spender scan must complete");
+    assert_eq!(spender.rows.len(), 1, "the fixture has exactly one spender");
+    assert_eq!(spender.rows[0].row.height(), 1);
+    assert_eq!(
+        TxPositionValue::decode(&spender.rows[0].value).map(|positions| positions
+            .iter()
+            .map(|position| (position.offset(), position.byte_len()))
+            .collect::<Vec<_>>()),
+        Some(vec![(100, 120)]),
+        "the surviving sibling must resolve the spender's literal byte range"
     );
     for cf in [
         ColumnFamily::ScriptDict,
