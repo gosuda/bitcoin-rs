@@ -35,13 +35,13 @@ fn ingress_and_peer_outbound_charges_return_to_their_owner_on_release() {
         .reserve(ingress_bytes, || false)
         .expect("ingress reservation succeeds");
     assert_eq!(
-        budget.available_of_charges(BudgetOwner::StagedImages),
+        budget.charged_bytes(BudgetOwner::StagedImages),
         1024 * 1024,
         "the staged block charge rises while the credit is held"
     );
     drop(credit);
     assert_eq!(
-        budget.available_of_charges(BudgetOwner::StagedImages),
+        budget.charged_bytes(BudgetOwner::StagedImages),
         0,
         "dropping the staged block credit returns its charge"
     );
@@ -51,13 +51,13 @@ fn ingress_and_peer_outbound_charges_return_to_their_owner_on_release() {
         "an outbound reservation inside the cap is admitted"
     );
     assert_eq!(
-        budget.available_of_charges(BudgetOwner::PeerOutbound),
+        budget.charged_bytes(BudgetOwner::PeerOutbound),
         4096,
         "the outbound reservation charges the peer owner"
     );
     outbound.give_back(4096);
     assert_eq!(
-        budget.available_of_charges(BudgetOwner::PeerOutbound),
+        budget.charged_bytes(BudgetOwner::PeerOutbound),
         0,
         "releasing the outbound bytes returns the peer owner charge"
     );

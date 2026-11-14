@@ -749,7 +749,7 @@ fn a_node_ledger_without_peer_outbound_room_refuses_the_server_reply() -> TestRe
         "a pong the node ledger refuses must not reach the peer"
     );
     assert_eq!(
-        budget.available_of_charges(bitcoin_rs_storage::budget::BudgetOwner::PeerOutbound),
+        budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::PeerOutbound),
         0,
         "a refused reply leaves no peer owner charge"
     );
@@ -769,7 +769,7 @@ fn a_node_ledger_with_peer_outbound_room_delivers_the_server_reply() -> TestResu
     let nonce = client.ping()?;
     client.read_through_pong(nonce)?;
     wait_until("the pong's peer owner charge to return", || {
-        budget.available_of_charges(bitcoin_rs_storage::budget::BudgetOwner::PeerOutbound) == 0
+        budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::PeerOutbound) == 0
     })?;
     drop(client);
     node.finish()

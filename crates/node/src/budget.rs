@@ -186,7 +186,7 @@ impl NodeBudget {
     }
 
     #[must_use]
-    pub fn available_of_charges(&self, owner: BudgetOwner) -> u64 {
+    pub fn charged_bytes(&self, owner: BudgetOwner) -> u64 {
         self.ledger.lock().charges[owner.index()]
     }
 
