@@ -2899,7 +2899,7 @@ mod tests {
 
     #[test]
     fn normalize_bip30_undo_rows_drops_overwrite_restores() -> Result<(), String> {
-        let (height, hash, block, overwritten, store) = overwrite_fixture()?;
+        let (height, hash, block, _overwritten, store) = overwrite_fixture()?;
         let load_block = |requested_height: u32, requested_hash: Hash256| {
             if requested_height == height && requested_hash == hash {
                 Ok(block.clone())
@@ -2921,12 +2921,6 @@ mod tests {
         let batch = decode_undo_record(&stored, hash).map_err(|e| e.to_string())?;
         assert!(batch.restores().is_empty());
         assert!(batch.removes().is_empty());
-        assert!(
-            batch
-                .restores()
-                .iter()
-                .all(|add| add.outpoint != overwritten)
-        );
         Ok(())
     }
 
