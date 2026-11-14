@@ -21,7 +21,6 @@ struct ShardState {
     entries: Vec<ClockEntry>,
     index: HashTable<usize>,
     hand: usize,
-    overhead_bytes: u64,
 }
 
 impl ShardState {
@@ -30,7 +29,6 @@ impl ShardState {
             entries: Vec::new(),
             index: HashTable::new(),
             hand: 0,
-            overhead_bytes: 0,
         }
     }
 
@@ -177,17 +175,17 @@ impl CoinCache {
     }
 
     fn charge_delta(&self, bytes: u64) -> bool {
-        let Some(handle) = self.charge.clone() else {
-            return true;
-        };
-        handle.charge(bytes).is_ok()
+        match self.charge.as_ref() {
+            Some(handle) => handle.charge(bytes).is_ok(),
+            None => true,
+        }
     }
 
     fn release_delta(&self, bytes: u64) {
         if bytes == 0 {
             return;
         }
-        if let Some(handle) = self.charge.clone() {
+        if let Some(handle) = self.charge.as_ref() {
             handle.release(bytes);
         }
     }
@@ -375,7 +373,6 @@ impl CoinCache {
         if *resident + charge > self.budget_bytes {
             return (false, freed);
         }
-        shard.overhead_bytes += charge;
         *resident += charge;
         (true, freed)
     }
