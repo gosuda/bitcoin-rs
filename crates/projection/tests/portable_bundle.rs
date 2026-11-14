@@ -727,12 +727,11 @@ fn tx_lookup_rows(store: &RocksDbStore) -> Vec<LogicalTxRow> {
         .collect::<Result<Vec<_>, _>>()
         .expect("read tx directory")
         .into_iter()
-        .filter(|(key, _)| decode_tx_dir_key(key).is_some())
-        .map(|(key, value)| {
-            let (_gen, txid, height) = decode_tx_dir_key(&key).expect("tx directory key");
+        .filter_map(|(key, value)| {
+            let (_gen, txid, height) = decode_tx_dir_key(&key)?;
             let (block_hash, _ordinal, offset, len) =
                 decode_tx_dir_value(&value).expect("tx directory value");
-            (txid, height, block_hash, offset, len)
+            Some((txid, height, block_hash, offset, len))
         })
         .collect();
     rows.sort_unstable();
